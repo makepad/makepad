@@ -159,7 +159,7 @@ impl ShaderRegistry {
                 LiveValue::DSL {token_start, ..} => {
                     // lets get the first token
                     let origin_doc = live_registry.token_id_to_origin_doc(node.token_id.unwrap());
-                    match origin_doc.tokens[token_start].token{
+                    match origin_doc.tokens[token_start as usize].token{
                         Token::Ident(id!(fn))=>{
                             if let Some(struct_ptr) = struct_ptr{
                                 return LiveNodeFindResult::PossibleStatic(StructPtr(struct_ptr),FnPtr(now_ptr));
@@ -259,8 +259,8 @@ impl ShaderRegistry {
                 let mut parser = ShaderParser::new(
                     live_registry,
                     self,
-                    origin_doc.get_tokens(token_start, token_count),
-                    &doc.scopes[scope_start..(scope_start+scope_count as usize)],
+                    origin_doc.get_tokens(token_start as usize, token_count as usize),
+                    &doc.scopes[scope_start as usize..(scope_start as usize+scope_count as usize)],
                     &mut parser_deps,
                     None,
                     const_ptr.0.file_id
@@ -306,8 +306,8 @@ impl ShaderRegistry {
                 let parser = ShaderParser::new(
                     live_registry, 
                     self,
-                    origin_doc.get_tokens(token_start, token_count),
-                    &doc.scopes[scope_start..(scope_start+scope_count as usize)],
+                    origin_doc.get_tokens(token_start as usize, token_count as usize),
+                    &doc.scopes[scope_start as usize..(scope_start as usize+scope_count as usize)],
                     &mut parser_deps,
                     if let Some(struct_ptr) = struct_ptr {Some(FnSelfKind::Struct(struct_ptr))}else {None},
                     fn_ptr.0.file_id
@@ -382,14 +382,14 @@ impl ShaderRegistry {
                             let mut parser = ShaderParser::new(
                                 live_registry,
                                 self,
-                                origin_doc.get_tokens(token_start, token_count),
-                                &scopes_doc.scopes[scope_start..scope_start+scope_count as usize],
+                                origin_doc.get_tokens(token_start as usize, token_count as usize),
+                                &scopes_doc.scopes[scope_start as usize..scope_start as usize+scope_count as usize],
                                 &mut parser_deps,
                                 Some(FnSelfKind::Struct(struct_ptr)),
                                 struct_ptr.0.file_id
                                 //Some(struct_full_ptr)
                             );
-                            match origin_doc.tokens[token_start].token{
+                            match origin_doc.tokens[token_start as usize].token{
                                 Token::Ident(id!(fn))=>{
                                     
                                     let fn_def = parser.expect_method_def(
@@ -519,15 +519,15 @@ impl ShaderRegistry {
                             let mut parser = ShaderParser::new(
                                 live_registry,
                                 self,
-                                origin_doc.get_tokens(token_start, token_count),
-                                &scopes_doc.scopes[scope_start..(scope_start+scope_count as usize)],
+                                origin_doc.get_tokens(token_start as usize, token_count as usize),
+                                &scopes_doc.scopes[scope_start as usize..(scope_start as usize+scope_count as usize)],
                                 &mut parser_deps,
                                 Some(FnSelfKind::DrawShader(draw_shader_ptr)),
                                 prop.token_id.unwrap().file_id()
                                 //None
                             );
                             
-                            match origin_doc.tokens[token_start].token{
+                            match origin_doc.tokens[token_start as usize].token{
                                 Token::Ident(id!(fn))=>{
                                     let fn_def = parser.expect_method_def(
                                         FnPtr(prop_ptr),

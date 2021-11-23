@@ -41,7 +41,7 @@ impl LiveNew for View {
 impl LiveComponent for View {
     fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
         
-        if !nodes[start_index].value.is_struct_type() {
+        if !nodes[start_index].value.is_structy_type() {
             cx.apply_error_wrong_type_for_struct(apply_from, start_index, nodes, id!(View));
             return nodes.skip_node(start_index);
         }
