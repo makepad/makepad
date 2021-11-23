@@ -30,6 +30,8 @@ pub use crate::livenode::LiveNodeVec;
 pub use crate::livenode::LiveTypeInfo;
 pub use crate::livenode::LiveTypeField;
 pub use crate::livenode::LiveOrCalc;
+pub use crate::livenode::InlineString;
+pub use crate::livenode::FittedString;
 pub use crate::token::TokenWithSpan;
 pub use crate::token::Token;
 pub use crate::token::TokenId;

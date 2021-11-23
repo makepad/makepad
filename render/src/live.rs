@@ -169,6 +169,10 @@ impl Cx {
     pub fn apply_error_no_matching_value(&mut self, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         self.apply_error(apply_from, index, nodes, format!("no matching value {}", nodes[index].id))
     }
+
+    pub fn apply_error_wrong_type_for_value(&mut self, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+        self.apply_error(apply_from, index, nodes, format!("wrong type for value {}", nodes[index].id))
+    }
     
     pub fn apply_error(&mut self, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode], message: String) {
         let live_registry = self.live_registry.borrow();
@@ -499,12 +503,17 @@ live_primitive!(
                 self.push_str(v);
                 index + 1
             }
-            LiveValue::String(v) => {
+            LiveValue::FittedString(v) => {
                 self.truncate(0);
-                self.push_str(v);
+                self.push_str(v.as_str());
                 index + 1
             }
-            LiveValue::StringRef {string_start, string_count} => {
+            LiveValue::InlineString(v) => {
+                self.truncate(0);
+                self.push_str(v.as_str());
+                index + 1
+            }
+            LiveValue::DocumentString {string_start, string_count} => {
                 let live_registry = cx.live_registry.borrow();
                 let origin_doc = live_registry.token_id_to_origin_doc(nodes[index].token_id.unwrap());
                 origin_doc.get_string(*string_start, *string_count, self);
@@ -520,7 +529,14 @@ live_primitive!(
         }
     },
     fn to_live_value(&self) -> LiveValue {
-        LiveValue::String(self.clone())
+        // lets check our byte size and choose a storage mode appropriately.
+        let bytes = self.as_bytes();
+        if let Some(inline_str) = InlineString::from_str(&self){
+            LiveValue::InlineString(inline_str)
+        }
+        else{
+            LiveValue::FittedString(FittedString::from_string(self.clone()))
+        }
     }
 );
 

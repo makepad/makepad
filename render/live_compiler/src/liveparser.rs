@@ -157,8 +157,8 @@ impl<'a> LiveParser<'a> {
         
         ld.nodes.push(LiveNode {
             token_id:Some(token_id),
-            id: Id::empty(),
-            value: LiveValue::Use {crate_id, module_id, object_id}
+            id: object_id,
+            value: LiveValue::Use {crate_id, module_id}
         });
         
         Ok(())
@@ -175,8 +175,8 @@ impl<'a> LiveParser<'a> {
             token_id:Some(token_id),
             id: prop_id,
             value: LiveValue::DSL {
-                token_start: token_start,
-                token_count: (token_index - token_start),
+                token_start: token_start as u32, 
+                token_count: (token_index - token_start) as u32,
                 scope_start: 0,
                 scope_count: 0
             }
@@ -198,8 +198,8 @@ impl<'a> LiveParser<'a> {
             token_id:Some(token_id),
             id: const_id,
             value: LiveValue::DSL {
-                token_start: token_start,
-                token_count: self.token_index - token_start,
+                token_start: token_start as u32,
+                token_count: (self.token_index - token_start) as u32,
                 scope_start: 0,
                 scope_count: 0
             }
@@ -220,8 +220,8 @@ impl<'a> LiveParser<'a> {
             token_id:Some(token_id),
             id: real_prop_id,
             value: LiveValue::DSL {
-                token_start,
-                token_count: (self.token_index - token_start),
+                token_start: token_start as u32,
+                token_count: (self.token_index - token_start) as u32,
                 scope_start: 0,
                 scope_count: 0
             }
@@ -388,7 +388,7 @@ impl<'a> LiveParser<'a> {
                 ld.nodes.push(LiveNode {
                     token_id: Some(self.get_token_id()),
                     id: prop_id,
-                    value: LiveValue::StringRef {string_start: index as usize, string_count: len as usize}
+                    value: LiveValue::DocumentString {string_start: index as usize, string_count: len as usize}
                 });
             },
             Token::Ident(id!(vec2)) => {
@@ -457,14 +457,25 @@ impl<'a> LiveParser<'a> {
                     }
                 }
                 else { // its an ident o
-                    ld.nodes.push(LiveNode {
-                        token_id: Some(self.get_token_id()),
-                        id: prop_id,
-                        value: LiveValue::Clone(base)
-                    });
-                    self.expect_token(Token::OpenBrace)?;
-                    self.expect_live_class(false, prop_id, ld) ?;
+                    // what if id is followed by
+                    // anything but a {/
                     
+                    let token_id = self.get_token_id();
+                     if self.accept_token(Token::OpenBrace){
+                        ld.nodes.push(LiveNode {
+                            token_id: Some(token_id),
+                            id: prop_id,
+                            value: LiveValue::Clone(base)
+                        });
+                        self.expect_live_class(false, prop_id, ld) ?;
+                    }
+                    else{
+                        ld.nodes.push(LiveNode {
+                            token_id: Some(token_id),
+                            id: prop_id,
+                            value: LiveValue::Id(prop_id)
+                        });
+                    }
                 }
             },
             other => return Err(self.error(format!("Unexpected token {} in property value", other)))

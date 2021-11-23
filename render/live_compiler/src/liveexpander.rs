@@ -99,7 +99,8 @@ impl<'a> LiveExpander<'a> {
                     in_index += 1;
                     continue;
                 }
-                LiveValue::Use {crate_id, module_id, object_id} => {
+                LiveValue::Use {crate_id, module_id} => {
+                    let object_id = in_node.id;
                     // add items to the scope
                     if let Some(file_id) = self.live_registry.module_path_to_file_id.get(&ModulePath(*crate_id, *module_id)){
                         // ok now find object_id and get us a pointer
@@ -109,7 +110,7 @@ impl<'a> LiveExpander<'a> {
                         let mut items_added = 0;
                         while let Some(node_index) = node_iter{
                             let node = &other_doc.nodes[node_index];
-                            if !node.id.is_empty() && (object_id.is_empty() || *object_id == node.id){
+                            if !node.id.is_empty() && (object_id.is_empty() || object_id == node.id){
                                 self.scope_stack.stack.last_mut().unwrap().push(LiveScopeItem {
                                     id: node.id,
                                     target: LiveScopeTarget::LivePtr(LivePtr{file_id:*file_id, local_ptr:LocalPtr(node_index)})
