@@ -540,18 +540,18 @@ live_primitive!(
 
 // cast traits.
 
-pub trait LiveCast {
+pub trait LiveCast : LiveCastAny {
     fn to_frame_component(&mut self) -> Option<&mut dyn FrameComponent> {
         None
     }
 }
 
-pub trait FrameAction: 'static {
+pub trait LiveCastAny: 'static {
     fn type_id(&self) -> TypeId;
 //    fn box_clone(&self) -> Box<dyn FrameAction>;
 }
 
-impl<T: 'static + ? Sized> FrameAction for T {
+impl<T: 'static + ? Sized> LiveCastAny for T {
     fn type_id(&self) -> TypeId {
         TypeId::of::<T>()
     }
@@ -561,15 +561,52 @@ impl<T: 'static + ? Sized> FrameAction for T {
 //    }
 }
 
-impl dyn FrameAction {
-    pub fn is<T: FrameAction>(&self) -> bool {
+impl dyn LiveCastAny {
+    pub fn is<T: LiveCastAny>(&self) -> bool {
         let t = TypeId::of::<T>();
         let concrete = self.type_id();
         t == concrete
     }
-    pub fn cast<T: FrameAction>(&self) -> Option<&T> {
+    pub fn cast<T: LiveCastAny>(&self) -> Option<&T> {
         if self.is::<T>() {
-            Some(unsafe {&*(self as *const dyn FrameAction as *const T)})
+            Some(unsafe {&*(self as *const dyn LiveCastAny as *const T)})
+        } else {
+            None
+        }
+    }
+    pub fn cast_mut<T: LiveCastAny>(&mut self) -> Option<&mut T> {
+        if self.is::<T>() {
+            Some(unsafe {&mut *(self as *const dyn LiveCastAny as *mut T)})
+        } else {
+            None
+        }
+    }
+}
+
+pub trait AnyAction: 'static {
+    fn type_id(&self) -> TypeId;
+//    fn box_clone(&self) -> Box<dyn FrameAction>;
+}
+
+impl<T: 'static + ? Sized> AnyAction for T {
+    fn type_id(&self) -> TypeId {
+        TypeId::of::<T>()
+    }
+    
+//    fn box_clone(&self)->Box<dyn FrameAction>{
+//        Box::new((*self).clone())
+//    }
+}
+
+impl dyn AnyAction {
+    pub fn is<T: AnyAction>(&self) -> bool {
+        let t = TypeId::of::<T>();
+        let concrete = self.type_id();
+        t == concrete
+    }
+    pub fn cast<T: AnyAction>(&self) -> Option<&T> {
+        if self.is::<T>() {
+            Some(unsafe {&*(self as *const dyn AnyAction as *const T)})
         } else {
             None
         }
@@ -583,12 +620,12 @@ impl dyn FrameAction {
 //    }/
 //}
 
-pub trait IntoFrameAction {
-    fn into_frame_action(self) -> Option<Box<dyn FrameAction >>;
+pub trait IntoAnyAction {
+    fn into_any_action(self) -> Option<Box<dyn AnyAction >>;
 }
 
 pub trait FrameComponent: LiveComponent {
-    fn handle(&mut self, cx: &mut Cx, event: &mut Event) -> Option<Box<dyn FrameAction >>;
+    fn handle(&mut self, cx: &mut Cx, event: &mut Event) -> Option<Box<dyn AnyAction >>;
     fn draw(&mut self, cx: &mut Cx);
     fn apply_draw(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
         self.apply_live(cx, nodes);
