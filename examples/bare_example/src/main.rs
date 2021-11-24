@@ -7,14 +7,12 @@ live_register!{
         use makepad_widget::button::Button;
         
         frame: {
-            b1: Button {label: "hi"}
-            b2: Button {label: "ho"}
-            b3: Button {label: "ho"}
-            
+            b1: Button {label: "btn1"}
+            b2: Button {label: "btn2"}
+            b3: Button {label: "btn3"}
             frame1: Frame {
                 children: [b3]
             }
-            
             children: [b1, b2, frame1]
         }
     }
@@ -34,17 +32,13 @@ impl BareExampleApp {
     }
     
     pub fn new_app(cx: &mut Cx) -> Self {
-        Self::new_from_doc(
-            cx,
-            cx.live_registry.clone().borrow().module_path_str_id_to_doc(&module_path!(), id!(App)).unwrap()
-        )
+        Self::new_from_doc(cx, cx.live_registry.clone().borrow().module_path_str_id_to_doc(&module_path!(), id!(App)).unwrap())
     }
     
     pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
         self.desktop_window.handle_desktop_window(cx, event);
-        
-        for item in self.frame.handle_frame(cx, event).iter() {
-            if let Some(ButtonAction::Clicked) = item.action.cast() {
+        for item in self.frame.handle_frame(cx, event) {
+            if let ButtonAction::Clicked = item.action.cast() {
                 println!("Clicked on button {}", item.id);
             }
         }
@@ -54,10 +48,12 @@ impl BareExampleApp {
         if self.desktop_window.begin_desktop_window(cx, None).is_err() {
             return;
         }
-        
+        // hard access the button component
+        if let Some(button) = get_component!(id!(b1), Button, self.frame) {
+            button.label = "hard type".to_string();
+        }
         self.frame.draw_frame(cx);
         
         self.desktop_window.end_desktop_window(cx);
     }
 }
-
