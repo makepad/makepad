@@ -28,14 +28,16 @@ pub enum ButtonAction {
     Up
 }
 
-impl IntoAnyAction for ButtonAction{
-    fn into_any_action(self)->Option<Box<dyn AnyAction>>{
-        if let ButtonAction::None = self{
-            return None
+
+impl Into<OptionAnyAction> for ButtonAction{
+    fn into(self)->Option<Box<dyn AnyAction>>{
+        match &self{
+            Self::None=>None,
+            _=>Some(Box::new(self))
         }
-        return Some(Box::new(self));
     }
 }
+
 
 #[derive(Copy, Clone, Default)]
 pub struct ButtonHandleResult {
