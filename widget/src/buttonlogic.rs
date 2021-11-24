@@ -24,7 +24,7 @@ impl Default for ButtonState {
 pub enum ButtonAction {
     None,
     Clicked,
-    Down,
+    Pressed,
     Up
 }
 
@@ -52,7 +52,7 @@ impl ButtonLogic {
         match event.hits(cx, area, HitOpt::default()) {
             Event::FingerDown(_fe) => {
                 return ButtonHandleResult {
-                    action: ButtonAction::Down,
+                    action: ButtonAction::Pressed,
                     state: ButtonState::Pressed
                 };
             },
