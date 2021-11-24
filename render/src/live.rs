@@ -142,7 +142,7 @@ pub trait LiveNew: LiveComponent {
     fn new(cx: &mut Cx) -> Self;
     
     fn live_register(cx: &mut Cx) {}
-    
+
     fn live_type_info() -> LiveTypeInfo where Self: Sized + 'static {
         LiveTypeInfo {module_path: ModulePath::from_str(&module_path!()).unwrap(), live_type: Self::live_type(), fields: Vec::new(), type_name: Id::from_str("LiveNew").unwrap()}
     }
@@ -232,14 +232,6 @@ pub trait LiveApply {
     fn after_new(&mut self, _cx: &mut Cx) {}
 }
 
-/*
-#[derive(Default)]
-pub struct LiveBinding {
-    pub live_ptr: Option<LivePtr>
-}
-
-*/
-
 impl<T> LiveCast for Option<T> where T: LiveComponent + LiveNew + 'static {}
 impl<T> LiveComponent for Option<T> where T: LiveComponent + LiveNew+ 'static {
     fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
@@ -253,7 +245,6 @@ impl<T> LiveComponent for Option<T> where T: LiveComponent + LiveNew+ 'static {
             index
         }
     }
-    
     fn type_id(&self) -> TypeId{
         std::any::TypeId::of::<T>()
     }

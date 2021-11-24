@@ -106,14 +106,15 @@ fn parse_value(prop_id:TokenStream, parser:&mut TokenParser, tb:&mut TokenBuilde
             }
         }
         else if parser.is_brace(){ 
-            tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id.clone())).add(",value:LiveValue::Class{");
-            tb.add("class:Id(").suf_u64(class_id).add(")}},");
+            tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id.clone())).add(",value:LiveValue::Clone(");
+            tb.add("Id(").suf_u64(class_id).add("))},");
             parser.open_group();
             parse_object(parser,tb)?;
             tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id)).add(",value:LiveValue::Close},");
         }
         else{
-            return Err(error("Expected {}"));
+            tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id.clone())).add(",value:LiveValue::Id(");
+            tb.add("Id(").suf_u64(class_id).add("))},");
         }
     }
     else if parser.eat_punct_alone('#'){ // coLor!
