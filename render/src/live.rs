@@ -287,6 +287,14 @@ macro_rules!get_component {
         $frame.get_component($comp_id).map_or(None, |v| v.cast_mut::<$ty>())
     }
 }
+
+#[macro_export]
+macro_rules!get_local_doc {
+    ( $ cx: expr, $ comp_id: expr) => {
+        $cx.live_registry.clone().borrow().module_path_str_id_to_doc(&module_path!(), $comp_id).unwrap()        
+    }
+}
+
 /*
 #[macro_export]
 macro_rules!let_action {
