@@ -53,6 +53,11 @@ impl Cx {
     pub fn apply_error_wrong_type_for_value(&mut self, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         self.apply_error(apply_from, index, nodes, format!("wrong type for value {}", nodes[index].id))
     }
+
+    pub fn apply_error_component_not_found(&mut self, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode], id:Id) {
+        self.apply_error(apply_from, index, nodes, format!("component not found {}", id))
+    }
+
     
     pub fn apply_error_cant_find_target(&mut self, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode], id: Id) {
         self.apply_error(apply_from, index, nodes, format!("cant find target {}", id))
@@ -178,6 +183,7 @@ pub trait LiveComponent: LiveCast {
     fn apply_live(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
         self.apply(cx, ApplyFrom::ApplyLive, 0, nodes);
     }
+    fn type_id(&self) -> TypeId;
 }
 
 
@@ -234,8 +240,8 @@ pub struct LiveBinding {
 
 */
 
-impl<T> LiveCast for Option<T> where T: LiveComponent + LiveNew {}
-impl<T> LiveComponent for Option<T> where T: LiveComponent + LiveNew {
+impl<T> LiveCast for Option<T> where T: LiveComponent + LiveNew + 'static {}
+impl<T> LiveComponent for Option<T> where T: LiveComponent + LiveNew+ 'static {
     fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         if let Some(v) = self {
             v.apply(cx, apply_from, index, nodes)
@@ -246,6 +252,10 @@ impl<T> LiveComponent for Option<T> where T: LiveComponent + LiveNew {
             *self = Some(inner);
             index
         }
+    }
+    
+    fn type_id(&self) -> TypeId{
+        std::any::TypeId::of::<T>()
     }
 }
 
@@ -271,15 +281,33 @@ impl<T> LiveNew for Option<T> where T: LiveComponent + LiveNew + 'static {
     }
 }
 
+#[macro_export]
+macro_rules!get_component {
+    (  $ comp_id: expr, $ ty: ty, $ frame: expr) => {
+        $frame.get_component($comp_id).map_or(None, |v| v.cast_mut::<$ty>())
+    }
+}
+/*
+#[macro_export]
+macro_rules!let_action {
+    ( $ item: expr, $ comp_id: expr, $ ty: expr) => {
+        let ($comp_id, $ty) = $item.action.cast_id($item.id)
+    }
+}*/
 
 #[macro_export]
 macro_rules!live_primitive {
     ( $ ty: ident, $ default: expr, $ apply: item, $ to_live_value: item) => {
+    
         impl LiveCast for $ ty {}
         impl ToLiveValue for $ ty {
             $ to_live_value
         }
         impl LiveComponent for $ ty {
+            fn type_id(&self) -> TypeId{
+                TypeId::of::<$ty>()
+            }
+
             $ apply
         }
         impl LiveNew for $ ty {
@@ -540,43 +568,28 @@ live_primitive!(
 
 // cast traits.
 
-pub trait LiveCast : LiveCastAny {
+pub trait LiveCast {
     fn to_frame_component(&mut self) -> Option<&mut dyn FrameComponent> {
         None
     }
 }
 
-pub trait LiveCastAny: 'static {
-    fn type_id(&self) -> TypeId;
-//    fn box_clone(&self) -> Box<dyn FrameAction>;
-}
-
-impl<T: 'static + ? Sized> LiveCastAny for T {
-    fn type_id(&self) -> TypeId {
-        TypeId::of::<T>()
-    }
-    
-//    fn box_clone(&self)->Box<dyn FrameAction>{
-//        Box::new((*self).clone())
-//    }
-}
-
-impl dyn LiveCastAny {
-    pub fn is<T: LiveCastAny>(&self) -> bool {
+impl dyn LiveComponent {
+    pub fn is<T: LiveComponent + 'static >(&self) -> bool {
         let t = TypeId::of::<T>();
         let concrete = self.type_id();
         t == concrete
     }
-    pub fn cast<T: LiveCastAny>(&self) -> Option<&T> {
+    pub fn cast<T: LiveComponent + 'static >(&self) -> Option<&T> {
         if self.is::<T>() {
-            Some(unsafe {&*(self as *const dyn LiveCastAny as *const T)})
+            Some(unsafe {&*(self as *const dyn LiveComponent as *const T)})
         } else {
             None
         }
     }
-    pub fn cast_mut<T: LiveCastAny>(&mut self) -> Option<&mut T> {
+    pub fn cast_mut<T: LiveComponent + 'static >(&mut self) -> Option<&mut T> {
         if self.is::<T>() {
-            Some(unsafe {&mut *(self as *const dyn LiveCastAny as *mut T)})
+            Some(unsafe {&mut *(self as *const dyn LiveComponent as *mut T)})
         } else {
             None
         }
@@ -585,43 +598,49 @@ impl dyn LiveCastAny {
 
 pub trait AnyAction: 'static {
     fn type_id(&self) -> TypeId;
-//    fn box_clone(&self) -> Box<dyn FrameAction>;
+    fn box_clone(&self) -> Box<dyn AnyAction>;
 }
 
-impl<T: 'static + ? Sized> AnyAction for T {
+impl<T: 'static + ? Sized + Clone> AnyAction for T {
     fn type_id(&self) -> TypeId {
         TypeId::of::<T>()
     }
     
-//    fn box_clone(&self)->Box<dyn FrameAction>{
-//        Box::new((*self).clone())
-//    }
+    fn box_clone(&self)->Box<dyn AnyAction>{
+        Box::new((*self).clone())
+    }
 }
 
 impl dyn AnyAction {
-    pub fn is<T: AnyAction>(&self) -> bool {
+    pub fn is<T: AnyAction >(&self) -> bool {
         let t = TypeId::of::<T>();
         let concrete = self.type_id();
         t == concrete
     }
-    pub fn cast<T: AnyAction>(&self) -> Option<&T> {
+    pub fn cast<T: AnyAction+ Default + Clone>(&self) -> T {
         if self.is::<T>() {
-            Some(unsafe {&*(self as *const dyn AnyAction as *const T)})
+            unsafe {&*(self as *const dyn AnyAction as *const T)}.clone()
         } else {
-            None
+            T::default()
         }
     }
+
+    pub fn cast_id<T: AnyAction+ Default + Clone>(&self, id:Id) -> (Id,T) {
+        if self.is::<T>() {
+            (id,unsafe {&*(self as *const dyn AnyAction as *const T)}.clone())
+        } else {
+            (id, T::default())
+        }
+    }
+
 }
 
-// We can now implement Clone manually by forwarding to clone_box.
-//impl Clone for Box<dyn FrameAction> {
-//    fn clone(&self) -> Box<dyn FrameAction> {
-//        self.box_clone()
-//    }/
-//}
+pub type OptionAnyAction = Option<Box<dyn AnyAction>>;
 
-pub trait IntoAnyAction {
-    fn into_any_action(self) -> Option<Box<dyn AnyAction >>;
+impl Clone for Box<dyn AnyAction> {
+    fn clone(&self) -> Box<dyn AnyAction> {
+        self.as_ref().box_clone()
+    }
 }
 
 pub trait FrameComponent: LiveComponent {

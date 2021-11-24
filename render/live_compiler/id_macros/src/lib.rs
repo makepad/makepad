@@ -27,7 +27,6 @@ pub fn id(item: TokenStream) -> TokenStream {
         parser.unexpected()
     }
 }
-
 #[proc_macro]
 pub fn id_from_str(item: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new(); 

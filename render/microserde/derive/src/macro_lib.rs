@@ -483,25 +483,6 @@ impl TokenParser {
         false
     }
 
-    pub fn expect_punct_alone(&mut self, what: char) -> Result<(),TokenStream> {
-        if self.is_punct_alone(what) {
-            self.advance();
-            return Ok(())
-        }
-        else{
-            Err(error(&format!("Expected punct {}", what)))
-        }
-    }
-
-    pub fn expect_punct_any(&mut self, what: char) -> Result<(),TokenStream> {
-        if self.is_punct_any(what) {
-            self.advance();
-            return Ok(())
-        }
-        else{
-            Err(error(&format!("Expected punct {}", what)))
-        }
-    }
     
     pub fn eat_any_punct(&mut self) -> Option<String> {
         let mut out = String::new();
@@ -531,6 +512,27 @@ impl TokenParser {
             return Ok(ret)
         }
         Err(error(&format!("Expected any ident")))
+    }
+    
+    
+    pub fn expect_punct_alone(&mut self, what: char) -> Result<(),TokenStream> {
+        if self.is_punct_alone(what) {
+            self.advance();
+            return Ok(())
+        }
+        else{
+            Err(error(&format!("Expected punct {}", what)))
+        }
+    }
+
+    pub fn expect_punct_any(&mut self, what: char) -> Result<(),TokenStream> {
+        if self.is_punct_any(what) {
+            self.advance();
+            return Ok(())
+        }
+        else{
+            Err(error(&format!("Expected punct {}", what)))
+        }
     }
     
     pub fn eat_ident_path(&mut self) -> Option<TokenStream> {
