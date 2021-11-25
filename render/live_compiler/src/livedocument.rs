@@ -4,7 +4,6 @@ use std::fmt;
 use crate::span::Span;
 use crate::token::{TokenWithSpan, TokenId};
 use crate::livenode::LiveNode;//, LiveValue};
-use crate::id::LocalPtr;
 use crate::id::LivePtr;
 use crate::id::FileId;
 
@@ -31,7 +30,7 @@ impl fmt::Display for LiveScopeTarget {
 
 #[derive(Copy, Clone)]
 pub enum LiveScopeTarget {
-    LocalPtr(LocalPtr),
+    LocalPtr(usize),
     LivePtr(LivePtr)
 }
 
@@ -39,7 +38,7 @@ impl LiveScopeTarget {
     pub fn to_full_node_ptr(&self, file_id: FileId) -> LivePtr {
         match self {
             LiveScopeTarget::LocalPtr(local_ptr) => {
-                LivePtr {file_id: file_id, local_ptr: *local_ptr}
+                LivePtr {file_id: file_id, index: *local_ptr as u32}
             }
             LiveScopeTarget::LivePtr(live_ptr) => {
                 *live_ptr
@@ -66,8 +65,8 @@ impl LiveDocument {
         }
     }
     
-    pub fn resolve_ptr(&self, local_ptr: LocalPtr) -> &LiveNode {
-        &self.nodes[local_ptr.0]
+    pub fn resolve_ptr(&self, index: usize) -> &LiveNode {
+        &self.nodes[index]
     }
     
     pub fn get_tokens(&self, token_start: usize, token_count: usize) -> &[TokenWithSpan] {

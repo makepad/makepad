@@ -141,7 +141,7 @@ impl DrawVars {
                                     }
                                     if field.id == id!(draw_vars) {
                                         // assert the thing to be marked correctly
-                                        if let LiveOrCalc::Calc = field.live_or_calc {}
+                                        if let LiveFieldKind::Calc = field.live_field_kind {}
                                         else {panic!()}
                                         if field.live_type_info.live_type != DrawVars::live_type() {panic!();}
                                         
@@ -156,18 +156,18 @@ impl DrawVars {
                                             slots += 1;
                                             //draw_shader_def.enums
                                             
-                                            draw_shader_def.add_instance(field.id, Ty::Enum(live_type), span, field.live_or_calc);
+                                            draw_shader_def.add_instance(field.id, Ty::Enum(live_type), span, field.live_field_kind);
                                         }
                                         else {
                                             let ty = live_type_to_shader_ty(live_type).expect("Please only put shader-understandable instance fields after draw_vars");
                                             slots += ty.slots();
-                                            draw_shader_def.add_instance(field.id, ty, span, field.live_or_calc);
+                                            draw_shader_def.add_instance(field.id, ty, span, field.live_field_kind);
                                         }
                                     }
                                 }
                                 // insert padding
                                 if level >0 &&  slots % 2 == 1 {
-                                    draw_shader_def.add_instance(Id(0), Ty::Float, span, LiveOrCalc::Calc);
+                                    draw_shader_def.add_instance(Id(0), Ty::Float, span, LiveFieldKind::Calc);
                                 }
                             }
                         }
@@ -495,7 +495,7 @@ impl CxDrawShaderMapping {
                 DrawShaderFieldKind::Geometry {..} => {
                     geometries.push(field.ident.0, ty, None);
                 }
-                DrawShaderFieldKind::Instance {var_def_ptr, live_or_calc, ..} => {
+                DrawShaderFieldKind::Instance {var_def_ptr, live_field_kind, ..} => {
                     if field.ident.0 == id!(rect_pos) {
                         rect_pos = Some(instances.total_slots);
                     }
@@ -506,7 +506,7 @@ impl CxDrawShaderMapping {
                         var_instances.push(field.ident.0, ty.clone(), None,);
                     }
                     instances.push(field.ident.0, ty, None);
-                    if let LiveOrCalc::Live = live_or_calc {
+                    if let LiveFieldKind::Live = live_field_kind {
                         live_instances.inputs.push(instances.inputs.last().unwrap().clone());
                     }
                 }
