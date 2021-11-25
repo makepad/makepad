@@ -3,7 +3,7 @@ use makepad_live_compiler::Token;
 use makepad_live_compiler::Id;
 use makepad_live_compiler::LivePtr;
 use makepad_live_compiler::LiveType;
-use makepad_live_compiler::LiveOrCalc;
+use makepad_live_compiler::LiveFieldKind;
 use makepad_live_compiler::Vec4;
 use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
@@ -110,7 +110,7 @@ pub enum DrawShaderFieldKind {
     },
     Instance {
         is_used_in_pixel_shader: Cell<bool >,
-        live_or_calc: LiveOrCalc,
+        live_field_kind: LiveFieldKind,
         var_def_ptr: Option<VarDefPtr>,
         //input_type: DrawShaderInputType,
     },
@@ -803,11 +803,11 @@ impl DrawShaderDef {
         )
     }
     
-    pub fn add_instance(&mut self, id:Id, ty:Ty, span:Span, live_or_calc:LiveOrCalc){
+    pub fn add_instance(&mut self, id:Id, ty:Ty, span:Span, live_field_kind:LiveFieldKind){
         self.fields.push(
             DrawShaderFieldDef { 
                 kind: DrawShaderFieldKind::Instance { 
-                    live_or_calc,
+                    live_field_kind,
                     is_used_in_pixel_shader: Cell::new(false),
                     var_def_ptr: None
                 },

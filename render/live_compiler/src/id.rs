@@ -109,34 +109,34 @@ impl fmt::Display for ModulePath {
         write!(f, "{}::{}", self.0, self.1)
     }
 }
-
+/*
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialOrd, Copy, PartialEq)]
 pub struct LocalPtr(pub usize);
-
+*/
 #[derive(Clone, Debug, Eq, Hash, Copy, Ord, PartialOrd, PartialEq)]
 pub struct LivePtr {
     pub file_id: FileId,
-    pub local_ptr: LocalPtr,
+    pub index: u32,
 }
 
 impl LivePtr{
     pub fn node_index(&self)->usize{
-        self.local_ptr.0
+        self.index as usize
     }
     
     pub fn with_index(&self, index:usize)->Self{
-        Self{file_id:self.file_id, local_ptr:LocalPtr(index)}
+        Self{file_id:self.file_id, index:index as u32}
     }
 
     pub fn from_index(file_id:FileId, index:usize)->Self{
-        Self{file_id:file_id, local_ptr:LocalPtr(index)}
+        Self{file_id:file_id, index:index as u32}
     }
 
 }
 
 impl fmt::Display for LivePtr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}_{}", self.file_id.0, self.local_ptr.0)
+        write!(f, "{}_{}", self.file_id.0, self.index)
     }
 }
 
@@ -146,6 +146,19 @@ pub struct Id(pub u64);
 impl Id {
     pub fn empty() -> Self {
         Self (0)
+    }
+    
+    // doing this cuts the hashsize but yolo.
+    pub fn with_num(&self, num:u16)->Self{
+        Self(self.0&0xffff_ffff_ffff_0000 | (num as u64))
+    }
+    
+    pub fn mask_num(&self)->Self{
+        Self(self.0&0xffff_ffff_ffff_0000)
+    }
+    
+    pub fn get_num(&self)->u16{
+        (self.0&0xffff) as u16
     }
     
     pub fn is_empty(&self) -> bool {
@@ -249,7 +262,7 @@ impl fmt::Display for Id {
                     write!(f, "{}", id)
                 }
                 else {
-                    write!(f, "IdNotFound {:x}", self.0)
+                    write!(f, "IdNotFound {:016x}", self.0)
                 }
             })
         }

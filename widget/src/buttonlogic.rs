@@ -20,24 +20,13 @@ impl Default for ButtonState {
     fn default() -> Self {Self::None}
 }
 
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Clone, PartialEq, IntoAnyAction)]
 pub enum ButtonAction {
     None,
     Clicked,
     Pressed,
     Up
 }
-
-
-impl Into<OptionAnyAction> for ButtonAction{
-    fn into(self)->Option<Box<dyn AnyAction>>{
-        match &self{
-            Self::None=>None,
-            _=>Some(Box::new(self))
-        }
-    }
-}
-
 
 #[derive(Copy, Clone, Default)]
 pub struct ButtonHandleResult {

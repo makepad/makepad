@@ -119,7 +119,7 @@ impl Cx {
         }
         let font_id = self.fonts.len();
         self.fonts.push(None);
-        
+        self.path_to_font_id.insert(path.to_string(), font_id);
         if let Ok(mut file_handle) = File::open(&path) {
             let mut buffer = Vec::<u8>::new();
             if file_handle.read_to_end(&mut buffer).is_ok() {

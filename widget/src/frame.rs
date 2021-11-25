@@ -2,7 +2,7 @@ use makepad_render::*;
 use std::collections::HashMap;
 
 live_register!{
-    Frame: {{Frame}}{
+    Frame: {{Frame}} {
     }
 }
 
@@ -12,14 +12,13 @@ pub struct FrameActionItem {
     pub action: Box<dyn AnyAction>
 }
 
-#[derive(Clone)]
-pub enum FrameActions{
+#[derive(Clone, IntoAnyAction)]
+pub enum FrameActions {
     None,
     Actions(Vec<FrameActionItem>)
 }
 
 pub struct FrameItem { // draw info per UI element
-    live_type: LiveType,
     component: Box<dyn LiveComponent>
 }
 
@@ -27,17 +26,19 @@ pub struct Frame { // draw info per UI element
     pub view: Option<View>,
     pub live_ptr: Option<LivePtr>,
     pub components: HashMap<Id, FrameItem>,
-    pub child_list: Vec<Id>,
+    pub has_children_array: bool,
+    pub children: Vec<Id>,
+    pub create_order: Vec<Id>
 }
 
-impl LiveCast for Frame{
-    fn to_frame_component(&mut self)->Option<&mut dyn FrameComponent>{
+impl LiveCast for Frame {
+    fn to_frame_component(&mut self) -> Option<&mut dyn FrameComponent> {
         return Some(self);
     }
 }
 
 impl FrameComponent for Frame {
-    fn handle(&mut self, cx: &mut Cx, event: &mut Event)->OptionAnyAction{
+    fn handle(&mut self, cx: &mut Cx, event: &mut Event) -> OptionAnyAction {
         self.handle_frame(cx, event).into()
     }
     
@@ -47,12 +48,14 @@ impl FrameComponent for Frame {
 }
 
 impl LiveNew for Frame {
-    fn new(_cx: &mut Cx)->Self{
+    fn new(_cx: &mut Cx) -> Self {
         Self {
             live_ptr: None,
             view: None,
             components: HashMap::new(),
-            child_list: Vec::new()
+            has_children_array: false,
+            children: Vec::new(),
+            create_order: Vec::new()
         }
     }
     
@@ -65,94 +68,125 @@ impl LiveNew for Frame {
         }
         cx.register_factory(Self::live_type(), Box::new(Factory()));
     }
+    
+    fn live_type_info() -> LiveTypeInfo where Self: Sized + 'static {
+        LiveTypeInfo {
+            module_path: ModulePath::from_str(&module_path!()).unwrap(),
+            live_type: Self::live_type(),
+            fields: Vec::new(),
+            type_name: Id::from_str("Frame").unwrap()
+        }
+    }
+    
 }
 
-impl Frame{
-    fn create_component(&mut self,  cx: &mut Cx, apply_from: ApplyFrom, id:Id, live_type:LiveType, index:usize, nodes:&[LiveNode]){
+impl Frame {
+    fn create_component(&mut self, cx: &mut Cx, apply_from: ApplyFrom, id: Id, live_type: LiveType, index: usize, nodes: &[LiveNode]) {
         let factories = cx.live_factories.clone();
         let factories_cp = factories.borrow();
-        if let Some(factory) = factories_cp.get(&live_type){
+        if let Some(factory) = factories_cp.get(&live_type) {
             let mut component = factory.new_component(cx);
             component.apply(cx, apply_from, index, nodes);
-            self.components.insert(id, FrameItem{component, live_type});
+            self.components.insert(id, FrameItem {component});
         }
     }
 }
 
 impl LiveComponent for Frame {
-    fn type_id(&self)->std::any::TypeId{ std::any::TypeId::of::<Self>()}
+    fn type_id(&self) -> std::any::TypeId {std::any::TypeId::of::<Self>()}
     
     fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
-
+        
         if let Some(file_id) = apply_from.file_id() {
-           self.live_ptr = Some(LivePtr::from_index(file_id, start_index));
+            self.live_ptr = Some(LivePtr::from_index(file_id, start_index));
         }
-
+        
         if !nodes[start_index].value.is_structy_type() {
             cx.apply_error_wrong_type_for_struct(apply_from, start_index, nodes, id!(Frame));
             return nodes.skip_node(start_index);
         }
+        let live_registry_rc = cx.live_registry.clone();
+        let live_registry = live_registry_rc.borrow();
         
         let mut index = start_index + 1;
-        while index<nodes.len(){
+        while index<nodes.len() {
             if nodes[index].value.is_close() {
                 index += 1;
                 break;
             }
-            match nodes[index].id{
-                id!(children)=>{
-                    self.child_list.truncate(0);
+            match nodes[index].id {
+                id!(children) => {
+                    self.has_children_array = true;
+                    self.children.truncate(0);
                     let mut node_iter = nodes.first_child(index);
-                    while let Some(index) = node_iter{
-                        if let LiveValue::Id(id) = nodes[index].value{
-                            if self.components.get(&id).is_none(){
+                    while let Some(index) = node_iter {
+                        if let LiveValue::Id(id) = nodes[index].value {
+                            if self.components.get(&id).is_none() {
                                 cx.apply_error_cant_find_target(apply_from, index, nodes, id);
                             }
-                            else{
-                                self.child_list.push(id)
+                            else {
+                                self.children.push(id)
                             }
                         }
-                        else{
+                        else {
                             cx.apply_error_wrong_type_for_value(apply_from, index, nodes);
                         }
                         node_iter = nodes.next_child(index);
                     }
                 }
-                id!(layout)=>{
+                id!(layout) => {
                 }
-                id=>{
-                    if !nodes[index].value.is_structy_type(){
+                component_id => {
+                    if !nodes[index].value.is_structy_type() {
                         cx.apply_error_no_matching_value(apply_from, index, nodes);
-                    } 
-                    else if let Some(item) = self.components.get_mut(&id){
+                    }
+                    else if let Some(item) = self.components.get_mut(&component_id) {
                         // exists
                         item.component.apply(cx, apply_from, index, nodes);
                     }
-                    else if !apply_from.is_from_doc(){ // not from doc. and doesnt exist.
-                        // ok now what. now we need to find the live_type
-                        todo!()
-                        /*
-                        let live_registry_rc = cx.live_registry.clone();
-                        let live_registry = live_registry_rc.borrow();
-                        let (nodes, index) = live_registry.ptr_to_nodes_index(self.live_ptr.unwrap());
-                        if let LiveValue::Class(live_type) = nodes[index].value{
-                            // if the component exists. what do we do.. nothing right
-                            self.create_component(cx, ApplyFrom::NewFromDoc{file_id:self.live_ptr.unwrap().file_id}, id, live_type, index, nodes);
-                            self.child_list.push(id);
+                    else if !apply_from.is_from_doc() { // not from doc. and doesnt exist.
+                        if let LiveValue::Clone(target_id) = nodes[index].value {
+                            
+                            
+                            // ok now we need to find
+                            if let Some((start_nodes, start_index)) = live_registry.find_scope_item_via_class_parent(self.live_ptr.unwrap(), target_id) {
+                                if let LiveValue::Class {live_type, ..} = start_nodes[start_index].value {
+                                    // first spawn the component from the target
+                                    //cx.profile_start(0);
+                                    self.create_component(
+                                        cx,
+                                        ApplyFrom::NewFromDoc {file_id: start_nodes[start_index].token_id.unwrap().file_id()},
+                                        component_id,
+                                        live_type,
+                                        start_index,
+                                        start_nodes
+                                    );
+                                    //cx.profile_end(0);
+                                    // then apply our local data over it.
+                                    self.components.get_mut(&component_id).as_mut().unwrap().component.apply(cx, apply_from, index, nodes);
+                                    self.create_order.push(component_id);
+                                }
+                                else {
+                                    cx.apply_error_wrong_type_for_value(apply_from, index, nodes);
+                                }
+                            }
+                            else {
+                                cx.apply_error_cant_find_target(apply_from, index, nodes, target_id);
+                            }
                         }
-                        else{
+                        else {
                             cx.apply_error_wrong_type_for_value(apply_from, index, nodes);
-                        } */
+                        }
                     }
-                    else{ // apply or create component
-                        if let LiveValue::Class(live_type) = nodes[index].value{
-                            self.create_component(cx, apply_from, id, live_type, index, nodes);
-                            self.child_list.push(id);
+                    else { // apply or create component
+                        if let LiveValue::Class {live_type, ..} = nodes[index].value {
+                            self.create_component(cx, apply_from, component_id, live_type, index, nodes);
+                            self.create_order.push(component_id);
                         }
-                        else{
+                        else {
                             cx.apply_error_wrong_type_for_value(apply_from, index, nodes);
                         }
-                    } 
+                    }
                 }
             }
             index = nodes.skip_node(index);
@@ -162,67 +196,67 @@ impl LiveComponent for Frame {
 }
 
 
-impl Frame{
-    pub fn get_component(&mut self, id:Id)->Option<&mut Box<dyn LiveComponent>>{
-        if let Some(comp) = self.components.get_mut(&id){
+impl Frame {
+    pub fn get_component(&mut self, id: Id) -> Option<&mut Box<dyn LiveComponent >> {
+        if let Some(comp) = self.components.get_mut(&id) {
             return Some(&mut comp.component)
         }
-        else{
+        else {
             None
         }
     }
     
-    pub fn handle_frame(&mut self, cx:&mut Cx, event:&mut Event)->FrameActions{
+    pub fn handle_frame(&mut self, cx: &mut Cx, event: &mut Event) -> FrameActions {
         let mut actions = Vec::new();
-        for id in &self.child_list{
+        for id in if self.has_children_array {&self.children}else {&self.create_order} {
             let item = self.components.get_mut(id).unwrap();
-            if let Some(fc) = item.component.to_frame_component(){
-                if let Some(action) = fc.handle(cx, event){
-                    if let FrameActions::Actions(other_actions) = action.cast(){
+            if let Some(fc) = item.component.to_frame_component() {
+                if let Some(action) = fc.handle(cx, event) {
+                    if let FrameActions::Actions(other_actions) = action.cast() {
                         actions.extend(other_actions);
                     }
-                    else{
-                        actions.push(FrameActionItem{
-                            id:*id,
-                            action:action
+                    else {
+                        actions.push(FrameActionItem {
+                            id: *id,
+                            action: action
                         });
                     }
                 }
             }
         }
-        if actions.len()>0{
+        if actions.len()>0 {
             FrameActions::Actions(actions)
         }
-        else{
+        else {
             FrameActions::None
         }
     }
     
-    pub fn draw_frame(&mut self, cx:&mut Cx){
-        for id in &self.child_list{
+    pub fn draw_frame(&mut self, cx: &mut Cx) {
+        for id in if self.has_children_array {&self.children}else {&self.create_order} {
             let item = self.components.get_mut(id).unwrap();
-            if let Some(fc) = item.component.to_frame_component(){
+            if let Some(fc) = item.component.to_frame_component() {
                 fc.draw(cx)
             }
         }
     }
 }
 
-impl Default for FrameActions{
-    fn default()->Self{Self::None}
+impl Default for FrameActions {
+    fn default() -> Self {Self::None}
 }
 
-pub struct FrameActionsIterator{
-    iter: Option<std::vec::IntoIter<FrameActionItem>>
+pub struct FrameActionsIterator {
+    iter: Option<std::vec::IntoIter<FrameActionItem >>
 }
 
-impl Iterator for FrameActionsIterator{
+impl Iterator for FrameActionsIterator {
     type Item = FrameActionItem;
-    fn next(&mut self)->Option<Self::Item>{
-        if let Some(iter) = self.iter.as_mut(){
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Some(iter) = self.iter.as_mut() {
             return iter.next()
         }
-        else{
+        else {
             None
         }
     }
@@ -232,20 +266,11 @@ impl Iterator for FrameActionsIterator{
 impl IntoIterator for FrameActions {
     type Item = FrameActionItem;
     type IntoIter = FrameActionsIterator;
-
+    
     fn into_iter(self) -> Self::IntoIter {
-        match self{
-            Self::None=>FrameActionsIterator{iter:None},
-            Self::Actions(actions)=>FrameActionsIterator{iter:Some(actions.into_iter())},
-        }
-    }
-}
-
-impl Into<OptionAnyAction> for FrameActions{
-    fn into(self)->Option<Box<dyn AnyAction>>{
-        match &self{
-            Self::None=>None,
-            Self::Actions(_)=>Some(Box::new(self))
+        match self {
+            Self::None => FrameActionsIterator {iter: None},
+            Self::Actions(actions) => FrameActionsIterator {iter: Some(actions.into_iter())},
         }
     }
 }

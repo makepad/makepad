@@ -36,6 +36,11 @@ pub fn derive_live_cast(input: TokenStream) -> TokenStream {
     derive_live_cast_impl(input)
 }
 
+#[proc_macro_derive(IntoAnyAction)]
+pub fn derive_into_any_action(input: TokenStream) -> TokenStream {
+    derive_into_any_action_impl(input)
+}
+
 #[proc_macro]
 pub fn live(input: TokenStream) -> TokenStream {
     live_impl(input)

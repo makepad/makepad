@@ -83,10 +83,27 @@ impl TokenBuilder {
                 }
                 ('+', _) | ('-', _) | ('*', _) | ('/', _) |
                 ('=', _) | ('<', _) | ('>', _) | ('?', _) | (';', _) | ('&', _) |
-                ('^', _) | (':', _) | (',', _) | ('!', _) | ('.', _) | ('|', _)=> {
+                ('^', _) | (':', _) | (',', _) | ('!', _) | ('.', _) | ('|', _) => {
                     self.punct(std::str::from_utf8(&b[o..o + 1]).unwrap());
                     o += 1;
                 },
+                ('0', 'x') => { // this needs to be fancier but whatever.
+                    let mut e = o + 2;
+                    let mut out = 0u64;
+                    while e < b.len() {
+                        let c = b[e] as char;
+                        if c >= '0' && c <= '9' {out = (out << 4) | (b[e] - '0' as u8) as u64}
+                        else if c >= 'a' && c <= 'f' {out = (out << 4) | (b[e] - 'a' as u8 + 10) as u64}
+                        else if c >= 'A' && c <'F' {out = (out << 4) | (b[e] - 'A' as u8 + 10) as u64}
+                        else if c == '_' {}
+                        else {
+                            break;
+                        }
+                        e += 1;
+                    }
+                    self.suf_u64(out);
+                    o = e;
+                }
                 ('0'..='9', _) => {
                     let mut e = o + 1;
                     while e < b.len() {
@@ -99,21 +116,21 @@ impl TokenBuilder {
                         }
                     }
                     let num = std::str::from_utf8(&b[o..e]).unwrap();
-                    self.unsuf_usize(num.parse().expect(&format!("Can't parse number \"{}\"", what)));
+                    self.unsuf_usize(num.parse().expect(&format!("Can't parse usize number \"{}\"", what)));
                     o = e;
                 }
-                ('"',_)=>{
+                ('"', _) => {
                     let mut e = o + 1;
                     while e < b.len() {
                         let c = b[e] as char;
                         if c == '"' {
                             break;
                         }
-                        else{
+                        else {
                             e += 1;
                         }
                     }
-                    self.string(std::str::from_utf8(&b[o+1..e]).unwrap());
+                    self.string(std::str::from_utf8(&b[o + 1..e]).unwrap());
                     o = e + 1;
                 }
                 _ => {
@@ -167,7 +184,7 @@ impl TokenBuilder {
     pub fn unsuf_f32(&mut self, val: f32) -> &mut Self {self.extend(TokenTree::from(Literal::f32_unsuffixed(val)))}
     pub fn unsuf_f64(&mut self, val: f64) -> &mut Self {self.extend(TokenTree::from(Literal::f64_unsuffixed(val)))}
     pub fn unsuf_i64(&mut self, val: i64) -> &mut Self {self.extend(TokenTree::from(Literal::i64_unsuffixed(val)))}
-
+    
     pub fn chr(&mut self, val: char) -> &mut Self {self.extend(TokenTree::from(Literal::character(val)))}
     pub fn _lit(&mut self, lit: Literal) -> &mut Self {self.extend(TokenTree::from(lit))}
     
@@ -370,11 +387,11 @@ impl TokenParser {
         }
         tb.end()
     }
-
-    pub fn eat_level_or_punct(&mut self, what:char) -> TokenStream {
+    
+    pub fn eat_level_or_punct(&mut self, what: char) -> TokenStream {
         let mut tb = TokenBuilder::new();
         while !self.eat_eot() {
-            if self.is_punct_alone(what){
+            if self.is_punct_alone(what) {
                 self.advance();
                 return tb.end();
             }
@@ -425,13 +442,13 @@ impl TokenParser {
     pub fn is_punct_alone(&mut self, what: char) -> bool {
         // check if our punct is multichar.
         if let Some(TokenTree::Punct(current)) = &self.current {
-            if current.as_char() == what && (current.as_char() == '>' || current.spacing() == Spacing::Alone ){
+            if current.as_char() == what && (current.as_char() == '>' || current.spacing() == Spacing::Alone) {
                 return true
             }
         }
         return false
     }
-
+    
     pub fn is_punct_any(&mut self, what: char) -> bool {
         // check if our punct is multichar.
         if let Some(TokenTree::Punct(current)) = &self.current {
@@ -441,15 +458,15 @@ impl TokenParser {
         }
         return false
     }
-
+    
     
     pub fn eat_double_colon_destruct(&mut self) -> bool {
         // check if our punct is multichar.
         if let Some(TokenTree::Punct(current)) = &self.current {
-            if current.as_char() == ':' && current.spacing() == Spacing::Joint{
+            if current.as_char() == ':' && current.spacing() == Spacing::Joint {
                 self.advance();
                 if let Some(TokenTree::Punct(current)) = &self.current {
-                    if current.as_char() == ':' && current.spacing() == Spacing::Alone{
+                    if current.as_char() == ':' && current.spacing() == Spacing::Alone {
                         self.advance();
                         return true
                     }
@@ -482,7 +499,7 @@ impl TokenParser {
         }
         false
     }
-
+    
     
     pub fn eat_any_punct(&mut self) -> Option<String> {
         let mut out = String::new();
@@ -505,6 +522,15 @@ impl TokenParser {
         return None
     }
     
+    pub fn eat_any_ident_with_span(&mut self) -> Option<(String, Span)> {
+        if let Some(TokenTree::Ident(ident)) = &self.current {
+            let ret = Some((ident.to_string(), self.span().unwrap()));
+            self.advance();
+            return ret
+        }
+        return None
+    }
+    
     pub fn expect_any_ident(&mut self) -> Result<String, TokenStream> {
         if let Some(TokenTree::Ident(ident)) = &self.current {
             let ret = ident.to_string();
@@ -515,22 +541,22 @@ impl TokenParser {
     }
     
     
-    pub fn expect_punct_alone(&mut self, what: char) -> Result<(),TokenStream> {
+    pub fn expect_punct_alone(&mut self, what: char) -> Result<(), TokenStream> {
         if self.is_punct_alone(what) {
             self.advance();
             return Ok(())
         }
-        else{
+        else {
             Err(error(&format!("Expected punct {}", what)))
         }
     }
-
-    pub fn expect_punct_any(&mut self, what: char) -> Result<(),TokenStream> {
+    
+    pub fn expect_punct_any(&mut self, what: char) -> Result<(), TokenStream> {
         if self.is_punct_any(what) {
             self.advance();
             return Ok(())
         }
-        else{
+        else {
             Err(error(&format!("Expected punct {}", what)))
         }
     }
@@ -597,7 +623,7 @@ impl TokenParser {
                             }
                         }
                         else {
-                            return None // unexpected 
+                            return None // unexpected
                         }
                     }
                 }
@@ -624,7 +650,6 @@ impl TokenParser {
         return None
     }
     
-    
     pub fn eat_attributes(&mut self) -> Vec<Attribute> {
         let mut results = Vec::new();
         while self.eat_punct_alone('#') { // parse our attribute
@@ -632,7 +657,7 @@ impl TokenParser {
                 break;
             }
             while let Some(ident) = self.eat_any_ident() {
-                if !self.open_paren() && !self.open_brace(){
+                if !self.open_paren() && !self.open_brace() {
                     results.push(Attribute {name: ident, args: None});
                     break;
                 }
@@ -742,13 +767,26 @@ impl TokenParser {
             tb.add(")");
             return Some(tb.end());
         }
-        else if let Some(ty) = self.eat_any_ident() {
-            tb.ident(&ty);
+        else if let Some((ty, span)) = self.eat_any_ident_with_span() {
+            tb.ident_with_span(&ty, span);
             tb.stream(self.eat_generic());
             
             return Some(tb.end())
         }
         return None
+    }
+    
+    pub fn unwrap_option(input: TokenStream) -> Result<TokenStream, TokenStream> {
+        let mut ty_parser = TokenParser::new(input.clone());
+        if ty_parser.eat_ident("Option") {
+            if !ty_parser.eat_punct_alone('<') {
+                panic!()
+            }
+            Ok(ty_parser.eat_level_or_punct('>'))
+        }
+        else {
+            Err(input)
+        }
     }
 }
 

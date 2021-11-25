@@ -4,6 +4,7 @@ use crate::token::{Token, TokenWithSpan, TokenId};
 use std::iter::Cloned;
 use std::slice::Iter;
 use crate::id::FileId;
+use crate::id::ModulePath;
 use crate::span::Span;
 use crate::liveerror::LiveError;
 use crate::liveerror::LiveErrorOrigin;
@@ -158,7 +159,7 @@ impl<'a> LiveParser<'a> {
         ld.nodes.push(LiveNode {
             token_id:Some(token_id),
             id: object_id,
-            value: LiveValue::Use {crate_id, module_id}
+            value: LiveValue::Use(ModulePath(crate_id, module_id))
         });
         
         Ok(())
@@ -329,7 +330,11 @@ impl<'a> LiveParser<'a> {
                     ld.nodes.push(LiveNode {
                         token_id:Some(token_id),
                         id: prop_id,
-                        value: LiveValue::Class(self.live_type_infos[val as usize].live_type)
+                        value: LiveValue::Class{
+                            live_type: self.live_type_infos[val as usize].live_type,
+                            class_parent: None,
+                            
+                        }
                     });
                     self.expect_token(Token::CloseBrace) ?;
                     self.expect_token(Token::CloseBrace) ?;

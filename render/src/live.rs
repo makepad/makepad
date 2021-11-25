@@ -555,7 +555,7 @@ live_primitive!(
     },
     fn to_live_value(&self) -> LiveValue {
         // lets check our byte size and choose a storage mode appropriately.
-        let bytes = self.as_bytes();
+        //let bytes = self.as_bytes();
         if let Some(inline_str) = InlineString::from_str(&self) {
             LiveValue::InlineString(inline_str)
         }
