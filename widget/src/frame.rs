@@ -107,7 +107,9 @@ impl LiveComponent for Frame {
         }
         let live_registry_rc = cx.live_registry.clone();
         let live_registry = live_registry_rc.borrow();
-        
+        if let ApplyFrom::ApplyClear = apply_from{
+            self.create_order.truncate(0);
+        }
         let mut index = start_index + 1;
         while index<nodes.len() {
             if nodes[index].value.is_close() {
@@ -143,6 +145,9 @@ impl LiveComponent for Frame {
                     else if let Some(item) = self.components.get_mut(&component_id) {
                         // exists
                         item.component.apply(cx, apply_from, index, nodes);
+                        if let ApplyFrom::ApplyClear = apply_from{
+                            self.create_order.push(component_id);
+                        }
                     }
                     else if !apply_from.is_from_doc() { // not from doc. and doesnt exist.
                         if let LiveValue::Clone(target_id) = nodes[index].value {
