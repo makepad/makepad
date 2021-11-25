@@ -103,14 +103,6 @@ impl ScrollView{
         changed
     }
     
-    pub fn set_scroll_view_total(&mut self, cx: &mut Cx, view_total: Vec2) {
-        if self.show_h {
-           self.scroll_h.set_scroll_view_total(cx, view_total.x)
-        }
-        if self.show_v {
-            self.scroll_v.set_scroll_view_total(cx, view_total.y)
-        }
-    }
     
     pub fn get_scroll_view_total(&mut self) -> Vec2 {
         Vec2 {

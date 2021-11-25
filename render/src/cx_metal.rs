@@ -364,7 +364,7 @@ impl Cx {
             let () = unsafe {msg_send![encoder, endEncoding]};
             let () = unsafe {msg_send![command_buffer, presentDrawable: drawable]};
             let () = unsafe {msg_send![command_buffer, commit]};
-            let () = unsafe {msg_send![command_buffer, waitUntilScheduled]};
+            //let () = unsafe {msg_send![command_buffer, waitUntilScheduled]};
         }
         let () = unsafe {msg_send![pool, release]};
     }
