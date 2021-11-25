@@ -91,6 +91,48 @@ pub fn derive_live_cast_impl(input: TokenStream) -> TokenStream {
     return parser.unexpected()
 }
 
+pub fn derive_into_any_action_impl(input: TokenStream) -> TokenStream {
+    let mut tb = TokenBuilder::new();
+    let mut parser = TokenParser::new(input);
+    let _main_attribs = parser.eat_attributes();
+    parser.eat_ident("pub");
+    if parser.eat_ident("struct") {
+        if let Some(struct_name) = parser.eat_any_ident() {
+            let generic = parser.eat_generic();
+            let _types = parser.eat_all_types();
+            let where_clause = parser.eat_where_clause(None); //Some("LiveUpdateHooks"));
+            tb.add("impl").stream(generic.clone());
+            tb.add("Into<OptionAnyAction> for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+            tb.add("    fn into(self)->Option<Box<dyn AnyAction>>{");
+            tb.add("        match &self{");
+            tb.add("            Self::None=>None,");
+            tb.add("            _=>Some(Box::new(self))");
+            tb.add("        }");
+            tb.add("    }");
+            tb.add("}");
+            return tb.end();
+        }
+    }
+    else if parser.eat_ident("enum") {
+        if let Some(enum_name) = parser.eat_any_ident() {
+            let generic = parser.eat_generic();
+            let where_clause = parser.eat_where_clause(None);
+            tb.add("impl").stream(generic.clone());
+            tb.add("Into<OptionAnyAction> for").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+            tb.add("    fn into(self)->Option<Box<dyn AnyAction>>{");
+            tb.add("        match &self{");
+            tb.add("            Self::None=>None,");
+            tb.add("            _=>Some(Box::new(self))");
+            tb.add("        }");
+            tb.add("    }");
+            tb.add("}");
+            return tb.end();
+        }
+    }
+    return parser.unexpected()
+}
+
+
 pub fn derive_live_apply_impl(input: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new();
     let mut parser = TokenParser::new(input);
@@ -259,12 +301,14 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             
             tb.add("impl").stream(generic.clone());
             tb.add("LiveComponent for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-
+            
             tb.add("    fn type_id(&self)->std::any::TypeId{ std::any::TypeId::of::<Self>() }");
-
+            
             tb.add("    fn apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, start_index: usize, nodes: &[LiveNode])->usize {");
-            tb.add("        self.before_apply(cx, apply_from, start_index, nodes);");
+            //tb.add("    cx.profile_start(start_index as u64);");
 
+            tb.add("        self.before_apply(cx, apply_from, start_index, nodes);");
+            
             tb.add("        let struct_id = Id(").suf_u64(Id::from_str(&struct_name).unwrap().0).add(");");
             tb.add("        if !nodes[start_index].value.is_structy_type(){");
             tb.add("            cx.apply_error_wrong_type_for_struct(apply_from, start_index, nodes, struct_id);");
@@ -281,13 +325,14 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("            index = self.apply_value(cx, apply_from, index, nodes);");
             tb.add("        }");
             tb.add("        self.after_apply(cx, apply_from, start_index, nodes);");
+            //tb.add("    cx.profile_end(start_index as u64);");
             tb.add("        return index;");
             tb.add("    }");
             tb.add("}");
             
             tb.add("impl").stream(generic.clone());
             tb.add("LiveNew for").ident(&struct_name).stream(generic).stream(where_clause).add("{");
-
+            
             tb.add("    fn live_type_info() -> LiveTypeInfo {");
             tb.add("        let mut fields = Vec::new();");
             
@@ -295,12 +340,25 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                 let attr = &field.attrs[0];
                 if attr.name == "live" || attr.name == "calc" {
                     tb.add("fields.push(LiveTypeField{id:Id::from_str(").string(&field.name).add(").unwrap(),");
-                    tb.add("live_type_info:").stream(Some(field.ty.clone())).add("::live_type_info(),");
-                    if attr.name == "live" {
-                        tb.add("live_or_calc: LiveOrCalc::Live");
-                    }
-                    else {
-                        tb.add("live_or_calc: LiveOrCalc::Calc");
+                    // ok so what do we do if we have an Option<..>
+                    // how about LiveOrCalc becomes LiveFieldType::Option
+                    match TokenParser::unwrap_option(field.ty.clone()) {
+                        Ok(inside) => {
+                            if attr.name != "live" {
+                                return error("For option type only use of live is supported")
+                            }
+                            tb.add("live_type_info:").stream(Some(inside)).add("::live_type_info(),");
+                            tb.add("live_field_kind: LiveFieldKind::LiveOption");
+                        }
+                        Err(not_option) => {
+                            tb.add("live_type_info:").stream(Some(not_option)).add("::live_type_info(),");
+                            if attr.name == "live" {
+                                tb.add("live_field_kind: LiveFieldKind::Live");
+                            }
+                            else {
+                                tb.add("live_field_kind: LiveFieldKind::Calc");
+                            }
+                        }
                     }
                     tb.add("});");
                 }
@@ -325,7 +383,14 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             for field in &fields {
                 let attr = &field.attrs[0];
                 if attr.name == "live" || attr.name == "calc" {
-                    tb.stream(Some(field.ty.clone())).add("::live_register(cx);");
+                    match TokenParser::unwrap_option(field.ty.clone()) {
+                        Ok(inside) => {
+                            tb.stream(Some(inside)).add("::live_register(cx);");
+                        }
+                        Err(not_option) => {
+                            tb.stream(Some(not_option)).add("::live_register(cx);");
+                        }
+                    }
                 }
             }
             tb.add("    }");
@@ -433,7 +498,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             items[pick.unwrap()].gen_new(&mut tb);
             tb.add("    ;ret.after_new(cx);ret");
             tb.add("    }");
-
+            
             tb.add("    fn live_type_info() -> LiveTypeInfo {");
             tb.add("        LiveTypeInfo{module_path:ModulePath::from_str(&module_path!()).unwrap(), live_type:Self::live_type(), fields:Vec::new(),");
             tb.add("            type_name:Id::from_str(").string(&enum_name).add(").unwrap()}");
@@ -457,7 +522,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                 }
                 tb.add("        cx.shader_registry.register_enum(").ident(&enum_name).add("::live_type(),ShaderEnum{enum_name:Id::from_str(").string(&enum_name).add(").unwrap(),variants});");
             }
-
+            
             tb.add("    }");
             tb.add("}");
             

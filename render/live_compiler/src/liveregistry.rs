@@ -48,7 +48,7 @@ pub struct LiveDocNodes<'a>{
 impl LiveRegistry {
     pub fn ptr_to_node(&self, live_ptr: LivePtr) -> &LiveNode {
         let doc = &self.expanded[live_ptr.file_id.to_index()];
-        &doc.resolve_ptr(live_ptr.local_ptr)
+        &doc.resolve_ptr(live_ptr.index as usize)
     }
     
     pub fn file_id_to_file_name(&self, file_id: FileId) -> &str {
@@ -57,7 +57,7 @@ impl LiveRegistry {
     
     pub fn ptr_to_doc_node(&self, live_ptr: LivePtr) -> (&LiveDocument, &LiveNode) {
         let doc = &self.expanded[live_ptr.file_id.to_index()];
-        (doc, &doc.resolve_ptr(live_ptr.local_ptr))
+        (doc, &doc.resolve_ptr(live_ptr.index as usize))
     }
     
     pub fn ptr_to_doc(&self, live_ptr: LivePtr) -> &LiveDocument{
@@ -66,7 +66,7 @@ impl LiveRegistry {
     
     pub fn ptr_to_nodes_index(&self, live_ptr: LivePtr) -> (&[LiveNode], usize) {
         let doc = &self.expanded[live_ptr.file_id.to_index()];
-        (&doc.nodes, live_ptr.local_ptr.0)
+        (&doc.nodes, live_ptr.index as usize)
     }
     
     pub fn token_id_to_origin_doc(&self, token_id: TokenId) -> &LiveDocument {
@@ -102,6 +102,39 @@ impl LiveRegistry {
         }
         None
     }
+    
+    pub fn find_scope_item_via_class_parent(&self, start_ptr:LivePtr, item:Id) -> Option<(&[LiveNode], usize)> {
+        let (nodes, index) = self.ptr_to_nodes_index(start_ptr);
+        if let LiveValue::Class{class_parent,..} = &nodes[index].value{
+            // ok its a class so now first scan up from here.
+            
+            if let Some(index) = nodes.scope_up_by_name(index, item){
+                // item can be a 'use' as well.
+                // if its a use we need to resolve it, otherwise w found it
+                if let LiveValue::Use(module_path) = &nodes[index].value{
+                    if let Some(ldn) = self.module_path_id_to_doc(*module_path, nodes[index].id){
+                        return Some((ldn.nodes, ldn.index))
+                    }
+                }
+                else{
+                    return Some((nodes, index))
+                }
+            }
+            else{
+                if let Some(class_parent) = class_parent{
+                    if class_parent.file_id != start_ptr.file_id{
+                       return self.find_scope_item_via_class_parent(*class_parent, item)
+                    }
+                }
+                
+            }
+        }
+        else{
+            println!("WRONG TYPE  {:?}", nodes[index].value);
+        }
+        None
+    }
+
 
     pub fn live_error_to_live_file_error(&self, live_error: LiveError) -> LiveFileError {
         let live_file = &self.live_files[live_error.span.file_id().to_index()];
@@ -200,17 +233,16 @@ impl LiveRegistry {
         
         for node in &mut document.nodes {
             match &mut node.value {
-                LiveValue::Use {crate_id, module_id, ..} => {
-                    if *crate_id == id!(crate){ // patch up crate refs
-                        *crate_id = own_module_path.0
+                LiveValue::Use(module_path)=> {
+                    if module_path.0 == id!(crate){ // patch up crate refs
+                        module_path.0 = own_module_path.0
                     };
-                    let module_path = ModulePath(*crate_id, *module_id); //document.use_ids_to_module_path(use_ids, own_module_path.0);
 
-                    dep_graph_set.insert(module_path);
-                    self.insert_dep_order(module_path, node.token_id.unwrap(), own_module_path);
+                    dep_graph_set.insert(*module_path);
+                    self.insert_dep_order(*module_path, node.token_id.unwrap(), own_module_path);
                     
                 }, // import
-                LiveValue::Class(live_type)=>{ // hold up. this is always own_module_path
+                LiveValue::Class{live_type,..}=>{ // hold up. this is always own_module_path
                     let infos = self.live_type_infos.get(&live_type).unwrap();
                     for sub_type in infos.fields.clone(){
                         let sub_module_path = sub_type.live_type_info.module_path;

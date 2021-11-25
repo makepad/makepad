@@ -84,8 +84,6 @@ live_register!{
     
     DesktopButton: {{DesktopButton}} {
         
-        //bg: DrawDesktopButton {}
-        
         state_default: {
             from: {all: Play::Forward {duration: 0.1}}
             bg: {pressed: 0.0, hover: 0.0}
@@ -111,7 +109,6 @@ live_register!{
         }
     }
 }
-
 
 #[derive(LiveComponent, LiveApply, LiveAnimate, LiveCast)]
 pub struct DesktopButton {

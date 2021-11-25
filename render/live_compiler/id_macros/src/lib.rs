@@ -27,6 +27,40 @@ pub fn id(item: TokenStream) -> TokenStream {
         parser.unexpected()
     }
 }
+
+// absolutely a very bad idea but lets see if we can do this.
+#[proc_macro]
+pub fn id_num(item: TokenStream) -> TokenStream {
+    let mut tb = TokenBuilder::new(); 
+
+    let mut parser = TokenParser::new(item);
+    if let Some(name) = parser.eat_any_ident() {
+        if !parser.eat_punct_alone(','){
+            return error("please add a number")
+        }
+        if let Some(v) = parser.eat_literal(){
+            if let Ok(v) = v.to_string().parse::<u64>(){
+                let id = Id::from_str_unchecked(&name);
+                tb.add("Id (").suf_u64(id.0&0xffff_ffff_ffff_0000 | (v&0xfff)).add(")");
+                return tb.end()
+            }
+            else{
+                return error("please add a number")
+            }
+        }
+        else{
+            let arg = parser.eat_level();
+            let id = Id::from_str_unchecked(&name);
+            tb.add("Id (").suf_u64(id.0&0xffff_ffff_ffff_0000).add("|((").stream(Some(arg)).add(")&0xffff)").add(")");
+            tb.end()
+        }
+    }
+    else{
+        parser.unexpected()
+    }
+}
+
+
 #[proc_macro]
 pub fn id_from_str(item: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new(); 

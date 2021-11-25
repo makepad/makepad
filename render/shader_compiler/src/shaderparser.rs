@@ -252,7 +252,7 @@ impl<'a> ShaderParser<'a> {
                 return span.end(self, | span | Ok(Some(DrawShaderFieldDef {
                     kind: DrawShaderFieldKind::Instance {
                         is_used_in_pixel_shader: Cell::new(false),
-                        live_or_calc:LiveOrCalc::Live,
+                        live_field_kind:LiveFieldKind::Live,
                         var_def_ptr: Some(VarDefPtr(decl_node_ptr)),
                         //input_type: DrawShaderInputType::VarDef(decl_node_ptr),
                     },
@@ -505,7 +505,7 @@ impl<'a> ShaderParser<'a> {
                     LiveScopeTarget::LivePtr(live_ptr) => live_ptr,
                     LiveScopeTarget::LocalPtr(local_ptr) => LivePtr {
                         file_id: self.file_id,
-                        local_ptr
+                        index:local_ptr as u32
                     }
                 };
                 return Some(full_ptr)

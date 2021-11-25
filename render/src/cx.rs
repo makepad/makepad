@@ -14,13 +14,12 @@ pub use makepad_live_compiler::LiveRegistry;
 pub use makepad_live_compiler::LiveDocNodes;
 pub use makepad_live_compiler::Id;
 pub use makepad_live_compiler::FileId;
-pub use makepad_live_compiler::LocalPtr;
 pub use makepad_live_compiler::LivePtr;
 pub use makepad_live_compiler::LiveNode;
 pub use makepad_live_compiler::LiveType;
 pub use makepad_live_compiler::LiveTypeInfo;
 pub use makepad_live_compiler::LiveTypeField;
-pub use makepad_live_compiler::LiveOrCalc;
+pub use makepad_live_compiler::LiveFieldKind;
 pub use makepad_live_compiler::LiveValue;
 pub use makepad_live_compiler::FittedString;
 pub use makepad_live_compiler::InlineString;
@@ -29,6 +28,7 @@ pub use makepad_live_compiler::LiveNodeSlice;
 pub use makepad_live_compiler::LiveNodeVec;
 
 pub use makepad_live_compiler::id;
+pub use makepad_live_compiler::id_num;
 
 pub use crate::font::*;
 pub use crate::turtle::*;
@@ -802,7 +802,7 @@ impl Cx {
     
     pub fn profile_end(&self, id:u64){
         if let Some(inst) = self.profiles.get(&id){
-            log!("Profile {} time {}", id, inst.elapsed().as_millis());
+            log!("Profile {} time {}", id, (inst.elapsed().as_nanos() as f64)/1000000f64);
         }
     }
     
