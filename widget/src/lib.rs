@@ -12,10 +12,17 @@ pub use crate::windowmenu::*;
 mod frame;
 pub use crate::frame::*;
 
+mod scrollview;
+pub use crate::scrollview::*;
+mod scrollbar;
+pub use crate::scrollbar::*;
+
 pub fn live_register(cx:&mut Cx){
     crate::button::live_register(cx);
     crate::desktopbutton::live_register(cx);
     crate::desktopwindow::live_register(cx);
     crate::windowmenu::live_register(cx);
     crate::frame::live_register(cx);
+    crate::scrollview::live_register(cx);
+    crate::scrollbar::live_register(cx);
 }

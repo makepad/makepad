@@ -6,9 +6,7 @@ use crate::livenode::LiveValue;
 use crate::livenode::LiveNodeSlice;
 use crate::livenode::LiveNodeVec;
 use crate::id::FileId;
-use crate::id::LocalPtr;
 use crate::id::LivePtr;
-use crate::id::ModulePath;
 use crate::livedocument::LiveScopeTarget;
 use crate::liveregistry::LiveRegistry;
 use crate::livedocument::LiveScopeItem;
@@ -99,10 +97,10 @@ impl<'a> LiveExpander<'a> {
                     in_index += 1;
                     continue;
                 }
-                LiveValue::Use {crate_id, module_id} => {
+                LiveValue::Use(module_path)=> {
                     let object_id = in_node.id;
                     // add items to the scope
-                    if let Some(file_id) = self.live_registry.module_path_to_file_id.get(&ModulePath(*crate_id, *module_id)){
+                    if let Some(file_id) = self.live_registry.module_path_to_file_id.get(&module_path){
                         // ok now find object_id and get us a pointer
                         let other_doc = &self.live_registry.expanded[file_id.to_index()];
 
@@ -113,7 +111,7 @@ impl<'a> LiveExpander<'a> {
                             if !node.id.is_empty() && (object_id.is_empty() || object_id == node.id){
                                 self.scope_stack.stack.last_mut().unwrap().push(LiveScopeItem {
                                     id: node.id,
-                                    target: LiveScopeTarget::LivePtr(LivePtr{file_id:*file_id, local_ptr:LocalPtr(node_index)})
+                                    target: LiveScopeTarget::LivePtr(LivePtr{file_id:*file_id, index:node_index as u32})
                                 });
                                 items_added += 1;
                                 if !object_id.is_empty(){
@@ -126,10 +124,12 @@ impl<'a> LiveExpander<'a> {
                             self.errors.push(LiveError {
                                 origin: live_error_origin!(),
                                 span: in_doc.token_id_to_span(in_node.token_id.unwrap()),
-                                message: format!("Cannot find use {}::{}::{}", crate_id, module_id, object_id)
+                                message: format!("Cannot find use {}::{}", module_path, object_id)
                             });
                         }
                     }
+                    let index = out_doc.nodes.append_child_index(*current_parent.last().unwrap());
+                    out_doc.nodes.insert(index, in_node.clone());
                     in_index += 1;
                     continue;
                 }
@@ -190,7 +190,11 @@ impl<'a> LiveExpander<'a> {
                         level_overwrite.push(true);
                         overwrite
                     }
-                    else if in_value.is_object() && out_value.is_class() {
+                    else if in_value.is_object() && out_value.is_class() { // lets set the target ptr
+                        // where is the thing in out_value from? we don't really know eh
+                        //if let LiveValue::Class{class_parent,..} = &mut out_doc.nodes[overwrite].value{
+                        //    *class_parent = Some(live_ptr);
+                        //}
                         level_overwrite.push(true);
                         overwrite
                     }
@@ -219,36 +223,50 @@ impl<'a> LiveExpander<'a> {
             
             self.scope_stack.stack.last_mut().unwrap().push(LiveScopeItem {
                 id: in_node.id,
-                target: LiveScopeTarget::LocalPtr(LocalPtr(out_index))
+                target: LiveScopeTarget::LocalPtr(out_index)
             });
             
             // process stacks
             match in_value {
                 LiveValue::Clone(clone) => {
                     if let Some(target) = self.scope_stack.find_item(*clone) {
-                        let val = match target {
+                        match target {
                             LiveScopeTarget::LocalPtr(local_ptr) => {
-                                if out_doc.nodes.clone_children_self(local_ptr.0, Some(out_index + 1)){
+                                if out_doc.nodes.clone_children_self(local_ptr, Some(out_index + 1)){
                                     self.errors.push(LiveError {
                                         origin: live_error_origin!(),
                                         span: in_doc.token_id_to_span(in_node.token_id.unwrap()),
                                         message: format!("Infinite recursion at {}", in_node.id)
                                     }); 
                                 }
-                                out_doc.nodes[local_ptr.0].value.clone()
+                                // clone the value and store a parent pointer
+                                out_doc.nodes[out_index].value = out_doc.nodes[local_ptr].value.clone();
+                                if let LiveValue::Class{class_parent,..} = &mut out_doc.nodes[out_index].value{
+                                    *class_parent = Some(LivePtr{file_id: self.in_file_id, index:out_index as u32});
+                                }
                             }
                             LiveScopeTarget::LivePtr(live_ptr) => {
                                 let doc = &self.live_registry.expanded[live_ptr.file_id.to_index()];
                                 out_doc.nodes.clone_children_from(live_ptr.node_index(), Some(out_index + 1), &doc.nodes);
-                                doc.nodes[live_ptr.node_index()].value.clone()
+                                // store the parent pointer
+                                out_doc.nodes[out_index].value = doc.nodes[live_ptr.node_index()].value.clone();
+                                if let LiveValue::Class{class_parent,..} = &mut out_doc.nodes[out_index].value{
+                                    *class_parent = Some(LivePtr{file_id: self.in_file_id, index:out_index as u32});
+                                }
                             }
                         };
-                        out_doc.nodes[out_index].value = val;
+                        //overwrite value, this copies the Class
+                        
                     }
                     self.scope_stack.stack.push(Vec::new());
                     current_parent.push(out_index);
                 }, 
-                LiveValue::Class(live_type)=>{
+                LiveValue::Class{live_type,..}=>{
+                    // store the class context
+                    if let LiveValue::Class{class_parent,..} = &mut out_doc.nodes[out_index].value{
+                        *class_parent = Some(LivePtr{file_id: self.in_file_id, index:out_index as u32});
+                    }
+                    
                     // ALRIGHT we ahve al the infos
                     // we should be able to get LiveTypeInfo to start populating our class.
                     // ok so.. our dep order should be good. so i should be able to look up
@@ -265,7 +283,6 @@ impl<'a> LiveExpander<'a> {
                         // if we have a deref target, this thing behaves entirely differently.
                         // we need to not clone in all the props, but we need to clone in the entire
                         // other class.
-                        
                     }
                     if has_deref_hop{
                         // ok so we need the lti of the deref hop and clone all children
@@ -279,7 +296,6 @@ impl<'a> LiveExpander<'a> {
                     else{
                         for field in &live_type_info.fields{
                             let lti = &field.live_type_info;
-
                             if let Some(file_id) = self.live_registry.module_path_to_file_id.get(&lti.module_path) {
                                 if *file_id == self.in_file_id{ // clone on self
                                     if let Ok(index) = out_doc.nodes.child_by_name(0, lti.type_name){
@@ -308,7 +324,8 @@ impl<'a> LiveExpander<'a> {
                 LiveValue::Array |
                 LiveValue::TupleEnum {..} |
                 LiveValue::NamedEnum {..} |
-                LiveValue::Object => {
+                LiveValue::Object => { // lets check what we are overwriting
+                    
                     self.scope_stack.stack.push(Vec::new());
                     current_parent.push(out_index);
                 },

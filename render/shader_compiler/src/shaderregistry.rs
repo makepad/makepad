@@ -136,7 +136,7 @@ impl ShaderRegistry {
         
         let doc = &live_registry.ptr_to_doc(base_ptr);
 
-        return walk_recur(live_registry, None, base_ptr.file_id, base_ptr.local_ptr.0, &doc.nodes, ids);
+        return walk_recur(live_registry, None, base_ptr.file_id, base_ptr.index as usize, &doc.nodes, ids);
         // ok so we got a node. great. now what
         fn walk_recur(live_registry:&LiveRegistry, struct_ptr:Option<LivePtr>,file_id: FileId, index: usize, nodes: &[LiveNode], ids: &[Id]) -> LiveNodeFindResult {
             let node = &nodes[index];
@@ -146,7 +146,7 @@ impl ShaderRegistry {
                 return LiveNodeFindResult::NotFound;
             }
             
-            let now_ptr = LivePtr {file_id, local_ptr: LocalPtr(index)};
+            let now_ptr = LivePtr {file_id, index: index as u32};
     
              
             match node.value {
@@ -172,7 +172,7 @@ impl ShaderRegistry {
                         _=>LiveNodeFindResult::NotFound
                     }
                 }
-                LiveValue::Class(_)=>{
+                LiveValue::Class{..}=>{
                     if ids.len() == 0{
                         return LiveNodeFindResult::Component(now_ptr);
                     }
@@ -468,14 +468,14 @@ impl ShaderRegistry {
         let (doc, class_node) = live_registry.ptr_to_doc_node(draw_shader_ptr.0);
 
         match class_node.value {
-            LiveValue::Class(draw_shader_type) => {
+            LiveValue::Class{live_type,..} => {
                 
                  ext_self(
                      live_registry,
                      self,
                      live_registry.token_id_to_span(class_node.token_id.unwrap()),
                      DrawShaderQuery::DrawShader,
-                     draw_shader_type,
+                     live_type,
                      &mut draw_shader_def
                 );
                 
@@ -500,7 +500,7 @@ impl ShaderRegistry {
                                 draw_shader_def.flags.draw_call_always = val;
                             }
                         }
-                        LiveValue::Class(live_type) => {
+                        LiveValue::Class{live_type,..} => {
                             if prop.id == id!(geometry){
                                 ext_self(
                                     live_registry,
