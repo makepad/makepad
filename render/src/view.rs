@@ -618,13 +618,14 @@ pub struct CxView {
 impl CxView {
     pub fn new() -> Self {
         let mut ret = Self {
+            is_clipped: true,
             do_v_scroll: true,
             do_h_scroll: true,
             ..Self::default()
         };
         ret.uniform_view_transform(&Mat4::identity());
         ret
-    }
+    } 
     
     pub fn initialize(&mut self, pass_id: usize, is_clipped: bool, redraw_id: u64) {
         self.is_clipped = is_clipped;

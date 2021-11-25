@@ -361,18 +361,17 @@ pub trait LiveNodeVec {
     fn push_vec3(&mut self, id: Id, v: Vec3);
     fn push_vec4(&mut self, id: Id, v: Vec4);
     fn push_id(&mut self, id: Id, v: Id);
-    
     fn push_bare_enum(&mut self, id: Id, base:Id, variant:Id);
-    fn push_tuple_enum(&mut self, id: Id, base:Id, variant:Id);
-    fn push_named_enum(&mut self, id: Id, base:Id, variant:Id);
-    fn push_object(&mut self, id: Id);
-    fn push_clone(&mut self, id: Id, clone:Id);
+    
+    fn open_tuple_enum(&mut self, id: Id, base:Id, variant:Id);
+    fn open_named_enum(&mut self, id: Id, base:Id, variant:Id);
+    fn open_object(&mut self, id: Id);
+    fn open_clone(&mut self, id: Id, clone:Id);
     //fn push_class(&mut self, id: Id, v:LiveType);
-    fn push_array(&mut self, id: Id);
-    fn push_close(&mut self);
+    fn open_array(&mut self, id: Id);
 
-    fn begin(&mut self);
-    fn end(&mut self);
+    fn open(&mut self);
+    fn close(&mut self);
 
 }
 
@@ -1039,15 +1038,13 @@ impl LiveNodeVec for Vec<LiveNode> {
     fn push_id(&mut self, id: Id, v: Id){self.push(LiveNode{token_id:None, id, value:LiveValue::Id(v)})}
     
     fn push_bare_enum(&mut self, id: Id, base:Id, variant:Id){self.push(LiveNode{token_id:None, id, value:LiveValue::BareEnum{base, variant}})}
-    fn push_tuple_enum(&mut self, id: Id, base:Id, variant:Id){self.push(LiveNode{token_id:None, id, value:LiveValue::TupleEnum{base, variant}})}
-    fn push_named_enum(&mut self, id: Id, base:Id, variant:Id){self.push(LiveNode{token_id:None, id, value:LiveValue::NamedEnum{base, variant}})}
-    fn push_object(&mut self, id: Id){self.push(LiveNode{token_id:None, id, value:LiveValue::Object})}
-    fn push_clone(&mut self, id: Id, clone:Id){self.push(LiveNode{token_id:None, id, value:LiveValue::Clone(clone)})}
-    fn push_array(&mut self, id: Id){self.push(LiveNode{token_id:None, id, value:LiveValue::Array})}
-    fn push_close(&mut self){self.push(LiveNode{token_id:None, id:Id(0), value:LiveValue::Close})}
-
-    fn begin(&mut self){self.push(LiveNode{token_id:None, id:Id(0), value:LiveValue::Object})}
-    fn end(&mut self){self.push(LiveNode{token_id:None, id:Id(0), value:LiveValue::Close})}
+    fn open_tuple_enum(&mut self, id: Id, base:Id, variant:Id){self.push(LiveNode{token_id:None, id, value:LiveValue::TupleEnum{base, variant}})}
+    fn open_named_enum(&mut self, id: Id, base:Id, variant:Id){self.push(LiveNode{token_id:None, id, value:LiveValue::NamedEnum{base, variant}})}
+    fn open_object(&mut self, id: Id){self.push(LiveNode{token_id:None, id, value:LiveValue::Object})}
+    fn open_clone(&mut self, id: Id, clone:Id){self.push(LiveNode{token_id:None, id, value:LiveValue::Clone(clone)})}
+    fn open_array(&mut self, id: Id){self.push(LiveNode{token_id:None, id, value:LiveValue::Array})}
+    fn close(&mut self){self.push(LiveNode{token_id:None, id:Id(0), value:LiveValue::Close})}
+    fn open(&mut self){self.push(LiveNode{token_id:None, id:Id(0), value:LiveValue::Object})}
 
 }
 const MAX_CLONE_STACK_DEPTH_SAFETY: usize = 100;
