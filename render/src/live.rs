@@ -385,6 +385,10 @@ live_primitive!(
                 *self = *val;
                 index + 1
             }
+            LiveValue::Int(val) => {
+                *self = *val != 0;
+                index + 1
+            }
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, apply_from, index, nodes);

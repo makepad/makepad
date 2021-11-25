@@ -176,6 +176,7 @@ impl Cx {
                         self.compute_passes_to_repaint(&mut passes_todo, &mut windows_need_repaint);
                         
                         if passes_todo.len() > 0 {
+                            self.repaint_id += 1;
                             for pass_id in &passes_todo {
                                 match self.passes[*pass_id].dep_of.clone() {
                                     CxPassDepOf::Window(window_id) => {

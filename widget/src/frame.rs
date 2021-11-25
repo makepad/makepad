@@ -151,8 +151,6 @@ impl LiveComponent for Frame {
                     }
                     else if !apply_from.is_from_doc() { // not from doc. and doesnt exist.
                         if let LiveValue::Clone(target_id) = nodes[index].value {
-                            
-                            
                             // ok now we need to find
                             if let Some((start_nodes, start_index)) = live_registry.find_scope_item_via_class_parent(self.live_ptr.unwrap(), target_id) {
                                 if let LiveValue::Class {live_type, ..} = start_nodes[start_index].value {
