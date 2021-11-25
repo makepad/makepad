@@ -56,7 +56,7 @@ impl App {
                 self.offset += 9999;
                 out.end();
                 // now apply it to frame to create it
-                self.frame.apply_live(cx, &out);
+                self.frame.apply_clear(cx, &out);
                 cx.profile_end(0);
                 
                 cx.redraw_all()

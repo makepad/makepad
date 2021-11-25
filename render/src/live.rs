@@ -183,6 +183,9 @@ pub trait LiveComponent: LiveCast {
     fn apply_live(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
         self.apply(cx, ApplyFrom::ApplyLive, 0, nodes);
     }
+    fn apply_clear(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
+        self.apply(cx, ApplyFrom::ApplyClear, 0, nodes);
+    }
     fn type_id(&self) -> TypeId;
 }
 
@@ -198,7 +201,8 @@ pub enum ApplyFrom {
     UpdateFromDoc {file_id: FileId}, // live DSL updated
     New, // Bare new without file info
     Animate, // from animate
-    ApplyLive // called from bare apply_live() call
+    ApplyLive, // called from bare apply_live() call
+    ApplyClear // called from bare apply_live() call
 }
 
 impl ApplyFrom {
