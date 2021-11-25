@@ -260,6 +260,7 @@ impl DrawVars {
                     }
                 }
                 // DONE!
+               
                 cx.passes[cxview.pass_id].paint_dirty = true;
                 draw_call.instance_dirty = true;
                 draw_call.uniforms_dirty = true;
@@ -363,9 +364,7 @@ impl DrawVars {
         if apply_from.is_from_doc() {
             self.init_slicer(cx);
         }
-        else if let ApplyFrom::Animate = apply_from {
-            self.update_vars_in_place(cx);
-        }
+        self.update_vars_in_place(cx);
     }
     
 }

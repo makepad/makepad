@@ -883,9 +883,8 @@ macro_rules!main_app {
             cx.event_loop( | cx, mut event | {
                 if let Event::Construct = event{
                     app = Some($ app::new_app(cx));
-                    return
                 }
-                if let Event::Draw = event {
+                else if let Event::Draw = event {
                     app.as_mut().unwrap().draw_app(cx);
                     cx.after_draw();
                     return
@@ -912,9 +911,8 @@ macro_rules!main_app {
             (*appcx.1).process_to_wasm(msg_bytes, | cx, mut event | {
                 if let Event::Construct = event{
                     (*appcx.0) = Box::new($ app::new_app(&mut cx));
-                    return
                 }
-                if let Event::Draw = event {
+                else if let Event::Draw = event {
                     (*appcx.0).draw_app(cx);
                      cx.after_draw();
                     return;
