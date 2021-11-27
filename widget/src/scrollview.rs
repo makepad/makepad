@@ -43,15 +43,15 @@ impl ScrollView{
         Self{scroll_v:Some(s), ..self}
     }
     */
-    pub fn begin_view(&mut self, cx: &mut Cx) -> ViewRedraw {
-        self.view.begin_view(cx)
+    pub fn begin(&mut self, cx: &mut Cx) -> ViewRedraw {
+        self.view.begin(cx)
     }
     
     pub fn view_will_redraw(&mut self, cx: &mut Cx)->bool{
         self.view.view_will_redraw(cx)
     }
     
-    pub fn handle_scroll_view(&mut self, cx: &mut Cx, event: &mut Event) -> bool {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> bool {
         let mut ret_h = ScrollBarEvent::None;
         let mut ret_v = ScrollBarEvent::None;
         
@@ -153,7 +153,7 @@ impl ScrollView{
         }
     }
     
-    pub fn end_view(&mut self, cx: &mut Cx) -> Area {
+    pub fn end(&mut self, cx: &mut Cx) -> Area {
 
         let view_id = self.view.view_id;
         let view_area = Area::View(ViewArea {view_id: view_id, redraw_id: cx.redraw_id});
@@ -191,8 +191,8 @@ impl ScrollView{
     }
     
     
-    pub fn redraw_view(&self, cx: &mut Cx) {
-        self.view.redraw_view(cx)
+    pub fn redraw(&self, cx: &mut Cx) {
+        self.view.redraw(cx)
     }
     
     pub fn area(&self) -> Area {

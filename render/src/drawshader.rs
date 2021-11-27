@@ -109,6 +109,7 @@ impl DrawVars {
                 draw_shader_ptr,
                 draw_shader_id: *draw_shader_id
             });
+            self.geometry = Some(geometry_fields.get_geometry());
         }
         else {
             fn live_type_to_shader_ty(live_type: LiveType) -> Option<Ty> {

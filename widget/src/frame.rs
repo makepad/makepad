@@ -38,12 +38,12 @@ impl LiveTraitCast for Frame {
 }
 
 impl FrameComponent for Frame {
-    fn handle(&mut self, cx: &mut Cx, event: &mut Event) -> OptionAnyAction {
-        self.handle_frame(cx, event).into()
+    fn handle_event_dyn(&mut self, cx: &mut Cx, event: &mut Event) -> OptionAnyAction {
+        self.handle_event(cx, event).into()
     }
     
-    fn draw(&mut self, cx: &mut Cx) {
-        self.draw_frame(cx);
+    fn draw_dyn(&mut self, cx: &mut Cx) {
+        self.draw(cx);
     }
 }
 
@@ -210,12 +210,12 @@ impl Frame {
         }
     }
     
-    pub fn handle_frame(&mut self, cx: &mut Cx, event: &mut Event) -> FrameActions {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> FrameActions {
         let mut actions = Vec::new();
         for id in if self.has_children_array {&self.children}else {&self.create_order} {
             let item = self.components.get_mut(id).unwrap();
             if let Some(fc) = item.component.to_frame_component() {
-                if let Some(action) = fc.handle(cx, event) {
+                if let Some(action) = fc.handle_event_dyn(cx, event) {
                     if let FrameActions::Actions(other_actions) = action.cast() {
                         actions.extend(other_actions);
                     }
@@ -236,11 +236,11 @@ impl Frame {
         }
     }
     
-    pub fn draw_frame(&mut self, cx: &mut Cx) {
+    pub fn draw(&mut self, cx: &mut Cx) {
         for id in if self.has_children_array {&self.children}else {&self.create_order} {
             let item = self.components.get_mut(id).unwrap();
             if let Some(fc) = item.component.to_frame_component() {
-                fc.draw(cx)
+                fc.draw_dyn(cx)
             }
         }
     }
