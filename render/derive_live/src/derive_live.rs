@@ -25,19 +25,23 @@ pub fn derive_live_animate_impl(input: TokenStream) -> TokenStream {
             };
             
             let animator = fields.iter().find( | field | field.name == "animator");
-            
+            let state_default = fields.iter().find( | field | field.name == "state_default");
             if !animator.is_some() {
                 // no can do
                 return error("Cannot generate LiveAnimate without animator");
             }
+            if !state_default.is_some() {
+                // no can do
+                return error("Cannot generate LiveAnimate without state_default");
+            }
             
             tb.add("impl").stream(generic.clone());
             tb.add("LiveAnimate for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-            tb.add("    fn animate_to(&mut self, cx: &mut Cx, state_id: Id) {");
+            tb.add("    fn animate_to(&mut self, cx: &mut Cx, state: LivePtr) {");
             tb.add("        if self.animator.state.is_none() {");
-            tb.add("            self.animator.cut_to_live(cx, id!(state_default));");
+            tb.add("            self.animator.cut_to_live(cx, self.state_default.unwrap());");
             tb.add("         }");
-            tb.add("        self.animator.animate_to_live(cx, state_id);");
+            tb.add("        self.animator.animate_to_live(cx, state);");
             tb.add("    }");
             tb.add("    fn handle_animation(&mut self, cx: &mut Cx, event: &mut Event) {");
             tb.add("        if self.animator.do_animation(cx, event) {");
@@ -157,6 +161,7 @@ pub fn derive_live_apply_impl(input: TokenStream) -> TokenStream {
             let deref_target = fields.iter().find( | field | field.name == "deref_target");
             let draw_vars = fields.iter().find( | field | field.name == "draw_vars");
             let animator = fields.iter().find( | field | field.name == "animator");
+            let live_ptr = fields.iter().find( | field | field.name == "live_ptr");
             
             if deref_target.is_some() && draw_vars.is_some() ||
             deref_target.is_some() && animator.is_some() ||
@@ -176,6 +181,9 @@ pub fn derive_live_apply_impl(input: TokenStream) -> TokenStream {
                 tb.add("    }");
                 tb.add("    fn after_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]) {");
                 tb.add("        self.draw_vars.after_apply(cx, apply_from, index, nodes);");
+                if live_ptr.is_some(){
+                    tb.add("    if let Some(file_id) = apply_from.file_id() {self.live_ptr = Some(LivePtr::from_index(file_id, index));}");
+                }
                 tb.add("    }");
                 tb.add("}");
             }
@@ -190,6 +198,9 @@ pub fn derive_live_apply_impl(input: TokenStream) -> TokenStream {
                 tb.add("    }");
                 tb.add("    fn after_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]) {");
                 tb.add("        self.deref_target.after_apply(cx, apply_from, index, nodes);");
+                if live_ptr.is_some(){
+                    tb.add("    if let Some(file_id) = apply_from.file_id() {self.live_ptr = Some(LivePtr::from_index(file_id, index));}");
+                }
                 tb.add("    }");
                 tb.add("}");
             }
@@ -198,7 +209,9 @@ pub fn derive_live_apply_impl(input: TokenStream) -> TokenStream {
                 tb.add("LiveApply for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
                 tb.add("    fn after_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]) {");
                 tb.add("        if let Some(file_id) = apply_from.file_id() {");
-                tb.add("            self.animator.live_ptr = Some(LivePtr::from_index(file_id, index));");
+                if live_ptr.is_some(){
+                    tb.add("        self.live_ptr = Some(LivePtr::from_index(file_id, index));");
+                }
                 tb.add("            if let Ok(index) = nodes.child_by_name(index, id!(state_default)) {");
                 tb.add("                self.apply(cx, ApplyFrom::Animate, index, nodes);");
                 tb.add("            }");
@@ -208,7 +221,14 @@ pub fn derive_live_apply_impl(input: TokenStream) -> TokenStream {
             }
             else {
                 tb.add("impl").stream(generic.clone());
-                tb.add("LiveApply for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{}");
+                tb.add("LiveApply for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+                if live_ptr.is_some(){
+                    tb.add("fn after_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, _nodes: &[LiveNode]) {");
+                    tb.add("    if let Some(file_id) = apply_from.file_id() {self.live_ptr = Some(LivePtr::from_index(file_id, index));}");
+                    tb.add("}");
+                }
+                tb.add("}");
+                
             }
             
             return tb.end();
@@ -363,8 +383,27 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                     tb.add("});");
                 }
             }
-            tb.add("        LiveTypeInfo{module_path:ModulePath::from_str2(&module_path!()).unwrap(), live_type:Self::live_type(), fields,");
-            tb.add("            type_name:Id::from_str(").string(&struct_name).add(").unwrap()}");
+            tb.add("        LiveTypeInfo{");
+            tb.add("            module_path: ModulePath::from_str2(&module_path!()).unwrap(),");
+            tb.add("            live_type: Self::live_type(),");
+            tb.add("            fields,");
+            // we have to decide Class or Object
+            let live_type_kind = if main_attribs.len()>0{
+                if main_attribs[0].name == "live_type_kind"{
+                    main_attribs[0].args.clone()
+                }
+                else {None}
+            }else{None};
+            
+            if let Some(live_type_kind) = live_type_kind{
+                tb.add("            kind: LiveTypeKind::").stream(Some(live_type_kind)).add(",");
+            }
+            else{
+                tb.add("            kind: LiveTypeKind::Class,");
+            }
+            
+            tb.add("            type_name: Id::from_str(").string(&struct_name).add(").unwrap()");
+            tb.add("        }");
             tb.add("    }");
             
             
@@ -396,7 +435,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("    }");
             
             tb.add("    fn new(cx: &mut Cx) -> Self {");
-            tb.add("        let mut ret = Self {");
+            tb.add("        Self {");
             for field in &fields {
                 let attr = &field.attrs[0];
                 tb.ident(&field.name).add(":");
@@ -413,8 +452,7 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
                 }
                 tb.add(",");
             }
-            tb.add("        };");
-            tb.add("        ret.after_new(cx);ret");
+            tb.add("        }");
             tb.add("    }");
             tb.add("}");
             return tb.end();
@@ -494,14 +532,18 @@ pub fn derive_live_component_impl(input: TokenStream) -> TokenStream {
             tb.add("impl").stream(generic.clone());
             tb.add("LiveNew for").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
             
-            tb.add("    fn new(cx:&mut Cx) -> Self { let mut ret = ");
+            tb.add("    fn new(cx:&mut Cx) -> Self {");
             items[pick.unwrap()].gen_new(&mut tb);
-            tb.add("    ;ret.after_new(cx);ret");
             tb.add("    }");
             
             tb.add("    fn live_type_info() -> LiveTypeInfo {");
-            tb.add("        LiveTypeInfo{module_path:ModulePath::from_str(&module_path!()).unwrap(), live_type:Self::live_type(), fields:Vec::new(),");
-            tb.add("            type_name:Id::from_str(").string(&enum_name).add(").unwrap()}");
+            tb.add("        LiveTypeInfo{");
+            tb.add("            module_path: ModulePath::from_str(&module_path!()).unwrap(),");
+            tb.add("            live_type: Self::live_type(),");
+            tb.add("            fields: Vec::new(),");
+            tb.add("            type_name: Id::from_str(").string(&enum_name).add(").unwrap(),");
+            tb.add("            kind: LiveTypeKind::Enum,");
+            tb.add("        }");
             tb.add("    }");
             
             tb.add("    fn live_register(cx: &mut Cx) {");

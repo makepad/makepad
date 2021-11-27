@@ -69,6 +69,16 @@ impl LiveNew for Texture {
             textures_free
         }
     }
+    
+    fn live_type_info() -> LiveTypeInfo{
+        LiveTypeInfo {
+            module_path: ModulePath::from_str(&module_path!()).unwrap(),
+            live_type: Self::live_type(),
+            fields: Vec::new(),
+            kind: LiveTypeKind::Object,
+            type_name: Id::from_str("Texture").unwrap()
+        }
+    }
 }
 
 impl LiveComponent for Texture {
@@ -88,7 +98,7 @@ impl LiveComponent for Texture {
             }
             match nodes[index].id {
                 _=> {
-                    cx.apply_error_no_matching_value(apply_from, index, nodes);
+                    cx.apply_error_no_matching_field(apply_from, index, nodes);
                     index = nodes.skip_node(index);
                 }
             }

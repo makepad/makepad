@@ -76,7 +76,7 @@ impl DrawVars {
     }
     
     pub fn redraw_view(&self, cx: &mut Cx) {
-        cx.redraw_view(self.area);
+        cx.redraw_view_of(self.area);
     }
     
     pub fn live_type() -> LiveType {
@@ -88,6 +88,7 @@ impl DrawVars {
             module_path: ModulePath::from_str(&module_path!()).unwrap(),
             live_type: Self::live_type(),
             fields: Vec::new(),
+            kind: LiveTypeKind::DrawVars,
             type_name: Id::from_str("DrawVars").unwrap()
         }
     }
@@ -102,7 +103,7 @@ impl DrawVars {
     }
     
     pub fn init_shader(&mut self, cx: &mut Cx, draw_shader_ptr: DrawShaderPtr, geometry_fields: &dyn GeometryFields) {
-        
+
         if let Some(draw_shader_id) = cx.draw_shader_ptr_to_id.get(&draw_shader_ptr) {
             self.draw_shader = Some(DrawShader {
                 draw_shader_ptr,
@@ -209,8 +210,22 @@ impl DrawVars {
                     );
                     mapping.update_live_uniforms(&cx.live_registry.borrow());
                     
+                    let live_registry_rc = cx.live_registry.clone();
+                    let live_registry = live_registry_rc.borrow();
+                    let class_node = live_registry.ptr_to_node(draw_shader_ptr.0);
+                    
+                    let shader_type_name = match &class_node.value {
+                        LiveValue::Class{live_type,..} => {
+                            // lets get the type name
+                            let lti = live_registry.live_type_infos.get(live_type).unwrap();
+                            lti.type_name
+                        } 
+                        _=>Id(0)
+                    };
+                    
                     cx.draw_shaders.push(CxDrawShader {
-                        name: "todo".to_string(),
+                        field: class_node.id,
+                        type_name: shader_type_name, 
                         platform: None,
                         mapping: mapping
                     });
@@ -355,7 +370,7 @@ impl DrawVars {
             _=>true
         };
         if unknown_shader_props && nodes[index].value.is_value_type(){
-            cx.apply_error_no_matching_value(apply_from, index, nodes);
+            cx.apply_error_no_matching_field(apply_from, index, nodes);
         }
         nodes.skip_node(index)
     }
@@ -617,7 +632,8 @@ impl CxDrawShaderMapping {
 
 #[derive(Clone)]
 pub struct CxDrawShader {
-    pub name: String,
+    pub field: Id,
+    pub type_name: Id,
     pub platform: Option<CxPlatformShader>,
     pub mapping: CxDrawShaderMapping
 }
