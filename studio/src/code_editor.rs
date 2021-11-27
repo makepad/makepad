@@ -1,6 +1,10 @@
 use {
     crate::{
-        code_editor_state::{CodeEditorState, DocumentId, SessionId},
+        code_editor_state::{
+            CodeEditorState,
+            DocumentId,
+            SessionId
+        },
         id::GenId,
         id_allocator::GenIdAllocator,
         id_map::GenIdMap,
@@ -20,18 +24,18 @@ use {
 live_register!{
     use makepad_widget::scrollview::ScrollView;
     
-    CodeEditor: {{CodeEditor}}{
-        code_editor_view:ScrollView{
-            view:{debug_id:code_editor_view}
+    CodeEditor: {{CodeEditor}} {
+        code_editor_view: ScrollView {
+            view: {debug_id: code_editor_view}
         }
-        text:{
-            draw_depth:1.0
-            text_style:{
-                font:{
+        text: {
+            draw_depth: 1.0 
+            text_style: {
+                font: {
                     path: "resources/LiberationMono-Regular.ttf",
                 }
                 brightness: 1.1,
-                font_size: 8.0, 
+                font_size: 8.0,
                 line_spacing: 1.8,
                 top_drop: 1.3,
             }
@@ -47,12 +51,12 @@ live_register!{
         text_color_string: #cc917b
         text_color_whitespace: #6e6e6e
         text_color_unknown: #808080
-        selection:{
-            color:#294e75
-            draw_depth:0.0
+        selection: {
+            color: #294e75
+            draw_depth: 0.0
         }
-        caret:{
-            draw_depth:2.0
+        caret: {
+            draw_depth: 2.0
             color: #b0b0b0
         }
     }
@@ -63,13 +67,13 @@ pub struct CodeEditor {
     #[rust] view_id_allocator: GenIdAllocator,
     #[rust] views_by_view_id: GenIdMap<CodeEditorViewId, CodeEditorView>,
     #[rust] text_glyph_size: Vec2,
-
+    
     #[live] code_editor_view: Option<LivePtr>,
     
     #[live] selection: DrawColor,
     #[live] text: DrawText,
     #[live] caret: DrawColor,
-
+    
     #[live] text_color_comment: Vec4,
     #[live] text_color_identifier: Vec4,
     #[live] text_color_function_identifier: Vec4,
@@ -94,7 +98,7 @@ impl CodeEditor {
                 let document = &state.documents_by_document_id[session.document_id];
                 if let Some(document_inner) = document.inner.as_ref() {
                     let visible_lines =
-                        self.visible_lines(cx, view_id, document_inner.text.as_lines().len());
+                    self.visible_lines(cx, view_id, document_inner.text.as_lines().len());
                     self.draw_selections(
                         cx,
                         &session.selections,
@@ -115,7 +119,7 @@ impl CodeEditor {
             view.scroll_view.end(cx);
         }
     }
-
+    
     fn visible_lines(&mut self, cx: &mut Cx, view_id: CodeEditorViewId, line_count: usize) -> VisibleLines {
         let Rect {
             pos: origin,
@@ -126,24 +130,24 @@ impl CodeEditor {
         let viewport_end = viewport_start + viewport_size;
         let mut start_y = 0.0;
         let start = (0..line_count)
-            .find_map(|line| {
-                let end_y = start_y + self.text_glyph_size.y;
-                if end_y >= viewport_start.y {
-                    return Some(line);
-                }
-                start_y = end_y;
-                None
-            })
+            .find_map( | line | {
+            let end_y = start_y + self.text_glyph_size.y;
+            if end_y >= viewport_start.y {
+                return Some(line);
+            }
+            start_y = end_y;
+            None
+        })
             .unwrap_or(line_count);
         let visible_start_y = origin.y + start_y;
         let end = (start..line_count)
-            .find_map(|line| {
-                if start_y >= viewport_end.y {
-                    return Some(line);
-                }
-                start_y += self.text_glyph_size.y;
-                None
-            })
+            .find_map( | line | {
+            if start_y >= viewport_end.y {
+                return Some(line);
+            }
+            start_y += self.text_glyph_size.y;
+            None
+        })
             .unwrap_or(line_count);
         VisibleLines {
             start,
@@ -151,7 +155,7 @@ impl CodeEditor {
             start_y: visible_start_y,
         }
     }
-
+    
     fn draw_selections(
         &mut self,
         cx: &mut Cx,
@@ -222,7 +226,7 @@ impl CodeEditor {
         }
         //self.selection.end_many(cx);
     }
-
+    
     fn draw_text(
         &mut self,
         cx: &mut Cx,
@@ -248,7 +252,7 @@ impl CodeEditor {
                 let end_x = start_x + token.len as f32 * self.text_glyph_size.x;
                 let end = start + token.len;
                 self.text.color =
-                    self.text_color(token.kind, next_token.map(|next_token| next_token.kind));
+                self.text_color(token.kind, next_token.map( | next_token | next_token.kind));
                 self.text.draw_text_chunk(
                     cx,
                     Vec2 {
@@ -257,7 +261,10 @@ impl CodeEditor {
                     },
                     0,
                     Some(&chars[start..end]),
-                    |_, _, _, _| 0.0,
+                    | _,
+                    _,
+                    _,
+                    _ | 0.0,
                 );
                 start = end;
                 start_x = end_x;
@@ -265,7 +272,7 @@ impl CodeEditor {
             start_y = end_y;
         }
     }
-
+    
     fn draw_carets(
         &mut self,
         cx: &mut Cx,
@@ -314,20 +321,20 @@ impl CodeEditor {
         }
         //self.caret.end_many(cx);
     }
-
+    
     fn set_turtle_bounds(&mut self, cx: &mut Cx, text: &Text) {
         cx.set_turtle_bounds(Vec2 {
             x: text
                 .as_lines()
                 .iter()
-                .map(|line| line.len() as f32 * self.text_glyph_size.x)
-                .fold(0.0, |max_line_width, line_width| {
-                    max_line_width.max(line_width)
-                }),
-            y: text.as_lines().iter().map(|_| self.text_glyph_size.y).sum(),
+                .map( | line | line.len() as f32 * self.text_glyph_size.x)
+                .fold(0.0, | max_line_width, line_width | {
+                max_line_width.max(line_width)
+            }),
+            y: text.as_lines().iter().map( | _ | self.text_glyph_size.y).sum(),
         });
     }
-
+    
     fn text_color(&self, kind: TokenKind, next_kind: Option<TokenKind>) -> Vec4 {
         match (kind, next_kind) {
             (TokenKind::Comment, _) => self.text_color_comment,
@@ -346,7 +353,7 @@ impl CodeEditor {
             (TokenKind::Unknown, _) => self.text_color_unknown,
         }
     }
-
+    
     pub fn create_view(
         &mut self,
         cx: &mut Cx,
@@ -367,12 +374,12 @@ impl CodeEditor {
         }
         view_id
     }
-
+    
     pub fn view_session_id(&self, view_id: CodeEditorViewId) -> Option<SessionId> {
         let view = &self.views_by_view_id[view_id];
         view.session_id
     }
-
+    
     pub fn set_view_session_id(
         &mut self,
         cx: &mut Cx,
@@ -392,12 +399,12 @@ impl CodeEditor {
             view.scroll_view.redraw(cx);
         }
     }
-
+    
     pub fn redraw_view(&mut self, cx: &mut Cx, view_id: CodeEditorViewId) {
         let view = &mut self.views_by_view_id[view_id];
         view.scroll_view.redraw(cx);
     }
-
+    
     pub fn redraw_views_for_document(
         &mut self,
         cx: &mut Cx,
@@ -413,7 +420,7 @@ impl CodeEditor {
             }
         }
     }
-
+    
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
@@ -428,7 +435,7 @@ impl CodeEditor {
         }
         let view = &self.views_by_view_id[view_id];
         match event.hits(cx, view.scroll_view.area(), HitOpt::default()) {
-            Event::FingerDown(FingerDownEvent { rel, modifiers, .. }) => {
+            Event::FingerDown(FingerDownEvent {rel, modifiers, ..}) => {
                 // TODO: How to handle key focus?
                 cx.set_key_focus(view.scroll_view.area());
                 cx.set_hover_mouse_cursor(MouseCursor::Text);
@@ -439,10 +446,10 @@ impl CodeEditor {
                     let document_inner = document.inner.as_ref().unwrap();
                     let position = self.position(&document_inner.text, rel);
                     match modifiers {
-                        KeyModifiers { control: true, .. } => {
+                        KeyModifiers {control: true, ..} => {
                             state.add_cursor(session_id, position);
                         }
-                        KeyModifiers { shift, .. } => {
+                        KeyModifiers {shift, ..} => {
                             state.move_cursors_to(session_id, position, shift);
                         }
                     }
@@ -450,7 +457,7 @@ impl CodeEditor {
                     view.scroll_view.redraw(cx);
                 }
             }
-            Event::FingerMove(FingerMoveEvent { rel, .. }) => {
+            Event::FingerMove(FingerMoveEvent {rel, ..}) => {
                 let view = &self.views_by_view_id[view_id];
                 if let Some(session_id) = view.session_id {
                     let session = &state.sessions_by_session_id[session_id];
@@ -464,7 +471,7 @@ impl CodeEditor {
             }
             Event::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowLeft,
-                modifiers: KeyModifiers { shift, .. },
+                modifiers: KeyModifiers {shift, ..},
                 ..
             }) => {
                 let view = &self.views_by_view_id[view_id];
@@ -476,7 +483,7 @@ impl CodeEditor {
             }
             Event::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowRight,
-                modifiers: KeyModifiers { shift, .. },
+                modifiers: KeyModifiers {shift, ..},
                 ..
             }) => {
                 let view = &self.views_by_view_id[view_id];
@@ -488,7 +495,7 @@ impl CodeEditor {
             }
             Event::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowUp,
-                modifiers: KeyModifiers { shift, .. },
+                modifiers: KeyModifiers {shift, ..},
                 ..
             }) => {
                 let view = &self.views_by_view_id[view_id];
@@ -500,7 +507,7 @@ impl CodeEditor {
             }
             Event::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowDown,
-                modifiers: KeyModifiers { shift, .. },
+                modifiers: KeyModifiers {shift, ..},
                 ..
             }) => {
                 let view = &self.views_by_view_id[view_id];
@@ -548,15 +555,15 @@ impl CodeEditor {
                     self.redraw_views_for_document(cx, state, session.document_id);
                 }
             }
-            Event::TextInput(TextInputEvent { input, .. }) => {
+            Event::TextInput(TextInputEvent {input, ..}) => {
                 let view = &self.views_by_view_id[view_id];
                 if let Some(session_id) = view.session_id {
                     state.insert_text(
                         session_id,
                         input
                             .lines()
-                            .map(|line| line.chars().collect::<Vec<_>>())
-                            .collect::<Vec<_>>()
+                            .map( | line | line.chars().collect::<Vec<_ >> ())
+                            .collect::<Vec<_ >> ()
                             .into(),
                         send_request,
                     );
@@ -567,7 +574,7 @@ impl CodeEditor {
             _ => {}
         }
     }
-
+    
     pub fn handle_response(
         &mut self,
         cx: &mut Cx,
@@ -579,7 +586,7 @@ impl CodeEditor {
             Response::OpenFile(response) => {
                 let (file_id, revision, text) = response.unwrap();
                 let document_id =
-                    state.handle_open_file_response(file_id, revision, text, send_request);
+                state.handle_open_file_response(file_id, revision, text, send_request);
                 self.redraw_views_for_document(cx, state, document_id);
             }
             Response::ApplyDelta(response) => {
@@ -589,7 +596,7 @@ impl CodeEditor {
             _ => {}
         }
     }
-
+    
     pub fn handle_notification(
         &mut self,
         cx: &mut Cx,
@@ -603,7 +610,7 @@ impl CodeEditor {
             }
         }
     }
-
+    
     fn position(&self, text: &Text, position: Vec2) -> Position {
         let line = ((position.y / self.text_glyph_size.y) as usize).min(text.as_lines().len() - 1);
         Position {
