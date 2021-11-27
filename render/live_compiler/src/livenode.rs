@@ -41,14 +41,14 @@ pub enum LiveFieldKind {
     LiveOption
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct LiveNode { // 40 bytes. Don't really see ways to compress
     pub token_id: Option<TokenId>,
     pub id: Id,
     pub value: LiveValue,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum LiveValue {
     None,
     // string types
@@ -96,6 +96,16 @@ pub struct FittedString {
     length: usize,
 }
 
+impl PartialEq for FittedString{
+    fn eq(&self, other: &FittedString) -> bool{
+        self.as_str() == other.as_str()
+    }
+
+    fn ne(&self, other: &FittedString) -> bool {
+        self.as_str() != other.as_str()
+    }    
+}
+
 impl FittedString {
     pub fn from_string(mut inp: String) -> Self {
         inp.shrink_to_fit();
@@ -131,7 +141,7 @@ impl Clone for FittedString {
 }
 
 const INLINE_STRING_BUFFER_SIZE: usize = 22;
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct InlineString {
     length: u8,
     buffer: [u8; INLINE_STRING_BUFFER_SIZE]
