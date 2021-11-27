@@ -681,11 +681,11 @@ impl Clone for Box<dyn AnyAction> {
 }
 
 pub trait FrameComponent: LiveComponent {
-    fn handle(&mut self, cx: &mut Cx, event: &mut Event) -> Option<Box<dyn AnyAction >>;
-    fn draw(&mut self, cx: &mut Cx);
+    fn handle_event_dyn(&mut self, cx: &mut Cx, event: &mut Event) -> Option<Box<dyn AnyAction >>;
+    fn draw_dyn(&mut self, cx: &mut Cx);
     fn apply_draw(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
         self.apply_over(cx, nodes);
-        self.draw(cx);
+        self.draw_dyn(cx);
     }
 }
 

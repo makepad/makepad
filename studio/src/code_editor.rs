@@ -22,7 +22,7 @@ live_register!{
     
     CodeEditor: {{CodeEditor}}{
         code_editor_view:ScrollView{
-        //    view:{layout:{walk:{width:Width::Filled,height:Height::Filled}}}
+            view:{debug_id:code_editor_view}
         }
         text:{
             draw_depth:1.0
@@ -70,7 +70,6 @@ pub struct CodeEditor {
     #[live] text: DrawText,
     #[live] caret: DrawColor,
 
-
     #[live] text_color_comment: Vec4,
     #[live] text_color_identifier: Vec4,
     #[live] text_color_function_identifier: Vec4,
@@ -89,7 +88,7 @@ impl CodeEditor {
     pub fn draw(&mut self, cx: &mut Cx, state: &CodeEditorState, view_id: CodeEditorViewId) {
         self.text_glyph_size = self.text.text_style.font_size * self.text.get_monospace_base(cx);
         let view = &mut self.views_by_view_id[view_id];
-        if view.view.begin_view(cx).is_ok() {
+        if view.scroll_view.begin(cx).is_ok() {
             if let Some(session_id) = view.session_id {
                 let session = &state.sessions_by_session_id[session_id];
                 let document = &state.documents_by_document_id[session.document_id];
@@ -113,7 +112,7 @@ impl CodeEditor {
                 }
             }
             let view = &mut self.views_by_view_id[view_id];
-            view.view.end_view(cx);
+            view.scroll_view.end(cx);
         }
     }
 
@@ -123,7 +122,7 @@ impl CodeEditor {
             size: viewport_size,
         } = cx.get_turtle_rect();
         let view = &self.views_by_view_id[view_id];
-        let viewport_start = view.view.get_scroll_pos(cx);
+        let viewport_start = view.scroll_view.get_scroll_pos(cx);
         let viewport_end = viewport_start + viewport_size;
         let mut start_y = 0.0;
         let start = (0..line_count)
@@ -358,7 +357,7 @@ impl CodeEditor {
         self.views_by_view_id.insert(
             view_id,
             CodeEditorView {
-                view: ScrollView::new_from_ptr(cx, self.code_editor_view.unwrap()),
+                scroll_view: ScrollView::new_from_ptr(cx, self.code_editor_view.unwrap()),
                 session_id,
             },
         );
@@ -390,13 +389,13 @@ impl CodeEditor {
         if let Some(session_id) = view.session_id {
             let session = &mut state.sessions_by_session_id[session_id];
             session.view_id = Some(view_id);
-            view.view.redraw_view(cx);
+            view.scroll_view.redraw(cx);
         }
     }
 
     pub fn redraw_view(&mut self, cx: &mut Cx, view_id: CodeEditorViewId) {
         let view = &mut self.views_by_view_id[view_id];
-        view.view.redraw_view(cx);
+        view.scroll_view.redraw(cx);
     }
 
     pub fn redraw_views_for_document(
@@ -410,7 +409,7 @@ impl CodeEditor {
             let session = &state.sessions_by_session_id[*session_id];
             if let Some(view_id) = session.view_id {
                 let view = &mut self.views_by_view_id[view_id];
-                view.view.redraw_view(cx);
+                view.scroll_view.redraw(cx);
             }
         }
     }
@@ -424,14 +423,14 @@ impl CodeEditor {
         send_request: &mut dyn FnMut(Request),
     ) {
         let view = &mut self.views_by_view_id[view_id];
-        if view.view.handle_scroll_view(cx, event) {
-            view.view.redraw_view(cx);
+        if view.scroll_view.handle_event(cx, event) {
+            view.scroll_view.redraw(cx);
         }
         let view = &self.views_by_view_id[view_id];
-        match event.hits(cx, view.view.area(), HitOpt::default()) {
+        match event.hits(cx, view.scroll_view.area(), HitOpt::default()) {
             Event::FingerDown(FingerDownEvent { rel, modifiers, .. }) => {
                 // TODO: How to handle key focus?
-                cx.set_key_focus(view.view.area());
+                cx.set_key_focus(view.scroll_view.area());
                 cx.set_hover_mouse_cursor(MouseCursor::Text);
                 let view = &self.views_by_view_id[view_id];
                 if let Some(session_id) = view.session_id {
@@ -448,7 +447,7 @@ impl CodeEditor {
                         }
                     }
                     let view = &mut self.views_by_view_id[view_id];
-                    view.view.redraw_view(cx);
+                    view.scroll_view.redraw(cx);
                 }
             }
             Event::FingerMove(FingerMoveEvent { rel, .. }) => {
@@ -460,7 +459,7 @@ impl CodeEditor {
                     let position = self.position(&document_inner.text, rel);
                     state.move_cursors_to(session_id, position, true);
                     let view = &mut self.views_by_view_id[view_id];
-                    view.view.redraw_view(cx);
+                    view.scroll_view.redraw(cx);
                 }
             }
             Event::KeyDown(KeyEvent {
@@ -472,7 +471,7 @@ impl CodeEditor {
                 if let Some(session_id) = view.session_id {
                     state.move_cursors_left(session_id, shift);
                     let view = &mut self.views_by_view_id[view_id];
-                    view.view.redraw_view(cx);
+                    view.scroll_view.redraw(cx);
                 }
             }
             Event::KeyDown(KeyEvent {
@@ -484,7 +483,7 @@ impl CodeEditor {
                 if let Some(session_id) = view.session_id {
                     state.move_cursors_right(session_id, shift);
                     let view = &mut self.views_by_view_id[view_id];
-                    view.view.redraw_view(cx);
+                    view.scroll_view.redraw(cx);
                 }
             }
             Event::KeyDown(KeyEvent {
@@ -496,7 +495,7 @@ impl CodeEditor {
                 if let Some(session_id) = view.session_id {
                     state.move_cursors_up(session_id, shift);
                     let view = &mut self.views_by_view_id[view_id];
-                    view.view.redraw_view(cx);
+                    view.scroll_view.redraw(cx);
                 }
             }
             Event::KeyDown(KeyEvent {
@@ -508,7 +507,7 @@ impl CodeEditor {
                 if let Some(session_id) = view.session_id {
                     state.move_cursors_down(session_id, shift);
                     let view = &mut self.views_by_view_id[view_id];
-                    view.view.redraw_view(cx);
+                    view.scroll_view.redraw(cx);
                 }
             }
             Event::KeyDown(KeyEvent {
@@ -625,7 +624,7 @@ impl AsRef<GenId> for CodeEditorViewId {
 }
 
 pub struct CodeEditorView {
-    view: ScrollView,
+    scroll_view: ScrollView,
     session_id: Option<SessionId>,
 }
 

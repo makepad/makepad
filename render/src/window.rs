@@ -97,7 +97,7 @@ impl LiveComponent for Window {
 
 impl Window {
 
-    pub fn begin_window(&mut self, cx: &mut Cx) {
+    pub fn begin(&mut self, cx: &mut Cx) {
         // if we are not at ground level for viewports,
         cx.windows[self.window_id].main_pass_id = None;
         cx.window_stack.push(self.window_id);
@@ -116,10 +116,11 @@ impl Window {
     pub fn set_position(&mut self, cx: &mut Cx, pos:Vec2) {
         return cx.windows[self.window_id].window_set_position = Some(pos);
     }
-    
+    /*
     pub fn handle_window(&mut self, _cx: &mut Cx, _event: &mut Event) -> bool {
         false
     }
+    */
     /*
     pub fn redraw_window_area(&mut self, cx: &mut Cx) {
         if let Some(pass_id) = cx.windows[self.window_id].main_pass_id {
@@ -127,24 +128,24 @@ impl Window {
         }
     }*/
     
-    pub fn end_window(&mut self, cx: &mut Cx) -> Area {
+    pub fn end(&mut self, cx: &mut Cx) -> Area {
         cx.window_stack.pop();
         Area::Empty
     }
     
-    pub fn minimize_window(&mut self, cx: &mut Cx) {
+    pub fn minimize(&mut self, cx: &mut Cx) {
         cx.windows[self.window_id].window_command = CxWindowCmd::Minimize;
     }
     
-    pub fn maximize_window(&mut self, cx: &mut Cx) {
+    pub fn maximize(&mut self, cx: &mut Cx) {
         cx.windows[self.window_id].window_command = CxWindowCmd::Maximize;
     }
     
-    pub fn fullscreen_window(&mut self, cx:&mut Cx){
+    pub fn fullscreen(&mut self, cx:&mut Cx){
         cx.windows[self.window_id].window_command = CxWindowCmd::FullScreen;
     }
     
-    pub fn normal_window(&mut self, cx:&mut Cx){
+    pub fn normal(&mut self, cx:&mut Cx){
         cx.windows[self.window_id].window_command = CxWindowCmd::NormalScreen;
     }
     
@@ -181,11 +182,11 @@ impl Window {
         cx.windows[self.window_id].window_topmost = Some(topmost);
     }
     
-    pub fn restore_window(&mut self, cx: &mut Cx) {
+    pub fn restore(&mut self, cx: &mut Cx) {
         cx.windows[self.window_id].window_command = CxWindowCmd::Restore;
     }
     
-    pub fn close_window(&mut self, cx: &mut Cx) {
+    pub fn close(&mut self, cx: &mut Cx) {
         cx.windows[self.window_id].window_state = CxWindowState::Close;
     }
 }
