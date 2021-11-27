@@ -261,7 +261,7 @@ impl Animator {
         let live_registry_rc = cx.live_registry.clone();
         let live_registry = live_registry_rc.borrow();
         let (nodes, index) = live_registry.ptr_to_nodes_index(live_ptr);
-        self.animate_to(cx, nodes[index].id, index, nodes)
+        self.animate_to(cx, nodes[index].id, index, nodes) 
     }
 
     pub fn animate_to(&mut self, cx: &mut Cx, state_id: Id, to_index:usize, to_nodes:&[LiveNode]) {
