@@ -113,6 +113,7 @@ pub struct Cx {
     pub live_factories: Rc<RefCell<HashMap<LiveType, Box<dyn LiveFactory >> >>,
     pub draw_shader_ptr_to_id: HashMap<DrawShaderPtr, usize>,
     pub draw_shader_compile_set: BTreeSet<DrawShaderPtr>,
+    pub draw_shader_fingerprints: Vec<DrawShaderFingerprint>,
     
     pub redraw_views: Vec<usize>,
     pub redraw_views_and_children: Vec<usize>,
@@ -267,6 +268,7 @@ impl Default for Cx {
             live_factories: Rc::new(RefCell::new(HashMap::new())),
             draw_shader_ptr_to_id: HashMap::new(),
             draw_shader_compile_set: BTreeSet::new(),
+            draw_shader_fingerprints: Vec::new(),
             
             redraw_views: Vec::new(),
             _redraw_views: Vec::new(),

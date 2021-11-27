@@ -1,14 +1,20 @@
-use crate::cx::*;
-use makepad_live_compiler::LiveRegistry;
-use makepad_live_compiler::Span;
-use makepad_shader_compiler::shaderast::Ty;
-use makepad_shader_compiler::shaderast::DrawShaderDef;
-use makepad_shader_compiler::shaderast::DrawShaderFieldKind;
-use makepad_shader_compiler::shaderast::DrawShaderFlags;
-use makepad_shader_compiler::shaderast::DrawShaderConstTable;
-use makepad_shader_compiler::shaderregistry::DrawShaderQuery;
-use makepad_shader_compiler::shaderast::ValuePtr;
-use makepad_shader_compiler::shaderast::DrawShaderPtr;
+use {
+    crate::cx::*,
+    makepad_live_compiler::{LiveRegistry, Span},
+    makepad_shader_compiler::{
+        shaderast::{
+            Ty,
+            DrawShaderDef,
+            DrawShaderFieldKind,
+            DrawShaderFlags,
+            DrawShaderConstTable,
+            ValuePtr,
+            DrawShaderPtr
+        },
+        shaderregistry::DrawShaderQuery
+    }
+};
+
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct DrawShader {
@@ -36,6 +42,12 @@ pub enum DrawShaderInputPacking {
     UniformsGLSL,
     UniformsHLSL,
     UniformsMetal
+}
+
+#[derive(Debug, PartialEq)]
+pub struct DrawShaderFingerprint {
+    fingerprint: Vec<LiveNode>,
+    draw_shader_id: usize
 }
 
 #[derive(Clone)]
@@ -92,7 +104,7 @@ impl DrawVars {
             type_name: Id::from_str("DrawVars").unwrap()
         }
     }
-
+    
     pub fn live_register(_cx: &mut Cx) {
     }
     
@@ -103,7 +115,7 @@ impl DrawVars {
     }
     
     pub fn init_shader(&mut self, cx: &mut Cx, draw_shader_ptr: DrawShaderPtr, geometry_fields: &dyn GeometryFields) {
-
+        
         if let Some(draw_shader_id) = cx.draw_shader_ptr_to_id.get(&draw_shader_ptr) {
             self.draw_shader = Some(DrawShader {
                 draw_shader_ptr,
@@ -112,6 +124,33 @@ impl DrawVars {
             self.geometry = Some(geometry_fields.get_geometry());
         }
         else {
+            let live_registry_cp = cx.live_registry.clone();
+            let live_registry = live_registry_cp.borrow();
+            
+            let doc = live_registry.ptr_to_doc(draw_shader_ptr.0);
+            
+            // create a fingerprint from all the dsl nodes only
+            let mut node_iter = doc.nodes.first_child(draw_shader_ptr.node_index());
+            let mut fingerprint = Vec::new();
+            while let Some(node_index) = node_iter {
+                if doc.nodes[node_index].value.is_dsl() {
+                    fingerprint.push(doc.nodes[node_index].clone());
+                }
+                node_iter = doc.nodes.next_child(node_index);
+            }
+            
+            // see if we have it already
+            for fp in &cx.draw_shader_fingerprints {
+                if fp.fingerprint == fingerprint {
+                    self.draw_shader = Some(DrawShader {
+                        draw_shader_ptr,
+                        draw_shader_id: fp.draw_shader_id
+                    });
+                    self.geometry = Some(geometry_fields.get_geometry());
+                    return;
+                }
+            }
+            
             fn live_type_to_shader_ty(live_type: LiveType) -> Option<Ty> {
                 if live_type == f32::live_type() {Some(Ty::Float)}
                 else if live_type == Vec2::live_type() {Some(Ty::Vec2)}
@@ -121,9 +160,9 @@ impl DrawVars {
             }
             // ok ! we have to compile it
             //let live_factories = &cx.live_factories;
-            let result = cx.shader_registry.analyse_draw_shader(&cx.live_registry.borrow(), draw_shader_ptr, | live_registry, shader_registry, span, draw_shader_query, live_type, draw_shader_def | {
-                match draw_shader_query{
-                    DrawShaderQuery::DrawShader=>{
+            let result = cx.shader_registry.analyse_draw_shader(&live_registry, draw_shader_ptr, | live_registry, shader_registry, span, draw_shader_query, live_type, draw_shader_def | {
+                match draw_shader_query {
+                    DrawShaderQuery::DrawShader => {
                         fn recur_expand(
                             live_registry: &LiveRegistry,
                             shader_registry: &ShaderRegistry,
@@ -148,7 +187,7 @@ impl DrawVars {
                                         if field.live_type_info.live_type != DrawVars::live_type() {panic!();}
                                         
                                         *after_draw_vars = true;
-                                        continue; 
+                                        continue;
                                     }
                                     if *after_draw_vars {
                                         // lets count sizes
@@ -168,14 +207,14 @@ impl DrawVars {
                                     }
                                 }
                                 // insert padding
-                                if level >0 &&  slots % 2 == 1 {
+                                if level >0 && slots % 2 == 1 {
                                     draw_shader_def.add_instance(Id(0), Ty::Float, span, LiveFieldKind::Calc);
                                 }
                             }
                         }
                         recur_expand(live_registry, shader_registry, 0, &mut false, live_type, draw_shader_def, span);
                     }
-                    DrawShaderQuery::Geometry=>{
+                    DrawShaderQuery::Geometry => {
                         if live_type == geometry_fields.live_type_check() {
                             let mut fields = Vec::new();
                             geometry_fields.geometry_fields(&mut fields);
@@ -216,17 +255,20 @@ impl DrawVars {
                     let class_node = live_registry.ptr_to_node(draw_shader_ptr.0);
                     
                     let shader_type_name = match &class_node.value {
-                        LiveValue::Class{live_type,..} => {
+                        LiveValue::Class {live_type, ..} => {
                             // lets get the type name
                             let lti = live_registry.live_type_infos.get(live_type).unwrap();
                             lti.type_name
-                        } 
-                        _=>Id(0)
+                        }
+                        _ => Id(0)
                     };
-                    
+                    cx.draw_shader_fingerprints.push(DrawShaderFingerprint {
+                        draw_shader_id,
+                        fingerprint
+                    });
                     cx.draw_shaders.push(CxDrawShader {
                         field: class_node.id,
-                        type_name: shader_type_name, 
+                        type_name: shader_type_name,
                         platform: None,
                         mapping: mapping
                     });
@@ -276,7 +318,7 @@ impl DrawVars {
                     }
                 }
                 // DONE!
-               
+                
                 cx.passes[cxview.pass_id].paint_dirty = true;
                 draw_call.instance_dirty = true;
                 draw_call.uniforms_dirty = true;
@@ -366,11 +408,11 @@ impl DrawVars {
                 }
             }
         }
-        let unknown_shader_props = match nodes[index].id{
+        let unknown_shader_props = match nodes[index].id {
             id!(debug) => false,
-            _=>true
+            _ => true
         };
-        if unknown_shader_props && nodes[index].value.is_value_type(){
+        if unknown_shader_props && nodes[index].value.is_value_type() {
             cx.apply_error_no_matching_field(apply_from, index, nodes);
         }
         nodes.skip_node(index)
