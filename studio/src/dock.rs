@@ -2,8 +2,8 @@ use {
     crate::{
         id::GenId,
         id_map::GenIdMap,
-        splitter::{self, Splitter},
-        tab_bar::{self, TabBar, TabId},
+        splitter::{SplitterAction, Splitter},
+        tab_bar::{TabBarAction, TabBar, TabId},
     },
     makepad_render::*,
 };
@@ -14,7 +14,7 @@ live_register!{
     Dock: {{Dock}} {
         drag_quad: {
             draw_depth: 10.0
-            color: #FFFFFF80
+            color: #ffffff80
         }
         drag_view: {
             layout: {abs_origin: vec2(0, 0)}
@@ -25,14 +25,13 @@ live_register!{
     }
 }
 
-#[derive(LiveComponent, LiveApply, LiveCast)]
+#[derive(LiveComponent, LiveApply, LiveTraitCast)]
 pub struct Dock {
     #[live] view: View,
     #[live] drag_view: View,
     #[live] drag_quad: DrawColor,
     #[live] tab_bar: Option<LivePtr>,
     #[live] splitter: Option<LivePtr>,
-//    #[rust] live_ptr: Option<LivePtr>,
     #[rust] panels_by_panel_id: GenIdMap<PanelId, Panel>,
     #[rust] panel_ids: Vec<PanelId>,
     #[rust] panel_id_stack: Vec<PanelId>,
@@ -190,7 +189,7 @@ impl Dock {
         &mut self,
         cx: &mut Cx,
         event: &mut Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, Action),
+        dispatch_action: &mut dyn FnMut(&mut Cx, DockAction),
     ) {
         for panel_id in &self.panel_ids {
             let panel = &mut self.panels_by_panel_id[*panel_id];
@@ -199,8 +198,8 @@ impl Dock {
                     panel
                         .splitter
                         .handle_event(cx, event, &mut | cx, action | match action {
-                        splitter::Action::Changed => {
-                            dispatch_action(cx, Action::SplitPanelChanged(*panel_id));
+                        SplitterAction::Changed => {
+                            dispatch_action(cx, DockAction::SplitPanelChanged(*panel_id));
                         }
                     });
                 }
@@ -208,20 +207,20 @@ impl Dock {
                     panel
                         .tab_bar
                         .handle_event(cx, event, &mut | cx, action | match action {
-                        tab_bar::Action::ReceivedDraggedItem(item) => dispatch_action(
+                        TabBarAction::ReceivedDraggedItem(item) => dispatch_action(
                             cx,
-                            Action::TabBarReceivedDraggedItem(*panel_id, item),
+                            DockAction::TabBarReceivedDraggedItem(*panel_id, item),
                         ),
-                        tab_bar::Action::TabWasPressed(tab_id) => {
-                            dispatch_action(cx, Action::TabWasPressed(*panel_id, tab_id))
+                        TabBarAction::TabWasPressed(tab_id) => {
+                            dispatch_action(cx, DockAction::TabWasPressed(*panel_id, tab_id))
                         }
-                        tab_bar::Action::TabButtonWasPressed(tab_id) => {
-                            dispatch_action(cx, Action::TabButtonWasPressed(*panel_id, tab_id))
+                        TabBarAction::TabButtonWasPressed(tab_id) => {
+                            dispatch_action(cx, DockAction::TabButtonWasPressed(*panel_id, tab_id))
                         }
-                        tab_bar::Action::TabReceivedDraggedItem(tab_id, item) => {
+                        TabBarAction::TabReceivedDraggedItem(tab_id, item) => {
                             dispatch_action(
                                 cx,
-                                Action::TabReceivedDraggedItem(*panel_id, tab_id, item),
+                                DockAction::TabReceivedDraggedItem(*panel_id, tab_id, item),
                             )
                         }
                     });
@@ -253,7 +252,7 @@ impl Dock {
                         if panel.contents_rect.contains(event.abs) {
                             dispatch_action(
                                 cx,
-                                Action::ContentsReceivedDraggedItem(
+                                DockAction::ContentsReceivedDraggedItem(
                                     *panel_id,
                                     compute_drag_position(panel.contents_rect, event.abs),
                                     event.dragged_item.clone(),
@@ -329,7 +328,7 @@ pub enum DragPosition {
     Center,
 }
 
-pub enum Action {
+pub enum DockAction {
     SplitPanelChanged(PanelId),
     TabBarReceivedDraggedItem(PanelId, DraggedItem),
     TabWasPressed(PanelId, TabId),

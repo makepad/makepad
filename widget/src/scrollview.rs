@@ -7,7 +7,7 @@ live_register!{
     }
 }
 
-#[derive(LiveComponent, LiveApply, LiveCast)]
+#[derive(LiveComponent, LiveApply, LiveTraitCast)]
 pub struct ScrollView{
     #[live] pub view:View,
     #[live] pub show_h:bool,

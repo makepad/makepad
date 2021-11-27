@@ -13,7 +13,7 @@ impl Drop for Window{
     }
 }
 
-impl LiveCast for Window{}
+impl LiveTraitCast for Window{}
 impl LiveNew for Window {
     fn new(cx: &mut Cx)->Self{
         let windows_free = cx.windows_free.clone();

@@ -148,7 +148,7 @@ impl TreeLogic {
         &mut self,
         cx: &mut Cx,
         event: &mut Event,
-        dispatch_action: &mut dyn FnMut(Action),
+        dispatch_action: &mut dyn FnMut(TreeAction),
     ) {
         match event {
             Event::NextFrame(_) if self.next_frame.is_active(cx) => {
@@ -160,7 +160,7 @@ impl TreeLogic {
                         new_animating_node_ids.insert(*node_id);
                     }
                 }
-                dispatch_action(Action::TreeWasAnimated);
+                dispatch_action(TreeAction::TreeWasAnimated);
                 self.animating_node_ids = new_animating_node_ids;
                 self.update_next_frame(cx);
             }
@@ -172,10 +172,10 @@ impl TreeLogic {
                             cx.set_hover_mouse_cursor(MouseCursor::Hand);
                             match event.hover_state {
                                 HoverState::In => {
-                                    dispatch_action(Action::NodeWasEntered(*node_id));
+                                    dispatch_action(TreeAction::NodeWasEntered(*node_id));
                                 }
                                 HoverState::Out => {
-                                    dispatch_action(Action::NodeWasExited(*node_id));
+                                    dispatch_action(TreeAction::NodeWasExited(*node_id));
                                 }
                                 _ => {}
                             }
@@ -184,12 +184,12 @@ impl TreeLogic {
                             if self.dragging_node_id.is_none()
                                 && event.abs.distance(&event.abs_start) >= MIN_DRAG_DISTANCE
                             {
-                                dispatch_action(Action::NodeShouldStartDragging(*node_id));
+                                dispatch_action(TreeAction::NodeShouldStartDragging(*node_id));
                             }
                         }
                         Event::FingerUp(event) => {
                             if area.get_rect(cx).contains(event.abs_start) {
-                                dispatch_action(Action::NodeWasClicked(*node_id));
+                                dispatch_action(TreeAction::NodeWasClicked(*node_id));
                             }
                         }
                         _ => {}
@@ -291,7 +291,7 @@ impl AnimatedBool {
     }
 }
 
-pub enum Action {
+pub enum TreeAction {
     TreeWasAnimated,
     NodeWasEntered(NodeId),
     NodeWasExited(NodeId),

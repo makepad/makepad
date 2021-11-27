@@ -57,7 +57,7 @@ pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPac
 pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsHLSL;
 
 
-#[derive(Default)]
+#[derive(Default, Debug)]
 pub struct DrawVars {
     pub area: Area,
     pub var_instance_start: usize,
