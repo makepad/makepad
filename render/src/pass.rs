@@ -71,7 +71,7 @@ impl LiveComponent for Pass {
 
 impl Pass {
 
-    pub fn begin_pass(&mut self, cx: &mut Cx) {
+    pub fn begin(&mut self, cx: &mut Cx) {
         
         
         if let Some(window_id) = cx.window_stack.last() {
@@ -158,7 +158,7 @@ impl Pass {
     }
 
     
-    pub fn end_pass(&mut self, cx: &mut Cx) {
+    pub fn end(&mut self, cx: &mut Cx) {
         cx.pass_stack.pop();
         if cx.pass_stack.len()>0{
             cx.current_dpi_factor = cx.get_delegated_dpi_factor(*cx.pass_stack.last().unwrap());

@@ -36,7 +36,7 @@ pub struct ButtonHandleResult {
 
 impl ButtonLogic {
     
-    pub fn handle_button_logic(&mut self, cx: &mut Cx, event: &mut Event, area: Area) -> ButtonHandleResult
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, area: Area) -> ButtonHandleResult
     {
         match event.hits(cx, area, HitOpt::default()) {
             Event::FingerDown(_fe) => {

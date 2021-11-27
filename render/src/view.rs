@@ -90,6 +90,10 @@ impl View {
         cx.views[self.view_id].layout = layout;
     }
     
+    pub fn layout(&self, cx: &mut Cx)->Layout {
+        cx.views[self.view_id].layout
+    }
+    
     
     pub fn lock_view_transform(&self, cx: &mut Cx, mat: &Mat4) {
         let cxview = &mut cx.views[self.view_id];
@@ -115,7 +119,7 @@ impl View {
         set_view_transform_recur(self.view_id, cx, mat);
     }
     
-    pub fn begin_view(&mut self, cx: &mut Cx) -> ViewRedraw {
+    pub fn begin(&mut self, cx: &mut Cx) -> ViewRedraw {
         
         if !cx.in_redraw_cycle {
             panic!("calling begin_view outside of redraw cycle is not possible!");
@@ -228,7 +232,7 @@ impl View {
         cx.view_will_redraw(self.view_id)
     }
     
-    pub fn end_view(&mut self, cx: &mut Cx) -> Area {
+    pub fn end(&mut self, cx: &mut Cx) -> Area {
         // let view_id = self.view_id.unwrap();
         let view_area = Area::View(ViewArea {view_id: self.view_id, redraw_id: cx.redraw_id});
         let rect = cx.end_turtle(view_area);
@@ -253,7 +257,7 @@ impl View {
         cxview.debug = Some(view_debug);
     }
     
-    pub fn redraw_view(&self, cx: &mut Cx) {
+    pub fn redraw(&self, cx: &mut Cx) {
         cx.redraw_view_of(self.area());
     }
     

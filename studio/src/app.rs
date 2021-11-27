@@ -3,7 +3,7 @@ use {
         code_editor::{CodeEditor, CodeEditorViewId},
         code_editor_state::{CodeEditorState, SessionId},
         dock::{Dock, DockAction, DragPosition, PanelId},
-        file_tree::{self, FileNodeId, FileTree},
+        file_tree::{FileTreeAction, FileNodeId, FileTree},
         id_allocator::GenIdAllocator,
         id_map::GenIdMap,
         protocol::{self, Notification, Request, Response, ResponseOrNotification},
@@ -126,12 +126,12 @@ impl AppIO{
 impl AppInner {
     
     fn draw(&mut self, cx: &mut Cx, state: &AppState) {
-        if self.window.begin_desktop_window(cx, None).is_ok() {
+        if self.window.begin(cx, None).is_ok() {
             if self.dock.begin(cx).is_ok() {
                 self.draw_panel(cx, state, state.root_panel_id);
                 self.dock.end(cx);
             }
-            self.window.end_desktop_window(cx);
+            self.window.end(cx);
         }
     }
 
@@ -200,15 +200,14 @@ impl AppInner {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, state: &mut AppState) {
-        self.window.handle_desktop_window(cx, event);
+        self.window.handle_event(cx, event);
 
         if let Event::Construct = event{
             self.send_request(Request::GetFileTree());
         }
 
         let mut actions = Vec::new();
-        self.dock
-            .handle_event(cx, event, &mut |_, action| actions.push(action));
+        self.dock.handle_event(cx, event, &mut |_, action| actions.push(action));
         for action in actions {
             match action {
                 DockAction::SplitPanelChanged(panel_id) => {
@@ -280,18 +279,17 @@ impl AppInner {
         }
 
         let mut actions = Vec::new();
-        self.file_tree
-            .handle_event(cx, event, &mut |_cx, action| actions.push(action));
+        self.file_tree.handle_event(cx, event, &mut |_cx, action| actions.push(action));
         for action in actions {
             match action {
-                file_tree::Action::FileNodeWasClicked(file_node_id) => {
+                FileTreeAction::FileNodeWasClicked(file_node_id) => {
                     let node = &state.file_nodes_by_file_node_id[file_node_id];
                     if node.is_file() {
                         let path = state.file_node_path(file_node_id);
                         self.create_code_editor_tab(cx, state, state.selected_panel_id, None, path);
                     }
                 }
-                file_tree::Action::FileNodeShouldStartDragging(file_node_id) => {
+                FileTreeAction::FileNodeShouldStartDragging(file_node_id) => {
                     let path = state.file_node_path(file_node_id);
                     self.file_tree.start_dragging_file_node(
                         cx,

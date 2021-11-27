@@ -70,7 +70,7 @@ pub enum DesktopWindowEvent {
 
 impl DesktopWindow {
     
-    pub fn handle_desktop_window(&mut self, cx: &mut Cx, event: &mut Event) -> DesktopWindowEvent {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> DesktopWindowEvent {
         //self.main_view.handle_scroll_bars(cx, event);
         //self.inner_view.handle_scroll_bars(cx, event);
         
@@ -85,25 +85,25 @@ impl DesktopWindow {
         
         if let ButtonAction::Clicked = self.fullscreen_btn.handle_desktop_button(cx, event) {
             if self.window.is_fullscreen(cx) {
-                self.window.normal_window(cx);
+                self.window.normal(cx);
             }
             else {
-                self.window.fullscreen_window(cx);
+                self.window.fullscreen(cx);
             }
         }
         if let ButtonAction::Clicked = self.min_btn.handle_desktop_button(cx, event) {
-            self.window.minimize_window(cx);
+            self.window.minimize(cx);
         }
         if let ButtonAction::Clicked = self.max_btn.handle_desktop_button(cx, event) {
             if self.window.is_fullscreen(cx) {
-                self.window.restore_window(cx);
+                self.window.restore(cx);
             }
             else {
-                self.window.maximize_window(cx);
+                self.window.maximize(cx);
             }
         }
         if let ButtonAction::Clicked = self.close_btn.handle_desktop_button(cx, event) {
-            self.window.close_window(cx);
+            self.window.close(cx);
         }
         let is_for_other_window = match event {
             Event::WindowCloseRequested(ev) => ev.window_id != self.window.window_id,
@@ -147,26 +147,26 @@ impl DesktopWindow {
         }
     }
     
-    pub fn begin_desktop_window(&mut self, cx: &mut Cx, menu: Option<&Menu>) -> ViewRedraw {
+    pub fn begin(&mut self, cx: &mut Cx, menu: Option<&Menu>) -> ViewRedraw {
         
         if !self.main_view.view_will_redraw(cx) {
             return Err(())
         }
 
-        self.window.begin_window(cx);
+        self.window.begin(cx);
         
-        self.pass.begin_pass(cx);
+        self.pass.begin(cx);
         self.pass.add_color_texture(cx, &self.color_texture, ClearColor::ClearWith(self.clear_color));
         self.pass.set_depth_texture(cx, &self.depth_texture, ClearDepth::ClearWith(1.0));
         
-        self.main_view.begin_view(cx).unwrap();
+        self.main_view.begin(cx).unwrap();
         
         /*self.caption_view.set_layout(cx, Layout {
             walk: Walk::wh(Width::Filled, Height::Computed),
             ..Layout::default()
         });*/
         
-        if self.caption_view.begin_view(cx).is_ok() {
+        if self.caption_view.begin(cx).is_ok() {
             // alright here we draw our platform buttons.
             let process_chrome = match cx.platform_type {
                 PlatformType::Linux {custom_window_chrome} => custom_window_chrome,
@@ -240,16 +240,16 @@ impl DesktopWindow {
                     }
                 }
             }
-            self.caption_view.end_view(cx);
+            self.caption_view.end(cx);
         }
         cx.turtle_new_line();
         
-        self.inner_view.begin_view(cx).unwrap();
+        self.inner_view.begin(cx).unwrap();
         Ok(())
     }
     
-    pub fn end_desktop_window(&mut self, cx: &mut Cx) {
-        self.inner_view.end_view(cx);
+    pub fn end(&mut self, cx: &mut Cx) {
+        self.inner_view.end(cx);
         // lets draw a VR button top right over the UI.
         // window fullscreen?
         
@@ -266,11 +266,11 @@ impl DesktopWindow {
             self.xr_btn.draw_desktop_button(cx, DesktopButtonType::XRMode);
         }
         
-        self.main_view.end_view(cx);
+        self.main_view.end(cx);
         
-        self.pass.end_pass(cx);
+        self.pass.end(cx);
         
-        self.window.end_window(cx);
+        self.window.end(cx);
     }
 }
 

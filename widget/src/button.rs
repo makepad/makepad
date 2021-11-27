@@ -34,7 +34,7 @@ live_register!{
                 );
                 return cx.fill(mix(mix(#3, #4, self.hover), #2a, self.pressed));
             }
-        } 
+        }  
         
         layout: Layout {
             align: Align {fx: 0.5, fy: 0.5},
@@ -95,20 +95,20 @@ impl LiveTraitCast for Button{
 }
 
 impl FrameComponent for Button {
-    fn handle(&mut self, cx: &mut Cx, event: &mut Event)->OptionAnyAction{
-        self.handle_button(cx, event).into()
+    fn handle_event_dyn(&mut self, cx: &mut Cx, event: &mut Event)->OptionAnyAction{
+        self.handle_event(cx, event).into()
     }
     
-    fn draw(&mut self, cx: &mut Cx) {
-        self.draw_button(cx, None);
+    fn draw_dyn(&mut self, cx: &mut Cx) {
+        self.draw(cx, None);
     }
 }
 
 impl Button {
     
-    pub fn handle_button(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonAction {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonAction {
         self.handle_animation(cx, event);
-        let res = self.button_logic.handle_button_logic(cx, event, self.bg.draw_vars.area);
+        let res = self.button_logic.handle_event(cx, event, self.bg.draw_vars.area);
         match res.state {
             ButtonState::Pressed => self.animate_to(cx, self.state_pressed.unwrap()),
             ButtonState::Default => self.animate_to(cx, self.state_default.unwrap()),
@@ -118,7 +118,7 @@ impl Button {
         res.action
     }
     
-    pub fn draw_button(&mut self, cx: &mut Cx, label: Option<&str>) {
+    pub fn draw(&mut self, cx: &mut Cx, label: Option<&str>) {
         self.bg.begin_quad(cx, self.layout);
         self.text.draw_text_walk(cx, label.unwrap_or(&self.label));
         self.bg.end_quad(cx);

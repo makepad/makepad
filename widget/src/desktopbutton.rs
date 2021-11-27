@@ -144,7 +144,7 @@ impl DesktopButton {
     
     pub fn handle_desktop_button(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonAction {
         self.handle_animation(cx, event);
-        let res = self.button_logic.handle_button_logic(cx, event, self.bg.draw_vars.area);
+        let res = self.button_logic.handle_event(cx, event, self.bg.draw_vars.area);
         match res.state {
             ButtonState::Pressed => self.animate_to(cx, self.state_pressed.unwrap()),
             ButtonState::Default => self.animate_to(cx, self.state_default.unwrap()),

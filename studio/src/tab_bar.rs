@@ -13,10 +13,18 @@ live_register!{
     use crate::tab::Tab;
     
     TabBar: {{TabBar}} {
-        tab: Tab{}
-        view: {
+        tab: Tab {}
+        draw_drag:{
+            draw_depth:10
+            color:#ff00ffff
+        }
+        scroll_view: {
             show_v: false
-            show_h: false
+            show_h: true
+            scroll_h:{
+                bar_size:8
+                use_vertical_finger_scroll:true
+            }
             view: {
                 debug_id: tab_bar_view
                 layout: {
@@ -32,7 +40,7 @@ live_register!{
 
 #[derive(LiveComponent, LiveApply, LiveTraitCast)]
 pub struct TabBar {
-    #[live] view: ScrollView,
+    #[live] scroll_view: ScrollView,
     #[live] draw_drag: DrawColor,
     #[live] tab: Option<LivePtr>,
     #[rust] is_dragged: bool,
@@ -43,7 +51,7 @@ pub struct TabBar {
 
 impl TabBar {
     pub fn begin(&mut self, cx: &mut Cx) -> Result<(), ()> {
-        self.view.begin_view(cx) ?;
+        self.scroll_view.begin(cx) ?;
         self.tab_ids.clear();
         Ok(())
     }
@@ -59,7 +67,7 @@ impl TabBar {
                 },
             );
         }
-        self.view.end_view(cx);
+        self.scroll_view.end(cx);
     }
     
     pub fn tab(&mut self, cx: &mut Cx, tab_id: TabId, name: &str) {
@@ -96,11 +104,11 @@ impl TabBar {
             let tab = self.get_or_create_tab(cx, tab_id);
             tab.set_is_selected(true);
         }
-        self.view.redraw_view(cx);
+        self.scroll_view.redraw(cx);
     }
     
     pub fn redraw(&mut self, cx: &mut Cx) {
-        self.view.redraw_view(cx)
+        self.scroll_view.redraw(cx)
     }
     
     pub fn handle_event(
@@ -109,8 +117,8 @@ impl TabBar {
         event: &mut Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, TabBarAction),
     ) {
-        if self.view.handle_scroll_view(cx, event) {
-            self.view.redraw_view(cx);
+        if self.scroll_view.handle_event(cx, event) {
+            self.scroll_view.redraw(cx);
         }
         for tab_id in &self.tab_ids {
             let tab = &mut self.tabs_by_tab_id[*tab_id];
@@ -126,7 +134,7 @@ impl TabBar {
                 }
             });
         }
-        match event.drag_hits(cx, self.view.area(), HitOpt::default()) {
+        match event.drag_hits(cx, self.scroll_view.area(), HitOpt::default()) {
             Event::FingerDrag(drag_event) => match drag_event.state {
                 DragState::In => {
                     self.is_dragged = true;
