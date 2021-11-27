@@ -1,18 +1,13 @@
 use {
-    crate::cx::*,
-    makepad_live_compiler::{LiveRegistry, Span},
-    makepad_shader_compiler::{
-        shaderast::{
-            Ty,
-            DrawShaderDef,
-            DrawShaderFieldKind,
-            DrawShaderFlags,
-            DrawShaderConstTable,
-            ValuePtr,
-            DrawShaderPtr
-        },
-        shaderregistry::DrawShaderQuery
-    }
+    makepad_live_compiler::*,
+    makepad_shader_compiler::*,
+    crate::{
+        cx::{Cx, CxPlatformShader},
+        area::Area,
+        geometry::{Geometry,GeometryFields},
+        live::*
+    },
+    
 };
 
 
@@ -29,8 +24,8 @@ pub enum ShaderCompileResult {
 
 #[derive(Clone)]
 pub struct DrawShaderInput {
-    pub id: Id,
-    pub ty: Ty,
+    pub id: LiveId,
+    pub ty: ShaderTy,
     pub offset: usize,
     pub slots: usize,
     pub value_ptr: Option<ValuePtr>
@@ -97,11 +92,11 @@ impl DrawVars {
     
     pub fn live_type_info() -> LiveTypeInfo {
         LiveTypeInfo {
-            module_path: ModulePath::from_str(&module_path!()).unwrap(),
+            module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
             live_type: Self::live_type(),
             fields: Vec::new(),
             kind: LiveTypeKind::DrawVars,
-            type_name: Id::from_str("DrawVars").unwrap()
+            type_name: LiveId::from_str("DrawVars").unwrap()
         }
     }
     
@@ -151,11 +146,11 @@ impl DrawVars {
                 }
             }
             
-            fn live_type_to_shader_ty(live_type: LiveType) -> Option<Ty> {
-                if live_type == f32::live_type() {Some(Ty::Float)}
-                else if live_type == Vec2::live_type() {Some(Ty::Vec2)}
-                else if live_type == Vec3::live_type() {Some(Ty::Vec3)}
-                else if live_type == Vec4::live_type() {Some(Ty::Vec4)}
+            fn live_type_to_shader_ty(live_type: LiveType) -> Option<ShaderTy> {
+                if live_type == f32::live_type() {Some(ShaderTy::Float)}
+                else if live_type == Vec2::live_type() {Some(ShaderTy::Vec2)}
+                else if live_type == Vec3::live_type() {Some(ShaderTy::Vec3)}
+                else if live_type == Vec4::live_type() {Some(ShaderTy::Vec4)}
                 else {None}
             }
             // ok ! we have to compile it
@@ -197,7 +192,7 @@ impl DrawVars {
                                             slots += 1;
                                             //draw_shader_def.enums
                                             
-                                            draw_shader_def.add_instance(field.id, Ty::Enum(live_type), span, field.live_field_kind);
+                                            draw_shader_def.add_instance(field.id, ShaderTy::Enum(live_type), span, field.live_field_kind);
                                         }
                                         else {
                                             let ty = live_type_to_shader_ty(live_type).expect("Please only put shader-understandable instance fields after draw_vars");
@@ -208,7 +203,7 @@ impl DrawVars {
                                 }
                                 // insert padding
                                 if level >0 && slots % 2 == 1 {
-                                    draw_shader_def.add_instance(Id(0), Ty::Float, span, LiveFieldKind::Calc);
+                                    draw_shader_def.add_instance(LiveId(0), ShaderTy::Float, span, LiveFieldKind::Calc);
                                 }
                             }
                         }
@@ -260,7 +255,7 @@ impl DrawVars {
                             let lti = live_registry.live_type_infos.get(live_type).unwrap();
                             lti.type_name
                         }
-                        _ => Id(0)
+                        _ => LiveId(0)
                     };
                     cx.draw_shader_fingerprints.push(DrawShaderFingerprint {
                         draw_shader_id,
@@ -436,7 +431,7 @@ impl DrawShaderInputs {
         }
     }
     
-    pub fn push(&mut self, id: Id, ty: Ty, value_ptr: Option<ValuePtr>) {
+    pub fn push(&mut self, id: LiveId, ty: ShaderTy, value_ptr: Option<ValuePtr>) {
         let slots = ty.slots();
         match self.packing_method {
             DrawShaderInputPacking::Attribute => {
@@ -505,8 +500,8 @@ impl DrawShaderInputs {
 
 #[derive(Clone)]
 pub struct DrawShaderTextureInput {
-    id: Id,
-    ty: Ty
+    id: LiveId,
+    ty: ShaderTy
 }
 
 #[derive(Clone)]
@@ -605,7 +600,7 @@ impl CxDrawShaderMapping {
         
         // ok now the live uniforms
         for (value_node_ptr, ty) in draw_shader_def.all_live_refs.borrow().iter() {
-            live_uniforms.push(Id(0), ty.clone(), Some(*value_node_ptr));
+            live_uniforms.push(LiveId(0), ty.clone(), Some(*value_node_ptr));
         }
         
         CxDrawShaderMapping {
@@ -675,8 +670,8 @@ impl CxDrawShaderMapping {
 
 #[derive(Clone)]
 pub struct CxDrawShader {
-    pub field: Id,
-    pub type_name: Id,
+    pub field: LiveId,
+    pub type_name: LiveId,
     pub platform: Option<CxPlatformShader>,
     pub mapping: CxDrawShaderMapping
 }

@@ -4,23 +4,23 @@ use proc_macro::{TokenStream};
 mod macro_lib;
 use crate::macro_lib::*;
 
-use crate::id::*;
-#[path = "../../../live_compiler/src/id.rs"]
-mod id; 
+use crate::liveid::*;
+#[path = "../../../live_compiler/src/liveid.rs"]
+mod liveid; 
 
-#[proc_macro]
+#[proc_macro] 
 pub fn id(item: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new(); 
 
     let mut parser = TokenParser::new(item);
     if let Some(name) = parser.eat_any_ident() {
-        let id = Id::from_str_unchecked(&name);
-        tb.add("Id (").suf_u64(id.0).add(")");
+        let id = LiveId::from_str_unchecked(&name);
+        tb.add("LiveId (").suf_u64(id.0).add(")");
         tb.end()
     }
     else if let Some(punct) = parser.eat_any_punct(){
-        let id = Id::from_str_unchecked(&punct);
-        tb.add("Id (").suf_u64(id.0).add(")");
+        let id = LiveId::from_str_unchecked(&punct);
+        tb.add("LiveId (").suf_u64(id.0).add(")");
         tb.end()
     }
     else{
@@ -40,8 +40,8 @@ pub fn id_num(item: TokenStream) -> TokenStream {
         }
         if let Some(v) = parser.eat_literal(){
             if let Ok(v) = v.to_string().parse::<u64>(){
-                let id = Id::from_str_unchecked(&name);
-                tb.add("Id (").suf_u64(id.0&0xffff_ffff_ffff_0000 | (v&0xfff)).add(")");
+                let id = LiveId::from_str_unchecked(&name);
+                tb.add("LiveId (").suf_u64(id.0&0xffff_ffff_ffff_0000 | (v&0xfff)).add(")");
                 return tb.end()
             }
             else{
@@ -50,8 +50,8 @@ pub fn id_num(item: TokenStream) -> TokenStream {
         }
         else{
             let arg = parser.eat_level();
-            let id = Id::from_str_unchecked(&name);
-            tb.add("Id (").suf_u64(id.0&0xffff_ffff_ffff_0000).add("|((").stream(Some(arg)).add(")&0xffff)").add(")");
+            let id = LiveId::from_str_unchecked(&name);
+            tb.add("LiveId (").suf_u64(id.0&0xffff_ffff_ffff_0000).add("|((").stream(Some(arg)).add(")&0xffff)").add(")");
             tb.end()
         }
     }
@@ -67,11 +67,11 @@ pub fn id_from_str(item: TokenStream) -> TokenStream {
 
     let mut parser = TokenParser::new(item);
     if let Some(name) = parser.eat_any_ident() {
-        tb.add("Id::from_str(").string(&name).add(")");
+        tb.add("LiveId::from_str(").string(&name).add(")");
         tb.end()
     }
     else if let Some(punct) = parser.eat_any_punct(){
-        tb.add("Id::from_str(").string(&punct).add(")");
+        tb.add("LiveId::from_str(").string(&punct).add(")");
         tb.end()
     }
     else{

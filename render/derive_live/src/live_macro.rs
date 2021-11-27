@@ -1,11 +1,11 @@
 use proc_macro::TokenStream;
 use crate::macro_lib::*;
-use crate::id::*;
+use crate::liveid::*;
 
 fn parse_array(parser:&mut TokenParser, tb:&mut TokenBuilder)->Result<(),TokenStream>{
     while !parser.eat_eot(){
         let mut prop_id_ts = TokenBuilder::new();
-        prop_id_ts.add("Id(0)");
+        prop_id_ts.add("LiveId(0)");
         parse_value(prop_id_ts.end(), parser, tb)?;
         parser.eat_punct_alone(',');
     }
@@ -20,9 +20,9 @@ fn parse_object(parser:&mut TokenParser, tb:&mut TokenBuilder)->Result<(),TokenS
         }
         else{
             let prop = parser.expect_any_ident()?;
-            let prop_id = Id::from_str(&prop).unwrap();
+            let prop_id = LiveId::from_str(&prop).unwrap();
             let mut prop_id_ts = TokenBuilder::new();
-            prop_id_ts.add("Id(").suf_u64(prop_id.0).add(")");
+            prop_id_ts.add("LiveId(").suf_u64(prop_id.0).add(")");
             prop_id_ts.end()
         };
         if parser.eat_punct_alone(':'){ // value is following
@@ -30,10 +30,10 @@ fn parse_object(parser:&mut TokenParser, tb:&mut TokenBuilder)->Result<(),TokenS
         }
         else if parser.is_brace(){  // its an inline class
             parser.open_group();
-            tb.add("LiveNode{token_id:None, id:Id(0),value:LiveValue::Class{");
+            tb.add("LiveNode{token_id:None, id:LiveId(0),value:LiveValue::Class{");
             tb.add("class:").stream(Some(prop_id_ts)).add("}},");
             parse_object(parser,tb)?;
-            tb.add("LiveNode{token_id:None, id:Id(0),value:LiveValue::Close},");
+            tb.add("LiveNode{token_id:None, id:LiveId(0),value:LiveValue::Close},");
         }
         else{
             return Err(parser.unexpected());
@@ -64,25 +64,25 @@ fn parse_value(prop_id:TokenStream, parser:&mut TokenParser, tb:&mut TokenBuilde
     }  
     // key values
     else if let Some(class) = parser.eat_any_ident(){
-        let class_id = Id::from_str(&class).unwrap().0;
+        let class_id = LiveId::from_str(&class).unwrap().0;
         // could be local class or enum
         if parser.eat_double_colon_destruct(){
             let variant = parser.expect_any_ident()?;
-            let variant_id = Id::from_str(&variant).unwrap().0;
+            let variant_id = LiveId::from_str(&variant).unwrap().0;
             // now check if we have a , eot or ( or {
             if parser.is_punct_alone(',') || parser.is_eot(){
                 tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id)).add(",value:LiveValue::BareEnum{");
-                tb.add("class:Id(").suf_u64(class_id).add("), variant:Id(").suf_u64(variant_id).add(")}},");
+                tb.add("class:LiveId(").suf_u64(class_id).add("), variant:LiveId(").suf_u64(variant_id).add(")}},");
             }
             else if parser.is_brace(){
                 tb.add("LiveNode{id:").stream(Some(prop_id.clone())).add(",value:LiveValue::NamedEnum{");
-                tb.add("class:Id(").suf_u64(class_id).add("), variant:Id(").suf_u64(variant_id).add(")}},");
+                tb.add("class:LiveId(").suf_u64(class_id).add("), variant:LiveId(").suf_u64(variant_id).add(")}},");
                 parser.open_group();
                 while !parser.eat_eot(){
                     let prop = parser.expect_any_ident()?;
-                    let prop_id = Id::from_str(&prop).unwrap();
+                    let prop_id = LiveId::from_str(&prop).unwrap();
                     let mut prop_id_ts = TokenBuilder::new();
-                    prop_id_ts.add("Id(").suf_u64(prop_id.0).add(")");
+                    prop_id_ts.add("LiveId(").suf_u64(prop_id.0).add(")");
                     parser.expect_punct_alone(':')?;
                     parse_value(prop_id_ts.end(), parser, tb)?;
                     parser.eat_punct_alone(',');
@@ -91,11 +91,11 @@ fn parse_value(prop_id:TokenStream, parser:&mut TokenParser, tb:&mut TokenBuilde
             }
             else if parser.is_paren(){
                 tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id.clone())).add(",value:LiveValue::TupleEnum{");
-                tb.add("class:Id(").suf_u64(class_id).add("), variant:Id(").suf_u64(variant_id).add(")}},");
+                tb.add("class:Id(").suf_u64(class_id).add("), variant:LiveId(").suf_u64(variant_id).add(")}},");
                 parser.open_group();
                 while !parser.eat_eot(){
                     let mut prop_id_ts = TokenBuilder::new();
-                    prop_id_ts.add("Id(0)");
+                    prop_id_ts.add("LiveId(0)");
                     parse_value(prop_id_ts.end(), parser, tb)?;
                     parser.eat_punct_alone(',');
                 }
@@ -114,7 +114,7 @@ fn parse_value(prop_id:TokenStream, parser:&mut TokenParser, tb:&mut TokenBuilde
         }
         else{
             tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id.clone())).add(",value:LiveValue::Id(");
-            tb.add("Id(").suf_u64(class_id).add("))},");
+            tb.add("LiveId(").suf_u64(class_id).add("))},");
         }
     }
     else if parser.eat_punct_alone('#'){ // coLor!
@@ -167,11 +167,11 @@ pub fn live_impl(input:TokenStream)->TokenStream{
     let mut tb = TokenBuilder::new();
 
     tb.add("&[");
-    tb.add("LiveNode{token_id:None, id:Id(0),value:LiveValue::Object},");
+    tb.add("LiveNode{token_id:None, id:LiveId(0),value:LiveValue::Object},");
     if let Err(e) = parse_object(&mut parser, &mut tb){
         return e
     };
-    tb.add("LiveNode{token_id:None, id:Id(0),value:LiveValue::Close},");
+    tb.add("LiveNode{token_id:None, id:LiveId(0),value:LiveValue::Close},");
     tb.add("]");
     tb.end()
 }

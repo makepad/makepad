@@ -192,7 +192,7 @@ impl<'a> DrawShaderGenerator<'a> {
                     match field.ty_expr.ty.borrow().as_ref().unwrap() {
                         Ty::Float | Ty::Vec2 | Ty::Vec3 | Ty::Vec4 => {
                             write!(self.string, "    ").unwrap();
-                            if field.ident == Ident(Id(0)){
+                            if field.ident == Ident(LiveId(0)){
                                 self.write_var_decl_packed(&DisplayPadding(padding), field.ty_expr.ty.borrow().as_ref().unwrap(),);
                                 padding += 1;
                             }

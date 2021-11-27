@@ -1,6 +1,18 @@
-use crate::cx::*;
-use std::rc::Rc;
-use std::cell::RefCell;
+pub use {
+    std::{
+        rc::Rc,
+        cell::RefCell
+    },
+    makepad_live_compiler::*,
+    crate::{
+        cx::{
+            Cx,
+            CxPlatformPass,
+        },
+        live::*,
+        texture::Texture,
+    }
+};
 
 pub struct Pass {
     pub pass_id: usize,
@@ -33,11 +45,11 @@ impl LiveNew for Pass {
     
     fn live_type_info() -> LiveTypeInfo{
         LiveTypeInfo {
-            module_path: ModulePath::from_str(&module_path!()).unwrap(),
+            module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
             live_type: Self::live_type(),
             fields: Vec::new(),
             kind: LiveTypeKind::Object,
-            type_name: Id::from_str("Pass").unwrap()
+            type_name: LiveId::from_str("Pass").unwrap()
         }
     }
 }
@@ -132,7 +144,7 @@ impl Pass {
         cxpass.clear_color = clear_color;
     }
     
-    pub fn add_color_texture(&mut self, cx: &mut Cx, texture: &Texture, clear_color: ClearColor) {
+    pub fn add_color_texture(&mut self, cx: &mut Cx, texture: &Texture, clear_color: PassClearColor) {
         let cxpass = &mut cx.passes[self.pass_id];
         cxpass.color_textures.push(CxPassColorTexture {
             texture_id: texture.texture_id,
@@ -140,7 +152,7 @@ impl Pass {
         })
     }
     
-    pub fn set_depth_texture(&mut self, cx: &mut Cx, texture: &Texture, clear_depth: ClearDepth) {
+    pub fn set_depth_texture(&mut self, cx: &mut Cx, texture: &Texture, clear_depth: PassClearDepth) {
         let cxpass = &mut cx.passes[self.pass_id];
         cxpass.depth_texture = Some(texture.texture_id);
         cxpass.clear_depth = clear_depth;
@@ -172,26 +184,26 @@ impl Pass {
 }
 
 #[derive(Clone)]
-pub enum ClearColor {
+pub enum PassClearColor {
     InitWith(Vec4),
     ClearWith(Vec4)
 }
 
-impl Default for ClearColor {
+impl Default for PassClearColor {
     fn default() -> Self {
-        ClearColor::ClearWith(Vec4::default())
+        Self::ClearWith(Vec4::default())
     }
 }
 
 #[derive(Clone)]
-pub enum ClearDepth {
+pub enum PassClearDepth {
     InitWith(f64),
     ClearWith(f64)
 }
 
 #[derive(Default, Clone)]
 pub struct CxPassColorTexture {
-    pub clear_color: ClearColor,
+    pub clear_color: PassClearColor,
     pub texture_id: usize
 }
 
@@ -225,7 +237,7 @@ pub struct CxPass {
     pub matrix_mode: PassMatrixMode,
     pub color_textures: Vec<CxPassColorTexture>,
     pub depth_texture: Option<usize>,
-    pub clear_depth: ClearDepth,
+    pub clear_depth: PassClearDepth,
     pub depth_init: f64,
     pub clear_color: Vec4,
     pub override_dpi_factor: Option<f32>,
@@ -248,7 +260,7 @@ impl Default for CxPass {
             color_textures: Vec::new(),
             depth_texture: None,
             override_dpi_factor: None,
-            clear_depth: ClearDepth::ClearWith(1.0),
+            clear_depth: PassClearDepth::ClearWith(1.0),
             clear_color: Vec4::default(),
             depth_init: 1.0,
             main_view_id: None,

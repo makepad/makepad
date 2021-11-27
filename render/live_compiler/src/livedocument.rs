@@ -1,11 +1,13 @@
 //use makepad_id_macros2::*;
-use crate::id::{Id};
-use std::fmt;
-use crate::span::Span;
-use crate::token::{TokenWithSpan, TokenId};
-use crate::livenode::LiveNode;//, LiveValue};
-use crate::id::LivePtr;
-use crate::id::FileId;
+use {
+    std::fmt,
+    crate::{
+        liveid::{LiveId, LivePtr, LiveFileId},
+        span::Span,
+        token::{TokenWithSpan, TokenId},
+        livenode::LiveNode,
+    }
+};
 
 pub struct LiveDocument {
     pub recompile: bool,
@@ -35,7 +37,7 @@ pub enum LiveScopeTarget {
 }
 
 impl LiveScopeTarget {
-    pub fn to_full_node_ptr(&self, file_id: FileId) -> LivePtr {
+    pub fn to_full_node_ptr(&self, file_id: LiveFileId) -> LivePtr {
         match self {
             LiveScopeTarget::LocalPtr(local_ptr) => {
                 LivePtr {file_id: file_id, index: *local_ptr as u32}
@@ -49,7 +51,7 @@ impl LiveScopeTarget {
 
 #[derive(Copy, Clone)]
 pub struct LiveScopeItem {
-    pub id: Id,
+    pub id: LiveId,
     pub target: LiveScopeTarget
 }
 

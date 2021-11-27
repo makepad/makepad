@@ -16,7 +16,7 @@ pub enum ShaderParserDep {
 
 pub struct ShaderParser<'a> {
     pub token_index: usize,
-    pub file_id: FileId,
+    pub file_id: LiveFileId,
     pub tokens_with_span: Cloned<Iter<'a, TokenWithSpan >>,
     pub live_scope: &'a [LiveScopeItem],
     pub live_registry: &'a LiveRegistry,
@@ -36,7 +36,7 @@ impl<'a> ShaderParser<'a> {
         live_scope: &'a [LiveScopeItem],
         type_deps: &'a mut Vec<ShaderParserDep>,
         self_kind: Option<FnSelfKind>,
-        file_id: FileId,
+        file_id: LiveFileId,
     ) -> Self {
         let mut tokens_with_span = tokens.iter().cloned();
         let token_with_span = tokens_with_span.next().unwrap();
@@ -199,7 +199,7 @@ impl<'a> ShaderParser<'a> {
         }
     }
     
-    fn expect_specific_ident(&mut self, specific_id:Id) -> Result<(), LiveError> {
+    fn expect_specific_ident(&mut self, specific_id:LiveId) -> Result<(), LiveError> {
         match self.peek_token() {
             Token::Ident(id) if id == id=> {
                 self.skip_token();
@@ -493,7 +493,7 @@ impl<'a> ShaderParser<'a> {
         Ok(acc)
     }
     
-    fn scan_scope_for_live_ptr(&mut self, file_id: FileId, id: Id) -> Option<LivePtr> {
+    fn scan_scope_for_live_ptr(&mut self, file_id: LiveFileId, id: LiveId) -> Option<LivePtr> {
         //we have to use a 
         for item in self.live_scope.iter().rev() {
             if item.id == id {
@@ -1445,7 +1445,7 @@ impl<'a> ShaderParser<'a> {
 }
 
 pub struct SpanTracker {
-    pub file_id: FileId,
+    pub file_id: LiveFileId,
     pub start: usize,
 }
 

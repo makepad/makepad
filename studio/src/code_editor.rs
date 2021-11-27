@@ -290,7 +290,6 @@ impl CodeEditor {
             }
         }
         let origin = cx.get_turtle_pos();
-        //self.caret.begin_many(cx);
         let mut start_y = visible_lines.start_y;
         for line_index in visible_lines.start..visible_lines.end {
             loop {
@@ -319,7 +318,6 @@ impl CodeEditor {
             }
             start_y += self.text_glyph_size.y;
         }
-        //self.caret.end_many(cx);
     }
     
     fn set_turtle_bounds(&mut self, cx: &mut Cx, text: &Text) {

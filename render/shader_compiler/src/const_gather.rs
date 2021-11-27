@@ -1,9 +1,13 @@
-use crate::shaderast::*;
-use crate::shaderast::Ident;
-use crate::shaderast::{Lit};
-use makepad_live_compiler::Span;
-use crate::shaderast::Val;
-use std::cell::Cell;
+use{
+    std::cell::Cell,
+    makepad_live_compiler::{
+        Span
+    },
+    crate::{
+        shaderast::*,
+    }
+};
+
 
 #[derive(Clone)]
 pub struct ConstGatherer<'a> {

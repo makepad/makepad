@@ -1,5 +1,19 @@
-use crate::cx::*;
-
+use {
+    makepad_live_compiler::*,
+    makepad_derive_live::*,
+    makepad_shader_compiler::{
+        ShaderTy,
+    },
+    crate::{
+        cx::Cx,
+        live::*,
+        geometry::{
+            Geometry,
+            GeometryField,
+            GeometryFields,
+        }
+    },
+};
 
 live_register!{
     GeometryQuad2D: {{GeometryQuad2D}} {
@@ -23,7 +37,7 @@ impl LiveApply for GeometryQuad2D {
 
 impl GeometryFields for GeometryQuad2D {
     fn geometry_fields(&self, fields: &mut Vec<GeometryField>) {
-        fields.push(GeometryField {id: id!(geom_pos), ty: Ty::Vec2});
+        fields.push(GeometryField {id: id!(geom_pos), ty: ShaderTy::Vec2});
     }
     
     fn get_geometry(&self) -> Geometry {

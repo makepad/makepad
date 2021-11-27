@@ -1,27 +1,27 @@
-use crate::shaderast::*;
-use crate::const_eval::ConstEvaluator;
-use crate::const_gather::ConstGatherer;
-use crate::dep_analyse::DepAnalyser;
-use crate::shaderast::Scopes;
-use crate::shaderast::ScopeSymKind;
-use crate::shaderast::Ident;
-use crate::shaderast::{Ty, TyExpr};
-use crate::ty_check::TyChecker;
-use crate::shaderregistry::ShaderRegistry;
+use{
+    std::{
+        cell::{RefCell, Cell},
+        collections::{BTreeMap, BTreeSet, HashMap}
+    },
+    makepad_live_compiler::{
+        live_error_origin,
+        id,
+        LiveRegistry,
+        LiveError,
+        LiveErrorOrigin,
+        LiveId,
+        Span
+    },
+    crate::{
+        shaderast::*,
+        const_eval::ConstEvaluator,
+        const_gather::ConstGatherer,
+        dep_analyse::DepAnalyser,
+        ty_check::TyChecker,
+        shaderregistry::ShaderRegistry
+    }
+};
 
-use makepad_live_compiler::LiveRegistry;
-use makepad_live_compiler::LiveError;
-use makepad_live_compiler::LiveErrorOrigin;
-use makepad_live_compiler::live_error_origin;
-use makepad_live_compiler::id;
-use makepad_live_compiler::Id;
-use makepad_live_compiler::Span;
-
-use std::cell::RefCell;
-use std::cell::Cell;
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
-use std::collections::HashMap;
 
 #[derive(Clone, Copy)]
 pub struct ShaderAnalyseOptions {

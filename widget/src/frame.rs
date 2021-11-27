@@ -8,7 +8,7 @@ live_register!{
 
 #[derive(Clone)]
 pub struct FrameActionItem {
-    pub id: Id,
+    pub id: LiveId,
     pub action: Box<dyn AnyAction>
 }
 
@@ -25,10 +25,10 @@ pub struct FrameItem { // draw info per UI element
 pub struct Frame { // draw info per UI element
     pub view: Option<View>,
     pub live_ptr: Option<LivePtr>,
-    pub components: HashMap<Id, FrameItem>,
+    pub components: HashMap<LiveId, FrameItem>,
     pub has_children_array: bool,
-    pub children: Vec<Id>,
-    pub create_order: Vec<Id>
+    pub children: Vec<LiveId>,
+    pub create_order: Vec<LiveId>
 }
 
 impl LiveTraitCast for Frame {
@@ -71,10 +71,10 @@ impl LiveNew for Frame {
     
     fn live_type_info() -> LiveTypeInfo where Self: Sized + 'static {
         LiveTypeInfo {
-            module_path: ModulePath::from_str(&module_path!()).unwrap(),
+            module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
             live_type: Self::live_type(),
             fields: Vec::new(),
-            type_name: Id::from_str("Frame").unwrap(),
+            type_name: LiveId::from_str("Frame").unwrap(),
             kind: LiveTypeKind::Class
         }
     }
@@ -82,7 +82,7 @@ impl LiveNew for Frame {
 }
 
 impl Frame {
-    fn create_component(&mut self, cx: &mut Cx, apply_from: ApplyFrom, id: Id, live_type: LiveType, index: usize, nodes: &[LiveNode]) {
+    fn create_component(&mut self, cx: &mut Cx, apply_from: ApplyFrom, id: LiveId, live_type: LiveType, index: usize, nodes: &[LiveNode]) {
         let factories = cx.live_factories.clone();
         let factories_cp = factories.borrow();
         if let Some(factory) = factories_cp.get(&live_type) {
@@ -201,7 +201,7 @@ impl LiveComponent for Frame {
 
 
 impl Frame {
-    pub fn get_component(&mut self, id: Id) -> Option<&mut Box<dyn LiveComponent >> {
+    pub fn get_component(&mut self, id: LiveId) -> Option<&mut Box<dyn LiveComponent >> {
         if let Some(comp) = self.components.get_mut(&id) {
             return Some(&mut comp.component)
         }

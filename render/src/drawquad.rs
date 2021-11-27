@@ -1,3 +1,15 @@
+use {
+    makepad_live_compiler::*,
+    makepad_derive_live::*,
+    crate::{
+        cx::Cx,
+        live::*,
+        geometrygen::GeometryQuad2D,
+        drawshader::DrawVars,
+        turtle::{Layout, Walk, Rect}
+    },
+};
+
 live_register!{
     use crate::shader_std::*;
     
@@ -31,8 +43,6 @@ live_register!{
         }
     }
 }
-
-use crate::cx::*;
 
 #[derive(LiveComponent, LiveApply, LiveTraitCast)]
 #[repr(C)]

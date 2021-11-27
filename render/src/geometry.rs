@@ -1,4 +1,14 @@
-use crate::cx::*;
+pub use {
+    makepad_live_compiler::*,
+    makepad_shader_compiler::ShaderTy,
+    crate::{
+        cx::{
+            Cx,
+            CxPlatformGeometry
+        },
+        live::*
+    }
+};
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct Geometry {
@@ -28,8 +38,8 @@ pub struct CxGeometry{
 
 #[derive(Debug)]
 pub struct GeometryField {
-    pub id: Id,
-    pub ty: Ty
+    pub id: LiveId,
+    pub ty: ShaderTy
 }
 
 pub trait GeometryFields{

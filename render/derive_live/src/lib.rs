@@ -13,8 +13,8 @@ use crate::live_macro::*;
 #[path = "../../microserde/derive/src/macro_lib.rs"]
 mod macro_lib;
 
-#[path = "../../live_compiler/src/id.rs"]
-mod id;
+#[path = "../../live_compiler/src/liveid.rs"]
+mod liveid;
 
 #[proc_macro_derive(LiveComponent, attributes(calc, live, rust, pick, live_type_kind))]
 pub fn derive_live(input: TokenStream) -> TokenStream {
