@@ -1,8 +1,8 @@
 use {
     crate::{
         delta::Delta,
-        id_allocator::GenIdAllocator,
-        id_map::GenIdMap,
+        genid_allocator::GenIdAllocator,
+        genid_map::GenIdMap,
         protocol::{
             DirectoryEntry, Error, FileId, FileNode, FileTree, Notification, Request, Response,
         },

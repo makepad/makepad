@@ -5,9 +5,9 @@ use {
             DocumentId,
             SessionId
         },
-        id::GenId,
-        id_allocator::GenIdAllocator,
-        id_map::GenIdMap,
+        genid::GenId,
+        genid_allocator::GenIdAllocator,
+        genid_map::GenIdMap,
         position::Position,
         position_set::PositionSet,
         protocol::{Notification, Request, Response},

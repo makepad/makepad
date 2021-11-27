@@ -1,5 +1,5 @@
 use {
-    crate::{id::GenId, id_map::GenIdMap},
+    crate::{genid::GenId, genid_map::GenIdMap},
     makepad_render::*,
     std::collections::{HashMap, HashSet},
 };

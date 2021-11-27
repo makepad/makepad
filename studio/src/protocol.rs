@@ -1,5 +1,5 @@
 use {
-    crate::{delta::Delta, id::GenId, text::Text},
+    crate::{delta::Delta, genid::GenId, text::Text},
     std::{ffi::OsString, path::PathBuf},
 };
 use makepad_microserde::{SerBin, DeBin};

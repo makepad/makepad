@@ -1,4 +1,4 @@
-use crate::id::GenId;
+use crate::genid::GenId;
 
 #[derive(Debug, Default)]
 pub struct GenIdAllocator {
