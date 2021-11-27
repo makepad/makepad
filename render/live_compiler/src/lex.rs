@@ -1,16 +1,17 @@
-use makepad_id_macros::*;
-use crate::id::{IdMap, Id};
-use crate::liveerror::LiveError;
-use crate::liveerror::LiveErrorOrigin;
-use crate::id::FileId;
-use crate::span::Span;
-use crate::token::{Token, TokenWithSpan};
-use crate::id::hex_bytes_to_u32;
+use{
+    makepad_id_macros::*,
+    crate::{
+        liveid::{LiveIdMap, LiveId, LiveFileId, hex_bytes_to_u32},
+        liveerror::{LiveError, LiveErrorOrigin},
+        span::Span,
+        token::{Token, TokenWithSpan},
+    }
+};
 
 #[derive(Clone)]
 pub struct Lex<C> {
     chars: C,
-    file_id: FileId,
+    file_id: LiveFileId,
     temp_string: String,
     temp_hex: Vec<u8>,
     strings: Vec<char>,
@@ -23,7 +24,7 @@ pub struct Lex<C> {
 
 // put all the words here that the lexer might not see for collision check
 pub fn fill_collisions() {
-    IdMap::with( | idmap | {
+    LiveIdMap::with( | idmap | {
         if idmap.contains("use") {
             return
         }
@@ -358,7 +359,7 @@ C: Iterator<Item = char>,
                     "true" => Token::Bool(true),
                     "false" => Token::Bool(false),
                     _ => {
-                        match Id::from_str(&self.temp_string) {
+                        match LiveId::from_str(&self.temp_string) {
                             Err(collide) => return Err(span.error(self, format!("Id has collision {} with {}, please rename one of them", self.temp_string, collide).into())),
                             Ok(id) => Token::Ident(id)
                         }
@@ -513,7 +514,7 @@ pub struct LexResult {
     pub tokens: Vec<TokenWithSpan>
 }
 
-pub fn lex<C>(chars: C, file_id: FileId) -> Result<LexResult, LiveError>
+pub fn lex<C>(chars: C, file_id: LiveFileId) -> Result<LexResult, LiveError>
 where
 C: IntoIterator<Item = char>,
 {
@@ -554,7 +555,7 @@ C: IntoIterator<Item = char>,
 }
 
 struct SpanTracker {
-    file_id: FileId,
+    file_id: LiveFileId,
     start: usize,
 }
 

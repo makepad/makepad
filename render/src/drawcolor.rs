@@ -1,5 +1,12 @@
-use crate::cx::*;
-use crate::drawquad::DrawQuad;
+use {
+    makepad_live_compiler::*,
+    makepad_derive_live::*,
+    crate::{
+        cx::Cx,
+        live::*,
+        drawquad::DrawQuad
+    },
+};
 
 live_register!{
     DrawColor: {{DrawColor}} {

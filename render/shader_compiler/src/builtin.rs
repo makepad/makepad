@@ -1,7 +1,14 @@
+use{
+    std::collections::HashMap,
+    makepad_live_compiler::LiveId,
+    crate::shaderast::{Ident, ShaderTy}
+};
+type Ty = ShaderTy;
+
 macro_rules! builtin {
     ($f:ident, [$(($($a:path),*) -> $b:path),*]) => {
         (
-            Ident(Id::from_str_unchecked(stringify!($f))),
+            Ident(LiveId::from_str_unchecked(stringify!($f))),
             Builtin {
                 return_tys: [$(
                     (
@@ -16,10 +23,6 @@ macro_rules! builtin {
     }
 }
 
-use crate::shaderast::Ident;
-use crate::shaderast::Ty;
-use std::collections::HashMap;
-use makepad_live_compiler::Id;
 #[derive(Clone, Debug)]
 pub struct Builtin {
     pub return_tys: HashMap<Vec<Ty>, Ty>,

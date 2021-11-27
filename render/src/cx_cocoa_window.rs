@@ -1,9 +1,37 @@
-use crate::cx_apple::*;
-use std::os::raw::{c_void};
-use std::ptr;
-use std::time::Instant;
-use crate::cx::*;
-use crate::cx_cocoa_app::*;
+use{
+    std::{
+        ptr,
+        time::Instant,
+        os::raw::{c_void}
+    },
+    makepad_live_compiler::{
+        Vec2
+    },
+    crate::{
+        cx_apple::*,
+        cx::NUM_FINGERS,
+        cx_cocoa_app::CocoaApp,
+        events::{
+            Event,
+            FingerInputType,
+            WindowDragQueryResponse,
+            WindowGeomChangeEvent,
+            WindowDragQueryEvent,
+            KeyModifiers,
+            FingerDownEvent,
+            FingerUpEvent,
+            FingerMoveEvent,
+            FingerHoverEvent,
+            WindowCloseRequestedEvent,
+            WindowClosedEvent,
+            TextInputEvent,
+            DraggedItem,
+            HoverState
+        },
+        turtle::Rect,
+        window::WindowGeom
+    }
+};
 
 #[derive(Clone)]
 pub struct CocoaWindow {

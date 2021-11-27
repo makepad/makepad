@@ -1,13 +1,50 @@
-use std::collections::{HashMap,BTreeSet};
-use crate::cx_apple::*;
-use std::os::raw::{c_void};
-use std::ptr;
-use std::sync::{Mutex};
-use std::time::Instant;
-use crate::cx::*;
-use crate::cx_cocoa_window::*;
-use crate::cx_cocoa_delegate::*;
-use crate::cx_cocoa_util::*;
+
+use{
+    std::{
+        ptr,
+        time::Instant,
+        collections::HashMap,
+        os::raw::{c_void}
+    },
+    makepad_live_compiler::{
+        Vec2
+    },
+    crate::{
+        cx_apple::*,
+        cx_cocoa_delegate::*,
+        cx_cocoa_window::CocoaWindow,
+        cx_cocoa_util::{
+            keycode_to_menu_key,
+            get_event_keycode,
+            get_event_key_modifier
+        },
+        cx::{
+            CxCommandSetting
+        },
+        turtle::{
+            Rect
+        },
+        events::{
+            Event,
+            KeyCode,
+            KeyEvent,
+            TextInputEvent,
+            TextCopyEvent,
+            FingerInputType,
+            FingerScrollEvent,
+            TimerEvent,
+            Signal,
+            SignalEvent,
+            DraggedItem,
+            KeyModifiers
+        },
+        cursor::MouseCursor,
+        menu::{
+            Menu,
+            CommandId
+        }
+    }
+};
 
 static mut GLOBAL_COCOA_APP: *mut CocoaApp = 0 as *mut _;
 
@@ -44,10 +81,10 @@ pub struct CocoaApp {
     pub loop_block: bool,
     pub cursors: HashMap<MouseCursor, ObjcId>,
     pub current_cursor: MouseCursor,
-    pub status_map: Mutex<CocoaStatusMap>,
+    //pub status_map: Mutex<CocoaStatusMap>,
     pub ns_event: ObjcId,
 }
-
+/*
 #[derive(Default)]
 pub struct CocoaStatusMap {
     pub status_to_usize: HashMap<StatusId, usize>,
@@ -55,7 +92,7 @@ pub struct CocoaStatusMap {
     pub command_to_usize: HashMap<CommandId, usize>,
     pub usize_to_command: HashMap<usize, CommandId>,
 }
-
+*/
 impl CocoaApp {
     pub fn new() -> CocoaApp {
         unsafe {
@@ -102,7 +139,7 @@ impl CocoaApp {
                 event_recur_block: false,
                 event_loop_running: true,
                 cursors: HashMap::new(),
-                status_map: Mutex::new(CocoaStatusMap::default()),
+                //status_map: Mutex::new(CocoaStatusMap::default()),
                 current_cursor: MouseCursor::Default,
                 ns_event: ptr::null_mut(),
             }
@@ -115,7 +152,7 @@ impl CocoaApp {
             delegate: ObjcId,
             menu_target_class: *const Class,
             menu: &Menu,
-            status_map: &Mutex<CocoaStatusMap>,
+            //status_map: &Mutex<CocoaStatusMap>,
             command_settings: &HashMap<CommandId, CxCommandSetting>
         ) {
             match menu {
@@ -126,7 +163,7 @@ impl CocoaApp {
                     let () = msg_send![main_menu, setDelegate: delegate];
                     
                     for item in items {
-                        make_menu(main_menu, delegate, menu_target_class, item, status_map, command_settings);
+                        make_menu(main_menu, delegate, menu_target_class, item, command_settings);
                     }
                     let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
                     let () = msg_send![
@@ -149,7 +186,7 @@ impl CocoaApp {
                     // connect submenu
                     let () = msg_send![parent_menu, setSubmenu: sub_menu forItem: sub_item];
                     for item in items {
-                        make_menu(sub_menu, delegate, menu_target_class, item, status_map, command_settings);
+                        make_menu(sub_menu, delegate, menu_target_class, item, command_settings);
                     }
                 },
                 Menu::Item {name, command} => {
@@ -168,7 +205,7 @@ impl CocoaApp {
                     let target: ObjcId = msg_send![menu_target_class, new];
                     let () = msg_send![sub_item, setTarget: target];
                     let () = msg_send![sub_item, setEnabled: if settings.enabled {YES}else {NO}];
-                    
+                    /*
                     let command_usize = if let Ok(mut status_map) = status_map.lock() {
                         if let Some(id) = status_map.command_to_usize.get(&command) {
                             *id
@@ -182,9 +219,10 @@ impl CocoaApp {
                     }
                     else {
                         panic!("cannot lock cmd_map");
-                    };
+                    };*/
+                    
                     (*target).set_ivar("cocoa_app_ptr", GLOBAL_COCOA_APP as *mut _ as *mut c_void);
-                    (*target).set_ivar("command_usize", command_usize);
+                    (*target).set_ivar("command_usize", command.0);
                 },
                 Menu::Line => {
                     let sep_item: ObjcId = msg_send![class!(NSMenuItem), separatorItem];
@@ -196,7 +234,7 @@ impl CocoaApp {
             }
         }
         unsafe {
-            make_menu(nil, self.menu_delegate_instance, self.menu_target_class, menu, &self.status_map, command_settings);
+            make_menu(nil, self.menu_delegate_instance, self.menu_target_class, menu, command_settings);
         }
     }
     
@@ -529,13 +567,13 @@ impl CocoaApp {
         }
     }
     
-    pub fn post_signal(signal_id: usize, status: StatusId) {
+    pub fn post_signal(signal_id: usize, status: u64) {
         unsafe {
             let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
             
             let cocoa_app = &mut (*GLOBAL_COCOA_APP);
             let post_delegate_instance: ObjcId = msg_send![cocoa_app.post_delegate_class, new];
-            
+            /*
             // lock it
             let status_id = if let Ok(mut status_map) = cocoa_app.status_map.lock() {
                 if let Some(id) = status_map.status_to_usize.get(&status) {
@@ -550,11 +588,11 @@ impl CocoaApp {
             }
             else {
                 panic!("Cannot lock cmd_map");
-            };
+            };*/
             
             (*post_delegate_instance).set_ivar("cocoa_app_ptr", GLOBAL_COCOA_APP as *mut _ as *mut c_void);
             (*post_delegate_instance).set_ivar("signal_id", signal_id);
-            (*post_delegate_instance).set_ivar("status", status_id);
+            (*post_delegate_instance).set_ivar("status", status);
             let nstimer: ObjcId = msg_send![
                 class!(NSTimer),
                 timerWithTimeInterval: 0.
@@ -653,10 +691,10 @@ impl CocoaApp {
         }
     }
     
-    pub fn send_signal_event(&mut self, signal: Signal, status: StatusId) {
+    pub fn send_signal_event(&mut self, signal: Signal, status: u64) {
         let mut signals = HashMap::new();
-        let mut new_set = BTreeSet::new();
-        new_set.insert(status);
+        let mut new_set = Vec::new();
+        new_set.push(status);
         signals.insert(signal, new_set);
         self.do_callback(&mut vec![
             Event::Signal(SignalEvent {

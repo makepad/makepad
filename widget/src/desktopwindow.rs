@@ -156,8 +156,8 @@ impl DesktopWindow {
         self.window.begin(cx);
         
         self.pass.begin(cx);
-        self.pass.add_color_texture(cx, &self.color_texture, ClearColor::ClearWith(self.clear_color));
-        self.pass.set_depth_texture(cx, &self.depth_texture, ClearDepth::ClearWith(1.0));
+        self.pass.add_color_texture(cx, &self.color_texture, PassClearColor::ClearWith(self.clear_color));
+        self.pass.set_depth_texture(cx, &self.depth_texture, PassClearDepth::ClearWith(1.0));
         
         self.main_view.begin(cx).unwrap();
         

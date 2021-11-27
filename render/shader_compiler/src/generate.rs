@@ -1,11 +1,22 @@
-use crate::shaderast::*;
-use makepad_live_compiler::*;
-use std::cell::Cell;
-use std::cell::RefCell;
-use std::fmt::Write;
-use std::collections::BTreeSet;
-use std::fmt;
-use crate::shaderregistry::ShaderRegistry;
+use{
+    std::{
+        cell::{Cell, RefCell},
+        fmt,
+        fmt::Write,
+        collections::BTreeSet,
+    },
+    makepad_live_compiler::{
+        id,
+        PrettyPrintedF32,
+        LiveId,
+        Span
+    },
+    crate::{
+        shaderast::*,
+        shaderregistry::ShaderRegistry
+    }
+};
+
 
 struct VoidWrap();
 impl VoidWrap{

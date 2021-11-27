@@ -1,6 +1,18 @@
-use crate::cx::*;
-use std::rc::Rc;
-use std::cell::RefCell;
+pub use {
+    std::{
+        rc::Rc,
+        cell::RefCell
+    },
+    makepad_live_compiler::*,
+    crate::{
+        cx::{
+            Cx,
+            CxPlatformTexture
+        },
+        live::*
+    }
+};
+
 
 #[derive(PartialEq)]
 pub struct Texture {
@@ -72,11 +84,11 @@ impl LiveNew for Texture {
     
     fn live_type_info() -> LiveTypeInfo{
         LiveTypeInfo {
-            module_path: ModulePath::from_str(&module_path!()).unwrap(),
+            module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
             live_type: Self::live_type(),
             fields: Vec::new(),
             kind: LiveTypeKind::Object,
-            type_name: Id::from_str("Texture").unwrap()
+            type_name: LiveId::from_str("Texture").unwrap()
         }
     }
 }

@@ -1,6 +1,15 @@
-use crate::cx::*;
-use std::rc::Rc;
-use std::cell::RefCell;
+pub use {
+    std::{
+        rc::Rc,
+        cell::RefCell
+    },
+    makepad_live_compiler::*,
+    crate::{
+        cx::Cx,
+        area::Area,
+        live::*,
+    }
+};
 
 pub struct Window {
     pub window_id: usize,
@@ -41,11 +50,11 @@ impl LiveNew for Window {
     
     fn live_type_info() -> LiveTypeInfo{
         LiveTypeInfo {
-            module_path: ModulePath::from_str(&module_path!()).unwrap(),
+            module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
             live_type: Self::live_type(),
             fields: Vec::new(),
             kind: LiveTypeKind::Object,
-            type_name: Id::from_str("Window").unwrap()
+            type_name: LiveId::from_str("Window").unwrap()
         }
     }
 }

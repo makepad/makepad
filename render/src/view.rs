@@ -1,6 +1,29 @@
-use crate::cx::*;
-use std::rc::Rc;
-use std::cell::RefCell;
+pub use {
+    std::{
+        rc::Rc,
+        cell::RefCell
+    },
+    makepad_live_compiler::*,
+    crate::{
+        cx::{
+            Cx,
+            CxPlatformDrawCall,
+            CxPlatformView,
+        },
+        live::*,
+        area::{Area, ViewArea, InstanceArea},
+        turtle::{Layout, Width, Height, Walk, Rect},
+        drawshader::{
+            CxDrawShaderMapping,
+            CxDrawShader,
+            DrawShader,
+            DrawVars,
+            DRAW_CALL_USER_UNIFORMS,
+            DRAW_CALL_TEXTURE_SLOTS
+        },
+        geometry::Geometry
+    }
+};
 
 pub type ViewRedraw = Result<(), ()>;
 
@@ -17,9 +40,9 @@ impl Drop for View {
     }
 }
 
-impl LiveTraitCast for View{}
+impl LiveTraitCast for View {}
 impl LiveNew for View {
-    fn new(cx: &mut Cx)->Self{
+    fn new(cx: &mut Cx) -> Self {
         let views_free = cx.views_free.clone();
         let view_id = if let Some(view_id) = views_free.borrow_mut().pop() {
             cx.views[view_id].alloc_generation += 1;
@@ -38,19 +61,19 @@ impl LiveNew for View {
         }
     }
     
-    fn live_type_info() -> LiveTypeInfo{
+    fn live_type_info() -> LiveTypeInfo {
         LiveTypeInfo {
-            module_path: ModulePath::from_str(&module_path!()).unwrap(),
+            module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
             live_type: Self::live_type(),
             fields: Vec::new(),
             kind: LiveTypeKind::Object,
-            type_name: Id::from_str("View").unwrap()
+            type_name: LiveId::from_str("View").unwrap()
         }
     }
 }
 
 impl LiveComponent for View {
-    fn type_id(&self)->std::any::TypeId{ std::any::TypeId::of::<Self>()}
+    fn type_id(&self) -> std::any::TypeId {std::any::TypeId::of::<Self>()}
     fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
         
         if !nodes[start_index].value.is_structy_type() {
@@ -70,7 +93,7 @@ impl LiveComponent for View {
                 id!(is_overlay) => cx.views[self.view_id].is_overlay = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
                 id!(always_redraw) => cx.views[self.view_id].always_redraw = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
                 id!(layout) => cx.views[self.view_id].layout = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
-                _=> {
+                _ => {
                     cx.apply_error_no_matching_field(apply_from, index, nodes);
                     index = nodes.skip_node(index);
                 }
@@ -90,7 +113,7 @@ impl View {
         cx.views[self.view_id].layout = layout;
     }
     
-    pub fn layout(&self, cx: &mut Cx)->Layout {
+    pub fn layout(&self, cx: &mut Cx) -> Layout {
         cx.views[self.view_id].layout
     }
     
@@ -599,7 +622,7 @@ pub enum CxViewDebug {
 
 #[derive(Default, Clone)]
 pub struct CxView {
-    pub debug_id: Id,
+    pub debug_id: LiveId,
     
     pub alloc_generation: u64,
     
@@ -642,7 +665,7 @@ impl CxView {
         };
         ret.uniform_view_transform(&Mat4::identity());
         ret
-    } 
+    }
     
     pub fn initialize(&mut self, pass_id: usize, is_clipped: bool, redraw_id: u64) {
         self.is_clipped = is_clipped;

@@ -1,14 +1,29 @@
-use makepad_objc_sys::{msg_send};
-use makepad_objc_sys::runtime::YES;
+use {
+    makepad_objc_sys::{
+        msg_send,
+        runtime::{YES, NO},
+        sel,
+        class,
+        sel_impl,
+    },
+    makepad_shader_compiler::{DrawShaderDef, generate_metal},
+    makepad_live_compiler::*,
+    crate::{
+        cx::Cx,
+        cx_apple::*,
+        cx_cocoa_app::CocoaApp,
+        cx_cocoa_window::CocoaWindow,
+        pass::{PassClearColor, PassClearDepth},
+        texture::{
+            TextureFormat,
+            TextureDesc,
+            CxTexture
+        },
+        drawshader::CxDrawShader,
+        window::WindowGeom
+    }
+};
 
-use makepad_shader_compiler::generate_metal;
-use makepad_shader_compiler::generate_metal::MetalGeneratedShader;
-use makepad_shader_compiler::shaderast::DrawShaderDef;
-
-use crate::cx_apple::*;
-use crate::cx_cocoa_app::*;
-use crate::cx_cocoa_window::*;
-use crate::cx::*;
 
 impl Cx {
     
@@ -49,7 +64,7 @@ impl Cx {
                 //view.platform.uni_vw.update_with_f32_data(device, &view.uniforms);
                 let draw_call = cxview.draw_items[draw_item_id].draw_call.as_mut().unwrap();
                 let sh = &self.draw_shaders[draw_call.draw_shader.draw_shader_id];
-                if sh.platform.is_none(){ // shader didnt compile somehow
+                if sh.platform.is_none() { // shader didnt compile somehow
                     continue;
                 }
                 let shp = sh.platform.as_ref().unwrap();
@@ -163,9 +178,9 @@ impl Cx {
                 // lets set our textures
                 for i in 0..sh.mapping.textures.len() {
                     
-                    let texture_id = if let Some(texture_id) = draw_call.texture_slots[i]{
+                    let texture_id = if let Some(texture_id) = draw_call.texture_slots[i] {
                         texture_id
-                    }else{0};
+                    }else {0};
                     
                     let cxtexture = &mut self.textures[texture_id as usize];
                     if cxtexture.update_image {
@@ -246,7 +261,7 @@ impl Cx {
             unsafe {msg_send![color_attachment, setStoreAction: MTLStoreAction::Store]}
             
             match color_texture.clear_color {
-                ClearColor::InitWith(color) => {
+                PassClearColor::InitWith(color) => {
                     if is_initial {
                         unsafe {
                             let () = msg_send![color_attachment, setLoadAction: MTLLoadAction::Clear];
@@ -262,7 +277,7 @@ impl Cx {
                         unsafe {let () = msg_send![color_attachment, setLoadAction: MTLLoadAction::Load];}
                     }
                 },
-                ClearColor::ClearWith(color) => {
+                PassClearColor::ClearWith(color) => {
                     unsafe {
                         let () = msg_send![color_attachment, setLoadAction: MTLLoadAction::Clear];
                         let () = msg_send![color_attachment, setClearColor: MTLClearColor {
@@ -291,7 +306,7 @@ impl Cx {
             let () = unsafe {msg_send![depth_attachment, setStoreAction: MTLStoreAction::Store]};
             
             match self.passes[pass_id].clear_depth {
-                ClearDepth::InitWith(depth) => {
+                PassClearDepth::InitWith(depth) => {
                     if is_initial {
                         let () = unsafe {msg_send![depth_attachment, setLoadAction: MTLLoadAction::Clear]};
                         let () = unsafe {msg_send![depth_attachment, setClearDepth: depth as f64]};
@@ -300,7 +315,7 @@ impl Cx {
                         let () = unsafe {msg_send![depth_attachment, setLoadAction: MTLLoadAction::Load]};
                     }
                 },
-                ClearDepth::ClearWith(depth) => {
+                PassClearDepth::ClearWith(depth) => {
                     let () = unsafe {msg_send![depth_attachment, setLoadAction: MTLLoadAction::Clear]};
                     let () = unsafe {msg_send![depth_attachment, setClearDepth: depth as f64]};
                 }
@@ -597,7 +612,7 @@ impl MetalBuffer {
             let buffer: ObjcId = unsafe {msg_send![
                 metal_cx.device,
                 newBufferWithLength: (data.len() * std::mem::size_of::<u32>()) as u64
-                options: 
+                options:
                 MTLResourceOptions::HazardTrackingModeTracked |
                 MTLResourceOptions::StorageModeManaged |
                 MTLResourceOptions::CPUCacheModeWriteCombined
@@ -816,28 +831,28 @@ impl MetalCx {
     pub fn compile_draw_shader(
         &self,
         sh: &mut CxDrawShader,
-        gen: MetalGeneratedShader,
+        gen: generate_metal::MetalGeneratedShader,
         draw_shader_def: &DrawShaderDef,
-    ) -> ShaderCompileResult {
-
+    ) {
+        
         if draw_shader_def.flags.debug {
             let split = gen.mtlsl.split("\n");
-            for (i,item) in split.enumerate(){
-                println!("{: >3}:    {}", i+1, item);
+            for (i, item) in split.enumerate() {
+                println!("{: >3}:    {}", i + 1, item);
             }
         }
         
         if let Some(sh_platform) = &sh.platform {
             if sh_platform.metal_shader == gen.mtlsl {
                 //sh.mapping = mapping;
-                return ShaderCompileResult::Nop
+                return
             }
         }
         
         let mtl_compile_options: ObjcId = unsafe {msg_send![class!(MTLCompileOptions), new]};
         
         let _: ObjcId = unsafe {msg_send![
-            mtl_compile_options, 
+            mtl_compile_options,
             setFastMathEnabled: true
         ]};
         
@@ -854,7 +869,7 @@ impl MetalCx {
             println!("{}", nsstring_to_string(err_str));
             panic!("{}", nsstring_to_string(err_str));
         }
-
+        
         let mut draw_uniform_buffer_id = None;
         let mut pass_uniform_buffer_id = None;
         let mut view_uniform_buffer_id = None;
@@ -915,6 +930,5 @@ impl MetalCx {
             },
             library: library,
         });
-        return ShaderCompileResult::Ok
     }
 }

@@ -1,12 +1,134 @@
-#![allow(unused_variables)]
-use crate::cx::*;
-use makepad_live_compiler::LiveValue;
-use makepad_live_compiler::LiveError;
-use makepad_live_compiler::LiveErrorOrigin;
-use makepad_live_compiler::LiveTypeInfo;
-use makepad_live_compiler::ModulePath;
-use makepad_live_compiler::live_error_origin;
-use std::any::TypeId;
+pub use {
+    std::{
+        any::TypeId,
+    },
+    makepad_live_compiler::*,
+    crate::{
+        cx::Cx,
+        events::Event,
+        animation::Animator
+    }
+};
+
+pub trait LiveFactory {
+    fn new_component(&self, cx: &mut Cx) -> Box<dyn LiveComponent>;
+}
+
+pub trait LiveNew: LiveComponent {
+    fn new(cx: &mut Cx) -> Self;
+    
+    fn live_register(_cx: &mut Cx) {}
+    
+    fn live_type_info() -> LiveTypeInfo;
+    
+    fn new_apply(cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Self where Self: Sized {
+        let mut ret = Self::new(cx);
+        ret.apply(cx, apply_from, index, nodes);
+        ret
+    }
+    
+    fn new_apply_mut(cx: &mut Cx, apply_from: ApplyFrom, index: &mut usize, nodes: &[LiveNode]) -> Self where Self: Sized {
+        let mut ret = Self::new(cx);
+        *index = ret.apply(cx, apply_from, *index, nodes);
+        ret
+    }
+    
+    fn new_from_ptr(cx: &mut Cx, live_ptr:LivePtr) -> Self where Self: Sized {
+        let live_registry_rc = cx.live_registry.clone();
+        let live_registry = live_registry_rc.borrow();
+        let doc = live_registry.ptr_to_doc(live_ptr);
+        let mut ret = Self::new(cx);
+        ret.apply(cx, ApplyFrom::NewFromDoc{file_id:live_ptr.file_id}, live_ptr.index as usize, &doc.nodes);
+        return ret
+    }
+    
+    fn new_from_module_path_id(cx: &mut Cx, module_path: &str, id:LiveId) -> Option<Self> where Self: Sized {
+        let live_registry_rc = cx.live_registry.clone();
+        let live_registry = live_registry_rc.borrow();
+        if let Some(file_id) = live_registry.module_id_to_file_id.get(&LiveModuleId::from_str(module_path).unwrap()) {
+            let doc = live_registry.file_id_to_doc(*file_id);
+            if let Ok(index) = doc.nodes.child_by_name(0,id){
+                let mut ret = Self::new(cx);
+                ret.apply(cx, ApplyFrom::NewFromDoc {file_id:*file_id}, index, &doc.nodes);
+                return Some(ret)
+            }
+        }
+        None
+    }
+    
+    fn live_type() -> LiveType where Self: 'static {
+        LiveType(std::any::TypeId::of::<Self>())
+    }
+}
+
+pub trait ToLiveValue {
+    fn to_live_value(&self) -> LiveValue;
+}
+
+pub trait LiveComponentValue {
+    fn apply_value(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize;
+}
+
+pub trait LiveComponent: LiveTraitCast {
+    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize;
+    fn apply_over(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
+        self.apply(cx, ApplyFrom::ApplyOver, 0, nodes);
+    }
+    fn apply_clear(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
+        self.apply(cx, ApplyFrom::ApplyClear, 0, nodes);
+    }
+    fn type_id(&self) -> TypeId;
+}
+
+
+pub trait LiveAnimate {
+    fn animate_to(&mut self, cx: &mut Cx, state:LivePtr);
+    fn handle_animation(&mut self, cx: &mut Cx, event: &mut Event);
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum ApplyFrom {
+    NewFromDoc {file_id: LiveFileId}, // newed from DSL
+    UpdateFromDoc {file_id: LiveFileId}, // live DSL updated
+    New, // Bare new without file info
+    Animate, // from animate
+    ApplyOver, // called from bare apply_live() call
+    ApplyClear // called from bare apply_live() call
+}
+
+impl ApplyFrom {
+    pub fn is_from_doc(&self) -> bool {
+        match self {
+            Self::NewFromDoc {..} => true,
+            Self::UpdateFromDoc {..} => true,
+            _ => false
+        }
+    }
+    
+    pub fn file_id(&self) -> Option<LiveFileId> {
+        match self {
+            Self::NewFromDoc {file_id} => Some(*file_id),
+            Self::UpdateFromDoc {file_id} => Some(*file_id),
+            _ => None
+        }
+    }
+}
+
+
+pub trait LiveApply {
+    fn apply_value_unknown(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        if let ApplyFrom::Animate = apply_from{
+            if nodes[index].id == id!(from){
+                return nodes.skip_node(index)
+            }
+        }
+        cx.apply_error_no_matching_field(apply_from, index, nodes);
+        //}
+        nodes.skip_node(index)
+    }
+    fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {}
+    fn after_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {}
+}
 
 impl Cx {
     pub fn live_register(&mut self) {
@@ -18,27 +140,27 @@ impl Cx {
         crate::font::live_register(self);
     }
     
-    pub fn apply_error_tuple_enum_arg_not_found(&mut self, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode], enum_id: Id, base: Id, arg: usize) {
+    pub fn apply_error_tuple_enum_arg_not_found(&mut self, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode], enum_id: LiveId, base: LiveId, arg: usize) {
         self.apply_error(apply_from, index, nodes, format!("tuple enum too many args for {}::{} arg no {}", enum_id, base, arg))
     }
     
-    pub fn apply_error_named_enum_invalid_prop(&mut self, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode], enum_id: Id, base: Id, prop: Id) {
+    pub fn apply_error_named_enum_invalid_prop(&mut self, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode], enum_id: LiveId, base: LiveId, prop: LiveId) {
         self.apply_error(apply_from, index, nodes, format!("named enum invalid property for {}::{} prop: {}", enum_id, base, prop))
     }
     
-    pub fn apply_error_wrong_enum_base(&mut self, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode], enum_id: Id, base: Id) {
+    pub fn apply_error_wrong_enum_base(&mut self, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode], enum_id: LiveId, base: LiveId) {
         self.apply_error(apply_from, index, nodes, format!("wrong enum base expected: {} got: {}", enum_id, base))
     }
     
-    pub fn apply_error_wrong_struct_name(&mut self, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode], struct_id: Id, got_id: Id) {
+    pub fn apply_error_wrong_struct_name(&mut self, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode], struct_id: LiveId, got_id: LiveId) {
         self.apply_error(apply_from, index, nodes, format!("wrong struct name expected: {} got: {}", struct_id, got_id))
     }
     
-    pub fn apply_error_wrong_type_for_struct(&mut self, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode], struct_id: Id) {
+    pub fn apply_error_wrong_type_for_struct(&mut self, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode], struct_id: LiveId) {
         self.apply_error(apply_from, index, nodes, format!("wrong type for struct: {}", struct_id))
     }
     
-    pub fn apply_error_wrong_enum_variant(&mut self, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode], enum_id: Id, variant: Id) {
+    pub fn apply_error_wrong_enum_variant(&mut self, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode], enum_id: LiveId, variant: LiveId) {
         self.apply_error(apply_from, index, nodes, format!("wrong enum variant for enum: {} got variant: {}", enum_id, variant))
     }
     
@@ -54,12 +176,12 @@ impl Cx {
         self.apply_error(apply_from, index, nodes, format!("wrong type for value: {}", nodes[index].id))
     }
     
-    pub fn apply_error_component_not_found(&mut self, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode], id: Id) {
+    pub fn apply_error_component_not_found(&mut self, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode], id: LiveId) {
         self.apply_error(apply_from, index, nodes, format!("component not found: {}", id))
     }
     
     
-    pub fn apply_error_cant_find_target(&mut self, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode], id: Id) {
+    pub fn apply_error_cant_find_target(&mut self, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode], id: LiveId) {
         self.apply_error(apply_from, index, nodes, format!("cant find target: {}", id))
     }
     
@@ -108,7 +230,7 @@ impl Cx {
         //println!("START");
         let result = self.live_registry.borrow_mut().parse_live_file(
             &live_body.file,
-            ModulePath::from_str(&live_body.module_path).unwrap(),
+            LiveModuleId::from_str(&live_body.module_path).unwrap(),
             live_body.code,
             live_body.live_type_infos,
             live_body.line
@@ -132,126 +254,6 @@ pub struct LiveBody {
     pub column: usize,
     pub code: String,
     pub live_type_infos: Vec<LiveTypeInfo>
-}
-
-pub trait LiveFactory {
-    fn new_component(&self, cx: &mut Cx) -> Box<dyn LiveComponent>;
-}
-
-pub trait LiveNew: LiveComponent {
-    fn new(cx: &mut Cx) -> Self;
-    
-    fn live_register(cx: &mut Cx) {}
-    
-    fn live_type_info() -> LiveTypeInfo;
-    
-    fn new_apply(cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Self where Self: Sized {
-        let mut ret = Self::new(cx);
-        ret.apply(cx, apply_from, index, nodes);
-        ret
-    }
-    
-    fn new_apply_mut(cx: &mut Cx, apply_from: ApplyFrom, index: &mut usize, nodes: &[LiveNode]) -> Self where Self: Sized {
-        let mut ret = Self::new(cx);
-        *index = ret.apply(cx, apply_from, *index, nodes);
-        ret
-    }
-    
-    fn new_from_ptr(cx: &mut Cx, live_ptr:LivePtr) -> Self where Self: Sized {
-        let live_registry_rc = cx.live_registry.clone();
-        let live_registry = live_registry_rc.borrow();
-        let doc = live_registry.ptr_to_doc(live_ptr);
-        let mut ret = Self::new(cx);
-        ret.apply(cx, ApplyFrom::NewFromDoc{file_id:live_ptr.file_id}, live_ptr.index as usize, &doc.nodes);
-        return ret
-    }
-    
-    fn new_from_module_path_id(cx: &mut Cx, module_path: &str, id:Id) -> Option<Self> where Self: Sized {
-        let live_registry_rc = cx.live_registry.clone();
-        let live_registry = live_registry_rc.borrow();
-        if let Some(file_id) = live_registry.module_path_to_file_id.get(&ModulePath::from_str(module_path).unwrap()) {
-            let doc = live_registry.file_id_to_doc(*file_id);
-            if let Ok(index) = doc.nodes.child_by_name(0,id){
-                let mut ret = Self::new(cx);
-                ret.apply(cx, ApplyFrom::NewFromDoc {file_id:*file_id}, index, &doc.nodes);
-                return Some(ret)
-            }
-        }
-        None
-    }
-    
-    fn live_type() -> LiveType where Self: 'static {
-        LiveType(std::any::TypeId::of::<Self>())
-    }
-}
-
-pub trait ToLiveValue {
-    fn to_live_value(&self) -> LiveValue;
-}
-
-pub trait LiveComponentValue {
-    fn apply_value(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize;
-}
-
-pub trait LiveComponent: LiveTraitCast {
-    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize;
-    fn apply_over(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
-        self.apply(cx, ApplyFrom::ApplyOver, 0, nodes);
-    }
-    fn apply_clear(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
-        self.apply(cx, ApplyFrom::ApplyClear, 0, nodes);
-    }
-    fn type_id(&self) -> TypeId;
-}
-
-
-pub trait LiveAnimate {
-    fn animate_to(&mut self, cx: &mut Cx, state:LivePtr);
-    fn handle_animation(&mut self, cx: &mut Cx, event: &mut Event);
-}
-
-#[derive(Debug, Clone, Copy)]
-pub enum ApplyFrom {
-    NewFromDoc {file_id: FileId}, // newed from DSL
-    UpdateFromDoc {file_id: FileId}, // live DSL updated
-    New, // Bare new without file info
-    Animate, // from animate
-    ApplyOver, // called from bare apply_live() call
-    ApplyClear // called from bare apply_live() call
-}
-
-impl ApplyFrom {
-    pub fn is_from_doc(&self) -> bool {
-        match self {
-            Self::NewFromDoc {..} => true,
-            Self::UpdateFromDoc {..} => true,
-            _ => false
-        }
-    }
-    
-    pub fn file_id(&self) -> Option<FileId> {
-        match self {
-            Self::NewFromDoc {file_id} => Some(*file_id),
-            Self::UpdateFromDoc {file_id} => Some(*file_id),
-            _ => None
-        }
-    }
-}
-
-
-pub trait LiveApply {
-    fn apply_value_unknown(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
-        if let ApplyFrom::Animate = apply_from{
-            if nodes[index].id == id!(from){
-                return nodes.skip_node(index)
-            }
-        }
-        cx.apply_error_no_matching_field(apply_from, index, nodes);
-        //}
-        nodes.skip_node(index)
-    }
-    fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {}
-    fn after_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {}
 }
 
 impl<T> LiveTraitCast for Option<T> where T: LiveComponent + LiveNew + 'static {}
@@ -285,7 +287,7 @@ impl<T> LiveNew for Option<T> where T: LiveComponent + LiveNew + 'static {
     fn live_type_info() -> LiveTypeInfo {
         T::live_type_info()
     }
-    fn live_register(cx: &mut Cx) {
+    fn live_register(_cx: &mut Cx) {
     }
 }
 
@@ -333,10 +335,10 @@ macro_rules!live_primitive {
             
             fn live_type_info() -> LiveTypeInfo {
                 LiveTypeInfo {
-                    module_path: ModulePath::from_str(&module_path!()).unwrap(),
+                    module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
                     live_type: Self::live_type(),
                     fields: Vec::new(),
-                    type_name: Id::from_str(stringify!( $ ty)).unwrap(),
+                    type_name: LiveId::from_str(stringify!( $ ty)).unwrap(),
                     kind: LiveTypeKind::Primitive
                 }
             }
@@ -349,7 +351,7 @@ live_primitive!(
     LiveValue::None,
     fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         if nodes[index].value.is_array() {
-            if let Some(value) = Animator::last_keyframe_value_from_array(index, nodes) {
+            if let Some(_) = Animator::last_keyframe_value_from_array(index, nodes) {
                 self.apply(cx, apply_from, index, nodes);
             }
             nodes.skip_node(index)
@@ -368,8 +370,8 @@ live_primitive!(
 );
 
 live_primitive!(
-    Id,
-    Id::empty(),
+    LiveId,
+    LiveId::empty(),
     fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Id(id) => {
@@ -590,8 +592,8 @@ live_primitive!(
 
 live_primitive!(
     LivePtr,
-    LivePtr{file_id:FileId(0), index:0},
-    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    LivePtr{file_id:LiveFileId(0), index:0},
+    fn apply(&mut self, _cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         if let Some(file_id) = apply_from.file_id(){
             self.file_id = file_id;
             self.index = index as u32;
@@ -662,7 +664,7 @@ impl dyn AnyAction {
         }
     }
     
-    pub fn cast_id<T: AnyAction + Default + Clone>(&self, id: Id) -> (Id, T) {
+    pub fn cast_id<T: AnyAction + Default + Clone>(&self, id: LiveId) -> (LiveId, T) {
         if self.is::<T>() {
             (id, unsafe {&*(self as *const dyn AnyAction as *const T)}.clone())
         } else {

@@ -1,11 +1,49 @@
+use {
+    std::{
+        ffi::CStr,
+        os::raw::{c_void}
+    },
+    makepad_live_compiler::{
+        Vec2
+    },
+    crate::{
+        cx_apple::*,
+        cx_cocoa_app::{
+            CocoaApp,
+            get_cocoa_app
+        },
+        cx_cocoa_window::{
+            get_cocoa_window
+        },
+        cx_cocoa_util::{
+            get_event_key_modifier,
+            superclass,
+            load_mouse_cursor
+        },
+        turtle::{
+            Rect
+        },
+        menu::{
+            CommandId
+        },
+        events::{
+            Signal,
+            Event,
+            DragState,
+            FingerDragEvent,
+            FingerDropEvent,
+            DraggedItem,
+            DragAction
+        },
+    }
+};
+/*
 use crate::cx_apple::*;
-use std::ffi::CStr;
-use std::os::raw::{c_void};
 use crate::cx::*;
 use crate::cx_cocoa_app::*;
 use crate::cx_cocoa_window::*;
 use crate::cx_cocoa_util::*;
-
+*/
 pub fn define_cocoa_timer_delegate() -> *const Class {
     
     extern fn received_timer(this: &Object, _: Sel, nstimer: ObjcId) {
@@ -46,14 +84,14 @@ pub fn define_menu_target_class() -> *const Class {
         //println!("markedRange");
         let ca = get_cocoa_app(this);
         unsafe {
-            let command_usize: usize = *this.get_ivar("command_usize");
-            let cmd = if let Ok(status_map) = ca.status_map.lock() {
+            let command_u64: u64 = *this.get_ivar("command_usize");
+            /*let cmd = if let Ok(status_map) = ca.status_map.lock() {
                 *status_map.usize_to_command.get(&command_usize).expect("")
             }
             else {
                 panic!("Cannot lock cmd_map")
-            };
-            ca.send_command_event(cmd);
+            };*/
+            ca.send_command_event(CommandId(command_u64));
         }
     }
     
@@ -95,13 +133,13 @@ pub fn define_cocoa_post_delegate() -> *const Class {
         let ca = get_cocoa_app(this);
         unsafe {
             let signal_id: usize = *this.get_ivar("signal_id");
-            let status: usize = *this.get_ivar("status");
-            let status = if let Ok(status_map) = ca.status_map.lock() {
+            let status: u64 = *this.get_ivar("status");
+            /*let status = if let Ok(status_map) = ca.status_map.lock() {
                 *status_map.usize_to_status.get(&status).expect("status invalid")
             }
             else {
                 panic!("cannot lock cmd_map")
-            };
+            };*/
             ca.send_signal_event(Signal {signal_id: signal_id}, status);
         }
     }
@@ -357,20 +395,20 @@ pub fn define_cocoa_view_class() -> *const Class {
     }
     
     fn mouse_pos_from_event(view: &Object, event: ObjcId) -> Vec2 {
-        let window_point: NSPoint = unsafe { msg_send![event, locationInWindow] }; 
+        let window_point: NSPoint = unsafe {msg_send![event, locationInWindow]};
         let view_point = window_point_to_view_point(view, window_point);
         ns_point_to_vec2(view_point)
     }
-
+    
     fn window_point_to_view_point(view: &Object, window_point: NSPoint) -> NSPoint {
-        let view_point: NSPoint = unsafe { msg_send![view, convertPoint: window_point fromView: nil] };
-        let view_frame: NSRect = unsafe { msg_send![view, frame] };
+        let view_point: NSPoint = unsafe {msg_send![view, convertPoint: window_point fromView: nil]};
+        let view_frame: NSRect = unsafe {msg_send![view, frame]};
         NSPoint {
             x: view_point.x,
             y: view_frame.size.height - view_point.y
         }
     }
-
+    
     fn ns_point_to_vec2(point: NSPoint) -> Vec2 {
         Vec2 {
             x: point.x as f32,
@@ -400,7 +438,7 @@ pub fn define_cocoa_view_class() -> *const Class {
     extern fn other_mouse_dragged(this: &Object, _sel: Sel, event: ObjcId) {
         mouse_motion(this, event);
     }
-
+    
     extern fn draw_rect(this: &Object, _sel: Sel, rect: NSRect) {
         let _cw = get_cocoa_window(this);
         unsafe {
@@ -585,28 +623,28 @@ pub fn define_cocoa_view_class() -> *const Class {
         let cw = get_cocoa_window(this);
         cw.send_change_event();
     }
-
+    
     extern fn dragging_session_ended_at_point_operation(this: &Object, _: Sel, _session: ObjcId, _point: NSPoint, _operation: NSDragOperation) {
         let window = get_cocoa_window(this);
         window.fingers_down[0] = false;
         let mut events = vec![Event::DragEnd];
         window.do_callback(&mut events);
     }
-
+    
     extern fn dragging_entered(this: &Object, _: Sel, sender: ObjcId) -> NSDragOperation {
         let window = get_cocoa_window(this);
         window.start_live_resize();
         dragging(this, sender)
     }
-
+    
     extern fn dragging_updated(this: &Object, _: Sel, sender: ObjcId) -> NSDragOperation {
         dragging(this, sender)
     }
-
+    
     extern fn dragging_exited(this: &Object, _: Sel, sender: ObjcId) {
         dragging(this, sender);
     }
-
+    
     fn dragging(this: &Object, sender: ObjcId) -> NSDragOperation {
         let window = get_cocoa_window(this);
         let pos = ns_point_to_vec2(window_point_to_view_point(this, unsafe {
@@ -633,24 +671,24 @@ pub fn define_cocoa_view_class() -> *const Class {
             _ => panic!()
         }
     }
-
+    
     extern fn dragging_ended(this: &Object, _: Sel, _sender: ObjcId) {
         let window = get_cocoa_window(this);
         window.end_live_resize();
     }
-
+    
     extern fn perform_drag_operation(this: &Object, _: Sel, sender: ObjcId) {
         let window = get_cocoa_window(this);
         let pos = ns_point_to_vec2(window_point_to_view_point(this, unsafe {
             msg_send![sender, draggingLocation]
         }));
-        let pasteboard: ObjcId = unsafe { msg_send![sender, draggingPasteboard] };
-        let class: ObjcId = unsafe { msg_send![class!(NSURL), class] };
+        let pasteboard: ObjcId = unsafe {msg_send![sender, draggingPasteboard]};
+        let class: ObjcId = unsafe {msg_send![class!(NSURL), class]};
         let classes: ObjcId = unsafe {
             msg_send![class!(NSArray), arrayWithObject: class]
         };
         let object: ObjcId = unsafe {
-            msg_send![class!(NSNumber), numberWithBool:true]
+            msg_send![class!(NSNumber), numberWithBool: true]
         };
         let options: ObjcId = unsafe {
             msg_send![
@@ -660,15 +698,15 @@ pub fn define_cocoa_view_class() -> *const Class {
             ]
         };
         let urls: ObjcId = unsafe {
-            msg_send![pasteboard, readObjectsForClasses:classes options:options]
+            msg_send![pasteboard, readObjectsForClasses: classes options: options]
         };
-        let count: usize = unsafe { msg_send![urls, count] };
+        let count: usize = unsafe {msg_send![urls, count]};
         let mut file_urls = Vec::with_capacity(count);
         for index in 0..count {
-            let url: ObjcId = unsafe { msg_send![urls, objectAtIndex:index] };
-            let url: ObjcId = unsafe { msg_send![url, filePathURL] };
-            let string: ObjcId = unsafe { msg_send![url, absoluteString] };
-            let string = unsafe { CStr::from_ptr(msg_send![string, UTF8String]) };
+            let url: ObjcId = unsafe {msg_send![urls, objectAtIndex: index]};
+            let url: ObjcId = unsafe {msg_send![url, filePathURL]};
+            let string: ObjcId = unsafe {msg_send![url, absoluteString]};
+            let string = unsafe {CStr::from_ptr(msg_send![string, UTF8String])};
             file_urls.push(string.to_str().unwrap().to_string());
         }
         let mut events = vec![Event::FingerDrop(FingerDropEvent {
@@ -682,7 +720,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         })];
         window.do_callback(&mut events);
     }
-
+    
     /*
     extern fn draw(this: &Object, _: Sel, _calayer: id, _cgcontext: id) {
         println!("draw");
@@ -749,9 +787,9 @@ pub fn define_cocoa_view_class() -> *const Class {
         decl.add_method(sel!(resignFirstResponder:), yes_function as extern fn(&Object, Sel, ObjcId) -> BOOL);
         
         decl.add_method(sel!(displayLayer:), display_layer as extern fn(&Object, Sel, ObjcId));
-
-        decl.add_method(sel!(draggingSession:endedAtPoint:operation:), dragging_session_ended_at_point_operation as extern fn(&Object, Sel, ObjcId, NSPoint, NSDragOperation));
-
+        
+        decl.add_method(sel!(draggingSession: endedAtPoint: operation:), dragging_session_ended_at_point_operation as extern fn(&Object, Sel, ObjcId, NSPoint, NSDragOperation));
+        
         decl.add_method(sel!(draggingEntered:), dragging_entered as extern fn(&Object, Sel, ObjcId) -> NSDragOperation);
         decl.add_method(sel!(draggingExited:), dragging_exited as extern fn(&Object, Sel, ObjcId));
         decl.add_method(sel!(draggingUpdated:), dragging_updated as extern fn(&Object, Sel, ObjcId) -> NSDragOperation);

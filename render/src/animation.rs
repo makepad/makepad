@@ -1,5 +1,16 @@
 // OK ANIMATION
-use std::f64::consts::PI;
+use {
+    std::f64::consts::PI,
+    makepad_live_compiler::*,
+    crate::{
+        cx::Cx,
+        live::*,
+        events::NextFrame
+    },
+    
+};
+
+
 use crate::cx::*;
 
 // deserialisable DSL structure
@@ -17,7 +28,7 @@ pub struct KeyFrame {
 
 #[derive(Default)]
 pub struct Animator {
-    pub state_id: Option<Id>,
+    pub state_id: Option<LiveId>,
     pub start_time: Option<f64>,
     pub next_frame: NextFrame,
     pub play: Option<Play>,
@@ -206,7 +217,7 @@ impl Animator {
     }
     
     // hard cut / initialisate the state to a certain state
-    pub fn cut_to(&mut self, _cx: &mut Cx, state_id:Id, index:usize, nodes:&[LiveNode]) {
+    pub fn cut_to(&mut self, _cx: &mut Cx, state_id:LiveId, index:usize, nodes:&[LiveNode]) {
         self.state_id = Some(state_id);
         
         let state = if let Some(state) = &mut self.state {
@@ -264,7 +275,7 @@ impl Animator {
         self.animate_to(cx, nodes[index].id, index, nodes) 
     }
 
-    pub fn animate_to(&mut self, cx: &mut Cx, state_id: Id, to_index:usize, to_nodes:&[LiveNode]) {
+    pub fn animate_to(&mut self, cx: &mut Cx, state_id: LiveId, to_index:usize, to_nodes:&[LiveNode]) {
         
         let state_nodes = self.state.as_mut().unwrap();
         
@@ -317,7 +328,7 @@ impl Animator {
                             to_nodes[to_first - 1..to_last].iter().cloned()
                         );
 
-                        state_nodes[state_first].id = Id(0);
+                        state_nodes[state_first].id = LiveId(0);
                         state_nodes[state_first].value = current_value;
                     }
                     else {

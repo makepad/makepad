@@ -106,7 +106,7 @@ impl AppIO{
                             response_or_notification_sender
                                 .send(ResponseOrNotification::Notification(notification))
                                 .unwrap();
-                            Cx::post_signal(response_or_notification_signal, StatusId::default());
+                            Cx::post_signal(response_or_notification_signal, 0);
                         }
                     })),
                     response_or_notification_signal,
@@ -887,7 +887,7 @@ fn spawn_response_or_notification_receiver(
         response_or_notification_sender
             .send(response_or_notification)
             .unwrap();
-        Cx::post_signal(response_or_notification_signal, StatusId::default());
+        Cx::post_signal(response_or_notification_signal, 0);
     });
 }
 
@@ -903,6 +903,6 @@ fn spawn_local_request_handler(
         response_or_notification_sender
             .send(ResponseOrNotification::Response(response))
             .unwrap();
-        Cx::post_signal(response_or_notification_signal, StatusId::default());
+        Cx::post_signal(response_or_notification_signal, 0);
     });
 }

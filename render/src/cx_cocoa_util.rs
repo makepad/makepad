@@ -1,5 +1,13 @@
-use crate::cx_apple::*;
-use crate::cx::*;
+use{
+    crate::{
+        cx_apple::*,
+        events::{
+            KeyCode,
+            KeyModifiers
+        },
+        cursor::MouseCursor
+    }
+};
 
 pub fn get_event_char(event: ObjcId) -> char {
     unsafe {
