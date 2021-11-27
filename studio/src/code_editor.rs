@@ -18,8 +18,24 @@ use {
 };
 
 live_register!{
+    use makepad_widget::scrollview::ScrollView;
+    
     CodeEditor: {{CodeEditor}}{
-        selection_color: #294e75
+        code_editor_view:ScrollView{
+        //    view:{layout:{walk:{width:Width::Filled,height:Height::Filled}}}
+        }
+        text:{
+            draw_depth:1.0
+            text_style:{
+                font:{
+                    path: "resources/LiberationMono-Regular.ttf",
+                }
+                brightness: 1.1,
+                font_size: 8.0, 
+                line_spacing: 1.8,
+                top_drop: 1.3,
+            }
+        }
         text_color_comment: #638d54
         text_color_identifier: #d4d4d4
         text_color_function_identifier: #dcdcae
@@ -31,19 +47,30 @@ live_register!{
         text_color_string: #cc917b
         text_color_whitespace: #6e6e6e
         text_color_unknown: #808080
+        selection:{
+            color:#294e75
+            draw_depth:0.0
+        }
         caret:{
+            draw_depth:2.0
             color: #b0b0b0
         }
     }
 }
 
-#[derive(LiveComponent, LiveApply, LiveCast)]
+#[derive(LiveComponent, LiveApply, LiveTraitCast)]
 pub struct CodeEditor {
     #[rust] view_id_allocator: GenIdAllocator,
     #[rust] views_by_view_id: GenIdMap<CodeEditorViewId, CodeEditorView>,
+    #[rust] text_glyph_size: Vec2,
+
+    #[live] code_editor_view: Option<LivePtr>,
+    
     #[live] selection: DrawColor,
     #[live] text: DrawText,
-    #[live] text_glyph_size: Vec2,
+    #[live] caret: DrawColor,
+
+
     #[live] text_color_comment: Vec4,
     #[live] text_color_identifier: Vec4,
     #[live] text_color_function_identifier: Vec4,
@@ -55,13 +82,12 @@ pub struct CodeEditor {
     #[live] text_color_string: Vec4,
     #[live] text_color_whitespace: Vec4,
     #[live] text_color_unknown: Vec4,
-    #[live] selection_color: Vec4,
-    #[live] caret: DrawColor,
 }
 
 impl CodeEditor {
     
     pub fn draw(&mut self, cx: &mut Cx, state: &CodeEditorState, view_id: CodeEditorViewId) {
+        self.text_glyph_size = self.text.text_style.font_size * self.text.get_monospace_base(cx);
         let view = &mut self.views_by_view_id[view_id];
         if view.view.begin_view(cx).is_ok() {
             if let Some(session_id) = view.session_id {
@@ -163,6 +189,7 @@ impl CodeEditor {
                     line.len()
                 };
                 if span.is_included {
+                    
                     self.selection.draw_quad_abs(
                         cx,
                         Rect {
@@ -331,7 +358,7 @@ impl CodeEditor {
         self.views_by_view_id.insert(
             view_id,
             CodeEditorView {
-                view: ScrollView::new(cx),
+                view: ScrollView::new_from_ptr(cx, self.code_editor_view.unwrap()),
                 session_id,
             },
         );

@@ -11,7 +11,7 @@ live_register!{
     }
 }
 
-#[derive(LiveComponent, LiveApply, LiveAnimate, LiveCast)]
+#[derive(LiveComponent, LiveApply, LiveAnimate, LiveTraitCast)]
 pub struct Splitter {
     #[rust(Axis::Horizontal)] pub axis: Axis,
     #[rust(AlignPosition::Weighted(0.5))] pub align_position: AlignPosition,
@@ -103,7 +103,7 @@ impl Splitter {
         &mut self,
         cx: &mut Cx,
         event: &mut Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, Action),
+        dispatch_action: &mut dyn FnMut(&mut Cx, SplitterAction),
     ) {
         match event.hits(
             cx,
@@ -154,7 +154,7 @@ impl Splitter {
                         }
                     };
                     cx.redraw_view_of(self.split_bar.draw_vars.area);
-                    dispatch_action(cx, Action::Changed);
+                    dispatch_action(cx, SplitterAction::Changed);
                 }
             }
             _ => {}
@@ -203,6 +203,6 @@ impl AlignPosition {
     }
 }
 
-pub enum Action {
+pub enum SplitterAction {
     Changed,
 }
