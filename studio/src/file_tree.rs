@@ -40,12 +40,11 @@ live_register!{
         file_node_color_hovered_odd: #38
         file_node_color_hovered_selected: #x11466E
         
-        //folder_icon_color: #80
-        //folder_icon_width: 10.0
-        
         file_node_name_color_folder: #FF
         file_node_name_color_file: #9D
-        view:{view:{debug_id:file_tree_view}}
+        
+        scroll_view:{view:{debug_id:file_tree_view}}
+        
         folder_icon_walk: Walk {
             width: Width::Fixed(14.0),
             height: Height::Filled,
@@ -61,7 +60,7 @@ live_register!{
 
 #[derive(LiveComponent, LiveApply, LiveTraitCast)]
 pub struct FileTree {
-    #[live] view: ScrollView,
+    #[live] scroll_view: ScrollView,
     #[rust] logic: TreeLogic,
 
     #[live] file_node: DrawColor,
@@ -91,7 +90,7 @@ pub struct FileTree {
 impl FileTree {
 
     pub fn begin(&mut self, cx: &mut Cx) -> Result<(), ()> {
-        self.view.begin_view(cx)?;
+        self.scroll_view.begin(cx)?;
         self.count = 0;
         self.logic.begin();
         Ok(())
@@ -99,7 +98,7 @@ impl FileTree {
 
     pub fn end(&mut self, cx: &mut Cx) {
         self.logic.end();
-        self.view.end_view(cx);
+        self.scroll_view.end(cx);
     }
 
     pub fn begin_folder(
@@ -248,7 +247,7 @@ impl FileTree {
             .logic
             .set_node_is_expanded(cx, file_node_id.0, is_open, should_animate)
         {
-            self.view.redraw_view(cx);
+            self.scroll_view.redraw(cx);
         }
     }
 
@@ -262,7 +261,7 @@ impl FileTree {
             .logic
             .toggle_node_is_expanded(cx, file_node_id.0, should_animate)
         {
-            self.view.redraw_view(cx);
+            self.scroll_view.redraw(cx);
         }
     }
 
@@ -271,13 +270,13 @@ impl FileTree {
             .logic
             .set_hovered_node_id(file_node_id.map(|file_node_id| file_node_id.0))
         {
-            self.view.redraw_view(cx);
+            self.scroll_view.redraw(cx);
         }
     }
 
     pub fn set_selected_file_node_id(&mut self, cx: &mut Cx, file_node_id: FileNodeId) {
         if self.logic.set_selected_node_id(file_node_id.0) {
-            self.view.redraw_view(cx);
+            self.scroll_view.redraw(cx);
         }
     }
 
@@ -292,17 +291,17 @@ impl FileTree {
     }
 
     pub fn redraw(&mut self, cx: &mut Cx) {
-        self.view.redraw_view(cx);
+        self.scroll_view.redraw(cx);
     }
 
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
         event: &mut Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, Action),
+        dispatch_action: &mut dyn FnMut(&mut Cx, FileTreeAction),
     ) {
-        if self.view.handle_scroll_view(cx, event) {
-            self.view.redraw_view(cx);
+        if self.scroll_view.handle_event(cx, event) {
+            self.scroll_view.redraw(cx);
         }
         let mut actions = Vec::new();
         self.logic
@@ -325,11 +324,11 @@ impl FileTree {
                     let file_node_id = FileNodeId(node_id);
                     self.toggle_file_node_is_expanded(cx, file_node_id, true);
                     self.set_selected_file_node_id(cx, file_node_id);
-                    dispatch_action(cx, Action::FileNodeWasClicked(file_node_id));
+                    dispatch_action(cx, FileTreeAction::FileNodeWasClicked(file_node_id));
                 }
                 TreeAction::NodeShouldStartDragging(node_id) => {
                     let file_node_id = FileNodeId(node_id);
-                    dispatch_action(cx, Action::FileNodeShouldStartDragging(file_node_id));
+                    dispatch_action(cx, FileTreeAction::FileNodeShouldStartDragging(file_node_id));
                 }
             }
         }
@@ -345,7 +344,7 @@ impl AsRef<GenId> for FileNodeId {
     }
 }
 
-pub enum Action {
+pub enum FileTreeAction {
     FileNodeWasClicked(FileNodeId),
     FileNodeShouldStartDragging(FileNodeId),
 }

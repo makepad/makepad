@@ -329,7 +329,7 @@ impl CxDrawFontAtlas {
         // we need to start a pass that just uses the texture
         if cx.fonts_atlas.atlas_todo.len()>0 {
             
-            self.atlas_pass.begin_pass(cx);
+            self.atlas_pass.begin(cx);
             self.atlas_pass.set_size(cx, cx.fonts_atlas.texture_size);
             let clear = if cx.fonts_atlas.clear_buffer {
                 cx.fonts_atlas.clear_buffer = false;
@@ -340,7 +340,7 @@ impl CxDrawFontAtlas {
             };
             self.atlas_pass.add_color_texture(cx, &self.atlas_texture, clear);
             self.atlas_view.set_always_redraw(cx, true);
-            self.atlas_view.begin_view(cx).unwrap();
+            self.atlas_view.begin(cx).unwrap();
             let mut atlas_todo = Vec::new();
             std::mem::swap(&mut cx.fonts_atlas.atlas_todo, &mut atlas_todo);
             
@@ -353,8 +353,8 @@ impl CxDrawFontAtlas {
             cx.end_many_instances(many);
             
             self.counter += 1;
-            self.atlas_view.end_view(cx);
-            self.atlas_pass.end_pass(cx);
+            self.atlas_view.end(cx);
+            self.atlas_pass.end(cx);
         }
         //println!("TOTALT TIME {}", Cx::profile_time_ns() - start);
     }

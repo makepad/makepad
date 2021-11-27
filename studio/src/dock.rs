@@ -41,7 +41,7 @@ pub struct Dock {
 impl Dock {
     
     pub fn begin(&mut self, cx: &mut Cx) -> Result<(), ()> {
-        self.view.begin_view(cx) ?;
+        self.view.begin(cx) ?;
         self.panel_ids.clear();
         Ok(())
     }
@@ -49,7 +49,7 @@ impl Dock {
     pub fn end(&mut self, cx: &mut Cx) {
         if self
         .drag_view
-            .begin_view(cx)
+            .begin(cx)
             .is_ok()
         {
             if let Some(drag) = self.drag.as_ref() {
@@ -57,9 +57,9 @@ impl Dock {
                 let rect = compute_drag_rect(panel.contents_rect, drag.position);
                 self.drag_quad.draw_quad_abs(cx, rect);
             }
-            self.drag_view.end_view(cx);
+            self.drag_view.end(cx);
         }
-        self.view.end_view(cx);
+        self.view.end(cx);
     }
     
     pub fn begin_split_panel(&mut self, cx: &mut Cx, panel_id: PanelId) {
@@ -177,7 +177,7 @@ impl Dock {
     }
     
     pub fn redraw(&mut self, cx: &mut Cx) {
-        self.view.redraw_view(cx);
+        self.view.redraw(cx);
     }
     
     pub fn redraw_tab_bar(&mut self, cx: &mut Cx, panel_id: PanelId) {
@@ -242,7 +242,7 @@ impl Dock {
                         }
                     }
                 }
-                self.drag_view.redraw_view(cx);
+                self.drag_view.redraw(cx);
             }
             Event::FingerDrop(event) => {
                 self.drag = None;
@@ -261,7 +261,7 @@ impl Dock {
                         }
                     }
                 }
-                self.drag_view.redraw_view(cx);
+                self.drag_view.redraw(cx);
             }
             _ => {}
         }
