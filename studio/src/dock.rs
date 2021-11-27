@@ -16,8 +16,8 @@ live_register!{
             draw_depth: 10.0
             color: #FFFFFF80
         }
-        draw_view: {
-            abs_origin: vec2(0, 0)
+        drag_view: {
+            layout: {abs_origin: vec2(0, 0)}
             is_overlay: true
         }
         tab_bar: TabBar {}
@@ -30,7 +30,9 @@ pub struct Dock {
     #[live] view: View,
     #[live] drag_view: View,
     #[live] drag_quad: DrawColor,
-    #[rust] live_ptr: Option<LivePtr>,
+    #[live] tab_bar: Option<LivePtr>,
+    #[live] splitter: Option<LivePtr>,
+//    #[rust] live_ptr: Option<LivePtr>,
     #[rust] panels_by_panel_id: GenIdMap<PanelId, Panel>,
     #[rust] panel_ids: Vec<PanelId>,
     #[rust] panel_id_stack: Vec<PanelId>,
@@ -137,11 +139,7 @@ impl Dock {
             self.panels_by_panel_id.insert(
                 panel_id,
                 Panel::Split(SplitPanel {
-                    splitter: Splitter::new_from_ptr_id(
-                        cx,
-                        self.live_ptr.unwrap(),
-                        id!(splitter)
-                    ).unwrap(),
+                    splitter: Splitter::new_from_ptr(cx, self.splitter.unwrap()),
                 }),
             );
         }
@@ -153,11 +151,7 @@ impl Dock {
             self.panels_by_panel_id.insert(
                 panel_id,
                 Panel::Tab(TabPanel {
-                    tab_bar: TabBar::new_from_ptr_id(
-                        cx,
-                        self.live_ptr.unwrap(),
-                        id!(tab_bar)
-                    ).unwrap(),
+                    tab_bar: TabBar::new_from_ptr(cx, self.tab_bar.unwrap()),
                     contents_rect: Rect::default(),
                 }),
             );

@@ -161,7 +161,7 @@ pub fn derive_live_apply_impl(input: TokenStream) -> TokenStream {
             let deref_target = fields.iter().find( | field | field.name == "deref_target");
             let draw_vars = fields.iter().find( | field | field.name == "draw_vars");
             let animator = fields.iter().find( | field | field.name == "animator");
-            let live_ptr = fields.iter().find( | field | field.name == "live_ptr");
+            //let live_ptr = fields.iter().find( | field | field.name == "live_ptr");
             
             if deref_target.is_some() && draw_vars.is_some() ||
             deref_target.is_some() && animator.is_some() ||
@@ -181,9 +181,9 @@ pub fn derive_live_apply_impl(input: TokenStream) -> TokenStream {
                 tb.add("    }");
                 tb.add("    fn after_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]) {");
                 tb.add("        self.draw_vars.after_apply(cx, apply_from, index, nodes);");
-                if live_ptr.is_some(){
-                    tb.add("    if let Some(file_id) = apply_from.file_id() {self.live_ptr = Some(LivePtr::from_index(file_id, index));}");
-                }
+                //if live_ptr.is_some(){
+                //    tb.add("    if let Some(file_id) = apply_from.file_id() {self.live_ptr = Some(LivePtr::from_index(file_id, index));}");
+                //}
                 tb.add("    }");
                 tb.add("}");
             }
@@ -198,9 +198,9 @@ pub fn derive_live_apply_impl(input: TokenStream) -> TokenStream {
                 tb.add("    }");
                 tb.add("    fn after_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]) {");
                 tb.add("        self.deref_target.after_apply(cx, apply_from, index, nodes);");
-                if live_ptr.is_some(){
-                    tb.add("    if let Some(file_id) = apply_from.file_id() {self.live_ptr = Some(LivePtr::from_index(file_id, index));}");
-                }
+                //if live_ptr.is_some(){
+                //    tb.add("    if let Some(file_id) = apply_from.file_id() {self.live_ptr = Some(LivePtr::from_index(file_id, index));}");
+                //}
                 tb.add("    }");
                 tb.add("}");
             }
@@ -209,9 +209,9 @@ pub fn derive_live_apply_impl(input: TokenStream) -> TokenStream {
                 tb.add("LiveApply for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
                 tb.add("    fn after_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]) {");
                 tb.add("        if let Some(file_id) = apply_from.file_id() {");
-                if live_ptr.is_some(){
-                    tb.add("        self.live_ptr = Some(LivePtr::from_index(file_id, index));");
-                }
+                //if live_ptr.is_some(){
+                //    tb.add("        self.live_ptr = Some(LivePtr::from_index(file_id, index));");
+                //}
                 tb.add("            if let Ok(index) = nodes.child_by_name(index, id!(state_default)) {");
                 tb.add("                self.apply(cx, ApplyFrom::Animate, index, nodes);");
                 tb.add("            }");
@@ -222,11 +222,11 @@ pub fn derive_live_apply_impl(input: TokenStream) -> TokenStream {
             else {
                 tb.add("impl").stream(generic.clone());
                 tb.add("LiveApply for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-                if live_ptr.is_some(){
-                    tb.add("fn after_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, _nodes: &[LiveNode]) {");
-                    tb.add("    if let Some(file_id) = apply_from.file_id() {self.live_ptr = Some(LivePtr::from_index(file_id, index));}");
-                    tb.add("}");
-                }
+                //if live_ptr.is_some(){
+                //    tb.add("fn after_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, _nodes: &[LiveNode]) {");
+                //    tb.add("    if let Some(file_id) = apply_from.file_id() {self.live_ptr = Some(LivePtr::from_index(file_id, index));}");
+                //    tb.add("}");
+                //}
                 tb.add("}");
                 
             }
