@@ -1,5 +1,5 @@
 use {
-    crate::id::GenId,
+    crate::genid::GenId,
     makepad_render::*,
     std::collections::HashMap
 };
