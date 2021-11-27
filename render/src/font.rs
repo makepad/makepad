@@ -1,10 +1,28 @@
-use crate::cx::*;
-use makepad_trapezoidator::Trapezoidator;
-use makepad_geometry::{AffineTransformation, Transform, Vector};
-use makepad_internal_iter::*;
-use makepad_path::PathIterator;
-use std::io::prelude::*;
-use std::fs::File;
+pub use {
+    std::{
+        rc::Rc,
+        cell::RefCell,
+        io::prelude::*,
+        fs::File
+    },
+    makepad_trapezoidator::Trapezoidator,
+    makepad_geometry::{AffineTransformation, Transform, Vector},
+    makepad_internal_iter::*,
+    makepad_path::PathIterator,
+    makepad_derive_live::*,
+    makepad_live_compiler::*,
+    crate::{
+        cx::Cx,
+        live::*,
+        geometrygen::GeometryQuad2D,
+        drawshader::DrawVars,
+        view::ManyInstances,
+        pass::{Pass, PassClearColor},
+        view::View,
+        texture::Texture,
+    }
+};
+
 
 live_register!{
     use crate::shader_std::*;
@@ -333,10 +351,10 @@ impl CxDrawFontAtlas {
             self.atlas_pass.set_size(cx, cx.fonts_atlas.texture_size);
             let clear = if cx.fonts_atlas.clear_buffer {
                 cx.fonts_atlas.clear_buffer = false;
-                ClearColor::ClearWith(Vec4::default())
+                PassClearColor::ClearWith(Vec4::default())
             }
             else {
-                ClearColor::InitWith(Vec4::default())
+                PassClearColor::InitWith(Vec4::default())
             };
             self.atlas_pass.add_color_texture(cx, &self.atlas_texture, clear);
             self.atlas_view.set_always_redraw(cx, true);

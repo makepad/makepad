@@ -1,6 +1,19 @@
-use crate::cx::*;
-use std::any::TypeId;
-use std::collections::{HashMap, BTreeSet};
+use {
+    std::{
+        any::TypeId,
+        collections::{HashMap, BTreeSet}
+    },
+    makepad_live_compiler::*,
+    makepad_microserde::*,
+    crate::{
+        cx::Cx,
+        area::Area,
+        turtle::{Rect, Margin},
+        window::WindowGeom,
+        cursor::MouseCursor,
+        menu::CommandId,
+    },
+};
 
 #[derive(Clone, Debug, PartialEq, Default)]
 pub struct KeyModifiers {
@@ -167,7 +180,7 @@ pub struct TimerEvent {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SignalEvent {
-    pub signals: HashMap<Signal, BTreeSet<StatusId >>
+    pub signals: HashMap<Signal, Vec<u64>>
 }
 
 #[derive(Clone, Debug, PartialEq)]

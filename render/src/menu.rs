@@ -1,19 +1,29 @@
-use crate::cx::*;
-use std::any::TypeId;
+use {
+    makepad_live_compiler::{id, LiveId},
+    crate::{
+        cx::{
+            Cx,
+            CxCommandSetting
+        },
+        events::KeyCode
+    },
+};
 
 impl Cx{
-    pub fn command_quit()->CommandId{uid!()}
-    pub fn command_undo()->CommandId{uid!()}
-    pub fn command_redo()->CommandId{uid!()}
-    pub fn command_cut()->CommandId{uid!()}
+    
+    pub fn command_quit()->CommandId{CommandId::from_id(id!(quit))}
+    /*
+    pub fn command_undo()->CommandId{CommandId::from_id(id!(quit))}
+    pub fn command_redo()->CommandId{CommandId::from_id(id!(quit))}
+    pub fn command_cut()->CommandId{CommandId(id!(quit).0)}
     pub fn command_copy()->CommandId{uid!()}
     pub fn command_paste()->CommandId{uid!()}
     pub fn command_zoom_in()->CommandId{uid!()}
     pub fn command_zoom_out()->CommandId{uid!()}
     pub fn command_minimize()->CommandId{uid!()}
     pub fn command_zoom()->CommandId{uid!()}
-    pub fn command_select_all()->CommandId{uid!()}
-    
+    pub fn command_select_all()->CommandId{uid!()}*/
+    /*
     pub fn command_default_keymap(&mut self){
         Cx::command_quit().set_key(self, KeyCode::KeyQ);
         Cx::command_undo().set_key(self, KeyCode::KeyZ);
@@ -25,7 +35,7 @@ impl Cx{
         Cx::command_zoom_out().set_key(self, KeyCode::Minus);
         Cx::command_zoom_in().set_key(self, KeyCode::Equals);
         Cx::command_minimize().set_key(self, KeyCode::KeyM);
-    }
+    }*/
 }
 
 
@@ -33,9 +43,10 @@ impl Cx{
 
 
 #[derive(PartialEq, Copy, Clone, Hash, Eq, Debug)]
-pub struct CommandId(pub TypeId);
+pub struct CommandId(pub u64);
 
 impl CommandId{
+    pub fn from_id(id:LiveId)->Self{Self(id.0)}
     pub fn set_enabled(&self, cx:&mut Cx, enabled:bool)->Self{
         let mut s = if let Some(s) = cx.command_settings.get(self){*s}else{CxCommandSetting::default()};
         s.enabled = enabled;
@@ -59,11 +70,6 @@ impl CommandId{
         *self
     }
 }
-
-impl Into<CommandId> for TypeId {
-    fn into(self) -> CommandId {CommandId(self)}
-}
-
 
 #[derive(PartialEq, Clone)]
 pub enum Menu {

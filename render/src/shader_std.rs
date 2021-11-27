@@ -1,4 +1,11 @@
-use crate::cx::*;
+pub use {
+    makepad_live_compiler::*,
+    makepad_derive_live::*,
+    crate::{
+        cx::Cx,
+        live::*,
+    }
+};
 
 live_register!{
     

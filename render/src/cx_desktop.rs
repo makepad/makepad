@@ -1,9 +1,21 @@
-use crate::cx::*;
-use std::io::prelude::*;
-use std::fs::File;
-use std::io;
-use std::net::TcpStream;
-//use time::precise_time_ns;
+use {
+    std::{
+        io::prelude::*,
+        fs::File,
+        io,
+    },
+    makepad_live_compiler::Vec2,
+    crate::{
+        cx::Cx,
+        area::Area,
+        events::{
+            Event,
+            KeyCode,
+            FileRead,
+            FileReadEvent,
+        }
+    }
+};
 
 #[macro_export]
 macro_rules!log {
@@ -141,7 +153,7 @@ impl Cx {
             }
         }
         
-        self.call_signals_and_triggers();
+        self.call_signals();
         
         // call redraw event
         if self.any_views_need_redrawing(){
@@ -154,7 +166,7 @@ impl Cx {
         
         self.process_desktop_file_reads();
         
-        self.call_signals_and_triggers();
+        self.call_signals();
         
         vsync
     }
@@ -243,7 +255,7 @@ impl Cx {
     pub fn websocket_send(&self, _url: &str, _data: &[u8]) {
         // nop
     }
-    
+    /*
     pub fn http_send(&self, verb: &str, path: &str, _proto: &str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
         
         fn write_bytes_to_tcp_stream(tcp_stream: &mut TcpStream, bytes: &[u8]) -> bool {
@@ -289,7 +301,7 @@ impl Cx {
                 Cx::post_signal(signal, Cx::status_http_send_fail());
             })
         };
-    }
+    }*/
     /*
     
     pub fn profile(&mut self) {

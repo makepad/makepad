@@ -1,13 +1,16 @@
-use crate::shaderast::*;
-use crate::analyse::ShaderAnalyseOptions;
-use makepad_live_compiler::LiveError;
-use makepad_live_compiler::LiveErrorOrigin;
-use makepad_live_compiler::live_error_origin;
-use crate::shaderast::Ident;
-use crate::shaderast::{Lit};
-use makepad_live_compiler::Span;
-use crate::shaderast::Val;
-use std::cell::Cell;
+use{
+    std::cell::Cell,
+    makepad_live_compiler::{
+        LiveError,
+        LiveErrorOrigin,
+        live_error_origin,
+        Span
+    },
+    crate::{
+        shaderast::*,
+        analyse::ShaderAnalyseOptions
+    }
+};
 
 pub struct ConstEvaluator {
     pub options: ShaderAnalyseOptions

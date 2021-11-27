@@ -1,6 +1,7 @@
-use crate::span::Span;
-//use std::error;
-use std::fmt;
+use {
+    std::fmt,
+    crate::span::Span
+};
 
 #[derive(Clone, Default, PartialEq)]
 pub struct LiveErrorOrigin {

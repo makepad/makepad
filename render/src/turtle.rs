@@ -1,4 +1,15 @@
-use crate::cx::*;
+pub use {
+    std::{
+        any::TypeId,
+    },
+    makepad_live_compiler::*,
+    makepad_derive_live::*,
+    crate::{
+        live::*,
+        cx::Cx,
+        area::Area
+    }
+};
 
 #[derive(Copy, Clone, Debug, LiveComponent, LiveApply, LiveTraitCast)]
 pub enum LineWrap {

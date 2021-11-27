@@ -1,5 +1,23 @@
-use crate::cx::*; 
-//use makepad_shader_compiler::Ty;
+pub use {
+    std::{
+        rc::Rc,
+        cell::RefCell
+    },
+    makepad_live_compiler::{
+        LiveId,
+        Vec2
+    },
+    makepad_shader_compiler::{
+        ShaderTy
+    },
+    crate::{
+        cx::{
+            Cx,
+        },
+        turtle::Rect,
+        geometry::Geometry
+    }
+};
 
 #[derive(Clone, Default, Hash, Ord, PartialOrd, Eq,Debug, PartialEq, Copy)]
 pub struct InstanceArea{
@@ -276,7 +294,7 @@ impl Area{
          }
     }
     
-    pub fn get_read_ref<'a>(&self, cx:&'a Cx, id:Id, ty:Ty)->Option<DrawReadRef<'a>>{
+    pub fn get_read_ref<'a>(&self, cx:&'a Cx, id:LiveId, ty:ShaderTy)->Option<DrawReadRef<'a>>{
         match self{
             Area::Instance(inst)=>{
                 let cxview = &cx.views[inst.view_id];
@@ -320,7 +338,7 @@ impl Area{
         None
     } 
     
-    pub fn get_write_ref<'a>(&self, cx:&'a mut Cx, id:Id, ty:Ty, name:&str)->Option<DrawWriteRef<'a>>{
+    pub fn get_write_ref<'a>(&self, cx:&'a mut Cx, id:LiveId, ty:ShaderTy, name:&str)->Option<DrawWriteRef<'a>>{
         match self{
             Area::Instance(inst)=>{
                 let cxview = &mut cx.views[inst.view_id];

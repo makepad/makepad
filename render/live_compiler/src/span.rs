@@ -1,5 +1,7 @@
-use std::fmt;
-use crate::id::FileId;
+use{
+    std::fmt,
+    crate::liveid::LiveFileId,
+};
 
 #[derive(Clone, Copy, Default, Eq, Ord, PartialOrd, PartialEq)]
 pub struct Span {
@@ -7,7 +9,7 @@ pub struct Span {
 }
 
 impl Span {
-    pub fn new(file_id: FileId, start: usize, end: usize)->Self{
+    pub fn new(file_id: LiveFileId, start: usize, end: usize)->Self{
         Span {
             store:
             (((file_id.to_index() as u64) & 0xffff) << 48) |
@@ -28,8 +30,8 @@ impl Span {
         self.end() - self.start()
     }    
     
-    pub fn file_id(&self)->FileId{
-        FileId::index(((self.store>>48)&0xffff) as usize)
+    pub fn file_id(&self)->LiveFileId{
+        LiveFileId::index(((self.store>>48)&0xffff) as usize)
     }
 }
 

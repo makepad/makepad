@@ -1,6 +1,22 @@
-// MacOS specific loop
-use crate::cx_cocoa_app::*;
-use crate::cx::*;
+use {
+    makepad_live_compiler::Vec2,
+    crate::{
+        cx::{Cx, PlatformType},
+        cx_desktop::CxDesktop,
+        events::{
+            Timer,
+            Signal,
+            Event,
+            DraggedItem
+        },
+        window::{CxWindowState, CxWindowCmd},
+        cursor::MouseCursor,
+        menu::Menu,
+        pass::CxPassDepOf,
+        cx_cocoa_app::CocoaApp,
+        cx_metal::{MetalCx, MetalWindow}
+    }
+};
 
 impl Cx {
     
@@ -24,7 +40,7 @@ impl Cx {
         let mut metal_windows: Vec<MetalWindow> = Vec::new();
         
         //self.mtl_compile_all_shaders(&metal_cx);
-       
+        
         
         self.call_event_handler(&mut Event::Construct);
         
@@ -33,9 +49,9 @@ impl Cx {
         let mut passes_todo = Vec::new();
         
         cocoa_app.event_loop( | cocoa_app, events | {
-
+            
             self.mtl_compile_shaders(&metal_cx);
-
+            
             //let mut paint_dirty = false;
             for mut event in events {
                 
@@ -170,7 +186,7 @@ impl Cx {
                                 cocoa_app.update_app_menu(menu, &self.command_settings)
                             }
                         }
-
+                        
                         // build a list of renderpasses to repaint
                         let mut windows_need_repaint = 0;
                         self.compute_passes_to_repaint(&mut passes_todo, &mut windows_need_repaint);
@@ -241,23 +257,23 @@ impl Cx {
                     },
                     Event::Signal {..} => {
                         self.call_event_handler(&mut event);
-                        self.call_signals_and_triggers();
+                        self.call_signals();
                     },
                     _ => {
                         self.call_event_handler(&mut event);
                     }
                 }
-
+                
                 if let Some(dragged_item) = self.platform.start_dragging.take() {
                     cocoa_app.start_dragging(dragged_item);
                 }
-
+                
                 if self.process_desktop_post_event(event) {
                     cocoa_app.terminate_event_loop();
                 }
             }
             
-           /* if self.live_styles.changed_live_bodies.len()>0 || self.live_styles.changed_deps.len()>0 {
+            /* if self.live_styles.changed_live_bodies.len()>0 || self.live_styles.changed_deps.len()>0 {
                 let changed_live_bodies = self.live_styles.changed_live_bodies.clone();
                 let mut errors = self.process_live_styles_changes();
                 self.mtl_update_all_shaders(&metal_cx, &mut errors);
@@ -266,9 +282,9 @@ impl Cx {
             
             self.process_live_style_errors();
             */
-            if  self.any_views_need_redrawing()
+            if self.any_views_need_redrawing()
                 || self.next_frames.len() != 0 {
-                false   
+                false
             } else {
                 true
             }
@@ -302,8 +318,8 @@ impl Cx {
             timer.timer_id = 0;
         }
     }
-
-    pub fn post_signal(signal: Signal, status: StatusId) {
+    
+    pub fn post_signal(signal: Signal, status: u64) {
         if signal.signal_id != 0 {
             CocoaApp::post_signal(signal.signal_id, status);
         }
@@ -317,7 +333,7 @@ impl Cx {
             platform.set_menu = true;
         }
     }
-
+    
     pub fn start_dragging(&mut self, dragged_item: DraggedItem) {
         assert!(self.platform.start_dragging.is_none());
         self.platform.start_dragging = Some(dragged_item);

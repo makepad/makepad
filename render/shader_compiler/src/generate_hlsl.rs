@@ -1,11 +1,19 @@
-use crate::shaderast::*;
-use makepad_live_compiler::*;
-use crate::generate::*;
-use std::fmt::Write;
-use std::fmt;
-use std::collections::BTreeMap;
-use std::collections::BTreeSet;
-use crate::shaderregistry::ShaderRegistry;
+use{
+    std::{
+        fmt,
+        fmt::Write,
+        collections::{BTreeSet,BTreeMap},
+    },
+    makepad_live_compiler::{
+        id,
+        LiveId,
+    },
+    crate::{
+        generate::*,
+        shaderast::*,
+        shaderregistry::ShaderRegistry
+    }
+};
 
 pub fn index_to_char(index: usize) -> char {
     std::char::from_u32(index as u32 + 65).unwrap()

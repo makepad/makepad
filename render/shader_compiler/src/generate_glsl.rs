@@ -1,12 +1,20 @@
-use crate::shaderast::*;
-use makepad_live_compiler::*;
-use crate::generate::*;
-use crate::swizzle::Swizzle;
-use std::fmt::Write;
-use std::fmt;
-use std::collections::BTreeSet;
-use crate::shaderregistry::ShaderRegistry;
-
+use{
+    std::{
+        fmt,
+        fmt::Write,
+        collections::BTreeSet,
+    },
+    makepad_live_compiler::{
+        id,
+        LiveId,
+    },
+    crate::{
+        generate::*,
+        swizzle::Swizzle,
+        shaderast::*,
+        shaderregistry::ShaderRegistry
+    }
+};
 
 pub fn generate_vertex_shader(draw_shader_def: &DrawShaderDef, const_table:&DrawShaderConstTable, shader_registry: &ShaderRegistry) -> String {
     let mut string = String::new();
