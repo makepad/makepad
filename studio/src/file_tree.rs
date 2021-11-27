@@ -1,7 +1,7 @@
 use {
     crate::{
         id::GenId,
-        tree_logic::{self, NodeId, TreeLogic},
+        tree_logic::{TreeAction, NodeId, TreeLogic},
     },
     makepad_render::*,
     makepad_widget::*,
@@ -12,6 +12,7 @@ live_register!{
     FileTree: {{FileTree}} {
         
         folder_icon:{
+            color: #80
             fn pixel(self) -> vec4 {
                 let cx = Sdf2d::viewport(self.pos * self.rect_size);
                 let w = self.rect_size.x;
@@ -39,14 +40,14 @@ live_register!{
         file_node_color_hovered_odd: #38
         file_node_color_hovered_selected: #x11466E
         
-        folder_icon_color: #80
-        folder_icon_width: 10.0
+        //folder_icon_color: #80
+        //folder_icon_width: 10.0
         
         file_node_name_color_folder: #FF
         file_node_name_color_file: #9D
         view:{view:{debug_id:file_tree_view}}
         folder_icon_walk: Walk {
-            width: Width::Fixed(10.0),
+            width: Width::Fixed(14.0),
             height: Height::Filled,
             margin: Margin {
                 l: 1.0,
@@ -58,7 +59,7 @@ live_register!{
     }
 }
 
-#[derive(LiveComponent, LiveApply, LiveCast)]
+#[derive(LiveComponent, LiveApply, LiveTraitCast)]
 pub struct FileTree {
     #[live] view: ScrollView,
     #[rust] logic: TreeLogic,
@@ -74,8 +75,8 @@ pub struct FileTree {
     #[live] file_node_color_hovered_odd: Vec4,
     #[live] file_node_color_hovered_selected: Vec4,
 
-    #[live] folder_icon_color: Vec4,
-    #[live] folder_icon_width: f32,
+    //#[live] folder_icon_color: Vec4,
+    //#[live] folder_icon_width: f32,
 
     #[live] file_node_height: f32,
     #[live] indent_width: f32,
@@ -308,25 +309,25 @@ impl FileTree {
             .handle_event(cx, event, &mut |action| actions.push(action));
         for action in actions {
             match action {
-                tree_logic::Action::TreeWasAnimated => {
+                TreeAction::TreeWasAnimated => {
                     self.redraw(cx);
                 }
-                tree_logic::Action::NodeWasEntered(node_id) => {
+                TreeAction::NodeWasEntered(node_id) => {
                     let file_node_id = FileNodeId(node_id);
                     self.set_hovered_file_node_id(cx, Some(file_node_id));
                 }
-                tree_logic::Action::NodeWasExited(node_id) => {
+                TreeAction::NodeWasExited(node_id) => {
                     if self.logic.hovered_node_id() == Some(node_id) {
                         self.set_hovered_file_node_id(cx, None);
                     }
                 }
-                tree_logic::Action::NodeWasClicked(node_id) => {
+                TreeAction::NodeWasClicked(node_id) => {
                     let file_node_id = FileNodeId(node_id);
                     self.toggle_file_node_is_expanded(cx, file_node_id, true);
                     self.set_selected_file_node_id(cx, file_node_id);
                     dispatch_action(cx, Action::FileNodeWasClicked(file_node_id));
                 }
-                tree_logic::Action::NodeShouldStartDragging(node_id) => {
+                TreeAction::NodeShouldStartDragging(node_id) => {
                     let file_node_id = FileNodeId(node_id);
                     dispatch_action(cx, Action::FileNodeShouldStartDragging(file_node_id));
                 }

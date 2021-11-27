@@ -193,10 +193,10 @@ pub trait LiveComponentValue {
     fn apply_value(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize;
 }
 
-pub trait LiveComponent: LiveCast {
+pub trait LiveComponent: LiveTraitCast {
     fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize;
-    fn apply_live(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
-        self.apply(cx, ApplyFrom::ApplyLive, 0, nodes);
+    fn apply_over(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
+        self.apply(cx, ApplyFrom::ApplyOver, 0, nodes);
     }
     fn apply_clear(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
         self.apply(cx, ApplyFrom::ApplyClear, 0, nodes);
@@ -216,7 +216,7 @@ pub enum ApplyFrom {
     UpdateFromDoc {file_id: FileId}, // live DSL updated
     New, // Bare new without file info
     Animate, // from animate
-    ApplyLive, // called from bare apply_live() call
+    ApplyOver, // called from bare apply_live() call
     ApplyClear // called from bare apply_live() call
 }
 
@@ -254,7 +254,7 @@ pub trait LiveApply {
     fn after_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {}
 }
 
-impl<T> LiveCast for Option<T> where T: LiveComponent + LiveNew + 'static {}
+impl<T> LiveTraitCast for Option<T> where T: LiveComponent + LiveNew + 'static {}
 impl<T> LiveComponent for Option<T> where T: LiveComponent + LiveNew + 'static {
     fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         if let Some(v) = self {
@@ -315,7 +315,7 @@ macro_rules!let_action {
 macro_rules!live_primitive {
     ( $ ty: ident, $ default: expr, $ apply: item, $ to_live_value: item) => {
         
-        impl LiveCast for $ ty {}
+        impl LiveTraitCast for $ ty {}
         impl ToLiveValue for $ ty {
             $ to_live_value
         }
@@ -605,7 +605,7 @@ live_primitive!(
 
 // cast traits.
 
-pub trait LiveCast {
+pub trait LiveTraitCast{
     fn to_frame_component(&mut self) -> Option<&mut dyn FrameComponent> {
         None
     }
@@ -684,7 +684,7 @@ pub trait FrameComponent: LiveComponent {
     fn handle(&mut self, cx: &mut Cx, event: &mut Event) -> Option<Box<dyn AnyAction >>;
     fn draw(&mut self, cx: &mut Cx);
     fn apply_draw(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
-        self.apply_live(cx, nodes);
+        self.apply_over(cx, nodes);
         self.draw(cx);
     }
 }

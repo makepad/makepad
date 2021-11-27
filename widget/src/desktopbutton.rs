@@ -110,7 +110,7 @@ live_register!{
     }
 }
 
-#[derive(LiveComponent, LiveApply, LiveAnimate, LiveCast)]
+#[derive(LiveComponent, LiveApply, LiveAnimate, LiveTraitCast)]
 pub struct DesktopButton {
     #[rust] pub button_logic: ButtonLogic,
     #[rust] pub animator: Animator,
@@ -120,7 +120,7 @@ pub struct DesktopButton {
     #[live] pub bg: DrawDesktopButton,
 }
 
-#[derive(LiveComponent, LiveApply, LiveCast)]
+#[derive(LiveComponent, LiveApply, LiveTraitCast)]
 #[repr(u32)]
 pub enum DesktopButtonType {
     #[live] WindowsMin,
@@ -131,7 +131,7 @@ pub enum DesktopButtonType {
     #[pick] Fullscreen
 }
 
-#[derive(LiveComponent, LiveApply, LiveCast)]
+#[derive(LiveComponent, LiveApply, LiveTraitCast)]
 #[repr(C)]
 pub struct DrawDesktopButton {
     #[live] deref_target: DrawQuad,

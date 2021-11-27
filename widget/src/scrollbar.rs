@@ -61,7 +61,7 @@ live_register!{
     }
 }
 
-#[derive(LiveComponent, LiveApply, LiveAnimate, LiveCast)]
+#[derive(LiveComponent, LiveApply, LiveAnimate, LiveTraitCast)]
 pub struct ScrollBar {
     #[live] pub bg: DrawScrollBar,
     #[live(12.0)] pub bar_size: f32,
@@ -90,7 +90,7 @@ pub struct ScrollBar {
     #[rust] drag_point: Option<f32>, // the point in pixels where we are dragging
 }
 
-#[derive(LiveComponent, LiveApply, LiveCast)]
+#[derive(LiveComponent, LiveApply, LiveTraitCast)]
 #[repr(C)]
 pub struct DrawScrollBar {
     #[live] deref_target: DrawQuad,
@@ -147,7 +147,7 @@ impl ScrollBar {
     // writes the norm_scroll value into the shader
     pub fn update_shader_scroll_pos(&mut self, cx: &mut Cx) {
         let (norm_scroll, _) = self.get_normalized_scroll_pos();
-        self.bg.apply_live(cx,live!{
+        self.bg.apply_over(cx,live!{
             norm_scroll:(norm_scroll)
         });
         //self.bg.set_norm_scroll(cx, norm_scroll);

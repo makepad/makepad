@@ -2,7 +2,7 @@ use {
     crate::{
         id::GenId,
         id_map::GenIdMap,
-        tab::{self, Tab},
+        tab::{TabAction, Tab},
     },
     makepad_render::*,
     makepad_widget::*,
@@ -10,17 +10,19 @@ use {
 
 live_register!{
     use makepad_render::shader_std::*;
+    use crate::tab::Tab;
     
     TabBar: {{TabBar}} {
+        tab: Tab{}
         view: {
-            show_v: true
-            show_h: true
+            show_v: false
+            show_h: false
             view: {
                 debug_id: tab_bar_view
                 layout: {
                     walk: {
                         width: Width::Filled
-                        height: Height::Fixed(24.0)
+                        height: Height::Fixed(40.0)
                     }
                 }
             }
@@ -28,15 +30,15 @@ live_register!{
     }
 }
 
-#[derive(LiveComponent, LiveApply, LiveCast)]
+#[derive(LiveComponent, LiveApply, LiveTraitCast)]
 pub struct TabBar {
     #[live] view: ScrollView,
-    #[live] drag: DrawColor,
+    #[live] draw_drag: DrawColor,
+    #[live] tab: Option<LivePtr>,
     #[rust] is_dragged: bool,
     #[rust] tabs_by_tab_id: GenIdMap<TabId, Tab>,
     #[rust] tab_ids: Vec<TabId>,
     #[rust] selected_tab_id: Option<TabId>,
-    //    #[rust] tab_height: f32,
 }
 
 impl TabBar {
@@ -48,7 +50,7 @@ impl TabBar {
     
     pub fn end(&mut self, cx: &mut Cx) {
         if self.is_dragged {
-            self.drag.draw_quad_walk(
+            self.draw_drag.draw_quad_walk(
                 cx,
                 Walk {
                     width: Width::Filled,
@@ -68,7 +70,7 @@ impl TabBar {
     
     pub fn get_or_create_tab(&mut self, cx: &mut Cx, tab_id: TabId) -> &mut Tab {
         if !self.tabs_by_tab_id.contains(tab_id) {
-            self.tabs_by_tab_id.insert(tab_id, Tab::new(cx));
+            self.tabs_by_tab_id.insert(tab_id, Tab::new_from_ptr(cx, self.tab.unwrap()));
         }
         &mut self.tabs_by_tab_id[tab_id]
     }
@@ -105,7 +107,7 @@ impl TabBar {
         &mut self,
         cx: &mut Cx,
         event: &mut Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, Action),
+        dispatch_action: &mut dyn FnMut(&mut Cx, TabBarAction),
     ) {
         if self.view.handle_scroll_view(cx, event) {
             self.view.redraw_view(cx);
@@ -113,14 +115,14 @@ impl TabBar {
         for tab_id in &self.tab_ids {
             let tab = &mut self.tabs_by_tab_id[*tab_id];
             tab.handle_event(cx, event, &mut | cx, action | match action {
-                tab::Action::WasPressed => {
-                    dispatch_action(cx, Action::TabWasPressed(*tab_id));
+                TabAction::WasPressed => {
+                    dispatch_action(cx, TabBarAction::TabWasPressed(*tab_id));
                 }
-                tab::Action::ButtonWasPressed => {
-                    dispatch_action(cx, Action::TabButtonWasPressed(*tab_id));
+                TabAction::ButtonWasPressed => {
+                    dispatch_action(cx, TabBarAction::TabButtonWasPressed(*tab_id));
                 }
-                tab::Action::ReceivedDraggedItem(item) => {
-                    dispatch_action(cx, Action::TabReceivedDraggedItem(*tab_id, item));
+                TabAction::ReceivedDraggedItem(item) => {
+                    dispatch_action(cx, TabBarAction::TabReceivedDraggedItem(*tab_id, item));
                 }
             });
         }
@@ -150,7 +152,7 @@ impl TabBar {
             Event::FingerDrop(event) => {
                 self.is_dragged = false;
                 self.redraw(cx);
-                dispatch_action(cx, Action::ReceivedDraggedItem(event.dragged_item))
+                dispatch_action(cx, TabBarAction::ReceivedDraggedItem(event.dragged_item))
             }
             _ => {}
         }
@@ -166,7 +168,7 @@ impl AsRef<GenId> for TabId {
     }
 }
 
-pub enum Action {
+pub enum TabBarAction {
     ReceivedDraggedItem(DraggedItem),
     TabWasPressed(TabId),
     TabButtonWasPressed(TabId),

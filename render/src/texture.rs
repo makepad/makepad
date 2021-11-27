@@ -52,7 +52,7 @@ pub trait TextureCx {
 }
 
 
-impl LiveCast for Texture{}
+impl LiveTraitCast for Texture{}
 impl LiveNew for Texture {
     fn new(cx: &mut Cx)->Self{
         let textures_free = cx.textures_free.clone();

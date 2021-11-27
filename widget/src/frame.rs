@@ -31,7 +31,7 @@ pub struct Frame { // draw info per UI element
     pub create_order: Vec<Id>
 }
 
-impl LiveCast for Frame {
+impl LiveTraitCast for Frame {
     fn to_frame_component(&mut self) -> Option<&mut dyn FrameComponent> {
         return Some(self);
     }
