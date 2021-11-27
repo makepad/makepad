@@ -1,6 +1,6 @@
 use {
     crate::{
-        id::GenId,
+        genid::GenId,
         tree_logic::{TreeAction, NodeId, TreeLogic},
     },
     makepad_render::*,
