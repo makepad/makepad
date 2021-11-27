@@ -10,10 +10,20 @@ use std::fmt::Write;
 pub struct LiveType(pub core::any::TypeId);
 
 #[derive(Clone)]
+pub enum LiveTypeKind {
+    Class,
+    Enum,
+    Object,
+    Primitive,
+    DrawVars,
+}
+
+#[derive(Clone)]
 pub struct LiveTypeInfo {
     pub live_type: LiveType,
     pub type_name: Id,
     pub module_path: ModulePath,
+    pub kind: LiveTypeKind,
     pub fields: Vec<LiveTypeField>
 }
 

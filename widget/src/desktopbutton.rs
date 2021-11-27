@@ -114,6 +114,9 @@ live_register!{
 pub struct DesktopButton {
     #[rust] pub button_logic: ButtonLogic,
     #[rust] pub animator: Animator,
+    #[live] pub state_default: Option<LivePtr>,
+    #[live] pub state_hover: Option<LivePtr>,
+    #[live] pub state_pressed: Option<LivePtr>,
     #[live] pub bg: DrawDesktopButton,
 }
 
@@ -143,9 +146,9 @@ impl DesktopButton {
         self.handle_animation(cx, event);
         let res = self.button_logic.handle_button_logic(cx, event, self.bg.draw_vars.area);
         match res.state {
-            ButtonState::Pressed => self.animate_to(cx, id!(state_pressed)),
-            ButtonState::Default => self.animate_to(cx, id!(state_default)),
-            ButtonState::Hover => self.animate_to(cx, id!(state_hover)),
+            ButtonState::Pressed => self.animate_to(cx, self.state_pressed.unwrap()),
+            ButtonState::Default => self.animate_to(cx, self.state_default.unwrap()),
+            ButtonState::Hover => self.animate_to(cx, self.state_hover.unwrap()),
             _ => ()
         };
         res.action

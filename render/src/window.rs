@@ -38,6 +38,16 @@ impl LiveNew for Window {
             window_id,
         }
     }
+    
+    fn live_type_info() -> LiveTypeInfo{
+        LiveTypeInfo {
+            module_path: ModulePath::from_str(&module_path!()).unwrap(),
+            live_type: Self::live_type(),
+            fields: Vec::new(),
+            kind: LiveTypeKind::Object,
+            type_name: Id::from_str("Window").unwrap()
+        }
+    }
 }
 impl LiveComponent for Window {
     fn type_id(&self)->std::any::TypeId{ std::any::TypeId::of::<Self>()}
@@ -75,7 +85,7 @@ impl LiveComponent for Window {
                     }
                 }
                 _=> {
-                    cx.apply_error_no_matching_value(apply_from, index, nodes);
+                    cx.apply_error_no_matching_field(apply_from, index, nodes);
                     index = nodes.skip_node(index);
                 }
             }

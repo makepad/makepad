@@ -31,6 +31,7 @@ pub use crate::livenode::LiveTypeField;
 pub use crate::livenode::LiveFieldKind;
 pub use crate::livenode::InlineString;
 pub use crate::livenode::FittedString;
+pub use crate::livenode::LiveTypeKind;
 pub use crate::token::TokenWithSpan;
 pub use crate::token::Token;
 pub use crate::token::TokenId;

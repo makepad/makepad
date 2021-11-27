@@ -1,0 +1,19 @@
+[package]
+name = "makepad_studio"
+version = "0.1.0"
+authors = ["Eddy Bruel <ejpbruel@gmail.com>"]
+edition = "2018"
+
+[dependencies]
+
+[dependencies.makepad-render]
+path="../render"
+version="0.2"
+
+[dependencies.makepad-microserde]
+path="../render/microserde"
+version="0.1"
+
+[dependencies.makepad-widget]
+path="../widget"  
+version="0.1"
