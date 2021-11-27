@@ -2,7 +2,7 @@ use {
     crate::{
         code_editor::{CodeEditor, CodeEditorViewId},
         code_editor_state::{CodeEditorState, SessionId},
-        dock::{self, Dock, DragPosition, PanelId},
+        dock::{Dock, DockAction, DragPosition, PanelId},
         file_tree::{self, FileNodeId, FileTree},
         id_allocator::GenIdAllocator,
         id_map::GenIdMap,
@@ -29,11 +29,11 @@ live_register!{
         window:{caption:"Makepad Studio"}
     }
     
-    App: {{App}} {
+    App: {{App}} { 
     }
 }
 
-#[derive(LiveComponent, LiveApply, LiveCast)]
+#[derive(LiveComponent, LiveApply, LiveTraitCast)]
 pub struct App {
     #[live] inner: AppInner,
     #[rust(AppState::new())] state: AppState,
@@ -71,7 +71,7 @@ pub struct AppIO {
     response_or_notification_receiver: Receiver<ResponseOrNotification>,
 }
 
-#[derive(LiveComponent, LiveApply, LiveCast)]
+#[derive(LiveComponent, LiveApply, LiveTraitCast)]
 pub struct AppInner {
     #[live] window: DesktopWindow,
     #[live] dock: Dock,
@@ -211,20 +211,20 @@ impl AppInner {
             .handle_event(cx, event, &mut |_, action| actions.push(action));
         for action in actions {
             match action {
-                dock::Action::SplitPanelChanged(panel_id) => {
+                DockAction::SplitPanelChanged(panel_id) => {
                     self.dock.redraw(cx);
                     self.redraw_panel(cx, state, panel_id);
                 }
-                dock::Action::TabBarReceivedDraggedItem(panel_id, item) => {
+                DockAction::TabBarReceivedDraggedItem(panel_id, item) => {
                     for file_url in &item.file_urls {
                         let path = Path::new(&file_url[7..]).to_path_buf();
                         self.create_code_editor_tab(cx, state, panel_id, None, path);
                     }
                 }
-                dock::Action::TabWasPressed(panel_id, tab_id) => {
+                DockAction::TabWasPressed(panel_id, tab_id) => {
                     self.select_tab(cx, state, panel_id, tab_id)
                 }
-                dock::Action::TabButtonWasPressed(panel_id, tab_id) => {
+                DockAction::TabButtonWasPressed(panel_id, tab_id) => {
                     let tab = &state.tabs_by_tab_id[tab_id];
                     match tab.kind {
                         TabKind::CodeEditor { session_id } => {
@@ -260,13 +260,13 @@ impl AppInner {
                         _ => {}
                     }
                 }
-                dock::Action::TabReceivedDraggedItem(panel_id, tab_id, item) => {
+                DockAction::TabReceivedDraggedItem(panel_id, tab_id, item) => {
                     for file_url in &item.file_urls {
                         let path = Path::new(&file_url[7..]).to_path_buf();
                         self.create_code_editor_tab(cx, state, panel_id, Some(tab_id), path);
                     }
                 }
-                dock::Action::ContentsReceivedDraggedItem(panel_id, position, item) => {
+                DockAction::ContentsReceivedDraggedItem(panel_id, position, item) => {
                     let panel_id = match position {
                         DragPosition::Center => panel_id,
                         _ => self.split_tab_panel(cx, state, panel_id, position),
@@ -599,9 +599,9 @@ impl AppState {
         let mut tabs_by_tab_id = GenIdMap::new();
 
         let root_panel_id = PanelId(panel_id_allocator.allocate());
-
         let side_bar_panel_id = PanelId(panel_id_allocator.allocate());
         let file_tree_tab_id = TabId(tab_id_allocator.allocate());
+        
         panels_by_panel_id.insert(
             side_bar_panel_id,
             Panel {
@@ -612,6 +612,7 @@ impl AppState {
                 }),
             },
         );
+        
         tabs_by_tab_id.insert(
             file_tree_tab_id,
             Tab {

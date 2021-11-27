@@ -13,7 +13,7 @@ impl Drop for Pass{
     }
 }
 
-impl LiveCast for Pass{}
+impl LiveTraitCast for Pass{}
 impl LiveNew for Pass {
     fn new(cx: &mut Cx)->Self{
         let passes_free = cx.passes_free.clone();

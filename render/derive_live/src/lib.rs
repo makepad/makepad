@@ -31,9 +31,9 @@ pub fn derive_live_animate(input: TokenStream) -> TokenStream {
     derive_live_animate_impl(input)
 }
 
-#[proc_macro_derive(LiveCast)]
-pub fn derive_live_cast(input: TokenStream) -> TokenStream {
-    derive_live_cast_impl(input)
+#[proc_macro_derive(LiveTraitCast)]
+pub fn derive_live_trait_cast(input: TokenStream) -> TokenStream {
+    derive_live_trait_cast_impl(input)
 }
 
 #[proc_macro_derive(IntoAnyAction)]

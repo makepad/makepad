@@ -34,7 +34,7 @@ live_register!{
                 );
                 return cx.fill(mix(mix(#3, #4, self.hover), #2a, self.pressed));
             }
-        }
+        } 
         
         layout: Layout {
             align: Align {fx: 0.5, fy: 0.5},
@@ -45,7 +45,7 @@ live_register!{
             }
             padding: Padding {l: 16.0, t: 12.0, r: 16.0, b: 12.0}
         }
-        
+         
         state_default: {
             from: {all: Play::Forward {duration: 0.1}}
             bg: {pressed: 0.0, hover: 0.0}
@@ -88,7 +88,7 @@ pub struct Button {
     #[live] pub label: String
 }
 
-impl LiveCast for Button{
+impl LiveTraitCast for Button{
     fn to_frame_component(&mut self)->Option<&mut dyn FrameComponent>{
         return Some(self);
     }
