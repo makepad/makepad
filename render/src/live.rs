@@ -46,21 +46,21 @@ impl Cx {
         self.apply_error(apply_from, index, nodes, format!("expected enum value type, but got {} {:?}", nodes[index].id, nodes[index].value))
     }
     
-    pub fn apply_error_no_matching_value(&mut self, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        self.apply_error(apply_from, index, nodes, format!("no matching value {}", nodes[index].id))
+    pub fn apply_error_no_matching_field(&mut self, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+        self.apply_error(apply_from, index, nodes, format!("no matching field: {}", nodes[index].id))
     }
     
     pub fn apply_error_wrong_type_for_value(&mut self, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        self.apply_error(apply_from, index, nodes, format!("wrong type for value {}", nodes[index].id))
+        self.apply_error(apply_from, index, nodes, format!("wrong type for value: {}", nodes[index].id))
     }
-
-    pub fn apply_error_component_not_found(&mut self, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode], id:Id) {
-        self.apply_error(apply_from, index, nodes, format!("component not found {}", id))
+    
+    pub fn apply_error_component_not_found(&mut self, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode], id: Id) {
+        self.apply_error(apply_from, index, nodes, format!("component not found: {}", id))
     }
-
+    
     
     pub fn apply_error_cant_find_target(&mut self, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode], id: Id) {
-        self.apply_error(apply_from, index, nodes, format!("cant find target {}", id))
+        self.apply_error(apply_from, index, nodes, format!("cant find target: {}", id))
     }
     
     
@@ -142,10 +142,8 @@ pub trait LiveNew: LiveComponent {
     fn new(cx: &mut Cx) -> Self;
     
     fn live_register(cx: &mut Cx) {}
-
-    fn live_type_info() -> LiveTypeInfo where Self: Sized + 'static {
-        LiveTypeInfo {module_path: ModulePath::from_str(&module_path!()).unwrap(), live_type: Self::live_type(), fields: Vec::new(), type_name: Id::from_str("LiveNew").unwrap()}
-    }
+    
+    fn live_type_info() -> LiveTypeInfo;
     
     fn new_apply(cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Self where Self: Sized {
         let mut ret = Self::new(cx);
@@ -159,10 +157,30 @@ pub trait LiveNew: LiveComponent {
         ret
     }
     
-    fn new_from_doc(cx: &mut Cx, live_doc_nodes: LiveDocNodes) -> Self where Self: Sized {
-        let mut ret = Self::new(cx);
-        ret.apply(cx, ApplyFrom::NewFromDoc {file_id: live_doc_nodes.file_id}, live_doc_nodes.index, live_doc_nodes.nodes);
-        ret
+    fn new_from_ptr_id(cx: &mut Cx, live_ptr:LivePtr, id:Id) -> Option<Self> where Self: Sized {
+        let live_registry_rc = cx.live_registry.clone();
+        let live_registry = live_registry_rc.borrow();
+        let doc = live_registry.ptr_to_doc(live_ptr);
+        if let Ok(index) = doc.nodes.child_by_name(live_ptr.index as usize,id){
+            let mut ret = Self::new(cx);
+            ret.apply(cx, ApplyFrom::NewFromDoc{file_id:live_ptr.file_id}, index, &doc.nodes);
+            return Some(ret)
+        }
+        None
+    }
+    
+    fn new_from_module_path_id(cx: &mut Cx, module_path: &str, id:Id) -> Option<Self> where Self: Sized {
+        let live_registry_rc = cx.live_registry.clone();
+        let live_registry = live_registry_rc.borrow();
+        if let Some(file_id) = live_registry.module_path_to_file_id.get(&ModulePath::from_str(module_path).unwrap()) {
+            let doc = live_registry.file_id_to_doc(*file_id);
+            if let Ok(index) = doc.nodes.child_by_name(0,id){
+                let mut ret = Self::new(cx);
+                ret.apply(cx, ApplyFrom::NewFromDoc {file_id:*file_id}, index, &doc.nodes);
+                return Some(ret)
+            }
+        }
+        None
     }
     
     fn live_type() -> LiveType where Self: 'static {
@@ -191,7 +209,7 @@ pub trait LiveComponent: LiveCast {
 
 
 pub trait LiveAnimate {
-    fn animate_to(&mut self, cx: &mut Cx, state_id: Id);
+    fn animate_to(&mut self, cx: &mut Cx, state:LivePtr);
     fn handle_animation(&mut self, cx: &mut Cx, event: &mut Event);
 }
 
@@ -227,17 +245,16 @@ impl ApplyFrom {
 pub trait LiveApply {
     fn apply_value_unknown(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         if nodes[index].value.is_value_type() {
-            cx.apply_error_no_matching_value(apply_from, index, nodes);
+            cx.apply_error_no_matching_field(apply_from, index, nodes);
         }
         nodes.skip_node(index)
     }
     fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {}
     fn after_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {}
-    fn after_new(&mut self, _cx: &mut Cx) {}
 }
 
 impl<T> LiveCast for Option<T> where T: LiveComponent + LiveNew + 'static {}
-impl<T> LiveComponent for Option<T> where T: LiveComponent + LiveNew+ 'static {
+impl<T> LiveComponent for Option<T> where T: LiveComponent + LiveNew + 'static {
     fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         if let Some(v) = self {
             v.apply(cx, apply_from, index, nodes)
@@ -249,7 +266,7 @@ impl<T> LiveComponent for Option<T> where T: LiveComponent + LiveNew+ 'static {
             index
         }
     }
-    fn type_id(&self) -> TypeId{
+    fn type_id(&self) -> TypeId {
         std::any::TypeId::of::<T>()
     }
 }
@@ -263,11 +280,6 @@ impl<T> LiveNew for Option<T> where T: LiveComponent + LiveNew + 'static {
         ret.apply(cx, apply_from, index, nodes);
         ret
     }
-    fn new_from_doc(cx: &mut Cx, live_doc_nodes: LiveDocNodes) -> Self {
-        let mut ret = Self::None;
-        ret.apply(cx, ApplyFrom::NewFromDoc {file_id: live_doc_nodes.file_id}, live_doc_nodes.index, live_doc_nodes.nodes);
-        ret
-    }
     
     fn live_type_info() -> LiveTypeInfo {
         T::live_type_info()
@@ -278,17 +290,17 @@ impl<T> LiveNew for Option<T> where T: LiveComponent + LiveNew + 'static {
 
 #[macro_export]
 macro_rules!get_component {
-    (  $ comp_id: expr, $ ty: ty, $ frame: expr) => {
-        $frame.get_component($comp_id).map_or(None, |v| v.cast_mut::<$ty>())
+    ( $ comp_id: expr, $ ty: ty, $ frame: expr) => {
+        $ frame.get_component( $ comp_id).map_or(None, | v | v.cast_mut::< $ ty>())
     }
 }
-
+/*
 #[macro_export]
-macro_rules!get_local_doc {
-    ( $ cx: expr, $ comp_id: expr) => {
-        $cx.live_registry.clone().borrow().module_path_str_id_to_doc(&module_path!(), $comp_id).unwrap()        
+macro_rules!module_path_obj {
+    () => {
+        ModulePath::from_str(&module_path!()).unwrap()
     }
-}
+}*/
 
 /*
 #[macro_export]
@@ -301,16 +313,16 @@ macro_rules!let_action {
 #[macro_export]
 macro_rules!live_primitive {
     ( $ ty: ident, $ default: expr, $ apply: item, $ to_live_value: item) => {
-    
+        
         impl LiveCast for $ ty {}
         impl ToLiveValue for $ ty {
             $ to_live_value
         }
         impl LiveComponent for $ ty {
-            fn type_id(&self) -> TypeId{
-                TypeId::of::<$ty>()
+            fn type_id(&self) -> TypeId {
+                TypeId::of::< $ ty>()
             }
-
+            
             $ apply
         }
         impl LiveNew for $ ty {
@@ -323,7 +335,8 @@ macro_rules!live_primitive {
                     module_path: ModulePath::from_str(&module_path!()).unwrap(),
                     live_type: Self::live_type(),
                     fields: Vec::new(),
-                    type_name: Id::from_str(stringify!( $ ty)).unwrap()
+                    type_name: Id::from_str(stringify!( $ ty)).unwrap(),
+                    kind: LiveTypeKind::Primitive
                 }
             }
         }
@@ -573,6 +586,22 @@ live_primitive!(
     }
 );
 
+
+live_primitive!(
+    LivePtr,
+    LivePtr{file_id:FileId(0), index:0},
+    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        if let Some(file_id) = apply_from.file_id(){
+            self.file_id = file_id;
+            self.index = index as u32;
+        }
+        nodes.skip_node(index)
+    },
+    fn to_live_value(&self) -> LiveValue {
+        panic!()
+    }
+);
+
 // cast traits.
 
 pub trait LiveCast {
@@ -613,7 +642,7 @@ impl<T: 'static + ? Sized + Clone> AnyAction for T {
         TypeId::of::<T>()
     }
     
-    fn box_clone(&self)->Box<dyn AnyAction>{
+    fn box_clone(&self) -> Box<dyn AnyAction> {
         Box::new((*self).clone())
     }
 }
@@ -624,25 +653,25 @@ impl dyn AnyAction {
         let concrete = self.type_id();
         t == concrete
     }
-    pub fn cast<T: AnyAction+ Default + Clone>(&self) -> T {
+    pub fn cast<T: AnyAction + Default + Clone>(&self) -> T {
         if self.is::<T>() {
             unsafe {&*(self as *const dyn AnyAction as *const T)}.clone()
         } else {
             T::default()
         }
     }
-
-    pub fn cast_id<T: AnyAction+ Default + Clone>(&self, id:Id) -> (Id,T) {
+    
+    pub fn cast_id<T: AnyAction + Default + Clone>(&self, id: Id) -> (Id, T) {
         if self.is::<T>() {
-            (id,unsafe {&*(self as *const dyn AnyAction as *const T)}.clone())
+            (id, unsafe {&*(self as *const dyn AnyAction as *const T)}.clone())
         } else {
             (id, T::default())
         }
     }
-
+    
 }
 
-pub type OptionAnyAction = Option<Box<dyn AnyAction>>;
+pub type OptionAnyAction = Option<Box<dyn AnyAction >>;
 
 impl Clone for Box<dyn AnyAction> {
     fn clone(&self) -> Box<dyn AnyAction> {

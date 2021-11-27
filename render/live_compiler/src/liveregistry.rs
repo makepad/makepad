@@ -1,19 +1,19 @@
 //use crate::id::Id;
 use crate::liveerror::{LiveError, LiveFileError};
 use makepad_id_macros::*;
+use crate::liveparser::LiveParser;
 use crate::livedocument::LiveDocument;
 use crate::livenode::LiveNode;
 use crate::livenode::LiveValue;
 use crate::livenode::LiveType;
 use crate::livenode::LiveTypeInfo;
 use crate::livenode::LiveNodeSlice;
-use crate::liveparser::LiveParser;
 use crate::id::Id;
 use crate::id::FileId;
 use crate::id::LivePtr;
+use crate::id::ModulePath;
 use crate::token::TokenId;
 use crate::span::Span;
-use crate::id::ModulePath;
 use std::collections::HashMap;
 use std::collections::HashSet;
 use crate::lex::lex;
@@ -64,6 +64,10 @@ impl LiveRegistry {
          &self.expanded[live_ptr.file_id.to_index()]
     }
     
+    pub fn file_id_to_doc(&self, file_id: FileId) -> &LiveDocument{
+         &self.expanded[file_id.to_index()]
+    }
+    
     pub fn ptr_to_nodes_index(&self, live_ptr: LivePtr) -> (&[LiveNode], usize) {
         let doc = &self.expanded[live_ptr.file_id.to_index()];
         (&doc.nodes, live_ptr.index as usize)
@@ -76,11 +80,11 @@ impl LiveRegistry {
     pub fn token_id_to_expanded_doc(&self, token_id: TokenId) -> &LiveDocument {
         &self.expanded[token_id.file_id().to_index()]
     }
-    
+    /*
     pub fn module_path_str_id_to_doc(&self, module_path: &str, id:Id) -> Option<LiveDocNodes> {
         self.module_path_id_to_doc(ModulePath::from_str(module_path).unwrap(), id)
     }
-    
+    */
     pub fn module_path_id_to_doc(&self, module_path: ModulePath, id:Id) -> Option<LiveDocNodes> {
         if let Some(file_id) = self.module_path_to_file_id.get(&module_path) {
             let doc = &self.expanded[file_id.to_index()];

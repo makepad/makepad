@@ -67,6 +67,11 @@ pub struct ScrollBar {
     #[live(12.0)] pub bar_size: f32,
     #[live(30.0)] pub min_handle_size: f32, //minimum size of the handle in pixels
     #[live(Axis::Horizontal)] pub axis: Axis,
+
+    #[live] pub state_default: Option<LivePtr>,
+    #[live] pub state_hover: Option<LivePtr>,
+    #[live] pub state_pressed: Option<LivePtr>,
+
     #[rust] pub animator: Animator,
     #[live(false)] pub use_vertical_finger_scroll: bool,
     #[live] pub smoothing: Option<f32>,
@@ -305,7 +310,7 @@ impl ScrollBar {
             
             match event.hits(cx, self.bg.draw_vars.area, HitOpt::default()) {
                 Event::FingerDown(fe) => {
-                    self.animate_to(cx, id!(state_pressed));
+                    self.animate_to(cx, self.state_pressed.unwrap());
                     let rel = match self.axis {
                         Axis::Horizontal => fe.rel.x,
                         Axis::Vertical => fe.rel.y
@@ -327,10 +332,10 @@ impl ScrollBar {
                         cx.set_hover_mouse_cursor(MouseCursor::Default);
                         match fe.hover_state {
                             HoverState::In => {
-                                self.animate_to(cx, id!(state_hover));
+                                self.animate_to(cx, self.state_hover.unwrap());
                             },
                             HoverState::Out => {
-                                self.animate_to(cx, id!(state_default));
+                                self.animate_to(cx, self.state_default.unwrap());
                             },
                             _ => ()
                         }
@@ -340,14 +345,14 @@ impl ScrollBar {
                     self.drag_point = None;
                     if fe.is_over {
                         if fe.input_type.has_hovers() {
-                            self.animate_to(cx, id!(state_hover));
+                            self.animate_to(cx, self.state_hover.unwrap());
                         }
                         else {
-                            self.animate_to(cx, id!(state_default));
+                            self.animate_to(cx, self.state_default.unwrap());
                         }
                     }
                     else {
-                        self.animate_to(cx, id!(state_default));
+                        self.animate_to(cx, self.state_default.unwrap());
                     }
                     return ScrollBarEvent::ScrollDone;
                 },

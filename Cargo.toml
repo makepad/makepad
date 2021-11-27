@@ -3,6 +3,7 @@
 members = [
     "examples/bare_example", 
     "examples/cmdline_example",
+    "studio",
     "tools/webserver",
 ]
 
@@ -11,4 +12,3 @@ members = [
 #codegen-units=1
 #panic = 'abort'
 #opt-level = 'z'
- 

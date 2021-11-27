@@ -5,6 +5,7 @@ use crate::livedocument::LiveDocument;
 use crate::livenode::LiveValue;
 use crate::livenode::LiveNodeSlice;
 use crate::livenode::LiveNodeVec;
+use crate::livenode::LiveTypeKind;
 use crate::id::FileId;
 use crate::id::LivePtr;
 use crate::livedocument::LiveScopeTarget;
@@ -302,6 +303,13 @@ impl<'a> LiveExpander<'a> {
                                         let node_insert_point = insert_point;
                                         insert_point = out_doc.nodes.clone_node_self(index, Some(insert_point));
                                         out_doc.nodes[node_insert_point].id = field.id;
+                                    }
+                                    else if let LiveTypeKind::Class = lti.kind{
+                                        self.errors.push(LiveError {
+                                            origin: live_error_origin!(),
+                                            span: in_doc.token_id_to_span(in_node.token_id.unwrap()),
+                                            message: format!("Cannot find class {}, make sure its defined before its used", lti.type_name)
+                                        }); 
                                     }
                                 }
                                 else{
