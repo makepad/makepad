@@ -3,6 +3,7 @@ use crate::scrollbar::*;
 
 live_register!{
     ScrollView:{{ScrollView}}{
+        view:{debug_id:scroll_inner_view}
     }
 }
 

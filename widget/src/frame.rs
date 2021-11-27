@@ -74,7 +74,8 @@ impl LiveNew for Frame {
             module_path: ModulePath::from_str(&module_path!()).unwrap(),
             live_type: Self::live_type(),
             fields: Vec::new(),
-            type_name: Id::from_str("Frame").unwrap()
+            type_name: Id::from_str("Frame").unwrap(),
+            kind: LiveTypeKind::Class
         }
     }
     
@@ -140,7 +141,7 @@ impl LiveComponent for Frame {
                 }
                 component_id => {
                     if !nodes[index].value.is_structy_type() {
-                        cx.apply_error_no_matching_value(apply_from, index, nodes);
+                        cx.apply_error_no_matching_field(apply_from, index, nodes);
                     }
                     else if let Some(item) = self.components.get_mut(&component_id) {
                         // exists

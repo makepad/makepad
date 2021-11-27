@@ -30,6 +30,16 @@ impl LiveNew for Pass {
             passes_free
         }
     }
+    
+    fn live_type_info() -> LiveTypeInfo{
+        LiveTypeInfo {
+            module_path: ModulePath::from_str(&module_path!()).unwrap(),
+            live_type: Self::live_type(),
+            fields: Vec::new(),
+            kind: LiveTypeKind::Object,
+            type_name: Id::from_str("Pass").unwrap()
+        }
+    }
 }
 
 impl LiveComponent for Pass {
@@ -50,7 +60,7 @@ impl LiveComponent for Pass {
             match nodes[index].id {
                 id!(clear_color) => cx.passes[self.pass_id].clear_color = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
                 _=> {
-                    cx.apply_error_no_matching_value(apply_from, index, nodes);
+                    cx.apply_error_no_matching_field(apply_from, index, nodes);
                     index = nodes.skip_node(index);
                 }
             }

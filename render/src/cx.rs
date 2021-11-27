@@ -5,6 +5,7 @@ use std::rc::Rc;
 use std::cell::RefCell;
 
 pub use makepad_derive_live::*;
+pub use makepad_microserde::*;
 pub use makepad_live_compiler::math::*;
 pub use makepad_shader_compiler::shaderregistry::ShaderRegistry;
 pub use makepad_shader_compiler::shaderregistry::ShaderEnum;
@@ -20,6 +21,7 @@ pub use makepad_live_compiler::LiveType;
 pub use makepad_live_compiler::LiveTypeInfo;
 pub use makepad_live_compiler::LiveTypeField;
 pub use makepad_live_compiler::LiveFieldKind;
+pub use makepad_live_compiler::LiveTypeKind;
 pub use makepad_live_compiler::LiveValue;
 pub use makepad_live_compiler::FittedString;
 pub use makepad_live_compiler::InlineString;
@@ -81,20 +83,20 @@ pub struct Cx {
     pub gpu_info: GpuInfo,
     
     pub windows: Vec<CxWindow>,
-    pub windows_free: Rc<RefCell<Vec<usize>>>,
+    pub windows_free: Rc<RefCell<Vec<usize >> >,
     
     pub passes: Vec<CxPass>,
-    pub passes_free: Rc<RefCell<Vec<usize>>>,
+    pub passes_free: Rc<RefCell<Vec<usize >> >,
     
     pub views: Vec<CxView>,
-    pub views_free: Rc<RefCell<Vec<usize>>>,
+    pub views_free: Rc<RefCell<Vec<usize >> >,
     
-    pub fonts: Vec<Option<CxFont>>,
+    pub fonts: Vec<Option<CxFont >>,
     pub fonts_atlas: CxFontsAtlas,
     pub path_to_font_id: HashMap<String, usize>,
     
     pub textures: Vec<CxTexture>,
-    pub textures_free: Rc<RefCell<Vec<usize>>>,
+    pub textures_free: Rc<RefCell<Vec<usize >> >,
     
     pub geometries: Vec<CxGeometry>,
     pub draw_shaders: Vec<CxDrawShader>,
@@ -108,7 +110,7 @@ pub struct Cx {
     pub turtles: Vec<Turtle>,
     pub align_list: Vec<Area>,
     
-    pub live_factories: Rc<RefCell<HashMap<LiveType, Box<dyn LiveFactory>>>>,
+    pub live_factories: Rc<RefCell<HashMap<LiveType, Box<dyn LiveFactory >> >>,
     pub draw_shader_ptr_to_id: HashMap<DrawShaderPtr, usize>,
     pub draw_shader_compile_set: BTreeSet<DrawShaderPtr>,
     
@@ -136,23 +138,23 @@ pub struct Cx {
     pub down_mouse_cursor: Option<MouseCursor>,
     pub hover_mouse_cursor: Option<MouseCursor>,
     pub fingers: Vec<CxPerFinger>,
-
+    
     pub drag_area: Area,
     pub new_drag_area: Area,
     
-    pub draw_font_atlas: Option<Box<CxDrawFontAtlas>>,
+    pub draw_font_atlas: Option<Box<CxDrawFontAtlas >>,
     
     //pub playing_animator_ids: BTreeMap<AnimatorId, AnimInfo>,
     
     pub next_frames: HashSet<NextFrame>,
     pub _next_frames: HashSet<NextFrame>,
     
-    pub triggers: HashMap<Area, BTreeSet<TriggerId>>,
+    pub triggers: HashMap<Area, BTreeSet<TriggerId >>,
     pub signals: HashMap<Signal, BTreeSet<StatusId >>,
-
+    
     pub profiles: HashMap<u64, Instant>,
     
-    pub live_registry: Rc<RefCell<LiveRegistry>>,
+    pub live_registry: Rc<RefCell<LiveRegistry >>,
     pub shader_registry: ShaderRegistry,
     
     pub command_settings: HashMap<CommandId, CxCommandSetting>,
@@ -181,7 +183,7 @@ impl PlatformType {
             PlatformType::Unknown => true,
             PlatformType::Windows => true,
             PlatformType::OSX => true,
-            PlatformType::Linux{..} => true,
+            PlatformType::Linux {..} => true,
             PlatformType::Web {..} => false
         }
     }
@@ -238,9 +240,9 @@ impl Default for Cx {
             passes: Vec::new(),
             passes_free: Rc::new(RefCell::new(Vec::new())),
             
-            views: Vec::new(),//vec![CxView {..Default::default()}],
+            views: Vec::new(), //vec![CxView {..Default::default()}],
             views_free: Rc::new(RefCell::new(Vec::new())),
-
+            
             textures: textures,
             textures_free: Rc::new(RefCell::new(Vec::new())),
             
@@ -272,7 +274,7 @@ impl Default for Cx {
             _redraw_views_and_children: Vec::new(),
             redraw_all_views: true,
             _redraw_all_views: true,
-    
+            
             draw_font_atlas: None,
             
             redraw_id: 1,
@@ -291,8 +293,8 @@ impl Default for Cx {
             
             down_mouse_cursor: None,
             hover_mouse_cursor: None,
-            fingers: fingers, 
-
+            fingers: fingers,
+            
             drag_area: Area::Empty,
             new_drag_area: Area::Empty,
             
@@ -301,13 +303,13 @@ impl Default for Cx {
             
             command_settings: HashMap::new(),
             
-           //playing_animator_ids: BTreeMap::new(),
+            //playing_animator_ids: BTreeMap::new(),
             
             next_frames: HashSet::new(),
             _next_frames: HashSet::new(),
             profiles: HashMap::new(),
             
-            signals: HashMap::new(), 
+            signals: HashMap::new(),
             
             triggers: HashMap::new(),
             
@@ -386,7 +388,7 @@ impl Cx {
         
         // we need this because we don't mark the entire deptree of passes dirty every small paint
         loop { // loop untill we don't propagate anymore
-            let mut altered = false; 
+            let mut altered = false;
             for pass_id in 0..self.passes.len() {
                 if self.passes[pass_id].paint_dirty {
                     let other = match self.passes[pass_id].dep_of {
@@ -456,7 +458,7 @@ impl Cx {
         let mut walk_pass_id = pass_id;
         loop {
             if let Some(main_view_id) = self.passes[walk_pass_id].main_view_id {
-                self.redraw_view_and_children(Area::View(ViewArea {redraw_id: 0, view_id: main_view_id}));
+                self.redraw_view_and_children_of(Area::View(ViewArea {redraw_id: 0, view_id: main_view_id}));
             }
             match self.passes[walk_pass_id].dep_of.clone() {
                 CxPassDepOf::Pass(next_pass_id) => {
@@ -472,7 +474,7 @@ impl Cx {
     pub fn redraw_pass_and_child_passes(&mut self, pass_id: usize) {
         let cxpass = &self.passes[pass_id];
         if let Some(main_view_id) = cxpass.main_view_id {
-            self.redraw_view_and_children(Area::View(ViewArea {redraw_id: 0, view_id: main_view_id}));
+            self.redraw_view_and_children_of(Area::View(ViewArea {redraw_id: 0, view_id: main_view_id}));
         }
         // lets redraw all subpasses as well
         for sub_pass_id in 0..self.passes.len() {
@@ -488,14 +490,14 @@ impl Cx {
         self.redraw_all_views = true;
     }
     
-    pub fn any_views_need_redrawing(&self)->bool{
-        self.redraw_all_views 
-        || self.redraw_views.len() != 0
-        || self.redraw_views_and_children.len() != 0
+    pub fn any_views_need_redrawing(&self) -> bool {
+        self.redraw_all_views
+            || self.redraw_views.len() != 0
+            || self.redraw_views_and_children.len() != 0
     }
     
-    pub fn redraw_view(&mut self, area: Area) {
-        if let Some(view_id) = area.view_id(){
+    pub fn redraw_view_of(&mut self, area: Area) {
+        if let Some(view_id) = area.view_id() {
             if self.redraw_views.iter().position( | v | *v == view_id).is_some() {
                 return;
             }
@@ -503,8 +505,8 @@ impl Cx {
         }
     }
     
-    pub fn redraw_view_and_children(&mut self, area: Area) {
-        if let Some(view_id) = area.view_id(){
+    pub fn redraw_view_and_children_of(&mut self, area: Area) {
+        if let Some(view_id) = area.view_id() {
             if self.redraw_views_and_children.iter().position( | v | *v == view_id).is_some() {
                 return;
             }
@@ -532,7 +534,7 @@ impl Cx {
     }*/
     
     pub fn view_will_redraw(&self, view_id: usize) -> bool {
-        if self._redraw_all_views{
+        if self._redraw_all_views {
             return true;
         }
         // figure out if areas are in some way a child of view_id, then we need to redraw
@@ -577,11 +579,11 @@ impl Cx {
                 finger._over_last = new_area.clone();
             }
         }
-
+        
         if self.drag_area == old_area {
             self.drag_area = new_area.clone();
         }
-
+        
         // update capture keyboard
         if self.key_focus == old_area {
             self.key_focus = new_area.clone()
@@ -640,15 +642,15 @@ impl Cx {
     pub fn call_event_handler(&mut self, event: &mut Event)
     {
         self.event_id += 1;
-
+        
         let event_handler = self.event_handler.unwrap();
         
-        unsafe{(*event_handler)(self, event);}
-
+        unsafe {(*event_handler)(self, event);}
+        
         if self.next_key_focus != self.key_focus {
             self.prev_key_focus = self.key_focus;
             self.key_focus = self.next_key_focus;
-            unsafe{(*event_handler)(self,  &mut Event::KeyFocus(KeyFocusEvent {
+            unsafe {(*event_handler)(self, &mut Event::KeyFocus(KeyFocusEvent {
                 prev: self.prev_key_focus,
                 focus: self.key_focus
             }));}
@@ -661,19 +663,19 @@ impl Cx {
         self.in_redraw_cycle = true;
         self.redraw_id += 1;
         self.counter = 0;
-
+        
         std::mem::swap(&mut self._redraw_views, &mut self.redraw_views);
         std::mem::swap(&mut self._redraw_views_and_children, &mut self.redraw_views_and_children);
-
+        
         self._redraw_all_views = self._redraw_all_views;
         self.redraw_all_views = false;
         self.redraw_views.truncate(0);
         self.redraw_views_and_children.truncate(0);
-
+        
         self.align_list.truncate(0);
-
+        
         self.call_event_handler(&mut Event::Draw);
-
+        
         self.in_redraw_cycle = false;
         /*
         if self.live_styles.style_stack.len()>0 {
@@ -716,7 +718,7 @@ impl Cx {
     
     pub fn new_signal(&mut self) -> Signal {
         self.signal_id += 1;
-        return Signal{signal_id:self.signal_id};
+        return Signal {signal_id: self.signal_id};
     }
     
     pub fn send_signal(&mut self, signal: Signal, status: StatusId) {
@@ -735,8 +737,8 @@ impl Cx {
         }
     }
     
-    pub fn send_trigger(&mut self, area:Area, trigger_id:TriggerId){
-         if let Some(triggers) = self.triggers.get_mut(&area) {
+    pub fn send_trigger(&mut self, area: Area, trigger_id: TriggerId) {
+        if let Some(triggers) = self.triggers.get_mut(&area) {
             if !triggers.contains(&trigger_id) {
                 triggers.insert(trigger_id);
             }
@@ -745,7 +747,7 @@ impl Cx {
             let mut new_set = BTreeSet::new();
             new_set.insert(trigger_id);
             self.triggers.insert(area, new_set);
-        }    
+        }
     }
     
     pub fn call_signals_and_triggers(&mut self)
@@ -765,7 +767,7 @@ impl Cx {
                 break
             }
         }
-
+        
         let mut counter = 0;
         while self.triggers.len() != 0 {
             counter += 1;
@@ -781,7 +783,7 @@ impl Cx {
                 break
             }
         }
-
+        
     }
     /*
     pub fn call_live_recompile_event(&mut self, changed_live_bodies: BTreeSet<LiveBodyId>, errors: Vec<LiveBodyError>)
@@ -794,45 +796,78 @@ impl Cx {
     
     pub fn status_http_send_ok() -> StatusId {uid!()}
     pub fn status_http_send_fail() -> StatusId {uid!()}
-
-
-    pub fn profile_start(&mut self, id:u64){
+    
+    
+    pub fn profile_start(&mut self, id: u64) {
         self.profiles.insert(id, Instant::now());
     }
     
-    pub fn profile_end(&self, id:u64){
-        if let Some(inst) = self.profiles.get(&id){
-            log!("Profile {} time {}", id, (inst.elapsed().as_nanos() as f64)/1000000f64);
+    pub fn profile_end(&self, id: u64) {
+        if let Some(inst) = self.profiles.get(&id) {
+            log!("Profile {} time {}", id, (inst.elapsed().as_nanos() as f64) / 1000000f64);
         }
     }
     
-    pub fn debug_draw_tree_recur(&mut self, dump_instances: bool, s: &mut String, view_id: usize, depth: usize) {
+    pub fn debug_draw_tree(&self, dump_instances: bool) {
+        let mut s = String::new();
+        self.debug_draw_tree_recur(dump_instances, &mut s, 0, 0);
+        println!("{}", s);
+    }
+    
+    pub fn debug_draw_tree_recur(&self, dump_instances: bool, s: &mut String, view_id: usize, depth: usize) {
         if view_id >= self.views.len() {
             writeln!(s, "---------- Drawlist still empty ---------").unwrap();
             return
         }
         let mut indent = String::new();
         for _i in 0..depth {
-            indent.push_str("  ");
+            indent.push_str("|   ");
         }
         let draw_items_len = self.views[view_id].draw_items_len;
         if view_id == 0 {
             writeln!(s, "---------- Begin Debug draw tree for redraw_id: {} ---------", self.redraw_id).unwrap();
         }
-        writeln!(s, "{}view {}: len:{} rect:{:?} scroll:{:?}", indent, view_id, draw_items_len, self.views[view_id].rect, self.views[view_id].get_local_scroll()).unwrap();
+        let rect = self.views[view_id].rect;
+        let scroll = self.views[view_id].get_local_scroll();
+        writeln!(
+            s,
+            "{}{} {}: len:{} rect:({}, {}, {}, {}) scroll:({}, {})",
+            indent,
+            self.views[view_id].debug_id,
+            view_id,
+            draw_items_len,
+            rect.pos.x,
+            rect.pos.y,
+            rect.size.x,
+            rect.size.y,
+            scroll.x,
+            scroll.y
+        ).unwrap();
         indent.push_str("  ");
+        let mut indent = String::new();
+        for _i in 0..depth+1 {
+            indent.push_str("|   ");
+        }
         for draw_item_id in 0..draw_items_len {
-            if let Some(sub_view_id) = self.views[view_id].draw_items[draw_item_id].sub_view_id{
-                
+            if let Some(sub_view_id) = self.views[view_id].draw_items[draw_item_id].sub_view_id {
                 self.debug_draw_tree_recur(dump_instances, s, sub_view_id, depth + 1);
             }
             else {
-                let cxview = &mut self.views[view_id];
-                let draw_call = cxview.draw_items[draw_item_id].draw_call.as_mut().unwrap();
+                let cxview = &self.views[view_id];
+                let draw_call = cxview.draw_items[draw_item_id].draw_call.as_ref().unwrap();
                 let sh = &self.draw_shaders[draw_call.draw_shader.draw_shader_id];
                 let slots = sh.mapping.instances.total_slots;
                 let instances = draw_call.instances.as_ref().unwrap().len() / slots;
-                writeln!(s, "{}call {}: {}({}) *:{} scroll:{}", indent, draw_item_id, sh.name, draw_call.draw_shader.draw_shader_id, instances, draw_call.get_local_scroll()).unwrap();
+                writeln!(
+                    s,
+                    "{}{}({}) sid:{} inst:{} scroll:{}",
+                    indent,
+                    sh.field,
+                    sh.type_name,
+                    draw_call.draw_shader.draw_shader_id,
+                    instances,
+                    draw_call.get_local_scroll()
+                ).unwrap();
                 // lets dump the instance geometry
                 if dump_instances {
                     for inst in 0..instances.min(1) {
@@ -872,24 +907,24 @@ macro_rules!uid {
 macro_rules!main_app {
     ( $ app: ident) => {
         #[cfg(not(target_arch = "wasm32"))]
-        fn main(){
+        fn main() {
             //TODO do this with a macro to generate both entrypoints for App and Cx
             let mut cx = Cx::default();
             cx.live_register();
             live_register(&mut cx);
-            $app :: live_register(&mut cx);
+            $ app ::live_register(&mut cx);
             cx.live_expand();
             let mut app = None;
             cx.event_loop( | cx, mut event | {
-                if let Event::Construct = event{
-                    app = Some($ app::new_app(cx));
+                if let Event::Construct = event {
+                    app = Some( $ app::new_app(cx));
                 }
                 else if let Event::Draw = event {
-                    app.as_mut().unwrap().draw_app(cx);
+                    app.as_mut().unwrap().draw(cx);
                     cx.after_draw();
                     return
                 }
-                app.as_mut().unwrap().handle_app(cx, &mut event);
+                app.as_mut().unwrap().handle_event(cx, &mut event);
             });
         }
         
@@ -899,7 +934,7 @@ macro_rules!main_app {
             let mut cx = Box::new(Cx::default());
             cx.live_register();
             live_register(&mut cx);
-            $app :: live_register(&mut cx);
+            $ app ::live_register(&mut cx);
             cx.live_expand();
             Box::into_raw(Box::new((0, Box::into_raw(cx)/*, Box::into_raw(cxafterdraw)*/))) as u32
         }
@@ -909,15 +944,15 @@ macro_rules!main_app {
         pub unsafe extern "C" fn process_to_wasm(appcx: u32, msg_bytes: u32) -> u32 {
             let appcx = &*(appcx as *mut (*mut $ app, *mut Cx/*, *mut CxAfterDraw*/));
             (*appcx.1).process_to_wasm(msg_bytes, | cx, mut event | {
-                if let Event::Construct = event{
-                    (*appcx.0) = Box::new($ app::new_app(&mut cx));
+                if let Event::Construct = event {
+                    (*appcx.0) = Box::new( $ app::new_app(&mut cx));
                 }
                 else if let Event::Draw = event {
-                    (*appcx.0).draw_app(cx);
-                     cx.after_draw();
+                    (*appcx.0).draw(cx);
+                    cx.after_draw();
                     return;
                 };
-                (*appcx.0).handle_app(cx, &mut event);
+                (*appcx.0).handle_event(cx, &mut event);
             })
         }
     }

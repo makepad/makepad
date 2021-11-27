@@ -2,10 +2,10 @@ use crate::cx::*;
 
 live_register!{
     use crate::shader_std::*;
-    
+    //TextStyle:{}
+    //Wrapping:{}
     DrawText: {{DrawText}} {
         //debug: true;
-        
         wrapping: Wrapping::None
         text_style: {
             font: {
@@ -109,6 +109,7 @@ live_register!{
 }
 
 #[derive(Clone, LiveComponent, LiveApply, LiveCast)]
+#[live_type_kind(Object)]
 pub struct TextStyle {
     #[live()] pub font: Font,
     #[live(8.0)] pub font_size: f32,
@@ -120,6 +121,7 @@ pub struct TextStyle {
 }
 
 #[derive(Debug, Copy, LiveComponent, LiveApply, Clone, LiveCast)]
+#[live_type_kind(Object)]
 pub enum Wrapping {
     #[pick] Char,
     #[live] Word,

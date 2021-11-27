@@ -21,7 +21,6 @@ pub struct Animator {
     pub start_time: Option<f64>,
     pub next_frame: NextFrame,
     pub play: Option<Play>,
-    pub live_ptr: Option<LivePtr>,
     pub state: Option<Vec<LiveNode >>,
 }
 
@@ -196,14 +195,14 @@ impl Animator {
         }
     }
     
-    pub fn cut_to_live(&mut self, cx: &mut Cx, state_id: Id) {
+    pub fn cut_to_live(&mut self, cx: &mut Cx, live_ptr:LivePtr/*, state_id: Id*/) {
         let live_registry_rc = cx.live_registry.clone();
         let live_registry = live_registry_rc.borrow();
-        let (nodes, index) = live_registry.ptr_to_nodes_index(self.live_ptr.unwrap());
+        let (nodes, index) = live_registry.ptr_to_nodes_index(live_ptr);
         
-        if let Ok(index) = nodes.child_by_name(index, state_id) {
-            self.cut_to(cx, state_id, index, nodes);
-        }
+        //if let Ok(index) = nodes.child_by_name(index, state_id) {
+        self.cut_to(cx, nodes[index].id, index, nodes);
+        //}
     }
     
     // hard cut / initialisate the state to a certain state
@@ -258,19 +257,20 @@ impl Animator {
         }
     }
     
-    pub fn animate_to_live(&mut self, cx: &mut Cx, state_id: Id) {
+    pub fn animate_to_live(&mut self, cx: &mut Cx, live_ptr:LivePtr/*,state_id: Id*/) {
         let live_registry_rc = cx.live_registry.clone();
         let live_registry = live_registry_rc.borrow();
-        let (to_nodes, to_root_index) = live_registry.ptr_to_nodes_index(self.live_ptr.unwrap());
-        self.animate_to(cx, state_id, to_root_index, to_nodes)
+        let (nodes, index) = live_registry.ptr_to_nodes_index(live_ptr);
+        self.animate_to(cx, nodes[index].id, index, nodes)
     }
 
-    pub fn animate_to(&mut self, cx: &mut Cx, state_id: Id, to_root_index:usize, to_nodes:&[LiveNode]) {
+    pub fn animate_to(&mut self, cx: &mut Cx, state_id: Id, to_index:usize, to_nodes:&[LiveNode]) {
         
         let state_nodes = self.state.as_mut().unwrap();
         
         let mut state_index = 0;
-        let mut to_index = to_nodes.child_by_name(to_root_index, state_id).unwrap();
+        let mut to_index = to_index;
+        //let mut to_index = to_nodes.child_by_name(to_root_index, state_id).unwrap();
         let mut stack_depth = 0;
         
 

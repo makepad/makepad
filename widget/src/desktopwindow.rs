@@ -8,6 +8,8 @@ live_register!{
         clear_color: #1e1e1e
         caption_bg: {color: #3d3d3d}
         caption: "Desktop Window",
+        main_view:{},
+        inner_view:{},
         caption_view: {
             layout: {
                 walk: {
@@ -27,8 +29,8 @@ pub struct DesktopWindow {
     #[rust] pub caption_size: Vec2,
     
     #[live] pub window: Window,
-    #[live] pub caption_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
     #[live] pub main_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
+    #[live] pub caption_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
     #[live] pub inner_view: View,
     
     #[live] pub clear_color: Vec4,
@@ -150,7 +152,7 @@ impl DesktopWindow {
         if !self.main_view.view_will_redraw(cx) {
             return Err(())
         }
-        
+
         self.window.begin_window(cx);
         
         self.pass.begin_pass(cx);

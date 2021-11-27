@@ -306,11 +306,12 @@ impl CxDrawFontAtlas {
         
         let atlas_texture = Texture::new(cx);
         cx.fonts_atlas.texture_id = atlas_texture.texture_id;
-
-        let draw_trapezoid_text = DrawTrapezoidText::new_from_doc(
+        
+        let draw_trapezoid_text = DrawTrapezoidText::new_from_module_path_id(
             cx,
-            cx.live_registry.clone().borrow().module_path_str_id_to_doc(&module_path!(), id!(DrawTrapezoidText)).unwrap()
-        );
+            &module_path!(),
+            id!(DrawTrapezoidText)
+        ).unwrap();
         
         // ok we need to initialize drawtrapezoidtext from a live pointer.
         Self {

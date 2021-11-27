@@ -18,7 +18,6 @@ live_register!{
 }
 main_app!(App);
 
-
 #[derive(LiveComponent, LiveApply, LiveCast)]
 pub struct App {
     #[live] frame: Frame,
@@ -37,7 +36,7 @@ impl App {
         Self::new_from_doc(cx, get_local_doc!(cx, id!(App)))
     }
     
-    pub fn handle_app(&mut self, cx: &mut Cx, event: &mut Event) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
         self.desktop_window.handle_desktop_window(cx, event);
         self.scroll_view.handle_scroll_view(cx, event);
         if let Event::Construct = event{
@@ -63,7 +62,7 @@ impl App {
         }
     }
     
-    pub fn draw_app(&mut self, cx: &mut Cx) {
+    pub fn draw(&mut self, cx: &mut Cx) {
         if self.desktop_window.begin_desktop_window(cx, None).is_err() {
             return;
         }
@@ -72,7 +71,6 @@ impl App {
             if let Some(button) = get_component!(id!(b1), Button, self.frame) {
                 button.label = "Btn1 label override".to_string();
             }
-            println!("DRAW");
             //cx.profile_start(1);
             self.frame.draw_frame(cx);
             //cx.profile_end(1);
@@ -81,5 +79,6 @@ impl App {
         }
         
         self.desktop_window.end_desktop_window(cx);
+        cx.debug_draw_tree(false);
     }
 }

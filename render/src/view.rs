@@ -37,6 +37,16 @@ impl LiveNew for View {
             view_id,
         }
     }
+    
+    fn live_type_info() -> LiveTypeInfo{
+        LiveTypeInfo {
+            module_path: ModulePath::from_str(&module_path!()).unwrap(),
+            live_type: Self::live_type(),
+            fields: Vec::new(),
+            kind: LiveTypeKind::Object,
+            type_name: Id::from_str("View").unwrap()
+        }
+    }
 }
 
 impl LiveComponent for View {
@@ -47,7 +57,7 @@ impl LiveComponent for View {
             cx.apply_error_wrong_type_for_struct(apply_from, start_index, nodes, id!(View));
             return nodes.skip_node(start_index);
         }
-        
+        cx.views[self.view_id].debug_id = nodes[start_index].id;
         let mut index = start_index + 1;
         loop {
             if nodes[index].value.is_close() {
@@ -55,12 +65,13 @@ impl LiveComponent for View {
                 break;
             }
             match nodes[index].id {
+                id!(debug_id) => cx.views[self.view_id].debug_id = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
                 id!(is_clipped) => cx.views[self.view_id].is_clipped = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
                 id!(is_overlay) => cx.views[self.view_id].is_overlay = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
                 id!(always_redraw) => cx.views[self.view_id].always_redraw = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
                 id!(layout) => cx.views[self.view_id].layout = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
                 _=> {
-                    cx.apply_error_no_matching_value(apply_from, index, nodes);
+                    cx.apply_error_no_matching_field(apply_from, index, nodes);
                     index = nodes.skip_node(index);
                 }
             }
@@ -243,11 +254,11 @@ impl View {
     }
     
     pub fn redraw_view(&self, cx: &mut Cx) {
-        cx.redraw_view(self.area());
+        cx.redraw_view_of(self.area());
     }
     
     pub fn redraw_view_and_children(&self, cx: &mut Cx) {
-        cx.redraw_view_and_children(self.area());
+        cx.redraw_view_and_children_of(self.area());
     }
     
     pub fn area(&self) -> Area {
@@ -584,6 +595,8 @@ pub enum CxViewDebug {
 
 #[derive(Default, Clone)]
 pub struct CxView {
+    pub debug_id: Id,
+    
     pub alloc_generation: u64,
     
     pub codeflow_parent_id: Option<usize>, // the id of the parent we nest in, codeflow wise
