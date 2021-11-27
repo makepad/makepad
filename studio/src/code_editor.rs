@@ -19,14 +19,6 @@ use {
 
 live_register!{
     CodeEditor: {{CodeEditor}}{
-        drag_quad:{
-            draw_depth: 10.0
-            color:#FFFFFF80
-        }
-        draw_view:{
-            is_overlay: true
-        }
-        
         selection_color: #294e75
         text_color_comment: #638d54
         text_color_identifier: #d4d4d4

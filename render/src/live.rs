@@ -157,16 +157,13 @@ pub trait LiveNew: LiveComponent {
         ret
     }
     
-    fn new_from_ptr_id(cx: &mut Cx, live_ptr:LivePtr, id:Id) -> Option<Self> where Self: Sized {
+    fn new_from_ptr(cx: &mut Cx, live_ptr:LivePtr) -> Self where Self: Sized {
         let live_registry_rc = cx.live_registry.clone();
         let live_registry = live_registry_rc.borrow();
         let doc = live_registry.ptr_to_doc(live_ptr);
-        if let Ok(index) = doc.nodes.child_by_name(live_ptr.index as usize,id){
-            let mut ret = Self::new(cx);
-            ret.apply(cx, ApplyFrom::NewFromDoc{file_id:live_ptr.file_id}, index, &doc.nodes);
-            return Some(ret)
-        }
-        None
+        let mut ret = Self::new(cx);
+        ret.apply(cx, ApplyFrom::NewFromDoc{file_id:live_ptr.file_id}, live_ptr.index as usize, &doc.nodes);
+        return ret
     }
     
     fn new_from_module_path_id(cx: &mut Cx, module_path: &str, id:Id) -> Option<Self> where Self: Sized {
@@ -244,9 +241,13 @@ impl ApplyFrom {
 
 pub trait LiveApply {
     fn apply_value_unknown(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
-        if nodes[index].value.is_value_type() {
-            cx.apply_error_no_matching_field(apply_from, index, nodes);
+        if let ApplyFrom::Animate = apply_from{
+            if nodes[index].id == id!(from){
+                return nodes.skip_node(index)
+            }
         }
+        cx.apply_error_no_matching_field(apply_from, index, nodes);
+        //}
         nodes.skip_node(index)
     }
     fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {}
