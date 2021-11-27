@@ -1,10 +1,11 @@
-#![allow(unused_variables)]
-use crate::id::Id;
-use crate::id::ModulePath;
-use crate::id::LivePtr;
-use crate::token::TokenId;
-use crate::math::{Vec2, Vec3, Vec4};
-use std::fmt::Write;
+use{
+    std::fmt::Write,
+    crate::{
+        liveid::{LiveId, LiveModuleId, LivePtr},
+        token::TokenId,
+        math::{Vec2, Vec3, Vec4},
+    }
+};
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Copy, Hash)]
 pub struct LiveType(pub core::any::TypeId);
@@ -21,15 +22,15 @@ pub enum LiveTypeKind {
 #[derive(Clone)]
 pub struct LiveTypeInfo {
     pub live_type: LiveType,
-    pub type_name: Id,
-    pub module_path: ModulePath,
+    pub type_name: LiveId,
+    pub module_id: LiveModuleId,
     pub kind: LiveTypeKind,
     pub fields: Vec<LiveTypeField>
 }
 
 #[derive(Clone)]
 pub struct LiveTypeField {
-    pub id: Id,
+    pub id: LiveId,
     pub live_type_info: LiveTypeInfo,
     pub live_field_kind: LiveFieldKind
 }
@@ -44,7 +45,7 @@ pub enum LiveFieldKind {
 #[derive(Clone, Debug, PartialEq)]
 pub struct LiveNode { // 40 bytes. Don't really see ways to compress
     pub token_id: Option<TokenId>,
-    pub id: Id,
+    pub id: LiveId,
     pub value: LiveValue,
 }
 
@@ -67,16 +68,16 @@ pub enum LiveValue {
     Vec2(Vec2),
     Vec3(Vec3),
     Vec4(Vec4),
-    Id(Id),
+    Id(LiveId),
     
     // enum thing
-    BareEnum {base: Id, variant: Id},
+    BareEnum {base: LiveId, variant: LiveId},
     // tree items
     Array,
-    TupleEnum {base: Id, variant: Id},
-    NamedEnum {base: Id, variant: Id},
+    TupleEnum {base: LiveId, variant: LiveId},
+    NamedEnum {base: LiveId, variant: LiveId},
     Object,
-    Clone(Id),
+    Clone(LiveId),
     Class{live_type:LiveType, class_parent:Option<LivePtr>},
     Close,
     
@@ -87,7 +88,7 @@ pub enum LiveValue {
         scope_start: u32,
         scope_count: u32
     },
-    Use (ModulePath),
+    Use (LiveModuleId),
 }
 
 #[derive(Debug)]
@@ -282,7 +283,7 @@ impl LiveValue {
         }
     }*/
     
-    pub fn enum_base_id(&self) -> Option<Id> {
+    pub fn enum_base_id(&self) -> Option<LiveId> {
         match self {
             Self::BareEnum {base, ..} => Some(*base),
             Self::TupleEnum {base, ..} => Some(*base),
@@ -300,17 +301,17 @@ impl LiveValue {
         }
     }
     
-    pub fn set_clone_name(&mut self, name: Id) {
+    pub fn set_clone_name(&mut self, name: LiveId) {
         match self {
             Self::Clone(clone) => *clone = name,
             _ => ()
         }
     }
     
-    pub fn get_clone_name(&self) -> Id {
+    pub fn get_clone_name(&self) -> LiveId {
         match self {
             Self::Clone(clone) => *clone,
-            _ => Id(0)
+            _ => LiveId(0)
         }
     }
     
@@ -354,8 +355,8 @@ pub trait LiveNodeSlice {
     fn child_range(&self, parent_index: usize) -> (usize, usize);
     fn next_child(&self, child_index: usize) -> Option<usize>;
     fn child_by_number(&self, parent_index: usize, child_number: usize) -> Option<usize>;
-    fn child_by_name(&self, parent_index: usize, name: Id) -> Result<usize, usize>;
-    fn scope_up_by_name(&self, parent_index: usize, name: Id) -> Option<usize>;
+    fn child_by_name(&self, parent_index: usize, name: LiveId) -> Result<usize, usize>;
+    fn scope_up_by_name(&self, parent_index: usize, name: LiveId) -> Option<usize>;
     fn count_children(&self, parent_index: usize) -> usize;
     fn skip_node(&self, node_index: usize) -> usize;
     fn clone_child(&self, parent_index: usize, out_vec: &mut Vec<LiveNode>);
@@ -371,24 +372,24 @@ pub trait LiveNodeVec {
     fn clone_children_self(&mut self, from_index: usize, insert_start: Option<usize>) -> bool;
     
     fn push_live(&mut self, v: &[LiveNode]);
-    fn push_str(&mut self, id: Id, v: &'static str);
-    fn push_string(&mut self, id: Id, v: &str);
-    fn push_bool(&mut self, id: Id, v: bool);
-    fn push_int(&mut self, id: Id, v: i64);
-    fn push_float(&mut self, id: Id, v: f64);
-    fn push_color(&mut self, id: Id, v: u32);
-    fn push_vec2(&mut self, id: Id, v: Vec2);
-    fn push_vec3(&mut self, id: Id, v: Vec3);
-    fn push_vec4(&mut self, id: Id, v: Vec4);
-    fn push_id(&mut self, id: Id, v: Id);
-    fn push_bare_enum(&mut self, id: Id, base:Id, variant:Id);
+    fn push_str(&mut self, id: LiveId, v: &'static str);
+    fn push_string(&mut self, id: LiveId, v: &str);
+    fn push_bool(&mut self, id: LiveId, v: bool);
+    fn push_int(&mut self, id: LiveId, v: i64);
+    fn push_float(&mut self, id: LiveId, v: f64);
+    fn push_color(&mut self, id: LiveId, v: u32);
+    fn push_vec2(&mut self, id: LiveId, v: Vec2);
+    fn push_vec3(&mut self, id: LiveId, v: Vec3);
+    fn push_vec4(&mut self, id: LiveId, v: Vec4);
+    fn push_id(&mut self, id: LiveId, v: LiveId);
+    fn push_bare_enum(&mut self, id: LiveId, base:LiveId, variant:LiveId);
     
-    fn open_tuple_enum(&mut self, id: Id, base:Id, variant:Id);
-    fn open_named_enum(&mut self, id: Id, base:Id, variant:Id);
-    fn open_object(&mut self, id: Id);
-    fn open_clone(&mut self, id: Id, clone:Id);
+    fn open_tuple_enum(&mut self, id: LiveId, base:LiveId, variant:LiveId);
+    fn open_named_enum(&mut self, id: LiveId, base:LiveId, variant:LiveId);
+    fn open_object(&mut self, id: LiveId);
+    fn open_clone(&mut self, id: LiveId, clone:LiveId);
     //fn push_class(&mut self, id: Id, v:LiveType);
-    fn open_array(&mut self, id: Id);
+    fn open_array(&mut self, id: LiveId);
 
     fn open(&mut self);
     fn close(&mut self);
@@ -424,7 +425,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         Some(0)
     }
     
-    fn scope_up_by_name(&self, index: usize, name: Id) -> Option<usize> {
+    fn scope_up_by_name(&self, index: usize, name: LiveId) -> Option<usize> {
         let self_ref = self.as_ref();
         if self_ref.len() == 0 {
             return None
@@ -535,7 +536,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         let self_ref = self.as_ref();
         let mut stack_depth = 0;
         let mut index = parent_index;
-        let mut child_count = 0;
+        //let mut child_count = 0;
         let mut found_child = None;
         if !self_ref[index].value.is_open() {
             panic!()
@@ -544,7 +545,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
             if self_ref[index].value.is_open() {
                 if stack_depth == 1 {
                     found_child = Some(index);
-                    child_count += 1;
+                    //child_count += 1;
                 }
                 stack_depth += 1;
             }
@@ -557,7 +558,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
             else {
                 if stack_depth == 1 {
                     found_child = Some(index);
-                    child_count += 1;
+                    //child_count += 1;
                 }
                 else if stack_depth == 0 {
                     panic!()
@@ -573,7 +574,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         let self_ref = self.as_ref();
         let mut stack_depth = 0;
         let mut index = parent_index;
-        let mut child_count = 0;
+        //let mut child_count = 0;
         let mut first_child = None;
         if !self_ref[index].value.is_open() {
             panic!()
@@ -584,7 +585,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
                     if first_child.is_none() {
                         first_child = Some(index)
                     }
-                    child_count += 1;
+                    //child_count += 1;
                 }
                 stack_depth += 1;
             }
@@ -602,7 +603,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
                     if first_child.is_none() {
                         first_child = Some(index)
                     }
-                    child_count += 1;
+                    //child_count += 1;
                 }
                 else if stack_depth == 0 {
                     panic!()
@@ -635,7 +636,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         index
     }
     
-    fn child_by_name(&self, parent_index: usize, child_name: Id) -> Result<usize, usize> {
+    fn child_by_name(&self, parent_index: usize, child_name: LiveId) -> Result<usize, usize> {
         let self_ref = self.as_ref();
         let mut stack_depth = 0;
         let mut index = parent_index;
@@ -645,7 +646,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         while index < self_ref.len() {
             if self_ref[index].value.is_open() {
                 if stack_depth == 1 {
-                    if child_name != Id::empty() && self_ref[index].id == child_name {
+                    if child_name != LiveId::empty() && self_ref[index].id == child_name {
                         return Ok(index);
                     }
                 }
@@ -659,7 +660,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
             }
             else {
                 if stack_depth == 1 {
-                    if child_name != Id::empty() && self_ref[index].id == child_name {
+                    if child_name != LiveId::empty() && self_ref[index].id == child_name {
                         return Ok(index);
                     }
                 }
@@ -1038,9 +1039,9 @@ impl LiveNodeVec for Vec<LiveNode> {
 
     fn push_live(&mut self, v: &[LiveNode]){self.extend_from_slice(v)}
     
-    fn push_str(&mut self, id: Id, v: &'static str){self.push(LiveNode{token_id:None, id, value:LiveValue::Str(v)})}
-    fn push_string(&mut self, id: Id, v: &str){
-        let bytes = v.as_bytes();
+    fn push_str(&mut self, id: LiveId, v: &'static str){self.push(LiveNode{token_id:None, id, value:LiveValue::Str(v)})}
+    fn push_string(&mut self, id: LiveId, v: &str){
+        //let bytes = v.as_bytes();
         if let Some(inline_str) = InlineString::from_str(v) {
             self.push(LiveNode{token_id:None, id, value:LiveValue::InlineString(inline_str)});
         }
@@ -1048,23 +1049,23 @@ impl LiveNodeVec for Vec<LiveNode> {
             self.push(LiveNode{token_id:None, id, value:LiveValue::FittedString(FittedString::from_string(v.to_string()))});
         }        
     }
-    fn push_bool(&mut self, id: Id, v: bool){self.push(LiveNode{token_id:None, id, value:LiveValue::Bool(v)})}
-    fn push_int(&mut self, id: Id, v: i64){self.push(LiveNode{token_id:None, id, value:LiveValue::Int(v)})}
-    fn push_float(&mut self, id: Id, v: f64){self.push(LiveNode{token_id:None, id, value:LiveValue::Float(v)})}
-    fn push_color(&mut self, id: Id, v: u32){self.push(LiveNode{token_id:None, id, value:LiveValue::Color(v)})}
-    fn push_vec2(&mut self, id: Id, v: Vec2){self.push(LiveNode{token_id:None, id, value:LiveValue::Vec2(v)})}
-    fn push_vec3(&mut self, id: Id, v: Vec3){self.push(LiveNode{token_id:None, id, value:LiveValue::Vec3(v)})}
-    fn push_vec4(&mut self, id: Id, v: Vec4){self.push(LiveNode{token_id:None, id, value:LiveValue::Vec4(v)})}
-    fn push_id(&mut self, id: Id, v: Id){self.push(LiveNode{token_id:None, id, value:LiveValue::Id(v)})}
+    fn push_bool(&mut self, id: LiveId, v: bool){self.push(LiveNode{token_id:None, id, value:LiveValue::Bool(v)})}
+    fn push_int(&mut self, id: LiveId, v: i64){self.push(LiveNode{token_id:None, id, value:LiveValue::Int(v)})}
+    fn push_float(&mut self, id: LiveId, v: f64){self.push(LiveNode{token_id:None, id, value:LiveValue::Float(v)})}
+    fn push_color(&mut self, id: LiveId, v: u32){self.push(LiveNode{token_id:None, id, value:LiveValue::Color(v)})}
+    fn push_vec2(&mut self, id: LiveId, v: Vec2){self.push(LiveNode{token_id:None, id, value:LiveValue::Vec2(v)})}
+    fn push_vec3(&mut self, id: LiveId, v: Vec3){self.push(LiveNode{token_id:None, id, value:LiveValue::Vec3(v)})}
+    fn push_vec4(&mut self, id: LiveId, v: Vec4){self.push(LiveNode{token_id:None, id, value:LiveValue::Vec4(v)})}
+    fn push_id(&mut self, id: LiveId, v: LiveId){self.push(LiveNode{token_id:None, id, value:LiveValue::Id(v)})}
     
-    fn push_bare_enum(&mut self, id: Id, base:Id, variant:Id){self.push(LiveNode{token_id:None, id, value:LiveValue::BareEnum{base, variant}})}
-    fn open_tuple_enum(&mut self, id: Id, base:Id, variant:Id){self.push(LiveNode{token_id:None, id, value:LiveValue::TupleEnum{base, variant}})}
-    fn open_named_enum(&mut self, id: Id, base:Id, variant:Id){self.push(LiveNode{token_id:None, id, value:LiveValue::NamedEnum{base, variant}})}
-    fn open_object(&mut self, id: Id){self.push(LiveNode{token_id:None, id, value:LiveValue::Object})}
-    fn open_clone(&mut self, id: Id, clone:Id){self.push(LiveNode{token_id:None, id, value:LiveValue::Clone(clone)})}
-    fn open_array(&mut self, id: Id){self.push(LiveNode{token_id:None, id, value:LiveValue::Array})}
-    fn close(&mut self){self.push(LiveNode{token_id:None, id:Id(0), value:LiveValue::Close})}
-    fn open(&mut self){self.push(LiveNode{token_id:None, id:Id(0), value:LiveValue::Object})}
+    fn push_bare_enum(&mut self, id: LiveId, base:LiveId, variant:LiveId){self.push(LiveNode{token_id:None, id, value:LiveValue::BareEnum{base, variant}})}
+    fn open_tuple_enum(&mut self, id: LiveId, base:LiveId, variant:LiveId){self.push(LiveNode{token_id:None, id, value:LiveValue::TupleEnum{base, variant}})}
+    fn open_named_enum(&mut self, id: LiveId, base:LiveId, variant:LiveId){self.push(LiveNode{token_id:None, id, value:LiveValue::NamedEnum{base, variant}})}
+    fn open_object(&mut self, id: LiveId){self.push(LiveNode{token_id:None, id, value:LiveValue::Object})}
+    fn open_clone(&mut self, id: LiveId, clone:LiveId){self.push(LiveNode{token_id:None, id, value:LiveValue::Clone(clone)})}
+    fn open_array(&mut self, id: LiveId){self.push(LiveNode{token_id:None, id, value:LiveValue::Array})}
+    fn close(&mut self){self.push(LiveNode{token_id:None, id:LiveId(0), value:LiveValue::Close})}
+    fn open(&mut self){self.push(LiveNode{token_id:None, id:LiveId(0), value:LiveValue::Object})}
 
 }
 const MAX_CLONE_STACK_DEPTH_SAFETY: usize = 100;

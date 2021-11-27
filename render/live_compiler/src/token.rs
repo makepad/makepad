@@ -1,7 +1,10 @@
-use crate::id::Id;
-use crate::id::FileId;
-use crate::span::Span;
-use std::fmt;
+use{
+    std::fmt,
+    crate::{
+        liveid::{LiveId, LiveFileId},
+        span::Span
+    }
+};
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TokenWithSpan {
@@ -19,8 +22,8 @@ impl fmt::Display for TokenWithSpan {
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Token {
     Eof,
-    Punct(Id),
-    Ident(Id),
+    Punct(LiveId),
+    Ident(LiveId),
     OpenParen,
     OpenBrace,
     OpenBracket,
@@ -56,7 +59,7 @@ impl fmt::Display for Token {
 }
 
 impl TokenId {
-    pub fn new(file_id: FileId, token: usize)->Self{
+    pub fn new(file_id: LiveFileId, token: usize)->Self{
         TokenId(
             (((file_id.to_index() as u32) & 0x0fff) << 20) |
             ((token as u32) & 0xfffff) 
@@ -67,8 +70,8 @@ impl TokenId {
         (self.0&0xfffff) as usize
     }
     
-    pub fn file_id(&self)->FileId{
-        FileId(((self.0>>20)&0xfff) as u16)
+    pub fn file_id(&self)->LiveFileId{
+        LiveFileId(((self.0>>20)&0xfff) as u16)
     }
 }
 

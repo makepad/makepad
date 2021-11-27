@@ -1,8 +1,14 @@
-use proc_macro::{TokenStream, Span, Delimiter};
-use crate::macro_lib::*;
-use std::fmt::Write;
+use {
+    proc_macro::{
+        TokenStream,
+        Span,
+        Delimiter
+    },
+    crate::macro_lib::*,
+    std::fmt::Write
+};
 
-pub fn live_register_impl(input:TokenStream)->TokenStream{
+pub fn live_register_impl(input: TokenStream) -> TokenStream {
     let mut parser = TokenParser::new(input);
     let mut tb = TokenBuilder::new();
     if let Some(span) = parser.span() {
@@ -63,8 +69,8 @@ fn token_parser_to_whitespace_matching_string(parser: &mut TokenParser, span: Sp
             Delimiter::None => (' ', ' '),
         }
     }
-        
-        
+    
+    
     fn parse_type_ident(in_delim: Delimiter, parser: &mut TokenParser, out: &mut String, live_types: &mut Vec<TokenStream>) -> bool {
         if in_delim == Delimiter::Brace && parser.is_group_with_delim(Delimiter::Brace) {
             parser.open_group();

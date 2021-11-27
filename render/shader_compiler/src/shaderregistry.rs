@@ -22,13 +22,13 @@ pub struct ShaderRegistry {
 }
 
 pub struct ShaderEnum{
-    pub enum_name: Id,
-    pub variants:Vec<Id>
+    pub enum_name: LiveId,
+    pub variants:Vec<LiveId>
 }
 
 impl ShaderRegistry {
     pub fn new() -> Self {
-        Id::from_str("user").unwrap();
+        LiveId::from_str("user").unwrap();
         Self {
             structs: HashMap::new(),
             consts: HashMap::new(),
@@ -62,7 +62,7 @@ impl ShaderRegistry {
         self.enums.insert(live_type, shader_enum);
     }
     
-    pub fn compute_const_table(&self, draw_shader_def: &mut DrawShaderDef, filter_file_id: FileId) -> DrawShaderConstTable {
+    pub fn compute_const_table(&self, draw_shader_def: &mut DrawShaderDef, filter_file_id: LiveFileId) -> DrawShaderConstTable {
         let mut offsets = BTreeMap::new();
         let mut table = Vec::new();
         let mut offset = 0;
@@ -131,14 +131,14 @@ impl ShaderRegistry {
         None
     }
     
-    pub fn find_live_node_by_path(&self, live_registry:&LiveRegistry, base_ptr: LivePtr, ids: &[Id]) -> LiveNodeFindResult {
+    pub fn find_live_node_by_path(&self, live_registry:&LiveRegistry, base_ptr: LivePtr, ids: &[LiveId]) -> LiveNodeFindResult {
         
         
         let doc = &live_registry.ptr_to_doc(base_ptr);
 
         return walk_recur(live_registry, None, base_ptr.file_id, base_ptr.index as usize, &doc.nodes, ids);
         // ok so we got a node. great. now what
-        fn walk_recur(live_registry:&LiveRegistry, struct_ptr:Option<LivePtr>,file_id: FileId, index: usize, nodes: &[LiveNode], ids: &[Id]) -> LiveNodeFindResult {
+        fn walk_recur(live_registry:&LiveRegistry, struct_ptr:Option<LivePtr>,file_id: LiveFileId, index: usize, nodes: &[LiveNode], ids: &[LiveId]) -> LiveNodeFindResult {
             let node = &nodes[index];
             //println!("RESOLVING {:?}", ids);
     

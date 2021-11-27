@@ -1,54 +1,76 @@
-use std::collections::{HashMap, HashSet, BTreeSet};
-use std::fmt::Write;
-use std::time::{Instant};
-use std::rc::Rc;
-use std::cell::RefCell;
+use {
+    std::{
+        collections::{HashMap, HashSet, BTreeSet},
+        fmt::Write,
+        time::Instant,
+        rc::Rc,
+        cell::RefCell,
+    },
+    makepad_live_compiler::{
+        LiveType,
+        LiveRegistry
+    },
+    makepad_shader_compiler::{
+        DrawShaderPtr,
+        ShaderRegistry
+    },
+    crate::{
+        live::{
+            LiveFactory,
+        },
+        gpuinfo::GpuInfo,
+        window::{
+            CxWindow,
+            CxWindowState
+        },
+        menu::{
+            CommandId
+        },
+        pass::{
+            CxPass,
+            CxPassDepOf
+        },
+        view::CxView,
+        font::{
+            CxFont,
+            CxFontsAtlas,
+            CxDrawFontAtlas
+        },
+        texture::{
+            CxTexture,
+            TextureDesc,
+            TextureFormat
+        },
+        geometry::CxGeometry,
+        drawshader::{
+            CxDrawShader,
+            DrawShaderFingerprint,
+        },
+        turtle::Turtle,
+        area::{
+            Area,
+            ViewArea
+        },
+        cursor::{
+            MouseCursor
+        },
+        events::{
+            Event,
+            Signal,
+            SignalEvent,
+            KeyEvent,
+            KeyCode,
+            NextFrame,
+            KeyFocusEvent,
+            NextFrameEvent,
+        }
+    }
+};
 
 pub use makepad_derive_live::*;
 pub use makepad_microserde::*;
 pub use makepad_live_compiler::math::*;
-pub use makepad_shader_compiler::shaderregistry::ShaderRegistry;
-pub use makepad_shader_compiler::shaderregistry::ShaderEnum;
-pub use makepad_shader_compiler::shaderast::DrawShaderPtr;
-pub use makepad_shader_compiler::shaderast::Ty;
-pub use makepad_live_compiler::LiveRegistry;
-pub use makepad_live_compiler::LiveDocNodes;
-pub use makepad_live_compiler::Id;
-pub use makepad_live_compiler::FileId;
-pub use makepad_live_compiler::LivePtr;
-pub use makepad_live_compiler::LiveNode;
-pub use makepad_live_compiler::LiveType;
-pub use makepad_live_compiler::LiveTypeInfo;
-pub use makepad_live_compiler::LiveTypeField;
-pub use makepad_live_compiler::LiveFieldKind;
-pub use makepad_live_compiler::LiveTypeKind;
-pub use makepad_live_compiler::LiveValue;
-pub use makepad_live_compiler::FittedString;
-pub use makepad_live_compiler::InlineString;
-pub use makepad_live_compiler::ModulePath;
-pub use makepad_live_compiler::LiveNodeSlice;
-pub use makepad_live_compiler::LiveNodeVec;
 
-pub use makepad_live_compiler::id;
-pub use makepad_live_compiler::id_num;
-
-pub use crate::font::*;
-pub use crate::turtle::*;
-pub use crate::cursor::*;
-pub use crate::window::*;
-pub use crate::view::*;
-pub use crate::pass::*;
-pub use crate::geometry::*;
-pub use crate::texture::*;
-pub use crate::live::*;
-pub use crate::events::*;
-pub use crate::animation::*;
-pub use crate::area::*;
-pub use crate::menu::*;
-pub use crate::drawshader::*;
-pub use crate::geometrygen::*;
-pub use crate::gpuinfo::*;
-pub use crate::uid;
 
 #[cfg(target_os = "linux")]
 pub use crate::cx_linux::*;
@@ -150,8 +172,8 @@ pub struct Cx {
     pub next_frames: HashSet<NextFrame>,
     pub _next_frames: HashSet<NextFrame>,
     
-    pub triggers: HashMap<Area, BTreeSet<TriggerId >>,
-    pub signals: HashMap<Signal, BTreeSet<StatusId >>,
+    //pub triggers: HashMap<Area, BTreeSet<TriggerId >>,
+    pub signals: HashMap<Signal, Vec<u64>>,
     
     pub profiles: HashMap<u64, Instant>,
     
@@ -313,7 +335,7 @@ impl Default for Cx {
             
             signals: HashMap::new(),
             
-            triggers: HashMap::new(),
+            //triggers: HashMap::new(),
             
             panic_now: false,
             panic_redraw: false,
@@ -723,22 +745,20 @@ impl Cx {
         return Signal {signal_id: self.signal_id};
     }
     
-    pub fn send_signal(&mut self, signal: Signal, status: StatusId) {
+    pub fn send_signal(&mut self, signal: Signal, status: u64) {
         if signal.signal_id == 0 {
             return
         }
         if let Some(statusses) = self.signals.get_mut(&signal) {
-            if !statusses.contains(&status) {
-                statusses.insert(status);
-            }
+            statusses.push(status);
         }
         else {
-            let mut new_set = BTreeSet::new();
-            new_set.insert(status);
+            let mut new_set = Vec::new();
+            new_set.push(status);
             self.signals.insert(signal, new_set);
         }
     }
-    
+    /*
     pub fn send_trigger(&mut self, area: Area, trigger_id: TriggerId) {
         if let Some(triggers) = self.triggers.get_mut(&area) {
             if !triggers.contains(&trigger_id) {
@@ -750,9 +770,9 @@ impl Cx {
             new_set.insert(trigger_id);
             self.triggers.insert(area, new_set);
         }
-    }
+    }*/
     
-    pub fn call_signals_and_triggers(&mut self)
+    pub fn call_signals(&mut self)
     {
         let mut counter = 0;
         while self.signals.len() != 0 {
@@ -769,7 +789,7 @@ impl Cx {
                 break
             }
         }
-        
+        /*
         let mut counter = 0;
         while self.triggers.len() != 0 {
             counter += 1;
@@ -784,8 +804,7 @@ impl Cx {
                 println!("Trigger feedback loop detected");
                 break
             }
-        }
-        
+        }*/
     }
     /*
     pub fn call_live_recompile_event(&mut self, changed_live_bodies: BTreeSet<LiveBodyId>, errors: Vec<LiveBodyError>)
@@ -796,8 +815,8 @@ impl Cx {
         }));
     }*/
     
-    pub fn status_http_send_ok() -> StatusId {uid!()}
-    pub fn status_http_send_fail() -> StatusId {uid!()}
+    //pub fn status_http_send_ok() -> StatusId {uid!()}
+    //pub fn status_http_send_fail() -> StatusId {uid!()}
     
     
     pub fn profile_start(&mut self, id: u64) {
@@ -847,7 +866,7 @@ impl Cx {
         ).unwrap();
         indent.push_str("  ");
         let mut indent = String::new();
-        for _i in 0..depth+1 {
+        for _i in 0..depth + 1 {
             indent.push_str("|   ");
         }
         for draw_item_id in 0..draw_items_len {

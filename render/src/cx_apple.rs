@@ -3,10 +3,18 @@
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]
 
-pub use makepad_objc_sys::runtime::{Class, Object, Protocol, Sel, BOOL, YES, NO};
-pub use makepad_objc_sys::declare::ClassDecl;
-pub use makepad_objc_sys::{msg_send, sel,  class, sel_impl};
-pub use makepad_objc_sys::{Encode, Encoding};
+pub use {
+    makepad_objc_sys::{
+        runtime::{Class, Object, Protocol, Sel, BOOL, YES, NO},
+        declare::ClassDecl,
+        msg_send,
+        sel,
+        class,
+        sel_impl,
+        Encode,
+        Encoding
+    }
+};
 //use bitflags::bitflags;
 
 pub type ObjcId = *mut makepad_objc_sys::runtime::Object;
@@ -22,7 +30,7 @@ extern {
 #[link(name = "AppKit", kind = "framework")]
 extern {
     pub static NSPasteboardURLReadingFileURLsOnlyKey: ObjcId;
-
+    
     pub static NSStringPboardType: ObjcId;
     pub static NSPasteboardTypeFileURL: ObjcId;
 }
@@ -44,7 +52,7 @@ extern "C" {
 pub fn get_default_metal_device() -> Option<ObjcId> {
     unsafe {
         let dev = MTLCreateSystemDefaultDevice();
-        if dev == nil{None} else {Some(dev)}
+        if dev == nil {None} else {Some(dev)}
     }
 }
 
@@ -194,7 +202,7 @@ unsafe impl Encode for NSRect {
 #[repr(u64)] // NSUInteger
 pub enum NSEventModifierFlags {
     NSAlphaShiftKeyMask = 1 << 16,
-    NSShiftKeyMask= 1 << 17,
+    NSShiftKeyMask = 1 << 17,
     NSControlKeyMask = 1 << 18,
     NSAlternateKeyMask = 1 << 19,
     NSCommandKeyMask = 1 << 20,
@@ -249,7 +257,7 @@ pub enum NSEventType {
 }
 
 #[repr(u64)] // NSUInteger
-pub enum NSEventMask{
+pub enum NSEventMask {
     NSLeftMouseDownMask = 1 << NSEventType::NSLeftMouseDown as u64,
     NSLeftMouseUpMask = 1 << NSEventType::NSLeftMouseUp as u64,
     NSRightMouseDownMask = 1 << NSEventType::NSRightMouseDown as u64,
@@ -283,7 +291,7 @@ pub enum NSEventMask{
 }
 
 #[repr(u64)] // NSUInteger
-pub enum NSWindowStyleMask{
+pub enum NSWindowStyleMask {
     NSBorderlessWindowMask = 0,
     NSTitledWindowMask = 1 << 0,
     NSClosableWindowMask = 1 << 1,
@@ -594,17 +602,17 @@ pub const MTLResourceHazardTrackingModeMask: u64 = 0x3 << MTLResourceHazardTrack
 
 #[allow(non_upper_case_globals)]
 pub struct MTLResourceOptions;
-impl MTLResourceOptions{
-    pub const CPUCacheModeDefaultCache:u64  = (MTLCPUCacheMode::DefaultCache as u64) << MTLResourceCPUCacheModeShift;
-    pub const CPUCacheModeWriteCombined:u64 = (MTLCPUCacheMode::WriteCombined as u64) << MTLResourceCPUCacheModeShift;
-
-    pub const HazardTrackingModeUntracked:u64 = (MTLHazardTrackingMode::Untracked as u64) << MTLResourceHazardTrackingModeShift;
-    pub const HazardTrackingModeTracked:u64 = (MTLHazardTrackingMode::Tracked as u64) << MTLResourceHazardTrackingModeShift;
-
-    pub const StorageModeShared:u64  = (MTLStorageMode::Shared as u64)  << MTLResourceStorageModeShift;
-    pub const StorageModeManaged:u64 = (MTLStorageMode::Managed as u64) << MTLResourceStorageModeShift;
-    pub const StorageModePrivate:u64 = (MTLStorageMode::Private as u64) << MTLResourceStorageModeShift;
-    pub const StorageModeMemoryless:u64 = (MTLStorageMode::Memoryless as u64) << MTLResourceStorageModeShift;
+impl MTLResourceOptions {
+    pub const CPUCacheModeDefaultCache: u64 = (MTLCPUCacheMode::DefaultCache as u64) << MTLResourceCPUCacheModeShift;
+    pub const CPUCacheModeWriteCombined: u64 = (MTLCPUCacheMode::WriteCombined as u64) << MTLResourceCPUCacheModeShift;
+    
+    pub const HazardTrackingModeUntracked: u64 = (MTLHazardTrackingMode::Untracked as u64) << MTLResourceHazardTrackingModeShift;
+    pub const HazardTrackingModeTracked: u64 = (MTLHazardTrackingMode::Tracked as u64) << MTLResourceHazardTrackingModeShift;
+    
+    pub const StorageModeShared: u64 = (MTLStorageMode::Shared as u64) << MTLResourceStorageModeShift;
+    pub const StorageModeManaged: u64 = (MTLStorageMode::Managed as u64) << MTLResourceStorageModeShift;
+    pub const StorageModePrivate: u64 = (MTLStorageMode::Private as u64) << MTLResourceStorageModeShift;
+    pub const StorageModeMemoryless: u64 = (MTLStorageMode::Memoryless as u64) << MTLResourceStorageModeShift;
 }
 
 #[repr(u64)]
@@ -618,6 +626,6 @@ pub enum NSDragOperation {
 unsafe impl Encode for NSDragOperation {
     fn encode() -> Encoding {
         let encoding = format!("Q");
-        unsafe { Encoding::from_str(&encoding) }
+        unsafe {Encoding::from_str(&encoding)}
     }
 }

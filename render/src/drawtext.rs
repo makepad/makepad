@@ -1,4 +1,19 @@
-use crate::cx::*;
+use {
+    makepad_live_compiler::*,
+    makepad_derive_live::*,
+    makepad_shader_compiler::{
+        ShaderTy,
+    },
+    crate::{
+        cx::Cx,
+        live::*,
+        turtle::{Walk, Width, Height, Margin},
+        font::{CxFontsAtlasTodo, Font,},
+        view::ManyInstances,
+        drawshader::DrawVars,
+        geometrygen::GeometryQuad2D,
+    },
+};
 
 live_register!{
     use crate::shader_std::*;
@@ -443,10 +458,10 @@ impl DrawText {
         let scroll_pos = area.get_scroll_pos(cx);
         let spos = Vec2 {x: pos.x + scroll_pos.x, y: pos.y + scroll_pos.y};
         
-        let base = area.get_read_ref(cx, id!(base), Ty::Vec2).unwrap();
-        let rect_size = area.get_read_ref(cx, id!(rect_size), Ty::Vec2).unwrap();
-        let font_size = area.get_read_ref(cx, id!(font_size), Ty::Float).unwrap();
-        let char_offset = area.get_read_ref(cx, id!(char_offset), Ty::Float).unwrap();
+        let base = area.get_read_ref(cx, id!(base), ShaderTy::Vec2).unwrap();
+        let rect_size = area.get_read_ref(cx, id!(rect_size), ShaderTy::Vec2).unwrap();
+        let font_size = area.get_read_ref(cx, id!(font_size), ShaderTy::Float).unwrap();
+        let char_offset = area.get_read_ref(cx, id!(char_offset), ShaderTy::Float).unwrap();
         
         let text_style = &self.text_style;
         let line_spacing = text_style.line_spacing;

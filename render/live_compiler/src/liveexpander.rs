@@ -1,17 +1,14 @@
-use crate::id::Id;
-use crate::liveerror::{LiveError, LiveErrorOrigin};
-use makepad_id_macros::*;
-use crate::livedocument::LiveDocument;
-use crate::livenode::LiveValue;
-use crate::livenode::LiveNodeSlice;
-use crate::livenode::LiveNodeVec;
-use crate::livenode::LiveTypeKind;
-use crate::id::FileId;
-use crate::id::LivePtr;
-use crate::livedocument::LiveScopeTarget;
-use crate::liveregistry::LiveRegistry;
-use crate::livedocument::LiveScopeItem;
-use std::fmt;
+use{
+    std::fmt,
+    makepad_id_macros::*,
+    crate::{
+        liveid::{LiveId, LiveFileId, LivePtr},
+        liveerror::{LiveError, LiveErrorOrigin},
+        livedocument::{LiveDocument,LiveScopeTarget, LiveScopeItem},
+        livenode::{LiveValue, LiveNodeSlice, LiveNodeVec, LiveTypeKind},
+        liveregistry::LiveRegistry
+    }
+};
 
 pub struct ScopeStack {
     pub stack: Vec<Vec<LiveScopeItem >>
@@ -31,7 +28,7 @@ impl fmt::Debug for ScopeStack {
 
 impl ScopeStack {
 
-    fn find_item(&self, id: Id) -> Option<LiveScopeTarget> {
+    fn find_item(&self, id: LiveId) -> Option<LiveScopeTarget> {
         for items in self.stack.iter().rev() {
             for item in items.iter().rev() {
                 if item.id == id {
@@ -45,14 +42,14 @@ impl ScopeStack {
 
 pub struct LiveExpander<'a> {
     pub live_registry: &'a LiveRegistry,
-    pub in_crate: Id,
-    pub in_file_id: FileId,
+    pub in_crate: LiveId,
+    pub in_file_id: LiveFileId,
     pub errors: &'a mut Vec<LiveError>,
     pub scope_stack: &'a mut ScopeStack,
 }
 
 impl<'a> LiveExpander<'a> {
-    pub fn is_baseclass(id: Id) -> bool {
+    pub fn is_baseclass(id: LiveId) -> bool {
         id == id!(Component)
             || id == id!(Enum)
             || id == id!(Struct)
@@ -101,7 +98,7 @@ impl<'a> LiveExpander<'a> {
                 LiveValue::Use(module_path)=> {
                     let object_id = in_node.id;
                     // add items to the scope
-                    if let Some(file_id) = self.live_registry.module_path_to_file_id.get(&module_path){
+                    if let Some(file_id) = self.live_registry.module_id_to_file_id.get(&module_path){
                         // ok now find object_id and get us a pointer
                         let other_doc = &self.live_registry.expanded[file_id.to_index()];
 
@@ -287,7 +284,7 @@ impl<'a> LiveExpander<'a> {
                     }
                     if has_deref_hop{
                         // ok so we need the lti of the deref hop and clone all children
-                        if let Some(file_id) = self.live_registry.module_path_to_file_id.get(&live_type_info.module_path) {
+                        if let Some(file_id) = self.live_registry.module_id_to_file_id.get(&live_type_info.module_id) {
                             let doc = &self.live_registry.expanded[file_id.to_index()];
                             if let Ok(index) = doc.nodes.child_by_name(0, live_type_info.type_name){
                                 out_doc.nodes.clone_children_from(index, Some(out_index + 1), &doc.nodes);
@@ -296,8 +293,8 @@ impl<'a> LiveExpander<'a> {
                     }
                     else{
                         for field in &live_type_info.fields{
-                            let lti = &field.live_type_info;
-                            if let Some(file_id) = self.live_registry.module_path_to_file_id.get(&lti.module_path) {
+                            let lti = &field.live_type_info; 
+                            if let Some(file_id) = self.live_registry.module_id_to_file_id.get(&lti.module_id) {
                                 if *file_id == self.in_file_id{ // clone on self
                                     if let Ok(index) = out_doc.nodes.child_by_name(0, lti.type_name){
                                         let node_insert_point = insert_point;

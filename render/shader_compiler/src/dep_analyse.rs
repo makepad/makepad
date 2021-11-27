@@ -1,13 +1,14 @@
-#![allow(unused_variables)]
-use crate::shaderast::*;
-use crate::shaderast::Scopes;
-use crate::shaderast::Ident;
-use makepad_live_compiler::Span;
-//use makepad_live_parser::Id;
-//use makepad_live_parser::id;
-use crate::shaderast::{Ty, TyLit};
-use std::cell::{Cell};
-use crate::shaderregistry::ShaderRegistry;
+use{
+    std::cell::Cell,
+    makepad_live_compiler::{
+        Span
+    },
+    crate::{
+        shaderast::*,
+        shaderregistry::ShaderRegistry
+    }
+};
+
 
 #[derive(Clone)]
 pub struct DepAnalyser<'a> {
@@ -112,7 +113,7 @@ impl<'a> DepAnalyser<'a> {
     
     fn dep_analyse_method_call_expr(
         &mut self,
-        span: Span,
+        _span: Span,
         method_ident: Ident,
         arg_exprs: &[Expr],
     ) {
@@ -147,7 +148,7 @@ impl<'a> DepAnalyser<'a> {
     
     fn dep_analyse_builtin_call_expr(
         &mut self,
-        span: Span,
+        _span: Span,
         ident: Ident,
         arg_exprs: &[Expr],
     ) {
@@ -165,7 +166,7 @@ impl<'a> DepAnalyser<'a> {
     
     fn dep_analyse_plain_call_expr(
         &mut self,
-        span: Span,
+        _span: Span,
         //ident: Ident,
         arg_exprs: &[Expr],
         fn_ptr: FnPtr,
@@ -182,7 +183,7 @@ impl<'a> DepAnalyser<'a> {
     fn dep_analyse_field_expr(&mut self, _span: Span, expr: &Expr, field_ident: Ident) {
         // so we have to store which 'shader props' we use
         match expr.ty.borrow().as_ref().unwrap(){
-            Ty::DrawShader(shader_ptr)=>{
+            Ty::DrawShader(_)=>{
                 self.fn_def.draw_shader_refs.borrow_mut().as_mut().unwrap().insert(field_ident);
             }
             _=>{

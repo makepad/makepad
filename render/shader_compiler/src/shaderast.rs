@@ -1,6 +1,6 @@
 use makepad_live_compiler::Span;
 use makepad_live_compiler::Token;
-use makepad_live_compiler::Id;
+use makepad_live_compiler::LiveId;
 use makepad_live_compiler::LivePtr;
 use makepad_live_compiler::LiveType;
 use makepad_live_compiler::LiveFieldKind;
@@ -510,7 +510,7 @@ pub enum UnOp {
 }
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
-pub enum Ty {
+pub enum ShaderTy {
     Void,
     Bool,
     Int,
@@ -528,13 +528,15 @@ pub enum Ty {
     Mat3,
     Mat4,
     Texture2D,
-    Array {elem_ty: Rc<Ty>, len: usize},
+    Array {elem_ty: Rc<ShaderTy>, len: usize},
     Struct(StructPtr),
     Enum(LiveType),
     DrawShader(DrawShaderPtr),
     ClosureDef(ClosureDefIndex),
     ClosureDecl
 }
+
+pub type Ty = ShaderTy;
 
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
@@ -692,7 +694,7 @@ impl Scopes {
 }
 
 #[derive(Clone, Copy, Ord, PartialOrd, Default, Eq, Hash, PartialEq)]
-pub struct Ident(pub Id);
+pub struct Ident(pub LiveId);
 
 
 impl StructDef {
@@ -789,7 +791,7 @@ impl DrawShaderDef {
         uniform_blocks
     }
     
-    pub fn add_uniform(&mut self, id:Id, block:Id, ty:Ty, span:Span){
+    pub fn add_uniform(&mut self, id:LiveId, block:LiveId, ty:Ty, span:Span){
         self.fields.push(
             DrawShaderFieldDef {
                 kind: DrawShaderFieldKind::Uniform {
@@ -803,7 +805,7 @@ impl DrawShaderDef {
         )
     }
     
-    pub fn add_instance(&mut self, id:Id, ty:Ty, span:Span, live_field_kind:LiveFieldKind){
+    pub fn add_instance(&mut self, id:LiveId, ty:Ty, span:Span, live_field_kind:LiveFieldKind){
         self.fields.push(
             DrawShaderFieldDef { 
                 kind: DrawShaderFieldKind::Instance { 
@@ -818,7 +820,7 @@ impl DrawShaderDef {
         )
     }   
 
-    pub fn add_geometry(&mut self, id:Id, ty:Ty, span:Span){
+    pub fn add_geometry(&mut self, id:LiveId, ty:Ty, span:Span){
         self.fields.push(
             DrawShaderFieldDef {
                 kind: DrawShaderFieldKind::Geometry {
@@ -833,7 +835,7 @@ impl DrawShaderDef {
     }  
     
      
-    pub fn add_texture(&mut self, id:Id, ty:Ty, span:Span){
+    pub fn add_texture(&mut self, id:LiveId, ty:Ty, span:Span){
         self.fields.push(
             DrawShaderFieldDef {
                 kind: DrawShaderFieldKind::Texture {
@@ -1114,7 +1116,7 @@ impl fmt::Display for Ty {
 }
 
 impl TyLit {
-    pub fn from_id(id: Id) -> Option<TyLit> {
+    pub fn from_id(id: LiveId) -> Option<TyLit> {
         match id {
             id!(vec4) => Some(TyLit::Vec4),
             id!(vec3) => Some(TyLit::Vec3),
@@ -1240,7 +1242,7 @@ impl fmt::Display for Lit {
 
 
 impl Ident {
-    pub fn to_id(self) -> Id {self.0}
+    pub fn to_id(self) -> LiveId {self.0}
 
 }
 
@@ -1258,7 +1260,7 @@ impl fmt::Display for Ident {
 
 #[derive(Clone, Default, Copy, Eq, PartialEq, Hash, PartialOrd, Ord)]
 pub struct IdentPath {
-    pub segs: [Id; 6],
+    pub segs: [LiveId; 6],
     pub len: usize
 }
 
