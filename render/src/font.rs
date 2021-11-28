@@ -118,13 +118,13 @@ live_register!{
     }
 }
 
-#[derive(Clone, LiveComponent, LiveTraitCast)]
+#[derive(Clone, Live)]
 pub struct Font {
     #[rust] pub font_id: Option<usize>,
     #[live] pub path: String
 }
 
-impl LiveApply for Font {
+impl LiveHook for Font {
     fn after_apply(&mut self, cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
         self.font_id = Some(cx.get_font_by_path(&self.path));
     }
@@ -180,7 +180,7 @@ impl Cx {
 }
 
 
-#[derive(LiveComponent, LiveApply, LiveTraitCast)]
+#[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawTrapezoidText {
     #[rust] pub trapezoidator: Trapezoidator,

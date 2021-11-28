@@ -24,7 +24,7 @@ live_register!{
     }
 }
 
-impl LiveApply for GeometryQuad2D {
+impl LiveHook for GeometryQuad2D {
     fn after_apply(&mut self, cx: &mut Cx, _apply_from:ApplyFrom, _index:usize, _nodes:&[LiveNode]) {
         GeometryGen::from_quad_2d(
             self.x1,
@@ -49,7 +49,7 @@ impl GeometryFields for GeometryQuad2D {
     }
 }
 
-#[derive(LiveComponent, LiveTraitCast)]
+#[derive(Live)]
 pub struct GeometryQuad2D {
     #[rust(cx.new_geometry())] pub geometry: Geometry,
     #[live(0.0)] pub x1: f32,

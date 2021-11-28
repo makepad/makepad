@@ -64,7 +64,7 @@ pub trait TextureCx {
 }
 
 
-impl LiveTraitCast for Texture{}
+impl LiveHook for Texture{}
 impl LiveNew for Texture {
     fn new(cx: &mut Cx)->Self{
         let textures_free = cx.textures_free.clone();
@@ -93,7 +93,7 @@ impl LiveNew for Texture {
     }
 }
 
-impl LiveComponent for Texture {
+impl LiveApply for Texture {
     fn type_id(&self)->std::any::TypeId{ std::any::TypeId::of::<Self>()}
     fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
         

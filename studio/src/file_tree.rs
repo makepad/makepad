@@ -60,7 +60,7 @@ live_register!{
     }
 }
 
-#[derive(LiveComponent, LiveApply, LiveTraitCast)]
+#[derive(Live, LiveHook)]
 pub struct FileTree {
     #[live] scroll_view: ScrollView,
     #[rust] logic: TreeLogic,

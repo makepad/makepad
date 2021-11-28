@@ -44,7 +44,7 @@ live_register!{
     }
 }
 
-#[derive(LiveComponent, LiveApply, LiveTraitCast)]
+#[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawQuad {
     #[live] pub geometry: GeometryQuad2D,

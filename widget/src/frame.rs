@@ -19,7 +19,7 @@ pub enum FrameActions {
 }
 
 pub struct FrameItem { // draw info per UI element
-    component: Box<dyn LiveComponent>
+    component: Box<dyn LiveApply>
 }
 
 pub struct Frame { // draw info per UI element
@@ -31,7 +31,7 @@ pub struct Frame { // draw info per UI element
     pub create_order: Vec<LiveId>
 }
 
-impl LiveTraitCast for Frame {
+impl LiveHook for Frame {
     fn to_frame_component(&mut self) -> Option<&mut dyn FrameComponent> {
         return Some(self);
     }
@@ -62,7 +62,7 @@ impl LiveNew for Frame {
     fn live_register(cx: &mut Cx) {
         struct Factory();
         impl LiveFactory for Factory {
-            fn new_component(&self, cx: &mut Cx) -> Box<dyn LiveComponent> where Self: Sized {
+            fn new_component(&self, cx: &mut Cx) -> Box<dyn LiveApply> where Self: Sized {
                 Box::new(Frame::new(cx))
             }
         }
@@ -93,7 +93,7 @@ impl Frame {
     }
 }
 
-impl LiveComponent for Frame {
+impl LiveApply for Frame {
     fn type_id(&self) -> std::any::TypeId {std::any::TypeId::of::<Self>()}
     
     fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
@@ -201,7 +201,7 @@ impl LiveComponent for Frame {
 
 
 impl Frame {
-    pub fn get_component(&mut self, id: LiveId) -> Option<&mut Box<dyn LiveComponent >> {
+    pub fn get_component(&mut self, id: LiveId) -> Option<&mut Box<dyn LiveApply >> {
         if let Some(comp) = self.components.get_mut(&id) {
             return Some(&mut comp.component)
         }

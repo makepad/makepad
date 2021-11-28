@@ -38,7 +38,7 @@ live_register!{
     }
 }
 
-#[derive(LiveComponent, LiveApply, LiveTraitCast)]
+#[derive(Live, LiveHook)]
 pub struct TabBar {
     #[live] scroll_view: ScrollView,
     #[live] draw_drag: DrawColor,

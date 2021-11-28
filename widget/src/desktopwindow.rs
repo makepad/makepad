@@ -21,7 +21,7 @@ live_register!{
     }
 }
 
-#[derive(LiveComponent, LiveApply, LiveTraitCast)]
+#[derive(Live, LiveHook)]
 pub struct DesktopWindow {
     #[live] pub pass: Pass,
     #[live] pub color_texture: Texture,
@@ -171,7 +171,7 @@ impl DesktopWindow {
             let process_chrome = match cx.platform_type {
                 PlatformType::Linux {custom_window_chrome} => custom_window_chrome,
                 _ => true
-            };
+            }; 
             if process_chrome {
                 match PlatformType::Windows { //cx.platform_type {
                     PlatformType::Windows | PlatformType::Unknown | PlatformType::Linux {..} => {
