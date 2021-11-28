@@ -25,7 +25,7 @@ impl Drop for Pass{
     }
 }
 
-impl LiveTraitCast for Pass{}
+impl LiveHook for Pass{}
 impl LiveNew for Pass {
     fn new(cx: &mut Cx)->Self{
         let passes_free = cx.passes_free.clone();
@@ -54,7 +54,7 @@ impl LiveNew for Pass {
     }
 }
 
-impl LiveComponent for Pass {
+impl LiveApply for Pass {
     fn type_id(&self)->std::any::TypeId{ std::any::TypeId::of::<Self>()}
     fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
         

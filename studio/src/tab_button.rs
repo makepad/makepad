@@ -32,7 +32,7 @@ live_register!{
 }
 
 
-#[derive(LiveComponent, LiveApply, LiveTraitCast)]
+#[derive(Live, LiveHook)]
 pub struct TabButton {
     #[live] tab_close_button: DrawColor,
     #[live] walk: Walk

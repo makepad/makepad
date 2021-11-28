@@ -21,8 +21,7 @@ impl Drop for Window{
         self.windows_free.borrow_mut().push(self.window_id)
     }
 }
-
-impl LiveTraitCast for Window{}
+impl LiveHook for Window{}
 impl LiveNew for Window {
     fn new(cx: &mut Cx)->Self{
         let windows_free = cx.windows_free.clone();
@@ -58,7 +57,7 @@ impl LiveNew for Window {
         }
     }
 }
-impl LiveComponent for Window {
+impl LiveApply for Window {
     fn type_id(&self)->std::any::TypeId{ std::any::TypeId::of::<Self>()}
     fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
         

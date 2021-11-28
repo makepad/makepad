@@ -11,7 +11,7 @@ live_register!{
     }
 }
 
-#[derive(LiveComponent, LiveApply, LiveAnimate, LiveTraitCast)]
+#[derive(Live, LiveHook)]
 pub struct Splitter {
     #[rust(Axis::Horizontal)] pub axis: Axis,
     #[rust(AlignPosition::Weighted(0.5))] pub align_position: AlignPosition,
