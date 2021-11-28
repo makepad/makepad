@@ -45,7 +45,7 @@ live_register!{
 
 }
 
-#[derive(LiveComponent, LiveApply, LiveTraitCast)]
+#[derive(Live, LiveHook)]
 pub struct Tab {
     #[rust] is_selected: bool,
     #[rust] is_dragged: bool,
@@ -153,7 +153,7 @@ impl Tab {
     }
 }
 
-#[derive(LiveComponent, LiveApply, LiveTraitCast)]
+#[derive(Live, LiveHook)]
 #[repr(C)]
 struct DrawTab {
     #[live] deref_target: DrawColor,

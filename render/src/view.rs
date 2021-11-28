@@ -40,7 +40,7 @@ impl Drop for View {
     }
 }
 
-impl LiveTraitCast for View {}
+impl LiveHook for View{}
 impl LiveNew for View {
     fn new(cx: &mut Cx) -> Self {
         let views_free = cx.views_free.clone();
@@ -71,8 +71,7 @@ impl LiveNew for View {
         }
     }
 }
-
-impl LiveComponent for View {
+impl LiveApply for View {
     fn type_id(&self) -> std::any::TypeId {std::any::TypeId::of::<Self>()}
     fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
         

@@ -33,13 +33,14 @@ live_register!{
     }
 }
 
-#[derive(LiveComponent, LiveApply, LiveTraitCast)]
+#[derive(Live, LiveHook)]
 pub struct App {
     #[live] inner: AppInner,
     #[rust(AppState::new())] state: AppState,
 }
 
-impl App {
+impl App { 
+    
     pub fn live_register(cx: &mut Cx) {
         makepad_widget::live_register(cx);
         crate::code_editor::live_register(cx);
@@ -71,7 +72,7 @@ pub struct AppIO {
     response_or_notification_receiver: Receiver<ResponseOrNotification>,
 }
 
-#[derive(LiveComponent, LiveApply, LiveTraitCast)]
+#[derive(Live, LiveHook)]
 pub struct AppInner {
     #[live] window: DesktopWindow,
     #[live] dock: Dock,

@@ -123,7 +123,7 @@ live_register!{
     }
 }
 
-#[derive(Clone, LiveComponent, LiveApply, LiveTraitCast)]
+#[derive(Clone, Live, LiveHook)]
 #[live_type_kind(Object)]
 pub struct TextStyle {
     #[live()] pub font: Font,
@@ -135,7 +135,7 @@ pub struct TextStyle {
     #[live(1.3)] pub height_factor: f32,
 }
 
-#[derive(Debug, Copy, LiveComponent, LiveApply, Clone, LiveTraitCast)]
+#[derive(Debug, Clone, Copy, Live, LiveHook)]
 #[live_type_kind(Object)]
 pub enum Wrapping {
     #[pick] Char,
@@ -145,7 +145,7 @@ pub enum Wrapping {
     #[live(1.0)] Ellipsis(f32),
 }
 
-#[derive(LiveComponent, LiveApply, LiveTraitCast)]
+#[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawText {
     #[rust] pub buf: Vec<char>,

@@ -75,7 +75,7 @@ live_register!{
     }
 }
 
-#[derive(LiveComponent, LiveApply, LiveAnimate)]
+#[derive(Live)]
 pub struct Button {
     #[rust] pub button_logic: ButtonLogic,
     #[rust] pub animator: Animator,
@@ -88,7 +88,7 @@ pub struct Button {
     #[live] pub label: String
 }
 
-impl LiveTraitCast for Button{
+impl LiveHook for Button{
     fn to_frame_component(&mut self)->Option<&mut dyn FrameComponent>{
         return Some(self);
     }

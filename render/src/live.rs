@@ -11,10 +11,10 @@ pub use {
 };
 
 pub trait LiveFactory {
-    fn new_component(&self, cx: &mut Cx) -> Box<dyn LiveComponent>;
+    fn new_component(&self, cx: &mut Cx) -> Box<dyn LiveApply>;
 }
 
-pub trait LiveNew: LiveComponent {
+pub trait LiveNew: LiveApply {
     fn new(cx: &mut Cx) -> Self;
     
     fn live_register(_cx: &mut Cx) {}
@@ -65,11 +65,11 @@ pub trait ToLiveValue {
     fn to_live_value(&self) -> LiveValue;
 }
 
-pub trait LiveComponentValue {
+pub trait LiveApplyValue {
     fn apply_value(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize;
 }
 
-pub trait LiveComponent: LiveTraitCast {
+pub trait LiveApply : LiveHook {
     fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize;
     fn apply_over(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
         self.apply(cx, ApplyFrom::ApplyOver, 0, nodes);
@@ -115,7 +115,7 @@ impl ApplyFrom {
 }
 
 
-pub trait LiveApply {
+pub trait LiveHook {
     fn apply_value_unknown(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         if let ApplyFrom::Animate = apply_from{
             if nodes[index].id == id!(from){
@@ -123,11 +123,14 @@ pub trait LiveApply {
             }
         }
         cx.apply_error_no_matching_field(apply_from, index, nodes);
-        //}
         nodes.skip_node(index)
     }
     fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {}
     fn after_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {}
+    fn after_new(&mut self, _cx: &mut Cx) {}
+    fn to_frame_component(&mut self) -> Option<&mut dyn FrameComponent> {
+        None
+    }
 }
 
 impl Cx {
@@ -256,8 +259,8 @@ pub struct LiveBody {
     pub live_type_infos: Vec<LiveTypeInfo>
 }
 
-impl<T> LiveTraitCast for Option<T> where T: LiveComponent + LiveNew + 'static {}
-impl<T> LiveComponent for Option<T> where T: LiveComponent + LiveNew + 'static {
+impl<T> LiveHook for Option<T> where T: LiveApply + LiveNew + 'static {}
+impl<T> LiveApply for Option<T> where T: LiveApply + LiveNew + 'static {
     fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         if let Some(v) = self {
             v.apply(cx, apply_from, index, nodes)
@@ -274,7 +277,7 @@ impl<T> LiveComponent for Option<T> where T: LiveComponent + LiveNew + 'static {
     }
 }
 
-impl<T> LiveNew for Option<T> where T: LiveComponent + LiveNew + 'static {
+impl<T> LiveNew for Option<T> where T: LiveApply + LiveNew + 'static {
     fn new(_cx: &mut Cx) -> Self {
         Self::None
     }
@@ -316,12 +319,11 @@ macro_rules!let_action {
 #[macro_export]
 macro_rules!live_primitive {
     ( $ ty: ident, $ default: expr, $ apply: item, $ to_live_value: item) => {
-        
-        impl LiveTraitCast for $ ty {}
+        impl LiveHook for $ ty {}
         impl ToLiveValue for $ ty {
             $ to_live_value
         }
-        impl LiveComponent for $ ty {
+        impl LiveApply for $ ty {
             fn type_id(&self) -> TypeId {
                 TypeId::of::< $ ty>()
             }
@@ -605,30 +607,22 @@ live_primitive!(
     }
 );
 
-// cast traits.
-
-pub trait LiveTraitCast{
-    fn to_frame_component(&mut self) -> Option<&mut dyn FrameComponent> {
-        None
-    }
-}
-
-impl dyn LiveComponent {
-    pub fn is<T: LiveComponent + 'static >(&self) -> bool {
+impl dyn LiveApply {
+    pub fn is<T: LiveApply + 'static >(&self) -> bool {
         let t = TypeId::of::<T>();
         let concrete = self.type_id();
         t == concrete
     }
-    pub fn cast<T: LiveComponent + 'static >(&self) -> Option<&T> {
+    pub fn cast<T: LiveApply + 'static >(&self) -> Option<&T> {
         if self.is::<T>() {
-            Some(unsafe {&*(self as *const dyn LiveComponent as *const T)})
+            Some(unsafe {&*(self as *const dyn LiveApply as *const T)})
         } else {
             None
         }
     }
-    pub fn cast_mut<T: LiveComponent + 'static >(&mut self) -> Option<&mut T> {
+    pub fn cast_mut<T: LiveApply + 'static >(&mut self) -> Option<&mut T> {
         if self.is::<T>() {
-            Some(unsafe {&mut *(self as *const dyn LiveComponent as *mut T)})
+            Some(unsafe {&mut *(self as *const dyn LiveApply as *mut T)})
         } else {
             None
         }
@@ -682,7 +676,7 @@ impl Clone for Box<dyn AnyAction> {
     }
 }
 
-pub trait FrameComponent: LiveComponent {
+pub trait FrameComponent: LiveApply {
     fn handle_event_dyn(&mut self, cx: &mut Cx, event: &mut Event) -> Option<Box<dyn AnyAction >>;
     fn draw_dyn(&mut self, cx: &mut Cx);
     fn apply_draw(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {

@@ -18,7 +18,7 @@ live_register!{
 }
 main_app!(App);
 
-#[derive(LiveComponent, LiveApply, LiveCast)]
+#[derive(Live, LiveHook)]
 pub struct App {
     #[live] frame: Frame,
     #[live] desktop_window: DesktopWindow,
@@ -33,12 +33,12 @@ impl App {
     
     pub fn new_app(cx: &mut Cx) -> Self {
         //println!("{}", get_local_doc!(cx, id!(App)).nodes.to_string(0,100));
-        Self::new_from_doc(cx, get_local_doc!(cx, id!(App)))
+        Self::new_from_module_path_id(cx, &module_path!(), id!(App)).unwrap()
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
-        self.desktop_window.handle_desktop_window(cx, event);
-        self.scroll_view.handle_scroll_view(cx, event);
+        self.desktop_window.handle_event(cx, event);
+        self.scroll_view.handle_event(cx, event);
         if let Event::Construct = event{
             // spawn 1000 buttons into the live structure
             cx.profile_start(0);
@@ -55,7 +55,7 @@ impl App {
             self.frame.apply_clear(cx, &out);
             cx.profile_end(0);
         }
-        for item in self.frame.handle_frame(cx, event) {
+        for item in self.frame.handle_event(cx, event) {
             if let ButtonAction::Pressed = item.action.cast() {
                 println!("Clicked on button {}", item.id);
             }
@@ -63,22 +63,22 @@ impl App {
     }
     
     pub fn draw(&mut self, cx: &mut Cx) {
-        if self.desktop_window.begin_desktop_window(cx, None).is_err() {
+        if self.desktop_window.begin(cx, None).is_err() {
             return;
         }
-        if self.scroll_view.begin_view(cx).is_ok(){
+        if self.scroll_view.begin(cx).is_ok(){
             
             if let Some(button) = get_component!(id!(b1), Button, self.frame) {
                 button.label = "Btn1 label override".to_string();
             }
             //cx.profile_start(1);
-            self.frame.draw_frame(cx);
+            self.frame.draw(cx);
             //cx.profile_end(1);
             //cx.set_turtle_bounds(Vec2{x:10000.0,y:10000.0});
-            self.scroll_view.end_view(cx);
+            self.scroll_view.end(cx);
         }
         
-        self.desktop_window.end_desktop_window(cx);
+        self.desktop_window.end(cx);
         cx.debug_draw_tree(false);
     }
 }
