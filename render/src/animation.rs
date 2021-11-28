@@ -14,7 +14,7 @@ use {
 use crate::cx::*;
 
 // deserialisable DSL structure
-#[derive(Debug, Clone, LiveComponent, LiveApply, LiveTraitCast)]
+#[derive(Debug, Clone, Live, LiveHook)]
 pub struct KeyFrame {
     #[live(Ease::Linear)]
     pub ease: Ease,
@@ -403,7 +403,7 @@ impl Animator {
     }
 }
 
-#[derive(Clone, LiveComponent, LiveApply, Debug, PartialEq, LiveTraitCast)]
+#[derive(Clone, Debug, PartialEq, Live, LiveHook)]
 pub enum Play {
     #[pick {duration: 1.0}]
     Forward {duration: f64},
@@ -458,7 +458,7 @@ impl Play {
 }
 
 
-#[derive(Clone, LiveComponent, LiveApply, Debug, PartialEq, LiveTraitCast)]
+#[derive(Clone, Debug, PartialEq, Live, LiveHook)]
 pub enum Ease {
     #[pick] Linear,
     #[live] None,

@@ -25,7 +25,7 @@ live_register!{
     }
 }
 
-#[derive(LiveComponent, LiveApply, LiveTraitCast)]
+#[derive(Live, LiveHook)]
 pub struct Dock {
     #[live] view: View,
     #[live] drag_view: View,

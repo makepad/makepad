@@ -16,24 +16,14 @@ mod macro_lib;
 #[path = "../../live_compiler/src/liveid.rs"]
 mod liveid;
 
-#[proc_macro_derive(LiveComponent, attributes(calc, live, rust, pick, live_type_kind))]
+#[proc_macro_derive(Live, attributes(calc, live, rust, pick, live_type_kind))]
 pub fn derive_live(input: TokenStream) -> TokenStream {
-    derive_live_component_impl(input)
+    derive_live_impl(input)
 }
 
-#[proc_macro_derive(LiveApply)]
+#[proc_macro_derive(LiveHook)]
 pub fn derive_live_apply(input: TokenStream) -> TokenStream {
-    derive_live_apply_impl(input)
-}
-
-#[proc_macro_derive(LiveAnimate)]
-pub fn derive_live_animate(input: TokenStream) -> TokenStream {
-    derive_live_animate_impl(input)
-}
-
-#[proc_macro_derive(LiveTraitCast)]
-pub fn derive_live_trait_cast(input: TokenStream) -> TokenStream {
-    derive_live_trait_cast_impl(input)
+    derive_live_hook_impl(input)
 }
 
 #[proc_macro_derive(IntoAnyAction)]

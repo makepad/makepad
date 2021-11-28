@@ -61,7 +61,7 @@ live_register!{
     }
 }
 
-#[derive(LiveComponent, LiveApply, LiveAnimate, LiveTraitCast)]
+#[derive(Live, LiveHook)]
 pub struct ScrollBar {
     #[live] pub bg: DrawScrollBar,
     #[live(12.0)] pub bar_size: f32,
@@ -90,7 +90,7 @@ pub struct ScrollBar {
     #[rust] drag_point: Option<f32>, // the point in pixels where we are dragging
 }
 
-#[derive(LiveComponent, LiveApply, LiveTraitCast)]
+#[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawScrollBar {
     #[live] deref_target: DrawQuad,

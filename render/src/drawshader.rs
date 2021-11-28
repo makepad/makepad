@@ -333,14 +333,16 @@ impl DrawVars {
     }
     
     pub fn before_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, _nodes: &[LiveNode], geometry_fields: &dyn GeometryFields) {
+        
         if self.draw_shader.is_some() {
+            
             return
         }
-        
         let draw_shader_ptr = if let Some(file_id) = apply_from.file_id() {
             DrawShaderPtr(LivePtr::from_index(file_id, index))
         }
         else {
+            
             return
         };
         self.init_shader(cx, draw_shader_ptr, geometry_fields)
@@ -402,6 +404,9 @@ impl DrawVars {
                     return apply_slots(cx, slots, &mut self.var_instances, offset, apply_from, index, nodes);
                 }
             }
+        }
+        else{
+            panic!();
         }
         let unknown_shader_props = match nodes[index].id {
             id!(debug) => false,
