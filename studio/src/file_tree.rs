@@ -13,9 +13,14 @@ use {
 live_register!{
     use makepad_render::shader_std::*;
     
-    FileTreeNode: {{FileTreeNode}} {
+    FileTreeNode: {{FileTreeNode}} { 
         folder_quad: {
             color: #80
+            
+            instance even: float = 1.0
+            instance selected: float = 0.0
+            instance hover: float = 0.0
+            
             fn pixel(self) -> vec4 {
                 let cx = Sdf2d::viewport(self.pos * self.rect_size);
                 let w = self.rect_size.x;
