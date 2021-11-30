@@ -56,7 +56,7 @@ pub struct DrawQuad {
 
 impl DrawQuad {
     
-    pub fn begin_quad(&mut self, cx: &mut Cx, layout: Layout) {
+    pub fn begin(&mut self, cx: &mut Cx, layout: Layout) {
         if self.draw_vars.draw_shader.is_some() {
             let new_area = cx.add_aligned_instance(&self.draw_vars);
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
@@ -64,34 +64,34 @@ impl DrawQuad {
         }
     }
     
-    pub fn end_quad(&mut self, cx: &mut Cx) {
+    pub fn end(&mut self, cx: &mut Cx) {
         if self.draw_vars.draw_shader.is_some() {
             let rect = cx.end_turtle(self.draw_vars.area);
             self.draw_vars.area.set_rect(cx, &rect);
         }
     }
     
-    pub fn draw_quad_walk(&mut self, cx: &mut Cx, walk: Walk) {
+    pub fn draw_walk(&mut self, cx: &mut Cx, walk: Walk) {
         let rect = cx.walk_turtle(walk);
         self.rect_pos = rect.pos;
         self.rect_size = rect.size;
-        self.draw_quad(cx);
+        self.draw(cx);
     }
     
-    pub fn draw_quad_abs(&mut self, cx: &mut Cx, rect: Rect) {
+    pub fn draw_abs(&mut self, cx: &mut Cx, rect: Rect) {
         self.rect_pos = rect.pos;
         self.rect_size = rect.size;
-        self.draw_quad(cx);
+        self.draw(cx);
     }
     
-    pub fn draw_quad_rel(&mut self, cx: &mut Cx, rect: Rect) {
+    pub fn draw_rel(&mut self, cx: &mut Cx, rect: Rect) {
         let rect = rect.translate(cx.get_turtle_origin());
         self.rect_pos = rect.pos;
         self.rect_size = rect.size;
-        self.draw_quad(cx);
+        self.draw(cx);
     }
     
-    pub fn draw_quad(&mut self, cx: &mut Cx) {
+    pub fn draw(&mut self, cx: &mut Cx) {
         if self.draw_vars.can_instance() {
             let new_area = cx.add_aligned_instance(&self.draw_vars);
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);

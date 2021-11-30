@@ -17,6 +17,12 @@ pub fn error(err: &str) -> TokenStream {
     tb.end()
 }
 
+pub fn error_result(err: &str) -> Result<(),TokenStream> {
+    let mut tb = TokenBuilder::new();
+    tb.add("compile_error ! (").string(err).add(") ;");
+    Err(tb.end())
+}
+
 pub struct TokenBuilder {
     pub groups: Vec<(Delimiter, TokenStream)>
 }

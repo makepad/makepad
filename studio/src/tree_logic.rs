@@ -111,9 +111,7 @@ impl TreeLogic {
     }
 
     fn update_next_frame(&mut self, cx: &mut Cx) {
-        if self.animating_node_ids.is_empty() {
-            self.next_frame = NextFrame::default();
-        } else {
+        if !self.animating_node_ids.is_empty() {
             self.next_frame = cx.new_next_frame();
         }
     }

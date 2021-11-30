@@ -31,7 +31,6 @@ live_register!{
     }
 }
 
-
 #[derive(Live, LiveHook)]
 pub struct TabButton {
     #[live] tab_close_button: DrawColor,
@@ -41,7 +40,7 @@ pub struct TabButton {
 impl TabButton {
 
     pub fn draw(&mut self, cx: &mut Cx) {
-        self.tab_close_button.draw_quad_walk(
+        self.tab_close_button.draw_walk(
             cx,
             self.walk
         );

@@ -1,10 +1,6 @@
 use {
     crate::{
-        code_editor_state::{
-            CodeEditorState,
-            DocumentId,
-            SessionId
-        },
+        code_editor_state::{CodeEditorState, DocumentId, SessionId},
         genid::GenId,
         genid_allocator::GenIdAllocator,
         genid_map::GenIdMap,
@@ -28,8 +24,8 @@ live_register!{
         code_editor_view: ScrollView {
             view: {debug_id: code_editor_view}
         }
-        text: {
-            draw_depth: 1.0 
+        code_text: {
+            draw_depth: 1.0
             text_style: {
                 font: {
                     path: "resources/LiberationMono-Regular.ttf"
@@ -51,11 +47,11 @@ live_register!{
         text_color_string: #cc917b
         text_color_whitespace: #6e6e6e
         text_color_unknown: #808080
-        selection: {
+        selection_quad: {
             color: #294e75
             draw_depth: 0.0
         }
-        caret: {
+        caret_quad: {
             draw_depth: 2.0
             color: #b0b0b0
         }
@@ -70,9 +66,9 @@ pub struct CodeEditor {
     
     #[live] code_editor_view: Option<LivePtr>,
     
-    #[live] selection: DrawColor,
-    #[live] text: DrawText,
-    #[live] caret: DrawColor,
+    #[live] selection_quad: DrawColor,
+    #[live] code_text: DrawText,
+    #[live] caret_quad: DrawColor,
     
     #[live] text_color_comment: Vec4,
     #[live] text_color_identifier: Vec4,
@@ -90,7 +86,7 @@ pub struct CodeEditor {
 impl CodeEditor {
     
     pub fn draw(&mut self, cx: &mut Cx, state: &CodeEditorState, view_id: CodeEditorViewId) {
-        self.text_glyph_size = self.text.text_style.font_size * self.text.get_monospace_base(cx);
+        self.text_glyph_size = self.code_text.text_style.font_size * self.code_text.get_monospace_base(cx);
         let view = &mut self.views_by_view_id[view_id];
         if view.scroll_view.begin(cx).is_ok() {
             if let Some(session_id) = view.session_id {
@@ -193,7 +189,7 @@ impl CodeEditor {
                 };
                 if span.is_included {
                     
-                    self.selection.draw_quad_abs(
+                    self.selection_quad.draw_abs(
                         cx,
                         Rect {
                             pos: Vec2 {
@@ -251,9 +247,9 @@ impl CodeEditor {
                 let next_token = token_iter.peek();
                 let end_x = start_x + token.len as f32 * self.text_glyph_size.x;
                 let end = start + token.len;
-                self.text.color =
+                self.code_text.color =
                 self.text_color(token.kind, next_token.map( | next_token | next_token.kind));
-                self.text.draw_text_chunk(
+                self.code_text.draw_chunk(
                     cx,
                     Vec2 {
                         x: start_x,
@@ -299,7 +295,7 @@ impl CodeEditor {
                         if selections.contains_position(*caret) {
                             continue;
                         }
-                        self.caret.draw_quad_abs(
+                        self.caret_quad.draw_abs(
                             cx,
                             Rect {
                                 pos: Vec2 {

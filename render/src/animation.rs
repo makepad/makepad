@@ -1,3 +1,4 @@
+#![allow(unused)]
 // OK ANIMATION
 use {
     std::f64::consts::PI,
@@ -25,7 +26,7 @@ pub struct KeyFrame {
     #[live(LiveValue::None)]
     pub value: LiveValue,
 }
-
+/*
 #[derive(Default)]
 pub struct Animator {
     pub state_id: Option<LiveId>,
@@ -49,16 +50,16 @@ impl Animator {
         self.state = Some(state);
     }
     
-    pub fn do_animation(&mut self, cx:&mut Cx, event:&mut Event)->bool{
-        if let Some(nf) = event.is_next_frame(cx, self.next_frame){
+    pub fn do_animation(&mut self, cx: &mut Cx, event: &mut Event) -> bool {
+        if let Some(nf) = event.is_next_frame(cx, self.next_frame) {
             let play = self.play.as_ref().unwrap();
-            if self.start_time.is_none(){
+            if self.start_time.is_none() {
                 self.start_time = Some(nf.time);
             }
-            let time =  nf.time - self.start_time.unwrap();
+            let time = nf.time - self.start_time.unwrap();
             let (ended, play_time) = play.get_ended_time(time);
             self.update_timeline(cx, play_time);
-            if !ended{
+            if !ended {
                 self.next_frame = cx.new_next_frame();
             }
             return true
@@ -69,7 +70,7 @@ impl Animator {
     pub fn last_keyframe_value_from_array(index: usize, nodes: &[LiveNode]) -> Option<usize> {
         if let Some(index) = nodes.last_child(index) {
             if nodes[index].value.is_object() {
-                if let Ok(index) = nodes.child_by_name(index, id!(value)) {
+                if let Some(index) = nodes.child_by_name(index, id!(value)) {
                     return Some(index)
                 }
             }
@@ -83,7 +84,7 @@ impl Animator {
     pub fn first_keyframe_time_from_array(index: usize, nodes: &[LiveNode]) -> f64 {
         if let Some(index) = nodes.first_child(index) {
             if nodes[index].value.is_object() {
-                if let Ok(index) = nodes.child_by_name(index, id!(time)) {
+                if let Some(index) = nodes.child_by_name(index, id!(time)) {
                     return match nodes[index].value {
                         LiveValue::Float(v) => v,
                         LiveValue::Int(v) => v as f64,
@@ -96,7 +97,7 @@ impl Animator {
     }
     
     // this outputs a set of arrays at the end of current_state containing the tracks
-    pub fn update_timeline(&mut self, cx: &mut Cx, time:f64) {
+    pub fn update_timeline(&mut self, cx: &mut Cx, time: f64) {
         let state_nodes = self.state.as_mut().unwrap();
         let mut state_index = 0;
         let mut stack_depth = 0;
@@ -159,7 +160,7 @@ impl Animator {
             let mut prev_kf: Option<KeyFrame> = None;
             let mut last_child_index = node_iter.unwrap();
             while let Some(node_index) = node_iter {
-                if nodes[node_index+1].value.is_close(){ // at last slot
+                if nodes[node_index + 1].value.is_close() { // at last slot
                     last_child_index = node_index;
                     break;
                 }
@@ -171,7 +172,7 @@ impl Animator {
                             value: nodes[node_index].value.clone()
                         }
                     }
-                    else{
+                    else {
                         KeyFrame {
                             ease: Ease::Linear,
                             time: 0.0,
@@ -188,11 +189,11 @@ impl Animator {
                         let normalised_time = (time - prev_kf.time) / (next_kf.time - prev_kf.time);
                         let mix = next_kf.ease.map(normalised_time);
                         // find last one
-                        while let Some(node_index) = node_iter{
+                        while let Some(node_index) = node_iter {
                             last_child_index = node_index;
-                            node_iter = nodes.next_child(node_index);                             
+                            node_iter = nodes.next_child(node_index);
                         }
-                        nodes[last_child_index].value =  Self::tween_live_values(&prev_kf.value, &next_kf.value, mix);
+                        nodes[last_child_index].value = Self::tween_live_values(&prev_kf.value, &next_kf.value, mix);
                         return
                     }
                 }
@@ -206,7 +207,7 @@ impl Animator {
         }
     }
     
-    pub fn cut_to_live(&mut self, cx: &mut Cx, live_ptr:LivePtr/*, state_id: Id*/) {
+    pub fn cut_to_live(&mut self, cx: &mut Cx, live_ptr: LivePtr/*, state_id: Id*/) {
         let live_registry_rc = cx.live_registry.clone();
         let live_registry = live_registry_rc.borrow();
         let (nodes, index) = live_registry.ptr_to_nodes_index(live_ptr);
@@ -217,7 +218,7 @@ impl Animator {
     }
     
     // hard cut / initialisate the state to a certain state
-    pub fn cut_to(&mut self, _cx: &mut Cx, state_id:LiveId, index:usize, nodes:&[LiveNode]) {
+    pub fn cut_to(&mut self, _cx: &mut Cx, state_id: LiveId, index: usize, nodes: &[LiveNode]) {
         self.state_id = Some(state_id);
         
         let state = if let Some(state) = &mut self.state {
@@ -257,7 +258,7 @@ impl Animator {
                         break;
                     }
                 }
-                else { 
+                else {
                     state.extend_from_slice(live_object!{
                         [node.id]: [(node.value.clone())]
                     });
@@ -268,15 +269,15 @@ impl Animator {
         }
     }
     
-    pub fn animate_to_live(&mut self, cx: &mut Cx, live_ptr:LivePtr/*,state_id: Id*/) {
+    pub fn animate_to_live(&mut self, cx: &mut Cx, live_ptr: LivePtr/*,state_id: Id*/) {
         let live_registry_rc = cx.live_registry.clone();
         let live_registry = live_registry_rc.borrow();
         let (nodes, index) = live_registry.ptr_to_nodes_index(live_ptr);
-        self.animate_to(cx, nodes[index].id, index, nodes) 
+        self.animate_to(cx, nodes[index].id, index, nodes)
     }
-
-    pub fn animate_to(&mut self, cx: &mut Cx, state_id: LiveId, to_index:usize, to_nodes:&[LiveNode]) {
-        
+    
+    pub fn animate_to(&mut self, cx: &mut Cx, state_id: LiveId, to_index: usize, to_nodes: &[LiveNode]) {
+        /*
         let state_nodes = self.state.as_mut().unwrap();
         
         let mut state_index = 0;
@@ -284,20 +285,20 @@ impl Animator {
         //let mut to_index = to_nodes.child_by_name(to_root_index, state_id).unwrap();
         let mut stack_depth = 0;
         
-
+        
         while state_index < state_nodes.len() {
             let state_node = &mut state_nodes[state_index];
             let to_node = &to_nodes[to_index];
-
+            
             if stack_depth == 1 && to_node.id == id!(from) {
                 let from_id = self.state_id.unwrap();
-                if let Ok(from_index) = to_nodes.child_by_name(to_index, from_id){
+                if let Some(from_index) = to_nodes.child_by_name(to_index, from_id) {
                     self.play = Some(Play::new_apply(cx, ApplyFrom::New, from_index, to_nodes));
                 }
-                else if let Ok(from_index) = to_nodes.child_by_name(to_index, id!(all)){
+                else if let Some(from_index) = to_nodes.child_by_name(to_index, id!(all)) {
                     self.play = Some(Play::new_apply(cx, ApplyFrom::New, from_index, to_nodes));
                 }
-                else{
+                else {
                     self.play = Some(Play::new(cx));
                 }
                 to_index = to_nodes.skip_node(to_index);
@@ -306,7 +307,7 @@ impl Animator {
                 
                 if to_node.value.is_array() {
                     if !state_node.value.is_array() {panic!()};
-                    if state_node.id != to_node.id { 
+                    if state_node.id != to_node.id {
                         println!("State node order desync: <state.id> {} <to_node.id> {}", state_node.id, to_node.id);
                         return
                     }
@@ -319,33 +320,33 @@ impl Animator {
                         let (to_first, to_last) = to_nodes.child_range(to_index);
                         
                         let current_value = state_nodes[state_last - 1].value.clone();
-                        if !current_value.is_value_type(){
+                        if !current_value.is_value_type() {
                             panic!()
                         }
-
+                        
                         state_nodes.splice(
                             state_first..state_last - 1,
                             to_nodes[to_first - 1..to_last].iter().cloned()
                         );
-
+                        
                         state_nodes[state_first].id = LiveId(0);
                         state_nodes[state_first].value = current_value;
                     }
                     else {
                         let (state_first, state_last) = state_nodes.child_range(state_index);
                         let (to_first, to_last) = to_nodes.child_range(to_index);
-
+                        
                         state_nodes.splice(
-                            state_first..state_last-1,
+                            state_first..state_last - 1,
                             to_nodes[to_first..to_last].iter().cloned()
                         );
                     }
                     to_index = to_nodes.skip_node(to_index);
                     state_index = state_nodes.skip_node(state_index);
                 }
-                else { 
+                else {
                     
-
+                    
                     if to_node.value.is_open() {
                         if stack_depth == 0 {
                             state_node.id = to_node.id;
@@ -381,7 +382,7 @@ impl Animator {
                         }
                         let (state_first, state_last) = state_nodes.child_range(state_index);
                         let current_value = state_nodes[state_last - 1].value.clone();
-                        if !current_value.is_value_type(){
+                        if !current_value.is_value_type() {
                             panic!()
                         }
                         state_nodes.splice(
@@ -396,14 +397,14 @@ impl Animator {
                     }
                 }
             }
-        }
+        }*/
         self.state_id = Some(state_id);
         self.start_time = None;
         self.next_frame = cx.new_next_frame();
     }
-}
+}*/
 
-#[derive(Clone, Debug, PartialEq, Live, LiveHook)]
+#[derive(Copy, Clone, Debug, PartialEq, Live, LiveHook)]
 pub enum Play {
     #[pick {duration: 1.0}]
     Forward {duration: f64},
@@ -432,7 +433,7 @@ impl Play {
         }
     }
     
-    pub fn get_ended_time(&self, time: f64) -> (bool,f64) {
+    pub fn get_ended_time(&self, time: f64) -> (bool, f64) {
         match self {
             Self::Forward {duration} => {
                 (time > *duration, time / duration)
@@ -798,5 +799,423 @@ impl Ease {
                 return ((ay * u + by) * u + cy) * u;
             }
         }
+    }
+}
+
+#[derive(Default)]
+pub struct Animator {
+    pub state: Option<Vec<LiveNode >>,
+    pub next_frame: NextFrame,
+}
+
+impl Animator {
+    
+    pub fn swap_out_state(&mut self) -> Vec<LiveNode> {
+        if let Some(state) = self.state.take() {
+            state
+        }
+        else {
+            Vec::new()
+        }
+    }
+    
+    pub fn swap_in_state(&mut self, state: Vec<LiveNode>) {
+        self.state = Some(state);
+    }
+    
+    pub fn do_animation(&mut self, cx: &mut Cx, event: &mut Event) -> bool {
+        
+        if let Some(nf) = event.is_next_frame(cx, self.next_frame){
+            
+            let state_nodes = self.state.as_mut().unwrap();
+            
+            let mut state_index = state_nodes.child_by_name(0, id!(state)).unwrap();
+            let mut stack_depth = 0;
+            let mut ended = false;
+            while state_index < state_nodes.len() {
+                let state_node = &mut state_nodes[state_index];
+                if state_node.value.is_array() {
+                    // ok so. lets compute our value and store it in the last slot
+                    if Self::update_timeline_value(cx, state_index, state_nodes, nf.time){
+                        ended = true;
+                    }
+                    state_index = state_nodes.skip_node(state_index);
+                }
+                else { // we have to create a timeline ourselves
+                    if state_node.value.is_open() {
+                        stack_depth += 1;
+                        state_index += 1;
+                    }
+                    else if state_node.value.is_close() {
+                        stack_depth -= 1;
+                        state_index += 1;
+                        if stack_depth == 0 {
+                            break;
+                        }
+                    }
+                    else { 
+                        state_index = state_nodes.skip_node(state_index);
+                    }
+                }
+            }
+
+            if !ended{
+                self.next_frame = cx.new_next_frame();
+            }
+
+            return true
+        }
+        false
+    }
+    
+    // this find the last keyframe value from an array node
+    pub fn update_timeline_value(cx: &mut Cx, index: usize, nodes: &mut [LiveNode], ext_time: f64)->bool {
+        // OK so. we have an array with keyframes
+        if nodes[index].value.is_array() {
+            let mut node_iter = nodes.first_child(index);
+            
+            // compute the animation time from the id
+            let (ended, time) =  if let Some(id_index) = node_iter{
+                if let LiveValue::Id(id) = &nodes[id_index].value{
+                    // ok so now we have to find our id in tracks
+                    let track_index = nodes.child_by_path(0, &[id!(tracks), *id]).unwrap();
+                    // ok we should have a play and time key here
+                    let time_index = nodes.child_by_name(track_index, id!(time)).unwrap();
+                    let start_time = match &nodes[time_index].value{
+                        LiveValue::Id(v) => {
+                            assert!(*v == id!(void));
+                            nodes[time_index].value = LiveValue::Float(ext_time);
+                            ext_time
+                        }
+                        LiveValue::Float(time)=>{
+                            
+                            *time
+                        }
+                        _=>panic!()
+                    };
+                    // alright we have the start time.
+                    // next we deserialize 'play'
+                    let play = if let Some(play_index) = nodes.child_by_name(track_index, id!(play)){
+                        Play::new_apply(cx, ApplyFrom::New, play_index, nodes)
+                    }
+                    else{
+                        Play::new(cx)
+                    };
+                    node_iter = nodes.next_child(id_index);
+                    play.get_ended_time(ext_time - start_time)
+                }
+                else{panic!()}
+            }
+            else{panic!()};
+            
+            
+            let mut prev_kf: Option<KeyFrame> = None;
+            let mut last_child_index = node_iter.unwrap();
+            while let Some(node_index) = node_iter {
+                if nodes[node_index + 1].value.is_close() { // at last slot
+                    last_child_index = node_index;
+                    break;
+                }
+                let next_kf = if nodes[node_index].value.is_value_type() { // we hit a bare value node
+                    if prev_kf.is_some() {
+                        KeyFrame {
+                            ease: Ease::Linear,
+                            time: 1.0,
+                            value: nodes[node_index].value.clone()
+                        }
+                    }
+                    else {
+                        KeyFrame {
+                            ease: Ease::Linear,
+                            time: 0.0,
+                            value: nodes[node_index].value.clone()
+                        }
+                    }
+                }
+                else { // try to deserialize a keyframe
+                    KeyFrame::new_apply(cx, ApplyFrom::New, node_index, nodes)
+                };
+                
+                if let Some(prev_kf) = prev_kf {
+                    if time >= prev_kf.time && time <= next_kf.time {
+                        let normalised_time = (time - prev_kf.time) / (next_kf.time - prev_kf.time);
+                        let mix = next_kf.ease.map(normalised_time);
+                        // find last one
+                        while let Some(node_index) = node_iter {
+                            last_child_index = node_index;
+                            node_iter = nodes.next_child(node_index);
+                        }
+                        
+                        let a = &prev_kf.value;
+                        let b = &next_kf.value;
+                        
+                        if a.variant_id() != b.variant_id() {
+                            cx.apply_key_frame_cannot_be_interpolated(index, nodes);
+                            return ended
+                        }
+
+                        let new_val = match a {
+                            LiveValue::Int(va) => if let LiveValue::Int(vb) = b {
+                                LiveValue::Int((((vb - va) as f64) * mix + *va as f64) as i64)
+                            } else {LiveValue::None}
+                            LiveValue::Float(va) => if let LiveValue::Float(vb) = b {
+                                LiveValue::Float((vb - va) * mix + va)
+                            } else {LiveValue::None}
+                            LiveValue::Color(va) => if let LiveValue::Color(vb) = b {
+                                LiveValue::Color(Vec4::from_lerp(Vec4::from_u32(*va), Vec4::from_u32(*vb), mix as f32).to_u32())
+                            } else {LiveValue::None}
+                            LiveValue::Vec2(va) => if let LiveValue::Vec2(vb) = b {
+                                LiveValue::Vec2(Vec2::from_lerp(*va, *vb, mix as f32))
+                            } else {LiveValue::None}
+                            LiveValue::Vec3(va) => if let LiveValue::Vec3(vb) = b {
+                                LiveValue::Vec3(Vec3::from_lerp(*va, *vb, mix as f32))
+                            } else {LiveValue::None}
+                            _ => LiveValue::None
+                        };
+                        if let LiveValue::None = &new_val {
+                            cx.apply_key_frame_cannot_be_interpolated(index, nodes);
+                            return ended
+                        }
+                        nodes[last_child_index].value =  new_val;
+                        
+                        return ended
+                    }
+                }
+                prev_kf = Some(next_kf);
+                last_child_index = node_index;
+                node_iter = nodes.next_child(node_index);
+            }
+            if let Some(prev_kf) = prev_kf {
+                nodes[last_child_index].value = prev_kf.value
+            }
+            return ended
+        }
+        true
+    }
+    
+    
+    pub fn last_keyframe_value_from_array(index: usize, nodes:&[LiveNode]) -> Option<usize> {
+        if let Some(index) = nodes.last_child(index) {
+            if nodes[index].value.is_object() {
+                return nodes.child_by_name(index, id!(value));
+            }
+            else {
+                return Some(index)
+            }
+        }
+        return None
+    }
+    
+    pub fn first_keyframe_time_from_array(reader: &LiveNodeReader) -> f64 {
+        if let Some(reader) = reader.first_child() {
+            if reader.is_object() {
+                if let Some(reader) = reader.child_by_name(id!(time)) {
+                    return match reader.value() {
+                        LiveValue::Float(v) => *v,
+                        LiveValue::Int(v) => *v as f64,
+                        _ => 1.0
+                    }
+                }
+            }
+        }
+        return 1.0
+    }
+    
+    
+    pub fn cut_to_live(&mut self, cx: &mut Cx, track: LiveId, live_ptr: LivePtr/*, state_id: Id*/) {
+        let live_registry_rc = cx.live_registry.clone();
+        let live_registry = live_registry_rc.borrow();
+        let (nodes, index) = live_registry.ptr_to_nodes_index(live_ptr);
+        
+        self.cut_to(cx, track, nodes[index].id, index, nodes);
+    }
+    
+    // hard cut / initialisate the state to a certain state
+    pub fn cut_to(&mut self, _cx: &mut Cx, track: LiveId, state_id: LiveId, index: usize, nodes: &[LiveNode]) {
+        // if we dont have a state object, lets create a template
+        let mut state = self.swap_out_state();
+        
+        if state.len() == 0 {
+            state.push_live(live!{
+                tracks: {},
+                state: {}
+            });
+        }
+        
+        state.replace_or_insert_node_by_path(0, &[id!(tracks), track], live_object!{
+            [track]: {state_id:(state_id)}
+        });
+        
+        let mut reader = LiveNodeReader::new(index, nodes);
+        let mut path = Vec::new();
+        path.push(id!(state));
+        reader.walk();
+        while !reader.is_eot() {
+            if reader.depth() == 1 && reader.id() == id!(from) {
+                reader.skip();
+            }
+            else if reader.is_array() {
+                path.push(reader.id());
+                if let Some(last_value) = Self::last_keyframe_value_from_array(reader.index(), reader.nodes()) {
+                    state.replace_or_insert_node_by_path(0, &path, live_array!{
+                         [(track), (reader.nodes()[last_value].value.clone())]
+                    });
+                }
+                path.pop();
+                reader.skip();
+            }
+            else {
+                if reader.is_open() {
+                    path.push(reader.id());
+                }
+                else if reader.is_close() {
+                    path.pop();
+                }
+                else {
+                    path.push(reader.id());
+                    state.replace_or_insert_node_by_path(0, &path, live_array!{
+                        [(track), (reader.value().clone())]
+                    });
+                    path.pop();
+                }
+                reader.walk();
+            }
+        }
+        //println!("AFTER CUT {}", state.to_string(0,100));
+        self.swap_in_state(state);
+    }
+    
+    pub fn animate_to_live(&mut self, cx: &mut Cx, track: LiveId, live_ptr: LivePtr/*,state_id: Id*/) {
+        let live_registry_rc = cx.live_registry.clone();
+        let live_registry = live_registry_rc.borrow();
+        let (nodes, index) = live_registry.ptr_to_nodes_index(live_ptr);
+        self.animate_to(cx, track, nodes[index].id, index, nodes)
+    }
+    
+    pub fn animate_to(&mut self, cx: &mut Cx, track: LiveId, state_id: LiveId, index: usize, nodes: &[LiveNode]) {
+        
+        let mut state = self.swap_out_state();
+        if state.len() == 0 { // call cut first
+            panic!();
+        }
+
+        // ok we have to look up into state/tracks for our state_id what state we are in right now
+        let from_id = if let Some(LiveValue::Id(id)) = state.child_value_by_path(0, &[id!(tracks), track, id!(state_id)]){
+            *id
+        }
+        else{
+            cx.apply_error_animate_to_unknown_track(index, nodes, track, state_id);
+            return
+        };
+
+        let mut reader = LiveNodeReader::new(index, nodes);
+        let mut path = Vec::new();
+
+        path.push(id!(state));
+        reader.walk();
+        let mut any_from_found = false;
+        while !reader.is_eot() {
+            if reader.depth() == 1 && reader.id() == id!(from) {
+                // we have to store the right 'from' in our 'tracks' 
+                if let Some(reader) = reader.child_by_name(from_id){
+                    state.replace_or_insert_node_by_path(0, &[id!(tracks), track, id!(play)], reader.node_slice());
+                }
+                else if let Some(reader) = reader.child_by_name(id!(all)){
+                    state.replace_or_insert_node_by_path(0, &[id!(tracks), track, id!(play)], reader.node_slice());
+                }
+                state.replace_or_insert_node_by_path(0, &[id!(tracks), track, id!(time)], live_array!{void});
+                any_from_found = true;
+                reader.skip();
+            }
+            else if reader.is_array() {
+                path.push(reader.id());
+                let (first_index, last_index)  = if let Some(state_child) = state.child_by_path(0, &path){
+                    if let Some(last_index) = state.last_child(state_child){
+                        (state_child+1,last_index)
+                    }
+                    else{panic!()}
+                }
+                else{panic!()};
+                // verify we do the right track
+                if let LiveValue::Id(check_id) = &state[first_index].value{
+                    if *check_id != track{
+                        cx.apply_error_wrong_animation_track_used(index, nodes, *path.last().unwrap(), *check_id, track);
+                        path.pop();
+                        reader.skip();
+                        continue;
+                    }
+                }
+                else{
+                    panic!()
+                }
+                let first_time = Self::first_keyframe_time_from_array(&reader);
+                
+                let mut timeline = Vec::new();
+                timeline.open_array(id!(0));
+                timeline.push_id(id!(0),track);
+                if first_time != 0.0 { // insert first key from the last value
+                    timeline.push_live(state.node_slice(last_index));
+                }
+                timeline.push_live(reader.children_slice());
+                timeline.push_live(state.node_slice(last_index));
+                timeline.close();
+                state.replace_or_insert_node_by_path(0, &path, &timeline);
+
+                path.pop();
+                reader.skip();
+            }
+            else {
+                if reader.is_open() {
+                    path.push(reader.id());
+                }
+                else if reader.is_close() {
+                    path.pop();
+                }
+                else {
+                    path.push(reader.id());
+
+                    let (first_index, last_index) = if let Some(state_child) = state.child_by_path(0, &path){
+                        if let Some(last_index) = state.last_child(state_child){
+                            (state_child+1,last_index)
+                        }
+                        else{panic!()}
+                    }
+                    else{panic!()};
+                    // verify 
+                    if let LiveValue::Id(check_id) = &state[first_index].value{
+                        if *check_id != track{
+                            cx.apply_error_wrong_animation_track_used(index, nodes, *path.last().unwrap(), *check_id, track);
+                            path.pop();
+                            reader.skip();
+                            continue;
+                        }
+                    }
+                    else{
+                        panic!()
+                    }
+                    let mut timeline = Vec::new();
+                    timeline.open_array(LiveId(0));
+                    timeline.push_live(live_array!{(track)});
+                    timeline.push_live(state.node_slice(last_index));
+                    timeline.push_live(reader.node_slice());
+                    timeline.last_mut().unwrap().id = id!(0); // clean up property id
+                    timeline.push_live(state.node_slice(last_index));
+                    timeline.close();
+                    state.replace_or_insert_node_by_path(0, &path, &timeline);
+                    path.pop();
+                }
+                reader.walk();
+            }
+        }
+        
+        if !any_from_found{
+            // add a bare time info track here
+            state.replace_or_insert_node_by_path(0, &[id!(tracks), track, id!(time)], live_array!{void});
+        }
+        state.replace_or_insert_node_by_path(0, &[id!(tracks), track, id!(state_id)], live_array!{(state_id)});
+        
+        self.swap_in_state(state);
+
+        self.next_frame = cx.new_next_frame();
     }
 }

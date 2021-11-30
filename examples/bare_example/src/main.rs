@@ -7,12 +7,12 @@ live_register!{
     App: {{App}} {
         scroll_view:{show_h:true, show_v:true,view:{layout:{line_wrap:LineWrap::NewLine}}} 
         frame: {
-            b1: Button {label: "btn1"}
+           /*b1: Button {label: "btn1"}
             b2: Button {label: "btn2"}
             frame1: Frame {
                 b3: Button {label: "btn3"}
                 children: [b3]
-            }
+            }*/
         }
     }
 }
@@ -44,7 +44,7 @@ impl App {
             cx.profile_start(0);
             let mut out = Vec::new();
             out.open();  
-            for i in 0..10000{
+            for i in 0..1{
                 out.push_live(live_object!{ 
                     [id_num!(btn,i)]: Button{label: (format!("B{}",i+self.offset))},
                 });
@@ -79,6 +79,6 @@ impl App {
         }
         
         self.desktop_window.end(cx);
-        cx.debug_draw_tree(false);
+        //cx.debug_draw_tree(false);
     }
 }

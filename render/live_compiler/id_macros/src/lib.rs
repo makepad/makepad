@@ -23,6 +23,15 @@ pub fn id(item: TokenStream) -> TokenStream {
         tb.add("LiveId (").suf_u64(id.0).add(")");
         tb.end()
     }
+    else if let Some(v) = parser.eat_literal(){
+        if let Ok(v) = v.to_string().parse::<u64>(){
+            tb.add("LiveId (").suf_u64(v).add(")");
+            return tb.end()
+        }
+        else{
+            parser.unexpected()
+        }
+    }
     else{
         parser.unexpected()
     }
