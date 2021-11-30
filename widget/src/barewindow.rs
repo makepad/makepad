@@ -9,13 +9,13 @@ live_register!{
 
 #[derive(Live, LiveHook)]
 pub struct BareWindow {
-    #[live] pub pass: Pass,
-    #[live] pub color_texture: Texture,
-    #[live] pub depth_texture: Texture,
+    pass: Pass,
+    color_texture: Texture,
+    depth_texture: Texture,
     
-    #[live] pub window: Window,
-    #[live] pub main_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
-    #[live] pub clear_color: Vec4,
+    window: Window,
+    main_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
+    clear_color: Vec4,
 }
 
 impl BareWindow {
