@@ -136,7 +136,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
             tb.add("         self.animator.animate_to_live(cx, track, state);");
             tb.add("    }");
             tb.add("    fn handle_animation(&mut self, cx: &mut Cx, event: &mut Event) {");
-            tb.add("        if self.animator.do_animation(cx, event) {");
+            tb.add("        if self.animator.handle_event(cx, event) {");
             tb.add("            let state = self.animator.swap_out_state();");
             tb.add("            self.apply(cx, ApplyFrom::Animate, state.child_by_name(0,id!(state)).unwrap(), &state);");
             tb.add("            self.animator.swap_in_state(state);");
