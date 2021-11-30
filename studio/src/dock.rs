@@ -55,7 +55,7 @@ impl Dock {
             if let Some(drag) = self.drag.as_ref() {
                 let panel = self.panels_by_panel_id[drag.panel_id].as_tab_panel();
                 let rect = compute_drag_rect(panel.contents_rect, drag.position);
-                self.drag_quad.draw_quad_abs(cx, rect);
+                self.drag_quad.draw_abs(cx, rect);
             }
             self.drag_view.end(cx);
         }

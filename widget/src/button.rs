@@ -1,11 +1,13 @@
+#![allow(unused)]
 use makepad_render::*;
 use crate::buttonlogic::*;
+
 
 live_register!{
     use makepad_render::shader_std::*;
     
     Button: {{Button}} {
-        bg: {
+        bg_quad: {
             instance color: vec4 = #333
             instance hover: float
             instance pressed: float
@@ -48,29 +50,29 @@ live_register!{
          
         state_default: {
             from: {all: Play::Forward {duration: 0.1}}
-            bg: {pressed: 0.0, hover: 0.0}
-            text: {color: #9}
+            bg_quad: {pressed: 0.0, hover: 0.0}
+            label_text: {color: #9}
         }
-        
+
         state_hover: {
             from: {
                 all: Play::Forward {duration: 0.1}
-                state_down: Play::Forward {duration: 0.01}
+                state_pressed: Play::Forward {duration: 0.01}
             }
-            bg: { 
+            bg_quad: { 
                 pressed: 0.0,
                 hover: [{time: 0.0, value: 1.0}],
             } 
-            text: {color: [{time: 0.0, value: #f}]}
+            label_text: {color: [{time: 0.0, value: #f}]}
         }
          
         state_pressed: {
             from: {all: Play::Forward {duration: 0.2}}
-            bg: {
+            bg_quad: {
                 pressed: [{time: 0.0, value: 1.0}],
                 hover: 1.0,
             }
-            text: {color: [{time: 0.0, value: #c}]}
+            label_text: {color: [{time: 0.0, value: #c}]}
         }
     }
 }
@@ -78,12 +80,12 @@ live_register!{
 #[derive(Live)]
 pub struct Button {
     #[rust] pub button_logic: ButtonLogic,
-    #[rust] pub animator: Animator,
+    #[track(base=state_default)] pub animator: Animator,
     #[live] pub state_default: Option<LivePtr>,
     #[live] pub state_hover: Option<LivePtr>,
     #[live] pub state_pressed: Option<LivePtr>,
-    #[live] pub bg: DrawQuad,
-    #[live] pub text: DrawText,
+    #[live] pub bg_quad: DrawQuad,
+    #[live] pub label_text: DrawText,
     #[live] pub layout: Layout,
     #[live] pub label: String
 }
@@ -91,6 +93,18 @@ pub struct Button {
 impl LiveHook for Button{
     fn to_frame_component(&mut self)->Option<&mut dyn FrameComponent>{
         return Some(self);
+    }
+    fn after_apply(&mut self, cx:&mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]){
+        if apply_from.is_from_doc(){
+            /*
+            self.animator2.cut_to_live(cx, id!(hover), self.state_default.unwrap());
+            self.animator2.cut_to_live(cx, id!(label), self.state_default_label.unwrap());
+            //self.animator2.cut_to_live(cx, id!(hover), self.state_default.unwrap());
+            self.animator2.animate_to_live(cx, id!(hover), self.state_hover.unwrap());
+            self.animator2.animate_to_live(cx, id!(label), self.state_hover_label.unwrap());
+            println!("{}", self.animator2.state.as_ref().unwrap().to_string(0,100));
+            */
+        }
     }
 }
 
@@ -103,24 +117,43 @@ impl FrameComponent for Button {
         self.draw(cx, None);
     }
 }
+/*
+impl Button{
+    fn animate_to2(&mut self, cx: &mut Cx, track:LiveId, state: LivePtr) {
+        if self.animator2.state.is_none() {
+            self.animator2.cut_to_live(cx, track, self.state_default.unwrap());
+         }
+        self.animator2.animate_to_live(cx, track, state);
+        //println!("{}", self.animator2.state.as_ref().unwrap().to_string(0,100));
+    }
+    fn handle_animation2(&mut self, cx: &mut Cx, event: &mut Event) {
+        if self.animator2.do_animation(cx, event) {
+            let state = self.animator2.swap_out_state();
+            self.apply(cx, ApplyFrom::Animate, state.child_by_name(0,id!(state)).unwrap(), &state);
+            self.animator2.swap_in_state(state);
+        }
+    }
+}    */        
 
 impl Button {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonAction {
+
         self.handle_animation(cx, event);
-        let res = self.button_logic.handle_event(cx, event, self.bg.draw_vars.area);
+        let res = self.button_logic.handle_event(cx, event, self.bg_quad.draw_vars.area);
+        
         match res.state {
-            ButtonState::Pressed => self.animate_to(cx, self.state_pressed.unwrap()),
-            ButtonState::Default => self.animate_to(cx, self.state_default.unwrap()),
-            ButtonState::Hover => self.animate_to(cx, self.state_hover.unwrap()),
+            ButtonState::Pressed => self.animate_to(cx, id!(base), self.state_pressed.unwrap()),
+            ButtonState::Default => self.animate_to(cx, id!(base), self.state_default.unwrap()),
+            ButtonState::Hover => self.animate_to(cx, id!(base), self.state_hover.unwrap()),
             _ => ()
         };
         res.action
     }
     
     pub fn draw(&mut self, cx: &mut Cx, label: Option<&str>) {
-        self.bg.begin_quad(cx, self.layout);
-        self.text.draw_text_walk(cx, label.unwrap_or(&self.label));
-        self.bg.end_quad(cx);
+        self.bg_quad.begin(cx, self.layout);
+        self.label_text.draw_walk(cx, label.unwrap_or(&self.label));
+        self.bg_quad.end(cx);
     }
 }

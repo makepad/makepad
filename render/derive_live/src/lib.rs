@@ -16,7 +16,7 @@ mod macro_lib;
 #[path = "../../live_compiler/src/liveid.rs"]
 mod liveid;
 
-#[proc_macro_derive(Live, attributes(calc, live, rust, pick, live_type_kind))]
+#[proc_macro_derive(Live, attributes(calc, live, rust, pick, live_type_kind, track))]
 pub fn derive_live(input: TokenStream) -> TokenStream {
     derive_live_impl(input)
 }

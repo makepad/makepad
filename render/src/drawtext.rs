@@ -179,20 +179,20 @@ impl DrawText {
         }
     }
     
-    pub fn draw_text(&mut self, cx: &mut Cx, pos: Vec2) {
-        self.draw_text_chunk(cx, pos, 0, None, | _, _, _, _ | {0.0});
+    pub fn draw(&mut self, cx: &mut Cx, pos: Vec2) {
+        self.draw_chunk(cx, pos, 0, None, | _, _, _, _ | {0.0});
     }
     
-    pub fn draw_text_rel(&mut self, cx: &mut Cx, pos: Vec2, val: &str) {
+    pub fn draw_rel(&mut self, cx: &mut Cx, pos: Vec2, val: &str) {
         self.buf.truncate(0);
         self.buf_push_str(val);
-        self.draw_text(cx, pos + cx.get_turtle_origin());
+        self.draw(cx, pos + cx.get_turtle_origin());
     }
     
-    pub fn draw_text_abs(&mut self, cx: &mut Cx, pos: Vec2, val: &str) {
+    pub fn draw_abs(&mut self, cx: &mut Cx, pos: Vec2, val: &str) {
         self.buf.truncate(0);
         self.buf_push_str(val);
-        self.draw_text(cx, pos);
+        self.draw(cx, pos);
     }
     
     pub fn begin_many_instances(&mut self, cx: &mut Cx) {
@@ -213,7 +213,7 @@ impl DrawText {
         self.draw_vars.user_uniforms[1] = self.text_style.curve;
     }
     
-    pub fn draw_text_chunk<F>(&mut self, cx: &mut Cx, pos: Vec2, char_offset: usize, chunk: Option<&[char]>, mut char_callback: F)
+    pub fn draw_chunk<F>(&mut self, cx: &mut Cx, pos: Vec2, char_offset: usize, chunk: Option<&[char]>, mut char_callback: F)
     where F: FnMut(char, usize, f32, f32) -> f32
     {
         
@@ -346,7 +346,7 @@ impl DrawText {
         }
     }
     
-    pub fn draw_text_walk(&mut self, cx: &mut Cx, text: &str) {
+    pub fn draw_walk(&mut self, cx: &mut Cx, text: &str) {
         
         if !self.draw_vars.can_instance()
             || self.text_style.font.font_id.is_none() {
@@ -433,7 +433,7 @@ impl DrawText {
                     margin: Margin::default()
                 });
                 
-                self.draw_text_chunk(cx, rect.pos, 0, None, | _, _, _, _ | {0.0});
+                self.draw_chunk(cx, rect.pos, 0, None, | _, _, _, _ | {0.0});
                 
                 width = 0.0;
                 self.buf.truncate(0);
@@ -448,7 +448,7 @@ impl DrawText {
     }
     
     // looks up text with the behavior of a text selection mouse cursor
-    pub fn closest_text_offset(&self, cx: &Cx, pos: Vec2) -> Option<usize> {
+    pub fn closest_offset(&self, cx: &Cx, pos: Vec2) -> Option<usize> {
         let area = &self.draw_vars.area;
         
         if !area.is_valid(cx) {
