@@ -149,6 +149,8 @@ impl LiveRegistry {
     pub fn insert_dep_order(&mut self, module_id: LiveModuleId, token_id: TokenId, own_module_id: LiveModuleId) {
         let self_index = self.dep_order.iter().position( | v | v.0 == own_module_id).unwrap();
         if let Some(other_index) = self.dep_order.iter().position( | v | v.0 == module_id) {
+            // if other_index is > self index. we should move self later
+            
             if other_index > self_index {
                 self.dep_order.remove(other_index);
                 self.dep_order.insert(self_index, (module_id, token_id));
@@ -248,6 +250,7 @@ impl LiveRegistry {
                         let sub_module_id = sub_type.live_type_info.module_id;
                         if sub_module_id != own_module_id {
                             dep_graph_set.insert(sub_module_id);
+                            
                             self.insert_dep_order(sub_module_id, node.token_id.unwrap(), own_module_id);
                         }
                     }
@@ -281,19 +284,22 @@ impl LiveRegistry {
     }
     
     pub fn expand_all_documents(&mut self, errors: &mut Vec<LiveError>) {
+
         for (crate_module, _token_id) in &self.dep_order {
             let file_id = if let Some(file_id) = self.module_id_to_file_id.get(crate_module) {
                 file_id
             }
             else {
+                //println!("DEP NOT FOUND {}", crate_module);
                 // ok so we have a token_id. now what.
-                /*errors.push(LiveError {
+                /*Errors.push(LiveError {
                     origin: live_error_origin!(),
                     span: self.token_id_to_span(*token_id),
                     message: format!("Cannot find dependency: {}::{}", crate_module.0, crate_module.1)
                 });*/
                 continue
             };
+           //println!("DEP ORDER {} {}", crate_module, file_id.0);
             
             if !self.expanded[file_id.to_index()].recompile {
                 continue;

@@ -311,6 +311,9 @@ impl<'a> LiveExpander<'a> {
                                 }
                                 else{
                                     let other_nodes = &self.live_registry.expanded[file_id.to_index()].nodes;
+                                    if other_nodes.len() == 0{
+                                        panic!("Dependency order wrong, someday i'll learn to program. {} {} {}", file_id.0, self.in_file_id.0, lti.type_name);
+                                    }
                                     if let Some(index) = other_nodes.child_by_name(0, lti.type_name){
                                         let node_insert_point = insert_point;
                                         insert_point = out_doc.nodes.insert_node_from_other(index, Some(insert_point), other_nodes);
