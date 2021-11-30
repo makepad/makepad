@@ -58,7 +58,7 @@ impl TabBar {
     
     pub fn end(&mut self, cx: &mut Cx) {
         if self.is_dragged {
-            self.draw_drag.draw_quad_walk(
+            self.draw_drag.draw_walk(
                 cx,
                 Walk {
                     width: Width::Filled,

@@ -113,7 +113,7 @@ live_register!{
 #[derive(Live, LiveHook)]
 pub struct DesktopButton {
     #[rust] pub button_logic: ButtonLogic,
-    #[rust] pub animator: Animator,
+    #[track(base=state_default)] pub animator: Animator,
     #[live] pub state_default: Option<LivePtr>,
     #[live] pub state_hover: Option<LivePtr>,
     #[live] pub state_pressed: Option<LivePtr>,
@@ -146,14 +146,14 @@ impl DesktopButton {
         self.handle_animation(cx, event);
         let res = self.button_logic.handle_event(cx, event, self.bg.draw_vars.area);
         match res.state {
-            ButtonState::Pressed => self.animate_to(cx, self.state_pressed.unwrap()),
-            ButtonState::Default => self.animate_to(cx, self.state_default.unwrap()),
-            ButtonState::Hover => self.animate_to(cx, self.state_hover.unwrap()),
+            ButtonState::Pressed => self.animate_to(cx, id!(base), self.state_pressed.unwrap()),
+            ButtonState::Default => self.animate_to(cx, id!(base), self.state_default.unwrap()),
+            ButtonState::Hover => self.animate_to(cx, id!(base), self.state_hover.unwrap()),
             _ => ()
         };
         res.action
     }
-    
+     
     pub fn draw_desktop_button(&mut self, cx: &mut Cx, ty: DesktopButtonType) {
         let (w, h) = match ty {
             DesktopButtonType::WindowsMin
@@ -165,7 +165,7 @@ impl DesktopButton {
         };
         
         self.bg.button_type = ty;
-        self.bg.draw_quad_walk(cx, Walk::fixed(w, h));
+        self.bg.draw_walk(cx, Walk::fixed(w, h));
     }
 }
 

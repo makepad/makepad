@@ -9,6 +9,72 @@ use{
     }
 };
 
+
+impl LiveIdMap {
+    pub fn add(&mut self, val: &str) {
+        self.id_to_string.insert(LiveId::from_str_unchecked(val), val.to_string());
+    }
+    
+    pub fn contains(&mut self, val: &str) -> bool {
+        self.id_to_string.contains_key(&LiveId::from_str_unchecked(val))
+    }
+    
+    pub fn with<F, R>(f: F) -> R
+    where
+    F: FnOnce(&mut Self) -> R,
+    {
+        static mut IDMAP: Option<LiveIdMap> = None;
+        static ONCE: Once = Once::new();
+        ONCE.call_once( || unsafe {
+            let mut map = LiveIdMap {
+                id_to_string: HashMap::new()
+            };
+            // pre-seed list for debugging purposes
+            let fill = [
+                "true",
+                "false",
+                "use",
+                "!=",
+                "!",
+                "&&",
+                "*=",
+                "*",
+                "+=",
+                "+",
+                ",",
+                "-=",
+                "->",
+                "-",
+                "..",
+                ".",
+                "/=",
+                "/",
+                "::",
+                ":",
+                ";",
+                "<=",
+                "<",
+                "==",
+                "=",
+                ">=",
+                "=>",
+                ">",
+                "?",
+                "tracks",
+                "state",
+                "state_id",
+                "user",
+                "play",
+            ];
+            for item in &fill {
+                map.add(item);
+            }
+            IDMAP = Some(map)
+        });
+        f(unsafe {IDMAP.as_mut().unwrap()})
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Ord, PartialOrd, Hash, PartialEq)]
 pub struct LiveFileId(pub u16);
 
@@ -284,29 +350,6 @@ pub struct LiveIdMap {
     id_to_string: HashMap<LiveId, String>,
 }
 
-impl LiveIdMap {
-    pub fn add(&mut self, val: &str) {
-        self.id_to_string.insert(LiveId::from_str_unchecked(val), val.to_string());
-    }
-    
-    pub fn contains(&mut self, val: &str) -> bool {
-        self.id_to_string.contains_key(&LiveId::from_str_unchecked(val))
-    }
-    
-    pub fn with<F, R>(f: F) -> R
-    where
-    F: FnOnce(&mut Self) -> R,
-    {
-        static mut IDMAP: Option<LiveIdMap> = None;
-        static ONCE: Once = Once::new();
-        ONCE.call_once( || unsafe {
-            IDMAP = Some(LiveIdMap {
-                id_to_string: HashMap::new()
-            })
-        });
-        f(unsafe {IDMAP.as_mut().unwrap()})
-    }
-}
 
 
 pub fn hex_bytes_to_u32(bytes: &[u8]) -> Result<u32, ()> {

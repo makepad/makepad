@@ -47,7 +47,7 @@ pub trait LiveNew: LiveApply {
         let live_registry = live_registry_rc.borrow();
         if let Some(file_id) = live_registry.module_id_to_file_id.get(&LiveModuleId::from_str(module_path).unwrap()) {
             let doc = live_registry.file_id_to_doc(*file_id);
-            if let Ok(index) = doc.nodes.child_by_name(0,id){
+            if let Some(index) = doc.nodes.child_by_name(0,id){
                 let mut ret = Self::new(cx);
                 ret.apply(cx, ApplyFrom::NewFromDoc {file_id:*file_id}, index, &doc.nodes);
                 return Some(ret)
@@ -82,7 +82,7 @@ pub trait LiveApply : LiveHook {
 
 
 pub trait LiveAnimate {
-    fn animate_to(&mut self, cx: &mut Cx, state:LivePtr);
+    fn animate_to(&mut self, cx: &mut Cx, track: LiveId, state:LivePtr);
     fn handle_animation(&mut self, cx: &mut Cx, event: &mut Event);
 }
 
@@ -183,11 +183,21 @@ impl Cx {
         self.apply_error(apply_from, index, nodes, format!("component not found: {}", id))
     }
     
-    
     pub fn apply_error_cant_find_target(&mut self, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode], id: LiveId) {
         self.apply_error(apply_from, index, nodes, format!("cant find target: {}", id))
     }
+        
+    pub fn apply_error_wrong_animation_track_used(&mut self, index: usize, nodes: &[LiveNode], id:LiveId, expect:LiveId, got:LiveId) {
+        self.apply_error(ApplyFrom::Animate, index, nodes, format!("encountered value [{}] with track [{}] whilst animating on track [{}]", id, expect, got))
+    }
     
+    pub fn apply_error_animate_to_unknown_track(&mut self, index: usize, nodes: &[LiveNode], id:LiveId, state_id:LiveId) {
+        self.apply_error(ApplyFrom::Animate, index, nodes, format!("unknown track {} in animate_to state_id {}", id, state_id))
+    }
+    
+    pub fn apply_key_frame_cannot_be_interpolated(&mut self, index: usize, nodes: &[LiveNode]) {
+        self.apply_error(ApplyFrom::Animate, index, nodes, format!("key frame values cannot be interpolated"))
+    }
     
     pub fn apply_error(&mut self, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode], message: String) {
         let live_registry = self.live_registry.borrow();
@@ -204,8 +214,7 @@ impl Cx {
             
         }
     }
-    
-    
+
     // ok so now what. now we should run the expansion
     pub fn live_expand(&mut self) {
         // lets expand the f'er
@@ -472,6 +481,33 @@ live_primitive!(
     },
     fn to_live_value(&self) -> LiveValue {
         LiveValue::Float(*self as f64)
+    }
+);
+
+live_primitive!(
+    i64,
+    0i64,
+    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        match &nodes[index].value {
+            LiveValue::Float(val) => {
+                *self = *val as i64;
+                index + 1
+            }
+            LiveValue::Int(val) => {
+                *self = *val as i64;
+                index + 1
+            }
+            LiveValue::Array => {
+                if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
+                    self.apply(cx, apply_from, index, nodes);
+                }
+                nodes.skip_node(index)
+            }
+            _ => nodes.skip_node(index)
+        }
+    },
+    fn to_live_value(&self) -> LiveValue {
+        LiveValue::Int(*self)
     }
 );
 

@@ -89,7 +89,7 @@ impl LiveRegistry {
                     println!("module_path_id_to_doc zero nodelen {}", self.file_id_to_file_name(*file_id));
                     return None
                 }
-                if let Ok(index) = doc.nodes.child_by_name(0, id) {
+                if let Some(index) = doc.nodes.child_by_name(0, id) {
                     return Some(LiveDocNodes {nodes: &doc.nodes, file_id: *file_id, index});
                 }
                 else {

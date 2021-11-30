@@ -50,9 +50,9 @@ pub struct Tab {
     #[rust] is_selected: bool,
     #[rust] is_dragged: bool,
 
-    #[live] draw_tab: DrawTab,
-    #[live] draw_name: DrawText,
-    #[live] draw_drag: DrawColor,
+    #[live] bg_quad: DrawTab,
+    #[live] name_text: DrawText,
+    #[live] drag_quad: DrawColor,
 
     #[live] close_button: TabButton,
 
@@ -75,15 +75,15 @@ impl Tab {
     }
 
     pub fn draw(&mut self, cx: &mut Cx, name: &str) {
-        self.draw_tab.color = self.color(self.is_selected);
-        self.draw_tab.begin_quad(cx, self.layout);
-        self.draw_name.color = self.name_color(self.is_selected);
-        self.draw_name.draw_text_walk(cx, name);
+        self.bg_quad.color = self.color(self.is_selected);
+        self.bg_quad.begin(cx, self.layout);
+        self.name_text.color = self.name_color(self.is_selected);
+        self.name_text.draw_walk(cx, name);
         cx.turtle_align_y();
         self.close_button.draw(cx);
-        self.draw_tab.end_quad(cx);
+        self.bg_quad.end(cx);
         if self.is_dragged {
-            self.draw_drag.draw_quad_abs(cx, self.draw_tab.draw_vars.area.get_rect(cx));
+            self.drag_quad.draw_abs(cx, self.bg_quad.draw_vars.area.get_rect(cx));
         }
     }
 
@@ -114,17 +114,17 @@ impl Tab {
             .handle_event(cx, event, &mut |cx, action| match action {
                 tab_button::Action::WasPressed => dispatch_action(cx, TabAction::ButtonWasPressed),
             });
-        match event.hits(cx, self.draw_tab.draw_vars.area, HitOpt::default()) {
+        match event.hits(cx, self.bg_quad.draw_vars.area, HitOpt::default()) {
             Event::FingerDown(_) => {
                 dispatch_action(cx, TabAction::WasPressed);
             }
             _ => {}
         }
-        match event.drag_hits(cx, self.draw_tab.draw_vars.area, HitOpt::default()) {
+        match event.drag_hits(cx, self.bg_quad.draw_vars.area, HitOpt::default()) {
             Event::FingerDrag(drag_event) => match drag_event.state {
                 DragState::In => {
                     self.is_dragged = true;
-                    self.draw_tab.draw_vars.redraw_view(cx);
+                    self.bg_quad.draw_vars.redraw_view(cx);
                     match event {
                         Event::FingerDrag(event) => {
                             event.action = DragAction::Copy;
@@ -134,7 +134,7 @@ impl Tab {
                 }
                 DragState::Out => {
                     self.is_dragged = false;
-                    self.draw_tab.draw_vars.redraw_view(cx);
+                    self.bg_quad.draw_vars.redraw_view(cx);
                 }
                 DragState::Over => match event {
                     Event::FingerDrag(event) => {
@@ -145,7 +145,7 @@ impl Tab {
             },
             Event::FingerDrop(event) => {
                 self.is_dragged = false;
-                self.draw_tab.draw_vars.redraw_view(cx);
+                self.bg_quad.draw_vars.redraw_view(cx);
                 dispatch_action(cx, TabAction::ReceivedDraggedItem(event.dragged_item))
             }
             _ => {}

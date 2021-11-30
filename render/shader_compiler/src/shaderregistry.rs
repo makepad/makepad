@@ -28,7 +28,6 @@ pub struct ShaderEnum{
 
 impl ShaderRegistry {
     pub fn new() -> Self {
-        LiveId::from_str("user").unwrap();
         Self {
             structs: HashMap::new(),
             consts: HashMap::new(),
@@ -177,10 +176,10 @@ impl ShaderRegistry {
                         return LiveNodeFindResult::Component(now_ptr);
                     }
                     match nodes.child_by_name(index, ids[0]){
-                        Ok(child_index)=>{
+                        Some(child_index)=>{
                             return walk_recur(live_registry, None, file_id, child_index, nodes, &ids[1..])
                         }
-                        Err(_)=>{
+                        None=>{
                             return LiveNodeFindResult::NotFound;
                         }
                     }
@@ -193,7 +192,7 @@ impl ShaderRegistry {
                         return LiveNodeFindResult::Component(now_ptr);
                     }
                     match nodes.child_by_name(index, ids[0]){
-                        Ok(child_index)=>{
+                        Some(child_index)=>{
                             let struct_ptr = if clone == id!(Struct){
                                 Some(now_ptr)
                             }
@@ -202,7 +201,7 @@ impl ShaderRegistry {
                             };
                             return walk_recur(live_registry, struct_ptr, file_id, child_index, nodes, &ids[1..])
                         }
-                        Err(_)=>{
+                        None=>{
                             return LiveNodeFindResult::NotFound;
                         }
                     }
@@ -212,10 +211,10 @@ impl ShaderRegistry {
                         return LiveNodeFindResult::NotFound;
                     }
                     match nodes.child_by_name(index, ids[0]){
-                        Ok(child_index)=>{
+                        Some(child_index)=>{
                             return walk_recur(live_registry, None, file_id, child_index, nodes, &ids[1..])
                         }
-                        Err(_)=>{
+                        None=>{
                             return LiveNodeFindResult::NotFound;
                         }
                     }

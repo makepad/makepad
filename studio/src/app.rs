@@ -9,7 +9,6 @@ use {
         protocol::{self, Notification, Request, Response, ResponseOrNotification},
         server::{Connection, Server},
         tab_bar::TabId,
-        tree_logic::NodeId,
     },
     makepad_render::*,
     makepad_widget::*,
@@ -26,10 +25,10 @@ use {
 
 live_register!{
     AppInner: {{AppInner}} {
-        window:{caption:"Makepad Studio"}
+        window: {caption: "Makepad Studio"}
     }
     
-    App: {{App}} { 
+    App: {{App}} {
     }
 }
 
@@ -39,7 +38,7 @@ pub struct App {
     #[rust(AppState::new())] state: AppState,
 }
 
-impl App { 
+impl App {
     
     pub fn live_register(cx: &mut Cx) {
         makepad_widget::live_register(cx);
@@ -55,12 +54,14 @@ impl App {
     pub fn new_app(cx: &mut Cx) -> Self {
         Self::new_from_module_path_id(cx, &module_path!(), id!(App)).unwrap()
     }
-
+    
     pub fn draw(&mut self, cx: &mut Cx) {
+        //cx.profile_start(0);
         self.inner.draw(cx, &self.state);
+        //cx.profile_end(0);
         //cx.debug_draw_tree(false);
     }
-
+    
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
         self.inner.handle_event(cx, event, &mut self.state);
     }
@@ -81,8 +82,8 @@ pub struct AppInner {
     #[rust(AppIO::new(cx))] io: AppIO
 }
 
-impl AppIO{
-    fn new(cx: &mut Cx)->Self{
+impl AppIO {
+    fn new(cx: &mut Cx) -> Self {
         let mut server = Server::new(env::current_dir().unwrap());
         let (request_sender, request_receiver) = mpsc::channel();
         let response_or_notification_signal = cx.new_signal();
@@ -102,8 +103,8 @@ impl AppIO{
                     request_receiver,
                     server.connect(Box::new({
                         let response_or_notification_sender =
-                            response_or_notification_sender.clone();
-                        move |notification| {
+                        response_or_notification_sender.clone();
+                        move | notification | {
                             response_or_notification_sender
                                 .send(ResponseOrNotification::Notification(notification))
                                 .unwrap();
@@ -116,10 +117,10 @@ impl AppIO{
             }
         }
         spawn_connection_listener(TcpListener::bind("127.0.0.1:0").unwrap(), server);
-        Self{
+        Self {
             request_sender,
             response_or_notification_signal,
-            response_or_notification_receiver,            
+            response_or_notification_receiver,
         }
     }
 }
@@ -135,18 +136,18 @@ impl AppInner {
             self.window.end(cx);
         }
     }
-
+    
     fn draw_panel(&mut self, cx: &mut Cx, state: &AppState, panel_id: PanelId) {
         let panel = &state.panels_by_panel_id[panel_id];
         match &panel.kind {
-            PanelKind::Split(SplitPanel { child_panel_ids }) => {
+            PanelKind::Split(SplitPanel {child_panel_ids}) => {
                 self.dock.begin_split_panel(cx, panel_id);
                 self.draw_panel(cx, state, child_panel_ids[0]);
                 self.dock.middle_split_panel(cx);
                 self.draw_panel(cx, state, child_panel_ids[01]);
                 self.dock.end_split_panel(cx);
             }
-            PanelKind::Tab(TabPanel { tab_ids, .. }) => {
+            PanelKind::Tab(TabPanel {tab_ids, ..}) => {
                 self.dock.begin_tab_panel(cx, panel_id);
                 if self.dock.begin_tab_bar(cx).is_ok() {
                     for tab_id in tab_ids {
@@ -164,7 +165,7 @@ impl AppInner {
                                 self.file_tree.end(cx);
                             }
                         }
-                        TabKind::CodeEditor { .. } => {
+                        TabKind::CodeEditor {..} => {
                             let panel = state.panels_by_panel_id[panel_id].as_tab_panel();
                             self.code_editor.draw(
                                 cx,
@@ -178,15 +179,12 @@ impl AppInner {
             }
         }
     }
-
+    
     fn draw_file_node(&mut self, cx: &mut Cx, state: &AppState, file_node_id: FileNodeId) {
         let file_node = &state.file_nodes_by_file_node_id[file_node_id];
         match &file_node.child_edges {
             Some(child_edges) => {
-                if self
-                    .file_tree
-                    .begin_folder(cx, file_node_id, &file_node.name)
-                    .is_ok()
+                if self.file_tree.begin_folder(cx, file_node_id, &file_node.name).is_ok()
                 {
                     for child_edge in child_edges {
                         self.draw_file_node(cx, state, child_edge.file_node_id);
@@ -199,16 +197,16 @@ impl AppInner {
             }
         }
     }
-
+    
     fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, state: &mut AppState) {
         self.window.handle_event(cx, event);
-
-        if let Event::Construct = event{
+        
+        if let Event::Construct = event {
             self.send_request(Request::GetFileTree());
         }
-
+        
         let mut actions = Vec::new();
-        self.dock.handle_event(cx, event, &mut |_, action| actions.push(action));
+        self.dock.handle_event(cx, event, &mut | _, action | actions.push(action));
         for action in actions {
             match action {
                 DockAction::SplitPanelChanged(panel_id) => {
@@ -227,7 +225,7 @@ impl AppInner {
                 DockAction::TabButtonWasPressed(panel_id, tab_id) => {
                     let tab = &state.tabs_by_tab_id[tab_id];
                     match tab.kind {
-                        TabKind::CodeEditor { session_id } => {
+                        TabKind::CodeEditor {session_id} => {
                             let panel = state
                                 .panels_by_panel_id
                                 .get_mut(panel_id)
@@ -243,13 +241,13 @@ impl AppInner {
                             }
                             state.code_editor_state.destroy_session(session_id, &mut {
                                 let request_sender = &self.io.request_sender;
-                                move |request| request_sender.send(request).unwrap()
+                                move | request | request_sender.send(request).unwrap()
                             });
                             panel.tab_ids.remove(
                                 panel
                                     .tab_ids
                                     .iter()
-                                    .position(|existing_tab_id| *existing_tab_id == tab_id)
+                                    .position( | existing_tab_id | *existing_tab_id == tab_id)
                                     .unwrap(),
                             );
                             state.tabs_by_tab_id.remove(tab_id);
@@ -278,9 +276,9 @@ impl AppInner {
                 }
             }
         }
-
+        
         let mut actions = Vec::new();
-        self.file_tree.handle_event(cx, event, &mut |_cx, action| actions.push(action));
+        self.file_tree.handle_event(cx, event, &mut | _cx, action | actions.push(action));
         for action in actions {
             match action {
                 FileTreeAction::FileNodeWasClicked(file_node_id) => {
@@ -304,12 +302,12 @@ impl AppInner {
                 }
             }
         }
-
+        
         let mut panel_id_stack = vec![state.root_panel_id];
         while let Some(panel_id) = panel_id_stack.pop() {
             let panel = &state.panels_by_panel_id[panel_id];
             match &panel.kind {
-                PanelKind::Split(SplitPanel { child_panel_ids }) => {
+                PanelKind::Split(SplitPanel {child_panel_ids}) => {
                     for child_id in child_panel_ids {
                         panel_id_stack.push(*child_id);
                     }
@@ -326,19 +324,19 @@ impl AppInner {
                             event,
                             &mut {
                                 let request_sender = &self.io.request_sender;
-                                move |request| request_sender.send(request).unwrap()
+                                move | request | request_sender.send(request).unwrap()
                             },
                         );
                     }
                 }
             }
         }
-
+        
         match event {
             Event::Signal(event)
-                if event
-                    .signals
-                    .contains_key(&self.io.response_or_notification_signal) =>
+            if event
+                .signals
+                .contains_key(&self.io.response_or_notification_signal) =>
             {
                 loop {
                     match self.io.response_or_notification_receiver.try_recv() {
@@ -356,7 +354,7 @@ impl AppInner {
             _ => {}
         }
     }
-
+    
     fn handle_response(&mut self, cx: &mut Cx, state: &mut AppState, response: Response) {
         match response {
             Response::GetFileTree(response) => {
@@ -364,15 +362,14 @@ impl AppInner {
                 self.select_tab(cx, state, state.side_bar_panel_id, state.file_tree_tab_id);
             }
             response => {
-                self.code_editor
-                    .handle_response(cx, &mut state.code_editor_state, response, &mut {
-                        let request_sender = &self.io.request_sender;
-                        move |request| request_sender.send(request).unwrap()
-                    })
+                self.code_editor.handle_response(cx, &mut state.code_editor_state, response, &mut {
+                    let request_sender = &self.io.request_sender;
+                    move | request | request_sender.send(request).unwrap()
+                })
             }
         };
     }
-
+    
     fn handle_notification(&mut self, cx: &mut Cx, state: &mut AppState, notification: Notification) {
         match notification {
             notification => {
@@ -381,15 +378,14 @@ impl AppInner {
             }
         }
     }
-
+    
     fn set_file_tree(&mut self, cx: &mut Cx, state: &mut AppState, file_tree: protocol::FileTree) {
         self.file_tree.forget();
         state.set_file_tree(file_tree);
-        self.file_tree
-            .set_file_node_is_expanded(cx, state.root_file_node_id, true, true);
+        self.file_tree.set_file_node_is_expanded(cx, state.root_file_node_id, true, true);
         self.file_tree.redraw(cx);
     }
-
+    
     fn split_tab_panel(
         &mut self,
         cx: &mut Cx,
@@ -401,10 +397,10 @@ impl AppInner {
         let parent_panel_id = panel.parent_panel_id;
         let new_parent_panel_id = PanelId(state.panel_id_allocator.allocate());
         let new_panel_id = PanelId(state.panel_id_allocator.allocate());
-
+        
         let panel = &mut state.panels_by_panel_id[panel_id];
         panel.parent_panel_id = Some(new_parent_panel_id);
-
+        
         state.panels_by_panel_id.insert(
             new_panel_id,
             Panel {
@@ -415,7 +411,7 @@ impl AppInner {
                 }),
             },
         );
-
+        
         state.panels_by_panel_id.insert(
             new_parent_panel_id,
             Panel {
@@ -429,17 +425,17 @@ impl AppInner {
                 }),
             },
         );
-
+        
         if let Some(parent_panel_id) = parent_panel_id {
             let parent_panel = &mut state.panels_by_panel_id[parent_panel_id].as_split_panel_mut();
             let position = parent_panel
                 .child_panel_ids
                 .iter()
-                .position(|child_panel_id| *child_panel_id == panel_id)
+                .position( | child_panel_id | *child_panel_id == panel_id)
                 .unwrap();
             parent_panel.child_panel_ids[position] = new_parent_panel_id;
         }
-
+        
         self.dock.set_split_panel_axis(
             cx,
             new_parent_panel_id,
@@ -449,13 +445,13 @@ impl AppInner {
                 _ => panic!(),
             },
         );
-
+        
         self.dock.redraw(cx);
         self.redraw_panel(cx, state, panel_id);
-
+        
         new_panel_id
     }
-
+    
     fn create_code_editor_tab(
         &mut self,
         cx: &mut Cx,
@@ -468,13 +464,13 @@ impl AppInner {
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         let session_id = state.code_editor_state.create_session(path, &mut {
             let request_sender = &self.io.request_sender;
-            move |request| request_sender.send(request).unwrap()
+            move | request | request_sender.send(request).unwrap()
         });
         state.tabs_by_tab_id.insert(
             tab_id,
             Tab {
                 name,
-                kind: TabKind::CodeEditor { session_id },
+                kind: TabKind::CodeEditor {session_id},
             },
         );
         let panel = state
@@ -488,7 +484,7 @@ impl AppInner {
                     panel
                         .tab_ids
                         .iter()
-                        .position(|existing_tab_id| *existing_tab_id == next_tab_id)
+                        .position( | existing_tab_id | *existing_tab_id == next_tab_id)
                         .unwrap(),
                     tab_id,
                 );
@@ -497,19 +493,19 @@ impl AppInner {
         }
         self.select_tab(cx, state, panel_id, tab_id);
     }
-
+    
     fn select_tab(&mut self, cx: &mut Cx, state: &mut AppState, panel_id: PanelId, tab_id: TabId) {
         let tab = &state.tabs_by_tab_id[tab_id];
         self.dock.set_selected_tab_id(cx, panel_id, Some(tab_id));
         self.dock.redraw_tab_bar(cx, panel_id);
         match tab.kind {
-            TabKind::CodeEditor { session_id } => {
+            TabKind::CodeEditor {session_id} => {
                 self.set_code_editor_view_session_id(cx, state, panel_id, session_id);
             }
             _ => {}
         }
     }
-
+    
     fn set_code_editor_view_session_id(
         &mut self,
         cx: &mut Cx,
@@ -540,11 +536,11 @@ impl AppInner {
             }
         }
     }
-
+    
     fn send_request(&mut self, request: Request) {
         self.io.request_sender.send(request).unwrap();
     }
-
+    
     fn redraw_panel(&mut self, cx: &mut Cx, state: &AppState, panel_id: PanelId) {
         match &state.panels_by_panel_id[panel_id].kind {
             PanelKind::Split(panel) => {
@@ -582,7 +578,7 @@ impl AppState {
     fn new() -> AppState {
         let mut file_node_id_allocator = GenIdAllocator::new();
         let mut file_nodes_by_file_node_id = GenIdMap::new();
-        let root_file_node_id = FileNodeId(NodeId(file_node_id_allocator.allocate()));
+        let root_file_node_id = FileNodeId(file_node_id_allocator.allocate());
         file_nodes_by_file_node_id.insert(
             root_file_node_id,
             FileNode {
@@ -591,12 +587,12 @@ impl AppState {
                 child_edges: Some(Vec::new()),
             },
         );
-
+        
         let mut panel_id_allocator = GenIdAllocator::new();
         let mut panels_by_panel_id = GenIdMap::new();
         let mut tab_id_allocator = GenIdAllocator::new();
         let mut tabs_by_tab_id = GenIdMap::new();
-
+        
         let root_panel_id = PanelId(panel_id_allocator.allocate());
         let side_bar_panel_id = PanelId(panel_id_allocator.allocate());
         let file_tree_tab_id = TabId(tab_id_allocator.allocate());
@@ -619,7 +615,7 @@ impl AppState {
                 kind: TabKind::FileTree,
             },
         );
-
+        
         let content_panel_id = PanelId(panel_id_allocator.allocate());
         panels_by_panel_id.insert(
             content_panel_id,
@@ -631,7 +627,7 @@ impl AppState {
                 }),
             },
         );
-
+        
         panels_by_panel_id.insert(
             root_panel_id,
             Panel {
@@ -641,7 +637,7 @@ impl AppState {
                 }),
             },
         );
-
+        
         AppState {
             panel_id_allocator,
             panels_by_panel_id,
@@ -658,7 +654,7 @@ impl AppState {
             code_editor_state: CodeEditorState::new(),
         }
     }
-
+    
     fn file_node_path(&self, file_node_id: FileNodeId) -> PathBuf {
         let mut components = Vec::new();
         let mut file_node = &self.file_nodes_by_file_node_id[file_node_id];
@@ -669,7 +665,7 @@ impl AppState {
         self.path
             .join(components.into_iter().rev().collect::<PathBuf>())
     }
-
+    
     fn set_file_tree(&mut self, file_tree: protocol::FileTree) {
         fn create_file_node(
             file_node_id_allocator: &mut GenIdAllocator,
@@ -677,31 +673,31 @@ impl AppState {
             parent_edge: Option<FileEdge>,
             node: protocol::FileNode,
         ) -> FileNodeId {
-            let file_node_id = FileNodeId(NodeId(file_node_id_allocator.allocate()));
+            let file_node_id = FileNodeId(file_node_id_allocator.allocate());
             let name = parent_edge.as_ref().map_or_else(
                 || String::from("root"),
-                |edge| edge.name.to_string_lossy().into_owned(),
+                | edge | edge.name.to_string_lossy().into_owned(),
             );
             let node = FileNode {
                 parent_edge,
                 name,
                 child_edges: match node {
-                    protocol::FileNode::Directory { entries } => Some(
+                    protocol::FileNode::Directory {entries} => Some(
                         entries
                             .into_iter()
-                            .map(|entry| FileEdge {
-                                name: entry.name.clone(),
-                                file_node_id: create_file_node(
-                                    file_node_id_allocator,
-                                    file_nodes_by_file_node_id,
-                                    Some(FileEdge {
-                                        name: entry.name,
-                                        file_node_id,
-                                    }),
-                                    entry.node,
-                                ),
-                            })
-                            .collect::<Vec<_>>(),
+                            .map( | entry | FileEdge {
+                            name: entry.name.clone(),
+                            file_node_id: create_file_node(
+                                file_node_id_allocator,
+                                file_nodes_by_file_node_id,
+                                Some(FileEdge {
+                                    name: entry.name,
+                                    file_node_id,
+                                }),
+                                entry.node,
+                            ),
+                        })
+                            .collect::<Vec<_ >> (),
                     ),
                     protocol::FileNode::File => None,
                 },
@@ -709,7 +705,7 @@ impl AppState {
             file_nodes_by_file_node_id.insert(file_node_id, node);
             file_node_id
         }
-
+        
         self.path = file_tree.path;
         self.file_node_id_allocator.clear();
         self.file_nodes_by_file_node_id.clear();
@@ -735,14 +731,14 @@ impl Panel {
             _ => panic!(),
         }
     }
-
+    
     fn as_tab_panel(&self) -> &TabPanel {
         match &self.kind {
             PanelKind::Tab(panel) => panel,
             _ => panic!(),
         }
     }
-
+    
     fn as_tab_panel_mut(&mut self) -> &mut TabPanel {
         match &mut self.kind {
             PanelKind::Tab(panel) => panel,
@@ -775,14 +771,14 @@ struct Tab {
 
 enum TabKind {
     FileTree,
-    CodeEditor { session_id: SessionId },
+    CodeEditor {session_id: SessionId},
 }
 
 #[derive(Debug)]
 struct FileNode {
     parent_edge: Option<FileEdge>,
     name: String,
-    child_edges: Option<Vec<FileEdge>>,
+    child_edges: Option<Vec<FileEdge >>,
 }
 
 impl FileNode {
@@ -804,10 +800,10 @@ fn spawn_connection_listener(listener: TcpListener, mut server: Server) {
             let stream = stream.unwrap();
             println!("Incoming connection from {}", stream.peer_addr().unwrap());
             let (response_or_notification_sender, response_or_notification_receiver) =
-                mpsc::channel();
+            mpsc::channel();
             let connection = server.connect(Box::new({
                 let response_or_notification_sender = response_or_notification_sender.clone();
-                move |notification| {
+                move | notification | {
                     response_or_notification_sender
                         .send(ResponseOrNotification::Notification(notification))
                         .unwrap();
@@ -852,7 +848,7 @@ fn spawn_response_or_notification_sender(
         let mut response_or_notification_bytes = Vec::new();
         
         response_or_notification.ser_bin(&mut response_or_notification_bytes);
-
+        
         let len_bytes = response_or_notification_bytes.len().to_be_bytes();
         stream.write_all(&len_bytes).unwrap();
         stream.write_all(&response_or_notification_bytes).unwrap();
@@ -884,7 +880,7 @@ fn spawn_response_or_notification_receiver(
             .read_exact(&mut response_or_notification_bytes)
             .unwrap();
         let response_or_notification =
-            DeBin::deserialize_bin(response_or_notification_bytes.as_slice()).unwrap();
+        DeBin::deserialize_bin(response_or_notification_bytes.as_slice()).unwrap();
         response_or_notification_sender
             .send(response_or_notification)
             .unwrap();

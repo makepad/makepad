@@ -199,7 +199,9 @@ pub use {
             DraggedItem
         },
         animation::{
-            Animator
+            Ease,
+            Play,
+            Animator,
         },
         area::{
             Area,

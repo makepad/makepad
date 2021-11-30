@@ -7,6 +7,7 @@ pub mod cursor_set;
 pub mod delta;
 pub mod dock;
 pub mod file_tree;
+//pub mod file_tree2;
 pub mod genid;
 pub mod genid_allocator;
 pub mod genid_map;
