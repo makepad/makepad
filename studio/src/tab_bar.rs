@@ -40,9 +40,11 @@ live_register!{
 
 #[derive(Live, LiveHook)]
 pub struct TabBar {
-    #[live] scroll_view: ScrollView,
-    #[live] draw_drag: DrawColor,
-    #[live] tab: Option<LivePtr>,
+    
+    scroll_view: ScrollView,
+    draw_drag: DrawColor,
+    tab: Option<LivePtr>,
+    
     #[rust] is_dragged: bool,
     #[rust] tabs_by_tab_id: GenIdMap<TabId, Tab>,
     #[rust] tab_ids: Vec<TabId>,

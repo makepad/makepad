@@ -50,18 +50,18 @@ pub struct Tab {
     #[rust] is_selected: bool,
     #[rust] is_dragged: bool,
 
-    #[live] bg_quad: DrawTab,
-    #[live] name_text: DrawText,
-    #[live] drag_quad: DrawColor,
+    bg_quad: DrawTab,
+    name_text: DrawText,
+    drag_quad: DrawColor,
 
-    #[live] close_button: TabButton,
+    close_button: TabButton,
 
-    #[live] height: f32,
-    #[live] layout: Layout,
-    #[live] color: Vec4,
-    #[live] color_selected: Vec4,
-    #[live] name_color: Vec4,
-    #[live] name_color_selected: Vec4,
+    height: f32,
+    layout: Layout,
+    color: Vec4,
+    color_selected: Vec4,
+    name_color: Vec4,
+    name_color_selected: Vec4,
 }
 
 impl Tab {

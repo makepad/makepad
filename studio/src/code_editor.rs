@@ -64,23 +64,23 @@ pub struct CodeEditor {
     #[rust] views_by_view_id: GenIdMap<CodeEditorViewId, CodeEditorView>,
     #[rust] text_glyph_size: Vec2,
     
-    #[live] code_editor_view: Option<LivePtr>,
+    code_editor_view: Option<LivePtr>,
     
-    #[live] selection_quad: DrawColor,
-    #[live] code_text: DrawText,
-    #[live] caret_quad: DrawColor,
+    selection_quad: DrawColor,
+    code_text: DrawText,
+    caret_quad: DrawColor,
     
-    #[live] text_color_comment: Vec4,
-    #[live] text_color_identifier: Vec4,
-    #[live] text_color_function_identifier: Vec4,
-    #[live] text_color_branch_keyword: Vec4,
-    #[live] text_color_loop_keyword: Vec4,
-    #[live] text_color_other_keyword: Vec4,
-    #[live] text_color_number: Vec4,
-    #[live] text_color_punctuator: Vec4,
-    #[live] text_color_string: Vec4,
-    #[live] text_color_whitespace: Vec4,
-    #[live] text_color_unknown: Vec4,
+    text_color_comment: Vec4,
+    text_color_identifier: Vec4,
+    text_color_function_identifier: Vec4,
+    text_color_branch_keyword: Vec4,
+    text_color_loop_keyword: Vec4,
+    text_color_other_keyword: Vec4,
+    text_color_number: Vec4,
+    text_color_punctuator: Vec4,
+    text_color_string: Vec4,
+    text_color_whitespace: Vec4,
+    text_color_unknown: Vec4,
 }
 
 impl CodeEditor {

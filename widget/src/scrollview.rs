@@ -11,11 +11,11 @@ live_register!{
 
 #[derive(Live, LiveHook)]
 pub struct ScrollView{
-    #[live] pub view:View,
-    #[live] pub show_h:bool,
-    #[live] pub show_v:bool,
-    #[live] pub scroll_h:ScrollBar,
-    #[live] pub scroll_v:ScrollBar,
+    pub view:View,
+    pub show_h:bool,
+    pub show_v:bool,
+    pub scroll_h:ScrollBar,
+    pub scroll_v:ScrollBar,
 }
 
 impl ScrollView{

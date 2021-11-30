@@ -114,30 +114,30 @@ live_register!{
 pub struct DesktopButton {
     #[rust] pub button_logic: ButtonLogic,
     #[track(base=state_default)] pub animator: Animator,
-    #[live] pub state_default: Option<LivePtr>,
-    #[live] pub state_hover: Option<LivePtr>,
-    #[live] pub state_pressed: Option<LivePtr>,
-    #[live] pub bg: DrawDesktopButton,
+    pub state_default: Option<LivePtr>,
+    pub state_hover: Option<LivePtr>,
+    pub state_pressed: Option<LivePtr>,
+    pub bg: DrawDesktopButton,
 }
 
 #[derive(Live, LiveHook)]
 #[repr(u32)]
 pub enum DesktopButtonType {
-    #[live] WindowsMin,
-    #[live] WindowsMax,
-    #[live] WindowsMaxToggled,
-    #[live] WindowsClose,
-    #[live] XRMode,
+    WindowsMin,
+    WindowsMax,
+    WindowsMaxToggled,
+    WindowsClose,
+    XRMode,
     #[pick] Fullscreen
 }
 
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawDesktopButton {
-    #[live] deref_target: DrawQuad,
-    #[live] hover: f32,
-    #[live] pressed: f32,
-    #[live] button_type: DesktopButtonType
+    deref_target: DrawQuad,
+    hover: f32,
+    pressed: f32,
+    button_type: DesktopButtonType
 }
 
 impl DesktopButton {

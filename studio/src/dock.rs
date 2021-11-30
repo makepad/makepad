@@ -27,11 +27,13 @@ live_register!{
 
 #[derive(Live, LiveHook)]
 pub struct Dock {
-    #[live] view: View,
-    #[live] drag_view: View,
-    #[live] drag_quad: DrawColor,
-    #[live] tab_bar: Option<LivePtr>,
-    #[live] splitter: Option<LivePtr>,
+    
+    view: View,
+    drag_view: View,
+    drag_quad: DrawColor,
+    tab_bar: Option<LivePtr>,
+    splitter: Option<LivePtr>,
+    
     #[rust] panels_by_panel_id: GenIdMap<PanelId, Panel>,
     #[rust] panel_ids: Vec<PanelId>,
     #[rust] panel_id_stack: Vec<PanelId>,

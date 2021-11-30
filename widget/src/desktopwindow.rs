@@ -23,28 +23,28 @@ live_register!{
 
 #[derive(Live, LiveHook)]
 pub struct DesktopWindow {
-    #[live] pub pass: Pass,
-    #[live] pub color_texture: Texture,
-    #[live] pub depth_texture: Texture,
     #[rust] pub caption_size: Vec2,
+
+    pass: Pass,
+    color_texture: Texture,
+    depth_texture: Texture,
     
-    #[live] pub window: Window,
-    #[live] pub main_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
-    #[live] pub caption_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
-    #[live] pub inner_view: View,
+    window: Window,
+    main_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
+    caption_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
+    inner_view: View,
     
-    #[live] pub clear_color: Vec4,
+    clear_color: Vec4,
     
-    //pub caption_bg_color: ColorId,
-    #[live] pub min_btn: DesktopButton,
-    #[live] pub max_btn: DesktopButton,
-    #[live] pub close_btn: DesktopButton,
-    #[live] pub xr_btn: DesktopButton,
-    #[live] pub fullscreen_btn: DesktopButton,
+    min_btn: DesktopButton,
+    max_btn: DesktopButton,
+    close_btn: DesktopButton,
+    xr_btn: DesktopButton,
+    fullscreen_btn: DesktopButton,
     
-    #[live] pub caption_text: DrawText,
-    #[live] pub caption_bg: DrawColor,
-    #[live] pub caption: String,
+    caption_text: DrawText,
+    caption_bg: DrawColor,
+    caption: String,
     
     #[rust(WindowMenu::new(cx))] pub window_menu: WindowMenu,
     #[rust(Menu::main(vec![ 
@@ -52,7 +52,8 @@ pub struct DesktopWindow {
             Menu::item("Quit App", Cx::command_quit()),
         ]),
     ]))]
-    pub default_menu: Menu,
+    
+    default_menu: Menu,
     
     #[rust] pub last_menu: Option<Menu>,
     
