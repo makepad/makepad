@@ -13,14 +13,21 @@ use {
 live_register!{
     use makepad_render::shader_std::*;
     
-    FileTreeNode: {{FileTreeNode}} { 
+    DrawNodeBg: {{DrawNodeBg}} { 
+        instance selected: float = 0.0
+        instance hover: float = 0.0
+        
+        const color_even:vec4 = #25
+        const color_odd:vec4= #28
+        
+        fn pixel(self) -> vec4 {
+            return mix(color_even, color_odd, self.is_even);
+        }
+    }
+    
+    FileTreeNode: {{FileTreeNode}} {
         folder_quad: {
             color: #80
-            
-            instance even: float = 1.0
-            instance selected: float = 0.0
-            instance hover: float = 0.0
-            
             fn pixel(self) -> vec4 {
                 let cx = Sdf2d::viewport(self.pos * self.rect_size);
                 let w = self.rect_size.x;
@@ -60,8 +67,8 @@ live_register!{
         
         indent_width: 10.0
         file_node_height: 20.0
-        file_node_color_even: #25
-        file_node_color_odd: #28
+        //file_node_color_even: #25
+        //file_node_color_odd: #28
         file_node_color_selected: #x11466E
         file_node_color_hovered_even: #3D
         file_node_color_hovered_odd: #38
@@ -80,44 +87,46 @@ live_register!{
     }
 }
 
+#[derive(Live, LiveHook)]
+#[repr(C)]
+pub struct DrawNodeBg {
+    deref_target: DrawQuad,
+    is_even: f32,
+}
 
 #[derive(Live, LiveHook)]
 pub struct FileTreeNode {
-    #[live] node_quad: DrawColor,
-    #[live] folder_quad: DrawColor,
-    #[live] name_text: DrawText,
+    node_quad: DrawNodeBg,
+    folder_quad: DrawColor,
+    name_text: DrawText,
     
-    #[live] layout: Layout,
+    layout: Layout,
     
-    #[live] file_node_height: f32,
-    #[live] indent_width: f32,
+    file_node_height: f32, 
+    indent_width: f32,
     
-    #[live] folder_icon_walk: Walk,
+    folder_icon_walk: Walk,
     
-    #[live] file_node_color_even: Vec4,
-    #[live] file_node_color_odd: Vec4,
-    #[live] file_node_color_selected: Vec4,
-    #[live] file_node_color_hovered_even: Vec4,
-    #[live] file_node_color_hovered_odd: Vec4,
-    #[live] file_node_color_hovered_selected: Vec4,
-    #[live] file_name_color_folder: Vec4,
-    #[live] file_name_color_file: Vec4,
+    file_node_color_selected: Vec4,
+    file_node_color_hovered_even: Vec4,
+    file_node_color_hovered_odd: Vec4,
+    file_node_color_hovered_selected: Vec4,
+    file_name_color_folder: Vec4,
+    file_name_color_file: Vec4,
 }
 
 #[derive(Live, LiveHook)]
 pub struct FileTree {
-    #[live] scroll_view: ScrollView,
-    //#[rust] logic: TreeLogic,
+    scroll_view: ScrollView,
+    tree_node: Option<LivePtr>,
     
-    #[live] tree_node: Option<LivePtr>,
     #[rust] tree_nodes: HashMap<FileNodeId, FileTreeNode>,
-    
     #[rust] count: usize,
     #[rust] stack: Vec<f32>,
-}
+} 
 
 impl FileTreeNode {
-    pub fn draw_folder(&mut self, cx: &mut Cx, name: &str, stack: &[f32]) {
+    pub fn draw_folder(&mut self, cx: &mut Cx, name: &str, is_even:bool, stack: &[f32]) {
         let scale = stack.last().cloned().unwrap_or(1.0);
         
         //self.node_quad.draw_vars.area = Area::Empty;
@@ -125,7 +134,7 @@ impl FileTreeNode {
         //let layout = self.file_node_layout(scale);
         
         self.layout.walk.height = Height::Fixed(scale * self.file_node_height);
-        
+        self.node_quad.is_even = if is_even{1.0}else{0.0};
         self.node_quad.begin(cx, self.layout);
         
         cx.walk_turtle(self.indent_walk(stack.len()));
@@ -149,7 +158,7 @@ impl FileTreeNode {
         //Ok(())
     }
     
-    pub fn draw_file(&mut self, cx: &mut Cx, name: &str, stack: &[f32]) {
+    pub fn draw_file(&mut self, cx: &mut Cx,  name: &str, is_even:bool, stack: &[f32]) {
         
         let scale = stack.last().cloned().unwrap_or(1.0);
         //let count = self.count;
@@ -158,8 +167,8 @@ impl FileTreeNode {
         //self.node_quad.draw_vars.area = Area::Empty;
         //self.node_quad.color = self.file_node_color(count, info.is_hovered, info.is_selected);
         //let layout = self.file_node_layout(scale);
+        self.node_quad.is_even = if is_even{1.0}else{0.0};
         self.layout.walk.height = Height::Fixed(scale * self.file_node_height);
-        
         self.node_quad.begin(cx, self.layout);
         
         cx.walk_turtle(self.indent_walk(stack.len()));
@@ -225,7 +234,7 @@ impl FileTree {
             Entry::Vacant(v) => v.insert(FileTreeNode::new_from_ptr(cx, self.tree_node.unwrap()))
         };
         
-        tree_node.draw_folder(cx, name, &self.stack);
+        tree_node.draw_folder(cx,  name, self.count%2 == 1, &self.stack);
         /*
         tree_node.begin_folder(cx, name);
         /*
@@ -256,6 +265,10 @@ impl FileTree {
         //    self.end_folder();
         //    return Err(());
         // }
+        if self.count > 10{
+            self.end_folder();
+            return Err(())
+        }
         Ok(())
     }
     
@@ -264,11 +277,12 @@ impl FileTree {
     }
     
     pub fn file(&mut self, cx: &mut Cx, node_id: FileNodeId, name: &str) {
+        self.count += 1;
         let tree_node = match self.tree_nodes.entry(node_id) {
             Entry::Occupied(o) => o.into_mut(),
             Entry::Vacant(v) => v.insert(FileTreeNode::new_from_ptr(cx, self.tree_node.unwrap()))
         };
-        tree_node.draw_file(cx, name, &self.stack);
+        tree_node.draw_file(cx,  name, self.count%2 == 1,&self.stack);
         cx.turtle_new_line();
     } 
     /*
