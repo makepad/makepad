@@ -7,6 +7,9 @@ mod desktopbutton;
 pub use crate::desktopbutton::*;
 mod desktopwindow;
 pub use crate::desktopwindow::*;
+mod barewindow;
+pub use crate::barewindow::*;
+
 mod windowmenu;
 pub use crate::windowmenu::*;
 mod frame;
@@ -21,6 +24,7 @@ pub fn live_register(cx:&mut Cx){
     crate::button::live_register(cx);
     crate::desktopbutton::live_register(cx);
     crate::desktopwindow::live_register(cx);
+    crate::barewindow::live_register(cx);
     crate::windowmenu::live_register(cx);
     crate::frame::live_register(cx);
     crate::scrollview::live_register(cx);

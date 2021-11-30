@@ -176,7 +176,7 @@ impl DesktopWindow {
                 match PlatformType::Windows { //cx.platform_type {
                     PlatformType::Windows | PlatformType::Unknown | PlatformType::Linux {..} => {
                         
-                        self.caption_bg.begin_quad(cx, Layout {
+                        self.caption_bg.begin(cx, Layout {
                             align: Align {fx: 1.0, fy: 0.0},
                             walk: Walk::wh(Width::Filled, Height::Computed),
                             ..Default::default()
@@ -205,8 +205,8 @@ impl DesktopWindow {
                         cx.move_turtle(50., 0.);
                         // we need to store our caption rect somewhere.
                         self.caption_size = Vec2 {x: cx.get_width_left(), y: cx.get_height_left()};
-                        self.caption_text.draw_text_walk(cx, &self.caption);
-                        self.caption_bg.end_quad(cx);
+                        self.caption_text.draw_walk(cx, &self.caption);
+                        self.caption_bg.end(cx);
                         cx.turtle_new_line();
                     },
                     
@@ -217,24 +217,24 @@ impl DesktopWindow {
                         else {
                             cx.update_menu(&self.default_menu);
                         }
-                        self.caption_bg.begin_quad(cx, Layout {
+                        self.caption_bg.begin(cx, Layout {
                             align: Align {fx: 0.5, fy: 0.5},
                             walk: Walk::wh(Width::Filled, Height::Fixed(26.)),
                             ..Default::default()
                         });
                         self.caption_size = Vec2 {x: cx.get_width_left(), y: cx.get_height_left()};
-                        self.caption_text.draw_text_walk(cx, &self.caption);
-                        self.caption_bg.end_quad(cx);
+                        self.caption_text.draw_walk(cx, &self.caption);
+                        self.caption_bg.end(cx);
                         cx.turtle_new_line();
                     },
                     PlatformType::Web {..} => {
                         if self.window.is_fullscreen(cx) { // put a bar at the top
-                            self.caption_bg.begin_quad(cx, Layout {
+                            self.caption_bg.begin(cx, Layout {
                                 align: Align {fx: 0.5, fy: 0.5},
                                 walk: Walk::wh(Width::Filled, Height::Fixed(22.)),
                                 ..Default::default()
                             });
-                            self.caption_bg.end_quad(cx);
+                            self.caption_bg.end(cx);
                             cx.turtle_new_line();
                         }
                     }

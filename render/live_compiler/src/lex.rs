@@ -1,7 +1,7 @@
 use{
     makepad_id_macros::*,
     crate::{
-        liveid::{LiveIdMap, LiveId, LiveFileId, hex_bytes_to_u32},
+        liveid::{LiveId, LiveFileId, hex_bytes_to_u32},
         liveerror::{LiveError, LiveErrorOrigin},
         span::Span,
         token::{Token, TokenWithSpan},
@@ -22,48 +22,6 @@ pub struct Lex<C> {
     is_done: bool,
 }
 
-// put all the words here that the lexer might not see for collision check
-pub fn fill_collisions() {
-    LiveIdMap::with( | idmap | {
-        if idmap.contains("use") {
-            return
-        }
-        let collision_seed = [
-            "true",
-            "false",
-            "use",
-            "!=",
-            "!",
-            "&&",
-            "*=",
-            "*",
-            "+=",
-            "+",
-            ",",
-            "-=",
-            "->",
-            "-",
-            "..",
-            ".",
-            "/=",
-            "/",
-            "::",
-            ":",
-            ";",
-            "<=",
-            "<",
-            "==",
-            "=",
-            ">=",
-            "=>",
-            ">",
-            "?"
-        ];
-        for seed in &collision_seed {
-            idmap.add(seed);
-        }
-    })
-}
 
 impl<C> Lex<C>
 where
@@ -518,7 +476,6 @@ pub fn lex<C>(chars: C, file_id: LiveFileId) -> Result<LexResult, LiveError>
 where
 C: IntoIterator<Item = char>,
 {
-    fill_collisions();
     let mut chars = chars.into_iter();
     let ch_0 = chars.next().unwrap_or('\0');
     let ch_1 = chars.next().unwrap_or('\0');

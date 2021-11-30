@@ -29,6 +29,7 @@ pub use {
             LiveTypeInfo,
             LiveTypeField,
             LiveFieldKind,
+            LiveNodeReader,
             InlineString,
             FittedString,
             LiveTypeKind,

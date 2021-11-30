@@ -7,5 +7,6 @@ edition = "2018"
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
+makepad-derive-live = { path = "../derive_live", version = "0.1" }
 makepad-microserde = { path = "../microserde", version = "0.1" }
 makepad-id-macros = { path = "id_macros", version = "0.1" }

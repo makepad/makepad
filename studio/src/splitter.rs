@@ -5,7 +5,7 @@ live_register!{
     
     Splitter: {{Splitter}} {
         split_bar_size: 2.0
-        split_bar:{
+        bar_quad:{
             color:#19
         }
     }
@@ -18,13 +18,13 @@ pub struct Splitter {
     #[rust] pub rect: Rect,
     #[rust] pub position: f32,
     #[rust] pub live_ptr: Option<LivePtr>,
-    #[rust] pub animator: Animator,
+    #[track(base=state_default)] pub animator: Animator,
     #[live] pub layout: Layout,
     #[rust] pub drag_start_align_position: Option<AlignPosition>,
 
     #[live] pub state_default: Option<LivePtr>,
 
-    #[live] pub split_bar: DrawColor,
+    #[live] pub bar_quad: DrawColor,
     #[live] pub split_bar_size: f32,
 }
 
@@ -40,7 +40,7 @@ impl Splitter {
         cx.end_turtle(Area::Empty);
         match self.axis {
             Axis::Horizontal => {
-                self.split_bar.draw_quad_abs(
+                self.bar_quad.draw_abs(
                     cx,
                     Rect {
                         pos: vec2(self.rect.pos.x + self.position, self.rect.pos.y),
@@ -53,7 +53,7 @@ impl Splitter {
                 });
             }
             Axis::Vertical => {
-                self.split_bar.draw_quad_abs(
+                self.bar_quad.draw_abs(
                     cx,
                     Rect {
                         pos: vec2(self.rect.pos.x, self.rect.pos.y + self.position),
@@ -107,7 +107,7 @@ impl Splitter {
     ) {
         match event.hits(
             cx,
-            self.split_bar.draw_vars.area,
+            self.bar_quad.draw_vars.area,
             HitOpt {
                 margin: Some(self.margin()),
                 ..HitOpt::default()
@@ -153,7 +153,7 @@ impl Splitter {
                             }
                         }
                     };
-                    cx.redraw_view_of(self.split_bar.draw_vars.area);
+                    cx.redraw_view_of(self.bar_quad.draw_vars.area);
                     dispatch_action(cx, SplitterAction::Changed);
                 }
             }

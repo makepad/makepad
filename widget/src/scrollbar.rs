@@ -72,7 +72,7 @@ pub struct ScrollBar {
     #[live] pub state_hover: Option<LivePtr>,
     #[live] pub state_pressed: Option<LivePtr>,
 
-    #[rust] pub animator: Animator,
+    #[track(base=state_default)] pub animator: Animator,
     #[live(false)] pub use_vertical_finger_scroll: bool,
     #[live] pub smoothing: Option<f32>,
     
@@ -310,7 +310,7 @@ impl ScrollBar {
             
             match event.hits(cx, self.bg.draw_vars.area, HitOpt::default()) {
                 Event::FingerDown(fe) => {
-                    self.animate_to(cx, self.state_pressed.unwrap());
+                    self.animate_to(cx, id!(base), self.state_pressed.unwrap());
                     let rel = match self.axis {
                         Axis::Horizontal => fe.rel.x,
                         Axis::Vertical => fe.rel.y
@@ -332,10 +332,10 @@ impl ScrollBar {
                         cx.set_hover_mouse_cursor(MouseCursor::Default);
                         match fe.hover_state {
                             HoverState::In => {
-                                self.animate_to(cx, self.state_hover.unwrap());
+                                self.animate_to(cx, id!(base), self.state_hover.unwrap());
                             },
                             HoverState::Out => {
-                                self.animate_to(cx, self.state_default.unwrap());
+                                self.animate_to(cx, id!(base), self.state_default.unwrap());
                             },
                             _ => ()
                         }
@@ -345,14 +345,14 @@ impl ScrollBar {
                     self.drag_point = None;
                     if fe.is_over {
                         if fe.input_type.has_hovers() {
-                            self.animate_to(cx, self.state_hover.unwrap());
+                            self.animate_to(cx, id!(base), self.state_hover.unwrap());
                         }
                         else {
-                            self.animate_to(cx, self.state_default.unwrap());
+                            self.animate_to(cx, id!(base), self.state_default.unwrap());
                         }
                     }
                     else {
-                        self.animate_to(cx, self.state_default.unwrap());
+                        self.animate_to(cx, id!(base), self.state_default.unwrap());
                     }
                     return ScrollBarEvent::ScrollDone;
                 },
@@ -403,7 +403,7 @@ impl ScrollBar {
                     self.bg.is_vertical = 0.0;
                     self.bg.norm_scroll = norm_scroll;
                     self.bg.norm_handle = norm_handle;
-                    self.bg.draw_quad_rel(
+                    self.bg.draw_rel(
                         cx,
                         Rect {
                             pos: vec2(self.bar_side_margin, view_rect.size.y - self.bar_size),
@@ -430,7 +430,7 @@ impl ScrollBar {
                     self.bg.is_vertical = 1.0;
                     self.bg.norm_scroll = norm_scroll;
                     self.bg.norm_handle = norm_handle;
-                    self.bg.draw_quad_rel(
+                    self.bg.draw_rel(
                         cx,
                         Rect {
                             pos: vec2(view_rect.size.x - self.bar_size, self.bar_side_margin),

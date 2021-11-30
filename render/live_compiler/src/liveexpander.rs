@@ -135,7 +135,7 @@ impl<'a> LiveExpander<'a> {
             }
             
             // determine node overwrite rules
-            let out_index = match out_doc.nodes.child_by_name(*current_parent.last().unwrap(), in_node.id) {
+            let out_index = match out_doc.nodes.child_or_append_index_by_name(*current_parent.last().unwrap(), in_node.id) {
                 Ok(overwrite) => {
                     let out_value = &out_doc.nodes[overwrite].value;
                     
@@ -230,7 +230,7 @@ impl<'a> LiveExpander<'a> {
                     if let Some(target) = self.scope_stack.find_item(*clone) {
                         match target {
                             LiveScopeTarget::LocalPtr(local_ptr) => {
-                                if out_doc.nodes.clone_children_self(local_ptr, Some(out_index + 1)){
+                                if out_doc.nodes.insert_children_from_self(local_ptr, Some(out_index + 1)){
                                     self.errors.push(LiveError {
                                         origin: live_error_origin!(),
                                         span: in_doc.token_id_to_span(in_node.token_id.unwrap()),
@@ -245,7 +245,7 @@ impl<'a> LiveExpander<'a> {
                             }
                             LiveScopeTarget::LivePtr(live_ptr) => {
                                 let doc = &self.live_registry.expanded[live_ptr.file_id.to_index()];
-                                out_doc.nodes.clone_children_from(live_ptr.node_index(), Some(out_index + 1), &doc.nodes);
+                                out_doc.nodes.insert_children_from_other(live_ptr.node_index(), Some(out_index + 1), &doc.nodes);
                                 // store the parent pointer
                                 out_doc.nodes[out_index].value = doc.nodes[live_ptr.node_index()].value.clone();
                                 if let LiveValue::Class{class_parent,..} = &mut out_doc.nodes[out_index].value{
@@ -286,8 +286,8 @@ impl<'a> LiveExpander<'a> {
                         // ok so we need the lti of the deref hop and clone all children
                         if let Some(file_id) = self.live_registry.module_id_to_file_id.get(&live_type_info.module_id) {
                             let doc = &self.live_registry.expanded[file_id.to_index()];
-                            if let Ok(index) = doc.nodes.child_by_name(0, live_type_info.type_name){
-                                out_doc.nodes.clone_children_from(index, Some(out_index + 1), &doc.nodes);
+                            if let Some(index) = doc.nodes.child_by_name(0, live_type_info.type_name){
+                                out_doc.nodes.insert_children_from_other(index, Some(out_index + 1), &doc.nodes);
                             }
                         }
                     }
@@ -296,9 +296,9 @@ impl<'a> LiveExpander<'a> {
                             let lti = &field.live_type_info; 
                             if let Some(file_id) = self.live_registry.module_id_to_file_id.get(&lti.module_id) {
                                 if *file_id == self.in_file_id{ // clone on self
-                                    if let Ok(index) = out_doc.nodes.child_by_name(0, lti.type_name){
+                                    if let Some(index) = out_doc.nodes.child_by_name(0, lti.type_name){
                                         let node_insert_point = insert_point;
-                                        insert_point = out_doc.nodes.clone_node_self(index, Some(insert_point));
+                                        insert_point = out_doc.nodes.insert_node_from_self(index, Some(insert_point));
                                         out_doc.nodes[node_insert_point].id = field.id;
                                     }
                                     else if let LiveTypeKind::Class = lti.kind{
@@ -311,9 +311,9 @@ impl<'a> LiveExpander<'a> {
                                 }
                                 else{
                                     let other_nodes = &self.live_registry.expanded[file_id.to_index()].nodes;
-                                    if let Ok(index) = other_nodes.child_by_name(0, lti.type_name){
+                                    if let Some(index) = other_nodes.child_by_name(0, lti.type_name){
                                         let node_insert_point = insert_point;
-                                        insert_point = out_doc.nodes.clone_node_from(index, Some(insert_point), other_nodes);
+                                        insert_point = out_doc.nodes.insert_node_from_other(index, Some(insert_point), other_nodes);
                                         out_doc.nodes[node_insert_point].id = field.id;
                                     }
                                 }
