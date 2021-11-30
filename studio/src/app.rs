@@ -44,11 +44,11 @@ impl App {
         makepad_widget::live_register(cx);
         crate::code_editor::live_register(cx);
         crate::file_tree::live_register(cx);
-        crate::dock::live_register(cx);
         crate::splitter::live_register(cx);
+        crate::tab_button::live_register(cx);
         crate::tab::live_register(cx);
         crate::tab_bar::live_register(cx);
-        crate::tab_button::live_register(cx);
+        crate::dock::live_register(cx);
     }
     
     pub fn new_app(cx: &mut Cx) -> Self {

@@ -933,7 +933,7 @@ macro_rules!main_app {
             let mut cx = Cx::default();
             cx.live_register();
             live_register(&mut cx);
-            $ app ::live_register(&mut cx);
+            //$ app ::live_register(&mut cx);
             cx.live_expand();
             let mut app = None;
             cx.event_loop( | cx, mut event | {
@@ -955,7 +955,7 @@ macro_rules!main_app {
             let mut cx = Box::new(Cx::default());
             cx.live_register();
             live_register(&mut cx);
-            $ app ::live_register(&mut cx);
+            //$ app ::live_register(&mut cx);
             cx.live_expand();
             Box::into_raw(Box::new((0, Box::into_raw(cx)/*, Box::into_raw(cxafterdraw)*/))) as u32
         }
