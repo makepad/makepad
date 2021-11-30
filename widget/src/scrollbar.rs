@@ -63,18 +63,18 @@ live_register!{
 
 #[derive(Live, LiveHook)]
 pub struct ScrollBar {
-    #[live] pub bg: DrawScrollBar,
+    bg: DrawScrollBar,
     #[live(12.0)] pub bar_size: f32,
     #[live(30.0)] pub min_handle_size: f32, //minimum size of the handle in pixels
     #[live(Axis::Horizontal)] pub axis: Axis,
 
-    #[live] pub state_default: Option<LivePtr>,
-    #[live] pub state_hover: Option<LivePtr>,
-    #[live] pub state_pressed: Option<LivePtr>,
+    state_default: Option<LivePtr>,
+    state_hover: Option<LivePtr>,
+    state_pressed: Option<LivePtr>,
+    use_vertical_finger_scroll: bool,
+    smoothing: Option<f32>,
 
     #[track(base=state_default)] pub animator: Animator,
-    #[live(false)] pub use_vertical_finger_scroll: bool,
-    #[live] pub smoothing: Option<f32>,
     
     #[rust] next_frame: NextFrame,
     #[rust(false)] visible: bool,
@@ -88,7 +88,7 @@ pub struct ScrollBar {
     #[rust] scroll_target: f32,
     #[rust] scroll_delta: f32,
     #[rust] drag_point: Option<f32>, // the point in pixels where we are dragging
-}
+} 
 
 #[derive(Live, LiveHook)]
 #[repr(C)]

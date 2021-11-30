@@ -79,15 +79,17 @@ live_register!{
 
 #[derive(Live)]
 pub struct Button {
+    
     #[rust] pub button_logic: ButtonLogic,
     #[track(base=state_default)] pub animator: Animator,
-    #[live] pub state_default: Option<LivePtr>,
-    #[live] pub state_hover: Option<LivePtr>,
-    #[live] pub state_pressed: Option<LivePtr>,
-    #[live] pub bg_quad: DrawQuad,
-    #[live] pub label_text: DrawText,
-    #[live] pub layout: Layout,
-    #[live] pub label: String
+    
+    state_default: Option<LivePtr>,
+    state_hover: Option<LivePtr>,
+    state_pressed: Option<LivePtr>,
+    bg_quad: DrawQuad,
+    label_text: DrawText,
+    layout: Layout,
+    label: String
 }
 
 impl LiveHook for Button{

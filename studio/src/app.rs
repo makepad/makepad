@@ -34,7 +34,7 @@ live_register!{
 
 #[derive(Live, LiveHook)]
 pub struct App {
-    #[live] inner: AppInner,
+    inner: AppInner,
     #[rust(AppState::new())] state: AppState,
 }
 
@@ -75,10 +75,12 @@ pub struct AppIO {
 
 #[derive(Live, LiveHook)]
 pub struct AppInner {
-    #[live] window: DesktopWindow,
-    #[live] dock: Dock,
-    #[live] file_tree: FileTree,
-    #[live] code_editor: CodeEditor,
+    
+    window: DesktopWindow,
+    dock: Dock,
+    file_tree: FileTree,
+    code_editor: CodeEditor,
+    
     #[rust(AppIO::new(cx))] io: AppIO
 }
 

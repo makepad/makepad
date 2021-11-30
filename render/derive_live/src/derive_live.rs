@@ -82,7 +82,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         let types = parser.eat_all_types();
         let where_clause = parser.eat_where_clause(None); //Some("LiveUpdateHooks"));
         
-        let fields = if let Some(_types) = types {
+        let mut fields = if let Some(_types) = types {
             return error_result("Unexpected type form")
         }
         else if let Some(fields) = parser.eat_all_struct_fields() {
@@ -91,6 +91,16 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         else {
             return error_result("Unexpected field form")
         };
+        
+         // alright now. we have a field
+        for field in &mut fields {
+            if field.attrs.len() == 1 &&&  field.attrs[0].name != "live" && field.attrs[0].name != "calc" && field.attrs[0].name != "rust" && field.attrs[0].name != "track" {
+                return error_result(&format!("Field {} does not have a live, calc or rust attribute", field.name));
+            }
+            if field.attrs.len() == 0{ // insert a default
+                field.attrs.push(Attribute{name:"live".to_string(),args:None});
+            }
+        }
         
         // special marker fields
         let deref_target = fields.iter().find( | field | field.name == "deref_target");
@@ -155,12 +165,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
             }
         }
         
-        // alright now. we have a field
-        for field in &fields {
-            if field.attrs.len() != 1 || field.attrs[0].name != "live" && field.attrs[0].name != "calc" && field.attrs[0].name != "rust" && field.attrs[0].name != "track" {
-                return error_result(&format!("Field {} does not have a live, calc or rust attribute", field.name));
-            }
-        }
+       
         
         if let Some(deref_target) = deref_target {
             tb.add("impl").stream(generic.clone());
@@ -429,10 +434,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
             let attributes = parser.eat_attributes();
             // check if we have a default attribute
             if let Some(name) = parser.eat_any_ident() {
-                if attributes.len() != 1 {
-                    return error_result(&format!("Field {} does not have a live or pick attribute", name));
-                }
-                if attributes[0].name == "pick" {
+                if attributes.len() > 0 && attributes[0].name == "pick" {
                     if pick.is_some() {
                         return error_result(&format!("Enum can only have a single field marked pick"));
                     }
