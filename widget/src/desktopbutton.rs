@@ -84,12 +84,12 @@ live_register!{
     
     DesktopButton: {{DesktopButton}} {
         
-        state_default: {
+        default_state: {
             from: {all: Play::Forward {duration: 0.1}}
             bg: {pressed: 0.0, hover: 0.0}
         }
         
-        state_hover: {
+        hover_state: {
             from: {
                 all: Play::Forward {duration: 0.1}
                 state_down: Play::Forward {duration: 0.01}
@@ -100,7 +100,7 @@ live_register!{
             }
         }
         
-        state_pressed: {
+        pressed_state: {
             from: {all: Play::Forward {duration: 0.2}}
             bg: {
                 pressed: [{time: 0.0, value: 1.0}],
@@ -113,10 +113,10 @@ live_register!{
 #[derive(Live, LiveHook)]
 pub struct DesktopButton {
     #[rust] pub button_logic: ButtonLogic,
-    #[track(base=state_default)] pub animator: Animator,
-    pub state_default: Option<LivePtr>,
-    pub state_hover: Option<LivePtr>,
-    pub state_pressed: Option<LivePtr>,
+    #[track(base=default_state)] pub animator: Animator,
+    pub default_state: Option<LivePtr>,
+    pub hover_state: Option<LivePtr>,
+    pub pressed_state: Option<LivePtr>,
     pub bg: DrawDesktopButton,
 }
 
@@ -146,9 +146,9 @@ impl DesktopButton {
         self.handle_animation(cx, event);
         let res = self.button_logic.handle_event(cx, event, self.bg.draw_vars.area);
         match res.state {
-            ButtonState::Pressed => self.animate_to(cx, id!(base), self.state_pressed.unwrap()),
-            ButtonState::Default => self.animate_to(cx, id!(base), self.state_default.unwrap()),
-            ButtonState::Hover => self.animate_to(cx, id!(base), self.state_hover.unwrap()),
+            ButtonState::Pressed => self.animate_to(cx, id!(base), self.pressed_state.unwrap()),
+            ButtonState::Default => self.animate_to(cx, id!(base), self.default_state.unwrap()),
+            ButtonState::Hover => self.animate_to(cx, id!(base), self.hover_state.unwrap()),
             _ => ()
         };
         res.action

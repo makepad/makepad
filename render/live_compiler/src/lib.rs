@@ -8,6 +8,7 @@ pub mod lex;
 pub mod liveerror;
 pub mod liveparser;
 pub mod livenode;
+pub mod livenodevec;
 pub mod livedocument;
 pub mod liveregistry;
 pub mod liveexpander;
@@ -20,16 +21,18 @@ pub use {
         liveid::{LiveId, LivePtr, LiveFileId},
         liveregistry::{LiveRegistry, LiveDocNodes},
         liveid::LiveModuleId,
+        livenodevec::{
+            LiveNodeSlice,
+            LiveNodeVec,
+            LiveNodeReader,
+        },
         livenode::{
             LiveValue,
             LiveNode,
             LiveType,
-            LiveNodeSlice,
-            LiveNodeVec,
             LiveTypeInfo,
             LiveTypeField,
             LiveFieldKind,
-            LiveNodeReader,
             InlineString,
             FittedString,
             LiveTypeKind,

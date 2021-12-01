@@ -48,16 +48,16 @@ live_register!{
             padding: Padding {l: 16.0, t: 12.0, r: 16.0, b: 12.0}
         }
          
-        state_default: {
+        default_state: {
             from: {all: Play::Forward {duration: 0.1}}
             bg_quad: {pressed: 0.0, hover: 0.0}
             label_text: {color: #9}
         }
 
-        state_hover: {
+        hover_state: {
             from: {
                 all: Play::Forward {duration: 0.1}
-                state_pressed: Play::Forward {duration: 0.01}
+                pressed_state: Play::Forward {duration: 0.01}
             }
             bg_quad: { 
                 pressed: 0.0,
@@ -66,7 +66,7 @@ live_register!{
             label_text: {color: [{time: 0.0, value: #f}]}
         }
          
-        state_pressed: {
+        pressed_state: {
             from: {all: Play::Forward {duration: 0.2}}
             bg_quad: {
                 pressed: [{time: 0.0, value: 1.0}],
@@ -81,11 +81,11 @@ live_register!{
 pub struct Button {
     
     #[rust] pub button_logic: ButtonLogic,
-    #[track(base=state_default)] pub animator: Animator,
+    #[track(base=default_state)] pub animator: Animator,
     
-    state_default: Option<LivePtr>,
-    state_hover: Option<LivePtr>,
-    state_pressed: Option<LivePtr>,
+    default_state: Option<LivePtr>,
+    hover_state: Option<LivePtr>,
+    pressed_state: Option<LivePtr>,
     bg_quad: DrawQuad,
     label_text: DrawText,
     layout: Layout,
@@ -145,9 +145,9 @@ impl Button {
         let res = self.button_logic.handle_event(cx, event, self.bg_quad.draw_vars.area);
         
         match res.state {
-            ButtonState::Pressed => self.animate_to(cx, id!(base), self.state_pressed.unwrap()),
-            ButtonState::Default => self.animate_to(cx, id!(base), self.state_default.unwrap()),
-            ButtonState::Hover => self.animate_to(cx, id!(base), self.state_hover.unwrap()),
+            ButtonState::Pressed => self.animate_to(cx, id!(base), self.pressed_state.unwrap()),
+            ButtonState::Default => self.animate_to(cx, id!(base), self.default_state.unwrap()),
+            ButtonState::Hover => self.animate_to(cx, id!(base), self.hover_state.unwrap()),
             _ => ()
         };
         res.action

@@ -35,12 +35,12 @@ live_register!{
     
     ScrollBar: {{ScrollBar}} {
         
-        state_default: {
+        default_state: {
             from: {all: Play::Forward {duration: 0.1}}
             bg: {pressed: 0.0, hover: 0.0}
         }
         
-        state_hover: {
+        hover_state: {
             from: {
                 all: Play::Forward {duration: 0.1}
                 state_down: Play::Forward {duration: 0.01}
@@ -51,7 +51,7 @@ live_register!{
             }
         }
         
-        state_pressed: {
+        pressed_state: {
             from: {all: Play::Forward {duration: 0.2}}
             bg: {
                 pressed: [{time: 0.0, value: 1.0}],
@@ -68,13 +68,13 @@ pub struct ScrollBar {
     #[live(30.0)] pub min_handle_size: f32, //minimum size of the handle in pixels
     #[live(Axis::Horizontal)] pub axis: Axis,
 
-    state_default: Option<LivePtr>,
-    state_hover: Option<LivePtr>,
-    state_pressed: Option<LivePtr>,
+    default_state: Option<LivePtr>,
+    hover_state: Option<LivePtr>,
+    pressed_state: Option<LivePtr>,
     use_vertical_finger_scroll: bool,
     smoothing: Option<f32>,
 
-    #[track(base=state_default)] pub animator: Animator,
+    #[track(base=default_state)] pub animator: Animator,
     
     #[rust] next_frame: NextFrame,
     #[rust(false)] visible: bool,
@@ -310,7 +310,7 @@ impl ScrollBar {
             
             match event.hits(cx, self.bg.draw_vars.area, HitOpt::default()) {
                 Event::FingerDown(fe) => {
-                    self.animate_to(cx, id!(base), self.state_pressed.unwrap());
+                    self.animate_to(cx, id!(base), self.pressed_state.unwrap());
                     let rel = match self.axis {
                         Axis::Horizontal => fe.rel.x,
                         Axis::Vertical => fe.rel.y
@@ -332,10 +332,10 @@ impl ScrollBar {
                         cx.set_hover_mouse_cursor(MouseCursor::Default);
                         match fe.hover_state {
                             HoverState::In => {
-                                self.animate_to(cx, id!(base), self.state_hover.unwrap());
+                                self.animate_to(cx, id!(base), self.hover_state.unwrap());
                             },
                             HoverState::Out => {
-                                self.animate_to(cx, id!(base), self.state_default.unwrap());
+                                self.animate_to(cx, id!(base), self.default_state.unwrap());
                             },
                             _ => ()
                         }
@@ -345,14 +345,14 @@ impl ScrollBar {
                     self.drag_point = None;
                     if fe.is_over {
                         if fe.input_type.has_hovers() {
-                            self.animate_to(cx, id!(base), self.state_hover.unwrap());
+                            self.animate_to(cx, id!(base), self.hover_state.unwrap());
                         }
                         else {
-                            self.animate_to(cx, id!(base), self.state_default.unwrap());
+                            self.animate_to(cx, id!(base), self.default_state.unwrap());
                         }
                     }
                     else {
-                        self.animate_to(cx, id!(base), self.state_default.unwrap());
+                        self.animate_to(cx, id!(base), self.default_state.unwrap());
                     }
                     return ScrollBarEvent::ScrollDone;
                 },

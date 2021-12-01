@@ -9,9 +9,9 @@ use {
         liveid::{LiveId, LiveFileId, LiveModuleId},
         span::Span,
         liveerror::{LiveError, LiveErrorOrigin},
-        math::{Vec2,Vec3,Vec4},
+        math::{Vec2, Vec3, Vec4},
         livedocument::LiveDocument,
-        livenode::{LiveNode, LiveValue, LiveTypeInfo},
+        livenode::{LiveNode, LiveValue, LiveTypeInfo, LiveBinOp, LiveUnOp},
     }
 };
 
@@ -138,7 +138,7 @@ impl<'a> LiveParser<'a> {
         self.skip_token();
         Ok(())
     }
-
+    
     fn expect_use(&mut self, ld: &mut LiveDocument) -> Result<(), LiveError> {
         let token_id = self.get_token_id();
         let crate_id = self.expect_ident() ?;
@@ -146,8 +146,8 @@ impl<'a> LiveParser<'a> {
         self.expect_token(Token::Punct(id!(::))) ?;
         let module_id = self.expect_ident() ?;
         self.expect_token(Token::Punct(id!(::))) ?;
-
-
+        
+        
         let object_id = if self.peek_token() == Token::Punct(id!(*)) {
             self.skip_token();
             LiveId(0)
@@ -157,7 +157,7 @@ impl<'a> LiveParser<'a> {
         };
         
         ld.nodes.push(LiveNode {
-            token_id:Some(token_id),
+            token_id: Some(token_id),
             id: object_id,
             value: LiveValue::Use(LiveModuleId(crate_id, module_id))
         });
@@ -166,17 +166,17 @@ impl<'a> LiveParser<'a> {
     }
     
     fn expect_fn(&mut self, ld: &mut LiveDocument) -> Result<(), LiveError> {
-        let token_start = self.token_index-1;
+        let token_start = self.token_index - 1;
         let token_id = self.get_token_id();
         let prop_id = self.expect_ident() ?;
         //let token_start = self.token_index;
         let token_index = self.scan_to_token(Token::CloseBrace) ?;
         
         ld.nodes.push(LiveNode {
-            token_id:Some(token_id),
+            token_id: Some(token_id),
             id: prop_id,
             value: LiveValue::DSL {
-                token_start: token_start as u32, 
+                token_start: token_start as u32,
                 token_count: (token_index - token_start) as u32,
                 scope_start: 0,
                 scope_count: 0
@@ -196,7 +196,7 @@ impl<'a> LiveParser<'a> {
         self.expect_value_literal() ?;
         
         ld.nodes.push(LiveNode {
-            token_id:Some(token_id),
+            token_id: Some(token_id),
             id: const_id,
             value: LiveValue::DSL {
                 token_start: token_start as u32,
@@ -210,7 +210,7 @@ impl<'a> LiveParser<'a> {
     }
     
     fn expect_var_def(&mut self, ld: &mut LiveDocument) -> Result<(), LiveError> {
-
+        
         let token_start = self.token_index - 1;
         let token_id = self.get_token_id();
         let real_prop_id = self.expect_ident() ?;
@@ -218,7 +218,7 @@ impl<'a> LiveParser<'a> {
         self.expect_var_def_type() ?;
         
         ld.nodes.push(LiveNode {
-            token_id:Some(token_id),
+            token_id: Some(token_id),
             id: real_prop_id,
             value: LiveValue::DSL {
                 token_start: token_start as u32,
@@ -257,6 +257,7 @@ impl<'a> LiveParser<'a> {
         }
         return Err(self.error(format!("Eof in array body")))
     }
+    
     
     fn expect_tuple_enum(&mut self, prop_id: LiveId, base: LiveId, variant: LiveId, ld: &mut LiveDocument) -> Result<(), LiveError> {
         self.expect_token(Token::OpenParen) ?;
@@ -328,9 +329,9 @@ impl<'a> LiveParser<'a> {
                         return Err(self.error(format!("live_type index out of range {}", val)));
                     }
                     ld.nodes.push(LiveNode {
-                        token_id:Some(token_id),
+                        token_id: Some(token_id),
                         id: prop_id,
-                        value: LiveValue::Class{
+                        value: LiveValue::Class {
                             live_type: self.live_type_infos[val as usize].live_type,
                             class_parent: None,
                             
@@ -338,20 +339,23 @@ impl<'a> LiveParser<'a> {
                     });
                     self.expect_token(Token::CloseBrace) ?;
                     self.expect_token(Token::CloseBrace) ?;
-
-                    self.expect_token(Token::OpenBrace)?;
+                    
+                    self.expect_token(Token::OpenBrace) ?;
                     self.expect_live_class(false, prop_id, ld) ?;
-
+                    
                     return Ok(());
                 }
                 else {
                     ld.nodes.push(LiveNode {
-                        token_id:Some(token_id),
+                        token_id: Some(token_id),
                         id: prop_id,
                         value: LiveValue::Object
                     });
                     self.expect_live_class(false, prop_id, ld) ?;
                 }
+            },
+            Token::OpenParen => { // expression
+                self.expect_expression(prop_id, ld) ?;
             },
             Token::OpenBracket => { // array
                 self.expect_array(prop_id, ld) ?;
@@ -398,47 +402,47 @@ impl<'a> LiveParser<'a> {
             },
             Token::Ident(id!(vec2)) => {
                 self.skip_token();
-                self.expect_token(Token::OpenParen)?;
-                let x =self.expect_float()?;
-                self.expect_token(Token::Punct(id!(,)))?;
-                let y = self.expect_float()?;
-                self.expect_token(Token::CloseParen)?;
+                self.expect_token(Token::OpenParen) ?;
+                let x = self.expect_float() ?;
+                self.expect_token(Token::Punct(id!(,))) ?;
+                let y = self.expect_float() ?;
+                self.expect_token(Token::CloseParen) ?;
                 ld.nodes.push(LiveNode {
                     token_id: Some(self.get_token_id()),
                     id: prop_id,
-                    value: LiveValue::Vec2(Vec2{x:x as f32, y:y as f32})
+                    value: LiveValue::Vec2(Vec2 {x: x as f32, y: y as f32})
                 });
             },
             Token::Ident(id!(vec3)) => {
                 self.skip_token();
-                self.expect_token(Token::OpenParen)?;
-                let x =self.expect_float()?;
-                self.expect_token(Token::Punct(id!(,)))?;
-                let y = self.expect_float()?;
-                self.expect_token(Token::Punct(id!(,)))?;
-                let z = self.expect_float()?;
-                self.expect_token(Token::CloseParen)?;
+                self.expect_token(Token::OpenParen) ?;
+                let x = self.expect_float() ?;
+                self.expect_token(Token::Punct(id!(,))) ?;
+                let y = self.expect_float() ?;
+                self.expect_token(Token::Punct(id!(,))) ?;
+                let z = self.expect_float() ?;
+                self.expect_token(Token::CloseParen) ?;
                 ld.nodes.push(LiveNode {
                     token_id: Some(self.get_token_id()),
                     id: prop_id,
-                    value: LiveValue::Vec3(Vec3{x:x as f32, y:y as f32, z:z as f32})
+                    value: LiveValue::Vec3(Vec3 {x: x as f32, y: y as f32, z: z as f32})
                 });
             },
             Token::Ident(id!(vec4)) => {
                 self.skip_token();
-                self.expect_token(Token::OpenParen)?;
-                let x =self.expect_float()?;
-                self.expect_token(Token::Punct(id!(,)))?;
-                let y = self.expect_float()?;
-                self.expect_token(Token::Punct(id!(,)))?;
-                let z = self.expect_float()?;
-                self.expect_token(Token::Punct(id!(,)))?;
-                let w = self.expect_float()?;
-                self.expect_token(Token::CloseParen)?;
+                self.expect_token(Token::OpenParen) ?;
+                let x = self.expect_float() ?;
+                self.expect_token(Token::Punct(id!(,))) ?;
+                let y = self.expect_float() ?;
+                self.expect_token(Token::Punct(id!(,))) ?;
+                let z = self.expect_float() ?;
+                self.expect_token(Token::Punct(id!(,))) ?;
+                let w = self.expect_float() ?;
+                self.expect_token(Token::CloseParen) ?;
                 ld.nodes.push(LiveNode {
                     token_id: Some(self.get_token_id()),
                     id: prop_id,
-                    value: LiveValue::Vec4(Vec4{x:x as f32, y:y as f32, z:z as f32, w:w as f32})
+                    value: LiveValue::Vec4(Vec4 {x: x as f32, y: y as f32, z: z as f32, w: w as f32})
                 });
             },
             Token::Ident(base) => { // we're gonna parse a class or an enum
@@ -466,7 +470,7 @@ impl<'a> LiveParser<'a> {
                     // anything but a {/
                     
                     let token_id = self.get_token_id();
-                     if self.accept_token(Token::OpenBrace){
+                    if self.accept_token(Token::OpenBrace) {
                         ld.nodes.push(LiveNode {
                             token_id: Some(token_id),
                             id: prop_id,
@@ -474,7 +478,7 @@ impl<'a> LiveParser<'a> {
                         });
                         self.expect_live_class(false, prop_id, ld) ?;
                     }
-                    else{
+                    else {
                         ld.nodes.push(LiveNode {
                             token_id: Some(token_id),
                             id: prop_id,
@@ -538,12 +542,12 @@ impl<'a> LiveParser<'a> {
         Err(self.error(format!("Expected value literal")))
     }
     
-    fn expect_live_class(&mut self, root:bool, prop_id: LiveId, ld: &mut LiveDocument) -> Result<(), LiveError> {
-
+    fn expect_live_class(&mut self, root: bool, prop_id: LiveId, ld: &mut LiveDocument) -> Result<(), LiveError> {
+        
         while self.peek_token() != Token::Eof {
             match self.peek_token() {
                 Token::CloseBrace => {
-                    if root{
+                    if root {
                         return Err(self.error(format!("Unexpected token }} in root")))
                     }
                     self.skip_token();
@@ -556,9 +560,9 @@ impl<'a> LiveParser<'a> {
                 }
                 Token::Ident(prop_id) => {
                     self.skip_token();
-
+                    
                     //let span = self.begin_span();
-                    // next 
+                    // next
                     // there is another token coming
                     if let Token::Ident(_) = self.peek_token() {
                         match prop_id {
@@ -589,7 +593,7 @@ impl<'a> LiveParser<'a> {
                 other => return Err(self.error(format!("Unexpected token {} in class body of {}", other, prop_id)))
             }
         }
-        if root{
+        if root {
             return Ok(())
         }
         return Err(self.error(format!("Eof in class body")))
@@ -616,6 +620,425 @@ impl<'a> LiveParser<'a> {
         });
         // we should s
         Ok(ld)
+    }
+    
+    
+    
+    
+    
+    // EXPRESSION PARSER
+    
+    
+    
+    
+    fn expect_expression(&mut self, prop_id: LiveId, ld: &mut LiveDocument) -> Result<(), LiveError> {
+        
+        let expr = self.expect_prim_expr() ?;
+        
+        ld.nodes.push(LiveNode {
+            token_id: Some(self.get_token_id()),
+            id: prop_id,
+            value: LiveValue::Expr
+        });
+        
+        fn recur_walk(expr:Expr, ld: &mut LiveDocument){
+            match expr{
+                Expr::Bin{token_id, op, left_expr, right_expr}=>{
+                    ld.nodes.push(LiveNode {
+                        token_id: Some(token_id),
+                        id: LiveId::empty(),
+                        value: LiveValue::ExprBinOp(op)
+                    });
+                    recur_walk(*left_expr, ld);
+                    recur_walk(*right_expr, ld);
+                }
+                Expr::Un{token_id, op, expr}=>{
+                    ld.nodes.push(LiveNode {
+                        token_id: Some(token_id),
+                        id: LiveId::empty(),
+                        value: LiveValue::ExprUnOp(op)
+                    });
+                    recur_walk(*expr, ld);
+                }
+                Expr::Call{token_id, ident, arg_exprs}=>{
+                    ld.nodes.push(LiveNode {
+                        token_id: Some(token_id),
+                        id: LiveId::empty(),
+                        value: LiveValue::ExprCall{ident, args:arg_exprs.len()}
+                    });
+                    for arg in arg_exprs{
+                        recur_walk(arg, ld);
+                    }
+                }
+                Expr::Member{token_id, ident, expr}=>{
+                    ld.nodes.push(LiveNode {
+                        token_id: Some(token_id),
+                        id: LiveId::empty(),
+                        value: LiveValue::ExprMember(ident)
+                    });
+                    recur_walk(*expr, ld);
+                }
+                Expr::Var{token_id, ident}=>{
+                    ld.nodes.push(LiveNode {
+                        token_id: Some(token_id),
+                        id: LiveId::empty(),
+                        value: LiveValue::Id(ident)
+                    });
+                }
+                Expr::Bool{token_id, v}=>{
+                    ld.nodes.push(LiveNode {
+                        token_id: Some(token_id),
+                        id: LiveId::empty(),
+                        value: LiveValue::Bool(v)
+                    });
+                }
+                Expr::Int{token_id, v}=>{
+                    ld.nodes.push(LiveNode {
+                        token_id: Some(token_id),
+                        id: LiveId::empty(),
+                        value: LiveValue::Int(v)
+                    });
+                }
+                Expr::Float{token_id, v}=>{
+                    ld.nodes.push(LiveNode {
+                        token_id: Some(token_id),
+                        id: LiveId::empty(),
+                        value: LiveValue::Float(v)
+                    });
+                }
+                Expr::Color{token_id, v}=>{
+                    ld.nodes.push(LiveNode {
+                        token_id: Some(token_id),
+                        id: LiveId::empty(),
+                        value: LiveValue::Color(v)
+                    });
+                }
+            }
+        }
+        
+        recur_walk(expr, ld);
+        
+        ld.nodes.push(LiveNode {
+            token_id: Some(self.get_token_id()),
+            id: prop_id,
+            value: LiveValue::Close
+        });
+
+        
+        Ok(())
+        /*
+        ld.nodes.push(LiveNode {
+            token_id: Some(self.get_token_id()),
+            id: prop_id,
+            value: LiveValue::Expression
+        });
+        
+        let mut stack_depth = 0;
+        
+        while self.peek_token() != Token::Eof {
+            if self.accept_token(Token::OpenParen){
+                stack_depth += 1;             
+            }
+            else if self.accept_token(Token::CloseParen) {
+                stack_depth -= 1;
+                // terminate
+                if stack_depth == 0{
+                    ld.nodes.push(LiveNode {
+                        token_id: Some(self.get_token_id()),
+                        id: LiveId::empty(),
+                        value: LiveValue::Close
+                    });
+                    return Ok(())
+                }
+            }
+            // ok so what do we do here.
+            // we accept 
+            self.expect_live_value(LiveId::empty(), ld) ?;
+            self.accept_token(Token::Punct(id!(,)));
+        }
+        return Err(self.error(format!("Eof in array body")))*/
+    }
+    
+    fn expect_expr(&mut self) -> Result<Expr, LiveError> {
+        self.expect_cond_expr()
+    }
+    
+    fn expect_cond_expr(&mut self) -> Result<Expr, LiveError> {
+        let expr = self.expect_or_expr() ?;
+        Ok(if self.accept_token(Token::Punct(id!( ?))) {
+            let token_id = self.get_token_id();
+            let expr_if_true = self.expect_expr() ?;
+            self.expect_token(Token::Punct(id!(:))) ?;
+            let expr_if_false = self.expect_cond_expr() ?;
+            Expr ::Call {token_id, ident: id!(cond), arg_exprs: vec![expr, expr_if_true, expr_if_false]}
+        } else {
+            expr
+        })
+    }
+    
+    fn expect_or_expr(&mut self) -> Result<Expr, LiveError> {
+        let mut acc = self.expect_and_expr() ?;
+        while let Some(op) = LiveBinOp::from_or_op(self.peek_token()) {
+            self.skip_token();
+            let token_id = self.get_token_id();
+            let left_expr = Box::new(acc);
+            let right_expr = Box::new(self.expect_and_expr() ?);
+            acc = Expr::Bin {token_id, op, left_expr, right_expr,};
+        }
+        Ok(acc)
+    }
+    
+    fn expect_and_expr(&mut self) -> Result<Expr, LiveError> {
+        let mut acc = self.expect_eq_expr() ?;
+        while let Some(op) = LiveBinOp::from_and_op(self.peek_token()) {
+            self.skip_token();
+            let token_id = self.get_token_id();
+            let left_expr = Box::new(acc);
+            let right_expr = Box::new(self.expect_eq_expr() ?);
+            acc = Expr::Bin {token_id, op, left_expr, right_expr,};
+        }
+        Ok(acc)
+    }
+    
+    fn expect_eq_expr(&mut self) -> Result<Expr, LiveError> {
+        let mut acc = self.expect_rel_expr() ?;
+        while let Some(op) = LiveBinOp::from_eq_op(self.peek_token()) {
+            self.skip_token();
+            let token_id = self.get_token_id();
+            let left_expr = Box::new(acc);
+            let right_expr = Box::new(self.expect_rel_expr() ?);
+            acc = Expr::Bin {token_id, op, left_expr, right_expr,};
+        }
+        Ok(acc)
+    }
+    
+    fn expect_rel_expr(&mut self) -> Result<Expr, LiveError> {
+        let mut acc = self.expect_add_expr() ?;
+        while let Some(op) = LiveBinOp::from_rel_op(self.peek_token()) {
+            self.skip_token();
+            let token_id = self.get_token_id();
+            let left_expr = Box::new(acc);
+            let right_expr = Box::new(self.expect_add_expr() ?);
+            acc = Expr::Bin {token_id, op, left_expr, right_expr,};
+        }
+        Ok(acc)
+    }
+    
+    fn expect_add_expr(&mut self) -> Result<Expr, LiveError> {
+        let mut acc = self.expect_mul_expr() ?;
+        while let Some(op) = LiveBinOp::from_add_op(self.peek_token()) {
+            self.skip_token();
+            let token_id = self.get_token_id();
+            let left_expr = Box::new(acc);
+            let right_expr = Box::new(self.expect_mul_expr() ?);
+            acc = Expr::Bin {token_id, op, left_expr, right_expr,};
+        }
+        Ok(acc)
+    }
+    
+    fn expect_mul_expr(&mut self) -> Result<Expr, LiveError> {
+        let mut acc = self.expect_un_expr() ?;
+        while let Some(op) = LiveBinOp::from_mul_op(self.peek_token()) {
+            self.skip_token();
+            let token_id = self.get_token_id();
+            let left_expr = Box::new(acc);
+            let right_expr = Box::new(self.expect_un_expr() ?);
+            acc = Expr::Bin {token_id, op, left_expr, right_expr,};
+        }
+        Ok(acc)
+    }
+    
+    fn expect_un_expr(&mut self) -> Result<Expr, LiveError> {
+        Ok(if let Some(op) = LiveUnOp::from_un_op(self.peek_token()) {
+            self.skip_token();
+            let token_id = self.get_token_id();
+            let expr = Box::new(self.expect_un_expr() ?);
+            Expr::Un {token_id, op, expr,}
+        } else {
+            self.expect_member_expr() ?
+        })
+    }
+    
+    fn expect_member_expr(&mut self) -> Result<Expr, LiveError> {
+        let mut acc = self.expect_prim_expr() ?;
+        loop{
+            if let Token::Punct(id!(.)) = self.peek_token() {
+                self.skip_token();
+                let token_id = self.get_token_id();
+                let ident = self.expect_ident() ?;
+                acc = Expr::Member {token_id, ident, expr: Box::new(acc)}
+            }
+            else{
+                break
+            }
+        }
+        Ok(acc)
+    }
+    
+    fn expect_prim_expr(&mut self) -> Result<Expr, LiveError> {
+        match self.peek_token() {
+            Token::Ident(ident) => {
+                let token_id = self.get_token_id();
+                self.skip_token();
+                match self.peek_token() {
+                    Token::OpenParen => {
+                        let arg_exprs = self.expect_arg_exprs() ?;
+                        Ok(Expr::Call {token_id, ident, arg_exprs})
+                    }
+                    _ => Ok(Expr::Var {token_id, ident}),
+                }
+            }
+            Token::Bool(v) => {
+                self.skip_token();
+                let token_id = self.get_token_id();
+                Ok(Expr::Bool {token_id, v})
+            }
+            Token::Int(v) => {
+                self.skip_token();
+                let token_id = self.get_token_id();
+                Ok(Expr::Int {token_id, v})
+            }
+            Token::Float(v) => {
+                self.skip_token();
+                let token_id = self.get_token_id();
+                Ok(Expr::Float {token_id, v})
+            }
+            Token::Color(v) => {
+                self.skip_token();
+                let token_id = self.get_token_id();
+                Ok(Expr::Color {token_id, v})
+            }
+            Token::OpenParen => {
+                self.skip_token();
+                let expr = self.expect_expr() ?;
+                self.expect_token(Token::CloseParen) ?;
+                Ok(expr)
+            }
+            token=>Err(self.error(format!("Unexpected token {} in class expression", token)))
+        }
+    }
+    
+    fn expect_arg_exprs(&mut self) -> Result<Vec<Expr>, LiveError> {
+        self.expect_token(Token::OpenParen) ?;
+        let mut arg_exprs = Vec::new();
+        if !self.accept_token(Token::CloseParen) {
+            loop {
+                arg_exprs.push(self.expect_expr() ?);
+                if !self.accept_token(Token::Punct(id!(,))) {
+                    break;
+                }
+            }
+            self.expect_token(Token::CloseParen) ?;
+        }
+        Ok(arg_exprs)
+    }
+    
+    
+}
+
+#[derive(Debug)]
+enum Expr {
+    Bin {
+        token_id: TokenId,
+        op: LiveBinOp,
+        left_expr: Box<Expr>,
+        right_expr: Box<Expr>,
+    },
+    Un {
+        token_id: TokenId,
+        op: LiveUnOp,
+        expr: Box<Expr>,
+    },
+    Call {
+        token_id: TokenId,
+        ident: LiveId,
+        arg_exprs: Vec<Expr>,
+    },
+    Member {
+        token_id: TokenId,
+        ident: LiveId,
+        expr: Box<Expr>
+    },
+    Var {
+        token_id: TokenId,
+        ident: LiveId,
+    },
+    Bool {
+        token_id: TokenId,
+        v: bool
+    },
+    Int {
+        token_id: TokenId,
+        v: i64
+    },
+    Float {
+        token_id: TokenId,
+        v: f64
+    },
+    Color {
+        token_id: TokenId,
+        v: u32
+    }
+}
+
+
+impl LiveBinOp {
+    fn from_or_op(token: Token) -> Option<Self> {
+        match token {
+            Token::Punct(id!( ||)) => Some(Self::Or),
+            _ => None,
+        }
+    }
+    
+    fn from_and_op(token: Token) -> Option<Self> {
+        match token {
+            Token::Punct(id!( &&)) => Some(Self::And),
+            _ => None,
+        }
+    }
+    
+    fn from_eq_op(token: Token) -> Option<Self> {
+        match token {
+            Token::Punct(id!( ==)) => Some(Self::Eq),
+            Token::Punct(id!( !=)) => Some(Self::Ne),
+            _ => None,
+        }
+    }
+    
+    fn from_rel_op(token: Token) -> Option<Self> {
+        match token {
+            Token::Punct(id!(<)) => Some(Self::Lt),
+            Token::Punct(id!( <=)) => Some(Self::Le),
+            Token::Punct(id!(>)) => Some(Self::Gt),
+            Token::Punct(id!( >=)) => Some(Self::Ge),
+            _ => None,
+        }
+    }
+    
+    fn from_add_op(token: Token) -> Option<Self> {
+        match token {
+            Token::Punct(id!( +)) => Some(Self::Add),
+            Token::Punct(id!(-)) => Some(Self::Sub),
+            _ => None,
+        }
+    }
+    
+    fn from_mul_op(token: Token) -> Option<Self> {
+        match token {
+            Token::Punct(id!(*)) => Some(Self::Mul),
+            Token::Punct(id!( /)) => Some(Self::Div),
+            _ => None,
+        }
+    }
+}
+
+impl LiveUnOp {
+    pub fn from_un_op(token: Token) -> Option<Self> {
+        match token {
+            Token::Punct(id!(!)) => Some(Self::Not),
+            Token::Punct(id!(-)) => Some(Self::Neg),
+            _ => None,
+        }
     }
 }
 
