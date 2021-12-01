@@ -5,7 +5,8 @@ use{
         liveid::{LiveId, LiveFileId, LivePtr},
         liveerror::{LiveError, LiveErrorOrigin},
         livedocument::{LiveDocument,LiveScopeTarget, LiveScopeItem},
-        livenode::{LiveValue, LiveNodeSlice, LiveNodeVec, LiveTypeKind},
+        livenode::{LiveValue, LiveTypeKind},
+        livenodevec::{LiveNodeSlice, LiveNodeVec},
         liveregistry::LiveRegistry
     }
 };
@@ -139,7 +140,14 @@ impl<'a> LiveExpander<'a> {
                 Ok(overwrite) => {
                     let out_value = &out_doc.nodes[overwrite].value;
                     
-                    if !in_value.is_class() && out_value.variant_id() == in_value.variant_id() { // same type
+                    if in_value.is_expr() && out_value.is_expr() || in_value.is_expr() && out_value.is_value_type(){
+                        // replace range
+                        let next_index = out_doc.nodes.skip_node(overwrite);
+                        out_doc.nodes.splice(overwrite..next_index, in_doc.nodes.node_slice(in_index).iter().cloned());
+                        in_index = in_doc.nodes.skip_node(in_index);
+                        continue;
+                    }
+                    else if !in_value.is_class() && out_value.variant_id() == in_value.variant_id() { // same type
                         match in_value {
                             LiveValue::Array |
                             LiveValue::TupleEnum {..} |
@@ -211,6 +219,14 @@ impl<'a> LiveExpander<'a> {
                     }
                 }
                 Err(insert_point) => {
+                    // ok so. if we are inserting an expression, just do the whole thing in one go.
+                    if in_node.value.is_expr(){
+                        // splice it in
+                        out_doc.nodes.splice(insert_point..insert_point, in_doc.nodes.node_slice(in_index).iter().cloned());
+                        in_index = in_doc.nodes.skip_node(in_index);
+                        continue;
+                    }
+                    
                     out_doc.nodes.insert(insert_point, in_node.clone());
                     if in_node.value.is_open() {
                         level_overwrite.push(false);
@@ -265,10 +281,7 @@ impl<'a> LiveExpander<'a> {
                         *class_parent = Some(LivePtr{file_id: self.in_file_id, index:out_index as u32});
                     }
                     
-                    // ALRIGHT we ahve al the infos
-                    // we should be able to get LiveTypeInfo to start populating our class.
-                    // ok so.. our dep order should be good. so i should be able to look up
-                    
+
                     let mut insert_point = out_index + 1;
                     
                     // if we have a deref_target lets traverse all the way up
@@ -278,9 +291,6 @@ impl<'a> LiveExpander<'a> {
                     while let Some(field) = live_type_info.fields.iter().find(|f| f.id == id!(deref_target)){
                         has_deref_hop = true;
                         live_type_info = &field.live_type_info;
-                        // if we have a deref target, this thing behaves entirely differently.
-                        // we need to not clone in all the props, but we need to clone in the entire
-                        // other class.
                     }
                     if has_deref_hop{
                         // ok so we need the lti of the deref hop and clone all children
@@ -326,9 +336,10 @@ impl<'a> LiveExpander<'a> {
 
                     self.scope_stack.stack.push(Vec::new());
                     current_parent.push(out_index);
-                    
-                    //panic!();
                 }
+                LiveValue::Expr=>{
+                    panic!()
+                },
                 LiveValue::Array |
                 LiveValue::TupleEnum {..} |
                 LiveValue::NamedEnum {..} |

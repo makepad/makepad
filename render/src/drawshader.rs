@@ -52,9 +52,9 @@ pub struct DrawShaderInputs {
     pub total_slots: usize,
 }
 
-pub const DRAW_CALL_USER_UNIFORMS: usize = 32;
-pub const DRAW_CALL_TEXTURE_SLOTS: usize = 16;
-pub const DRAW_CALL_VAR_INSTANCES: usize = 32;
+pub const DRAW_CALL_USER_UNIFORMS: usize = 16;
+pub const DRAW_CALL_TEXTURE_SLOTS: usize = 4;
+pub const DRAW_CALL_VAR_INSTANCES: usize = 16;
 
 #[cfg(any(target_os = "linux", target_arch = "wasm32", test))]
 pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformGLSL;
@@ -62,7 +62,6 @@ pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPac
 pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsMetal;
 #[cfg(any(target_os = "windows", test))]
 pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsHLSL;
-
 
 #[derive(Default, Debug)]
 pub struct DrawVars {

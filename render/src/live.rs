@@ -195,8 +195,8 @@ impl Cx {
         self.apply_error(ApplyFrom::Animate, index, nodes, format!("unknown track {} in animate_to state_id {}", id, state_id))
     }
     
-    pub fn apply_key_frame_cannot_be_interpolated(&mut self, index: usize, nodes: &[LiveNode]) {
-        self.apply_error(ApplyFrom::Animate, index, nodes, format!("key frame values cannot be interpolated"))
+    pub fn apply_key_frame_cannot_be_interpolated(&mut self, index: usize, nodes: &[LiveNode], a:&LiveValue, b:&LiveValue) {
+        self.apply_error(ApplyFrom::Animate, index, nodes, format!("key frame values cannot be interpolated {:?} {:?}", a, b))
     }
     
     pub fn apply_error(&mut self, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode], message: String) {
@@ -443,6 +443,10 @@ live_primitive!(
                 *self = *val as f32;
                 index + 1
             }
+            LiveValue::Expr=>{
+                println!("EXPR!");
+                nodes.skip_node(index)
+            },
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, apply_from, index, nodes);
