@@ -80,7 +80,7 @@ live_register!{
         }
         
         indent_width: 10.0
-        file_node_height: 20.0
+        file_node_height: (20.0)
         /*
         file_node_color_selected: #x11466E
         file_node_color_hovered_even: #3D

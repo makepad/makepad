@@ -10,7 +10,7 @@ pub use {
             CxPlatformDrawCall,
             CxPlatformView,
         },
-        live::*,
+        livetraits::*,
         area::{Area, ViewArea, InstanceArea},
         turtle::{Layout, Width, Height, Walk, Rect},
         drawshader::{

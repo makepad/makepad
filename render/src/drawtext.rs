@@ -6,7 +6,7 @@ use {
     },
     crate::{
         cx::Cx,
-        live::*,
+        livetraits::*,
         turtle::{Walk, Width, Height, Margin},
         font::{CxFontsAtlasTodo, Font,},
         view::ManyInstances,

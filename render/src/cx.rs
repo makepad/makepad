@@ -15,7 +15,7 @@ use {
         ShaderRegistry
     },
     crate::{
-        live::{
+        livetraits::{
             LiveFactory,
         },
         gpuinfo::GpuInfo,

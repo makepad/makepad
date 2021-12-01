@@ -3,7 +3,7 @@ use {
     makepad_derive_live::*,
     crate::{
         cx::Cx,
-        live::*,
+        livetraits::*,
         geometrygen::GeometryQuad2D,
         drawshader::DrawVars,
         turtle::{Layout, Walk, Rect}
