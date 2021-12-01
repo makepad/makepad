@@ -13,20 +13,22 @@ use {
 live_register!{
     use makepad_render::shader_std::*;
     
-    DrawNodeBg: {{DrawNodeBg}} { 
+    DrawNodeBg: {{DrawNodeBg}} {
         instance selected: float = 0.0
         instance hover: float = 0.0
         
-        const color_even:vec4 = #25
-        const color_odd:vec4= #28
+        const color_even: vec4 = #25
+        const color_odd: vec4 = #28
         
         fn pixel(self) -> vec4 {
-            return mix(color_even, color_odd, self.is_even);
+            return mix(color_even, color_odd, self.is_even) + #3 * self.hover;
         }
     }
     
     FileTreeNode: {{FileTreeNode}} {
-        folder_quad: {
+        bg_quad: {}
+        
+        icon_quad: {
             color: #80
             fn pixel(self) -> vec4 {
                 let cx = Sdf2d::viewport(self.pos * self.rect_size);
@@ -54,7 +56,7 @@ live_register!{
             padding: {l: 5.0, t: 0.0, r: 0.0, b: 1.0,},
         }
         
-        folder_icon_walk: Walk {
+        icon_walk: Walk {
             width: Width::Fixed(14.0),
             height: Height::Filled,
             margin: Margin {
@@ -65,22 +67,37 @@ live_register!{
             },
         }
         
+        default_state: {
+            from: {all: Play::Forward {duration: 2.1}}
+            bg_quad: {hover: 0}
+        }
+        
+        hover_state: {
+            from: {
+                all: Play::Forward {duration: 0.1}
+            }
+            bg_quad: {hover: [{time: 0.0, value: 1.0}]}
+        }
+        
         indent_width: 10.0
         file_node_height: 20.0
-        //file_node_color_even: #25
-        //file_node_color_odd: #28
+        /*
         file_node_color_selected: #x11466E
         file_node_color_hovered_even: #3D
         file_node_color_hovered_odd: #38
         file_node_color_hovered_selected: #x11466E
         file_name_color_folder: #FF
-        file_name_color_file: #9D
+        file_name_color_file: #9D*/
     }
     
     FileTree: {{FileTree}} {
-        
-        tree_node: FileTreeNode {}
-        
+        file_node: FileTreeNode {
+            name_text: {color: #9d}
+        }
+        folder_node: FileTreeNode {
+            name_text: {color: #ff}
+        }
+        test:(1.0+2.0)
         scroll_view: {
             view: {debug_id: file_tree_view}
         }
@@ -96,96 +113,70 @@ pub struct DrawNodeBg {
 
 #[derive(Live, LiveHook)]
 pub struct FileTreeNode {
-    node_quad: DrawNodeBg,
-    folder_quad: DrawColor,
+    bg_quad: DrawNodeBg,
+    icon_quad: DrawColor,
     name_text: DrawText,
-    
     layout: Layout,
+    #[track(hover=default_state)] animator: Animator,
     
-    file_node_height: f32, 
+    file_node_height: f32,
     indent_width: f32,
     
-    folder_icon_walk: Walk,
+    default_state: Option<LivePtr>,
+    hover_state: Option<LivePtr>,
+    icon_walk: Walk,
     
-    file_node_color_selected: Vec4,
-    file_node_color_hovered_even: Vec4,
-    file_node_color_hovered_odd: Vec4,
-    file_node_color_hovered_selected: Vec4,
-    file_name_color_folder: Vec4,
-    file_name_color_file: Vec4,
+    hover: f32,
 }
 
 #[derive(Live, LiveHook)]
 pub struct FileTree {
     scroll_view: ScrollView,
-    tree_node: Option<LivePtr>,
-    
+    file_node: Option<LivePtr>,
+    folder_node: Option<LivePtr>,
+    test: f32,
     #[rust] tree_nodes: HashMap<FileNodeId, FileTreeNode>,
     #[rust] count: usize,
     #[rust] stack: Vec<f32>,
-} 
+}
 
 impl FileTreeNode {
-    pub fn draw_folder(&mut self, cx: &mut Cx, name: &str, is_even:bool, stack: &[f32]) {
-        let scale = stack.last().cloned().unwrap_or(1.0);
-        
-        //self.node_quad.draw_vars.area = Area::Empty;
-        //self.node_quad.color = self.file_node_color(count, info.is_hovered, info.is_selected);
-        //let layout = self.file_node_layout(scale);
+    pub fn draw_folder(&mut self, cx: &mut Cx, name: &str, is_even: bool, scale_stack: &[f32]) {
+        let scale = scale_stack.last().cloned().unwrap_or(1.0);
         
         self.layout.walk.height = Height::Fixed(scale * self.file_node_height);
-        self.node_quad.is_even = if is_even{1.0}else{0.0};
-        self.node_quad.begin(cx, self.layout);
+        self.bg_quad.is_even = if is_even {1.0}else {0.0};
+        self.bg_quad.begin(cx, self.layout);
         
-        cx.walk_turtle(self.indent_walk(stack.len()));
+        cx.walk_turtle(self.indent_walk(scale_stack.len()));
         
-        self.folder_quad.draw_walk(cx, self.folder_icon_walk);
+        self.icon_quad.draw_walk(cx, self.icon_walk);
         cx.turtle_align_y();
         
-        self.name_text.color = self.file_name_color_folder;
-        self.name_text.font_scale = stack.last().cloned().unwrap_or(1.0);
+        self.name_text.font_scale = scale_stack.last().cloned().unwrap_or(1.0);
         self.name_text.draw_walk(cx, name);
-        self.node_quad.end(cx);
+        self.bg_quad.end(cx);
         
         cx.turtle_new_line();
-        
-        //stack.push(scale * info.is_expanded_fraction);
-        /*
-        if info.is_fully_collapsed() {
-            self.end_folder();
-            return Err(());
-        }*/
-        //Ok(())
     }
     
-    pub fn draw_file(&mut self, cx: &mut Cx,  name: &str, is_even:bool, stack: &[f32]) {
+    pub fn draw_file(&mut self, cx: &mut Cx, name: &str, is_even: bool, scale_stack: &[f32]) {
         
-        let scale = stack.last().cloned().unwrap_or(1.0);
-        //let count = self.count;
-        //self.count += 1;
+        let scale = scale_stack.last().cloned().unwrap_or(1.0);
         
-        //self.node_quad.draw_vars.area = Area::Empty;
-        //self.node_quad.color = self.file_node_color(count, info.is_hovered, info.is_selected);
-        //let layout = self.file_node_layout(scale);
-        self.node_quad.is_even = if is_even{1.0}else{0.0};
+        self.bg_quad.is_even = if is_even {1.0}else {0.0};
         self.layout.walk.height = Height::Fixed(scale * self.file_node_height);
-        self.node_quad.begin(cx, self.layout);
+        self.bg_quad.begin(cx, self.layout);
         
-        cx.walk_turtle(self.indent_walk(stack.len()));
+        cx.walk_turtle(self.indent_walk(scale_stack.len()));
         cx.turtle_align_y();
         
-        self.name_text.color = self.file_name_color_file;
         self.name_text.font_scale = scale;
         self.name_text.draw_walk(cx, name);
-        self.node_quad.end(cx);
-        
-        //self.logic
-        //    .set_node_area(cx, file_node_id.0, self.node_quad.draw_vars.area);
+        self.bg_quad.end(cx);
         
         cx.turtle_new_line();
-        //self.logic.end_node();
     }
-    
     
     fn indent_walk(&self, depth: usize) -> Walk {
         Walk {
@@ -200,6 +191,42 @@ impl FileTreeNode {
         }
     }
     
+    pub fn handle_event(
+        &mut self,
+        cx: &mut Cx,
+        event: &mut Event,
+    ) {
+        self.handle_animation(cx, event);
+        match event.hits(cx, self.bg_quad.draw_vars.area, HitOpt::default()) {
+            Event::FingerHover(event) => {
+                cx.set_hover_mouse_cursor(MouseCursor::Hand);
+                match event.hover_state {
+                    HoverState::In => {
+                        self.animate_to(cx, id!(hover), self.hover_state.unwrap());
+                    }
+                    HoverState::Out => {
+                        self.animate_to(cx, id!(hover), self.default_state.unwrap());
+                        //dispatch_action(TreeAction::NodeWasExited(*node_id));
+                    }
+                    _ => {}
+                }
+            }
+            Event::FingerMove(event) => {
+                //if self.dragging_node_id.is_none()
+                //    && event.abs.distance(&event.abs_start) >= MIN_DRAG_DISTANCE
+               // {
+               //     dispatch_action(TreeAction::NodeShouldStartDragging(*node_id));
+               // }
+            }
+            Event::FingerUp(event) => {
+                //if area.get_rect(cx).contains(event.abs_start) {
+                //    dispatch_action(TreeAction::NodeWasClicked(*node_id));
+                //}
+            }
+            _ => {}
+        }
+        
+    }
 }
 
 
@@ -208,10 +235,7 @@ impl FileTree {
     pub fn begin(&mut self, cx: &mut Cx) -> Result<(), ()> {
         self.scroll_view.begin(cx) ?;
         self.count = 0;
-        //println!("{}", std::mem::size_of::<FileTreeNode>());
-        //println!("{}", self.tree_nodes.len() * std::mem::size_of::<FileTreeNode>());
         Ok(())
-        
     }
     
     pub fn end(&mut self, cx: &mut Cx) {
@@ -231,33 +255,10 @@ impl FileTree {
         
         let tree_node = match self.tree_nodes.entry(node_id) {
             Entry::Occupied(o) => o.into_mut(),
-            Entry::Vacant(v) => v.insert(FileTreeNode::new_from_ptr(cx, self.tree_node.unwrap()))
+            Entry::Vacant(v) => v.insert(FileTreeNode::new_from_ptr(cx, self.folder_node.unwrap()))
         };
         
-        tree_node.draw_folder(cx,  name, self.count%2 == 1, &self.stack);
-        /*
-        tree_node.begin_folder(cx, name);
-        /*
-        self.node_quad.draw_vars.area = Area::Empty;
-        self.node_quad.color = self.file_node_color(count, info.is_hovered, info.is_selected);
-        let layout = self.file_node_layout(scale);
-        self.node_quad.begin(cx, layout);
-        */
-        cx.walk_turtle(self.indent_walk(self.stack.len()));
-        
-        self.folder_quad.draw_walk(cx, self.folder_icon_walk);
-        cx.turtle_align_y();
-        
-        self.name_text.color = self.file_node_name_color_folder;
-        self.name_text.font_scale = self.stack.last().cloned().unwrap_or(1.0);
-        self.name_text.draw_walk(cx, name);
-        self.node_quad.end(cx);
-        
-        self.logic
-            .set_node_area(cx, file_node_id.0, self.node_quad.draw_vars.area);
-        
-        cx.turtle_new_line();
-        */
+        tree_node.draw_folder(cx, name, self.count % 2 == 1, &self.stack);
         
         self.stack.push(scale * 1.0);
         
@@ -265,7 +266,7 @@ impl FileTree {
         //    self.end_folder();
         //    return Err(());
         // }
-        if self.count > 10{
+        if self.count > 10 {
             self.end_folder();
             return Err(())
         }
@@ -280,49 +281,11 @@ impl FileTree {
         self.count += 1;
         let tree_node = match self.tree_nodes.entry(node_id) {
             Entry::Occupied(o) => o.into_mut(),
-            Entry::Vacant(v) => v.insert(FileTreeNode::new_from_ptr(cx, self.tree_node.unwrap()))
+            Entry::Vacant(v) => v.insert(FileTreeNode::new_from_ptr(cx, self.file_node.unwrap()))
         };
-        tree_node.draw_file(cx,  name, self.count%2 == 1,&self.stack);
+        tree_node.draw_file(cx, name, self.count % 2 == 1, &self.stack);
         cx.turtle_new_line();
-    } 
-    /*
-    fn file_node_color(&self, count: usize, is_hovered: bool, is_selected: bool) -> Vec4 {
-        if is_hovered {
-            if is_selected {
-                self.file_node_color_hovered_selected
-            } else if count % 2 == 0 {
-                self.file_node_color_hovered_even
-            } else {
-                self.file_node_color_hovered_odd
-            }
-        } else {
-            if is_selected {
-                self.file_node_color_selected
-            } else if count % 2 == 0 {
-                self.file_node_color_even
-            } else {
-                self.file_node_color_odd
-            }
-        }
     }
-    
-    fn file_node_layout(&self, scale: f32) -> Layout {
-        Layout {
-            walk: Walk {
-                width: Width::Filled,
-                height: Height::Fixed(scale * self.file_node_height),
-                ..Walk::default()
-            },
-            align: Align {fx: 0.0, fy: 0.5},
-            padding: Padding {
-                l: 5.0,
-                t: 0.0,
-                r: 0.0,
-                b: 1.0,
-            },
-            ..Layout::default()
-        }
-    }*/
     
     pub fn forget(&mut self) {
         self.tree_nodes.clear();
@@ -396,6 +359,10 @@ impl FileTree {
     ) {
         if self.scroll_view.handle_event(cx, event) {
             self.scroll_view.redraw(cx);
+        }
+        
+        for (_key, node) in &mut self.tree_nodes {
+            node.handle_event(cx, event);
         }
         /*
         let mut actions = Vec::new();

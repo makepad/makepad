@@ -448,7 +448,7 @@ impl Animator {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> bool {
         
-        if let Some(nf) = event.is_next_frame(cx, self.next_frame){
+        if let Some(nf) = event.is_next_frame(cx, self.next_frame) {
             
             let state_nodes = self.state.as_mut().unwrap();
             
@@ -459,7 +459,7 @@ impl Animator {
                 let state_node = &mut state_nodes[state_index];
                 if state_node.value.is_array() {
                     // ok so. lets compute our value and store it in the last slot
-                    if Self::update_timeline_value(cx, state_index, state_nodes, nf.time){
+                    if Self::update_timeline_value(cx, state_index, state_nodes, nf.time) {
                         ended = true;
                     }
                     state_index = state_nodes.skip_node(state_index);
@@ -476,60 +476,60 @@ impl Animator {
                             break;
                         }
                     }
-                    else { 
+                    else {
                         state_index = state_nodes.skip_node(state_index);
                     }
                 }
             }
-
-            if !ended{
+            
+            if !ended {
                 self.next_frame = cx.new_next_frame();
             }
-
+            
             return true
         }
         false
     }
     
     // this find the last keyframe value from an array node
-    pub fn update_timeline_value(cx: &mut Cx, index: usize, nodes: &mut [LiveNode], ext_time: f64)->bool {
+    pub fn update_timeline_value(cx: &mut Cx, index: usize, nodes: &mut [LiveNode], ext_time: f64) -> bool {
         // OK so. we have an array with keyframes
         if nodes[index].value.is_array() {
             let mut node_iter = nodes.first_child(index);
             
             // compute the animation time from the id
-            let (ended, time) =  if let Some(id_index) = node_iter{
-                if let LiveValue::Id(id) = &nodes[id_index].value{
+            let (ended, time) = if let Some(id_index) = node_iter {
+                if let LiveValue::Id(id) = &nodes[id_index].value {
                     // ok so now we have to find our id in tracks
                     let track_index = nodes.child_by_path(0, &[id!(tracks), *id]).unwrap();
                     // ok we should have a play and time key here
                     let time_index = nodes.child_by_name(track_index, id!(time)).unwrap();
-                    let start_time = match &nodes[time_index].value{
+                    let start_time = match &nodes[time_index].value {
                         LiveValue::Id(v) => {
                             assert!(*v == id!(void));
                             nodes[time_index].value = LiveValue::Float(ext_time);
                             ext_time
                         }
-                        LiveValue::Float(time)=>{
+                        LiveValue::Float(time) => {
                             
                             *time
                         }
-                        _=>panic!()
+                        _ => panic!()
                     };
                     // alright we have the start time.
                     // next we deserialize 'play'
-                    let play = if let Some(play_index) = nodes.child_by_name(track_index, id!(play)){
+                    let play = if let Some(play_index) = nodes.child_by_name(track_index, id!(play)) {
                         Play::new_apply(cx, ApplyFrom::New, play_index, nodes)
                     }
-                    else{
+                    else {
                         Play::new(cx)
                     };
                     node_iter = nodes.next_child(id_index);
                     play.get_ended_time(ext_time - start_time)
                 }
-                else{panic!()}
+                else {panic!()}
             }
-            else{panic!()};
+            else {panic!()};
             
             
             let mut prev_kf: Option<KeyFrame> = None;
@@ -572,34 +572,50 @@ impl Animator {
                         let a = &prev_kf.value;
                         let b = &next_kf.value;
                         
-                        if a.variant_id() != b.variant_id() {
-                            cx.apply_key_frame_cannot_be_interpolated(index, nodes);
-                            return ended
-                        }
-
                         let new_val = match a {
-                            LiveValue::Int(va) => if let LiveValue::Int(vb) = b {
-                                LiveValue::Int((((vb - va) as f64) * mix + *va as f64) as i64)
-                            } else {LiveValue::None}
-                            LiveValue::Float(va) => if let LiveValue::Float(vb) = b {
-                                LiveValue::Float((vb - va) * mix + va)
-                            } else {LiveValue::None}
-                            LiveValue::Color(va) => if let LiveValue::Color(vb) = b {
-                                LiveValue::Color(Vec4::from_lerp(Vec4::from_u32(*va), Vec4::from_u32(*vb), mix as f32).to_u32())
-                            } else {LiveValue::None}
-                            LiveValue::Vec2(va) => if let LiveValue::Vec2(vb) = b {
-                                LiveValue::Vec2(Vec2::from_lerp(*va, *vb, mix as f32))
-                            } else {LiveValue::None}
-                            LiveValue::Vec3(va) => if let LiveValue::Vec3(vb) = b {
-                                LiveValue::Vec3(Vec3::from_lerp(*va, *vb, mix as f32))
-                            } else {LiveValue::None}
+                            LiveValue::Int(va) => match b{
+                                LiveValue::Int(vb) => {
+                                    LiveValue::Float((((vb - va) as f64) * mix + *va as f64))
+                                } 
+                                LiveValue::Float(vb) => {
+                                    LiveValue::Float((((vb - *va as f64) as f64) * mix + *va as f64))
+                                } 
+                                _=>LiveValue::None
+                            }
+                            LiveValue::Float(va) => match b{
+                                LiveValue::Int(vb) => {
+                                    LiveValue::Float((((*vb as f64 - va) as f64) * mix + *va as f64))
+                                } 
+                                LiveValue::Float(vb) => {
+                                    LiveValue::Float((((vb - va)) * mix + *va))
+                                } 
+                                _=>LiveValue::None
+                            }
+                            LiveValue::Color(va) => match b{
+                                LiveValue::Color(vb)=>{
+                                    LiveValue::Color(Vec4::from_lerp(Vec4::from_u32(*va), Vec4::from_u32(*vb), mix as f32).to_u32())
+                                } 
+                                _=>LiveValue::None
+                            }
+                            LiveValue::Vec2(va) => match b{
+                                LiveValue::Vec2(vb)=>{
+                                    LiveValue::Vec2(Vec2::from_lerp(*va, *vb, mix as f32))
+                                } 
+                                _=>LiveValue::None
+                            }
+                            LiveValue::Vec3(va) => match b{
+                                LiveValue::Vec3(vb) => {
+                                    LiveValue::Vec3(Vec3::from_lerp(*va, *vb, mix as f32))
+                                } 
+                                _=>LiveValue::None
+                            }
                             _ => LiveValue::None
                         };
                         if let LiveValue::None = &new_val {
-                            cx.apply_key_frame_cannot_be_interpolated(index, nodes);
+                            cx.apply_key_frame_cannot_be_interpolated(index, nodes, a, b);
                             return ended
                         }
-                        nodes[last_child_index].value =  new_val;
+                        nodes[last_child_index].value = new_val;
                         
                         return ended
                     }
@@ -617,7 +633,7 @@ impl Animator {
     }
     
     
-    pub fn last_keyframe_value_from_array(index: usize, nodes:&[LiveNode]) -> Option<usize> {
+    pub fn last_keyframe_value_from_array(index: usize, nodes: &[LiveNode]) -> Option<usize> {
         if let Some(index) = nodes.last_child(index) {
             if nodes[index].value.is_object() {
                 return nodes.child_by_name(index, id!(value));
@@ -666,7 +682,7 @@ impl Animator {
         }
         
         state.replace_or_insert_node_by_path(0, &[id!(tracks), track], live_object!{
-            [track]: {state_id:(state_id)}
+            [track]: {state_id: (state_id)}
         });
         
         let mut reader = LiveNodeReader::new(index, nodes);
@@ -681,7 +697,7 @@ impl Animator {
                 path.push(reader.id());
                 if let Some(last_value) = Self::last_keyframe_value_from_array(reader.index(), reader.nodes()) {
                     state.replace_or_insert_node_by_path(0, &path, live_array!{
-                         [(track), (reader.nodes()[last_value].value.clone())]
+                        [(track), (reader.nodes()[last_value].value.clone())]
                     });
                 }
                 path.pop();
@@ -721,29 +737,29 @@ impl Animator {
         if state.len() == 0 { // call cut first
             panic!();
         }
-
+        
         // ok we have to look up into state/tracks for our state_id what state we are in right now
-        let from_id = if let Some(LiveValue::Id(id)) = state.child_value_by_path(0, &[id!(tracks), track, id!(state_id)]){
+        let from_id = if let Some(LiveValue::Id(id)) = state.child_value_by_path(0, &[id!(tracks), track, id!(state_id)]) {
             *id
         }
-        else{
+        else {
             cx.apply_error_animate_to_unknown_track(index, nodes, track, state_id);
             return
         };
-
+        
         let mut reader = LiveNodeReader::new(index, nodes);
         let mut path = Vec::new();
-
+        
         path.push(id!(state));
         reader.walk();
         let mut any_from_found = false;
         while !reader.is_eot() {
             if reader.depth() == 1 && reader.id() == id!(from) {
-                // we have to store the right 'from' in our 'tracks' 
-                if let Some(reader) = reader.child_by_name(from_id){
+                // we have to store the right 'from' in our 'tracks'
+                if let Some(reader) = reader.child_by_name(from_id) {
                     state.replace_or_insert_node_by_path(0, &[id!(tracks), track, id!(play)], reader.node_slice());
                 }
-                else if let Some(reader) = reader.child_by_name(id!(all)){
+                else if let Some(reader) = reader.child_by_name(id!(all)) {
                     state.replace_or_insert_node_by_path(0, &[id!(tracks), track, id!(play)], reader.node_slice());
                 }
                 state.replace_or_insert_node_by_path(0, &[id!(tracks), track, id!(time)], live_array!{void});
@@ -752,30 +768,30 @@ impl Animator {
             }
             else if reader.is_array() {
                 path.push(reader.id());
-                let (first_index, last_index)  = if let Some(state_child) = state.child_by_path(0, &path){
-                    if let Some(last_index) = state.last_child(state_child){
-                        (state_child+1,last_index)
+                let (first_index, last_index) = if let Some(state_child) = state.child_by_path(0, &path) {
+                    if let Some(last_index) = state.last_child(state_child) {
+                        (state_child + 1, last_index)
                     }
-                    else{panic!()}
+                    else {panic!()}
                 }
-                else{panic!()};
+                else {panic!()};
                 // verify we do the right track
-                if let LiveValue::Id(check_id) = &state[first_index].value{
-                    if *check_id != track{
+                if let LiveValue::Id(check_id) = &state[first_index].value {
+                    if *check_id != track {
                         cx.apply_error_wrong_animation_track_used(index, nodes, *path.last().unwrap(), *check_id, track);
                         path.pop();
                         reader.skip();
                         continue;
                     }
                 }
-                else{
+                else {
                     panic!()
                 }
                 let first_time = Self::first_keyframe_time_from_array(&reader);
                 
                 let mut timeline = Vec::new();
                 timeline.open_array(id!(0));
-                timeline.push_id(id!(0),track);
+                timeline.push_id(id!(0), track);
                 if first_time != 0.0 { // insert first key from the last value
                     timeline.push_live(state.node_slice(last_index));
                 }
@@ -783,7 +799,7 @@ impl Animator {
                 timeline.push_live(state.node_slice(last_index));
                 timeline.close();
                 state.replace_or_insert_node_by_path(0, &path, &timeline);
-
+                
                 path.pop();
                 reader.skip();
             }
@@ -796,24 +812,24 @@ impl Animator {
                 }
                 else {
                     path.push(reader.id());
-
-                    let (first_index, last_index) = if let Some(state_child) = state.child_by_path(0, &path){
-                        if let Some(last_index) = state.last_child(state_child){
-                            (state_child+1,last_index)
+                    
+                    let (first_index, last_index) = if let Some(state_child) = state.child_by_path(0, &path) {
+                        if let Some(last_index) = state.last_child(state_child) {
+                            (state_child + 1, last_index)
                         }
-                        else{panic!()}
+                        else {panic!()}
                     }
-                    else{panic!()};
-                    // verify 
-                    if let LiveValue::Id(check_id) = &state[first_index].value{
-                        if *check_id != track{
+                    else {panic!()};
+                    // verify
+                    if let LiveValue::Id(check_id) = &state[first_index].value {
+                        if *check_id != track {
                             cx.apply_error_wrong_animation_track_used(index, nodes, *path.last().unwrap(), *check_id, track);
                             path.pop();
                             reader.skip();
                             continue;
                         }
                     }
-                    else{
+                    else {
                         panic!()
                     }
                     let mut timeline = Vec::new();
@@ -831,14 +847,14 @@ impl Animator {
             }
         }
         
-        if !any_from_found{
+        if !any_from_found {
             // add a bare time info track here
             state.replace_or_insert_node_by_path(0, &[id!(tracks), track, id!(time)], live_array!{void});
         }
         state.replace_or_insert_node_by_path(0, &[id!(tracks), track, id!(state_id)], live_array!{(state_id)});
         
         self.swap_in_state(state);
-
+        
         self.next_frame = cx.new_next_frame();
     }
 }
