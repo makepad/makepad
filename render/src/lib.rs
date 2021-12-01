@@ -3,7 +3,11 @@
 #[macro_use]
 mod cx;
 #[macro_use]
-mod live;
+mod liveprims;
+
+mod liveeval;
+mod livetraits;
+mod livecx;
 
 #[cfg(target_os = "linux")]
 mod cx_opengl;
@@ -141,7 +145,7 @@ pub use {
             PassClearDepth
         },
         texture::{Texture,TextureFormat},
-        live::{
+        livetraits::{
             OptionAnyAction,
             LiveFactory,
             LiveNew,

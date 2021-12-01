@@ -33,6 +33,8 @@ pub use {
             LiveTypeInfo,
             LiveTypeField,
             LiveFieldKind,
+            LiveBinOp,
+            LiveUnOp,
             InlineString,
             FittedString,
             LiveTypeKind,

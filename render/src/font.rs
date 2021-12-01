@@ -13,7 +13,7 @@ pub use {
     makepad_live_compiler::*,
     crate::{
         cx::Cx,
-        live::*,
+        livetraits::*,
         geometrygen::GeometryQuad2D,
         drawshader::DrawVars,
         view::ManyInstances,

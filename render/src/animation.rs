@@ -5,7 +5,7 @@ use {
     makepad_live_compiler::*,
     crate::{
         cx::Cx,
-        live::*,
+        livetraits::*,
         events::NextFrame
     },
     
