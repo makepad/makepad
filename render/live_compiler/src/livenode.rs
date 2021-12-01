@@ -94,7 +94,7 @@ pub enum LiveFieldKind {
     LiveOption
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum LiveBinOp {
     Or,
     And,
@@ -110,7 +110,7 @@ pub enum LiveBinOp {
     Div,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub enum LiveUnOp {
     Not,
     Neg,

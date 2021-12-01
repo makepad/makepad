@@ -6,7 +6,7 @@ pub use {
             Cx,
             CxPlatformGeometry
         },
-        live::*
+        livetraits::*
     }
 };
 
