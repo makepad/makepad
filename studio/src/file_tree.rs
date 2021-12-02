@@ -1,6 +1,6 @@
 use {
     std::{
-        collections::HashMap,
+        collections::{HashSet,HashMap},
         collections::hash_map::Entry
     },
     crate::{
@@ -118,11 +118,11 @@ live_register!{
         }
         
         indent_width: 10.0
-        file_node_height: 20.0
         min_drag_distance: 10.0
     }
     
     FileTree: {{FileTree}} {
+        node_height: 20.0,
         file_node: FileTreeNode {
             is_folder: false,
             bg_quad: {is_folder: 0.0}
@@ -187,7 +187,6 @@ pub struct FileTreeNode {
     )]
     animator: Animator,
     
-    file_node_height: f32,
     indent_width: f32,
     
     default_state: Option<LivePtr>,
@@ -213,8 +212,13 @@ pub struct FileTree {
     file_node: Option<LivePtr>,
     folder_node: Option<LivePtr>,
     
+    node_height: f32,
+
     #[rust] dragging_node_id: Option<FileNodeId>,
     #[rust] last_selected: Option<FileNodeId>,
+    #[rust] open_nodes: HashSet<FileNodeId>,
+    #[rust] visible_nodes: HashSet<FileNodeId>,
+    #[rust] gc_nodes: HashSet<FileNodeId>,
     #[rust] tree_nodes: HashMap<FileNodeId, FileTreeNode>,
     #[rust] count: usize,
     #[rust] stack: Vec<f32>,
@@ -223,6 +227,8 @@ pub struct FileTree {
 pub enum FileTreeNodeAction {
     None,
     WasClicked,
+    Opening,
+    Closing,
     NodeShouldStartDragging,
 }
 
@@ -238,12 +244,12 @@ impl FileTreeNode {
         self.name_text.font_scale = scale;
     }
     
-    pub fn draw_folder(&mut self, cx: &mut Cx, name: &str, is_even: bool, scale_stack: &[f32]) {
+    pub fn draw_folder(&mut self, cx: &mut Cx, name: &str, is_even: bool, node_height:f32, scale_stack: &[f32]) {
         
         let scale = scale_stack.last().cloned().unwrap_or(1.0);
         self.set_draw_state(is_even, scale);
         
-        self.layout.walk.height = Height::Fixed(scale * self.file_node_height);
+        self.layout.walk.height = Height::Fixed(scale * node_height);
         self.bg_quad.begin(cx, self.layout);
         
         cx.walk_turtle(self.indent_walk(scale_stack.len()));
@@ -257,13 +263,13 @@ impl FileTreeNode {
         cx.turtle_new_line();
     }
     
-    pub fn draw_file(&mut self, cx: &mut Cx, name: &str, is_even: bool, scale_stack: &[f32]) {
+    pub fn draw_file(&mut self, cx: &mut Cx, name: &str, is_even: bool, node_height:f32, scale_stack: &[f32]) {
         
         let scale = scale_stack.last().cloned().unwrap_or(1.0);
         
         self.set_draw_state(is_even, scale);
         
-        self.layout.walk.height = Height::Fixed(scale * self.file_node_height);
+        self.layout.walk.height = Height::Fixed(scale * node_height);
         self.bg_quad.begin(cx, self.layout);
         
         cx.walk_turtle(self.indent_walk(scale_stack.len()));
@@ -299,7 +305,7 @@ impl FileTreeNode {
         )
     }
     
-    pub fn set_folder_is_expanded(
+    pub fn set_folder_is_open(
         &mut self,
         cx: &mut Cx,
         is_open: bool,
@@ -347,10 +353,13 @@ impl FileTreeNode {
                 if self.is_folder {
                     if self.opened > 0.2 {
                         self.animate_to(cx, id!(opened), self.closed_state.unwrap());
+                        dispatch_action(cx, FileTreeNodeAction::Closing);
                     }
                     else {
                         self.animate_to(cx, id!(opened), self.opened_state.unwrap());
+                        dispatch_action(cx, FileTreeNodeAction::Opening);
                     }
+                    
                 }
                 dispatch_action(cx, FileTreeNodeAction::WasClicked);
             }
@@ -364,12 +373,41 @@ impl FileTree {
     
     pub fn begin(&mut self, cx: &mut Cx) -> Result<(), ()> {
         self.scroll_view.begin(cx) ?;
+        self.visible_nodes.clear();
         self.count = 0;
         Ok(())
     }
     
     pub fn end(&mut self, cx: &mut Cx) {
         self.scroll_view.end(cx);
+
+        // remove all nodes that are invisible
+        self.gc_nodes.clear();
+        for (node_id, _) in &self.tree_nodes{
+            if !self.visible_nodes.contains(node_id) && Some(*node_id) != self.last_selected{
+                self.gc_nodes.insert(*node_id);
+            }
+        }
+        for node_id in &self.gc_nodes{
+            self.tree_nodes.remove(node_id);
+        }
+    }
+    
+    pub fn should_node_draw(&mut self, cx:&mut Cx)->bool{
+        let scale = self.stack.last().cloned().unwrap_or(1.0);
+        let height = self.node_height * scale;
+        if scale > 0.01 && cx.turtle_line_is_visible(height, self.scroll_view.get_scroll_pos(cx)){
+            return true
+        }
+        else{
+            cx.walk_turtle(Walk{
+                width: Width::Filled,
+                height: Height::Fixed(height),
+                margin:Margin::default()
+            });
+            cx.turtle_new_line();
+            return false
+        }
     }
     
     pub fn begin_folder(
@@ -379,21 +417,36 @@ impl FileTree {
         name: &str,
     ) -> Result<(), ()> {
         let scale = self.stack.last().cloned().unwrap_or(1.0);
-        
+
         self.count += 1;
+        let is_open = self.open_nodes.contains(&node_id);
         
-        let tree_node = match self.tree_nodes.entry(node_id) {
-            Entry::Occupied(o) => o.into_mut(),
-            Entry::Vacant(v) => v.insert(FileTreeNode::new_from_ptr(cx, self.folder_node.unwrap()))
-        };
-        
-        tree_node.draw_folder(cx, name, self.count % 2 == 1, &self.stack);
-        
-        self.stack.push(tree_node.opened * scale);
-        
-        if tree_node.opened == 0.0 {
-            self.end_folder();
-            return Err(());
+        if self.should_node_draw(cx){
+            let tree_node = match self.tree_nodes.entry(node_id) {
+                Entry::Occupied(o) => o.into_mut(),
+                Entry::Vacant(v) => v.insert({
+                    let mut tree_node = FileTreeNode::new_from_ptr(cx, self.folder_node.unwrap());
+                    if is_open{
+                        tree_node.set_folder_is_open(cx, true, false)
+                    }
+                    tree_node
+                })
+            };
+            tree_node.draw_folder(cx, name, self.count % 2 == 1, self.node_height, &self.stack);
+            self.stack.push(tree_node.opened * scale);
+            self.visible_nodes.insert(node_id);
+            if tree_node.opened == 0.0 {
+                self.end_folder();
+                return Err(());
+            }
+        }
+        else{
+            if is_open{
+                self.stack.push(1.0);
+            }
+            else{
+                return Err(());
+            }
         }
         Ok(())
     }
@@ -404,12 +457,15 @@ impl FileTree {
     
     pub fn file(&mut self, cx: &mut Cx, node_id: FileNodeId, name: &str) {
         self.count += 1;
-        let tree_node = match self.tree_nodes.entry(node_id) {
-            Entry::Occupied(o) => o.into_mut(),
-            Entry::Vacant(v) => v.insert(FileTreeNode::new_from_ptr(cx, self.file_node.unwrap()))
-        };
-        tree_node.draw_file(cx, name, self.count % 2 == 1, &self.stack);
-        cx.turtle_new_line();
+        if self.should_node_draw(cx){
+            self.visible_nodes.insert(node_id);
+            let tree_node = match self.tree_nodes.entry(node_id) {
+                Entry::Occupied(o) => o.into_mut(),
+                Entry::Vacant(v) => v.insert(FileTreeNode::new_from_ptr(cx, self.file_node.unwrap()))
+            };
+            tree_node.draw_file(cx, name, self.count % 2 == 1,self.node_height, &self.stack);
+            cx.turtle_new_line();
+        }
     }
     
     pub fn forget(&mut self) {
@@ -420,18 +476,22 @@ impl FileTree {
         self.tree_nodes.remove(&file_node_id);
     }
     
-    pub fn set_folder_is_expanded(
+    pub fn set_folder_is_open(
         &mut self,
         cx: &mut Cx,
         node_id: FileNodeId,
         is_open: bool,
         should_animate: bool,
     ) {
-        let tree_node = match self.tree_nodes.entry(node_id) {
-            Entry::Occupied(o) => o.into_mut(),
-            Entry::Vacant(v) => v.insert(FileTreeNode::new_from_ptr(cx, self.folder_node.unwrap()))
-        };
-        tree_node.set_folder_is_expanded(cx, is_open, should_animate);
+        if is_open{
+            self.open_nodes.insert(node_id);
+        }
+        else{
+            self.open_nodes.remove(&node_id);
+        }
+        if let Some(tree_node) = self.tree_nodes.get_mut(&node_id){
+            tree_node.set_folder_is_open(cx, is_open, should_animate);
+        }
     }
     
     pub fn set_selected_file_node_id(&mut self, _cx: &mut Cx, _file_node_id: FileNodeId) {
@@ -473,8 +533,15 @@ impl FileTree {
         for (node_id, node) in &mut self.tree_nodes {
             node.handle_event(cx, event, &mut | _, e | actions.push((*node_id, e)));
         }
+        
         for (node_id, action) in actions {
             match action{
+                FileTreeNodeAction::Opening=>{
+                    self.open_nodes.insert(node_id);
+                }
+                FileTreeNodeAction::Closing=>{
+                    self.open_nodes.remove(&node_id);
+                }
                 FileTreeNodeAction::WasClicked=>{
                     if let Some(last_selected) = self.last_selected {
                         if last_selected != node_id {

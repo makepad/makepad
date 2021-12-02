@@ -385,7 +385,7 @@ impl AppInner {
     fn set_file_tree(&mut self, cx: &mut Cx, state: &mut AppState, file_tree: protocol::FileTree) {
         self.file_tree.forget();
         state.set_file_tree(file_tree);
-        self.file_tree.set_folder_is_expanded(cx, state.root_file_node_id, true, true);
+        self.file_tree.set_folder_is_open(cx, state.root_file_node_id, true, false);
         self.file_tree.redraw(cx);
     }
     
