@@ -13,7 +13,7 @@ use {
 live_register!{
     use makepad_render::shader_std::*;
     
-    DrawNodeBg: {{DrawNodeBg}} {
+    DrawBgQuad: {{DrawBgQuad}} {
         instance is_folder: float = 0.0
         instance selected: float = 0.0
         instance hover: float = 0.0
@@ -36,6 +36,24 @@ live_register!{
         }
     }
     
+    DrawNameText: {{DrawNameText}} {
+        instance selected: float = 0.0
+        instance hover: float = 0.0
+        instance opened: float = 0.0
+        instance is_folder: float = 0.0
+        
+        const color_file: vec4 = #9d
+        const color_folder: vec4 = #ff
+        
+        fn get_color(self)->vec4{
+            return mix(color_file, color_folder, self.is_folder) * self.scale
+        }
+        
+        text_style: {
+            top_drop: 1.3,
+        }
+    }
+    
     FileTreeNode: {{FileTreeNode}} {
         bg_quad: {}
         
@@ -52,24 +70,7 @@ live_register!{
             }
         }
         
-        name_text: {
-            instance selected: float = 0.0
-            instance hover: float = 0.0
-            instance opened: float = 0.0
-            instance is_folder: float = 0.0
-            
-            const color_file: vec4 = #9d
-            const color_folder: vec4 = #ff
-            
-            fn get_color(self)->vec4{
-              //  return self.color
-                return mix(color_file, color_folder, self.is_folder);//mix(1.0,self.opened,self.is_folder))
-            }
-            
-            text_style: {
-                top_drop: 1.3,
-            }
-        }
+        name_text: {}
         
         layout: {
             walk: {
@@ -100,6 +101,7 @@ live_register!{
         
         hover_state: {
             from: {all: Play::Forward {duration: 0.1}}
+            hover: [{time: 0.0, value: 1.0}],
         }
         
         unselected_state: {
@@ -149,18 +151,25 @@ live_register!{
     }
 }
 
-#[derive(Live, LiveHook)]
-#[repr(C)]
-pub struct DrawNodeBg {
+#[derive(Live, LiveHook)]#[repr(C)]
+struct DrawBgQuad {
     deref_target: DrawQuad,
     is_even: f32,
+    scale: f32,
+}
+
+#[derive(Live, LiveHook)]#[repr(C)]
+struct DrawNameText{
+    deref_target: DrawText,
+    is_even: f32,
+    scale: f32,
 }
 
 #[derive(Live, LiveHook)]
 pub struct FileTreeNode {
-    bg_quad: DrawNodeBg,
+    bg_quad: DrawBgQuad,
     icon_quad: DrawColor,
-    name_text: DrawText,
+    name_text: DrawNameText,
     layout: Layout,
     
     #[track(
@@ -211,9 +220,12 @@ impl FileTreeNode {
     pub fn draw_folder(&mut self, cx: &mut Cx, name: &str, is_even: bool, scale_stack: &[f32]) {
         
         let scale = scale_stack.last().cloned().unwrap_or(1.0);
-        
+
         self.layout.walk.height = Height::Fixed(scale * self.file_node_height);
+        
+        self.bg_quad.scale = scale;
         self.bg_quad.is_even = if is_even {1.0}else {0.0};
+        
         self.bg_quad.begin(cx, self.layout);
         
         cx.walk_turtle(self.indent_walk(scale_stack.len()));
@@ -221,6 +233,9 @@ impl FileTreeNode {
         self.icon_quad.draw_walk(cx, self.icon_walk);
         cx.turtle_align_y();
         
+        self.name_text.scale = scale;
+        self.name_text.is_even = if is_even {1.0}else {0.0};
+
         self.name_text.font_scale = scale_stack.last().cloned().unwrap_or(1.0);
         self.name_text.draw_walk(cx, name);
         self.bg_quad.end(cx);
@@ -232,13 +247,17 @@ impl FileTreeNode {
         
         let scale = scale_stack.last().cloned().unwrap_or(1.0);
         
+        self.bg_quad.scale = scale;
         self.bg_quad.is_even = if is_even {1.0}else {0.0};
+        
         self.layout.walk.height = Height::Fixed(scale * self.file_node_height);
         self.bg_quad.begin(cx, self.layout);
         
         cx.walk_turtle(self.indent_walk(scale_stack.len()));
         cx.turtle_align_y();
         
+        self.name_text.scale = scale;
+        self.bg_quad.is_even = if is_even {1.0}else {0.0};
         self.name_text.font_scale = scale;
         self.name_text.draw_walk(cx, name);
         self.bg_quad.end(cx);
@@ -360,7 +379,7 @@ impl FileTree {
         
         let tree_node = match self.tree_nodes.entry(node_id) {
             Entry::Occupied(o) => o.into_mut(),
-            Entry::Vacant(v) => v.insert(FileTreeNode::new_from_ptr_debug(cx, self.folder_node.unwrap()))
+            Entry::Vacant(v) => v.insert(FileTreeNode::new_from_ptr(cx, self.folder_node.unwrap()))
         };
         
         tree_node.draw_folder(cx, name, self.count % 2 == 1, &self.stack);

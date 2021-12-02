@@ -50,21 +50,21 @@ impl Deref for VarDefPtr{type Target = LivePtr;fn deref(&self) -> &Self::Target 
 impl DerefMut for VarDefPtr{fn deref_mut(&mut self) -> &mut Self::Target {&mut self.0}} 
 
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct DrawShaderConstTable {
     pub table: Vec<f32>,
     pub offsets: BTreeMap<FnPtr, usize>
 }
 
 
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Debug)]
 pub struct DrawShaderFlags{
     pub debug: bool,
     pub draw_call_compare: bool,
     pub draw_call_always: bool,
 }
 
-#[derive(Clone, Default)]
+#[derive(Clone, Default, Debug)]
 pub struct DrawShaderDef {
     pub flags: DrawShaderFlags,
     //pub default_geometry: Option<ShaderResourceId>,
@@ -85,7 +85,7 @@ pub struct DrawShaderDef {
     //pub var_inputs: RefCell<DrawShaderVarInputs>
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DrawShaderFieldDef {
     pub span: Span,
     pub ident: Ident,
@@ -102,7 +102,7 @@ pub enum DrawShaderInputType {
 
 
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum DrawShaderFieldKind {
     Geometry {
         is_used_in_pixel_shader: Cell<bool >,
@@ -128,7 +128,7 @@ pub enum DrawShaderFieldKind {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ConstDef {
     pub span: Span,
     pub ident: Ident,
@@ -144,7 +144,7 @@ pub struct ConstDef {
 //    StructMethod {struct_node_ptr: StructNodePtr, ident: Ident},
 //}
 
-#[derive(Clone, Copy,  Eq, Hash, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Copy,  Eq, Hash, PartialEq, Ord, PartialOrd, Debug)]
 pub enum FnSelfKind {
     Struct(StructPtr),
     DrawShader(DrawShaderPtr)
@@ -163,7 +163,7 @@ impl FnSelfKind {
     }
 }
 
-#[derive(Clone, Copy, Eq, Hash, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Copy, Eq, Hash, PartialEq, Ord, PartialOrd, Debug)]
 pub enum HiddenArgKind {
     Geometries,
     Instances,
@@ -173,7 +173,7 @@ pub enum HiddenArgKind {
     LiveUniforms,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct FnDef {
     pub fn_ptr: FnPtr,
     
@@ -213,14 +213,14 @@ pub struct FnDef {
 #[derive(Clone, Debug, Copy, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub struct ClosureDefIndex(pub usize);
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ClosureParam {
     pub span: Span,
     pub ident: Ident,
     pub shadow: Cell<Option<ScopeSymShadow >>
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ClosureDef {
     pub span: Span,
     pub closed_over_syms: RefCell<Option<Vec<Sym >> >,
@@ -228,26 +228,26 @@ pub struct ClosureDef {
     pub kind: ClosureDefKind
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum ClosureDefKind {
     Expr(Expr),
     Block(Block)
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ClosureSite { //
     pub call_to: FnPtr,
     pub all_closed_over: BTreeSet<Sym>,
     pub closure_args: Vec<ClosureSiteArg>
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct ClosureSiteArg {
     pub param_index: usize,
     pub closure_def_index: ClosureDefIndex
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct StructDef {
     pub span: Span,
     //pub ident: Ident,
@@ -256,7 +256,7 @@ pub struct StructDef {
     pub methods: Vec<FnPtr>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct StructFieldDef {
     pub var_def_ptr: VarDefPtr,
     pub span: Span,
@@ -272,7 +272,7 @@ impl StructDef {
 }
 
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Param {
     pub span: Span,
     pub is_inout: bool,
@@ -281,12 +281,12 @@ pub struct Param {
     pub ty_expr: TyExpr,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Block {
     pub stmts: Vec<Stmt>,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum Stmt {
     Break {
         span: Span,
@@ -336,7 +336,7 @@ pub enum Stmt {
     },
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Match {
     pub span: Span,
     pub enum_name: Ident,
@@ -345,7 +345,7 @@ pub struct Match {
     pub block: Block
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Expr {
     pub span: Span,
     pub ty: RefCell<Option<Ty >>,
@@ -354,7 +354,7 @@ pub struct Expr {
     pub kind: ExprKind,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum ExprKind {
     Cond {
         span: Span,
@@ -433,7 +433,7 @@ pub enum PlainCallType {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum VarResolve {
     NotFound,
     Function(FnPtr),
@@ -441,7 +441,7 @@ pub enum VarResolve {
     LiveValue(ValuePtr, TyLit)
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum VarKind {
     Local {ident: Ident, shadow: ScopeSymShadow},
     MutLocal {ident: Ident, shadow: ScopeSymShadow},
@@ -449,14 +449,14 @@ pub enum VarKind {
     LiveValue(ValuePtr)
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct TyExpr {
     pub span: Span,
     pub ty: RefCell<Option<Ty >>,
     pub kind: TyExprKind,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum TyExprKind {
     Array {
         elem_ty_expr: Box<TyExpr>,
@@ -480,7 +480,7 @@ pub enum TyExprKind {
 pub enum MacroCallAnalysis {
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum BinOp {
     Assign,
     AddAssign,
@@ -503,7 +503,7 @@ pub enum BinOp {
 
 
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum UnOp {
     Not,
     Neg,
@@ -559,7 +559,7 @@ pub enum TyLit {
     Texture2D,
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Lit {
     Bool(bool),
     Int(i32),
@@ -567,7 +567,7 @@ pub enum Lit {
     Color(u32),
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Debug)]
 pub enum Val {
     Bool(bool),
     Int(i32),
@@ -578,7 +578,7 @@ pub enum Val {
 
 pub type Scope = HashMap<Ident, ScopeSym>;
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Scopes {
     pub scopes: Vec<Scope>,
     pub closure_scopes: RefCell<HashMap<ClosureDefIndex, Vec<Scope >> >,
@@ -588,14 +588,14 @@ pub struct Scopes {
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub struct ScopeSymShadow(pub usize);
 
-#[derive(Clone, Eq, Hash, PartialEq, Ord, PartialOrd)]
+#[derive(Clone, Eq, Hash, PartialEq, Ord, PartialOrd, Debug)]
 pub struct Sym {
     pub ident: Ident,
     pub ty: Ty,
     pub shadow: ScopeSymShadow, // how many times this symbol has been shadowed
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct ScopeSym {
     pub span: Span,
     pub sym: Sym,
@@ -603,7 +603,7 @@ pub struct ScopeSym {
     pub kind: ScopeSymKind
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum ScopeSymKind {
     Local,
     MutLocal,
