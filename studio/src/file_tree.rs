@@ -84,38 +84,40 @@ live_register!{
         
         hover_state: {
             from: {all: Play::Forward {duration: 0.1}}
-            hover: [{time: 0.0, value: 1.0}],
-            bg_quad: {hover: (hover)}
+        }
+        
+        unselected_state: {
+            from: {all: Play::Forward {duration: 0.1}}
+            selected: 0.0,
+            bg_quad: {selected: (selected)}
         }
         
         selected_state: {
             from: {all: Play::Forward {duration: 0.1}}
             selected: [{time: 0.0, value: 1.0}],
-            bg_quad: {selected: (selected)}
         }
-
-        unselected_state: {
-            from: {all: Play::Forward {duration: 2.1}}
-            selected: 0.0,
-            bg_quad: {selected: (selected)}
+        
+        closed_state: {
+            from: {all: Play::Forward {duration: 0.3, redraw: true}}
+            opened: [{value: 0.0, ease: Ease::OutExp}],
+        }
+        
+        opened_state: {
+            from: {all: Play::Forward {duration: 0.3, redraw: true}}
+            opened: [{value: 1.0, ease: Ease::OutExp}],
         }
         
         indent_width: 10.0
-        file_node_height: (20.0)
-        /*
-        file_node_color_selected: #x11466E
-        file_node_color_hovered_even: #3D
-        file_node_color_hovered_odd: #38
-        file_node_color_hovered_selected: #x11466E
-        file_name_color_folder: #FF
-        file_name_color_file: #9D*/
+        file_node_height: 20.0
     }
     
     FileTree: {{FileTree}} {
         file_node: FileTreeNode {
+            is_folder: false,
             name_text: {color: #9d}
         }
         folder_node: FileTreeNode {
+            is_folder: true,
             name_text: {color: #ff}
         }
         test: (1.0 + 2.0)
@@ -138,7 +140,13 @@ pub struct FileTreeNode {
     icon_quad: DrawColor,
     name_text: DrawText,
     layout: Layout,
-    #[track(hover = default_state, selected = unselected_state)] animator: Animator,
+    
+    #[track(
+        hover = default_state,
+        selected = unselected_state,
+        opened = closed_state
+    )]
+    animator: Animator,
     
     file_node_height: f32,
     indent_width: f32,
@@ -147,8 +155,14 @@ pub struct FileTreeNode {
     hover_state: Option<LivePtr>,
     selected_state: Option<LivePtr>,
     unselected_state: Option<LivePtr>,
+    opened_state: Option<LivePtr>,
+    closed_state: Option<LivePtr>,
+    
     icon_walk: Walk,
     
+    is_folder: bool,
+    
+    opened: f32,
     hover: f32,
     selected: f32,
 }
@@ -159,6 +173,7 @@ pub struct FileTree {
     file_node: Option<LivePtr>,
     folder_node: Option<LivePtr>,
     test: f32,
+    
     #[rust] last_selected: Option<FileNodeId>,
     #[rust] tree_nodes: HashMap<FileNodeId, FileTreeNode>,
     #[rust] count: usize,
@@ -172,6 +187,7 @@ pub enum FileTreeNodeAction {
 
 impl FileTreeNode {
     pub fn draw_folder(&mut self, cx: &mut Cx, name: &str, is_even: bool, scale_stack: &[f32]) {
+        
         let scale = scale_stack.last().cloned().unwrap_or(1.0);
         
         self.layout.walk.height = Height::Fixed(scale * self.file_node_height);
@@ -221,8 +237,31 @@ impl FileTreeNode {
         }
     }
     
-    fn unselect(&mut self, cx:&mut Cx){
-        self.animate_to(cx, id!(selected), self.unselected_state.unwrap());
+    fn set_is_selected(&mut self, cx: &mut Cx, is_selected: bool, should_animate: bool) {
+        self.toggle_animator(
+            cx,
+            is_selected,
+            should_animate,
+            id!(selected),
+            self.selected_state.unwrap(),
+            self.unselected_state.unwrap()
+        )
+    }
+    
+    pub fn set_folder_is_expanded(
+        &mut self,
+        cx: &mut Cx,
+        is_open: bool,
+        should_animate: bool,
+    ) {
+        self.toggle_animator(
+            cx,
+            is_open,
+            should_animate,
+            id!(opened),
+            self.opened_state.unwrap(),
+            self.closed_state.unwrap()
+        );
     }
     
     pub fn handle_event(
@@ -230,19 +269,19 @@ impl FileTreeNode {
         cx: &mut Cx,
         event: &mut Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, FileTreeNodeAction),
-    ){
-        self.handle_animation(cx, event);
+    ) {
+        if self.animator_handle_event(cx, event) {
+            self.bg_quad.draw_vars.redraw_view(cx);
+        }
         match event.hits(cx, self.bg_quad.draw_vars.area, HitOpt::default()) {
             Event::FingerHover(event) => {
                 cx.set_hover_mouse_cursor(MouseCursor::Hand);
                 match event.hover_state {
                     HoverState::In => {
                         self.animate_to(cx, id!(hover), self.hover_state.unwrap());
-                        //println!("{}", self.animator.state.as_ref().unwrap().to_string(0,100));
                     }
                     HoverState::Out => {
                         self.animate_to(cx, id!(hover), self.default_state.unwrap());
-                        //dispatch_action(TreeAction::NodeWasExited(*node_id));
                     }
                     _ => {}
                 }
@@ -256,6 +295,14 @@ impl FileTreeNode {
             }
             Event::FingerDown(_event) => {
                 self.animate_to(cx, id!(selected), self.selected_state.unwrap());
+                if self.is_folder {
+                    if self.opened > 0.2 {
+                        self.animate_to(cx, id!(opened), self.closed_state.unwrap());
+                    }
+                    else {
+                        self.animate_to(cx, id!(opened), self.opened_state.unwrap());
+                    }
+                }
                 dispatch_action(cx, FileTreeNodeAction::WasClicked);
                 //if area.get_rect(cx).contains(event.abs_start) {
                 //    dispatch_action(TreeAction::NodeWasClicked(*node_id));
@@ -287,7 +334,6 @@ impl FileTree {
     ) -> Result<(), ()> {
         let scale = self.stack.last().cloned().unwrap_or(1.0);
         
-        //let count = self.count;
         self.count += 1;
         
         let tree_node = match self.tree_nodes.entry(node_id) {
@@ -297,15 +343,11 @@ impl FileTree {
         
         tree_node.draw_folder(cx, name, self.count % 2 == 1, &self.stack);
         
-        self.stack.push(scale * 1.0);
+        self.stack.push(tree_node.opened * scale);
         
-        //if info.is_fully_collapsed() {
-        //    self.end_folder();
-        //    return Err(());
-        // }
-        if self.count > 10 {
+        if tree_node.opened == 0.0 {
             self.end_folder();
-            return Err(())
+            return Err(());
         }
         Ok(())
     }
@@ -336,37 +378,18 @@ impl FileTree {
         true
     }
     
-    pub fn set_file_node_is_expanded(
+    pub fn set_folder_is_expanded(
         &mut self,
-        _cx: &mut Cx,
-        _file_node_id: FileNodeId,
-        _is_open: bool,
-        _should_animate: bool,
+        cx: &mut Cx,
+        node_id: FileNodeId,
+        is_open: bool,
+        should_animate: bool,
     ) {
-        /*
-        if self.logic.set_node_is_expanded(cx, file_node_id.0, is_open, should_animate)
-        {
-            self.scroll_view.redraw(cx);
-        }*/
-    }
-    
-    pub fn toggle_file_node_is_expanded(
-        &mut self,
-        _cx: &mut Cx,
-        _file_node_id: FileNodeId,
-        _should_animate: bool,
-    ) {/*
-        if self.logic.toggle_node_is_expanded(cx, file_node_id.0, should_animate)
-        {
-            self.scroll_view.redraw(cx);
-        }*/
-    }
-    
-    pub fn set_hovered_file_node_id(&mut self, _cx: &mut Cx, _file_node_id: Option<FileNodeId>) {
-        /*if self.logic.set_hovered_node_id(file_node_id.map( | file_node_id | file_node_id.0))
-        {
-            self.scroll_view.redraw(cx);
-        }*/
+        let tree_node = match self.tree_nodes.entry(node_id) {
+            Entry::Occupied(o) => o.into_mut(),
+            Entry::Vacant(v) => v.insert(FileTreeNode::new_from_ptr(cx, self.folder_node.unwrap()))
+        };
+        tree_node.set_folder_is_expanded(cx, is_open, should_animate);
     }
     
     pub fn set_selected_file_node_id(&mut self, _cx: &mut Cx, _file_node_id: FileNodeId) {
@@ -400,12 +423,14 @@ impl FileTree {
         
         let mut actions = Vec::new();
         for (key, node) in &mut self.tree_nodes {
-            node.handle_event(cx, event, &mut |_,e| actions.push((*key,e)));
+            node.handle_event(cx, event, &mut | _, e | actions.push((*key, e)));
         }
-        for (key,action) in actions{
-            if let FileTreeNodeAction::WasClicked = action{
-                if let Some(last_selected) = self.last_selected{
-                    self.tree_nodes.get_mut(&last_selected).unwrap().unselect(cx);
+        for (key, action) in actions {
+            if let FileTreeNodeAction::WasClicked = action {
+                if let Some(last_selected) = self.last_selected {
+                    if last_selected != key {
+                        self.tree_nodes.get_mut(&last_selected).unwrap().set_is_selected(cx, false, true);
+                    }
                 }
                 self.last_selected = Some(key);
             }

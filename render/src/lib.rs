@@ -56,7 +56,7 @@ mod window;
 mod view;
 mod pass;
 mod texture;
-mod animation;
+mod animator;
 mod area;
 mod geometrygen;
 
@@ -204,10 +204,11 @@ pub use {
             DragAction,
             DraggedItem
         },
-        animation::{
+        animator::{
             Ease,
             Play,
             Animator,
+            AnimatorAction
         },
         area::{
             Area,
