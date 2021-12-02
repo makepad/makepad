@@ -10,7 +10,7 @@ use {
         turtle::{Walk, Width, Height, Margin},
         font::{CxFontsAtlasTodo, Font,},
         view::ManyInstances,
-        drawshader::DrawVars,
+        drawvars::DrawVars,
         geometrygen::GeometryQuad2D,
     },
 };

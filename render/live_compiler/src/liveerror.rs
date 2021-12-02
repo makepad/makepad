@@ -83,6 +83,12 @@ impl LiveError{
 
 impl fmt::Display for LiveError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{} - origin: {}:{} ", self.message, self.origin.filename, self.origin.line)
+        write!(f, "{} - origin: {} ", self.message, self.origin)
+    }
+}
+
+impl fmt::Display for LiveErrorOrigin {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}:{} ", self.filename, self.line)
     }
 }

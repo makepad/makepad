@@ -105,7 +105,7 @@ live_primitive!(
                 nodes.skip_node(index)
             }
             _ => {
-                cx.apply_error_wrong_value_type_for_primitive(apply_from, index, nodes, "LiveId");
+                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), apply_from, index, nodes, "LiveId");
                 nodes.skip_node(index)
             }
         }
@@ -141,14 +141,14 @@ live_primitive!(
                         *self = v;
                     }
                     _=>{
-                        cx.apply_error_wrong_expression_type_for_primitive(apply_from, index, nodes, "bool", ret);
+                        cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), apply_from, index, nodes, "bool", ret);
                     }
                 }
                 nodes.skip_node(index)
             },
             LiveValue::DSL {..} => nodes.skip_node(index),
             _ => {
-                cx.apply_error_wrong_value_type_for_primitive(apply_from, index, nodes, "bool");
+                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), apply_from, index, nodes, "bool");
                 nodes.skip_node(index)
             }
         }
@@ -182,7 +182,7 @@ live_primitive!(
                         *self = v as f32;
                     }
                     _=>{
-                        cx.apply_error_wrong_expression_type_for_primitive(apply_from, index, nodes, "f32", ret);
+                        cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), apply_from, index, nodes, "f32", ret);
                     }
                 }
                 nodes.skip_node(index)
@@ -195,7 +195,7 @@ live_primitive!(
             }
             LiveValue::DSL {..} => nodes.skip_node(index),
             _ => {
-                cx.apply_error_wrong_value_type_for_primitive(apply_from, index, nodes, "f32");
+                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), apply_from, index, nodes, "f32");
                 nodes.skip_node(index)
             }
         }
@@ -226,7 +226,7 @@ live_primitive!(
             }
             LiveValue::DSL {..} => nodes.skip_node(index),
             _ => {
-                cx.apply_error_wrong_value_type_for_primitive(apply_from, index, nodes, "f64");
+                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), apply_from, index, nodes, "f64");
                 nodes.skip_node(index)
             }
         }
@@ -257,7 +257,7 @@ live_primitive!(
             }
             LiveValue::DSL {..} => nodes.skip_node(index),
             _ => {
-                cx.apply_error_wrong_value_type_for_primitive(apply_from, index, nodes, "i64");
+                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), apply_from, index, nodes, "i64");
                 nodes.skip_node(index)
             }
         }
@@ -284,7 +284,7 @@ live_primitive!(
             }
             LiveValue::DSL {..} => nodes.skip_node(index),
             _ => {
-                cx.apply_error_wrong_value_type_for_primitive(apply_from, index, nodes, "Vec2");
+                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), apply_from, index, nodes, "Vec2");
                 nodes.skip_node(index)
             }
         }
@@ -311,7 +311,7 @@ live_primitive!(
             }
             LiveValue::DSL {..} => nodes.skip_node(index),
             _ => {
-                cx.apply_error_wrong_value_type_for_primitive(apply_from, index, nodes, "Vec3");
+                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), apply_from, index, nodes, "Vec3");
                 nodes.skip_node(index)
             }
         }
@@ -338,7 +338,7 @@ live_primitive!(
             }
             LiveValue::DSL {..} => nodes.skip_node(index),
             _ => {
-                cx.apply_error_wrong_value_type_for_primitive(apply_from, index, nodes, "Vec4");
+                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), apply_from, index, nodes, "Vec4");
                 nodes.skip_node(index)
             }
         }
@@ -381,7 +381,7 @@ live_primitive!(
                 nodes.skip_node(index)
             }
             _ => {
-                cx.apply_error_wrong_value_type_for_primitive(apply_from, index, nodes, "String");
+                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), apply_from, index, nodes, "String");
                 nodes.skip_node(index)
             }
         }

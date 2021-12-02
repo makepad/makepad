@@ -641,9 +641,9 @@ impl<'a> LiveParser<'a> {
             value: LiveValue::Expr
         });
         
-        fn recur_walk(expr:Expr, ld: &mut LiveDocument){
-            match expr{
-                Expr::Bin{token_id, op, left_expr, right_expr}=>{
+        fn recur_walk(expr: Expr, ld: &mut LiveDocument) {
+            match expr {
+                Expr::Bin {token_id, op, left_expr, right_expr} => {
                     ld.nodes.push(LiveNode {
                         token_id: Some(token_id),
                         id: LiveId::empty(),
@@ -652,7 +652,7 @@ impl<'a> LiveParser<'a> {
                     recur_walk(*left_expr, ld);
                     recur_walk(*right_expr, ld);
                 }
-                Expr::Un{token_id, op, expr}=>{
+                Expr::Un {token_id, op, expr} => {
                     ld.nodes.push(LiveNode {
                         token_id: Some(token_id),
                         id: LiveId::empty(),
@@ -660,17 +660,17 @@ impl<'a> LiveParser<'a> {
                     });
                     recur_walk(*expr, ld);
                 }
-                Expr::Call{token_id, ident, arg_exprs}=>{
+                Expr::Call {token_id, ident, arg_exprs} => {
                     ld.nodes.push(LiveNode {
                         token_id: Some(token_id),
                         id: LiveId::empty(),
-                        value: LiveValue::ExprCall{ident, args:arg_exprs.len()}
+                        value: LiveValue::ExprCall {ident, args: arg_exprs.len()}
                     });
-                    for arg in arg_exprs{
+                    for arg in arg_exprs {
                         recur_walk(arg, ld);
                     }
                 }
-                Expr::Member{token_id, ident, expr}=>{
+                Expr::Member {token_id, ident, expr} => {
                     ld.nodes.push(LiveNode {
                         token_id: Some(token_id),
                         id: LiveId::empty(),
@@ -678,35 +678,35 @@ impl<'a> LiveParser<'a> {
                     });
                     recur_walk(*expr, ld);
                 }
-                Expr::Var{token_id, ident}=>{
+                Expr::Var {token_id, ident} => {
                     ld.nodes.push(LiveNode {
                         token_id: Some(token_id),
                         id: LiveId::empty(),
                         value: LiveValue::Id(ident)
                     });
                 }
-                Expr::Bool{token_id, v}=>{
+                Expr::Bool {token_id, v} => {
                     ld.nodes.push(LiveNode {
                         token_id: Some(token_id),
                         id: LiveId::empty(),
                         value: LiveValue::Bool(v)
                     });
                 }
-                Expr::Int{token_id, v}=>{
+                Expr::Int {token_id, v} => {
                     ld.nodes.push(LiveNode {
                         token_id: Some(token_id),
                         id: LiveId::empty(),
                         value: LiveValue::Int(v)
                     });
                 }
-                Expr::Float{token_id, v}=>{
+                Expr::Float {token_id, v} => {
                     ld.nodes.push(LiveNode {
                         token_id: Some(token_id),
                         id: LiveId::empty(),
                         value: LiveValue::Float(v)
                     });
                 }
-                Expr::Color{token_id, v}=>{
+                Expr::Color {token_id, v} => {
                     ld.nodes.push(LiveNode {
                         token_id: Some(token_id),
                         id: LiveId::empty(),
@@ -723,7 +723,7 @@ impl<'a> LiveParser<'a> {
             id: prop_id,
             value: LiveValue::Close
         });
-
+        
         
         Ok(())
         /*
@@ -861,14 +861,14 @@ impl<'a> LiveParser<'a> {
     
     fn expect_member_expr(&mut self) -> Result<Expr, LiveError> {
         let mut acc = self.expect_prim_expr() ?;
-        loop{
+        loop {
             if let Token::Punct(id!(.)) = self.peek_token() {
                 self.skip_token();
                 let token_id = self.get_token_id();
                 let ident = self.expect_ident() ?;
                 acc = Expr::Member {token_id, ident, expr: Box::new(acc)}
             }
-            else{
+            else {
                 break
             }
         }
@@ -914,7 +914,7 @@ impl<'a> LiveParser<'a> {
                 self.expect_token(Token::CloseParen) ?;
                 Ok(expr)
             }
-            token=>Err(self.error(format!("Unexpected token {} in class expression", token)))
+            token => Err(self.error(format!("Unexpected token {} in class expression", token)))
         }
     }
     
