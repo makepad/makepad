@@ -499,7 +499,7 @@ impl ShaderRegistry {
                                 draw_shader_def.flags.debug = val;
                             }
                             if prop.id == id!(draw_call_compare) {
-                                draw_shader_def.flags.draw_call_compare = val;
+                                draw_shader_def.flags.draw_call_nocompare = val;
                             }
                             if prop.id == id!(draw_call_always) {
                                 draw_shader_def.flags.draw_call_always = val;

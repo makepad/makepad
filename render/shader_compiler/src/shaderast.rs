@@ -60,7 +60,7 @@ pub struct DrawShaderConstTable {
 #[derive(Clone, Copy, Default, Debug)]
 pub struct DrawShaderFlags{
     pub debug: bool,
-    pub draw_call_compare: bool,
+    pub draw_call_nocompare: bool,
     pub draw_call_always: bool,
 }
 

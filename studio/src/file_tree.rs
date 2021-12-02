@@ -1,6 +1,6 @@
 use {
     std::{
-        collections::{HashSet,HashMap},
+        collections::{HashSet, HashMap},
         collections::hash_map::Entry
     },
     crate::{
@@ -18,7 +18,7 @@ live_register!{
         const color_odd: vec4 = #28
         const color_selected: vec4 = #x11466E
         
-        fn pixel(self) -> vec4 { 
+        fn pixel(self) -> vec4 {
             return mix(
                 mix(
                     color_even,
@@ -134,7 +134,10 @@ live_register!{
             name_text: {is_folder: 1.0}
         }
         scroll_view: {
-            view: {debug_id: file_tree_view}
+            view: {
+                layout:{direction:Direction::Down}
+                debug_id: file_tree_view
+            }
         }
     }
 }
@@ -213,7 +216,7 @@ pub struct FileTree {
     folder_node: Option<LivePtr>,
     
     node_height: f32,
-
+    
     #[rust] dragging_node_id: Option<FileNodeId>,
     #[rust] last_selected: Option<FileNodeId>,
     #[rust] open_nodes: HashSet<FileNodeId>,
@@ -244,12 +247,12 @@ impl FileTreeNode {
         self.name_text.font_scale = scale;
     }
     
-    pub fn draw_folder(&mut self, cx: &mut Cx, name: &str, is_even: bool, node_height:f32, scale_stack: &[f32]) {
-        
+    pub fn draw_folder(&mut self, cx: &mut Cx, name: &str, is_even: bool, node_height: f32, scale_stack: &[f32]) {
         let scale = scale_stack.last().cloned().unwrap_or(1.0);
         self.set_draw_state(is_even, scale);
         
         self.layout.walk.height = Height::Fixed(scale * node_height);
+        
         self.bg_quad.begin(cx, self.layout);
         
         cx.walk_turtle(self.indent_walk(scale_stack.len()));
@@ -260,11 +263,10 @@ impl FileTreeNode {
         self.name_text.draw_walk(cx, name);
         self.bg_quad.end(cx);
         
-        cx.turtle_new_line();
+        //cx.turtle_new_line();
     }
     
-    pub fn draw_file(&mut self, cx: &mut Cx, name: &str, is_even: bool, node_height:f32, scale_stack: &[f32]) {
-        
+    pub fn draw_file(&mut self, cx: &mut Cx, name: &str, is_even: bool, node_height: f32, scale_stack: &[f32]) {
         let scale = scale_stack.last().cloned().unwrap_or(1.0);
         
         self.set_draw_state(is_even, scale);
@@ -278,7 +280,7 @@ impl FileTreeNode {
         self.name_text.draw_walk(cx, name);
         self.bg_quad.end(cx);
         
-        cx.turtle_new_line();
+       // cx.turtle_new_line();
     }
     
     fn indent_walk(&self, depth: usize) -> Walk {
@@ -380,34 +382,36 @@ impl FileTree {
     
     pub fn end(&mut self, cx: &mut Cx) {
         self.scroll_view.end(cx);
-
+        
         // remove all nodes that are invisible
         self.gc_nodes.clear();
-        for (node_id, _) in &self.tree_nodes{
-            if !self.visible_nodes.contains(node_id) && Some(*node_id) != self.last_selected{
+        for (node_id, _) in &self.tree_nodes {
+            if !self.visible_nodes.contains(node_id) && Some(*node_id) != self.last_selected {
                 self.gc_nodes.insert(*node_id);
             }
         }
-        for node_id in &self.gc_nodes{
+        for node_id in &self.gc_nodes {
             self.tree_nodes.remove(node_id);
         }
+        
+        // dump the view
+        //cx.debug_draw_tree(false, self.scroll_view.view.view_id);
     }
     
-    pub fn should_node_draw(&mut self, cx:&mut Cx)->bool{
+    pub fn should_node_draw(&mut self, cx: &mut Cx) -> bool {
         //return true;
         
         let scale = self.stack.last().cloned().unwrap_or(1.0);
         let height = self.node_height * scale;
-        if scale > 0.01 && cx.turtle_line_is_visible(height, self.scroll_view.get_scroll_pos(cx)){
+        if scale > 0.01 && cx.turtle_line_is_visible(height, self.scroll_view.get_scroll_pos(cx)) {
             return true
         }
-        else{
-            cx.walk_turtle(Walk{
+        else {
+            cx.walk_turtle(Walk {
                 width: Width::Filled,
                 height: Height::Fixed(height),
-                margin:Margin::default()
+                margin: Margin::default()
             });
-            cx.turtle_new_line();
             return false
         }
     }
@@ -419,16 +423,16 @@ impl FileTree {
         name: &str,
     ) -> Result<(), ()> {
         let scale = self.stack.last().cloned().unwrap_or(1.0);
-
+        
         self.count += 1;
         let is_open = self.open_nodes.contains(&node_id);
         
-        if self.should_node_draw(cx){
+        if self.should_node_draw(cx) {
             let tree_node = match self.tree_nodes.entry(node_id) {
                 Entry::Occupied(o) => o.into_mut(),
                 Entry::Vacant(v) => v.insert({
                     let mut tree_node = FileTreeNode::new_from_ptr(cx, self.folder_node.unwrap());
-                    if is_open{
+                    if is_open {
                         tree_node.set_folder_is_open(cx, true, false)
                     }
                     tree_node
@@ -442,11 +446,11 @@ impl FileTree {
                 return Err(());
             }
         }
-        else{
-            if is_open{
-                self.stack.push(1.0);
+        else {
+            if is_open {
+                self.stack.push(scale*1.0);
             }
-            else{
+            else {
                 return Err(());
             }
         }
@@ -459,14 +463,14 @@ impl FileTree {
     
     pub fn file(&mut self, cx: &mut Cx, node_id: FileNodeId, name: &str) {
         self.count += 1;
-        if self.should_node_draw(cx){
+        if self.should_node_draw(cx) {
             self.visible_nodes.insert(node_id);
             let tree_node = match self.tree_nodes.entry(node_id) {
                 Entry::Occupied(o) => o.into_mut(),
                 Entry::Vacant(v) => v.insert(FileTreeNode::new_from_ptr(cx, self.file_node.unwrap()))
             };
-            tree_node.draw_file(cx, name, self.count % 2 == 1,self.node_height, &self.stack);
-            cx.turtle_new_line();
+            tree_node.draw_file(cx, name, self.count % 2 == 1, self.node_height, &self.stack);
+            //cx.turtle_new_line();
         }
     }
     
@@ -485,13 +489,13 @@ impl FileTree {
         is_open: bool,
         should_animate: bool,
     ) {
-        if is_open{
+        if is_open {
             self.open_nodes.insert(node_id);
         }
-        else{
+        else {
             self.open_nodes.remove(&node_id);
         }
-        if let Some(tree_node) = self.tree_nodes.get_mut(&node_id){
+        if let Some(tree_node) = self.tree_nodes.get_mut(&node_id) {
             tree_node.set_folder_is_open(cx, is_open, should_animate);
         }
     }
@@ -520,9 +524,9 @@ impl FileTree {
             self.scroll_view.redraw(cx);
         }
         
-        match event{
+        match event {
             Event::DragEnd => self.dragging_node_id = None,
-            _=>()
+            _ => ()
         }
         
         let mut actions = Vec::new();
@@ -531,14 +535,14 @@ impl FileTree {
         }
         
         for (node_id, action) in actions {
-            match action{
-                FileTreeNodeAction::Opening=>{
+            match action {
+                FileTreeNodeAction::Opening => {
                     self.open_nodes.insert(node_id);
                 }
-                FileTreeNodeAction::Closing=>{
+                FileTreeNodeAction::Closing => {
                     self.open_nodes.remove(&node_id);
                 }
-                FileTreeNodeAction::WasClicked=>{
+                FileTreeNodeAction::WasClicked => {
                     if let Some(last_selected) = self.last_selected {
                         if last_selected != node_id {
                             self.tree_nodes.get_mut(&last_selected).unwrap().set_is_selected(cx, false, true);
@@ -547,13 +551,13 @@ impl FileTree {
                     self.last_selected = Some(node_id);
                     dispatch_action(cx, FileTreeAction::FileNodeWasClicked(node_id));
                 }
-                FileTreeNodeAction::NodeShouldStartDragging=>{
-                    if self.dragging_node_id.is_none(){
+                FileTreeNodeAction::NodeShouldStartDragging => {
+                    if self.dragging_node_id.is_none() {
                         dispatch_action(cx, FileTreeAction::FileNodeShouldStartDragging(node_id));
                     }
                 }
-                _=>()
-            } 
+                _ => ()
+            }
         }
     }
 }

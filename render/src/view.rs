@@ -503,11 +503,12 @@ pub struct UserUniforms {
 pub struct DrawCall {
     pub draw_shader: DrawShader, // if shader_id changed, delete gl vao
     
+    pub draw_call_group: LiveId,
     pub instances: Option<Vec<f32 >>,
     pub total_instance_slots: usize,
     
     pub draw_uniforms: DrawUniforms, // draw uniforms
-    pub geometry: Option<Geometry>,
+    pub geometry_id: Option<usize>,
     pub user_uniforms: [f32; DRAW_CALL_USER_UNIFORMS], // user uniforms
     
     pub do_v_scroll: bool,
@@ -523,9 +524,10 @@ impl DrawCall {
     
     pub fn new(mapping: &CxDrawShaderMapping, draw_vars: &DrawVars) -> Self {
         DrawCall {
-            geometry: draw_vars.geometry,
+            geometry_id: draw_vars.geometry_id,
             do_h_scroll: true,
             do_v_scroll: true,
+            draw_call_group:draw_vars.draw_call_group,
             draw_shader: draw_vars.draw_shader.unwrap(),
             instances: Some(Vec::new()),
             total_instance_slots: mapping.instances.total_slots,
@@ -540,7 +542,7 @@ impl DrawCall {
     
     pub fn reuse_in_place(&mut self, mapping: &CxDrawShaderMapping, draw_vars: &DrawVars) {
         self.draw_shader = draw_vars.draw_shader.unwrap();
-        self.geometry = draw_vars.geometry;
+        self.geometry_id = draw_vars.geometry_id;
         self.instances.as_mut().unwrap().truncate(0);
         self.total_instance_slots = mapping.instances.total_slots;
         for i in 0..mapping.user_uniforms.total_slots {
@@ -715,8 +717,8 @@ impl CxView {
                 if let Some(draw_call) = &draw_item.draw_call {
                     if draw_item.sub_view_id.is_none() && draw_call.draw_shader == draw_vars.draw_shader.unwrap() {
                         // lets compare uniforms and textures..
-                        if sh.mapping.flags.draw_call_compare {
-                            if draw_call.geometry != draw_vars.geometry {
+                        if !sh.mapping.flags.draw_call_nocompare {
+                            if draw_call.geometry_id != draw_vars.geometry_id {
                                 return None
                             }
                             for i in 0..sh.mapping.user_uniforms.total_slots {
@@ -729,6 +731,9 @@ impl CxView {
                                     return None
                                 }
                             }
+                        }
+                        if draw_call.draw_call_group != draw_vars.draw_call_group{
+                            return None
                         }
                         return Some(i)
                     }
