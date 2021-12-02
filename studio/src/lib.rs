@@ -27,4 +27,3 @@ pub mod text;
 pub mod token;
 pub mod token_cache;
 pub mod tokenizer;
-pub mod tree_logic;

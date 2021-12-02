@@ -18,7 +18,7 @@ live_register!{
         const color_odd: vec4 = #28
         const color_selected: vec4 = #x11466E
         
-        fn pixel(self) -> vec4 {
+        fn pixel(self) -> vec4 { 
             return mix(
                 mix(
                     color_even,
