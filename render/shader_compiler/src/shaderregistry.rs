@@ -266,8 +266,13 @@ impl ShaderRegistry {
                     //Some(struct_full_ptr)
                 );
                 
+                
                 let const_decl = parser.expect_const_def(Ident(id)) ?;
                 self.consts.insert(const_ptr, const_decl);
+                
+                if id == id!(color_file){
+                    //println!("CONST {:?}", const_decl);
+                }
                 
                 self.analyse_deps(live_registry, &parser_deps) ?;
                 

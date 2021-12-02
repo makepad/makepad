@@ -205,8 +205,15 @@ impl<'a> LiveExpander<'a> {
                         overwrite
                     }
                     else if out_value.is_dsl() && in_value.is_value_type(){ // this is allowed
-                        out_doc.nodes.insert(overwrite+1, in_node.clone());
-                        overwrite + 1
+                        // see if we have a node after to overwrite
+                        if let Some(overwrite) = out_doc.nodes.next_child_by_name(overwrite+1, in_node.id){
+                            out_doc.nodes[overwrite] = in_node.clone();
+                            overwrite
+                        }
+                        else{
+                            out_doc.nodes.insert(overwrite+1, in_node.clone());
+                            overwrite + 1
+                        }
                     }
                     else{
                         self.errors.push(LiveError {

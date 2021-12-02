@@ -22,6 +22,7 @@ pub trait LiveNodeSlice {
 
     fn child_by_number(&self, parent_index: usize, child_number: usize) -> Option<usize>;
     fn child_or_append_index_by_name(&self, parent_index: usize, name: LiveId) -> Result<usize, usize>;
+    fn next_child_by_name(&self, child_index: usize, name: LiveId) ->Option<usize>;
     fn child_by_name(&self, parent_index: usize, name: LiveId) ->Option<usize>;
     fn child_by_path(&self, parent_index: usize, path: &[LiveId]) ->Option<usize>;
     fn child_value_by_path(&self, parent_index: usize, path: &[LiveId]) ->Option<&LiveValue>;
@@ -409,6 +410,41 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
             None
         }
     }
+
+    fn next_child_by_name(&self, child_index: usize, child_name: LiveId) ->Option<usize>{
+        let self_ref = self.as_ref();
+        let mut stack_depth = 1;
+        let mut index = child_index;
+        while index < self_ref.len() {
+            if self_ref[index].value.is_open() {
+                if stack_depth == 1 {
+                    if self_ref[index].id == child_name {
+                        return Some(index);
+                    }
+                }
+                stack_depth += 1;
+            }
+            else if self_ref[index].value.is_close() {
+                stack_depth -= 1;
+                if stack_depth == 0 {
+                    return None
+                }
+            }
+            else {
+                if stack_depth == 1 {
+                    if child_name != LiveId::empty() && self_ref[index].id == child_name {
+                        return Some(index);
+                    }
+                }
+                if stack_depth == 0 {
+                    panic!()
+                }
+            }
+            index += 1;
+        }
+        None
+    }
+
     
     fn child_by_path(&self, parent_index: usize, path: &[LiveId]) ->Option<usize>{
         let mut index = parent_index;
