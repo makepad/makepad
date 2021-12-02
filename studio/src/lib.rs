@@ -1,4 +1,7 @@
 pub mod app;
+pub mod appinner;
+pub mod appstate;
+pub mod appio;
 pub mod char;
 pub mod code_editor;
 pub mod code_editor_state;
