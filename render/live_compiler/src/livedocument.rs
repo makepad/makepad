@@ -30,7 +30,7 @@ impl fmt::Display for LiveScopeTarget {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum LiveScopeTarget {
     LocalPtr(usize),
     LivePtr(LivePtr)
@@ -49,7 +49,7 @@ impl LiveScopeTarget {
     }
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub struct LiveScopeItem {
     pub id: LiveId,
     pub target: LiveScopeTarget

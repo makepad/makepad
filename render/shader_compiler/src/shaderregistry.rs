@@ -132,14 +132,13 @@ impl ShaderRegistry {
     
     pub fn find_live_node_by_path(&self, live_registry:&LiveRegistry, base_ptr: LivePtr, ids: &[LiveId]) -> LiveNodeFindResult {
         
-        
         let doc = &live_registry.ptr_to_doc(base_ptr);
-
-        return walk_recur(live_registry, None, base_ptr.file_id, base_ptr.index as usize, &doc.nodes, ids);
+        
+        let ret = walk_recur(live_registry, None, base_ptr.file_id, base_ptr.index as usize, &doc.nodes, ids);
+        return ret;
         // ok so we got a node. great. now what
         fn walk_recur(live_registry:&LiveRegistry, struct_ptr:Option<LivePtr>,file_id: LiveFileId, index: usize, nodes: &[LiveNode], ids: &[LiveId]) -> LiveNodeFindResult {
             let node = &nodes[index];
-            //println!("RESOLVING {:?}", ids);
     
             if ids.len() != 0 && !node.value.is_class() && !node.value.is_clone() && !node.value.is_object() {
                 return LiveNodeFindResult::NotFound;
@@ -268,11 +267,10 @@ impl ShaderRegistry {
                 
                 
                 let const_decl = parser.expect_const_def(Ident(id)) ?;
+
+                
                 self.consts.insert(const_ptr, const_decl);
                 
-                if id == id!(color_file){
-                    //println!("CONST {:?}", const_decl);
-                }
                 
                 self.analyse_deps(live_registry, &parser_deps) ?;
                 
@@ -285,6 +283,9 @@ impl ShaderRegistry {
                         no_const_collapse: true
                     },
                 };
+                
+
+
                 ca.analyse_const_decl() ?;
             }
             _ => panic!()
@@ -610,7 +611,6 @@ impl ShaderRegistry {
                         message: format!("analyse_draw_shader missing pixel method")
                     })
                 }
-                
                     
                 self.analyse_deps(live_registry, &parser_deps) ?;
                 

@@ -574,8 +574,13 @@ impl<'a> TyChecker<'a> {
             .iter()
             .map( | arg_expr | arg_expr.ty.borrow().as_ref().unwrap().clone())
             .collect::<Vec<_ >> ();
-        Ok(builtin .return_tys .get(&arg_tys) .ok_or({
+        Ok(builtin .return_tys .get(&arg_tys) .ok_or_else(||{
             let mut message = String::new();
+            
+            //if id == id!(color_file){
+             //   println!("CONST {:#?}", arg_exprs);
+            //}
+            
             write!(
                 message,
                 "can't apply builtin `{}` to arguments of types ",
