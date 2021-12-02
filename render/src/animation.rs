@@ -700,7 +700,7 @@ impl Animator {
             });
         }
         
-        state.replace_or_insert_node_by_path(0, &[id!(tracks), track], live_object!{
+        state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track], live_object!{
             [track]: {state_id: (state_id), ended:true}
         });
         
@@ -715,7 +715,7 @@ impl Animator {
             else if reader.is_array() {
                 path.push(reader.id());
                 if let Some(last_value) = Self::last_keyframe_value_from_array(reader.index(), reader.nodes()) {
-                    state.replace_or_insert_node_by_path(0, &path, live_array!{
+                    state.replace_or_insert_first_node_by_path(0, &path, live_array!{
                         [(track), (reader.nodes()[last_value].value.clone())]
                     });
                 }
@@ -725,7 +725,7 @@ impl Animator {
             else {
                 if reader.is_expr() {
                     path.push(reader.id());
-                    state.replace_or_insert_node_by_path(0, &path, reader.node_slice());
+                    state.replace_or_insert_last_node_by_path(0, &path, reader.node_slice());
                     path.pop();
                     reader.skip();
                     continue;
@@ -738,7 +738,7 @@ impl Animator {
                 }
                 else {
                     path.push(reader.id());
-                    state.replace_or_insert_node_by_path(0, &path, live_array!{
+                    state.replace_or_insert_first_node_by_path(0, &path, live_array!{
                         [(track), (reader.value().clone())]
                     });
                     path.pop();
@@ -746,7 +746,6 @@ impl Animator {
                 reader.walk();
             }
         }
-        //println!("AFTER CUT {}", state.to_string(0,100));
         self.swap_in_state(state);
     }
     
@@ -783,12 +782,12 @@ impl Animator {
             if reader.depth() == 1 && reader.id() == id!(from) {
                 // we have to store the right 'from' in our 'tracks'
                 if let Some(reader) = reader.child_by_name(from_id) {
-                    state.replace_or_insert_node_by_path(0, &[id!(tracks), track, id!(play)], reader.node_slice());
+                    state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(play)], reader.node_slice());
                 }
                 else if let Some(reader) = reader.child_by_name(id!(all)) {
-                    state.replace_or_insert_node_by_path(0, &[id!(tracks), track, id!(play)], reader.node_slice());
+                    state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(play)], reader.node_slice());
                 }
-                state.replace_or_insert_node_by_path(0, &[id!(tracks), track, id!(time)], live_array!{void});
+                state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(time)], live_array!{void});
                 any_from_found = true;
                 reader.skip();
             }
@@ -829,7 +828,7 @@ impl Animator {
                 timeline.push_live(reader.children_slice());
                 timeline.push_live(state.node_slice(last_index));
                 timeline.close();
-                state.replace_or_insert_node_by_path(0, &path, &timeline);
+                state.replace_or_insert_last_node_by_path(0, &path, &timeline);
                 
                 path.pop();
                 reader.skip();
@@ -837,7 +836,7 @@ impl Animator {
             else {
                 if reader.is_expr() {
                     path.push(reader.id());
-                    state.replace_or_insert_node_by_path(0, &path, reader.node_slice());
+                    state.replace_or_insert_last_node_by_path(0, &path, reader.node_slice());
                     path.pop();
                     reader.skip();
                     continue;
@@ -883,7 +882,7 @@ impl Animator {
                     timeline.last_mut().unwrap().id = id!(0); // clean up property id
                     timeline.push_live(state.node_slice(last_index));
                     timeline.close();
-                    state.replace_or_insert_node_by_path(0, &path, &timeline);
+                    state.replace_or_insert_last_node_by_path(0, &path, &timeline);
                     path.pop();
                 }
                 reader.walk();
@@ -892,9 +891,9 @@ impl Animator {
         
         if !any_from_found {
             // add a bare time info track here
-            state.replace_or_insert_node_by_path(0, &[id!(tracks), track, id!(time)], live_array!{void});
+            state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(time)], live_array!{void});
         }
-        state.replace_or_insert_node_by_path(0, &[id!(tracks), track, id!(ended)], live_array!{false});
+        state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(ended)], live_array!{false});
         
         self.swap_in_state(state);
         
