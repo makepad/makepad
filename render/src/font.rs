@@ -15,7 +15,7 @@ pub use {
         cx::Cx,
         livetraits::*,
         geometrygen::GeometryQuad2D,
-        drawshader::DrawVars,
+        drawvars::DrawVars,
         view::ManyInstances,
         pass::{Pass, PassClearColor},
         view::View,

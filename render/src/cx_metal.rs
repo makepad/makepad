@@ -19,7 +19,7 @@ use {
             TextureDesc,
             CxTexture
         },
-        drawshader::CxDrawShader,
+        drawvars::CxDrawShader,
         window::WindowGeom
     }
 };

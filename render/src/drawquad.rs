@@ -5,7 +5,7 @@ use {
         cx::Cx,
         livetraits::*,
         geometrygen::GeometryQuad2D,
-        drawshader::DrawVars,
+        drawvars::DrawVars,
         turtle::{Layout, Walk, Rect}
     },
 };

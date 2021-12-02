@@ -59,7 +59,7 @@ impl LiveApply for Pass {
     fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
         
         if !nodes[start_index].value.is_structy_type() {
-            cx.apply_error_wrong_type_for_struct(apply_from, start_index, nodes, id!(View));
+            cx.apply_error_wrong_type_for_struct(live_error_origin!(), apply_from, start_index, nodes, id!(View));
             return nodes.skip_node(start_index);
         }
         
@@ -72,7 +72,7 @@ impl LiveApply for Pass {
             match nodes[index].id {
                 id!(clear_color) => cx.passes[self.pass_id].clear_color = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
                 _=> {
-                    cx.apply_error_no_matching_field(apply_from, index, nodes);
+                    cx.apply_error_no_matching_field(live_error_origin!(), apply_from, index, nodes);
                     index = nodes.skip_node(index);
                 }
             }

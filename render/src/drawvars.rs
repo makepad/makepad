@@ -411,7 +411,7 @@ impl DrawVars {
             _ => true
         };
         if unknown_shader_props && nodes[index].value.is_value_type() {
-            cx.apply_error_no_matching_field(apply_from, index, nodes);
+            cx.apply_error_no_matching_field(live_error_origin!(), apply_from, index, nodes);
         }
         nodes.skip_node(index)
     }

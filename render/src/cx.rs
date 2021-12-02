@@ -42,7 +42,7 @@ use {
             TextureFormat
         },
         geometry::CxGeometry,
-        drawshader::{
+        drawvars::{
             CxDrawShader,
             DrawShaderFingerprint,
         },

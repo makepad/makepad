@@ -65,6 +65,7 @@ impl LiveIdMap {
                 "state_id",
                 "user",
                 "play",
+                "ended"
             ];
             for item in &fill {
                 map.add(item);
