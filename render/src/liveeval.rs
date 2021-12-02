@@ -6,7 +6,7 @@ pub use {
     crate::{
         cx::Cx,
         events::Event,
-        animation::Animator,
+        animator::Animator,
         livetraits::*,
     }
 };

@@ -8,7 +8,7 @@ pub use {
         events::Event,
         livetraits::*,
         liveeval::*,
-        animation::Animator
+        animator::Animator
     }
 };
 

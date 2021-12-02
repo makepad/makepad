@@ -141,7 +141,7 @@ impl Button {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonAction {
 
-        self.handle_animation(cx, event);
+        self.animator_handle_event(cx, event);
         let res = self.button_logic.handle_event(cx, event, self.bg_quad.draw_vars.area);
         
         match res.state {

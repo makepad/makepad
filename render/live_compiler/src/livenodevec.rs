@@ -374,7 +374,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         while index < self_ref.len() {
             if self_ref[index].value.is_open() {
                 if stack_depth == 1 {
-                    if child_name != LiveId::empty() && self_ref[index].id == child_name {
+                    if /*child_name != LiveId::empty() && */self_ref[index].id == child_name {
                         return Ok(index);
                     }
                 }
