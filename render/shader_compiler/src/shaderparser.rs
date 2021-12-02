@@ -500,7 +500,6 @@ impl<'a> ShaderParser<'a> {
                 if file_id != self.file_id{
                     panic!()
                 }
-                //println!("FOUND ITEM {}", id);
                 let full_ptr = match item.target {
                     LiveScopeTarget::LivePtr(live_ptr) => live_ptr,
                     LiveScopeTarget::LocalPtr(local_ptr) => LivePtr {
@@ -1280,7 +1279,11 @@ impl<'a> ShaderParser<'a> {
                             // ok we wanna resolve, however if its multi-segment and not resolved it fails.
                             
                             let mut var_resolve = VarResolve::NotFound;
+                            
+                            
+                            
                             if let Some(ptr) = self.scan_scope_for_live_ptr(span.file_id, ident_path.segs[0]) {
+                                
                                 let find_result = self.shader_registry.find_live_node_by_path(self.live_registry, ptr, &ident_path.segs[1..ident_path.len()]); 
                                 match find_result {
                                     LiveNodeFindResult::LiveValue(value_ptr, ty) => {
