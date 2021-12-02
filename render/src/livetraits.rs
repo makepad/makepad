@@ -6,7 +6,7 @@ pub use {
     crate::{
         cx::Cx,
         events::Event,
-        animation::Animator
+        animator::Animator
     }
 };
 
@@ -90,8 +90,29 @@ pub struct LiveBody {
 }
 
 pub trait LiveAnimate {
+    fn init_animator(&mut self, cx: &mut Cx);
+    fn apply_animator(&mut self, cx: &mut Cx);
+    fn toggle_animator(&mut self, cx: &mut Cx,  is_state_1:bool, should_animate:bool, track:LiveId,state1: LivePtr, state2:LivePtr, ){
+        if is_state_1{
+            if should_animate{
+                self.animate_to(cx, track, state1)
+            }
+            else{
+                self.cut_to(cx, track, state1)
+            }
+        }
+        else{
+            if should_animate{
+                self.animate_to(cx, track, state2)
+            }
+            else{
+                self.cut_to(cx, track, state2)
+            }
+        }
+    }
+    fn cut_to(&mut self, cx: &mut Cx, track: LiveId, state: LivePtr);
     fn animate_to(&mut self, cx: &mut Cx, track: LiveId, state: LivePtr);
-    fn handle_animation(&mut self, cx: &mut Cx, event: &mut Event);
+    fn animator_handle_event(&mut self, cx: &mut Cx, event: &mut Event)->bool;
 }
 
 #[derive(Debug, Clone, Copy)]

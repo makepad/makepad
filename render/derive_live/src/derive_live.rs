@@ -137,20 +137,40 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
             
             tb.add("impl").stream(generic.clone());
             tb.add("LiveAnimate for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+            tb.add("    fn init_animator(&mut self, cx: &mut Cx) {");
+            for (track,def) in &kv{
+                tb.add("    self.animator.cut_to_live(cx,LiveId(").suf_u64(LiveId::from_str(track).unwrap().0).add("),self.").ident(def).add(".unwrap());");
+            }
+            tb.add("    }");            
+
             tb.add("    fn animate_to(&mut self, cx: &mut Cx, track:LiveId, state: LivePtr) {");
             tb.add("        if self.animator.state.is_none() {");
-            for (track,def) in &kv{
-                tb.add("        self.animator.cut_to_live(cx,LiveId(").suf_u64(LiveId::from_str(track).unwrap().0).add("),self.").ident(def).add(".unwrap());");
-            }
+            tb.add("            self.init_animator(cx);");
             tb.add("         }");
             tb.add("         self.animator.animate_to_live(cx, track, state);");
             tb.add("    }");
-            tb.add("    fn handle_animation(&mut self, cx: &mut Cx, event: &mut Event) {");
-            tb.add("        if self.animator.handle_event(cx, event) {");
-            tb.add("            let state = self.animator.swap_out_state();");
-            tb.add("            self.apply(cx, ApplyFrom::Animate, state.child_by_name(0,id!(state)).unwrap(), &state);");
-            tb.add("            self.animator.swap_in_state(state);");
+
+            tb.add("    fn apply_animator(&mut self, cx: &mut Cx) {");
+            tb.add("        let state = self.animator.swap_out_state();");
+            tb.add("        self.apply(cx, ApplyFrom::Animate, state.child_by_name(0,id!(state)).unwrap(), &state);");
+            tb.add("        self.animator.swap_in_state(state);");
+            tb.add("    }");
+
+
+            tb.add("    fn cut_to(&mut self, cx: &mut Cx, track:LiveId, state: LivePtr) {");
+            tb.add("        if self.animator.state.is_none() {");
+            tb.add("            self.init_animator(cx);");
+            tb.add("         }");
+            tb.add("         self.animator.cut_to_live(cx, track, state);");
+            tb.add("         self.apply_animator(cx);");
+            tb.add("    }");
+
+            tb.add("    fn animator_handle_event(&mut self, cx: &mut Cx, event: &mut Event)->bool{");
+            tb.add("        if let AnimatorAction::Animating{redraw} = self.animator.handle_event(cx, event) {");
+            tb.add("            self.apply_animator(cx);");
+            tb.add("            return redraw;");
             tb.add("        }");
+            tb.add("        false");
             tb.add("    }");
             tb.add("}");
             Some(kv)

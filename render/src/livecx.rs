@@ -8,18 +8,18 @@ pub use {
         events::Event,
         livetraits::*,
         liveeval::*,
-        animation::Animator
+        animator::Animator
     }
 };
 
 
-impl Cx {
+impl Cx { 
     pub fn live_register(&mut self) {
         crate::drawquad::live_register(self);
         crate::drawcolor::live_register(self);
         crate::drawtext::live_register(self);
         crate::geometrygen::live_register(self);
-        crate::shader_std::live_register(self);
+        crate::shader_std::live_register(self); 
         crate::font::live_register(self);
     }
     
@@ -120,7 +120,6 @@ impl Cx {
         }
         else {
             println!("Apply without file, at index {} {} origin: {}", index, message, origin);
-            
         }
     }
     
@@ -128,11 +127,13 @@ impl Cx {
     pub fn live_expand(&mut self) {
         // lets expand the f'er
         let mut errs = Vec::new();
+        //self.profile_start(0);   
         let mut live_registry = self.live_registry.borrow_mut();
         live_registry.expand_all_documents(&mut errs);
         for err in errs {
             println!("Error expanding live file {}", live_registry.live_error_to_live_file_error(err));
         }
+        //self.profile_end(0);
     }
     /*
     pub fn verify_type_signature(&self, live_ptr: LivePtr, live_type: LiveType) -> bool {
