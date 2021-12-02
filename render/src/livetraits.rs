@@ -42,6 +42,16 @@ pub trait LiveNew: LiveApply {
         return ret
     }
     
+    fn new_from_ptr_debug(cx: &mut Cx, live_ptr: LivePtr) -> Self where Self: Sized {
+        let live_registry_rc = cx.live_registry.clone();
+        let live_registry = live_registry_rc.borrow();
+        let doc = live_registry.ptr_to_doc(live_ptr);
+        let mut ret = Self::new(cx);
+        ret.apply(cx, ApplyFrom::NewFromDoc {file_id: live_ptr.file_id}, live_ptr.index as usize, &doc.nodes);
+        println!("{}", doc.nodes.to_string(live_ptr.index as usize, 100));
+        return ret
+    }
+    
     fn new_from_module_path_id(cx: &mut Cx, module_path: &str, id: LiveId) -> Option<Self> where Self: Sized {
         let live_registry_rc = cx.live_registry.clone();
         let live_registry = live_registry_rc.borrow();
