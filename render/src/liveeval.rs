@@ -36,7 +36,7 @@ pub fn live_eval(cx: &mut Cx, start: usize, apply_from: ApplyFrom, index: &mut u
         }
         LiveValue::Id(id) => { // look it up from start on up
             *index += 1;
-            if let Some(index) = nodes.scope_up_down_by_name(start, *id) {
+            if let Some(index) = nodes.scope_up_by_name(start-1, *id) {
                 // found ok now what. it depends on the type of the thing here
                 return match &nodes[index].value {
                     LiveValue::Float(val) => LiveEval::Float(*val),
@@ -52,7 +52,6 @@ pub fn live_eval(cx: &mut Cx, start: usize, apply_from: ApplyFrom, index: &mut u
                                 LiveValue::Int(val) => LiveEval::Int(*val),
                                 LiveValue::Bool(val) => LiveEval::Bool(*val),
                                 _=>{
-
                                     LiveEval::Void
                                 }
                             }
