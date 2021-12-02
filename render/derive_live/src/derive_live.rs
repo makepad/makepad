@@ -105,11 +105,16 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         // special marker fields
         let deref_target = fields.iter().find( | field | field.name == "deref_target");
         let draw_vars = fields.iter().find( | field | field.name == "draw_vars");
+        let geometry = fields.iter().find( | field | field.name == "geometry");
         let animator = fields.iter().find( | field | field.name == "animator");
         // ok we have to parse the animator args fields
         
         if deref_target.is_some() && draw_vars.is_some() {
             return error_result("Cannot dereive Live with more than one of: both draw_vars and deref_target");
+        }
+
+        if draw_vars.is_some() &&! geometry.is_some() {
+            return error_result("drawvars requires a geometry object to be present");
         }
         
         let animator_kv = if let Some(animator) = animator {
@@ -241,7 +246,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
             tb.add("    }");
             tb.add("    pub fn deref_target_after_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]){");
             if draw_vars.is_some() {
-                tb.add("    self.draw_vars.after_apply(cx, apply_from, index, nodes);");
+                tb.add("    self.draw_vars.after_apply(cx, apply_from, index, nodes, &self.geometry);");
             }
             else if deref_target.is_some() {
                 tb.add("    self.deref_target.deref_target_after_apply(cx, apply_from, index, nodes);");
@@ -284,7 +289,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         tb.add("        }");
         
         if let Some(_) = draw_vars {
-            tb.add("    self.draw_vars.after_apply(cx, apply_from, start_index, nodes);");
+            tb.add("    self.draw_vars.after_apply(cx, apply_from, start_index, nodes, &self.geometry);");
         }
         else if let Some(_) = deref_target {
             tb.add("    self.deref_target.deref_target_after_apply(cx, apply_from, start_index, nodes);");

@@ -9,6 +9,8 @@ use {
         livetraits::*,
         geometry::{
             Geometry,
+            GeometryFingerprint,
+            GeometryRef,
             GeometryField,
             GeometryFields,
         }
@@ -26,12 +28,19 @@ live_register!{
 
 impl LiveHook for GeometryQuad2D {
     fn after_apply(&mut self, cx: &mut Cx, _apply_from:ApplyFrom, _index:usize, _nodes:&[LiveNode]) {
+        let mut fp = GeometryFingerprint::new(Self::live_type());
+        fp.push(self.x1);
+        fp.push(self.y1);
+        fp.push(self.x2);
+        fp.push(self.y2);
+        // lets get the fingerprint
+        self.geometry_ref = Some(cx.get_geometry_ref(fp));
         GeometryGen::from_quad_2d(
             self.x1,
             self.y1,
             self.x2,
             self.y2,
-        ).to_geometry(cx, self.geometry);
+        ).to_geometry(cx, &self.geometry_ref.as_ref().unwrap().0);
     }
 }
 
@@ -40,8 +49,14 @@ impl GeometryFields for GeometryQuad2D {
         fields.push(GeometryField {id: id!(geom_pos), ty: ShaderTy::Vec2});
     }
     
-    fn get_geometry(&self) -> Geometry {
-        self.geometry
+    fn get_geometry_id(&self) -> Option<usize> {
+        // ok so what about doing a Rc<Geometry> based on input and class type
+        if let Some(gr) = &self.geometry_ref{
+            Some(gr.0.geometry_id)
+        }
+        else{
+            None
+        }
     }
     
     fn live_type_check(&self) -> LiveType {
@@ -51,7 +66,7 @@ impl GeometryFields for GeometryQuad2D {
 
 #[derive(Live)]
 pub struct GeometryQuad2D {
-    #[rust(cx.new_geometry())] pub geometry: Geometry,
+    #[rust] pub geometry_ref: Option<GeometryRef>,
     #[live(0.0)] pub x1: f32,
     #[live(0.0)] pub y1: f32,
     #[live(1.0)] pub x2: f32,
@@ -73,7 +88,7 @@ pub enum GeometryAxis {
 
 impl GeometryGen {
     
-    pub fn to_geometry(self, cx:&mut Cx, geometry:Geometry){
+    pub fn to_geometry(self, cx:&mut Cx, geometry:&Geometry){
         let cxgeom = &mut cx.geometries[geometry.geometry_id];
         cxgeom.indices = self.indices;
         cxgeom.vertices = self.vertices;

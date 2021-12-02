@@ -61,7 +61,7 @@ impl CodeEditorState {
         &mut self,
         session_id: SessionId,
         send_request: &mut dyn FnMut(Request),
-    ) {
+    ) { 
         let session = &self.sessions_by_session_id[session_id];
         let document_id = session.document_id;
         let document = &mut self.documents_by_document_id[document_id];
