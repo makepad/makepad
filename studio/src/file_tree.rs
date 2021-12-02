@@ -262,8 +262,6 @@ impl FileTreeNode {
         
         self.name_text.draw_walk(cx, name);
         self.bg_quad.end(cx);
-        
-        //cx.turtle_new_line();
     }
     
     pub fn draw_file(&mut self, cx: &mut Cx, name: &str, is_even: bool, node_height: f32, scale_stack: &[f32]) {
@@ -279,8 +277,6 @@ impl FileTreeNode {
         
         self.name_text.draw_walk(cx, name);
         self.bg_quad.end(cx);
-        
-       // cx.turtle_new_line();
     }
     
     fn indent_walk(&self, depth: usize) -> Walk {
@@ -393,14 +389,9 @@ impl FileTree {
         for node_id in &self.gc_nodes {
             self.tree_nodes.remove(node_id);
         }
-        
-        // dump the view
-        //cx.debug_draw_tree(false, self.scroll_view.view.view_id);
     }
     
     pub fn should_node_draw(&mut self, cx: &mut Cx) -> bool {
-        //return true;
-        
         let scale = self.stack.last().cloned().unwrap_or(1.0);
         let height = self.node_height * scale;
         if scale > 0.01 && cx.turtle_line_is_visible(height, self.scroll_view.get_scroll_pos(cx)) {
@@ -470,7 +461,6 @@ impl FileTree {
                 Entry::Vacant(v) => v.insert(FileTreeNode::new_from_ptr(cx, self.file_node.unwrap()))
             };
             tree_node.draw_file(cx, name, self.count % 2 == 1, self.node_height, &self.stack);
-            //cx.turtle_new_line();
         }
     }
     
