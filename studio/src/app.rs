@@ -4,6 +4,7 @@ use {
         code_editor_state::{CodeEditorState, SessionId},
         dock::{Dock, DockAction, DragPosition, PanelId},
         file_tree::{FileTreeAction, FileNodeId, FileTree},
+        splitter::{SplitterAlign},
         genid_allocator::GenIdAllocator,
         genid_map::GenIdMap,
         protocol::{self, Notification, Request, Response, ResponseOrNotification},
@@ -138,13 +139,15 @@ impl AppInner {
             }
             self.window.end(cx);
         }
+        cx.redraw_all();
     }
     
     fn draw_panel(&mut self, cx: &mut Cx, state: &AppState, panel_id: PanelId) {
         let panel = &state.panels_by_panel_id[panel_id];
         match &panel.kind {
-            PanelKind::Split(SplitPanel {child_panel_ids}) => {
-                self.dock.begin_split_panel(cx, panel_id);
+            PanelKind::Split(SplitPanel {child_panel_ids, axis, align}) => {
+                
+                self.dock.begin_split_panel(cx, panel_id, *axis, *align);
                 self.draw_panel(cx, state, child_panel_ids[0]);
                 self.dock.middle_split_panel(cx);
                 self.draw_panel(cx, state, child_panel_ids[01]);
@@ -206,13 +209,25 @@ impl AppInner {
         
         if let Event::Construct = event {
             self.send_request(Request::GetFileTree());
+            self.create_code_editor_tab(
+                cx,
+                state,
+                state.content_panel_id,
+                None,
+                state.file_path_join(&["README.MD"])
+            );
         }
         
         let mut actions = Vec::new();
         self.dock.handle_event(cx, event, &mut | _, action | actions.push(action));
         for action in actions {
             match action {
-                DockAction::SplitPanelChanged(panel_id) => {
+                DockAction::SplitPanelChanged {panel_id, axis, align} => {
+                    if let PanelKind::Split(panel) = &mut state.panels_by_panel_id[panel_id].kind {
+                        panel.axis = axis;
+                        panel.align = align;
+                    }
+                    // do shit here
                     self.dock.redraw(cx);
                     self.redraw_panel(cx, state, panel_id);
                 }
@@ -310,7 +325,7 @@ impl AppInner {
         while let Some(panel_id) = panel_id_stack.pop() {
             let panel = &state.panels_by_panel_id[panel_id];
             match &panel.kind {
-                PanelKind::Split(SplitPanel {child_panel_ids}) => {
+                PanelKind::Split(SplitPanel {child_panel_ids, ..}) => {
                     for child_id in child_panel_ids {
                         panel_id_stack.push(*child_id);
                     }
@@ -420,6 +435,12 @@ impl AppInner {
             Panel {
                 parent_panel_id,
                 kind: PanelKind::Split(SplitPanel {
+                    axis: match position {
+                        DragPosition::Left | DragPosition::Right => Axis::Horizontal,
+                        DragPosition::Top | DragPosition::Bottom => Axis::Vertical,
+                        _ => panic!(),
+                    },
+                    align: SplitterAlign::Weighted(0.5),
                     child_panel_ids: match position {
                         DragPosition::Left | DragPosition::Top => [new_panel_id, panel_id],
                         DragPosition::Right | DragPosition::Bottom => [panel_id, new_panel_id],
@@ -438,7 +459,7 @@ impl AppInner {
                 .unwrap();
             parent_panel.child_panel_ids[position] = new_parent_panel_id;
         }
-        
+        /*
         self.dock.set_split_panel_axis(
             cx,
             new_parent_panel_id,
@@ -447,7 +468,7 @@ impl AppInner {
                 DragPosition::Top | DragPosition::Bottom => Axis::Vertical,
                 _ => panic!(),
             },
-        );
+        );*/
         
         self.dock.redraw(cx);
         self.redraw_panel(cx, state, panel_id);
@@ -567,6 +588,7 @@ struct AppState {
     root_panel_id: PanelId,
     side_bar_panel_id: PanelId,
     selected_panel_id: PanelId,
+    content_panel_id: PanelId,
     tab_id_allocator: GenIdAllocator,
     tabs_by_tab_id: GenIdMap<TabId, Tab>,
     file_tree_tab_id: TabId,
@@ -636,12 +658,15 @@ impl AppState {
             Panel {
                 parent_panel_id: None,
                 kind: PanelKind::Split(SplitPanel {
+                    axis: Axis::Horizontal,
+                    align: SplitterAlign::FromStart(200.0),
                     child_panel_ids: [side_bar_panel_id, content_panel_id],
                 }),
             },
         );
         
         AppState {
+            content_panel_id,
             panel_id_allocator,
             panels_by_panel_id,
             root_panel_id,
@@ -665,8 +690,11 @@ impl AppState {
             components.push(&edge.name);
             file_node = &self.file_nodes_by_file_node_id[edge.file_node_id];
         }
-        self.path
-            .join(components.into_iter().rev().collect::<PathBuf>())
+        self.path.join(components.into_iter().rev().collect::<PathBuf>())
+    }
+    
+    fn file_path_join(&self, components: &[&str]) -> PathBuf {
+        self.path.join(components.into_iter().rev().collect::<PathBuf>())
     }
     
     fn set_file_tree(&mut self, file_tree: protocol::FileTree) {
@@ -758,6 +786,8 @@ enum PanelKind {
 
 #[derive(Clone, Debug)]
 struct SplitPanel {
+    axis: Axis,
+    align: SplitterAlign,
     child_panel_ids: [PanelId; 2],
 }
 
