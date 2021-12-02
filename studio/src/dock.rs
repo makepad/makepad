@@ -2,7 +2,7 @@ use {
     crate::{
         genid::GenId,
         genid_map::GenIdMap,
-        splitter::{SplitterAction, Splitter},
+        splitter::{SplitterAction, Splitter, SplitterAlign},
         tab_bar::{TabBarAction, TabBar, TabId},
     },
     makepad_render::*,
@@ -10,7 +10,7 @@ use {
 
 live_register!{
     use crate::tab_bar::TabBar
-    use crate::splitter::Splitter
+    use crate::splitter::Splitter 
     Dock: {{Dock}} {
         drag_quad: {
             draw_depth: 10.0
@@ -64,9 +64,11 @@ impl Dock {
         self.view.end(cx);
     }
     
-    pub fn begin_split_panel(&mut self, cx: &mut Cx, panel_id: PanelId) {
+    pub fn begin_split_panel(&mut self, cx: &mut Cx, panel_id: PanelId, axis:Axis, align:SplitterAlign) {
         self.panel_ids.push(panel_id);
         let panel = self.get_or_create_split_panel(cx, panel_id);
+        panel.splitter.set_axis(axis);
+        panel.splitter.set_align(align);
         panel.splitter.begin(cx);
         self.panel_id_stack.push(panel_id);
     }
@@ -200,8 +202,8 @@ impl Dock {
                     panel
                         .splitter
                         .handle_event(cx, event, &mut | cx, action | match action {
-                        SplitterAction::Changed => {
-                            dispatch_action(cx, DockAction::SplitPanelChanged(*panel_id));
+                        SplitterAction::Changed{axis, align} => {
+                            dispatch_action(cx, DockAction::SplitPanelChanged{panel_id:*panel_id, axis, align});
                         }
                     });
                 }
@@ -331,7 +333,7 @@ pub enum DragPosition {
 }
 
 pub enum DockAction {
-    SplitPanelChanged(PanelId),
+    SplitPanelChanged{panel_id:PanelId, axis:Axis, align:SplitterAlign},
     TabBarReceivedDraggedItem(PanelId, DraggedItem),
     TabWasPressed(PanelId, TabId),
     TabButtonWasPressed(PanelId, TabId),
