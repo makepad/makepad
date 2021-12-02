@@ -249,7 +249,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         
         tb.add("        let struct_id = LiveId(").suf_u64(LiveId::from_str(&struct_name).unwrap().0).add(");");
         tb.add("        if !nodes[start_index].value.is_structy_type(){");
-        tb.add("            cx.apply_error_wrong_type_for_struct(apply_from, start_index, nodes, struct_id);");
+        tb.add("            cx.apply_error_wrong_type_for_struct(live_error_origin!(), apply_from, start_index, nodes, struct_id);");
         tb.add("            self.after_apply(cx, apply_from, start_index, nodes);");
         tb.add("            return nodes.skip_node(start_index);");
         tb.add("        }");
@@ -269,7 +269,6 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         else if let Some(_) = deref_target {
             tb.add("    self.deref_target.deref_target_after_apply(cx, apply_from, start_index, nodes);");
         }
-        tb.add("        self.after_apply(cx, apply_from, start_index, nodes);");
         
         if let Some(_) = animator { // apply the default states
             tb.add("    if let Some(file_id) = apply_from.file_id() {");
@@ -281,6 +280,8 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
             tb.add("    }");
         }
         
+        tb.add("        self.after_apply(cx, apply_from, start_index, nodes);");
+
         //tb.add("    cx.profile_end(start_index as u64);");
         tb.add("        return index;");
         tb.add("    }");
@@ -514,7 +515,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         tb.add("        match &nodes[start_index].value{");
         tb.add("            LiveValue::BareEnum{base,variant}=>{");
         tb.add("                if *base != enum_id{");
-        tb.add("                    cx.apply_error_wrong_enum_base(apply_from, index, nodes, enum_id, *base);");
+        tb.add("                    cx.apply_error_wrong_enum_base(live_error_origin!(), apply_from, index, nodes, enum_id, *base);");
         tb.add("                    index = nodes.skip_node(index);");
         tb.add("                    self.after_apply(cx, apply_from, start_index, nodes);");
         tb.add("                    return index;");
@@ -526,7 +527,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
             }
         }
         tb.add("                    _=>{");
-        tb.add("                        cx.apply_error_wrong_enum_variant(apply_from, index, nodes, enum_id, *variant);");
+        tb.add("                        cx.apply_error_wrong_enum_variant(live_error_origin!(), apply_from, index, nodes, enum_id, *variant);");
         tb.add("                        index = nodes.skip_node(index);");
         tb.add("                    }");
         tb.add("                }");
@@ -534,7 +535,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         
         tb.add("            LiveValue::NamedEnum{base, variant}=>{");
         tb.add("                if *base != enum_id{");
-        tb.add("                    cx.apply_error_wrong_enum_base(apply_from, index, nodes, enum_id, *base);");
+        tb.add("                    cx.apply_error_wrong_enum_base(live_error_origin!(), apply_from, index, nodes, enum_id, *base);");
         tb.add("                    index = nodes.skip_node(index);");
         tb.add("                    self.after_apply(cx, apply_from, start_index, nodes);");
         tb.add("                    return index;");
@@ -564,7 +565,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
                     tb.ident(&format!("prefix_{}", field.name)).add(").apply(cx, apply_from, index, nodes);},");
                 }
                 tb.add("                            _=>{");
-                tb.add("                                cx.apply_error_named_enum_invalid_prop(apply_from, index, nodes, enum_id, *variant, nodes[index].id);");
+                tb.add("                                cx.apply_error_named_enum_invalid_prop(live_error_origin!(), apply_from, index, nodes, enum_id, *variant, nodes[index].id);");
                 tb.add("                                index = nodes.skip_node(index);");
                 tb.add("                            }");
                 tb.add("                        }");
@@ -574,14 +575,14 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
             }
         }
         tb.add("                    _=>{");
-        tb.add("                        cx.apply_error_wrong_enum_variant(apply_from, index, nodes, enum_id, *variant);");
+        tb.add("                        cx.apply_error_wrong_enum_variant(live_error_origin!(), apply_from, index, nodes, enum_id, *variant);");
         tb.add("                        index = nodes.skip_node(index);");
         tb.add("                    }");
         tb.add("                }");
         tb.add("            }");
         tb.add("            LiveValue::TupleEnum{base, variant}=>{");
         tb.add("                if *base != enum_id{");
-        tb.add("                    cx.apply_error_wrong_enum_base(apply_from, index, nodes, enum_id, *base);");
+        tb.add("                    cx.apply_error_wrong_enum_base(live_error_origin!(), apply_from, index, nodes, enum_id, *base);");
         tb.add("                    index = nodes.skip_node(index);");
         tb.add("                    self.after_apply(cx, apply_from, start_index, nodes);");
         tb.add("                    return index;");
@@ -614,7 +615,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
                     tb.add("                        ").unsuf_usize(i).add("=>{index = (*").ident(&format!("var{}", i)).add(").apply(cx, apply_from, index, nodes); },");
                 }
                 tb.add("                            _=>{");
-                tb.add("                                cx.apply_error_tuple_enum_arg_not_found(apply_from, index, nodes, enum_id, *variant, arg);");
+                tb.add("                                cx.apply_error_tuple_enum_arg_not_found(live_error_origin!(), apply_from, index, nodes, enum_id, *variant, arg);");
                 tb.add("                                index = nodes.skip_node(index);");
                 tb.add("                            }");
                 tb.add("                        }");
@@ -624,13 +625,13 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
             }
         }
         tb.add("                    _=>{");
-        tb.add("                        cx.apply_error_wrong_enum_variant(apply_from, index, nodes, enum_id, *variant);");
+        tb.add("                        cx.apply_error_wrong_enum_variant(live_error_origin!(), apply_from, index, nodes, enum_id, *variant);");
         tb.add("                        index = nodes.skip_node(index);");
         tb.add("                    }");
         tb.add("                }");
         tb.add("            }");
         tb.add("            _=>{");
-        tb.add("               cx.apply_error_expected_enum(apply_from, index, nodes);");
+        tb.add("               cx.apply_error_expected_enum(live_error_origin!(), apply_from, index, nodes);");
         tb.add("               index = nodes.skip_node(index);");
         tb.add("            }");
         tb.add("        }");

@@ -88,7 +88,7 @@ impl CodeEditor {
     pub fn draw(&mut self, cx: &mut Cx, state: &CodeEditorState, view_id: CodeEditorViewId) {
         self.text_glyph_size = self.code_text.text_style.font_size * self.code_text.get_monospace_base(cx);
         let view = &mut self.views_by_view_id[view_id];
-        if view.scroll_view.begin(cx).is_ok() {
+        if view.scroll_view.begin(cx).is_ok() { 
             if let Some(session_id) = view.session_id {
                 let session = &state.sessions_by_session_id[session_id];
                 let document = &state.documents_by_document_id[session.document_id];
