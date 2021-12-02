@@ -379,7 +379,7 @@ impl Cx {
             let () = unsafe {msg_send![encoder, endEncoding]};
             let () = unsafe {msg_send![command_buffer, presentDrawable: drawable]};
             let () = unsafe {msg_send![command_buffer, commit]};
-            //let () = unsafe {msg_send![command_buffer, waitUntilScheduled]};
+            let () = unsafe {msg_send![command_buffer, waitUntilScheduled]};
         }
         let () = unsafe {msg_send![pool, release]};
     }
@@ -581,7 +581,7 @@ impl MetalBuffer {
                 newBufferWithLength: (data.len() * std::mem::size_of::<f32>()) as u64
                 options: MTLResourceOptions::HazardTrackingModeTracked |
                 MTLResourceOptions::StorageModeManaged |
-                MTLResourceOptions::CPUCacheModeWriteCombined
+                MTLResourceOptions::CPUCacheModeDefaultCache
             ]};
             if buffer == nil {self.buffer = None} else {self.buffer = Some(buffer)}
             self.size = data.len()

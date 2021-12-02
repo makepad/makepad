@@ -393,9 +393,9 @@ impl FileTree {
         }
     }
     
-    pub fn should_node_draw(&mut self, _cx:&mut Cx)->bool{
-        return true;
-        /*
+    pub fn should_node_draw(&mut self, cx:&mut Cx)->bool{
+        //return true;
+        
         let scale = self.stack.last().cloned().unwrap_or(1.0);
         let height = self.node_height * scale;
         if scale > 0.01 && cx.turtle_line_is_visible(height, self.scroll_view.get_scroll_pos(cx)){
@@ -409,7 +409,7 @@ impl FileTree {
             });
             cx.turtle_new_line();
             return false
-        }*/
+        }
     }
     
     pub fn begin_folder(
@@ -494,12 +494,6 @@ impl FileTree {
         if let Some(tree_node) = self.tree_nodes.get_mut(&node_id){
             tree_node.set_folder_is_open(cx, is_open, should_animate);
         }
-    }
-    
-    pub fn set_selected_file_node_id(&mut self, _cx: &mut Cx, _file_node_id: FileNodeId) {
-        /*if self.logic.set_selected_node_id(file_node_id.0) {
-            self.scroll_view.redraw(cx);
-        }*/
     }
     
     pub fn start_dragging_file_node(
