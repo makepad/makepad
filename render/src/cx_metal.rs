@@ -94,9 +94,7 @@ impl Cx {
                 let pipeline_state = shp.pipeline_state;
                 unsafe {let () = msg_send![encoder, setRenderPipelineState: pipeline_state];}
                 
-                let geometry_id = if let Some(geometry) = draw_call.geometry {
-                    geometry.geometry_id
-                }
+                let geometry_id = if let Some(geometry_id) = draw_call.geometry_id {geometry_id}
                 else {
                     continue;
                 };

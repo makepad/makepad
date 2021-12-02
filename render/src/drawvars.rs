@@ -66,10 +66,11 @@ pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPac
 #[derive(Default, Debug)]
 pub struct DrawVars {
     pub area: Area,
+    pub draw_call_group: LiveId,
     pub var_instance_start: usize,
     pub var_instance_slots: usize,
     pub draw_shader: Option<DrawShader>,
-    pub geometry: Option<Geometry>,
+    pub geometry_id: Option<usize>,
     pub user_uniforms: [f32; DRAW_CALL_USER_UNIFORMS],
     pub texture_slots: [Option<usize>; DRAW_CALL_TEXTURE_SLOTS],
     pub var_instances: [f32; DRAW_CALL_VAR_INSTANCES]
@@ -114,7 +115,7 @@ impl DrawVars {
                 draw_shader_ptr,
                 draw_shader_id: *draw_shader_id
             });
-            self.geometry = Some(geometry_fields.get_geometry());
+            //self.geometry_id = geometry_fields.get_geometry_id();
         }
         else {
             let live_registry_cp = cx.live_registry.clone();
@@ -126,8 +127,14 @@ impl DrawVars {
             let mut node_iter = doc.nodes.first_child(draw_shader_ptr.node_index());
             let mut fingerprint = Vec::new();
             while let Some(node_index) = node_iter {
-                if doc.nodes[node_index].value.is_dsl() {
-                    fingerprint.push(doc.nodes[node_index].clone());
+                let node = &doc.nodes[node_index];
+                if node.value.is_dsl() {
+                    fingerprint.push(node.clone());
+                }
+                if node.id == id!(draw_call_group){
+                    if let LiveValue::Id(id) = node.value{
+                        self.draw_call_group = id;
+                    }
                 }
                 node_iter = doc.nodes.next_child(node_index);
             }
@@ -139,7 +146,7 @@ impl DrawVars {
                         draw_shader_ptr,
                         draw_shader_id: fp.draw_shader_id
                     });
-                    self.geometry = Some(geometry_fields.get_geometry());
+                    //self.geometry_id = geometry_fields.get_geometry_id();
                     return;
                 }
             }
@@ -275,7 +282,8 @@ impl DrawVars {
                         draw_shader_ptr
                     });
                     
-                    self.geometry = Some(geometry_fields.get_geometry());
+                    // self.geometry_id = geometry_fields.get_geometry_id();
+                    //println!("{:?}", self.geometry_id);
                     // also we should allocate it a Shader object
                 }
             }
@@ -331,7 +339,6 @@ impl DrawVars {
     }
     
     pub fn before_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, _nodes: &[LiveNode], geometry_fields: &dyn GeometryFields) {
-        
         if self.draw_shader.is_some() {
             
             return
@@ -404,7 +411,7 @@ impl DrawVars {
             }
         }
         else{
-            panic!();
+            panic!("no shader applying {}", nodes[index].id);
         }
         let unknown_shader_props = match nodes[index].id {
             id!(debug) => false,
@@ -416,10 +423,11 @@ impl DrawVars {
         nodes.skip_node(index)
     }
     
-    pub fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
+    pub fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode], geometry_fields: &dyn GeometryFields) {
         if apply_from.is_from_doc() {
             self.init_slicer(cx);
         }
+        self.geometry_id = geometry_fields.get_geometry_id();
         self.update_vars_in_place(cx);
     }
     

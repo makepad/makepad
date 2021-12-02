@@ -45,7 +45,7 @@ impl AppInner {
             }
             self.window.end(cx);
         }
-        cx.redraw_all();
+        //cx.redraw_all();
     }
     
     fn draw_panel(&mut self, cx: &mut Cx, state: &AppState, panel_id: PanelId) {

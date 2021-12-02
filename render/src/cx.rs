@@ -4,6 +4,7 @@ use {
         fmt::Write,
         time::Instant,
         rc::Rc,
+        rc::Weak,
         cell::RefCell,
     },
     makepad_live_compiler::{
@@ -41,7 +42,11 @@ use {
             TextureDesc,
             TextureFormat
         },
-        geometry::CxGeometry,
+        geometry::{
+            Geometry,
+            CxGeometry,
+            GeometryFingerprint
+        },
         drawvars::{
             CxDrawShader,
             DrawShaderFingerprint,
@@ -121,6 +126,9 @@ pub struct Cx {
     pub textures_free: Rc<RefCell<Vec<usize >> >,
     
     pub geometries: Vec<CxGeometry>,
+    pub geometries_free: Rc<RefCell<Vec<usize >> >,
+    pub geometries_refs: HashMap<GeometryFingerprint, Weak<Geometry>>,
+
     pub draw_shaders: Vec<CxDrawShader>,
     
     pub in_redraw_cycle: bool,
@@ -277,6 +285,8 @@ impl Default for Cx {
             //shader_recompiles: Vec::new(),
             
             geometries: Vec::new(),
+            geometries_free: Rc::new(RefCell::new(Vec::new())),
+            geometries_refs: HashMap::new(),
             
             default_dpi_factor: 1.0,
             current_dpi_factor: 1.0,
@@ -829,9 +839,9 @@ impl Cx {
         }
     }
     
-    pub fn debug_draw_tree(&self, dump_instances: bool) {
+    pub fn debug_draw_tree(&self, dump_instances: bool, view_id: usize) {
         let mut s = String::new();
-        self.debug_draw_tree_recur(dump_instances, &mut s, 0, 0);
+        self.debug_draw_tree_recur(dump_instances, &mut s, view_id, 0);
         println!("{}", s);
     }
     
