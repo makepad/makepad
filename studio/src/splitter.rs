@@ -14,13 +14,13 @@ live_register!{
 #[derive(Live, LiveHook)]
 pub struct Splitter {
     #[rust(Axis::Horizontal)] pub axis: Axis,
-    #[rust(AlignPosition::Weighted(0.5))] pub align_position: AlignPosition,
+    #[rust(SplitterAlign::Weighted(0.5))] pub align: SplitterAlign,
     #[rust] pub rect: Rect,
     #[rust] pub position: f32,
     #[rust] pub live_ptr: Option<LivePtr>,
     #[track(base=state_default)] pub animator: Animator,
     #[live] pub layout: Layout,
-    #[rust] pub drag_start_align_position: Option<AlignPosition>,
+    #[rust] pub drag_start_align: Option<SplitterAlign>,
 
     #[live] pub state_default: Option<LivePtr>,
 
@@ -32,7 +32,7 @@ impl Splitter {
 
     pub fn begin(&mut self, cx: &mut Cx) {
         self.rect = cx.get_turtle_rect();
-        self.position = self.align_position.to_position(self.axis, self.rect);
+        self.position = self.align.to_position(self.axis, self.rect);
         cx.begin_turtle(self.layout(), Area::Empty);
     }
 
@@ -91,12 +91,12 @@ impl Splitter {
         self.axis = axis;
     }
 
-    pub fn align_position(&self) -> AlignPosition {
-        self.align_position
+    pub fn align(&self) -> SplitterAlign {
+        self.align
     }
 
-    pub fn set_align_position(&mut self, align_position: AlignPosition) {
-        self.align_position = align_position;
+    pub fn set_align(&mut self, align: SplitterAlign) {
+        self.align = align;
     }
 
     pub fn handle_event(
@@ -118,43 +118,43 @@ impl Splitter {
                 Axis::Vertical => cx.set_hover_mouse_cursor(MouseCursor::RowResize),
             },
             Event::FingerDown(_) => {
-                self.drag_start_align_position = Some(self.align_position);
+                self.drag_start_align = Some(self.align);
             }
             Event::FingerUp(_) => {
-                self.drag_start_align_position = None;
+                self.drag_start_align = None;
             }
             Event::FingerMove(event) => {
-                if let Some(drag_start_align_position) = self.drag_start_align_position {
+                if let Some(drag_start_align) = self.drag_start_align {
                     let delta = match self.axis {
                         Axis::Horizontal => event.abs.x - event.abs_start.x,
                         Axis::Vertical => event.abs.y - event.abs_start.y,
                     };
                     let new_position =
-                        drag_start_align_position.to_position(self.axis, self.rect) + delta;
-                    self.align_position = match self.axis {
+                        drag_start_align.to_position(self.axis, self.rect) + delta;
+                    self.align = match self.axis {
                         Axis::Horizontal => {
                             let center = self.rect.size.x / 2.0;
                             if new_position < center - 30.0 {
-                                AlignPosition::FromStart(new_position)
+                                SplitterAlign::FromStart(new_position)
                             } else if new_position > center + 30.0 {
-                                AlignPosition::FromEnd(self.rect.size.x - new_position)
+                                SplitterAlign::FromEnd(self.rect.size.x - new_position)
                             } else {
-                                AlignPosition::Weighted(new_position / self.rect.size.x)
+                                SplitterAlign::Weighted(new_position / self.rect.size.x)
                             }
                         }
                         Axis::Vertical => {
                             let center = self.rect.size.y / 2.0;
                             if new_position < center - 30.0 {
-                                AlignPosition::FromStart(new_position)
+                                SplitterAlign::FromStart(new_position)
                             } else if new_position > center + 30.0 {
-                                AlignPosition::FromEnd(self.rect.size.y - new_position)
+                                SplitterAlign::FromEnd(self.rect.size.y - new_position)
                             } else {
-                                AlignPosition::Weighted(new_position / self.rect.size.y)
+                                SplitterAlign::Weighted(new_position / self.rect.size.y)
                             }
                         }
                     };
                     cx.redraw_view_of(self.bar_quad.draw_vars.area);
-                    dispatch_action(cx, SplitterAction::Changed);
+                    dispatch_action(cx, SplitterAction::Changed{axis:self.axis, align:self.align});
                 }
             }
             _ => {}
@@ -180,29 +180,29 @@ impl Splitter {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub enum AlignPosition {
+pub enum SplitterAlign {
     FromStart(f32),
     FromEnd(f32),
     Weighted(f32),
 }
 
-impl AlignPosition {
+impl SplitterAlign {
     fn to_position(self, axis: Axis, rect: Rect) -> f32 {
         match axis {
             Axis::Horizontal => match self {
-                AlignPosition::FromStart(position) => position,
-                AlignPosition::FromEnd(position) => rect.size.x - position,
-                AlignPosition::Weighted(weight) => weight * rect.size.x,
+                Self::FromStart(position) => position,
+                Self::FromEnd(position) => rect.size.x - position,
+                Self::Weighted(weight) => weight * rect.size.x,
             },
             Axis::Vertical => match self {
-                AlignPosition::FromStart(position) => position,
-                AlignPosition::FromEnd(position) => rect.size.y - position,
-                AlignPosition::Weighted(weight) => weight * rect.size.y,
+                Self::FromStart(position) => position,
+                Self::FromEnd(position) => rect.size.y - position,
+                Self::Weighted(weight) => weight * rect.size.y,
             },
         }
     }
 }
 
 pub enum SplitterAction {
-    Changed,
+    Changed{axis:Axis, align:SplitterAlign},
 }

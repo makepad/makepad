@@ -393,7 +393,9 @@ impl FileTree {
         }
     }
     
-    pub fn should_node_draw(&mut self, cx:&mut Cx)->bool{
+    pub fn should_node_draw(&mut self, _cx:&mut Cx)->bool{
+        return true;
+        /*
         let scale = self.stack.last().cloned().unwrap_or(1.0);
         let height = self.node_height * scale;
         if scale > 0.01 && cx.turtle_line_is_visible(height, self.scroll_view.get_scroll_pos(cx)){
@@ -407,7 +409,7 @@ impl FileTree {
             });
             cx.turtle_new_line();
             return false
-        }
+        }*/
     }
     
     pub fn begin_folder(
