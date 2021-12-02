@@ -130,7 +130,7 @@ pub trait LiveHook {
                 return nodes.skip_node(index)
             }
         }
-        cx.apply_error_no_matching_field(apply_from, index, nodes);
+        cx.apply_error_no_matching_field(live_error_origin!(), apply_from, index, nodes);
         nodes.skip_node(index)
     }
     fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {}

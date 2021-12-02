@@ -27,6 +27,8 @@ pub trait LiveNodeSlice {
     fn child_value_by_path(&self, parent_index: usize, path: &[LiveId]) ->Option<&LiveValue>;
 
     fn scope_up_by_name(&self, parent_index: usize, name: LiveId) -> Option<usize>;
+    fn scope_up_down_by_name(&self, parent_index: usize, name: LiveId) -> Option<usize>;
+
     fn count_children(&self, parent_index: usize) -> usize;
     fn skip_node(&self, node_index: usize) -> usize;
     fn clone_child(&self, parent_index: usize, out_vec: &mut Vec<LiveNode>);
@@ -96,7 +98,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
     
     fn scope_up_by_name(&self, index: usize, name: LiveId) -> Option<usize> {
         let self_ref = self.as_ref();
-        if self_ref.len() == 0 {
+        if self_ref.len() == 0{
             return None
         }
         let mut stack_depth: isize = 0;
@@ -122,6 +124,47 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         }
         None
     }
+    
+    fn scope_up_down_by_name(&self, start_index: usize, name: LiveId) -> Option<usize> {
+        let self_ref = self.as_ref();
+        if self_ref.len() == 0{
+            return None
+        }
+        let mut stack_depth: isize = 0;
+        let mut index = start_index;
+        // scan backwards to find a node with this name
+        loop {
+            if self_ref[index].value.is_open() {
+                if stack_depth>0 {
+                    stack_depth -= 1;
+                }
+            }
+            else if self_ref[index].value.is_close() {
+                stack_depth += 1;
+            }
+            if stack_depth == 0{
+                if self_ref[index].id == name && index != start_index && !self_ref[index].value.is_close() { // valuenode
+                    return Some(index)
+                }
+                // scan child down
+                if self_ref[index].value.is_open(){
+                    if let Some(child_index) = self.child_by_name(index, name){
+                        if child_index != start_index{
+                            return Some(child_index)
+                        }
+                    }
+                }
+            }
+            
+            if index == 0 {
+                break
+            }
+            index -= 1;
+        }
+        None
+    }
+    
+    
     
     fn child_by_number(&self, parent_index: usize, child_number: usize) -> Option<usize> {
         let self_ref = self.as_ref();

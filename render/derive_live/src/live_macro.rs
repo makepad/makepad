@@ -113,8 +113,16 @@ fn parse_value(prop_id:TokenStream, parser:&mut TokenParser, tb:&mut TokenBuilde
             tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id)).add(",value:LiveValue::Close},");
         }
         else{
-            tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id.clone())).add(",value:LiveValue::Id(");
-            tb.add("LiveId(").suf_u64(class_id).add("))},");
+            if class == "true"{
+                tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id.clone())).add(",value:LiveValue::Bool(true)},");
+            }
+            else if class == "false"{
+                tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id.clone())).add(",value:LiveValue::Bool(false)},");
+            }
+            else{
+                tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id.clone())).add(",value:LiveValue::Id(");
+                tb.add("LiveId(").suf_u64(class_id).add("))},");
+            }
         }
     }
     else if parser.eat_punct_alone('#'){ // coLor!

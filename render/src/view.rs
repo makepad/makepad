@@ -13,7 +13,7 @@ pub use {
         livetraits::*,
         area::{Area, ViewArea, InstanceArea},
         turtle::{Layout, Width, Height, Walk, Rect},
-        drawshader::{
+        drawvars::{
             CxDrawShaderMapping,
             CxDrawShader,
             DrawShader,
@@ -76,7 +76,7 @@ impl LiveApply for View {
     fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
         
         if !nodes[start_index].value.is_structy_type() {
-            cx.apply_error_wrong_type_for_struct(apply_from, start_index, nodes, id!(View));
+            cx.apply_error_wrong_type_for_struct(live_error_origin!(), apply_from, start_index, nodes, id!(View));
             return nodes.skip_node(start_index);
         }
         cx.views[self.view_id].debug_id = nodes[start_index].id;
@@ -93,7 +93,7 @@ impl LiveApply for View {
                 id!(always_redraw) => cx.views[self.view_id].always_redraw = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
                 id!(layout) => cx.views[self.view_id].layout = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
                 _ => {
-                    cx.apply_error_no_matching_field(apply_from, index, nodes);
+                    cx.apply_error_no_matching_field(live_error_origin!(), apply_from, index, nodes);
                     index = nodes.skip_node(index);
                 }
             }

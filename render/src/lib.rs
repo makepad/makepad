@@ -66,7 +66,7 @@ mod drawcolor;
 mod events;
 mod menu; 
 mod geometry;
-mod drawshader;
+mod drawvars;
 mod shader_std;
 mod gpuinfo;
 
@@ -74,6 +74,8 @@ pub use {
     makepad_derive_live::*,
     makepad_microserde::*,
     makepad_live_compiler::{
+        live_error_origin,
+        LiveErrorOrigin,
         id,
         id_num,
         Mat4,
@@ -215,7 +217,7 @@ pub use {
         menu::{
             Menu
         },
-        drawshader::{
+        drawvars::{
             DrawShader,
             DrawVars
         },

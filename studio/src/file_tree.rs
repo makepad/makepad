@@ -19,9 +19,18 @@ live_register!{
         
         const color_even: vec4 = #25
         const color_odd: vec4 = #28
+        const color_selected: vec4 = #x11466E
         
         fn pixel(self) -> vec4 {
-            return mix(color_even, color_odd, self.is_even) + #3 * self.hover;
+            return mix(
+                mix(
+                    color_even,
+                    color_odd,
+                    self.is_even
+                ),
+                color_selected,
+                self.selected
+            ) + #3 * self.hover;
         }
     }
     
@@ -69,14 +78,26 @@ live_register!{
         
         default_state: {
             from: {all: Play::Forward {duration: 2.1}}
-            bg_quad: {hover: 0}
+            hover: 0.0,
+            bg_quad: {hover: (hover)}
         }
         
         hover_state: {
-            from: {
-                all: Play::Forward {duration: 0.1}
-            }
-            bg_quad: {hover: [{time: 0.0, value: 1.0}]}
+            from: {all: Play::Forward {duration: 0.1}}
+            hover: [{time: 0.0, value: 1.0}],
+            bg_quad: {hover: (hover)}
+        }
+        
+        selected_state: {
+            from: {all: Play::Forward {duration: 0.1}}
+            selected: [{time: 0.0, value: 1.0}],
+            bg_quad: {selected: (selected)}
+        }
+
+        unselected_state: {
+            from: {all: Play::Forward {duration: 2.1}}
+            selected: 0.0,
+            bg_quad: {selected: (selected)}
         }
         
         indent_width: 10.0
@@ -97,7 +118,7 @@ live_register!{
         folder_node: FileTreeNode {
             name_text: {color: #ff}
         }
-        test:(1.0+2.0)
+        test: (1.0 + 2.0)
         scroll_view: {
             view: {debug_id: file_tree_view}
         }
@@ -117,16 +138,19 @@ pub struct FileTreeNode {
     icon_quad: DrawColor,
     name_text: DrawText,
     layout: Layout,
-    #[track(hover=default_state)] animator: Animator,
+    #[track(hover = default_state, selected = unselected_state)] animator: Animator,
     
     file_node_height: f32,
     indent_width: f32,
     
     default_state: Option<LivePtr>,
     hover_state: Option<LivePtr>,
+    selected_state: Option<LivePtr>,
+    unselected_state: Option<LivePtr>,
     icon_walk: Walk,
     
     hover: f32,
+    selected: f32,
 }
 
 #[derive(Live, LiveHook)]
@@ -135,9 +159,15 @@ pub struct FileTree {
     file_node: Option<LivePtr>,
     folder_node: Option<LivePtr>,
     test: f32,
+    #[rust] last_selected: Option<FileNodeId>,
     #[rust] tree_nodes: HashMap<FileNodeId, FileTreeNode>,
     #[rust] count: usize,
     #[rust] stack: Vec<f32>,
+}
+
+pub enum FileTreeNodeAction {
+    None,
+    WasClicked,
 }
 
 impl FileTreeNode {
@@ -191,11 +221,16 @@ impl FileTreeNode {
         }
     }
     
+    fn unselect(&mut self, cx:&mut Cx){
+        self.animate_to(cx, id!(selected), self.unselected_state.unwrap());
+    }
+    
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
         event: &mut Event,
-    ) {
+        dispatch_action: &mut dyn FnMut(&mut Cx, FileTreeNodeAction),
+    ){
         self.handle_animation(cx, event);
         match event.hits(cx, self.bg_quad.draw_vars.area, HitOpt::default()) {
             Event::FingerHover(event) => {
@@ -203,6 +238,7 @@ impl FileTreeNode {
                 match event.hover_state {
                     HoverState::In => {
                         self.animate_to(cx, id!(hover), self.hover_state.unwrap());
+                        //println!("{}", self.animator.state.as_ref().unwrap().to_string(0,100));
                     }
                     HoverState::Out => {
                         self.animate_to(cx, id!(hover), self.default_state.unwrap());
@@ -211,21 +247,22 @@ impl FileTreeNode {
                     _ => {}
                 }
             }
-            Event::FingerMove(event) => {
+            Event::FingerMove(_event) => {
                 //if self.dragging_node_id.is_none()
                 //    && event.abs.distance(&event.abs_start) >= MIN_DRAG_DISTANCE
-               // {
-               //     dispatch_action(TreeAction::NodeShouldStartDragging(*node_id));
-               // }
+                // {
+                //     dispatch_action(TreeAction::NodeShouldStartDragging(*node_id));
+                // }
             }
-            Event::FingerUp(event) => {
+            Event::FingerDown(_event) => {
+                self.animate_to(cx, id!(selected), self.selected_state.unwrap());
+                dispatch_action(cx, FileTreeNodeAction::WasClicked);
                 //if area.get_rect(cx).contains(event.abs_start) {
                 //    dispatch_action(TreeAction::NodeWasClicked(*node_id));
                 //}
             }
             _ => {}
         }
-        
     }
 }
 
@@ -361,8 +398,17 @@ impl FileTree {
             self.scroll_view.redraw(cx);
         }
         
-        for (_key, node) in &mut self.tree_nodes {
-            node.handle_event(cx, event);
+        let mut actions = Vec::new();
+        for (key, node) in &mut self.tree_nodes {
+            node.handle_event(cx, event, &mut |_,e| actions.push((*key,e)));
+        }
+        for (key,action) in actions{
+            if let FileTreeNodeAction::WasClicked = action{
+                if let Some(last_selected) = self.last_selected{
+                    self.tree_nodes.get_mut(&last_selected).unwrap().unselect(cx);
+                }
+                self.last_selected = Some(key);
+            }
         }
         /*
         let mut actions = Vec::new();

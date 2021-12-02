@@ -36,7 +36,7 @@ pub fn live_eval(cx: &mut Cx, start: usize, apply_from: ApplyFrom, index: &mut u
         }
         LiveValue::Id(id) => { // look it up from start on up
             *index += 1;
-            if let Some(index) = nodes.scope_up_by_name(start, *id) {
+            if let Some(index) = nodes.scope_up_down_by_name(start, *id) {
                 // found ok now what. it depends on the type of the thing here
                 return match &nodes[index].value {
                     LiveValue::Float(val) => LiveEval::Float(*val),
@@ -45,14 +45,30 @@ pub fn live_eval(cx: &mut Cx, start: usize, apply_from: ApplyFrom, index: &mut u
                     LiveValue::Expr => {
                         LiveEval::Void
                     }
+                    LiveValue::Array=>{// got an animation track. select the last value
+                        if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
+                            match &nodes[index].value {
+                                LiveValue::Float(val) => LiveEval::Float(*val),
+                                LiveValue::Int(val) => LiveEval::Int(*val),
+                                LiveValue::Bool(val) => LiveEval::Bool(*val),
+                                _=>{
+
+                                    LiveEval::Void
+                                }
+                            }
+                        }
+                        else{
+                            LiveEval::Void
+                        }
+                    },
                     _ => {
-                        cx.apply_error_wrong_value_in_expression(apply_from, index, nodes, "Id");
+                        cx.apply_error_wrong_value_in_expression(live_error_origin!(), apply_from, index, nodes, "Id");
                         LiveEval::Void
                     }
                 }
             }
             else{
-                cx.apply_error_cant_find_target(apply_from, *index, nodes, *id);
+                cx.apply_error_cant_find_target(live_error_origin!(), apply_from, *index, nodes, *id);
                 LiveEval::Void
             }
         },
@@ -71,7 +87,7 @@ pub fn live_eval(cx: &mut Cx, start: usize, apply_from: ApplyFrom, index: &mut u
                 }
             };
             if let LiveEval::Void = ret {
-                cx.apply_error_unop_undefined_in_expression(apply_from, *index, nodes, *op, a);
+                cx.apply_error_unop_undefined_in_expression(live_error_origin!(), apply_from, *index, nodes, *op, a);
             }
             ret
         }
@@ -80,7 +96,7 @@ pub fn live_eval(cx: &mut Cx, start: usize, apply_from: ApplyFrom, index: &mut u
             for _ in 0..*args{
                 live_eval(cx, start, apply_from, index, nodes);
             }
-            cx.apply_error_expression_call_not_implemented(apply_from, *index, nodes, *ident, *args);
+            cx.apply_error_expression_call_not_implemented(live_error_origin!(), apply_from, *index, nodes, *ident, *args);
             LiveEval::Void
         }
         LiveValue::ExprBinOp(op) => {
@@ -242,12 +258,12 @@ pub fn live_eval(cx: &mut Cx, start: usize, apply_from: ApplyFrom, index: &mut u
                 },
             };
             if let LiveEval::Void = ret {
-                cx.apply_error_binop_undefined_in_expression(apply_from, *index, nodes, *op, a, b);
+                cx.apply_error_binop_undefined_in_expression(live_error_origin!(), apply_from, *index, nodes, *op, a, b);
             }
             ret
         }
         _ => {
-            cx.apply_error_wrong_value_in_expression(apply_from, *index, nodes, "f32");
+            cx.apply_error_wrong_value_in_expression(live_error_origin!(), apply_from, *index, nodes, "f32");
             *index = nodes.skip_node(*index);
             LiveEval::Void
         }
