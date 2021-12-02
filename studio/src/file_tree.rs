@@ -14,8 +14,10 @@ live_register!{
     use makepad_render::shader_std::*;
     
     DrawNodeBg: {{DrawNodeBg}} {
+        instance is_folder: float = 0.0
         instance selected: float = 0.0
         instance hover: float = 0.0
+        instance opened: float = 0.0
         
         const color_even: vec4 = #25
         const color_odd: vec4 = #28
@@ -51,6 +53,19 @@ live_register!{
         }
         
         name_text: {
+            instance selected: float = 0.0
+            instance hover: float = 0.0
+            instance opened: float = 0.0
+            instance is_folder: float = 0.0
+            
+            const color_file: vec4 = #9d
+            const color_folder: vec4 = #ff
+            
+            fn get_color(self)->vec4{
+              //  return self.color
+                return mix(color_file, color_folder, self.is_folder);//mix(1.0,self.opened,self.is_folder))
+            }
+            
             text_style: {
                 top_drop: 1.3,
             }
@@ -59,7 +74,7 @@ live_register!{
         layout: {
             walk: {
                 width: Width::Filled,
-                height: Height::Fixed(10.0),
+                height: Height::Fixed(0.0),
             },
             align: {fx: 0.0, fy: 0.5},
             padding: {l: 5.0, t: 0.0, r: 0.0, b: 1.0,},
@@ -80,6 +95,7 @@ live_register!{
             from: {all: Play::Forward {duration: 2.1}}
             hover: 0.0,
             bg_quad: {hover: (hover)}
+            name_text: {hover: (hover)}
         }
         
         hover_state: {
@@ -90,6 +106,7 @@ live_register!{
             from: {all: Play::Forward {duration: 0.1}}
             selected: 0.0,
             bg_quad: {selected: (selected)}
+            name_text: {selected: (selected)}
         }
         
         selected_state: {
@@ -100,6 +117,8 @@ live_register!{
         closed_state: {
             from: {all: Play::Forward {duration: 0.3, redraw: true}}
             opened: [{value: 0.0, ease: Ease::OutExp}],
+            bg_quad: {opened: (opened)}
+            name_text: {opened: (opened)}
         }
         
         opened_state: {
@@ -107,6 +126,7 @@ live_register!{
             opened: [{value: 1.0, ease: Ease::OutExp}],
         }
         
+        opened: 1.0
         indent_width: 10.0
         file_node_height: 20.0
     }
@@ -114,11 +134,13 @@ live_register!{
     FileTree: {{FileTree}} {
         file_node: FileTreeNode {
             is_folder: false,
-            name_text: {color: #9d}
+            bg_quad:{is_folder:0.0}
+            name_text: {is_folder:0.0}
         }
         folder_node: FileTreeNode {
             is_folder: true,
-            name_text: {color: #ff}
+            bg_quad:{is_folder:1.0}
+            name_text: {is_folder:1.0}
         }
         test: (1.0 + 2.0)
         scroll_view: {
@@ -338,7 +360,7 @@ impl FileTree {
         
         let tree_node = match self.tree_nodes.entry(node_id) {
             Entry::Occupied(o) => o.into_mut(),
-            Entry::Vacant(v) => v.insert(FileTreeNode::new_from_ptr(cx, self.folder_node.unwrap()))
+            Entry::Vacant(v) => v.insert(FileTreeNode::new_from_ptr_debug(cx, self.folder_node.unwrap()))
         };
         
         tree_node.draw_folder(cx, name, self.count % 2 == 1, &self.stack);
