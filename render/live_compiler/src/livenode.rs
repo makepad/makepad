@@ -62,7 +62,7 @@ pub enum LiveValue {
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Copy, Hash)]
 pub struct LiveType(pub core::any::TypeId);
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub enum LiveTypeKind {
     Class, 
     Enum,
@@ -71,7 +71,7 @@ pub enum LiveTypeKind {
     DrawVars,
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct LiveTypeInfo {
     pub live_type: LiveType,
     pub type_name: LiveId,
@@ -80,14 +80,14 @@ pub struct LiveTypeInfo {
     pub fields: Vec<LiveTypeField>
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct LiveTypeField {
     pub id: LiveId,
     pub live_type_info: LiveTypeInfo,
     pub live_field_kind: LiveFieldKind
 }
 
-#[derive(Copy, Clone)]
+#[derive(Copy, Clone, Debug)]
 pub enum LiveFieldKind {
     Calc,
     Live,

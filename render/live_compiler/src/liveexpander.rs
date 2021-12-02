@@ -1,10 +1,10 @@
-use{
+use {
     std::fmt,
     makepad_id_macros::*,
     crate::{
         liveid::{LiveId, LiveFileId, LivePtr},
         liveerror::{LiveError, LiveErrorOrigin},
-        livedocument::{LiveDocument,LiveScopeTarget, LiveScopeItem},
+        livedocument::{LiveDocument, LiveScopeTarget, LiveScopeItem},
         livenode::{LiveValue, LiveTypeKind},
         livenodevec::{LiveNodeSlice, LiveNodeVec},
         liveregistry::LiveRegistry
@@ -28,7 +28,7 @@ impl fmt::Debug for ScopeStack {
 }
 
 impl ScopeStack {
-
+    
     fn find_item(&self, id: LiveId) -> Option<LiveScopeTarget> {
         for items in self.stack.iter().rev() {
             for item in items.iter().rev() {
@@ -70,6 +70,22 @@ impl<'a> LiveExpander<'a> {
         (scope_start, out_doc.scopes.len() - scope_start)
     }
     
+    pub fn shift_scopes(&self, out_doc: &mut LiveDocument, after_point: usize, old_size: usize, new_size: usize) {
+        
+        for item in &mut out_doc.scopes {
+            if let LiveScopeTarget::LocalPtr(local_ptr) = &mut item.target {
+                if *local_ptr > after_point {
+                    if old_size > new_size {
+                        *local_ptr -= old_size - new_size;
+                    }
+                    else if old_size < new_size {
+                        *local_ptr += new_size - old_size;
+                    }
+                }
+            }
+        }
+    }
+    
     pub fn expand(&mut self, in_doc: &LiveDocument, out_doc: &mut LiveDocument) {
         out_doc.nodes.push(in_doc.nodes[0].clone());
         let mut current_parent = vec![0usize];
@@ -96,30 +112,30 @@ impl<'a> LiveExpander<'a> {
                     in_index += 1;
                     continue;
                 }
-                LiveValue::Use(module_path)=> {
+                LiveValue::Use(module_path) => {
                     let object_id = in_node.id;
                     // add items to the scope
-                    if let Some(file_id) = self.live_registry.module_id_to_file_id.get(&module_path){
+                    if let Some(file_id) = self.live_registry.module_id_to_file_id.get(&module_path) {
                         // ok now find object_id and get us a pointer
                         let other_doc = &self.live_registry.expanded[file_id.to_index()];
-
+                        
                         let mut node_iter = other_doc.nodes.first_child(0);
                         let mut items_added = 0;
-                        while let Some(node_index) = node_iter{
+                        while let Some(node_index) = node_iter {
                             let node = &other_doc.nodes[node_index];
-                            if !node.id.is_empty() && (object_id.is_empty() || object_id == node.id){
+                            if !node.id.is_empty() && (object_id.is_empty() || object_id == node.id) {
                                 self.scope_stack.stack.last_mut().unwrap().push(LiveScopeItem {
                                     id: node.id,
-                                    target: LiveScopeTarget::LivePtr(LivePtr{file_id:*file_id, index:node_index as u32})
+                                    target: LiveScopeTarget::LivePtr(LivePtr {file_id: *file_id, index: node_index as u32})
                                 });
                                 items_added += 1;
-                                if !object_id.is_empty(){
+                                if !object_id.is_empty() {
                                     break
                                 }
                             }
                             node_iter = other_doc.nodes.next_child(node_index);
                         }
-                        if items_added == 0{
+                        if items_added == 0 {
                             self.errors.push(LiveError {
                                 origin: live_error_origin!(),
                                 span: in_doc.token_id_to_span(in_node.token_id.unwrap()),
@@ -140,10 +156,15 @@ impl<'a> LiveExpander<'a> {
                 Ok(overwrite) => {
                     let out_value = &out_doc.nodes[overwrite].value;
                     
-                    if in_value.is_expr() && out_value.is_expr() || in_value.is_expr() && out_value.is_value_type(){
+                    if in_value.is_expr() && out_value.is_expr() || in_value.is_expr() && out_value.is_value_type() {
                         // replace range
                         let next_index = out_doc.nodes.skip_node(overwrite);
+                        
+                        // POTENTIAL SHIFT
+                        let old_len = out_doc.nodes.len();
                         out_doc.nodes.splice(overwrite..next_index, in_doc.nodes.node_slice(in_index).iter().cloned());
+                        self.shift_scopes(out_doc, overwrite, old_len, out_doc.nodes.len());
+                        
                         in_index = in_doc.nodes.skip_node(in_index);
                         continue;
                     }
@@ -155,7 +176,11 @@ impl<'a> LiveExpander<'a> {
                             LiveValue::Clone {..} => {
                                 let next_index = out_doc.nodes.next_child(overwrite).unwrap();
                                 out_doc.nodes[overwrite] = in_node.clone();
+                                // POTENTIAL SHIFT
+                                let old_len = out_doc.nodes.len();
                                 out_doc.nodes.drain(overwrite + 1..next_index - 1);
+                                self.shift_scopes(out_doc, overwrite, old_len, out_doc.nodes.len());
+                                
                                 level_overwrite.push(true);
                             },
                             LiveValue::Object => {
@@ -174,7 +199,11 @@ impl<'a> LiveExpander<'a> {
                             if out_value.is_open() {
                                 let next_index = out_doc.nodes.next_child(overwrite).unwrap();
                                 out_doc.nodes[overwrite] = in_node.clone();
+                                // POTENTIAL SHIFT
+                                let old_len = out_doc.nodes.len();
                                 out_doc.nodes.drain(overwrite + 1..next_index - 1);
+                                self.shift_scopes(out_doc, overwrite, old_len, out_doc.nodes.len());
+                                
                                 level_overwrite.push(true);
                             }
                             else { // in is a tree, out isnt
@@ -185,7 +214,11 @@ impl<'a> LiveExpander<'a> {
                         else if out_value.is_open() { // out is a tree remove incl close
                             let next_index = out_doc.nodes.next_child(overwrite).unwrap();
                             out_doc.nodes[overwrite] = in_node.clone();
+                            // POTENTIAL SHIFT
+                            let old_len = out_doc.nodes.len();
                             out_doc.nodes.drain(overwrite + 1..next_index);
+                            self.shift_scopes(out_doc, overwrite, old_len, out_doc.nodes.len());
+
                         }
                         else {
                             panic!()
@@ -204,18 +237,21 @@ impl<'a> LiveExpander<'a> {
                         level_overwrite.push(true);
                         overwrite
                     }
-                    else if out_value.is_dsl() && in_value.is_value_type(){ // this is allowed
+                    else if out_value.is_dsl() && in_value.is_value_type() { // this is allowed
                         // see if we have a node after to overwrite
-                        if let Some(overwrite) = out_doc.nodes.next_child_by_name(overwrite+1, in_node.id){
+                        if let Some(overwrite) = out_doc.nodes.next_child_by_name(overwrite + 1, in_node.id) {
                             out_doc.nodes[overwrite] = in_node.clone();
                             overwrite
                         }
-                        else{
-                            out_doc.nodes.insert(overwrite+1, in_node.clone());
+                        else {
+                            // POTENTIAL SHIFT
+                            let old_len = out_doc.nodes.len();
+                            out_doc.nodes.insert(overwrite + 1, in_node.clone());
+                            self.shift_scopes(out_doc, overwrite, old_len, out_doc.nodes.len());
                             overwrite + 1
                         }
                     }
-                    else{
+                    else {
                         self.errors.push(LiveError {
                             origin: live_error_origin!(),
                             span: in_doc.token_id_to_span(in_node.token_id.unwrap()),
@@ -227,14 +263,20 @@ impl<'a> LiveExpander<'a> {
                 }
                 Err(insert_point) => {
                     // ok so. if we are inserting an expression, just do the whole thing in one go.
-                    if in_node.value.is_expr(){
+                    if in_node.value.is_expr() {
                         // splice it in
+                        let old_len = out_doc.nodes.len();
                         out_doc.nodes.splice(insert_point..insert_point, in_doc.nodes.node_slice(in_index).iter().cloned());
+                        self.shift_scopes(out_doc, insert_point - 1, old_len, out_doc.nodes.len());
+                        
                         in_index = in_doc.nodes.skip_node(in_index);
                         continue;
                     }
                     
                     out_doc.nodes.insert(insert_point, in_node.clone());
+                    
+                    self.shift_scopes(out_doc, insert_point - 1, 0, 1);
+                    
                     if in_node.value.is_open() {
                         level_overwrite.push(false);
                     }
@@ -242,6 +284,7 @@ impl<'a> LiveExpander<'a> {
                 }
             };
             
+            // these are unstable
             self.scope_stack.stack.last_mut().unwrap().push(LiveScopeItem {
                 id: in_node.id,
                 target: LiveScopeTarget::LocalPtr(out_index)
@@ -253,26 +296,32 @@ impl<'a> LiveExpander<'a> {
                     if let Some(target) = self.scope_stack.find_item(*clone) {
                         match target {
                             LiveScopeTarget::LocalPtr(local_ptr) => {
-                                if out_doc.nodes.insert_children_from_self(local_ptr, Some(out_index + 1)){
+                                let old_len = out_doc.nodes.len();
+                                if out_doc.nodes.insert_children_from_self(local_ptr, Some(out_index + 1)) {
                                     self.errors.push(LiveError {
                                         origin: live_error_origin!(),
                                         span: in_doc.token_id_to_span(in_node.token_id.unwrap()),
                                         message: format!("Infinite recursion at {}", in_node.id)
-                                    }); 
+                                    });
                                 }
+                                // SHIFT POINT
+                                self.shift_scopes(out_doc, out_index, old_len, out_doc.nodes.len());
                                 // clone the value and store a parent pointer
                                 out_doc.nodes[out_index].value = out_doc.nodes[local_ptr].value.clone();
-                                if let LiveValue::Class{class_parent,..} = &mut out_doc.nodes[out_index].value{
-                                    *class_parent = Some(LivePtr{file_id: self.in_file_id, index:out_index as u32});
+                                if let LiveValue::Class {class_parent, ..} = &mut out_doc.nodes[out_index].value {
+                                    *class_parent = Some(LivePtr {file_id: self.in_file_id, index: out_index as u32});
                                 }
                             }
                             LiveScopeTarget::LivePtr(live_ptr) => {
                                 let doc = &self.live_registry.expanded[live_ptr.file_id.to_index()];
+                                let old_len = out_doc.nodes.len();
                                 out_doc.nodes.insert_children_from_other(live_ptr.node_index(), Some(out_index + 1), &doc.nodes);
+                                // SHIFT POINT
+                                self.shift_scopes(out_doc, out_index, old_len, out_doc.nodes.len());
                                 // store the parent pointer
                                 out_doc.nodes[out_index].value = doc.nodes[live_ptr.node_index()].value.clone();
-                                if let LiveValue::Class{class_parent,..} = &mut out_doc.nodes[out_index].value{
-                                    *class_parent = Some(LivePtr{file_id: self.in_file_id, index:out_index as u32});
+                                if let LiveValue::Class {class_parent, ..} = &mut out_doc.nodes[out_index].value {
+                                    *class_parent = Some(LivePtr {file_id: self.in_file_id, index: out_index as u32});
                                 }
                             }
                         };
@@ -281,70 +330,79 @@ impl<'a> LiveExpander<'a> {
                     }
                     self.scope_stack.stack.push(Vec::new());
                     current_parent.push(out_index);
-                }, 
-                LiveValue::Class{live_type,..}=>{
+                },
+                LiveValue::Class {live_type, ..} => {
                     // store the class context
-                    if let LiveValue::Class{class_parent,..} = &mut out_doc.nodes[out_index].value{
-                        *class_parent = Some(LivePtr{file_id: self.in_file_id, index:out_index as u32});
+                    if let LiveValue::Class {class_parent, ..} = &mut out_doc.nodes[out_index].value {
+                        *class_parent = Some(LivePtr {file_id: self.in_file_id, index: out_index as u32});
                     }
                     
-
+                    
                     let mut insert_point = out_index + 1;
                     
                     // if we have a deref_target lets traverse all the way up
                     let mut live_type_info = self.live_registry.live_type_infos.get(live_type).unwrap();
                     
                     let mut has_deref_hop = false;
-                    while let Some(field) = live_type_info.fields.iter().find(|f| f.id == id!(deref_target)){
+                    while let Some(field) = live_type_info.fields.iter().find( | f | f.id == id!(deref_target)) {
                         has_deref_hop = true;
                         live_type_info = &field.live_type_info;
                     }
-                    if has_deref_hop{
+                    if has_deref_hop {
                         // ok so we need the lti of the deref hop and clone all children
                         if let Some(file_id) = self.live_registry.module_id_to_file_id.get(&live_type_info.module_id) {
                             let doc = &self.live_registry.expanded[file_id.to_index()];
-                            if let Some(index) = doc.nodes.child_by_name(0, live_type_info.type_name){
+                            if let Some(index) = doc.nodes.child_by_name(0, live_type_info.type_name) {
+                                let old_len = out_doc.nodes.len();
                                 out_doc.nodes.insert_children_from_other(index, Some(out_index + 1), &doc.nodes);
+                                // SHIFT POINT
+                                self.shift_scopes(out_doc, out_index, old_len, out_doc.nodes.len());
                             }
                         }
                     }
-                    else{
-                        for field in &live_type_info.fields{
-                            let lti = &field.live_type_info; 
+                    else {
+                        for field in &live_type_info.fields {
+                            let lti = &field.live_type_info;
                             if let Some(file_id) = self.live_registry.module_id_to_file_id.get(&lti.module_id) {
-                                if *file_id == self.in_file_id{ // clone on self
-                                    if let Some(index) = out_doc.nodes.child_by_name(0, lti.type_name){
+                                if *file_id == self.in_file_id { // clone on self
+                                    if let Some(index) = out_doc.nodes.child_by_name(0, lti.type_name) {
                                         let node_insert_point = insert_point;
+                                        let old_len = out_doc.nodes.len();
                                         insert_point = out_doc.nodes.insert_node_from_self(index, Some(insert_point));
+                                        self.shift_scopes(out_doc, node_insert_point - 1, old_len, out_doc.nodes.len());
+                                        // SHIFT POINT
                                         out_doc.nodes[node_insert_point].id = field.id;
                                     }
-                                    else if let LiveTypeKind::Class = lti.kind{
+                                    else if let LiveTypeKind::Class = lti.kind {
                                         self.errors.push(LiveError {
                                             origin: live_error_origin!(),
                                             span: in_doc.token_id_to_span(in_node.token_id.unwrap()),
                                             message: format!("Cannot find class {}, make sure its defined before its used", lti.type_name)
-                                        }); 
+                                        });
                                     }
                                 }
-                                else{
+                                else {
                                     let other_nodes = &self.live_registry.expanded[file_id.to_index()].nodes;
-                                    if other_nodes.len() == 0{
+                                    if other_nodes.len() == 0 {
                                         panic!("Dependency order wrong, someday i'll learn to program. {} {} {}", file_id.0, self.in_file_id.0, lti.type_name);
                                     }
-                                    if let Some(index) = other_nodes.child_by_name(0, lti.type_name){
+                                    if let Some(index) = other_nodes.child_by_name(0, lti.type_name) {
                                         let node_insert_point = insert_point;
+                                        let old_len = out_doc.nodes.len();
                                         insert_point = out_doc.nodes.insert_node_from_other(index, Some(insert_point), other_nodes);
+                                        self.shift_scopes(out_doc, node_insert_point - 1, old_len, out_doc.nodes.len());
+                                        // SHIFT POINT
                                         out_doc.nodes[node_insert_point].id = field.id;
                                     }
                                 }
                             }
                         }
                     }
-
+                    
                     self.scope_stack.stack.push(Vec::new());
                     current_parent.push(out_index);
                 }
-                LiveValue::Expr=>{
+                LiveValue::Expr => {
                     panic!()
                 },
                 LiveValue::Array |
