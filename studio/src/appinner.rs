@@ -2,12 +2,15 @@ use {
     crate::{
         appio::AppIO,
         appstate::{PanelKind, TabKind, AppState, SplitPanel, TabPanel, Panel, Tab},
-        code_editor::{CodeEditor},
-        code_editor_state::{SessionId},
+        code_editor::{
+            code_editor::{CodeEditor},
+            code_editor_state::{SessionId},
+            protocol,
+            protocol::{Notification, Request, Response, ResponseOrNotification},
+        },
         dock::{Dock, DockAction, DragPosition, PanelId},
         file_tree::{FileTreeAction, FileNodeId, FileTree},
         splitter::{SplitterAlign},
-        protocol::{self, Notification, Request, Response, ResponseOrNotification},
         tab_bar::TabId,
     },
     makepad_render::*,

@@ -1,7 +1,9 @@
 use {
     crate::{
-        delta::{Delta, OperationSpan},
-        size::Size,
+        code_editor::{
+            delta::{Delta, OperationSpan},
+            size::Size,
+        }
     },
     std::{
         cmp::Ordering,

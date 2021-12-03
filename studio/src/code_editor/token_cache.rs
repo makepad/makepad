@@ -1,9 +1,11 @@
 use {
     crate::{
-        delta::{Delta, OperationRange},
-        text::Text,
-        token::Token,
-        tokenizer::{Cursor, State},
+        code_editor::{
+            delta::{Delta, OperationRange},
+            text::Text,
+            token::Token,
+            tokenizer::{Cursor, State},
+        }
     },
     std::{iter, slice},
 };
