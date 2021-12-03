@@ -174,9 +174,9 @@ impl Dock {
         panel.tab_bar.selected_tab_id()
     }
     
-    pub fn set_selected_tab_id(&mut self, cx: &mut Cx, panel_id: PanelId, tab_id: Option<TabId>) {
+    pub fn set_selected_tab_id(&mut self, cx: &mut Cx, panel_id: PanelId, tab_id: Option<TabId>, should_animate:bool) {
         let panel = self.get_or_create_tab_panel(cx, panel_id);
-        panel.tab_bar.set_selected_tab_id(cx, tab_id);
+        panel.tab_bar.set_selected_tab_id(cx, tab_id, should_animate);
     }
     
     pub fn redraw(&mut self, cx: &mut Cx) {
