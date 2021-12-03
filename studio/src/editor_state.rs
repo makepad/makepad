@@ -12,6 +12,9 @@ use {
             text::Text,
             token_cache::TokenCache,
         },
+        design_editor::{
+            design_editor::DesignEditorViewId
+        },
         genid::GenId,
         genid_allocator::GenIdAllocator,
         genid_map::GenIdMap,
@@ -24,7 +27,7 @@ use {
 };
 
 #[derive(Default)]
-pub struct CodeEditorState {
+pub struct EditorState {
     pub session_id_allocator: GenIdAllocator,
     pub sessions_by_session_id: GenIdMap<SessionId, Session>,
     pub document_id_allocator: GenIdAllocator,
@@ -34,9 +37,9 @@ pub struct CodeEditorState {
     pub outstanding_document_id_queue: VecDeque<DocumentId>,
 }
 
-impl CodeEditorState {
-    pub fn new() -> CodeEditorState {
-        CodeEditorState::default()
+impl EditorState {
+    pub fn new() -> EditorState {
+        EditorState::default()
     }
 
     pub fn create_session(
@@ -47,7 +50,7 @@ impl CodeEditorState {
         let document_id = self.get_or_create_document(path, send_request);
         let session_id = SessionId(self.session_id_allocator.allocate());
         let session = Session {
-            view_id: None,
+            session_view: None,
             cursors: CursorSet::new(),
             selections: RangeSet::new(),
             carets: PositionSet::new(),
@@ -447,8 +450,13 @@ impl AsRef<GenId> for SessionId {
     }
 }
 
+pub enum SessionView{
+    CodeEditor(CodeEditorViewId),
+    DesignEditor(DesignEditorViewId)
+}
+
 pub struct Session {
-    pub view_id: Option<CodeEditorViewId>,
+    pub session_view: Option<SessionView>,
     pub cursors: CursorSet,
     pub selections: RangeSet,
     pub carets: PositionSet,
