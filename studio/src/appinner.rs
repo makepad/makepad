@@ -2,9 +2,9 @@ use {
     crate::{
         appio::AppIO,
         appstate::{PanelKind, TabKind, AppState, SplitPanel, TabPanel, Panel, Tab},
+        editor_state::{SessionId},
         code_editor::{
-            code_editor::{CodeEditor},
-            code_editor_state::{SessionId},
+            code_editor::{CodeEditors},
             protocol,
             protocol::{Notification, Request, Response, ResponseOrNotification},
         },
@@ -33,7 +33,7 @@ pub struct AppInner {
     window: DesktopWindow,
     dock: Dock,
     file_tree: FileTree,
-    code_editor: CodeEditor,
+    code_editors: CodeEditors,
     
     #[rust(AppIO::new(cx))] io: AppIO
 }
@@ -82,9 +82,9 @@ impl AppInner {
                         }
                         TabKind::CodeEditor {..} => {
                             let panel = state.panels_by_panel_id[panel_id].as_tab_panel();
-                            self.code_editor.draw(
+                            self.code_editors.draw(
                                 cx,
-                                &state.code_editor_state,
+                                &state.editor_state,
                                 panel.code_editor_view_id.unwrap(),
                             );
                         }
@@ -159,14 +159,14 @@ impl AppInner {
                                 .unwrap()
                                 .as_tab_panel_mut();
                             if let Some(code_editor_view_id) = panel.code_editor_view_id {
-                                self.code_editor.set_view_session_id(
+                                self.code_editors.set_view_session_id(
                                     cx,
-                                    &mut state.code_editor_state,
+                                    &mut state.editor_state,
                                     code_editor_view_id,
                                     None,
                                 );
                             }
-                            state.code_editor_state.destroy_session(session_id, &mut {
+                            state.editor_state.destroy_session(session_id, &mut {
                                 let request_sender = &self.io.request_sender;
                                 move | request | request_sender.send(request).unwrap()
                             });
@@ -244,9 +244,9 @@ impl AppInner {
                     ..
                 }) => {
                     if let Some(code_editor_view_id) = code_editor_view_id {
-                        self.code_editor.handle_event(
+                        self.code_editors.handle_event(
                             cx,
-                            &mut state.code_editor_state,
+                            &mut state.editor_state,
                             *code_editor_view_id,
                             event,
                             &mut {
@@ -289,7 +289,7 @@ impl AppInner {
                 self.select_tab(cx, state, state.side_bar_panel_id, state.file_tree_tab_id);
             }
             response => {
-                self.code_editor.handle_response(cx, &mut state.code_editor_state, response, &mut {
+                self.code_editors.handle_response(cx, &mut state.editor_state, response, &mut {
                     let request_sender = &self.io.request_sender;
                     move | request | request_sender.send(request).unwrap()
                 })
@@ -300,8 +300,8 @@ impl AppInner {
     fn handle_notification(&mut self, cx: &mut Cx, state: &mut AppState, notification: Notification) {
         match notification {
             notification => {
-                self.code_editor
-                    .handle_notification(cx, &mut state.code_editor_state, notification)
+                self.code_editors
+                    .handle_notification(cx, &mut state.editor_state, notification)
             }
         }
     }
@@ -395,7 +395,7 @@ impl AppInner {
     ) {
         let tab_id = TabId(state.tab_id_allocator.allocate());
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        let session_id = state.code_editor_state.create_session(path, &mut {
+        let session_id = state.editor_state.create_session(path, &mut {
             let request_sender = &self.io.request_sender;
             move | request | request_sender.send(request).unwrap()
         });
@@ -453,17 +453,17 @@ impl AppInner {
             .as_tab_panel_mut();
         match panel.code_editor_view_id {
             Some(view_id) => {
-                self.code_editor.set_view_session_id(
+                self.code_editors.set_view_session_id(
                     cx,
-                    &mut state.code_editor_state,
+                    &mut state.editor_state,
                     view_id,
                     Some(session_id),
                 );
             }
             None => {
-                panel.code_editor_view_id = Some(self.code_editor.create_view(
+                panel.code_editor_view_id = Some(self.code_editors.create_view(
                     cx,
-                    &mut state.code_editor_state,
+                    &mut state.editor_state,
                     Some(session_id),
                 ));
             }
@@ -484,7 +484,7 @@ impl AppInner {
             PanelKind::Tab(panel) => {
                 self.dock.redraw_tab_bar(cx, panel_id);
                 if let Some(code_editor_view_id) = panel.code_editor_view_id {
-                    self.code_editor.redraw_view(cx, code_editor_view_id);
+                    self.code_editors.redraw_view(cx, code_editor_view_id);
                 }
             }
         }

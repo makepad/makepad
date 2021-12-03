@@ -1,8 +1,8 @@
 use {
     crate::{
+        editor_state::{EditorState, SessionId},
         code_editor::{
             code_editor::{CodeEditorViewId},
-            code_editor_state::{CodeEditorState, SessionId},
             protocol,
         },
         dock::{PanelId},
@@ -33,7 +33,7 @@ pub struct AppState {
     pub file_nodes_by_file_node_id: GenIdMap<FileNodeId, FileNode>,
     pub path: PathBuf,
     pub root_file_node_id: FileNodeId,
-    pub code_editor_state: CodeEditorState,
+    pub editor_state: EditorState,
 }
 
 impl AppState {
@@ -116,7 +116,7 @@ impl AppState {
             file_nodes_by_file_node_id,
             path: PathBuf::new(),
             root_file_node_id,
-            code_editor_state: CodeEditorState::new(),
+            editor_state: EditorState::new(),
         }
     }
     
