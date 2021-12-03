@@ -1,6 +1,19 @@
 use {
-    crate::{position::Position, range::Range, size::Size, text::Text},
-    std::{cmp::Ordering, mem, ops::Deref, slice::Iter, vec::IntoIter},
+    crate::{
+        code_editor::{
+            position::Position,
+            range::Range,
+            size::Size,
+            text::Text
+        }
+    },
+    std::{
+        cmp::Ordering,
+        mem,
+        ops::Deref,
+        slice::Iter,
+        vec::IntoIter
+    },
     makepad_microserde::{SerBin, DeBin}
 };
 
@@ -13,14 +26,14 @@ impl Delta {
     pub fn identity() -> Delta {
         Delta::default()
     }
-
+    
     pub fn operation_ranges(&self) -> OperationRanges<'_> {
         OperationRanges {
             position: Position::origin(),
             iter: self.operations.iter(),
         }
     }
-
+    
     pub fn invert(self, text: &Text) -> Delta {
         let mut builder = Builder::new();
         let mut position = Position::origin();
@@ -45,7 +58,7 @@ impl Delta {
         }
         builder.build()
     }
-
+    
     pub fn compose(self, other: Delta) -> Delta {
         let mut builder = Builder::new();
         let mut operation_iter_0 = self.operations.into_iter();
@@ -164,7 +177,7 @@ impl Delta {
         }
         builder.build()
     }
-
+    
     pub fn transform(self, other: Delta) -> (Delta, Delta) {
         let mut builder_0 = Builder::new();
         let mut builder_1 = Builder::new();
@@ -294,7 +307,7 @@ impl Delta {
 
 impl Deref for Delta {
     type Target = [Operation];
-
+    
     fn deref(&self) -> &Self::Target {
         &self.operations
     }
@@ -303,7 +316,7 @@ impl Deref for Delta {
 impl<'a> IntoIterator for &'a Delta {
     type Item = &'a Operation;
     type IntoIter = Iter<'a, Operation>;
-
+    
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
     }
@@ -312,7 +325,7 @@ impl<'a> IntoIterator for &'a Delta {
 impl IntoIterator for Delta {
     type Item = Operation;
     type IntoIter = IntoIter<Operation>;
-
+    
     fn into_iter(self) -> Self::IntoIter {
         self.operations.into_iter()
     }
@@ -325,10 +338,10 @@ pub struct OperationRanges<'a> {
 
 impl<'a> Iterator for OperationRanges<'a> {
     type Item = OperationRange;
-
+    
     fn next(&mut self) -> Option<OperationRange> {
         loop {
-            match self.iter.next()?.span() {
+            match self.iter.next() ? .span() {
                 OperationSpan::Retain(count) => {
                     self.position += count;
                 }
@@ -366,7 +379,7 @@ impl Builder {
     pub fn new() -> Builder {
         Builder::default()
     }
-
+    
     pub fn retain(&mut self, count: Size) {
         if count.is_zero() {
             return;
@@ -378,7 +391,7 @@ impl Builder {
             _ => self.operations.push(Operation::Retain(count)),
         }
     }
-
+    
     pub fn insert(&mut self, text: Text) {
         if text.is_empty() {
             return;
@@ -397,7 +410,7 @@ impl Builder {
             _ => self.operations.push(Operation::Insert(text)),
         }
     }
-
+    
     pub fn delete(&mut self, count: Size) {
         if count.is_zero() {
             return;
@@ -409,7 +422,7 @@ impl Builder {
             _ => self.operations.push(Operation::Delete(count)),
         }
     }
-
+    
     pub fn build(mut self) -> Delta {
         if let Some(Operation::Retain(_)) = self.operations.last() {
             self.operations.pop();

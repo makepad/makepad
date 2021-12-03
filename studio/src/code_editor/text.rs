@@ -1,9 +1,11 @@
 use {
     crate::{
-        delta::{Delta, Operation},
-        position::Position,
-        range::Range,
-        size::Size,
+        code_editor::{
+            delta::{Delta, Operation},
+            position::Position,
+            range::Range,
+            size::Size,
+        }
     },
     std::{iter, mem, ops::AddAssign},
 };

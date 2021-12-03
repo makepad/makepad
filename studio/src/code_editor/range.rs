@@ -1,4 +1,8 @@
-use crate::position::Position;
+use crate::{
+    code_editor::{
+        position::Position
+    }
+};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct Range {

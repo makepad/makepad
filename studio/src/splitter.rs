@@ -6,26 +6,57 @@ live_register!{
     Splitter: {{Splitter}} {
         split_bar_size: 2.0
         bar_quad:{
-            color:#19
+            instance pressed:float;
+            instance hover:float;
+            
+            fn pixel(self) -> vec4 {
+                return mix(#2, mix(#7, #f, self.pressed), self.hover);
+            }
+        }
+        
+        default_state: {
+            from: {all: Play::Forward {duration: 0.1}}
+            bar_quad: {pressed: 0.0, hover: 0.0}
+        }
+        
+        hover_state: {
+            from: {
+                all: Play::Forward {duration: 0.1}
+                state_down: Play::Forward {duration: 0.01}
+            }
+            bar_quad: {
+                pressed: 0.0,
+                hover: [{time: 0.0, value: 1.0}],
+            }
+        }
+        
+        pressed_state: {
+            from: {all: Play::Forward {duration: 0.1}}
+            bar_quad: {
+                pressed: [{time: 0.0, value: 1.0},{time:1.0,value:0.25}],
+                hover: 1.0,
+            }
         }
     }
 }
+
 
 #[derive(Live, LiveHook)]
 pub struct Splitter {
     #[rust(Axis::Horizontal)] pub axis: Axis,
     #[rust(SplitterAlign::Weighted(0.5))] pub align: SplitterAlign,
-    #[rust] pub rect: Rect,
-    #[rust] pub position: f32,
-    #[rust] pub live_ptr: Option<LivePtr>,
-    #[track(base=state_default)] pub animator: Animator,
-    #[live] pub layout: Layout,
-    #[rust] pub drag_start_align: Option<SplitterAlign>,
+    #[rust] rect: Rect,
+    #[rust] position: f32,
+    #[rust] drag_start_align: Option<SplitterAlign>,
+    #[track(base=default_state)] pub animator: Animator,
 
-    #[live] pub state_default: Option<LivePtr>,
+    default_state: Option<LivePtr>,
+    hover_state: Option<LivePtr>,
+    pressed_state: Option<LivePtr>,
 
-    #[live] pub bar_quad: DrawColor,
-    #[live] pub split_bar_size: f32,
+    layout: Layout,
+    bar_quad: DrawColor,
+    split_bar_size: f32,
 }
 
 impl Splitter {
@@ -105,6 +136,7 @@ impl Splitter {
         event: &mut Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, SplitterAction),
     ) {
+        self.animator_handle_event(cx, event);
         match event.hits(
             cx,
             self.bar_quad.draw_vars.area,
@@ -113,15 +145,38 @@ impl Splitter {
                 ..HitOpt::default()
             },
         ) {
-            Event::FingerHover(_) => match self.axis {
-                Axis::Horizontal => cx.set_hover_mouse_cursor(MouseCursor::ColResize),
-                Axis::Vertical => cx.set_hover_mouse_cursor(MouseCursor::RowResize),
+            Event::FingerHover(fe) => {
+                match self.axis {
+                    Axis::Horizontal => cx.set_hover_mouse_cursor(MouseCursor::ColResize),
+                    Axis::Vertical => cx.set_hover_mouse_cursor(MouseCursor::RowResize),
+                }
+                match fe.hover_state {
+                    HoverState::In => {
+                        self.animate_to(cx, id!(base), self.hover_state.unwrap());
+                    },
+                    HoverState::Out => {
+                        self.animate_to(cx, id!(base), self.default_state.unwrap());
+                    },
+                    _ => ()
+                }
             },
             Event::FingerDown(_) => {
+                self.animate_to(cx, id!(base), self.pressed_state.unwrap());
                 self.drag_start_align = Some(self.align);
             }
-            Event::FingerUp(_) => {
+            Event::FingerUp(fe) => {
                 self.drag_start_align = None;
+                if fe.is_over {
+                    if fe.input_type.has_hovers() {
+                        self.animate_to(cx, id!(base), self.hover_state.unwrap());
+                    }
+                    else {
+                        self.animate_to(cx, id!(base), self.default_state.unwrap());
+                    }
+                }
+                else {
+                    self.animate_to(cx, id!(base), self.default_state.unwrap());
+                }
             }
             Event::FingerMove(event) => {
                 if let Some(drag_start_align) = self.drag_start_align {

@@ -1,5 +1,10 @@
 use {
-    crate::{position::Position, size::Size},
+    crate::{
+        code_editor::{
+            position::Position,
+            size::Size
+        }
+    },
     std::{ops::Deref, slice::Iter},
 };
 
@@ -12,7 +17,7 @@ impl PositionSet {
     pub fn new() -> PositionSet {
         PositionSet::default()
     }
-
+    
     pub fn distances(&self) -> Distances {
         Distances {
             next_position_iter: self.positions.iter(),
@@ -23,7 +28,7 @@ impl PositionSet {
 
 impl Deref for PositionSet {
     type Target = [Position];
-
+    
     fn deref(&self) -> &Self::Target {
         &self.positions
     }
@@ -32,7 +37,7 @@ impl Deref for PositionSet {
 impl<'a> IntoIterator for &'a PositionSet {
     type Item = &'a Position;
     type IntoIter = Iter<'a, Position>;
-
+    
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
     }
@@ -47,11 +52,11 @@ impl Builder {
     pub fn new() -> Builder {
         Builder::default()
     }
-
+    
     pub fn insert(&mut self, position: Position) {
         self.positions.push(position);
     }
-
+    
     pub fn build(mut self) -> PositionSet {
         self.positions.sort();
         self.positions.dedup();
@@ -69,9 +74,9 @@ pub struct Distances<'a> {
 
 impl<'a> Iterator for Distances<'a> {
     type Item = Size;
-
+    
     fn next(&mut self) -> Option<Self::Item> {
-        let next_position = *self.next_position_iter.next()?;
+        let next_position = *self.next_position_iter.next() ?;
         let distance = next_position - self.position;
         self.position = next_position;
         Some(distance)
