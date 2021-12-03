@@ -1,8 +1,7 @@
 use {
     crate::{
-        genid::GenId,
-        genid_map::GenIdMap,
-        tab::{TabAction, Tab},
+        genid::{GenId, GenIdMap},
+        tab::{TabAction, Tab}, 
     },
     makepad_render::*,
     makepad_widget::*,
