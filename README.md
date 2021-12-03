@@ -6,9 +6,9 @@ Makepad Studio is an IDE with integrated designtool to develop applications with
 All code in this repository EXCEPT the files in studio/src/design_editor are licensed as MIT/Apache2.
 
 This means the code editing part of Makepad Studio is licensed MIT/Apache2, and the visual designtooling is not.
-For our commercial offering we are building a visual designer extension.
+For our commercial offering we are building a visual designer, we hope the value this creates is worth paying for.
 
-During the alpha/beta phase of the product development we keep the files for the visaul designer inside the OSS repository,
+During the alpha/beta phase of the product development we keep the files for the visual designer inside the OSS repository,
 however after product launch we will distribute these in a different manner.
 
 For the first build of our editor / UI you can look at the following URL in your browser,
