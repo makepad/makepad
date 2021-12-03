@@ -1,6 +1,8 @@
 use crate::{
-    char::CharExt,
-    token::{Delimiter, Keyword, Punctuator, Token, TokenKind},
+    code_editor::{
+        char::CharExt,
+        token::{Delimiter, Keyword, Punctuator, Token, TokenKind},
+    }
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

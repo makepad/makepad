@@ -1,7 +1,9 @@
 use {
     crate::{
-        protocol::{Request, ResponseOrNotification},
-        server::{Connection, Server},
+        code_editor::{
+            protocol::{Request, ResponseOrNotification},
+            server::{Connection, Server},
+        }
     },
     makepad_render::*,
     std::{

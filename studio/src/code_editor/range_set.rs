@@ -1,5 +1,11 @@
 use {
-    crate::{position::Position, range::Range, size::Size},
+    crate::{
+        code_editor::{
+            position::Position,
+            range::Range,
+            size::Size
+        }
+    },
     std::{
         collections::{btree_map::Entry, BTreeMap},
         slice::Iter,
@@ -15,14 +21,14 @@ impl RangeSet {
     pub fn new() -> RangeSet {
         RangeSet::default()
     }
-
+    
     pub fn contains_position(&self, position: Position) -> bool {
         match self.positions.binary_search(&position) {
             Ok(_) => false,
             Err(index) => index % 2 == 1,
         }
     }
-
+    
     pub fn spans(&self) -> Spans {
         Spans {
             next_position_iter: self.positions.iter(),
@@ -41,9 +47,9 @@ pub struct Spans<'a> {
 
 impl<'a> Iterator for Spans<'a> {
     type Item = Span;
-
+    
     fn next(&mut self) -> Option<Self::Item> {
-        let next_position = *self.next_position_iter.next()?;
+        let next_position = *self.next_position_iter.next() ?;
         let span = Span {
             len: next_position - self.position,
             is_included: self.is_included,
@@ -69,7 +75,7 @@ impl Builder {
     pub fn new() -> Builder {
         Builder::default()
     }
-
+    
     pub fn include(&mut self, range: Range) {
         match self.deltas_by_position.entry(range.start) {
             Entry::Occupied(mut entry) => {
@@ -94,7 +100,7 @@ impl Builder {
             }
         }
     }
-
+    
     pub fn build(&self) -> RangeSet {
         let mut positions = Vec::new();
         let mut value = 0;
@@ -105,6 +111,6 @@ impl Builder {
             }
             value = next_value;
         }
-        RangeSet { positions }
+        RangeSet {positions}
     }
 }

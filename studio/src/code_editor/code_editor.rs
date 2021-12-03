@@ -1,17 +1,19 @@
 use {
     crate::{
-        code_editor_state::{CodeEditorState, DocumentId, SessionId},
+        code_editor::{
+            code_editor_state::{CodeEditorState, DocumentId, SessionId},
+            position::Position,
+            position_set::PositionSet,
+            protocol::{Notification, Request, Response},
+            range_set::{RangeSet, Span},
+            size::Size,
+            text::Text,
+            token::{Delimiter, Keyword, Punctuator, TokenKind},
+            token_cache::TokenCache,
+        },
         genid::GenId,
         genid_allocator::GenIdAllocator,
         genid_map::GenIdMap,
-        position::Position,
-        position_set::PositionSet,
-        protocol::{Notification, Request, Response},
-        range_set::{RangeSet, Span},
-        size::Size,
-        text::Text,
-        token::{Delimiter, Keyword, Punctuator, TokenKind},
-        token_cache::TokenCache,
     },
     makepad_render::*,
     makepad_widget::*,
@@ -432,7 +434,7 @@ impl CodeEditor {
             Event::FingerDown(FingerDownEvent {rel, modifiers, ..}) => {
                 // TODO: How to handle key focus?
                 cx.set_key_focus(view.scroll_view.area());
-                cx.set_hover_mouse_cursor(MouseCursor::Text);
+                cx.set_down_mouse_cursor(MouseCursor::Text);
                 let view = &self.views_by_view_id[view_id];
                 if let Some(session_id) = view.session_id {
                     let session = &state.sessions_by_session_id[session_id];
@@ -450,6 +452,9 @@ impl CodeEditor {
                     let view = &mut self.views_by_view_id[view_id];
                     view.scroll_view.redraw(cx);
                 }
+            }
+            Event::FingerHover(_)=>{
+                cx.set_hover_mouse_cursor(MouseCursor::Text);
             }
             Event::FingerMove(FingerMoveEvent {rel, ..}) => {
                 let view = &self.views_by_view_id[view_id];

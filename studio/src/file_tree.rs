@@ -92,7 +92,7 @@ live_register!{
         }
         
         unselected_state: {
-            from: {all: Play::Forward {duration: 0.1}}
+            from: {all: Play::Forward {duration: 0.1, redraw: true}}
             selected: 0.0,
             bg_quad: {selected: (selected)}
             name_text: {selected: (selected)}
@@ -100,7 +100,7 @@ live_register!{
         }
         
         selected_state: {
-            from: {all: Play::Forward {duration: 0.1}}
+            from: {all: Play::Forward {duration: 0.1, redraw: true}}
             selected: [{time: 0.0, value: 1.0}],
         }
         

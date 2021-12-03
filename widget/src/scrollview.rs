@@ -58,10 +58,10 @@ impl ScrollView{
         let mut ret_v = ScrollBarEvent::None;
         
         if self.show_h {
-            ret_h = self.scroll_h.handle_scroll_bar(cx, event);
+            ret_h = self.scroll_h.handle_event(cx, event);
         }
         if self.show_v {
-            ret_v = self.scroll_v.handle_scroll_bar(cx, event);
+            ret_v = self.scroll_v.handle_event(cx, event);
         }
    
         match ret_h {

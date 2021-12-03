@@ -1,4 +1,8 @@
-use crate::{position::Position, range::Range};
+use crate::{
+    code_editor::{
+        position::Position, range::Range
+    }
+};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct Cursor {
