@@ -387,6 +387,7 @@ impl FileTree {
         let height_left = cx.get_height_left();
         let mut walk = 0.0;
         while walk + self.node_height < height_left{
+            self.count += 1;
             self.filler_quad.is_even = Self::is_even(self.count);
             self.filler_quad.draw_walk(cx, Walk{
                 width: Width::Filled,
@@ -394,9 +395,9 @@ impl FileTree {
                 margin: Margin::default()
             });
             walk += self.node_height;
-            self.count += 1;
         }
-        self.filler_quad.is_even = if self.count % 2 == 1 {0.0}else {1.0};
+        self.count += 1;
+        self.filler_quad.is_even = Self::is_even(self.count);
         self.filler_quad.draw_walk(cx, Walk{
             width: Width::Filled,
             height: Height::Fixed(height_left - walk),

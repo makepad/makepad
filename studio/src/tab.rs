@@ -78,6 +78,11 @@ pub struct Tab {
     name_text: DrawText,
     drag_quad: DrawColor,
 
+    default_state: Option<LivePtr>,
+    hover_state: Option<LivePtr>,
+    selected_state: Option<LivePtr>,
+    unselected_state: Option<LivePtr>,
+
     close_button: TabButton,
 
     height: f32,
