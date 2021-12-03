@@ -9,7 +9,7 @@ live_register!{
     DrawTab: {{DrawTab}}{
         border_width: 1.0
         border_color: #28
-
+        
         fn pixel(self) -> vec4 {
             let cx = Sdf2d::viewport(self.pos * self.rect_size)
             cx.clear(self.color)
@@ -40,6 +40,31 @@ live_register!{
                 b: 0.0,
             },
         }
+        
+        default_state: {
+            from: {all: Play::Forward {duration: 0.2}}
+            hover: 0.0,
+            bg_quad: {hover: (hover)}
+            name_text: {hover: (hover)}
+        }
+        
+        hover_state: {
+            from: {all: Play::Forward {duration: 0.1}}
+            hover: [{time: 0.0, value: 1.0}],
+        }
+        
+        unselected_state: {
+            from: {all: Play::Forward {duration: 0.1, redraw: true}}
+            selected: 0.0,
+            bg_quad: {selected: (selected)}
+            name_text: {selected: (selected)}
+        }
+        
+        selected_state: {
+            from: {all: Play::Forward {duration: 0.1, redraw: true}}
+            selected: [{time: 0.0, value: 1.0}],
+        }
+        
     }
 
 }
@@ -61,6 +86,20 @@ pub struct Tab {
     color_selected: Vec4,
     name_color: Vec4,
     name_color_selected: Vec4,
+}
+
+#[derive(Live, LiveHook)]
+#[repr(C)]
+struct DrawTab {
+    #[live] deref_target: DrawColor,
+    #[live] border_width: f32,
+    #[live] border_color: Vec4,
+}
+
+pub enum TabAction {
+    WasPressed,
+    ButtonWasPressed,
+    ReceivedDraggedItem(DraggedItem),
 }
 
 impl Tab {
@@ -152,16 +191,3 @@ impl Tab {
     }
 }
 
-#[derive(Live, LiveHook)]
-#[repr(C)]
-struct DrawTab {
-    #[live] deref_target: DrawColor,
-    #[live] border_width: f32,
-    #[live] border_color: Vec4,
-}
-
-pub enum TabAction {
-    WasPressed,
-    ButtonWasPressed,
-    ReceivedDraggedItem(DraggedItem),
-}
