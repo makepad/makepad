@@ -1,6 +1,5 @@
 pub mod char;
 pub mod code_editor;
-pub mod code_editor_state;
 pub mod cursor;
 pub mod cursor_set;
 pub mod delta;
