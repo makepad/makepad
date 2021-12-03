@@ -205,14 +205,14 @@ impl AppInner {
         self.file_tree.handle_event(cx, event, &mut | _cx, action | actions.push(action));
         for action in actions {
             match action {
-                FileTreeAction::FileNodeWasClicked(file_node_id) => {
+                FileTreeAction::WasClicked(file_node_id) => {
                     let node = &state.file_nodes_by_file_node_id[file_node_id];
                     if node.is_file() {
                         let path = state.file_node_path(file_node_id);
                         self.create_code_editor_tab(cx, state, state.selected_panel_id, None, path);
                     }
                 }
-                FileTreeAction::FileNodeShouldStartDragging(file_node_id) => {
+                FileTreeAction::ShouldStartDragging(file_node_id) => {
                     let path = state.file_node_path(file_node_id);
                     self.file_tree.start_dragging_file_node(
                         cx,
