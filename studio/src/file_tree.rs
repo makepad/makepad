@@ -386,23 +386,16 @@ impl FileTree {
         // lets fill the space left with blanks
         let height_left = cx.get_height_left();
         let mut walk = 0.0;
-        while walk + self.node_height < height_left{
+        while walk < height_left{
             self.count += 1;
             self.filler_quad.is_even = Self::is_even(self.count);
             self.filler_quad.draw_walk(cx, Walk{
                 width: Width::Filled,
-                height: Height::Fixed(self.node_height),
+                height: Height::Fixed(self.node_height.min(height_left- walk)),
                 margin: Margin::default()
             });
             walk += self.node_height;
         }
-        self.count += 1;
-        self.filler_quad.is_even = Self::is_even(self.count);
-        self.filler_quad.draw_walk(cx, Walk{
-            width: Width::Filled,
-            height: Height::Fixed(height_left - walk),
-            margin: Margin::default()
-        });
         
         self.scroll_view.end(cx);
         
