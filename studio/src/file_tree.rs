@@ -135,7 +135,7 @@ live_register!{
         }
         scroll_view: {
             view: {
-                layout:{direction:Direction::Down}
+                layout: {direction: Direction::Down}
                 debug_id: file_tree_view
             }
         }
@@ -215,6 +215,8 @@ pub struct FileTree {
     file_node: Option<LivePtr>,
     folder_node: Option<LivePtr>,
     
+    filler_quad: DrawBgQuad,
+    
     node_height: f32,
     
     #[rust] dragging_node_id: Option<FileNodeId>,
@@ -232,12 +234,11 @@ pub enum FileTreeNodeAction {
     WasClicked,
     Opening,
     Closing,
-    NodeShouldStartDragging,
+    ShouldStartDragging,
 }
 
 impl FileTreeNode {
-    pub fn set_draw_state(&mut self, is_even: bool, scale: f32) {
-        let is_even = if is_even {1.0}else {0.0};
+    pub fn set_draw_state(&mut self, is_even: f32, scale: f32) {
         self.bg_quad.scale = scale;
         self.bg_quad.is_even = is_even;
         self.name_text.scale = scale;
@@ -247,7 +248,7 @@ impl FileTreeNode {
         self.name_text.font_scale = scale;
     }
     
-    pub fn draw_folder(&mut self, cx: &mut Cx, name: &str, is_even: bool, node_height: f32, scale_stack: &[f32]) {
+    pub fn draw_folder(&mut self, cx: &mut Cx, name: &str, is_even: f32, node_height: f32, scale_stack: &[f32]) {
         let scale = scale_stack.last().cloned().unwrap_or(1.0);
         self.set_draw_state(is_even, scale);
         
@@ -264,7 +265,7 @@ impl FileTreeNode {
         self.bg_quad.end(cx);
     }
     
-    pub fn draw_file(&mut self, cx: &mut Cx, name: &str, is_even: bool, node_height: f32, scale_stack: &[f32]) {
+    pub fn draw_file(&mut self, cx: &mut Cx, name: &str, is_even: f32, node_height: f32, scale_stack: &[f32]) {
         let scale = scale_stack.last().cloned().unwrap_or(1.0);
         
         self.set_draw_state(is_even, scale);
@@ -343,7 +344,7 @@ impl FileTreeNode {
             }
             Event::FingerMove(event) => {
                 if event.abs.distance(&event.abs_start) >= self.min_drag_distance {
-                    dispatch_action(cx, FileTreeNodeAction::NodeShouldStartDragging);
+                    dispatch_action(cx, FileTreeNodeAction::ShouldStartDragging);
                 }
             }
             Event::FingerDown(_event) => {
@@ -377,6 +378,26 @@ impl FileTree {
     }
     
     pub fn end(&mut self, cx: &mut Cx) {
+        // lets fill the space left with blanks
+        let height_left = cx.get_height_left();
+        let mut walk = 0.0;
+        while walk + self.node_height < height_left{
+            self.filler_quad.is_even = Self::is_even(self.count);
+            self.filler_quad.draw_walk(cx, Walk{
+                width: Width::Filled,
+                height: Height::Fixed(self.node_height),
+                margin: Margin::default()
+            });
+            walk += self.node_height;
+            self.count += 1;
+        }
+        self.filler_quad.is_even = if self.count % 2 == 1 {0.0}else {1.0};
+        self.filler_quad.draw_walk(cx, Walk{
+            width: Width::Filled,
+            height: Height::Fixed(height_left - walk),
+            margin: Margin::default()
+        });
+        
         self.scroll_view.end(cx);
         
         // remove all nodes that are invisible
@@ -389,6 +410,10 @@ impl FileTree {
         for node_id in &self.gc_nodes {
             self.tree_nodes.remove(node_id);
         }
+    }
+    
+    pub fn is_even(count:usize)->f32{
+        if count % 2 == 1 {0.0}else {1.0}
     }
     
     pub fn should_node_draw(&mut self, cx: &mut Cx) -> bool {
@@ -419,6 +444,7 @@ impl FileTree {
         let is_open = self.open_nodes.contains(&node_id);
         
         if self.should_node_draw(cx) {
+            self.visible_nodes.insert(node_id);
             let tree_node = match self.tree_nodes.entry(node_id) {
                 Entry::Occupied(o) => o.into_mut(),
                 Entry::Vacant(v) => v.insert({
@@ -429,9 +455,8 @@ impl FileTree {
                     tree_node
                 })
             };
-            tree_node.draw_folder(cx, name, self.count % 2 == 1, self.node_height, &self.stack);
+            tree_node.draw_folder(cx, name, Self::is_even(self.count), self.node_height, &self.stack);
             self.stack.push(tree_node.opened * scale);
-            self.visible_nodes.insert(node_id);
             if tree_node.opened == 0.0 {
                 self.end_folder();
                 return Err(());
@@ -439,7 +464,7 @@ impl FileTree {
         }
         else {
             if is_open {
-                self.stack.push(scale*1.0);
+                self.stack.push(scale * 1.0);
             }
             else {
                 return Err(());
@@ -460,7 +485,7 @@ impl FileTree {
                 Entry::Occupied(o) => o.into_mut(),
                 Entry::Vacant(v) => v.insert(FileTreeNode::new_from_ptr(cx, self.file_node.unwrap()))
             };
-            tree_node.draw_file(cx, name, self.count % 2 == 1, self.node_height, &self.stack);
+            tree_node.draw_file(cx, name, Self::is_even(self.count), self.node_height, &self.stack);
         }
     }
     
@@ -539,11 +564,11 @@ impl FileTree {
                         }
                     }
                     self.last_selected = Some(node_id);
-                    dispatch_action(cx, FileTreeAction::FileNodeWasClicked(node_id));
+                    dispatch_action(cx, FileTreeAction::WasClicked(node_id));
                 }
-                FileTreeNodeAction::NodeShouldStartDragging => {
+                FileTreeNodeAction::ShouldStartDragging => {
                     if self.dragging_node_id.is_none() {
-                        dispatch_action(cx, FileTreeAction::FileNodeShouldStartDragging(node_id));
+                        dispatch_action(cx, FileTreeAction::ShouldStartDragging(node_id));
                     }
                 }
                 _ => ()
@@ -560,8 +585,8 @@ impl AsRef<GenId> for FileNodeId {
         &self.0
     }
 }
-
+ 
 pub enum FileTreeAction {
-    FileNodeWasClicked(FileNodeId),
-    FileNodeShouldStartDragging(FileNodeId),
+    WasClicked(FileNodeId),
+    ShouldStartDragging(FileNodeId),
 }
