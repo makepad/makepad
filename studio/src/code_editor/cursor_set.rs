@@ -1,10 +1,12 @@
 use crate::{
-    cursor::Cursor,
-    delta::{Delta, Whose},
-    position::Position,
-    position_set::{self, PositionSet},
-    range_set::{self, RangeSet},
-    text::Text,
+    code_editor::{
+        cursor::Cursor,
+        delta::{Delta, Whose},
+        position::Position,
+        position_set::{self, PositionSet},
+        range_set::{self, RangeSet},
+        text::Text,
+    }
 };
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]

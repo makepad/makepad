@@ -1,12 +1,14 @@
 use {
     crate::{
-        delta::Delta,
+        code_editor::{
+            delta::Delta,
+            protocol::{
+                DirectoryEntry, Error, FileId, FileNode, FileTree, Notification, Request, Response,
+            },
+            text::Text,
+        },
         genid_allocator::GenIdAllocator,
         genid_map::GenIdMap,
-        protocol::{
-            DirectoryEntry, Error, FileId, FileNode, FileTree, Notification, Request, Response,
-        },
-        text::Text,
     },
     std::{
         collections::{HashMap, VecDeque},

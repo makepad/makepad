@@ -34,6 +34,7 @@ pub trait LiveNodeSlice {
     fn skip_node(&self, node_index: usize) -> usize;
     fn clone_child(&self, parent_index: usize, out_vec: &mut Vec<LiveNode>);
     fn to_string(&self, parent_index: usize, max_depth: usize) -> String;
+    fn debug_print(&self, parent_index: usize, max_depth: usize);
 }
 
 pub trait LiveNodeVec {
@@ -375,7 +376,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         while index < self_ref.len() {
             if self_ref[index].value.is_open() {
                 if stack_depth == 1 {
-                    if /*child_name != LiveId::empty() && */self_ref[index].id == child_name {
+                    if child_name != LiveId::empty() && self_ref[index].id == child_name {
                         return Ok(index);
                     }
                 }
@@ -554,6 +555,10 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
             index += 1;
         }
         return
+    }
+
+    fn debug_print(&self, parent_index: usize, max_depth: usize) {
+        println!("{}", self.to_string(parent_index, max_depth));
     }
     
     fn to_string(&self, parent_index: usize, max_depth: usize) -> String {

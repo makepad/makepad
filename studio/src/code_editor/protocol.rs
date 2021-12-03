@@ -1,6 +1,15 @@
 use {
-    crate::{delta::Delta, genid::GenId, text::Text},
-    std::{ffi::OsString, path::PathBuf},
+    crate::{
+        genid::GenId,
+        code_editor::{
+            delta::Delta,
+            text::Text
+        }
+    },
+    std::{
+        ffi::OsString,
+        path::PathBuf
+    },
 };
 use makepad_microserde::{SerBin, DeBin};
 
@@ -34,7 +43,7 @@ pub struct FileTree {
 
 #[derive(Clone, Debug, SerBin, DeBin)]
 pub enum FileNode {
-    Directory { entries: Vec<DirectoryEntry> },
+    Directory {entries: Vec<DirectoryEntry>},
     File,
 }
 

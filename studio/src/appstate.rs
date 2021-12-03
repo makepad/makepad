@@ -1,13 +1,15 @@
 use {
     crate::{
-        code_editor::{CodeEditorViewId},
-        code_editor_state::{CodeEditorState, SessionId},
+        code_editor::{
+            code_editor::{CodeEditorViewId},
+            code_editor_state::{CodeEditorState, SessionId},
+            protocol,
+        },
         dock::{PanelId},
         file_tree::{FileNodeId},
         splitter::{SplitterAlign},
         genid_allocator::GenIdAllocator,
         genid_map::GenIdMap,
-        protocol::{self},
         tab_bar::TabId,
     },
     makepad_render::*,

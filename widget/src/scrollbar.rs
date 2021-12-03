@@ -37,7 +37,7 @@ live_register!{
         
         default_state: {
             from: {all: Play::Forward {duration: 0.1}}
-            bg: {pressed: 0.0, hover: 0.0}
+            bar_quad: {pressed: 0.0, hover: 0.0}
         }
         
         hover_state: {
@@ -45,7 +45,7 @@ live_register!{
                 all: Play::Forward {duration: 0.1}
                 state_down: Play::Forward {duration: 0.01}
             }
-            bg: {
+            bar_quad: {
                 pressed: 0.0,
                 hover: [{time: 0.0, value: 1.0}],
             }
@@ -53,7 +53,7 @@ live_register!{
         
         pressed_state: {
             from: {all: Play::Forward {duration: 0.2}}
-            bg: {
+            bar_quad: {
                 pressed: [{time: 0.0, value: 1.0}],
                 hover: 1.0,
             }
@@ -63,7 +63,7 @@ live_register!{
 
 #[derive(Live, LiveHook)]
 pub struct ScrollBar {
-    bg: DrawScrollBar,
+    bar_quad: DrawScrollBar,
     #[live(12.0)] pub bar_size: f32,
     #[live(30.0)] pub min_handle_size: f32, //minimum size of the handle in pixels
     #[live(Axis::Horizontal)] pub axis: Axis,
@@ -71,6 +71,7 @@ pub struct ScrollBar {
     default_state: Option<LivePtr>,
     hover_state: Option<LivePtr>,
     pressed_state: Option<LivePtr>,
+
     use_vertical_finger_scroll: bool,
     smoothing: Option<f32>,
 
@@ -147,7 +148,7 @@ impl ScrollBar {
     // writes the norm_scroll value into the shader
     pub fn update_shader_scroll_pos(&mut self, cx: &mut Cx) {
         let (norm_scroll, _) = self.get_normalized_scroll_pos();
-        self.bg.apply_over(cx,live!{
+        self.bar_quad.apply_over(cx,live!{
             norm_scroll:(norm_scroll)
         });
         //self.bg.set_norm_scroll(cx, norm_scroll);
@@ -257,7 +258,7 @@ impl ScrollBar {
         }
     }
     
-    pub fn handle_scroll_bar(&mut self, cx: &mut Cx, event: &mut Event) -> ScrollBarEvent {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> ScrollBarEvent {
         // lets check if our view-area gets a mouse-scroll.
         match event {
             Event::FingerScroll(fe) => { //if !fe.handled {
@@ -308,7 +309,7 @@ impl ScrollBar {
                 return self.make_scroll_event()
             }
             
-            match event.hits(cx, self.bg.draw_vars.area, HitOpt::default()) {
+            match event.hits(cx, self.bar_quad.draw_vars.area, HitOpt::default()) {
                 Event::FingerDown(fe) => {
                     self.animate_to(cx, id!(base), self.pressed_state.unwrap());
                     let rel = match self.axis {
@@ -400,17 +401,17 @@ impl ScrollBar {
                 
                 if self.visible {
                     let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
-                    self.bg.is_vertical = 0.0;
-                    self.bg.norm_scroll = norm_scroll;
-                    self.bg.norm_handle = norm_handle;
-                    self.bg.draw_rel(
+                    self.bar_quad.is_vertical = 0.0;
+                    self.bar_quad.norm_scroll = norm_scroll;
+                    self.bar_quad.norm_handle = norm_handle;
+                    self.bar_quad.draw_rel(
                         cx,
                         Rect {
                             pos: vec2(self.bar_side_margin, view_rect.size.y - self.bar_size),
                             size: vec2(self.scroll_size, self.bar_size),
                         }
                     );
-                    self.bg.draw_vars.area.set_do_scroll(cx, false, false);
+                    self.bar_quad.draw_vars.area.set_do_scroll(cx, false, false);
                 }
             },
             Axis::Vertical => {
@@ -427,17 +428,17 @@ impl ScrollBar {
                 self.scroll_pos = self.scroll_pos.min(self.view_total - self.view_visible).max(0.);
                 if self.visible {
                     let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
-                    self.bg.is_vertical = 1.0;
-                    self.bg.norm_scroll = norm_scroll;
-                    self.bg.norm_handle = norm_handle;
-                    self.bg.draw_rel(
+                    self.bar_quad.is_vertical = 1.0;
+                    self.bar_quad.norm_scroll = norm_scroll;
+                    self.bar_quad.norm_handle = norm_handle;
+                    self.bar_quad.draw_rel(
                         cx,
                         Rect {
                             pos: vec2(view_rect.size.x - self.bar_size, self.bar_side_margin),
                             size: vec2(self.bar_size, self.scroll_size)
                         }
                     );
-                    self.bg.draw_vars.area.set_do_scroll(cx, false, false);
+                    self.bar_quad.draw_vars.area.set_do_scroll(cx, false, false);
                 }
             }
         }

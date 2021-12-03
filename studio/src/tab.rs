@@ -7,10 +7,9 @@ live_register!{
     use makepad_render::shader_std::*;
         
     DrawTab: {{DrawTab}}{
-       //debug:true
         border_width: 1.0
         border_color: #28
-     //   drag_color: #FFFFFF80
+
         fn pixel(self) -> vec4 {
             let cx = Sdf2d::viewport(self.pos * self.rect_size)
             cx.clear(self.color)
