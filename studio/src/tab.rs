@@ -64,9 +64,7 @@ live_register!{
             from: {all: Play::Forward {duration: 0.1, redraw: true}}
             selected: [{time: 0.0, value: 1.0}],
         }
-        
     }
-
 }
 
 #[derive(Live, LiveHook)]
