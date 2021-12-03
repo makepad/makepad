@@ -15,7 +15,7 @@ live_register!{
         tab: Tab {}
         draw_drag:{
             draw_depth:10
-            color:#ff00ffff
+            color:#c
         }
         scroll_view: {
             show_v: false
@@ -92,18 +92,18 @@ impl TabBar {
         self.selected_tab_id
     }
     
-    pub fn set_selected_tab_id(&mut self, cx: &mut Cx, tab_id: Option<TabId>) {
+    pub fn set_selected_tab_id(&mut self, cx: &mut Cx, tab_id: Option<TabId>, should_animate:bool) {
         if self.selected_tab_id == tab_id {
             return;
         }
         if let Some(tab_id) = self.selected_tab_id {
             let tab = &mut self.tabs_by_tab_id[tab_id];
-            tab.set_is_selected(false);
+            tab.set_is_selected(cx, false, should_animate);
         }
         self.selected_tab_id = tab_id;
         if let Some(tab_id) = self.selected_tab_id {
             let tab = self.get_or_create_tab(cx, tab_id);
-            tab.set_is_selected(true);
+            tab.set_is_selected(cx, true, should_animate);
         }
         self.scroll_view.redraw(cx);
     }
