@@ -153,7 +153,7 @@ impl AppInner {
                 DockAction::TabWasPressed(panel_id, tab_id) => {
                     self.select_tab(cx, state, panel_id, tab_id)
                 }
-                DockAction::TabButtonWasPressed(panel_id, tab_id) => {
+                DockAction::TabCloseWasPressed(panel_id, tab_id) => {
                     let tab = &state.tabs_by_tab_id[tab_id];
                     match tab.kind {
                         TabKind::CodeEditor {session_id} => {

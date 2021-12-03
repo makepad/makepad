@@ -23,9 +23,9 @@ impl Default for ButtonState {
 #[derive(Copy, Clone, PartialEq, IntoAnyAction)]
 pub enum ButtonAction {
     None,
-    Clicked,
-    Pressed,
-    Up
+    WasClicked,
+    IsPressed,
+    IsUp
 }
 
 #[derive(Copy, Clone, Default)]
@@ -41,7 +41,7 @@ impl ButtonLogic {
         match event.hits(cx, area, HitOpt::default()) {
             Event::FingerDown(_fe) => {
                 return ButtonHandleResult {
-                    action: ButtonAction::Pressed,
+                    action: ButtonAction::IsPressed,
                     state: ButtonState::Pressed
                 };
             },
@@ -70,18 +70,18 @@ impl ButtonLogic {
             Event::FingerUp(fe) => if fe.is_over {
                 if fe.input_type.has_hovers() {
                     return ButtonHandleResult {
-                        action: ButtonAction::Clicked,
+                        action: ButtonAction::WasClicked,
                         state: ButtonState::Hover
                     };
                 }
                 return ButtonHandleResult {
-                    action: ButtonAction::Clicked,
+                    action: ButtonAction::WasClicked,
                     state: ButtonState::Default
                 };
             }
             else {
                 return ButtonHandleResult {
-                    action: ButtonAction::Up,
+                    action: ButtonAction::IsUp,
                     state: ButtonState::Default
                 };
             }

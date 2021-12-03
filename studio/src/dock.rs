@@ -217,8 +217,8 @@ impl Dock {
                         TabBarAction::TabWasPressed(tab_id) => {
                             dispatch_action(cx, DockAction::TabWasPressed(*panel_id, tab_id))
                         }
-                        TabBarAction::TabButtonWasPressed(tab_id) => {
-                            dispatch_action(cx, DockAction::TabButtonWasPressed(*panel_id, tab_id))
+                        TabBarAction::TabCloseWasPressed(tab_id) => {
+                            dispatch_action(cx, DockAction::TabCloseWasPressed(*panel_id, tab_id))
                         }
                         TabBarAction::TabReceivedDraggedItem(tab_id, item) => {
                             dispatch_action(
@@ -335,7 +335,7 @@ pub enum DockAction {
     SplitPanelChanged{panel_id:PanelId, axis:Axis, align:SplitterAlign},
     TabBarReceivedDraggedItem(PanelId, DraggedItem),
     TabWasPressed(PanelId, TabId),
-    TabButtonWasPressed(PanelId, TabId),
+    TabCloseWasPressed(PanelId, TabId),
     TabReceivedDraggedItem(PanelId, TabId, DraggedItem),
     ContentsReceivedDraggedItem(PanelId, DragPosition, DraggedItem),
 }
