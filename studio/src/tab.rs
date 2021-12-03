@@ -1,5 +1,5 @@
 use {
-    crate::tab_button::{TabButtonAction, TabButton},
+    crate::tab_close_button::{TabCloseButtonAction, TabCloseButton},
     makepad_render::*,
 };
 
@@ -94,7 +94,7 @@ pub struct Tab {
     selected_state: Option<LivePtr>,
     unselected_state: Option<LivePtr>,
     
-    close_button: TabButton,
+    close_button: TabCloseButton,
     
     height: f32,
     
@@ -106,7 +106,7 @@ pub struct Tab {
 
 pub enum TabAction {
     WasPressed,
-    ButtonWasPressed,
+    CloseWasPressed,
     ReceivedDraggedItem(DraggedItem),
 }
 
@@ -169,10 +169,10 @@ impl Tab {
         self.animator_handle_event(cx, event);
         
         let mut block_hover_out = false;
-        match self.close_button.handle_event_ret(cx, event) {
-            TabButtonAction::WasPressed => dispatch_action(cx, TabAction::ButtonWasPressed),
-            TabButtonAction::HoverIn => block_hover_out = true,
-            TabButtonAction::HoverOut => self.animate_to(cx, id!(hover), self.default_state.unwrap()),
+        match self.close_button.handle_event(cx, event) {
+            TabCloseButtonAction::WasPressed => dispatch_action(cx, TabAction::CloseWasPressed),
+            TabCloseButtonAction::HoverIn => block_hover_out = true,
+            TabCloseButtonAction::HoverOut => self.animate_to(cx, id!(hover), self.default_state.unwrap()),
             _ => ()
         };
         

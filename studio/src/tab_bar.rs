@@ -127,8 +127,8 @@ impl TabBar {
                 TabAction::WasPressed => {
                     dispatch_action(cx, TabBarAction::TabWasPressed(*tab_id));
                 }
-                TabAction::ButtonWasPressed => {
-                    dispatch_action(cx, TabBarAction::TabButtonWasPressed(*tab_id));
+                TabAction::CloseWasPressed => {
+                    dispatch_action(cx, TabBarAction::TabCloseWasPressed(*tab_id));
                 }
                 TabAction::ReceivedDraggedItem(item) => {
                     dispatch_action(cx, TabBarAction::TabReceivedDraggedItem(*tab_id, item));
@@ -180,6 +180,6 @@ impl AsRef<GenId> for TabId {
 pub enum TabBarAction {
     ReceivedDraggedItem(DraggedItem),
     TabWasPressed(TabId),
-    TabButtonWasPressed(TabId),
+    TabCloseWasPressed(TabId),
     TabReceivedDraggedItem(TabId, DraggedItem),
 }
