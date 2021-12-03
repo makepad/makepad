@@ -228,6 +228,11 @@ pub struct FileTree {
     #[rust] count: usize,
     #[rust] stack: Vec<f32>,
 }
+ 
+pub enum FileTreeAction {
+    WasClicked(FileNodeId),
+    ShouldStartDragging(FileNodeId),
+}
 
 pub enum FileTreeNodeAction {
     None,
@@ -585,8 +590,4 @@ impl AsRef<GenId> for FileNodeId {
         &self.0
     }
 }
- 
-pub enum FileTreeAction {
-    WasClicked(FileNodeId),
-    ShouldStartDragging(FileNodeId),
-}
+
