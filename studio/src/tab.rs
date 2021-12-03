@@ -5,26 +5,26 @@ use {
 
 live_register!{
     use makepad_render::shader_std::*;
-
+    
     Tab: {{Tab}} {
-        name_text:{
+        name_text: {
             instance hover: float
             instance selected: float
-            fn get_color(self)->vec4{
+            fn get_color(self) -> vec4 {
                 return mix(#82, #ff, self.selected)
             }
         }
         
-        bg_quad:{
+        bg_quad: {
             const border_width: float = 1.0
             const border_color: vec4 = #28
-
+            
             instance hover: float
             instance selected: float
             
             fn pixel(self) -> vec4 {
                 let cx = Sdf2d::viewport(self.pos * self.rect_size)
-                let color = mix(mix(#34, #28, self.selected),#f,mix(self.hover*0.05,self.hover*-0.025,self.selected));
+                let color = mix(mix(#34, #28, self.selected), #f, mix(self.hover * 0.05, self.hover * -0.025, self.selected));
                 cx.clear(color)
                 cx.move_to(0.0, 0.0)
                 cx.line_to(0.0, self.rect_size.y)
@@ -32,10 +32,10 @@ live_register!{
                 cx.line_to(self.rect_size.x, self.rect_size.y)
                 return cx.stroke(border_color, border_width)
             }
-        } 
+        }
         
         height: 40.0
-         
+        
         layout: Layout {
             align: Align {fx: 0.0, fy: 0.5},
             walk: Walk {
@@ -43,9 +43,9 @@ live_register!{
                 height: Height::Fixed(40.0),
             },
             padding: Padding {
-                l: 15.0,
-                t: 0.0,
-                r: 10.0,
+                l: 10.0,
+                t: 2.0,
+                r: 15.0,
                 b: 0.0,
             },
         }
@@ -65,7 +65,7 @@ live_register!{
         unselected_state: {
             from: {all: Play::Forward {duration: 0.1, redraw: true}}
             selected: 0.0,
-            close_button: {button_quad:{selected:(selected)}}
+            close_button: {button_quad: {selected: (selected)}}
             bg_quad: {selected: (selected)}
             name_text: {selected: (selected)}
         }
@@ -116,7 +116,7 @@ impl Tab {
         self.is_selected
     }
     
-    pub fn set_is_selected(&mut self, cx:&mut Cx, is_selected: bool, should_animate:bool) {
+    pub fn set_is_selected(&mut self, cx: &mut Cx, is_selected: bool, should_animate: bool) {
         self.is_selected = is_selected;
         self.toggle_animator(
             cx,
@@ -132,9 +132,10 @@ impl Tab {
         //self.bg_quad.color = self.color(self.is_selected);
         self.bg_quad.begin(cx, self.layout);
         //self.name_text.color = self.name_color(self.is_selected);
-        self.name_text.draw_walk(cx, name);
-        cx.turtle_align_y();
         self.close_button.draw(cx);
+        //cx.turtle_align_y();
+        self.name_text.draw_walk(cx, name);
+        //cx.turtle_align_y();
         self.bg_quad.end(cx);
         
         if self.is_dragged {
@@ -166,9 +167,15 @@ impl Tab {
         dispatch_action: &mut dyn FnMut(&mut Cx, TabAction),
     ) {
         self.animator_handle_event(cx, event);
-        self.close_button.handle_event(cx, event, &mut | cx, action | match action {
+        
+        let mut block_hover_out = false;
+        match self.close_button.handle_event_ret(cx, event) {
             TabButtonAction::WasPressed => dispatch_action(cx, TabAction::ButtonWasPressed),
-        });
+            TabButtonAction::HoverIn => block_hover_out = true,
+            TabButtonAction::HoverOut => self.animate_to(cx, id!(hover), self.default_state.unwrap()),
+            _ => ()
+        };
+        
         match event.hits(cx, self.bg_quad.draw_vars.area, HitOpt::default()) {
             Event::FingerHover(event) => {
                 cx.set_hover_mouse_cursor(MouseCursor::Hand);
@@ -176,7 +183,7 @@ impl Tab {
                     HoverState::In => {
                         self.animate_to(cx, id!(hover), self.hover_state.unwrap());
                     }
-                    HoverState::Out => {
+                    HoverState::Out => if !block_hover_out {
                         self.animate_to(cx, id!(hover), self.default_state.unwrap());
                     }
                     _ => {}
