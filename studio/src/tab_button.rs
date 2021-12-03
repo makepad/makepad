@@ -37,9 +37,9 @@ live_register!{
             height: Height::Fixed(10.0),
             width: Width::Fixed(10.0),
             margin: Margin {
-                l: 10.0,
-                t: 1.0,
-                r: 0.0,
+                l: 0.0,
+                t: 0.0,
+                r: 5.0,
                 b: 0.0,
             },
         },
@@ -67,6 +67,12 @@ impl TabButton {
         );
     }
     
+    pub fn handle_event_ret(&mut self, cx: &mut Cx, event: &mut Event,) -> TabButtonAction {
+        let mut ret = TabButtonAction::None;
+        self.handle_event(cx, event, &mut | _, a | ret = a);
+        ret
+    }
+    
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
@@ -80,9 +86,11 @@ impl TabButton {
                 match event.hover_state {
                     HoverState::In => {
                         self.animate_to(cx, id!(hover), self.hover_state.unwrap());
+                        dispatch_action(cx, TabButtonAction::HoverIn)
                     }
                     HoverState::Out => {
                         self.animate_to(cx, id!(hover), self.default_state.unwrap());
+                        dispatch_action(cx, TabButtonAction::HoverOut)
                     }
                     _ => {}
                 }
@@ -94,5 +102,8 @@ impl TabButton {
 }
 
 pub enum TabButtonAction {
+    None,
     WasPressed,
+    HoverIn,
+    HoverOut,
 }
