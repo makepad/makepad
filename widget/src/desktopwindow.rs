@@ -75,7 +75,7 @@ impl DesktopWindow {
         //self.main_view.handle_scroll_bars(cx, event);
         //self.inner_view.handle_scroll_bars(cx, event);
         
-        if let ButtonAction::Clicked = self.xr_btn.handle_desktop_button(cx, event) {
+        if let ButtonAction::WasClicked = self.xr_btn.handle_desktop_button(cx, event) {
             if self.window.xr_is_presenting(cx) {
                 self.window.xr_stop_presenting(cx);
             }
@@ -84,7 +84,7 @@ impl DesktopWindow {
             }
         }
         
-        if let ButtonAction::Clicked = self.fullscreen_btn.handle_desktop_button(cx, event) {
+        if let ButtonAction::WasClicked = self.fullscreen_btn.handle_desktop_button(cx, event) {
             if self.window.is_fullscreen(cx) {
                 self.window.normal(cx);
             }
@@ -92,10 +92,10 @@ impl DesktopWindow {
                 self.window.fullscreen(cx);
             }
         }
-        if let ButtonAction::Clicked = self.min_btn.handle_desktop_button(cx, event) {
+        if let ButtonAction::WasClicked = self.min_btn.handle_desktop_button(cx, event) {
             self.window.minimize(cx);
         }
-        if let ButtonAction::Clicked = self.max_btn.handle_desktop_button(cx, event) {
+        if let ButtonAction::WasClicked = self.max_btn.handle_desktop_button(cx, event) {
             if self.window.is_fullscreen(cx) {
                 self.window.restore(cx);
             }
@@ -103,7 +103,7 @@ impl DesktopWindow {
                 self.window.maximize(cx);
             }
         }
-        if let ButtonAction::Clicked = self.close_btn.handle_desktop_button(cx, event) {
+        if let ButtonAction::WasClicked = self.close_btn.handle_desktop_button(cx, event) {
             self.window.close(cx);
         }
         let is_for_other_window = match event {

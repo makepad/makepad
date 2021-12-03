@@ -12,4 +12,4 @@ pub mod list_logic;
 pub mod splitter;
 pub mod tab;
 pub mod tab_bar;
-pub mod tab_button;
+pub mod tab_close_button;
