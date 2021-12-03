@@ -4,7 +4,7 @@ use {
     crate::{
         cx::{Cx, CxPlatformShader},
         area::Area,
-        geometry::{Geometry,GeometryFields},
+        geometry::{GeometryFields},
         livetraits::*
     },
     
