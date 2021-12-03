@@ -1,18 +1,24 @@
-# Introducing Makepad
+# Introducing Makepad Framework and Makepad Studio
 
-Makepad is a new VR, web and native-rendering UI framework for Rust.
-It utilises shaders as its styling primitives, and we are currently developing a live UI design and animation environment for it.
+Makepad Framework is a new web and native-rendering UI framework for Rust.
+Makepad Studio is an IDE with integrated designtool to develop applications with Makepad Framework.
+
+All code in this repository EXCEPT the files in studio/src/design_editor are licensed as MIT/Apache2.
+
+This means the code editing part of Makepad Studio is licensed MIT/Apache2, and the visual designtooling is not.
+For our commercial offering we are building a visual designer extension.
+
+During the alpha/beta phase of the product development we keep the files for the visaul designer inside the OSS repository,
+however after product launch we will distribute these in a different manner.
 
 For the first build of our editor / UI you can look at the following URL in your browser,
-or try makepad now on a Quest in the quest browser, click the goggles top right of the UI. Try touching the leaves of the tree with your hands! Magic!
 
 https://makepad.dev
 
-The Makepad Framework and UI component system is MIT licensed, our UI designer will be cloud based and commercial.
-
 # How to install the native version
 
-On all platforms first install Rust. We have seen the gnu chain fail a lot on windows, so if you are up for it also have to install msvc.
+On all platforms first install Rust. 
+We are currently relying on nightly because of the procmacro span information needed. Hopefully this will stabilise soon.
 
 https://www.rust-lang.org/tools/install
 
@@ -22,7 +28,7 @@ https://www.rust-lang.org/tools/install
 git clone https://github.com/makepad/makepad
 cd makepad
 tools/macos_rustup.sh
-cargo run -p makepad --release
+cargo run -p makepad_studio --release
 ```
 
 # Windows
@@ -30,18 +36,9 @@ cargo run -p makepad --release
 Clone this repo using either gitub desktop or commandline: https://github.com/makepad/makepad
 Open a cmd.exe in the directory you just cloned. Gh desktop makes: Documents\\Github\\makepad
 
-Gnu chain (can fail):
 ```
-rustup default stable-gnu
 tools/windows_rustup.bat
-cargo run -p makepad --release
-```
-
-MSVC chain (install msvc first):
-```
-rustup default stable-msvc
-tools/windows_rustup.bat
-cargo run -p makepad --release
+cargo run -p makepad_studio --release
 ```
 
 # Linux
@@ -49,7 +46,7 @@ cargo run -p makepad --release
 git clone https://github.com/makepad/makepad
 cd makepad
 tools/linux_rustup.sh
-cargo run -p makepad --release
+cargo run -p makepad_studio --release
 ```
 
 # Troubleshooting
