@@ -15,9 +15,7 @@ use {
         design_editor::{
             design_editor::DesignEditorViewId
         },
-        genid::GenId,
-        genid_allocator::GenIdAllocator,
-        genid_map::GenIdMap,
+        genid::{GenId, GenIdMap,GenIdAllocator},
     },
     std::{
         collections::{HashMap, HashSet, VecDeque},
