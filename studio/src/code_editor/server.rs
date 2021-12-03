@@ -7,8 +7,7 @@ use {
             },
             text::Text,
         },
-        genid_allocator::GenIdAllocator,
-        genid_map::GenIdMap,
+        genid::{GenIdMap,GenIdAllocator},
     },
     std::{
         collections::{HashMap, VecDeque},

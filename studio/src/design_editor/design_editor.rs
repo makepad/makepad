@@ -9,9 +9,7 @@ use {
         code_editor::{
             protocol::{Notification, Request, Response},
         },
-        genid::GenId,
-        genid_allocator::GenIdAllocator,
-        genid_map::GenIdMap,
+        genid::{GenId, GenIdMap,GenIdAllocator},
     },
     makepad_render::*,
     makepad_widget::*,

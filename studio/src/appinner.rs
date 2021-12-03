@@ -8,6 +8,9 @@ use {
             protocol,
             protocol::{Notification, Request, Response, ResponseOrNotification},
         },
+        design_editor::{
+            design_editor::{DesignEditors},
+        },
         dock::{Dock, DockAction, DragPosition, PanelId},
         file_tree::{FileTreeAction, FileNodeId, FileTree},
         splitter::{SplitterAlign},
@@ -34,6 +37,7 @@ pub struct AppInner {
     dock: Dock,
     file_tree: FileTree,
     code_editors: CodeEditors,
+    design_editors: DesignEditors,
     
     #[rust(AppIO::new(cx))] io: AppIO
 }
@@ -244,15 +248,13 @@ impl AppInner {
                     ..
                 }) => {
                     if let Some(code_editor_view_id) = code_editor_view_id {
+                        let request_sender = &self.io.request_sender;
                         self.code_editors.handle_event(
                             cx,
                             &mut state.editor_state,
                             *code_editor_view_id,
                             event,
-                            &mut {
-                                let request_sender = &self.io.request_sender;
-                                move | request | request_sender.send(request).unwrap()
-                            },
+                            &mut | request | request_sender.send(request).unwrap(),
                         );
                     }
                 }

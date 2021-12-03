@@ -1,7 +1,6 @@
 use {
     crate::{
-        genid::GenId,
-        genid_map::GenIdMap,
+        genid::{GenId, GenIdMap},
         splitter::{SplitterAction, Splitter, SplitterAlign},
         tab_bar::{TabBarAction, TabBar, TabId},
     },
