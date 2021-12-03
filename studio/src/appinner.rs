@@ -183,7 +183,7 @@ impl AppInner {
                             );
                             state.tabs_by_tab_id.remove(tab_id);
                             state.tab_id_allocator.deallocate(tab_id.0);
-                            self.dock.set_selected_tab_id(cx, panel_id, None);
+                            self.dock.set_selected_tab_id(cx, panel_id, None, true);
                             self.dock.redraw_tab_bar(cx, panel_id);
                         }
                         _ => {}
@@ -431,7 +431,7 @@ impl AppInner {
     
     fn select_tab(&mut self, cx: &mut Cx, state: &mut AppState, panel_id: PanelId, tab_id: TabId) {
         let tab = &state.tabs_by_tab_id[tab_id];
-        self.dock.set_selected_tab_id(cx, panel_id, Some(tab_id));
+        self.dock.set_selected_tab_id(cx, panel_id, Some(tab_id), false);
         self.dock.redraw_tab_bar(cx, panel_id);
         match tab.kind {
             TabKind::CodeEditor {session_id} => {
