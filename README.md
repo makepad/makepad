@@ -1,7 +1,7 @@
 # Introducing Makepad Framework and Makepad Studio
 
 Makepad Framework is a new web and native-rendering UI framework for Rust.
-Makepad Studio is an IDE with integrated designtool to develop applications with Makepad Framework.
+Makepad Studio is an IDE with an integrated designtool to develop applications with Makepad Framework.
 
 All code in this repository EXCEPT the files in studio/src/design_editor are licensed as MIT/Apache2.
 
