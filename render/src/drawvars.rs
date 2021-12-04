@@ -39,7 +39,7 @@ pub enum DrawShaderInputPacking {
     Attribute,
     UniformsGLSL,
     UniformsHLSL,
-    UniformsMetal
+    UniformsMetal 
 }
 
 #[derive(Debug, PartialEq)]
@@ -67,11 +67,14 @@ pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPac
 pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsHLSL;
 
 #[derive(Default, Debug)]
+#[repr(C)]
 pub struct DrawVars {
     pub area: Area,
     pub draw_call_group: LiveId,
     pub var_instance_start: usize,
     pub var_instance_slots: usize,
+    pub no_h_scroll: bool,
+    pub no_v_scroll: bool,
     pub draw_shader: Option<DrawShader>,
     pub geometry_id: Option<usize>,
     pub user_uniforms: [f32; DRAW_CALL_USER_UNIFORMS],
@@ -134,10 +137,17 @@ impl DrawVars {
                 if node.value.is_dsl() {
                     fingerprint.push(node.clone());
                 }
-                if node.id == id!(draw_call_group){
-                    if let LiveValue::Id(id) = node.value{
+                match node.id{
+                    id!(draw_call_group)=>if let LiveValue::Id(id) = node.value{
                         self.draw_call_group = id;
                     }
+                    id!(no_h_scroll)=>if let LiveValue::Bool(v) = node.value{
+                        self.no_h_scroll = v;
+                    }
+                    id!(no_v_scroll)=>if let LiveValue::Bool(v) = node.value{
+                        self.no_v_scroll = v;
+                    }
+                    _=>()
                 }
                 node_iter = doc.nodes.next_child(node_index);
             }
@@ -418,6 +428,9 @@ impl DrawVars {
         }
         let unknown_shader_props = match nodes[index].id {
             id!(debug) => false,
+            id!(no_v_scroll) => false,
+            id!(no_h_scroll) => false,
+            id!(draw_call_group) => false,
             _ => true
         };
         if unknown_shader_props && nodes[index].value.is_value_type() {
