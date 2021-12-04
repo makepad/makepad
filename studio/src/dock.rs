@@ -111,10 +111,10 @@ impl Dock {
         self.contents(cx);
     }
     
-    pub fn tab(&mut self, cx: &mut Cx, tab_id: TabId, name: &str) {
+    pub fn draw_tab(&mut self, cx: &mut Cx, tab_id: TabId, name: &str) {
         let panel_id = *self.panel_id_stack.last().unwrap();
         let panel = self.panels_by_panel_id[panel_id].as_tab_panel_mut();
-        panel.tab_bar.tab(cx, tab_id, name);
+        panel.tab_bar.draw_tab(cx, tab_id, name);
     }
     
     pub fn set_split_panel_axis(&mut self, cx: &mut Cx, panel_id: PanelId, axis: Axis) {
@@ -177,6 +177,11 @@ impl Dock {
     pub fn set_selected_tab_id(&mut self, cx: &mut Cx, panel_id: PanelId, tab_id: Option<TabId>, should_animate:bool) {
         let panel = self.get_or_create_tab_panel(cx, panel_id);
         panel.tab_bar.set_selected_tab_id(cx, tab_id, should_animate);
+    }
+    
+    pub fn set_next_selected_tab(&mut self, cx: &mut Cx, panel_id: PanelId, tab_id: TabId, should_animate:bool) {
+        let panel = self.get_or_create_tab_panel(cx, panel_id);
+        panel.tab_bar.set_next_selected_tab(cx, tab_id, should_animate);
     }
     
     pub fn redraw(&mut self, cx: &mut Cx) {
