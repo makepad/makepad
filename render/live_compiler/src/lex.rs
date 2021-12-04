@@ -1,7 +1,10 @@
 use{
     makepad_id_macros::*,
+    makepad_math::{
+        colorhex::hex_bytes_to_u32
+    },
     crate::{
-        liveid::{LiveId, LiveFileId, hex_bytes_to_u32},
+        liveid::{LiveId, LiveFileId, },
         liveerror::{LiveError, LiveErrorOrigin},
         span::Span,
         token::{Token, TokenWithSpan},

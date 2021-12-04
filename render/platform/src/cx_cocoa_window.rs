@@ -4,14 +4,16 @@ use{
         time::Instant,
         os::raw::{c_void}
     },
-    makepad_live_compiler::{
-        Vec2
+    makepad_math::{
+        Vec2,
+        Rect
     },
     crate::{
         cx_apple::*,
-        cx::NUM_FINGERS,
         cx_cocoa_app::CocoaApp,
         events::{
+            WindowGeom,
+            NUM_FINGERS,
             Event,
             FingerInputType,
             WindowDragQueryResponse,
@@ -28,8 +30,7 @@ use{
             DraggedItem,
             HoverState
         },
-        turtle::Rect,
-        window::WindowGeom
+        //turtle::Rect,
     }
 };
 

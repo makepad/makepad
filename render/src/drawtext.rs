@@ -11,6 +11,7 @@ use {
         font::{CxFontsAtlasTodo, Font,},
         view::ManyInstances,
         drawvars::DrawVars,
+        area::AreaImpl,
         geometrygen::GeometryQuad2D,
     },
 };

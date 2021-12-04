@@ -1,19 +1,19 @@
 use {
     std::{
         io::prelude::*,
-        fs::File,
+   //     fs::File,
         io,
     },
     makepad_live_compiler::Vec2,
-    crate::{
-        cx::Cx,
-        area::Area,
+    makepad_platform::{
         events::{
             Event,
             KeyCode,
-            FileRead,
-            FileReadEvent,
         }
+    },
+    crate::{
+        cx::Cx,
+        area::Area,
     }
 };
 
@@ -27,8 +27,8 @@ macro_rules!log {
 #[derive(Clone)]
 pub struct CxDesktop {
     pub repaint_via_scroll_event: bool,
-    pub file_read_id: u64,
-    pub file_reads: Vec<FileRead>,
+    //pub file_read_id: u64,
+    //pub file_reads: Vec<FileRead>,
     pub profiler_start: Option<u64>,
 }
 
@@ -36,8 +36,8 @@ impl Default for CxDesktop {
     fn default() -> CxDesktop {
         CxDesktop {
             repaint_via_scroll_event: false,
-            file_read_id: 1,
-            file_reads: Vec::new(),
+            //file_read_id: 1,
+            //file_reads: Vec::new(),
             profiler_start: None,
         }
     }
@@ -48,7 +48,7 @@ impl Cx {
     pub fn get_default_window_size(&self) -> Vec2 {
         return Vec2 {x: 800., y: 600.}
     }
-    
+    /*
     pub fn file_read(&mut self, path: &str) -> FileRead {
         let desktop = &mut self.platform.desktop;
         desktop.file_read_id += 1;
@@ -59,8 +59,8 @@ impl Cx {
         };
         desktop.file_reads.push(file_read.clone());
         file_read
-    }
-    
+    }*/
+    /*
     pub fn file_write(&mut self, path: &str, data: &[u8]) -> u64 {
         // just write it right now
         if let Ok(mut file) = File::create(path) {
@@ -74,7 +74,7 @@ impl Cx {
             println!("ERROR WRITING FILE {}", path);
         }
         0
-    }
+    }*/
     
     pub fn process_desktop_pre_event(&mut self, event: &mut Event)
     {
@@ -164,14 +164,14 @@ impl Cx {
             vsync = true;
         }
         
-        self.process_desktop_file_reads();
+        //self.process_desktop_file_reads();
         
         self.call_signals();
         
         vsync
     }
     
-    
+    /*
     pub fn process_desktop_file_reads(&mut self){
         if self.platform.desktop.file_reads.len() == 0 {
             return
@@ -209,7 +209,7 @@ impl Cx {
         if self.platform.desktop.file_reads.len() != 0 {
             self.process_desktop_file_reads();
         }
-    }
+    }*/
     
     pub fn process_to_wasm<F>(&mut self, _msg: u32, mut _event_handler: F) -> u32
     where F: FnMut(&mut Cx, &mut Event)

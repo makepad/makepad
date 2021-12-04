@@ -6,8 +6,9 @@ use{
         collections::HashMap,
         os::raw::{c_void}
     },
-    makepad_live_compiler::{
-        Vec2
+    makepad_math::{
+        Vec2,
+        Rect
     },
     crate::{
         cx_apple::*,
@@ -18,12 +19,12 @@ use{
             get_event_keycode,
             get_event_key_modifier
         },
-        cx::{
+        menu::{
             CxCommandSetting
         },
-        turtle::{
-            Rect
-        },
+        //turtle::{
+        //    Rect
+        //},
         events::{
             Event,
             KeyCode,

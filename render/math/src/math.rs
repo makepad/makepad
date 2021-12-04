@@ -1,11 +1,34 @@
 use{
     std::{fmt,ops},
     makepad_microserde::*,
-    crate::{
-        liveid::hex_bytes_to_u32,
-        util::PrettyPrintedF32
-    }
+    crate::colorhex::*
 };
+
+
+pub struct PrettyPrintedF32(pub f32);
+
+impl fmt::Display for PrettyPrintedF32 {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if self.0.abs().fract() < 0.00000001 {
+            write!(f, "{}.0", self.0)
+        } else {
+            write!(f, "{}", self.0)
+        }
+    }
+}
+
+
+pub struct PrettyPrintedF64(pub f64);
+
+impl fmt::Display for PrettyPrintedF64 {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        if self.0.abs().fract() < 0.00000001 {
+            write!(f, "{}.0", self.0)
+        } else {
+            write!(f, "{}", self.0)
+        }
+    }
+}
 
 
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
@@ -1332,4 +1355,5 @@ impl ops::DivAssign<f32> for Vec4 {
         self.w = self.w / rhs;
     }
 }
+
 
