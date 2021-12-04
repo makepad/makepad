@@ -3,9 +3,11 @@ pub use {
         any::TypeId,
     },
     makepad_live_compiler::*,
+    makepad_platform::{
+        events::Event
+    },
     crate::{
         cx::Cx,
-        events::Event,
         animator::Animator
     }
 };
@@ -102,27 +104,27 @@ pub struct LiveBody {
 pub trait LiveAnimate {
     fn init_animator(&mut self, cx: &mut Cx);
     fn apply_animator(&mut self, cx: &mut Cx);
-    fn toggle_animator(&mut self, cx: &mut Cx,  is_state_1:bool, should_animate:bool, track:LiveId,state1: LivePtr, state2:LivePtr, ){
-        if is_state_1{
-            if should_animate{
+    fn toggle_animator(&mut self, cx: &mut Cx, is_state_1: bool, should_animate: bool, track: LiveId, state1: LivePtr, state2: LivePtr,) {
+        if is_state_1 {
+            if should_animate {
                 self.animate_to(cx, track, state1)
             }
-            else{
+            else {
                 self.cut_to(cx, track, state1)
             }
         }
-        else{
-            if should_animate{
+        else {
+            if should_animate {
                 self.animate_to(cx, track, state2)
             }
-            else{
+            else {
                 self.cut_to(cx, track, state2)
             }
         }
     }
     fn cut_to(&mut self, cx: &mut Cx, track: LiveId, state: LivePtr);
     fn animate_to(&mut self, cx: &mut Cx, track: LiveId, state: LivePtr);
-    fn animator_handle_event(&mut self, cx: &mut Cx, event: &mut Event)->bool;
+    fn animator_handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> bool;
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -161,7 +163,7 @@ pub trait LiveHook {
                 return nodes.skip_node(index)
             }
         }
-        if !nodes[index].id.is_capitalised(){
+        if !nodes[index].id.is_capitalised() {
             cx.apply_error_no_matching_field(live_error_origin!(), apply_from, index, nodes);
         }
         nodes.skip_node(index)

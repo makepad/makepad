@@ -3,6 +3,11 @@ pub use {
         rc::Rc,
         cell::RefCell
     },
+    makepad_platform::{
+        events::{
+            WindowGeom
+        }
+    },
     makepad_live_compiler::*,
     crate::{
         cx::Cx,
@@ -197,19 +202,6 @@ impl Window {
     pub fn close(&mut self, cx: &mut Cx) {
         cx.windows[self.window_id].window_state = CxWindowState::Close;
     }
-}
-
-#[derive(Clone, Debug, Default, PartialEq)]
-pub struct WindowGeom {
-    pub dpi_factor: f32,
-    pub can_fullscreen: bool,
-    pub xr_can_present: bool,
-    pub xr_is_presenting: bool,
-    pub is_fullscreen: bool,
-    pub is_topmost: bool,
-    pub position: Vec2,
-    pub inner_size: Vec2,
-    pub outer_size: Vec2,
 }
 
 #[derive(Clone)]

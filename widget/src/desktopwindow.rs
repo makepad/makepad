@@ -49,7 +49,7 @@ pub struct DesktopWindow {
     #[rust(WindowMenu::new(cx))] pub window_menu: WindowMenu,
     #[rust(Menu::main(vec![ 
         Menu::sub("App", vec![
-            Menu::item("Quit App", Cx::command_quit()),
+            //Menu::item("Quit App", Cx::command_quit()),
         ]),
     ]))]
     

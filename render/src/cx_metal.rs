@@ -8,11 +8,14 @@ use {
     },
     makepad_shader_compiler::{DrawShaderDef, generate_metal},
     makepad_live_compiler::*,
-    crate::{
-        cx::Cx,
+    makepad_platform::{
         cx_apple::*,
         cx_cocoa_app::CocoaApp,
         cx_cocoa_window::CocoaWindow,
+        events::WindowGeom
+    },
+    crate::{
+        cx::Cx,
         pass::{PassClearColor, PassClearDepth},
         texture::{
             TextureFormat,
@@ -20,7 +23,6 @@ use {
             CxTexture
         },
         drawvars::CxDrawShader,
-        window::WindowGeom
     }
 };
 
