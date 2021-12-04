@@ -1,18 +1,8 @@
 use {
-    //std::{
-     //   any::TypeId,
-     //   collections::{HashMap, BTreeSet}
-    //},
-   // makepad_platform::{
-    //    area::*,
-    //    menu::*
-    //},
     makepad_live_compiler::*,
-   // makepad_microserde::*,
     makepad_platform::{
         events::*,
         area::Area,
-    //    menu::CommandId,
     },
     crate::{
         cx::Cx,
