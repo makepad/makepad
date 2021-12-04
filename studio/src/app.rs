@@ -34,6 +34,7 @@ impl App {
     
     pub fn new_app(cx: &mut Cx) -> Self {
         Self::new_from_module_path_id(cx, &module_path!(), id!(App)).unwrap()
+        
     }
     
     pub fn draw(&mut self, cx: &mut Cx) {
