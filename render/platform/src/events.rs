@@ -23,7 +23,7 @@ pub struct WindowGeom {
     pub can_fullscreen: bool,
     pub xr_can_present: bool,
     pub xr_is_presenting: bool,
-    pub is_fullscreen: bool,
+    pub is_fullscreen: bool, 
     pub is_topmost: bool,
     pub position: Vec2,
     pub inner_size: Vec2,
@@ -38,7 +38,7 @@ pub struct KeyModifiers {
     pub alt: bool,
     pub logo: bool
 }
- 
+  
 #[derive(Clone, Debug, PartialEq)]
 pub enum FingerInputType {
     Mouse,
@@ -364,8 +364,6 @@ pub enum Event {
     Redraw,
     AppFocus,
     AppFocusLost,
-    //AnimEnded(AnimateEvent),
-    //Animate(AnimateEvent),
     NextFrame(NextFrameEvent),
     XRUpdate(XRUpdateEvent),
     WindowSetHoverCursor(MouseCursor),
@@ -383,8 +381,6 @@ pub enum Event {
     FileWrite(FileWriteEvent),
     Timer(TimerEvent),
     Signal(SignalEvent),
-    //Triggers(TriggersEvent),
-    //Trigger(TriggerEvent),
     Command(CommandId),
     KeyFocus(KeyFocusEvent),
     KeyFocusLost(KeyFocusEvent),
@@ -392,7 +388,6 @@ pub enum Event {
     KeyUp(KeyEvent),
     TextInput(TextInputEvent),
     TextCopy(TextCopyEvent),
-    //LiveRecompile(LiveRecompileEvent),
     WebSocketMessage(WebSocketMessageEvent),
     FingerDrag(FingerDragEvent),
     FingerDrop(FingerDropEvent),
