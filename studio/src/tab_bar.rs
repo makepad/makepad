@@ -1,7 +1,7 @@
 use {
     crate::{
         genid::{GenId, GenIdMap},
-        tab::{TabAction, Tab}, 
+        tab::{TabAction, Tab},
     },
     makepad_render::*,
     makepad_widget::*,
@@ -13,16 +13,16 @@ live_register!{
     
     TabBar: {{TabBar}} {
         tab: Tab {}
-        draw_drag:{
-            draw_depth:10
-            color:#c
+        draw_drag: {
+            draw_depth: 10
+            color: #c
         }
         scroll_view: {
             show_v: false
             show_h: true
-            scroll_h:{
-                bar_size:8
-                use_vertical_finger_scroll:true
+            scroll_h: {
+                bar_size: 8
+                use_vertical_finger_scroll: true
             }
             view: {
                 debug_id: tab_bar_view
@@ -48,6 +48,7 @@ pub struct TabBar {
     #[rust] tabs_by_tab_id: GenIdMap<TabId, Tab>,
     #[rust] tab_ids: Vec<TabId>,
     #[rust] selected_tab_id: Option<TabId>,
+    #[rust] next_selected_tab_id: Option<TabId>,
 }
 
 impl TabBar {
@@ -71,7 +72,7 @@ impl TabBar {
         self.scroll_view.end(cx);
     }
     
-    pub fn tab(&mut self, cx: &mut Cx, tab_id: TabId, name: &str) {
+    pub fn draw_tab(&mut self, cx: &mut Cx, tab_id: TabId, name: &str) {
         let tab = self.get_or_create_tab(cx, tab_id);
         tab.draw(cx, name);
         self.tab_ids.push(tab_id);
@@ -92,7 +93,7 @@ impl TabBar {
         self.selected_tab_id
     }
     
-    pub fn set_selected_tab_id(&mut self, cx: &mut Cx, tab_id: Option<TabId>, should_animate:bool) {
+    pub fn set_selected_tab_id(&mut self, cx: &mut Cx, tab_id: Option<TabId>, should_animate: bool) {
         if self.selected_tab_id == tab_id {
             return;
         }
@@ -108,6 +109,23 @@ impl TabBar {
         self.scroll_view.redraw(cx);
     }
     
+    
+    pub fn set_next_selected_tab(&mut self, cx: &mut Cx, tab_id: TabId, should_animate: bool) {
+        if let Some(index) = self.tab_ids.iter().position( | id | *id == tab_id) {
+            if self.selected_tab_id != Some(tab_id) {
+                self.next_selected_tab_id = self.selected_tab_id;
+            }
+            else if index >0 {
+                self.next_selected_tab_id = Some(self.tab_ids[index - 1]);
+                self.set_selected_tab_id(cx, self.next_selected_tab_id, should_animate);
+            }
+            else if index + 1 < self.tab_ids.len() {
+                self.next_selected_tab_id = Some(self.tab_ids[index + 1]);
+                self.set_selected_tab_id(cx, self.next_selected_tab_id, should_animate);
+            }
+            cx.new_next_frame();
+        }
+    }
     pub fn redraw(&mut self, cx: &mut Cx) {
         self.scroll_view.redraw(cx)
     }
@@ -120,6 +138,9 @@ impl TabBar {
     ) {
         if self.scroll_view.handle_event(cx, event) {
             self.scroll_view.redraw(cx);
+        }
+        if let Some(tab_id) = self.next_selected_tab_id.take() {
+            dispatch_action(cx, TabBarAction::TabWasPressed(tab_id));
         }
         for tab_id in &self.tab_ids {
             let tab = &mut self.tabs_by_tab_id[*tab_id];
