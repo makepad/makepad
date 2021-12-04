@@ -52,7 +52,6 @@ mod drawquad;
 mod drawtext;
 mod drawcolor;
 mod events;
-//mod menu; 
 mod geometry;
 mod drawvars;
 mod shader_std;
