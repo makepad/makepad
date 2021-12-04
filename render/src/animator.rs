@@ -132,7 +132,7 @@ impl Ease {
             },
             Self::None => {
                 return 1.0;
-            },
+            },/*
             Self::Pow {begin, end} => {
                 if t < 0. {
                     return 0.;
@@ -221,7 +221,7 @@ impl Ease {
             },
             Self::InOutSine => {
                 return -0.5 * ((t * PI).cos() - 1.);
-            },
+            },*/
             Self::InExp => {
                 if t < 0.001 {
                     return 0.;
@@ -237,7 +237,7 @@ impl Ease {
                 else {
                     return -(2.0f64.powf(-10. * t)) + 1.;
                 }
-            },
+            },/*
             Self::InOutExp => {
                 if t<0.001 {
                     return 0.;
@@ -420,7 +420,7 @@ impl Ease {
                 }
                 
                 return ((ay * u + by) * u + cy) * u;
-            }
+            }*/
         }
     }
 }

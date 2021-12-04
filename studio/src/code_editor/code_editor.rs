@@ -30,19 +30,17 @@ live_register!{
             view: {debug_id: code_editor_view}
         }
         
-        MyCodeText:{
-            font: {
-                path: "resources/LiberationMono-Regular.ttf"
-            }
-            brightness: 1.1
-            font_size: 8.0
-            line_spacing: 1.8
-            top_drop: 1.3
-        }
-        
         code_text: {
             draw_depth: 1.0
-            text_style: MyCodeText{}
+            text_style: {
+                font: {
+                    path: "resources/LiberationMono-Regular.ttf"
+                }
+                brightness: 1.1
+                font_size: 8.0
+                line_spacing: 1.8
+                top_drop: 1.3
+            }
         }
         
         gutter_text:code_text{}
