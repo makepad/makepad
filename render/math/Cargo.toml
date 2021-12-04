@@ -9,4 +9,4 @@ license = "MIT"
 [features] 
 
 [dependencies]
-//makepad-microserde = { path = "../microserde", version = "0.1" }
+makepad-microserde = { path = "../microserde", version = "0.1" }
