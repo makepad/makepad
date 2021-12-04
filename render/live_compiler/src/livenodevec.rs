@@ -779,6 +779,9 @@ impl LiveNodeVec for Vec<LiveNode> {
             if stack_depth > MAX_CLONE_STACK_DEPTH_SAFETY {
                 return true
             }
+            if insert_point < index{
+                index += 1;
+            }
             index += 1;
         }
         false

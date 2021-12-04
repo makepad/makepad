@@ -167,7 +167,6 @@ pub struct DrawText {
     #[calc] pub base: Vec2,
     #[calc] pub font_size: f32,
     #[calc] pub char_offset: f32,
-    #[calc] pub marker: f32,
 }
 
 impl DrawText {
@@ -179,7 +178,7 @@ impl DrawText {
     }
     
     pub fn draw(&mut self, cx: &mut Cx, pos: Vec2) {
-        self.draw_chunk(cx, pos, 0, None, | _, _, _, _ | {0.0});
+        self.draw_chunk(cx, pos, 0, None);
     }
     
     pub fn draw_rel(&mut self, cx: &mut Cx, pos: Vec2, val: &str) {
@@ -212,8 +211,7 @@ impl DrawText {
         self.draw_vars.user_uniforms[1] = self.text_style.curve;
     }
     
-    pub fn draw_chunk<F>(&mut self, cx: &mut Cx, pos: Vec2, char_offset: usize, chunk: Option<&[char]>, mut char_callback: F)
-    where F: FnMut(char, usize, f32, f32) -> f32
+    pub fn draw_chunk(&mut self, cx: &mut Cx, pos: Vec2, char_offset: usize, chunk: Option<&[char]>)
     {
         
         if !self.draw_vars.can_instance()
@@ -330,12 +328,7 @@ impl DrawText {
             self.font_size = self.text_style.font_size;
             self.char_offset = char_offset as f32;
             
-            // self.marker = marker;
-            self.marker = char_callback(*wc, char_offset, walk_x, advance);
-            
             mi.instances.extend_from_slice(self.draw_vars.as_slice());
-            // !TODO make sure a derived shader adds 'empty' values here.
-            
             walk_x += advance;
             char_offset += 1;
         }
@@ -432,7 +425,7 @@ impl DrawText {
                     margin: Margin::default()
                 });
                 
-                self.draw_chunk(cx, rect.pos, 0, None, | _, _, _, _ | {0.0});
+                self.draw_chunk(cx, rect.pos, 0, None);
                 
                 width = 0.0;
                 self.buf.truncate(0);

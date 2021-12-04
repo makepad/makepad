@@ -103,8 +103,10 @@ impl<'a> LiveExpander<'a> {
             match in_value {
                 LiveValue::Close => {
                     if !level_overwrite.last().unwrap() {
+                        let old_len = out_doc.nodes.len();
                         let index = out_doc.nodes.append_child_index(*current_parent.last().unwrap());
                         out_doc.nodes.insert(index, in_node.clone());
+                        self.shift_scopes(out_doc, index, old_len, out_doc.nodes.len());
                     }
                     current_parent.pop();
                     level_overwrite.pop();
@@ -144,7 +146,9 @@ impl<'a> LiveExpander<'a> {
                         }
                     }
                     let index = out_doc.nodes.append_child_index(*current_parent.last().unwrap());
+                    let old_len = out_doc.nodes.len();
                     out_doc.nodes.insert(index, in_node.clone());
+                    self.shift_scopes(out_doc, index, old_len, out_doc.nodes.len());
                     in_index += 1;
                     continue;
                 }
@@ -197,7 +201,7 @@ impl<'a> LiveExpander<'a> {
                     in_value.enum_base_id() == out_value.enum_base_id() { // enum switch is allowed
                         if in_value.is_open() {
                             if out_value.is_open() {
-                                let next_index = out_doc.nodes.next_child(overwrite).unwrap();
+                                let next_index = out_doc.nodes.skip_node(overwrite);
                                 out_doc.nodes[overwrite] = in_node.clone();
                                 // POTENTIAL SHIFT
                                 let old_len = out_doc.nodes.len();
@@ -212,7 +216,7 @@ impl<'a> LiveExpander<'a> {
                             }
                         }
                         else if out_value.is_open() { // out is a tree remove incl close
-                            let next_index = out_doc.nodes.next_child(overwrite).unwrap();
+                            let next_index = out_doc.nodes.skip_node(overwrite);
                             out_doc.nodes[overwrite] = in_node.clone();
                             // POTENTIAL SHIFT
                             let old_len = out_doc.nodes.len();
@@ -226,6 +230,24 @@ impl<'a> LiveExpander<'a> {
                         overwrite
                     }
                     else if in_value.is_object() && out_value.is_clone() {
+                        level_overwrite.push(true);
+                        overwrite
+                    }
+                    else if in_value.is_clone() && out_value.is_class() {
+                        // throw away whats in there
+                        let next_index = out_doc.nodes.skip_node(overwrite);
+                        let old_len = out_doc.nodes.len();
+                        out_doc.nodes.drain(overwrite + 1..next_index - 1);
+                        self.shift_scopes(out_doc, overwrite, old_len, out_doc.nodes.len());
+                        level_overwrite.push(true);
+                        overwrite
+                    }
+                    else if in_value.is_clone() && out_value.is_object() {
+                        // throw away whats in there
+                        let next_index = out_doc.nodes.skip_node(overwrite);
+                        let old_len = out_doc.nodes.len();
+                        out_doc.nodes.drain(overwrite + 1..next_index - 1);
+                        self.shift_scopes(out_doc, overwrite, old_len, out_doc.nodes.len());
                         level_overwrite.push(true);
                         overwrite
                     }
@@ -273,9 +295,10 @@ impl<'a> LiveExpander<'a> {
                         continue;
                     }
                     
+                    let old_len = out_doc.nodes.len();
                     out_doc.nodes.insert(insert_point, in_node.clone());
                     
-                    self.shift_scopes(out_doc, insert_point - 1, 0, 1);
+                    self.shift_scopes(out_doc, insert_point - 1, old_len, out_doc.nodes.len());
                     
                     if in_node.value.is_open() {
                         level_overwrite.push(false);
@@ -304,9 +327,22 @@ impl<'a> LiveExpander<'a> {
                                         message: format!("Infinite recursion at {}", in_node.id)
                                     });
                                 }
+
                                 // SHIFT POINT
                                 self.shift_scopes(out_doc, out_index, old_len, out_doc.nodes.len());
                                 // clone the value and store a parent pointer
+                                if let LiveValue::Class {live_type:old_live_type,..} = &out_doc.nodes[out_index].value {
+                                    if let LiveValue::Class {live_type,..} = &out_doc.nodes[local_ptr].value {
+                                        if live_type !=old_live_type{
+                                             self.errors.push(LiveError {
+                                                origin: live_error_origin!(),
+                                                span: in_doc.token_id_to_span(in_node.token_id.unwrap()),
+                                                message: format!("Class override with wrong type {}", in_node.id)
+                                            });
+                                        }
+                                    }
+                                }
+
                                 out_doc.nodes[out_index].value = out_doc.nodes[local_ptr].value.clone();
                                 if let LiveValue::Class {class_parent, ..} = &mut out_doc.nodes[out_index].value {
                                     *class_parent = Some(LivePtr {file_id: self.in_file_id, index: out_index as u32});
@@ -319,14 +355,25 @@ impl<'a> LiveExpander<'a> {
                                 // SHIFT POINT
                                 self.shift_scopes(out_doc, out_index, old_len, out_doc.nodes.len());
                                 // store the parent pointer
+                                if let LiveValue::Class {live_type:old_live_type,..} = &out_doc.nodes[out_index].value {
+                                    if let LiveValue::Class {live_type,..} = &doc.nodes[live_ptr.node_index()].value {
+                                        if live_type !=old_live_type{
+                                             self.errors.push(LiveError {
+                                                origin: live_error_origin!(),
+                                                span: in_doc.token_id_to_span(in_node.token_id.unwrap()),
+                                                message: format!("Class override with wrong type {}", in_node.id)
+                                            });
+                                        }
+                                    }
+                                }
                                 out_doc.nodes[out_index].value = doc.nodes[live_ptr.node_index()].value.clone();
                                 if let LiveValue::Class {class_parent, ..} = &mut out_doc.nodes[out_index].value {
                                     *class_parent = Some(LivePtr {file_id: self.in_file_id, index: out_index as u32});
-                                }
+                                }                                           
                             }
                         };
                         //overwrite value, this copies the Class
-                        
+                               
                     }
                     self.scope_stack.stack.push(Vec::new());
                     current_parent.push(out_index);
