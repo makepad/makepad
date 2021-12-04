@@ -89,34 +89,6 @@ impl LiveFileId {
 pub struct LiveModuleId(pub LiveId, pub LiveId);
 
 impl LiveModuleId {
-    pub const fn from_str_unchecked(module_path: &str) -> Self {
-        // ok lets split off the first 2 things from module_path
-        let bytes = module_path.as_bytes();
-        let len = bytes.len();
-        // we have to find the first :
-        let mut crate_id = LiveId(0);
-        let mut i = 0;
-        while i < len {
-            if bytes[i] == ':' as u8 {
-                crate_id = LiveId::from_bytes(bytes, 0, i);
-                i += 2;
-                break
-            }
-            i += 1;
-        }
-        if i == len { // module_path is only one thing
-            return LiveModuleId(LiveId(0), LiveId::from_bytes(bytes, 0, len));
-        }
-        let module_start = i;
-        while i < len {
-            if bytes[i] == ':' as u8 {
-                break
-            }
-            i += 1;
-        }
-        return LiveModuleId(crate_id, LiveId::from_bytes(bytes, module_start, i));
-    }
-    
     pub fn from_str(module_path: &str) -> Result<Self,
     String> {
         // ok lets split off the first 2 things from module_path
@@ -136,43 +108,9 @@ impl LiveModuleId {
         if i == len { // module_path is only one thing
             return Ok(LiveModuleId(LiveId(0), LiveId::from_str(std::str::from_utf8(&bytes[0..len]).unwrap()) ?));
         }
-        let module_start = i;
-        while i < len {
-            if bytes[i] == ':' as u8 {
-                break
-            }
-            i += 1;
-        }
-        return Ok(LiveModuleId(crate_id, LiveId::from_str(std::str::from_utf8(&bytes[module_start..i]).unwrap()) ?));
+        return Ok(LiveModuleId(crate_id, LiveId::from_str(std::str::from_utf8(&bytes[i..len]).unwrap()) ?));
     }
-    
-        pub fn from_str2(module_path: &str) -> Result<Self,
-    String> {
-        let bytes = module_path.as_bytes();
-        let len = bytes.len();
-        // we have to find the first :
-        let mut crate_id = LiveId(0);
-        let mut i = 0;
-        while i < len {
-            if bytes[i] == ':' as u8 {
-                crate_id = LiveId::from_str(std::str::from_utf8(&bytes[0..i]).unwrap()) ?;
-                i += 2;
-                break
-            }
-            i += 1;
-        }
-        if i == len { // module_path is only one thing
-            return Ok(LiveModuleId(LiveId(0), LiveId::from_str(std::str::from_utf8(&bytes[0..len]).unwrap()) ?));
-        }
-        let module_start = i;
-        while i < len {
-            if bytes[i] == ':' as u8 {
-                break
-            }
-            i += 1;
-        }
-        return Ok(LiveModuleId(crate_id, LiveId::from_str(std::str::from_utf8(&bytes[module_start..i]).unwrap()) ?));
-    }
+
 }
 
 impl fmt::Display for LiveModuleId {
@@ -236,6 +174,11 @@ impl LiveId {
         self.0 == 0
     }
     
+    pub fn is_capitalised(&self) -> bool {
+        self.0&0x8000_0000_0000_0000 != 0
+    }
+    
+    
     // from https://nullprogram.com/blog/2018/07/31/
     // i have no idea what im doing with start value and finalisation.
     pub const fn from_bytes(id_bytes: &[u8], start: usize, end: usize) -> Self {
@@ -251,10 +194,17 @@ impl LiveId {
             x ^= x >> 32;
             i += 1;
         }
-        return Self (x) // leave the first bit
+        // use high bit to mark id as capitalised
+        if id_bytes[0] >= 'A' as u8 && id_bytes[0] <= 'Z' as u8{
+            return Self(x|0x8000_0000_0000_0000)
+        }
+        else{
+            return Self(x&0x7fff_ffff_ffff_ffff)
+        }
     }
     
     // merges 2 ids in a nonsymmetric fashion
+    /*
     pub const fn add_id(&self, id: LiveId) -> Self {
         //let id_len = id_bytes.len();
         let mut x = id.0;
@@ -265,7 +215,7 @@ impl LiveId {
         x = x.overflowing_mul(0xd6e8_feb8_6659_fd93).0;
         x ^= x >> 32;
         return Self (x) // leave the first bit
-    }
+    }*/
     
     pub const fn from_str_unchecked(id_str: &str) -> Self {
         let bytes = id_str.as_bytes();
