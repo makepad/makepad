@@ -1,12 +1,15 @@
 use {
-    std::fmt::Write,
-    std::ops::Deref,
+    std::{
+        fmt::Write,
+        ops::Deref,
+        iter
+    },
     makepad_derive_live::{
         live_object
     },
     crate::{
         liveid::{LiveId},
-        livenode::{LiveNode, LiveValue, InlineString, FittedString},
+        livenode::{LiveNode, LiveValue, LiveNodeOrigin, InlineString, FittedString},
         math::{Vec2, Vec3, Vec4},
     }
 };
@@ -28,7 +31,7 @@ pub trait LiveNodeSlice {
     fn child_value_by_path(&self, parent_index: usize, path: &[LiveId]) ->Option<&LiveValue>;
 
     fn scope_up_by_name(&self, parent_index: usize, name: LiveId) -> Option<usize>;
-    //fn scope_up_down_by_name(&self, parent_index: usize, name: LiveId) -> Option<usize>;
+    fn scope_up_down_by_name(&self, parent_index: usize, name: LiveId) -> Option<usize>;
 
     fn count_children(&self, parent_index: usize) -> usize;
     fn skip_node(&self, node_index: usize) -> usize;
@@ -38,11 +41,12 @@ pub trait LiveNodeSlice {
 }
 
 pub trait LiveNodeVec {
-    fn insert_node_from_other(&mut self, from_index: usize, insert_start: Option<usize>, other: &[LiveNode]) -> usize;
-    fn insert_node_from_self(&mut self, from_index: usize, insert_start: Option<usize>) -> usize;
+    fn insert_node_from_other(&mut self, from_index: usize, insert_start: usize, other: &[LiveNode]) -> usize;
+    fn insert_node_from_self(&mut self, from_index: usize, insert_start: usize)->usize;
     
-    fn insert_children_from_other(&mut self, from_index: usize, insert_start: Option<usize>, other: &[LiveNode]);
-    fn insert_children_from_self(&mut self, from_index: usize, insert_start: Option<usize>) -> bool;
+    fn insert_children_from_other(&mut self, from_index: usize, insert_start: usize, other: &[LiveNode]);
+    fn insert_children_from_self(&mut self, from_index: usize, insert_start: usize);
+    //fn insert_children_from_self2(&mut self, from_index: usize, insert_start: usize);
     
     fn replace_or_insert_last_node_by_path(&mut self, start_index: usize, path:&[LiveId], other: &[LiveNode]);
     fn replace_or_insert_first_node_by_path(&mut self, start_index: usize, path:&[LiveId], other: &[LiveNode]);
@@ -79,7 +83,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
             return None
         }
         let mut stack_depth = 0;
-        let mut index = child_index;
+        let mut index = child_index - 1;
         // we are going to scan backwards
         loop {
             if self_ref[index].value.is_open() {
@@ -127,7 +131,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         }
         None
     }
-    /*
+    
     fn scope_up_down_by_name(&self, start_index: usize, name: LiveId) -> Option<usize> {
         let self_ref = self.as_ref();
         if self_ref.len() == 0{
@@ -166,7 +170,6 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         }
         None
     }
-    */
     
     
     fn child_by_number(&self, parent_index: usize, child_number: usize) -> Option<usize> {
@@ -244,7 +247,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
             }
             index += 1;
         }
-        panic!()
+        None
     }
     
     fn last_child(&self, parent_index: usize) -> Option<usize> {
@@ -676,10 +679,8 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
                 LiveValue::DSL {
                     token_start,
                     token_count,
-                    scope_start,
-                    scope_count
                 } => {
-                    writeln!(f, "<DSL> {} :token_start:{}, token_count:{}, scope_start:{}, scope_end:{}", node.id, token_start, token_count, scope_start, scope_count).unwrap();
+                    writeln!(f, "<DSL> {} :token_start:{}, token_count:{}", node.id, token_start, token_count).unwrap();
                 },
                 LiveValue::Use(module_path) => {
                     writeln!(f, "<Use> {}::{}", module_path, node.id).unwrap();
@@ -701,161 +702,69 @@ impl_live_node_slice!(&mut [LiveNode]);
 impl_live_node_slice!(Vec<LiveNode>);
 */
 impl LiveNodeVec for Vec<LiveNode> {
-    fn insert_children_from_other(&mut self, index: usize, insert_start: Option<usize>, other: &[LiveNode]) {
-        let mut stack_depth = 0;
-        let mut index = index;
-        let mut insert_point = if let Some(insert_start) = insert_start {
-            insert_start
-        }
-        else {
-            other.len()
-        };
-        while index < other.len() {
-            if other[index].value.is_open() {
-                if stack_depth >= 1 {
-                    self.insert(insert_point, other[index].clone());
-                    insert_point += 1;
-                }
-                stack_depth += 1;
-            }
-            else if other[index].value.is_close() {
-                stack_depth -= 1;
-                if stack_depth >= 1 {
-                    self.insert(insert_point, other[index].clone());
-                    insert_point += 1;
-                }
-                if stack_depth == 0 {
-                    return
-                }
-            }
-            else {
-                self.insert(insert_point, other[index].clone());
-                insert_point += 1;
-                if stack_depth == 0 {
-                    return
-                }
-            }
-            index += 1;
-        }
-        panic!();
-    }
     
-    
-    fn insert_children_from_self(&mut self, index: usize, insert_start: Option<usize>) -> bool {
-        let mut stack_depth = 0;
-        let mut index = index;
-        let mut insert_point = if let Some(insert_start) = insert_start {
-            insert_start
-        }
-        else {
-            self.len()
-        };
-        //let mut insert_start = insert_point;
-        while index < self.len() {
-            if self[index].value.is_open() {
-                if stack_depth >= 1 {
-                    self.insert(insert_point, self[index].clone());
-                    insert_point += 1;
-                }
-                stack_depth += 1;
-            }
-            else if self[index].value.is_close() {
-                stack_depth -= 1;
-                if stack_depth >= 1 {
-                    self.insert(insert_point, self[index].clone());
-                    insert_point += 1;
-                }
-                if stack_depth == 0 {
-                    return false
-                }
-            }
-            else {
-                self.insert(insert_point, self[index].clone());
-                insert_point += 1;
-                if stack_depth == 0 {
-                    return false
-                }
-            }
-            if stack_depth > MAX_CLONE_STACK_DEPTH_SAFETY {
-                return true
-            }
-            if insert_point < index{
-                index += 1;
-            }
-            index += 1;
-        }
-        false
-    }
-    
-    
-    fn insert_node_from_self(&mut self, index: usize, insert_start: Option<usize>) -> usize {
-        let mut stack_depth = 0;
-        let mut index = index;
-        let mut insert_point = if let Some(insert_start) = insert_start {
-            insert_start
-        }
-        else {
-            self.len()
-        };
-        if insert_point < index {
+    fn insert_children_from_other(&mut self, source_index: usize, insert_point: usize, other: &[LiveNode]) {
+        
+        if !other[source_index].value.is_open(){
             panic!();
         }
-        while index < self.len() {
-            self.insert(insert_point, self[index].clone());
-            if self[index].value.is_open() {
-                insert_point += 1;
-                stack_depth += 1;
-            }
-            else if self[index].value.is_close() {
-                stack_depth -= 1;
-                insert_point += 1;
-                if stack_depth == 0 {
-                    return insert_point
-                }
-            }
-            else {
-                insert_point += 1;
-                if stack_depth == 0 {
-                    return insert_point
-                }
-            }
-            
-            index += 1;
+        let next_source = other.skip_node(source_index);
+        let num_children = (next_source - source_index) - 2;
+        // make space
+        self.splice(insert_point..insert_point,  iter::repeat(LiveNode::empty()).take(num_children));
+        
+        for i in 0..num_children{
+            self[insert_point + i] = other[source_index+1+i].clone();
         }
-        panic!();
     }
     
-    fn insert_node_from_other(&mut self, index: usize, insert_start: Option<usize>, other: &[LiveNode]) -> usize {
-        let mut stack_depth = 0;
-        let mut index = index;
-        let mut insert_point = if let Some(insert_start) = insert_start {
-            insert_start
+    
+    fn insert_children_from_self(&mut self, source_index: usize, insert_point: usize){
+        // get the # of children here
+        if !self[source_index].value.is_open(){
+            panic!();
         }
-        else {
-            self.len()
-        };
-        while index < other.len() {
-            self.insert(insert_point, other[index].clone());
-            if other[index].value.is_open() {
-                insert_point += 1;
-                stack_depth += 1;
-            }
-            else if other[index].value.is_close() {
-                stack_depth -= 1;
-                insert_point += 1;
-                if stack_depth == 0 {
-                    return insert_point
-                }
-            }
-            else {
-                insert_point += 1;
-                if stack_depth == 0 {
-                    return insert_point
-                }
-            }
-            index += 1;
+        let next_source = self.skip_node(source_index);
+        let num_children = (next_source - source_index) - 2;
+        // make space
+        self.splice(insert_point..insert_point,  iter::repeat(LiveNode::empty()).take(num_children));
+        
+        let source_index = if insert_point < source_index{source_index + num_children }else{source_index};
+        
+        for i in 0..num_children{
+            self[insert_point + i] = self[source_index+1+i].clone();
         }
-        panic!();
+    }
+    
+    
+    fn insert_node_from_self(&mut self, source_index: usize, insert_point: usize) ->usize  {
+        // get the # of children here
+
+        let next_source = self.skip_node(source_index);
+        let num_nodes = next_source - source_index;
+        // make space
+        self.splice(insert_point..insert_point,  iter::repeat(LiveNode::empty()).take(num_nodes));
+        
+        let source_index = if insert_point < source_index{source_index + num_nodes }else{source_index};
+        
+        for i in 0..num_nodes{
+            self[insert_point + i] = self[source_index+i].clone();
+        }
+
+        insert_point + num_nodes
+    }
+    
+    fn insert_node_from_other(&mut self, source_index: usize, insert_point: usize, other: &[LiveNode]) -> usize {
+        let next_source = other.skip_node(source_index);
+        let num_nodes = next_source - source_index;
+        // make space
+        self.splice(insert_point..insert_point,  iter::repeat(LiveNode::empty()).take(num_nodes));
+       
+        for i in 0..num_nodes{
+            self[insert_point + i] = other[source_index+i].clone();
+        }
+
+        insert_point + num_nodes
     }
     
     fn replace_or_insert_last_node_by_path(&mut self, start_index:usize, path:&[LiveId], other: &[LiveNode]) {
@@ -929,34 +838,34 @@ impl LiveNodeVec for Vec<LiveNode> {
     
     fn push_live(&mut self, v: &[LiveNode]) {self.extend_from_slice(v)}
     
-    fn push_str(&mut self, id: LiveId, v: &'static str) {self.push(LiveNode {token_id: None, id, value: LiveValue::Str(v)})}
+    fn push_str(&mut self, id: LiveId, v: &'static str) {self.push(LiveNode {origin:LiveNodeOrigin::empty(), id, value: LiveValue::Str(v)})}
     fn push_string(&mut self, id: LiveId, v: &str) {
         //let bytes = v.as_bytes();
         if let Some(inline_str) = InlineString::from_str(v) {
-            self.push(LiveNode {token_id: None, id, value: LiveValue::InlineString(inline_str)});
+            self.push(LiveNode {origin:LiveNodeOrigin::empty(), id, value: LiveValue::InlineString(inline_str)});
         }
         else {
-            self.push(LiveNode {token_id: None, id, value: LiveValue::FittedString(FittedString::from_string(v.to_string()))});
+            self.push(LiveNode {origin:LiveNodeOrigin::empty(), id, value: LiveValue::FittedString(FittedString::from_string(v.to_string()))});
         }
     }
     
-    fn push_bool(&mut self, id: LiveId, v: bool) {self.push(LiveNode {token_id: None, id, value: LiveValue::Bool(v)})}
-    fn push_int(&mut self, id: LiveId, v: i64) {self.push(LiveNode {token_id: None, id, value: LiveValue::Int(v)})}
-    fn push_float(&mut self, id: LiveId, v: f64) {self.push(LiveNode {token_id: None, id, value: LiveValue::Float(v)})}
-    fn push_color(&mut self, id: LiveId, v: u32) {self.push(LiveNode {token_id: None, id, value: LiveValue::Color(v)})}
-    fn push_vec2(&mut self, id: LiveId, v: Vec2) {self.push(LiveNode {token_id: None, id, value: LiveValue::Vec2(v)})}
-    fn push_vec3(&mut self, id: LiveId, v: Vec3) {self.push(LiveNode {token_id: None, id, value: LiveValue::Vec3(v)})}
-    fn push_vec4(&mut self, id: LiveId, v: Vec4) {self.push(LiveNode {token_id: None, id, value: LiveValue::Vec4(v)})}
-    fn push_id(&mut self, id: LiveId, v: LiveId) {self.push(LiveNode {token_id: None, id, value: LiveValue::Id(v)})}
+    fn push_bool(&mut self, id: LiveId, v: bool) {self.push(LiveNode {origin:LiveNodeOrigin::empty(), id, value: LiveValue::Bool(v)})}
+    fn push_int(&mut self, id: LiveId, v: i64) {self.push(LiveNode {origin:LiveNodeOrigin::empty(), id, value: LiveValue::Int(v)})}
+    fn push_float(&mut self, id: LiveId, v: f64) {self.push(LiveNode {origin:LiveNodeOrigin::empty(), id, value: LiveValue::Float(v)})}
+    fn push_color(&mut self, id: LiveId, v: u32) {self.push(LiveNode {origin:LiveNodeOrigin::empty(), id, value: LiveValue::Color(v)})}
+    fn push_vec2(&mut self, id: LiveId, v: Vec2) {self.push(LiveNode {origin:LiveNodeOrigin::empty(), id, value: LiveValue::Vec2(v)})}
+    fn push_vec3(&mut self, id: LiveId, v: Vec3) {self.push(LiveNode {origin:LiveNodeOrigin::empty(), id, value: LiveValue::Vec3(v)})}
+    fn push_vec4(&mut self, id: LiveId, v: Vec4) {self.push(LiveNode {origin:LiveNodeOrigin::empty(), id, value: LiveValue::Vec4(v)})}
+    fn push_id(&mut self, id: LiveId, v: LiveId) {self.push(LiveNode {origin:LiveNodeOrigin::empty(), id, value: LiveValue::Id(v)})}
     
-    fn push_bare_enum(&mut self, id: LiveId, base: LiveId, variant: LiveId) {self.push(LiveNode {token_id: None, id, value: LiveValue::BareEnum {base, variant}})}
-    fn open_tuple_enum(&mut self, id: LiveId, base: LiveId, variant: LiveId) {self.push(LiveNode {token_id: None, id, value: LiveValue::TupleEnum {base, variant}})}
-    fn open_named_enum(&mut self, id: LiveId, base: LiveId, variant: LiveId) {self.push(LiveNode {token_id: None, id, value: LiveValue::NamedEnum {base, variant}})}
-    fn open_object(&mut self, id: LiveId) {self.push(LiveNode {token_id: None, id, value: LiveValue::Object})}
-    fn open_clone(&mut self, id: LiveId, clone: LiveId) {self.push(LiveNode {token_id: None, id, value: LiveValue::Clone(clone)})}
-    fn open_array(&mut self, id: LiveId) {self.push(LiveNode {token_id: None, id, value: LiveValue::Array})}
-    fn close(&mut self) {self.push(LiveNode {token_id: None, id: LiveId(0), value: LiveValue::Close})}
-    fn open(&mut self) {self.push(LiveNode {token_id: None, id: LiveId(0), value: LiveValue::Object})}
+    fn push_bare_enum(&mut self, id: LiveId, base: LiveId, variant: LiveId) {self.push(LiveNode {origin:LiveNodeOrigin::empty(), id, value: LiveValue::BareEnum {base, variant}})}
+    fn open_tuple_enum(&mut self, id: LiveId, base: LiveId, variant: LiveId) {self.push(LiveNode {origin:LiveNodeOrigin::empty(), id, value: LiveValue::TupleEnum {base, variant}})}
+    fn open_named_enum(&mut self, id: LiveId, base: LiveId, variant: LiveId) {self.push(LiveNode {origin:LiveNodeOrigin::empty(), id, value: LiveValue::NamedEnum {base, variant}})}
+    fn open_object(&mut self, id: LiveId) {self.push(LiveNode {origin:LiveNodeOrigin::empty(), id, value: LiveValue::Object})}
+    fn open_clone(&mut self, id: LiveId, clone: LiveId) {self.push(LiveNode {origin:LiveNodeOrigin::empty(), id, value: LiveValue::Clone(clone)})}
+    fn open_array(&mut self, id: LiveId) {self.push(LiveNode {origin:LiveNodeOrigin::empty(), id, value: LiveValue::Array})}
+    fn close(&mut self) {self.push(LiveNode {origin:LiveNodeOrigin::empty(), id: LiveId(0), value: LiveValue::Close})}
+    fn open(&mut self) {self.push(LiveNode {origin:LiveNodeOrigin::empty(), id: LiveId(0), value: LiveValue::Object})}
 }
 const MAX_CLONE_STACK_DEPTH_SAFETY: usize = 100;
 

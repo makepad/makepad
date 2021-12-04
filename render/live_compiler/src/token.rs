@@ -73,6 +73,10 @@ impl TokenId {
     pub fn file_id(&self)->LiveFileId{
         LiveFileId(((self.0>>20)&0xfff) as u16)
     }
+    
+    pub fn to_bits(&self)->u32{self.0}
+    pub fn from_bits(v:u32)->Self{Self(v)}
+
 }
 
 #[derive(Clone, Copy, Eq, Ord, PartialOrd, PartialEq)]

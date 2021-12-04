@@ -6,13 +6,13 @@ use {
         liveerror::{LiveError, LiveFileError},
         liveparser::LiveParser,
         livedocument::LiveDocument,
-        livenode::{LiveNode, LiveValue, LiveType, LiveTypeInfo},
+        livenode::{LiveNode, LiveValue, LiveType, LiveTypeInfo,LiveNodeOrigin},
         livenodevec::{LiveNodeSlice},
         liveid::{LiveId, LiveFileId, LivePtr, LiveModuleId},
         token::TokenId,
         span::Span,
         lex::lex,
-        liveexpander::{LiveExpander, ScopeStack}
+        liveexpander::{LiveExpander}
     }
 };
 
@@ -40,6 +40,12 @@ pub struct LiveDocNodes<'a> {
     pub nodes: &'a [LiveNode],
     pub file_id: LiveFileId,
     pub index: usize
+}
+
+#[derive(Copy, Clone, Debug)]
+pub enum LiveScopeTarget {
+    LocalPtr(usize),
+    LivePtr(LivePtr)
 }
 
 impl LiveRegistry {
@@ -82,15 +88,19 @@ impl LiveRegistry {
         self.module_path_id_to_doc(ModulePath::from_str(module_path).unwrap(), id)
     }
     */
-    pub fn module_path_id_to_doc(&self, module_id: LiveModuleId, id: LiveId) -> Option<LiveDocNodes> {
+    pub fn module_id_to_file_id(&self, module_id: LiveModuleId) -> Option<LiveFileId> {
+        self.module_id_to_file_id.get(&module_id).cloned()
+    }
+
+    pub fn module_id_and_name_to_doc(&self, module_id: LiveModuleId, name: LiveId) -> Option<LiveDocNodes> {
         if let Some(file_id) = self.module_id_to_file_id.get(&module_id) {
             let doc = &self.expanded[file_id.to_index()];
-            if id != LiveId::empty() {
+            if name != LiveId::empty() {
                 if doc.nodes.len() == 0 {
                     println!("module_path_id_to_doc zero nodelen {}", self.file_id_to_file_name(*file_id));
                     return None
                 }
-                if let Some(index) = doc.nodes.child_by_name(0, id) {
+                if let Some(index) = doc.nodes.child_by_name(0, name) {
                     return Some(LiveDocNodes {nodes: &doc.nodes, file_id: *file_id, index});
                 }
                 else {
@@ -109,11 +119,11 @@ impl LiveRegistry {
         if let LiveValue::Class {class_parent, ..} = &nodes[index].value {
             // ok its a class so now first scan up from here.
             
-            if let Some(index) = nodes.scope_up_by_name(index, item) {
+            if let Some(index) = nodes.scope_up_down_by_name(index, item) {
                 // item can be a 'use' as well.
                 // if its a use we need to resolve it, otherwise w found it
-                if let LiveValue::Use(module_path) = &nodes[index].value {
-                    if let Some(ldn) = self.module_path_id_to_doc(*module_path, nodes[index].id) {
+                if let LiveValue::Use(module_id) = &nodes[index].value {
+                    if let Some(ldn) = self.module_id_and_name_to_doc(*module_id, nodes[index].id) {
                         return Some((ldn.nodes, ldn.index))
                     }
                 }
@@ -134,6 +144,56 @@ impl LiveRegistry {
             println!("WRONG TYPE  {:?}", nodes[index].value);
         }
         None
+    }
+    
+    pub fn find_scope_target_via_start(&self, item: LiveId, index:usize, nodes:&[LiveNode]) -> Option<LiveScopeTarget> {
+        if let Some(index) = nodes.scope_up_down_by_name(index, item) {
+            if let LiveValue::Use(module_id) = &nodes[index].value {
+                // ok lets find it in that other doc
+                if let Some(file_id) = self.module_id_to_file_id(*module_id) {
+                    let doc = self.file_id_to_doc(file_id);
+                    if let Some(index) = doc.nodes.child_by_name(0, item){
+                        return Some(LiveScopeTarget::LivePtr(
+                            LivePtr{file_id:file_id, index:index as u32}
+                        ))
+                    }
+                }
+            }
+            else{
+                return Some(LiveScopeTarget::LocalPtr(index))
+            }
+        }
+        // ok now look at the glob use * things
+        let mut node_iter = Some(1);
+        while let Some(index) = node_iter {
+            if let LiveValue::Use(module_id) = &nodes[index].value {
+                if nodes[index].id == LiveId::empty(){ // glob
+                    if let Some(file_id) = self.module_id_to_file_id(*module_id) {
+                        let doc = self.file_id_to_doc(file_id);
+                        if let Some(index) = doc.nodes.child_by_name(0, item){
+                            return Some(LiveScopeTarget::LivePtr(
+                                LivePtr{file_id:file_id, index:index as u32}
+                            ))
+                        }
+                    }
+                }
+            }
+            node_iter = nodes.next_child(index);
+        }
+        None
+    }
+    
+    pub fn find_scope_ptr_via_origin(&self, origin:LiveNodeOrigin, item: LiveId) -> Option<LivePtr> {
+        // ok lets start
+        let token_id = origin.token_id().unwrap();
+        let index = origin.node_index().unwrap();
+        let file_id = token_id.file_id();
+        let doc = self.file_id_to_doc(file_id);
+        match self.find_scope_target_via_start(item, index, &doc.nodes){
+            Some(LiveScopeTarget::LocalPtr(index))=>Some(LivePtr{file_id:file_id, index:index as u32}),
+            Some(LiveScopeTarget::LivePtr(ptr))=>Some(ptr),
+            None=>None
+        }
     }
     
     
@@ -242,7 +302,7 @@ impl LiveRegistry {
                     };
                     
                     dep_graph_set.insert(*module_id);
-                    self.insert_dep_order(*module_id, node.token_id.unwrap(), own_module_id);
+                    self.insert_dep_order(*module_id, node.origin.token_id().unwrap(), own_module_id);
                     
                 }, // import
                 LiveValue::Class {live_type, ..} => { // hold up. this is always own_module_path
@@ -252,7 +312,7 @@ impl LiveRegistry {
                         if sub_module_id != own_module_id {
                             dep_graph_set.insert(sub_module_id);
                             
-                            self.insert_dep_order(sub_module_id, node.token_id.unwrap(), own_module_id);
+                            self.insert_dep_order(sub_module_id, node.origin.token_id().unwrap(), own_module_id);
                         }
                     }
                 }
@@ -312,16 +372,16 @@ impl LiveRegistry {
             std::mem::swap(&mut out_doc, &mut self.expanded[file_id.to_index()]);
             out_doc.restart_from(&in_doc);
             
-            let mut scope_stack = ScopeStack {
+            /*let mut scope_stack = ScopeStack {
                 stack: vec![Vec::new()]
-            };
+            };*/
             //let len = in_doc.nodes[0].len();
             
             let mut live_document_expander = LiveExpander {
                 live_registry: self,
                 in_crate: crate_module.0,
                 in_file_id: *file_id,
-                scope_stack: &mut scope_stack,
+                //scope_stack: &mut scope_stack,
                 errors
             };
             // OK now what. how will we do this.

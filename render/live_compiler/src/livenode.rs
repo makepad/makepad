@@ -8,10 +8,11 @@ use {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct LiveNode { // 40 bytes. Don't really see ways to compress
-    pub token_id: Option<TokenId>,
+    pub origin: LiveNodeOrigin,
     pub id: LiveId,
     pub value: LiveValue,
 }
+
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum LiveValue {
@@ -53,10 +54,66 @@ pub enum LiveValue {
     DSL {
         token_start: u32,
         token_count: u32,
-        scope_start: u32,
-        scope_count: u32
     },
     Use (LiveModuleId),
+}
+
+impl LiveNode{
+    pub fn empty()->Self{
+        Self{
+            origin:LiveNodeOrigin::empty(),
+            id: LiveId(0),
+            value: LiveValue::None
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct LiveNodeOrigin(u64);
+
+impl LiveNodeOrigin{
+    pub fn empty()->Self{
+        Self(0)
+    }
+    
+    pub fn from_token_id(token_id:TokenId)->Self{
+        Self(0x8000_0000_0000_0000 | token_id.to_bits() as u64)
+    }
+    /*
+    pub fn unwrap_token_id(&self)->TokenId{
+        if self.0&0x8000_0000_0000_0000 != 0{
+            return TokenId::from_bits((self.0&0xffff_ffff) as u32)
+        }
+        else{
+            panic!()
+        }
+    }*/
+    
+    pub fn token_id(&self)->Option<TokenId>{
+        if self.0&0x8000_0000_0000_0000 != 0{
+            return Some(TokenId::from_bits((self.0&0xffff_ffff) as u32))
+        }
+        else{
+            None
+        }
+    }
+    
+    pub fn set_node_index(&mut self, index:usize){
+        self.0 = (((index as u64)&0x3fff_ffff) << 32) | 0x4000_0000_0000_0000 | ((self.0) & 0x8000_0000_ffff_ffff);
+    }
+    
+    pub fn node_index(&self)->Option<usize>{
+        if self.0&0x4000_0000_0000_0000 != 0{
+            return Some(((self.0>>32)&0x3fff_ffff) as usize)
+        }
+        else{
+            None
+        }
+    }
+    
+    pub fn has_node_index(&mut self)->bool{
+        self.0&0x4000_0000_0000_0000 != 0
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Copy, Hash)]
@@ -321,15 +378,6 @@ impl LiveValue {
             Self::TupleEnum {base, ..} => Some(*base),
             Self::NamedEnum {base, ..} => Some(*base),
             _ => None
-        }
-    }
-    
-    pub fn set_scope(&mut self, in_scope_start: usize, in_scope_count: u32) {
-        match self {
-            Self::DSL {scope_start, scope_count, ..} => {*scope_start = in_scope_start as u32; *scope_count = in_scope_count;},
-            //lf::Const {scope_start, scope_count, ..} => {*scope_start = in_scope_start; *scope_count = in_scope_count;},
-            //Self::VarDef {scope_start, scope_count, ..} => {*scope_start = in_scope_start; *scope_count = in_scope_count;},
-            _ => ()
         }
     }
     

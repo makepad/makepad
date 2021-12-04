@@ -19,7 +19,10 @@ pub use {
     crate::{
         math::*,
         liveid::{LiveId, LivePtr, LiveFileId},
-        liveregistry::{LiveRegistry, LiveDocNodes},
+        liveregistry::{
+            LiveRegistry,
+            LiveDocNodes,
+        },
         liveid::LiveModuleId,
         livenodevec::{
             LiveNodeSlice,
@@ -35,6 +38,7 @@ pub use {
             LiveFieldKind,
             LiveBinOp,
             LiveUnOp,
+            LiveNodeOrigin,
             InlineString,
             FittedString,
             LiveTypeKind,
@@ -47,6 +51,6 @@ pub use {
             LiveFileError
         },
         util::PrettyPrintedF32,
-        livedocument::{LiveScopeItem, LiveDocument, LiveScopeTarget}
+        livedocument::{LiveDocument}
     }
 };

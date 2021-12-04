@@ -110,7 +110,7 @@ impl Cx {
     
     pub fn apply_error(&mut self, origin:LiveErrorOrigin, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode], message: String) {
         let live_registry = self.live_registry.borrow();
-        if let Some(token_id) = &nodes[index].token_id {
+        if let Some(token_id) = &nodes[index].origin.token_id() {
             let err = LiveError {
                 origin,
                 message,

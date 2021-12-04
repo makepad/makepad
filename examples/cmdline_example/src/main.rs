@@ -2,13 +2,16 @@ use makepad_live_compiler::*;
 
 fn main() {
     let source1 = r#" 
+        MyThing:{x:1.0}
         
         Test:Component{
-            x:te{t:1}
-            t:My::Other{x:2.0,y:30}
-            v:1.0
-            y:2.0
+            v:MyThing{y:2.0}
         }
+
+        Test2:Test{
+            v:MyThing{y:3.0, x:4.0}
+        }
+
         /*Test2:Test{
             x:{x:2}
             t:My::Prop{x:1.0}
@@ -17,16 +20,16 @@ fn main() {
     "#;
     let source2 = r#" 
         use test::source1::Test;
-        Test3:Test{t:My::Bla,v:5.0, x:{t:2}};
+        Test3:Test{};
     "#;
     
     let mut lr = LiveRegistry::default();
     
-    match lr.parse_live_file(&format!("test1.live"), ModulePath::from_str("test::source1").unwrap(), source1.to_string(), vec![], 0) {
+    match lr.parse_live_file(&format!("test1.live"), LiveModuleId::from_str("test::source1").unwrap(), source1.to_string(), vec![], 0) {
         Err(why) => panic!("Couldnt parse file {}", why),
         _ => ()
     }
-    match lr.parse_live_file(&format!("test2.live"), ModulePath::from_str("test::source2").unwrap(), source2.to_string(), vec![], 0) {
+    match lr.parse_live_file(&format!("test2.live"), LiveModuleId::from_str("test::source2").unwrap(), source2.to_string(), vec![], 0) {
         Err(why) => panic!("Couldnt parse file {}", why),
         _ => ()
     }
@@ -40,7 +43,7 @@ fn main() {
         }
         //assert_eq!(true, false);
     }
-    println!("{:?}",lr.expanded[1]);
+    println!("{}",lr.expanded[0].nodes.to_string(0,100));
     
 }
 
