@@ -62,6 +62,8 @@ pub struct DrawShaderFlags{
     pub debug: bool,
     pub draw_call_nocompare: bool,
     pub draw_call_always: bool,
+//    pub no_v_scroll: bool,
+//    pub no_h_scroll: bool
 }
 
 #[derive(Clone, Default, Debug)]

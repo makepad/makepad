@@ -411,7 +411,7 @@ impl ScrollBar {
                             size: vec2(self.scroll_size, self.bar_size),
                         }
                     );
-                    self.bar_quad.draw_vars.area.set_do_scroll(cx, false, false);
+                    self.bar_quad.draw_vars.area.set_no_scroll(cx, true, true);
                 }
             },
             Axis::Vertical => {
@@ -438,7 +438,7 @@ impl ScrollBar {
                             size: vec2(self.bar_size, self.scroll_size)
                         }
                     );
-                    self.bar_quad.draw_vars.area.set_do_scroll(cx, false, false);
+                    self.bar_quad.draw_vars.area.set_no_scroll(cx, true, true);
                 }
             }
         }

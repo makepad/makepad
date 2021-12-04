@@ -40,7 +40,7 @@ impl Drop for View {
     }
 }
 
-impl LiveHook for View{}
+impl LiveHook for View {}
 impl LiveNew for View {
     fn new(cx: &mut Cx) -> Self {
         let views_free = cx.views_free.clone();
@@ -511,8 +511,8 @@ pub struct DrawCall {
     pub geometry_id: Option<usize>,
     pub user_uniforms: [f32; DRAW_CALL_USER_UNIFORMS], // user uniforms
     
-    pub do_v_scroll: bool,
-    pub do_h_scroll: bool,
+    pub no_v_scroll: bool,
+    pub no_h_scroll: bool,
     
     pub texture_slots: [Option<usize>; DRAW_CALL_TEXTURE_SLOTS],
     pub instance_dirty: bool,
@@ -523,11 +523,12 @@ pub struct DrawCall {
 impl DrawCall {
     
     pub fn new(mapping: &CxDrawShaderMapping, draw_vars: &DrawVars) -> Self {
+
         DrawCall {
             geometry_id: draw_vars.geometry_id,
-            do_h_scroll: true,
-            do_v_scroll: true,
-            draw_call_group:draw_vars.draw_call_group,
+            no_h_scroll: draw_vars.no_h_scroll,
+            no_v_scroll: draw_vars.no_v_scroll,
+            draw_call_group: draw_vars.draw_call_group,
             draw_shader: draw_vars.draw_shader.unwrap(),
             instances: Some(Vec::new()),
             total_instance_slots: mapping.instances.total_slots,
@@ -553,17 +554,17 @@ impl DrawCall {
         }
         self.instance_dirty = true;
         self.uniforms_dirty = true;
-        self.do_h_scroll = true;
-        self.do_v_scroll = true;
+        self.no_h_scroll = draw_vars.no_h_scroll;
+        self.no_v_scroll = draw_vars.no_v_scroll;
     }
     
     pub fn set_local_scroll(&mut self, scroll: Vec2, local_scroll: Vec2) {
         self.draw_uniforms.draw_scroll_x = scroll.x;
-        if self.do_h_scroll {
+        if !self.no_h_scroll {
             self.draw_uniforms.draw_scroll_x += local_scroll.x;
         }
         self.draw_uniforms.draw_scroll_y = scroll.y;
-        if self.do_v_scroll {
+        if !self.no_v_scroll {
             self.draw_uniforms.draw_scroll_y += local_scroll.y;
         }
         self.draw_uniforms.draw_scroll_z = local_scroll.x;
@@ -634,8 +635,8 @@ pub struct CxView {
     pub pass_id: usize,
     
     pub locked_view_transform: bool,
-    pub do_v_scroll: bool, // this means we
-    pub do_h_scroll: bool,
+    pub no_v_scroll: bool, // this means we
+    pub no_h_scroll: bool,
     pub parent_scroll: Vec2,
     pub unsnapped_scroll: Vec2,
     pub snapped_scroll: Vec2,
@@ -660,8 +661,8 @@ impl CxView {
     pub fn new() -> Self {
         let mut ret = Self {
             is_clipped: true,
-            do_v_scroll: true,
-            do_h_scroll: true,
+            no_v_scroll: false,
+            no_h_scroll: false,
             ..Self::default()
         };
         ret.uniform_view_transform(&Mat4::identity());
@@ -719,21 +720,32 @@ impl CxView {
                         // lets compare uniforms and textures..
                         if !sh.mapping.flags.draw_call_nocompare {
                             if draw_call.geometry_id != draw_vars.geometry_id {
-                                return None
+                                continue
                             }
+                            let mut diff = false;
                             for i in 0..sh.mapping.user_uniforms.total_slots {
                                 if draw_call.user_uniforms[i] != draw_vars.user_uniforms[i] {
-                                    return None
+                                    diff = true;
+                                    break;
                                 }
                             }
+                            if diff{continue}
                             for i in 0..sh.mapping.textures.len() {
                                 if draw_call.texture_slots[i] != draw_vars.texture_slots[i] {
-                                    return None
+                                    diff = true;
+                                    break;
                                 }
                             }
+                            if diff{continue}
                         }
-                        if draw_call.draw_call_group != draw_vars.draw_call_group{
-                            return None
+                        if draw_call.draw_call_group != draw_vars.draw_call_group {
+                            continue
+                        }
+                        if draw_call.no_v_scroll != draw_vars.no_v_scroll {
+                            continue
+                        }
+                        if draw_call.no_h_scroll != draw_vars.no_h_scroll {
+                            continue
                         }
                         return Some(i)
                     }
@@ -744,8 +756,8 @@ impl CxView {
     }
     
     pub fn get_local_scroll(&self) -> Vec2 {
-        let xs = if self.do_v_scroll {self.snapped_scroll.x}else {0.};
-        let ys = if self.do_h_scroll {self.snapped_scroll.y}else {0.};
+        let xs = if self.no_v_scroll {0.} else {self.snapped_scroll.x};
+        let ys = if self.no_h_scroll {0.} else {self.snapped_scroll.y};
         Vec2 {x: xs, y: ys}
     }
     
