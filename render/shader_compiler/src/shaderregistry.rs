@@ -491,14 +491,17 @@ impl ShaderRegistry {
                         // if we have a float or a vec2/3/4
                         // we should look to set a default value
                         LiveValue::Bool(val) => {
-                            if prop.id == id!(debug) {
-                                draw_shader_def.flags.debug = val;
-                            }
-                            if prop.id == id!(draw_call_compare) {
-                                draw_shader_def.flags.draw_call_nocompare = val;
-                            }
-                            if prop.id == id!(draw_call_always) {
-                                draw_shader_def.flags.draw_call_always = val;
+                            match prop.id{
+                                id!(debug)=>{
+                                    draw_shader_def.flags.debug = val;
+                                }
+                                id!(draw_call_compare)=>{
+                                    draw_shader_def.flags.draw_call_nocompare = val;
+                                }
+                                id!(draw_call_always)=>{
+                                    draw_shader_def.flags.draw_call_always = val;
+                                }
+                                _=>()
                             }
                         }
                         LiveValue::Class {live_type, ..} => {
