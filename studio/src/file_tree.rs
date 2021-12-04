@@ -113,7 +113,7 @@ live_register!{
         }
         
         opened_state: {
-            from: {all: Play::Forward {duration: 0.7, redraw: true}}
+            from: {all: Play::Forward {duration: 0.3, redraw: true}}
             opened: [{value: 1.0, ease: Ease::OutExp}],
         }
         
