@@ -710,7 +710,6 @@ impl LiveNodeVec for Vec<LiveNode> {
         }
         let next_source = other.skip_node(source_index);
         let num_children = (next_source - source_index) - 2;
-        // make space
         self.splice(insert_point..insert_point, other[source_index + 1..(source_index + 1 + num_children)].iter().cloned());
     }
     
@@ -722,7 +721,7 @@ impl LiveNodeVec for Vec<LiveNode> {
         }
         let next_source = self.skip_node(source_index);
         let num_children = (next_source - source_index) - 2;
-        // make space
+        
         self.splice(insert_point..insert_point, iter::repeat(LiveNode::empty()).take(num_children));
         
         let source_index = if insert_point < source_index {source_index + num_children}else {source_index};
@@ -734,8 +733,6 @@ impl LiveNodeVec for Vec<LiveNode> {
     
     
     fn insert_node_from_self(&mut self, source_index: usize, insert_point: usize) -> usize {
-        // get the # of children here
-        
         let next_source = self.skip_node(source_index);
         let num_nodes = next_source - source_index;
         // make space
