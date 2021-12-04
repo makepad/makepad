@@ -5,8 +5,7 @@ use {
         editor_state::{SessionId},
         code_editor::{
             code_editor::{CodeEditors},
-            protocol,
-            protocol::{Notification, Request, Response, ResponseOrNotification},
+            protocol::{FileTreeData,Notification, Request, Response, ResponseOrNotification},
         },
         design_editor::{
             design_editor::{DesignEditors},
@@ -71,7 +70,7 @@ impl AppInner {
                 if self.dock.begin_tab_bar(cx).is_ok() {
                     for tab_id in tab_ids {
                         let tab = &state.tabs_by_tab_id[*tab_id];
-                        self.dock.tab(cx, *tab_id, &tab.name);
+                        self.dock.draw_tab(cx, *tab_id, &tab.name);
                     }
                     self.dock.end_tab_bar(cx);
                 }
@@ -101,6 +100,7 @@ impl AppInner {
     
     fn draw_file_node(&mut self, cx: &mut Cx, state: &AppState, file_node_id: FileNodeId) {
         let file_node = &state.file_nodes_by_file_node_id[file_node_id];
+       // println!("DRAWING NODE {}", &file_node.name);
         match &file_node.child_edges {
             Some(child_edges) => {
                 if self.file_tree.begin_folder(cx, file_node_id, &file_node.name).is_ok()
@@ -121,7 +121,7 @@ impl AppInner {
         self.window.handle_event(cx, event);
         
         if let Event::Construct = event {
-            self.send_request(Request::GetFileTree());
+            self.send_request(Request::LoadFileTree());
             self.create_code_editor_tab(
                 cx,
                 state,
@@ -151,7 +151,7 @@ impl AppInner {
                     }
                 }
                 DockAction::TabWasPressed(panel_id, tab_id) => {
-                    self.select_tab(cx, state, panel_id, tab_id)
+                    self.select_tab(cx, state, panel_id, tab_id, true)
                 }
                 DockAction::TabCloseWasPressed(panel_id, tab_id) => {
                     let tab = &state.tabs_by_tab_id[tab_id];
@@ -183,7 +183,7 @@ impl AppInner {
                             );
                             state.tabs_by_tab_id.remove(tab_id);
                             state.tab_id_allocator.deallocate(tab_id.0);
-                            self.dock.set_selected_tab_id(cx, panel_id, None, true);
+                            self.dock.set_next_selected_tab(cx, panel_id, tab_id, true);
                             self.dock.redraw_tab_bar(cx, panel_id);
                         }
                         _ => {}
@@ -286,9 +286,9 @@ impl AppInner {
     
     fn handle_response(&mut self, cx: &mut Cx, state: &mut AppState, response: Response) {
         match response {
-            Response::GetFileTree(response) => {
-                self.set_file_tree(cx, state, response.unwrap());
-                self.select_tab(cx, state, state.side_bar_panel_id, state.file_tree_tab_id);
+            Response::LoadFileTree(response) => {
+                self.load_file_tree(cx, state, response.unwrap());
+                self.select_tab(cx, state, state.side_bar_panel_id, state.file_tree_tab_id, false);
             }
             response => {
                 self.code_editors.handle_response(cx, &mut state.editor_state, response, &mut {
@@ -308,9 +308,9 @@ impl AppInner {
         }
     }
     
-    fn set_file_tree(&mut self, cx: &mut Cx, state: &mut AppState, file_tree: protocol::FileTree) {
+    fn load_file_tree(&mut self, cx: &mut Cx, state: &mut AppState, file_tree_data: FileTreeData) {
         self.file_tree.forget();
-        state.set_file_tree(file_tree);
+        state.load_file_tree(file_tree_data);
         self.file_tree.set_folder_is_open(cx, state.root_file_node_id, true, false);
         self.file_tree.redraw(cx);
     }
@@ -426,12 +426,12 @@ impl AppInner {
             }
             None => panel.tab_ids.push(tab_id),
         }
-        self.select_tab(cx, state, panel_id, tab_id);
+        self.select_tab(cx, state, panel_id, tab_id, false);
     }
     
-    fn select_tab(&mut self, cx: &mut Cx, state: &mut AppState, panel_id: PanelId, tab_id: TabId) {
+    fn select_tab(&mut self, cx: &mut Cx, state: &mut AppState, panel_id: PanelId, tab_id: TabId, should_animate:bool) {
         let tab = &state.tabs_by_tab_id[tab_id];
-        self.dock.set_selected_tab_id(cx, panel_id, Some(tab_id), false);
+        self.dock.set_selected_tab_id(cx, panel_id, Some(tab_id), should_animate);
         self.dock.redraw_tab_bar(cx, panel_id);
         match tab.kind {
             TabKind::CodeEditor {session_id} => {
