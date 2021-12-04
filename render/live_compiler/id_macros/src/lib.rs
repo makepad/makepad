@@ -5,7 +5,7 @@ mod macro_lib;
 use crate::macro_lib::*;
 
 use crate::liveid::*;
-#[path = "../../../live_compiler/src/liveid.rs"]
+#[path = "../../../math/src/liveid.rs"]
 mod liveid; 
 
 #[proc_macro] 

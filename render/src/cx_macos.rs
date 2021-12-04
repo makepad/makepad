@@ -1,19 +1,23 @@
 use {
     makepad_live_compiler::Vec2,
-    crate::{
-        cx::{Cx, PlatformType},
-        cx_desktop::CxDesktop,
+    makepad_platform::{
         events::{
             Timer,
             Signal,
             Event,
             DraggedItem
         },
-        window::{CxWindowState, CxWindowCmd},
-        cursor::MouseCursor,
         menu::Menu,
-        pass::CxPassDepOf,
         cx_cocoa_app::CocoaApp,
+        cursor::MouseCursor,
+    },
+    crate::{
+        cx::{Cx, PlatformType},
+        cx_desktop::CxDesktop,
+        
+        window::{CxWindowState, CxWindowCmd},
+        pass::CxPassDepOf,
+        
         cx_metal::{MetalCx, MetalWindow}
     }
 };

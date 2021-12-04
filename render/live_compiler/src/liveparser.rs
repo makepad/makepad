@@ -4,12 +4,14 @@ use {
         slice::Iter
     },
     makepad_id_macros::*,
+    makepad_math::{
+        Vec2, Vec3, Vec4
+    },
     crate::{
         token::{Token, TokenWithSpan, TokenId},
         liveid::{LiveId, LiveFileId, LiveModuleId},
         span::Span,
         liveerror::{LiveError, LiveErrorOrigin},
-        math::{Vec2, Vec3, Vec4},
         livedocument::LiveDocument,
         livenode::{LiveNode, LiveValue, LiveTypeInfo, LiveBinOp, LiveUnOp, LiveNodeOrigin},
     }

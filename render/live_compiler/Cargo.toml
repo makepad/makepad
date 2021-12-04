@@ -10,3 +10,5 @@ edition = "2018"
 makepad-derive-live = { path = "../derive_live", version = "0.1" }
 makepad-microserde = { path = "../microserde", version = "0.1" }
 makepad-id-macros = { path = "id_macros", version = "0.1" }
+makepad-math = { path = "../math", version = "0.2" }
+

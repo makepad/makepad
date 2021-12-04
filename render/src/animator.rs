@@ -3,10 +3,13 @@
 use {
     std::f64::consts::PI,
     makepad_live_compiler::*,
+    makepad_platform::{
+        events::NextFrame
+    },
     crate::{
         cx::Cx,
         livetraits::*,
-        events::NextFrame
+        events::EventImpl
     },
     
 };
@@ -29,20 +32,20 @@ pub struct KeyFrame {
 
 #[derive(Copy, Clone, Debug, PartialEq, Live, LiveHook)]
 pub enum Play {
-    #[pick {duration: 1.0, redraw:false}]
-    Forward {duration: f64, redraw:bool},
+    #[pick {duration: 1.0, redraw: false}]
+    Forward {duration: f64, redraw: bool},
     
-    #[live {duration: 1.0, end: 1.0, redraw:false}]
-    Reverse {duration: f64, end: f64, redraw:bool},
+    #[live {duration: 1.0, end: 1.0, redraw: false}]
+    Reverse {duration: f64, end: f64, redraw: bool},
     
-    #[live {duration: 1.0, end: 1.0, redraw:false}]
-    Loop {duration: f64, end: f64, redraw:bool},
+    #[live {duration: 1.0, end: 1.0, redraw: false}]
+    Loop {duration: f64, end: f64, redraw: bool},
     
-    #[live {duration: 1.0, end: 1.0, redraw:false}]
-    ReverseLoop {duration: f64, end: f64, redraw:bool},
+    #[live {duration: 1.0, end: 1.0, redraw: false}]
+    ReverseLoop {duration: f64, end: f64, redraw: bool},
     
-    #[live {duration: 1.0, end: 1.0, redraw:false}]
-    BounceLoop {duration: f64, end: f64, redraw:bool},
+    #[live {duration: 1.0, end: 1.0, redraw: false}]
+    BounceLoop {duration: f64, end: f64, redraw: bool},
 }
 
 impl Play {
@@ -132,7 +135,7 @@ impl Ease {
             },
             Self::None => {
                 return 1.0;
-            },/*
+            },
             Self::Pow {begin, end} => {
                 if t < 0. {
                     return 0.;
@@ -221,7 +224,7 @@ impl Ease {
             },
             Self::InOutSine => {
                 return -0.5 * ((t * PI).cos() - 1.);
-            },*/
+            },
             Self::InExp => {
                 if t < 0.001 {
                     return 0.;
@@ -237,7 +240,7 @@ impl Ease {
                 else {
                     return -(2.0f64.powf(-10. * t)) + 1.;
                 }
-            },/*
+            },
             Self::InOutExp => {
                 if t<0.001 {
                     return 0.;
@@ -420,7 +423,7 @@ impl Ease {
                 }
                 
                 return ((ay * u + by) * u + cy) * u;
-            }*/
+            }
         }
     }
 }
@@ -432,8 +435,8 @@ pub struct Animator {
 }
 
 #[derive(Copy, Clone)]
-pub enum AnimatorAction{
-    Animating{redraw:bool},
+pub enum AnimatorAction {
+    Animating {redraw: bool},
     None
 }
 
@@ -467,10 +470,10 @@ impl Animator {
                 if state_node.value.is_array() {
                     // ok so. lets compute our value and store it in the last slot
                     let (play_ended, play_redraw) = Self::update_timeline_value(cx, state_index, state_nodes, nf.time);
-                    if !play_ended{
+                    if !play_ended {
                         ended = false;
                     }
-                    if play_redraw{
+                    if play_redraw {
                         redraw = true;
                     }
                     state_index = state_nodes.skip_node(state_index);
@@ -496,19 +499,19 @@ impl Animator {
             if !ended {
                 self.next_frame = cx.new_next_frame();
             }
-            else{
+            else {
                 //println!("ENDED!");
                 
                 // mark all states ended
-                let mut track = state_nodes.child_by_name(0,id!(tracks)).unwrap();
+                let mut track = state_nodes.child_by_name(0, id!(tracks)).unwrap();
                 let mut node_iter = state_nodes.first_child(track);
                 while let Some(node_index) = node_iter {
-                    let ended = state_nodes.child_by_name(node_index,id!(ended)).unwrap();
+                    let ended = state_nodes.child_by_name(node_index, id!(ended)).unwrap();
                     state_nodes[ended].value = LiveValue::Bool(true);
                     node_iter = state_nodes.next_child(node_index);
                 }
             }
-            return AnimatorAction::Animating{redraw}
+            return AnimatorAction::Animating {redraw}
         }
         AnimatorAction::None
     }
@@ -523,16 +526,16 @@ impl Animator {
             let (ended, time, redraw) = if let Some(id_index) = node_iter {
                 if let LiveValue::Id(id) = &nodes[id_index].value {
                     // ok so now we have to find our id in tracks
-                    if let Some(LiveValue::Bool(ended)) = nodes.child_value_by_path(0, &[id!(tracks), *id, id!(ended)]){
-                        if *ended{
+                    if let Some(LiveValue::Bool(ended)) = nodes.child_value_by_path(0, &[id!(tracks), *id, id!(ended)]) {
+                        if *ended {
                             return (true, false)
                         }
                     }
-                    else{
+                    else {
                         panic!();
                     }
                     let track_index = nodes.child_by_path(0, &[id!(tracks), *id]).unwrap();
-                    let time_index =  nodes.child_by_name(track_index, id!(time)).unwrap();
+                    let time_index = nodes.child_by_name(track_index, id!(time)).unwrap();
                     
                     let start_time = match &nodes[time_index].value {
                         LiveValue::Id(v) => {
@@ -712,7 +715,7 @@ impl Animator {
         }
         
         state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track], live_object!{
-            [track]: {state_id: (state_id), ended:true}
+            [track]: {state_id: (state_id), ended: true}
         });
         
         let mut reader = LiveNodeReader::new(index, nodes);
@@ -743,7 +746,7 @@ impl Animator {
                 }
                 else if reader.is_open() {
                     path.push(reader.id());
-                    if reader.is_enum(){
+                    if reader.is_enum() {
                         state.replace_or_insert_last_node_by_path(0, &path, reader.node_slice());
                     }
                 }
@@ -754,7 +757,7 @@ impl Animator {
                     path.push(reader.id());
                     state.replace_or_insert_first_node_by_path(0, &path, live_array!{
                         [(track), (reader.value().clone())]
-                    }); 
+                    });
                     path.pop();
                 }
                 reader.walk();
@@ -914,7 +917,7 @@ impl Animator {
         self.next_frame = cx.new_next_frame();
     }
     
-        
+    
     pub fn animate_to_live2(&mut self, cx: &mut Cx, track: LiveId, live_ptr: LivePtr/*,state_id: Id*/) {
         let live_registry_rc = cx.live_registry.clone();
         let live_registry = live_registry_rc.borrow();
@@ -942,7 +945,7 @@ impl Animator {
         let mut path = Vec::new();
         path.push(id!(state));
         reader.walk();
-        let mut any_from_found = false; 
+        let mut any_from_found = false;
         while !reader.is_eot() {
             if reader.depth() == 1 && reader.id() == id!(from) {
                 // we have to store the right 'from' in our 'tracks'
