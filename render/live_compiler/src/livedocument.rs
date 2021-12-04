@@ -1,8 +1,6 @@
 //use makepad_id_macros2::*;
 use {
-    std::fmt,
     crate::{
-        liveid::{LiveId, LivePtr, LiveFileId},
         span::Span,
         token::{TokenWithSpan, TokenId},
         livenode::LiveNode,
@@ -14,9 +12,10 @@ pub struct LiveDocument {
     pub nodes: Vec<LiveNode >,
     pub strings: Vec<char>,
     pub tokens: Vec<TokenWithSpan>,
-    pub scopes: Vec<LiveScopeItem>,
+//    pub scopes: Vec<LiveScopeItem>,
 }
 
+/*
 impl fmt::Display for LiveScopeTarget {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
@@ -54,7 +53,7 @@ pub struct LiveScopeItem {
     pub id: LiveId,
     pub target: LiveScopeTarget
 }
-
+*/
 
 impl LiveDocument {
     pub fn new() -> Self {
@@ -63,7 +62,7 @@ impl LiveDocument {
             nodes: Vec::new(),
             strings: Vec::new(),
             tokens: Vec::new(),
-            scopes: Vec::new(),
+//            scopes: Vec::new(),
         }
     }
     
@@ -74,11 +73,11 @@ impl LiveDocument {
     pub fn get_tokens(&self, token_start: usize, token_count: usize) -> &[TokenWithSpan] {
         &self.tokens[token_start..(token_start + token_count)]
     }
-    
+    /*
     pub fn get_scopes(&self, scope_start: usize, scope_count: u32) -> &[LiveScopeItem] {
         &self.scopes[scope_start..(scope_start + scope_count as usize)]
     }
-    
+    */
     pub fn get_string(&self, string_start: usize, string_count: usize, out:&mut String) {
         let chunk = &self.strings[string_start..(string_start + string_count)];
         out.truncate(0);
@@ -92,7 +91,7 @@ impl LiveDocument {
         //self.multi_ids.clone_from(&other.multi_ids.clone());
         self.strings.clone_from(&other.strings);
         self.tokens.clone_from(&other.tokens.clone());
-        self.scopes.truncate(0);
+        //self.scopes.truncate(0);
     }
     
     pub fn token_id_to_span(&self, token_id: TokenId) -> Span {

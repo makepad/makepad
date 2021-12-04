@@ -76,6 +76,7 @@ pub use {
     makepad_live_compiler::{
         live_error_origin,
         LiveErrorOrigin,
+        LiveNodeOrigin,
         id,
         id_num,
         Mat4,
