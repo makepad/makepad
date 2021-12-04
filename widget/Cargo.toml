@@ -8,9 +8,6 @@ license = "MIT"
 
 [dependencies]
 
-[dependencies.makepad-microserde]
-path="../render/microserde"
-
 [dependencies.makepad-render]
 path = "../render"
 version = "0.2"

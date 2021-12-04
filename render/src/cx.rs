@@ -81,7 +81,7 @@ use {
 };
 
 pub use makepad_derive_live::*;
-pub use makepad_microserde::*;
+//pub use makepad_microserde::*;
 pub use makepad_math::*;
 
 
@@ -766,6 +766,15 @@ impl Cx {
             new_set.push(status);
             self.signals.insert(signal, new_set);
         }
+    }
+
+    pub fn set_down_mouse_cursor(&mut self, mouse_cursor: MouseCursor) {
+        // ok so lets set the down mouse cursor
+        self.down_mouse_cursor = Some(mouse_cursor);
+    }
+    pub fn set_hover_mouse_cursor(&mut self, mouse_cursor: MouseCursor) {
+        // the down mouse cursor gets removed when there are no captured fingers
+        self.hover_mouse_cursor = Some(mouse_cursor);
     }
     /*
     pub fn send_trigger(&mut self, area: Area, trigger_id: TriggerId) {

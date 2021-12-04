@@ -38,10 +38,8 @@ mod cx_wasm32;
 #[cfg(any(target_os = "linux", target_os="macos", target_os="windows"))]
 mod cx_desktop;
 
-mod cx_style;
 mod turtle;
 mod font;
-mod cursor;
 mod window;
 mod view;
 mod pass;
@@ -62,7 +60,7 @@ mod gpuinfo;
 
 pub use {
     makepad_derive_live::*,
-    makepad_microserde::*,
+    //makepad_microserde::*,
     makepad_live_compiler::{
         live_error_origin,
         LiveErrorOrigin,
