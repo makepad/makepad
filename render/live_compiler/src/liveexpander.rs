@@ -6,7 +6,7 @@ use {
         livedocument::{LiveDocument},
         livenode::{LiveValue, LiveNode, LiveTypeKind},
         livenodevec::{LiveNodeSlice, LiveNodeVec},
-        liveregistry::{LiveRegistry,LiveScopeTarget},
+        liveregistry::{LiveRegistry, LiveScopeTarget},
     }
 };
 
@@ -27,8 +27,8 @@ impl<'a> LiveExpander<'a> {
             || id == id!(Geometry)
     }
     
-    pub fn shift_parent_stack(&self, parents:&mut Vec<(LiveId,usize)>, nodes:&[LiveNode], after_point: usize, old_size: usize, new_size: usize) {
-        for (live_id, item) in parents{
+    pub fn shift_parent_stack(&self, parents: &mut Vec<(LiveId, usize)>, nodes: &[LiveNode], after_point: usize, old_size: usize, new_size: usize) {
+        for (live_id, item) in parents {
             if *item > after_point {
                 if old_size > new_size {
                     *item -= old_size - new_size;
@@ -36,10 +36,10 @@ impl<'a> LiveExpander<'a> {
                 else if old_size < new_size {
                     *item += new_size - old_size;
                 }
-                if nodes[*item].id != *live_id{
+                if nodes[*item].id != *live_id {
                     panic!()
-                } 
-                if !nodes[*item].value.is_open(){
+                }
+                if !nodes[*item].value.is_open() {
                     panic!()
                 }
             }
@@ -49,7 +49,7 @@ impl<'a> LiveExpander<'a> {
     pub fn expand(&mut self, in_doc: &LiveDocument, out_doc: &mut LiveDocument) {
         
         out_doc.nodes.push(in_doc.nodes[0].clone());
-        let mut current_parent = vec![(LiveId(0),0usize)];
+        let mut current_parent = vec![(LiveId(0), 0usize)];
         let mut level_overwrite = vec![false];
         let mut in_index = 1;
         
@@ -85,9 +85,9 @@ impl<'a> LiveExpander<'a> {
                 }
                 _ => ()
             }
-
+            
             //// determine node overwrite rules
-
+            
             let out_index = match out_doc.nodes.child_or_append_index_by_name(current_parent.last().unwrap().1, in_node.id) {
                 Ok(overwrite) => {
                     
@@ -233,7 +233,7 @@ impl<'a> LiveExpander<'a> {
                     insert_point
                 }
             };
-
+            
             // process stacks
             match in_value {
                 LiveValue::Clone(clone) => {
@@ -241,15 +241,15 @@ impl<'a> LiveExpander<'a> {
                         match target {
                             LiveScopeTarget::LocalPtr(local_ptr) => {
                                 let old_len = out_doc.nodes.len();
-
-                                out_doc.nodes.insert_children_from_self(local_ptr, out_index+1) ;
+                                
+                                out_doc.nodes.insert_children_from_self(local_ptr, out_index + 1);
                                 self.shift_parent_stack(&mut current_parent, &out_doc.nodes, out_index, old_len, out_doc.nodes.len());
                                 
                                 // clone the value and store a parent pointer
-                                if let LiveValue::Class {live_type:old_live_type,..} = &out_doc.nodes[out_index].value {
-                                    if let LiveValue::Class {live_type,..} = &out_doc.nodes[local_ptr].value {
-                                        if live_type != old_live_type{
-                                             self.errors.push(LiveError {
+                                if let LiveValue::Class {live_type: old_live_type, ..} = &out_doc.nodes[out_index].value {
+                                    if let LiveValue::Class {live_type, ..} = &out_doc.nodes[local_ptr].value {
+                                        if live_type != old_live_type {
+                                            self.errors.push(LiveError {
                                                 origin: live_error_origin!(),
                                                 span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()),
                                                 message: format!("Class override with wrong type {}", in_node.id)
@@ -257,7 +257,7 @@ impl<'a> LiveExpander<'a> {
                                         }
                                     }
                                 }
-
+                                
                                 //out_doc.nodes[out_index].value = out_doc.nodes[local_ptr].value.clone();
                                 if let LiveValue::Class {class_parent, ..} = &mut out_doc.nodes[out_index].value {
                                     *class_parent = Some(LivePtr {file_id: self.in_file_id, index: out_index as u32});
@@ -265,16 +265,16 @@ impl<'a> LiveExpander<'a> {
                             }
                             LiveScopeTarget::LivePtr(live_ptr) => {
                                 let doc = &self.live_registry.expanded[live_ptr.file_id.to_index()];
-
+                                
                                 let old_len = out_doc.nodes.len();
                                 out_doc.nodes.insert_children_from_other(live_ptr.node_index(), out_index + 1, &doc.nodes);
                                 self.shift_parent_stack(&mut current_parent, &out_doc.nodes, out_index, old_len, out_doc.nodes.len());
-
+                                
                                 // store the parent pointer
-                                if let LiveValue::Class {live_type:old_live_type,..} = &out_doc.nodes[out_index].value {
-                                    if let LiveValue::Class {live_type,..} = &doc.nodes[live_ptr.node_index()].value {
-                                        if live_type != old_live_type{
-                                             self.errors.push(LiveError {
+                                if let LiveValue::Class {live_type: old_live_type, ..} = &out_doc.nodes[out_index].value {
+                                    if let LiveValue::Class {live_type, ..} = &doc.nodes[live_ptr.node_index()].value {
+                                        if live_type != old_live_type {
+                                            self.errors.push(LiveError {
                                                 origin: live_error_origin!(),
                                                 span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()),
                                                 message: format!("Class override with wrong type {}", in_node.id)
@@ -285,7 +285,7 @@ impl<'a> LiveExpander<'a> {
                                 out_doc.nodes[out_index].value = doc.nodes[live_ptr.node_index()].value.clone();
                                 if let LiveValue::Class {class_parent, ..} = &mut out_doc.nodes[out_index].value {
                                     *class_parent = Some(LivePtr {file_id: self.in_file_id, index: out_index as u32});
-                                }                                           
+                                }
                             }
                         };
                         //overwrite value, this copies the Class
@@ -328,7 +328,7 @@ impl<'a> LiveExpander<'a> {
                                         let old_len = out_doc.nodes.len();
                                         insert_point = out_doc.nodes.insert_node_from_self(index, insert_point);
                                         self.shift_parent_stack(&mut current_parent, &out_doc.nodes, node_insert_point - 1, old_len, out_doc.nodes.len());
-
+                                        
                                         out_doc.nodes[node_insert_point].id = field.id;
                                     }
                                     else if let LiveTypeKind::Class = lti.kind {
@@ -346,11 +346,11 @@ impl<'a> LiveExpander<'a> {
                                     }
                                     if let Some(index) = other_nodes.child_by_name(0, lti.type_name) {
                                         let node_insert_point = insert_point;
-
+                                        
                                         let old_len = out_doc.nodes.len();
                                         insert_point = out_doc.nodes.insert_node_from_other(index, insert_point, other_nodes);
                                         self.shift_parent_stack(&mut current_parent, &out_doc.nodes, node_insert_point - 1, old_len, out_doc.nodes.len());
-
+                                        
                                         out_doc.nodes[node_insert_point].id = field.id;
                                     }
                                 }
@@ -375,8 +375,8 @@ impl<'a> LiveExpander<'a> {
             in_index += 1;
         }
         out_doc.nodes.push(in_doc.nodes.last().unwrap().clone());
-        for i in 0..out_doc.nodes.len(){
-            if !out_doc.nodes[i].origin.has_node_index(){
+        for i in 0..out_doc.nodes.len() {
+            if !out_doc.nodes[i].origin.has_node_index() {
                 out_doc.nodes[i].origin.set_node_index(i);
             }
         }
