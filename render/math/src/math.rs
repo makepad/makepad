@@ -1,6 +1,6 @@
 use{
     std::{fmt,ops},
-    makepad_microserde::*,
+//    makepad_microserde::*,
     crate::colorhex::*
 };
 
@@ -77,12 +77,12 @@ impl Rect {
     }
 }
 
-#[derive(Clone, Copy, Default, SerBin, DeBin, PartialEq, Debug)]
+#[derive(Clone, Copy, Default,PartialEq, Debug)]
 pub struct Mat4 {
     pub v: [f32; 16],
 }
 
-#[derive(Clone, Copy, Default, SerBin, DeBin, PartialEq, Debug)]
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
 pub struct Transform {
     pub orientation: Quat,
     pub position: Vec3
@@ -127,7 +127,7 @@ impl Transform {
     }
 }
 
-#[derive(Clone, Copy, Default, Debug, PartialEq, SerRon, DeRon)]
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct Vec2 {
     pub x: f32,
     pub y: f32,
@@ -189,7 +189,7 @@ pub fn vec2(x:f32, y:f32)->Vec2{
     Vec2{x:x, y:y}
 }*/
 
-#[derive(Clone, Copy, Default, SerBin, DeBin, PartialEq, Debug)]
+#[derive(Clone, Copy, Default, PartialEq, Debug)]
 pub struct Vec3 {
     pub x: f32,
     pub y: f32,
@@ -251,7 +251,7 @@ pub fn vec3(x:f32, y:f32, z:f32)->Vec3{
 
 
 // equation ax + by + cz + d = 0
-#[derive(Clone, Copy, Default, Debug, PartialEq, SerRon, DeRon)]
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct Plane {
     pub a: f32,
     pub b: f32,
@@ -288,7 +288,7 @@ impl Plane {
 
 
 
-#[derive(Clone, Copy, Default, Debug, SerBin, DeBin, PartialEq)]
+#[derive(Clone, Copy, Default, Debug,PartialEq)]
 pub struct Vec4 {
     pub x: f32,
     pub y: f32,
@@ -453,7 +453,7 @@ impl Vec4 {
 }
 
 
-#[derive(Clone, Copy, Default, Debug, SerBin, DeBin, PartialEq)]
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct Quat {
     pub a: f32,
     pub b: f32,
