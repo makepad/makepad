@@ -5,8 +5,8 @@ use crate::buttonlogic::*;
 
 live_register!{
     DesktopWindow: {{DesktopWindow}} {
-        clear_color: #1e1e1e
-        caption_bg: {color: #3d3d3d}
+        clear_color: #x1e
+        caption_bg: {color: #3d}
         caption: "Desktop Window",
         main_view:{},
         inner_view:{},
