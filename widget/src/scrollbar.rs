@@ -20,7 +20,7 @@ live_register!{
                     border_radius
                 );
             }
-            else {
+            else { 
                 cx.box(
                     self.rect_size.x * self.norm_scroll,
                     1.,
