@@ -8,7 +8,6 @@ pub mod code_editor;
 pub mod design_editor;
 pub mod editor_state;
 pub mod genid;
-pub mod list_logic;
 pub mod splitter;
 pub mod tab;
 pub mod tab_bar;

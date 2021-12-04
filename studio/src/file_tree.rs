@@ -8,7 +8,7 @@ use {
     },
     makepad_render::*,
     makepad_widget::*,
-};
+};   
 
 live_register!{
     use makepad_render::shader_std::*;
