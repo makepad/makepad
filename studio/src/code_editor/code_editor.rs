@@ -16,7 +16,7 @@ use {
             token::{Delimiter, Keyword, Punctuator, TokenKind},
             token_cache::TokenCache,
         },
-        genid::{GenId, GenIdMap,GenIdAllocator},
+        genid::{GenId, GenIdMap, GenIdAllocator},
     },
     makepad_render::*,
     makepad_widget::*,
@@ -26,7 +26,7 @@ live_register!{
     use makepad_widget::scrollview::ScrollView;
     
     CodeEditorView: {{CodeEditorView}} {
-        scroll_view:{
+        scroll_view: {
             view: {debug_id: code_editor_view}
         }
         
@@ -42,11 +42,21 @@ live_register!{
                 top_drop: 1.3
             }
         }
-          
-        gutter_text:code_text{}
-        gutter_quad:{color:#x1e}
         
-        gutter_width: 32.0,
+        linenum_text: code_text {
+            draw_depth:3.0
+            draw_call_group: blaaah
+            no_h_scroll: true
+        }
+        
+        linenum_quad: {
+            color: #x1e
+            draw_depth:2.0
+            no_h_scroll: true
+            no_v_scroll: true
+        }
+        
+        linenum_width: 45.0,
         
         text_color_comment: #638d54
         text_color_identifier: #d4d4d4
@@ -59,6 +69,9 @@ live_register!{
         text_color_string: #cc917b
         text_color_whitespace: #6e6e6e
         text_color_unknown: #808080
+        text_color_linenum: #88
+        text_color_linenum_selected: #d4
+        
         selection_quad: {
             color: #294e75
             draw_depth: 0.0
@@ -70,7 +83,7 @@ live_register!{
     }
     
     CodeEditors: {{CodeEditors}} {
-        code_editor_view:CodeEditorView{},
+        code_editor_view: CodeEditorView {},
     }
 }
 
@@ -83,11 +96,13 @@ pub struct CodeEditorView {
     selection_quad: DrawColor,
     code_text: DrawText,
     caret_quad: DrawColor,
-    gutter_quad: DrawColor,
-    gutter_text: DrawText,
+    linenum_quad: DrawColor,
+    linenum_text: DrawText,
     
-    gutter_width: f32,
+    linenum_width: f32,
     
+    text_color_linenum: Vec4,
+    text_color_linenum_selected: Vec4,
     text_color_comment: Vec4,
     text_color_identifier: Vec4,
     text_color_function_identifier: Vec4,
@@ -101,9 +116,9 @@ pub struct CodeEditorView {
     text_color_unknown: Vec4,
 }
 
-impl LiveHook for CodeEditorView{
+impl LiveHook for CodeEditorView {
     //fn before_apply(&mut self, cx:&mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]){
-       // nodes.debug_print(index,100);
+    // nodes.debug_print(index,100);
     //}
 }
 
@@ -114,7 +129,7 @@ pub struct CodeEditors {
     code_editor_view: Option<LivePtr>,
 }
 
-impl CodeEditors{
+impl CodeEditors {
     
     pub fn draw(&mut self, cx: &mut Cx, state: &EditorState, view_id: CodeEditorViewId) {
         let view = &mut self.views_by_view_id[view_id];
@@ -287,6 +302,7 @@ impl CodeEditorView {
                         visible_lines,
                     );
                     self.draw_carets(cx, &session.selections, &session.carets, visible_lines);
+                    self.draw_linenums(cx, visible_lines);
                     self.set_turtle_bounds(cx, &document_inner.text);
                 }
             }
@@ -338,6 +354,7 @@ impl CodeEditorView {
         visible_lines: VisibleLines,
     ) {
         let origin = cx.get_turtle_pos();
+        let start_x = origin.x + self.linenum_width;
         let mut line_count = visible_lines.start;
         let mut span_iter = selections.spans();
         let mut span_slot = span_iter.next();
@@ -371,7 +388,7 @@ impl CodeEditorView {
                         cx,
                         Rect {
                             pos: Vec2 {
-                                x: origin.x + start as f32 * self.text_glyph_size.x,
+                                x: start_x + start as f32 * self.text_glyph_size.x,
                                 y: start_y,
                             },
                             size: Vec2 {
@@ -401,6 +418,58 @@ impl CodeEditorView {
         //self.selection.end_many(cx);
     }
     
+    
+    
+    fn draw_linenums(
+        &mut self,
+        cx: &mut Cx,
+        visible_lines: VisibleLines,
+    ) {
+        fn linenum_fill(buf: &mut Vec<char>, line: usize) {
+            buf.truncate(0);
+            let mut scale = 10000;
+            let mut fill = false;
+            loop {
+                let digit = ((line / scale) % 10) as u8;
+                if digit != 0 {
+                    fill = true;
+                }
+                if fill {
+                    buf.push((48 + digit) as char);
+                }
+                else {
+                    buf.push(' ');
+                }
+                if scale <= 1 {
+                    break
+                }
+                scale /= 10;
+            }
+        }
+        
+        let Rect {
+            pos: origin,
+            size: viewport_size,
+        } = cx.get_turtle_rect();
+        
+        let mut start_y = visible_lines.start_y;
+        let start_x = origin.x;
+        let mut chunk = Vec::new();
+        
+        self.linenum_quad.draw_abs(cx, Rect {
+            pos: origin,
+            size: Vec2 {x: self.linenum_width, y: viewport_size.y}
+        });
+        
+        self.linenum_text.color = self.text_color_linenum;
+        for i in visible_lines.start..visible_lines.end {
+            let end_y = start_y + self.text_glyph_size.y;
+            linenum_fill(&mut chunk, i + 1);
+            self.linenum_text.draw_chunk(cx, Vec2 {x: start_x, y: start_y,}, 0, Some(&chunk));
+            start_y = end_y;
+        }
+    }
+    
     fn draw_text(
         &mut self,
         cx: &mut Cx,
@@ -418,7 +487,7 @@ impl CodeEditorView {
             .take(visible_lines.end - visible_lines.start)
         {
             let end_y = start_y + self.text_glyph_size.y;
-            let mut start_x = origin.x;
+            let mut start_x = origin.x + self.linenum_width;
             let mut start = 0;
             let mut token_iter = tokens.iter().peekable();
             while let Some(token) = token_iter.next() {
@@ -427,15 +496,7 @@ impl CodeEditorView {
                 let end = start + token.len;
                 self.code_text.color =
                 self.text_color(token.kind, next_token.map( | next_token | next_token.kind));
-                self.code_text.draw_chunk(
-                    cx,
-                    Vec2 {
-                        x: start_x,
-                        y: start_y,
-                    },
-                    0,
-                    Some(&chars[start..end]),
-                );
+                self.code_text.draw_chunk(cx, Vec2 {x: start_x, y: start_y,}, 0, Some(&chars[start..end]));
                 start = end;
                 start_x = end_x;
             }
@@ -460,6 +521,7 @@ impl CodeEditorView {
             }
         }
         let origin = cx.get_turtle_pos();
+        let start_x = origin.x + self.linenum_width;
         let mut start_y = visible_lines.start_y;
         for line_index in visible_lines.start..visible_lines.end {
             loop {
@@ -473,7 +535,7 @@ impl CodeEditorView {
                             cx,
                             Rect {
                                 pos: Vec2 {
-                                    x: origin.x + caret.column as f32 * self.text_glyph_size.x,
+                                    x: start_x + caret.column as f32 * self.text_glyph_size.x,
                                     y: start_y,
                                 },
                                 size: Vec2 {

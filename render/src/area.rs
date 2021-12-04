@@ -42,7 +42,7 @@ pub trait AreaImpl{
     fn is_valid(&self, cx:&Cx)->bool;
     fn get_local_scroll_pos(&self, cx:&Cx)->Vec2;
     fn get_scroll_pos(&self, cx:&Cx)->Vec2;
-    fn set_do_scroll(&self, cx:&mut Cx, hor:bool, ver:bool);
+    fn set_no_scroll(&self, cx:&mut Cx, hor:bool, ver:bool);
     fn get_rect(&self, cx:&Cx)->Rect;
     fn abs_to_rel(&self, cx:&Cx, abs:Vec2)->Vec2;
     fn set_rect(&self, cx:&mut Cx, rect:&Rect);
@@ -154,7 +154,7 @@ impl AreaImpl for Area{
         }
     }
     
-    fn set_do_scroll(&self, cx:&mut Cx, hor:bool, ver:bool){
+    fn set_no_scroll(&self, cx:&mut Cx, hor:bool, ver:bool){
         return match self{
             Area::Instance(inst)=>{
                 let cxview = &mut cx.views[inst.view_id];
@@ -163,14 +163,14 @@ impl AreaImpl for Area{
                 }
                 else{
                     let draw_call = cxview.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
-                    draw_call.do_h_scroll = hor;
-                    draw_call.do_v_scroll = ver;
+                    draw_call.no_h_scroll = hor;
+                    draw_call.no_v_scroll = ver;
                 }
             },
             Area::View(view_area)=>{
                 let cxview = &mut cx.views[view_area.view_id];
-                cxview.do_h_scroll = hor;
-                cxview.do_v_scroll = ver;
+                cxview.no_h_scroll = hor;
+                cxview.no_v_scroll = ver;
             },
             _=>(),
         }
