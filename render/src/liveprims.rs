@@ -370,7 +370,7 @@ live_primitive!(
             }
             LiveValue::DocumentString {string_start, string_count} => {
                 let live_registry = cx.live_registry.borrow();
-                let origin_doc = live_registry.token_id_to_origin_doc(nodes[index].token_id.unwrap());
+                let origin_doc = live_registry.token_id_to_origin_doc(nodes[index].origin.token_id().unwrap());
                 origin_doc.get_string(*string_start, *string_count, self);
                 index + 1
             }

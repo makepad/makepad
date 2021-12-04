@@ -38,7 +38,7 @@ impl App {
             cx.profile_start(0);
             let mut out = Vec::new();
             out.open();
-            for i in 0..10000 {
+            for i in 0..1 {
                 out.push_live(live_object!{
                     [id_num!(btn, i)]: Button {
                         layout:{walk:{margin:{l:((((i+self.offset) as f32)*0.01).sin()*10.0)}}}

@@ -30,10 +30,10 @@ fn parse_object(parser:&mut TokenParser, tb:&mut TokenBuilder)->Result<(),TokenS
         }
         else if parser.is_brace(){  // its an inline class
             parser.open_group();
-            tb.add("LiveNode{token_id:None, id:LiveId(0),value:LiveValue::Class{");
+            tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:LiveId(0),value:LiveValue::Class{");
             tb.add("class:").stream(Some(prop_id_ts)).add("}},");
             parse_object(parser,tb)?;
-            tb.add("LiveNode{token_id:None, id:LiveId(0),value:LiveValue::Close},");
+            tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:LiveId(0),value:LiveValue::Close},");
         }
         else{
             return Err(parser.unexpected());
@@ -48,19 +48,19 @@ fn parse_value(prop_id:TokenStream, parser:&mut TokenParser, tb:&mut TokenBuilde
     if parser.is_paren(){ // its a Rust injection
         parser.open_group();
         let arg = parser.eat_level();
-        tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id)).add(",value:(").stream(Some(arg)).add(").to_live_value()},");
+        tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:").stream(Some(prop_id)).add(",value:(").stream(Some(arg)).add(").to_live_value()},");
     }
     else if parser.is_bracket(){ // its an array
-        tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id.clone())).add(",value:LiveValue::Array},");
+        tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:").stream(Some(prop_id.clone())).add(",value:LiveValue::Array},");
         parser.open_group();
         parse_array(parser,tb)?;
-        tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id)).add(",value:LiveValue::Close},");
+        tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:").stream(Some(prop_id)).add(",value:LiveValue::Close},");
     }
     else if parser.is_brace(){ // its a bare class
-        tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id.clone())).add(",value:LiveValue::Object},");
+        tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:").stream(Some(prop_id.clone())).add(",value:LiveValue::Object},");
         parser.open_group();
         parse_object(parser, tb)?;
-        tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id)).add(",value:LiveValue::Close},");
+        tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:").stream(Some(prop_id)).add(",value:LiveValue::Close},");
     }  
     // key values
     else if let Some(class) = parser.eat_any_ident(){
@@ -71,7 +71,7 @@ fn parse_value(prop_id:TokenStream, parser:&mut TokenParser, tb:&mut TokenBuilde
             let variant_id = LiveId::from_str(&variant).unwrap().0;
             // now check if we have a , eot or ( or {
             if parser.is_punct_alone(',') || parser.is_eot(){
-                tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id)).add(",value:LiveValue::BareEnum{");
+                tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:").stream(Some(prop_id)).add(",value:LiveValue::BareEnum{");
                 tb.add("class:LiveId(").suf_u64(class_id).add("), variant:LiveId(").suf_u64(variant_id).add(")}},");
             }
             else if parser.is_brace(){
@@ -87,10 +87,10 @@ fn parse_value(prop_id:TokenStream, parser:&mut TokenParser, tb:&mut TokenBuilde
                     parse_value(prop_id_ts.end(), parser, tb)?;
                     parser.eat_punct_alone(',');
                 }
-                tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id)).add(",value:LiveValue::Close},");
+                tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:").stream(Some(prop_id)).add(",value:LiveValue::Close},");
             }
             else if parser.is_paren(){
-                tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id.clone())).add(",value:LiveValue::TupleEnum{");
+                tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:").stream(Some(prop_id.clone())).add(",value:LiveValue::TupleEnum{");
                 tb.add("class:LiveId(").suf_u64(class_id).add("), variant:LiveId(").suf_u64(variant_id).add(")}},");
                 parser.open_group();
                 while !parser.eat_eot(){
@@ -99,28 +99,28 @@ fn parse_value(prop_id:TokenStream, parser:&mut TokenParser, tb:&mut TokenBuilde
                     parse_value(prop_id_ts.end(), parser, tb)?;
                     parser.eat_punct_alone(',');
                 }
-                tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id)).add(",value:LiveValue::Close},");
+                tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:").stream(Some(prop_id)).add(",value:LiveValue::Close},");
             }
             else{
                 return Err(error("Not a valid enum type"));
             }
         }
         else if parser.is_brace(){ 
-            tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id.clone())).add(",value:LiveValue::Clone(");
+            tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:").stream(Some(prop_id.clone())).add(",value:LiveValue::Clone(");
             tb.add("LiveId(").suf_u64(class_id).add("))},");
             parser.open_group();
             parse_object(parser,tb)?;
-            tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id)).add(",value:LiveValue::Close},");
+            tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:").stream(Some(prop_id)).add(",value:LiveValue::Close},");
         }
         else{
             if class == "true"{
-                tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id.clone())).add(",value:LiveValue::Bool(true)},");
+                tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:").stream(Some(prop_id.clone())).add(",value:LiveValue::Bool(true)},");
             }
             else if class == "false"{
-                tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id.clone())).add(",value:LiveValue::Bool(false)},");
+                tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:").stream(Some(prop_id.clone())).add(",value:LiveValue::Bool(false)},");
             }
             else{
-                tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id.clone())).add(",value:LiveValue::Id(");
+                tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:").stream(Some(prop_id.clone())).add(",value:LiveValue::Id(");
                 tb.add("LiveId(").suf_u64(class_id).add("))},");
             }
         }
@@ -136,7 +136,7 @@ fn parse_value(prop_id:TokenStream, parser:&mut TokenParser, tb:&mut TokenBuilde
             hex_bytes_to_u32(bytes)
         };
         if let Ok(val) = val{
-            tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id)).add(",value:LiveValue::Color(").suf_u32(val).add(")},");
+            tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:").stream(Some(prop_id)).add(",value:LiveValue::Color(").suf_u32(val).add(")},");
         }
         else{
             return Err(error(&format!("Can't parse color {}", color)));
@@ -148,17 +148,17 @@ fn parse_value(prop_id:TokenStream, parser:&mut TokenParser, tb:&mut TokenBuilde
         let bytes = s.as_bytes();
         if bytes[0] == '"' as u8{ // its a string
             let val = std::str::from_utf8(&bytes[1..bytes.len()-1]).unwrap();
-            tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id)).add(",value:LiveValue::Str(").string(val).add(")},");
+            tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:").stream(Some(prop_id)).add(",value:LiveValue::Str(").string(val).add(")},");
         }
         else if s == "true" || s == "false"{
-            tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id)).add(",value:LiveValue::Bool(").ident(&s).add(")},");
+            tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:").stream(Some(prop_id)).add(",value:LiveValue::Bool(").ident(&s).add(")},");
         }
         else{
             if let Ok(value) = s.parse::<f64>(){
-                tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id)).add(",value:LiveValue::Float(").unsuf_f64(value).add(")},");
+                tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:").stream(Some(prop_id)).add(",value:LiveValue::Float(").unsuf_f64(value).add(")},");
             }
             else if let Ok(value) = s.parse::<i64>(){
-                tb.add("LiveNode{token_id:None, id:").stream(Some(prop_id)).add(",value:LiveValue::Float(").unsuf_i64(value).add(")},");
+                tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:").stream(Some(prop_id)).add(",value:LiveValue::Float(").unsuf_i64(value).add(")},");
             }
             else{
                 return Err(error("Value cant be parsed"));
@@ -175,11 +175,11 @@ pub fn live_impl(input:TokenStream)->TokenStream{
     let mut tb = TokenBuilder::new();
 
     tb.add("&[");
-    tb.add("LiveNode{token_id:None, id:LiveId(0),value:LiveValue::Object},");
+    tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:LiveId(0),value:LiveValue::Object},");
     if let Err(e) = parse_object(&mut parser, &mut tb){
         return e
     };
-    tb.add("LiveNode{token_id:None, id:LiveId(0),value:LiveValue::Close},");
+    tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:LiveId(0),value:LiveValue::Close},");
     tb.add("]");
     tb.end()
 }

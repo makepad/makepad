@@ -159,7 +159,7 @@ impl LiveApply for Frame {
                                     //cx.profile_start(0);
                                     self.create_component(
                                         cx,
-                                        ApplyFrom::NewFromDoc {file_id: start_nodes[start_index].token_id.unwrap().file_id()},
+                                        ApplyFrom::NewFromDoc {file_id: start_nodes[start_index].origin.token_id().unwrap().file_id()},
                                         component_id,
                                         live_type,
                                         start_index,
