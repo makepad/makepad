@@ -19,17 +19,7 @@ mod cx_linux;
 #[cfg(target_os = "macos")]
 mod cx_metal;
 #[cfg(target_os = "macos")]
-mod cx_cocoa_util;
-#[cfg(target_os = "macos")]
-mod cx_cocoa_delegate;
-#[cfg(target_os = "macos")]
-mod cx_cocoa_app;
-#[cfg(target_os = "macos")]
-mod cx_cocoa_window;
-#[cfg(target_os = "macos")]
 mod cx_macos;
-#[cfg(target_os = "macos")]
-mod cx_apple;
 
 #[cfg(target_os = "windows")]
 mod cx_dx11;
@@ -64,7 +54,7 @@ mod drawquad;
 mod drawtext;
 mod drawcolor;
 mod events;
-mod menu; 
+//mod menu; 
 mod geometry;
 mod drawvars;
 mod shader_std;
@@ -107,6 +97,56 @@ pub use {
         LiveNodeSlice,
         LiveNodeVec,
     },
+    makepad_platform::{
+        area::{
+            Area,
+            ViewArea,
+            InstanceArea
+        },
+        events::{
+            KeyCode,
+            Event,
+            Signal,
+            Timer,
+            NextFrame,
+            KeyModifiers,
+            FingerInputType,
+            FingerDownEvent,
+            FingerMoveEvent,
+            FingerUpEvent,
+            HoverState,
+            FingerHoverEvent,
+            FingerScrollEvent,
+            WindowGeomChangeEvent,
+            WindowMovedEvent,
+            AnimateEvent,
+            NextFrameEvent,
+            FileReadEvent,
+            TimerEvent,
+            SignalEvent,
+            FileWriteEvent,
+            KeyEvent,
+            KeyFocusEvent,
+            TextInputEvent,
+            TextCopyEvent,
+            WindowCloseRequestedEvent,
+            WindowClosedEvent,
+            WindowResizeLoopEvent,
+            WindowDragQueryResponse,
+            WindowDragQueryEvent,
+            XRButton,
+            XRInput,
+            XRUpdateEvent,
+            WebSocketMessageEvent,
+            FingerDragEvent,
+            FingerDropEvent,
+            DragState,
+            DragAction,
+            DraggedItem
+        },
+        cursor::MouseCursor,
+        menu::Menu
+    },
     makepad_shader_compiler::{
         ShaderRegistry, 
         ShaderEnum,
@@ -122,6 +162,10 @@ pub use {
         drawtext::DrawText,
         drawcolor::DrawColor,
         font::Font,
+        events::{
+            HitOpt,
+            EventImpl
+        },
         turtle::{
             LineWrap,
             Layout,
@@ -135,7 +179,6 @@ pub use {
             Height,
             Rect
         },
-        cursor::MouseCursor,
         window::Window,
         view::{
             View,
@@ -162,49 +205,6 @@ pub use {
             AnyAction,
             FrameComponent
         },
-        events::{
-            KeyCode,
-            Event,
-            HitOpt,
-            Signal,
-            Timer,
-            NextFrame,
-            KeyModifiers,
-            FingerInputType,
-            FingerDownEvent,
-            FingerMoveEvent,
-            FingerUpEvent,
-            HoverState,
-            FingerHoverEvent,
-            FingerScrollEvent,
-            WindowGeomChangeEvent,
-            WindowMovedEvent,
-            AnimateEvent,
-            NextFrameEvent,
-            FileReadEvent,
-            TimerEvent,
-            SignalEvent,
-            TriggersEvent,
-            FileWriteEvent,
-            KeyEvent,
-            KeyFocusEvent,
-            TextInputEvent,
-            TextCopyEvent,
-            WindowCloseRequestedEvent,
-            WindowClosedEvent,
-            WindowResizeLoopEvent,
-            WindowDragQueryResponse,
-            WindowDragQueryEvent,
-            XRButton,
-            XRInput,
-            XRUpdateEvent,
-            WebSocketMessageEvent,
-            FingerDragEvent,
-            FingerDropEvent,
-            DragState,
-            DragAction,
-            DraggedItem
-        },
         animator::{
             Ease,
             Play,
@@ -212,12 +212,7 @@ pub use {
             AnimatorAction
         },
         area::{
-            Area,
-            ViewArea,
-            InstanceArea
-        },
-        menu::{
-            Menu
+            AreaImpl,
         },
         drawvars::{
             DrawShader,

@@ -15,6 +15,30 @@ use {
         DrawShaderPtr,
         ShaderRegistry
     },
+    makepad_platform::{
+        events::{
+            NUM_FINGERS,
+            Event,
+            Signal,
+            SignalEvent,
+            KeyEvent,
+           // KeyCode,
+            NextFrame,
+            KeyFocusEvent,
+            NextFrameEvent,
+        },
+        menu::{
+            CxCommandSetting,
+            CommandId
+        },
+        cursor::{
+            MouseCursor
+        },
+        area::{
+            Area,
+            ViewArea
+        }
+    },
     crate::{
         livetraits::{
             LiveFactory,
@@ -23,9 +47,6 @@ use {
         window::{
             CxWindow,
             CxWindowState
-        },
-        menu::{
-            CommandId
         },
         pass::{
             CxPass,
@@ -53,28 +74,15 @@ use {
         },
         turtle::Turtle,
         area::{
-            Area,
-            ViewArea
+            AreaImpl,
         },
-        cursor::{
-            MouseCursor
-        },
-        events::{
-            Event,
-            Signal,
-            SignalEvent,
-            KeyEvent,
-            KeyCode,
-            NextFrame,
-            KeyFocusEvent,
-            NextFrameEvent,
-        }
+       
     }
 };
 
 pub use makepad_derive_live::*;
 pub use makepad_microserde::*;
-pub use makepad_live_compiler::math::*;
+pub use makepad_math::*;
 
 
 #[cfg(target_os = "linux")]
@@ -221,13 +229,6 @@ impl PlatformType {
 }
 
 
-#[derive(Clone, Copy, Default)]
-pub struct CxCommandSetting {
-    pub shift: bool,
-    pub key_code: KeyCode,
-    pub enabled: bool
-}
-
 #[derive(Default, Clone)]
 pub struct CxPerFinger {
     pub captured: Area,
@@ -237,8 +238,6 @@ pub struct CxPerFinger {
     pub over_last: Area,
     pub _over_last: Area
 }
-
-pub const NUM_FINGERS: usize = 10;
 
 impl Default for Cx {
     fn default() -> Self {

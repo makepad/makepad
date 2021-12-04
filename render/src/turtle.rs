@@ -172,51 +172,6 @@ impl Height {
 }
 
 
-#[derive(Clone, Copy, Default, Debug, PartialEq,Live, LiveHook)]
-pub struct Rect {
-    #[live] pub pos: Vec2,
-    #[live] pub size: Vec2,
-}
-
-impl Rect {
-    
-    pub fn translate(self, pos: Vec2) -> Rect {
-        Rect {pos: self.pos + pos, size: self.size}
-    }
-    
-    pub fn contains(&self, pos: Vec2) -> bool {
-        return pos.x >= self.pos.x && pos.x <= self.pos.x + self.size.x &&
-        pos.y >= self.pos.y && pos.y <= self.pos.y + self.size.y;
-    }
-    pub fn intersects(&self, r: Rect) -> bool {
-        !(
-            r.pos.x > self.pos.x + self.size.x ||
-            r.pos.x + r.size.x < self.pos.x ||
-            r.pos.y > self.pos.y + self.size.y ||
-            r.pos.y + r.size.y < self.pos.y
-        )
-    }
-    
-    pub fn contains_with_margin(&self, pos: Vec2, margin: &Option<Margin>) -> bool {
-        if let Some(margin) = margin {
-            return
-            pos.x >= self.pos.x - margin.l
-                && pos.x <= self.pos.x + self.size.x + margin.r
-                && pos.y >= self.pos.y - margin.t
-                && pos.y <= self.pos.y + self.size.y + margin.b;
-        }
-        else {
-            return self.contains(pos);
-        }
-    }
-    
-    pub fn from_lerp(a: Rect, b: Rect, f: f32) -> Rect {
-        Rect {
-            pos: (b.pos - a.pos) * f + a.pos,
-            size: (b.size - a.size) * f + a.size
-        }
-    }
-}
 
 impl Cx {
     //pub fn debug_pt(&self, x:f32, y:f32, color:i32){

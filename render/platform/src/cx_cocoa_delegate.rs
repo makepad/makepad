@@ -3,8 +3,9 @@ use {
         ffi::CStr,
         os::raw::{c_void}
     },
-    makepad_live_compiler::{
-        Vec2
+    makepad_math::{
+        Vec2,
+        Rect
     },
     crate::{
         cx_apple::*,
@@ -20,9 +21,9 @@ use {
             superclass,
             load_mouse_cursor
         },
-        turtle::{
-            Rect
-        },
+        //turtle::{
+        //    Rect
+        //},
         menu::{
             CommandId
         },

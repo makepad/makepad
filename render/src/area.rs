@@ -10,6 +10,9 @@ pub use {
     makepad_shader_compiler::{
         ShaderTy
     },
+    makepad_platform::{
+        area::*
+    },
     crate::{
         cx::{
             Cx,
@@ -18,34 +21,6 @@ pub use {
         geometry::Geometry
     }
 };
-
-#[derive(Clone, Default, Hash, Ord, PartialOrd, Eq,Debug, PartialEq, Copy)]
-pub struct InstanceArea{
-    pub view_id:usize,
-    pub draw_item_id:usize,
-    pub instance_offset:usize,
-    pub instance_count:usize,
-    pub redraw_id:u64
-}
-
-#[derive(Clone, Default, Hash, Ord, PartialOrd, Eq,Debug, PartialEq, Copy)]
-pub struct ViewArea{
-    pub view_id:usize,
-    pub redraw_id:u64 
-}
-
-#[derive(Clone, Debug, Hash, PartialEq, Ord, PartialOrd, Eq, Copy)]
-pub enum Area{
-    Empty,
-    Instance(InstanceArea),
-    View(ViewArea)
-}
-
-impl Default for Area{
-    fn default()->Area{
-        Area::Empty
-    } 
-}  
 
 pub struct DrawReadRef<'a>{
     pub repeat: usize,
@@ -59,9 +34,25 @@ pub struct DrawWriteRef<'a>{
     pub buffer:&'a mut [f32]
 }
 
-impl Area{
+pub trait AreaImpl{
+    fn valid_instance(&self, cx:&Cx)->Option<&InstanceArea>;
+    fn is_empty(&self)->bool;
+    fn view_id(&self)->Option<usize>;
+    fn is_first_instance(&self)->bool;
+    fn is_valid(&self, cx:&Cx)->bool;
+    fn get_local_scroll_pos(&self, cx:&Cx)->Vec2;
+    fn get_scroll_pos(&self, cx:&Cx)->Vec2;
+    fn set_do_scroll(&self, cx:&mut Cx, hor:bool, ver:bool);
+    fn get_rect(&self, cx:&Cx)->Rect;
+    fn abs_to_rel(&self, cx:&Cx, abs:Vec2)->Vec2;
+    fn set_rect(&self, cx:&mut Cx, rect:&Rect);
+    fn get_read_ref<'a>(&self, cx:&'a Cx, id:LiveId, ty:ShaderTy)->Option<DrawReadRef<'a>>;
+    fn get_write_ref<'a>(&self, cx:&'a mut Cx, id:LiveId, ty:ShaderTy, name:&str)->Option<DrawWriteRef<'a>>;
+}
+
+impl AreaImpl for Area{
     
-    pub fn valid_instance(&self, cx:&Cx)->Option<&InstanceArea>{
+    fn valid_instance(&self, cx:&Cx)->Option<&InstanceArea>{
         if self.is_valid(cx){
             if let Self::Instance(inst) = self{
                 return Some(inst)
@@ -70,14 +61,14 @@ impl Area{
         None
     }
     
-    pub fn is_empty(&self)->bool{
+    fn is_empty(&self)->bool{
         if let Area::Empty = self{
             return true
         }
         false
     }
     
-    pub fn view_id(&self)->Option<usize>{
+    fn view_id(&self)->Option<usize>{
         return match self{
             Area::Instance(inst)=>{
                 Some(inst.view_id)
@@ -89,7 +80,7 @@ impl Area{
         }
     }
     
-    pub fn is_first_instance(&self)->bool{
+    fn is_first_instance(&self)->bool{
         return match self{
             Area::Instance(inst)=>{
                 inst.instance_offset == 0
@@ -98,7 +89,7 @@ impl Area{
         }
     }
     
-    pub fn is_valid(&self, cx:&Cx)->bool{
+    fn is_valid(&self, cx:&Cx)->bool{
         return match self{
             Area::Instance(inst)=>{
                 if inst.instance_count == 0{
@@ -121,7 +112,7 @@ impl Area{
         }
     }
     
-    pub fn get_local_scroll_pos(&self, cx:&Cx)->Vec2{
+    fn get_local_scroll_pos(&self, cx:&Cx)->Vec2{
         return match self{
             Area::Instance(inst)=>{
                 let cxview = &cx.views[inst.view_id];
@@ -140,7 +131,7 @@ impl Area{
         }
     }
 
-    pub fn get_scroll_pos(&self, cx:&Cx)->Vec2{
+    fn get_scroll_pos(&self, cx:&Cx)->Vec2{
         return match self{
             Area::Instance(inst)=>{
                 let cxview = &cx.views[inst.view_id];
@@ -163,7 +154,7 @@ impl Area{
         }
     }
     
-    pub fn set_do_scroll(&self, cx:&mut Cx, hor:bool, ver:bool){
+    fn set_do_scroll(&self, cx:&mut Cx, hor:bool, ver:bool){
         return match self{
             Area::Instance(inst)=>{
                 let cxview = &mut cx.views[inst.view_id];
@@ -186,7 +177,7 @@ impl Area{
     } 
     
     // returns the final screen rect
-    pub fn get_rect(&self, cx:&Cx)->Rect{
+    fn get_rect(&self, cx:&Cx)->Rect{
 
         return match self{
             Area::Instance(inst)=>{
@@ -230,7 +221,7 @@ impl Area{
         }
     }
 
-    pub fn abs_to_rel(&self, cx:&Cx, abs:Vec2)->Vec2{
+    fn abs_to_rel(&self, cx:&Cx, abs:Vec2)->Vec2{
         return match self{
             Area::Instance(inst)=>{
                 if inst.instance_count == 0{
@@ -266,7 +257,7 @@ impl Area{
         }
     }
 
-    pub fn set_rect(&self, cx:&mut Cx, rect:&Rect){
+    fn set_rect(&self, cx:&mut Cx, rect:&Rect){
          match self{
             Area::Instance(inst)=>{
                 let cxview = &mut cx.views[inst.view_id];
@@ -294,7 +285,7 @@ impl Area{
          }
     }
     
-    pub fn get_read_ref<'a>(&self, cx:&'a Cx, id:LiveId, ty:ShaderTy)->Option<DrawReadRef<'a>>{
+    fn get_read_ref<'a>(&self, cx:&'a Cx, id:LiveId, ty:ShaderTy)->Option<DrawReadRef<'a>>{
         match self{
             Area::Instance(inst)=>{
                 let cxview = &cx.views[inst.view_id];
@@ -338,7 +329,7 @@ impl Area{
         None
     } 
     
-    pub fn get_write_ref<'a>(&self, cx:&'a mut Cx, id:LiveId, ty:ShaderTy, name:&str)->Option<DrawWriteRef<'a>>{
+    fn get_write_ref<'a>(&self, cx:&'a mut Cx, id:LiveId, ty:ShaderTy, name:&str)->Option<DrawWriteRef<'a>>{
         match self{
             Area::Instance(inst)=>{
                 let cxview = &mut cx.views[inst.view_id];
@@ -390,8 +381,3 @@ impl Area{
     }
 }
 
-impl Into<Area> for InstanceArea{
-    fn into(self)->Area{
-        Area::Instance(self)
-    }
-}

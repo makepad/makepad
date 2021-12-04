@@ -1,8 +1,10 @@
 use {
+    makepad_math::{
+        Vec2, Vec3, Vec4
+    },
     crate::{
         liveid::{LiveId, LiveModuleId, LivePtr},
         token::TokenId,
-        math::{Vec2, Vec3, Vec4},
     }
 };
 

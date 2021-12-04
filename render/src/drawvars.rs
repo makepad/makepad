@@ -1,9 +1,12 @@
 use {
     makepad_live_compiler::*,
     makepad_shader_compiler::*,
+    makepad_platform::{
+        area::Area
+    },
     crate::{
         cx::{Cx, CxPlatformShader},
-        area::Area,
+        area::AreaImpl,
         geometry::{GeometryFields},
         livetraits::*
     },
