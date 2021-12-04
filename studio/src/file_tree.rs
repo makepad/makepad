@@ -102,18 +102,18 @@ live_register!{
         selected_state: {
             from: {all: Play::Forward {duration: 0.1, redraw: true}}
             selected: [{time: 0.0, value: 1.0}],
-        }
+        } 
         
         closed_state: {
             from: {all: Play::Forward {duration: 0.3, redraw: true}}
             opened: [{value: 0.0, ease: Ease::OutExp}],
             bg_quad: {opened: (opened)}
-            name_text: {opened: (opened)}
+            name_text: {opened: (opened)} 
             icon_quad: {opened: (opened)}
         }
         
         opened_state: {
-            from: {all: Play::Forward {duration: 0.3, redraw: true}}
+            from: {all: Play::Forward {duration: 0.7, redraw: true}}
             opened: [{value: 1.0, ease: Ease::OutExp}],
         }
         
@@ -220,7 +220,7 @@ pub struct FileTree {
     node_height: f32,
     
     #[rust] dragging_node_id: Option<FileNodeId>,
-    #[rust] last_selected: Option<FileNodeId>,
+    #[rust] selected_node_id: Option<FileNodeId>,
     #[rust] open_nodes: HashSet<FileNodeId>,
     #[rust] visible_nodes: HashSet<FileNodeId>,
     #[rust] gc_nodes: HashSet<FileNodeId>,
@@ -402,7 +402,7 @@ impl FileTree {
         // remove all nodes that are invisible
         self.gc_nodes.clear();
         for (node_id, _) in &self.tree_nodes {
-            if !self.visible_nodes.contains(node_id) && Some(*node_id) != self.last_selected {
+            if !self.visible_nodes.contains(node_id) && Some(*node_id) != self.selected_node_id {
                 self.gc_nodes.insert(*node_id);
             }
         }
@@ -557,12 +557,12 @@ impl FileTree {
                     self.open_nodes.remove(&node_id);
                 }
                 FileTreeNodeAction::WasClicked => {
-                    if let Some(last_selected) = self.last_selected {
+                    if let Some(last_selected) = self.selected_node_id {
                         if last_selected != node_id {
                             self.tree_nodes.get_mut(&last_selected).unwrap().set_is_selected(cx, false, true);
                         }
                     }
-                    self.last_selected = Some(node_id);
+                    self.selected_node_id = Some(node_id);
                     dispatch_action(cx, FileTreeAction::WasClicked(node_id));
                 }
                 FileTreeNodeAction::ShouldStartDragging => {

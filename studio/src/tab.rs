@@ -62,8 +62,8 @@ live_register!{
             hover: [{time: 0.0, value: 1.0}],
         }
         
-        unselected_state: {
-            from: {all: Play::Forward {duration: 0.1, redraw: true}}
+        unselected_state: { 
+            from: {all: Play::Forward {duration: 0.3}}
             selected: 0.0,
             close_button: {button_quad: {selected: (selected)}}
             bg_quad: {selected: (selected)}
@@ -71,9 +71,9 @@ live_register!{
         }
         
         selected_state: {
-            from: {all: Play::Forward {duration: 0.1, redraw: true}}
+            from: {all: Play::Forward {duration: 0.1}}
             selected: [{time: 0.0, value: 1.0}],
-        }
+        } 
     }
 }
 
@@ -165,7 +165,7 @@ impl Tab {
         cx: &mut Cx,
         event: &mut Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, TabAction),
-    ) {
+    ) {  
         self.animator_handle_event(cx, event);
         
         let mut block_hover_out = false;

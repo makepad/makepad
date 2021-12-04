@@ -3,7 +3,7 @@ use {
         editor_state::{EditorState, SessionId},
         code_editor::{
             code_editor::{CodeEditorViewId},
-            protocol,
+            protocol::{FileNodeData, FileTreeData},
         },
         dock::{PanelId},
         file_tree::{FileNodeId},
@@ -133,12 +133,12 @@ impl AppState {
         self.path.join(components.into_iter().rev().collect::<PathBuf>())
     }
     
-    pub fn set_file_tree(&mut self, file_tree: protocol::FileTree) {
+    pub fn load_file_tree(&mut self, tree_data: FileTreeData) {
         fn create_file_node(
             file_node_id_allocator: &mut GenIdAllocator,
             file_nodes_by_file_node_id: &mut GenIdMap<FileNodeId, FileNode>,
             parent_edge: Option<FileEdge>,
-            node: protocol::FileNode,
+            node: FileNodeData,
         ) -> FileNodeId {
             let file_node_id = FileNodeId(file_node_id_allocator.allocate());
             let name = parent_edge.as_ref().map_or_else(
@@ -149,7 +149,7 @@ impl AppState {
                 parent_edge,
                 name,
                 child_edges: match node {
-                    protocol::FileNode::Directory {entries} => Some(
+                    FileNodeData::Directory {entries} => Some(
                         entries
                             .into_iter()
                             .map( | entry | FileEdge {
@@ -166,21 +166,21 @@ impl AppState {
                         })
                             .collect::<Vec<_ >> (),
                     ),
-                    protocol::FileNode::File => None,
+                    FileNodeData::File => None,
                 },
             };
             file_nodes_by_file_node_id.insert(file_node_id, node);
             file_node_id
         }
         
-        self.path = file_tree.path;
+        self.path = tree_data.path;
         self.file_node_id_allocator.clear();
         self.file_nodes_by_file_node_id.clear();
         self.root_file_node_id = create_file_node(
             &mut self.file_node_id_allocator,
             &mut self.file_nodes_by_file_node_id,
             None,
-            file_tree.root,
+            tree_data.root,
         );
     }
 }
@@ -257,7 +257,7 @@ impl FileNode {
 }
 
 #[derive(Debug)]
-pub struct FileEdge {
+pub struct FileEdge { 
     pub name: OsString,
     pub file_node_id: FileNodeId,
 }

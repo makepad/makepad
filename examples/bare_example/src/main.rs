@@ -5,14 +5,8 @@ live_register!{
     use makepad_widget::frame::Frame;
     use makepad_widget::button::Button;
     App: {{App}} {
-        scroll_view:{show_h:true, show_v:true,view:{layout:{line_wrap:LineWrap::NewLine}}} 
+        scroll_view: {show_h: true, show_v: true, view: {layout: {line_wrap: LineWrap::NewLine}}}
         frame: {
-           /*b1: Button {label: "btn1"}
-            b2: Button {label: "btn2"}
-            frame1: Frame {
-                b3: Button {label: "btn3"}
-                children: [b3]
-            }*/
         }
     }
 }
@@ -23,7 +17,7 @@ pub struct App {
     #[live] frame: Frame,
     #[live] desktop_window: DesktopWindow,
     #[live] scroll_view: ScrollView,
-    #[rust] offset:u64
+    #[rust] offset: u64
 }
 
 impl App {
@@ -39,24 +33,32 @@ impl App {
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
         self.desktop_window.handle_event(cx, event);
         self.scroll_view.handle_event(cx, event);
-        if let Event::Construct = event{
+        if let Event::NextFrame(..) = event {
             // spawn 1000 buttons into the live structure
             cx.profile_start(0);
             let mut out = Vec::new();
-            out.open();  
-            for i in 0..1{
-                out.push_live(live_object!{ 
-                    [id_num!(btn,i)]: Button{label: (format!("B{}",i+self.offset))},
+            out.open();
+            for i in 0..10000 {
+                out.push_live(live_object!{
+                    [id_num!(btn, i)]: Button {
+                        layout:{walk:{margin:{l:((((i+self.offset) as f32)*0.01).sin()*10.0)}}}
+                        label: (format!("B{}", i + self.offset))
+                    },
                 });
             }
-            self.offset += 9999;
+            self.offset += 17;
             out.close();
             // now apply it to frame to create i t
             self.frame.apply_clear(cx, &out);
             cx.profile_end(0);
+            cx.new_next_frame();
+            cx.redraw_all();
+        }
+        if let Event::Construct = event {
+            
         }
         for item in self.frame.handle_event(cx, event) {
-            if let ButtonAction::Pressed = item.action.cast() {
+            if let ButtonAction::IsPressed = item.action.cast() {
                 println!("Clicked on button {}", item.id);
             }
         }
@@ -66,11 +68,11 @@ impl App {
         if self.desktop_window.begin(cx, None).is_err() {
             return;
         }
-        if self.scroll_view.begin(cx).is_ok(){
+        if self.scroll_view.begin(cx).is_ok() {
             
-            if let Some(button) = get_component!(id!(b1), Button, self.frame) {
-                button.label = "Btn1 label override".to_string();
-            }
+            //if let Some(button) = get_component!(id!(b1), Button, self.frame) {
+            //    button.label = "Btn1 label override".to_string();
+            // }
             //cx.profile_start(1);
             self.frame.draw(cx);
             //cx.profile_end(1);

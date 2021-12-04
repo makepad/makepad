@@ -15,7 +15,7 @@ use makepad_microserde::{SerBin, DeBin};
 
 #[derive(Clone, Debug, SerBin, DeBin)]
 pub enum Request {
-    GetFileTree(),
+    LoadFileTree(),
     OpenFile(PathBuf),
     ApplyDelta(FileId, usize, Delta),
     CloseFile(FileId),
@@ -29,20 +29,20 @@ pub enum ResponseOrNotification {
 
 #[derive(Clone, Debug, SerBin, DeBin)]
 pub enum Response {
-    GetFileTree(Result<FileTree, Error>),
+    LoadFileTree(Result<FileTreeData, Error>),
     OpenFile(Result<(FileId, usize, Text), Error>),
     ApplyDelta(Result<FileId, Error>),
     CloseFile(Result<FileId, Error>),
 }
 
 #[derive(Clone, Debug, SerBin, DeBin)]
-pub struct FileTree {
+pub struct FileTreeData {
     pub path: PathBuf,
-    pub root: FileNode,
+    pub root: FileNodeData,
 }
 
 #[derive(Clone, Debug, SerBin, DeBin)]
-pub enum FileNode {
+pub enum FileNodeData {
     Directory {entries: Vec<DirectoryEntry>},
     File,
 }
@@ -50,7 +50,7 @@ pub enum FileNode {
 #[derive(Clone, Debug, SerBin, DeBin)]
 pub struct DirectoryEntry {
     pub name: OsString,
-    pub node: FileNode,
+    pub node: FileNodeData,
 }
 
 #[derive(Clone, Debug, SerBin, DeBin)]

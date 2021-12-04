@@ -3,7 +3,7 @@ use {
         code_editor::{
             delta::Delta,
             protocol::{
-                DirectoryEntry, Error, FileId, FileNode, FileTree, Notification, Request, Response,
+                DirectoryEntry, Error, FileId, FileNodeData, FileTreeData, Notification, Request, Response,
             },
             text::Text,
         },
@@ -55,7 +55,7 @@ pub struct Connection {
 impl Connection {
     pub fn handle_request(&self, request: Request) -> Response {
         match request {
-            Request::GetFileTree() => Response::GetFileTree(self.get_file_tree()),
+            Request::LoadFileTree() => Response::LoadFileTree(self.load_file_tree()),
             Request::OpenFile(path) => Response::OpenFile(self.open_file(path)),
             Request::ApplyDelta(path, revision, delta) => {
                 Response::ApplyDelta(self.apply_delta(path, revision, delta))
@@ -64,7 +64,7 @@ impl Connection {
         }
     }
 
-    pub fn get_file_tree(&self) -> Result<FileTree, Error> {
+    pub fn load_file_tree(&self) -> Result<FileTreeData, Error> {
         fn get_directory_entries(path: &Path) -> Result<Vec<DirectoryEntry>, Error> {
             let mut entries = Vec::new();
             for entry in fs::read_dir(path).map_err(|error| Error::Unknown(error.to_string()))? {
@@ -73,11 +73,11 @@ impl Connection {
                 entries.push(DirectoryEntry {
                     name: entry.file_name(),
                     node: if entry_path.is_dir() {
-                        FileNode::Directory {
+                        FileNodeData::Directory {
                             entries: get_directory_entries(&entry_path)?,
                         }
                     } else {
-                        FileNode::File
+                        FileNodeData::File
                     },
                 });
             }
@@ -86,10 +86,10 @@ impl Connection {
         }
 
         let path = self.shared.read().unwrap().path.clone();
-        let root = FileNode::Directory {
+        let root = FileNodeData::Directory {
             entries: get_directory_entries(&path)?,
         };
-        Ok(FileTree { path, root })
+        Ok(FileTreeData { path, root })
     }
 
     pub fn open_file(&self, path: PathBuf) -> Result<(FileId, usize, Text), Error> {
