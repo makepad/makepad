@@ -42,6 +42,12 @@ live_register!{
                 top_drop: 1.3
             }
         }
+        
+        gutter_text:{}
+        gutter_quad:{color:#x1e}
+        
+        gutter_width: 32.0,
+        
         text_color_comment: #638d54
         text_color_identifier: #d4d4d4
         text_color_function_identifier: #dcdcae
@@ -68,7 +74,7 @@ live_register!{
     }
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live)]
 pub struct CodeEditorView {
     scroll_view: ScrollView,
     #[rust] session_id: Option<SessionId>,
@@ -77,6 +83,10 @@ pub struct CodeEditorView {
     selection_quad: DrawColor,
     code_text: DrawText,
     caret_quad: DrawColor,
+    gutter_quad: DrawColor,
+    gutter_text: DrawText,
+    
+    gutter_width: f32,
     
     text_color_comment: Vec4,
     text_color_identifier: Vec4,
@@ -89,6 +99,12 @@ pub struct CodeEditorView {
     text_color_string: Vec4,
     text_color_whitespace: Vec4,
     text_color_unknown: Vec4,
+}
+
+impl LiveHook for CodeEditorView{
+    fn before_apply(&mut self, cx:&mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]){
+       // nodes.debug_print(index,100);
+    }
 }
 
 #[derive(Live, LiveHook)]
@@ -419,10 +435,6 @@ impl CodeEditorView {
                     },
                     0,
                     Some(&chars[start..end]),
-                    | _,
-                    _,
-                    _,
-                    _ | 0.0,
                 );
                 start = end;
                 start_x = end_x;
@@ -648,7 +660,6 @@ impl CodeEditorView {
             _ => {}
         }
     }
-    
     
     fn position(&self, text: &Text, position: Vec2) -> Position {
         let line = ((position.y / self.text_glyph_size.y) as usize).min(text.as_lines().len() - 1);
