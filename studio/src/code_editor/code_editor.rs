@@ -30,17 +30,19 @@ live_register!{
             view: {debug_id: code_editor_view}
         }
         
+        MyCodeText:{
+            font: {
+                path: "resources/LiberationMono-Regular.ttf"
+            }
+            brightness: 1.1
+            font_size: 8.0
+            line_spacing: 1.8
+            top_drop: 1.3
+        }
+        
         code_text: {
             draw_depth: 1.0
-            text_style: {
-                font: {
-                    path: "resources/LiberationMono-Regular.ttf"
-                }
-                brightness: 1.1
-                font_size: 8.0
-                line_spacing: 1.8
-                top_drop: 1.3
-            }
+            text_style: MyCodeText{}
         }
         
         gutter_text:{}
@@ -102,9 +104,9 @@ pub struct CodeEditorView {
 }
 
 impl LiveHook for CodeEditorView{
-    fn before_apply(&mut self, cx:&mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]){
+    //fn before_apply(&mut self, cx:&mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]){
        // nodes.debug_print(index,100);
-    }
+    //}
 }
 
 #[derive(Live, LiveHook)]
