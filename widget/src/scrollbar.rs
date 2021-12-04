@@ -56,7 +56,7 @@ live_register!{
             bar_quad: {
                 pressed: [{time: 0.0, value: 1.0}],
                 hover: 1.0,
-            }
+            } 
         }
     }
 }
