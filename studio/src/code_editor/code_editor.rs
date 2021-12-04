@@ -45,7 +45,7 @@ live_register!{
             text_style: MyCodeText{}
         }
         
-        gutter_text:{}
+        gutter_text:code_text{}
         gutter_quad:{color:#x1e}
         
         gutter_width: 32.0,
