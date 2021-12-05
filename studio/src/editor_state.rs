@@ -1,7 +1,7 @@
 use {
     crate::{
         code_editor::{
-            code_editor::CodeEditorViewId,
+            code_editors::CodeEditorViewId,
             cursor_set::CursorSet,
             delta::{self, Delta, Whose},
             position::Position,

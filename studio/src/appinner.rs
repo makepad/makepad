@@ -4,7 +4,7 @@ use {
         appstate::{PanelKind, TabKind, AppState, SplitPanel, TabPanel, Panel, Tab},
         editor_state::{SessionId},
         code_editor::{
-            code_editor::{CodeEditors},
+            code_editors::{CodeEditors},
             protocol::{FileTreeData,Notification, Request, Response, ResponseOrNotification},
         },
         design_editor::{
