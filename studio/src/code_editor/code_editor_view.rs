@@ -40,13 +40,13 @@ live_register!{
         }
         
         linenum_text: code_text {
-            draw_depth:3.0
+            draw_depth: 3.0
             no_h_scroll: true
         }
         
         linenum_quad: {
-            color: #x1e 
-            draw_depth:2.0
+            color: #x1e
+            draw_depth: 2.0
             no_h_scroll: true
             no_v_scroll: true
         }
@@ -58,7 +58,7 @@ live_register!{
         text_color_function_identifier: #dcdcae
         text_color_branch_keyword: #c485be
         text_color_loop_keyword: #ff8c00
-        text_color_other_keyword: #5b9bd3 
+        text_color_other_keyword: #5b9bd3
         text_color_number: #b6ceaa
         text_color_punctuator: #d4d4d4
         text_color_string: #cc917b
@@ -195,6 +195,7 @@ impl CodeEditorView {
         let mut line_count = visible_lines.start;
         let mut span_iter = selections.spans();
         let mut span_slot = span_iter.next();
+        
         while let Some(span) = span_slot {
             if span.len.line >= line_count {
                 span_slot = Some(Span {
@@ -211,7 +212,7 @@ impl CodeEditorView {
         }
         let mut start_y = visible_lines.start_y;
         let mut start = 0;
-        //self.selection.begin_many(cx);
+        
         for line in &text.as_lines()[visible_lines.start..visible_lines.end] {
             while let Some(span) = span_slot {
                 let end = if span.len.line == 0 {
@@ -252,7 +253,6 @@ impl CodeEditorView {
             }
             start_y += self.text_glyph_size.y;
         }
-        //self.selection.end_many(cx);
     }
     
     
@@ -284,10 +284,7 @@ impl CodeEditorView {
             }
         }
         
-        let Rect {
-            pos: origin,
-            size: viewport_size,
-        } = cx.get_turtle_rect();
+        let Rect {pos: origin, size: viewport_size,} = cx.get_turtle_rect();
         
         let mut start_y = visible_lines.start_y;
         let start_x = origin.x;
@@ -564,7 +561,7 @@ impl CodeEditorView {
         let line = ((position.y / self.text_glyph_size.y) as usize).min(text.as_lines().len() - 1);
         Position {
             line,
-            column: (((position.x - self.linenum_width)/ self.text_glyph_size.x) as usize)
+            column: (((position.x - self.linenum_width) / self.text_glyph_size.x) as usize)
                 .min(text.as_lines()[line].len()),
         }
     }
