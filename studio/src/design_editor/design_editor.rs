@@ -9,10 +9,9 @@ use {
         code_editor::{
             protocol::{Notification, Request, Response},
         },
-        genid::{GenId, GenIdMap,GenIdAllocator},
     },
     makepad_render::*,
-    makepad_widget::*,
+    makepad_widget::{GenId, GenIdMap,GenIdAllocator, ScrollView},
 };
 
 live_register!{
