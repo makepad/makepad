@@ -725,7 +725,7 @@ impl CodeEditorView {
         let line = ((position.y / self.text_glyph_size.y) as usize).min(text.as_lines().len() - 1);
         Position {
             line,
-            column: ((position.x / self.text_glyph_size.x) as usize)
+            column: (((position.x - self.linenum_width)/ self.text_glyph_size.x) as usize)
                 .min(text.as_lines()[line].len()),
         }
     }
