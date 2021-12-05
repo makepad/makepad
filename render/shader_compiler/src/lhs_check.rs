@@ -1,7 +1,11 @@
-use makepad_live_compiler::*;
-use crate::shader_ast::*;
-use crate::shader_registry::ShaderRegistry;
-use std::cell::Cell;
+use{
+    std::cell::Cell,
+    makepad_live_compiler::*,
+    crate::{
+        shader_ast::*,
+        shader_registry::ShaderRegistry
+    }
+};
 
 pub struct LhsChecker<'a> {
     pub scopes: &'a Scopes,

@@ -1,20 +1,16 @@
-use makepad_live_compiler::Span;
-use makepad_live_compiler::Token;
-use makepad_live_compiler::LiveId;
-use makepad_live_compiler::LivePtr;
-use makepad_live_compiler::LiveType;
-use makepad_live_compiler::LiveFieldKind;
-use makepad_live_compiler::Vec4;
-use std::cell::{Cell, RefCell};
-use std::collections::HashMap;
-use std::collections::BTreeSet;
-use std::collections::BTreeMap;
-use std::fmt;
-use std::rc::Rc;
-use std::ops::Deref;
-use std::ops::DerefMut;
-use makepad_live_compiler::PrettyPrintedF32;
-use makepad_live_compiler::id;
+use{
+    std::{
+        cell::{Cell, RefCell},
+        collections::HashMap,
+        collections::BTreeSet,
+        collections::BTreeMap,
+        fmt,
+        rc::Rc,
+        ops::Deref,
+        ops::DerefMut
+    },
+    makepad_live_compiler::*,
+};
 //use crate::shaderregistry::ShaderResourceId;
 
 // all the Live node pointer newtypes

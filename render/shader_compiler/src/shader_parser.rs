@@ -1,11 +1,15 @@
-use std::iter::Cloned;
-use std::slice::Iter;
-use std::cell::Cell;
-use std::cell::RefCell;
-use makepad_live_compiler::*;
-use crate::shader_ast::*;
-use crate::shader_registry::ShaderRegistry;
-use crate::shader_registry::LiveNodeFindResult;
+use{
+    makepad_live_compiler::*,
+    std::{
+        iter::Cloned,
+        slice::Iter,
+        cell::{Cell,RefCell}
+    },
+    crate::{
+        shader_ast::*,
+        shader_registry::{ShaderRegistry, LiveNodeFindResult}
+    }
+};
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub enum ShaderParserDep {
