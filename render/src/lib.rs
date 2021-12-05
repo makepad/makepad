@@ -5,11 +5,11 @@ mod platform;
 #[macro_use]
 mod cx;
 #[macro_use]
-mod liveprims;
+mod live_prims;
 
-mod liveeval;
-mod livetraits;
-mod livecx;
+mod live_eval;
+mod live_traits;
+mod live_cx;
 
 mod area;
 mod events;
@@ -22,8 +22,8 @@ mod texture;
 mod cursor;
 mod menu;
 mod animator;
-mod gpuinfo;
-mod drawvars;
+mod gpu_info;
+mod draw_vars;
 mod geometry;
 
 mod shader;
@@ -152,7 +152,7 @@ pub use {
             PassClearDepth
         },
         texture::{Texture,TextureFormat},
-        livetraits::{
+        live_traits::{
             OptionAnyAction,
             LiveFactory,
             LiveNew,
@@ -172,7 +172,7 @@ pub use {
             Animator,
             AnimatorAction
         },
-        drawvars::{
+        draw_vars::{
             DrawShader,
             DrawVars
         },
@@ -180,14 +180,14 @@ pub use {
             GeometryField,
             Geometry,
         },
-        gpuinfo::{
+        gpu_info::{
             GpuPerformance
         },
         shader::{
-            drawquad::DrawQuad,
-            drawtext::DrawText,
-            drawcolor::DrawColor,
-            geometrygen::{
+            draw_quad::DrawQuad,
+            draw_text::DrawText,
+            draw_color::DrawColor,
+            geometry_gen::{
                 GeometryGen,
                 GeometryQuad2D,
             },

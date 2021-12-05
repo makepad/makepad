@@ -11,9 +11,9 @@ pub use {
             CxPlatformView,
         },
         area::{Area, ViewArea, InstanceArea},
-        livetraits::*,
+        live_traits::*,
         turtle::{Layout, Width, Height, Walk, Rect},
-        drawvars::{
+        draw_vars::{
             CxDrawShaderMapping,
             CxDrawShader,
             DrawShader,

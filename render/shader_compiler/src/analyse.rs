@@ -13,12 +13,12 @@ use{
         Span
     },
     crate::{
-        shaderast::*,
+        shader_ast::*,
         const_eval::ConstEvaluator,
         const_gather::ConstGatherer,
         dep_analyse::DepAnalyser,
         ty_check::TyChecker,
-        shaderregistry::ShaderRegistry
+        shader_registry::ShaderRegistry
     }
 };
 

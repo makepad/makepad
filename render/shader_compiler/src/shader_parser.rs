@@ -3,9 +3,9 @@ use std::slice::Iter;
 use std::cell::Cell;
 use std::cell::RefCell;
 use makepad_live_compiler::*;
-use crate::shaderast::*;
-use crate::shaderregistry::ShaderRegistry;
-use crate::shaderregistry::LiveNodeFindResult;
+use crate::shader_ast::*;
+use crate::shader_registry::ShaderRegistry;
+use crate::shader_registry::LiveNodeFindResult;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub enum ShaderParserDep {

@@ -9,7 +9,7 @@ pub use {
             Cx,
             CxPlatformPass,
         },
-        livetraits::*,
+        live_traits::*,
         texture::Texture,
     }
 };

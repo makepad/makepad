@@ -1,23 +1,23 @@
 #![allow(unused_variables)]
-use crate::shaderast::*;
-use crate::shaderast::Scopes;
+use crate::shader_ast::*;
+use crate::shader_ast::Scopes;
 use makepad_live_compiler::LiveRegistry;
 use makepad_live_compiler::LiveError;
 use makepad_live_compiler::LiveErrorOrigin;
 use makepad_live_compiler::live_error_origin;
-use crate::shaderast::Ident;
+use crate::shader_ast::Ident;
 use crate::lhs_check::LhsChecker;
-use crate::shaderast::Lit;
+use crate::shader_ast::Lit;
 use makepad_live_compiler::Span;
 use crate::swizzle::Swizzle;
-use crate::shaderast::{Ty, TyLit, TyExprKind, TyExpr};
+use crate::shader_ast::{Ty, TyLit, TyExprKind, TyExpr};
 use crate::util::CommaSep;
 use std::cell::Cell;
 use std::collections::BTreeSet;
 use std::fmt::Write;
 use std::rc::Rc;
-use crate::shaderregistry::ShaderRegistry;
-use crate::shaderast::ScopeSymKind;
+use crate::shader_registry::ShaderRegistry;
+use crate::shader_ast::ScopeSymKind;
 
 #[derive(Clone)]
 pub struct TyChecker<'a> {

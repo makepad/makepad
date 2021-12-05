@@ -13,9 +13,9 @@ pub use {
     makepad_live_compiler::*,
     crate::{
         cx::Cx,
-        livetraits::*,
-        shader::geometrygen::GeometryQuad2D,
-        drawvars::DrawVars,
+        live_traits::*,
+        shader::geometry_gen::GeometryQuad2D,
+        draw_vars::DrawVars,
         view::ManyInstances,
         pass::{Pass, PassClearColor},
         view::View,

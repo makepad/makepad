@@ -1,11 +1,11 @@
-use crate::shaderast::*;
+use crate::shader_ast::*;
 use makepad_live_compiler::*;
 use crate::generate::*;
 use std::fmt::Write;
 use std::fmt;
 use std::collections::BTreeMap;
 use std::collections::BTreeSet;
-use crate::shaderregistry::ShaderRegistry;
+use crate::shader_registry::ShaderRegistry;
 
 pub struct MetalGeneratedShader{
     pub mtlsl: String,

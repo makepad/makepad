@@ -6,7 +6,7 @@ use {
     },
     crate::{
         cx::Cx,
-        livetraits::*,
+        live_traits::*,
         geometry::{
             Geometry,
             GeometryFingerprint,

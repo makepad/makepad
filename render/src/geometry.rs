@@ -11,7 +11,7 @@ pub use {
             Cx,
             CxPlatformGeometry
         },
-        livetraits::*
+        live_traits::*
     }
 };
 

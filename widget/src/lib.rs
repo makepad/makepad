@@ -1,12 +1,12 @@
 use makepad_render::*;
-mod buttonlogic;
+mod button_logic;
 mod button;
-mod desktopbutton;
-mod desktopwindow;
-mod scrollbar;
-mod scrollview;
+mod desktop_button;
+mod desktop_window;
+mod scroll_bar;
+mod scroll_view;
 mod frame;
-mod windowmenu;
+mod window_menu;
 
 pub mod dock;
 pub mod file_tree;
@@ -15,26 +15,26 @@ pub mod tab;
 pub mod tab_bar;
 pub mod tab_close_button;
 pub mod genid;
-pub mod barewindow;
+pub mod bare_window;
 
 pub use crate::{
     genid::{GenId, GenIdMap, GenIdAllocator},
-    buttonlogic::{ButtonLogic, ButtonAction},
+    button_logic::{ButtonLogic, ButtonAction},
     button::{Button},
-    desktopwindow::{DesktopWindow},
-    scrollview::{ScrollView},
+    desktop_window::{DesktopWindow}, 
+    scroll_view::{ScrollView},
     frame::{Frame, FrameActions}
 };
 
 pub fn live_register(cx:&mut Cx){
     crate::button::live_register(cx);
-    crate::desktopbutton::live_register(cx);
-    crate::desktopwindow::live_register(cx);
-    crate::barewindow::live_register(cx);
-    crate::windowmenu::live_register(cx);
+    crate::desktop_button::live_register(cx);
+    crate::desktop_window::live_register(cx);
+    crate::bare_window::live_register(cx);
+    crate::window_menu::live_register(cx);
     crate::frame::live_register(cx);
-    crate::scrollview::live_register(cx);
-    crate::scrollbar::live_register(cx);
+    crate::scroll_view::live_register(cx);
+    crate::scroll_bar::live_register(cx);
     crate::file_tree::live_register(cx);
     crate::splitter::live_register(cx);
     crate::tab_close_button::live_register(cx);

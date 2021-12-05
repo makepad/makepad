@@ -5,29 +5,35 @@ pub mod util;
 pub mod span;
 pub mod token;
 pub mod lex;
-pub mod liveerror;
-pub mod liveparser;
-pub mod livenode;
-pub mod livenodevec;
-pub mod livedocument;
-pub mod liveregistry;
-pub mod liveexpander;
+pub mod live_error;
+pub mod live_parser;
+pub mod live_node;
+pub mod live_node_vec;
+pub mod live_document;
+pub mod live_registry; 
+pub mod live_expander;
+pub mod live_id;
 
 pub use makepad_id_macros::*;
 pub use makepad_math::*;
 pub use {
     crate::{
-        liveregistry::{
+        live_registry::{
             LiveRegistry,
             LiveDocNodes,
         },
-        liveid::LiveModuleId,
-        livenodevec::{
+        live_id::{
+            LiveModuleId,
+            LiveId,
+            LivePtr,
+            LiveFileId,
+        },
+        live_node_vec::{
             LiveNodeSlice,
             LiveNodeVec,
             LiveNodeReader,
         },
-        livenode::{
+        live_node::{
             LiveValue,
             LiveNode,
             LiveType,
@@ -43,11 +49,11 @@ pub use {
         },
         token::{TokenWithSpan, Token, TokenId},
         span::Span,
-        liveerror::{
+        live_error::{
             LiveError,
             LiveErrorOrigin,
             LiveFileError
         },
-        livedocument::{LiveDocument}
+        live_document::{LiveDocument}
     }
 };

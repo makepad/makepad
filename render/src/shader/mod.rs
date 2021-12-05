@@ -1,5 +1,5 @@
-pub mod geometrygen;
-pub mod drawquad;
-pub mod drawtext;
-pub mod drawcolor;
+pub mod geometry_gen;
+pub mod draw_quad;
+pub mod draw_text;
+pub mod draw_color;
 pub mod std;
