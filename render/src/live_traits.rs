@@ -38,17 +38,17 @@ pub trait LiveNew: LiveApply {
         let live_registry = live_registry_rc.borrow();
         let doc = live_registry.ptr_to_doc(live_ptr);
         let mut ret = Self::new(cx);
-        ret.apply(cx, ApplyFrom::NewFromDoc {file_id: live_ptr.file_id}, live_ptr.index as usize, &doc.nodes);
+        let apply_from = ApplyFrom::NewFromDoc {file_id: live_ptr.file_id};
+        let next_index =  ret.apply(cx, apply_from, live_ptr.index as usize, &doc.nodes);
+        if next_index <= live_ptr.index as usize + 2{
+            cx.apply_error_empty_object(live_error_origin!(), apply_from, live_ptr.index as usize, &doc.nodes);
+        }       
         return ret
     }
     
     fn new_from_ptr_debug(cx: &mut Cx, live_ptr: LivePtr) -> Self where Self: Sized {
-        let live_registry_rc = cx.live_registry.clone();
-        let live_registry = live_registry_rc.borrow();
-        let doc = live_registry.ptr_to_doc(live_ptr);
-        let mut ret = Self::new(cx);
-        ret.apply(cx, ApplyFrom::NewFromDoc {file_id: live_ptr.file_id}, live_ptr.index as usize, &doc.nodes);
-        println!("{}", doc.nodes.to_string(live_ptr.index as usize, 100));
+        cx.live_registry.borrow().ptr_to_doc(live_ptr).nodes.debug_print(live_ptr.index as usize, 100);
+        let ret = Self::new_from_ptr(cx, live_ptr);
         return ret
     }
     
