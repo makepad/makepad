@@ -78,7 +78,7 @@ live_register!{
     }
 }
 
-#[derive(Live)]
+#[derive(Live, LiveHook)]
 pub struct CodeEditorView {
     scroll_view: ScrollView,
     #[rust] pub session_id: Option<SessionId>,
