@@ -9,7 +9,7 @@ pub use {
             Cx,
             CxPlatformTexture
         },
-        livetraits::*
+        live_traits::*
     }
 };
 

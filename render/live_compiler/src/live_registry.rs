@@ -3,16 +3,16 @@ use {
     std::collections::{HashMap, HashSet},
     makepad_id_macros::*,
     crate::{
-        liveerror::{LiveError, LiveFileError},
-        liveparser::LiveParser,
-        livedocument::LiveDocument,
-        livenode::{LiveNode, LiveValue, LiveType, LiveTypeInfo,LiveNodeOrigin},
-        livenodevec::{LiveNodeSlice},
-        liveid::{LiveId, LiveFileId, LivePtr, LiveModuleId},
+        live_error::{LiveError, LiveFileError},
+        live_parser::LiveParser,
+        live_document::LiveDocument,
+        live_node::{LiveNode, LiveValue, LiveType, LiveTypeInfo,LiveNodeOrigin},
+        live_node_vec::{LiveNodeSlice},
+        live_id::{LiveId, LiveFileId, LivePtr, LiveModuleId},
         token::TokenId,
         span::Span,
         lex::lex,
-        liveexpander::{LiveExpander}
+        live_expander::{LiveExpander}
     }
 };
 

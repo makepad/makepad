@@ -1,19 +1,6 @@
-use crate::shaderast::Scopes;
-use makepad_live_compiler::LiveError;
-use makepad_live_compiler::LiveErrorOrigin;
-use makepad_live_compiler::live_error_origin;
-use makepad_live_compiler::Span;
-use crate::shaderast::Ident;
-use crate::shaderast::ExprKind;
-use crate::shaderast::BinOp;
-use crate::shaderast::UnOp;
-use crate::shaderast::Expr;
-use crate::shaderast::IdentPath;
-use crate::shaderast::Lit;
-use crate::shaderast::VarKind;
-use crate::shaderast::Ty;
-use crate::shaderast::DrawShaderFieldKind;
-use crate::shaderregistry::ShaderRegistry;
+use makepad_live_compiler::*;
+use crate::shader_ast::*;
+use crate::shader_registry::ShaderRegistry;
 use std::cell::Cell;
 
 pub struct LhsChecker<'a> {

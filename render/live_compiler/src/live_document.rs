@@ -3,7 +3,7 @@ use {
     crate::{
         span::Span,
         token::{TokenWithSpan, TokenId},
-        livenode::LiveNode,
+        live_node::LiveNode,
     }
 };
 

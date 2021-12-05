@@ -9,11 +9,11 @@ use {
     },
     crate::{
         token::{Token, TokenWithSpan, TokenId},
-        liveid::{LiveId, LiveFileId, LiveModuleId},
+        live_id::{LiveId, LiveFileId, LiveModuleId},
         span::Span,
-        liveerror::{LiveError, LiveErrorOrigin},
-        livedocument::LiveDocument,
-        livenode::{LiveNode, LiveValue, LiveTypeInfo, LiveBinOp, LiveUnOp, LiveNodeOrigin},
+        live_error::{LiveError, LiveErrorOrigin},
+        live_document::LiveDocument,
+        live_node::{LiveNode, LiveValue, LiveTypeInfo, LiveBinOp, LiveUnOp, LiveNodeOrigin},
     }
 };
 

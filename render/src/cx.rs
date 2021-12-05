@@ -39,10 +39,10 @@ use {
             Area,
             ViewArea
         },
-        livetraits::{
+        live_traits::{
             LiveFactory,
         },
-        gpuinfo::GpuInfo,
+        gpu_info::GpuInfo,
         window::{
             CxWindow,
             CxWindowState
@@ -67,7 +67,7 @@ use {
             CxGeometry,
             GeometryFingerprint
         },
-        drawvars::{
+        draw_vars::{
             CxDrawShader,
             DrawShaderFingerprint,
         },
@@ -79,9 +79,9 @@ pub use makepad_derive_live::*;
 pub use makepad_math::*;
 
 #[cfg(target_os = "macos")]
-pub use crate::platform::cx_metal::*;
+pub use crate::platform::metal::*;
 #[cfg(target_os = "macos")]
-pub use crate::platform::cx_macos::*;
+pub use crate::platform::macos::*;
 
 pub use crate::log;
 

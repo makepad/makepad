@@ -1,7 +1,7 @@
 use{
     crate::{
         platform::{
-            cx_apple::*,
+            apple::*,
         },
         events::{
             KeyCode,

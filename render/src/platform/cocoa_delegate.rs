@@ -9,15 +9,15 @@ use {
     },
     crate::{
         platform::{
-            cx_apple::*,
-            cx_cocoa_app::{
+            apple::*,
+            cocoa_app::{
                 CocoaApp,
                 get_cocoa_app
             },
-            cx_cocoa_window::{
+            cocoa_window::{
                 get_cocoa_window
             },
-            cx_cocoa_util::{
+            cocoa_util::{
                 get_event_key_modifier,
                 superclass,
                 load_mouse_cursor

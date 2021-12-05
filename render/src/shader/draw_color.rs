@@ -3,8 +3,8 @@ use {
     makepad_derive_live::*,
     crate::{
         cx::Cx,
-        livetraits::*,
-        shader::drawquad::DrawQuad
+        live_traits::*,
+        shader::draw_quad::DrawQuad
     },
 };
 

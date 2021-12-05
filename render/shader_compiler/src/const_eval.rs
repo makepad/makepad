@@ -7,7 +7,7 @@ use{
         Span
     },
     crate::{
-        shaderast::*,
+        shader_ast::*,
         analyse::ShaderAnalyseOptions
     }
 };

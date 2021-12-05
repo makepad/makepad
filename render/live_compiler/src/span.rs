@@ -1,6 +1,6 @@
 use{
     std::fmt,
-    crate::liveid::LiveFileId,
+    crate::live_id::LiveFileId,
 };
 
 #[derive(Clone, Copy, Default, Eq, Ord, PartialOrd, PartialEq)]

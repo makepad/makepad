@@ -6,8 +6,8 @@ pub use {
     crate::{
         cx::Cx,
         events::Event,
-        livetraits::*,
-        liveeval::*,
+        live_traits::*,
+        live_eval::*,
         animator::Animator
     }
 };
@@ -15,10 +15,10 @@ pub use {
 
 impl Cx { 
     pub fn live_register(&mut self) {
-        crate::shader::drawquad::live_register(self);
-        crate::shader::drawcolor::live_register(self);
-        crate::shader::drawtext::live_register(self);
-        crate::shader::geometrygen::live_register(self);
+        crate::shader::draw_quad::live_register(self);
+        crate::shader::draw_color::live_register(self);
+        crate::shader::draw_text::live_register(self);
+        crate::shader::geometry_gen::live_register(self);
         crate::shader::std::live_register(self); 
         crate::font::live_register(self);
     }

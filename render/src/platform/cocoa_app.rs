@@ -12,10 +12,10 @@ use {
     },
     crate::{
         platform::{
-            cx_apple::*,
-            cx_cocoa_delegate::*,
-            cx_cocoa_window::CocoaWindow,
-            cx_cocoa_util::{
+            apple::*,
+            cocoa_delegate::*,
+            cocoa_window::CocoaWindow,
+            cocoa_util::{
                 keycode_to_menu_key,
                 get_event_keycode,
                 get_event_key_modifier

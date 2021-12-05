@@ -1,5 +1,5 @@
 use makepad_render::*;
-use crate::buttonlogic::*;
+use crate::button_logic::*;
 
 live_register!{
     use makepad_render::shader::std::*;
