@@ -107,12 +107,6 @@ pub struct CodeEditorView {
     text_color_unknown: Vec4,
 }
 
-impl LiveHook for CodeEditorView {
-    //fn before_apply(&mut self, cx:&mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]){
-    // nodes.debug_print(index,100);
-    //}
-}
-
 pub enum CodeEditorViewAction {
     RedrawViewsForDocument(DocumentId)
 }
