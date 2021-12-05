@@ -255,8 +255,6 @@ impl CodeEditorView {
         }
     }
     
-    
-    
     fn draw_linenums(
         &mut self,
         cx: &mut Cx,
@@ -565,7 +563,6 @@ impl CodeEditorView {
                 .min(text.as_lines()[line].len()),
         }
     }
-    
 }
 
 #[derive(Clone, Copy, Debug)]
