@@ -6,15 +6,17 @@ pub use {
     makepad_shader_compiler::{
         ShaderTy
     },
-    makepad_math::{
+    makepad_live_compiler::{
         LiveId,
+    }, 
+    makepad_math::{
         Vec2,
         Rect
     },
     crate::{
         cx::Cx
     }
-};
+}; 
 
 #[derive(Clone, Default, Hash, Ord, PartialOrd, Eq,Debug, PartialEq, Copy)]
 pub struct InstanceArea{

@@ -3,9 +3,9 @@ use {
     makepad_derive_live::*,
     crate::{
         cx::Cx,
-        livetraits::*,
-        shader::geometrygen::GeometryQuad2D,
-        drawvars::DrawVars,
+        live_traits::*,
+        shader::geometry_gen::GeometryQuad2D,
+        draw_vars::DrawVars,
         turtle::{Layout, Walk, Rect}
     },
 };

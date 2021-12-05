@@ -12,8 +12,8 @@ use{
         Span
     },
     crate::{
-        shaderast::*,
-        shaderregistry::ShaderRegistry
+        shader_ast::*,
+        shader_registry::ShaderRegistry
     }
 };
 

@@ -5,7 +5,7 @@ use {
     },
     crate::{
         genid::GenId,
-        scrollview::ScrollView
+        scroll_view::ScrollView
     },
     makepad_render::*,
 };   

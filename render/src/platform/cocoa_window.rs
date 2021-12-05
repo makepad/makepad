@@ -10,8 +10,8 @@ use {
     },
     crate::{
         platform::{
-            cx_apple::*,
-            cx_cocoa_app::CocoaApp,
+            apple::*,
+            cocoa_app::CocoaApp,
         },
         events::{
             WindowGeom,

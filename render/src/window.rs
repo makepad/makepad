@@ -11,7 +11,7 @@ pub use {
         },
         area::Area,
         cx::Cx,
-        livetraits::*,
+        live_traits::*,
     }
 };
 

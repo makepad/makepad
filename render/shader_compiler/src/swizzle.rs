@@ -1,4 +1,4 @@
-use crate::shaderast::Ident;
+use crate::shader_ast::Ident;
 use std::fmt;
 use std::slice;
 

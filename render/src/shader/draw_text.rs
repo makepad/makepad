@@ -6,12 +6,12 @@ use {
     },
     crate::{
         cx::Cx,
-        livetraits::*,
+        live_traits::*,
         turtle::{Walk, Width, Height, Margin},
         font::{CxFontsAtlasTodo, Font,},
         view::ManyInstances,
-        drawvars::DrawVars,
-        shader::geometrygen::GeometryQuad2D,
+        draw_vars::DrawVars,
+        shader::geometry_gen::GeometryQuad2D,
     },
 };
 

@@ -1,7 +1,7 @@
 use makepad_render::*;
-use crate::desktopbutton::*;
-use crate::windowmenu::*;
-use crate::buttonlogic::*;
+use crate::desktop_button::*;
+use crate::window_menu::*;
+use crate::button_logic::*;
 
 live_register!{
     DesktopWindow: {{DesktopWindow}} {

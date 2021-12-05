@@ -1,8 +1,8 @@
 #![allow(dead_code)]
 
-pub mod shaderparser;
-pub mod shaderast;
-pub mod shaderregistry;
+pub mod shader_parser;
+pub mod shader_ast;
+pub mod shader_registry;
 //pub mod env;
 pub mod analyse;
 pub mod builtin;
@@ -24,7 +24,7 @@ pub mod generate_hlsl;
 
 pub use {
     crate::{
-        shaderast::{
+        shader_ast::{
             ShaderTy,
             DrawShaderPtr,
             DrawShaderDef,
@@ -33,7 +33,7 @@ pub use {
             DrawShaderConstTable,
             ValuePtr,
         },
-        shaderregistry::{
+        shader_registry::{
             ShaderEnum,
             ShaderRegistry,
             DrawShaderQuery
