@@ -3,9 +3,9 @@ use {
     
     crate::{
         platform::{
-            cx_cocoa_app::CocoaApp,
-            cx_desktop::CxDesktop,
-            cx_metal::{MetalCx, MetalWindow}
+            cocoa_app::CocoaApp,
+            desktop::CxDesktop,
+            metal::{MetalCx, MetalWindow}
         },
         events::{
             Timer,

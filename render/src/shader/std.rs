@@ -3,7 +3,7 @@ pub use {
     makepad_derive_live::*,
     crate::{
         cx::Cx,
-        livetraits::*,
+        live_traits::*,
     }
 };
 

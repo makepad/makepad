@@ -6,7 +6,7 @@ pub use {
     makepad_derive_live::*,
     crate::{
         area::Area,
-        livetraits::*,
+        live_traits::*,
         cx::Cx,
     }
 };

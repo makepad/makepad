@@ -13,8 +13,8 @@ use crate::live_macro::*;
 #[path = "../../microserde/derive/src/macro_lib.rs"]
 mod macro_lib;
 
-#[path = "../../math/src/liveid.rs"]
-mod liveid;
+#[path = "../../live_compiler/src/live_id.rs"]
+mod live_id;
 
 #[path = "../../math/src/colorhex.rs"]
 mod colorhex;

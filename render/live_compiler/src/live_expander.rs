@@ -1,12 +1,12 @@
 use {
     makepad_id_macros::*,
     crate::{
-        liveid::{LiveId, LiveFileId, LivePtr},
-        liveerror::{LiveError, LiveErrorOrigin},
-        livedocument::{LiveDocument},
-        livenode::{LiveValue, LiveNode, LiveTypeKind},
-        livenodevec::{LiveNodeSlice, LiveNodeVec},
-        liveregistry::{LiveRegistry, LiveScopeTarget},
+        live_id::{LiveId, LiveFileId, LivePtr},
+        live_error::{LiveError, LiveErrorOrigin},
+        live_document::{LiveDocument},
+        live_node::{LiveValue, LiveNode, LiveTypeKind},
+        live_node_vec::{LiveNodeSlice, LiveNodeVec},
+        live_registry::{LiveRegistry, LiveScopeTarget},
     }
 };
 

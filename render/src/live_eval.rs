@@ -7,7 +7,7 @@ pub use {
         cx::Cx,
         events::Event,
         animator::Animator,
-        livetraits::*,
+        live_traits::*,
     }
 };
 

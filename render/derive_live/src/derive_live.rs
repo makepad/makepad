@@ -1,7 +1,7 @@
 use proc_macro::{TokenStream};
 
 use crate::macro_lib::*;
-use crate::liveid::*;
+use crate::live_id::*;
 
 
 pub fn derive_live_hook_impl(input: TokenStream) -> TokenStream {

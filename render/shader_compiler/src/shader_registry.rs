@@ -1,16 +1,16 @@
 use makepad_live_compiler::*;
-use crate::shaderast::*;
+use crate::shader_ast::*;
 use crate::analyse::*;
 
-use crate::shaderparser::ShaderParser;
-use crate::shaderparser::ShaderParserDep;
+use crate::shader_parser::ShaderParser;
+use crate::shader_parser::ShaderParserDep;
 use std::collections::BTreeMap;
 use std::collections::HashSet;
 use std::cell::{RefCell};
 use std::collections::HashMap;
 use crate::builtin::Builtin;
 use crate::builtin::generate_builtins;
-use crate::shaderast::Scopes;
+use crate::shader_ast::Scopes;
 
 pub struct ShaderRegistry {
     pub consts: HashMap<ConstPtr, ConstDef>,

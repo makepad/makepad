@@ -1,7 +1,7 @@
 use{
     std::fmt,
     crate::{
-        liveid::{LiveId, LiveFileId},
+        live_id::{LiveId, LiveFileId},
         span::Span
     }
 };

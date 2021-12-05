@@ -2,7 +2,7 @@ use {
     crate::{
         genid::{GenId, GenIdMap},
         tab::{TabAction, Tab},
-        scrollview::ScrollView
+        scroll_view::ScrollView
     },
     makepad_render::*,
 };

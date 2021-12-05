@@ -11,8 +11,8 @@ use {
         Vec2, Vec3, Vec4
     },
     crate::{
-        liveid::{LiveId},
-        livenode::{LiveNode, LiveValue, LiveNodeOrigin, InlineString, FittedString},
+        live_id::{LiveId},
+        live_node::{LiveNode, LiveValue, LiveNodeOrigin, InlineString, FittedString},
     }
 };
 

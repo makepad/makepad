@@ -10,9 +10,9 @@ use {
     makepad_live_compiler::*,
     crate::{
         platform::{
-            cx_apple::*,
-            cx_cocoa_app::CocoaApp,
-            cx_cocoa_window::CocoaWindow,
+            apple::*,
+            cocoa_app::CocoaApp,
+            cocoa_window::CocoaWindow,
         },
         events::WindowGeom,
         cx::Cx,
@@ -22,7 +22,7 @@ use {
             TextureDesc,
             CxTexture
         },
-        drawvars::CxDrawShader,
+        draw_vars::CxDrawShader,
     }
 };
 

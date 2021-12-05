@@ -4,7 +4,7 @@ use{
         Span
     },
     crate::{
-        shaderast::*,
+        shader_ast::*,
     }
 };
 

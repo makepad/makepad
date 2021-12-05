@@ -4,8 +4,8 @@ use{
         colorhex::hex_bytes_to_u32
     },
     crate::{
-        liveid::{LiveId, LiveFileId, },
-        liveerror::{LiveError, LiveErrorOrigin},
+        live_id::{LiveId, LiveFileId, },
+        live_error::{LiveError, LiveErrorOrigin},
         span::Span,
         token::{Token, TokenWithSpan},
     }

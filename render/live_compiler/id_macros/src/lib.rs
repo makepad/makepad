@@ -4,9 +4,9 @@ use proc_macro::{TokenStream};
 mod macro_lib;
 use crate::macro_lib::*;
 
-use crate::liveid::*;
-#[path = "../../../math/src/liveid.rs"]
-mod liveid; 
+use crate::live_id::*;
+#[path = "../../../live_compiler/src/live_id.rs"]
+mod live_id; 
 
 #[proc_macro] 
 pub fn id(item: TokenStream) -> TokenStream {
