@@ -10,8 +10,8 @@ pub use {
             CxPlatformDrawCall,
             CxPlatformView,
         },
-        livetraits::*,
         area::{Area, ViewArea, InstanceArea},
+        livetraits::*,
         turtle::{Layout, Width, Height, Walk, Rect},
         drawvars::{
             CxDrawShaderMapping,

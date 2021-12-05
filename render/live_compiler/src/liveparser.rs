@@ -144,24 +144,39 @@ impl<'a> LiveParser<'a> {
     fn expect_use(&mut self, ld: &mut LiveDocument) -> Result<(), LiveError> {
         let token_id = self.get_token_id();
         let crate_id = self.expect_ident() ?;
-        
-        self.expect_token(Token::Punct(id!(::))) ?;
-        let module_id = self.expect_ident() ?;
         self.expect_token(Token::Punct(id!(::))) ?;
         
-        
-        let object_id = if self.peek_token() == Token::Punct(id!(*)) {
-            self.skip_token();
-            LiveId(0)
+        // ok so. we need to collect everything 'upto' the last id
+        let first_module_id = self.expect_ident() ?;
+        self.expect_token(Token::Punct(id!(::))) ?;
+        let mut module = String::new();
+        let mut last_id = LiveId(0);
+        module.push_str(&format!("{}", first_module_id));
+        loop{
+            match self.peek_token(){
+                Token::Ident(id)=>{
+                    self.skip_token();
+                    last_id = id;
+                    if !self.accept_token(Token::Punct(id!(::))){
+                        break;
+                    }
+                    module.push_str(&format!("::{}", id));
+                },
+                Token::Punct(id!(*))=>{
+                    self.skip_token();
+                    last_id = LiveId(0);
+                    break;
+                }
+                _=>{
+                    break;
+                }
+            }
         }
-        else {
-            self.expect_ident() ?
-        };
-        
+
         ld.nodes.push(LiveNode {
             origin: LiveNodeOrigin::from_token_id(token_id),
-            id: object_id,
-            value: LiveValue::Use(LiveModuleId(crate_id, module_id))
+            id: last_id,
+            value: LiveValue::Use(LiveModuleId(crate_id, LiveId::from_str(&module).unwrap()))
         });
         
         Ok(())

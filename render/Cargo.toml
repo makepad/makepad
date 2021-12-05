@@ -19,8 +19,8 @@ makepad-path = { path = "./vector/path", version = "0.1" }
 makepad-live-compiler = { path = "./live_compiler", version = "0.1" }
 makepad-shader-compiler = { path = "./shader_compiler", version = "0.1" }
 makepad-derive-live = { path = "./derive_live", version = "0.1" }
-makepad-platform = {path = "./platform", version = "0.2"}
 makepad-math = {path = "./math", version = "0.2"}
+
 [target.aarch64-apple-darwin.dependencies]
 makepad-objc-sys = { path = "./bind/objc-sys", version = "0.2" }
 

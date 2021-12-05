@@ -1,8 +1,8 @@
 use makepad_render::*;
 
 live_register!{
-    use makepad_render::shader_std::*;
-    
+    use makepad_render::shader::std::*;
+
     Splitter: {{Splitter}} {
         split_bar_size: 2.0
         bar_quad:{

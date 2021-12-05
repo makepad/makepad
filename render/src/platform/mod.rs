@@ -1,4 +1,3 @@
-#![allow(dead_code)]
 
 #[cfg(target_os = "linux")]
 pub mod cx_opengl;
@@ -17,6 +16,10 @@ pub mod cx_cocoa_app;
 pub mod cx_cocoa_window;
 #[cfg(target_os = "macos")]
 pub mod cx_apple;
+#[cfg(target_os = "macos")]
+pub mod cx_metal;
+#[cfg(target_os = "macos")]
+pub mod cx_macos;
 
 #[cfg(target_os = "windows")]
 pub mod cx_dx11;
@@ -31,7 +34,8 @@ pub mod cx_webgl;
 #[cfg(target_arch = "wasm32")]
 pub mod cx_wasm32;
 
-pub mod cursor;
-pub mod events;
-pub mod menu;
-pub mod area;
+
+#[macro_use]
+#[cfg(any(target_os = "linux", target_os="macos", target_os="windows"))]
+pub mod cx_desktop;
+

@@ -4,7 +4,7 @@ use {
     crate::{
         cx::Cx,
         livetraits::*,
-        drawquad::DrawQuad
+        shader::drawquad::DrawQuad
     },
 };
 

@@ -8,13 +8,13 @@ use {
     },
     makepad_shader_compiler::{DrawShaderDef, generate_metal},
     makepad_live_compiler::*,
-    makepad_platform::{
-        cx_apple::*,
-        cx_cocoa_app::CocoaApp,
-        cx_cocoa_window::CocoaWindow,
-        events::WindowGeom
-    },
     crate::{
+        platform::{
+            cx_apple::*,
+            cx_cocoa_app::CocoaApp,
+            cx_cocoa_window::CocoaWindow,
+        },
+        events::WindowGeom,
         cx::Cx,
         pass::{PassClearColor, PassClearDepth},
         texture::{
