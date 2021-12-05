@@ -15,14 +15,15 @@ use {
         DrawShaderPtr,
         ShaderRegistry
     },
-    makepad_platform::{
+    
+    crate::{
         events::{
             NUM_FINGERS,
             Event,
             Signal,
             SignalEvent,
             KeyEvent,
-           // KeyCode,
+            // KeyCode,
             NextFrame,
             KeyFocusEvent,
             NextFrameEvent,
@@ -37,9 +38,7 @@ use {
         area::{
             Area,
             ViewArea
-        }
-    },
-    crate::{
+        },
         livetraits::{
             LiveFactory,
         },
@@ -73,41 +72,16 @@ use {
             DrawShaderFingerprint,
         },
         turtle::Turtle,
-        area::{
-            AreaImpl,
-        },
-       
     }
 };
 
 pub use makepad_derive_live::*;
-//pub use makepad_microserde::*;
 pub use makepad_math::*;
 
-
-#[cfg(target_os = "linux")]
-pub use crate::cx_linux::*;
-#[cfg(target_os = "linux")]
-pub use crate::cx_opengl::*;
-
 #[cfg(target_os = "macos")]
-pub use crate::cx_macos::*;
+pub use crate::platform::cx_metal::*;
 #[cfg(target_os = "macos")]
-pub use crate::cx_metal::*;
-
-#[cfg(target_os = "windows")]
-pub use crate::cx_windows::*;
-#[cfg(target_os = "windows")]
-pub use crate::cx_dx11::*;
-
-#[cfg(target_arch = "wasm32")]
-pub use crate::cx_webgl::*;
-
-#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-pub use crate::cx_desktop::*;
-
-#[cfg(target_arch = "wasm32")]
-pub use crate::cx_wasm32::*;
+pub use crate::platform::cx_macos::*;
 
 pub use crate::log;
 
@@ -135,8 +109,8 @@ pub struct Cx {
     
     pub geometries: Vec<CxGeometry>,
     pub geometries_free: Rc<RefCell<Vec<usize >> >,
-    pub geometries_refs: HashMap<GeometryFingerprint, Weak<Geometry>>,
-
+    pub geometries_refs: HashMap<GeometryFingerprint, Weak<Geometry >>,
+    
     pub draw_shaders: Vec<CxDrawShader>,
     
     pub in_redraw_cycle: bool,
@@ -189,7 +163,7 @@ pub struct Cx {
     pub _next_frames: HashSet<NextFrame>,
     
     //pub triggers: HashMap<Area, BTreeSet<TriggerId >>,
-    pub signals: HashMap<Signal, Vec<u64>>,
+    pub signals: HashMap<Signal, Vec<u64 >>,
     
     pub profiles: HashMap<u64, Instant>,
     
@@ -767,7 +741,7 @@ impl Cx {
             self.signals.insert(signal, new_set);
         }
     }
-
+    
     pub fn set_down_mouse_cursor(&mut self, mouse_cursor: MouseCursor) {
         // ok so lets set the down mouse cursor
         self.down_mouse_cursor = Some(mouse_cursor);

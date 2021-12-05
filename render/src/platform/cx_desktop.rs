@@ -5,15 +5,14 @@ use {
         io,
     },
     makepad_live_compiler::Vec2,
-    makepad_platform::{
+
+    crate::{
         events::{
             Event,
             KeyCode,
-        }
-    },
-    crate::{
-        cx::Cx,
+        },
         area::Area,
+        cx::Cx,
     }
 };
 

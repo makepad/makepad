@@ -8,22 +8,21 @@ use {
         Rect
     },
     crate::{
-        cx_apple::*,
-        cx_cocoa_app::{
-            CocoaApp,
-            get_cocoa_app
+        platform::{
+            cx_apple::*,
+            cx_cocoa_app::{
+                CocoaApp,
+                get_cocoa_app
+            },
+            cx_cocoa_window::{
+                get_cocoa_window
+            },
+            cx_cocoa_util::{
+                get_event_key_modifier,
+                superclass,
+                load_mouse_cursor
+            },
         },
-        cx_cocoa_window::{
-            get_cocoa_window
-        },
-        cx_cocoa_util::{
-            get_event_key_modifier,
-            superclass,
-            load_mouse_cursor
-        },
-        //turtle::{
-        //    Rect
-        //},
         menu::{
             CommandId
         },

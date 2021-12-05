@@ -2,7 +2,7 @@ use makepad_render::*;
 use crate::buttonlogic::*;
 
 live_register!{
-    use makepad_render::shader_std::*;
+    use makepad_render::shader::std::*;
     
     DrawDesktopButton: {{DrawDesktopButton}} {
         debug:false,

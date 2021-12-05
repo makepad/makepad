@@ -3,11 +3,9 @@ pub use {
         any::TypeId,
     },
     makepad_live_compiler::*,
-    makepad_platform::{
-        events::Event
-    },
     crate::{
         cx::Cx,
+        events::Event,
         livetraits::*,
         liveeval::*,
         animator::Animator
@@ -17,11 +15,11 @@ pub use {
 
 impl Cx { 
     pub fn live_register(&mut self) {
-        crate::drawquad::live_register(self);
-        crate::drawcolor::live_register(self);
-        crate::drawtext::live_register(self);
-        crate::geometrygen::live_register(self);
-        crate::shader_std::live_register(self); 
+        crate::shader::drawquad::live_register(self);
+        crate::shader::drawcolor::live_register(self);
+        crate::shader::drawtext::live_register(self);
+        crate::shader::geometrygen::live_register(self);
+        crate::shader::std::live_register(self); 
         crate::font::live_register(self);
     }
     

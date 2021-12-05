@@ -45,12 +45,11 @@ live_register!{
         
         linenum_text: code_text {
             draw_depth:3.0
-            draw_call_group: blaaah
             no_h_scroll: true
         }
         
         linenum_quad: {
-            color: #x1e
+            color: #x1e 
             draw_depth:2.0
             no_h_scroll: true
             no_v_scroll: true
@@ -63,7 +62,7 @@ live_register!{
         text_color_function_identifier: #dcdcae
         text_color_branch_keyword: #c485be
         text_color_loop_keyword: #ff8c00
-        text_color_other_keyword: #5b9bd3
+        text_color_other_keyword: #5b9bd3 
         text_color_number: #b6ceaa
         text_color_punctuator: #d4d4d4
         text_color_string: #cc917b

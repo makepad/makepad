@@ -1,4 +1,4 @@
-use{
+use {
     std::{
         ptr,
         time::Instant,
@@ -9,8 +9,10 @@ use{
         Rect
     },
     crate::{
-        cx_apple::*,
-        cx_cocoa_app::CocoaApp,
+        platform::{
+            cx_apple::*,
+            cx_cocoa_app::CocoaApp,
+        },
         events::{
             WindowGeom,
             NUM_FINGERS,
@@ -211,7 +213,7 @@ impl CocoaWindow {
     }
     
     pub fn time_now(&self) -> f64 {
-        let time_now = Instant::now();//unsafe {mach_absolute_time()};
+        let time_now = Instant::now(); //unsafe {mach_absolute_time()};
         (time_now.duration_since(self.time_start)).as_micros() as f64 / 1_000_000.0
     }
     
@@ -370,8 +372,8 @@ impl CocoaWindow {
         self.last_mouse_pos = pos;
         let mut events = Vec::new();
         
-        unsafe{ (*self.cocoa_app).startup_focus_hack();}
-    
+        unsafe {(*self.cocoa_app).startup_focus_hack();}
+        
         for (digit, down) in self.fingers_down.iter().enumerate() {
             if *down {
                 events.push(Event::FingerMove(FingerMoveEvent {
@@ -390,7 +392,7 @@ impl CocoaWindow {
             }
         };
         events.push(Event::FingerHover(FingerHoverEvent {
-            digit:0,
+            digit: 0,
             window_id: self.window_id,
             abs: pos,
             rel: pos,
@@ -401,10 +403,10 @@ impl CocoaWindow {
             modifiers: modifiers,
             time: self.time_now()
         }));
-
-        unsafe { (*self.cocoa_app).ns_event = event };
+        
+        unsafe {(*self.cocoa_app).ns_event = event};
         self.do_callback(&mut events);
-        unsafe { (*self.cocoa_app).ns_event = ptr::null_mut() };
+        unsafe {(*self.cocoa_app).ns_event = ptr::null_mut()};
     }
     
     pub fn send_window_close_requested_event(&mut self) -> bool {
@@ -432,25 +434,25 @@ impl CocoaWindow {
             replace_last: replace_last
         })])
     }
-
+    
     pub fn start_dragging(&mut self, ns_event: ObjcId, dragged_item: DraggedItem) {
-        let dragging_items = dragged_item.file_urls.iter().map(|file_url| {
-            let pasteboard_item: ObjcId = unsafe { msg_send![class!(NSPasteboardItem), new] };
+        let dragging_items = dragged_item.file_urls.iter().map( | file_url | {
+            let pasteboard_item: ObjcId = unsafe {msg_send![class!(NSPasteboardItem), new]};
             let _: () = unsafe {
                 msg_send![
                     pasteboard_item,
-                    setString:str_to_nsstring(file_url)
-                    forType:NSPasteboardTypeFileURL
+                    setString: str_to_nsstring(file_url)
+                    forType: NSPasteboardTypeFileURL
                 ]
             };
-            let dragging_item: ObjcId = unsafe { msg_send![class!(NSDraggingItem), alloc] };
-            let _: () = unsafe { msg_send![dragging_item, initWithPasteboardWriter:pasteboard_item] };
-            let bounds: NSRect = unsafe { msg_send![self.view, bounds] };
+            let dragging_item: ObjcId = unsafe {msg_send![class!(NSDraggingItem), alloc]};
+            let _: () = unsafe {msg_send![dragging_item, initWithPasteboardWriter: pasteboard_item]};
+            let bounds: NSRect = unsafe {msg_send![self.view, bounds]};
             let _: () = unsafe {
-                msg_send![dragging_item, setDraggingFrame:bounds contents:self.view]
+                msg_send![dragging_item, setDraggingFrame: bounds contents: self.view]
             };
             dragging_item
-        }).collect::<Vec<_>>();
+        }).collect::<Vec<_ >> ();
         let dragging_items: ObjcId = unsafe {
             msg_send![
                 class!(NSArray),
@@ -458,16 +460,16 @@ impl CocoaWindow {
                 count: dragging_items.len()
             ]
         };
-
+        
         unsafe {
             msg_send![
                 self.view,
-                beginDraggingSessionWithItems:dragging_items
-                event:ns_event
-                source:self.view
+                beginDraggingSessionWithItems: dragging_items
+                event: ns_event
+                source: self.view
             ]
         }
-
+        
         /*
          self.delegate?.cellClick(self ,index:self.index)
         //
@@ -477,7 +479,7 @@ impl CocoaWindow {
         draggingItem.setDraggingFrame(self.bounds, contents:self)
         beginDraggingSession(with: [draggingItem], event: event, source: self.zIcon.image)
         */
-
+        
         // TODO
     }
 }
