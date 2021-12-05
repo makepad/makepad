@@ -15,8 +15,8 @@ use {
         design_editor::{
             design_editor::DesignEditorViewId
         },
-        genid::{GenId, GenIdMap,GenIdAllocator},
     },
+    makepad_widget::{GenId, GenIdMap,GenIdAllocator},
     std::{
         collections::{HashMap, HashSet, VecDeque},
         mem,
