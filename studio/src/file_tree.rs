@@ -11,7 +11,7 @@ use {
 };   
 
 live_register!{
-    use makepad_render::shader_std::*;
+    use makepad_render::shader::std::*;
     
     DrawBgQuad: {{DrawBgQuad}} {
         const color_even: vec4 = #25

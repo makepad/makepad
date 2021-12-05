@@ -1,5 +1,5 @@
 
-use{
+use {
     std::{
         ptr,
         time::Instant,
@@ -11,13 +11,15 @@ use{
         Rect
     },
     crate::{
-        cx_apple::*,
-        cx_cocoa_delegate::*,
-        cx_cocoa_window::CocoaWindow,
-        cx_cocoa_util::{
-            keycode_to_menu_key,
-            get_event_keycode,
-            get_event_key_modifier
+        platform::{
+            cx_apple::*,
+            cx_cocoa_delegate::*,
+            cx_cocoa_window::CocoaWindow,
+            cx_cocoa_util::{
+                keycode_to_menu_key,
+                get_event_keycode,
+                get_event_key_modifier
+            },
         },
         menu::{
             CxCommandSetting
@@ -239,8 +241,8 @@ impl CocoaApp {
         }
     }
     
-    pub fn startup_focus_hack(&mut self){
-        unsafe{
+    pub fn startup_focus_hack(&mut self) {
+        unsafe {
             if !self.startup_focus_hack_ran {
                 self.startup_focus_hack_ran = true;
                 let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
@@ -267,8 +269,8 @@ impl CocoaApp {
                         ];
                     }
                 }
-            }        
-        }       
+            }
+        }
     }
     
     /*    pub fn init_app_after_first_window(&mut self) {
@@ -304,7 +306,7 @@ impl CocoaApp {
     }
     
     pub fn time_now(&self) -> f64 {
-        let time_now = Instant::now();//unsafe {mach_absolute_time()};
+        let time_now = Instant::now(); //unsafe {mach_absolute_time()};
         (time_now.duration_since(self.time_start)).as_micros() as f64 / 1_000_000.0
     }
     
@@ -477,7 +479,7 @@ impl CocoaApp {
                 return if has_prec == YES {
                     self.do_callback(&mut vec![
                         Event::FingerScroll(FingerScrollEvent {
-                            digit:0,
+                            digit: 0,
                             window_id: cocoa_window.window_id,
                             scroll: Vec2 {x: -dx as f32, y: -dy as f32},
                             abs: cocoa_window.last_mouse_pos,
@@ -493,7 +495,7 @@ impl CocoaApp {
                 } else {
                     self.do_callback(&mut vec![
                         Event::FingerScroll(FingerScrollEvent {
-                            digit:0,
+                            digit: 0,
                             window_id: cocoa_window.window_id,
                             scroll: Vec2 {x: -dx as f32 * 32., y: -dy as f32 * 32.},
                             abs: cocoa_window.last_mouse_pos,
@@ -715,7 +717,7 @@ impl CocoaApp {
     pub fn send_paint_event(&mut self) {
         self.do_callback(&mut vec![Event::Paint]);
     }
-
+    
     pub fn start_dragging(&mut self, dragged_item: DraggedItem) {
         let cocoa_window = unsafe {
             let window: ObjcId = msg_send![self.ns_event, window];
@@ -723,7 +725,7 @@ impl CocoaApp {
             let cocoa_window: *mut c_void = *(*window_delegate).get_ivar("cocoa_window_ptr");
             &mut *(cocoa_window as *mut CocoaWindow)
         };
-
+        
         cocoa_window.start_dragging(self.ns_event, dragged_item);
     }
 }

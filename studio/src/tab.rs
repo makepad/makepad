@@ -4,7 +4,7 @@ use {
 };
 
 live_register!{
-    use makepad_render::shader_std::*;
+    use makepad_render::shader::std::*;
     
     Tab: {{Tab}} {
         name_text: {

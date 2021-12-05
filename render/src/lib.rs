@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 
+mod platform;
+
 #[macro_use]
 mod cx;
 #[macro_use]
@@ -9,53 +11,22 @@ mod liveeval;
 mod livetraits;
 mod livecx;
 
-#[cfg(target_os = "linux")]
-mod cx_opengl;
-#[cfg(target_os = "linux")]
-mod cx_xlib;
-#[cfg(target_os = "linux")]
-mod cx_linux;
-
-#[cfg(target_os = "macos")]
-mod cx_metal;
-#[cfg(target_os = "macos")]
-mod cx_macos;
-
-#[cfg(target_os = "windows")]
-mod cx_dx11;
-#[cfg(target_os = "windows")]
-mod cx_win32;
-#[cfg(target_os = "windows")]
-mod cx_windows;
-
-#[cfg(target_arch = "wasm32")]
-mod cx_webgl;
-#[macro_use]
-#[cfg(target_arch = "wasm32")]
-mod cx_wasm32;
-
-#[macro_use]
-#[cfg(any(target_os = "linux", target_os="macos", target_os="windows"))]
-mod cx_desktop;
-
+mod area;
+mod events;
 mod turtle;
 mod font;
 mod window;
 mod view;
 mod pass;
 mod texture;
+mod cursor;
+mod menu;
 mod animator;
-mod area;
-mod geometrygen;
-
-mod drawquad;
-mod drawtext;
-mod drawcolor;
-mod events;
-mod geometry;
-mod drawvars;
-mod shader_std;
 mod gpuinfo;
+mod drawvars;
+mod geometry;
+
+mod shader;
 
 pub use {
     makepad_derive_live::*,
@@ -94,7 +65,18 @@ pub use {
         LiveNodeSlice,
         LiveNodeVec,
     },
-    makepad_platform::{
+    
+    makepad_shader_compiler::{
+        ShaderRegistry, 
+        ShaderEnum,
+        DrawShaderPtr, 
+        ShaderTy,
+    },
+    crate::{
+        cx::{
+            Cx,
+            PlatformType
+        },
         area::{
             Area,
             ViewArea,
@@ -139,30 +121,12 @@ pub use {
             FingerDropEvent,
             DragState,
             DragAction,
-            DraggedItem
+            DraggedItem,
+            HitOpt,
         },
         cursor::MouseCursor,
-        menu::Menu
-    },
-    makepad_shader_compiler::{
-        ShaderRegistry, 
-        ShaderEnum,
-        DrawShaderPtr, 
-        ShaderTy,
-    },
-    crate::{
-        cx::{
-            Cx,
-            PlatformType
-        },
-        drawquad::DrawQuad,
-        drawtext::DrawText,
-        drawcolor::DrawColor,
+        menu::Menu,
         font::Font,
-        events::{
-            HitOpt,
-            EventImpl
-        },
         turtle::{
             LineWrap,
             Layout,
@@ -208,9 +172,6 @@ pub use {
             Animator,
             AnimatorAction
         },
-        area::{
-            AreaImpl,
-        },
         drawvars::{
             DrawShader,
             DrawVars
@@ -219,13 +180,18 @@ pub use {
             GeometryField,
             Geometry,
         },
-        geometrygen::{
-            GeometryGen,
-            GeometryQuad2D,
-        },
         gpuinfo::{
             GpuPerformance
-        }
+        },
+        shader::{
+            drawquad::DrawQuad,
+            drawtext::DrawText,
+            drawcolor::DrawColor,
+            geometrygen::{
+                GeometryGen,
+                GeometryQuad2D,
+            },
+        },
     }
 };
 

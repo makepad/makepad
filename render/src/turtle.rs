@@ -5,9 +5,9 @@ pub use {
     makepad_live_compiler::*,
     makepad_derive_live::*,
     crate::{
+        area::Area,
         livetraits::*,
         cx::Cx,
-        area::Area
     }
 };
 
