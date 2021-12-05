@@ -7,8 +7,8 @@ use {
             },
             text::Text,
         },
-        genid::{GenIdMap,GenIdAllocator},
     },
+    makepad_widget::{GenIdMap,GenIdAllocator},
     std::{
         collections::{HashMap, VecDeque},
         fmt, fs, mem,

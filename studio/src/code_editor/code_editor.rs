@@ -16,7 +16,6 @@ use {
             token::{Delimiter, Keyword, Punctuator, TokenKind},
             token_cache::TokenCache,
         },
-        genid::{GenId, GenIdMap, GenIdAllocator},
     },
     makepad_render::*,
     makepad_widget::*,

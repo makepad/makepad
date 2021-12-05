@@ -1,11 +1,11 @@
 use {
     crate::{
-        genid::GenId,
         code_editor::{
             delta::Delta,
             text::Text
         }
     },
+    makepad_widget::{GenId},
     std::{
         ffi::OsString,
         path::PathBuf
