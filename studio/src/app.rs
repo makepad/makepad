@@ -21,7 +21,8 @@ impl App {
     
     pub fn live_register(cx: &mut Cx) {
         makepad_widget::live_register(cx);
-        crate::code_editor::code_editor::live_register(cx);
+        crate::code_editor::code_editor_view::live_register(cx);
+        crate::code_editor::code_editors::live_register(cx);
         crate::design_editor::design_editor::live_register(cx);
         crate::appinner::live_register(cx);
     }

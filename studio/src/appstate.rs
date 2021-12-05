@@ -2,7 +2,7 @@ use {
     crate::{
         editor_state::{EditorState, SessionId},
         code_editor::{
-            code_editor::{CodeEditorViewId},
+            code_editors::{CodeEditorViewId},
             protocol::{FileNodeData, FileTreeData},
         },
     },
