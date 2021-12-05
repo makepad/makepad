@@ -23,12 +23,6 @@ impl App {
         makepad_widget::live_register(cx);
         crate::code_editor::code_editor::live_register(cx);
         crate::design_editor::design_editor::live_register(cx);
-        crate::file_tree::live_register(cx);
-        crate::splitter::live_register(cx);
-        crate::tab_close_button::live_register(cx);
-        crate::tab::live_register(cx);
-        crate::tab_bar::live_register(cx);
-        crate::dock::live_register(cx);
         crate::appinner::live_register(cx);
     }
     

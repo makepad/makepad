@@ -2,9 +2,9 @@ use {
     crate::{
         genid::{GenId, GenIdMap},
         tab::{TabAction, Tab},
+        scrollview::ScrollView
     },
     makepad_render::*,
-    makepad_widget::*,
 };
 
 live_register!{

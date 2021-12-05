@@ -5,9 +5,9 @@ use {
     },
     crate::{
         genid::GenId,
+        scrollview::ScrollView
     },
     makepad_render::*,
-    makepad_widget::*,
 };   
 
 live_register!{

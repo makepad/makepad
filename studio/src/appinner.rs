@@ -10,13 +10,15 @@ use {
         design_editor::{
             design_editor::{DesignEditors},
         },
+    },
+    makepad_render::*,
+    makepad_widget::{
+        DesktopWindow,
         dock::{Dock, DockAction, DragPosition, PanelId},
         file_tree::{FileTreeAction, FileNodeId, FileTree},
         splitter::{SplitterAlign},
         tab_bar::TabId,
     },
-    makepad_render::*,
-    makepad_widget::*,
     std::{
         path::{Path, PathBuf},
         sync::mpsc::{TryRecvError},

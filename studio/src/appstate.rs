@@ -5,6 +5,8 @@ use {
             code_editor::{CodeEditorViewId},
             protocol::{FileNodeData, FileTreeData},
         },
+    },
+    makepad_widget::{
         dock::{PanelId},
         file_tree::{FileNodeId},
         splitter::{SplitterAlign},
