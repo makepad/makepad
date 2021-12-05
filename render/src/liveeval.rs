@@ -3,11 +3,9 @@ pub use {
         any::TypeId,
     },
     makepad_live_compiler::*,
-    makepad_platform::{
-        events::Event
-    },
     crate::{
         cx::Cx,
+        events::Event,
         animator::Animator,
         livetraits::*,
     }

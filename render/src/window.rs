@@ -3,15 +3,14 @@ pub use {
         rc::Rc,
         cell::RefCell
     },
-    makepad_platform::{
-        events::{
-            WindowGeom
-        }
-    },
+
     makepad_live_compiler::*,
     crate::{
-        cx::Cx,
+        events::{
+            WindowGeom
+        },
         area::Area,
+        cx::Cx,
         livetraits::*,
     }
 };

@@ -1,6 +1,12 @@
 use {
     makepad_live_compiler::Vec2,
-    makepad_platform::{
+    
+    crate::{
+        platform::{
+            cx_cocoa_app::CocoaApp,
+            cx_desktop::CxDesktop,
+            cx_metal::{MetalCx, MetalWindow}
+        },
         events::{
             Timer,
             Signal,
@@ -8,17 +14,12 @@ use {
             DraggedItem
         },
         menu::Menu,
-        cx_cocoa_app::CocoaApp,
         cursor::MouseCursor,
-    },
-    crate::{
         cx::{Cx, PlatformType},
-        cx_desktop::CxDesktop,
         
         window::{CxWindowState, CxWindowCmd},
         pass::CxPassDepOf,
         
-        cx_metal::{MetalCx, MetalWindow}
     }
 };
 

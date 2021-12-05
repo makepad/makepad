@@ -14,7 +14,7 @@ pub use {
     crate::{
         cx::Cx,
         livetraits::*,
-        geometrygen::GeometryQuad2D,
+        shader::geometrygen::GeometryQuad2D,
         drawvars::DrawVars,
         view::ManyInstances,
         pass::{Pass, PassClearColor},
