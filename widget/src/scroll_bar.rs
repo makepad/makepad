@@ -2,12 +2,12 @@ use makepad_render::*;
 
 live_register!{
     use makepad_render::shader::std::*;
-
+    
     DrawScrollBar: {{DrawScrollBar}} {
         draw_depth: 5.0
         const border_radius: float = 1.5;
-        instance pressed:float;
-        instance hover:float;
+        instance pressed: float;
+        instance hover: float;
         
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -20,7 +20,7 @@ live_register!{
                     border_radius
                 );
             }
-            else { 
+            else {
                 sdf.box(
                     self.rect_size.x * self.norm_scroll,
                     1.,
@@ -37,7 +37,9 @@ live_register!{
         
         default_state: {
             from: {all: Play::Forward {duration: 0.1}}
-            bar_quad: {pressed: 0.0, hover: 0.0}
+            apply: {
+                bar_quad: {pressed: 0.0, hover: 0.0}
+            }
         }
         
         hover_state: {
@@ -45,18 +47,22 @@ live_register!{
                 all: Play::Forward {duration: 0.1}
                 state_down: Play::Forward {duration: 0.01}
             }
-            bar_quad: {
-                pressed: 0.0,
-                hover: [{time: 0.0, value: 1.0}],
+            apply: {
+                bar_quad: {
+                    pressed: 0.0,
+                    hover: [{time: 0.0, value: 1.0}],
+                }
             }
         }
         
         pressed_state: {
             from: {all: Play::Forward {duration: 0.2}}
-            bar_quad: {
-                pressed: [{time: 0.0, value: 1.0}],
-                hover: 1.0,
-            } 
+            apply: {
+                bar_quad: {
+                    pressed: [{time: 0.0, value: 1.0}],
+                    hover: 1.0,
+                }
+            }
         }
     }
 }
@@ -67,14 +73,14 @@ pub struct ScrollBar {
     #[live(12.0)] pub bar_size: f32,
     #[live(30.0)] pub min_handle_size: f32, //minimum size of the handle in pixels
     #[live(Axis::Horizontal)] pub axis: Axis,
-
+    
     default_state: Option<LivePtr>,
     hover_state: Option<LivePtr>,
     pressed_state: Option<LivePtr>,
-
+    
     use_vertical_finger_scroll: bool,
     smoothing: Option<f32>,
-
+    
     #[default_state(default_state)] pub animator: Animator,
     
     #[rust] next_frame: NextFrame,
@@ -89,7 +95,7 @@ pub struct ScrollBar {
     #[rust] scroll_target: f32,
     #[rust] scroll_delta: f32,
     #[rust] drag_point: Option<f32>, // the point in pixels where we are dragging
-} 
+}
 
 #[derive(Live, LiveHook)]
 #[repr(C)]
@@ -148,8 +154,8 @@ impl ScrollBar {
     // writes the norm_scroll value into the shader
     pub fn update_shader_scroll_pos(&mut self, cx: &mut Cx) {
         let (norm_scroll, _) = self.get_normalized_scroll_pos();
-        self.bar_quad.apply_over(cx,live!{
-            norm_scroll:(norm_scroll)
+        self.bar_quad.apply_over(cx, live!{
+            norm_scroll: (norm_scroll)
         });
         //self.bg.set_norm_scroll(cx, norm_scroll);
     }
@@ -329,7 +335,7 @@ impl ScrollBar {
                     }
                 },
                 Event::FingerHover(fe) => {
-                    if self.drag_point.is_none() { 
+                    if self.drag_point.is_none() {
                         cx.set_hover_mouse_cursor(MouseCursor::Default);
                         match fe.hover_state {
                             HoverState::In => {
