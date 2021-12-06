@@ -194,6 +194,7 @@ impl DrawText {
     }
     
     pub fn begin_many_instances(&mut self, cx: &mut Cx) {
+        self.update_draw_call_vars(cx);
         let mi = cx.begin_many_aligned_instances(&self.draw_vars);
         self.many_instances = Some(mi);
     }
@@ -213,22 +214,19 @@ impl DrawText {
     
     pub fn draw_chunk(&mut self, cx: &mut Cx, pos: Vec2, char_offset: usize, chunk: Option<&[char]>)
     {
-        
         if !self.draw_vars.can_instance()
             || pos.x.is_nan()
             || pos.y.is_nan()
             || self.text_style.font.font_id.is_none() {
             return
         }
+        
+        let in_many = self.many_instances.is_some();
         let font_id = self.text_style.font.font_id.unwrap();
         
         if cx.fonts[font_id].is_none() {
             return
         }
-        
-        let in_many = self.many_instances.is_some();
-        
-        self.update_draw_call_vars(cx);
         
         if !in_many {
             self.begin_many_instances(cx);

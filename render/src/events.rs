@@ -1,7 +1,7 @@
 use {
     std::{
         any::TypeId,
-        collections::{HashMap, BTreeSet}
+        collections::HashMap
     },
     makepad_math::*,
     //makepad_microserde::*,
@@ -184,12 +184,6 @@ impl NextFrame {
 
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct FileReadEvent {
-    pub read_id: u64,
-    pub data: Result<Vec<u8>, String>
-}
-
-#[derive(Clone, Debug, PartialEq)]
 pub struct TimerEvent {
     pub timer_id: u64
 }
@@ -198,33 +192,10 @@ pub struct TimerEvent {
 pub struct SignalEvent {
     pub signals: HashMap<Signal, Vec<u64>>
 }
-/*
-#[derive(Clone, Debug, PartialEq)]
-pub struct TriggersEvent {
-    pub triggers: HashMap<Area, BTreeSet<TriggerId >>
-}*/
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct TriggerEvent {
-    pub triggers: BTreeSet<TriggerId>
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct FileWriteEvent {
-    id: u64,
-    error: Option<String>
-}
-/*
-#[derive(Clone, Debug, PartialEq)]
-pub struct LiveRecompileEvent {
-    pub changed_live_bodies: BTreeSet<LiveBodyId>,
-    pub errors: Vec<LiveBodyError>
-}*/
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct KeyEvent {
     pub key_code: KeyCode,
-    //pub key_char: char,
     pub is_repeat: bool,
     pub modifiers: KeyModifiers,
     pub time: f64
@@ -377,8 +348,6 @@ pub enum Event {
     FingerHover(FingerHoverEvent),
     FingerUp(FingerUpEvent),
     FingerScroll(FingerScrollEvent),
-    FileRead(FileReadEvent),
-    FileWrite(FileWriteEvent),
     Timer(TimerEvent),
     Signal(SignalEvent),
     Command(CommandId),
@@ -551,11 +520,6 @@ pub enum KeyCode {
     Shift,
     Logo,
     
-    //RightControl,
-    //RightShift,
-    //RightAlt,
-    //RightLogo,
-    
     Space,
     Capslock,
     F1,
@@ -647,21 +611,7 @@ impl Event {
         }
         None
     }
-    /*
-    pub fn is_animate(&self, cx:&mut Cx, animator: &Animator)->Option<AnimateEvent>{
-         match self {
-            Event::Animate(ae) => {
-                if cx.playing_animator_ids.get(&animator.animator_id).is_some(){
-                    return Some(ae.clone())
-                }
-            }
-            _=>()
-        }
-        None
-    }*/
-    
-    
-    
+
     pub  fn hits(&mut self, cx: &mut Cx, area: Area, opt: HitOpt) -> Event {
         match self {
             Event::KeyFocus(kf) => {

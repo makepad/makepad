@@ -7,75 +7,75 @@ live_register!{
     DrawDesktopButton: {{DrawDesktopButton}} {
         debug:false,
         fn pixel(self) -> vec4 {
-            let cx = Sdf2d::viewport(self.pos * self.rect_size);
-            cx.aa *= 3.0;
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+            sdf.aa *= 3.0;
             let sz = 4.5;
             let c = self.rect_size * vec2(0.5, 0.5);
             
             // WindowsMin
             match self.button_type {
                 DesktopButtonType::WindowsMin => {
-                    cx.clear(mix(#3, mix(#6, #9, self.pressed), self.hover));
-                    cx.move_to(c.x - sz, c.y);
-                    cx.line_to(c.x + sz, c.y);
-                    cx.stroke(#f, 0.5 + 0.5 * self.dpi_dilate);
-                    return cx.result;
+                    sdf.clear(mix(#3, mix(#6, #9, self.pressed), self.hover));
+                    sdf.move_to(c.x - sz, c.y);
+                    sdf.line_to(c.x + sz, c.y);
+                    sdf.stroke(#f, 0.5 + 0.5 * self.dpi_dilate);
+                    return sdf.result;
                 }
                 DesktopButtonType::WindowsMax => {
-                    cx.clear(mix(#3, mix(#6, #9, self.pressed), self.hover));
-                    cx.rect(c.x - sz, c.y - sz, 2. * sz, 2. * sz);
-                    cx.stroke(#f, 0.5 + 0.5 * self.dpi_dilate);
-                    return cx.result;
+                    sdf.clear(mix(#3, mix(#6, #9, self.pressed), self.hover));
+                    sdf.rect(c.x - sz, c.y - sz, 2. * sz, 2. * sz);
+                    sdf.stroke(#f, 0.5 + 0.5 * self.dpi_dilate);
+                    return sdf.result;
                 }
                 DesktopButtonType::WindowsMaxToggled => {
                     let clear = mix(#3, mix(#6, #9, self.pressed), self.hover);
-                    cx.clear(clear);
+                    sdf.clear(clear);
                     let sz = 3.5;
-                    cx.rect(c.x - sz + 1., c.y - sz - 1., 2. * sz, 2. * sz);
-                    cx.stroke(#f, 0.5 + 0.5 * self.dpi_dilate);
-                    cx.rect(c.x - sz - 1., c.y - sz + 1., 2. * sz, 2. * sz);
-                    cx.fill_keep(clear);
-                    cx.stroke(#f, 0.5 + 0.5 * self.dpi_dilate);
-                    return cx.result;
+                    sdf.rect(c.x - sz + 1., c.y - sz - 1., 2. * sz, 2. * sz);
+                    sdf.stroke(#f, 0.5 + 0.5 * self.dpi_dilate);
+                    sdf.rect(c.x - sz - 1., c.y - sz + 1., 2. * sz, 2. * sz);
+                    sdf.fill_keep(clear);
+                    sdf.stroke(#f, 0.5 + 0.5 * self.dpi_dilate);
+                    return sdf.result;
                 }
                 DesktopButtonType::WindowsClose => {
-                    cx.clear(mix(#3, mix(#e00, #c00, self.pressed), self.hover));
-                    cx.move_to(c.x - sz, c.y - sz);
-                    cx.line_to(c.x + sz, c.y + sz);
-                    cx.move_to(c.x - sz, c.y + sz);
-                    cx.line_to(c.x + sz, c.y - sz);
-                    cx.stroke(#f, 0.5 + 0.5 * self.dpi_dilate);
-                    return cx.result;
+                    sdf.clear(mix(#3, mix(#e00, #c00, self.pressed), self.hover));
+                    sdf.move_to(c.x - sz, c.y - sz);
+                    sdf.line_to(c.x + sz, c.y + sz);
+                    sdf.move_to(c.x - sz, c.y + sz);
+                    sdf.line_to(c.x + sz, c.y - sz);
+                    sdf.stroke(#f, 0.5 + 0.5 * self.dpi_dilate);
+                    return sdf.result;
                 }
                 DesktopButtonType::XRMode => {
-                    cx.clear(mix(#3, mix(#0aa, #077, self.pressed), self.hover));
+                    sdf.clear(mix(#3, mix(#0aa, #077, self.pressed), self.hover));
                     let w = 12.;
                     let h = 8.;
-                    cx.box(c.x - w, c.y - h, 2. * w, 2. * h, 2.);
+                    sdf.box(c.x - w, c.y - h, 2. * w, 2. * h, 2.);
                     // subtract 2 eyes
-                    cx.circle(c.x - 5.5, c.y, 3.5);
-                    cx.subtract();
-                    cx.circle(c.x + 5.5, c.y, 3.5);
-                    cx.subtract();
-                    cx.circle(c.x, c.y + h - 0.75, 2.5);
-                    cx.subtract();
-                    cx.fill(#8);
+                    sdf.circle(c.x - 5.5, c.y, 3.5);
+                    sdf.subtract();
+                    sdf.circle(c.x + 5.5, c.y, 3.5);
+                    sdf.subtract();
+                    sdf.circle(c.x, c.y + h - 0.75, 2.5);
+                    sdf.subtract();
+                    sdf.fill(#8);
                     
-                    return cx.result;
+                    return sdf.result;
                 }
                 DesktopButtonType::Fullscreen => {
                     sz = 8.;
-                    cx.clear(mix(#3, mix(#6, #9, self.pressed), self.hover));
-                    cx.rect(c.x - sz, c.y - sz, 2. * sz, 2. * sz);
-                    cx.rect(c.x - sz + 1.5, c.y - sz + 1.5, 2. * (sz - 1.5), 2. * (sz - 1.5));
-                    cx.subtract();
-                    cx.rect(c.x - sz + 4., c.y - sz - 2., 2. * (sz - 4.), 2. * (sz + 2.));
-                    cx.subtract();
-                    cx.rect(c.x - sz - 2., c.y - sz + 4., 2. * (sz + 2.), 2. * (sz - 4.));
-                    cx.subtract();
-                    cx.fill(#f); //, 0.5 + 0.5 * dpi_dilate);
+                    sdf.clear(mix(#3, mix(#6, #9, self.pressed), self.hover));
+                    sdf.rect(c.x - sz, c.y - sz, 2. * sz, 2. * sz);
+                    sdf.rect(c.x - sz + 1.5, c.y - sz + 1.5, 2. * (sz - 1.5), 2. * (sz - 1.5));
+                    sdf.subtract();
+                    sdf.rect(c.x - sz + 4., c.y - sz - 2., 2. * (sz - 4.), 2. * (sz + 2.));
+                    sdf.subtract();
+                    sdf.rect(c.x - sz - 2., c.y - sz + 4., 2. * (sz + 2.), 2. * (sz - 4.));
+                    sdf.subtract();
+                    sdf.fill(#f); //, 0.5 + 0.5 * dpi_dilate);
                     
-                    return cx.result;
+                    return sdf.result;
                 }
             }
             return #f00;
