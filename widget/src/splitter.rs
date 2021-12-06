@@ -151,12 +151,12 @@ impl Splitter {
                 ..HitOpt::default()
             },
         ) {
-            Event::FingerHover(fe) => {
+            HitEvent::FingerHover(f) => {
                 match self.axis {
                     Axis::Horizontal => cx.set_hover_mouse_cursor(MouseCursor::ColResize),
                     Axis::Vertical => cx.set_hover_mouse_cursor(MouseCursor::RowResize),
                 }
-                match fe.hover_state {
+                match f.hover_state {
                     HoverState::In => {
                         self.animate_to(cx, self.hover_state.unwrap());
                     },
@@ -166,14 +166,14 @@ impl Splitter {
                     _ => ()
                 }
             },
-            Event::FingerDown(_) => {
+            HitEvent::FingerDown(_) => {
                 self.animate_to(cx, self.pressed_state.unwrap());
                 self.drag_start_align = Some(self.align);
             }
-            Event::FingerUp(fe) => {
+            HitEvent::FingerUp(f) => {
                 self.drag_start_align = None;
-                if fe.is_over {
-                    if fe.input_type.has_hovers() {
+                if f.is_over {
+                    if f.input_type.has_hovers() {
                         self.animate_to(cx, self.hover_state.unwrap());
                     }
                     else {
@@ -184,11 +184,11 @@ impl Splitter {
                     self.animate_to(cx, self.default_state.unwrap());
                 }
             }
-            Event::FingerMove(event) => {
+            HitEvent::FingerMove(f) => {
                 if let Some(drag_start_align) = self.drag_start_align {
                     let delta = match self.axis {
-                        Axis::Horizontal => event.abs.x - event.abs_start.x,
-                        Axis::Vertical => event.abs.y - event.abs_start.y,
+                        Axis::Horizontal => f.abs.x - f.abs_start.x,
+                        Axis::Vertical => f.abs.y - f.abs_start.y,
                     };
                     let new_position =
                     drag_start_align.to_position(self.axis, self.rect) + delta;

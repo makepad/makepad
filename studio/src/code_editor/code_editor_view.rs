@@ -527,7 +527,7 @@ impl CodeEditorView {
         }
         
         match event.hits(cx, self.scroll_view.area(), HitOpt::default()) {
-            Event::FingerDown(FingerDownEvent {rel, modifiers, ..}) => {
+            HitEvent::FingerDown(FingerDownEvent {rel, modifiers, ..}) => {
                 self.reset_caret_blink(cx);
                 // TODO: How to handle key focus?
                 cx.set_key_focus(self.scroll_view.area());
@@ -548,10 +548,10 @@ impl CodeEditorView {
                     self.scroll_view.redraw(cx);
                 }
             }
-            Event::FingerHover(_) => {
+            HitEvent::FingerHover(_) => {
                 cx.set_hover_mouse_cursor(MouseCursor::Text);
             }
-            Event::FingerMove(FingerMoveEvent {rel, ..}) => {
+            HitEvent::FingerMove(FingerMoveEvent {rel, ..}) => {
                 if let Some(session_id) = self.session_id {
                     let session = &state.sessions_by_session_id[session_id];
                     let document = &state.documents_by_document_id[session.document_id];
@@ -561,7 +561,7 @@ impl CodeEditorView {
                     self.scroll_view.redraw(cx);
                 }
             }
-            Event::KeyDown(KeyEvent {
+            HitEvent::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowLeft,
                 modifiers: KeyModifiers {shift, ..},
                 ..
@@ -572,7 +572,7 @@ impl CodeEditorView {
                     self.scroll_view.redraw(cx);
                 }
             }
-            Event::KeyDown(KeyEvent {
+            HitEvent::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowRight,
                 modifiers: KeyModifiers {shift, ..},
                 ..
@@ -583,7 +583,7 @@ impl CodeEditorView {
                     self.scroll_view.redraw(cx);
                 }
             }
-            Event::KeyDown(KeyEvent {
+            HitEvent::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowUp,
                 modifiers: KeyModifiers {shift, ..},
                 ..
@@ -594,7 +594,7 @@ impl CodeEditorView {
                     self.scroll_view.redraw(cx);
                 }
             }
-            Event::KeyDown(KeyEvent {
+            HitEvent::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowDown,
                 modifiers: KeyModifiers {shift, ..},
                 ..
@@ -605,7 +605,7 @@ impl CodeEditorView {
                     self.scroll_view.redraw(cx);
                 }
             }
-            Event::KeyDown(KeyEvent {
+            HitEvent::KeyDown(KeyEvent {
                 key_code: KeyCode::Backspace,
                 ..
             }) => {
@@ -616,7 +616,7 @@ impl CodeEditorView {
                     dispatch_action(cx, CodeEditorViewAction::RedrawViewsForDocument(session.document_id))
                 }
             }
-            Event::KeyDown(KeyEvent {
+            HitEvent::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
                 modifiers,
                 ..
@@ -632,7 +632,7 @@ impl CodeEditorView {
                     dispatch_action(cx, CodeEditorViewAction::RedrawViewsForDocument(session.document_id))
                 }
             }
-            Event::KeyDown(KeyEvent {
+            HitEvent::KeyDown(KeyEvent {
                 key_code: KeyCode::Return,
                 ..
             }) => {
@@ -643,7 +643,7 @@ impl CodeEditorView {
                     dispatch_action(cx, CodeEditorViewAction::RedrawViewsForDocument(session.document_id))
                 }
             }
-            Event::TextInput(TextInputEvent {input, ..}) => {
+            HitEvent::TextInput(TextInputEvent {input, ..}) => {
                 self.reset_caret_blink(cx);
                 if let Some(session_id) = self.session_id {
                     state.insert_text(
