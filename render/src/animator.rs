@@ -3,7 +3,7 @@
 use {
     std::f64::consts::PI,
     makepad_live_compiler::*,
-
+    makepad_derive_live::*,
     crate::{
         events::NextFrame,
         cx::Cx,
@@ -11,9 +11,6 @@ use {
     },
     
 };
-
-
-use crate::cx::*;
 
 // deserialisable DSL structure
 #[derive(Debug, Clone, Live, LiveHook)]
@@ -691,6 +688,14 @@ impl Animator {
         return 1.0
     }
     
+    pub fn is_in_state(&mut self, cx: &mut Cx, track:LiveId, live_ptr: LivePtr)->bool{
+        let state_id = cx.live_registry.borrow().ptr_to_node(live_ptr).id;
+        let state = self.state.as_ref().unwrap();
+        if let Some(LiveValue::Id(id)) = &state.child_value_by_path(0, &[id!(tracks),id!(state_id)]){
+            return *id == track;
+        }
+        false
+    }
     
     pub fn cut_to_live(&mut self, cx: &mut Cx, track: LiveId, live_ptr: LivePtr/*, state_id: Id*/) {
         let live_registry_rc = cx.live_registry.clone();

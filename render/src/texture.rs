@@ -5,10 +5,8 @@ pub use {
     },
     makepad_live_compiler::*,
     crate::{
-        cx::{
-            Cx,
-            CxPlatformTexture
-        },
+        cx::Cx,
+        platform::{CxPlatformTexture},
         live_traits::*
     }
 };

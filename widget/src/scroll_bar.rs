@@ -10,9 +10,9 @@ live_register!{
         instance hover:float;
         
         fn pixel(self) -> vec4 {
-            let cx = Sdf2d::viewport(self.pos * self.rect_size);
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
             if self.is_vertical > 0.5 {
-                cx.box(
+                sdf.box(
                     1.,
                     self.rect_size.y * self.norm_scroll,
                     self.rect_size.x * 0.5,
@@ -21,7 +21,7 @@ live_register!{
                 );
             }
             else { 
-                cx.box(
+                sdf.box(
                     self.rect_size.x * self.norm_scroll,
                     1.,
                     self.rect_size.x * self.norm_handle,
@@ -29,7 +29,7 @@ live_register!{
                     border_radius
                 );
             }
-            return cx.fill_keep(mix(#5, mix(#7, #9, self.pressed), self.hover));
+            return sdf.fill_keep(mix(#5, mix(#7, #9, self.pressed), self.hover));
         }
     }
     

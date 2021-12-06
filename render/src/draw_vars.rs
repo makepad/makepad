@@ -3,7 +3,10 @@ use {
     makepad_shader_compiler::*,
  
     crate::{
-        cx::{Cx, CxPlatformShader},
+        platform::{
+            CxPlatformShader            
+        },
+        cx::Cx,
         area::Area,
         geometry::{GeometryFields},
         live_traits::*

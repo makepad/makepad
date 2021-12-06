@@ -16,25 +16,25 @@ live_register!{
             const border_radius: float = 2.5
             
             fn pixel(self) -> vec4 {
-                let cx = Sdf2d::viewport(self.pos * self.rect_size);
-                cx.box(
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                sdf.box(
                     shadow,
                     shadow,
                     self.rect_size.x - shadow * (1. + self.pressed),
                     self.rect_size.y - shadow * (1. + self.pressed),
                     border_radius
                 );
-                cx.blur = 6.0;
-                cx.fill(mix(#0007, #0, self.hover));
-                cx.blur = 0.001;
-                cx.box(
+                sdf.blur = 6.0;
+                sdf.fill(mix(#0007, #0, self.hover));
+                sdf.blur = 0.001;
+                sdf.box(
                     shadow,
                     shadow,
                     self.rect_size.x - shadow * 2.,
                     self.rect_size.y - shadow * 2.,
                     border_radius
                 );
-                return cx.fill(mix(mix(#3, #4, self.hover), #2a, self.pressed));
+                return sdf.fill(mix(mix(#3, #4, self.hover), #2a, self.pressed));
             }
         }  
         

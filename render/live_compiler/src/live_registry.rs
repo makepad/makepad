@@ -83,11 +83,7 @@ impl LiveRegistry {
     pub fn token_id_to_expanded_doc(&self, token_id: TokenId) -> &LiveDocument {
         &self.expanded[token_id.file_id().to_index()]
     }
-    /*
-    pub fn module_path_str_id_to_doc(&self, module_path: &str, id:Id) -> Option<LiveDocNodes> {
-        self.module_path_id_to_doc(ModulePath::from_str(module_path).unwrap(), id)
-    }
-    */
+
     pub fn module_id_to_file_id(&self, module_id: LiveModuleId) -> Option<LiveFileId> {
         self.module_id_to_file_id.get(&module_id).cloned()
     }

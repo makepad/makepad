@@ -21,6 +21,40 @@ use {
 };
 
 live_register!{
+    use makepad_render::shader::std::*;
+    
+    DrawSelection: {{DrawSelection}} {
+        const gloopiness: float = 8.;
+        const border_radius: float = 2.;
+        
+        fn vertex(self) -> vec4 { // custom vertex shader because we widen the draweable area a bit for the gloopiness
+            let shift: vec2 = -self.draw_scroll.xy;
+            let clipped: vec2 = clamp(
+                self.geom_pos * vec2(self.rect_size.x + 16., self.rect_size.y) + self.rect_pos + shift - vec2(8., 0.),
+                self.draw_clip.xy,
+                self.draw_clip.zw
+            );
+            self.pos = (clipped - shift - self.rect_pos) / self.rect_size;
+            return self.camera_projection * (self.camera_view * (
+                self.view_transform * vec4(clipped.x, clipped.y, self.draw_depth + self.draw_zbias, 1.)
+            ));
+        }
+        
+        fn pixel(self) -> vec4 {
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+            sdf.box(0., 0., self.rect_size.x, self.rect_size.y, border_radius);
+            if self.prev_w > 0. {
+                sdf.box(self.prev_x, -self.rect_size.y, self.prev_w, self.rect_size.y, border_radius);
+                sdf.gloop(gloopiness);
+            }
+            if self.next_w > 0. {
+                sdf.box(self.next_x, self.rect_size.y, self.next_w, self.rect_size.y, border_radius);
+                sdf.gloop(gloopiness);
+            }
+            return sdf.fill(self.color);
+        }
+    }
+    
     CodeEditorView: {{CodeEditorView}} {
         scroll_view: {
             view: {debug_id: code_editor_view}
@@ -75,6 +109,18 @@ live_register!{
             draw_depth: 2.0
             color: #b0b0b0
         }
+        
+        show_caret_state: {
+            from: {all: Play::Forward {duration: 0.1}}
+            caret_quad: {color:#b0}
+        }
+
+        hide_caret_state: {
+            from: {all: Play::Forward {duration: 0.1}}
+            caret_quad: {color:#0000}
+        }
+        
+        caret_blink_timer: 0.5
     }
 }
 
@@ -83,14 +129,22 @@ pub struct CodeEditorView {
     scroll_view: ScrollView,
     #[rust] pub session_id: Option<SessionId>,
     #[rust] text_glyph_size: Vec2,
+    #[rust] caret_blink_timer: Timer,
+
+    show_caret_state: Option<LivePtr>,
+    hide_caret_state: Option<LivePtr>,
     
-    selection_quad: DrawColor,
+    #[track(caret = show_caret_state)]
+    animator: Animator,
+    
+    selection_quad: DrawSelection,
     code_text: DrawText,
     caret_quad: DrawColor,
     linenum_quad: DrawColor,
     linenum_text: DrawText,
     
     linenum_width: f32,
+    caret_time_len: f64,
     
     text_color_linenum: Vec4,
     text_color_linenum_selected: Vec4,
@@ -105,6 +159,16 @@ pub struct CodeEditorView {
     text_color_string: Vec4,
     text_color_whitespace: Vec4,
     text_color_unknown: Vec4,
+}
+
+#[derive(Live, LiveHook)]
+#[repr(C)]
+pub struct DrawSelection {
+    deref_target: DrawColor,
+    prev_x: f32,
+    prev_w: f32,
+    next_x: f32,
+    next_w: f32
 }
 
 pub enum CodeEditorViewAction {
@@ -124,6 +188,7 @@ impl CodeEditorView {
                 let session = &state.sessions_by_session_id[session_id];
                 let document = &state.documents_by_document_id[session.document_id];
                 if let Some(document_inner) = document.inner.as_ref() {
+                    self.begin_instances(cx);
                     let visible_lines =
                     self.visible_lines(cx, document_inner.text.as_lines().len());
                     self.draw_selections(
@@ -141,10 +206,31 @@ impl CodeEditorView {
                     self.draw_carets(cx, &session.selections, &session.carets, visible_lines);
                     self.draw_linenums(cx, visible_lines);
                     self.set_turtle_bounds(cx, &document_inner.text);
+                    self.end_instances(cx);
                 }
             }
             self.scroll_view.end(cx);
-        }
+        } 
+    }
+    
+    pub fn begin_instances(&mut self, cx: &mut Cx) {
+        // this makes a single area pointer cover all the items
+        // also enables a faster api below
+        self.selection_quad.begin_many_instances(cx);
+        self.code_text.begin_many_instances(cx);
+        self.caret_quad.begin_many_instances(cx);
+        self.linenum_text.begin_many_instances(cx);
+    }
+    
+    pub fn end_instances(&mut self, cx: &mut Cx) {
+        self.selection_quad.end_many_instances(cx);
+        self.code_text.end_many_instances(cx);
+        self.caret_quad.end_many_instances(cx);
+        self.linenum_text.end_many_instances(cx);
+    }
+    
+    pub fn reset_caret_blink(&mut self, _cx:&mut Cx){ 
+        
     }
     
     fn visible_lines(&mut self, cx: &mut Cx, line_count: usize) -> VisibleLines {
@@ -212,7 +298,6 @@ impl CodeEditorView {
         }
         let mut start_y = visible_lines.start_y;
         let mut start = 0;
-        
         for line in &text.as_lines()[visible_lines.start..visible_lines.end] {
             while let Some(span) = span_slot {
                 let end = if span.len.line == 0 {
@@ -286,7 +371,6 @@ impl CodeEditorView {
         
         let mut start_y = visible_lines.start_y;
         let start_x = origin.x;
-        let mut chunk = Vec::new();
         
         self.linenum_quad.draw_abs(cx, Rect {
             pos: origin,
@@ -296,8 +380,8 @@ impl CodeEditorView {
         self.linenum_text.color = self.text_color_linenum;
         for i in visible_lines.start..visible_lines.end {
             let end_y = start_y + self.text_glyph_size.y;
-            linenum_fill(&mut chunk, i + 1);
-            self.linenum_text.draw_chunk(cx, Vec2 {x: start_x, y: start_y,}, 0, Some(&chunk));
+            linenum_fill(&mut self.linenum_text.buf, i + 1);
+            self.linenum_text.draw_chunk(cx, Vec2 {x: start_x, y: start_y,}, 0, None);
             start_y = end_y;
         }
     }

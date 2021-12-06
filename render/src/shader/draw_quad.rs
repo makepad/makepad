@@ -6,6 +6,7 @@ use {
         live_traits::*,
         shader::geometry_gen::GeometryQuad2D,
         draw_vars::DrawVars,
+        view::ManyInstances,
         turtle::{Layout, Walk, Rect}
     },
 };
@@ -47,6 +48,7 @@ live_register!{
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawQuad {
+    #[rust] pub many_instances: Option<ManyInstances>,
     #[live] pub geometry: GeometryQuad2D,
     #[calc] pub draw_vars: DrawVars,
     #[calc] pub rect_pos: Vec2,
@@ -91,8 +93,23 @@ impl DrawQuad {
         self.draw(cx);
     }
     
+    pub fn begin_many_instances(&mut self, cx: &mut Cx){
+        let mi = cx.begin_many_aligned_instances(&self.draw_vars);
+        self.many_instances = Some(mi);        
+    }
+
+    pub fn end_many_instances(&mut self, cx: &mut Cx) {
+        if let Some(mi) = self.many_instances.take() {
+            let new_area = cx.end_many_instances(mi);
+            self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
+        }
+    }
+    
     pub fn draw(&mut self, cx: &mut Cx) {
-        if self.draw_vars.can_instance() {
+        if let Some(mi) = &mut self.many_instances{
+            mi.instances.extend_from_slice(self.draw_vars.as_slice());            
+        }
+        else if self.draw_vars.can_instance() {
             let new_area = cx.add_aligned_instance(&self.draw_vars);
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
         }

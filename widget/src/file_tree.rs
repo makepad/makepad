@@ -46,13 +46,13 @@ live_register!{
     
     DrawIconQuad: {{DrawIconQuad}} {
         fn pixel(self) -> vec4 {
-            let cx = Sdf2d::viewport(self.pos * self.rect_size);
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
             let w = self.rect_size.x;
             let h = self.rect_size.y;
-            cx.box(0. * w, 0.35 * h, 0.87 * w, 0.39 * h, 0.75);
-            cx.box(0. * w, 0.28 * h, 0.5 * w, 0.3 * h, 1.);
-            cx.union();
-            return cx.fill(#80);
+            sdf.box(0. * w, 0.35 * h, 0.87 * w, 0.39 * h, 0.75);
+            sdf.box(0. * w, 0.28 * h, 0.5 * w, 0.3 * h, 1.);
+            sdf.union();
+            return sdf.fill(#80);
         }
     }
     
