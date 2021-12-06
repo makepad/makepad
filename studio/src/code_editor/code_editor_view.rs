@@ -536,7 +536,7 @@ impl CodeEditorView {
                     let session = &state.sessions_by_session_id[session_id];
                     let document = &state.documents_by_document_id[session.document_id];
                     let document_inner = document.inner.as_ref().unwrap();
-                    let position = self.position(&document_inner.text, f.rel);
+                    let position = self.vec2_to_text_position(&document_inner.text, f.rel);
                     match f.modifiers {
                         KeyModifiers {control: true, ..} => {
                             state.add_cursor(session_id, position);
@@ -552,11 +552,12 @@ impl CodeEditorView {
                 cx.set_hover_mouse_cursor(MouseCursor::Text);
             }
             HitEvent::FingerMove(FingerMoveHitEvent {rel, ..}) => {
+                self.reset_caret_blink(cx);
                 if let Some(session_id) = self.session_id {
                     let session = &state.sessions_by_session_id[session_id];
                     let document = &state.documents_by_document_id[session.document_id];
                     let document_inner = document.inner.as_ref().unwrap();
-                    let position = self.position(&document_inner.text, rel);
+                    let position = self.vec2_to_text_position(&document_inner.text, rel);
                     state.move_cursors_to(session_id, position, true);
                     self.scroll_view.redraw(cx);
                 }
@@ -569,6 +570,7 @@ impl CodeEditorView {
                 self.reset_caret_blink(cx);
                 if let Some(session_id) = self.session_id {
                     state.move_cursors_left(session_id, shift);
+                    self.keep_last_cursor_in_view(cx, state);
                     self.scroll_view.redraw(cx);
                 }
             }
@@ -663,11 +665,31 @@ impl CodeEditorView {
         }
     }
     
-    fn position(&self, text: &Text, position: Vec2) -> Position {
+    fn keep_last_cursor_in_view(&mut self, cx:&mut Cx, state:&EditorState){
+        if let Some(session_id) = self.session_id {
+            let session = &state.sessions_by_session_id[session_id];
+            let last_cursor = session.cursors.last();
+            // ok so. we need to compute the head
+            
+        }
+    }
+    
+    fn position_to_vec2(&self, cx:&Cx, position: Position) -> Vec2 {
+        
+        
         let line = ((position.y / self.text_glyph_size.y) as usize).min(text.as_lines().len() - 1);
         Position {
             line,
             column: (((position.x - self.linenum_width + 0.5 * self.text_glyph_size.x) / self.text_glyph_size.x) as usize)
+                .min(text.as_lines()[line].len()),
+        }
+    }
+    
+    fn vec2_to_text_position(&self, text: &Text, vec2: Vec2) -> Position {
+        let line = ((vec2.y / self.text_glyph_size.y) as usize).min(text.as_lines().len() - 1);
+        Position {
+            line,
+            column: (((vec2.x - self.linenum_width + 0.5 * self.text_glyph_size.x) / self.text_glyph_size.x) as usize)
                 .min(text.as_lines()[line].len()),
         }
     }

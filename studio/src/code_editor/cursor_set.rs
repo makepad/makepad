@@ -27,6 +27,10 @@ impl CursorSet {
         builder.build()
     }
 
+    pub fn last(&self) -> Cursor {
+        *self.cursors.last().unwrap()
+    }
+
     pub fn carets(&self) -> PositionSet {
         let mut builder = position_set::Builder::new();
         for cursor in &self.cursors {

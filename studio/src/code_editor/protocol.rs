@@ -11,7 +11,7 @@ use {
         path::PathBuf
     },
 };
-use makepad_microserde::{SerBin, DeBin};
+use makepad_micro_serde::{SerBin, DeBin, DeBinErr};
 
 #[derive(Clone, Debug, SerBin, DeBin)]
 pub enum Request {
@@ -65,8 +65,21 @@ pub enum Error {
     Unknown(String),
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, SerBin, DeBin)]
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct FileId(pub GenId);
+
+impl SerBin for FileId{
+    fn ser_bin(&self, s: &mut Vec<u8>){
+        self.0.index.ser_bin(s);
+        self.0.generation.ser_bin(s);
+    }
+}
+
+impl DeBin for FileId{
+    fn de_bin(o:&mut usize, d:&[u8]) -> Result<Self, DeBinErr>{
+        Ok(Self(GenId{index:DeBin::de_bin(o, d)?, generation:DeBin::de_bin(o, d)?}))
+    }
+}
 
 impl AsRef<GenId> for FileId {
     fn as_ref(&self) -> &GenId {

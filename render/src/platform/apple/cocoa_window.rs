@@ -9,10 +9,10 @@ use {
     },
     crate::{
         platform::{
-            apple::*,
+            apple::frameworks::*,
             cocoa_app::CocoaApp,
         },
-        events::{
+        event::{
             WindowGeom,
             NUM_FINGERS,
             Event,

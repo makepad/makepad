@@ -5,7 +5,7 @@ pub use {
     makepad_live_compiler::*,
     crate::{
         cx::Cx,
-        events::Event,
+        event::Event,
         animator::Animator,
         live_traits::*,
     }

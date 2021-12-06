@@ -13,8 +13,9 @@ mod live_eval;
 mod live_traits;
 mod live_cx;
 
+mod event;
 mod area;
-mod events;
+
 mod turtle;
 mod font;
 mod window;
@@ -41,7 +42,7 @@ pub use {
         id_num,
         Mat4,
         Transform,
-        vec2,
+        vec2, 
         vec3,
         vec4,
         Vec2,
@@ -87,7 +88,7 @@ pub use {
             ViewArea,
             InstanceArea
         },
-        events::{
+        event::{
             KeyCode,
             Event,
             HitEvent,
@@ -120,7 +121,6 @@ pub use {
             XRButton,
             XRInput,
             XRUpdateEvent,
-            WebSocketMessageEvent,
             FingerDragEvent,
             FingerDropEvent,
             DragState,

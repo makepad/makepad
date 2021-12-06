@@ -1,9 +1,9 @@
 use{
     crate::{
         platform::{
-            apple::*,
+            apple::frameworks::*,
         },
-        events::{
+        event::{
             KeyCode,
             KeyModifiers
         },

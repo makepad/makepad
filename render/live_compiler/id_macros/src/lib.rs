@@ -1,6 +1,6 @@
 use proc_macro::{TokenStream};
 
-#[path = "../../../microserde/derive/src/macro_lib.rs"]
+#[path = "../../../../micro_serde/derive/src/macro_lib.rs"]
 mod macro_lib;
 use crate::macro_lib::*;
 

@@ -13,6 +13,3 @@ path = "../render"
 version = "0.2"
 
 
-[dependencies.makepad-microserde]
-path = "../render/microserde"
-version = "0.1"

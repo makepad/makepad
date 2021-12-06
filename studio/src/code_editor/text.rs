@@ -9,7 +9,7 @@ use {
     },
     std::{iter, mem, ops::AddAssign},
 };
-use makepad_microserde::{SerBin, DeBin};
+use makepad_micro_serde::{SerBin, DeBin, DeBinErr};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, SerBin, DeBin)]
 pub struct Text {

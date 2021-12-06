@@ -1,5 +1,5 @@
 use std::ops::{Add, AddAssign, Sub, SubAssign};
-use makepad_microserde::{SerBin, DeBin};
+use makepad_micro_serde::{SerBin, DeBin, DeBinErr};
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd, SerBin, DeBin)]
 pub struct Size {
