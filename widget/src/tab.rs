@@ -185,7 +185,7 @@ impl Tab {
             _ => ()
         };
         
-        match event.hits(cx, self.bg_quad.draw_vars.area, HitOpt::default()) {
+        match event.hits(cx, self.bg_quad.draw_vars.area) {
             HitEvent::FingerHover(f) => {
                 cx.set_hover_mouse_cursor(MouseCursor::Hand);
                 match f.hover_state {
@@ -203,7 +203,7 @@ impl Tab {
             }
             _ => {}
         }
-        match event.drag_hits(cx, self.bg_quad.draw_vars.area, HitOpt::default()) {
+        match event.drag_hits(cx, self.bg_quad.draw_vars.area) {
             DragEvent::FingerDrag(f) => match f.state {
                 DragState::In => {
                     self.is_dragged = true;
