@@ -25,12 +25,16 @@ live_register!{
         
         default_state: {
             from: {all: Play::Forward {duration: 0.2}}
-            button_quad: {hover: 0.0}
+            apply: {
+                button_quad: {hover: 0.0}
+            }
         }
         
         hover_state: {
             from: {all: Play::Forward {duration: 0.1}}
-            button_quad: {hover: [{time: 0.0, value: 1.0}]},
+            apply: {
+                button_quad: {hover: [{time: 0.0, value: 1.0}]},
+            }
         }
         
         walk: {
@@ -64,7 +68,7 @@ impl TabCloseButton {
             self.walk
         );
     }
-
+    
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,

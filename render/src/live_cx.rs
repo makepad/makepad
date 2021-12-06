@@ -111,6 +111,10 @@ impl Cx {
     pub fn apply_key_frame_cannot_be_interpolated(&mut self, origin:LiveErrorOrigin, index: usize, nodes: &[LiveNode], a: &LiveValue, b: &LiveValue) {
         self.apply_error(origin, ApplyFrom::Animate, index, nodes, format!("key frame values cannot be interpolated {:?} {:?}", a, b))
     }
+
+    pub fn apply_animate_missing_apply_block(&mut self, origin:LiveErrorOrigin, index: usize, nodes: &[LiveNode]) {
+        self.apply_error(origin, ApplyFrom::Animate, index, nodes, format!("animate missing apply:{{}} block"))
+    }
     
     pub fn apply_error(&mut self, origin:LiveErrorOrigin, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode], message: String) {
         let live_registry = self.live_registry.borrow();

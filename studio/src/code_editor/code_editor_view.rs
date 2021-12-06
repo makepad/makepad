@@ -111,15 +111,15 @@ live_register!{
         }
         
         show_caret_state: {
-            track:caret,
-            from: {all: Play::Forward {duration: 0.1}}
-            caret_quad: {color: #b0}
+            track: caret,
+            from: {all: Play::Forward {duration: 0.0}}
+            apply: {caret_quad: {color: #b0}}
         }
         
         hide_caret_state: {
-            track:caret,
-            from: {all: Play::Forward {duration: 0.1}}
-            caret_quad: {color: #0000}
+            track: caret,
+            from: {all: Play::Forward {duration: 0.0}}
+            apply: {caret_quad: {color: #0000}}
         }
         
         caret_blink_timeout: 0.5
@@ -517,11 +517,11 @@ impl CodeEditorView {
         if self.scroll_view.handle_event(cx, event) {
             self.scroll_view.redraw(cx);
         }
-        if event.is_timer(self.caret_blink_timer){
-            if self.animator_is_in_state(cx, self.show_caret_state.unwrap()){
+        if event.is_timer(self.caret_blink_timer) {
+            if self.animator_is_in_state(cx, self.show_caret_state.unwrap()) {
                 self.animate_to(cx, self.hide_caret_state.unwrap())
             }
-            else{
+            else {
                 self.animate_to(cx, self.show_caret_state.unwrap())
             }
         }

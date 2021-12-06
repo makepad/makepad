@@ -11,7 +11,7 @@ live_register!{
             instance color: vec4 = #333
             instance hover: float
             instance pressed: float
-
+            
             const shadow: float = 3.0
             const border_radius: float = 2.5
             
@@ -36,7 +36,7 @@ live_register!{
                 );
                 return sdf.fill(mix(mix(#3, #4, self.hover), #2a, self.pressed));
             }
-        }  
+        }
         
         layout: Layout {
             align: Align {fx: 0.5, fy: 0.5},
@@ -47,32 +47,38 @@ live_register!{
             }
             padding: Padding {l: 16.0, t: 12.0, r: 16.0, b: 12.0}
         }
-         
+        
         default_state: {
             from: {all: Play::Forward {duration: 0.1}}
-            bg_quad: {pressed: 0.0, hover: 0.0}
-            label_text: {color: #9}
+            apply:{
+                bg_quad: {pressed: 0.0, hover: 0.0}
+                label_text: {color: #9}
+            }
         }
-
+        
         hover_state: {
             from: {
                 all: Play::Forward {duration: 0.1}
                 pressed_state: Play::Forward {duration: 0.01}
             }
-            bg_quad: { 
-                pressed: 0.0,
-                hover: [{time: 0.0, value: 1.0}],
-            } 
-            label_text: {color: [{time: 0.0, value: #f}]}
+            apply: {
+                bg_quad: {
+                    pressed: 0.0,
+                    hover: [{time: 0.0, value: 1.0}],
+                }
+                label_text: {color: [{time: 0.0, value: #f}]}
+            }
         }
-         
+        
         pressed_state: {
             from: {all: Play::Forward {duration: 0.2}}
-            bg_quad: {
-                pressed: [{time: 0.0, value: 1.0}],
-                hover: 1.0,
+            apply: {
+                bg_quad: {
+                    pressed: [{time: 0.0, value: 1.0}],
+                    hover: 1.0,
+                }
+                label_text: {color: [{time: 0.0, value: #c}]}
             }
-            label_text: {color: [{time: 0.0, value: #c}]}
         }
     }
 }
@@ -92,12 +98,12 @@ pub struct Button {
     label: String
 }
 
-impl LiveHook for Button{
-    fn to_frame_component(&mut self)->Option<&mut dyn FrameComponent>{
+impl LiveHook for Button {
+    fn to_frame_component(&mut self) -> Option<&mut dyn FrameComponent> {
         return Some(self);
     }
-    fn after_apply(&mut self, cx:&mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]){
-        if apply_from.is_from_doc(){
+    fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+        if apply_from.is_from_doc() {
             /*
             self.animator2.cut_to_live(cx, id!(hover), self.state_default.unwrap());
             self.animator2.cut_to_live(cx, id!(label), self.state_default_label.unwrap());
@@ -111,7 +117,7 @@ impl LiveHook for Button{
 }
 
 impl FrameComponent for Button {
-    fn handle_event_dyn(&mut self, cx: &mut Cx, event: &mut Event)->OptionAnyAction{
+    fn handle_event_dyn(&mut self, cx: &mut Cx, event: &mut Event) -> OptionAnyAction {
         self.handle_event(cx, event).into()
     }
     
@@ -135,12 +141,12 @@ impl Button{
             self.animator2.swap_in_state(state);
         }
     }
-}    */        
+}    */
 
 impl Button {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonAction {
-
+        
         self.animator_handle_event(cx, event);
         let res = self.button_logic.handle_event(cx, event, self.bg_quad.draw_vars.area);
         
