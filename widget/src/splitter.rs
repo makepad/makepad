@@ -48,7 +48,7 @@ pub struct Splitter {
     #[rust] rect: Rect,
     #[rust] position: f32,
     #[rust] drag_start_align: Option<SplitterAlign>,
-    #[track(base=default_state)] pub animator: Animator,
+    #[default_state(default_state)] pub animator: Animator,
 
     default_state: Option<LivePtr>,
     hover_state: Option<LivePtr>,
@@ -152,30 +152,30 @@ impl Splitter {
                 }
                 match fe.hover_state {
                     HoverState::In => {
-                        self.animate_to(cx, id!(base), self.hover_state.unwrap());
+                        self.animate_to(cx, self.hover_state.unwrap());
                     },
                     HoverState::Out => {
-                        self.animate_to(cx, id!(base), self.default_state.unwrap());
+                        self.animate_to(cx, self.default_state.unwrap());
                     },
                     _ => ()
                 }
             },
             Event::FingerDown(_) => {
-                self.animate_to(cx, id!(base), self.pressed_state.unwrap());
+                self.animate_to(cx, self.pressed_state.unwrap());
                 self.drag_start_align = Some(self.align);
             }
             Event::FingerUp(fe) => {
                 self.drag_start_align = None;
                 if fe.is_over {
                     if fe.input_type.has_hovers() {
-                        self.animate_to(cx, id!(base), self.hover_state.unwrap());
+                        self.animate_to(cx, self.hover_state.unwrap());
                     }
                     else {
-                        self.animate_to(cx, id!(base), self.default_state.unwrap());
+                        self.animate_to(cx, self.default_state.unwrap());
                     }
                 }
                 else {
-                    self.animate_to(cx, id!(base), self.default_state.unwrap());
+                    self.animate_to(cx, self.default_state.unwrap());
                 }
             }
             Event::FingerMove(event) => {

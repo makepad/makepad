@@ -405,7 +405,7 @@ impl Into<TriggerId> for TypeId {
 }
 
 
-#[derive(Clone, Debug, Default)]
+#[derive(Copy, Clone, Debug, Default)]
 pub struct Timer {
     pub timer_id: u64
 }
@@ -610,6 +610,16 @@ impl Event {
             _ => ()
         }
         None
+    }
+    
+    pub fn is_timer(&self, timer: Timer) -> bool{
+        match self {
+            Event::Timer(te) => {
+                return te.timer_id == timer.timer_id
+            }
+            _ => ()
+        }
+        false
     }
 
     pub  fn hits(&mut self, cx: &mut Cx, area: Area, opt: HitOpt) -> Event {

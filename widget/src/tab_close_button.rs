@@ -49,9 +49,7 @@ live_register!{
 #[derive(Live, LiveHook)]
 pub struct TabCloseButton {
     button_quad: DrawQuad,
-    #[track(
-        hover = default_state
-    )]
+    #[default_state(default_state)]
     animator: Animator,
     default_state: Option<LivePtr>,
     hover_state: Option<LivePtr>,
@@ -78,11 +76,11 @@ impl TabCloseButton {
                 cx.set_hover_mouse_cursor(MouseCursor::Hand);
                 match event.hover_state {
                     HoverState::In => {
-                        self.animate_to(cx, id!(hover), self.hover_state.unwrap());
+                        self.animate_to(cx, self.hover_state.unwrap());
                         return TabCloseButtonAction::HoverIn;
                     }
                     HoverState::Out => {
-                        self.animate_to(cx, id!(hover), self.default_state.unwrap());
+                        self.animate_to(cx, self.default_state.unwrap());
                         return TabCloseButtonAction::HoverOut;
                     }
                     _ => {}

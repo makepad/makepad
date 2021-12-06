@@ -20,7 +20,7 @@ mod live_id;
 mod colorhex;
 
 
-#[proc_macro_derive(Live, attributes(calc, live, rust, pick, live_type_kind, track))]
+#[proc_macro_derive(Live, attributes(calc, live, rust, pick, live_type_kind, default_state))]
 pub fn derive_live(input: TokenStream) -> TokenStream {
     derive_live_impl(input)
 }

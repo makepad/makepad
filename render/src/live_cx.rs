@@ -139,18 +139,6 @@ impl Cx {
         } 
         //self.profile_end(0);
     }
-    /*
-    pub fn verify_type_signature(&self, live_ptr: LivePtr, live_type: LiveType) -> bool {
-        let live_registry = self.live_registry.borrow();
-        let node = live_registry.ptr_to_node(live_ptr);
-        if let LiveValue::LiveType(ty) = node.value {
-            if ty == live_type {
-                return true
-            }
-        }
-        println!("TYPE SIGNATURE VERIFY FAILED");
-        false
-    }*/
     
     pub fn register_live_body(&mut self, live_body: LiveBody) {
         //println!("START");
@@ -170,6 +158,5 @@ impl Cx {
     pub fn register_factory(&mut self, live_type: LiveType, factory: Box<dyn LiveFactory>) {
         self.live_factories.borrow_mut().insert(live_type, factory);
     }
-    
 }
 
