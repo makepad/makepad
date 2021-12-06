@@ -39,13 +39,13 @@ impl ButtonLogic {
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, area: Area) -> ButtonHandleResult
     {
         match event.hits(cx, area, HitOpt::default()) {
-            Event::FingerDown(_fe) => {
+            HitEvent::FingerDown(_fe) => {
                 return ButtonHandleResult {
                     action: ButtonAction::IsPressed,
                     state: ButtonState::Pressed
                 };
             },
-            Event::FingerHover(fe) => {
+            HitEvent::FingerHover(fe) => {
                 cx.set_hover_mouse_cursor(MouseCursor::Hand);
                 match fe.hover_state {
                     HoverState::In => if fe.any_down {
@@ -67,7 +67,7 @@ impl ButtonLogic {
                     _ => ()
                 }
             },
-            Event::FingerUp(fe) => if fe.is_over {
+            HitEvent::FingerUp(fe) => if fe.is_over {
                 if fe.input_type.has_hovers() {
                     return ButtonHandleResult {
                         action: ButtonAction::WasClicked,

@@ -343,9 +343,9 @@ impl FileTreeNode {
             self.bg_quad.draw_vars.redraw_view(cx);
         }
         match event.hits(cx, self.bg_quad.draw_vars.area, HitOpt::default()) {
-            Event::FingerHover(event) => {
+            HitEvent::FingerHover(f) => {
                 cx.set_hover_mouse_cursor(MouseCursor::Hand);
-                match event.hover_state {
+                match f.hover_state {
                     HoverState::In => {
                         self.animate_to(cx, self.hover_state.unwrap());
                     }
@@ -355,12 +355,12 @@ impl FileTreeNode {
                     _ => {}
                 }
             }
-            Event::FingerMove(event) => {
-                if event.abs.distance(&event.abs_start) >= self.min_drag_distance {
+            HitEvent::FingerMove(f) => {
+                if f.abs.distance(&f.abs_start) >= self.min_drag_distance {
                     dispatch_action(cx, FileTreeNodeAction::ShouldStartDragging);
                 }
             }
-            Event::FingerDown(_event) => {
+            HitEvent::FingerDown(_) => {
                 self.animate_to(cx, self.selected_state.unwrap());
                 if self.is_folder {
                     if self.opened > 0.2 {
