@@ -108,7 +108,7 @@ pub fn derive_de_bin_impl(input: TokenStream) -> TokenStream {
             tb.add("impl").stream(generic.clone());
             tb.add("DeBin for").ident(&name).stream(generic).stream(where_clause);
             tb.add("{ fn de_bin ( o : & mut usize , d : & [ u8 ] )");
-            tb.add("-> std :: result :: Result < Self , makepad_microserde :: DeBinErr > { ");
+            tb.add("-> std :: result :: Result < Self , DeBinErr > { ");
             tb.add("std :: result :: Result :: Ok ( Self");
 
             if let Some(types) = types{
@@ -140,7 +140,7 @@ pub fn derive_de_bin_impl(input: TokenStream) -> TokenStream {
             tb.add("impl").stream(generic.clone());
             tb.add("DeBin for").ident(&name).stream(generic).stream(where_clause);
             tb.add("{ fn de_bin ( o : & mut usize , d : & [ u8 ] )");
-            tb.add("-> std :: result :: Result < Self , makepad_microserde :: DeBinErr > {");
+            tb.add("-> std :: result :: Result < Self , DeBinErr > {");
             tb.add("let id : u16 = DeBin :: de_bin ( o , d ) ? ;");
             tb.add("match id {");
             
@@ -182,7 +182,7 @@ pub fn derive_de_bin_impl(input: TokenStream) -> TokenStream {
                     return parser.unexpected()
                 }
             } 
-            tb.add("_ => std :: result :: Result :: Err ( makepad_microserde :: DeBinErr { o : * o , l :");
+            tb.add("_ => std :: result :: Result :: Err ( DeBinErr { o : * o , l :");
             tb.unsuf_usize(1).add(", s : d . len ( ) , msg : ").string(&name).add(". to_string ( ) } )");
             tb.add("} } } ;");
             return tb.end();

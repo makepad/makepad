@@ -1,5 +1,5 @@
 [package]
-name = "makepad-microserde"
+name = "makepad-micro-serde"
 version = "0.1.0"
 authors = ["makepad <info@makepad.nl>"]
 license = "MIT OR Apache-2.0"

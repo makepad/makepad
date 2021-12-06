@@ -7,7 +7,7 @@ use {
     makepad_live_compiler::Vec2,
 
     crate::{
-        events::{
+        event::{
             Event,
             KeyCode,
         },

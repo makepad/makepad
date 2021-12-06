@@ -7,7 +7,7 @@ use {
             cx_desktop::CxDesktop,
             metal::{MetalCx, MetalWindow}
         },
-        events::{
+        event::{
             Timer,
             Signal,
             Event,

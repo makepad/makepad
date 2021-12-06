@@ -11,7 +11,7 @@ use {
     },
     crate::{
         platform::{
-            apple::*,
+            apple::frameworks::*,
             cocoa_delegate::*,
             cocoa_window::CocoaWindow,
             cocoa_util::{
@@ -26,7 +26,7 @@ use {
         //turtle::{
         //    Rect
         //},
-        events::{
+        event::{
             Event,
             KeyCode,
             KeyEvent,

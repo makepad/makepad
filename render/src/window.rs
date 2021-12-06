@@ -6,7 +6,7 @@ pub use {
 
     makepad_live_compiler::*,
     crate::{
-        events::{
+        event::{
             WindowGeom
         },
         area::Area,

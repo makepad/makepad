@@ -1,6 +1,6 @@
 use {
     crate::{
-        events::KeyCode
+        event::KeyCode
     },
 };
 

@@ -8,7 +8,7 @@ use {
     },
     crate::{
         cx::Cx,
-        events::{
+        event::{
             DraggedItem,
             Timer,
             Signal,

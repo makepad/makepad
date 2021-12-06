@@ -19,7 +19,8 @@ use {
             CxPlatform,
             CxPlatformTexture,
         },
-        events::{
+        event::{
+            CxPerFinger,
             NUM_FINGERS,
             Event,
             Signal,
@@ -165,37 +166,25 @@ pub struct Cx {
     pub event_handler: Option<*mut dyn FnMut(&mut Cx, &mut Event)>,
 }
 
-
 #[derive(Clone)]
 pub enum PlatformType {
     Unknown,
-    Windows,
+    MsWindows,
     OSX,
     Linux {custom_window_chrome: bool},
-    Web {protocol: String, hostname: String, port: u16, pathname: String, search: String, hash: String}
+    WebBrowser {protocol: String, hostname: String, port: u16, pathname: String, search: String, hash: String}
 }
 
 impl PlatformType {
     pub fn is_desktop(&self) -> bool {
         match self {
             PlatformType::Unknown => true,
-            PlatformType::Windows => true,
+            PlatformType::MsWindows => true,
             PlatformType::OSX => true,
             PlatformType::Linux {..} => true,
-            PlatformType::Web {..} => false
+            PlatformType::WebBrowser {..} => false
         }
     }
-}
-
-
-#[derive(Default, Clone)]
-pub struct CxPerFinger {
-    pub captured: Area,
-    pub tap_count: (Vec2, f64, u32),
-    pub down_abs_start: Vec2,
-    pub down_rel_start: Vec2,
-    pub over_last: Area,
-    pub _over_last: Area
 }
 
 impl Default for Cx {

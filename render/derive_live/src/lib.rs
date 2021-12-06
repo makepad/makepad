@@ -10,7 +10,7 @@ use crate::live_register_macro::*;
 mod live_macro;
 use crate::live_macro::*;
 
-#[path = "../../microserde/derive/src/macro_lib.rs"]
+#[path = "../../../micro_serde/derive/src/macro_lib.rs"]
 mod macro_lib;
 
 #[path = "../../live_compiler/src/live_id.rs"]
