@@ -9,6 +9,16 @@ live_register!{
     }
 }
 
+
+impl std::ops::Deref for ScrollView {
+    type Target = View;
+    fn deref(&self) -> &Self::Target {&self.view}
+}
+
+impl std::ops::DerefMut for ScrollView {
+    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.view}
+}
+
 #[derive(Live, LiveHook)]
 pub struct ScrollView{
     pub view:View,
@@ -19,39 +29,6 @@ pub struct ScrollView{
 }
 
 impl ScrollView{
-/*
-    pub fn new() -> Self {
-        Self {
-            view: View::new(),
-            scroll_h: None,
-            scroll_v: None
-        }
-    }
-
-    pub fn new_standard_hv(cx: &mut Cx) -> Self {
-        Self {
-            view: View::new(),
-            scroll_h: Some(ScrollBar::new(cx)),
-            scroll_v: Some(ScrollBar::new(cx)
-                .with_smoothing(0.15)),
-        }
-    }
-   
-    pub fn with_scroll_h(self, s:ScrollBar)->Self{
-        Self{scroll_h:Some(s), ..self}
-    }
-      
-    pub fn with_scroll_v(self, s:ScrollBar)->Self{
-        Self{scroll_v:Some(s), ..self}
-    }
-    */
-    pub fn begin(&mut self, cx: &mut Cx) -> ViewRedraw {
-        self.view.begin(cx)
-    }
-    
-    pub fn view_will_redraw(&mut self, cx: &mut Cx)->bool{
-        self.view.view_will_redraw(cx)
-    }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> bool {
         let mut ret_h = ScrollBarEvent::None;
@@ -186,18 +163,5 @@ impl ScrollView{
         cx.view_stack.pop();
         
         return view_area
-    }
-    
-    pub fn get_rect(&mut self, cx: &Cx) -> Rect {
-        self.view.get_rect(cx)
-    }
-    
-    
-    pub fn redraw(&self, cx: &mut Cx) {
-        self.view.redraw(cx)
-    }
-    
-    pub fn area(&self) -> Area {
-        self.view.area()
     }
 }
