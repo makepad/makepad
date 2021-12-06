@@ -186,9 +186,9 @@ impl Tab {
         };
         
         match event.hits(cx, self.bg_quad.draw_vars.area, HitOpt::default()) {
-            Event::FingerHover(event) => {
+            HitEvent::FingerHover(f) => {
                 cx.set_hover_mouse_cursor(MouseCursor::Hand);
-                match event.hover_state {
+                match f.hover_state {
                     HoverState::In => {
                         self.animate_to(cx, self.hover_state.unwrap());
                     }
@@ -198,13 +198,13 @@ impl Tab {
                     _ => {}
                 }
             }
-            Event::FingerDown(_) => {
+            HitEvent::FingerDown(_) => {
                 dispatch_action(cx, TabAction::WasPressed);
             }
             _ => {}
         }
         match event.drag_hits(cx, self.bg_quad.draw_vars.area, HitOpt::default()) {
-            Event::FingerDrag(drag_event) => match drag_event.state {
+            DragEvent::FingerDrag(f) => match f.state {
                 DragState::In => {
                     self.is_dragged = true;
                     self.bg_quad.draw_vars.redraw_view(cx);
@@ -226,10 +226,10 @@ impl Tab {
                     _ => panic!(),
                 },
             },
-            Event::FingerDrop(event) => {
+            DragEvent::FingerDrop(f) => {
                 self.is_dragged = false;
                 self.bg_quad.draw_vars.redraw_view(cx);
-                dispatch_action(cx, TabAction::ReceivedDraggedItem(event.dragged_item))
+                dispatch_action(cx, TabAction::ReceivedDraggedItem(f.dragged_item.clone()))
             }
             _ => {}
         }

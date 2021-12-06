@@ -217,7 +217,7 @@ impl DesignEditorView {
             self.scroll_view.redraw(cx);
         }
         match event.hits(cx, self.scroll_view.area(), HitOpt::default()) {
-            Event::FingerDown(FingerDownEvent {..}) => {
+            HitEvent::FingerDown(_) => {
                 cx.set_key_focus(self.scroll_view.area());
                 cx.set_down_mouse_cursor(MouseCursor::Text);
                 if let Some(session_id) = self.session_id {
@@ -227,10 +227,10 @@ impl DesignEditorView {
                     self.scroll_view.redraw(cx);
                 }
             }
-            Event::FingerHover(_) => {
+            HitEvent::FingerHover(_) => {
                 cx.set_hover_mouse_cursor(MouseCursor::Text);
             }
-            Event::FingerMove(FingerMoveEvent { ..}) => {
+            HitEvent::FingerMove(_) => {
                 if let Some(session_id) = self.session_id {
                     let session = &state.sessions_by_session_id[session_id];
                     let document = &state.documents_by_document_id[session.document_id];

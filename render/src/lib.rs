@@ -90,6 +90,8 @@ pub use {
         events::{
             KeyCode,
             Event,
+            HitEvent,
+            DragEvent,
             Signal,
             Timer,
             NextFrame,
