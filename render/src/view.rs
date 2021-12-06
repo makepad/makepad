@@ -5,10 +5,12 @@ pub use {
     },
     makepad_live_compiler::*,
     crate::{
-        cx::{
-            Cx,
+        platform::{
             CxPlatformDrawCall,
             CxPlatformView,
+        },
+        cx::{
+            Cx,
         },
         area::{Area, ViewArea, InstanceArea},
         live_traits::*,

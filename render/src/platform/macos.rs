@@ -4,7 +4,7 @@ use {
     crate::{
         platform::{
             cocoa_app::CocoaApp,
-            desktop::CxDesktop,
+            cx_desktop::CxDesktop,
             metal::{MetalCx, MetalWindow}
         },
         events::{
@@ -16,7 +16,6 @@ use {
         menu::Menu,
         cursor::MouseCursor,
         cx::{Cx, PlatformType},
-        
         window::{CxWindowState, CxWindowCmd},
         pass::CxPassDepOf,
         

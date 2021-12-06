@@ -5,9 +5,11 @@ pub use {
     },
     makepad_live_compiler::*,
     crate::{
+        platform::{
+            CxPlatformPass,
+        },
         cx::{
             Cx,
-            CxPlatformPass,
         },
         live_traits::*,
         texture::Texture,
