@@ -208,12 +208,7 @@ impl Tab {
                 DragState::In => {
                     self.is_dragged = true;
                     self.bg_quad.draw_vars.redraw_view(cx);
-                    match event {
-                        Event::FingerDrag(event) => {
-                            event.action = DragAction::Copy;
-                        }
-                        _ => panic!(),
-                    }
+                    *f.action = DragAction::Copy;
                 }
                 DragState::Out => {
                     self.is_dragged = false;
