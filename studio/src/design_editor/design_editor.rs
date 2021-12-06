@@ -216,7 +216,7 @@ impl DesignEditorView {
         if self.scroll_view.handle_event(cx, event) {
             self.scroll_view.redraw(cx);
         }
-        match event.hits(cx, self.scroll_view.area(), HitOpt::default()) {
+        match event.hits(cx, self.scroll_view.area()) {
             HitEvent::FingerDown(_) => {
                 cx.set_key_focus(self.scroll_view.area());
                 cx.set_down_mouse_cursor(MouseCursor::Text);
