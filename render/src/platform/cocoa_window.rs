@@ -6,7 +6,6 @@ use {
     },
     makepad_math::{
         Vec2,
-        Rect
     },
     crate::{
         platform::{
@@ -30,7 +29,7 @@ use {
             WindowClosedEvent,
             TextInputEvent,
             DraggedItem,
-            HoverState
+            //HoverState
         },
         //turtle::Rect,
     }
@@ -340,8 +339,6 @@ impl CocoaWindow {
         self.do_callback(&mut vec![Event::FingerDown(FingerDownEvent {
             window_id: self.window_id,
             abs: self.last_mouse_pos,
-            rel: self.last_mouse_pos,
-            rect: Rect::default(),
             digit: digit,
             handled: false,
             input_type: FingerInputType::Mouse,
@@ -356,12 +353,7 @@ impl CocoaWindow {
         self.do_callback(&mut vec![Event::FingerUp(FingerUpEvent {
             window_id: self.window_id,
             abs: self.last_mouse_pos,
-            rel: self.last_mouse_pos,
-            rect: Rect::default(),
-            abs_start: Vec2::default(),
-            rel_start: Vec2::default(),
             digit: digit,
-            is_over: false,
             input_type: FingerInputType::Mouse,
             modifiers: modifiers,
             time: self.time_now()
@@ -379,12 +371,7 @@ impl CocoaWindow {
                 events.push(Event::FingerMove(FingerMoveEvent {
                     window_id: self.window_id,
                     abs: pos,
-                    rel: pos,
-                    rect: Rect::default(),
                     digit: digit,
-                    abs_start: Vec2::default(),
-                    rel_start: Vec2::default(),
-                    is_over: false,
                     input_type: FingerInputType::Mouse,
                     modifiers: modifiers.clone(),
                     time: self.time_now()
@@ -395,11 +382,11 @@ impl CocoaWindow {
             digit: 0,
             window_id: self.window_id,
             abs: pos,
-            rel: pos,
-            any_down: false,
-            rect: Rect::default(),
+            //rel: pos,
+            //any_down: false,
+            //rect: Rect::default(),
             handled: false,
-            hover_state: HoverState::Over,
+            //hover_state: HoverState::Over,
             modifiers: modifiers,
             time: self.time_now()
         }));

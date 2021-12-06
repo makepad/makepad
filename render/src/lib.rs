@@ -69,9 +69,9 @@ pub use {
     },
     
     makepad_shader_compiler::{
-        ShaderRegistry, 
+        ShaderRegistry,
         ShaderEnum,
-        DrawShaderPtr, 
+        DrawShaderPtr,
         ShaderTy,
     },
     crate::{
@@ -128,6 +128,13 @@ pub use {
             DragAction,
             DraggedItem,
             HitOpt,
+            FingerScrollHitEvent,
+            FingerMoveHitEvent,
+            FingerHoverHitEvent,
+            FingerDownHitEvent,
+            FingerUpHitEvent,
+            FingerDragHitEvent,
+            FingerDropHitEvent
         },
         cursor::MouseCursor,
         menu::Menu,
@@ -156,7 +163,7 @@ pub use {
             PassClearColor,
             PassClearDepth
         },
-        texture::{Texture,TextureFormat},
+        texture::{Texture, TextureFormat},
         live_traits::{
             OptionAnyAction,
             LiveFactory,
