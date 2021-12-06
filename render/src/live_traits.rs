@@ -108,7 +108,7 @@ pub trait LiveAnimate {
                 self.animate_to(cx, track, state1)
             }
             else {
-                self.cut_to(cx, track, state1)
+                self.animate_cut(cx, track, state1)
             }
         }
         else {
@@ -116,11 +116,12 @@ pub trait LiveAnimate {
                 self.animate_to(cx, track, state2)
             }
             else {
-                self.cut_to(cx, track, state2)
+                self.animate_cut(cx, track, state2)
             }
         }
     }
-    fn cut_to(&mut self, cx: &mut Cx, track: LiveId, state: LivePtr);
+    fn animator_is_in_state(&mut self, cx:&mut Cx, track:LiveId, state:LivePtr)->bool;
+    fn animate_cut(&mut self, cx: &mut Cx, track: LiveId, state: LivePtr);
     fn animate_to(&mut self, cx: &mut Cx, track: LiveId, state: LivePtr);
     fn animator_handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> bool;
 }

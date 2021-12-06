@@ -10,16 +10,16 @@ live_register!{
             instance selected: float;
             
             fn pixel(self) -> vec4 {
-                let cx = Sdf2d::viewport(self.pos * self.rect_size);
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let mid = self.rect_size / 2.0;
                 let size = (self.hover * 0.5 + 0.5) * 0.5 * length(self.rect_size) / 2.0;
                 let min = mid - vec2(size);
                 let max = mid + vec2(size);
-                cx.move_to(min.x, min.y);
-                cx.line_to(max.x, max.y);
-                cx.move_to(min.x, max.y);
-                cx.line_to(max.x, min.y);
-                return cx.stroke(vec4(1.0) * (0.5 * self.hover + 0.5), 1.0);
+                sdf.move_to(min.x, min.y);
+                sdf.line_to(max.x, max.y);
+                sdf.move_to(min.x, max.y);
+                sdf.line_to(max.x, min.y);
+                return sdf.stroke(vec4(1.0) * (0.5 * self.hover + 0.5), 1.0);
             }
         }
         

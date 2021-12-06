@@ -23,14 +23,14 @@ live_register!{
             instance selected: float
             
             fn pixel(self) -> vec4 {
-                let cx = Sdf2d::viewport(self.pos * self.rect_size)
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 let color = mix(mix(#34, #28, self.selected), #f, mix(self.hover * 0.05, self.hover * -0.025, self.selected));
-                cx.clear(color)
-                cx.move_to(0.0, 0.0)
-                cx.line_to(0.0, self.rect_size.y)
-                cx.move_to(self.rect_size.x, 0.0)
-                cx.line_to(self.rect_size.x, self.rect_size.y)
-                return cx.stroke(border_color, border_width)
+                sdf.clear(color)
+                sdf.move_to(0.0, 0.0)
+                sdf.line_to(0.0, self.rect_size.y)
+                sdf.move_to(self.rect_size.x, 0.0)
+                sdf.line_to(self.rect_size.x, self.rect_size.y)
+                return sdf.stroke(border_color, border_width)
             }
         }
         

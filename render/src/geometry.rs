@@ -7,10 +7,8 @@ pub use {
     makepad_live_compiler::*,
     makepad_shader_compiler::ShaderTy,
     crate::{
-        cx::{
-            Cx,
-            CxPlatformGeometry
-        },
+        platform::CxPlatformGeometry,
+        cx::Cx,
         live_traits::*
     }
 };
