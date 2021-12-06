@@ -75,6 +75,9 @@ pub use {
         ShaderTy,
     },
     crate::{
+        cx_api::{
+            CxPlatformApi
+        },
         cx::{
             Cx,
             PlatformType

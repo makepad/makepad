@@ -113,7 +113,7 @@ live_register!{
 #[derive(Live, LiveHook)]
 pub struct DesktopButton {
     #[rust] pub button_logic: ButtonLogic,
-    #[track(base=default_state)] pub animator: Animator,
+    #[default_state(default_state)] pub animator: Animator,
     pub default_state: Option<LivePtr>,
     pub hover_state: Option<LivePtr>,
     pub pressed_state: Option<LivePtr>,
@@ -146,9 +146,9 @@ impl DesktopButton {
         self.animator_handle_event(cx, event);
         let res = self.button_logic.handle_event(cx, event, self.bg.draw_vars.area);
         match res.state {
-            ButtonState::Pressed => self.animate_to(cx, id!(base), self.pressed_state.unwrap()),
-            ButtonState::Default => self.animate_to(cx, id!(base), self.default_state.unwrap()),
-            ButtonState::Hover => self.animate_to(cx, id!(base), self.hover_state.unwrap()),
+            ButtonState::Pressed => self.animate_to(cx, self.pressed_state.unwrap()),
+            ButtonState::Default => self.animate_to(cx, self.default_state.unwrap()),
+            ButtonState::Hover => self.animate_to(cx, self.hover_state.unwrap()),
             _ => ()
         };
         res.action

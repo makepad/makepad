@@ -39,10 +39,10 @@ pub trait LiveNew: LiveApply {
         let doc = live_registry.ptr_to_doc(live_ptr);
         let mut ret = Self::new(cx);
         let apply_from = ApplyFrom::NewFromDoc {file_id: live_ptr.file_id};
-        let next_index =  ret.apply(cx, apply_from, live_ptr.index as usize, &doc.nodes);
-        if next_index <= live_ptr.index as usize + 2{
+        let next_index = ret.apply(cx, apply_from, live_ptr.index as usize, &doc.nodes);
+        if next_index <= live_ptr.index as usize + 2 {
             cx.apply_error_empty_object(live_error_origin!(), apply_from, live_ptr.index as usize, &doc.nodes);
-        }       
+        }
         return ret
     }
     
@@ -102,27 +102,27 @@ pub struct LiveBody {
 pub trait LiveAnimate {
     fn init_animator(&mut self, cx: &mut Cx);
     fn apply_animator(&mut self, cx: &mut Cx);
-    fn toggle_animator(&mut self, cx: &mut Cx, is_state_1: bool, should_animate: bool, track: LiveId, state1: LivePtr, state2: LivePtr,) {
+    fn toggle_animator(&mut self, cx: &mut Cx, is_state_1: bool, should_animate: bool, state1: LivePtr, state2: LivePtr,) {
         if is_state_1 {
             if should_animate {
-                self.animate_to(cx, track, state1)
+                self.animate_to(cx, state1)
             }
             else {
-                self.animate_cut(cx, track, state1)
+                self.animate_cut(cx, state1)
             }
         }
         else {
             if should_animate {
-                self.animate_to(cx, track, state2)
+                self.animate_to(cx, state2)
             }
             else {
-                self.animate_cut(cx, track, state2)
+                self.animate_cut(cx, state2)
             }
         }
     }
-    fn animator_is_in_state(&mut self, cx:&mut Cx, track:LiveId, state:LivePtr)->bool;
-    fn animate_cut(&mut self, cx: &mut Cx, track: LiveId, state: LivePtr);
-    fn animate_to(&mut self, cx: &mut Cx, track: LiveId, state: LivePtr);
+    fn animator_is_in_state(&mut self, cx: &mut Cx, state: LivePtr) -> bool;
+    fn animate_cut(&mut self, cx: &mut Cx, state: LivePtr);
+    fn animate_to(&mut self, cx: &mut Cx, state: LivePtr);
     fn animator_handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> bool;
 }
 
@@ -158,8 +158,11 @@ impl ApplyFrom {
 pub trait LiveHook {
     fn apply_value_unknown(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         if let ApplyFrom::Animate = apply_from {
-            if nodes[index].id == id!(from) {
-                return nodes.skip_node(index)
+            match nodes[index].id {
+                id!(from) | id!(track) => {
+                    return nodes.skip_node(index)
+                }
+                _ => ()
             }
         }
         if !nodes[index].id.is_capitalised() {
