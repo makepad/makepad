@@ -90,7 +90,7 @@ live_register!{
         
         hover_state: {
             from: {all: Play::Forward {duration: 0.1}}
-            apply:{hover: [{time: 0.0, value: 1.0}]},
+            apply: {hover: [{time: 0.0, value: 1.0}]},
         }
         
         unselected_state: {
@@ -115,7 +115,7 @@ live_register!{
         closed_state: {
             track: open,
             from: {all: Play::Forward {duration: 0.3, redraw: true}}
-           apply: {
+            apply: {
                 opened: [{value: 0.0, ease: Ease::OutExp}],
                 bg_quad: {opened: (opened)}
                 name_text: {opened: (opened)}
