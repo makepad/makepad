@@ -57,7 +57,10 @@ live_register!{
     
     CodeEditorView: {{CodeEditorView}} {
         scroll_view: {
-            view: {debug_id: code_editor_view}
+            scroll_v:{smoothing:0.15},
+            view: {
+                debug_id: code_editor_view
+            }
         }
         
         code_text: {
@@ -536,7 +539,7 @@ impl CodeEditorView {
                     let session = &state.sessions_by_session_id[session_id];
                     let document = &state.documents_by_document_id[session.document_id];
                     let document_inner = document.inner.as_ref().unwrap();
-                    let position = self.vec2_to_text_position(&document_inner.text, f.rel);
+                    let position = self.vec2_to_position(&document_inner.text, f.rel);
                     match f.modifiers {
                         KeyModifiers {control: true, ..} => {
                             state.add_cursor(session_id, position);
@@ -557,7 +560,7 @@ impl CodeEditorView {
                     let session = &state.sessions_by_session_id[session_id];
                     let document = &state.documents_by_document_id[session.document_id];
                     let document_inner = document.inner.as_ref().unwrap();
-                    let position = self.vec2_to_text_position(&document_inner.text, rel);
+                    let position = self.vec2_to_position(&document_inner.text, rel);
                     state.move_cursors_to(session_id, position, true);
                     self.scroll_view.redraw(cx);
                 }
@@ -571,6 +574,7 @@ impl CodeEditorView {
                 if let Some(session_id) = self.session_id {
                     state.move_cursors_left(session_id, shift);
                     self.keep_last_cursor_in_view(cx, state);
+                    self.keep_last_cursor_in_view(cx, state);
                     self.scroll_view.redraw(cx);
                 }
             }
@@ -582,6 +586,7 @@ impl CodeEditorView {
                 self.reset_caret_blink(cx);
                 if let Some(session_id) = self.session_id {
                     state.move_cursors_right(session_id, shift);
+                    self.keep_last_cursor_in_view(cx, state);
                     self.scroll_view.redraw(cx);
                 }
             }
@@ -593,6 +598,7 @@ impl CodeEditorView {
                 self.reset_caret_blink(cx);
                 if let Some(session_id) = self.session_id {
                     state.move_cursors_up(session_id, shift);
+                    self.keep_last_cursor_in_view(cx, state);
                     self.scroll_view.redraw(cx);
                 }
             }
@@ -604,6 +610,7 @@ impl CodeEditorView {
                 self.reset_caret_blink(cx);
                 if let Some(session_id) = self.session_id {
                     state.move_cursors_down(session_id, shift);
+                    self.keep_last_cursor_in_view(cx, state);
                     self.scroll_view.redraw(cx);
                 }
             }
@@ -615,6 +622,7 @@ impl CodeEditorView {
                 if let Some(session_id) = self.session_id {
                     state.insert_backspace(session_id, send_request);
                     let session = &state.sessions_by_session_id[session_id];
+                    self.keep_last_cursor_in_view(cx, state);
                     dispatch_action(cx, CodeEditorViewAction::RedrawViewsForDocument(session.document_id))
                 }
             }
@@ -642,6 +650,7 @@ impl CodeEditorView {
                 if let Some(session_id) = self.session_id {
                     state.insert_text(session_id, Text::from(vec![vec![], vec![]]), send_request);
                     let session = &state.sessions_by_session_id[session_id];
+                    self.keep_last_cursor_in_view(cx, state);
                     dispatch_action(cx, CodeEditorViewAction::RedrawViewsForDocument(session.document_id))
                 }
             }
@@ -658,6 +667,7 @@ impl CodeEditorView {
                         send_request,
                     );
                     let session = &state.sessions_by_session_id[session_id];
+                    self.keep_last_cursor_in_view(cx, state);
                     dispatch_action(cx, CodeEditorViewAction::RedrawViewsForDocument(session.document_id))
                 }
             }
@@ -665,27 +675,29 @@ impl CodeEditorView {
         }
     }
     
-    fn keep_last_cursor_in_view(&mut self, cx:&mut Cx, state:&EditorState){
+    fn keep_last_cursor_in_view(&mut self, cx: &mut Cx, state: &EditorState) {
         if let Some(session_id) = self.session_id {
             let session = &state.sessions_by_session_id[session_id];
             let last_cursor = session.cursors.last();
             // ok so. we need to compute the head
-            
+            let pos = self.position_to_vec2(last_cursor.head);
+            let rect = Rect {
+                pos: pos + self.text_glyph_size * vec2(0.0, -1.0),
+                size: self.text_glyph_size * vec2(5.0, 3.0)
+            };
+            self.scroll_view.scroll_into_view(cx, rect);
         }
     }
     
-    fn position_to_vec2(&self, cx:&Cx, position: Position) -> Vec2 {
-        
-        
-        let line = ((position.y / self.text_glyph_size.y) as usize).min(text.as_lines().len() - 1);
-        Position {
-            line,
-            column: (((position.x - self.linenum_width + 0.5 * self.text_glyph_size.x) / self.text_glyph_size.x) as usize)
-                .min(text.as_lines()[line].len()),
-        }
+    fn position_to_vec2(&self, position: Position) -> Vec2 {
+        // we need to compute the position in the editor space
+        vec2(
+            position.column as f32 * self.text_glyph_size.x,
+            position.line as f32 * self.text_glyph_size.y
+        )
     }
     
-    fn vec2_to_text_position(&self, text: &Text, vec2: Vec2) -> Position {
+    fn vec2_to_position(&self, text: &Text, vec2: Vec2) -> Position {
         let line = ((vec2.y / self.text_glyph_size.y) as usize).min(text.as_lines().len() - 1);
         Position {
             line,
