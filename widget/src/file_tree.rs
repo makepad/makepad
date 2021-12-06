@@ -8,7 +8,7 @@ use {
         scroll_view::ScrollView
     },
     makepad_render::*,
-};   
+};
 
 live_register!{
     use makepad_render::shader::std::*;
@@ -80,45 +80,55 @@ live_register!{
         
         default_state: {
             from: {all: Play::Forward {duration: 0.2}}
-            hover: 0.0,
-            bg_quad: {hover: (hover)}
-            name_text: {hover: (hover)}
-            icon_quad: {hover: (hover)}
+            apply: {
+                hover: 0.0,
+                bg_quad: {hover: (hover)}
+                name_text: {hover: (hover)}
+                icon_quad: {hover: (hover)}
+            }
         }
         
         hover_state: {
             from: {all: Play::Forward {duration: 0.1}}
-            hover: [{time: 0.0, value: 1.0}],
+            apply:{hover: [{time: 0.0, value: 1.0}]},
         }
         
         unselected_state: {
             track: select,
             from: {all: Play::Forward {duration: 0.1, redraw: true}}
-            selected: 0.0,
-            bg_quad: {selected: (selected)}
-            name_text: {selected: (selected)}
-            icon_quad: {selected: (selected)}
+            apply: {
+                selected: 0.0,
+                bg_quad: {selected: (selected)}
+                name_text: {selected: (selected)}
+                icon_quad: {selected: (selected)}
+            }
         }
         
         selected_state: {
             track: select,
             from: {all: Play::Forward {duration: 0.1, redraw: true}}
-            selected: [{time: 0.0, value: 1.0}],
-        } 
+            apply: {
+                selected: [{time: 0.0, value: 1.0}],
+            }
+        }
         
         closed_state: {
             track: open,
             from: {all: Play::Forward {duration: 0.3, redraw: true}}
-            opened: [{value: 0.0, ease: Ease::OutExp}],
-            bg_quad: {opened: (opened)}
-            name_text: {opened: (opened)} 
-            icon_quad: {opened: (opened)}
+           apply: {
+                opened: [{value: 0.0, ease: Ease::OutExp}],
+                bg_quad: {opened: (opened)}
+                name_text: {opened: (opened)}
+                icon_quad: {opened: (opened)}
+            }
         }
         
         opened_state: {
             track: open,
             from: {all: Play::Forward {duration: 0.3, redraw: true}}
-            opened: [{value: 1.0, ease: Ease::OutExp}],
+            apply: {
+                opened: [{value: 1.0, ease: Ease::OutExp}],
+            }
         }
         
         indent_width: 10.0
@@ -228,7 +238,7 @@ pub struct FileTree {
     #[rust] count: usize,
     #[rust] stack: Vec<f32>,
 }
- 
+
 pub enum FileTreeAction {
     WasClicked(FileNodeId),
     ShouldStartDragging(FileNodeId),
@@ -384,12 +394,12 @@ impl FileTree {
         // lets fill the space left with blanks
         let height_left = cx.get_height_left();
         let mut walk = 0.0;
-        while walk < height_left{
+        while walk < height_left {
             self.count += 1;
             self.filler_quad.is_even = Self::is_even(self.count);
-            self.filler_quad.draw_walk(cx, Walk{
+            self.filler_quad.draw_walk(cx, Walk {
                 width: Width::Filled,
-                height: Height::Fixed(self.node_height.min(height_left- walk)),
+                height: Height::Fixed(self.node_height.min(height_left - walk)),
                 margin: Margin::default()
             });
             walk += self.node_height;
@@ -409,7 +419,7 @@ impl FileTree {
         }
     }
     
-    pub fn is_even(count:usize)->f32{
+    pub fn is_even(count: usize) -> f32 {
         if count % 2 == 1 {0.0}else {1.0}
     }
     

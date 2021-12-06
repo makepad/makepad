@@ -5,7 +5,7 @@ live_register!{
     use makepad_render::shader::std::*;
     
     DrawDesktopButton: {{DrawDesktopButton}} {
-        debug:false,
+        debug: false,
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
             sdf.aa *= 3.0;
@@ -86,7 +86,9 @@ live_register!{
         
         default_state: {
             from: {all: Play::Forward {duration: 0.1}}
-            bg: {pressed: 0.0, hover: 0.0}
+            apply: {
+                bg: {pressed: 0.0, hover: 0.0}
+            }
         }
         
         hover_state: {
@@ -94,17 +96,21 @@ live_register!{
                 all: Play::Forward {duration: 0.1}
                 state_down: Play::Forward {duration: 0.01}
             }
-            bg: {
-                pressed: 0.0,
-                hover: [{time: 0.0, value: 1.0}],
+            apply: {
+                bg: {
+                    pressed: 0.0,
+                    hover: [{time: 0.0, value: 1.0}],
+                }
             }
         }
         
         pressed_state: {
             from: {all: Play::Forward {duration: 0.2}}
-            bg: {
-                pressed: [{time: 0.0, value: 1.0}],
-                hover: 1.0,
+            apply: {
+                bg: {
+                    pressed: [{time: 0.0, value: 1.0}],
+                    hover: 1.0,
+                }
             }
         }
     }
@@ -153,7 +159,7 @@ impl DesktopButton {
         };
         res.action
     }
-     
+    
     pub fn draw_desktop_button(&mut self, cx: &mut Cx, ty: DesktopButtonType) {
         let (w, h) = match ty {
             DesktopButtonType::WindowsMin

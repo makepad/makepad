@@ -2,12 +2,12 @@ use makepad_render::*;
 
 live_register!{
     use makepad_render::shader::std::*;
-
+    
     Splitter: {{Splitter}} {
         split_bar_size: 2.0
-        bar_quad:{
-            instance pressed:float;
-            instance hover:float;
+        bar_quad: {
+            instance pressed: float;
+            instance hover: float;
             
             fn pixel(self) -> vec4 {
                 return mix(#2, mix(#7, #f, self.pressed), self.hover);
@@ -16,7 +16,9 @@ live_register!{
         
         default_state: {
             from: {all: Play::Forward {duration: 0.1}}
-            bar_quad: {pressed: 0.0, hover: 0.0}
+            apply: {
+                bar_quad: {pressed: 0.0, hover: 0.0}
+            }
         }
         
         hover_state: {
@@ -24,17 +26,21 @@ live_register!{
                 all: Play::Forward {duration: 0.1}
                 state_down: Play::Forward {duration: 0.01}
             }
-            bar_quad: {
-                pressed: 0.0,
-                hover: [{time: 0.0, value: 1.0}],
+            apply: {
+                bar_quad: {
+                    pressed: 0.0,
+                    hover: [{time: 0.0, value: 1.0}],
+                }
             }
         }
         
         pressed_state: {
             from: {all: Play::Forward {duration: 0.1}}
-            bar_quad: {
-                pressed: [{time: 0.0, value: 1.0},{time:1.0,value:0.25}],
-                hover: 1.0,
+            apply: {
+                bar_quad: {
+                    pressed: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.25}],
+                    hover: 1.0,
+                }
             }
         }
     }
@@ -49,24 +55,24 @@ pub struct Splitter {
     #[rust] position: f32,
     #[rust] drag_start_align: Option<SplitterAlign>,
     #[default_state(default_state)] pub animator: Animator,
-
+    
     default_state: Option<LivePtr>,
     hover_state: Option<LivePtr>,
     pressed_state: Option<LivePtr>,
-
+    
     layout: Layout,
     bar_quad: DrawColor,
     split_bar_size: f32,
 }
 
 impl Splitter {
-
+    
     pub fn begin(&mut self, cx: &mut Cx) {
         self.rect = cx.get_turtle_rect();
         self.position = self.align.to_position(self.axis, self.rect);
         cx.begin_turtle(self.layout(), Area::Empty);
     }
-
+    
     pub fn middle(&mut self, cx: &mut Cx) {
         cx.end_turtle(Area::Empty);
         match self.axis {
@@ -99,11 +105,11 @@ impl Splitter {
         }
         cx.begin_turtle(Layout::default(), Area::Empty);
     }
-
+    
     pub fn end(&mut self, cx: &mut Cx) {
         cx.end_turtle(Area::Empty);
     }
-
+    
     fn layout(&self) -> Layout {
         Layout {
             walk: match self.axis {
@@ -113,23 +119,23 @@ impl Splitter {
             ..self.layout
         }
     }
-
+    
     pub fn axis(&self) -> Axis {
         self.axis
     }
-
+    
     pub fn set_axis(&mut self, axis: Axis) {
         self.axis = axis;
     }
-
+    
     pub fn align(&self) -> SplitterAlign {
         self.align
     }
-
+    
     pub fn set_align(&mut self, align: SplitterAlign) {
         self.align = align;
     }
-
+    
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
@@ -185,7 +191,7 @@ impl Splitter {
                         Axis::Vertical => event.abs.y - event.abs_start.y,
                     };
                     let new_position =
-                        drag_start_align.to_position(self.axis, self.rect) + delta;
+                    drag_start_align.to_position(self.axis, self.rect) + delta;
                     self.align = match self.axis {
                         Axis::Horizontal => {
                             let center = self.rect.size.x / 2.0;
@@ -209,13 +215,13 @@ impl Splitter {
                         }
                     };
                     cx.redraw_view_of(self.bar_quad.draw_vars.area);
-                    dispatch_action(cx, SplitterAction::Changed{axis:self.axis, align:self.align});
+                    dispatch_action(cx, SplitterAction::Changed {axis: self.axis, align: self.align});
                 }
             }
             _ => {}
         }
     }
-
+    
     fn margin(&self) -> Margin {
         match self.axis {
             Axis::Horizontal => Margin {
@@ -259,5 +265,5 @@ impl SplitterAlign {
 }
 
 pub enum SplitterAction {
-    Changed{axis:Axis, align:SplitterAlign},
+    Changed {axis: Axis, align: SplitterAlign},
 }
