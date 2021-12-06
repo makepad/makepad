@@ -38,7 +38,7 @@ impl ButtonLogic {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, area: Area) -> ButtonHandleResult
     {
-        match event.hits(cx, area, HitOpt::default()) {
+        match event.hits(cx, area) {
             HitEvent::FingerDown(_fe) => {
                 return ButtonHandleResult {
                     action: ButtonAction::IsPressed,
