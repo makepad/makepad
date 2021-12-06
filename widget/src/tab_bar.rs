@@ -161,12 +161,7 @@ impl TabBar {
                 DragState::In => {
                     self.is_dragged = true;
                     self.redraw(cx);
-                    match event {
-                        Event::FingerDrag(event) => {
-                            event.action = DragAction::Copy;
-                        }
-                        _ => panic!(),
-                    }
+                    *f.action = DragAction::Copy;
                 }
                 DragState::Out => {
                     self.is_dragged = false;
