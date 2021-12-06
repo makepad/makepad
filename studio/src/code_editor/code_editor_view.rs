@@ -111,16 +111,18 @@ live_register!{
         }
         
         show_caret_state: {
+            track:caret,
             from: {all: Play::Forward {duration: 0.1}}
-            caret_quad: {color:#b0}
-        }
-
-        hide_caret_state: {
-            from: {all: Play::Forward {duration: 0.1}}
-            caret_quad: {color:#0000}
+            caret_quad: {color: #b0}
         }
         
-        caret_blink_timer: 0.5
+        hide_caret_state: {
+            track:caret,
+            from: {all: Play::Forward {duration: 0.1}}
+            caret_quad: {color: #0000}
+        }
+        
+        caret_blink_timeout: 0.5
     }
 }
 
@@ -130,11 +132,11 @@ pub struct CodeEditorView {
     #[rust] pub session_id: Option<SessionId>,
     #[rust] text_glyph_size: Vec2,
     #[rust] caret_blink_timer: Timer,
-
+    
     show_caret_state: Option<LivePtr>,
     hide_caret_state: Option<LivePtr>,
     
-    #[track(caret = show_caret_state)]
+    #[default_state(show_caret_state)]
     animator: Animator,
     
     selection_quad: DrawSelection,
@@ -144,7 +146,7 @@ pub struct CodeEditorView {
     linenum_text: DrawText,
     
     linenum_width: f32,
-    caret_time_len: f64,
+    caret_blink_timeout: f64,
     
     text_color_linenum: Vec4,
     text_color_linenum_selected: Vec4,
@@ -210,7 +212,7 @@ impl CodeEditorView {
                 }
             }
             self.scroll_view.end(cx);
-        } 
+        }
     }
     
     pub fn begin_instances(&mut self, cx: &mut Cx) {
@@ -229,8 +231,10 @@ impl CodeEditorView {
         self.linenum_text.end_many_instances(cx);
     }
     
-    pub fn reset_caret_blink(&mut self, _cx:&mut Cx){ 
-        
+    pub fn reset_caret_blink(&mut self, cx: &mut Cx) {
+        cx.stop_timer(self.caret_blink_timer);
+        self.caret_blink_timer = cx.start_timer(self.caret_blink_timeout, true);
+        self.animate_cut(cx, self.show_caret_state.unwrap());
     }
     
     fn visible_lines(&mut self, cx: &mut Cx, line_count: usize) -> VisibleLines {
@@ -508,11 +512,23 @@ impl CodeEditorView {
         send_request: &mut dyn FnMut(Request),
         dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorViewAction),
     ) {
+        self.animator_handle_event(cx, event);
+        
         if self.scroll_view.handle_event(cx, event) {
             self.scroll_view.redraw(cx);
         }
+        if event.is_timer(self.caret_blink_timer){
+            if self.animator_is_in_state(cx, self.show_caret_state.unwrap()){
+                self.animate_to(cx, self.hide_caret_state.unwrap())
+            }
+            else{
+                self.animate_to(cx, self.show_caret_state.unwrap())
+            }
+        }
+        
         match event.hits(cx, self.scroll_view.area(), HitOpt::default()) {
             Event::FingerDown(FingerDownEvent {rel, modifiers, ..}) => {
+                self.reset_caret_blink(cx);
                 // TODO: How to handle key focus?
                 cx.set_key_focus(self.scroll_view.area());
                 cx.set_down_mouse_cursor(MouseCursor::Text);
@@ -550,6 +566,7 @@ impl CodeEditorView {
                 modifiers: KeyModifiers {shift, ..},
                 ..
             }) => {
+                self.reset_caret_blink(cx);
                 if let Some(session_id) = self.session_id {
                     state.move_cursors_left(session_id, shift);
                     self.scroll_view.redraw(cx);
@@ -560,6 +577,7 @@ impl CodeEditorView {
                 modifiers: KeyModifiers {shift, ..},
                 ..
             }) => {
+                self.reset_caret_blink(cx);
                 if let Some(session_id) = self.session_id {
                     state.move_cursors_right(session_id, shift);
                     self.scroll_view.redraw(cx);
@@ -570,6 +588,7 @@ impl CodeEditorView {
                 modifiers: KeyModifiers {shift, ..},
                 ..
             }) => {
+                self.reset_caret_blink(cx);
                 if let Some(session_id) = self.session_id {
                     state.move_cursors_up(session_id, shift);
                     self.scroll_view.redraw(cx);
@@ -580,6 +599,7 @@ impl CodeEditorView {
                 modifiers: KeyModifiers {shift, ..},
                 ..
             }) => {
+                self.reset_caret_blink(cx);
                 if let Some(session_id) = self.session_id {
                     state.move_cursors_down(session_id, shift);
                     self.scroll_view.redraw(cx);
@@ -589,6 +609,7 @@ impl CodeEditorView {
                 key_code: KeyCode::Backspace,
                 ..
             }) => {
+                self.reset_caret_blink(cx);
                 if let Some(session_id) = self.session_id {
                     state.insert_backspace(session_id, send_request);
                     let session = &state.sessions_by_session_id[session_id];
@@ -600,6 +621,7 @@ impl CodeEditorView {
                 modifiers,
                 ..
             }) if modifiers.control || modifiers.logo => {
+                self.reset_caret_blink(cx);
                 if let Some(session_id) = self.session_id {
                     if modifiers.shift {
                         state.redo(session_id, send_request);
@@ -614,6 +636,7 @@ impl CodeEditorView {
                 key_code: KeyCode::Return,
                 ..
             }) => {
+                self.reset_caret_blink(cx);
                 if let Some(session_id) = self.session_id {
                     state.insert_text(session_id, Text::from(vec![vec![], vec![]]), send_request);
                     let session = &state.sessions_by_session_id[session_id];
@@ -621,6 +644,7 @@ impl CodeEditorView {
                 }
             }
             Event::TextInput(TextInputEvent {input, ..}) => {
+                self.reset_caret_blink(cx);
                 if let Some(session_id) = self.session_id {
                     state.insert_text(
                         session_id,

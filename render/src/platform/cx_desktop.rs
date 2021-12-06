@@ -48,7 +48,7 @@ impl Cx {
         return Vec2 {x: 800., y: 600.}
     }
     
-    pub fn process_desktop_pre_event(&mut self, event: &mut Event)
+    pub(crate) fn process_desktop_pre_event(&mut self, event: &mut Event)
     {
         match event {
             Event::FingerHover(fe) => {
@@ -85,7 +85,7 @@ impl Cx {
         };
     }
     
-    pub fn process_desktop_post_event(&mut self, event: &mut Event) -> bool {
+    pub(crate) fn process_desktop_post_event(&mut self, event: &mut Event) -> bool {
         match event {
             Event::FingerUp(fe) => { // decapture automatically
                 self.fingers[fe.digit].captured = Area::Empty;
@@ -110,7 +110,7 @@ impl Cx {
         false
     }
     
-    pub fn process_desktop_paint_callbacks(&mut self, time: f64) -> bool
+    pub(crate) fn process_desktop_paint_callbacks(&mut self, time: f64) -> bool
     {
         let mut vsync = false; //self.platform.desktop.repaint_via_scroll_event;
         self.platform.desktop.repaint_via_scroll_event = false;
@@ -137,7 +137,7 @@ impl Cx {
         vsync
     }
     
-    pub fn process_to_wasm<F>(&mut self, _msg: u32, mut _event_handler: F) -> u32
+    pub(crate) fn process_to_wasm<F>(&mut self, _msg: u32, mut _event_handler: F) -> u32
     where F: FnMut(&mut Cx, &mut Event)
     {
         0
@@ -147,9 +147,4 @@ impl Cx {
         let _ = io::stdout().write(data.as_bytes());
         let _ = io::stdout().flush();
     }
-    
-    pub fn websocket_send(&self, _url: &str, _data: &[u8]) {
-        // nop
-    }
-    
 }

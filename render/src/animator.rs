@@ -688,27 +688,43 @@ impl Animator {
         return 1.0
     }
     
-    pub fn is_in_state(&mut self, cx: &mut Cx, track:LiveId, live_ptr: LivePtr)->bool{
-        let state_id = cx.live_registry.borrow().ptr_to_node(live_ptr).id;
+    pub fn is_in_state(&mut self, cx: &mut Cx, live_ptr: LivePtr)->bool{
+        let live_registry = cx.live_registry.borrow();
+        let (nodes, index) = live_registry.ptr_to_nodes_index(live_ptr);
+        let track = if let Some(LiveValue::Id(id)) = nodes.child_value_by_path(index,&[id!(track)]){
+            *id
+        }
+        else{
+            LiveId(1)
+        };
+        let state_id = nodes[index].id;
         let state = self.state.as_ref().unwrap();
-        if let Some(LiveValue::Id(id)) = &state.child_value_by_path(0, &[id!(tracks),id!(state_id)]){
-            return *id == track;
+        if let Some(LiveValue::Id(id)) = &state.child_value_by_path(0, &[id!(tracks),track, id!(state_id)]){
+            return *id == state_id;
         }
         false
     }
     
-    pub fn cut_to_live(&mut self, cx: &mut Cx, track: LiveId, live_ptr: LivePtr/*, state_id: Id*/) {
+    pub fn cut_to_live(&mut self, cx: &mut Cx,  live_ptr: LivePtr/*, state_id: Id*/) {
         let live_registry_rc = cx.live_registry.clone();
         let live_registry = live_registry_rc.borrow();
         let (nodes, index) = live_registry.ptr_to_nodes_index(live_ptr);
         
-        self.cut_to(cx, track, nodes[index].id, index, nodes);
+        self.cut_to(cx, nodes[index].id, index, nodes);
     }
     
     // hard cut / initialisate the state to a certain state
-    pub fn cut_to(&mut self, _cx: &mut Cx, track: LiveId, state_id: LiveId, index: usize, nodes: &[LiveNode]) {
+    pub fn cut_to(&mut self, _cx: &mut Cx,  state_id: LiveId, index: usize, nodes: &[LiveNode]) {
         // if we dont have a state object, lets create a template
         let mut state = self.swap_out_state();
+        
+        // ok lets fetch the track
+        let track = if let Some(LiveValue::Id(id)) = nodes.child_value_by_path(index,&[id!(track)]){
+            *id
+        }
+        else{
+            LiveId(1)
+        };
         
         if state.len() == 0 {
             state.push_live(live!{
@@ -726,7 +742,7 @@ impl Animator {
         path.push(id!(state));
         reader.walk();
         while !reader.is_eot() {
-            if reader.depth() == 1 && reader.id() == id!(from) {
+            if reader.depth() == 1 && (reader.id() == id!(from)||reader.id() == id!(track)) {
                 reader.skip();
             }
             else if reader.is_array() {
@@ -769,19 +785,26 @@ impl Animator {
         self.swap_in_state(state);
     }
     
-    pub fn animate_to_live(&mut self, cx: &mut Cx, track: LiveId, live_ptr: LivePtr/*,state_id: Id*/) {
+    pub fn animate_to_live(&mut self, cx: &mut Cx, live_ptr: LivePtr/*,state_id: Id*/) {
         let live_registry_rc = cx.live_registry.clone();
         let live_registry = live_registry_rc.borrow();
         let (nodes, index) = live_registry.ptr_to_nodes_index(live_ptr);
-        self.animate_to(cx, track, nodes[index].id, index, nodes)
+        self.animate_to(cx, nodes[index].id, index, nodes)
     }
     
-    pub fn animate_to(&mut self, cx: &mut Cx, track: LiveId, state_id: LiveId, index: usize, nodes: &[LiveNode]) {
+    pub fn animate_to(&mut self, cx: &mut Cx, state_id: LiveId, index: usize, nodes: &[LiveNode]) {
         
         let mut state = self.swap_out_state();
         if state.len() == 0 { // call cut first
             panic!();
         }
+
+        let track = if let Some(LiveValue::Id(id)) = nodes.child_value_by_path(index,&[id!(track)]){
+            *id
+        }
+        else{
+            LiveId(1)
+        };
         
         // ok we have to look up into state/tracks for our state_id what state we are in right now
         let from_id = if let Some(LiveValue::Id(id)) = state.child_value_by_path(0, &[id!(tracks), track, id!(state_id)]) {
@@ -794,6 +817,10 @@ impl Animator {
         
         let mut reader = LiveNodeReader::new(index, nodes);
         let mut path = Vec::new();
+
+        state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track], live_object!{
+            [track]: {state_id: (state_id), ended:false, time:void}
+        });
         
         path.push(id!(state));
         reader.walk();
@@ -809,6 +836,9 @@ impl Animator {
                 }
                 state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(time)], live_array!{void});
                 any_from_found = true;
+                reader.skip();
+            }
+            else if reader.depth() == 1 && reader.id() == id!(track){
                 reader.skip();
             }
             else if reader.is_array() {
@@ -909,166 +939,9 @@ impl Animator {
             }
         }
         
-        if !any_from_found {
-            // add a bare time info track here
-            state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(time)], live_array!{void});
-        }
-        state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(ended)], live_array!{false});
-        
         self.swap_in_state(state);
         
         self.next_frame = cx.new_next_frame();
     }
     
-    
-    pub fn animate_to_live2(&mut self, cx: &mut Cx, track: LiveId, live_ptr: LivePtr/*,state_id: Id*/) {
-        let live_registry_rc = cx.live_registry.clone();
-        let live_registry = live_registry_rc.borrow();
-        let (nodes, index) = live_registry.ptr_to_nodes_index(live_ptr);
-        self.animate_to2(cx, track, nodes[index].id, index, nodes)
-    }
-    
-    pub fn animate_to2(&mut self, cx: &mut Cx, track: LiveId, state_id: LiveId, index: usize, nodes: &[LiveNode]) {
-        
-        let mut state = self.swap_out_state();
-        if state.len() == 0 { // call cut first
-            panic!();
-        }
-        
-        // ok we have to look up into state/tracks for our state_id what state we are in right now
-        let from_id = if let Some(LiveValue::Id(id)) = state.child_value_by_path(0, &[id!(tracks), track, id!(state_id)]) {
-            *id
-        }
-        else {
-            cx.apply_error_animate_to_unknown_track(live_error_origin!(), index, nodes, track, state_id);
-            return
-        };
-        
-        let mut reader = LiveNodeReader::new(index, nodes);
-        let mut path = Vec::new();
-        path.push(id!(state));
-        reader.walk();
-        let mut any_from_found = false;
-        while !reader.is_eot() {
-            if reader.depth() == 1 && reader.id() == id!(from) {
-                // we have to store the right 'from' in our 'tracks'
-                if let Some(reader) = reader.child_by_name(from_id) {
-                    state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(play)], reader.node_slice());
-                }
-                else if let Some(reader) = reader.child_by_name(id!(all)) {
-                    state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(play)], reader.node_slice());
-                }
-                state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(time)], live_array!{void});
-                any_from_found = true;
-                reader.skip();
-            }
-            else if reader.is_array() {
-                path.push(reader.id());
-                let (first_index, last_index) = if let Some(state_child) = state.child_by_path(0, &path) {
-                    if let Some(last_index) = state.last_child(state_child) {
-                        (state_child + 1, last_index)
-                    }
-                    else {panic!()}
-                }
-                else {
-                    cx.apply_error_animation_missing_state(live_error_origin!(), index, nodes, track, state_id, &path);
-                    path.pop();
-                    reader.skip();
-                    continue;
-                };
-                // verify we do the right track
-                if let LiveValue::Id(check_id) = &state[first_index].value {
-                    if *check_id != track {
-                        cx.apply_error_wrong_animation_track_used(live_error_origin!(), index, nodes, *path.last().unwrap(), *check_id, track);
-                        path.pop();
-                        reader.skip();
-                        continue;
-                    }
-                }
-                else {
-                    panic!()
-                }
-                let first_time = Self::first_keyframe_time_from_array(&reader);
-                
-                let mut timeline = Vec::new();
-                timeline.open_array(id!(0));
-                timeline.push_id(id!(0), track);
-                
-                if first_time != 0.0 { // insert first key from the last value
-                    timeline.push_live(state.node_slice(last_index));
-                }
-                timeline.push_live(reader.children_slice());
-                timeline.push_live(state.node_slice(last_index));
-                timeline.close();
-                state.replace_or_insert_last_node_by_path(0, &path, &timeline);
-                
-                path.pop();
-                reader.skip();
-            }
-            else {
-                if reader.is_expr() {
-                    path.push(reader.id());
-                    state.replace_or_insert_last_node_by_path(0, &path, reader.node_slice());
-                    path.pop();
-                    reader.skip();
-                    continue;
-                }
-                if reader.is_open() {
-                    path.push(reader.id());
-                }
-                else if reader.is_close() {
-                    path.pop();
-                }
-                else {
-                    path.push(reader.id());
-                    
-                    let (first_index, last_index) = if let Some(state_child) = state.child_by_path(0, &path) {
-                        if let Some(last_index) = state.last_child(state_child) {
-                            (state_child + 1, last_index)
-                        }
-                        else {panic!()}
-                    }
-                    else {
-                        cx.apply_error_animation_missing_state(live_error_origin!(), index, nodes, track, state_id, &path);
-                        path.pop();
-                        reader.skip();
-                        continue;
-                    };
-                    // verify
-                    if let LiveValue::Id(check_id) = &state[first_index].value {
-                        if *check_id != track {
-                            cx.apply_error_wrong_animation_track_used(live_error_origin!(), index, nodes, *path.last().unwrap(), *check_id, track);
-                            path.pop();
-                            reader.skip();
-                            continue;
-                        }
-                    }
-                    else {
-                        panic!()
-                    }
-                    let mut timeline = Vec::new();
-                    timeline.open_array(LiveId(0));
-                    timeline.push_live(live_array!{(track)});
-                    timeline.push_live(state.node_slice(last_index));
-                    timeline.push_live(reader.node_slice());
-                    timeline.last_mut().unwrap().id = id!(0); // clean up property id
-                    timeline.push_live(state.node_slice(last_index));
-                    timeline.close();
-                    state.replace_or_insert_last_node_by_path(0, &path, &timeline);
-                    path.pop();
-                }
-                reader.walk();
-            }
-        }
-        
-        if !any_from_found {
-            // add a bare time info track here
-            state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(time)], live_array!{void});
-        }
-        state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(ended)], live_array!{false});
-        
-        self.swap_in_state(state);
-        
-        self.next_frame = cx.new_next_frame();
-    }
 }

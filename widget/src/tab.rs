@@ -63,6 +63,7 @@ live_register!{
         }
         
         unselected_state: { 
+            track:select,
             from: {all: Play::Forward {duration: 0.3}}
             selected: 0.0,
             close_button: {button_quad: {selected: (selected)}}
@@ -71,6 +72,7 @@ live_register!{
         }
         
         selected_state: {
+            track:select,
             from: {all: Play::Forward {duration: 0.1}}
             selected: [{time: 0.0, value: 1.0}],
         } 
@@ -86,7 +88,7 @@ pub struct Tab {
     name_text: DrawText,
     drag_quad: DrawColor,
     
-    #[track(hover = default_state, selected = unselected_state)]
+    #[default_state(default_state, unselected_state)]
     animator: Animator,
     
     default_state: Option<LivePtr>,
@@ -122,7 +124,6 @@ impl Tab {
             cx,
             is_selected,
             should_animate,
-            id!(selected),
             self.selected_state.unwrap(),
             self.unselected_state.unwrap()
         );
@@ -172,7 +173,7 @@ impl Tab {
         match self.close_button.handle_event(cx, event) {
             TabCloseButtonAction::WasPressed => dispatch_action(cx, TabAction::CloseWasPressed),
             TabCloseButtonAction::HoverIn => block_hover_out = true,
-            TabCloseButtonAction::HoverOut => self.animate_to(cx, id!(hover), self.default_state.unwrap()),
+            TabCloseButtonAction::HoverOut => self.animate_to(cx, self.default_state.unwrap()),
             _ => ()
         };
         
@@ -181,10 +182,10 @@ impl Tab {
                 cx.set_hover_mouse_cursor(MouseCursor::Hand);
                 match event.hover_state {
                     HoverState::In => {
-                        self.animate_to(cx, id!(hover), self.hover_state.unwrap());
+                        self.animate_to(cx, self.hover_state.unwrap());
                     }
                     HoverState::Out => if !block_hover_out {
-                        self.animate_to(cx, id!(hover), self.default_state.unwrap());
+                        self.animate_to(cx, self.default_state.unwrap());
                     }
                     _ => {}
                 }

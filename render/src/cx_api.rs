@@ -3,9 +3,14 @@ use {
         fmt::Write,
         time::Instant,
     },
+    makepad_math::{
+        Vec2
+    },
     crate::{
         cx::Cx,
         events::{
+            DraggedItem,
+            Timer,
             Signal,
             NextFrame,
         },
@@ -19,17 +24,28 @@ use {
         window::{
             CxWindowState
         },
+        menu::{
+            Menu,
+        },
         pass::{
             CxPassDepOf
         },
     }
 };
 
-trait CxPlatformApi{
-    
-}
-
 pub use crate::log;
+
+pub trait CxPlatformApi{
+    fn show_text_ime(&mut self, x: f32, y: f32);
+    fn hide_text_ime(&mut self);
+    fn set_window_outer_size(&mut self, size: Vec2);
+    fn set_window_position(&mut self, pos: Vec2);
+    fn start_timer(&mut self, interval: f64, repeats: bool) -> Timer;
+    fn stop_timer(&mut self, timer: Timer); 
+    fn post_signal(signal: Signal, status: u64); 
+    fn update_menu(&mut self, menu: &Menu);
+    fn start_dragging(&mut self, dragged_item: DraggedItem);
+}
 
 impl Cx {
     
