@@ -310,7 +310,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         if let Some(_) = animator { // apply the default states
             tb.add("    if let Some(file_id) = apply_from.file_id() {");
             for def in &animator_kv.unwrap(){
-                tb.add("    if let Some(index) = nodes.child_by_name(start_index, LiveId(").suf_u64(LiveId::from_str(def).unwrap().0).add(")) {");
+                tb.add("    if let Some(index) = nodes.child_by_path(start_index, &[LiveId(").suf_u64(LiveId::from_str(def).unwrap().0).add("),id!(apply)]) {");
                 tb.add("       self.apply(cx, ApplyFrom::Animate, index, nodes);");
                 tb.add("    }");
             }

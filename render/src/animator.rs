@@ -57,18 +57,23 @@ impl Play {
     pub fn get_ended_time(&self, time: f64) -> (bool, f64, bool) {
         match self {
             Self::Forward {duration, redraw} => {
+                if *duration == 0.0{return (true, 1.0, *redraw)}
                 (time > *duration, time / duration, *redraw)
             },
             Self::Reverse {duration, end, redraw} => {
+                if *duration == 0.0{return (true, 1.0, *redraw)}
                 (time > *duration, end - (time / duration), *redraw)
             },
             Self::Loop {duration, end, redraw} => {
+                if *duration == 0.0{return (true, 1.0, *redraw)}
                 (false, (time / duration) % end, *redraw)
             },
             Self::ReverseLoop {end, duration, redraw} => {
+                if *duration == 0.0{return (true, 1.0, *redraw)}
                 (false, end - (time / duration) % end, *redraw)
             },
             Self::BounceLoop {end, duration, redraw} => {
+                if *duration == 0.0{return (true, 1.0, *redraw)}
                 let mut local_time = (time / duration) % (end * 2.0);
                 if local_time > *end {
                     local_time = 2.0 * end - local_time;
@@ -714,7 +719,7 @@ impl Animator {
     }
     
     // hard cut / initialisate the state to a certain state
-    pub fn cut_to(&mut self, _cx: &mut Cx,  state_id: LiveId, index: usize, nodes: &[LiveNode]) {
+    pub fn cut_to(&mut self, cx: &mut Cx,  state_id: LiveId, index: usize, nodes: &[LiveNode]) {
         // if we dont have a state object, lets create a template
         let mut state = self.swap_out_state();
         
@@ -737,15 +742,21 @@ impl Animator {
             [track]: {state_id: (state_id), ended: true}
         });
         
-        let mut reader = LiveNodeReader::new(index, nodes);
+        let mut reader =if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(apply)){
+            reader
+        }
+        else{
+            cx.apply_animate_missing_apply_block(live_error_origin!(), index, nodes);
+            self.swap_in_state(state);
+            return
+        };
+        
         let mut path = Vec::new();
         path.push(id!(state));
+
         reader.walk();
         while !reader.is_eot() {
-            if reader.depth() == 1 && (reader.id() == id!(from)||reader.id() == id!(track)) {
-                reader.skip();
-            }
-            else if reader.is_array() {
+            if reader.is_array() {
                 path.push(reader.id());
                 if let Some(last_value) = Self::last_keyframe_value_from_array(reader.index(), reader.nodes()) {
                     state.replace_or_insert_first_node_by_path(0, &path, live_array!{
@@ -794,6 +805,14 @@ impl Animator {
     
     pub fn animate_to(&mut self, cx: &mut Cx, state_id: LiveId, index: usize, nodes: &[LiveNode]) {
         
+        let mut reader =if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(apply)){
+            reader
+        }
+        else{
+            cx.apply_animate_missing_apply_block(live_error_origin!(), index, nodes);
+            return
+        };
+
         let mut state = self.swap_out_state();
         if state.len() == 0 { // call cut first
             panic!();
@@ -815,33 +834,27 @@ impl Animator {
             return
         };
         
-        let mut reader = LiveNodeReader::new(index, nodes);
         let mut path = Vec::new();
 
         state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track], live_object!{
             [track]: {state_id: (state_id), ended:false, time:void}
         });
         
+        if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(from)){
+            if let Some(reader) = reader.child_by_name(from_id) {
+                state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(play)], reader.node_slice());
+            }
+            else if let Some(reader) = reader.child_by_name(id!(all)) {
+                state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(play)], reader.node_slice());
+            }
+            state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(time)], live_array!{void});
+        }
+
         path.push(id!(state));
         reader.walk();
-        let mut any_from_found = false;
         while !reader.is_eot() {
-            if reader.depth() == 1 && reader.id() == id!(from) {
-                // we have to store the right 'from' in our 'tracks'
-                if let Some(reader) = reader.child_by_name(from_id) {
-                    state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(play)], reader.node_slice());
-                }
-                else if let Some(reader) = reader.child_by_name(id!(all)) {
-                    state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(play)], reader.node_slice());
-                }
-                state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(time)], live_array!{void});
-                any_from_found = true;
-                reader.skip();
-            }
-            else if reader.depth() == 1 && reader.id() == id!(track){
-                reader.skip();
-            }
-            else if reader.is_array() {
+
+            if reader.is_array() {
                 path.push(reader.id());
                 let (first_index, last_index) = if let Some(state_child) = state.child_by_path(0, &path) {
                     if let Some(last_index) = state.last_child(state_child) {

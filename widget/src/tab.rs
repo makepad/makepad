@@ -52,30 +52,38 @@ live_register!{
         
         default_state: {
             from: {all: Play::Forward {duration: 0.2}}
-            hover: 0.0,
-            bg_quad: {hover: (hover)}
-            name_text: {hover: (hover)}
+            apply: {
+                hover: 0.0,
+                bg_quad: {hover: (hover)}
+                name_text: {hover: (hover)}
+            }
         }
         
         hover_state: {
             from: {all: Play::Forward {duration: 0.1}}
-            hover: [{time: 0.0, value: 1.0}],
+            apply: {
+                hover: [{time: 0.0, value: 1.0}],
+            }
         }
         
-        unselected_state: { 
-            track:select,
+        unselected_state: {
+            track: select,
             from: {all: Play::Forward {duration: 0.3}}
-            selected: 0.0,
-            close_button: {button_quad: {selected: (selected)}}
-            bg_quad: {selected: (selected)}
-            name_text: {selected: (selected)}
+            apply: {
+                selected: 0.0,
+                close_button: {button_quad: {selected: (selected)}}
+                bg_quad: {selected: (selected)}
+                name_text: {selected: (selected)}
+            }
         }
         
         selected_state: {
-            track:select,
+            track: select,
             from: {all: Play::Forward {duration: 0.1}}
-            selected: [{time: 0.0, value: 1.0}],
-        } 
+            apply: {
+                selected: [{time: 0.0, value: 1.0}],
+            }
+        }
     }
 }
 
@@ -166,7 +174,7 @@ impl Tab {
         cx: &mut Cx,
         event: &mut Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, TabAction),
-    ) {  
+    ) {
         self.animator_handle_event(cx, event);
         
         let mut block_hover_out = false;
