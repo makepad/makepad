@@ -14,7 +14,7 @@ use {
         slice::Iter,
         vec::IntoIter
     },
-    makepad_microserde::{SerBin, DeBin}
+    makepad_micro_serde::{SerBin, DeBin, DeBinErr}
 };
 
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq, SerBin, DeBin)]

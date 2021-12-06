@@ -174,8 +174,8 @@ impl DesktopWindow {
                 _ => true
             }; 
             if process_chrome {
-                match PlatformType::Windows { //cx.platform_type {
-                    PlatformType::Windows | PlatformType::Unknown | PlatformType::Linux {..} => {
+                match PlatformType::MsWindows { //cx.platform_type {
+                    PlatformType::MsWindows | PlatformType::Unknown | PlatformType::Linux {..} => {
                         
                         self.caption_bg.begin(cx, Layout {
                             align: Align {fx: 1.0, fy: 0.0},
@@ -228,7 +228,7 @@ impl DesktopWindow {
                         self.caption_bg.end(cx);
                         cx.turtle_new_line();
                     },
-                    PlatformType::Web {..} => {
+                    PlatformType::WebBrowser {..} => {
                         if self.window.is_fullscreen(cx) { // put a bar at the top
                             self.caption_bg.begin(cx, Layout {
                                 align: Align {fx: 0.5, fy: 0.5},

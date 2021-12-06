@@ -9,7 +9,7 @@ use {
     },
     crate::{
         platform::{
-            apple::*,
+            apple::frameworks::*,
             cocoa_app::{
                 CocoaApp,
                 get_cocoa_app
@@ -26,7 +26,7 @@ use {
         menu::{
             CommandId
         },
-        events::{
+        event::{
             Signal,
             Event,
             DragState,
