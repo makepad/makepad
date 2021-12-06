@@ -8,7 +8,6 @@ use {
     },
     makepad_math::{
         Vec2,
-        Rect
     },
     crate::{
         platform::{
@@ -483,8 +482,6 @@ impl CocoaApp {
                             window_id: cocoa_window.window_id,
                             scroll: Vec2 {x: -dx as f32, y: -dy as f32},
                             abs: cocoa_window.last_mouse_pos,
-                            rel: cocoa_window.last_mouse_pos,
-                            rect: Rect::default(),
                             input_type: FingerInputType::Mouse,
                             modifiers: get_event_key_modifier(ns_event),
                             handled_x: false,
@@ -499,8 +496,6 @@ impl CocoaApp {
                             window_id: cocoa_window.window_id,
                             scroll: Vec2 {x: -dx as f32 * 32., y: -dy as f32 * 32.},
                             abs: cocoa_window.last_mouse_pos,
-                            rel: cocoa_window.last_mouse_pos,
-                            rect: Rect::default(),
                             input_type: FingerInputType::Mouse,
                             modifiers: get_event_key_modifier(ns_event),
                             handled_x: false,
