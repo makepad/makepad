@@ -315,7 +315,7 @@ impl ScrollBar {
                 return self.make_scroll_event()
             }
             
-            match event.hits(cx, self.bar_quad.draw_vars.area, HitOpt::default()) {
+            match event.hits(cx, self.bar_quad.draw_vars.area) {
                 HitEvent::FingerDown(fe) => {
                     self.animate_to(cx, self.pressed_state.unwrap());
                     let rel = match self.axis {

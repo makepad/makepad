@@ -526,7 +526,7 @@ impl CodeEditorView {
             }
         }
         
-        match event.hits(cx, self.scroll_view.area(), HitOpt::default()) {
+        match event.hits(cx, self.scroll_view.area()) {
             HitEvent::FingerDown(f) => {
                 self.reset_caret_blink(cx);
                 // TODO: How to handle key focus?

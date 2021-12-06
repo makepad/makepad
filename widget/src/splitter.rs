@@ -143,12 +143,12 @@ impl Splitter {
         dispatch_action: &mut dyn FnMut(&mut Cx, SplitterAction),
     ) {
         self.animator_handle_event(cx, event);
-        match event.hits(
+        match event.hits_with_options(
             cx,
             self.bar_quad.draw_vars.area,
-            HitOpt {
+            HitOptions {
                 margin: Some(self.margin()),
-                ..HitOpt::default()
+                ..HitOptions::default()
             },
         ) {
             HitEvent::FingerHover(f) => {

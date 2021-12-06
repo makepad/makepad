@@ -342,7 +342,7 @@ impl FileTreeNode {
         if self.animator_handle_event(cx, event) {
             self.bg_quad.draw_vars.redraw_view(cx);
         }
-        match event.hits(cx, self.bg_quad.draw_vars.area, HitOpt::default()) {
+        match event.hits(cx, self.bg_quad.draw_vars.area) {
             HitEvent::FingerHover(f) => {
                 cx.set_hover_mouse_cursor(MouseCursor::Hand);
                 match f.hover_state {
