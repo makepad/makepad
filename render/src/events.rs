@@ -61,8 +61,6 @@ impl Default for FingerInputType {
 pub struct FingerDownEvent {
     pub window_id: usize,
     pub abs: Vec2,
-    pub rel: Vec2,
-    pub rect: Rect,
     pub digit: usize,
     pub tap_count: u32,
     pub handled: bool,
@@ -72,21 +70,52 @@ pub struct FingerDownEvent {
 }
 
 #[derive(Clone, Default, Debug, PartialEq)]
+pub struct FingerDownHitEvent {
+    pub rel: Vec2,
+    pub rect: Rect,
+    pub event: FingerDownEvent
+}
+
+impl std::ops::Deref for FingerDownHitEvent{
+    type Target = FingerDownEvent;
+    fn deref(&self) -> &Self::Target {&self.event}
+}
+
+impl std::ops::DerefMut for FingerDownHitEvent{
+    fn deref_mut(&mut self) -> &mut  Self::Target {&mut self.event}
+}
+
+#[derive(Clone, Default, Debug, PartialEq)]
 pub struct FingerMoveEvent {
     pub window_id: usize,
     pub abs: Vec2,
-    pub abs_start: Vec2,
-    pub rel: Vec2,
-    pub rel_start: Vec2,
-    pub rect: Rect,
-    pub is_over: bool,
     pub digit: usize,
     pub input_type: FingerInputType,
     pub modifiers: KeyModifiers,
     pub time: f64
 }
 
-impl FingerMoveEvent {
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct FingerMoveHitEvent {
+    pub abs_start: Vec2,
+    pub rel: Vec2,
+    pub rel_start: Vec2,
+    pub rect: Rect,
+    pub is_over: bool,
+    pub event: FingerMoveEvent,
+}
+
+impl std::ops::Deref for FingerMoveHitEvent{
+    type Target = FingerMoveEvent;
+    fn deref(&self) -> &Self::Target {&self.event}
+}
+
+impl std::ops::DerefMut for FingerMoveHitEvent{
+    fn deref_mut(&mut self) -> &mut  Self::Target {&mut self.event}
+}
+
+
+impl FingerMoveHitEvent {
     pub fn move_distance(&self) -> f32 {
         ((self.abs_start.x - self.abs.x).powf(2.) + (self.abs_start.y - self.abs.y).powf(2.)).sqrt()
     }
@@ -96,15 +125,29 @@ impl FingerMoveEvent {
 pub struct FingerUpEvent {
     pub window_id: usize,
     pub abs: Vec2,
-    pub abs_start: Vec2,
-    pub rel: Vec2,
-    pub rel_start: Vec2,
-    pub rect: Rect,
     pub digit: usize,
-    pub is_over: bool,
     pub input_type: FingerInputType,
     pub modifiers: KeyModifiers,
     pub time: f64
+}
+
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct FingerUpHitEvent {
+    pub rel: Vec2,
+    pub abs_start: Vec2,
+    pub rel_start: Vec2,
+    pub rect: Rect,
+    pub is_over: bool,
+    pub event: FingerUpEvent
+}
+
+impl std::ops::Deref for FingerUpHitEvent{
+    type Target = FingerUpEvent;
+    fn deref(&self) -> &Self::Target {&self.event}
+}
+
+impl std::ops::DerefMut for FingerUpHitEvent{
+    fn deref_mut(&mut self) -> &mut  Self::Target {&mut self.event}
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -125,13 +168,27 @@ pub struct FingerHoverEvent {
     pub window_id: usize,
     pub digit: usize,
     pub abs: Vec2,
+    pub handled: bool,
+    pub modifiers: KeyModifiers,
+    pub time: f64
+}
+
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct FingerHoverHitEvent {
     pub rel: Vec2,
     pub rect: Rect,
     pub any_down: bool,
-    pub handled: bool,
     pub hover_state: HoverState,
-    pub modifiers: KeyModifiers,
-    pub time: f64
+    pub event: FingerHoverEvent
+}
+
+impl std::ops::Deref for FingerHoverHitEvent{
+    type Target = FingerHoverEvent;
+    fn deref(&self) -> &Self::Target {&self.event}
+}
+
+impl std::ops::DerefMut for FingerHoverHitEvent{
+    fn deref_mut(&mut self) -> &mut  Self::Target {&mut self.event}
 }
 
 #[derive(Clone, Default, Debug, PartialEq)]
@@ -139,16 +196,30 @@ pub struct FingerScrollEvent {
     pub window_id: usize,
     pub digit: usize,
     pub abs: Vec2,
-    pub rel: Vec2,
-    pub rect: Rect,
     pub scroll: Vec2,
     pub input_type: FingerInputType,
-    //pub is_wheel: bool,
     pub handled_x: bool,
     pub handled_y: bool,
     pub modifiers: KeyModifiers,
     pub time: f64
 }
+
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct FingerScrollHitEvent {
+    pub rel: Vec2,
+    pub rect: Rect,
+    pub event: FingerScrollEvent
+}
+
+impl std::ops::Deref for FingerScrollHitEvent{
+    type Target = FingerScrollEvent;
+    fn deref(&self) -> &Self::Target {&self.event}
+}
+
+impl std::ops::DerefMut for FingerScrollHitEvent{
+    fn deref_mut(&mut self) -> &mut  Self::Target {&mut self.event}
+}
+
 
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct WindowGeomChangeEvent {
@@ -387,11 +458,11 @@ pub enum HitEvent<'a>{
     KeyUp(KeyEvent),
     TextInput(TextInputEvent),
     TextCopy(&'a mut TextCopyEvent),
-    FingerScroll(FingerScrollEvent),
-    FingerDown(FingerDownEvent),
-    FingerMove(FingerMoveEvent),
-    FingerHover(FingerHoverEvent),
-    FingerUp(FingerUpEvent),
+    FingerScroll(FingerScrollHitEvent),
+    FingerDown(FingerDownHitEvent),
+    FingerMove(FingerMoveHitEvent),
+    FingerHover(FingerHoverHitEvent),
+    FingerUp(FingerUpHitEvent),
     None
 }
 
@@ -696,10 +767,10 @@ impl Event {
                 let rect = area.get_rect(&cx);
                 if rect_contains_with_margin(&rect, fe.abs, &opt.margin) {
                     //fe.handled = true;
-                    return HitEvent::FingerScroll(FingerScrollEvent {
+                    return HitEvent::FingerScroll(FingerScrollHitEvent {
                         rel: fe.abs - rect.pos,
                         rect: rect,
-                        ..fe.clone()
+                        event: fe.clone()
                     })
                 }
             },
@@ -716,27 +787,28 @@ impl Event {
                     }
                     if !fe.handled && rect_contains_with_margin(&rect, fe.abs, &opt.margin) {
                         fe.handled = true;
-                        if let HoverState::Out = fe.hover_state {
+                        //if let HoverState::Out = fe.hover_state {
                             //    cx.finger_over_last_area = Area::Empty;
-                        }
-                        else {
+                        //}
+                        //else {
                             cx.fingers[fe.digit].over_last = area;
-                        }
-                        return HitEvent::FingerHover(FingerHoverEvent {
+                        // }
+                        return HitEvent::FingerHover(FingerHoverHitEvent {
                             rel: area.abs_to_rel(cx, fe.abs),
                             rect: rect,
                             any_down: any_down,
-                            ..fe.clone()
+                            hover_state: HoverState::Over,
+                            event:fe.clone()
                         })
                     }
                     else {
                         //self.was_over_last_call = false;
-                        return HitEvent::FingerHover(FingerHoverEvent {
+                        return HitEvent::FingerHover(FingerHoverHitEvent {
                             rel: area.abs_to_rel(cx, fe.abs),
                             rect: rect,
                             any_down: any_down,
                             hover_state: HoverState::Out,
-                            ..fe.clone()
+                            event:fe.clone()
                         })
                     }
                 }
@@ -752,12 +824,12 @@ impl Event {
                         cx.fingers[fe.digit].over_last = area;
                         fe.handled = true;
                         //self.was_over_last_call = true;
-                        return HitEvent::FingerHover(FingerHoverEvent {
+                        return HitEvent::FingerHover(FingerHoverHitEvent {
                             rel: area.abs_to_rel(cx, fe.abs),
                             rect: rect,
                             any_down: any_down,
                             hover_state: HoverState::In,
-                            ..fe.clone()
+                            event:fe.clone()
                         })
                     }
                 }
@@ -768,13 +840,13 @@ impl Event {
                     let abs_start = cx.fingers[fe.digit].down_abs_start;
                     let rel_start = cx.fingers[fe.digit].down_rel_start;
                     let rect = area.get_rect(&cx);
-                    return HitEvent::FingerMove(FingerMoveEvent {
+                    return HitEvent::FingerMove(FingerMoveHitEvent {
                         abs_start: abs_start,
                         rel: area.abs_to_rel(cx, fe.abs),
                         rel_start: rel_start,
                         rect: rect,
                         is_over: rect_contains_with_margin(&rect, fe.abs, &opt.margin),
-                        ..fe.clone()
+                        event:fe.clone()
                     })
                 }
             },
@@ -795,10 +867,10 @@ impl Event {
                         cx.fingers[fe.digit].down_abs_start = fe.abs;
                         cx.fingers[fe.digit].down_rel_start = rel;
                         fe.handled = true;
-                        return HitEvent::FingerDown(FingerDownEvent {
+                        return HitEvent::FingerDown(FingerDownHitEvent {
                             rel: rel,
                             rect: rect,
-                            ..fe.clone()
+                            event:fe.clone()
                         })
                     }
                 }
@@ -809,13 +881,13 @@ impl Event {
                     let abs_start = cx.fingers[fe.digit].down_abs_start;
                     let rel_start = cx.fingers[fe.digit].down_rel_start;
                     let rect = area.get_rect(&cx);
-                    return HitEvent::FingerUp(FingerUpEvent {
+                    return HitEvent::FingerUp(FingerUpHitEvent {
                         is_over: rect.contains(fe.abs),
                         abs_start: abs_start,
                         rel_start: rel_start,
                         rel: area.abs_to_rel(cx, fe.abs),
                         rect: rect,
-                        ..fe.clone()
+                        event:fe.clone()
                     })
                 }
             },

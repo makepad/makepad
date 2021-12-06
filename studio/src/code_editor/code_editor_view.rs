@@ -527,7 +527,7 @@ impl CodeEditorView {
         }
         
         match event.hits(cx, self.scroll_view.area(), HitOpt::default()) {
-            HitEvent::FingerDown(FingerDownEvent {rel, modifiers, ..}) => {
+            HitEvent::FingerDown(f) => {
                 self.reset_caret_blink(cx);
                 // TODO: How to handle key focus?
                 cx.set_key_focus(self.scroll_view.area());
@@ -536,8 +536,8 @@ impl CodeEditorView {
                     let session = &state.sessions_by_session_id[session_id];
                     let document = &state.documents_by_document_id[session.document_id];
                     let document_inner = document.inner.as_ref().unwrap();
-                    let position = self.position(&document_inner.text, rel);
-                    match modifiers {
+                    let position = self.position(&document_inner.text, f.rel);
+                    match f.modifiers {
                         KeyModifiers {control: true, ..} => {
                             state.add_cursor(session_id, position);
                         }
@@ -551,7 +551,7 @@ impl CodeEditorView {
             HitEvent::FingerHover(_) => {
                 cx.set_hover_mouse_cursor(MouseCursor::Text);
             }
-            HitEvent::FingerMove(FingerMoveEvent {rel, ..}) => {
+            HitEvent::FingerMove(FingerMoveHitEvent {rel, ..}) => {
                 if let Some(session_id) = self.session_id {
                     let session = &state.sessions_by_session_id[session_id];
                     let document = &state.documents_by_document_id[session.document_id];
