@@ -92,6 +92,7 @@ live_register!{
         }
         
         unselected_state: {
+            track: select,
             from: {all: Play::Forward {duration: 0.1, redraw: true}}
             selected: 0.0,
             bg_quad: {selected: (selected)}
@@ -100,11 +101,13 @@ live_register!{
         }
         
         selected_state: {
+            track: select,
             from: {all: Play::Forward {duration: 0.1, redraw: true}}
             selected: [{time: 0.0, value: 1.0}],
         } 
         
         closed_state: {
+            track: open,
             from: {all: Play::Forward {duration: 0.3, redraw: true}}
             opened: [{value: 0.0, ease: Ease::OutExp}],
             bg_quad: {opened: (opened)}
@@ -113,6 +116,7 @@ live_register!{
         }
         
         opened_state: {
+            track: open,
             from: {all: Play::Forward {duration: 0.3, redraw: true}}
             opened: [{value: 1.0, ease: Ease::OutExp}],
         }
@@ -183,11 +187,7 @@ pub struct FileTreeNode {
     name_text: DrawNameText,
     layout: Layout,
     
-    #[track(
-        hover = default_state,
-        selected = unselected_state,
-        opened = closed_state
-    )]
+    #[default_state(default_state, unselected_state, closed_state)]
     animator: Animator,
     
     indent_width: f32,
@@ -303,7 +303,6 @@ impl FileTreeNode {
             cx,
             is_selected,
             should_animate,
-            id!(selected),
             self.selected_state.unwrap(),
             self.unselected_state.unwrap()
         )
@@ -319,7 +318,6 @@ impl FileTreeNode {
             cx,
             is_open,
             should_animate,
-            id!(opened),
             self.opened_state.unwrap(),
             self.closed_state.unwrap()
         );
@@ -339,10 +337,10 @@ impl FileTreeNode {
                 cx.set_hover_mouse_cursor(MouseCursor::Hand);
                 match event.hover_state {
                     HoverState::In => {
-                        self.animate_to(cx, id!(hover), self.hover_state.unwrap());
+                        self.animate_to(cx, self.hover_state.unwrap());
                     }
                     HoverState::Out => {
-                        self.animate_to(cx, id!(hover), self.default_state.unwrap());
+                        self.animate_to(cx, self.default_state.unwrap());
                     }
                     _ => {}
                 }
@@ -353,14 +351,14 @@ impl FileTreeNode {
                 }
             }
             Event::FingerDown(_event) => {
-                self.animate_to(cx, id!(selected), self.selected_state.unwrap());
+                self.animate_to(cx, self.selected_state.unwrap());
                 if self.is_folder {
                     if self.opened > 0.2 {
-                        self.animate_to(cx, id!(opened), self.closed_state.unwrap());
+                        self.animate_to(cx, self.closed_state.unwrap());
                         dispatch_action(cx, FileTreeNodeAction::Closing);
                     }
                     else {
-                        self.animate_to(cx, id!(opened), self.opened_state.unwrap());
+                        self.animate_to(cx, self.opened_state.unwrap());
                         dispatch_action(cx, FileTreeNodeAction::Opening);
                     }
                     

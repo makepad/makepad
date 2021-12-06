@@ -94,9 +94,9 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         
          // alright now. we have a field
         for field in &mut fields {
-            if field.attrs.len() == 1 &&&  field.attrs[0].name != "live" && field.attrs[0].name != "calc" && field.attrs[0].name != "rust" && field.attrs[0].name != "track" {
+            if field.attrs.len() == 1 &&&  field.attrs[0].name != "live" && field.attrs[0].name != "calc" && field.attrs[0].name != "rust" && field.attrs[0].name != "default_state" {
                 return error_result(&format!("Field {} does not have a live, calc or rust attribute", field.name));
-            }
+            } 
             if field.attrs.len() == 0{ // insert a default
                 field.attrs.push(Attribute{name:"live".to_string(),args:None});
             }
@@ -118,41 +118,39 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         }
         
         let animator_kv = if let Some(animator) = animator {
-            let kv = if let Some(attr) = animator.attrs.iter().find( | attr | attr.name == "track") {
+            let kv = if let Some(attr) = animator.attrs.iter().find( | attr | attr.name == "default_state") {
                 if let Some(args) = &attr.args {
                     let mut parser = TokenParser::new(args.clone());
                     // ok its key:value comma
                     let mut kv = Vec::new();
                     while !parser.eat_eot() {
-                        let track = parser.expect_any_ident() ?;
-                        parser.expect_punct_alone('=')?;
                         let def = parser.expect_any_ident()?;
                         parser.eat_punct_alone(',');
-                        kv.push((track,def));
+                        kv.push(def);
                     }
                     kv
                 }
                 else {
-                    return error_result("track attribute needs arguments");
+                    return error_result("default_state attribute needs arguments");
                 }
             }
             else {
-                return error_result("Animator needs a track(base:state_default) attribute");
+                return error_result("Animator needs a default_state(base:state_default) attribute");
             };
             
             tb.add("impl").stream(generic.clone());
             tb.add("LiveAnimate for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
             tb.add("    fn init_animator(&mut self, cx: &mut Cx) {");
-            for (track,def) in &kv{
-                tb.add("    self.animator.cut_to_live(cx,LiveId(").suf_u64(LiveId::from_str(track).unwrap().0).add("),self.").ident(def).add(".unwrap());");
+            for def in &kv{
+                tb.add("    self.animator.cut_to_live(cx,self.").ident(def).add(".unwrap());");
             }
             tb.add("    }");            
 
-            tb.add("    fn animate_to(&mut self, cx: &mut Cx, track:LiveId, state: LivePtr) {");
+            tb.add("    fn animate_to(&mut self, cx: &mut Cx, state: LivePtr) {");
             tb.add("        if self.animator.state.is_none() {");
             tb.add("            self.init_animator(cx);");
             tb.add("         }");
-            tb.add("         self.animator.animate_to_live(cx, track, state);");
+            tb.add("         self.animator.animate_to_live(cx, state);");
             tb.add("    }");
 
             tb.add("    fn apply_animator(&mut self, cx: &mut Cx) {");
@@ -162,24 +160,24 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
             tb.add("    }");
 
 
-            tb.add("    fn animate_cut(&mut self, cx: &mut Cx, track:LiveId, state: LivePtr) {");
+            tb.add("    fn animate_cut(&mut self, cx: &mut Cx, state: LivePtr) {");
             tb.add("        if self.animator.state.is_none() {");
             tb.add("            self.init_animator(cx);");
             tb.add("         }");
-            tb.add("         self.animator.cut_to_live(cx, track, state);");
+            tb.add("         self.animator.cut_to_live(cx, state);");
             tb.add("         self.apply_animator(cx);");
             tb.add("    }");
 
 
-            tb.add("    fn animator_is_in_state(&mut self, cx: &mut Cx, track:LiveId, state: LivePtr)->bool{");
+            tb.add("    fn animator_is_in_state(&mut self, cx: &mut Cx, state: LivePtr)->bool{");
             tb.add("        if self.animator.state.is_none() {");
-            for (track,def) in &kv{ 
-                tb.add("         if track == LiveId(").suf_u64(LiveId::from_str(track).unwrap().0).add(") && state == self.").ident(def).add(".unwrap(){ return true }");
+            for def in &kv{ 
+                tb.add("         if state == self.").ident(def).add(".unwrap(){ return true }");
             }
             tb.add("             return false");
             tb.add("         }");
             tb.add("         else{");
-            tb.add("             return self.animator.is_in_state(cx, track, state)");
+            tb.add("             return self.animator.is_in_state(cx, state)");
             tb.add("         }");
             tb.add("    }");
 
@@ -311,7 +309,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         
         if let Some(_) = animator { // apply the default states
             tb.add("    if let Some(file_id) = apply_from.file_id() {");
-            for (_,def) in &animator_kv.unwrap(){
+            for def in &animator_kv.unwrap(){
                 tb.add("    if let Some(index) = nodes.child_by_name(start_index, LiveId(").suf_u64(LiveId::from_str(def).unwrap().0).add(")) {");
                 tb.add("       self.apply(cx, ApplyFrom::Animate, index, nodes);");
                 tb.add("    }");

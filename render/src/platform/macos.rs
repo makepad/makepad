@@ -15,6 +15,7 @@ use {
         },
         menu::Menu,
         cursor::MouseCursor,
+        cx_api::{CxPlatformApi},
         cx::{Cx, PlatformType},
         window::{CxWindowState, CxWindowCmd},
         pass::CxPassDepOf,
@@ -294,42 +295,44 @@ impl Cx {
             }
         })
     }
+}
+
+impl CxPlatformApi for Cx{
     
-    pub fn show_text_ime(&mut self, x: f32, y: f32) {
+    fn show_text_ime(&mut self, x: f32, y: f32) {
         self.platform.set_ime_position = Some(Vec2 {x: x, y: y});
     }
     
-    pub fn hide_text_ime(&mut self) {
+    fn hide_text_ime(&mut self) {
     }
     
-    pub fn set_window_outer_size(&mut self, size: Vec2) {
+    fn set_window_outer_size(&mut self, size: Vec2) {
         self.platform.set_window_outer_size = Some(size);
     }
     
-    pub fn set_window_position(&mut self, pos: Vec2) {
+    fn set_window_position(&mut self, pos: Vec2) {
         self.platform.set_window_position = Some(pos);
     }
     
-    pub fn start_timer(&mut self, interval: f64, repeats: bool) -> Timer {
+    fn start_timer(&mut self, interval: f64, repeats: bool) -> Timer {
         self.timer_id += 1;
         self.platform.start_timer.push((self.timer_id, interval, repeats));
         Timer {timer_id: self.timer_id}
     }
     
-    pub fn stop_timer(&mut self, timer: &mut Timer) {
+    fn stop_timer(&mut self, timer: Timer) {
         if timer.timer_id != 0 {
             self.platform.stop_timer.push(timer.timer_id);
-            timer.timer_id = 0;
         }
     }
     
-    pub fn post_signal(signal: Signal, status: u64) {
+    fn post_signal(signal: Signal, status: u64) {
         if signal.signal_id != 0 {
             CocoaApp::post_signal(signal.signal_id, status);
         }
     }
     
-    pub fn update_menu(&mut self, menu: &Menu) {
+    fn update_menu(&mut self, menu: &Menu) {
         // lets walk the menu and do the cocoa equivalents
         let platform = &mut self.platform;
         if platform.last_menu.is_none() || platform.last_menu.as_ref().unwrap() != menu {
@@ -338,7 +341,7 @@ impl Cx {
         }
     }
     
-    pub fn start_dragging(&mut self, dragged_item: DraggedItem) {
+    fn start_dragging(&mut self, dragged_item: DraggedItem) {
         assert!(self.platform.start_dragging.is_none());
         self.platform.start_dragging = Some(dragged_item);
     }
