@@ -107,7 +107,6 @@ impl Default for Axis {
     }
 }
 
-
 #[derive(Copy, Clone, Debug, Live, LiveHook)]
 pub enum Width {
     #[pick] Filled,
@@ -642,12 +641,12 @@ impl Cx {
             Vec2::default()
         }
     }
-    
+    /*
     pub fn set_turtle_padding(&mut self, padding: Padding) {
         if let Some(turtle) = self.turtles.last_mut() {
             turtle.layout.padding = padding
         }
-    }
+    }*/
     
     pub fn visible_in_turtle(&self, geom: Rect, scroll: Vec2) -> bool {
         if let Some(turtle) = self.turtles.last() {
@@ -804,7 +803,6 @@ impl Cx {
             };
         }
     }
-    
     
     fn _get_width_left(&self, abs: bool, abs_size: f32) -> f32 {
         if !abs {

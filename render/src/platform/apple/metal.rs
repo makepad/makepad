@@ -10,11 +10,11 @@ use {
     makepad_live_compiler::*,
     crate::{
         platform::{
-            apple::*,
+            apple::frameworks::*,
             cocoa_app::CocoaApp,
             cocoa_window::CocoaWindow,
         },
-        events::WindowGeom,
+        event::WindowGeom,
         cx::Cx,
         pass::{PassClearColor, PassClearDepth},
         texture::{

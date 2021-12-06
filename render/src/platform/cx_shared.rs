@@ -8,7 +8,7 @@ use {
         pass::{
             CxPassDepOf
         },
-        events::{
+        event::{
             SignalEvent,
             Event,
             KeyEvent,
@@ -189,10 +189,7 @@ impl Cx {
         self.call_event_handler(&mut Event::Draw);
         
         self.in_redraw_cycle = false;
-        /*
-        if self.live_styles.style_stack.len()>0 {
-            panic!("Style stack disaligned, forgot a cx.end_style()");
-        }*/
+
         if self.view_stack.len()>0 {
             panic!("View stack disaligned, forgot an end_view(cx)");
         }
@@ -205,7 +202,6 @@ impl Cx {
         if self.turtles.len()>0 {
             panic!("Turtle stack disaligned, forgot an end_turtle()");
         }
-        //self.profile();
     }
     
     pub(crate) fn call_next_frame_event(&mut self, time: f64)
