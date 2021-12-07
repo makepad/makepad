@@ -3,6 +3,7 @@ mod button_logic;
 mod button;
 mod desktop_button;
 mod desktop_window;
+mod scroll_shadow;
 mod scroll_bar;
 mod scroll_view;
 mod frame;
@@ -23,10 +24,12 @@ pub use crate::{
     button::{Button},
     desktop_window::{DesktopWindow}, 
     scroll_view::{ScrollView},
+    scroll_shadow::{ScrollShadow},
     frame::{Frame, FrameActions}
 };
 
 pub fn live_register(cx:&mut Cx){
+    crate::scroll_shadow::live_register(cx);
     crate::button::live_register(cx);
     crate::desktop_button::live_register(cx);
     crate::desktop_window::live_register(cx);
