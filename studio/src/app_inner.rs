@@ -1,7 +1,7 @@
 use {
     crate::{
-        appio::AppIO,
-        appstate::{PanelKind, TabKind, AppState, SplitPanel, TabPanel, Panel, Tab},
+        app_io::AppIO,
+        app_state::{PanelKind, TabKind, AppState, SplitPanel, TabPanel, Panel, Tab},
         editor_state::{SessionId},
         code_editor::{
             code_editors::{CodeEditors},
