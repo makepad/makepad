@@ -1,7 +1,7 @@
 use {
     crate::{
-        appinner::AppInner,
-        appstate::AppState
+        app_inner::AppInner,
+        app_state::AppState
     },
     makepad_render::*,
 };
@@ -24,7 +24,7 @@ impl App {
         crate::code_editor::code_editor_view::live_register(cx);
         crate::code_editor::code_editors::live_register(cx);
         crate::design_editor::design_editor::live_register(cx);
-        crate::appinner::live_register(cx);
+        crate::app_inner::live_register(cx);
     }
     
     pub fn new_app(cx: &mut Cx) -> Self {

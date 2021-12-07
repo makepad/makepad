@@ -697,7 +697,6 @@ impl CodeEditorView {
                 if let Some(session_id) = self.session_id {
                     state.move_cursors_left(session_id, shift);
                     self.keep_last_cursor_in_view(cx, state);
-                    self.keep_last_cursor_in_view(cx, state);
                     self.scroll_view.redraw(cx);
                 }
             }
