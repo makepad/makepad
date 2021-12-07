@@ -135,13 +135,13 @@ impl Cx {
     pub fn live_expand(&mut self) {
         // lets expand the f'er
         let mut errs = Vec::new();
-        //self.profile_start(0);    
+        self.profile_start(0);    
         let mut live_registry = self.live_registry.borrow_mut();
         live_registry.expand_all_documents(&mut errs);
         for err in errs {
             println!("Error expanding live file {}", live_registry.live_error_to_live_file_error(err));
         } 
-        //self.profile_end(0);
+        self.profile_end(0);
     }
     
     pub fn register_live_body(&mut self, live_body: LiveBody) {

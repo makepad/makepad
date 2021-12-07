@@ -3,8 +3,8 @@ use crate::scroll_bar::*;
 
 live_register!{
     ScrollView:{{ScrollView}}{
-        show_h:true,
-        show_v:true,
+        h_show:true,
+        v_show:true,
         view:{debug_id:scroll_inner_view}
     }
 }
@@ -22,10 +22,10 @@ impl std::ops::DerefMut for ScrollView {
 #[derive(Live, LiveHook)]
 pub struct ScrollView{
     pub view:View,
-    pub show_h:bool,
-    pub show_v:bool,
-    pub scroll_h:ScrollBar,
-    pub scroll_v:ScrollBar,
+    pub h_show:bool,
+    pub v_show:bool,
+    pub h_scroll:ScrollBar,
+    pub v_scroll:ScrollBar,
 }
 
 impl ScrollView{
@@ -34,11 +34,11 @@ impl ScrollView{
         let mut ret_h = ScrollBarEvent::None;
         let mut ret_v = ScrollBarEvent::None;
         
-        if self.show_h {
-            ret_h = self.scroll_h.handle_event(cx, event);
+        if self.h_show {
+            ret_h = self.h_scroll.handle_event(cx, event);
         }
-        if self.show_v {
-            ret_v = self.scroll_v.handle_event(cx, event);
+        if self.v_show {
+            ret_v = self.v_scroll.handle_event(cx, event);
         }
    
         match ret_h {
@@ -66,16 +66,16 @@ impl ScrollView{
     pub fn set_scroll_pos(&mut self, cx: &mut Cx, pos: Vec2) -> bool {
         //let view_area = Area::DrawList(DrawListArea{draw_list_id:draw_list_id, redraw_id:cx.redraw_id});
         let mut changed = false;
-        if self.show_h {
-            if self.scroll_h.set_scroll_pos(cx, pos.x) {
-                let scroll_pos = self.scroll_h.get_scroll_pos();
+        if self.h_show {
+            if self.h_scroll.set_scroll_pos(cx, pos.x) {
+                let scroll_pos = self.h_scroll.get_scroll_pos();
                 cx.set_view_scroll_x(self.view.view_id, scroll_pos);
                 changed = true;
             }
         }
-        if self.show_v {
-            if self.scroll_v.set_scroll_pos(cx, pos.y) {
-                let scroll_pos = self.scroll_v.get_scroll_pos();
+        if self.v_show {
+            if self.v_scroll.set_scroll_pos(cx, pos.y) {
+                let scroll_pos = self.v_scroll.get_scroll_pos();
                 cx.set_view_scroll_y(self.view.view_id, scroll_pos);
                 changed = true;
             }
@@ -86,49 +86,49 @@ impl ScrollView{
     
     pub fn get_scroll_view_total(&mut self) -> Vec2 {
         Vec2 {
-            x: if self.show_h {
-                self.scroll_h.get_scroll_view_total()
+            x: if self.h_show {
+                self.h_scroll.get_scroll_view_total()
             }else {0.},
-            y: if self.show_v {
-                self.scroll_v.get_scroll_view_total()
+            y: if self.v_show {
+                self.v_scroll.get_scroll_view_total()
             }else {0.}
         }
     }
     
     pub fn scroll_into_view(&mut self, cx: &mut Cx, rect: Rect) {
-        if self.show_h {
-            self.scroll_h.scroll_into_view(cx, rect.pos.x, rect.size.x, true);
+        if self.h_show {
+            self.h_scroll.scroll_into_view(cx, rect.pos.x, rect.size.x, true);
         }
-        if self.show_v{
-            self.scroll_v.scroll_into_view(cx, rect.pos.y, rect.size.y, true);
+        if self.v_show{
+            self.v_scroll.scroll_into_view(cx, rect.pos.y, rect.size.y, true);
         }
     }
     
     pub fn scroll_into_view_no_smooth(&mut self, cx: &mut Cx, rect: Rect) {
-        if self.show_h {
-            self.scroll_h.scroll_into_view(cx, rect.pos.x, rect.size.x, false);
+        if self.h_show {
+            self.h_scroll.scroll_into_view(cx, rect.pos.x, rect.size.x, false);
         }
-        if self.show_v {
-            self.scroll_v.scroll_into_view(cx, rect.pos.y, rect.size.y, false);
+        if self.v_show {
+            self.v_scroll.scroll_into_view(cx, rect.pos.y, rect.size.y, false);
         }
     }
     
     pub fn scroll_into_view_abs(&mut self, cx: &mut Cx, rect: Rect) {
         let self_rect = self.get_rect(cx); 
-        if self.show_h {
-            self.scroll_h.scroll_into_view(cx, rect.pos.x - self_rect.pos.x, rect.size.x, true);
+        if self.h_show {
+            self.h_scroll.scroll_into_view(cx, rect.pos.x - self_rect.pos.x, rect.size.x, true);
         }
-        if self.show_v {
-            self.scroll_v.scroll_into_view(cx, rect.pos.y  - self_rect.pos.y, rect.size.y, true);
+        if self.v_show {
+            self.v_scroll.scroll_into_view(cx, rect.pos.y  - self_rect.pos.y, rect.size.y, true);
         }
     }
     
     pub fn set_scroll_target(&mut self, cx: &mut Cx, pos: Vec2) {
-        if self.show_h {
-            self.scroll_h.set_scroll_target(cx, pos.x);
+        if self.h_show {
+            self.h_scroll.set_scroll_target(cx, pos.x);
         }
-        if self.show_v {
-           self.scroll_v.set_scroll_target(cx, pos.y);
+        if self.v_show {
+           self.v_scroll.set_scroll_target(cx, pos.y);
         }
     }
     
@@ -147,13 +147,13 @@ impl ScrollView{
             rect_now.size.x = view_total.x;
         }
         
-        if self.show_h {
-            let scroll_pos = self.scroll_h.draw_scroll_bar(cx, Axis::Horizontal, view_area, rect_now, view_total);
+        if self.h_show {
+            let scroll_pos = self.h_scroll.draw_scroll_bar(cx, Axis::Horizontal, view_area, rect_now, view_total);
             cx.set_view_scroll_x(view_id, scroll_pos);
         }
-        if self.show_v {
+        if self.v_show {
             //println!("SET SCROLLBAR {} {}", rect_now.h, view_total.y);
-            let scroll_pos = self.scroll_v.draw_scroll_bar(cx, Axis::Vertical, view_area, rect_now, view_total);
+            let scroll_pos = self.v_scroll.draw_scroll_bar(cx, Axis::Vertical, view_area, rect_now, view_total);
             cx.set_view_scroll_y(view_id, scroll_pos);
         }
         
