@@ -57,7 +57,7 @@ live_register!{
     
     CodeEditorView: {{CodeEditorView}} {
         scroll_view: {
-            scroll_v:{smoothing:0.15},
+            v_scroll: {smoothing: 0.15},
             view: {
                 debug_id: code_editor_view
             }
@@ -76,19 +76,19 @@ live_register!{
             }
         }
         
-        linenum_text: code_text {
+        line_num_text: code_text {
             draw_depth: 3.0
             no_h_scroll: true
         }
         
-        linenum_quad: {
+        line_num_quad: {
             color: #x1e
             draw_depth: 2.0
             no_h_scroll: true
             no_v_scroll: true
         }
         
-        linenum_width: 45.0,
+        line_num_width: 45.0,
         
         text_color_comment: #638d54
         text_color_identifier: #d4d4d4
@@ -131,10 +131,14 @@ live_register!{
 
 #[derive(Live, LiveHook)]
 pub struct CodeEditorView {
-    scroll_view: ScrollView,
     #[rust] pub session_id: Option<SessionId>,
+    
     #[rust] text_glyph_size: Vec2,
     #[rust] caret_blink_timer: Timer,
+    #[rust] select_scroll: Option<SelectScroll>,
+    #[rust] last_move_position: Option<Position>,
+    
+    scroll_view: ScrollView,
     
     show_caret_state: Option<LivePtr>,
     hide_caret_state: Option<LivePtr>,
@@ -145,10 +149,10 @@ pub struct CodeEditorView {
     selection_quad: DrawSelection,
     code_text: DrawText,
     caret_quad: DrawColor,
-    linenum_quad: DrawColor,
-    linenum_text: DrawText,
+    line_num_quad: DrawColor,
+    line_num_text: DrawText,
     
-    linenum_width: f32,
+    line_num_width: f32,
     caret_blink_timeout: f64,
     
     text_color_linenum: Vec4,
@@ -193,6 +197,7 @@ impl CodeEditorView {
                 let session = &state.sessions_by_session_id[session_id];
                 let document = &state.documents_by_document_id[session.document_id];
                 if let Some(document_inner) = document.inner.as_ref() {
+                    self.handle_select_scroll_in_draw(cx);
                     self.begin_instances(cx);
                     let visible_lines =
                     self.visible_lines(cx, document_inner.text.as_lines().len());
@@ -224,14 +229,14 @@ impl CodeEditorView {
         self.selection_quad.begin_many_instances(cx);
         self.code_text.begin_many_instances(cx);
         self.caret_quad.begin_many_instances(cx);
-        self.linenum_text.begin_many_instances(cx);
+        self.line_num_text.begin_many_instances(cx);
     }
     
     pub fn end_instances(&mut self, cx: &mut Cx) {
         self.selection_quad.end_many_instances(cx);
         self.code_text.end_many_instances(cx);
         self.caret_quad.end_many_instances(cx);
-        self.linenum_text.end_many_instances(cx);
+        self.line_num_text.end_many_instances(cx);
     }
     
     pub fn reset_caret_blink(&mut self, cx: &mut Cx) {
@@ -284,7 +289,7 @@ impl CodeEditorView {
         visible_lines: VisibleLines,
     ) {
         let origin = cx.get_turtle_pos();
-        let start_x = origin.x + self.linenum_width;
+        let start_x = origin.x + self.line_num_width;
         let mut line_count = visible_lines.start;
         let mut span_iter = selections.spans();
         let mut span_slot = span_iter.next();
@@ -379,16 +384,16 @@ impl CodeEditorView {
         let mut start_y = visible_lines.start_y;
         let start_x = origin.x;
         
-        self.linenum_quad.draw_abs(cx, Rect {
+        self.line_num_quad.draw_abs(cx, Rect {
             pos: origin,
-            size: Vec2 {x: self.linenum_width, y: viewport_size.y}
+            size: Vec2 {x: self.line_num_width, y: viewport_size.y}
         });
         
-        self.linenum_text.color = self.text_color_linenum;
+        self.line_num_text.color = self.text_color_linenum;
         for i in visible_lines.start..visible_lines.end {
             let end_y = start_y + self.text_glyph_size.y;
-            linenum_fill(&mut self.linenum_text.buf, i + 1);
-            self.linenum_text.draw_chunk(cx, Vec2 {x: start_x, y: start_y,}, 0, None);
+            linenum_fill(&mut self.line_num_text.buf, i + 1);
+            self.line_num_text.draw_chunk(cx, Vec2 {x: start_x, y: start_y,}, 0, None);
             start_y = end_y;
         }
     }
@@ -410,7 +415,7 @@ impl CodeEditorView {
             .take(visible_lines.end - visible_lines.start)
         {
             let end_y = start_y + self.text_glyph_size.y;
-            let mut start_x = origin.x + self.linenum_width;
+            let mut start_x = origin.x + self.line_num_width;
             let mut start = 0;
             let mut token_iter = tokens.iter().peekable();
             while let Some(token) = token_iter.next() {
@@ -444,7 +449,7 @@ impl CodeEditorView {
             }
         }
         let origin = cx.get_turtle_pos();
-        let start_x = origin.x + self.linenum_width;
+        let start_x = origin.x + self.line_num_width;
         let mut start_y = visible_lines.start_y;
         for line_index in visible_lines.start..visible_lines.end {
             loop {
@@ -530,7 +535,11 @@ impl CodeEditorView {
         }
         
         match event.hits(cx, self.scroll_view.area()) {
+            HitEvent::Trigger(_) => { //
+                self.handle_select_scroll_in_trigger(cx, state);
+            },
             HitEvent::FingerDown(f) => {
+                self.last_move_position = None;
                 self.reset_caret_blink(cx);
                 // TODO: How to handle key focus?
                 cx.set_key_focus(self.scroll_view.area());
@@ -551,18 +560,25 @@ impl CodeEditorView {
                     self.scroll_view.redraw(cx);
                 }
             }
+            HitEvent::FingerUp(_) => {
+                self.select_scroll = None;
+            }
             HitEvent::FingerHover(_) => {
                 cx.set_hover_mouse_cursor(MouseCursor::Text);
             }
-            HitEvent::FingerMove(FingerMoveHitEvent {rel, ..}) => {
+            HitEvent::FingerMove(fe) => {
                 self.reset_caret_blink(cx);
                 if let Some(session_id) = self.session_id {
                     let session = &state.sessions_by_session_id[session_id];
                     let document = &state.documents_by_document_id[session.document_id];
                     let document_inner = document.inner.as_ref().unwrap();
-                    let position = self.vec2_to_position(&document_inner.text, rel);
-                    state.move_cursors_to(session_id, position, true);
-                    self.scroll_view.redraw(cx);
+                    let position = self.vec2_to_position(&document_inner.text, fe.rel);
+                    if self.last_move_position != Some(position) {
+                        self.last_move_position = Some(position);
+                        state.move_cursors_to(session_id, position, true);
+                        self.handle_select_scroll_in_finger_move(&fe);
+                        self.scroll_view.redraw(cx);
+                    }
                 }
             }
             HitEvent::KeyDown(KeyEvent {
@@ -675,6 +691,80 @@ impl CodeEditorView {
         }
     }
     
+    fn handle_select_scroll_in_finger_move(&mut self, fe: &FingerMoveHitEvent) {
+        let pow_scale = 0.1;
+        let pow_fac = 3.;
+        let max_speed = 40.;
+        let pad_scroll = 20.;
+        let rect = Rect {
+            pos: fe.rect.pos + pad_scroll,
+            size: fe.rect.size - 2. * pad_scroll
+        };
+        let delta = Vec2 {
+            x: if fe.abs.x < rect.pos.x {
+                -((rect.pos.x - fe.abs.x) * pow_scale).powf(pow_fac).min(max_speed)
+            }
+            else if fe.abs.x > rect.pos.x + rect.size.x {
+                ((fe.abs.x - (rect.pos.x + rect.size.x)) * pow_scale).powf(pow_fac).min(max_speed)
+            }
+            else {
+                0.
+            },
+            y: if fe.abs.y < rect.pos.y {
+                -((rect.pos.y - fe.abs.y) * pow_scale).powf(pow_fac).min(max_speed)
+            }
+            else if fe.abs.y > rect.pos.y + rect.size.y {
+                ((fe.abs.y - (rect.pos.y + rect.size.y)) * pow_scale).powf(pow_fac).min(max_speed)
+            }
+            else {
+                0.
+            }
+        };
+        if delta.x != 0. || delta.y != 0. {
+            self.select_scroll = Some(SelectScroll {
+                rel: fe.rel,
+                delta: delta,
+                at_end: false
+            });
+        }
+        else {
+            self.select_scroll = None;
+        }
+    }
+    
+    fn handle_select_scroll_in_draw(&mut self, cx: &mut Cx) {
+        if let Some(select_scroll) = &mut self.select_scroll {
+            let old_pos = self.scroll_view.get_scroll_pos(cx);
+            let new_pos = Vec2 {
+                x: old_pos.x + select_scroll.delta.x,
+                y: old_pos.y + select_scroll.delta.y
+            };
+            if self.scroll_view.set_scroll_pos(cx, new_pos) {
+                select_scroll.rel += select_scroll.delta;
+                self.scroll_view.redraw(cx);
+            }
+            else {
+                select_scroll.at_end = true;
+            }
+            cx.send_trigger(self.scroll_view.area(), Some(id!(scroll).0));
+        }
+    }
+    
+    fn handle_select_scroll_in_trigger(&mut self, cx:&mut Cx, state:&mut EditorState){
+        if let Some(select_scroll) = &mut self.select_scroll {
+            let rel = select_scroll.rel;
+            if select_scroll.at_end {
+                self.select_scroll = None;
+            }
+            let session = &state.sessions_by_session_id[self.session_id.unwrap()];
+            let document = &state.documents_by_document_id[session.document_id];
+            let document_inner = document.inner.as_ref().unwrap();
+            let position = self.vec2_to_position(&document_inner.text, rel);
+            state.move_cursors_to(self.session_id.unwrap(), position, true);
+            self.scroll_view.redraw(cx);
+        }
+    }
+    
     fn keep_last_cursor_in_view(&mut self, cx: &mut Cx, state: &EditorState) {
         if let Some(session_id) = self.session_id {
             let session = &state.sessions_by_session_id[session_id];
@@ -698,13 +788,36 @@ impl CodeEditorView {
     }
     
     fn vec2_to_position(&self, text: &Text, vec2: Vec2) -> Position {
-        let line = ((vec2.y / self.text_glyph_size.y) as usize).min(text.as_lines().len() - 1);
+        let calc_line = (vec2.y / self.text_glyph_size.y) as isize;
+        // do the end clamping
+        if calc_line < 0 {
+            return Position {
+                line: 0,
+                column: 0
+            }
+        }
+        if calc_line as usize >= text.as_lines().len() {
+            return Position {
+                line: text.as_lines().len() - 1,
+                column: text.as_lines().last().unwrap().len()
+            }
+        }
+        // otherwise per line
+        let line = (calc_line as usize).min(text.as_lines().len() - 1);
         Position {
             line,
-            column: (((vec2.x - self.linenum_width + 0.5 * self.text_glyph_size.x) / self.text_glyph_size.x) as usize)
+            column: (((vec2.x - self.line_num_width + 0.5 * self.text_glyph_size.x) / self.text_glyph_size.x) as usize)
                 .min(text.as_lines()[line].len()),
         }
     }
+}
+
+#[derive(Clone, Default)]
+pub struct SelectScroll {
+    // pub margin:Margin,
+    pub delta: Vec2,
+    pub rel: Vec2,
+    pub at_end: bool
 }
 
 #[derive(Clone, Copy, Debug)]

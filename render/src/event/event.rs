@@ -4,6 +4,7 @@ use {
     },
     crate::{
         cx::Cx,
+        area::Area,
         event::{
             finger::*,
             keyboard::*,
@@ -39,7 +40,9 @@ pub enum Event {
     FingerUp(FingerUpEvent),
     FingerScroll(FingerScrollEvent),
     Timer(TimerEvent),
+    
     Signal(SignalEvent),
+    Trigger(TriggerEvent),
     Command(CommandId),
     KeyFocus(KeyFocusEvent),
     KeyFocusLost(KeyFocusEvent),
@@ -57,6 +60,7 @@ pub enum HitEvent<'a>{
     KeyFocusLost(KeyFocusEvent),
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),
+    Trigger(TriggerHitEvent<'a>),
     TextInput(TextInputEvent),
     TextCopy(&'a mut TextCopyEvent),
     FingerScroll(FingerScrollHitEvent),
@@ -104,6 +108,15 @@ impl Signal {
 pub struct SignalEvent {
     pub signals: HashMap<Signal, Vec<u64>>
 }
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TriggerEvent {
+    pub triggers: HashMap<Area, Vec<u64>>
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TriggerHitEvent<'a>(pub &'a [u64]);
+
 
 impl Default for Event {
     fn default() -> Event {
@@ -164,7 +177,7 @@ impl Event {
     pub fn is_next_frame(&self, cx: &mut Cx, next_frame: NextFrame) -> Option<NextFrameEvent> {
         match self {
             Event::NextFrame(fe) => {
-                if cx._next_frames.contains(&next_frame) {
+                if cx.next_frames.contains(&next_frame) {
                     return Some(fe.clone())
                 }
             }

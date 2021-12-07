@@ -5,7 +5,6 @@ use {
     },
     makepad_math::{
         Vec2,
-        Rect
     },
     crate::{
         platform::{
@@ -653,8 +652,8 @@ pub fn define_cocoa_view_class() -> *const Class {
         let mut events = vec![Event::FingerDrag(FingerDragEvent {
             handled: false,
             abs: pos,
-            rel: pos,
-            rect: Rect::default(),
+            //rel: pos,
+            //rect: Rect::default(),
             state: DragState::Over,
             action: DragAction::None,
         })];
@@ -712,8 +711,6 @@ pub fn define_cocoa_view_class() -> *const Class {
         let mut events = vec![Event::FingerDrop(FingerDropEvent {
             handled: false,
             abs: pos,
-            rel: pos,
-            rect: Rect::default(),
             dragged_item: DraggedItem {
                 file_urls,
             }

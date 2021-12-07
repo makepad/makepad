@@ -9,7 +9,7 @@ use {
     crate::{
         event::{
             Event,
-            KeyCode,
+            //KeyCode,
         },
         area::Area,
         cx::Cx,
@@ -66,14 +66,14 @@ impl Cx {
             },
             Event::KeyDown(ke) => {
                 self.process_key_down(ke.clone());
-                if ke.key_code == KeyCode::PrintScreen {
+                /*if ke.key_code == KeyCode::PrintScreen {
                     if ke.modifiers.control {
                         self.panic_redraw = true;
                     }
                     else {
                         self.panic_now = true;
                     }
-                }
+                }*/
             },
             Event::KeyUp(ke) => {
                 self.process_key_up(&ke);
@@ -114,14 +114,14 @@ impl Cx {
     {
         let mut vsync = false; //self.platform.desktop.repaint_via_scroll_event;
         self.platform.desktop.repaint_via_scroll_event = false;
-        if self.next_frames.len() != 0 {
+        if self.new_next_frames.len() != 0 {
             self.call_next_frame_event(time);
-            if self.next_frames.len() != 0 {
+            if self.new_next_frames.len() != 0 {
                 vsync = true;
             }
         }
         
-        self.call_signals();
+        self.call_signals_and_triggers();
         
         // call redraw event
         if self.any_views_need_redrawing(){
@@ -132,7 +132,7 @@ impl Cx {
             vsync = true;
         }
         
-        self.call_signals();
+        self.call_signals_and_triggers();
         
         vsync
     }

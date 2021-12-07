@@ -75,8 +75,6 @@ pub use makepad_derive_live::*;
 pub use makepad_math::*;
 
 pub struct Cx {
-    pub running: bool,
-    pub counter: usize,
     pub platform_type: PlatformType,
     pub gpu_info: GpuInfo,
     
@@ -89,18 +87,23 @@ pub struct Cx {
     pub views: Vec<CxView>,
     pub views_free: Rc<RefCell<Vec<usize >> >,
     
-    pub fonts: Vec<Option<CxFont >>,
-    pub fonts_atlas: CxFontsAtlas,
-    pub path_to_font_id: HashMap<String, usize>,
-    
     pub textures: Vec<CxTexture>,
     pub textures_free: Rc<RefCell<Vec<usize >> >,
-    
+
     pub geometries: Vec<CxGeometry>,
     pub geometries_free: Rc<RefCell<Vec<usize >> >,
     pub geometries_refs: HashMap<GeometryFingerprint, Weak<Geometry >>,
     
     pub draw_shaders: Vec<CxDrawShader>,
+    pub draw_shader_ptr_to_id: HashMap<DrawShaderPtr, usize>,
+    pub draw_shader_compile_set: BTreeSet<DrawShaderPtr>,
+    pub draw_shader_fingerprints: Vec<DrawShaderFingerprint>,
+
+    pub fonts: Vec<Option<CxFont >>,
+    pub fonts_atlas: CxFontsAtlas,
+    pub path_to_font_id: HashMap<String, usize>,
+    pub draw_font_atlas: Option<Box<CxDrawFontAtlas >>,
+    
     
     pub in_redraw_cycle: bool,
     pub default_dpi_factor: f32,
@@ -112,16 +115,13 @@ pub struct Cx {
     pub align_list: Vec<Area>,
     
     pub live_factories: Rc<RefCell<HashMap<LiveType, Box<dyn LiveFactory >> >>,
-    pub draw_shader_ptr_to_id: HashMap<DrawShaderPtr, usize>,
-    pub draw_shader_compile_set: BTreeSet<DrawShaderPtr>,
-    pub draw_shader_fingerprints: Vec<DrawShaderFingerprint>,
     
+    pub new_redraw_views: Vec<usize>,
+    pub new_redraw_views_and_children: Vec<usize>,
+    pub new_redraw_all_views: bool,
     pub redraw_views: Vec<usize>,
     pub redraw_views_and_children: Vec<usize>,
-    pub _redraw_views: Vec<usize>,
-    pub _redraw_views_and_children: Vec<usize>,
     pub redraw_all_views: bool,
-    pub _redraw_all_views: bool,
     
     pub redraw_id: u64,
     pub repaint_id: u64,
@@ -135,8 +135,6 @@ pub struct Cx {
     pub key_focus: Area,
     pub keys_down: Vec<KeyEvent>,
     
-    pub debug_area: Area,
-    
     pub down_mouse_cursor: Option<MouseCursor>,
     pub hover_mouse_cursor: Option<MouseCursor>,
     pub fingers: Vec<CxPerFinger>,
@@ -144,12 +142,11 @@ pub struct Cx {
     pub drag_area: Area,
     pub new_drag_area: Area,
     
-    pub draw_font_atlas: Option<Box<CxDrawFontAtlas >>,
-    
+    pub new_next_frames: HashSet<NextFrame>,
     pub next_frames: HashSet<NextFrame>,
-    pub _next_frames: HashSet<NextFrame>,
     
     pub signals: HashMap<Signal, Vec<u64 >>,
+    pub triggers: HashMap<Area, Vec<u64>>,
     
     pub profiles: HashMap<u64, Instant>,
     
@@ -157,9 +154,6 @@ pub struct Cx {
     pub shader_registry: ShaderRegistry,
     
     pub command_settings: HashMap<CommandId, CxCommandSetting>,
-    
-    pub panic_now: bool,
-    pub panic_redraw: bool,
     
     pub platform: CxPlatform,
     // this cuts the compiletime of an end-user application in half
@@ -207,10 +201,8 @@ impl Default for Cx {
         }];
         
         Self {
-            counter: 0,
             platform_type: PlatformType::Unknown,
             gpu_info: GpuInfo::default(),
-            running: true,
             
             windows: Vec::new(),
             windows_free: Rc::new(RefCell::new(Vec::new())),
@@ -218,26 +210,29 @@ impl Default for Cx {
             passes: Vec::new(),
             passes_free: Rc::new(RefCell::new(Vec::new())),
             
-            views: Vec::new(), //vec![CxView {..Default::default()}],
+            views: Vec::new(),
             views_free: Rc::new(RefCell::new(Vec::new())),
             
             textures: textures,
             textures_free: Rc::new(RefCell::new(Vec::new())),
+
+            geometries: Vec::new(),
+            geometries_free: Rc::new(RefCell::new(Vec::new())),
+            geometries_refs: HashMap::new(),
+
+            draw_shaders: Vec::new(),
+            draw_shader_ptr_to_id: HashMap::new(),
+            draw_shader_compile_set: BTreeSet::new(),
+            draw_shader_fingerprints: Vec::new(),
             
             fonts: Vec::new(),
             fonts_atlas: CxFontsAtlas::new(),
             path_to_font_id: HashMap::new(),
+            draw_font_atlas: None,
             
-            draw_shaders: Vec::new(),
-            //shader_recompiles: Vec::new(),
-            
-            geometries: Vec::new(),
-            geometries_free: Rc::new(RefCell::new(Vec::new())),
-            geometries_refs: HashMap::new(),
-            
+            in_redraw_cycle: false,
             default_dpi_factor: 1.0,
             current_dpi_factor: 1.0,
-            in_redraw_cycle: false,
             window_stack: Vec::new(),
             pass_stack: Vec::new(),
             view_stack: Vec::new(),
@@ -245,18 +240,13 @@ impl Default for Cx {
             align_list: Vec::new(),
             
             live_factories: Rc::new(RefCell::new(HashMap::new())),
-            draw_shader_ptr_to_id: HashMap::new(),
-            draw_shader_compile_set: BTreeSet::new(),
-            draw_shader_fingerprints: Vec::new(),
             
+            new_redraw_views: Vec::new(),
+            new_redraw_views_and_children: Vec::new(),
+            new_redraw_all_views: true,
             redraw_views: Vec::new(),
-            _redraw_views: Vec::new(),
             redraw_views_and_children: Vec::new(),
-            _redraw_views_and_children: Vec::new(),
             redraw_all_views: true,
-            _redraw_all_views: true,
-            
-            draw_font_atlas: None,
             
             redraw_id: 1,
             event_id: 1,
@@ -270,8 +260,6 @@ impl Default for Cx {
             key_focus: Area::Empty,
             keys_down: Vec::new(),
             
-            debug_area: Area::Empty,
-            
             down_mouse_cursor: None,
             hover_mouse_cursor: None,
             fingers: fingers,
@@ -279,23 +267,18 @@ impl Default for Cx {
             drag_area: Area::Empty,
             new_drag_area: Area::Empty,
             
-            shader_registry: ShaderRegistry::new(),
-            live_registry: Rc::new(RefCell::new(LiveRegistry::default())),
-            
-            command_settings: HashMap::new(),
-            
-            //playing_animator_ids: BTreeMap::new(),
-            
+            new_next_frames: HashSet::new(),
             next_frames: HashSet::new(),
-            _next_frames: HashSet::new(),
-            profiles: HashMap::new(),
             
             signals: HashMap::new(),
+            triggers: HashMap::new(),
             
-            //triggers: HashMap::new(),
+            profiles: HashMap::new(),
+
+            live_registry: Rc::new(RefCell::new(LiveRegistry::default())),
+            shader_registry: ShaderRegistry::new(),
             
-            panic_now: false,
-            panic_redraw: false,
+            command_settings: HashMap::new(),
             
             platform: CxPlatform {..Default::default()},
             

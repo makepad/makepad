@@ -18,9 +18,9 @@ live_register!{
             color: #c
         }
         scroll_view: {
-            show_v: false
-            show_h: true
-            scroll_h: {
+            v_show: false
+            h_show: true
+            h_scroll: {
                 bar_size: 8
                 use_vertical_finger_scroll: true
             }
