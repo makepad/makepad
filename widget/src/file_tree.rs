@@ -263,15 +263,14 @@ impl FileTreeNode {
         self.name_text.font_scale = scale;
     }
     
-    pub fn draw_folder(&mut self, cx: &mut Cx, name: &str, is_even: f32, node_height: f32, scale_stack: &[f32]) {
-        let scale = scale_stack.last().cloned().unwrap_or(1.0);
+    pub fn draw_folder(&mut self, cx: &mut Cx, name: &str, is_even: f32, node_height: f32, depth:usize, scale:f32) {
         self.set_draw_state(is_even, scale);
         
         self.layout.walk.height = Height::Fixed(scale * node_height);
         
         self.bg_quad.begin(cx, self.layout);
         
-        cx.walk_turtle(self.indent_walk(scale_stack.len()));
+        cx.walk_turtle(self.indent_walk(depth));
         
         self.icon_quad.draw_walk(cx, self.icon_walk);
         cx.turtle_align_y();
@@ -280,15 +279,13 @@ impl FileTreeNode {
         self.bg_quad.end(cx);
     }
     
-    pub fn draw_file(&mut self, cx: &mut Cx, name: &str, is_even: f32, node_height: f32, scale_stack: &[f32]) {
-        let scale = scale_stack.last().cloned().unwrap_or(1.0);
-        
+    pub fn draw_file(&mut self, cx: &mut Cx, name: &str, is_even: f32, node_height: f32, depth:usize, scale:f32) {
         self.set_draw_state(is_even, scale);
         
         self.layout.walk.height = Height::Fixed(scale * node_height);
         self.bg_quad.begin(cx, self.layout);
         
-        cx.walk_turtle(self.indent_walk(scale_stack.len()));
+        cx.walk_turtle(self.indent_walk(depth));
         cx.turtle_align_y();
         
         self.name_text.draw_walk(cx, name);
@@ -447,7 +444,10 @@ impl FileTree {
     ) -> Result<(), ()> {
         let scale = self.stack.last().cloned().unwrap_or(1.0);
         
-        self.count += 1;
+        if scale > 0.2{
+            self.count += 1;
+        }
+        
         let is_open = self.open_nodes.contains(&node_id);
         
         if self.should_node_draw(cx) {
@@ -462,7 +462,7 @@ impl FileTree {
                     tree_node
                 })
             };
-            tree_node.draw_folder(cx, name, Self::is_even(self.count), self.node_height, &self.stack);
+            tree_node.draw_folder(cx, name, Self::is_even(self.count), self.node_height, self.stack.len(), scale);
             self.stack.push(tree_node.opened * scale);
             if tree_node.opened == 0.0 {
                 self.end_folder();
@@ -485,14 +485,18 @@ impl FileTree {
     }
     
     pub fn file(&mut self, cx: &mut Cx, node_id: FileNodeId, name: &str) {
-        self.count += 1;
+        let scale = self.stack.last().cloned().unwrap_or(1.0);
+        
+        if scale > 0.2{
+            self.count += 1;
+        }
         if self.should_node_draw(cx) {
             self.visible_nodes.insert(node_id);
             let tree_node = match self.tree_nodes.entry(node_id) {
                 Entry::Occupied(o) => o.into_mut(),
                 Entry::Vacant(v) => v.insert(FileTreeNode::new_from_ptr(cx, self.file_node.unwrap()))
             };
-            tree_node.draw_file(cx, name, Self::is_even(self.count), self.node_height, &self.stack);
+            tree_node.draw_file(cx, name, Self::is_even(self.count), self.node_height, self.stack.len(), scale);
         }
     }
     

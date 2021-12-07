@@ -205,6 +205,10 @@ impl DrawText {
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
         }
     }
+
+    pub fn new_draw_call(&self, cx:&mut Cx){
+        cx.new_draw_call(&self.draw_vars);
+    }
     
     pub fn update_draw_call_vars(&mut self, cx: &mut Cx) {
         self.draw_vars.texture_slots[0] = Some(cx.fonts_atlas.texture_id);
