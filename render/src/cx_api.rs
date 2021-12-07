@@ -136,24 +136,24 @@ impl Cx {
     }
     
     pub fn redraw_all(&mut self) {
-        self.redraw_all_views = true;
+        self.new_redraw_all_views = true;
     }
     
     pub fn redraw_view_of(&mut self, area: Area) {
         if let Some(view_id) = area.view_id() {
-            if self.redraw_views.iter().position( | v | *v == view_id).is_some() {
+            if self.new_redraw_views.iter().position( | v | *v == view_id).is_some() {
                 return;
             }
-            self.redraw_views.push(view_id);
+            self.new_redraw_views.push(view_id);
         }
     }
     
     pub fn redraw_view_and_children_of(&mut self, area: Area) {
         if let Some(view_id) = area.view_id() {
-            if self.redraw_views_and_children.iter().position( | v | *v == view_id).is_some() {
+            if self.new_redraw_views_and_children.iter().position( | v | *v == view_id).is_some() {
                 return;
             }
-            self.redraw_views_and_children.push(view_id);
+            self.new_redraw_views_and_children.push(view_id);
         }
     }
     
@@ -168,11 +168,11 @@ impl Cx {
     }
     
     pub fn view_will_redraw(&self, view_id: usize) -> bool {
-        if self._redraw_all_views {
+        if self.redraw_all_views {
             return true;
         }
         // figure out if areas are in some way a child of view_id, then we need to redraw
-        for check_view_id in &self._redraw_views {
+        for check_view_id in &self.redraw_views {
             if *check_view_id == view_id {
                 return true
             }
@@ -185,7 +185,7 @@ impl Cx {
             }
         }
         // figure out if areas are in some way a parent of view_id, then redraw
-        for check_view_id in &self._redraw_views_and_children {
+        for check_view_id in &self.redraw_views_and_children {
             if *check_view_id == view_id {
                 return true
             }
@@ -249,7 +249,7 @@ impl Cx {
     pub fn new_next_frame(&mut self) -> NextFrame {
         let res = NextFrame(self.next_frame_id);
         self.next_frame_id += 1;
-        self.next_frames.insert(res);
+        self.new_next_frames.insert(res);
         res
     }
     
@@ -258,17 +258,36 @@ impl Cx {
         return Signal {signal_id: self.signal_id};
     }
     
-    pub fn send_signal(&mut self, signal: Signal, status: u64) {
+    pub fn send_signal(&mut self, signal: Signal, status: Option<u64>) {
         if signal.signal_id == 0 {
             return
         }
-        if let Some(statusses) = self.signals.get_mut(&signal) {
-            statusses.push(status);
+        if let Some(set) = self.signals.get_mut(&signal) {
+            if let Some(status) = status{
+                set.push(status);
+            }
+        }
+        else {
+            let mut set = Vec::new();
+            if let Some(status) = status{
+                set.push(status);
+            }
+            self.signals.insert(signal, set);
+        }
+    }
+
+    pub fn send_trigger(&mut self, area:Area, trigger_id:Option<u64>){
+         if let Some(triggers) = self.triggers.get_mut(&area) {
+            if let Some(trigger_id) = trigger_id{
+                triggers.push(trigger_id);
+            }
         }
         else {
             let mut new_set = Vec::new();
-            new_set.push(status);
-            self.signals.insert(signal, new_set);
+            if let Some(trigger_id) = trigger_id{
+                new_set.push(trigger_id);
+            }
+            self.triggers.insert(area, new_set);
         }
     }
     

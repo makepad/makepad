@@ -10,6 +10,7 @@ use {
         },
         event::{
             SignalEvent,
+            TriggerEvent,
             Event,
             KeyEvent,
             KeyFocusEvent,
@@ -97,9 +98,9 @@ impl Cx {
     }
     
     pub(crate) fn any_views_need_redrawing(&self) -> bool {
-        self.redraw_all_views
-            || self.redraw_views.len() != 0
-            || self.redraw_views_and_children.len() != 0
+        self.new_redraw_all_views
+            || self.new_redraw_views.len() != 0
+            || self.new_redraw_views_and_children.len() != 0
     }
     
     pub(crate) fn process_key_down(&mut self, key_event: KeyEvent) {
@@ -141,7 +142,7 @@ impl Cx {
         }
     }
     
-       pub(crate) fn call_signals(&mut self)
+    pub(crate) fn call_signals_and_triggers(&mut self)
     {
         let mut counter = 0;
         while self.signals.len() != 0 {
@@ -158,6 +159,23 @@ impl Cx {
                 break
             }
         }
+
+        let mut counter = 0;
+        while self.triggers.len() != 0 {
+            counter += 1;
+            let mut triggers = HashMap::new();
+            std::mem::swap(&mut self.triggers, &mut triggers);
+            
+            self.call_event_handler(&mut Event::Trigger(TriggerEvent {
+                triggers: triggers,
+            }));
+            
+            if counter > 100 {
+                println!("Trigger feedback loop detected");
+                break
+            }
+        }
+
     }
     
     pub(crate) fn call_all_keys_up(&mut self)
@@ -174,15 +192,14 @@ impl Cx {
         // self.profile();
         self.in_redraw_cycle = true;
         self.redraw_id += 1;
-        self.counter = 0;
         
-        std::mem::swap(&mut self._redraw_views, &mut self.redraw_views);
-        std::mem::swap(&mut self._redraw_views_and_children, &mut self.redraw_views_and_children);
+        std::mem::swap(&mut self.redraw_views, &mut self.new_redraw_views);
+        std::mem::swap(&mut self.redraw_views_and_children, &mut self.new_redraw_views_and_children);
         
-        self._redraw_all_views = self._redraw_all_views;
-        self.redraw_all_views = false;
-        self.redraw_views.truncate(0);
-        self.redraw_views_and_children.truncate(0);
+        self.redraw_all_views = self.redraw_all_views;
+        self.new_redraw_all_views = false;
+        self.new_redraw_views.truncate(0);
+        self.new_redraw_views_and_children.truncate(0);
         
         self.align_list.truncate(0);
         
@@ -206,8 +223,8 @@ impl Cx {
     
     pub(crate) fn call_next_frame_event(&mut self, time: f64)
     {
-        std::mem::swap(&mut self._next_frames, &mut self.next_frames);
-        self.next_frames.clear();
+        std::mem::swap(&mut self.next_frames, &mut self.new_next_frames);
+        self.new_next_frames.clear();
         self.call_event_handler(&mut Event::NextFrame(NextFrameEvent {time: time, frame: self.repaint_id}));
     }
 }

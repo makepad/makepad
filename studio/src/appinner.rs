@@ -77,7 +77,7 @@ impl AppInner {
                     self.dock.end_tab_bar(cx);
                 }
                 if let Some(tab_id) = self.dock.selected_tab_id(cx, panel_id) {
-                    let tab = &state.tabs_by_tab_id[tab_id]; 
+                    let tab = &state.tabs_by_tab_id[tab_id];
                     match tab.kind {
                         TabKind::FileTree => {
                             if self.file_tree.begin(cx).is_ok() {
@@ -129,7 +129,7 @@ impl AppInner {
                 state,
                 state.content_panel_id,
                 None,
-                state.file_path_join(&["README.MD"])
+                state.file_path_join(&["render/src/animator.rs"])
             );
         }
         

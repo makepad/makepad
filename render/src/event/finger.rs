@@ -3,7 +3,7 @@ use {
     //makepad_microserde::*,
     crate::{
         event::{
-            event::{Event, HitEvent, DragEvent}
+            event::{Event, HitEvent, TriggerHitEvent, DragEvent}
         },
         cx::Cx,
         turtle::{Margin},
@@ -66,16 +66,16 @@ pub struct FingerDownEvent {
 pub struct FingerDownHitEvent {
     pub rel: Vec2,
     pub rect: Rect,
-    pub event: FingerDownEvent
+    pub deref_target: FingerDownEvent
 }
 
 impl std::ops::Deref for FingerDownHitEvent {
     type Target = FingerDownEvent;
-    fn deref(&self) -> &Self::Target {&self.event}
+    fn deref(&self) -> &Self::Target {&self.deref_target}
 }
 
 impl std::ops::DerefMut for FingerDownHitEvent {
-    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.event}
+    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.deref_target}
 }
 
 #[derive(Clone, Default, Debug, PartialEq)]
@@ -95,16 +95,16 @@ pub struct FingerMoveHitEvent {
     pub rel_start: Vec2,
     pub rect: Rect,
     pub is_over: bool,
-    pub event: FingerMoveEvent,
+    pub deref_target: FingerMoveEvent,
 }
 
 impl std::ops::Deref for FingerMoveHitEvent {
     type Target = FingerMoveEvent;
-    fn deref(&self) -> &Self::Target {&self.event}
+    fn deref(&self) -> &Self::Target {&self.deref_target}
 }
 
 impl std::ops::DerefMut for FingerMoveHitEvent {
-    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.event}
+    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.deref_target}
 }
 
 
@@ -131,16 +131,16 @@ pub struct FingerUpHitEvent {
     pub rel_start: Vec2,
     pub rect: Rect,
     pub is_over: bool,
-    pub event: FingerUpEvent
+    pub deref_target: FingerUpEvent
 }
 
 impl std::ops::Deref for FingerUpHitEvent {
     type Target = FingerUpEvent;
-    fn deref(&self) -> &Self::Target {&self.event}
+    fn deref(&self) -> &Self::Target {&self.deref_target}
 }
 
 impl std::ops::DerefMut for FingerUpHitEvent {
-    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.event}
+    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.deref_target}
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -218,8 +218,6 @@ impl std::ops::DerefMut for FingerScrollHitEvent {
 pub struct FingerDragEvent {
     pub handled: bool,
     pub abs: Vec2,
-    pub rel: Vec2,
-    pub rect: Rect,
     pub state: DragState,
     pub action: DragAction,
 }
@@ -228,8 +226,6 @@ pub struct FingerDragEvent {
 pub struct FingerDropEvent {
     pub handled: bool,
     pub abs: Vec2,
-    pub rel: Vec2,
-    pub rect: Rect,
     pub dragged_item: DraggedItem,
 }
 
@@ -307,6 +303,11 @@ impl Event {
     
     pub fn hits_with_options(&mut self, cx: &mut Cx, area: Area, options: HitOptions) -> HitEvent {
         match self {
+            Event::Trigger(te)=>{
+                if let Some(data) = te.triggers.get(&area){
+                    return HitEvent::Trigger(TriggerHitEvent(data))
+                }
+            },
             Event::KeyFocus(kf) => {
                 if area == kf.prev {
                     return HitEvent::KeyFocusLost(kf.clone())
@@ -418,7 +419,7 @@ impl Event {
                         rel_start: rel_start,
                         rect: rect,
                         is_over: rect_contains_with_margin(&rect, fe.abs, &options.margin),
-                        event: fe.clone()
+                        deref_target: fe.clone()
                     })
                 }
             },
@@ -442,7 +443,7 @@ impl Event {
                         return HitEvent::FingerDown(FingerDownHitEvent {
                             rel: rel,
                             rect: rect,
-                            event: fe.clone()
+                            deref_target: fe.clone()
                         })
                     }
                 }
@@ -459,7 +460,7 @@ impl Event {
                         rel_start: rel_start,
                         rel: area.abs_to_rel(cx, fe.abs),
                         rect: rect,
-                        event: fe.clone()
+                        deref_target: fe.clone()
                     })
                 }
             },

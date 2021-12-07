@@ -204,7 +204,6 @@ impl ScrollBar {
     pub fn set_scroll_pos(&mut self, cx: &mut Cx, scroll_pos: f32) -> bool {
         // clamp scroll_pos to
         let scroll_pos = scroll_pos.min(self.view_total - self.view_visible).max(0.);
-        
         if self.scroll_pos != scroll_pos {
             self.scroll_pos = scroll_pos;
             self.scroll_target = scroll_pos;

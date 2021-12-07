@@ -34,7 +34,7 @@ impl App {
     
     pub fn draw(&mut self, cx: &mut Cx) {
         //cx.profile_start(0);
-        self.inner.draw(cx, &self.state);
+        self.inner.draw(cx, &mut self.state);
         //cx.profile_end(0);
         //cx.debug_draw_tree(false);
     }

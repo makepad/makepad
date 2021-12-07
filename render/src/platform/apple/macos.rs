@@ -262,7 +262,7 @@ impl Cx {
                     },
                     Event::Signal {..} => {
                         self.call_event_handler(&mut event);
-                        self.call_signals();
+                        self.call_signals_and_triggers();
                     },
                     _ => {
                         self.call_event_handler(&mut event);
@@ -288,7 +288,7 @@ impl Cx {
             self.process_live_style_errors();
             */
             if self.any_views_need_redrawing()
-                || self.next_frames.len() != 0 {
+                || self.new_next_frames.len() != 0 {
                 false
             } else {
                 true
