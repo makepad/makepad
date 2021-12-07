@@ -18,6 +18,7 @@ use {
     },
     makepad_render::*,
     makepad_widget::*,
+    std::mem,
 };
 
 live_register!{
@@ -308,30 +309,51 @@ impl CodeEditorView {
             line_count -= span.len.line;
             span_slot = span_iter.next();
         }
+        
+        let mut selected_rects_on_previous_line = vec![];
+        let mut selected_rects_on_current_line = vec![];
+        let mut selected_rects_on_next_line = vec![];
         let mut start_y = visible_lines.start_y;
         let mut start = 0;
-        for line in &text.as_lines()[visible_lines.start..visible_lines.end] {
+
+        // Iterate over each line with one line lookahead. During each iteration, we compute the
+        // selected rects for the next line, and draw the selected rects for the current line.
+        // 
+        // Note that since the iterator always points to the next line, the current line is not
+        // defined until after the first iteration, and the previous line is not defined until after
+        // the second iteration.
+        for (next_line_index, next_line) in text.as_lines()[visible_lines.start..visible_lines.end].iter().enumerate() {
+            // Rotate so that the next line becomes the current line, the current line becomes the
+            // previous line, and the previous line becomes the next line.
+            mem::swap(&mut selected_rects_on_previous_line, &mut selected_rects_on_current_line);
+            mem::swap(&mut selected_rects_on_current_line, &mut selected_rects_on_next_line);
+            
+            // Draw the selected rects for the current line.
+            if next_line_index > 0 {
+                for &rect in &selected_rects_on_current_line {
+                    self.selection_quad.draw_abs(cx, rect);
+                }
+            }
+
+            // Compute the selected rects for the next line.
+            selected_rects_on_next_line.clear();
             while let Some(span) = span_slot {
                 let end = if span.len.line == 0 {
                     start + span.len.column
                 } else {
-                    line.len()
+                    next_line.len()
                 };
                 if span.is_included {
-                    
-                    self.selection_quad.draw_abs(
-                        cx,
-                        Rect {
-                            pos: Vec2 {
-                                x: start_x + start as f32 * self.text_glyph_size.x,
-                                y: start_y,
-                            },
-                            size: Vec2 {
-                                x: (end - start) as f32 * self.text_glyph_size.x,
-                                y: self.text_glyph_size.y,
-                            },
+                    selected_rects_on_next_line.push(Rect {
+                        pos: Vec2 {
+                            x: start_x + start as f32 * self.text_glyph_size.x,
+                            y: start_y,
                         },
-                    );
+                        size: Vec2 {
+                            x: (end - start) as f32 * self.text_glyph_size.x,
+                            y: self.text_glyph_size.y,
+                        },
+                    });
                 }
                 if span.len.line == 0 {
                     start = end;
@@ -349,6 +371,11 @@ impl CodeEditorView {
                 }
             }
             start_y += self.text_glyph_size.y;
+        }
+
+        // Draw the selected rects for the last line.
+        for &rect in &selected_rects_on_next_line {
+            self.selection_quad.draw_abs(cx, rect);
         }
     }
     
