@@ -26,7 +26,6 @@ use {
     }
 };
 
-
 impl Cx {
     
     pub fn render_view(
@@ -382,7 +381,7 @@ impl Cx {
             let () = unsafe {msg_send![command_buffer, waitUntilScheduled]};
         }
         let () = unsafe {msg_send![pool, release]};
-    }
+    } 
     
     pub fn draw_pass_to_texture(
         &mut self,
@@ -468,10 +467,10 @@ impl MetalWindow {
             let () = msg_send![view, setLayer: ca_layer];
         }
         
-        MetalWindow {
+        MetalWindow { 
             first_draw: true,
             window_id,
-            cal_size: Vec2::default(),
+            cal_size: Vec2::default(), 
             ca_layer,
             window_geom: cocoa_window.get_window_geom(),
             cocoa_window
@@ -479,11 +478,11 @@ impl MetalWindow {
     }
     
     pub fn set_vsync_enable(&mut self, _enable: bool) {
-        let () = unsafe {msg_send![self.ca_layer, setDisplaySyncEnabled: true]};
+       // let () = unsafe {msg_send![self.ca_layer, setDisplaySyncEnabled: false]};
     }
     
     pub fn set_buffer_count(&mut self, _count: u64) {
-        let () = unsafe {msg_send![self.ca_layer, setMaximumDrawableCount: 3]};
+      //  let () = unsafe {msg_send![self.ca_layer, setMaximumDrawableCount: 3]};
     }
     
     pub fn resize_core_animation_layer(&mut self, _metal_cx: &MetalCx) -> bool {
@@ -497,7 +496,6 @@ impl MetalWindow {
                 let () = msg_send![self.ca_layer, setDrawableSize: CGSize {width: cal_size.x as f64, height: cal_size.y as f64}];
                 let () = msg_send![self.ca_layer, setContentsScale: self.window_geom.dpi_factor as f64];
             }
-            //self.msam_target = Some(RenderTarget::new(device, self.cal_size.x as u64, self.cal_size.y as u64, 2));
             true
         }
         else {
@@ -536,40 +534,9 @@ pub struct MetalBuffer {
     pub size: usize,
     pub used: usize
 }
-/*
-#[derive(Default, Clone)]
-pub struct MetalBuffer {
-    pub last_written: usize,
-    pub multi1: MultiMetalBuffer,
-    pub multi2: MultiMetalBuffer,
-    pub multi3: MultiMetalBuffer,
-    pub multi4: MultiMetalBuffer,
-    pub multi5: MultiMetalBuffer,
-}
-*/
+
 impl MetalBuffer {
-    /*
-    pub fn multi_buffer_read(&self) -> &MultiMetalBuffer {
-        match self.last_written {
-            0 => &self.multi1,
-            1 => &self.multi2,
-            2 => &self.multi3,
-            3 => &self.multi4,
-            _ => &self.multi5,
-        }
-    }
-    
-    pub fn multi_buffer_write(&mut self) -> &mut MultiMetalBuffer {
-        self.last_written = (self.last_written + 1) % 5;
-        match self.last_written {
-            0 => &mut self.multi1,
-            1 => &mut self.multi2,
-            2 => &mut self.multi3,
-            3 => &mut self.multi4,
-            _ => &mut self.multi5,
-        }
-    }*/
-    
+
     pub fn update_with_f32_data(&mut self, metal_cx: &MetalCx, data: &Vec<f32>) {
         //let elem = self.multi_buffer_write();
         if self.size < data.len() {
