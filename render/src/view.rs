@@ -471,10 +471,7 @@ pub struct DrawUniforms {
     pub draw_clip_y1: f32,
     pub draw_clip_x2: f32,
     pub draw_clip_y2: f32,
-    pub draw_scroll_x: f32,
-    pub draw_scroll_y: f32,
-    pub draw_scroll_z: f32,
-    pub draw_scroll_w: f32,
+    pub draw_scroll: Vec4,
     pub draw_zbias: f32,
     pub pad1: f32,
     pub pad2: f32,
@@ -561,25 +558,20 @@ impl DrawCall {
     }
     
     pub fn set_local_scroll(&mut self, scroll: Vec2, local_scroll: Vec2) {
-        self.draw_uniforms.draw_scroll_x = scroll.x;
+        self.draw_uniforms.draw_scroll.x = scroll.x;
         if !self.no_h_scroll {
-            self.draw_uniforms.draw_scroll_x += local_scroll.x;
+            self.draw_uniforms.draw_scroll.x += local_scroll.x;
         }
-        self.draw_uniforms.draw_scroll_y = scroll.y;
+        self.draw_uniforms.draw_scroll.y = scroll.y;
         if !self.no_v_scroll {
-            self.draw_uniforms.draw_scroll_y += local_scroll.y;
+            self.draw_uniforms.draw_scroll.y += local_scroll.y;
         }
-        self.draw_uniforms.draw_scroll_z = local_scroll.x;
-        self.draw_uniforms.draw_scroll_w = local_scroll.y;
+        self.draw_uniforms.draw_scroll.z = local_scroll.x;
+        self.draw_uniforms.draw_scroll.w = local_scroll.y;
     }
     
     pub fn get_local_scroll(&self) -> Vec4 {
-        Vec4 {
-            x: self.draw_uniforms.draw_scroll_x,
-            y: self.draw_uniforms.draw_scroll_y,
-            z: self.draw_uniforms.draw_scroll_z,
-            w: self.draw_uniforms.draw_scroll_w
-        }
+        self.draw_uniforms.draw_scroll
     }
     
     pub fn set_zbias(&mut self, zbias: f32) {
@@ -594,8 +586,8 @@ impl DrawCall {
     }
     
     pub fn clip_and_scroll_rect(&self, x: f32, y: f32, w: f32, h: f32) -> Rect {
-        let mut x1 = x - self.draw_uniforms.draw_scroll_x;
-        let mut y1 = y - self.draw_uniforms.draw_scroll_y;
+        let mut x1 = x - self.draw_uniforms.draw_scroll.x;
+        let mut y1 = y - self.draw_uniforms.draw_scroll.y;
         let mut x2 = x1 + w;
         let mut y2 = y1 + h;
         x1 = self.draw_uniforms.draw_clip_x1.max(x1).min(self.draw_uniforms.draw_clip_x2);

@@ -155,8 +155,8 @@ impl Area{
                 else{
                     let draw_call = &cxview.draw_items[inst.draw_item_id].draw_call.as_ref().unwrap();
                     Vec2{
-                        x:draw_call.draw_uniforms.draw_scroll_x,
-                        y:draw_call.draw_uniforms.draw_scroll_y
+                        x:draw_call.draw_uniforms.draw_scroll.x,
+                        y:draw_call.draw_uniforms.draw_scroll.y
                     }
                 }
             },
@@ -254,8 +254,8 @@ impl Area{
                     let x = buf[inst.instance_offset + rect_pos + 0];
                     let y = buf[inst.instance_offset + rect_pos + 1];
                     return Vec2{
-                        x:abs.x - x + draw_call.draw_uniforms.draw_scroll_x,
-                        y:abs.y - y + draw_call.draw_uniforms.draw_scroll_y
+                        x:abs.x - x + draw_call.draw_uniforms.draw_scroll.x,
+                        y:abs.y - y + draw_call.draw_uniforms.draw_scroll.y
                     }
                 }
                 abs
