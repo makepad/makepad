@@ -310,9 +310,9 @@ impl CodeEditorView {
             span_slot = span_iter.next();
         }
         
-        let mut selected_rects_on_previous_line = vec![];
-        let mut selected_rects_on_current_line = vec![];
-        let mut selected_rects_on_next_line = vec![];
+        let mut selected_rects_on_previous_line = Vec::new();
+        let mut selected_rects_on_current_line = Vec::new();
+        let mut selected_rects_on_next_line = Vec::new();
         let mut start_y = visible_lines.start_y;
         let mut start = 0;
 
@@ -327,13 +327,6 @@ impl CodeEditorView {
             // previous line, and the previous line becomes the next line.
             mem::swap(&mut selected_rects_on_previous_line, &mut selected_rects_on_current_line);
             mem::swap(&mut selected_rects_on_current_line, &mut selected_rects_on_next_line);
-            
-            // Draw the selected rects for the current line.
-            if next_line_index > 0 {
-                for &rect in &selected_rects_on_current_line {
-                    self.selection_quad.draw_abs(cx, rect);
-                }
-            }
 
             // Compute the selected rects for the next line.
             selected_rects_on_next_line.clear();
@@ -371,10 +364,43 @@ impl CodeEditorView {
                 }
             }
             start_y += self.text_glyph_size.y;
+            
+            // Draw the selected rects for the current line.
+            if next_line_index > 0 {
+                for &rect in &selected_rects_on_current_line {
+                    if let Some(r) = selected_rects_on_previous_line.first(){
+                        self.selection_quad.prev_x = r.pos.x - rect.pos.x;
+                        self.selection_quad.prev_w = r.size.x;
+                    }
+                    else{
+                        self.selection_quad.prev_x = 0.0;
+                        self.selection_quad.prev_w = -1.0;
+                    }
+                    if let Some(r) = selected_rects_on_next_line.first(){
+                        self.selection_quad.next_x = r.pos.x - rect.pos.x;;
+                        self.selection_quad.next_w = r.size.x;
+                    }
+                    else{
+                        self.selection_quad.next_x = 0.0;
+                        self.selection_quad.next_w = -1.0;
+                    }
+                    self.selection_quad.draw_abs(cx, rect);
+                }
+            }
         }
 
         // Draw the selected rects for the last line.
         for &rect in &selected_rects_on_next_line {
+            if let Some(r) = selected_rects_on_previous_line.first(){
+                self.selection_quad.prev_x = r.pos.x - rect.pos.x;
+                self.selection_quad.prev_w = r.size.x;
+            }
+            else{
+                self.selection_quad.prev_x = 0.0;
+                self.selection_quad.prev_w = -1.0;
+            }
+            self.selection_quad.next_x = 0.0;
+            self.selection_quad.next_w = -1.0;
             self.selection_quad.draw_abs(cx, rect);
         }
     }
