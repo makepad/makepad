@@ -19,7 +19,7 @@ use {
     },
     makepad_render::*,
     makepad_widget::{
-        ScrollView,
+        ScrollView, 
         ScrollShadow
     },
     std::mem,
@@ -86,17 +86,17 @@ live_register!{
             no_h_scroll: true
         }
         
-        line_num_quad: { 
+        line_num_quad: {
             color: #x1e
             draw_depth: 3.0
             no_h_scroll: true
             no_v_scroll: true
         }
         
-        scroll_shadow:{
-            draw_depth:4.0
+        scroll_shadow: {
+            draw_depth: 4.0
         }
-         
+        
         line_num_width: 45.0,
         
         text_color_comment: #638d54
@@ -110,7 +110,7 @@ live_register!{
         text_color_string: #cc917b
         text_color_whitespace: #6e6e6e
         text_color_unknown: #808080
-
+        
         text_color_linenum: #88
         text_color_linenum_current: #d4
         
@@ -239,7 +239,7 @@ impl CodeEditorView {
                     self.set_turtle_bounds(cx, &document_inner.text);
                     self.end_instances(cx);
                     self.draw_linenums(cx, visible_lines, session.cursors.last());
-                    self.scroll_shadow.draw(cx, &self.scroll_view, vec2(self.line_num_width,0.));
+                    self.scroll_shadow.draw(cx, &self.scroll_view, vec2(self.line_num_width, 0.));
                 }
             }
             self.scroll_view.end(cx);
@@ -249,20 +249,19 @@ impl CodeEditorView {
     pub fn begin_instances(&mut self, cx: &mut Cx) {
         // this makes a single area pointer cover all the items drawn
         // also enables a faster draw api because it doesnt have to look up the instance buffer every time
+        // since this also locks in draw-call-order, some draw apis call new_draw_call here
         self.selection_quad.begin_many_instances(cx);
-        self.current_line_quad.begin_many_instances(cx);
+        self.current_line_quad.new_draw_call(cx);
         self.code_text.begin_many_instances(cx);
         self.caret_quad.begin_many_instances(cx);
-        self.line_num_quad.begin_many_instances(cx);
+        self.line_num_quad.new_draw_call(cx);
         self.line_num_text.begin_many_instances(cx);
     }
     
     pub fn end_instances(&mut self, cx: &mut Cx) {
         self.selection_quad.end_many_instances(cx);
-        self.current_line_quad.end_many_instances(cx);
         self.code_text.end_many_instances(cx);
         self.caret_quad.end_many_instances(cx);
-        self.line_num_quad.end_many_instances(cx);
         self.line_num_text.end_many_instances(cx);
     }
     
@@ -277,29 +276,29 @@ impl CodeEditorView {
             pos: origin,
             size: viewport_size,
         } = cx.get_turtle_rect();
+        
         let viewport_start = self.scroll_view.get_scroll_pos(cx);
         let viewport_end = viewport_start + viewport_size;
         let mut start_y = 0.0;
-        let start = (0..line_count)
-            .find_map( | line | {
+        
+        let start = (0..line_count).find_map( | line | {
             let end_y = start_y + self.text_glyph_size.y;
             if end_y >= viewport_start.y {
                 return Some(line);
             }
             start_y = end_y;
             None
-        })
-            .unwrap_or(line_count);
+        }).unwrap_or(line_count);
+        
         let visible_start_y = origin.y + start_y;
-        let end = (start..line_count)
-            .find_map( | line | {
+        let end = (start..line_count).find_map( | line | {
             if start_y >= viewport_end.y {
                 return Some(line);
             }
             start_y += self.text_glyph_size.y;
             None
-        })
-            .unwrap_or(line_count);
+        }).unwrap_or(line_count);
+        
         VisibleLines {
             start,
             end,
@@ -434,7 +433,7 @@ impl CodeEditorView {
         &mut self,
         cx: &mut Cx,
         visible_lines: VisibleLines,
-        cursor:Cursor
+        cursor: Cursor
     ) {
         fn linenum_fill(buf: &mut Vec<char>, line: usize) {
             buf.truncate(0);
@@ -470,10 +469,10 @@ impl CodeEditorView {
         
         
         for i in visible_lines.start..visible_lines.end {
-            if i == cursor.head.line{
+            if i == cursor.head.line {
                 self.line_num_text.color = self.text_color_linenum_current;
             }
-            else{
+            else {
                 self.line_num_text.color = self.text_color_linenum;
             }
             let end_y = start_y + self.text_glyph_size.y;
@@ -571,8 +570,8 @@ impl CodeEditorView {
         cursor: Cursor,
     ) {
         let rect = cx.get_turtle_rect();
-        if cursor.head == cursor.tail{
-             self.current_line_quad.draw_abs(
+        if cursor.head == cursor.tail {
+            self.current_line_quad.draw_abs(
                 cx,
                 Rect {
                     pos: Vec2 {
