@@ -6,6 +6,7 @@ use {
             SessionId,
         },
         code_editor::{
+            cursor::Cursor,
             position::Position,
             position_set::PositionSet,
             protocol::Request,
@@ -17,7 +18,10 @@ use {
         },
     },
     makepad_render::*,
-    makepad_widget::*,
+    makepad_widget::{
+        ScrollView,
+        ScrollShadow
+    },
     std::mem,
 };
 
@@ -78,17 +82,21 @@ live_register!{
         }
         
         line_num_text: code_text {
-            draw_depth: 3.0
+            draw_depth: 3.5
             no_h_scroll: true
         }
         
-        line_num_quad: {
+        line_num_quad: { 
             color: #x1e
-            draw_depth: 2.0
+            draw_depth: 3.0
             no_h_scroll: true
             no_v_scroll: true
         }
         
+        scroll_shadow:{
+            draw_depth:4.0
+        }
+         
         line_num_width: 45.0,
         
         text_color_comment: #638d54
@@ -102,16 +110,24 @@ live_register!{
         text_color_string: #cc917b
         text_color_whitespace: #6e6e6e
         text_color_unknown: #808080
+
         text_color_linenum: #88
-        text_color_linenum_selected: #d4
+        text_color_linenum_current: #d4
         
         selection_quad: {
             color: #294e75
             draw_depth: 0.0
         }
+        
         caret_quad: {
             draw_depth: 2.0
             color: #b0b0b0
+        }
+        
+        current_line_quad: {
+            no_h_scroll: true
+            draw_depth: 0.0
+            color: #6663
         }
         
         show_caret_state: {
@@ -153,11 +169,15 @@ pub struct CodeEditorView {
     line_num_quad: DrawColor,
     line_num_text: DrawText,
     
+    current_line_quad: DrawColor,
+    
+    scroll_shadow: ScrollShadow,
+    
     line_num_width: f32,
     caret_blink_timeout: f64,
     
     text_color_linenum: Vec4,
-    text_color_linenum_selected: Vec4,
+    text_color_linenum_current: Vec4,
     text_color_comment: Vec4,
     text_color_identifier: Vec4,
     text_color_function_identifier: Vec4,
@@ -214,10 +234,12 @@ impl CodeEditorView {
                         &document_inner.token_cache,
                         visible_lines,
                     );
+                    self.draw_current_line(cx, session.cursors.last());
                     self.draw_carets(cx, &session.selections, &session.carets, visible_lines);
-                    self.draw_linenums(cx, visible_lines);
                     self.set_turtle_bounds(cx, &document_inner.text);
                     self.end_instances(cx);
+                    self.draw_linenums(cx, visible_lines, session.cursors.last());
+                    self.scroll_shadow.draw(cx, &self.scroll_view, vec2(self.line_num_width,0.));
                 }
             }
             self.scroll_view.end(cx);
@@ -225,18 +247,22 @@ impl CodeEditorView {
     }
     
     pub fn begin_instances(&mut self, cx: &mut Cx) {
-        // this makes a single area pointer cover all the items
-        // also enables a faster api below
+        // this makes a single area pointer cover all the items drawn
+        // also enables a faster draw api because it doesnt have to look up the instance buffer every time
         self.selection_quad.begin_many_instances(cx);
+        self.current_line_quad.begin_many_instances(cx);
         self.code_text.begin_many_instances(cx);
         self.caret_quad.begin_many_instances(cx);
+        self.line_num_quad.begin_many_instances(cx);
         self.line_num_text.begin_many_instances(cx);
     }
     
     pub fn end_instances(&mut self, cx: &mut Cx) {
         self.selection_quad.end_many_instances(cx);
+        self.current_line_quad.end_many_instances(cx);
         self.code_text.end_many_instances(cx);
         self.caret_quad.end_many_instances(cx);
+        self.line_num_quad.end_many_instances(cx);
         self.line_num_text.end_many_instances(cx);
     }
     
@@ -281,7 +307,6 @@ impl CodeEditorView {
         }
     }
     
-    
     fn draw_selections(
         &mut self,
         cx: &mut Cx,
@@ -315,10 +340,10 @@ impl CodeEditorView {
         let mut selected_rects_on_next_line = Vec::new();
         let mut start_y = visible_lines.start_y;
         let mut start = 0;
-
+        
         // Iterate over each line with one line lookahead. During each iteration, we compute the
         // selected rects for the next line, and draw the selected rects for the current line.
-        // 
+        //
         // Note that since the iterator always points to the next line, the current line is not
         // defined until after the first iteration, and the previous line is not defined until after
         // the second iteration.
@@ -327,14 +352,14 @@ impl CodeEditorView {
             // previous line, and the previous line becomes the next line.
             mem::swap(&mut selected_rects_on_previous_line, &mut selected_rects_on_current_line);
             mem::swap(&mut selected_rects_on_current_line, &mut selected_rects_on_next_line);
-
+            
             // Compute the selected rects for the next line.
             selected_rects_on_next_line.clear();
             while let Some(span) = span_slot {
                 let end = if span.len.line == 0 {
                     start + span.len.column
                 } else {
-                    next_line.len()
+                    next_line.len() + 1
                 };
                 if span.is_included {
                     selected_rects_on_next_line.push(Rect {
@@ -368,19 +393,19 @@ impl CodeEditorView {
             // Draw the selected rects for the current line.
             if next_line_index > 0 {
                 for &rect in &selected_rects_on_current_line {
-                    if let Some(r) = selected_rects_on_previous_line.first(){
+                    if let Some(r) = selected_rects_on_previous_line.first() {
                         self.selection_quad.prev_x = r.pos.x - rect.pos.x;
                         self.selection_quad.prev_w = r.size.x;
                     }
-                    else{
+                    else {
                         self.selection_quad.prev_x = 0.0;
                         self.selection_quad.prev_w = -1.0;
                     }
-                    if let Some(r) = selected_rects_on_next_line.first(){
-                        self.selection_quad.next_x = r.pos.x - rect.pos.x;;
+                    if let Some(r) = selected_rects_on_next_line.first() {
+                        self.selection_quad.next_x = r.pos.x - rect.pos.x;
                         self.selection_quad.next_w = r.size.x;
                     }
-                    else{
+                    else {
                         self.selection_quad.next_x = 0.0;
                         self.selection_quad.next_w = -1.0;
                     }
@@ -388,14 +413,14 @@ impl CodeEditorView {
                 }
             }
         }
-
+        
         // Draw the selected rects for the last line.
         for &rect in &selected_rects_on_next_line {
-            if let Some(r) = selected_rects_on_previous_line.first(){
+            if let Some(r) = selected_rects_on_previous_line.first() {
                 self.selection_quad.prev_x = r.pos.x - rect.pos.x;
                 self.selection_quad.prev_w = r.size.x;
             }
-            else{
+            else {
                 self.selection_quad.prev_x = 0.0;
                 self.selection_quad.prev_w = -1.0;
             }
@@ -409,6 +434,7 @@ impl CodeEditorView {
         &mut self,
         cx: &mut Cx,
         visible_lines: VisibleLines,
+        cursor:Cursor
     ) {
         fn linenum_fill(buf: &mut Vec<char>, line: usize) {
             buf.truncate(0);
@@ -442,8 +468,14 @@ impl CodeEditorView {
             size: Vec2 {x: self.line_num_width, y: viewport_size.y}
         });
         
-        self.line_num_text.color = self.text_color_linenum;
+        
         for i in visible_lines.start..visible_lines.end {
+            if i == cursor.head.line{
+                self.line_num_text.color = self.text_color_linenum_current;
+            }
+            else{
+                self.line_num_text.color = self.text_color_linenum;
+            }
             let end_y = start_y + self.text_glyph_size.y;
             linenum_fill(&mut self.line_num_text.buf, i + 1);
             self.line_num_text.draw_chunk(cx, Vec2 {x: start_x, y: start_y,}, 0, None);
@@ -530,6 +562,29 @@ impl CodeEditorView {
                 }
             }
             start_y += self.text_glyph_size.y;
+        }
+    }
+    
+    fn draw_current_line(
+        &mut self,
+        cx: &mut Cx,
+        cursor: Cursor,
+    ) {
+        let rect = cx.get_turtle_rect();
+        if cursor.head == cursor.tail{
+             self.current_line_quad.draw_abs(
+                cx,
+                Rect {
+                    pos: Vec2 {
+                        x: rect.pos.x,
+                        y: rect.pos.y + self.text_glyph_size.y * cursor.head.line as f32,
+                    },
+                    size: Vec2 {
+                        x: rect.size.x,
+                        y: self.text_glyph_size.y,
+                    },
+                },
+            );
         }
     }
     
@@ -803,7 +858,7 @@ impl CodeEditorView {
         }
     }
     
-    fn handle_select_scroll_in_trigger(&mut self, cx:&mut Cx, state:&mut EditorState){
+    fn handle_select_scroll_in_trigger(&mut self, cx: &mut Cx, state: &mut EditorState) {
         if let Some(select_scroll) = &mut self.select_scroll {
             let rel = select_scroll.rel;
             if select_scroll.at_end {
