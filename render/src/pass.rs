@@ -118,9 +118,6 @@ impl Pass {
         cxpass.main_view_id = None;
         cxpass.color_textures.truncate(0);
         cx.pass_stack.push(self.pass_id);
-        
-        //let pass_size = cxpass.pass_size;
-        //self.set_ortho_matrix(cx, Vec2::zero(), pass_size);
     }
     
     pub fn override_dpi_factor(&mut self, cx: &mut Cx, dpi_factor:f32){
@@ -212,9 +209,9 @@ pub struct CxPassColorTexture {
 #[derive(Default, Clone)]
 #[repr(C)]
 pub struct PassUniforms{
-    camera_projection:[f32;16],
-    camera_view:[f32;16],
-    camera_inv:[f32;16],
+    camera_projection:Mat4,
+    camera_view:Mat4,
+    camera_inv:Mat4,
     dpi_factor:f32,
     dpi_dilate:f32,
     pad1:f32,
@@ -284,20 +281,6 @@ pub enum CxPassDepOf {
 
 impl CxPass {
     
-    pub fn uniform_camera_projection(&mut self, v: &Mat4) {
-        //dump in uniforms
-        for i in 0..16 {
-            self.pass_uniforms.camera_projection[i] = v.v[i];
-        }
-    }
-    
-    pub fn uniform_camera_view(&mut self, v: &Mat4) {
-        //dump in uniforms
-        for i in 0..16 {
-            self.pass_uniforms.camera_view[i] =  v.v[i];
-        }
-    }
-    
     pub fn set_dpi_factor(&mut self, dpi_factor: f32) {
         let dpi_dilate = (2. - dpi_factor).max(0.).min(1.);
         self.pass_uniforms.dpi_factor = dpi_factor;
@@ -317,30 +300,14 @@ impl CxPass {
                     1.0,
                     1.0
                 );
-                self.uniform_camera_projection(&ortho);
-                self.uniform_camera_view(&Mat4::identity());
+                self.pass_uniforms.camera_projection = ortho;
+                self.pass_uniforms.camera_view = Mat4::identity();
             }
             PassMatrixMode::Projection{fov_y, near, far, cam}=>{
                 let proj = Mat4::perspective(fov_y, size.x / size.y, near, far);
-                self.uniform_camera_projection(&proj);
-                self.uniform_camera_view(&cam);
-                
-                /*Mat4::ortho(
-                    offset.x,
-                    offset.x + size.x,
-                    offset.y,
-                    offset.y + size.y,
-                    100.,
-                    -100.,
-                    1.0,
-                    1.0)*/
+                self.pass_uniforms.camera_projection = proj;
+                self.pass_uniforms.camera_view = cam;
             }
         };
-        //self.set_matrix(cx, &ortho_matrix);
     }
-    
-    //pub fn set_matrix(&mut self, cx: &mut Cx, matrix: &Mat4) {
-    //let pass_id = self.pass_id.expect("Please call set_ortho_matrix after begin_pass");
-    //let cxpass = &mut cx.passes[pass_id];
-    // }
 }

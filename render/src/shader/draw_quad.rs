@@ -92,7 +92,11 @@ impl DrawQuad {
         self.rect_size = rect.size;
         self.draw(cx);
     }
-    
+
+    pub fn new_draw_call(&self, cx:&mut Cx){
+        cx.new_draw_call(&self.draw_vars);
+    }
+
     pub fn begin_many_instances(&mut self, cx: &mut Cx){
         let mi = cx.begin_many_aligned_instances(&self.draw_vars);
         self.many_instances = Some(mi);        
