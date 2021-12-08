@@ -11,6 +11,7 @@ use {
             range_set::RangeSet,
             size::Size,
             text::Text,
+            token::{Punctuator, Token, TokenKind},
             token_cache::TokenCache,
         },
         design_editor::{
@@ -246,7 +247,14 @@ impl EditorState {
         send_request: &mut dyn FnMut(Request)
     ) {
         self.insert_text(session_id, Text::from(vec![vec![], vec![]]), send_request);
+        self.autoindent(session_id, send_request);
+    }
 
+    fn autoindent(
+        &mut self,
+        session_id: SessionId,
+        send_request: &mut dyn FnMut(Request)
+    ) {
         let session = &self.sessions_by_session_id[session_id];
         let document = &self.documents_by_document_id[session.document_id];
         let document_inner = document.inner.as_ref().unwrap();
@@ -256,8 +264,17 @@ impl EditorState {
         for distance in session.carets.distances() {
             position += distance;
             builder.retain(distance);
-            let indent_info = &document_inner.indent_cache[position.line];
-            let indent_count = (indent_info.virtual_leading_whitespace() + 3) / 4;
+            assert!(position.line > 0);
+            let indent_info = &document_inner.indent_cache[position.line - 1];
+            let mut indent_count = (indent_info.virtual_leading_whitespace() + 3) / 4;
+            let token_info = &document_inner.token_cache[position.line - 1];
+            match token_info.tokens().last() {
+                Some(Token {
+                    kind: TokenKind::Punctuator(Punctuator::OpenDelimiter(_)),
+                    ..
+                }) => indent_count += 1,
+                _ => {}
+            }
             let text = Text::from(vec![iter::repeat(' ').take(indent_count * 4).collect::<Vec<_>>()]);
             let len = text.len();
             builder.insert(text);
