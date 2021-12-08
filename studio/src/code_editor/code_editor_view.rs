@@ -7,6 +7,7 @@ use {
         },
         code_editor::{
             cursor::Cursor,
+            indent_cache::IndentCache,
             position::Position,
             position_set::PositionSet,
             protocol::Request,
@@ -226,6 +227,12 @@ impl CodeEditorView {
                         cx,
                         &session.selections,
                         &document_inner.text,
+                        visible_lines,
+                    );
+                    self.draw_indent_guides(
+                        cx,
+                        &document_inner.token_cache,
+                        &document_inner.indent_cache,
                         visible_lines,
                     );
                     self.draw_text(
@@ -479,6 +486,40 @@ impl CodeEditorView {
             linenum_fill(&mut self.line_num_text.buf, i + 1);
             self.line_num_text.draw_chunk(cx, Vec2 {x: start_x, y: start_y,}, 0, None);
             start_y = end_y;
+        }
+    }
+
+    fn draw_indent_guides(
+        &mut self,
+        cx: &mut Cx,
+        token_cache: &TokenCache,
+        indent_cache: &IndentCache,
+        visible_lines: VisibleLines,
+    ) {
+        let origin = cx.get_turtle_pos();
+        let mut start_y = visible_lines.start_y;
+        for (tokens, indent_info) in token_cache
+            .iter()
+            .zip(indent_cache.iter())
+            .skip(visible_lines.start)
+            .take(visible_lines.end - visible_lines.start)
+        {
+            let indent_count = (indent_info.virtual_leading_whitespace() + 3) / 4;
+            for indent in 0..indent_count {
+                let indent_guide_column = indent * 4;
+                self.indent_guide.base.color = self.text_color_unknown; // TODO: Colored indent guides
+                self.indent_guide.draw_quad_abs(
+                    cx,
+                    Rect {
+                        pos: Vec2 {
+                            x: origin.x + indent_guide_column as f32 * self.text_glyph_size.x,
+                            y: start_y,
+                        },
+                        size: self.text_glyph_size,
+                    },
+                );
+            }
+            start_y += self.text_glyph_size.y;
         }
     }
     
