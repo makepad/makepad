@@ -117,7 +117,7 @@ impl EditorState {
         let document_id = self.outstanding_document_id_queue.pop_front().unwrap();
         let document = &mut self.documents_by_document_id[document_id];
         let token_cache = TokenCache::new(&text);
-        let indent_cache = TokenCache::new(&text);
+        let indent_cache = IndentCache::new(&text);
         document.inner = Some(DocumentInner {
             file_id,
             revision,
