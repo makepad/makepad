@@ -63,7 +63,7 @@ live_register!{
     
     DrawIndentLines:{{DrawIndentLines}}{
         fn pixel(self) -> vec4 {
-            return #f00;
+            //return #f00;
             let col = self.color;
             let thickness = 0.8 + self.dpi_dilate * 0.5;
             //if indent_id == indent_sel {
@@ -102,7 +102,7 @@ live_register!{
         }
         
         line_num_text: code_text {
-            draw_depth: 3.5
+            draw_depth: 1.5
             no_h_scroll: true
         }
         
@@ -141,7 +141,7 @@ live_register!{
         
         indent_lines_quad: {
             color: #fff
-            draw_depth: 0.0
+            draw_depth: 5.5
         }
         
         caret_quad: {
@@ -292,6 +292,7 @@ impl CodeEditorView {
         self.selection_quad.begin_many_instances(cx);
         self.current_line_quad.new_draw_call(cx);
         self.code_text.begin_many_instances(cx);
+        self.indent_lines_quad.new_draw_call(cx);
         self.caret_quad.begin_many_instances(cx);
         self.line_num_quad.new_draw_call(cx);
         self.line_num_text.begin_many_instances(cx);
@@ -544,7 +545,7 @@ impl CodeEditorView {
                     cx,
                     Rect {
                         pos: Vec2 {
-                            x: origin.x + indent_lines_column as f32 * self.text_glyph_size.x,
+                            x: origin.x + self.line_num_width + indent_lines_column as f32 * self.text_glyph_size.x,
                             y: start_y,
                         },
                         size: self.text_glyph_size,
