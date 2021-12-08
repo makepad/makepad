@@ -12,7 +12,7 @@ use {
     },
     makepad_render::*,
     makepad_widget::{GenId, GenIdMap,GenIdAllocator, ScrollView},
-};
+}; 
 
 live_register!{
     use makepad_widget::scrollview::ScrollView;
