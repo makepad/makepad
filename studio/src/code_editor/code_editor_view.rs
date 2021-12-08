@@ -103,13 +103,13 @@ live_register!{
         }
         
         line_num_text: code_text {
-            draw_depth: 1.5
+            draw_depth: 4.5
             no_h_scroll: true
         }
         
         line_num_quad: {
             color: #x1e
-            draw_depth: 3.0
+            draw_depth: 4.0
             no_h_scroll: true
             no_v_scroll: true
         }
@@ -142,7 +142,7 @@ live_register!{
         
         indent_lines_quad: {
             color: #fff
-            draw_depth: 5.5
+            draw_depth: 1.5
         }
         
         caret_quad: {
