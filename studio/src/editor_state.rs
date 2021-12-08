@@ -20,6 +20,7 @@ use {
     makepad_widget::{GenId, GenIdMap,GenIdAllocator},
     std::{
         collections::{HashMap, HashSet, VecDeque},
+        iter,
         mem,
         path::PathBuf,
     },
@@ -235,6 +236,34 @@ impl EditorState {
 
         let (_, new_delta_1) = delta_0.clone().transform(delta_1);
         let delta = delta_0.compose(new_delta_1);
+
+        self.apply_delta(session_id, delta, send_request);
+    }
+
+    pub fn insert_newline(
+        &mut self,
+        session_id: SessionId,
+        send_request: &mut dyn FnMut(Request)
+    ) {
+        self.insert_text(session_id, Text::from(vec![vec![], vec![]]), send_request);
+
+        let session = &self.sessions_by_session_id[session_id];
+        let document = &self.documents_by_document_id[session.document_id];
+        let document_inner = document.inner.as_ref().unwrap();
+        
+        let mut builder = delta::Builder::new();
+        let mut position = Position::origin();
+        for distance in session.carets.distances() {
+            position += distance;
+            builder.retain(distance);
+            let indent_info = &document_inner.indent_cache[position.line];
+            let indent_count = (indent_info.virtual_leading_whitespace() + 3) / 4;
+            let text = Text::from(vec![iter::repeat(' ').take(indent_count * 4).collect::<Vec<_>>()]);
+            let len = text.len();
+            builder.insert(text);
+            position += len;
+        }
+        let delta = builder.build();
 
         self.apply_delta(session_id, delta, send_request);
     }
