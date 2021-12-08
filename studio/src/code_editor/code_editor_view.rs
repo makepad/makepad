@@ -563,7 +563,7 @@ impl CodeEditorView {
     ) {
         let origin = cx.get_turtle_pos();
         let mut start_y = visible_lines.start_y;
-        for (chars, tokens) in text
+        for (chars, token_info) in text
             .as_lines()
             .iter()
             .zip(token_cache.iter())
@@ -573,7 +573,7 @@ impl CodeEditorView {
             let end_y = start_y + self.text_glyph_size.y;
             let mut start_x = origin.x + self.line_num_width;
             let mut start = 0;
-            let mut token_iter = tokens.iter().peekable();
+            let mut token_iter = token_info.tokens().iter().peekable();
             while let Some(token) = token_iter.next() {
                 let next_token = token_iter.peek();
                 let end_x = start_x + token.len as f32 * self.text_glyph_size.x;
