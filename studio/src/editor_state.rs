@@ -276,7 +276,7 @@ impl EditorState {
                     delimiter_count -= 1;
                 }
             }
-            if delimiter_count % 2 == 1 {
+            if delimiter_count > 0 {
                 indent_count += 1;
             }
             let text = Text::from(vec![iter::repeat(' ').take(indent_count * 4).collect::<Vec<_>>()]);
