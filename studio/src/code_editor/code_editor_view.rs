@@ -539,7 +539,7 @@ impl CodeEditorView {
             let indent_count = (indent_info.virtual_leading_whitespace() + 3) / 4;
             for indent in 0..indent_count {
                 let indent_lines_column = indent * 4;
-                self.indent_guide_quad.color = self.text_color_unknown; // TODO: Colored indent guides
+                self.indent_lines_quad.color = self.text_color_unknown; // TODO: Colored indent guides
                 self.indent_lines_quad.draw_abs(
                     cx,
                     Rect {
