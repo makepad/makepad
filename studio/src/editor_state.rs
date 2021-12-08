@@ -263,22 +263,26 @@ impl EditorState {
         for distance in session.carets.distances() {
             position += distance;
             builder.retain(distance);
-            assert!(position.line > 0);
-            let indent_info = &document_inner.indent_cache[position.line - 1];
-            let mut indent_count = (indent_info.virtual_leading_whitespace() + 3) / 4;
-            let mut delimiter_count = 0;
-            let token_info = &document_inner.token_cache[position.line - 1];
-            for token in token_info.tokens() {
-                if token.kind.is_open_delimiter() {
-                    delimiter_count += 1;
-                }
-                if token.kind.is_close_delimiter() {
-                    delimiter_count -= 1;
-                }
-            }
-            if delimiter_count > 0 {
-                indent_count += 1;
-            }
+            let indent_count = (0..position.line).rev().find_map(|line| {
+                let indent_info = &document_inner.indent_cache[line];
+                indent_info.leading_whitespace().map(|leading_whitespace| {
+                    let mut indent_count = (leading_whitespace + 3) / 4;
+                    let mut delimiter_count = 0;
+                    let token_info = &document_inner.token_cache[line];
+                    for token in token_info.tokens() {
+                        if token.kind.is_open_delimiter() {
+                            delimiter_count += 1;
+                        }
+                        if token.kind.is_close_delimiter() {
+                            delimiter_count -= 1;
+                        }
+                    }
+                    if delimiter_count > 0 {
+                        indent_count += 1;
+                    }
+                    indent_count
+                })
+            }).unwrap_or(0);
             let text = Text::from(vec![iter::repeat(' ').take(indent_count * 4).collect::<Vec<_>>()]);
             let len = text.len();
             builder.insert(text);

@@ -105,6 +105,10 @@ pub struct Line {
 }
 
 impl Line {
+    pub fn leading_whitespace(&self) -> Option<usize> {
+        self.leading_whitespace.unwrap()
+    }
+
     pub fn virtual_leading_whitespace(&self) -> usize {
         self.leading_whitespace_above
             .unwrap()
