@@ -92,7 +92,7 @@ impl<'a> IntoIterator for &'a IndentCache {
     type Item = &'a Line;
     type IntoIter = Iter<'a, Line>;
 
-    fn into_iter(self) -> Iter<'a, Line> {
+    fn into_iter(self) -> Self::IntoIter {
         self.iter()
     }
 }
