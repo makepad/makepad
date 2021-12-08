@@ -776,6 +776,12 @@ impl CodeEditorView {
                     dispatch_action(cx, CodeEditorViewAction::RedrawViewsForDocument(session.document_id))
                 }
             }
+            HitEvent::TextCopy(ke) =>{
+                // set ke
+                // Set to Some(String)
+                ke.response = None;
+                println!("DOING TEXTCOPY");
+            },
             HitEvent::TextInput(TextInputEvent {input, ..}) => {
                 self.reset_caret_blink(cx);
                 if let Some(session_id) = self.session_id {
