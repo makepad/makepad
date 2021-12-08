@@ -7,7 +7,7 @@ use {
             size::Size,
         }
     },
-    std::{iter, mem, ops::AddAssign},
+    std::{fmt, iter, mem, ops::AddAssign},
 };
 use makepad_micro_serde::{SerBin, DeBin, DeBinErr};
 
@@ -163,8 +163,39 @@ impl Default for Text {
     }
 }
 
+impl fmt::Display for Text {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let mut sep = "";
+        for line in self.lines.iter() {
+            write!(f, "{}", sep)?;
+            for ch in line {
+                write!(f, "{}", ch)?;
+            }
+            sep = "\n";
+        }
+        Ok(())
+    }
+}
+
 impl From<Vec<Vec<char>>> for Text {
     fn from(lines: Vec<Vec<char>>) -> Text {
         Text { lines }
+    }
+}
+
+impl From<String> for Text {
+    fn from(string: String) -> Text {
+        Text::from(string.as_str())
+    }
+}
+
+impl From<&str> for Text {
+    fn from(string: &str) -> Text {
+        Text::from(
+            string
+                .lines()
+                .map( | line | line.chars().collect::<Vec<_ >> ())
+                .collect::<Vec<_ >> ()
+        )
     }
 }

@@ -11,6 +11,7 @@ use {
             position::Position,
             position_set::PositionSet,
             protocol::Request,
+            range::Range,
             range_set::{RangeSet, Span},
             size::Size,
             text::Text,
@@ -851,21 +852,38 @@ impl CodeEditorView {
                 }
             }
             HitEvent::TextCopy(ke) =>{
-                // set ke
-                // Set to Some(String)
-                ke.response = None;
-                println!("DOING TEXTCOPY");
+                if let Some(session_id) = self.session_id {
+                    // TODO: The code below belongs in a function on EditorState
+                    let mut string = String::new();
+
+                    let session = &state.sessions_by_session_id[session_id];
+                    let document = &state.documents_by_document_id[session.document_id];
+                    let document_inner = document.inner.as_ref().unwrap();
+
+                    let mut start = Position::origin(); 
+                    for span in session.selections.spans() {
+                        let end = start + span.len;
+                        if span.is_included {
+                            // TODO: We make two unnecessary allocations here. First when copying a
+                            // sub-range of the text, and again when converting the copied text to a
+                            // string. It would be nice if we could directly append a text to a
+                            // string.
+                            string += &document_inner.text.copy(Range { start, end }).to_string();
+                        }
+                        start = end;
+                    }
+
+                    ke.response = Some(string);
+                } else {
+                    ke.response = None;
+                }
             },
             HitEvent::TextInput(TextInputEvent {input, ..}) => {
                 self.reset_caret_blink(cx);
                 if let Some(session_id) = self.session_id {
                     state.insert_text(
                         session_id,
-                        input
-                            .lines()
-                            .map( | line | line.chars().collect::<Vec<_ >> ())
-                            .collect::<Vec<_ >> ()
-                            .into(),
+                        input.into(),
                         send_request,
                     );
                     let session = &state.sessions_by_session_id[session_id];
