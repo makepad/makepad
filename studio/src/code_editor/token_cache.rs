@@ -36,7 +36,7 @@ impl TokenCache {
                 OperationRange::Insert(range) => {
                     self.lines[range.start.line] = None;
                     self.lines.splice(
-                        range.start.line + 1..range.start.line + 1,
+                        range.start.line..range.start.line,
                         iter::repeat(None).take(range.end.line - range.start.line),
                     );
                 }

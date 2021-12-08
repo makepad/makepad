@@ -1,0 +1,103 @@
+use {crate::code_editor::{delta::{Delta, OperationRange}, text::Text}, std::slice};
+
+pub struct IndentCache {
+    lines: Vec<Line>
+}
+
+impl IndentCache {
+    pub fn new(text: &Text) -> IndentCache {
+        let mut cache = IndentCache {
+            lines: (0..text.as_lines().len()).map(|_| Line::default()).collect::<Vec<_>>(),
+        };
+        cache.refresh(text);
+        cache
+    }
+
+    pub fn iter(&self) -> Iter {
+        Iter {
+            iter: self.lines.iter(),
+        }
+    }
+
+    pub fn invalidate(&mut self, delta: &Delta) {
+        for operation_range in delta.operation_ranges() {
+            match operation_range {
+                OperationRange::Insert(range) => {
+                    self.lines[range.start.line] = Line::default();
+                    self.lines.splice(
+                        range.start.line..range.start.line,
+                        (0..range.end.line - range.start.line).map(|_| Line::default())
+                    );
+                }
+                OperationRange::Delete(range) => {
+                    self.lines.drain(range.start.line..range.end.line);
+                    self.lines[range.start.line] = Line::default();
+                }
+            }
+        }
+    }
+
+    pub fn refresh(&mut self, text: &Text) {
+        for (index, line) in self.lines.iter_mut().enumerate() {
+            if line.leading_whitespace.is_some() {
+                continue;
+            }
+            line.leading_whitespace = Some(
+                text.as_lines()[index]
+                    .iter()
+                    .position(|ch| !ch.is_whitespace()),
+            );
+        }
+
+        let mut leading_whitespace_above = 0;
+        for line in self.lines.iter_mut() {
+            if let Some(leading_whitespace) = line.leading_whitespace.unwrap() {
+                leading_whitespace_above = leading_whitespace;
+            }
+            line.leading_whitespace_above = Some(leading_whitespace_above);
+        }
+
+        let mut leading_whitespace_below = 0;
+        for line_info in self.lines.iter_mut().rev() {
+            if let Some(non_whitespace_start) = line_info.leading_whitespace.unwrap() {
+                leading_whitespace_below = non_whitespace_start
+            }
+            line_info.leading_whitespace_below = Some(leading_whitespace_below);
+        }
+    }
+}
+
+impl<'a> IntoIterator for &'a IndentCache {
+    type Item = &'a Line;
+    type IntoIter = Iter<'a>;
+
+    fn into_iter(self) -> Iter<'a> {
+        self.iter()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Iter<'a> {
+    iter: slice::Iter<'a, Line>,
+}
+
+impl<'a> Iterator for Iter<'a> {
+    type Item = &'a Line;
+    
+    fn next(&mut self) -> Option<&'a Line> {
+        self.iter.next()
+    }
+}
+
+#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
+pub struct Line {
+    leading_whitespace: Option<Option<usize>>,
+    leading_whitespace_above: Option<usize>,
+    leading_whitespace_below: Option<usize>,
+}
+
+impl Line {
+    pub fn virtual_leading_whitespace(&self) -> usize {
+        self.leading_whitespace_above.unwrap().min(self.leading_whitespace_below.unwrap())
+    }
+}
