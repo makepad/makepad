@@ -236,7 +236,11 @@ impl EditorState {
         let (_, new_delta_1) = delta_0.clone().transform(delta_1);
         let delta = delta_0.compose(new_delta_1);
 
-        self.apply_delta(session_id, delta, send_request);
+        self.apply_delta(session_id, delta.clone());
+
+        let session = &self.sessions_by_session_id[session_id];
+        let document = &mut self.documents_by_document_id[session.document_id];
+        document.schedule_apply_delta_request(delta, send_request);
     }
 
     pub fn insert_backspace(
@@ -287,7 +291,11 @@ impl EditorState {
         let (_, new_delta_1) = delta_0.clone().transform(delta_1);
         let delta = delta_0.compose(new_delta_1);
 
-        self.apply_delta(session_id, delta, send_request);
+        self.apply_delta(session_id, delta.clone());
+
+        let session = &self.sessions_by_session_id[session_id];
+        let document = &mut self.documents_by_document_id[session.document_id];
+        document.schedule_apply_delta_request(delta, send_request);
     }
 
     pub fn undo(&mut self, session_id: SessionId, send_request: &mut dyn FnMut(Request)) {
@@ -301,23 +309,10 @@ impl EditorState {
                 delta: inverse_delta,
             });
 
-            let session = &mut self.sessions_by_session_id[session_id];
-            session.cursors = undo.cursors;
-            session.update_selections_and_carets();
-
-            let document = &self.documents_by_document_id[session.document_id];
-            for other_session_id in document.session_ids.iter().cloned() {
-                if other_session_id == session_id {
-                    continue;
-                }
-
-                let other_session = &mut self.sessions_by_session_id[other_session_id];
-                other_session.apply_delta(&undo.delta, Whose::Theirs);
-            }
+            self.apply_delta_for_undo_redo(session_id, undo.cursors, undo.delta.clone());
 
             let session = &mut self.sessions_by_session_id[session_id];
             let document = &mut self.documents_by_document_id[session.document_id];
-            document.apply_delta(undo.delta.clone());
             document.schedule_apply_delta_request(undo.delta, send_request);
         }
     }
@@ -333,23 +328,10 @@ impl EditorState {
                 delta: inverse_delta,
             });
 
-            let session = &mut self.sessions_by_session_id[session_id];
-            session.cursors = redo.cursors;
-            session.update_selections_and_carets();
-
-            let document = &self.documents_by_document_id[session.document_id];
-            for other_session_id in document.session_ids.iter().cloned() {
-                if other_session_id == session_id {
-                    continue;
-                }
-
-                let other_session = &mut self.sessions_by_session_id[other_session_id];
-                other_session.apply_delta(&redo.delta, Whose::Theirs);
-            }
+            self.apply_delta_for_undo_redo(session_id, redo.cursors, redo.delta.clone());
 
             let session = &mut self.sessions_by_session_id[session_id];
             let document = &mut self.documents_by_document_id[session.document_id];
-            document.apply_delta(redo.delta.clone());
             document.schedule_apply_delta_request(redo.delta, send_request);
         }
     }
@@ -358,7 +340,6 @@ impl EditorState {
         &mut self,
         session_id: SessionId,
         delta: Delta,
-        send_request: &mut dyn FnMut(Request),
     ) {
         let session = &self.sessions_by_session_id[session_id];
         let document = &mut self.documents_by_document_id[session.document_id];
@@ -385,7 +366,31 @@ impl EditorState {
         let session = &mut self.sessions_by_session_id[session_id];
         let document = &mut self.documents_by_document_id[session.document_id];
         document.apply_delta(delta.clone());
-        document.schedule_apply_delta_request(delta, send_request);
+    }
+
+    fn apply_delta_for_undo_redo(
+        &mut self,
+        session_id: SessionId,
+        cursors: CursorSet,
+        delta: Delta,
+    ) {
+        let session = &mut self.sessions_by_session_id[session_id];
+        session.cursors = cursors;
+        session.update_selections_and_carets();
+
+        let document = &self.documents_by_document_id[session.document_id];
+        for other_session_id in document.session_ids.iter().cloned() {
+            if other_session_id == session_id {
+                continue;
+            }
+
+            let other_session = &mut self.sessions_by_session_id[other_session_id];
+            other_session.apply_delta(&delta, Whose::Theirs);
+        }
+
+        let session = &mut self.sessions_by_session_id[session_id];
+        let document = &mut self.documents_by_document_id[session.document_id];
+        document.apply_delta(delta.clone())
     }
 
     pub fn handle_apply_delta_response(
