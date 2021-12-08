@@ -4,6 +4,7 @@ use {
             code_editors::CodeEditorViewId,
             cursor_set::CursorSet,
             delta::{self, Delta, Whose},
+            indent_cache::IndentCache,
             position::Position,
             position_set::PositionSet,
             protocol::{FileId, Request},
@@ -116,11 +117,13 @@ impl EditorState {
         let document_id = self.outstanding_document_id_queue.pop_front().unwrap();
         let document = &mut self.documents_by_document_id[document_id];
         let token_cache = TokenCache::new(&text);
+        let indent_cache = TokenCache::new(&text);
         document.inner = Some(DocumentInner {
             file_id,
             revision,
             text,
             token_cache,
+            indent_cache,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             outstanding_deltas: VecDeque::new(),
@@ -493,8 +496,10 @@ impl Document {
     fn apply_delta(&mut self, delta: Delta) {
         let inner = self.inner.as_mut().unwrap();
         inner.token_cache.invalidate(&delta);
+        inner.indent_cache.invalidate(&delta);
         inner.text.apply_delta(delta);
         inner.token_cache.refresh(&inner.text);
+        inner.indent_cache.refresh(&inner.text);
     }
 
     fn schedule_apply_delta_request(
@@ -526,6 +531,7 @@ pub struct DocumentInner {
     pub revision: usize,
     pub text: Text,
     pub token_cache: TokenCache,
+    pub indent_cache: IndentCache,
     pub undo_stack: Vec<Edit>,
     pub redo_stack: Vec<Edit>,
     pub outstanding_deltas: VecDeque<Delta>,
