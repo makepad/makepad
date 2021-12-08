@@ -236,11 +236,7 @@ impl EditorState {
         let (_, new_delta_1) = delta_0.clone().transform(delta_1);
         let delta = delta_0.compose(new_delta_1);
 
-        self.apply_delta(session_id, delta.clone());
-
-        let session = &self.sessions_by_session_id[session_id];
-        let document = &mut self.documents_by_document_id[session.document_id];
-        document.schedule_apply_delta_request(delta, send_request);
+        self.apply_delta(session_id, delta, send_request);
     }
 
     pub fn insert_backspace(
@@ -291,11 +287,7 @@ impl EditorState {
         let (_, new_delta_1) = delta_0.clone().transform(delta_1);
         let delta = delta_0.compose(new_delta_1);
 
-        self.apply_delta(session_id, delta.clone());
-
-        let session = &self.sessions_by_session_id[session_id];
-        let document = &mut self.documents_by_document_id[session.document_id];
-        document.schedule_apply_delta_request(delta, send_request);
+        self.apply_delta(session_id, delta, send_request);
     }
 
     pub fn undo(&mut self, session_id: SessionId, send_request: &mut dyn FnMut(Request)) {
@@ -309,11 +301,7 @@ impl EditorState {
                 delta: inverse_delta,
             });
 
-            self.apply_delta_for_undo_redo(session_id, undo.cursors, undo.delta.clone());
-
-            let session = &mut self.sessions_by_session_id[session_id];
-            let document = &mut self.documents_by_document_id[session.document_id];
-            document.schedule_apply_delta_request(undo.delta, send_request);
+            self.apply_delta_for_undo_redo(session_id, undo.cursors, undo.delta, send_request);
         }
     }
 
@@ -328,11 +316,7 @@ impl EditorState {
                 delta: inverse_delta,
             });
 
-            self.apply_delta_for_undo_redo(session_id, redo.cursors, redo.delta.clone());
-
-            let session = &mut self.sessions_by_session_id[session_id];
-            let document = &mut self.documents_by_document_id[session.document_id];
-            document.schedule_apply_delta_request(redo.delta, send_request);
+            self.apply_delta_for_undo_redo(session_id, redo.cursors, redo.delta, send_request);
         }
     }
 
@@ -340,6 +324,7 @@ impl EditorState {
         &mut self,
         session_id: SessionId,
         delta: Delta,
+        send_request: &mut dyn FnMut(Request),
     ) {
         let session = &self.sessions_by_session_id[session_id];
         let document = &mut self.documents_by_document_id[session.document_id];
@@ -366,6 +351,7 @@ impl EditorState {
         let session = &mut self.sessions_by_session_id[session_id];
         let document = &mut self.documents_by_document_id[session.document_id];
         document.apply_delta(delta.clone());
+        document.schedule_apply_delta_request(delta, send_request);
     }
 
     fn apply_delta_for_undo_redo(
@@ -373,6 +359,7 @@ impl EditorState {
         session_id: SessionId,
         cursors: CursorSet,
         delta: Delta,
+        send_request: &mut dyn FnMut(Request),
     ) {
         let session = &mut self.sessions_by_session_id[session_id];
         session.cursors = cursors;
@@ -390,7 +377,8 @@ impl EditorState {
 
         let session = &mut self.sessions_by_session_id[session_id];
         let document = &mut self.documents_by_document_id[session.document_id];
-        document.apply_delta(delta.clone())
+        document.apply_delta(delta.clone());
+        document.schedule_apply_delta_request(delta, send_request);
     }
 
     pub fn handle_apply_delta_response(
