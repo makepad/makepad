@@ -7,42 +7,36 @@ use {
             tokenizer::{Cursor, State},
         }
     },
-    std::{iter, slice},
+    std::{iter, ops::{Deref, Index}, slice::Iter},
 };
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct TokenCache {
-    lines: Vec<Option<Line>>,
+    lines: Vec<Line>,
 }
 
 impl TokenCache {
     pub fn new(text: &Text) -> TokenCache {
         let mut cache = TokenCache {
-            lines: (0..text.as_lines().len()).map(|_| None).collect::<Vec<_>>(),
+            lines: (0..text.as_lines().len()).map(|_| Line::default()).collect::<Vec<_>>(),
         };
         cache.refresh(text);
         cache
-    }
-
-    pub fn iter(&self) -> Iter {
-        Iter {
-            iter: self.lines.iter(),
-        }
     }
 
     pub fn invalidate(&mut self, delta: &Delta) {
         for operation_range in delta.operation_ranges() {
             match operation_range {
                 OperationRange::Insert(range) => {
-                    self.lines[range.start.line] = None;
+                    self.lines[range.start.line] = Line::default();
                     self.lines.splice(
                         range.start.line..range.start.line,
-                        iter::repeat(None).take(range.end.line - range.start.line),
+                        iter::repeat(Line::default()).take(range.end.line - range.start.line),
                     );
                 }
                 OperationRange::Delete(range) => {
                     self.lines.drain(range.start.line..range.end.line);
-                    self.lines[range.start.line] = None;
+                    self.lines[range.start.line] = Line::default();
                 }
             }
         }
@@ -51,13 +45,13 @@ impl TokenCache {
     pub fn refresh(&mut self, text: &Text) {
         let mut state = State::default();
         for (index, line) in self.lines.iter_mut().enumerate() {
-            match line {
-                Some(Line {
+            match line.token_info {
+                Some(TokenInfo {
                     start_state,
                     end_state,
                     ..
-                }) if state == *start_state => {
-                    state = *end_state;
+                }) if state == start_state => {
+                    state = end_state;
                 }
                 _ => {
                     let start_state = state;
@@ -71,7 +65,7 @@ impl TokenCache {
                             None => break,
                         }
                     }
-                    *line = Some(Line {
+                    line.token_info = Some(TokenInfo {
                         start_state,
                         tokens,
                         end_state: state,
@@ -82,30 +76,44 @@ impl TokenCache {
     }
 }
 
-impl<'a> IntoIterator for &'a TokenCache {
-    type Item = &'a [Token];
-    type IntoIter = Iter<'a>;
+impl Deref for TokenCache {
+    type Target = [Line];
 
-    fn into_iter(self) -> Iter<'a> {
+    fn deref(&self) -> &Self::Target {
+        &self.lines
+    }
+}
+
+impl Index<usize> for TokenCache {
+    type Output = Line;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.lines[index]
+    }
+}
+
+impl<'a> IntoIterator for &'a TokenCache {
+    type Item = &'a Line;
+    type IntoIter = Iter<'a, Line>;
+
+    fn into_iter(self) -> Self::IntoIter {
         self.iter()
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct Iter<'a> {
-    iter: slice::Iter<'a, Option<Line>>,
+#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
+pub struct Line {
+    token_info: Option<TokenInfo>
 }
 
-impl<'a> Iterator for Iter<'a> {
-    type Item = &'a [Token];
-
-    fn next(&mut self) -> Option<&'a [Token]> {
-        Some(&self.iter.next()?.as_ref().unwrap().tokens)
+impl Line {
+    pub fn tokens(&self) -> &[Token] {
+        &self.token_info.as_ref().unwrap().tokens
     }
 }
 
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
-struct Line {
+struct TokenInfo {
     start_state: State,
     tokens: Vec<Token>,
     end_state: State,
