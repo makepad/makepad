@@ -61,6 +61,25 @@ live_register!{
         }
     }
     
+    DrawIndentLines:{{DrawIndentLines}}{
+        fn pixel(self) -> vec4 {
+            return #f00;
+            let col = self.color;
+            let thickness = 0.8 + self.dpi_dilate * 0.5;
+            //if indent_id == indent_sel {
+            //    col *= vec4(1., 1., 1., 1.);
+            //    thickness *= 1.3;
+           // }
+           // else {
+                col *= vec4(0.75, 0.75, 0.75, 0.75);
+            //}
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+            sdf.move_to(1., -1.);
+            sdf.line_to(1., self.rect_size.y + 1.);
+            return sdf.stroke(col, thickness);
+        }
+    }
+    
     CodeEditorView: {{CodeEditorView}} {
         scroll_view: {
             v_scroll: {smoothing: 0.15},
@@ -120,6 +139,11 @@ live_register!{
             draw_depth: 0.0
         }
         
+        indent_lines_quad: {
+            color: #fff
+            draw_depth: 0.0
+        }
+        
         caret_quad: {
             draw_depth: 2.0
             color: #b0b0b0
@@ -169,6 +193,7 @@ pub struct CodeEditorView {
     caret_quad: DrawColor,
     line_num_quad: DrawColor,
     line_num_text: DrawText,
+    indent_lines_quad: DrawIndentLines,
     
     current_line_quad: DrawColor,
     
@@ -200,6 +225,13 @@ pub struct DrawSelection {
     prev_w: f32,
     next_x: f32,
     next_w: f32
+}
+
+#[derive(Live, LiveHook)]
+#[repr(C)]
+pub struct DrawIndentLines {
+    deref_target: DrawColor,
+    indent_id: f32
 }
 
 pub enum CodeEditorViewAction {
@@ -506,13 +538,13 @@ impl CodeEditorView {
         {
             let indent_count = (indent_info.virtual_leading_whitespace() + 3) / 4;
             for indent in 0..indent_count {
-                let indent_guide_column = indent * 4;
-                self.indent_guide.base.color = self.text_color_unknown; // TODO: Colored indent guides
-                self.indent_guide.draw_quad_abs(
+                let indent_lines_column = indent * 4;
+                self.indent_guide_quad.color = self.text_color_unknown; // TODO: Colored indent guides
+                self.indent_lines_quad.draw_abs(
                     cx,
                     Rect {
                         pos: Vec2 {
-                            x: origin.x + indent_guide_column as f32 * self.text_glyph_size.x,
+                            x: origin.x + indent_lines_column as f32 * self.text_glyph_size.x,
                             y: start_y,
                         },
                         size: self.text_glyph_size,
