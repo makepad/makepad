@@ -11,7 +11,6 @@ use {
             range_set::RangeSet,
             size::Size,
             text::Text,
-            token::{Punctuator, Token, TokenKind},
             token_cache::TokenCache,
         },
         design_editor::{
@@ -267,13 +266,18 @@ impl EditorState {
             assert!(position.line > 0);
             let indent_info = &document_inner.indent_cache[position.line - 1];
             let mut indent_count = (indent_info.virtual_leading_whitespace() + 3) / 4;
+            let mut delimiter_count = 0;
             let token_info = &document_inner.token_cache[position.line - 1];
-            match token_info.tokens().last() {
-                Some(Token {
-                    kind: TokenKind::Punctuator(Punctuator::OpenDelimiter(_)),
-                    ..
-                }) => indent_count += 1,
-                _ => {}
+            for token in token_info.tokens() {
+                if token.kind.is_open_delimiter() {
+                    delimiter_count += 1;
+                }
+                if token.kind.is_close_delimiter() {
+                    delimiter_count -= 1;
+                }
+            }
+            if delimiter_count % 2 == 1 {
+                indent_count += 1;
             }
             let text = Text::from(vec![iter::repeat(' ').take(indent_count * 4).collect::<Vec<_>>()]);
             let len = text.len();
