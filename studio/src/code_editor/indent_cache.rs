@@ -1,22 +1,27 @@
-use {crate::code_editor::{delta::{Delta, OperationRange}, text::Text}, std::slice};
+use {
+    crate::code_editor::{
+        delta::{Delta, OperationRange},
+        text::Text,
+    },
+    std::{
+        ops::{Deref, Index},
+        slice::Iter,
+    },
+};
 
 pub struct IndentCache {
-    lines: Vec<Line>
+    lines: Vec<Line>,
 }
 
 impl IndentCache {
     pub fn new(text: &Text) -> IndentCache {
         let mut cache = IndentCache {
-            lines: (0..text.as_lines().len()).map(|_| Line::default()).collect::<Vec<_>>(),
+            lines: (0..text.as_lines().len())
+                .map(|_| Line::default())
+                .collect::<Vec<_>>(),
         };
         cache.refresh(text);
         cache
-    }
-
-    pub fn iter(&self) -> Iter {
-        Iter {
-            iter: self.lines.iter(),
-        }
     }
 
     pub fn invalidate(&mut self, delta: &Delta) {
@@ -26,7 +31,7 @@ impl IndentCache {
                     self.lines[range.start.line] = Line::default();
                     self.lines.splice(
                         range.start.line..range.start.line,
-                        (0..range.end.line - range.start.line).map(|_| Line::default())
+                        (0..range.end.line - range.start.line).map(|_| Line::default()),
                     );
                 }
                 OperationRange::Delete(range) => {
@@ -67,25 +72,28 @@ impl IndentCache {
     }
 }
 
-impl<'a> IntoIterator for &'a IndentCache {
-    type Item = &'a Line;
-    type IntoIter = Iter<'a>;
+impl Deref for IndentCache {
+    type Target = [Line];
 
-    fn into_iter(self) -> Iter<'a> {
-        self.iter()
+    fn deref(&self) -> &Self::Target {
+        &self.lines
     }
 }
 
-#[derive(Clone, Debug)]
-pub struct Iter<'a> {
-    iter: slice::Iter<'a, Line>,
+impl Index<usize> for IndentCache {
+    type Output = Line;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.lines[index]
+    }
 }
 
-impl<'a> Iterator for Iter<'a> {
+impl<'a> IntoIterator for &'a IndentCache {
     type Item = &'a Line;
-    
-    fn next(&mut self) -> Option<&'a Line> {
-        self.iter.next()
+    type IntoIter = Iter<'a, Line>;
+
+    fn into_iter(self) -> Iter<'a, Line> {
+        self.iter()
     }
 }
 
@@ -98,6 +106,8 @@ pub struct Line {
 
 impl Line {
     pub fn virtual_leading_whitespace(&self) -> usize {
-        self.leading_whitespace_above.unwrap().min(self.leading_whitespace_below.unwrap())
+        self.leading_whitespace_above
+            .unwrap()
+            .min(self.leading_whitespace_below.unwrap())
     }
 }

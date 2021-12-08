@@ -264,7 +264,6 @@ impl CodeEditorView {
                     );
                     self.draw_indent_guides(
                         cx,
-                        &document_inner.token_cache,
                         &document_inner.indent_cache,
                         visible_lines,
                     );
@@ -526,15 +525,13 @@ impl CodeEditorView {
     fn draw_indent_guides(
         &mut self,
         cx: &mut Cx,
-        token_cache: &TokenCache,
         indent_cache: &IndentCache,
         visible_lines: VisibleLines,
     ) {
         let origin = cx.get_turtle_pos();
         let mut start_y = visible_lines.start_y;
-        for (tokens, indent_info) in token_cache
+        for indent_info in indent_cache
             .iter()
-            .zip(indent_cache.iter())
             .skip(visible_lines.start)
             .take(visible_lines.end - visible_lines.start)
         {
@@ -845,7 +842,7 @@ impl CodeEditorView {
             }) => {
                 self.reset_caret_blink(cx);
                 if let Some(session_id) = self.session_id {
-                    state.insert_text(session_id, Text::from(vec![vec![], vec![]]), send_request);
+                    state.insert_newline(session_id, send_request);
                     let session = &state.sessions_by_session_id[session_id];
                     self.keep_last_cursor_in_view(cx, state);
                     dispatch_action(cx, CodeEditorViewAction::RedrawViewsForDocument(session.document_id))
