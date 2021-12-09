@@ -13,13 +13,47 @@ pub use {
         sel_impl,
         Encode,
         Encoding
-    }
+    },
+    std::ptr::NonNull,
 };
+
 //use bitflags::bitflags;
 
-pub type ObjcId = *mut makepad_objc_sys::runtime::Object;
+pub type ObjcId = *mut Object;
 pub const nil: ObjcId = 0 as ObjcId;
 
+pub struct RcObjcId(NonNull<Object>);
+
+impl RcObjcId {
+    pub fn from_owned(id: NonNull<Object>) -> Self {
+        Self(id)
+    }
+
+    pub fn from_unowned(id: NonNull<Object>) -> Self {
+        unsafe {
+            let _: () = msg_send![id.as_ptr(), retain];
+        }
+        Self::from_owned(id)
+    }
+
+    pub fn as_id(&self) -> ObjcId {
+        self.0.as_ptr()
+    }
+}
+
+impl Clone for RcObjcId {
+    fn clone(&self) -> Self {
+        Self::from_unowned(self.0)
+    }
+}
+
+impl Drop for RcObjcId {
+    fn drop(&mut self) {
+        unsafe {
+            let _: () = msg_send![self.0.as_ptr(), release ];
+        }
+    }
+}
 
 #[link(name = "Foundation", kind = "framework")]
 extern {
