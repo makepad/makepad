@@ -60,23 +60,38 @@ impl fmt::Display for Token {
 
 impl TokenId {
     pub fn new(file_id: LiveFileId, token: usize)->Self{
+        let file_id = file_id.to_index();
+        if file_id == 0 || file_id > 0x3ff ||  token > 0x3ffff{
+            panic!();
+        }
         TokenId(
-            (((file_id.to_index() as u32) & 0x0fff) << 20) |
-            ((token as u32) & 0xfffff) 
+            (((file_id as u32) & 0x3ff) << 18) |
+            ((token as u32) & 0x3ffff) 
         )
     }
     
+    pub fn is_empty(&self)->bool{
+        ((self.0>>18)&0x3ff) == 0
+    }
+    
     pub fn token_index(&self)->usize{
-        (self.0&0xfffff) as usize
+        (self.0&0x3ffff) as usize
     }
     
     pub fn file_id(&self)->LiveFileId{
-        LiveFileId(((self.0>>20)&0xfff) as u16)
+        LiveFileId(((self.0>>18)&0x3ff) as u16)
     }
     
     pub fn to_bits(&self)->u32{self.0}
-    pub fn from_bits(v:u32)->Self{Self(v)}
-
+    pub fn from_bits(v:u32)->Option<Self>{
+        if (v&0xf000_0000)!=0{
+            panic!();
+        }
+        if ((v>>18)&0x3ff) == 0{
+            return None
+        }
+        return Some(Self(v))
+    }
 }
 
 #[derive(Clone, Copy, Eq, Ord, PartialOrd, PartialEq)]

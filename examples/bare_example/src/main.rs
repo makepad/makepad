@@ -4,9 +4,16 @@ use makepad_widget::*;
 live_register!{
     use makepad_widget::frame::Frame;
     use makepad_widget::button::Button;
+    use makepad_widget::filetree::FileTree;
     App: {{App}} {
         scroll_view: {show_h: true, show_v: true, view: {layout: {line_wrap: LineWrap::NewLine}}}
         frame: {
+            file_tree:FileTree{
+                position:vec2(0.5.,100.0)
+                layout:{
+                }
+            }
+            children:[file_tree]
         }
     }
 }

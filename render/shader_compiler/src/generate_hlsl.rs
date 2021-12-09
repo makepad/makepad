@@ -10,8 +10,8 @@ use{
     },
     crate::{
         generate::*,
-        shaderast::*,
-        shaderregistry::ShaderRegistry
+        shader_ast::*,
+        shader_registry::ShaderRegistry
     }
 };
 
@@ -598,7 +598,10 @@ impl<'a> BackendWriter for HlslBackendWriter<'a> {
                 prefix(string, sep, is_inout);
                 write!(string, "{} {}", struct_node_ptr, ident).unwrap();
             }
-            Ty::DrawShader(_) => {
+            Ty::Enum(_) => {
+                prefix(string, sep, is_inout);
+                write!(string, "int {}", ident).unwrap();
+            }            Ty::DrawShader(_) => {
                 return false
             }
             Ty::ClosureDef {..} => {
