@@ -131,7 +131,7 @@ live_register!{
             }
         }
         
-        indent_width: 10.0
+        indent_width.{name:"hello world",min:1.0,max:20.0}: 10.0
         min_drag_distance: 10.0
     }
     
@@ -212,7 +212,7 @@ pub struct FileTreeNode {
     icon_walk: Walk,
     
     is_folder: bool,
-    min_drag_distance: f32,
+    min_drag_distance: f32, 
     
     opened: f32,
     hover: f32,
@@ -329,7 +329,7 @@ impl FileTreeNode {
             self.closed_state.unwrap()
         );
     }
-    
+     
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,

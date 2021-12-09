@@ -17,6 +17,7 @@ use {
 };
 
 
+#[derive(Default)]
 pub struct LiveFile {
     pub module_id: LiveModuleId,
     pub line_offset: usize,
@@ -25,7 +26,6 @@ pub struct LiveFile {
     pub document: LiveDocument,
 }
 
-#[derive(Default)]
 pub struct LiveRegistry {
     pub file_ids: HashMap<String, LiveFileId>,
     pub module_id_to_file_id: HashMap<LiveModuleId, LiveFileId>,
@@ -34,6 +34,20 @@ pub struct LiveRegistry {
     pub dep_order: Vec<(LiveModuleId, TokenId)>,
     pub dep_graph: HashMap<LiveModuleId, HashSet<LiveModuleId >>, // this contains all the dependencies a crate has
     pub expanded: Vec<LiveDocument >,
+}
+
+impl Default for LiveRegistry{
+    fn default()->Self{
+        Self{
+            file_ids: HashMap::new(),
+            module_id_to_file_id: HashMap::new(),
+            live_files: vec![LiveFile::default()],
+            live_type_infos: HashMap::new(),
+            dep_order: Vec::new(),
+            dep_graph: HashMap::new(),// this contains all the dependencies a crate has
+            expanded: vec![LiveDocument::default()]
+        }
+    }
 }
 
 pub struct LiveDocNodes<'a> {

@@ -3,7 +3,7 @@ use {
         Vec2, Vec3, Vec4
     },
     crate::{
-        live_id::{LiveId, LiveModuleId, LivePtr},
+        live_id::{LiveId, LiveFileId, LiveModuleId, LivePtr},
         token::TokenId,
     }
 };
@@ -14,7 +14,6 @@ pub struct LiveNode { // 40 bytes. Don't really see ways to compress
     pub id: LiveId,
     pub value: LiveValue,
 }
-
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum LiveValue {
@@ -73,48 +72,100 @@ impl LiveNode{
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct LiveNodeOrigin(u64);
 
+// 10 bit file id (1024)
+// 18 bit token id (256k tokens)
+// 18 bits node index (256000 lines)
+// 10 bits original file_id
+// 8 bits (256) metadata index 
+
 impl LiveNodeOrigin{
     pub fn empty()->Self{
         Self(0)
     }
     
     pub fn from_token_id(token_id:TokenId)->Self{
-        Self(0x8000_0000_0000_0000 | token_id.to_bits() as u64)
+        Self(token_id.to_bits() as u64)
     }
-    /*
-    pub fn unwrap_token_id(&self)->TokenId{
-        if self.0&0x8000_0000_0000_0000 != 0{
-            return TokenId::from_bits((self.0&0xffff_ffff) as u32)
-        }
-        else{
-            panic!()
-        }
-    }*/
     
     pub fn token_id(&self)->Option<TokenId>{
-        if self.0&0x8000_0000_0000_0000 != 0{
-            return Some(TokenId::from_bits((self.0&0xffff_ffff) as u32))
-        }
-        else{
-            None
-        }
+        TokenId::from_bits((self.0&0x0fff_ffff) as u32)
     }
     
     pub fn set_node_index(&mut self, index:usize){
-        self.0 = (((index as u64)&0x3fff_ffff) << 32) | 0x4000_0000_0000_0000 | ((self.0) & 0x8000_0000_ffff_ffff);
+        if index == 0 || index > 0x3ffff{
+            panic!();
+        }
+        self.0 = (self.0 & 0xFFFF_C000_0fff_ffff) | ((index as u64) << 28);
     }
     
-    pub fn node_index(&self)->Option<usize>{
-        if self.0&0x4000_0000_0000_0000 != 0{
-            return Some(((self.0>>32)&0x3fff_ffff) as usize)
+     pub fn node_index(&self)->Option<usize>{
+        if self.0&0x0000_03FFF_F000_0000 != 0{
+            return Some(((self.0>>28)&0x3ffff) as usize)
         }
         else{
             None
         }
     }
     
-    pub fn has_node_index(&mut self)->bool{
-        self.0&0x4000_0000_0000_0000 != 0
+    pub fn with_edit_info(mut self, edit_info:Option<LiveEditInfo>)->Self{
+        if let Some(edit_info) = edit_info{
+            self.set_edit_info(edit_info)
+        }
+        self
+    }
+    
+    pub fn set_optional_edit_info(&mut self, edit_info:Option<LiveEditInfo>){
+        if let Some(edit_info) = edit_info{
+            self.set_edit_info(edit_info)
+        }
+    }
+    
+    pub fn set_edit_info(&mut self, edit_info:LiveEditInfo){
+        self.0 = (self.0&0x0000_03FFF_FFFF_FFFF) |  (edit_info.0 as u64) << 46;
+    }
+    
+    pub fn get_edit_info(&self)->Option<LiveEditInfo>{
+        LiveEditInfo::from_bits((self.0>>46) as u32)
+    }
+    
+}
+
+pub struct LiveEditInfo(u32);
+
+impl LiveEditInfo{
+    pub fn new(file_id: LiveFileId, edit_info_index: usize)->Self{
+        let file_id = file_id.to_index();
+        if file_id == 0 || file_id > 0x3ff || edit_info_index&0xf != 0 || edit_info_index > 0xff0{
+            panic!();
+        }
+        LiveEditInfo(
+            (((file_id as u32) & 0x3ff) << 8) |
+            (((edit_info_index as u32)>>4) & 0xff) 
+        )
+    }
+    
+    pub fn is_empty(&self)->bool{
+        ((self.0>>8)&0x3ff) == 0
+    }
+    
+    pub fn edit_info_index(&self)->usize{
+        ((self.0&0xff) as usize)<<4
+        
+    }
+    
+    pub fn file_id(&self)->LiveFileId{
+        LiveFileId(((self.0>>18)&0x3ff) as u16)
+    }
+    
+    pub fn to_bits(&self)->u32{self.0}
+    pub fn from_bits(v:u32)->Option<Self>{
+        if (v&0xFFFC0000)!=0{
+            panic!();
+        }
+        if v == 0{
+            return None
+        }
+        return Some(Self(v))
     }
 }
 
