@@ -23,7 +23,7 @@ use {
             CxTexture
         },
         draw_vars::CxDrawShader,
-    }
+    },
 };
 
 impl Cx {
@@ -74,7 +74,7 @@ impl Cx {
                     draw_call.instance_dirty = false;
                     // update the instance buffer data
                     self.platform.bytes_written += draw_call.instances.as_ref().unwrap().len() * 4;
-                    draw_call.platform.inst_vbuf.update_with_f32_data(metal_cx, &draw_call.instances.as_ref().unwrap());
+                    draw_call.platform.inst_vbuf.update(metal_cx, &draw_call.instances.as_ref().unwrap());
                 }
                 
                 // update the zbias uniform if we have it.
@@ -109,25 +109,25 @@ impl Cx {
                 let geometry = &mut self.geometries[geometry_id];
                 
                 if geometry.dirty {
-                    geometry.platform.geom_ibuf.update_with_u32_data(metal_cx, &geometry.indices);
-                    geometry.platform.geom_vbuf.update_with_f32_data(metal_cx, &geometry.vertices);
+                    geometry.platform.geom_ibuf.update(metal_cx, &geometry.indices);
+                    geometry.platform.geom_vbuf.update(metal_cx, &geometry.vertices);
                     geometry.dirty = false;
                 }
                 
-                if let Some(buf) = geometry.platform.geom_vbuf.buffer {
+                if let Some(buf) = geometry.platform.geom_vbuf.buffer.as_ref() {
                     unsafe {msg_send![
                         encoder,
-                        setVertexBuffer: buf
+                        setVertexBuffer: buf.as_id()
                         offset: 0
                         atIndex: 0
                     ]}
                 }
                 else {println!("Drawing error: geom_vbuf None")}
                 
-                if let Some(buf) = draw_call.platform.inst_vbuf.buffer {
+                if let Some(buf) = draw_call.platform.inst_vbuf.buffer.as_ref() {
                     unsafe {msg_send![
                         encoder,
-                        setVertexBuffer: buf
+                        setVertexBuffer: buf.as_id()
                         offset: 0
                         atIndex: 1
                     ]}
@@ -199,14 +199,14 @@ impl Cx {
                     }
                 }
                 self.platform.draw_calls_done += 1;
-                if let Some(buf) = geometry.platform.geom_ibuf.buffer {
+                if let Some(buf) = geometry.platform.geom_ibuf.buffer.as_ref() {
                     
                     let () = unsafe {msg_send![
                         encoder,
                         drawIndexedPrimitives: MTLPrimitiveType::Triangle
                         indexCount: geometry.indices.len() as u64
                         indexType: MTLIndexType::UInt32
-                        indexBuffer: buf
+                        indexBuffer: buf.as_id()
                         indexBufferOffset: 0
                         instanceCount: instances
                     ]};
@@ -528,82 +528,6 @@ pub struct CxPlatformPass {
     pub mtl_depth_state: Option<ObjcId>
 }
 
-#[derive(Default, Clone)]
-pub struct MetalBuffer {
-    pub buffer: Option<ObjcId>,
-    pub size: usize,
-    pub used: usize
-}
-
-impl MetalBuffer {
-
-    pub fn update_with_f32_data(&mut self, metal_cx: &MetalCx, data: &Vec<f32>) {
-        //let elem = self.multi_buffer_write();
-        if self.size < data.len() {
-            self.buffer = None;
-        }
-        if let None = self.buffer {
-            let buffer: ObjcId = unsafe {msg_send![
-                metal_cx.device,
-                newBufferWithLength: (data.len() * std::mem::size_of::<f32>()) as u64
-                options: MTLResourceOptions::HazardTrackingModeTracked |
-                MTLResourceOptions::StorageModeManaged |
-                MTLResourceOptions::CPUCacheModeDefaultCache
-            ]};
-            if buffer == nil {self.buffer = None} else {self.buffer = Some(buffer)}
-            self.size = data.len()
-        }
-        
-        if let Some(buffer) = self.buffer {
-            unsafe {
-                let p: *mut std::ffi::c_void = msg_send![buffer, contents];
-                std::ptr::copy(data.as_ptr(), p as *mut f32, data.len());
-                let () = msg_send![
-                    buffer,
-                    didModifyRange: NSRange {
-                        location: 0,
-                        length: (data.len() * std::mem::size_of::<f32>()) as u64
-                    }
-                ];
-            }
-        }
-        self.used = data.len()
-    }
-    
-    pub fn update_with_u32_data(&mut self, metal_cx: &MetalCx, data: &Vec<u32>) {
-        //let elem = self.multi_buffer_write();
-        if self.size < data.len() {
-            self.buffer = None;
-        }
-        if let None = self.buffer {
-            let buffer: ObjcId = unsafe {msg_send![
-                metal_cx.device,
-                newBufferWithLength: (data.len() * std::mem::size_of::<u32>()) as u64
-                options:
-                MTLResourceOptions::HazardTrackingModeTracked |
-                MTLResourceOptions::StorageModeManaged |
-                MTLResourceOptions::CPUCacheModeWriteCombined
-            ]};
-            if buffer == nil {self.buffer = None} else {self.buffer = Some(buffer)}
-            self.size = data.len()
-        }
-        if let Some(buffer) = self.buffer {
-            unsafe {
-                let p: *mut std::ffi::c_void = msg_send![buffer, contents];
-                std::ptr::copy(data.as_ptr(), p as *mut u32, data.len());
-                let () = msg_send![
-                    buffer,
-                    didModifyRange: NSRange {
-                        location: 0,
-                        length: (data.len() * std::mem::size_of::<f32>()) as u64
-                    }
-                ];
-            }
-        }
-        self.used = data.len()
-    }
-}
-
 #[derive(Clone, Default)]
 pub struct CxPlatformGeometry {
     pub geom_vbuf: MetalBuffer,
@@ -897,5 +821,47 @@ impl MetalCx {
             },
             library: library,
         });
+    }
+}
+
+#[derive(Default, Clone)]
+pub struct MetalBuffer {
+    len: usize,
+    buffer: Option<RcObjcId>,
+}
+
+impl MetalBuffer {
+    pub fn update<T>(&mut self, metal_cx: &MetalCx, data: &[T]) {
+        let len = data.len() * std::mem::size_of::<T>();
+        if self.len < len {
+            self.buffer = None;
+        }
+        self.len = len;
+        if self.buffer.is_none() {
+            self.buffer = if len == 0 {
+                None
+            } else {
+                Some(RcObjcId::from_owned(NonNull::new(unsafe {
+                    msg_send![
+                        metal_cx.device,
+                        newBufferWithLength: len
+                        options: nil
+                    ]
+                }).unwrap()))
+            };
+        }
+        if let Some(buffer) = self.buffer.as_ref() {
+            unsafe {
+                let contents: *mut u8 = msg_send![buffer.as_id(), contents];
+                std::ptr::copy(data.as_ptr() as *const u8, contents, len);
+                let () = msg_send![
+                    buffer.as_id(),
+                    didModifyRange: NSRange {
+                        location: 0,
+                        length: (data.len() * std::mem::size_of::<f32>()) as u64
+                    }
+                ];
+            }
+        }
     }
 }
