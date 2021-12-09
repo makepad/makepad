@@ -100,10 +100,10 @@ pub struct ScrollBar {
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawScrollBar {
-    #[live] deref_target: DrawQuad,
-    #[live] is_vertical: f32,
-    #[live] norm_handle: f32,
-    #[live] norm_scroll: f32
+    deref_target: DrawQuad,
+    is_vertical: f32,
+    norm_handle: f32,
+    norm_scroll: f32
 }
 
 #[derive(Clone, PartialEq, Debug)]

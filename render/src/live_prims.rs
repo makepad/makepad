@@ -268,6 +268,37 @@ live_primitive!(
 );
 
 live_primitive!(
+    usize,
+    0usize,
+    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        match &nodes[index].value {
+            LiveValue::Float(val) => {
+                *self = *val as usize;
+                index + 1
+            }
+            LiveValue::Int(val) => {
+                *self = *val as usize;
+                index + 1
+            }
+            LiveValue::Array => {
+                if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
+                    self.apply(cx, apply_from, index, nodes);
+                }
+                nodes.skip_node(index)
+            }
+            LiveValue::DSL {..} => nodes.skip_node(index),
+            _ => {
+                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), apply_from, index, nodes, "i64");
+                nodes.skip_node(index)
+            }
+        }
+    },
+    fn to_live_value(&self) -> LiveValue {
+        LiveValue::Int(*self as i64)
+    }
+);
+
+live_primitive!(
     Vec2,
     Vec2::default(),
     fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {

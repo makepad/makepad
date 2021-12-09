@@ -7,12 +7,13 @@ use {
     }
 };
 
+#[derive(Default)]
 pub struct LiveDocument {
     pub recompile: bool,
     pub nodes: Vec<LiveNode >,
+    pub edit_info: Vec<LiveNode>,
     pub strings: Vec<char>,
     pub tokens: Vec<TokenWithSpan>,
-//    pub scopes: Vec<LiveScopeItem>,
 }
 
 /*
@@ -60,9 +61,9 @@ impl LiveDocument {
         Self {
             recompile: true,
             nodes: Vec::new(),
+            edit_info: Vec::new(),
             strings: Vec::new(),
             tokens: Vec::new(),
-//            scopes: Vec::new(),
         }
     }
     
