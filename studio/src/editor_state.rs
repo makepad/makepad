@@ -245,7 +245,64 @@ impl EditorState {
         session_id: SessionId,
         send_request: &mut dyn FnMut(Request)
     ) {
-        self.insert_text(session_id, Text::from(vec![vec![], vec![]]), send_request);
+        let session = &self.sessions_by_session_id[session_id];
+        let document = &self.documents_by_document_id[session.document_id];
+        let document_inner = document.inner.as_ref().unwrap();
+
+        let mut builder_0 = delta::Builder::new();
+        for span in session.selections.spans() {
+            if span.is_included {
+                builder_0.delete(span.len);
+            } else {
+                builder_0.retain(span.len);
+            }
+        }
+        let delta_0 = builder_0.build();
+
+        let mut builder_1 = delta::Builder::new();
+        let mut position = Position::origin();
+        for distance in session.carets.distances() {
+            if distance.line == 0 {
+                position += distance;
+                builder_1.retain(distance);
+            } else {
+                position.line += distance.line;
+                position.column = 0;
+                builder_1.retain(Size {
+                    line: distance.line,
+                    column: 0,
+                });
+                let indent_info = &document_inner.indent_cache[position.line];
+                match indent_info.leading_whitespace() {
+                    Some(_) => {
+                        position.column += distance.column;
+                        builder_1.retain(Size {
+                            line: 0,
+                            column: distance.column
+                        });
+                    }
+                    None => {
+                        builder_1.delete(Size {
+                            line: 0,
+                            column: distance.column
+                        });
+                    }
+                }
+            }
+            if session.selections.contains_position(position) {
+                continue;
+            }
+            let text = Text::from(vec![vec![], vec![]]);
+            builder_1.insert(text.clone());
+            position += text.len();
+        }
+        let delta_1 = builder_1.build();
+
+        let (_, new_delta_1) = delta_0.clone().transform(delta_1);
+        let delta = delta_0.compose(new_delta_1);
+
+        self.edit(session_id, delta, send_request);
+
         self.autoindent(session_id, send_request);
     }
 
