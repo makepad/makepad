@@ -85,7 +85,7 @@ impl LiveFileId {
 }
 
 //TODO FIX THIS THING TO BE N LEVELS OF MODULES
-#[derive(Clone, Eq, Hash, Debug, Copy, PartialEq)]
+#[derive(Default, Clone, Eq, Hash, Debug, Copy, PartialEq)]
 pub struct LiveModuleId(pub LiveId, pub LiveId);
 
 impl LiveModuleId {

@@ -48,6 +48,9 @@ impl<'a> LiveExpander<'a> {
     
     pub fn expand(&mut self, in_doc: &LiveDocument, out_doc: &mut LiveDocument) {
         
+        // ok first copy the edit_info over.
+        out_doc.edit_info = in_doc.edit_info.clone();
+        
         out_doc.nodes.push(in_doc.nodes[0].clone());
         let mut current_parent = vec![(LiveId(0), 0usize)];
         let mut level_overwrite = vec![false];
@@ -92,8 +95,9 @@ impl<'a> LiveExpander<'a> {
                 Ok(overwrite) => {
                     
                     let out_value = &out_doc.nodes[overwrite].value;
+                    let out_edit_info = out_doc.nodes[overwrite].origin.get_edit_info();
                     
-                    if in_value.is_expr() && out_value.is_expr() || in_value.is_expr() && out_value.is_value_type() {
+                    let ret_val = if in_value.is_expr() && out_value.is_expr() || in_value.is_expr() && out_value.is_value_type() {
                         // replace range
                         let next_index = out_doc.nodes.skip_node(overwrite);
                         
@@ -103,6 +107,7 @@ impl<'a> LiveExpander<'a> {
                         self.shift_parent_stack(&mut current_parent, &out_doc.nodes, overwrite, old_len, out_doc.nodes.len());
                         
                         in_index = in_doc.nodes.skip_node(in_index);
+                        out_doc.nodes[overwrite].origin.set_optional_edit_info(out_edit_info);
                         continue;
                     }
                     else if !in_value.is_class() && out_value.variant_id() == in_value.variant_id() { // same type
@@ -209,7 +214,9 @@ impl<'a> LiveExpander<'a> {
                         });
                         in_index = in_doc.nodes.skip_node(in_index);
                         continue;
-                    }
+                    };
+                    out_doc.nodes[overwrite].origin.set_optional_edit_info(out_edit_info);
+                    ret_val
                 }
                 Err(insert_point) => {
                     // ok so. if we are inserting an expression, just do the whole thing in one go.
@@ -375,8 +382,8 @@ impl<'a> LiveExpander<'a> {
             in_index += 1;
         }
         out_doc.nodes.push(in_doc.nodes.last().unwrap().clone());
-        for i in 0..out_doc.nodes.len() {
-            if !out_doc.nodes[i].origin.has_node_index() {
+        for i in 1..out_doc.nodes.len() {
+            if !out_doc.nodes[i].origin.node_index().is_some() {
                 out_doc.nodes[i].origin.set_node_index(i);
             }
         }

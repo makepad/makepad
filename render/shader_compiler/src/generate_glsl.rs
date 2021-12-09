@@ -11,8 +11,8 @@ use{
     crate::{
         generate::*,
         swizzle::Swizzle,
-        shaderast::*,
-        shaderregistry::ShaderRegistry
+        shader_ast::*,
+        shader_registry::ShaderRegistry
     }
 };
 
@@ -833,6 +833,10 @@ impl<'a> BackendWriter for GlslBackendWriter<'a> {
             Ty::Struct(ptr) => {
                 prefix(string, sep, is_inout);
                 write!(string, "{} {}", ptr, ident).unwrap();
+            }
+            Ty::Enum(_) => {
+                prefix(string, sep, is_inout);
+                write!(string, "int {}", ident).unwrap();
             }
         }
         true

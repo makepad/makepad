@@ -129,7 +129,7 @@ impl AppInner {
                 state,
                 state.content_panel_id,
                 None,
-                state.file_path_join(&["render/src/animator.rs"])
+                state.file_path_join(&["widget/src/file_tree.rs"])
             );
         }
         
