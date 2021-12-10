@@ -184,9 +184,11 @@ impl Cx {
                     }else {0};
                     
                     let cxtexture = &mut self.textures[texture_id as usize];
+                    /*
                     if cxtexture.update_image {
                         metal_cx.update_platform_texture_image2d(cxtexture);
                     }
+                    */
                     if let Some(mtl_texture) = cxtexture.platform.mtl_texture {
                         let () = unsafe {msg_send![
                             encoder,
@@ -642,6 +644,7 @@ impl MetalCx {
         return true
     }
     
+    /*
     pub fn update_platform_texture_image2d(&self, cxtexture: &mut CxTexture) {
         
         if cxtexture.desc.width.is_none() || cxtexture.desc.height.is_none() {
@@ -704,6 +707,7 @@ impl MetalCx {
         
         cxtexture.update_image = false;
     }
+    */
 }
 
 /**************************************************************************************************/
