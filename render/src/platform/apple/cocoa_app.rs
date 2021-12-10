@@ -107,8 +107,8 @@ impl CocoaApp {
             let app_delegate_instance: ObjcId = msg_send![app_delegate_class, new];
             
             let const_attributes = vec![
-                str_to_nsstring("NSMarkedClauseSegment"),
-                str_to_nsstring("NSGlyphInfo")
+                RcObjcId::from_unowned(NonNull::new(str_to_ns_string("NSMarkedClauseSegment")).unwrap()).forget(),
+                RcObjcId::from_unowned(NonNull::new(str_to_ns_string("NSGlyphInfo")).unwrap()).forget(),
             ];
             
             // Construct the bits that are shared between windows
@@ -119,7 +119,7 @@ impl CocoaApp {
                     count: const_attributes.len()
                 ],
                 startup_focus_hack_ran: false,
-                const_empty_string: str_to_nsstring(""),
+                const_empty_string: RcObjcId::from_unowned(NonNull::new(str_to_ns_string("")).unwrap()),
                 pasteboard: msg_send![class!(NSPasteboard), generalPasteboard],
                 time_start: Instant::now(),
                 timer_delegate_instance: timer_delegate_instance,
@@ -160,7 +160,7 @@ impl CocoaApp {
             match menu {
                 Menu::Main {items} => {
                     let main_menu: ObjcId = msg_send![class!(NSMenu), new];
-                    let () = msg_send![main_menu, setTitle: str_to_nsstring("MainMenu")];
+                    let () = msg_send![main_menu, setTitle: str_to_ns_string("MainMenu")];
                     let () = msg_send![main_menu, setAutoenablesItems: NO];
                     let () = msg_send![main_menu, setDelegate: delegate];
                     
@@ -175,15 +175,15 @@ impl CocoaApp {
                 },
                 Menu::Sub {name, items} => {
                     let sub_menu: ObjcId = msg_send![class!(NSMenu), new];
-                    let () = msg_send![sub_menu, setTitle: str_to_nsstring(name)];
+                    let () = msg_send![sub_menu, setTitle: str_to_ns_string(name)];
                     let () = msg_send![sub_menu, setAutoenablesItems: NO];
                     let () = msg_send![sub_menu, setDelegate: delegate];
                     // append item to parebt
                     let sub_item: ObjcId = msg_send![
                         parent_menu,
-                        addItemWithTitle: str_to_nsstring(name)
+                        addItemWithTitle: str_to_ns_string(name)
                         action: nil
-                        keyEquivalent: str_to_nsstring("")
+                        keyEquivalent: str_to_ns_string("")
                     ];
                     // connect submenu
                     let () = msg_send![parent_menu, setSubmenu: sub_menu forItem: sub_item];
@@ -200,9 +200,9 @@ impl CocoaApp {
                     };
                     let sub_item: ObjcId = msg_send![
                         parent_menu,
-                        addItemWithTitle: str_to_nsstring(name)
+                        addItemWithTitle: str_to_ns_string(name)
                         action: sel!(menuAction:)
-                        keyEquivalent: str_to_nsstring(keycode_to_menu_key(settings.key_code, settings.shift))
+                        keyEquivalent: str_to_ns_string(keycode_to_menu_key(settings.key_code, settings.shift))
                     ];
                     let target: ObjcId = msg_send![menu_target_class, new];
                     let () = msg_send![sub_item, setTarget: target];
@@ -247,7 +247,7 @@ impl CocoaApp {
                 let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
                 let active: bool = msg_send![ns_app, isActive];
                 if !active {
-                    let dock_bundle_id = str_to_nsstring("com.apple.dock");
+                    let dock_bundle_id = str_to_ns_string("com.apple.dock");
                     let dock_array: ObjcId = msg_send![
                         class!(NSRunningApplication),
                         runningApplicationsWithBundleIdentifier: dock_bundle_id
@@ -370,7 +370,7 @@ impl CocoaApp {
                             match &events[0] {
                                 Event::TextCopy(req) => if let Some(response) = &req.response {
                                     // plug it into the apple clipboard
-                                    let nsstring = str_to_nsstring(&response);
+                                    let nsstring = str_to_ns_string(&response);
                                     let array: ObjcId = msg_send![class!(NSArray), arrayWithObject: NSStringPboardType];
                                     let () = msg_send![self.pasteboard, declareTypes: array owner: nil];
                                     let () = msg_send![self.pasteboard, setString: nsstring forType: NSStringPboardType];
