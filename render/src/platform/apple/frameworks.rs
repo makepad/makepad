@@ -129,18 +129,16 @@ pub fn nsstring_to_string(string: ObjcId) -> String {
 }
 
 pub fn str_to_nsstring(val: &str) -> RcObjcId {
-    unsafe {
-        let ns_string = RcObjcId::from_owned(unsafe { msg_send![class!(NSString), alloc] });
-        unsafe {
-            let _: () = msg_send![
-                ns_string.as_id(),
-                initWithBytes: val.as_ptr()
-                length: val.len()
-                encoding: UTF8_ENCODING as ObjcId
-            ];
-        }
-        ns_string
-    }
+    let ns_string = RcObjcId::from_owned(NonNull::new(unsafe {
+        let ns_string: ObjcId = msg_send![class!(NSString), alloc];
+        msg_send![
+            ns_string,
+            initWithBytes: val.as_ptr()
+            length: val.len()
+            encoding: UTF8_ENCODING as ObjcId
+        ]
+    }).unwrap());
+    ns_string
 }
 
 pub fn load_native_cursor(cursor_name: &str) -> ObjcId {
@@ -169,7 +167,7 @@ pub fn load_webkit_cursor(cursor_name_str: &str) -> ObjcId {
         let key_x = str_to_nsstring("hotx");
         let key_y = str_to_nsstring("hoty");
         
-        let cursor_path: ObjcId = msg_send![cursor_root, stringByAppendingPathComponent: cursor_name];
+        let cursor_path: ObjcId = msg_send![cursor_root.as_id(), stringByAppendingPathComponent: cursor_name];
         let pdf_path: ObjcId = msg_send![cursor_path, stringByAppendingPathComponent: cursor_pdf];
         let info_path: ObjcId = msg_send![cursor_path, stringByAppendingPathComponent: cursor_plist];
         

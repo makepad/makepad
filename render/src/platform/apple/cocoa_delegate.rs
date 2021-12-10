@@ -518,7 +518,7 @@ pub fn define_cocoa_view_class() -> *const Class {
             let cocoa_app = &(*cw.cocoa_app);
             let marked_text: ObjcId = *this.get_ivar("markedText");
             let mutable_string = marked_text.mutable_string();
-            let _: () = msg_send![mutable_string, setString: cocoa_app.const_empty_string];
+            let _: () = msg_send![mutable_string, setString: cocoa_app.const_empty_string.as_id()];
             let input_context: ObjcId = msg_send![this, inputContext];
             let _: () = msg_send![input_context, discardMarkedText];
         }
