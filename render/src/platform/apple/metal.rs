@@ -747,7 +747,7 @@ impl MetalCx {
             setFastMathEnabled: true
         ]};
         
-        let ns_mtlsl: ObjcId = str_to_nsstring(&gen.mtlsl);
+        let ns_mtlsl =str_to_nsstring(&gen.mtlsl);
         let mut err: ObjcId = nil;
         let library: ObjcId = unsafe {msg_send![
             self.device,

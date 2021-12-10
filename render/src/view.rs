@@ -484,7 +484,6 @@ impl DrawUniforms {
     }
 }
 
-#[derive(Clone)]
 pub struct DrawItem {
     pub draw_item_id: usize,
     pub view_id: usize,
@@ -498,7 +497,6 @@ pub struct UserUniforms {
     
 }
 
-#[derive(Clone)]
 pub struct DrawCall {
     pub draw_shader: DrawShader, // if shader_id changed, delete gl vao
     
@@ -616,7 +614,7 @@ pub enum CxViewDebug {
     Instances
 }
 
-#[derive(Default, Clone)]
+#[derive(Default)]
 pub struct CxView {
     pub debug_id: LiveId,
     
