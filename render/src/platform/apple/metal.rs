@@ -509,10 +509,10 @@ impl MetalWindow {
 pub struct CxPlatformView {
 }
 
-#[derive(Default, Clone)]
+#[derive(Default)]
 pub struct CxPlatformDrawCall {
     //pub uni_dr: MetalBuffer,
-    pub inst_vbuf: MetalBuffer
+    inst_vbuf: MetalBuffer
 }
 
 #[derive(Default, Clone)]
@@ -528,10 +528,10 @@ pub struct CxPlatformPass {
     pub mtl_depth_state: Option<ObjcId>
 }
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub struct CxPlatformGeometry {
-    pub geom_vbuf: MetalBuffer,
-    pub geom_ibuf: MetalBuffer,
+    geom_vbuf: MetalBuffer,
+    geom_ibuf: MetalBuffer,
 }
 
 #[derive(Clone)]
@@ -824,8 +824,8 @@ impl MetalCx {
     }
 }
 
-#[derive(Default, Clone)]
-pub struct MetalBuffer {
+#[derive(Default)]
+struct MetalBuffer {
     buffer: Option<RcObjcId>,
 }
 
