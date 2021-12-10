@@ -128,15 +128,17 @@ pub fn nsstring_to_string(string: ObjcId) -> String {
     }
 }
 
-pub fn str_to_nsstring(val: &str) -> ObjcId {
+pub fn str_to_nsstring(val: &str) -> RcObjcId {
     unsafe {
-        let ns_string: ObjcId = msg_send![class!(NSString), alloc];
-        let ns_string: ObjcId = msg_send![
-            ns_string,
-            initWithBytes: val.as_ptr()
-            length: val.len()
-            encoding: UTF8_ENCODING as ObjcId
-        ];
+        let ns_string = RcObjcId::from_owned(unsafe { msg_send![class!(NSString), alloc] });
+        unsafe {
+            let _: () = msg_send![
+                ns_string.as_id(),
+                initWithBytes: val.as_ptr()
+                length: val.len()
+                encoding: UTF8_ENCODING as ObjcId
+            ];
+        }
         ns_string
     }
 }
