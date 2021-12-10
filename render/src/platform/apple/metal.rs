@@ -536,7 +536,7 @@ pub struct CxPlatformGeometry {
 
 #[derive(Clone)]
 pub struct CxPlatformShader {
-    pub library: ObjcId,
+    pub library: RcObjcId,
     pub metal_shader: String,
     pub pipeline_state: ObjcId,
     pub draw_uniform_buffer_id: Option<u64>,
@@ -740,26 +740,27 @@ impl MetalCx {
             }
         }
         
-        let mtl_compile_options: ObjcId = unsafe {msg_send![class!(MTLCompileOptions), new]};
+        let options = RcObjcId::from_owned(unsafe {msg_send![class!(MTLCompileOptions), new]});
+        unsafe {
+            let _: () = msg_send![options.as_id(), setFastMathEnabled: YES];
+        };
         
-        let _: ObjcId = unsafe {msg_send![
-            mtl_compile_options,
-            setFastMathEnabled: true
-        ]};
-        
-        let ns_mtlsl =str_to_nsstring(&gen.mtlsl);
-        let mut err: ObjcId = nil;
-        let library: ObjcId = unsafe {msg_send![
-            self.device,
-            newLibraryWithSource: ns_mtlsl
-            options: mtl_compile_options
-            error: &mut err
-        ]};
-        if library == nil {
-            let err_str: ObjcId = unsafe {msg_send![err, localizedDescription]};
-            println!("{}", nsstring_to_string(err_str));
-            panic!("{}", nsstring_to_string(err_str));
-        }
+        let mut error: ObjcId = nil;
+
+        let library = RcObjcId::from_owned(match NonNull::new(unsafe {
+            msg_send![
+                self.device,
+                newLibraryWithSource: str_to_nsstring(&gen.mtlsl)
+                options: options
+                error: &mut error
+            ]
+        }) {
+            Some(library) => library,
+            None => {
+                let description: ObjcId = unsafe {msg_send![error, localizedDescription]};
+                panic!("{}", nsstring_to_string(description));
+            }
+        });
         
         let mut draw_uniform_buffer_id = None;
         let mut pass_uniform_buffer_id = None;
@@ -767,7 +768,7 @@ impl MetalCx {
         let mut user_uniform_buffer_id = None;
         
         let mut buffer_id = 4;
-        for (field, _set) in gen.fields_as_uniform_blocks {
+        for (field, _) in gen.fields_as_uniform_blocks {
             match field.0 {
                 id!(draw) => draw_uniform_buffer_id = Some(buffer_id),
                 id!(pass) => pass_uniform_buffer_id = Some(buffer_id),
@@ -785,8 +786,8 @@ impl MetalCx {
             user_uniform_buffer_id,
             metal_shader: gen.mtlsl,
             pipeline_state: unsafe {
-                let vert: ObjcId = msg_send![library, newFunctionWithName: str_to_nsstring("vertex_main")];
-                let frag: ObjcId = msg_send![library, newFunctionWithName: str_to_nsstring("fragment_main")];
+                let vert: ObjcId = msg_send![library.as_id(), newFunctionWithName: str_to_nsstring("vertex_main")];
+                let frag: ObjcId = msg_send![library.as_id(), newFunctionWithName: str_to_nsstring("fragment_main")];
                 let rpd: ObjcId = msg_send![class!(MTLRenderPipelineDescriptor), new];
                 
                 let () = msg_send![rpd, setVertexFunction: vert];
