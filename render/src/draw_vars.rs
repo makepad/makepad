@@ -283,7 +283,7 @@ impl DrawVars {
                     cx.draw_shaders.push(CxDrawShader {
                         field: class_node.id,
                         type_name: shader_type_name,
-                        platform: None,
+                        platform: CxPlatformShader::default(),
                         mapping: mapping
                     });
                     // ok so. maybe we should fill the live_uniforms buffer?
@@ -696,10 +696,9 @@ impl CxDrawShaderMapping {
     }
 }
 
-#[derive(Clone)]
 pub struct CxDrawShader {
     pub field: LiveId,
     pub type_name: LiveId,
-    pub platform: Option<CxPlatformShader>,
+    pub platform: CxPlatformShader,
     pub mapping: CxDrawShaderMapping
 }
