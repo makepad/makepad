@@ -92,8 +92,8 @@ impl Cx {
                 if instances == 0 {
                     continue;
                 }
-                let pipeline_state = shp.pipeline_state;
-                unsafe {let () = msg_send![encoder, setRenderPipelineState: pipeline_state];}
+                let render_pipeline_state = shp.render_pipeline_state.as_id();
+                unsafe {let () = msg_send![encoder, setRenderPipelineState: render_pipeline_state];}
                 
                 let geometry_id = if let Some(geometry_id) = draw_call.geometry_id {geometry_id}
                 else {
@@ -537,12 +537,12 @@ pub struct CxPlatformGeometry {
 #[derive(Clone)]
 pub struct CxPlatformShader {
     pub library: RcObjcId,
-    pub metal_shader: String,
-    pub pipeline_state: ObjcId,
+    pub render_pipeline_state: RcObjcId,
     pub draw_uniform_buffer_id: Option<u64>,
     pub pass_uniform_buffer_id: Option<u64>,
     pub view_uniform_buffer_id: Option<u64>,
     pub user_uniform_buffer_id: Option<u64>,
+    pub source: String,
 }
 
 impl PartialEq for CxPlatformShader {
@@ -734,7 +734,7 @@ impl MetalCx {
         }
         
         if let Some(sh_platform) = &sh.platform {
-            if sh_platform.metal_shader == gen.mtlsl {
+            if sh_platform.source == gen.mtlsl {
                 //sh.mapping = mapping;
                 return
             }
@@ -750,7 +750,7 @@ impl MetalCx {
         let library = RcObjcId::from_owned(match NonNull::new(unsafe {
             msg_send![
                 self.device,
-                newLibraryWithSource: str_to_nsstring(&gen.mtlsl)
+                newLibraryWithSource: str_to_ns_string(&gen.mtlsl)
                 options: options
                 error: &mut error
             ]
@@ -761,7 +761,41 @@ impl MetalCx {
                 panic!("{}", nsstring_to_string(description));
             }
         });
-        
+
+        let descriptor = RcObjcId::from_owned(NonNull::new(unsafe {
+            msg_send![class!(MTLRenderPipelineDescriptor), new]
+        }).unwrap());
+        let vertex_function = RcObjcId::from_owned(NonNull::new(unsafe {
+            msg_send![library.as_id(), newFunctionWithName: str_to_ns_string("vertex_main")]
+        }).unwrap());
+        let fragment_function = RcObjcId::from_owned(NonNull::new(unsafe {
+            msg_send![library.as_id(), newFunctionWithName: str_to_ns_string("fragment_main")]
+        }).unwrap());
+        let render_pipeline_state = RcObjcId::from_owned(NonNull::new(unsafe {
+            let _: () = msg_send![descriptor.as_id(), setVertexFunction: vertex_function];
+            let _: () = msg_send![descriptor.as_id(), setFragmentFunction: fragment_function];
+
+            let color_attachments: ObjcId = msg_send![descriptor.as_id(), colorAttachments];
+            let color_attachment: ObjcId = msg_send![color_attachments, objectAtIndexedSubscript: 0];          
+            let () = msg_send![color_attachment, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
+            let () = msg_send![color_attachment, setBlendingEnabled: YES];
+            let () = msg_send![color_attachment, setRgbBlendOperation: MTLBlendOperation::Add];
+            let () = msg_send![color_attachment, setAlphaBlendOperation: MTLBlendOperation::Add];
+            let () = msg_send![color_attachment, setSourceRGBBlendFactor: MTLBlendFactor::One];
+            let () = msg_send![color_attachment, setSourceAlphaBlendFactor: MTLBlendFactor::One];
+            let () = msg_send![color_attachment, setDestinationRGBBlendFactor: MTLBlendFactor::OneMinusSourceAlpha];
+            let () = msg_send![color_attachment, setDestinationAlphaBlendFactor: MTLBlendFactor::OneMinusSourceAlpha];
+
+            let () = msg_send![descriptor.as_id(), setDepthAttachmentPixelFormat: MTLPixelFormat::Depth32Float_Stencil8];
+            
+            let mut error: ObjcId = nil;
+            msg_send![
+                self.device,
+                newRenderPipelineStateWithDescriptor: descriptor
+                error: &mut error
+            ]
+        }).unwrap());
+
         let mut draw_uniform_buffer_id = None;
         let mut pass_uniform_buffer_id = None;
         let mut view_uniform_buffer_id = None;
@@ -780,47 +814,13 @@ impl MetalCx {
         }
         
         sh.platform = Some(CxPlatformShader {
+            library,
+            render_pipeline_state,
             draw_uniform_buffer_id,
             pass_uniform_buffer_id,
             view_uniform_buffer_id,
             user_uniform_buffer_id,
-            metal_shader: gen.mtlsl,
-            pipeline_state: unsafe {
-                let vert: ObjcId = msg_send![library.as_id(), newFunctionWithName: str_to_nsstring("vertex_main")];
-                let frag: ObjcId = msg_send![library.as_id(), newFunctionWithName: str_to_nsstring("fragment_main")];
-                let rpd: ObjcId = msg_send![class!(MTLRenderPipelineDescriptor), new];
-                
-                let () = msg_send![rpd, setVertexFunction: vert];
-                let () = msg_send![rpd, setFragmentFunction: frag];
-                
-                let color_attachments: ObjcId = msg_send![rpd, colorAttachments];
-                
-                let ca: ObjcId = msg_send![color_attachments, objectAtIndexedSubscript: 0u64];
-                
-                let () = msg_send![ca, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
-                let () = msg_send![ca, setBlendingEnabled: YES];
-                let () = msg_send![ca, setSourceRGBBlendFactor: MTLBlendFactor::One];
-                let () = msg_send![ca, setDestinationRGBBlendFactor: MTLBlendFactor::OneMinusSourceAlpha];
-                
-                let () = msg_send![ca, setSourceAlphaBlendFactor: MTLBlendFactor::One];
-                let () = msg_send![ca, setDestinationAlphaBlendFactor: MTLBlendFactor::OneMinusSourceAlpha];
-                let () = msg_send![ca, setRgbBlendOperation: MTLBlendOperation::Add];
-                let () = msg_send![ca, setAlphaBlendOperation: MTLBlendOperation::Add];
-                
-                let () = msg_send![rpd, setDepthAttachmentPixelFormat: MTLPixelFormat::Depth32Float_Stencil8];
-                
-                let mut err: ObjcId = nil;
-                let rps: ObjcId = msg_send![
-                    self.device,
-                    newRenderPipelineStateWithDescriptor: rpd
-                    error: &mut err
-                ];
-                if rps == nil {
-                    panic!("Could not create render pipeline state")
-                }
-                rps //.expect("Could not create render pipeline state")
-            },
-            library: library,
+            source: gen.mtlsl,
         });
     }
 }

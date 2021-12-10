@@ -39,6 +39,13 @@ impl RcObjcId {
     pub fn as_id(&self) -> ObjcId {
         self.0.as_ptr()
     }
+
+    pub fn forget(self) -> NonNull<Object> {
+        unsafe {
+            let _: () = msg_send![self.0.as_ptr(), retain];
+        }
+        self.0
+    }
 }
 
 impl Clone for RcObjcId {
@@ -128,17 +135,18 @@ pub fn nsstring_to_string(string: ObjcId) -> String {
     }
 }
 
-pub fn str_to_nsstring(val: &str) -> RcObjcId {
-    let ns_string = RcObjcId::from_owned(NonNull::new(unsafe {
+pub fn str_to_ns_string(str: &str) -> ObjcId {
+    unsafe {
         let ns_string: ObjcId = msg_send![class!(NSString), alloc];
-        msg_send![
+        let ns_string: ObjcId = msg_send![
             ns_string,
-            initWithBytes: val.as_ptr()
-            length: val.len()
+            initWithBytes: str.as_ptr()
+            length: str.len()
             encoding: UTF8_ENCODING as ObjcId
-        ]
-    }).unwrap());
-    ns_string
+        ];
+        let _: () = msg_send![ns_string, autorelease];
+        ns_string
+    }
 }
 
 pub fn load_native_cursor(cursor_name: &str) -> ObjcId {
@@ -160,14 +168,14 @@ pub fn load_undocumented_cursor(cursor_name: &str) -> ObjcId {
 pub fn load_webkit_cursor(cursor_name_str: &str) -> ObjcId {
     unsafe {
         static CURSOR_ROOT: &'static str = "/System/Library/Frameworks/ApplicationServices.framework/Versions/A/Frameworks/HIServices.framework/Versions/A/Resources/cursors";
-        let cursor_root = str_to_nsstring(CURSOR_ROOT);
-        let cursor_name = str_to_nsstring(cursor_name_str);
-        let cursor_pdf = str_to_nsstring("cursor.pdf");
-        let cursor_plist = str_to_nsstring("info.plist");
-        let key_x = str_to_nsstring("hotx");
-        let key_y = str_to_nsstring("hoty");
+        let cursor_root = str_to_ns_string(CURSOR_ROOT);
+        let cursor_name = str_to_ns_string(cursor_name_str);
+        let cursor_pdf = str_to_ns_string("cursor.pdf");
+        let cursor_plist = str_to_ns_string("info.plist");
+        let key_x = str_to_ns_string("hotx");
+        let key_y = str_to_ns_string("hoty");
         
-        let cursor_path: ObjcId = msg_send![cursor_root.as_id(), stringByAppendingPathComponent: cursor_name];
+        let cursor_path: ObjcId = msg_send![cursor_root, stringByAppendingPathComponent: cursor_name];
         let pdf_path: ObjcId = msg_send![cursor_path, stringByAppendingPathComponent: cursor_pdf];
         let info_path: ObjcId = msg_send![cursor_path, stringByAppendingPathComponent: cursor_plist];
         
