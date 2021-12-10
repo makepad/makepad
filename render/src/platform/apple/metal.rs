@@ -6,7 +6,10 @@ use {
         class,
         sel_impl,
     },
-    makepad_shader_compiler::{DrawShaderDef, generate_metal},
+    makepad_shader_compiler::{
+        generate_metal,
+        generate_metal::MetalGeneratedShader,
+    },
     makepad_live_compiler::*,
     crate::{
         platform::{
@@ -22,7 +25,6 @@ use {
             TextureDesc,
             CxTexture
         },
-        draw_vars::CxDrawShader,
     },
 };
 
@@ -65,10 +67,10 @@ impl Cx {
                 //view.platform.uni_vw.update_with_f32_data(device, &view.uniforms);
                 let draw_call = cxview.draw_items[draw_item_id].draw_call.as_mut().unwrap();
                 let sh = &self.draw_shaders[draw_call.draw_shader.draw_shader_id];
-                if sh.platform.is_none() { // shader didnt compile somehow
+                if sh.platform.inner.is_none() { // shader didnt compile somehow
                     continue;
                 }
-                let shp = sh.platform.as_ref().unwrap();
+                let shp = sh.platform.inner.as_ref().unwrap();
                 
                 if draw_call.instance_dirty {
                     draw_call.instance_dirty = false;
@@ -534,21 +536,6 @@ pub struct CxPlatformGeometry {
     geom_ibuf: MetalBuffer,
 }
 
-#[derive(Clone)]
-pub struct CxPlatformShader {
-    pub library: RcObjcId,
-    pub render_pipeline_state: RcObjcId,
-    pub draw_uniform_buffer_id: Option<u64>,
-    pub pass_uniform_buffer_id: Option<u64>,
-    pub view_uniform_buffer_id: Option<u64>,
-    pub user_uniform_buffer_id: Option<u64>,
-    pub source: String,
-}
-
-impl PartialEq for CxPlatformShader {
-    fn eq(&self, _other: &Self) -> bool {false}
-}
-
 pub enum PackType {
     Packed,
     Unpacked
@@ -570,7 +557,7 @@ impl Cx {
                     &cx_shader.mapping.const_table,
                     &self.shader_registry
                 );
-                metal_cx.compile_draw_shader(cx_shader, gen, draw_shader_def.as_ref().unwrap());
+                cx_shader.platform.update(metal_cx, gen);
             }
         }
         self.draw_shader_compile_set.clear();
@@ -717,29 +704,21 @@ impl MetalCx {
         
         cxtexture.update_image = false;
     }
-    
-    
-    pub fn compile_draw_shader(
-        &self,
-        sh: &mut CxDrawShader,
-        gen: generate_metal::MetalGeneratedShader,
-        draw_shader_def: &DrawShaderDef,
-    ) {
-        
-        if draw_shader_def.flags.debug {
-            let split = gen.mtlsl.split("\n");
-            for (i, item) in split.enumerate() {
-                println!("{: >3}:    {}", i + 1, item);
-            }
-        }
-        
-        if let Some(sh_platform) = &sh.platform {
-            if sh_platform.source == gen.mtlsl {
-                //sh.mapping = mapping;
-                return
-            }
-        }
-        
+}
+
+/**************************************************************************************************/
+
+#[derive(Default)]
+pub struct CxPlatformShader {
+    inner: Option<CxPlatformShaderInner>
+}
+
+impl CxPlatformShader {
+    pub fn update(
+        &mut self,
+        metal_cx: &MetalCx,
+        shader: MetalGeneratedShader,
+    ) { 
         let options = RcObjcId::from_owned(unsafe {msg_send![class!(MTLCompileOptions), new]});
         unsafe {
             let _: () = msg_send![options.as_id(), setFastMathEnabled: YES];
@@ -749,8 +728,8 @@ impl MetalCx {
 
         let library = RcObjcId::from_owned(match NonNull::new(unsafe {
             msg_send![
-                self.device,
-                newLibraryWithSource: str_to_ns_string(&gen.mtlsl)
+                metal_cx.device,
+                newLibraryWithSource: str_to_ns_string(&shader.mtlsl)
                 options: options
                 error: &mut error
             ]
@@ -790,7 +769,7 @@ impl MetalCx {
             
             let mut error: ObjcId = nil;
             msg_send![
-                self.device,
+                metal_cx.device,
                 newRenderPipelineStateWithDescriptor: descriptor
                 error: &mut error
             ]
@@ -802,7 +781,7 @@ impl MetalCx {
         let mut user_uniform_buffer_id = None;
         
         let mut buffer_id = 4;
-        for (field, _) in gen.fields_as_uniform_blocks {
+        for (field, _) in shader.fields_as_uniform_blocks {
             match field.0 {
                 id!(draw) => draw_uniform_buffer_id = Some(buffer_id),
                 id!(pass) => pass_uniform_buffer_id = Some(buffer_id),
@@ -813,16 +792,26 @@ impl MetalCx {
             buffer_id += 1;
         }
         
-        sh.platform = Some(CxPlatformShader {
+        self.inner = Some(CxPlatformShaderInner {
             library,
             render_pipeline_state,
             draw_uniform_buffer_id,
             pass_uniform_buffer_id,
             view_uniform_buffer_id,
             user_uniform_buffer_id,
-            source: gen.mtlsl,
+            source: shader.mtlsl,
         });
     }
+}
+
+struct CxPlatformShaderInner {
+    library: RcObjcId,
+    render_pipeline_state: RcObjcId,
+    draw_uniform_buffer_id: Option<u64>,
+    pass_uniform_buffer_id: Option<u64>,
+    view_uniform_buffer_id: Option<u64>,
+    user_uniform_buffer_id: Option<u64>,
+    source: String,
 }
 
 #[derive(Default)]
