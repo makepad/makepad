@@ -69,7 +69,7 @@ pub struct CocoaApp {
     pub menu_delegate_instance: ObjcId,
     pub app_delegate_instance: ObjcId,
     pub const_attributes_for_marked_text: ObjcId,
-    pub const_empty_string: ObjcId,
+    pub const_empty_string: RcObjcId,
     pub time_start: Instant,
     pub timer_delegate_instance: ObjcId,
     pub timers: Vec<CocoaTimer>,
@@ -247,7 +247,7 @@ impl CocoaApp {
                 let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
                 let active: bool = msg_send![ns_app, isActive];
                 if !active {
-                    let dock_bundle_id: ObjcId = str_to_nsstring("com.apple.dock");
+                    let dock_bundle_id = str_to_nsstring("com.apple.dock");
                     let dock_array: ObjcId = msg_send![
                         class!(NSRunningApplication),
                         runningApplicationsWithBundleIdentifier: dock_bundle_id
@@ -370,7 +370,7 @@ impl CocoaApp {
                             match &events[0] {
                                 Event::TextCopy(req) => if let Some(response) = &req.response {
                                     // plug it into the apple clipboard
-                                    let nsstring: ObjcId = str_to_nsstring(&response);
+                                    let nsstring = str_to_nsstring(&response);
                                     let array: ObjcId = msg_send![class!(NSArray), arrayWithObject: NSStringPboardType];
                                     let () = msg_send![self.pasteboard, declareTypes: array owner: nil];
                                     let () = msg_send![self.pasteboard, setString: nsstring forType: NSStringPboardType];
