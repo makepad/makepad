@@ -826,17 +826,19 @@ impl MetalCx {
 
 #[derive(Default, Clone)]
 pub struct MetalBuffer {
-    len: usize,
     buffer: Option<RcObjcId>,
 }
 
 impl MetalBuffer {
     pub fn update<T>(&mut self, metal_cx: &MetalCx, data: &[T]) {
+        let capacity = match self.buffer.as_ref() {
+            Some(buffer) => unsafe { msg_send![buffer.as_id(), length] }
+            None => 0,
+        };
         let len = data.len() * std::mem::size_of::<T>();
-        if self.len < len {
+        if capacity < len {
             self.buffer = None;
         }
-        self.len = len;
         if self.buffer.is_none() {
             self.buffer = if len == 0 {
                 None
