@@ -116,20 +116,20 @@ impl Cx {
                     geometry.dirty = false;
                 }
                 
-                if let Some(buf) = geometry.platform.geom_vbuf.buffer.as_ref() {
+                if let Some(inner) = geometry.platform.geom_vbuf.inner.as_ref() {
                     unsafe {msg_send![
                         encoder,
-                        setVertexBuffer: buf.as_id()
+                        setVertexBuffer: inner.buffer.as_id()
                         offset: 0
                         atIndex: 0
                     ]}
                 }
                 else {println!("Drawing error: geom_vbuf None")}
                 
-                if let Some(buf) = draw_call.platform.inst_vbuf.buffer.as_ref() {
+                if let Some(inner) = draw_call.platform.inst_vbuf.inner.as_ref() {
                     unsafe {msg_send![
                         encoder,
-                        setVertexBuffer: buf.as_id()
+                        setVertexBuffer: inner.buffer.as_id()
                         offset: 0
                         atIndex: 1
                     ]}
@@ -201,14 +201,14 @@ impl Cx {
                     }
                 }
                 self.platform.draw_calls_done += 1;
-                if let Some(buf) = geometry.platform.geom_ibuf.buffer.as_ref() {
+                if let Some(inner) = geometry.platform.geom_ibuf.inner.as_ref() {
                     
                     let () = unsafe {msg_send![
                         encoder,
                         drawIndexedPrimitives: MTLPrimitiveType::Triangle
                         indexCount: geometry.indices.len() as u64
                         indexType: MTLIndexType::UInt32
-                        indexBuffer: buf.as_id()
+                        indexBuffer: inner.buffer.as_id()
                         indexBufferOffset: 0
                         instanceCount: instances
                     ]};
@@ -816,44 +816,44 @@ struct CxPlatformShaderInner {
 
 #[derive(Default)]
 struct MetalBuffer {
-    buffer: Option<RcObjcId>,
+    inner: Option<MetalBufferInner>,
 }
 
 impl MetalBuffer {
     pub fn update<T>(&mut self, metal_cx: &MetalCx, data: &[T]) {
-        let capacity = match self.buffer.as_ref() {
-            Some(buffer) => unsafe { msg_send![buffer.as_id(), length] }
-            None => 0,
-        };
         let len = data.len() * std::mem::size_of::<T>();
-        if capacity < len {
-            self.buffer = None;
+        if len == 0 {
+            self.inner = None;
+            return;
         }
-        if self.buffer.is_none() {
-            self.buffer = if len == 0 {
-                None
-            } else {
-                Some(RcObjcId::from_owned(NonNull::new(unsafe {
+        if self.inner.as_ref().map_or(0, |inner| inner.len) < len {
+            self.inner = Some(MetalBufferInner {
+                len,
+                buffer: RcObjcId::from_owned(NonNull::new(unsafe {
                     msg_send![
                         metal_cx.device,
-                        newBufferWithLength: len
+                        newBufferWithLength: len as u64
                         options: nil
                     ]
-                }).unwrap()))
-            };
+                }).unwrap())
+            });
         }
-        if let Some(buffer) = self.buffer.as_ref() {
-            unsafe {
-                let contents: *mut u8 = msg_send![buffer.as_id(), contents];
-                std::ptr::copy(data.as_ptr() as *const u8, contents, len);
-                let () = msg_send![
-                    buffer.as_id(),
-                    didModifyRange: NSRange {
-                        location: 0,
-                        length: (data.len() * std::mem::size_of::<f32>()) as u64
-                    }
-                ];
-            }
+        let inner = self.inner.as_ref().unwrap();
+        unsafe {
+            let contents: *mut u8 = msg_send![inner.buffer.as_id(), contents];
+            std::ptr::copy(data.as_ptr() as *const u8, contents, len);
+            let () = msg_send![
+                inner.buffer.as_id(),
+                didModifyRange: NSRange {
+                    location: 0,
+                    length: len as u64
+                }
+            ];
         }
     }
+}
+
+struct MetalBufferInner {
+    len: usize,
+    buffer: RcObjcId,
 }
