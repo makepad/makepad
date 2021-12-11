@@ -14,7 +14,7 @@ use {
             protocol::{Notification, Request, Response},
         },
     },
-    makepad_widget::{GenId, GenIdMap, GenIdAllocator,},
+    makepad_widget::{GenId, GenIdMap, GenIdAllocator},
     makepad_render::*,
 };
 
