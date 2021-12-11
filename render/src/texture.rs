@@ -18,7 +18,7 @@ pub struct Texture {
     pub textures_free: Rc<RefCell<Vec<usize>>>,
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum TextureFormat {
     Default,
     ImageBGRA,
@@ -35,7 +35,7 @@ pub enum TextureFormat {
     //    MappedRGf32,
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone, Copy, PartialEq)]
 pub struct TextureDesc {
     pub format: TextureFormat,
     pub width: Option<usize>,
