@@ -29,7 +29,7 @@ pub struct ShaderParser<'a> {
     pub closure_defs: Vec<ClosureDef>,
     pub token_with_span: TokenWithSpan,
     pub self_kind: Option<FnSelfKind>,
-    pub end: usize,
+    pub end: TextPos,
 }
 
 impl<'a> ShaderParser<'a> {
@@ -53,7 +53,7 @@ impl<'a> ShaderParser<'a> {
             tokens_with_span,
             token_with_span,
             token_index: 0,
-            end: 0,
+            end: TextPos::default(),
             self_kind
         }
     }
@@ -76,7 +76,7 @@ impl<'a> ShaderParser<'a> {
     }
     
     fn skip_token(&mut self) {
-        self.end = self.token_with_span.span.end() as usize;
+        self.end = self.token_with_span.span.end;
         if Token::Eof == self.token_with_span.token{
             return
         }
@@ -102,12 +102,12 @@ impl<'a> ShaderParser<'a> {
         }
     }
     
-    fn end(&self) -> usize {
+    fn end(&self) -> TextPos {
         self.end
     }
     
-    fn token_end(&self) -> usize {
-        self.token_with_span.span.end()
+    fn token_end(&self) -> TextPos {
+        self.token_with_span.span.end
     }
     
     fn accept_ident(&mut self) -> Option<Ident> {
@@ -223,8 +223,8 @@ impl<'a> ShaderParser<'a> {
     
     fn begin_span(&self) -> SpanTracker {
         SpanTracker {
-            file_id: self.token_with_span.span.file_id(),
-            start: self.token_with_span.span.start(),
+            file_id: self.token_with_span.span.file_id,
+            start: self.token_with_span.span.start,
         }
     }
     
@@ -1435,7 +1435,7 @@ impl<'a> ShaderParser<'a> {
 
 pub struct SpanTracker {
     pub file_id: LiveFileId,
-    pub start: usize,
+    pub start: TextPos,
 }
 
 impl SpanTracker {
@@ -1443,21 +1443,21 @@ impl SpanTracker {
     where
     F: FnOnce(Span) -> R,
     {
-        f(Span::new(
-            self.file_id,
-            self.start,
-            parser.token_end(),
-        ))
+        f(Span{
+            file_id:self.file_id,
+            start:self.start,
+            end:parser.token_end(),
+        })
     }
     
     pub fn error(&self, parser: &mut ShaderParser, origin: LiveErrorOrigin, message: String) -> LiveError {
         LiveError {
             origin,
-            span: Span::new(
-                self.file_id,
-                self.start,
-                parser.token_end(),
-            ),
+            span: Span{
+                file_id:self.file_id,
+                start:self.start,
+                end:parser.token_end(),
+            },
             message,
         }
     }

@@ -10,7 +10,7 @@ use {
         live_node_vec::{LiveNodeSlice},
         live_id::{LiveId, LiveFileId, LivePtr, LiveModuleId},
         token::TokenId,
-        span::Span,
+        span::{Span, TextPos},
         lex::lex,
         live_expander::{LiveExpander} 
     }
@@ -20,7 +20,7 @@ use {
 #[derive(Default)]
 pub struct LiveFile {
     pub module_id: LiveModuleId,
-    pub line_offset: usize,
+    pub start_pos: TextPos,
     pub file_name: String,
     pub source: String,
     pub document: LiveDocument,
@@ -33,11 +33,12 @@ pub struct LiveRegistry {
     pub live_type_infos: HashMap<LiveType, LiveTypeInfo>,
     pub dep_order: Vec<(LiveModuleId, TokenId)>,
     pub dep_graph: HashMap<LiveModuleId, HashSet<LiveModuleId >>, // this contains all the dependencies a crate has
-    pub expanded: Vec<LiveDocument >,
+    pub expanded: Vec<LiveDocument>,
 }
 
 impl Default for LiveRegistry{
     fn default()->Self{
+        
         Self{
             file_ids: HashMap::new(),
             module_id_to_file_id: HashMap::new(),
@@ -208,8 +209,8 @@ impl LiveRegistry {
     
     
     pub fn live_error_to_live_file_error(&self, live_error: LiveError) -> LiveFileError {
-        let live_file = &self.live_files[live_error.span.file_id().to_index()];
-        live_error.to_live_file_error(&live_file.file_name, &live_file.source, live_file.line_offset)
+        let live_file = &self.live_files[live_error.span.file_id.to_index()];
+        live_error.to_live_file_error(&live_file.file_name)
     }
     
     
@@ -238,7 +239,7 @@ impl LiveRegistry {
         own_module_id: LiveModuleId,
         source: String,
         live_type_infos: Vec<LiveTypeInfo>,
-        line_offset: usize
+        start_pos: TextPos,
     ) -> Result<LiveFileId, LiveFileError> {
         
         // lets register our live_type_infos
@@ -251,15 +252,15 @@ impl LiveRegistry {
             (true, file_id)
         };
         
-        let lex_result = match lex(source.chars(), file_id) {
-            Err(msg) => return Err(msg.to_live_file_error(file_name, &source, line_offset)), //panic!("Lex error {}", msg),
+        let lex_result = match lex(source.chars(), start_pos, file_id) {
+            Err(msg) => return Err(msg.to_live_file_error(file_name)), //panic!("Lex error {}", msg),
             Ok(lex_result) => lex_result
         };
         
         let mut parser = LiveParser::new(&lex_result.tokens, &live_type_infos, file_id);
         
         let mut document = match parser.parse_live_document() {
-            Err(msg) => return Err(msg.to_live_file_error(file_name, &source, line_offset)), //panic!("Parse error {}", msg.to_live_file_error(file, &source)),
+            Err(msg) => return Err(msg.to_live_file_error(file_name)), //panic!("Parse error {}", msg.to_live_file_error(file, &source)),
             Ok(ld) => ld
         };
         document.strings = lex_result.strings;
@@ -335,7 +336,7 @@ impl LiveRegistry {
         let live_file = LiveFile {
             module_id: own_module_id,
             file_name: file_name.to_string(),
-            line_offset,
+            start_pos,
             source,
             document
         };
@@ -370,7 +371,7 @@ impl LiveRegistry {
                 });*/
                 continue
             };
-           //println!("DEP ORDER {} {}", crate_module, file_id.0);
+            //println!("DEP ORDER {} {}", crate_module, file_id.0);
             
             if !self.expanded[file_id.to_index()].recompile {
                 continue;

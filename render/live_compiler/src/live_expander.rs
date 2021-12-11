@@ -95,7 +95,7 @@ impl<'a> LiveExpander<'a> {
                 Ok(overwrite) => {
                     
                     let out_value = &out_doc.nodes[overwrite].value;
-                    let out_edit_info = out_doc.nodes[overwrite].origin.get_edit_info();
+                    let out_edit_info = out_doc.nodes[overwrite].origin.edit_info();
                     
                     let ret_val = if in_value.is_expr() && out_value.is_expr() || in_value.is_expr() && out_value.is_value_type() {
                         // replace range
