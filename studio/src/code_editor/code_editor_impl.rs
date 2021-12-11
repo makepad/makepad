@@ -62,10 +62,6 @@ live_register!{
         }
     }
     
-    Bla: DrawSelection {
-        gloopiness: 0.4
-    }
-    
     DrawIndentLines: {{DrawIndentLines}} {
         fn pixel(self) -> vec4 {
             //return #f00;
@@ -85,7 +81,7 @@ live_register!{
         }
     }
     
-    CodeEditorView: {{CodeEditorView}} {
+    CodeEditorImpl: {{CodeEditorImpl}} {
         scroll_view: {
             v_scroll: {smoothing: 0.15},
             view: {
@@ -195,7 +191,7 @@ live_register!{
 }
 
 #[derive(Live, LiveHook)]
-pub struct CodeEditorView {
+pub struct CodeEditorImpl {
     #[rust] pub session_id: Option<SessionId>,
     
     #[rust] text_glyph_size: Vec2,
@@ -265,11 +261,11 @@ pub struct DrawIndentLines {
     indent_id: f32
 }
 
-pub enum CodeEditorViewAction {
+pub enum CodeEditorAction {
     RedrawViewsForDocument(DocumentId)
 }
 
-impl CodeEditorView {
+impl CodeEditorImpl {
     
     pub fn redraw(&self, cx: &mut Cx) {
         self.scroll_view.redraw(cx);
@@ -751,7 +747,7 @@ impl CodeEditorView {
         state: &mut EditorState,
         event: &mut Event,
         send_request: &mut dyn FnMut(Request),
-        dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorViewAction),
+        dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
     ) {
         if self.animator_handle_event(cx, event) {
             self.scroll_view.redraw(cx);
@@ -879,7 +875,7 @@ impl CodeEditorView {
                     state.insert_backspace(session_id, send_request);
                     let session = &state.sessions_by_session_id[session_id];
                     self.keep_last_cursor_in_view(cx, state);
-                    dispatch_action(cx, CodeEditorViewAction::RedrawViewsForDocument(session.document_id))
+                    dispatch_action(cx, CodeEditorAction::RedrawViewsForDocument(session.document_id))
                 }
             }
             HitEvent::KeyDown(KeyEvent {
@@ -895,7 +891,7 @@ impl CodeEditorView {
                         state.undo(session_id, send_request);
                     }
                     let session = &state.sessions_by_session_id[session_id];
-                    dispatch_action(cx, CodeEditorViewAction::RedrawViewsForDocument(session.document_id))
+                    dispatch_action(cx, CodeEditorAction::RedrawViewsForDocument(session.document_id))
                 }
             }
             HitEvent::KeyDown(KeyEvent {
@@ -935,7 +931,7 @@ impl CodeEditorView {
                     state.insert_newline(session_id, send_request);
                     let session = &state.sessions_by_session_id[session_id];
                     self.keep_last_cursor_in_view(cx, state);
-                    dispatch_action(cx, CodeEditorViewAction::RedrawViewsForDocument(session.document_id))
+                    dispatch_action(cx, CodeEditorAction::RedrawViewsForDocument(session.document_id))
                 }
             }
             HitEvent::TextCopy(ke) => {
@@ -975,7 +971,7 @@ impl CodeEditorView {
                     );
                     let session = &state.sessions_by_session_id[session_id];
                     self.keep_last_cursor_in_view(cx, state);
-                    dispatch_action(cx, CodeEditorViewAction::RedrawViewsForDocument(session.document_id))
+                    dispatch_action(cx, CodeEditorAction::RedrawViewsForDocument(session.document_id))
                 }
             }
             _ => {}
