@@ -6,7 +6,7 @@ use{
     crate::{
         live_id::{LiveId, LiveFileId, },
         live_error::{LiveError, LiveErrorOrigin},
-        span::Span,
+        span::{Span, TextPos},
         token::{Token, TokenWithSpan},
     }
 };
@@ -22,6 +22,7 @@ pub struct Lex<C> {
     ch_0: char,
     ch_1: char,
     index: usize,
+    pos: TextPos,
     is_done: bool,
 }
 
@@ -431,12 +432,26 @@ C: Iterator<Item = char>,
     }
     
     fn skip_char(&mut self) {
+        if self.ch_0 == '\n'{
+            self.pos.line += 1;
+            self.pos.column = 0;
+        }
+        else{
+            self.pos.column += 1;
+        }
         self.ch_0 = self.ch_1;
         self.ch_1 = self.chars.next().unwrap_or('\0');
+        
         self.index += 1;
     }
     
     fn skip_two_chars(&mut self) {
+        if self.ch_0 == '\n' || self.ch_1 == '\n'{
+            panic!()
+        }
+        else{
+            self.pos.column += 2;
+        }
         self.ch_0 = self.chars.next().unwrap_or('\0');
         self.ch_1 = self.chars.next().unwrap_or('\0');
         self.index += 2;
@@ -445,7 +460,7 @@ C: Iterator<Item = char>,
     fn begin_span(&mut self) -> SpanTracker {
         SpanTracker {
             file_id: self.file_id,
-            start: self.index,
+            pos: self.pos,
         }
     }
 }
@@ -475,7 +490,7 @@ pub struct LexResult {
     pub tokens: Vec<TokenWithSpan>
 }
 
-pub fn lex<C>(chars: C, file_id: LiveFileId) -> Result<LexResult, LiveError>
+pub fn lex<C>(chars: C, start_pos:TextPos, file_id: LiveFileId) -> Result<LexResult, LiveError>
 where
 C: IntoIterator<Item = char>,
 {
@@ -493,6 +508,7 @@ C: IntoIterator<Item = char>,
         temp_string: String::new(),
         group_stack: Vec::new(),
         strings: Vec::new(),
+        pos: start_pos,
         is_done: false,
     };
     loop {
@@ -516,17 +532,17 @@ C: IntoIterator<Item = char>,
 
 struct SpanTracker {
     file_id: LiveFileId,
-    start: usize,
+    pos: TextPos
 }
 
 impl SpanTracker {
     fn token<C>(&self, lex: &Lex<C>, token: Token) -> TokenWithSpan {
         TokenWithSpan {
-            span: Span::new(
-                self.file_id,
-                self.start,
-                lex.index,
-            ),
+            span: Span{
+                file_id:self.file_id,
+                start: self.pos,
+                end: lex.pos
+            },
             token,
         }
     }
@@ -534,11 +550,11 @@ impl SpanTracker {
     fn error<C>(&self, lex: &Lex<C>, message: String) -> LiveError {
         LiveError {
             origin: live_error_origin!(),
-            span: Span::new(
-                self.file_id,
-                self.start,
-                lex.index,
-            ),
+            span: Span{
+                file_id:self.file_id,
+                start: self.pos,
+                end: lex.pos
+            },
             message,
         }
     }

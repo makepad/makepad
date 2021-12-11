@@ -10,6 +10,7 @@ pub enum TokenKind {
     Identifier,
     Keyword(Keyword),
     Number,
+    Color,
     Punctuator(Punctuator),
     String,
     Whitespace,
@@ -17,6 +18,17 @@ pub enum TokenKind {
 }
 
 impl TokenKind {
+    pub fn is_live_countable(&self) -> bool {
+        match self{
+            Self::Identifier=>true,
+            Self::Keyword(_)=>true,
+            Self::Number=>true,
+            Self::Punctuator(_)=>true,
+            Self::String=>true,
+            _=>false,
+        }
+    }
+    
     pub fn is_open_delimiter(&self) -> bool {
         match self {
             TokenKind::Punctuator(Punctuator::OpenDelimiter(_)) => true,
