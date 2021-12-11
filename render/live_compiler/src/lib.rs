@@ -48,7 +48,10 @@ pub use {
             LiveTypeKind,
         },
         token::{TokenWithSpan, Token, TokenId},
-        span::Span,
+        span::{
+            Span,
+            TextPos
+        },
         live_error::{
             LiveError,
             LiveErrorOrigin,

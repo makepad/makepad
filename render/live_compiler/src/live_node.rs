@@ -1,4 +1,5 @@
 use {
+    std::fmt,
     makepad_math::{
         Vec2, Vec3, Vec4
     },
@@ -69,8 +70,14 @@ impl LiveNode{
     }
 }
 
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, PartialEq)]
 pub struct LiveNodeOrigin(u64);
+
+impl fmt::Debug for LiveNodeOrigin{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "token_id:{:?} node_index:{:?} edit_info:{:?}", self.token_id(), self.node_index(), self.edit_info())
+    }
+}
 
 // 10 bit file id (1024)
 // 18 bit token id (256k tokens)
@@ -121,16 +128,23 @@ impl LiveNodeOrigin{
     }
     
     pub fn set_edit_info(&mut self, edit_info:LiveEditInfo){
+        return
         self.0 = (self.0&0x0000_03FFF_FFFF_FFFF) |  (edit_info.0 as u64) << 46;
     }
     
-    pub fn get_edit_info(&self)->Option<LiveEditInfo>{
+    pub fn edit_info(&self)->Option<LiveEditInfo>{
         LiveEditInfo::from_bits((self.0>>46) as u32)
     }
     
 }
 
 pub struct LiveEditInfo(u32);
+
+impl fmt::Debug for LiveEditInfo{
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{:?}:{:?}", self.file_id(), self.edit_info_index())
+    }
+}
 
 impl LiveEditInfo{
     pub fn new(file_id: LiveFileId, edit_info_index: usize)->Self{

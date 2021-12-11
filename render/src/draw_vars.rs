@@ -246,9 +246,9 @@ impl DrawVars {
             match result {
                 Err(e) => {
                     // ok so. lets get the source for this file id
-                    let file = &cx.live_registry.borrow().live_files[e.span.file_id().to_index()];
+                    let file = &cx.live_registry.borrow().live_files[e.span.file_id.to_index()];
                     //println!("{}", file.source);
-                    println!("Error {}", e.to_live_file_error(&file.file_name, &file.source, file.line_offset));
+                    println!("Error {}", e.to_live_file_error(&file.file_name));
                 }
                 Ok(draw_shader_def) => {
                     // OK! SO the shader parsed

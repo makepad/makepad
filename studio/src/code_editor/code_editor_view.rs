@@ -14,7 +14,7 @@ use {
             range::Range,
             range_set::{RangeSet, Span},
             size::Size,
-            text::Text,
+            text::{Text},
             token::{Delimiter, Keyword, Punctuator, TokenKind},
             token_cache::TokenCache,
         },
@@ -135,7 +135,7 @@ live_register!{
         text_color_string: #cc917b
         text_color_whitespace: #6e6e6e
         text_color_unknown: #808080
-        
+        text_color_color: #cc917b
         text_color_linenum: #88
         text_color_linenum_current: #d4
         
@@ -232,6 +232,7 @@ pub struct CodeEditorView {
     line_num_width: f32,
     caret_blink_timeout: f64,
     
+    text_color_color: Vec4,
     text_color_linenum: Vec4,
     text_color_linenum_current: Vec4,
     text_color_comment: Vec4,
@@ -739,6 +740,7 @@ impl CodeEditorView {
             (TokenKind::Punctuator(_), _) => self.text_color_punctuator,
             (TokenKind::String, _) => self.text_color_string,
             (TokenKind::Whitespace, _) => self.text_color_whitespace,
+            (TokenKind::Color, _) => self.text_color_color,
             (TokenKind::Unknown, _) => self.text_color_unknown,
         }
     }
@@ -790,6 +792,7 @@ impl CodeEditorView {
                             state.move_cursors_to(session_id, position, shift);
                         }
                     }
+                    self.fetch_cursor_context(cx, state);
                     self.scroll_view.redraw(cx);
                 }
             }
@@ -810,6 +813,7 @@ impl CodeEditorView {
                         self.last_move_position = Some(position);
                         state.move_cursors_to(session_id, position, true);
                         self.handle_select_scroll_in_finger_move(&fe);
+                        self.fetch_cursor_context(cx, state);
                         self.scroll_view.redraw(cx);
                     }
                 }
@@ -823,6 +827,7 @@ impl CodeEditorView {
                 if let Some(session_id) = self.session_id {
                     state.move_cursors_left(session_id, shift);
                     self.keep_last_cursor_in_view(cx, state);
+                    self.fetch_cursor_context(cx, state);
                     self.scroll_view.redraw(cx);
                 }
             }
@@ -835,6 +840,7 @@ impl CodeEditorView {
                 if let Some(session_id) = self.session_id {
                     state.move_cursors_right(session_id, shift);
                     self.keep_last_cursor_in_view(cx, state);
+                    self.fetch_cursor_context(cx, state);
                     self.scroll_view.redraw(cx);
                 }
             }
@@ -847,6 +853,7 @@ impl CodeEditorView {
                 if let Some(session_id) = self.session_id {
                     state.move_cursors_up(session_id, shift);
                     self.keep_last_cursor_in_view(cx, state);
+                    self.fetch_cursor_context(cx, state);
                     self.scroll_view.redraw(cx);
                 }
             }
@@ -859,6 +866,7 @@ impl CodeEditorView {
                 if let Some(session_id) = self.session_id {
                     state.move_cursors_down(session_id, shift);
                     self.keep_last_cursor_in_view(cx, state);
+                    self.fetch_cursor_context(cx, state);
                     self.scroll_view.redraw(cx);
                 }
             }
@@ -1048,22 +1056,44 @@ impl CodeEditorView {
         }
     }
     
+    
+    fn fetch_cursor_context(&mut self, cx: &mut Cx, state: &EditorState) {
+        if let Some(session_id) = self.session_id {
+            let session = &state.sessions_by_session_id[session_id];
+            let document = &state.documents_by_document_id[session.document_id];
+            let _document_inner = document.inner.as_ref().unwrap();
+            let last_cursor = session.cursors.last();
+            let head = last_cursor.head;
+            
+            let lr_cp = cx.live_registry.clone();
+            let lr = lr_cp.borrow();
+            let live_file = &lr.live_files[16];
+            let expanded = &lr.expanded[16];
+            for (token_index,token) in live_file.document.tokens.iter().enumerate() {
+                if head.line == token.span.start.line as usize
+                    && head.column >= token.span.start.column as usize
+                    && head.column < token.span.end.column as usize {
+                    // great we found the token.
+                    // now lets see if we can look it up
+                    let match_token_id = makepad_live_compiler::TokenId::new(LiveFileId(16), token_index);
+                    for (node_index,node) in expanded.nodes.iter().enumerate(){
+                        if let Some(token_id) = node.origin.token_id(){
+                            if token_id == match_token_id{
+                                println!("{} {:?} {:?}", node_index, node, token);
+                                //break;
+                            }
+                        }
+                    }
+                    break
+                }
+            }
+        }
+    }
+    
     fn keep_last_cursor_in_view(&mut self, cx: &mut Cx, state: &EditorState) {
         if let Some(session_id) = self.session_id {
             let session = &state.sessions_by_session_id[session_id];
             let last_cursor = session.cursors.last();
-            
-            // ok lets find the token at our cursor pos and print it
-            let document = &state.documents_by_document_id[session.document_id];
-            let document_inner = document.inner.as_ref().unwrap();
-            
-            let line = &document_inner.token_cache[last_cursor.head.line];
-            let mut _offset = 0;
-            for token in line.tokens() {
-                let _line = &document_inner.text.as_lines()[last_cursor.head.line];
-                
-                _offset += token.len;
-            }
             
             // ok so. we need to compute the head
             let pos = self.position_to_vec2(last_cursor.head);
