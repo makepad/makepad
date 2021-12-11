@@ -7,9 +7,11 @@ use {
             SessionView
         },
         code_editor::{
-            code_editor_view::{
-                CodeEditorView,
-                CodeEditorViewAction
+            rust_editor::{
+                RustEditor
+            },
+            code_editor_impl::{
+                CodeEditorAction
             },
             protocol::{Notification, Request, Response},
         },
@@ -18,11 +20,54 @@ use {
     makepad_render::*,
 };
 
+enum CodeEditorView {
+    RustEditor(RustEditor)
+}
+
+impl CodeEditorView {
+    pub fn redraw(&self, cx: &mut Cx) {
+        match self {
+            Self::RustEditor(e) => e.redraw(cx)
+        }
+    }
+
+    pub fn set_session_id(&mut self, session_id:Option<SessionId>) {
+        match self {
+            Self::RustEditor(e) => e.set_session_id(session_id)
+        }
+    }
+    
+    pub fn session_id(&self)->Option<SessionId> {
+        match self {
+            Self::RustEditor(e) => e.session_id()
+        }
+    }
+    
+    pub fn draw(&mut self, cx: &mut Cx, state: &EditorState) {
+        match self {
+            Self::RustEditor(e) => e.draw(cx, state)
+        }
+    }
+    
+    pub fn handle_event(
+        &mut self,
+        cx: &mut Cx,
+        state: &mut EditorState,
+        event: &mut Event,
+        send_request: &mut dyn FnMut(Request),
+        dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
+    ) {
+        match self {
+            Self::RustEditor(e) => e.handle_event(cx, state, event, send_request, dispatch_action)
+        }
+    }
+}
+
 live_register!{
-    use crate::code_editor::code_editor_view::CodeEditorView;
+    use crate::code_editor::rust_editor::RustEditor;
     
     CodeEditors: {{CodeEditors}} {
-        code_editor_view: CodeEditorView {},
+        rust_editor: RustEditor {},
     }
 }
 
@@ -30,7 +75,7 @@ live_register!{
 pub struct CodeEditors {
     #[rust] view_id_allocator: GenIdAllocator,
     #[rust] views_by_view_id: GenIdMap<CodeEditorViewId, CodeEditorView>,
-    code_editor_view: Option<LivePtr>,
+    rust_editor: Option<LivePtr>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -57,8 +102,8 @@ impl CodeEditors {
         session_id: Option<SessionId>,
     ) -> CodeEditorViewId {
         let view_id = CodeEditorViewId(self.view_id_allocator.allocate());
-        let mut view = CodeEditorView::new_from_ptr(cx, self.code_editor_view.unwrap());
-        view.session_id = session_id;
+        let mut view = CodeEditorView::RustEditor(RustEditor::new_from_ptr(cx, self.rust_editor.unwrap()));
+        view.set_session_id(session_id);
         self.views_by_view_id.insert(
             view_id,
             view,
@@ -72,7 +117,7 @@ impl CodeEditors {
     
     pub fn view_session_id(&self, view_id: CodeEditorViewId) -> Option<SessionId> {
         let view = &self.views_by_view_id[view_id];
-        view.session_id
+        view.session_id()
     }
     
     pub fn set_view_session_id(
@@ -83,12 +128,12 @@ impl CodeEditors {
         session_id: Option<SessionId>,
     ) {
         let view = &mut self.views_by_view_id[view_id];
-        if let Some(session_id) = view.session_id {
+        if let Some(session_id) = view.session_id() {
             let session = &mut state.sessions_by_session_id[session_id];
             session.session_view = None;
         }
-        view.session_id = session_id;
-        if let Some(session_id) = view.session_id {
+        view.set_session_id(session_id);
+        if let Some(session_id) = view.session_id() {
             let session = &mut state.sessions_by_session_id[session_id];
             session.session_view = Some(SessionView::CodeEditor(view_id));
             view.redraw(cx);
@@ -113,7 +158,7 @@ impl CodeEditors {
         view.handle_event(cx, state, event, send_request, &mut | _, action | actions.push(action));
         for action in actions {
             match action {
-                CodeEditorViewAction::RedrawViewsForDocument(document_id) => {
+                CodeEditorAction::RedrawViewsForDocument(document_id) => {
                     self.redraw_views_for_document(cx, state, document_id);
                 }
             }

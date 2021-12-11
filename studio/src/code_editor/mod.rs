@@ -1,6 +1,7 @@
 pub mod char;
 pub mod code_editors;
-pub mod code_editor_view;
+pub mod code_editor_impl;
+pub mod rust_editor;
 pub mod cursor;
 pub mod cursor_set;
 pub mod delta;
