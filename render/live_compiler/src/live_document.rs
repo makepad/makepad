@@ -1,7 +1,7 @@
 //use makepad_id_macros2::*;
 use {
     crate::{
-        span::Span,
+        span::{Span,TextPos},
         token::{TokenWithSpan, TokenId},
         live_node::LiveNode,
     }
@@ -73,6 +73,17 @@ impl LiveDocument {
     
     pub fn get_tokens(&self, token_start: usize, token_count: usize) -> &[TokenWithSpan] {
         &self.tokens[token_start..(token_start + token_count)]
+    }
+    
+    pub fn find_token_by_pos(&self, pos:TextPos) -> Option<usize> {
+        for (token_index, token) in self.tokens.iter().enumerate() {
+            if pos.line  == token.span.start.line
+                && pos.column >= token.span.start.column
+                && pos.column < token.span.end.column {
+                    return Some(token_index)
+            }
+        }
+        None
     }
     /*
     pub fn get_scopes(&self, scope_start: usize, scope_count: u32) -> &[LiveScopeItem] {

@@ -89,6 +89,12 @@ impl Cx {
         }
         dpi_factor
     }
+
+    
+    pub fn get_scroll_pos(&self) -> Vec2 {
+        let cxview = &self.views[*self.view_stack.last().unwrap()];
+        cxview.unsnapped_scroll
+    }
     
     pub fn redraw_pass_of(&mut self, area: Area) {
         // we walk up the stack of area
