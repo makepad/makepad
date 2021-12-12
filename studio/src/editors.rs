@@ -4,7 +4,6 @@ use {
             EditorState,
             DocumentId,
             SessionId,
-            SessionView
         },
         code_editor::{
             rust_editor::{
@@ -20,11 +19,11 @@ use {
     makepad_render::*,
 };
 
-enum CodeEditorView {
+enum EditorView {
     RustEditor(RustEditor)
 }
 
-impl CodeEditorView {
+impl EditorView {
     pub fn redraw(&self, cx: &mut Cx) {
         match self {
             Self::RustEditor(e) => e.redraw(cx)
@@ -66,31 +65,31 @@ impl CodeEditorView {
 live_register!{
     use crate::code_editor::rust_editor::RustEditor;
     
-    CodeEditors: {{CodeEditors}} {
+    Editors: {{Editors}} {
         rust_editor: RustEditor {},
     }
 }
 
 #[derive(Live, LiveHook)]
-pub struct CodeEditors {
+pub struct Editors {
     #[rust] view_id_allocator: GenIdAllocator,
-    #[rust] views_by_view_id: GenIdMap<CodeEditorViewId, CodeEditorView>,
+    #[rust] views_by_view_id: GenIdMap<EditorViewId, EditorView>,
     rust_editor: Option<LivePtr>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct CodeEditorViewId(pub GenId);
+pub struct EditorViewId(pub GenId);
 
-impl AsRef<GenId> for CodeEditorViewId {
+impl AsRef<GenId> for EditorViewId {
     fn as_ref(&self) -> &GenId {
         &self.0
     }
 }
 
 
-impl CodeEditors {
+impl Editors {
     
-    pub fn draw(&mut self, cx: &mut Cx, state: &EditorState, view_id: CodeEditorViewId) {
+    pub fn draw(&mut self, cx: &mut Cx, state: &EditorState, view_id: EditorViewId) {
         let view = &mut self.views_by_view_id[view_id];
         view.draw(cx, state);
     }
@@ -100,9 +99,12 @@ impl CodeEditors {
         cx: &mut Cx,
         state: &mut EditorState,
         session_id: Option<SessionId>,
-    ) -> CodeEditorViewId {
-        let view_id = CodeEditorViewId(self.view_id_allocator.allocate());
-        let mut view = CodeEditorView::RustEditor(RustEditor::new_from_ptr(cx, self.rust_editor.unwrap()));
+    ) -> EditorViewId {
+        let view_id = EditorViewId(self.view_id_allocator.allocate());
+
+        // TODO branch here on filetype somehow.
+        let mut view = EditorView::RustEditor(RustEditor::new_from_ptr(cx, self.rust_editor.unwrap()));
+
         view.set_session_id(session_id);
         self.views_by_view_id.insert(
             view_id,
@@ -110,12 +112,12 @@ impl CodeEditors {
         );
         if let Some(session_id) = session_id {
             let session = &mut state.sessions_by_session_id[session_id];
-            session.session_view = Some(SessionView::CodeEditor(view_id));
+            session.session_view = Some(view_id);
         }
         view_id
     }
     
-    pub fn view_session_id(&self, view_id: CodeEditorViewId) -> Option<SessionId> {
+    pub fn view_session_id(&self, view_id: EditorViewId) -> Option<SessionId> {
         let view = &self.views_by_view_id[view_id];
         view.session_id()
     }
@@ -124,7 +126,7 @@ impl CodeEditors {
         &mut self,
         cx: &mut Cx,
         state: &mut EditorState,
-        view_id: CodeEditorViewId,
+        view_id: EditorViewId,
         session_id: Option<SessionId>,
     ) {
         let view = &mut self.views_by_view_id[view_id];
@@ -135,12 +137,12 @@ impl CodeEditors {
         view.set_session_id(session_id);
         if let Some(session_id) = view.session_id() {
             let session = &mut state.sessions_by_session_id[session_id];
-            session.session_view = Some(SessionView::CodeEditor(view_id));
+            session.session_view = Some(view_id);
             view.redraw(cx);
         }
     }
     
-    pub fn redraw_view(&mut self, cx: &mut Cx, view_id: CodeEditorViewId) {
+    pub fn redraw_view(&mut self, cx: &mut Cx, view_id: EditorViewId) {
         let view = &mut self.views_by_view_id[view_id];
         view.redraw(cx);
     }
@@ -149,7 +151,7 @@ impl CodeEditors {
         &mut self,
         cx: &mut Cx,
         state: &mut EditorState,
-        view_id: CodeEditorViewId,
+        view_id: EditorViewId,
         event: &mut Event,
         send_request: &mut dyn FnMut(Request),
     ) {
@@ -210,7 +212,7 @@ impl CodeEditors {
         let document = &state.documents_by_document_id[document_id];
         for session_id in &document.session_ids {
             let session = &state.sessions_by_session_id[*session_id];
-            if let Some(SessionView::CodeEditor(view_id)) = session.session_view {
+            if let Some(view_id) = session.session_view {
                 let view = &mut self.views_by_view_id[view_id];
                 view.redraw(cx);
             }
