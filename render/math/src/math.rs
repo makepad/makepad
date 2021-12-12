@@ -332,12 +332,11 @@ impl Vec4 {
         };
     }
     
-    
-    pub fn is_equal_enough(&self, other: &Vec4) -> bool {
-        (self.x - other.x).abs() < 0.0001
-            && (self.y - other.y).abs() < 0.0001
-            && (self.z - other.z).abs() < 0.0001
-            && (self.w - other.w).abs() < 0.0001
+    pub fn is_equal_enough(&self, other: &Vec4, epsilon:f32) -> bool {
+        (self.x - other.x).abs() < epsilon
+            && (self.y - other.y).abs() < epsilon
+            && (self.z - other.z).abs() < epsilon
+            && (self.w - other.w).abs() < epsilon
     }
     
     

@@ -72,6 +72,26 @@ impl Text {
             },
         }
     }
+    
+    pub fn append_to_string(&self, range: Range, out:&mut String){
+        if range.start.line == range.end.line {
+            for c in self.lines[range.start.line][range.start.column..range.end.column].iter(){
+                out.push(*c);
+            }
+        } else {
+            for c in self.lines[range.start.line][range.start.column..].iter(){
+                out.push(*c);
+            }
+            for line in self.lines[range.start.line + 1..range.end.line].iter(){
+                for c in line{
+                    out.push(*c)
+                }
+            }
+            for c in self.lines[range.end.line][..range.end.column].iter(){
+                out.push(*c)
+            }
+        }
+    }
 
     pub fn take(&mut self, len: Size) -> Text {
         let mut lines = self.lines.drain(..len.line).collect::<Vec<_>>();

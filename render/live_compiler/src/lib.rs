@@ -34,6 +34,7 @@ pub use {
             LiveNodeReader,
         },
         live_node::{
+            LiveEditInfo,
             LiveValue,
             LiveNode,
             LiveType,
