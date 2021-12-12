@@ -79,11 +79,13 @@ impl fmt::Debug for LiveNodeOrigin{
     }
 }
 
+// this layout can be reshuffled and just be made bigger. 
+// However it keeps the LiveNode size at 40 bytes which is nice for now.
 // 10 bit file id (1024)
-// 18 bit token id (256k tokens)
-// 18 bits node index (256000 lines)
-// 10 bits original file_id
-// 8 bits (256) metadata index 
+// 18 bit token id (262k tokens, avg tokensize: 5 = 1.25 megs of code)
+// 18 bits node index (262k nodes *40 bytes = 10 megs. We are at 70kb now for the UI)
+// 10 bits edit_info file_id 
+// 8 bits (256) edit_info index 
 
 impl LiveNodeOrigin{
     pub fn empty()->Self{

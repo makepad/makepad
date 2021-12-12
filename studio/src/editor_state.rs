@@ -1,10 +1,10 @@
 use {
     crate::{
         code_editor::{
-            code_editors::CodeEditorViewId,
             cursor_set::CursorSet,
             delta::{self, Delta, Whose},
             indent_cache::IndentCache,
+            edit_info_cache::EditInfoCache,
             position::Position,
             position_set::PositionSet,
             protocol::{FileId, Request},
@@ -13,12 +13,11 @@ use {
             text::Text,
             token_cache::TokenCache,
         },
-        design_editor::{
-            design_editor::DesignEditorViewId
-        },
+        editors::EditorViewId,
     },
     makepad_widget::{GenId, GenIdMap,GenIdAllocator},
     std::{
+        cell::RefCell,
         collections::{HashMap, HashSet, VecDeque},
         iter,
         mem,
@@ -119,12 +118,15 @@ impl EditorState {
         let document = &mut self.documents_by_document_id[document_id];
         let token_cache = TokenCache::new(&text);
         let indent_cache = IndentCache::new(&text);
+        let edit_info_cache = RefCell::new(EditInfoCache::new(&text));
+        
         document.inner = Some(DocumentInner {
             file_id,
             revision,
             text,
             token_cache,
             indent_cache,
+            edit_info_cache,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             outstanding_deltas: VecDeque::new(),
@@ -556,13 +558,9 @@ impl AsRef<GenId> for SessionId {
     }
 }
 
-pub enum SessionView{
-    CodeEditor(CodeEditorViewId),
-    DesignEditor(DesignEditorViewId)
-}
 
 pub struct Session {
-    pub session_view: Option<SessionView>,
+    pub session_view: Option<EditorViewId>,
     pub cursors: CursorSet,
     pub selections: RangeSet,
     pub carets: PositionSet,
@@ -602,6 +600,7 @@ impl Document {
         let inner = self.inner.as_mut().unwrap();
         inner.token_cache.invalidate(&delta);
         inner.indent_cache.invalidate(&delta);
+        inner.edit_info_cache.borrow_mut().invalidate(&delta);
         inner.text.apply_delta(delta);
         inner.token_cache.refresh(&inner.text);
         inner.indent_cache.refresh(&inner.text);
@@ -637,6 +636,7 @@ pub struct DocumentInner {
     pub text: Text,
     pub token_cache: TokenCache,
     pub indent_cache: IndentCache,
+    pub edit_info_cache: RefCell<EditInfoCache>,
     pub undo_stack: Vec<Edit>,
     pub redo_stack: Vec<Edit>,
     pub outstanding_deltas: VecDeque<Delta>,
