@@ -14,7 +14,11 @@ pub use {
         Encode,
         Encoding
     },
-    std::ptr::NonNull,
+    std::{
+        ffi::c_void,
+        os::raw::c_ulong,
+        ptr::NonNull,
+    },
 };
 
 //use bitflags::bitflags;
@@ -60,6 +64,12 @@ impl Drop for RcObjcId {
             let _: () = msg_send![self.0.as_ptr(), release ];
         }
     }
+}
+
+#[link(name = "system")]
+extern {
+    pub static _NSConcreteStackBlock: [*const c_void; 32];
+    pub static _NSConcreteBogusBlock: [*const c_void; 32];
 }
 
 #[link(name = "Foundation", kind = "framework")]
