@@ -25,6 +25,12 @@ use {
             TextureDesc,
         },
     },
+    std::{
+        ffi::c_void,
+        mem,
+        os::raw::{c_int, c_ulong},
+        ptr,
+    }
 };
 
 impl Cx {
@@ -382,8 +388,62 @@ impl Cx {
             
             let () = unsafe {msg_send![encoder, endEncoding]};
             let () = unsafe {msg_send![command_buffer, presentDrawable: drawable]};
+
+            #[derive(Debug)]
+            #[repr(C)]
+            struct BlockDescriptor {
+                reserved: c_ulong,
+                size: c_ulong,
+                copy_helper: extern "C" fn(*mut c_void, *const c_void),
+                dispose_helper: extern "C" fn(*mut c_void),
+            }
+
+            static DESCRIPTOR: BlockDescriptor = BlockDescriptor {
+                reserved: 0,
+                size: mem::size_of::<BlockLiteral>() as c_ulong,
+                copy_helper,
+                dispose_helper,
+            };
+       
+            extern "C" fn copy_helper(dst: *mut c_void, src: *const c_void) {
+                unsafe {
+                    let src = &*(src as *const BlockLiteral);
+                    ptr::write(dst as *mut BlockLiteral, BlockLiteral {
+                        ..*src
+                    });
+                }
+            }
+
+            extern "C" fn dispose_helper(src: *mut c_void) {
+                unsafe {
+                    ptr::drop_in_place(src as *mut BlockLiteral);
+                }
+            }
+
+            #[derive(Debug)]
+            #[repr(C)]
+            struct BlockLiteral {
+                isa: *const c_void,
+                flags: c_int,
+                reserved: c_int,
+                invoke: extern "C" fn(*mut BlockLiteral, ObjcId),
+                descriptor: *const BlockDescriptor,
+            }
+
+            let literal = BlockLiteral {
+                isa: unsafe { _NSConcreteStackBlock.as_ptr() as *const c_void },
+                flags: 1 << 25,
+                reserved: 0,
+                invoke,
+                descriptor: &DESCRIPTOR,
+            };
+
+            extern "C" fn invoke(literal: *mut BlockLiteral, command_buffer: ObjcId) {
+                // println!("Invoke called");
+            }
+
+            let () = unsafe {msg_send![command_buffer, addCompletedHandler: &literal]};
             let () = unsafe {msg_send![command_buffer, commit]};
-            let () = unsafe {msg_send![command_buffer, waitUntilScheduled]};
         }
         let () = unsafe {msg_send![pool, release]};
     } 
