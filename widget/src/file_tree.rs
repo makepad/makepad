@@ -130,7 +130,7 @@ live_register!{
                 opened: [{value: 1.0, ease: Ease::OutExp}],
             }
         }
-        
+        is_folder:false,
         indent_width.{name:"hello world",min:1.0,max:20.0}: 10.0
         min_drag_distance: 10.0
     }

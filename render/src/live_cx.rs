@@ -151,7 +151,7 @@ impl Cx {
             LiveModuleId::from_str(&live_body.module_path).unwrap(),
             live_body.code,
             live_body.live_type_infos,
-            live_body.line
+            TextPos{line:live_body.line as u32,column:live_body.column as u32}
         );
         //println!("END");
         if let Err(err) = result {
