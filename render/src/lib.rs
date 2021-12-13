@@ -68,7 +68,8 @@ pub use {
         LiveNodeSlice,
         LiveNodeVec,
     },
-    
+    makepad_shader_compiler,
+    makepad_live_compiler,
     makepad_shader_compiler::{
         ShaderRegistry,
         ShaderEnum,

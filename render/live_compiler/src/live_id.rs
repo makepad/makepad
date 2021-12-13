@@ -76,13 +76,15 @@ impl LiveIdMap {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Ord, PartialOrd, Hash, PartialEq)]
+#[derive(Clone, Copy, Default, Debug, Eq, Ord, PartialOrd, Hash, PartialEq)]
 pub struct LiveFileId(pub u16);
 
 impl LiveFileId {
     pub fn index(index: usize) -> LiveFileId {LiveFileId(index as u16)}
     pub fn to_index(&self) -> usize {self.0 as usize}
 }
+
+
 
 //TODO FIX THIS THING TO BE N LEVELS OF MODULES
 #[derive(Default, Clone, Eq, Hash, Debug, Copy, PartialEq)]
