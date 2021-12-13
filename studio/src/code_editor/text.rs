@@ -72,6 +72,26 @@ impl Text {
             },
         }
     }
+    
+    pub fn append_to_string(&self, range: Range, out:&mut String){
+        if range.start.line == range.end.line {
+            for c in self.lines[range.start.line][range.start.column..range.end.column].iter(){
+                out.push(*c);
+            }
+        } else {
+            for c in self.lines[range.start.line][range.start.column..].iter(){
+                out.push(*c);
+            }
+            for line in self.lines[range.start.line + 1..range.end.line].iter(){
+                for c in line{
+                    out.push(*c)
+                }
+            }
+            for c in self.lines[range.end.line][..range.end.column].iter(){
+                out.push(*c)
+            }
+        }
+    }
 
     pub fn take(&mut self, len: Size) -> Text {
         let mut lines = self.lines.drain(..len.line).collect::<Vec<_>>();
@@ -144,6 +164,38 @@ impl Text {
                 Operation::Delete(count) => self.delete(position, count),
             }
         }
+    }
+}
+
+pub trait CharVecToString{
+    fn to_string(&self, start:usize, len:usize)->String;
+    fn compare_string(&self, s:&str, start:usize, end:usize)->bool;
+}
+
+impl CharVecToString for Vec<char>{
+    fn to_string(&self, start:usize, end:usize)->String{
+        let mut s = String::new();
+        for i in start..end{
+            s.push(self[i]);
+        }
+        return s
+    }
+    
+    fn compare_string(&self, s:&str, start:usize, end:usize)->bool{
+        let mut i = start;
+        for s in s.chars(){
+            if i >= end{
+                return false
+            }
+            if self[i] != s{
+                return false
+            }
+            i+=1;
+        }
+        if i < end{
+            return false
+        }
+        true
     }
 }
 

@@ -9,6 +9,7 @@ mod scroll_view;
 mod frame;
 mod window_menu;
 
+pub mod color_picker;
 pub mod dock;
 pub mod file_tree;
 pub mod splitter;
@@ -29,6 +30,7 @@ pub use crate::{
 };
 
 pub fn live_register(cx:&mut Cx){
+    crate::color_picker::live_register(cx);
     crate::scroll_shadow::live_register(cx);
     crate::button::live_register(cx);
     crate::desktop_button::live_register(cx);

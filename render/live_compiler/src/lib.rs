@@ -34,6 +34,7 @@ pub use {
             LiveNodeReader,
         },
         live_node::{
+            LiveEditInfo,
             LiveValue,
             LiveNode,
             LiveType,
@@ -48,7 +49,10 @@ pub use {
             LiveTypeKind,
         },
         token::{TokenWithSpan, Token, TokenId},
-        span::Span,
+        span::{
+            Span,
+            TextPos
+        },
         live_error::{
             LiveError,
             LiveErrorOrigin,

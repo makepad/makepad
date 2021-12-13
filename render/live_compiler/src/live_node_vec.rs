@@ -12,6 +12,7 @@ use {
     },
     crate::{
         live_id::{LiveId},
+        token::TokenId,
         live_node::{LiveNode, LiveValue, LiveNodeOrigin, InlineString, FittedString},
     }
 };
@@ -31,6 +32,8 @@ pub trait LiveNodeSlice {
     fn child_by_name(&self, parent_index: usize, name: LiveId) -> Option<usize>;
     fn child_by_path(&self, parent_index: usize, path: &[LiveId]) -> Option<usize>;
     fn child_value_by_path(&self, parent_index: usize, path: &[LiveId]) -> Option<&LiveValue>;
+    
+    fn first_node_with_token_id(&self, match_token_id:TokenId)->Option<usize>;
     
     fn scope_up_by_name(&self, parent_index: usize, name: LiveId) -> Option<usize>;
     fn scope_up_down_by_name(&self, parent_index: usize, name: LiveId) -> Option<usize>;
@@ -78,6 +81,17 @@ pub trait LiveNodeVec {
 
 // accessing the Gen structure like a tree
 impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
+    
+    fn first_node_with_token_id(&self, match_token_id:TokenId) -> Option<usize> {
+        for (node_index, node) in self.as_ref().iter().enumerate() {
+            if let Some(token_id) = node.origin.token_id() {
+                if token_id == match_token_id {
+                    return Some(node_index)
+                }
+            }
+        }
+        None
+    }
     
     fn parent(&self, child_index: usize) -> Option<usize> {
         let self_ref = self.as_ref();
