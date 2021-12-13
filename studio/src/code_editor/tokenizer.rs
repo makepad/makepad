@@ -132,6 +132,7 @@ impl InitialState {
                     TokenKind::Punctuator(Punctuator::CloseDelimiter(Delimiter::Brace)),
                 )
             }
+            ('#', ch1, ch2) if ch1 == 'x' && ch2.is_hex() || ch1.is_hex() =>  self.color(cursor),
             ('!', _, _)
             | ('#', _, _)
             | ('$', _, _)
@@ -634,6 +635,25 @@ impl InitialState {
         };
         cursor.skip_suffix();
         (State::Initial(InitialState), TokenKind::Number)
+    }
+
+
+    fn color(self, cursor: &mut Cursor) -> (State, TokenKind) {
+        match (cursor.peek(0), cursor.peek(1)) {
+            ('#','x') => {
+                cursor.skip(2);
+                if !cursor.skip_digits(16) {
+                    return (State::Initial(InitialState), TokenKind::Unknown);
+                }
+            }
+            _=> {
+                cursor.skip(1);
+                if !cursor.skip_digits(16) {
+                    return (State::Initial(InitialState), TokenKind::Unknown);
+                }
+            }
+        };
+        (State::Initial(InitialState), TokenKind::Color)
     }
 
     fn char_or_lifetime(self, cursor: &mut Cursor) -> (State, TokenKind) {

@@ -574,6 +574,15 @@ impl Cx {
         };
         return Rect::default();
     }
+
+    pub fn get_turtle_size(&self) -> Vec2 {
+        if let Some(turtle) = self.turtles.last() {
+            vec2(turtle.width, turtle.height)
+        }
+        else {
+            Vec2::default()
+        }
+    }
     
     pub fn get_turtle_biggest(&self) -> f32 {
         if let Some(turtle) = self.turtles.last() {

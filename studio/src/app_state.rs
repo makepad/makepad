@@ -2,9 +2,9 @@ use {
     crate::{
         editor_state::{EditorState, SessionId},
         code_editor::{
-            code_editors::{CodeEditorViewId},
             protocol::{FileNodeData, FileTreeData},
         },
+        editors::{EditorViewId},
     },
     makepad_widget::{
         dock::{PanelId},
@@ -66,7 +66,7 @@ impl AppState {
                 parent_panel_id: Some(root_panel_id),
                 kind: PanelKind::Tab(TabPanel {
                     tab_ids: vec![file_tree_tab_id],
-                    code_editor_view_id: None,
+                    editor_view_id: None,
                 }),
             },
         );
@@ -86,7 +86,7 @@ impl AppState {
                 parent_panel_id: Some(root_panel_id),
                 kind: PanelKind::Tab(TabPanel {
                     tab_ids: vec![],
-                    code_editor_view_id: None,
+                    editor_view_id: None,
                 }),
             },
         );
@@ -232,7 +232,7 @@ pub struct SplitPanel {
 #[derive(Clone, Debug)]
 pub struct TabPanel {
     pub tab_ids: Vec<TabId>,
-    pub code_editor_view_id: Option<CodeEditorViewId>,
+    pub editor_view_id: Option<EditorViewId>,
 }
 
 pub struct Tab {

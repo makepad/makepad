@@ -19,7 +19,7 @@ pub fn live_register_impl(input: TokenStream) -> TokenStream {
         tb.add("        module_path :").ident_with_span("module_path", span).add("!().to_string(),");
         tb.add("        file:").ident_with_span("file", span).add("!().to_string().replace(").string("\\").add(",").string("/").add("),");
         tb.add("        line:").unsuf_usize(span.start().line - 1).add(",");
-        tb.add("        column:").unsuf_usize(span.start().column).add(",");
+        tb.add("        column:").unsuf_usize(span.start().column - 1).add(",");
         tb.add("        live_type_infos:{");
         tb.add("            let mut v = Vec::new();");
         for live_type in &live_types {
@@ -109,7 +109,7 @@ fn token_parser_to_whitespace_matching_string(parser: &mut TokenParser, span: Sp
                 for _ in now.line..needed.line {
                     out.push('\n');
                 }
-                for _ in 0..needed.column {
+                for _ in 1..needed.column {
                     out.push(' ');
                 }
             }
@@ -135,7 +135,7 @@ fn token_parser_to_whitespace_matching_string(parser: &mut TokenParser, span: Sp
                 out.push(gs);
                 *last_end = Some(start._next_char());
                 tp_to_str(parser, span, out, live_types, last_end);
-                delta_whitespace(last_end.unwrap(), end, out);
+                delta_whitespace(last_end.unwrap(), Lc{line:end.line, column:end.column-1}, out);
                 *last_end = Some(end);
                 out.push(ge);
             }

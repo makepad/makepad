@@ -1,10 +1,11 @@
 pub mod char;
-pub mod code_editors;
-pub mod code_editor_view;
+pub mod code_editor_impl;
+pub mod rust_editor;
 pub mod cursor;
 pub mod cursor_set;
 pub mod delta;
 pub mod indent_cache;
+pub mod edit_info_cache;
 pub mod position;
 pub mod position_set;
 pub mod protocol;
