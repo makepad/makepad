@@ -358,6 +358,7 @@ impl Cx {
         dpi_factor: f32,
         layer: ObjcId,
         metal_cx: &mut MetalCx,
+        is_resizing: bool
     ) {
         self.platform.bytes_written = 0;
         self.platform.draw_calls_done = 0;
@@ -399,9 +400,15 @@ impl Cx {
             );
             
             let () = unsafe {msg_send![encoder, endEncoding]};
-            //let () = unsafe {msg_send![command_buffer, presentDrawable: drawable]};
-            self.commit_command_buffer(command_buffer, gpu_read_guards);
-            let () = unsafe {msg_send![drawable, present]};
+            if is_resizing{
+                self.commit_command_buffer(command_buffer, gpu_read_guards);
+                let () = unsafe {msg_send![command_buffer, waitUntilScheduled]};
+                let () = unsafe {msg_send![drawable, present]};
+            }
+            else{
+                let () = unsafe {msg_send![command_buffer, presentDrawable: drawable]};
+                self.commit_command_buffer(command_buffer, gpu_read_guards);
+            }
             
         }
         let () = unsafe {msg_send![pool, release]};
@@ -528,6 +535,7 @@ pub struct MetalWindow {
     pub cal_size: Vec2,
     pub ca_layer: ObjcId,
     pub cocoa_window: CocoaWindow,
+    pub is_resizing: bool
 }
 
 impl MetalWindow {
@@ -538,7 +546,6 @@ impl MetalWindow {
         let mut cocoa_window = CocoaWindow::new(cocoa_app, window_id);
         
         cocoa_window.init(title, inner_size, position);
-        
         unsafe {
             let () = msg_send![ca_layer, setDevice: metal_cx.device];
             let () = msg_send![ca_layer, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
@@ -559,6 +566,7 @@ impl MetalWindow {
         }
         
         MetalWindow { 
+            is_resizing: false,
             first_draw: true,
             window_id,
             cal_size: Vec2::default(), 
@@ -573,10 +581,12 @@ impl MetalWindow {
     }
     
     pub fn start_resize(&mut self){
+        self.is_resizing = true;
         let () = unsafe{msg_send![self.ca_layer, setPresentsWithTransaction: YES]};
     }
     
     pub fn stop_resize(&mut self){
+        self.is_resizing = false;
         let () = unsafe{msg_send![self.ca_layer, setPresentsWithTransaction: NO]};
     }
     
