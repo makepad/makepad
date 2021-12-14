@@ -63,6 +63,18 @@ impl Cx {
                 self.process_desktop_pre_event(&mut event);
                 
                 match &event {
+                    Event::WindowResizeLoop(wr) => {
+                        for metal_window in &mut metal_windows {
+                            if metal_window.window_id == wr.window_id {
+                                if wr.was_started {
+                                    metal_window.start_resize();
+                                }
+                                else {
+                                    metal_window.stop_resize();
+                                }
+                            }
+                        }
+                    },
                     Event::WindowGeomChange(re) => { // do this here because mac
                         for metal_window in &mut metal_windows {
                             if metal_window.window_id == re.window_id {
