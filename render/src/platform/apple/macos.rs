@@ -231,6 +231,7 @@ impl Cx {
                                                 dpi_factor,
                                                 metal_window.ca_layer,
                                                 &mut metal_cx,
+                                                metal_window.is_resizing
                                             );
                                             
                                             //let pass = &mut self.passes[*pass_id];
