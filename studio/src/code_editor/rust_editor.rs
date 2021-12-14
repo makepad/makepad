@@ -9,7 +9,7 @@ use {
             token_cache::TokenCache,
             edit_info_cache::EditInfoCache,
             protocol::Request,
-            code_editor_impl::{CodeEditorImpl, CodeEditorAction, VisibleLines}
+            code_editor_impl::{CodeEditorImpl, CodeEditorAction, LinesLayout}
         },
         editor_state::{
             SessionId
@@ -32,7 +32,7 @@ live_register!{
 pub struct RustEditor {
     editor_impl: CodeEditorImpl,
     color_picker: Option<LivePtr>,
-    #[rust] visible_lines: VisibleLines,
+    #[rust] lines_layout: LinesLayout,
     #[rust] color_pickers: HashMap<TokenId, ColorPicker>
 }
 
@@ -47,11 +47,14 @@ impl EditInfoCache {
         let lr_cp = cx.live_registry.clone();
         let lr = lr_cp.borrow();
         
-        let file_id = LiveFileId(16);
+        let file_id = LiveFileId(23);
         
         let live_file = &lr.live_files[file_id.to_index()];
         let expanded = &lr.expanded[file_id.to_index()];
         
+        if self.lines.len() != token_cache.len(){
+            panic!();
+        }
         for (line, line_cache) in self.lines.iter_mut().enumerate() {
             if line_cache.is_clean { // line not dirty
                 continue
@@ -68,7 +71,7 @@ impl EditInfoCache {
                         let match_token_id = makepad_live_compiler::TokenId::new(file_id, live_token_index);
                         if let Some(node_index) = expanded.nodes.first_node_with_token_id(match_token_id) {
                             let live_ptr = LivePtr {file_id, index: node_index as u32};
-                            
+                            //println!("FOUND TOKEN {:?}", expanded.nodes[node_index]);
                             // and metadata to spawn up a UI element
                             line_cache.live_ptrs.push((editor_token_index, live_ptr));
                         }
@@ -103,12 +106,23 @@ impl RustEditor {
             // first we generate the layout structure
             let lr_cp = cx.live_registry.clone();
             let lr = lr_cp.borrow();
-            self.editor_impl.calc_visible_lines(cx, document_inner, &mut self.visible_lines, | _cx, line_index | {
+            self.editor_impl.calc_lines_layout(cx, document_inner, &mut self.lines_layout, | _cx, line_index, start_y, past_end| {
                 let edit_info = &edit_info_cache[line_index];
-                return 0.0;
                 for (_token_index, live_ptr) in &edit_info.live_ptrs {
-                    let _node = lr.ptr_to_node(*live_ptr);
-                    return 100.0
+                    let node = lr.ptr_to_node(*live_ptr);
+                    // alright we have a node.
+                    // now what. if the node is a color, we show a color picker.
+                    // if its a float we show some kind of infinite dial
+                    // if its not, we dont.
+                    match node.value{ 
+                        LiveValue::Color(_)=>{
+                            // ok we need to allocate a colorpicker, with the right value.
+                            // but ONLY if we are visible
+                            
+                            return 100.0
+                        }
+                        _=>()
+                    }
                 }
                 return 0.0
             });
@@ -117,20 +131,20 @@ impl RustEditor {
                 cx,
                 &session.selections,
                 &document_inner.text,
-                &self.visible_lines,
+                &self.lines_layout,
             );
             
             self.editor_impl.draw_indent_guides(
                 cx,
                 &document_inner.indent_cache,
-                &self.visible_lines,
+                &self.lines_layout,
             );
             
             self.editor_impl.draw_carets(
                 cx,
                 &session.selections,
                 &session.carets,
-                &self.visible_lines
+                &self.lines_layout
             );
             
             // alright great. now we can draw the text
@@ -138,15 +152,15 @@ impl RustEditor {
                 cx,
                 &document_inner.text,
                 &document_inner.token_cache,
-                &self.visible_lines,
+                &self.lines_layout,
             );
             
-            self.editor_impl.draw_current_line(cx,  &self.visible_lines, session.cursors.last());
+            self.editor_impl.draw_current_line(cx,  &self.lines_layout, session.cursors.last());
 
-            self.editor_impl.draw_linenums(cx, &self.visible_lines, session.cursors.last());
+            self.editor_impl.draw_linenums(cx, &self.lines_layout, session.cursors.last());
 
             
-            self.editor_impl.end(cx, &self.visible_lines);
+            self.editor_impl.end(cx, &self.lines_layout);
         }
     }
     
@@ -158,7 +172,7 @@ impl RustEditor {
         send_request: &mut dyn FnMut(Request),
         dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
     ) {
-        self.editor_impl.handle_event(cx, state, event, &self.visible_lines, send_request, dispatch_action);
+        self.editor_impl.handle_event(cx, state, event, &self.lines_layout, send_request, dispatch_action);
     }
 }
 
