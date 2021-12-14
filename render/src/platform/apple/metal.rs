@@ -28,14 +28,20 @@ use {
     std::{
         ffi::c_void,
         mem,
+        ops::{Deref, DerefMut},
         os::raw::{c_int, c_ulong},
         ptr,
+        sync::{
+            mpsc,
+            mpsc::{Receiver, SyncSender},
+            Arc,
+            Mutex,
+        }
     }
 };
 
 impl Cx {
-    
-    pub fn render_view(
+    fn render_view(
         &mut self,
         pass_id: usize,
         view_id: usize,
@@ -44,6 +50,7 @@ impl Cx {
         zbias: &mut f32,
         zbias_step: f32,
         encoder: ObjcId,
+        buffer_guards: &mut Vec<MetalBufferGuard>,
         metal_cx: &MetalCx,
     ) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
@@ -64,6 +71,7 @@ impl Cx {
                     zbias,
                     zbias_step,
                     encoder,
+                    buffer_guards,
                     metal_cx,
                 );
             }
@@ -375,6 +383,7 @@ impl Cx {
             let mut zbias = 0.0;
             let zbias_step = self.passes[pass_id].zbias_step;
             
+            let mut buffer_guards = Vec::new();
             self.render_view(
                 pass_id,
                 view_id,
@@ -383,67 +392,13 @@ impl Cx {
                 &mut zbias,
                 zbias_step,
                 encoder,
+                &mut buffer_guards,
                 &metal_cx,
             );
             
             let () = unsafe {msg_send![encoder, endEncoding]};
             let () = unsafe {msg_send![command_buffer, presentDrawable: drawable]};
-
-            #[derive(Debug)]
-            #[repr(C)]
-            struct BlockDescriptor {
-                reserved: c_ulong,
-                size: c_ulong,
-                copy_helper: extern "C" fn(*mut c_void, *const c_void),
-                dispose_helper: extern "C" fn(*mut c_void),
-            }
-
-            static DESCRIPTOR: BlockDescriptor = BlockDescriptor {
-                reserved: 0,
-                size: mem::size_of::<BlockLiteral>() as c_ulong,
-                copy_helper,
-                dispose_helper,
-            };
-       
-            extern "C" fn copy_helper(dst: *mut c_void, src: *const c_void) {
-                unsafe {
-                    let src = &*(src as *const BlockLiteral);
-                    ptr::write(dst as *mut BlockLiteral, BlockLiteral {
-                        ..*src
-                    });
-                }
-            }
-
-            extern "C" fn dispose_helper(src: *mut c_void) {
-                unsafe {
-                    ptr::drop_in_place(src as *mut BlockLiteral);
-                }
-            }
-
-            #[derive(Debug)]
-            #[repr(C)]
-            struct BlockLiteral {
-                isa: *const c_void,
-                flags: c_int,
-                reserved: c_int,
-                invoke: extern "C" fn(*mut BlockLiteral, ObjcId),
-                descriptor: *const BlockDescriptor,
-            }
-
-            let literal = BlockLiteral {
-                isa: unsafe { _NSConcreteStackBlock.as_ptr() as *const c_void },
-                flags: 1 << 25,
-                reserved: 0,
-                invoke,
-                descriptor: &DESCRIPTOR,
-            };
-
-            extern "C" fn invoke(literal: *mut BlockLiteral, command_buffer: ObjcId) {
-                // println!("Invoke called");
-            }
-
-            let () = unsafe {msg_send![command_buffer, addCompletedHandler: &literal]};
-            let () = unsafe {msg_send![command_buffer, commit]};
+            self.commit_command_buffer(command_buffer, buffer_guards);
         }
         let () = unsafe {msg_send![pool, release]};
     } 
@@ -470,6 +425,7 @@ impl Cx {
         
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
+        let mut buffer_guards = Vec::new();
         self.render_view(
             pass_id,
             view_id,
@@ -478,13 +434,79 @@ impl Cx {
             &mut zbias,
             zbias_step,
             encoder,
+            &mut buffer_guards,
             &metal_cx,
         );
         let () = unsafe {msg_send![encoder, textureBarrier]};
         let () = unsafe {msg_send![encoder, endEncoding]};
-        let () = unsafe {msg_send![command_buffer, commit]};
-        let () = unsafe {msg_send![command_buffer, waitUntilScheduled]};
+        self.commit_command_buffer(command_buffer, buffer_guards);
         let () = unsafe {msg_send![pool, release]};
+    }
+
+    fn commit_command_buffer(&mut self, command_buffer: ObjcId, buffer_guards: Vec<MetalBufferGuard>) {
+        #[repr(C)]
+        struct BlockDescriptor {
+            reserved: c_ulong,
+            size: c_ulong,
+            copy_helper: extern "C" fn(*mut c_void, *const c_void),
+            dispose_helper: extern "C" fn(*mut c_void),
+        }
+
+        static DESCRIPTOR: BlockDescriptor = BlockDescriptor {
+            reserved: 0,
+            size: mem::size_of::<BlockLiteral>() as c_ulong,
+            copy_helper,
+            dispose_helper,
+        };
+   
+        extern "C" fn copy_helper(dst: *mut c_void, src: *const c_void) {
+            unsafe {
+                ptr::write(
+                    &mut (*(dst as *mut BlockLiteral)).inner as *mut _,
+                    (&*(src as *const BlockLiteral)).inner.clone()
+                );
+            }
+        }
+
+        extern "C" fn dispose_helper(src: *mut c_void) {
+            unsafe {
+                ptr::drop_in_place(src as *mut BlockLiteral);
+            }
+        }
+
+        #[repr(C)]
+        struct BlockLiteral {
+            isa: *const c_void,
+            flags: c_int,
+            reserved: c_int,
+            invoke: extern "C" fn(*mut BlockLiteral, ObjcId),
+            descriptor: *const BlockDescriptor,
+            inner: Arc<BlockLiteralInner>,
+        }
+
+        #[repr(C)]
+        struct BlockLiteralInner {
+            buffer_guards: Mutex<Option<Vec<MetalBufferGuard>>>,
+        }
+
+        let literal = BlockLiteral {
+            isa: unsafe { _NSConcreteStackBlock.as_ptr() as *const c_void },
+            flags: 1 << 25,
+            reserved: 0,
+            invoke,
+            descriptor: &DESCRIPTOR,
+            inner: Arc::new(BlockLiteralInner {
+                buffer_guards: Mutex::new(Some(buffer_guards)),
+            })
+        };
+
+        extern "C" fn invoke(literal: *mut BlockLiteral, _command_buffer: ObjcId) {
+            let literal = unsafe { &mut *literal };
+            drop(literal.inner.buffer_guards.lock().unwrap().take().unwrap());
+        }
+
+        let () = unsafe {msg_send![command_buffer, addCompletedHandler: &literal]};
+        let () = unsafe {msg_send![command_buffer, commit]};
     }
 }
 
@@ -813,6 +835,58 @@ struct CxPlatformShaderInner {
     view_uniform_buffer_id: Option<u64>,
     user_uniform_buffer_id: Option<u64>,
     source: String,
+}
+
+struct MetalBufferQueue {
+    sender: SyncSender<MetalBuffer>,
+    receiver: Receiver<MetalBuffer>,
+}
+
+impl MetalBufferQueue {
+    fn acquire(&self) -> MetalBufferGuard {
+        MetalBufferGuard {
+            sender: self.sender.clone(),
+            buffer: Some(self.receiver.recv().unwrap()),
+        }
+    }
+}
+
+impl Default for MetalBufferQueue {
+    fn default() -> Self {
+        let (sender, receiver) = mpsc::sync_channel(3);
+        for _ in 0..3 {
+            sender.send(MetalBuffer::default()).unwrap();
+        }
+        Self {
+            sender,
+            receiver,
+        }
+    }
+}
+
+struct MetalBufferGuard {
+    sender: SyncSender<MetalBuffer>,
+    buffer: Option<MetalBuffer>,
+}
+
+impl Deref for MetalBufferGuard {
+    type Target = MetalBuffer;
+
+    fn deref(&self) -> &Self::Target {
+        self.buffer.as_ref().unwrap()
+    }
+}
+
+impl DerefMut for MetalBufferGuard {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.buffer.as_mut().unwrap()
+    }
+}
+
+impl Drop for MetalBufferGuard {
+    fn drop(&mut self) {
+        self.sender.send(self.buffer.take().unwrap()).unwrap();
+    }
 }
 
 #[derive(Default)]
