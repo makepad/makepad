@@ -399,8 +399,10 @@ impl Cx {
             );
             
             let () = unsafe {msg_send![encoder, endEncoding]};
-            let () = unsafe {msg_send![command_buffer, presentDrawable: drawable]};
+            //let () = unsafe {msg_send![command_buffer, presentDrawable: drawable]};
             self.commit_command_buffer(command_buffer, gpu_read_guards);
+            let () = unsafe {msg_send![drawable, present]};
+            
         }
         let () = unsafe {msg_send![pool, release]};
     } 
@@ -568,6 +570,14 @@ impl MetalWindow {
     
     pub fn set_vsync_enable(&mut self, _enable: bool) {
        // let () = unsafe {msg_send![self.ca_layer, setDisplaySyncEnabled: false]};
+    }
+    
+    pub fn start_resize(&mut self){
+        let () = unsafe{msg_send![self.ca_layer, setPresentsWithTransaction: YES]};
+    }
+    
+    pub fn stop_resize(&mut self){
+        let () = unsafe{msg_send![self.ca_layer, setPresentsWithTransaction: NO]};
     }
     
     pub fn set_buffer_count(&mut self, _count: u64) {

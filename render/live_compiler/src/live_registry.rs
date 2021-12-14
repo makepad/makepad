@@ -332,7 +332,7 @@ impl LiveRegistry {
             }
         }
         self.dep_graph.insert(own_module_id, dep_graph_set);
-        
+
         let live_file = LiveFile {
             module_id: own_module_id,
             file_name: file_name.to_string(),

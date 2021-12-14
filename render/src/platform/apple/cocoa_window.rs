@@ -18,6 +18,7 @@ use {
             Event,
             FingerInputType,
             WindowDragQueryResponse,
+            WindowResizeLoopEvent,
             WindowGeomChangeEvent,
             WindowDragQueryEvent,
             KeyModifiers,
@@ -174,6 +175,28 @@ impl CocoaWindow {
             
             let () = msg_send![pool, release];
         }
+        
+        let mut events = vec![
+            Event::WindowResizeLoop(WindowResizeLoopEvent{
+                window_id: self.window_id,
+                was_started:true
+            })
+        ];
+        self.do_callback(&mut events);
+    }
+    
+    pub fn end_live_resize(&mut self) {
+        unsafe {
+            let () = msg_send![self.live_resize_timer, invalidate];
+            self.live_resize_timer = nil;
+        }
+        let mut events = vec![
+            Event::WindowResizeLoop(WindowResizeLoopEvent{
+                window_id: self.window_id,
+                was_started:false
+            })
+        ];
+        self.do_callback(&mut events);
     }
     
     pub fn close_window(&mut self) {
@@ -204,12 +227,6 @@ impl CocoaWindow {
     pub fn set_topmost(&mut self, _topmost: bool) {
     }
     
-    pub fn end_live_resize(&mut self) {
-        unsafe {
-            let () = msg_send![self.live_resize_timer, invalidate];
-            self.live_resize_timer = nil;
-        }
-    }
     
     pub fn time_now(&self) -> f64 {
         let time_now = Instant::now(); //unsafe {mach_absolute_time()};
