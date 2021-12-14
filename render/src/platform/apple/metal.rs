@@ -28,13 +28,11 @@ use {
     std::{
         ffi::c_void,
         mem,
-        ops::{Deref, DerefMut},
         os::raw::{c_int, c_ulong},
         ptr,
         sync::{
-            mpsc,
-            mpsc::{Receiver, SyncSender},
             Arc,
+            Condvar,
             Mutex,
         }
     }
@@ -50,7 +48,7 @@ impl Cx {
         zbias: &mut f32,
         zbias_step: f32,
         encoder: ObjcId,
-        buffer_guards: &mut Vec<MetalBufferGuard>,
+        gpu_read_guards: &mut Vec<MetalRwLockGpuReadGuard>,
         metal_cx: &MetalCx,
     ) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
@@ -71,7 +69,7 @@ impl Cx {
                     zbias,
                     zbias_step,
                     encoder,
-                    buffer_guards,
+                    gpu_read_guards,
                     metal_cx,
                 );
             }
@@ -89,7 +87,7 @@ impl Cx {
                     draw_call.instance_dirty = false;
                     // update the instance buffer data
                     self.platform.bytes_written += draw_call.instances.as_ref().unwrap().len() * 4;
-                    draw_call.platform.inst_vbuf.update(metal_cx, &draw_call.instances.as_ref().unwrap());
+                    draw_call.platform.instance_buffer.cpu_write().update(metal_cx, &draw_call.instances.as_ref().unwrap());
                 }
                 
                 // update the zbias uniform if we have it.
@@ -124,12 +122,12 @@ impl Cx {
                 let geometry = &mut self.geometries[geometry_id];
                 
                 if geometry.dirty {
-                    geometry.platform.geom_ibuf.update(metal_cx, &geometry.indices);
-                    geometry.platform.geom_vbuf.update(metal_cx, &geometry.vertices);
+                    geometry.platform.index_buffer.cpu_write().update(metal_cx, &geometry.indices);
+                    geometry.platform.vertex_buffer.cpu_write().update(metal_cx, &geometry.vertices);
                     geometry.dirty = false;
                 }
                 
-                if let Some(inner) = geometry.platform.geom_vbuf.inner.as_ref() {
+                if let Some(inner) = geometry.platform.vertex_buffer.cpu_read().inner.as_ref() {
                     unsafe {msg_send![
                         encoder,
                         setVertexBuffer: inner.buffer.as_id()
@@ -137,9 +135,9 @@ impl Cx {
                         atIndex: 0
                     ]}
                 }
-                else {println!("Drawing error: geom_vbuf None")}
+                else {println!("Drawing error: vertex_buffer None")}
                 
-                if let Some(inner) = draw_call.platform.inst_vbuf.inner.as_ref() {
+                if let Some(inner) = draw_call.platform.instance_buffer.cpu_read().inner.as_ref() {
                     unsafe {msg_send![
                         encoder,
                         setVertexBuffer: inner.buffer.as_id()
@@ -147,7 +145,7 @@ impl Cx {
                         atIndex: 1
                     ]}
                 }
-                else {println!("Drawing error: inst_vbuf None")}
+                else {println!("Drawing error: instance_buffer None")}
                 
                 let pass_uniforms = self.passes[pass_id].pass_uniforms.as_slice();
                 let view_uniforms = cxview.view_uniforms.as_slice();
@@ -216,7 +214,7 @@ impl Cx {
                     }
                 }
                 self.platform.draw_calls_done += 1;
-                if let Some(inner) = geometry.platform.geom_ibuf.inner.as_ref() {
+                if let Some(inner) = geometry.platform.index_buffer.cpu_read().inner.as_ref() {
                     
                     let () = unsafe {msg_send![
                         encoder,
@@ -228,7 +226,11 @@ impl Cx {
                         instanceCount: instances
                     ]};
                 }
-                else {println!("Drawing error: geom_ibuf None")}
+                else {println!("Drawing error: index_buffer None")}
+                
+                gpu_read_guards.push(draw_call.platform.instance_buffer.gpu_read());
+                gpu_read_guards.push(geometry.platform.vertex_buffer.gpu_read());
+                gpu_read_guards.push(geometry.platform.index_buffer.gpu_read());
             }
         }
     }
@@ -383,7 +385,7 @@ impl Cx {
             let mut zbias = 0.0;
             let zbias_step = self.passes[pass_id].zbias_step;
             
-            let mut buffer_guards = Vec::new();
+            let mut gpu_read_guards = Vec::new();
             self.render_view(
                 pass_id,
                 view_id,
@@ -392,13 +394,13 @@ impl Cx {
                 &mut zbias,
                 zbias_step,
                 encoder,
-                &mut buffer_guards,
+                &mut gpu_read_guards,
                 &metal_cx,
             );
             
             let () = unsafe {msg_send![encoder, endEncoding]};
             let () = unsafe {msg_send![command_buffer, presentDrawable: drawable]};
-            self.commit_command_buffer(command_buffer, buffer_guards);
+            self.commit_command_buffer(command_buffer, gpu_read_guards);
         }
         let () = unsafe {msg_send![pool, release]};
     } 
@@ -425,7 +427,7 @@ impl Cx {
         
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
-        let mut buffer_guards = Vec::new();
+        let mut gpu_read_guards = Vec::new();
         self.render_view(
             pass_id,
             view_id,
@@ -434,16 +436,16 @@ impl Cx {
             &mut zbias,
             zbias_step,
             encoder,
-            &mut buffer_guards,
+            &mut gpu_read_guards,
             &metal_cx,
         );
         let () = unsafe {msg_send![encoder, textureBarrier]};
         let () = unsafe {msg_send![encoder, endEncoding]};
-        self.commit_command_buffer(command_buffer, buffer_guards);
+        self.commit_command_buffer(command_buffer, gpu_read_guards);
         let () = unsafe {msg_send![pool, release]};
     }
 
-    fn commit_command_buffer(&mut self, command_buffer: ObjcId, buffer_guards: Vec<MetalBufferGuard>) {
+    fn commit_command_buffer(&mut self, command_buffer: ObjcId, gpu_read_guards: Vec<MetalRwLockGpuReadGuard>) {
         #[repr(C)]
         struct BlockDescriptor {
             reserved: c_ulong,
@@ -486,7 +488,7 @@ impl Cx {
 
         #[repr(C)]
         struct BlockLiteralInner {
-            buffer_guards: Mutex<Option<Vec<MetalBufferGuard>>>,
+            gpu_read_guards: Mutex<Option<Vec<MetalRwLockGpuReadGuard>>>,
         }
 
         let literal = BlockLiteral {
@@ -496,13 +498,13 @@ impl Cx {
             invoke,
             descriptor: &DESCRIPTOR,
             inner: Arc::new(BlockLiteralInner {
-                buffer_guards: Mutex::new(Some(buffer_guards)),
+                gpu_read_guards: Mutex::new(Some(gpu_read_guards))
             })
         };
 
         extern "C" fn invoke(literal: *mut BlockLiteral, _command_buffer: ObjcId) {
             let literal = unsafe { &mut *literal };
-            drop(literal.inner.buffer_guards.lock().unwrap().take().unwrap());
+            drop(literal.inner.gpu_read_guards.lock().unwrap().take().unwrap());
         }
 
         let () = unsafe {msg_send![command_buffer, addCompletedHandler: &literal]};
@@ -596,21 +598,9 @@ impl MetalWindow {
 pub struct CxPlatformView {
 }
 
-#[derive(Default)]
-pub struct CxPlatformDrawCall {
-    //pub uni_dr: MetalBuffer,
-    inst_vbuf: MetalBuffer
-}
-
 #[derive(Default, Clone)]
 pub struct CxPlatformPass {
     pub mtl_depth_state: Option<ObjcId>
-}
-
-#[derive(Default)]
-pub struct CxPlatformGeometry {
-    geom_vbuf: MetalBuffer,
-    geom_ibuf: MetalBuffer,
 }
 
 pub enum PackType {
@@ -837,56 +827,16 @@ struct CxPlatformShaderInner {
     source: String,
 }
 
-struct MetalBufferQueue {
-    sender: SyncSender<MetalBuffer>,
-    receiver: Receiver<MetalBuffer>,
+#[derive(Default)]
+pub struct CxPlatformDrawCall {
+    //pub uni_dr: MetalBuffer,
+    instance_buffer: MetalRwLock<MetalBuffer>,
 }
 
-impl MetalBufferQueue {
-    fn acquire(&self) -> MetalBufferGuard {
-        MetalBufferGuard {
-            sender: self.sender.clone(),
-            buffer: Some(self.receiver.recv().unwrap()),
-        }
-    }
-}
-
-impl Default for MetalBufferQueue {
-    fn default() -> Self {
-        let (sender, receiver) = mpsc::sync_channel(3);
-        for _ in 0..3 {
-            sender.send(MetalBuffer::default()).unwrap();
-        }
-        Self {
-            sender,
-            receiver,
-        }
-    }
-}
-
-struct MetalBufferGuard {
-    sender: SyncSender<MetalBuffer>,
-    buffer: Option<MetalBuffer>,
-}
-
-impl Deref for MetalBufferGuard {
-    type Target = MetalBuffer;
-
-    fn deref(&self) -> &Self::Target {
-        self.buffer.as_ref().unwrap()
-    }
-}
-
-impl DerefMut for MetalBufferGuard {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.buffer.as_mut().unwrap()
-    }
-}
-
-impl Drop for MetalBufferGuard {
-    fn drop(&mut self) {
-        self.sender.send(self.buffer.take().unwrap()).unwrap();
-    }
+#[derive(Default)]
+pub struct CxPlatformGeometry {
+    vertex_buffer: MetalRwLock<MetalBuffer>,
+    index_buffer: MetalRwLock<MetalBuffer>,
 }
 
 #[derive(Default)]
@@ -895,7 +845,7 @@ struct MetalBuffer {
 }
 
 impl MetalBuffer {
-    pub fn update<T>(&mut self, metal_cx: &MetalCx, data: &[T]) {
+    fn update<T>(&mut self, metal_cx: &MetalCx, data: &[T]) {
         let len = data.len() * std::mem::size_of::<T>();
         if len == 0 {
             self.inner = None;
@@ -1028,4 +978,52 @@ struct CxPlatformTextureInner {
 enum AttachmentKind {
     Color,
     Depth,
+}
+
+#[derive(Default)]
+struct MetalRwLock<T> {
+    inner: Arc<MetalRwLockInner>,
+    value: T
+}
+
+impl<T> MetalRwLock<T> {
+    fn cpu_read(&self) -> &T {
+        &self.value
+    }
+
+    fn gpu_read(&self) -> MetalRwLockGpuReadGuard {
+        let mut reader_count = self.inner.reader_count.lock().unwrap();
+        *reader_count += 1;
+        MetalRwLockGpuReadGuard {
+            inner: self.inner.clone()
+        }
+    }
+
+    fn cpu_write(&mut self) -> &mut T {
+        let mut reader_count = self.inner.reader_count.lock().unwrap();
+        while *reader_count != 0 {
+            reader_count = self.inner.condvar.wait(reader_count).unwrap();
+        }
+        &mut self.value
+    }
+}
+
+#[derive(Default)]
+struct MetalRwLockInner {
+    reader_count: Mutex<usize>,
+    condvar: Condvar,
+}
+
+struct MetalRwLockGpuReadGuard {
+    inner: Arc<MetalRwLockInner>
+}
+
+impl Drop for MetalRwLockGpuReadGuard {
+    fn drop(&mut self) {
+        let mut reader_count = self.inner.reader_count.lock().unwrap();
+        *reader_count -= 1;
+        if *reader_count == 0 {
+            self.inner.condvar.notify_one();
+        }
+    }
 }
