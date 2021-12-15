@@ -66,15 +66,15 @@ impl LiveNew for View {
     fn live_type_info() -> LiveTypeInfo {
         LiveTypeInfo {
             module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
-            live_type: Self::live_type(),
+            live_type: LiveType::of::<Self>(),
             fields: Vec::new(),
-            kind: LiveTypeKind::Object,
+            //kind: LiveTypeKind::Object,
             type_name: LiveId::from_str("View").unwrap()
         }
     }
 }
 impl LiveApply for View {
-    fn type_id(&self) -> std::any::TypeId {std::any::TypeId::of::<Self>()}
+    //fn type_id(&self) -> std::any::TypeId {std::any::TypeId::of::<Self>()}
     fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
         
         if !nodes[start_index].value.is_structy_type() {

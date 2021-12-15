@@ -1,10 +1,10 @@
 #![allow(unused)]
 use makepad_render::*;
 use crate::button_logic::*;
-
+use crate::frame::*;
 
 live_register!{
-    use makepad_render::shader_std::*;
+    use makepad_render::shader::std::*;
     
     Button: {{Button}} {
         bg_quad: {
@@ -83,7 +83,7 @@ live_register!{
     }
 }
 
-#[derive(Live)]
+#[derive(Live, LiveHook)]
 pub struct Button {
     
     #[rust] pub button_logic: ButtonLogic,
@@ -98,26 +98,8 @@ pub struct Button {
     label: String
 }
 
-impl LiveHook for Button {
-    fn to_frame_component(&mut self) -> Option<&mut dyn FrameComponent> {
-        return Some(self);
-    }
-    fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        if apply_from.is_from_doc() {
-            /*
-            self.animator2.cut_to_live(cx, id!(hover), self.state_default.unwrap());
-            self.animator2.cut_to_live(cx, id!(label), self.state_default_label.unwrap());
-            //self.animator2.cut_to_live(cx, id!(hover), self.state_default.unwrap());
-            self.animator2.animate_to_live(cx, id!(hover), self.state_hover.unwrap());
-            self.animator2.animate_to_live(cx, id!(label), self.state_hover_label.unwrap());
-            println!("{}", self.animator2.state.as_ref().unwrap().to_string(0,100));
-            */
-        }
-    }
-}
-
 impl FrameComponent for Button {
-    fn handle_event_dyn(&mut self, cx: &mut Cx, event: &mut Event) -> OptionAnyAction {
+    fn handle_event_dyn(&mut self, cx: &mut Cx, event: &mut Event) -> OptionFrameComponentAction {
         self.handle_event(cx, event).into()
     }
     

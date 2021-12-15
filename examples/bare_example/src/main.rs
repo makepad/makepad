@@ -1,21 +1,69 @@
 use makepad_render::*;
 use makepad_widget::*;
+use makepad_live_compiler::LiveBinOp;
+use makepad_live_compiler::LiveUnOp;
 
 live_register!{
     use makepad_widget::frame::Frame;
     use makepad_widget::button::Button;
     use makepad_widget::filetree::FileTree;
     App: {{App}} {
-        scroll_view: {show_h: true, show_v: true, view: {layout: {line_wrap: LineWrap::NewLine}}}
+        scroll_view: {h_show: true, v_show: true, view: {layout: {line_wrap: LineWrap::NewLine}}}
         frame: {
-            file_tree:FileTree{
-                position:vec2(0.5.,100.0)
-                layout:{
-                }
-            }
-            children:[file_tree]
+
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct LiveNode2 { // 40 bytes. Don't really see ways to compress
+    pub origin: LiveNodeOrigin,
+    pub id: LiveId,
+    pub value: LiveValue2,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum LiveValue2 {
+    None,
+    // string types
+    Str(&'static str),
+    DocumentString {
+        string_start: usize,
+        string_count: usize
+    },
+    FittedString(FittedString),
+    InlineString(InlineString),
+    // bare values
+    Bool(bool),
+    Int(i64),
+    Float(f64),
+    Color(u32),
+    Vec2(Vec2),
+    Vec3(Vec3),
+    Vec4(Vec4),
+    Id(LiveId),
+    ExprBinOp(LiveBinOp),
+    ExprUnOp(LiveUnOp),
+    ExprMember(LiveId),
+    ExprCall{ident:LiveId, args:usize},
+    // enum thing
+    BareEnum {base: LiveId, variant: LiveId},
+    // tree items
+    Array,
+    Expr,
+    TupleEnum {base: LiveId, variant: LiveId},
+    NamedEnum {base: LiveId, variant: LiveId},
+    Object,
+    Clone(LiveId),
+    Class {live_type: LiveType, class_parent: LivePtr, id: LiveId},
+    Close,
+    
+    // shader code and other DSLs
+    DSL {
+        token_start: u32,
+        token_count: u32,
+    },
+    Use (LiveModuleId),
 }
 
 main_app!(App);
@@ -34,6 +82,7 @@ impl App {
     }
     
     pub fn new_app(cx: &mut Cx) -> Self {
+        println!("{}", std::mem::size_of::<LiveNode2>());
         //println!("{}", get_local_doc!(cx, id!(App)).nodes.to_string(0,100));
         Self::new_from_module_path_id(cx, &module_path!(), id!(App)).unwrap()
     }
