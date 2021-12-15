@@ -23,7 +23,7 @@ pub fn live_register_impl(input: TokenStream) -> TokenStream {
         tb.add("        live_type_infos:{");
         tb.add("            let mut v = Vec::new();");
         for live_type in &live_types {
-            tb.stream(Some(live_type.clone())).add("::live_register(cx);");
+            tb.stream(Some(live_type.clone())).add("::register_factories(cx);");
             tb.add("        v.push(").stream(Some(live_type.clone())).add("::live_type_info());");
         }
         tb.add("            v");

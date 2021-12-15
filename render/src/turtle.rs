@@ -12,6 +12,7 @@ pub use {
 };
 
 #[derive(Copy, Clone, Debug, Live, LiveHook)]
+#[register_with(ShaderEnum)]
 pub enum LineWrap {
     #[pick] None,
     #[live()] NewLine,

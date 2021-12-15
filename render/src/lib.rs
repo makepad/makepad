@@ -60,7 +60,7 @@ pub use {
         LiveTypeInfo,
         LiveTypeField,
         LiveFieldKind,
-        LiveTypeKind,
+        //LiveTypeKind,
         LiveValue,
         FittedString,
         InlineString,
@@ -82,6 +82,7 @@ pub use {
         },
         cx::{
             Cx,
+            CxRegistries,
             PlatformType
         },
         area::{
@@ -165,8 +166,6 @@ pub use {
         },
         texture::{Texture, TextureFormat},
         live_traits::{
-            OptionAnyAction,
-            LiveFactory,
             LiveNew,
             LiveApply,
             LiveHook,
@@ -175,8 +174,6 @@ pub use {
             LiveAnimate,
             ApplyFrom,
             LiveBody,
-            AnyAction,
-            FrameComponent
         },
         animator::{
             Ease,

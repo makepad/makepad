@@ -46,7 +46,7 @@ pub use {
             LiveNodeOrigin,
             InlineString,
             FittedString,
-            LiveTypeKind,
+            //LiveTypeKind,
         },
         token::{TokenWithSpan, Token, TokenId},
         span::{

@@ -2,12 +2,14 @@ use {
     std::{
         collections::{HashMap, HashSet, BTreeSet},
         time::Instant,
+        any::{Any,TypeId},
         rc::Rc,
         rc::Weak,
         cell::RefCell,
     },
     makepad_live_compiler::{
-        LiveType,
+        //LiveType,
+        //LiveId,
         LiveRegistry
     },
     makepad_shader_compiler::{
@@ -36,9 +38,6 @@ use {
         },
         area::{
             Area,
-        },
-        live_traits::{
-            LiveFactory,
         },
         gpu_info::GpuInfo,
         window::{
@@ -114,7 +113,9 @@ pub struct Cx {
     pub turtles: Vec<Turtle>,
     pub align_list: Vec<Area>,
     
-    pub live_factories: Rc<RefCell<HashMap<LiveType, Box<dyn LiveFactory >> >>,
+    //pub live_factories: Rc<RefCell<HashMap<LiveType, Box<dyn LiveFactory >> >>,
+    
+    pub registries: CxRegistries,
     
     pub new_redraw_views: Vec<usize>,
     pub new_redraw_views_and_children: Vec<usize>,
@@ -141,7 +142,7 @@ pub struct Cx {
     
     pub drag_area: Area,
     pub new_drag_area: Area,
-    
+     
     pub new_next_frames: HashSet<NextFrame>,
     pub next_frames: HashSet<NextFrame>,
     
@@ -239,7 +240,7 @@ impl Default for Cx {
             turtles: Vec::new(),
             align_list: Vec::new(),
             
-            live_factories: Rc::new(RefCell::new(HashMap::new())),
+            //live_factories: Rc::new(RefCell::new(HashMap::new())),
             
             new_redraw_views: Vec::new(),
             new_redraw_views_and_children: Vec::new(),
@@ -247,6 +248,8 @@ impl Default for Cx {
             redraw_views: Vec::new(),
             redraw_views_and_children: Vec::new(),
             redraw_all_views: true,
+            
+            registries: CxRegistries::new(),
             
             redraw_id: 1,
             event_id: 1,
@@ -284,6 +287,19 @@ impl Default for Cx {
             
             event_handler: None
         }
+    }
+}
+
+#[derive(Clone)]
+pub struct CxRegistries(pub Rc<RefCell<HashMap<TypeId, Box<dyn Any>>>>);
+
+impl CxRegistries{
+    pub fn new()->Self{
+        Self(Rc::new(RefCell::new(HashMap::new())))
+    }
+    
+    pub fn add_registry(&self, type_id:TypeId, item:Box<dyn Any>){
+        self.0.borrow_mut().insert(type_id, item);
     }
 }
 

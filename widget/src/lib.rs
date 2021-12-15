@@ -26,10 +26,12 @@ pub use crate::{
     desktop_window::{DesktopWindow}, 
     scroll_view::{ScrollView},
     scroll_shadow::{ScrollShadow},
-    frame::{Frame, FrameActions}
+    frame::{Frame, FrameActions, CxRegistriesExt, FrameComponentNew, FrameComponent}
 };
 
 pub fn live_register(cx:&mut Cx){
+    crate::frame::add_frame_component_registry(cx);
+    crate::frame::live_register(cx);
     crate::color_picker::live_register(cx);
     crate::scroll_shadow::live_register(cx);
     crate::button::live_register(cx);
@@ -37,7 +39,6 @@ pub fn live_register(cx:&mut Cx){
     crate::desktop_window::live_register(cx);
     crate::bare_window::live_register(cx);
     crate::window_menu::live_register(cx);
-    crate::frame::live_register(cx);
     crate::scroll_view::live_register(cx);
     crate::scroll_bar::live_register(cx);
     crate::file_tree::live_register(cx);
