@@ -74,6 +74,7 @@ live_register!{
 pub struct Editors {
     #[rust] view_id_allocator: GenIdAllocator,
     #[rust] views_by_view_id: GenIdMap<EditorViewId, EditorView>,
+    
     rust_editor: Option<LivePtr>,
 }
 
@@ -85,7 +86,6 @@ impl AsRef<GenId> for EditorViewId {
         &self.0
     }
 }
-
 
 impl Editors {
     

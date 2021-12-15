@@ -92,22 +92,22 @@ impl DrawVars {
     pub fn redraw_view(&self, cx: &mut Cx) {
         cx.redraw_view_of(self.area);
     }
-    
+    /*
     pub fn live_type() -> LiveType {
         LiveType(std::any::TypeId::of::<DrawVars>())
-    }
+    }*/
     
     pub fn live_type_info() -> LiveTypeInfo {
         LiveTypeInfo {
             module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
-            live_type: Self::live_type(),
+            live_type: std::any::TypeId::of::<Self>(),
             fields: Vec::new(),
-            kind: LiveTypeKind::DrawVars,
+            //kind: LiveTypeKind::DrawVars,
             type_name: LiveId::from_str("DrawVars").unwrap()
         }
     }
     
-    pub fn live_register(_cx: &mut Cx) {}
+    pub fn register_factories(_cx: &mut Cx) {}
     
     pub fn as_slice<'a>(&'a self) -> &'a [f32] {
         unsafe {
@@ -166,10 +166,10 @@ impl DrawVars {
             }
             
             fn live_type_to_shader_ty(live_type: LiveType) -> Option<ShaderTy> {
-                if live_type == f32::live_type() {Some(ShaderTy::Float)}
-                else if live_type == Vec2::live_type() {Some(ShaderTy::Vec2)}
-                else if live_type == Vec3::live_type() {Some(ShaderTy::Vec3)}
-                else if live_type == Vec4::live_type() {Some(ShaderTy::Vec4)}
+                if live_type == LiveType::of::<f32>() {Some(ShaderTy::Float)}
+                else if live_type == LiveType::of::<Vec2>() {Some(ShaderTy::Vec2)}
+                else if live_type == LiveType::of::<Vec3>() {Some(ShaderTy::Vec3)}
+                else if live_type == LiveType::of::<Vec4>() {Some(ShaderTy::Vec4)}
                 else {None}
             }
             // ok ! we have to compile it
@@ -198,7 +198,7 @@ impl DrawVars {
                                         // assert the thing to be marked correctly
                                         if let LiveFieldKind::Calc = field.live_field_kind {}
                                         else {panic!()}
-                                        if field.live_type_info.live_type != DrawVars::live_type() {panic!();}
+                                        if field.live_type_info.live_type != LiveType::of::<DrawVars>() {panic!();}
                                         
                                         *after_draw_vars = true;
                                         continue;

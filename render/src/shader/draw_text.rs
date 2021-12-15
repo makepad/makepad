@@ -123,7 +123,6 @@ live_register!{
 }
 
 #[derive(Clone, Live, LiveHook)]
-#[live_type_kind(Object)]
 pub struct TextStyle {
     #[live()] pub font: Font,
     #[live(8.0)] pub font_size: f32,
@@ -135,7 +134,6 @@ pub struct TextStyle {
 }
 
 #[derive(Debug, Clone, Copy, Live, LiveHook)]
-#[live_type_kind(Object)]
 pub enum Wrapping {
     #[pick] Char,
     #[live] Word,

@@ -316,9 +316,9 @@ impl CodeEditorImpl {
         cx: &mut Cx,
         di: &DocumentInner,
         lines_layout: &mut LinesLayout,
-        compute_height: T,
+        mut compute_height: T,
     )
-    where T: Fn(&mut Cx, usize, f32, bool) -> f32
+    where T: FnMut(&mut Cx, usize, f32, f32, f32) -> f32
     {
         let viewport_size = cx.get_turtle_size();
         let viewport_start = cx.get_scroll_pos();
@@ -337,12 +337,18 @@ impl CodeEditorImpl {
         let mut start = None;
         let mut end = None;
         let mut max_line_width = 0;
-
+        
         for (line_index, text_line) in di.text.as_lines().iter().enumerate() {
             
             max_line_width = text_line.len().max(max_line_width);
             
-            let edit_widget_height = compute_height(cx, line_index, start_y, end.is_some());
+            let edit_widget_height = compute_height(
+                cx,
+                line_index,
+                start_y + self.get_character_height(),
+                viewport_start.y,
+                viewport_end.y
+            );
             
             let height = edit_widget_height + self.get_character_height();
             

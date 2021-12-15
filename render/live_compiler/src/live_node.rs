@@ -85,7 +85,8 @@ impl fmt::Debug for LiveNodeOrigin{
 // 18 bit token id (262k tokens, avg tokensize: 5 = 1.25 megs of code)
 // 18 bits node index (262k nodes *40 bytes = 10 megs. We are at 70kb now for the UI)
 // 10 bits edit_info file_id 
-// 8 bits (256) edit_info index 
+// 7 bits (128) edit_info index 
+// 1 bit 'id_is_nonunique'
 
 impl LiveNodeOrigin{
     pub fn empty()->Self{
@@ -123,6 +124,13 @@ impl LiveNodeOrigin{
         self
     }
     
+    pub fn with_id_non_unique(mut self, non_unique:bool)->Self{
+        if non_unique{
+            self.set_id_non_unique();
+        }
+        self
+    }
+    
     pub fn set_optional_edit_info(&mut self, edit_info:Option<LiveEditInfo>){
         if let Some(edit_info) = edit_info{
             self.set_edit_info(edit_info)
@@ -131,11 +139,19 @@ impl LiveNodeOrigin{
     
     pub fn set_edit_info(&mut self, edit_info:LiveEditInfo){
         return
-        self.0 = (self.0&0x0000_03FFF_FFFF_FFFF) |  (edit_info.0 as u64) << 46;
+        self.0 = (self.0&0x8000_03FF_FFFF_FFFF) |  (edit_info.0 as u64) << 46;
     }
     
     pub fn edit_info(&self)->Option<LiveEditInfo>{
-        LiveEditInfo::from_bits((self.0>>46) as u32)
+        LiveEditInfo::from_bits(((self.0&0x7fff_fc00_0000_0000)>>46) as u32)
+    }
+    
+    pub fn set_id_non_unique(&mut self){
+        self.0 |= 0x8000_0000_0000_0000;
+    }
+    
+    pub fn id_non_unique(&self)->bool{
+        self.0 & 0x8000_0000_0000_0000 != 0
     }
     
 }
@@ -151,31 +167,30 @@ impl fmt::Debug for LiveEditInfo{
 impl LiveEditInfo{
     pub fn new(file_id: LiveFileId, edit_info_index: usize)->Self{
         let file_id = file_id.to_index();
-        if file_id == 0 || file_id > 0x3ff || edit_info_index&0xf != 0 || edit_info_index > 0xff0{
+        if file_id == 0 || file_id > 0x3ff || edit_info_index&0xf != 0 || edit_info_index > 0x7f0{
             panic!();
         }
         LiveEditInfo(
-            (((file_id as u32) & 0x3ff) << 8) |
-            (((edit_info_index as u32)>>4) & 0xff) 
+            (((file_id as u32) & 0x3ff)) |
+            (((edit_info_index as u32)<<6)) 
         )
     }
     
     pub fn is_empty(&self)->bool{
-        ((self.0>>8)&0x3ff) == 0
+        (self.0&0x3ff) == 0
     }
     
     pub fn edit_info_index(&self)->usize{
-        ((self.0&0xff) as usize)<<4
-        
+        (((self.0) as usize)>>6)&0x7f0
     }
     
     pub fn file_id(&self)->LiveFileId{
-        LiveFileId(((self.0>>18)&0x3ff) as u16)
+        LiveFileId((self.0&0x3ff) as u16)
     }
     
     pub fn to_bits(&self)->u32{self.0}
     pub fn from_bits(v:u32)->Option<Self>{
-        if (v&0xFFFC0000)!=0{
+        if (v&0xFFFE0000)!=0{
             panic!();
         }
         if v == 0{
@@ -185,9 +200,11 @@ impl LiveEditInfo{
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Copy, Hash)]
-pub struct LiveType(pub core::any::TypeId);
-
+//#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Copy, Hash)]
+//pub struct LiveType(pub core::any::TypeId);
+pub type LiveType = std::any::TypeId;
+ 
+/*
 #[derive(Clone, Debug)]
 pub enum LiveTypeKind {
     Class, 
@@ -196,13 +213,13 @@ pub enum LiveTypeKind {
     Primitive,
     DrawVars,
 }
-
+*/
 #[derive(Clone, Debug)]
 pub struct LiveTypeInfo {
     pub live_type: LiveType,
     pub type_name: LiveId,
     pub module_id: LiveModuleId,
-    pub kind: LiveTypeKind,
+    //pub kind: LiveTypeKind,
     pub fields: Vec<LiveTypeField>
 }
 

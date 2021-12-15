@@ -10,14 +10,10 @@ pub use {
     }
 };
 
-pub trait LiveFactory {
-    fn new_component(&self, cx: &mut Cx) -> Box<dyn LiveApply>;
-}
-
 pub trait LiveNew: LiveApply {
     fn new(cx: &mut Cx) -> Self;
     
-    fn live_register(_cx: &mut Cx) {}
+    fn register_factories(_cx: &mut Cx) {}
     
     fn live_type_info() -> LiveTypeInfo;
     
@@ -65,10 +61,6 @@ pub trait LiveNew: LiveApply {
         }
         None
     }
-    
-    fn live_type() -> LiveType where Self: 'static {
-        LiveType(std::any::TypeId::of::<Self>())
-    }
 }
 
 pub trait ToLiveValue {
@@ -87,7 +79,7 @@ pub trait LiveApply: LiveHook {
     fn apply_clear(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
         self.apply(cx, ApplyFrom::ApplyClear, 0, nodes);
     }
-    fn type_id(&self) -> TypeId;
+    //fn type_id(&self) -> TypeId;
 }
 
 pub struct LiveBody {
@@ -173,9 +165,6 @@ pub trait LiveHook {
     fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {}
     fn after_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {}
     fn after_new(&mut self, _cx: &mut Cx) {}
-    fn to_frame_component(&mut self) -> Option<&mut dyn FrameComponent> {
-        None
-    }
 }
 
 impl<T> LiveHook for Option<T> where T: LiveApply + LiveNew + 'static {}
@@ -190,9 +179,6 @@ impl<T> LiveApply for Option<T> where T: LiveApply + LiveNew + 'static {
             *self = Some(inner);
             index
         }
-    }
-    fn type_id(&self) -> TypeId {
-        std::any::TypeId::of::<T>()
     }
 }
 
@@ -209,11 +195,11 @@ impl<T> LiveNew for Option<T> where T: LiveApply + LiveNew + 'static {
     fn live_type_info() -> LiveTypeInfo {
         T::live_type_info()
     }
-    fn live_register(_cx: &mut Cx) {
-    }
 }
 
 impl dyn LiveApply {
+    pub fn type_id(&self)->std::any::TypeId{ std::any::TypeId::of::<Self>()}
+
     pub fn is<T: LiveApply + 'static >(&self) -> bool {
         let t = TypeId::of::<T>();
         let concrete = self.type_id();
@@ -235,53 +221,7 @@ impl dyn LiveApply {
     }
 }
 
-pub trait AnyAction: 'static {
-    fn type_id(&self) -> TypeId;
-    fn box_clone(&self) -> Box<dyn AnyAction>;
-}
-
-impl<T: 'static + ? Sized + Clone> AnyAction for T {
-    fn type_id(&self) -> TypeId {
-        TypeId::of::<T>()
-    }
-    
-    fn box_clone(&self) -> Box<dyn AnyAction> {
-        Box::new((*self).clone())
-    }
-}
-
-impl dyn AnyAction {
-    pub fn is<T: AnyAction >(&self) -> bool {
-        let t = TypeId::of::<T>();
-        let concrete = self.type_id();
-        t == concrete
-    }
-    pub fn cast<T: AnyAction + Default + Clone>(&self) -> T {
-        if self.is::<T>() {
-            unsafe {&*(self as *const dyn AnyAction as *const T)}.clone()
-        } else {
-            T::default()
-        }
-    }
-    
-    pub fn cast_id<T: AnyAction + Default + Clone>(&self, id: LiveId) -> (LiveId, T) {
-        if self.is::<T>() {
-            (id, unsafe {&*(self as *const dyn AnyAction as *const T)}.clone())
-        } else {
-            (id, T::default())
-        }
-    }
-    
-}
-
-pub type OptionAnyAction = Option<Box<dyn AnyAction >>;
-
-impl Clone for Box<dyn AnyAction> {
-    fn clone(&self) -> Box<dyn AnyAction> {
-        self.as_ref().box_clone()
-    }
-}
-
+/*
 pub trait FrameComponent: LiveApply {
     fn handle_event_dyn(&mut self, cx: &mut Cx, event: &mut Event) -> Option<Box<dyn AnyAction >>;
     fn draw_dyn(&mut self, cx: &mut Cx);
@@ -290,5 +230,5 @@ pub trait FrameComponent: LiveApply {
         self.draw_dyn(cx);
     }
 }
-
+*/
 

@@ -30,7 +30,7 @@ pub fn derive_live_hook_impl(input: TokenStream) -> TokenStream {
     }
     return parser.unexpected()
 }
-pub fn derive_into_any_action_impl(input: TokenStream) -> TokenStream {
+pub fn derive_into_frame_component_action_impl(input: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new();
     let mut parser = TokenParser::new(input);
     let _main_attribs = parser.eat_attributes();
@@ -41,8 +41,8 @@ pub fn derive_into_any_action_impl(input: TokenStream) -> TokenStream {
             let _types = parser.eat_all_types();
             let where_clause = parser.eat_where_clause(None); //Some("LiveUpdateHooks"));
             tb.add("impl").stream(generic.clone());
-            tb.add("Into<OptionAnyAction> for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-            tb.add("    fn into(self)->Option<Box<dyn AnyAction>>{");
+            tb.add("Into<OptionFrameComponentAction> for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+            tb.add("    fn into(self)->Option<Box<dyn FrameComponentAction>>{");
             tb.add("        match &self{");
             tb.add("            Self::None=>None,");
             tb.add("            _=>Some(Box::new(self))");
@@ -57,8 +57,8 @@ pub fn derive_into_any_action_impl(input: TokenStream) -> TokenStream {
             let generic = parser.eat_generic();
             let where_clause = parser.eat_where_clause(None);
             tb.add("impl").stream(generic.clone());
-            tb.add("Into<OptionAnyAction> for").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-            tb.add("    fn into(self)->Option<Box<dyn AnyAction>>{");
+            tb.add("Into<OptionFrameComponentAction> for").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+            tb.add("    fn into(self)->Option<Box<dyn FrameComponentAction>>{");
             tb.add("        match &self{");
             tb.add("            Self::None=>None,");
             tb.add("            _=>Some(Box::new(self))");
@@ -271,7 +271,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         tb.add("impl").stream(generic.clone());
         tb.add("LiveApply for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
         
-        tb.add("    fn type_id(&self)->std::any::TypeId{ std::any::TypeId::of::<Self>() }");
+        //tb.add("    fn type_id(&self)->std::any::TypeId{ std::any::TypeId::of::<Self>() }");
         
         tb.add("    fn apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, start_index: usize, nodes: &[LiveNode])->usize {");
         //tb.add("    cx.profile_start(start_index as u64);");
@@ -359,53 +359,67 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         }
         tb.add("        LiveTypeInfo{");
         tb.add("            module_id: LiveModuleId::from_str(&module_path!()).unwrap(),");
-        tb.add("            live_type: Self::live_type(),");
+        tb.add("            live_type: LiveType::of::<Self>(),");
         tb.add("            fields,");
         // we have to decide Class or Object
+        /*
         let live_type_kind = if main_attribs.len()>0 {
             if main_attribs[0].name == "live_type_kind" {
                 main_attribs[0].args.clone()
             }
             else {None}
-        }else {None};
-        
+        }else {None};*/
+        /*
         if let Some(live_type_kind) = live_type_kind {
             tb.add("            kind: LiveTypeKind::").stream(Some(live_type_kind)).add(",");
         }
         else {
             tb.add("            kind: LiveTypeKind::Class,");
-        }
+        }*/
         
         tb.add("            type_name: LiveId::from_str(").string(&struct_name).add(").unwrap()");
         tb.add("        }");
         tb.add("    }");
         
-        
-        tb.add("    fn live_register(cx: &mut Cx) {");
-        tb.add("        struct Factory();");
+        tb.add("    fn register_factories(cx: &mut Cx) {");
+        //tb.add("        struct Factory();");
+        /*
+        let kv = if let Some(attr) = animator.attrs.iter().find( | attr | attr.name == "default_state") {
+        if let Some(args) = &attr.args {
+            let mut parser = TokenParser::new(args.clone());
+            // ok its key:value comma
+            let mut kv = Vec::new();
+            while !parser.eat_eot() {
+                let def = parser.expect_any_ident()?;
+                parser.eat_punct_alone(',');
+                kv.push(def);
+            }
+            kv
+        }*/
+        /*
         tb.add("        impl LiveFactory for Factory {");
-        
         tb.add("            fn new_component(&self, cx: &mut Cx) -> Box<dyn LiveApply> {");
         tb.add("                Box::new(").ident(&struct_name).add(" ::new(cx))");
         tb.add("            }");
-        
-        
         tb.add("        }");
-        tb.add("        cx.register_factory(").ident(&struct_name).add("::live_type(), Box::new(Factory()));");
-        // lets register all our components
+        
+        tb.add("        cx.register_factory(").ident(&struct_name).add("::live_type(), Box::new(Factory()));");*/
+        
+        // we need this here for shader enums to register without hassle
         for field in &fields {
             let attr = &field.attrs[0];
             if attr.name == "live" || attr.name == "calc" {
                 match TokenParser::unwrap_option(field.ty.clone()) {
                     Ok(inside) => {
-                        tb.stream(Some(inside)).add("::live_register(cx);");
+                        tb.stream(Some(inside)).add("::register_factories(cx);");
                     }
                     Err(not_option) => {
-                        tb.stream(Some(not_option)).add("::live_register(cx);");
+                        tb.stream(Some(not_option)).add("::register_factories(cx);");
                     }
                 }
             }
         }
+        
         tb.add("    }");
         
         tb.add("    fn new(cx: &mut Cx) -> Self {");
@@ -512,14 +526,14 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         tb.add("    fn live_type_info() -> LiveTypeInfo {");
         tb.add("        LiveTypeInfo{");
         tb.add("            module_id: LiveModuleId::from_str(&module_path!()).unwrap(),");
-        tb.add("            live_type: Self::live_type(),");
+        tb.add("            live_type: LiveType::of::<Self>(),");
         tb.add("            fields: Vec::new(),");
         tb.add("            type_name: LiveId::from_str(").string(&enum_name).add(").unwrap(),");
-        tb.add("            kind: LiveTypeKind::Enum,");
+        /*tb.add("            kind: LiveTypeKind::Enum,");*/
         tb.add("        }");
         tb.add("    }");
         
-        tb.add("    fn live_register(cx: &mut Cx) {");
+        tb.add("    fn register_factories(cx: &mut Cx) {");
         
         let is_u32_enum = main_attribs.iter().find( | attr | attr.name == "repr" && attr.args.as_ref().unwrap().to_string().to_lowercase() == "u32").is_some();
         if is_u32_enum {
@@ -535,7 +549,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
                     }
                 }
             }
-            tb.add("        cx.shader_registry.register_enum(").ident(&enum_name).add("::live_type(),ShaderEnum{enum_name:LiveId::from_str(").string(&enum_name).add(").unwrap(),variants});");
+            tb.add("        cx.shader_registry.register_enum(LiveType::of::<").ident(&enum_name).add(">(),ShaderEnum{enum_name:LiveId::from_str(").string(&enum_name).add(").unwrap(),variants});");
         }
         
         tb.add("    }");
@@ -543,7 +557,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         
         tb.add("impl").stream(generic.clone());
         tb.add("LiveApply for").ident(&enum_name).stream(generic).stream(where_clause).add("{");
-        tb.add("    fn type_id(&self)->std::any::TypeId{ std::any::TypeId::of::<Self>() }");
+        //tb.add("    fn type_id(&self)->std::any::TypeId{ std::any::TypeId::of::<Self>() }");
         
         tb.add("    fn apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, start_index:usize, nodes: &[LiveNode]) -> usize {");
         tb.add("        self.before_apply(cx, apply_from, start_index, nodes);");
