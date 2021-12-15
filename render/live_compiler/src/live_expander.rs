@@ -4,7 +4,7 @@ use {
         live_id::{LiveId, LiveFileId, LivePtr},
         live_error::{LiveError, LiveErrorOrigin},
         live_document::{LiveDocument},
-        live_node::{LiveValue, LiveNode, LiveTypeKind},
+        live_node::{LiveValue, LiveNode, /*LiveTypeKind*/},
         live_node_vec::{LiveNodeSlice, LiveNodeVec},
         live_registry::{LiveRegistry, LiveScopeTarget},
     }
@@ -338,13 +338,13 @@ impl<'a> LiveExpander<'a> {
                                         
                                         out_doc.nodes[node_insert_point].id = field.id;
                                     }
-                                    else if let LiveTypeKind::Class = lti.kind {
+                                    /*else if let LiveTypeKind::Class = lti.kind {
                                         self.errors.push(LiveError {
                                             origin: live_error_origin!(),
                                             span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()),
                                             message: format!("Cannot find class {}, make sure its defined before its used", lti.type_name)
                                         });
-                                    }
+                                    }*/
                                 }
                                 else {
                                     let other_nodes = &self.live_registry.expanded[file_id.to_index()].nodes;

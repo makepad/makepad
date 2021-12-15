@@ -233,7 +233,7 @@ impl LiveRegistry {
         }
     }
     
-    pub fn parse_live_file(
+    pub fn register_live_file(
         &mut self,
         file_name: &str,
         own_module_id: LiveModuleId,

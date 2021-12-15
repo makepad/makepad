@@ -28,7 +28,7 @@ live_register!{
 
 impl LiveHook for GeometryQuad2D {
     fn after_apply(&mut self, cx: &mut Cx, _apply_from:ApplyFrom, _index:usize, _nodes:&[LiveNode]) {
-        let mut fp = GeometryFingerprint::new(Self::live_type());
+        let mut fp = GeometryFingerprint::new(LiveType::of::<Self>());
         fp.push(self.x1);
         fp.push(self.y1);
         fp.push(self.x2);
@@ -60,7 +60,7 @@ impl GeometryFields for GeometryQuad2D {
     }
     
     fn live_type_check(&self) -> LiveType {
-        Self::live_type()
+        LiveType::of::<Self>()
     }
 }
 

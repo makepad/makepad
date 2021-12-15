@@ -22,7 +22,9 @@ impl App {
     pub fn live_register(cx: &mut Cx) {
         makepad_widget::live_register(cx);
         crate::code_editor::code_editor_impl::live_register(cx);
+        crate::code_editor::live_edit_widget::add_live_edit_widget_registry(cx);
         crate::code_editor::rust_editor::live_register(cx);
+        
         crate::editors::live_register(cx);
         crate::app_inner::live_register(cx);
     }

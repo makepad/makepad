@@ -42,9 +42,9 @@ macro_rules!live_primitive {
             $ to_live_value
         }
         impl LiveApply for $ ty {
-            fn type_id(&self) -> TypeId {
-                TypeId::of::< $ ty>()
-            }
+            //fn type_id(&self) -> TypeId {
+            //    TypeId::of::< $ ty>()
+           // }
             
             $ apply
         }
@@ -56,10 +56,10 @@ macro_rules!live_primitive {
             fn live_type_info() -> LiveTypeInfo {
                 LiveTypeInfo {
                     module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
-                    live_type: Self::live_type(),
+                    live_type: LiveType::of::<Self>(),
                     fields: Vec::new(),
                     type_name: LiveId::from_str(stringify!( $ ty)).unwrap(),
-                    kind: LiveTypeKind::Primitive
+                    //kind: LiveTypeKind::Primitive
                 }
             }
         }

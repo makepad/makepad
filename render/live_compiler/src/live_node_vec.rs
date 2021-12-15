@@ -395,7 +395,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         while index < self_ref.len() {
             if self_ref[index].value.is_open() {
                 if stack_depth == 1 {
-                    if child_name != LiveId::empty() && self_ref[index].id == child_name {
+                    if !self_ref[index].origin.id_non_unique() && self_ref[index].id == child_name {
                         return Ok(index);
                     }
                 }
@@ -409,7 +409,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
             }
             else {
                 if stack_depth == 1 {
-                    if child_name != LiveId::empty() && self_ref[index].id == child_name {
+                    if !self_ref[index].origin.id_non_unique() && self_ref[index].id == child_name {
                         return Ok(index);
                     }
                 }

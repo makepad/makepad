@@ -1,4 +1,5 @@
 use makepad_render::*;
+use crate::frame::*;
 
 #[derive(Default, Clone)]
 pub struct ButtonLogic {
@@ -20,7 +21,7 @@ impl Default for ButtonState {
     fn default() -> Self {Self::None}
 }
 
-#[derive(Copy, Clone, PartialEq, IntoAnyAction)]
+#[derive(Copy, Clone, PartialEq, IntoFrameComponentAction)]
 pub enum ButtonAction {
     None,
     WasClicked,

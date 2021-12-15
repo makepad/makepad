@@ -146,7 +146,7 @@ impl Cx {
     
     pub fn register_live_body(&mut self, live_body: LiveBody) {
         //println!("START");
-        let result = self.live_registry.borrow_mut().parse_live_file(
+        let result = self.live_registry.borrow_mut().register_live_file(
             &live_body.file,
             LiveModuleId::from_str(&live_body.module_path).unwrap(),
             live_body.code,
@@ -158,9 +158,8 @@ impl Cx {
             println!("Error parsing live file {}", err);
         }
     }
-    
-    pub fn register_factory(&mut self, live_type: LiveType, factory: Box<dyn LiveFactory>) {
+    /*(&mut self, live_type: LiveType, factory: Box<dyn LiveFactory>) {
         self.live_factories.borrow_mut().insert(live_type, factory);
-    }
+    }*/
 }
 
