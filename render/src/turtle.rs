@@ -12,10 +12,9 @@ pub use {
 };
 
 #[derive(Copy, Clone, Debug, Live, LiveHook)]
-#[register_with(ShaderEnum)]
 pub enum LineWrap {
     #[pick] None,
-    #[live()] NewLine,
+    NewLine,
     #[live(8.0)] MaxSize(f32)
 }
 
@@ -27,21 +26,21 @@ impl Default for LineWrap {
 
 #[derive(Copy, Clone, Default, Debug, Live, LiveHook)]
 pub struct Layout {
-    #[live] pub padding: Padding,
-    #[live] pub align: Align,
-    #[live] pub direction: Direction,
-    #[live] pub line_wrap: LineWrap,
-    #[live] pub new_line_padding: f32,
-    #[live] pub abs_origin: Option<Vec2>,
-    #[live] pub abs_size: Option<Vec2>,
-    #[live] pub walk: Walk,
+    pub padding: Padding,
+    pub align: Align,
+    pub direction: Direction,
+    pub line_wrap: LineWrap,
+    pub new_line_padding: f32,
+    pub abs_origin: Option<Vec2>,
+    pub abs_size: Option<Vec2>,
+    pub walk: Walk,
 }
 
 #[derive(Copy, Clone, Default, Debug, Live, LiveHook)]
 pub struct Walk {
-    #[live] pub margin: Margin,
-    #[live] pub width: Width,
-    #[live] pub height: Height,
+    pub margin: Margin,
+    pub width: Width,
+    pub height: Height,
 }
 
 impl Walk{
@@ -64,32 +63,32 @@ impl Walk{
 
 #[derive(Clone, Copy, Default, Debug, Live, LiveHook)]
 pub struct Align {
-    #[live] pub fx: f32,
-    #[live] pub fy: f32
+    pub fx: f32,
+    pub fy: f32
 }
 
 #[derive(Clone, Copy, Default, Debug, Live, LiveHook)]
 pub struct Margin {
-    #[live] pub l: f32,
-    #[live] pub t: f32,
-    #[live] pub r: f32,
-    #[live] pub b: f32
+    pub l: f32,
+    pub t: f32,
+    pub r: f32,
+    pub b: f32
 }
 
 #[derive(Clone, Copy, Default, Debug, Live, LiveHook)]
 pub struct Padding {
-    #[live] pub l: f32,
-    #[live] pub t: f32,
-    #[live] pub r: f32,
-    #[live] pub b: f32
+    pub l: f32,
+    pub t: f32,
+    pub r: f32,
+    pub b: f32
 }
 
 #[derive(Copy, Clone, Debug, Live, LiveHook)]
 pub enum Direction {
-    #[live] Left,
+    Left,
     #[pick] Right,
-    #[live] Up,
-    #[live] Down
+    Up,
+    Down
 }
 
 impl Default for Direction {
@@ -99,7 +98,7 @@ impl Default for Direction {
 #[derive(Copy, Clone, Debug, Live, LiveHook)]
 pub enum Axis {
     #[pick] Horizontal,
-    #[live] Vertical
+    Vertical
 }
 
 impl Default for Axis {
@@ -112,7 +111,7 @@ impl Default for Axis {
 pub enum Width {
     #[pick] Filled,
     #[live(200.0)] Fixed(f32),
-    #[live] Computed,
+    Computed,
     /*
     #[live] ComputeFill,
     #[live(0.0)] FillPad(f32),
@@ -127,7 +126,7 @@ pub enum Width {
 pub enum Height {
     #[pick] Filled,
     #[live(200.0)] Fixed(f32),
-    #[live] Computed,
+    Computed,
     /*
     #[live] ComputeFill,
     #[live(0.0)] FillPad(f32),
