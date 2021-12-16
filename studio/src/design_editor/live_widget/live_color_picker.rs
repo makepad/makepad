@@ -36,7 +36,8 @@ fn register_factory(cx: &mut Cx) {
 }
 
 impl LiveWidget for LiveColorPicker {
-    fn handle_widget_event(&mut self, _cx: &mut Cx, _event: &mut Event) -> LiveWidgetAction {
+    fn handle_widget_event(&mut self, cx: &mut Cx, event: &mut Event) -> LiveWidgetAction {
+        self.color_picker.handle_event(cx, event);
         LiveWidgetAction::None
     }
     
@@ -50,18 +51,4 @@ impl LiveWidget for LiveColorPicker {
 #[live_register_hook(register_factory)]
 pub struct LiveColorPicker {
     color_picker: ColorPicker
-}
-
-impl LiveColorPicker {
-    pub fn draw(&mut self, _cx: &mut Cx) {
-    }
-    
-    pub fn handle_event(
-        &mut self,
-        _cx: &mut Cx,
-        _event: &mut Event,
-    )->LiveWidgetAction{
-        
-        LiveWidgetAction::None
-    }
 }
