@@ -84,11 +84,10 @@ live_register!{
 }
 
 #[derive(Live, LiveHook)]
+#[register_as_frame_component]
 pub struct Button {
-    
     #[rust] pub button_logic: ButtonLogic,
     #[default_state(default_state)] pub animator: Animator,
-    
     default_state: Option<LivePtr>,
     hover_state: Option<LivePtr>,
     pressed_state: Option<LivePtr>,
@@ -107,23 +106,6 @@ impl FrameComponent for Button {
         self.draw(cx, None);
     }
 }
-/*
-impl Button{
-    fn animate_to2(&mut self, cx: &mut Cx, track:LiveId, state: LivePtr) {
-        if self.animator2.state.is_none() {
-            self.animator2.cut_to_live(cx, track, self.state_default.unwrap());
-         }
-        self.animator2.animate_to_live(cx, track, state);
-        //println!("{}", self.animator2.state.as_ref().unwrap().to_string(0,100));
-    }
-    fn handle_animation2(&mut self, cx: &mut Cx, event: &mut Event) {
-        if self.animator2.do_animation(cx, event) {
-            let state = self.animator2.swap_out_state();
-            self.apply(cx, ApplyFrom::Animate, state.child_by_name(0,id!(state)).unwrap(), &state);
-            self.animator2.swap_in_state(state);
-        }
-    }
-}    */
 
 impl Button {
     

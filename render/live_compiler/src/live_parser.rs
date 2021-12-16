@@ -238,6 +238,10 @@ impl<'a> LiveParser<'a> {
             }
             let edit_info_index = ld.edit_info.len();
             
+            if edit_info_index > 0x7f0{
+                return Err(self.error(format!("Used more than 128 .{{..}} edit info fields in a file, we dont have the bitspace for that in our u64.")))
+            }
+            
             ld.edit_info.push(LiveNode {
                 origin: LiveNodeOrigin::from_token_id(self.get_token_id()),
                 id: LiveId::empty(),
