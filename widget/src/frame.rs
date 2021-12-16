@@ -1,6 +1,5 @@
 use makepad_render::*;
 use std::collections::HashMap;
-use std::collections::hash_map::Entry;
 use std::any::TypeId;
 
 live_register!{
@@ -324,23 +323,15 @@ pub trait CxRegistriesExt{
 
 impl CxRegistriesExt for CxRegistries {
     fn register_frame_component(&self, live_type: LiveType, component: Box<dyn FrameComponentFactory>) {
-        let registries_cp = self.0.clone();
-        let mut registries = registries_cp.borrow_mut();
-        let registry = match registries.entry(TypeId::of::<Registry>()) {
-            Entry::Occupied(o) => o.into_mut(),
-            Entry::Vacant(v) => v.insert(Box::new(Registry {factories: HashMap::new()}))
-        };
-        registry
-            .downcast_mut::<Registry>().unwrap()
-            .factories.insert(live_type, component);
+        let registries = self.clone();
+        let mut registry = registries.get_or_create::<Registry,_>(|| Registry {factories: HashMap::new()});
+        registry.factories.insert(live_type, component);
     }
     
     fn new_frame_component(cx:&mut Cx, live_type: LiveType) -> Option<Box<dyn FrameComponent >> {
-        let registries_cp = cx.registries.clone();
-        let registries = registries_cp.0.borrow();
-        registries
-            .get(&TypeId::of::<Registry>()).unwrap()
-            .downcast_ref::<Registry>().unwrap()
+        let registries = cx.registries.clone();
+        let registry = registries.get::<Registry>();
+        registry
             .factories.get(&live_type)
             .and_then(|cnew| Some(cnew.new_from_factory(cx)) )
     }
