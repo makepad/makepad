@@ -209,7 +209,7 @@ impl RustEditor {
             }
             if last_line.is_some(){
                 cx.end_turtle();
-            }
+            } 
             
             // clean up the mess
             for (ident, widget) in &mut self.widgets{
