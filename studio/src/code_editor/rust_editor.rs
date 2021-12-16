@@ -1,8 +1,5 @@
 use {
-    std::collections::{
-        HashSet,
-        HashMap,
-    },
+    //std::collections::{HashSet,HashMap,},
     crate::{
         editor_state::{
             EditorState,
@@ -41,9 +38,9 @@ pub struct RustEditor {
     color_picker: Option<LivePtr>,
     
     #[rust] lines_layout: LinesLayout,
-    #[rust] visible_editors: HashSet<LivePtr>,
+//    #[rust] visible_editors: HashSet<LivePtr>,
 //    #[rust] gc_editors: HashSet<LivePtr>,
-    #[rust] live_editors: HashMap<LivePtr, Box<dyn LiveEditWidget >>,
+//    #[rust] live_editors: HashMap<LivePtr, Box<dyn LiveEditWidget >>,
 }
 
 impl EditInfoCache {
@@ -109,10 +106,9 @@ impl RustEditor {
         self.editor_impl.redraw(cx);
     }
     
-    pub fn draw_line_editors(&mut self, cx: &mut Cx, document_inner: &DocumentInner) {
+    pub fn draw_line_editors(&mut self, _cx: &mut Cx, _document_inner: &DocumentInner) {
         // alrigth so now what.
         // we have to go draw our line editors
-        
     }
     
     pub fn draw(&mut self, cx: &mut Cx, state: &EditorState) {
@@ -125,9 +121,9 @@ impl RustEditor {
             let live_registry_rc = cx.live_registry.clone();
             let live_registry = live_registry_rc.borrow();
             
-            let mut live_editors = &mut self.live_editors;
-            let mut visible_editors = &mut self.visible_editors;
-            let color_picker = self.color_picker;
+            //let mut live_editors = &mut self.live_editors;
+            //let mut visible_editors = &mut self.visible_editors;
+            //let color_picker = self.color_picker;
             
             self.editor_impl.calc_lines_layout(cx, document_inner, &mut self.lines_layout, | cx, line_index, start_y, viewport_start, viewport_end | {
                 let edit_info = &edit_info_cache[line_index];
@@ -135,10 +131,9 @@ impl RustEditor {
                 for (_token_index, live_ptr) in &edit_info.live_ptrs {
                     let node = live_registry.ptr_to_node(*live_ptr);
                     
-                    if let Some((height, editor_type)) = cx.registries.match_live_edit_widget(&live_registry, node){
+                    if let Some(matched) = cx.registries.match_live_edit_widget(&live_registry, node){
                         
-                        
-                        max_height = max_height.max(height);
+                        max_height = max_height.max(matched.height);
                     }
 
                     let height = match node.value {
@@ -151,7 +146,7 @@ impl RustEditor {
                     if start_y + height > viewport_start && start_y < viewport_end {
                         match node.value {
                             LiveValue::Color(_) => {
-                                visible_editors.insert(*live_ptr);
+                                //visible_editors.insert(*live_ptr);
                                 //line_editors.entry(*live_ptr).or_insert_with( || {
                                 //    Box::new(ColorPicker::new_from_ptr(cx, color_picker.unwrap()))
                                 //});

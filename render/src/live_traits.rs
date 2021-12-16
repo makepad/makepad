@@ -13,9 +13,9 @@ pub use {
 pub trait LiveNew: LiveApply {
     fn new(cx: &mut Cx) -> Self;
     
-    fn register_factories(_cx: &mut Cx) {}
+    fn live_register(_cx: &mut Cx) {}
     
-    fn live_type_info() -> LiveTypeInfo;
+    fn live_type_info(cx:&mut Cx) -> LiveTypeInfo;
     
     fn new_apply(cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Self where Self: Sized {
         let mut ret = Self::new(cx);
@@ -192,8 +192,8 @@ impl<T> LiveNew for Option<T> where T: LiveApply + LiveNew + 'static {
         ret
     }
     
-    fn live_type_info() -> LiveTypeInfo {
-        T::live_type_info()
+    fn live_type_info(_cx:&mut Cx) -> LiveTypeInfo {
+        T::live_type_info(_cx)
     }
 }
 
