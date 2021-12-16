@@ -17,4 +17,4 @@ pub mod text;
 pub mod token;
 pub mod token_cache;
 pub mod tokenizer;
-pub mod live_edit_widget;
+pub mod live_widget;

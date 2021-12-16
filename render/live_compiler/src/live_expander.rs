@@ -328,6 +328,7 @@ impl<'a> LiveExpander<'a> {
                         for field in &live_type_info.fields {
                             let lti = &field.live_type_info;
                             if let Some(file_id) = self.live_registry.module_id_to_file_id.get(&lti.module_id) {
+
                                 if *file_id == self.in_file_id { // clone on self
                                     if let Some(index) = out_doc.nodes.child_by_name(0, lti.type_name) {
                                         let node_insert_point = insert_point;
@@ -338,13 +339,6 @@ impl<'a> LiveExpander<'a> {
                                         
                                         out_doc.nodes[node_insert_point].id = field.id;
                                     }
-                                    /*else if let LiveTypeKind::Class = lti.kind {
-                                        self.errors.push(LiveError {
-                                            origin: live_error_origin!(),
-                                            span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()),
-                                            message: format!("Cannot find class {}, make sure its defined before its used", lti.type_name)
-                                        });
-                                    }*/
                                 }
                                 else {
                                     let other_nodes = &self.live_registry.expanded[file_id.to_index()].nodes;
@@ -359,6 +353,13 @@ impl<'a> LiveExpander<'a> {
                                         self.shift_parent_stack(&mut current_parent, &out_doc.nodes, node_insert_point - 1, old_len, out_doc.nodes.len());
                                         
                                         out_doc.nodes[node_insert_point].id = field.id;
+                                    }
+                                    else{
+                                        self.errors.push(LiveError {
+                                            origin: live_error_origin!(),
+                                            span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()),
+                                            message: format!("Typename {}, not defined in file where it was expected", lti.type_name)
+                                        });
                                     }
                                 }
                             }

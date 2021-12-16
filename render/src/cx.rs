@@ -312,6 +312,15 @@ impl CxRegistries {
         )
     }
     
+    pub fn get_mut<T: 'static>(&self) -> std::cell::RefMut<'_, T> {
+        std::cell::RefMut::map(
+            self.0.borrow_mut(),
+            | v | v
+                .get_mut(&TypeId::of::<T>()).unwrap()
+                .downcast_mut::<T>().unwrap()
+        )
+    }
+
     pub fn get_or_create<T: 'static, CB>(&self, new_cb:CB) -> std::cell::RefMut<'_, T> 
     where CB: FnOnce()->T
     {
