@@ -233,7 +233,6 @@ pub struct FileTree {
     #[rust] selected_node_id: Option<FileNodeId>,
     #[rust] open_nodes: HashSet<FileNodeId>,
     #[rust] visible_nodes: HashSet<FileNodeId>,
-    #[rust] gc_nodes: HashSet<FileNodeId>,
     #[rust] tree_nodes: HashMap<FileNodeId, FileTreeNode>,
     #[rust] count: usize,
     #[rust] stack: Vec<f32>,
@@ -404,16 +403,9 @@ impl FileTree {
         
         self.scroll_view.end(cx);
         
-        // remove all nodes that are invisible
-        self.gc_nodes.clear();
-        for (node_id, _) in &self.tree_nodes {
-            if !self.visible_nodes.contains(node_id) && Some(*node_id) != self.selected_node_id {
-                self.gc_nodes.insert(*node_id);
-            }
-        }
-        for node_id in &self.gc_nodes {
-            self.tree_nodes.remove(node_id);
-        }
+        let visible_nodes = &self.visible_nodes;
+        let selected_node_id = self.selected_node_id;
+        self.tree_nodes.retain(|node_id,_| visible_nodes.contains(node_id) || Some(*node_id) == selected_node_id)
     }
     
     pub fn is_even(count: usize) -> f32 {

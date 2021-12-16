@@ -1,5 +1,5 @@
 use {
-    std::collections::{HashSet,HashMap,},
+    std::collections::{HashSet, HashMap,},
     crate::{
         editor_state::{
             EditorState,
@@ -26,21 +26,19 @@ live_register!{
     
     RustEditor: {{RustEditor}} {
         color_picker: ColorPicker,
-        widget_layout:Layout {
-            align: Align {fx: 0., fy: 0.},
+        widget_layout: Layout {
+            align: Align {fx: 0.2, fy: 0.},
             padding: Padding {l: 0, t: .0, r: 0, b: 0}
         }
         editor_impl: {}
     }
 }
-pub trait LineEditor : std::any::Any {}
+pub trait LineEditor: std::any::Any {}
 
-#[derive(Copy,Clone,Hash,PartialEq,Eq)]
+#[derive(Copy, Clone, Hash, PartialEq, Eq)]
 pub struct WidgetIdent(LivePtr, LiveType);
 
-pub struct Widget{
-    start_y: f32,
-    height: f32,
+pub struct Widget {
     live_widget: Box<dyn LiveWidget>
 }
 
@@ -53,10 +51,9 @@ pub struct RustEditor {
     widget_layout: Layout,
     
     #[rust] lines_layout: LinesLayout,
-
-    #[rust] widget_draw_order: Vec<(usize,WidgetIdent)>,
+    
+    #[rust] widget_draw_order: Vec<(usize, WidgetIdent)>,
     #[rust] visible_widgets: HashSet<WidgetIdent>,
-    #[rust] gc_widgets: HashSet<WidgetIdent>,
     #[rust] widgets: HashMap<WidgetIdent, Widget>,
 }
 
@@ -136,25 +133,26 @@ impl RustEditor {
             let live_registry = live_registry_rc.borrow();
             
             let widgets = &mut self.widgets;
+            
             let visible_widgets = &mut self.visible_widgets;
             visible_widgets.clear();
+            
             let widget_draw_order = &mut self.widget_draw_order;
             widget_draw_order.clear();
+            
             self.editor_impl.calc_lines_layout(cx, document_inner, &mut self.lines_layout, | cx, line_index, start_y, viewport_start, viewport_end | {
                 let edit_info = &edit_info_cache[line_index];
                 let mut max_height = 0.0f32;
                 for (_token_index, live_ptr) in &edit_info.live_ptrs {
                     let node = live_registry.ptr_to_node(*live_ptr);
-                    if let Some(matched) = cx.registries.match_live_widget(&live_registry, node){
+                    if let Some(matched) = cx.registries.match_live_widget(&live_registry, node) {
                         max_height = max_height.max(matched.height);
                         if start_y + matched.height > viewport_start && start_y < viewport_end {
                             // lets spawn it
                             let ident = WidgetIdent(*live_ptr, matched.live_type);
-                            widgets.entry(ident).or_insert_with(||{
-                                Widget{
-                                    live_widget:cx.registries.clone().new_live_widget(cx, matched.live_type).unwrap(),
-                                    start_y,
-                                    height:matched.height
+                            widgets.entry(ident).or_insert_with( || {
+                                Widget {
+                                    live_widget: cx.registries.clone().new_live_widget(cx, matched.live_type).unwrap(),
                                 }
                             });
                             visible_widgets.insert(ident);
@@ -164,6 +162,8 @@ impl RustEditor {
                 }
                 return max_height
             });
+            
+            widgets.retain( | ident, _ | visible_widgets.contains(ident));
             
             self.editor_impl.draw_selections(
                 cx,
@@ -184,20 +184,20 @@ impl RustEditor {
                 &session.carets,
                 &self.lines_layout
             );
-
-            self.gc_widgets.clear();
             
             let mut last_line = None;
-            let origin = cx.get_turtle_pos()+ vec2(self.editor_impl.line_num_width,0.0);
-            let size = cx.get_turtle_size() - vec2(self.editor_impl.line_num_width,0.0);
-            for (line,ident) in &self.widget_draw_order{
-                if Some(line) != last_line{ // start a new draw segment with the turtle
-                    if last_line.is_some(){
+            
+            let line_num_geom = vec2(self.editor_impl.line_num_width, 0.0);
+            let origin = cx.get_turtle_pos() + line_num_geom;
+            let size = cx.get_turtle_size() - line_num_geom;
+            for (line, ident) in &self.widget_draw_order {
+                if Some(line) != last_line { // start a new draw segment with the turtle
+                    if last_line.is_some() {
                         cx.end_turtle();
                     }
                     // lets look at the line height
                     let ll = &self.lines_layout.lines[*line];
-                    cx.begin_turtle(Layout{
+                    cx.begin_turtle(Layout {
                         abs_origin: Some(vec2(origin.x, origin.y + ll.start_y + ll.text_height)),
                         abs_size: Some(vec2(size.x, ll.widget_height)),
                         ..self.widget_layout
@@ -207,19 +207,11 @@ impl RustEditor {
                 widget.live_widget.draw_widget(cx);
                 last_line = Some(line)
             }
-            if last_line.is_some(){
+            if last_line.is_some() {
                 cx.end_turtle();
-            } 
-            
+            }
             // clean up the mess
-            for (ident, widget) in &mut self.widgets{
-                if !self.visible_widgets.contains(ident){
-                    self.gc_widgets.insert(*ident);
-                }
-            }
-            for ident in &self.gc_widgets{
-                self.widgets.remove(ident);
-            }
+            
             
             // alright great. now we can draw the text
             self.editor_impl.draw_text(
@@ -245,6 +237,9 @@ impl RustEditor {
         send_request: &mut dyn FnMut(Request),
         dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
     ) {
+        for widget in self.widgets.values_mut(){
+            widget.live_widget.handle_widget_event(cx, event);
+        }
         self.editor_impl.handle_event(cx, state, event, &self.lines_layout, send_request, dispatch_action);
     }
 }
