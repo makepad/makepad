@@ -157,7 +157,7 @@ impl ScrollView{
             cx.set_view_scroll_y(view_id, scroll_pos);
         }
         
-        let rect = cx.end_turtle(view_area);
+        let rect = cx.end_turtle_with_guard(view_area);
         let cxview = &mut cx.views[view_id];
         cxview.rect = rect;
         cx.view_stack.pop();

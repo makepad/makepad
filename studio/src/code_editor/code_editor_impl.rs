@@ -227,7 +227,7 @@ pub struct CodeEditorImpl {
     
     scroll_shadow: ScrollShadow,
     
-    line_num_width: f32,
+    pub line_num_width: f32,
     caret_blink_timeout: f64,
     
     text_color_color: Vec4,
@@ -342,7 +342,7 @@ impl CodeEditorImpl {
             
             max_line_width = text_line.len().max(max_line_width);
             
-            let edit_widget_height = compute_height(
+            let widget_height = compute_height(
                 cx,
                 line_index,
                 start_y + self.get_character_height(),
@@ -350,15 +350,17 @@ impl CodeEditorImpl {
                 viewport_end.y
             );
             
-            let height = edit_widget_height + self.get_character_height();
+            let text_height = self.get_character_height();
             
             lines_layout.lines.push(LineInfo {
                 start_y,
-                height,
+                text_height,
+                widget_height,
+                total_height: text_height + widget_height,
                 text_scale
             });
             
-            let end_y = start_y + height;
+            let end_y = start_y + text_height + widget_height;
             if start.is_none() && end_y >= viewport_start.y {
                 start_line_y = Some(start_y);
                 start = Some(line_index);
@@ -538,7 +540,7 @@ impl CodeEditorImpl {
         // the second iteration.
         for (next_line_index, next_line) in text.as_lines()[lines_layout.view_start..lines_layout.view_end].iter().enumerate() {
             let line_index = next_line_index + lines_layout.view_start;
-            let line_height = lines_layout.lines[line_index].height;
+            let line_height = lines_layout.lines[line_index].total_height;
             // Rotate so that the next line becomes the current line, the current line becomes the
             // previous line, and the previous line becomes the next line.
             mem::swap(&mut selected_rects_on_previous_line, &mut selected_rects_on_current_line);
@@ -661,7 +663,7 @@ impl CodeEditorImpl {
         
         
         for i in lines_layout.view_start..lines_layout.view_end {
-            let line_height = lines_layout.lines[i].height;
+            let line_height = lines_layout.lines[i].total_height;
             if i == cursor.head.line {
                 self.line_num_text.color = self.text_color_linenum_current;
             }
@@ -690,7 +692,7 @@ impl CodeEditorImpl {
             .enumerate()
         {
             let line_index = line_index + lines_layout.view_start;
-            let line_height = lines_layout.lines[line_index].height;
+            let line_height = lines_layout.lines[line_index].total_height;
             let indent_count = (indent_info.virtual_leading_whitespace() + 3) / 4;
             for indent in 0..indent_count {
                 let indent_lines_column = indent * 4;
@@ -781,7 +783,7 @@ impl CodeEditorImpl {
         let start_x = origin.x + self.line_num_width;
         let mut start_y = lines_layout.start_y + origin.y;
         for line_index in lines_layout.view_start..lines_layout.view_end {
-            let line_height = lines_layout.lines[line_index].height;
+            let line_height = lines_layout.lines[line_index].total_height;
             loop {
                 match caret_iter.peek() {
                     Some(caret) if caret.line == line_index => {
@@ -828,7 +830,7 @@ impl CodeEditorImpl {
                     },
                     size: Vec2 {
                         x: rect.size.x,
-                        y: line.height,
+                        y: line.total_height,
                     },
                 },
             );
@@ -1231,7 +1233,7 @@ impl CodeEditorImpl {
             }
         }
         for (line, info) in lines_layout.lines.iter().enumerate() {
-            if vec2.y >= info.start_y && vec2.y <= info.start_y + info.height {
+            if vec2.y >= info.start_y && vec2.y <= info.start_y + info.total_height {
                 return Position {
                     line,
                     column: (((vec2.x - self.line_num_width + 0.5 * self.text_glyph_size.x) / self.text_glyph_size.x) as usize)
@@ -1258,7 +1260,9 @@ pub struct SelectScroll {
 #[derive(Clone, Debug)]
 pub struct LineInfo {
     pub start_y: f32,
-    pub height: f32,
+    pub text_height: f32,
+    pub widget_height: f32,
+    pub total_height: f32,
     pub text_scale: f32,
 }
 

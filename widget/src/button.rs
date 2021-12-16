@@ -6,6 +6,8 @@ use crate::frame::*;
 live_register!{
     use makepad_render::shader::std::*;
     
+    color: #fff,
+    
     Button: {{Button}} {
         bg_quad: {
             instance color: vec4 = #333
@@ -98,11 +100,11 @@ pub struct Button {
 }
 
 impl FrameComponent for Button {
-    fn handle_event_dyn(&mut self, cx: &mut Cx, event: &mut Event) -> OptionFrameComponentAction {
+    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event) -> OptionFrameComponentAction {
         self.handle_event(cx, event).into()
     }
     
-    fn draw_dyn(&mut self, cx: &mut Cx) {
+    fn draw_component(&mut self, cx: &mut Cx) {
         self.draw(cx, None);
     }
 }
