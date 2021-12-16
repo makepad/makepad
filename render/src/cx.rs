@@ -1,8 +1,13 @@
 use {
     std::{
-        collections::{HashMap, HashSet, BTreeSet},
+        collections::{
+            HashMap,
+            HashSet,
+            BTreeSet,
+            hash_map::Entry
+        },
         time::Instant,
-        any::{Any,TypeId},
+        any::{Any, TypeId},
         rc::Rc,
         rc::Weak,
         cell::RefCell,
@@ -88,7 +93,7 @@ pub struct Cx {
     
     pub textures: Vec<CxTexture>,
     pub textures_free: Rc<RefCell<Vec<usize >> >,
-
+    
     pub geometries: Vec<CxGeometry>,
     pub geometries_free: Rc<RefCell<Vec<usize >> >,
     pub geometries_refs: HashMap<GeometryFingerprint, Weak<Geometry >>,
@@ -97,7 +102,7 @@ pub struct Cx {
     pub draw_shader_ptr_to_id: HashMap<DrawShaderPtr, usize>,
     pub draw_shader_compile_set: BTreeSet<DrawShaderPtr>,
     pub draw_shader_fingerprints: Vec<DrawShaderFingerprint>,
-
+    
     pub fonts: Vec<Option<CxFont >>,
     pub fonts_atlas: CxFontsAtlas,
     pub path_to_font_id: HashMap<String, usize>,
@@ -142,12 +147,12 @@ pub struct Cx {
     
     pub drag_area: Area,
     pub new_drag_area: Area,
-     
+    
     pub new_next_frames: HashSet<NextFrame>,
     pub next_frames: HashSet<NextFrame>,
     
     pub signals: HashMap<Signal, Vec<u64 >>,
-    pub triggers: HashMap<Area, Vec<u64>>,
+    pub triggers: HashMap<Area, Vec<u64 >>,
     
     pub profiles: HashMap<u64, Instant>,
     
@@ -216,11 +221,11 @@ impl Default for Cx {
             
             textures: textures,
             textures_free: Rc::new(RefCell::new(Vec::new())),
-
+            
             geometries: Vec::new(),
             geometries_free: Rc::new(RefCell::new(Vec::new())),
             geometries_refs: HashMap::new(),
-
+            
             draw_shaders: Vec::new(),
             draw_shader_ptr_to_id: HashMap::new(),
             draw_shader_compile_set: BTreeSet::new(),
@@ -277,7 +282,7 @@ impl Default for Cx {
             triggers: HashMap::new(),
             
             profiles: HashMap::new(),
-
+            
             live_registry: Rc::new(RefCell::new(LiveRegistry::default())),
             shader_registry: ShaderRegistry::new(),
             
@@ -291,11 +296,35 @@ impl Default for Cx {
 }
 
 #[derive(Clone)]
-pub struct CxRegistries(pub Rc<RefCell<HashMap<TypeId, Box<dyn Any>>>>);
+pub struct CxRegistries(pub Rc<RefCell<HashMap<TypeId, Box<dyn Any >> >>);
 
-impl CxRegistries{
-    pub fn new()->Self{
-        Self(Rc::new(RefCell::new(HashMap::new())))
+impl CxRegistries {
+    pub fn new() -> Self {
+        Self (Rc::new(RefCell::new(HashMap::new())))
+    }
+    
+    pub fn get<T: 'static>(&self) -> std::cell::Ref<'_, T> {
+        std::cell::Ref::map(
+            self.0.borrow(),
+            | v | v
+                .get(&TypeId::of::<T>()).unwrap()
+                .downcast_ref::<T>().unwrap()
+        )
+    }
+    
+    pub fn get_or_create<T: 'static, CB>(&self, new_cb:CB) -> std::cell::RefMut<'_, T> 
+    where CB: FnOnce()->T
+    {
+        let reg = self.0.borrow_mut();
+        std::cell::RefMut::map(
+            reg,
+            | v |
+            match v.entry(TypeId::of::<T>()) {
+                Entry::Occupied(o) => o.into_mut(),
+                Entry::Vacant(v) => v.insert(Box::new(new_cb()))
+            }
+            .downcast_mut::<T>().unwrap()
+        )
     }
 }
 
