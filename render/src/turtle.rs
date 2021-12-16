@@ -186,7 +186,11 @@ impl Cx {
     }
     
     // begin a new turtle with a layout
-    pub fn begin_turtle(&mut self, layout: Layout, guard_area: Area) {
+    pub fn begin_turtle(&mut self, layout: Layout) {
+        self.begin_turtle_with_guard(layout, Area::Empty)
+    }
+
+    pub fn begin_turtle_with_guard(&mut self, layout: Layout, guard_area: Area) {
         
         if !self.in_redraw_cycle {
             panic!("calling begin_turtle outside of redraw cycle is not possible!");
@@ -242,7 +246,11 @@ impl Cx {
         self.turtles.push(turtle);
     }
     
-    pub fn end_turtle(&mut self, guard_area: Area) -> Rect {
+    pub fn end_turtle(&mut self) -> Rect {
+        self.end_turtle_with_guard(Area::Empty)
+    }
+
+    pub fn end_turtle_with_guard(&mut self, guard_area: Area) -> Rect {
         let old = self.turtles.pop().unwrap();
         if guard_area != old.guard_area {
             panic!("End turtle guard area misaligned!, begin/end pair not matched begin {:?} end {:?}", old.guard_area, guard_area)

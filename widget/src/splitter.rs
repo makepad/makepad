@@ -70,11 +70,11 @@ impl Splitter {
     pub fn begin(&mut self, cx: &mut Cx) {
         self.rect = cx.get_turtle_rect();
         self.position = self.align.to_position(self.axis, self.rect);
-        cx.begin_turtle(self.layout(), Area::Empty);
+        cx.begin_turtle(self.layout());
     }
     
     pub fn middle(&mut self, cx: &mut Cx) {
-        cx.end_turtle(Area::Empty);
+        cx.end_turtle();
         match self.axis {
             Axis::Horizontal => {
                 self.bar_quad.draw_abs(
@@ -103,11 +103,11 @@ impl Splitter {
                 });
             }
         }
-        cx.begin_turtle(Layout::default(), Area::Empty);
+        cx.begin_turtle(Layout::default());
     }
     
     pub fn end(&mut self, cx: &mut Cx) {
-        cx.end_turtle(Area::Empty);
+        cx.end_turtle();
     }
     
     fn layout(&self) -> Layout {

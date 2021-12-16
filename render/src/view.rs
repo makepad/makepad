@@ -247,7 +247,7 @@ impl View {
         let new_area = Area::View(ViewArea {view_id: self.view_id, redraw_id: cx.redraw_id});
         
         cx.update_area_refs(old_area, new_area);
-        cx.begin_turtle(cx.views[self.view_id].layout, new_area);
+        cx.begin_turtle_with_guard(cx.views[self.view_id].layout, new_area);
         
         Ok(())
     }
@@ -259,7 +259,7 @@ impl View {
     pub fn end(&mut self, cx: &mut Cx) -> Area {
         // let view_id = self.view_id.unwrap();
         let view_area = Area::View(ViewArea {view_id: self.view_id, redraw_id: cx.redraw_id});
-        let rect = cx.end_turtle(view_area);
+        let rect = cx.end_turtle_with_guard(view_area);
         let cxview = &mut cx.views[self.view_id];
         cxview.rect = rect;
         cx.view_stack.pop();

@@ -2,7 +2,7 @@ use makepad_render::*;
 
 
 live_register!{
-    use makepad_render::shader_std::*;
+    use makepad_render::shader::std::*;
     
     DrawColorWheel: {{DrawColorWheel}} {
         instance hover: float
@@ -47,22 +47,22 @@ live_register!{
             let col_angle = (self.hue + .333333) * 2. * PI;
             let circle_puk = vec2(sin(col_angle) * radius + cx, cos(col_angle) * radius + cy);
             
-            let rect_puk = vec2(cx + sat * 2. * rsize - rsize, cy + (1. - val) * 2. * rsize - rsize);
+            let rect_puk = vec2(cx + self.sat * 2. * rsize - rsize, cy + (1. - self.val) * 2. * rsize - rsize);
             
-            let color = mix(mix(#3, #E, self.hover), #F, self.down);
+            let color = mix(mix(#3, #E, self.hover), #F, self.pressed);
             let puck_size = 0.1 * w;
             sdf.circle(rect_puk.x, rect_puk.y, puck_size);
             sdf.rect(cx - rsize, cy - rsize, rsize * 2.0, rsize * 2.0);
             sdf.intersect();
             sdf.fill(color);
-            sdf.circle(rect_puk.x, rect_puk.y, puck_size - 1. - 2. * hover + down);
+            sdf.circle(rect_puk.x, rect_puk.y, puck_size - 1. - 2. * self.hover + self.pressed);
             sdf.rect(cx - rsize, cy - rsize, rsize * 2.0, rsize * 2.0);
             sdf.intersect();
             sdf.fill(rgbv);
             
             sdf.circle(circle_puk.x, circle_puk.y, puck_size);
             sdf.fill(color);
-            sdf.circle(circle_puk.x, circle_puk.y, puck_size - 1. - 2. * hover + down);
+            sdf.circle(circle_puk.x, circle_puk.y, puck_size - 1. - 2. * self.hover + self.pressed);
             sdf.fill(rgbv);
             
             return sdf.result;
@@ -124,7 +124,7 @@ pub struct ColorPicker {
     hover_state: Option<LivePtr>,
     pressed_state: Option<LivePtr>,
     
-    #[rust] size: f32,
+    #[rust] pub size: f32,
     #[rust] hue: f32,
     #[rust] sat: f32,
     #[rust] val: f32,
@@ -266,14 +266,14 @@ impl ColorPicker {
         }
         //self.wheel.shader = live_shader!(cx, self::shader_wheel);
         // i wanna draw a wheel with 'width' set but height a fixed height.
-        self.size = cx.get_turtle_rect().size.x;
+        self.size = cx.get_turtle_rect().size.y;
         self.draw_wheel.hue = self.hue;
         self.draw_wheel.sat = self.sat;
         self.draw_wheel.val = self.val;
         
         self.draw_wheel.draw_walk(cx, Walk {
-            margin: Margin {b: 10. * height_scale, l: 0.0, t: 0.0, r: 0.0},
-            width: Width::Filled,
+            margin: Margin {b: 0.0, l: 0.0, t: 0.0, r: 0.0},
+            width: Width::Fixed(self.size * height_scale),
             height: Height::Fixed(self.size * height_scale)
         });
     }
