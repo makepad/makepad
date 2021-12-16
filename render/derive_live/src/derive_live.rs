@@ -71,13 +71,13 @@ pub fn derive_into_frame_component_action_impl(input: TokenStream) -> TokenStrea
     return parser.unexpected()
 }
 
-    
+
 fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<(), TokenStream> {
     
     let main_attribs = parser.eat_attributes();
     parser.eat_ident("pub");
     if parser.eat_ident("struct") {
-        let struct_name = parser.expect_any_ident()?;
+        let struct_name = parser.expect_any_ident() ?;
         let generic = parser.eat_generic();
         let types = parser.eat_all_types();
         let where_clause = parser.eat_where_clause(None); //Some("LiveUpdateHooks"));
@@ -92,13 +92,13 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
             return error_result("Unexpected field form")
         };
         
-         // alright now. we have a field
+        // alright now. we have a field
         for field in &mut fields {
-            if field.attrs.len() == 1 &&&  field.attrs[0].name != "live" && field.attrs[0].name != "calc" && field.attrs[0].name != "rust" && field.attrs[0].name != "default_state" {
+            if field.attrs.len() == 1 && &field.attrs[0].name != "live" && field.attrs[0].name != "calc" && field.attrs[0].name != "rust" && field.attrs[0].name != "default_state" {
                 return error_result(&format!("Field {} does not have a live, calc or rust attribute", field.name));
-            } 
-            if field.attrs.len() == 0{ // insert a default
-                field.attrs.push(Attribute{name:"live".to_string(),args:None});
+            }
+            if field.attrs.len() == 0 { // insert a default
+                field.attrs.push(Attribute {name: "live".to_string(), args: None});
             }
         }
         
@@ -112,8 +112,8 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         if deref_target.is_some() && draw_vars.is_some() {
             return error_result("Cannot dereive Live with more than one of: both draw_vars and deref_target");
         }
-
-        if draw_vars.is_some() &&! geometry.is_some() {
+        
+        if draw_vars.is_some() && !geometry.is_some() {
             return error_result("drawvars requires a geometry object to be present");
         }
         
@@ -124,7 +124,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
                     // ok its key:value comma
                     let mut kv = Vec::new();
                     while !parser.eat_eot() {
-                        let def = parser.expect_any_ident()?;
+                        let def = parser.expect_any_ident() ?;
                         parser.eat_punct_alone(',');
                         kv.push(def);
                     }
@@ -141,25 +141,25 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
             tb.add("impl").stream(generic.clone());
             tb.add("LiveAnimate for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
             tb.add("    fn init_animator(&mut self, cx: &mut Cx) {");
-            for def in &kv{
+            for def in &kv {
                 tb.add("    self.animator.cut_to_live(cx,self.").ident(def).add(".unwrap());");
             }
-            tb.add("    }");            
-
+            tb.add("    }");
+            
             tb.add("    fn animate_to(&mut self, cx: &mut Cx, state: LivePtr) {");
             tb.add("        if self.animator.state.is_none() {");
             tb.add("            self.init_animator(cx);");
             tb.add("         }");
             tb.add("         self.animator.animate_to_live(cx, state);");
             tb.add("    }");
-
+            
             tb.add("    fn apply_animator(&mut self, cx: &mut Cx) {");
             tb.add("        let state = self.animator.swap_out_state();");
             tb.add("        self.apply(cx, ApplyFrom::Animate, state.child_by_name(0,id!(state)).unwrap(), &state);");
             tb.add("        self.animator.swap_in_state(state);");
             tb.add("    }");
-
-
+            
+            
             tb.add("    fn animate_cut(&mut self, cx: &mut Cx, state: LivePtr) {");
             tb.add("        if self.animator.state.is_none() {");
             tb.add("            self.init_animator(cx);");
@@ -167,11 +167,11 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
             tb.add("         self.animator.cut_to_live(cx, state);");
             tb.add("         self.apply_animator(cx);");
             tb.add("    }");
-
-
+            
+            
             tb.add("    fn animator_is_in_state(&mut self, cx: &mut Cx, state: LivePtr)->bool{");
             tb.add("        if self.animator.state.is_none() {");
-            for def in &kv{ 
+            for def in &kv {
                 tb.add("         if state == self.").ident(def).add(".unwrap(){ return true }");
             }
             tb.add("             return false");
@@ -180,8 +180,8 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
             tb.add("             return self.animator.is_in_state(cx, state)");
             tb.add("         }");
             tb.add("    }");
-
-
+            
+            
             tb.add("    fn animator_handle_event(&mut self, cx: &mut Cx, event: &mut Event)->bool{");
             tb.add("        if let AnimatorAction::Animating{redraw} = self.animator.handle_event(cx, event) {");
             tb.add("            self.apply_animator(cx);");
@@ -201,8 +201,6 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
                 return error_result("Any struct with draw_vars needs to be repr(c)")
             }
         }
-        
-       
         
         if let Some(deref_target) = deref_target {
             tb.add("impl").stream(generic.clone());
@@ -271,10 +269,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         tb.add("impl").stream(generic.clone());
         tb.add("LiveApply for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
         
-        //tb.add("    fn type_id(&self)->std::any::TypeId{ std::any::TypeId::of::<Self>() }");
-        
         tb.add("    fn apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, start_index: usize, nodes: &[LiveNode])->usize {");
-        //tb.add("    cx.profile_start(start_index as u64);");
         
         tb.add("        self.before_apply(cx, apply_from, start_index, nodes);");
         if draw_vars.is_some() {
@@ -309,7 +304,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         
         if let Some(_) = animator { // apply the default states
             tb.add("    if let Some(file_id) = apply_from.file_id() {");
-            for def in &animator_kv.unwrap(){
+            for def in &animator_kv.unwrap() {
                 tb.add("    if let Some(index) = nodes.child_by_path(start_index, &[LiveId(").suf_u64(LiveId::from_str(def).unwrap().0).add("),id!(apply)]) {");
                 tb.add("       self.apply(cx, ApplyFrom::Animate, index, nodes);");
                 tb.add("    }");
@@ -318,8 +313,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         }
         
         tb.add("        self.after_apply(cx, apply_from, start_index, nodes);");
-
-        //tb.add("    cx.profile_end(start_index as u64);");
+        
         tb.add("        return index;");
         tb.add("    }");
         tb.add("}");
@@ -327,7 +321,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         tb.add("impl").stream(generic.clone());
         tb.add("LiveNew for").ident(&struct_name).stream(generic).stream(where_clause).add("{");
         
-        tb.add("    fn live_type_info() -> LiveTypeInfo {");
+        tb.add("    fn live_type_info(cx:&mut Cx) -> LiveTypeInfo {");
         tb.add("        let mut fields = Vec::new();");
         
         for field in &fields {
@@ -341,11 +335,11 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
                         if attr.name != "live" {
                             return error_result("For option type only use of live is supported")
                         }
-                        tb.add("live_type_info:").stream(Some(inside)).add("::live_type_info(),");
+                        tb.add("live_type_info:").stream(Some(inside)).add("::live_type_info(cx),");
                         tb.add("live_field_kind: LiveFieldKind::LiveOption");
                     }
                     Err(not_option) => {
-                        tb.add("live_type_info:").stream(Some(not_option)).add("::live_type_info(),");
+                        tb.add("live_type_info:").stream(Some(not_option)).add("::live_type_info(cx),");
                         if attr.name == "live" {
                             tb.add("live_field_kind: LiveFieldKind::Live");
                         }
@@ -361,49 +355,33 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         tb.add("            module_id: LiveModuleId::from_str(&module_path!()).unwrap(),");
         tb.add("            live_type: LiveType::of::<Self>(),");
         tb.add("            fields,");
-        // we have to decide Class or Object
-        /*
-        let live_type_kind = if main_attribs.len()>0 {
-            if main_attribs[0].name == "live_type_kind" {
-                main_attribs[0].args.clone()
-            }
-            else {None}
-        }else {None};*/
-        /*
-        if let Some(live_type_kind) = live_type_kind {
-            tb.add("            kind: LiveTypeKind::").stream(Some(live_type_kind)).add(",");
-        }
-        else {
-            tb.add("            kind: LiveTypeKind::Class,");
-        }*/
         
         tb.add("            type_name: LiveId::from_str(").string(&struct_name).add(").unwrap()");
         tb.add("        }");
         tb.add("    }");
         
-        tb.add("    fn register_factories(cx: &mut Cx) {");
-        //tb.add("        struct Factory();");
-        /*
-        let kv = if let Some(attr) = animator.attrs.iter().find( | attr | attr.name == "default_state") {
-        if let Some(args) = &attr.args {
-            let mut parser = TokenParser::new(args.clone());
-            // ok its key:value comma
-            let mut kv = Vec::new();
-            while !parser.eat_eot() {
-                let def = parser.expect_any_ident()?;
-                parser.eat_punct_alone(',');
-                kv.push(def);
-            }
-            kv
-        }*/
-        /*
-        tb.add("        impl LiveFactory for Factory {");
-        tb.add("            fn new_component(&self, cx: &mut Cx) -> Box<dyn LiveApply> {");
-        tb.add("                Box::new(").ident(&struct_name).add(" ::new(cx))");
-        tb.add("            }");
-        tb.add("        }");
+        tb.add("    fn live_register(cx: &mut Cx) {");
         
-        tb.add("        cx.register_factory(").ident(&struct_name).add("::live_type(), Box::new(Factory()));");*/
+        // generate frame component factory
+        if let Some(attr) = main_attribs.iter().find(|attr| attr.name == "register_as_frame_component"){
+            tb.add("{");
+            tb.add("    struct Factory();");
+            tb.add("    impl FrameComponentFactory for Factory{");
+            tb.add("        fn new_from_factory(&self, cx:&mut Cx) -> Box<dyn FrameComponent>{");
+            tb.add("            Box::new(").ident(&struct_name).add("::new(cx))");
+            tb.add("        }");
+            tb.add("    }");
+            tb.add("    cx.registries.register_frame_component");
+            tb.add("    (LiveType::of::<Self>(), Box::new(Factory()),").stream(attr.args.clone()).add(");");
+            tb.add("}");
+        }
+        
+        for attr in main_attribs.iter().filter(|attr| attr.name == "live_register_hook"){
+            if attr.args.is_none(){
+                return error_result("live_register_hook needs an argument")
+            }
+            tb.stream(attr.args.clone()).add("(cx);");
+        }
         
         // we need this here for shader enums to register without hassle
         for field in &fields {
@@ -411,10 +389,10 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
             if attr.name == "live" || attr.name == "calc" {
                 match TokenParser::unwrap_option(field.ty.clone()) {
                     Ok(inside) => {
-                        tb.stream(Some(inside)).add("::register_factories(cx);");
+                        tb.stream(Some(inside)).add("::live_register(cx);");
                     }
                     Err(not_option) => {
-                        tb.stream(Some(not_option)).add("::register_factories(cx);");
+                        tb.stream(Some(not_option)).add("::live_register(cx);");
                     }
                 }
             }
@@ -427,7 +405,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         for field in &fields {
             let attr = &field.attrs[0];
             tb.ident(&field.name).add(":");
-            if attr.args.is_none () || attr.args.as_ref().unwrap().is_empty() || field.name == "animator"{
+            if attr.args.is_none () || attr.args.as_ref().unwrap().is_empty() || field.name == "animator" {
                 if attr.name == "live" {
                     tb.add("LiveNew::new(cx)");
                 }
@@ -448,7 +426,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         Ok(())
     }
     else if parser.eat_ident("enum") {
-        let enum_name = parser.expect_any_ident()?;
+        let enum_name = parser.expect_any_ident() ?;
         let generic = parser.eat_generic();
         let where_clause = parser.eat_where_clause(None);
         
@@ -523,7 +501,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         tb.add("        ;ret.after_new(cx);ret");
         tb.add("    }");
         
-        tb.add("    fn live_type_info() -> LiveTypeInfo {");
+        tb.add("    fn live_type_info(cx:&mut Cx) -> LiveTypeInfo {");
         tb.add("        LiveTypeInfo{");
         tb.add("            module_id: LiveModuleId::from_str(&module_path!()).unwrap(),");
         tb.add("            live_type: LiveType::of::<Self>(),");
@@ -533,7 +511,8 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         tb.add("        }");
         tb.add("    }");
         
-        tb.add("    fn register_factories(cx: &mut Cx) {");
+        tb.add("    fn live_register(cx: &mut Cx) {");
+
         
         let is_u32_enum = main_attribs.iter().find( | attr | attr.name == "repr" && attr.args.as_ref().unwrap().to_string().to_lowercase() == "u32").is_some();
         if is_u32_enum {
@@ -695,7 +674,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         //tb.eprint();
         Ok(())
     }
-    else{
+    else {
         error_result("Not enum or struct")
     }
     
@@ -704,11 +683,11 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
 pub fn derive_live_impl(input: TokenStream) -> TokenStream {
     let mut parser = TokenParser::new(input);
     let mut tb = TokenBuilder::new();
-    if let Err(err) = parse_live_type(&mut parser, &mut tb){
+    if let Err(err) = parse_live_type(&mut parser, &mut tb) {
         return err
     }
-    else{
+    else {
         tb.end()
     }
-
+    
 }

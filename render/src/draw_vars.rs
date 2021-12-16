@@ -97,7 +97,7 @@ impl DrawVars {
         LiveType(std::any::TypeId::of::<DrawVars>())
     }*/
     
-    pub fn live_type_info() -> LiveTypeInfo {
+    pub fn live_type_info(_cx:&mut Cx) -> LiveTypeInfo {
         LiveTypeInfo {
             module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
             live_type: std::any::TypeId::of::<Self>(),
@@ -107,7 +107,7 @@ impl DrawVars {
         }
     }
     
-    pub fn register_factories(_cx: &mut Cx) {}
+    pub fn live_register(_cx: &mut Cx) {}
     
     pub fn as_slice<'a>(&'a self) -> &'a [f32] {
         unsafe {

@@ -53,7 +53,7 @@ macro_rules!live_primitive {
                 $ default
             }
             
-            fn live_type_info() -> LiveTypeInfo {
+            fn live_type_info(_cx:&mut Cx) -> LiveTypeInfo {
                 LiveTypeInfo {
                     module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
                     live_type: LiveType::of::<Self>(),

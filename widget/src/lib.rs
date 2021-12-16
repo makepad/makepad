@@ -8,6 +8,8 @@ mod scroll_bar;
 mod scroll_view;
 mod frame;
 mod window_menu;
+pub mod frame_template;
+pub mod empty_template;
 
 pub mod color_picker;
 pub mod dock;
@@ -26,11 +28,10 @@ pub use crate::{
     desktop_window::{DesktopWindow}, 
     scroll_view::{ScrollView},
     scroll_shadow::{ScrollShadow},
-    frame::{Frame, FrameActions, CxRegistriesExt, FrameComponentNew, FrameComponent}
+    frame::{Frame, FrameActions, CxRegistriesExt, FrameComponent}
 };
 
 pub fn live_register(cx:&mut Cx){
-    crate::frame::add_frame_component_registry(cx);
     crate::frame::live_register(cx);
     crate::color_picker::live_register(cx);
     crate::scroll_shadow::live_register(cx);

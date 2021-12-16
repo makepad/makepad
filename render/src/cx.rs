@@ -297,9 +297,5 @@ impl CxRegistries{
     pub fn new()->Self{
         Self(Rc::new(RefCell::new(HashMap::new())))
     }
-    
-    pub fn add_registry(&self, type_id:TypeId, item:Box<dyn Any>){
-        self.0.borrow_mut().insert(type_id, item);
-    }
 }
 
