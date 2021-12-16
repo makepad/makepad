@@ -367,7 +367,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
             tb.add("{");
             tb.add("    struct Factory();");
             tb.add("    impl FrameComponentFactory for Factory{");
-            tb.add("        fn new_from_factory(&self, cx:&mut Cx) -> Box<dyn FrameComponent>{");
+            tb.add("        fn new_frame_component(&self, cx:&mut Cx) -> Box<dyn FrameComponent>{");
             tb.add("            Box::new(").ident(&struct_name).add("::new(cx))");
             tb.add("        }");
             tb.add("    }");

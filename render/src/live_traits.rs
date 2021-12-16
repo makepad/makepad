@@ -33,6 +33,7 @@ pub trait LiveNew: LiveApply {
         let live_registry_rc = cx.live_registry.clone();
         let live_registry = live_registry_rc.borrow();
         let doc = live_registry.ptr_to_doc(live_ptr);
+        
         let mut ret = Self::new(cx);
         let apply_from = ApplyFrom::NewFromDoc {file_id: live_ptr.file_id};
         let next_index = ret.apply(cx, apply_from, live_ptr.index as usize, &doc.nodes);

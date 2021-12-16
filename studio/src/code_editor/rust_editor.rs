@@ -1,12 +1,12 @@
 use {
-    //std::collections::{HashSet,HashMap,},
+    std::collections::{HashSet,HashMap,},
     crate::{
         editor_state::{
             EditorState,
             DocumentInner
         },
         code_editor::{
-            live_edit_widget::*,
+            live_widget::*,
             token::TokenKind,
             token_cache::TokenCache,
             edit_info_cache::EditInfoCache,
@@ -26,10 +26,23 @@ live_register!{
     
     RustEditor: {{RustEditor}} {
         color_picker: ColorPicker,
+        widget_layout:Layout {
+            align: Align {fx: 0., fy: 0.},
+            padding: Padding {l: 0, t: .0, r: 0, b: 0}
+        }
         editor_impl: {}
     }
 }
 pub trait LineEditor : std::any::Any {}
+
+#[derive(Copy,Clone,Hash,PartialEq,Eq)]
+pub struct WidgetIdent(LivePtr, LiveType);
+
+pub struct Widget{
+    start_y: f32,
+    height: f32,
+    live_widget: Box<dyn LiveWidget>
+}
 
 #[derive(Live, LiveHook)]
 pub struct RustEditor {
@@ -37,10 +50,14 @@ pub struct RustEditor {
     
     color_picker: Option<LivePtr>,
     
+    widget_layout: Layout,
+    
     #[rust] lines_layout: LinesLayout,
-//    #[rust] visible_editors: HashSet<LivePtr>,
-//    #[rust] gc_editors: HashSet<LivePtr>,
-//    #[rust] live_editors: HashMap<LivePtr, Box<dyn LiveEditWidget >>,
+
+    #[rust] widget_draw_order: Vec<(usize,WidgetIdent)>,
+    #[rust] visible_widgets: HashSet<WidgetIdent>,
+    #[rust] gc_widgets: HashSet<WidgetIdent>,
+    #[rust] widgets: HashMap<WidgetIdent, Widget>,
 }
 
 impl EditInfoCache {
@@ -51,13 +68,13 @@ impl EditInfoCache {
         }
         self.is_clean = true;
         
-        let lr_cp = cx.live_registry.clone();
-        let lr = lr_cp.borrow();
+        let live_registry_rc = cx.live_registry.clone();
+        let live_registry = live_registry_rc.borrow();
         
-        let file_id = LiveFileId(23);
+        let file_id = LiveFileId(10);
         
-        let live_file = &lr.live_files[file_id.to_index()];
-        let expanded = &lr.expanded[file_id.to_index()];
+        let live_file = &live_registry.live_files[file_id.to_index()];
+        let expanded = &live_registry.expanded[file_id.to_index()];
         
         if self.lines.len() != token_cache.len() {
             panic!();
@@ -78,9 +95,6 @@ impl EditInfoCache {
                         let match_token_id = makepad_live_compiler::TokenId::new(file_id, live_token_index);
                         if let Some(node_index) = expanded.nodes.first_node_with_token_id(match_token_id) {
                             let live_ptr = LivePtr {file_id, index: node_index as u32};
-                            
-                            //println!("FOUND TOKEN {:?}", expanded.nodes[node_index]);
-                            // and metadata to spawn up a UI element
                             
                             line_cache.live_ptrs.push((editor_token_index, live_ptr));
                         }
@@ -121,40 +135,32 @@ impl RustEditor {
             let live_registry_rc = cx.live_registry.clone();
             let live_registry = live_registry_rc.borrow();
             
-            //let mut live_editors = &mut self.live_editors;
-            //let mut visible_editors = &mut self.visible_editors;
-            //let color_picker = self.color_picker;
-            
+            let widgets = &mut self.widgets;
+            let visible_widgets = &mut self.visible_widgets;
+            visible_widgets.clear();
+            let widget_draw_order = &mut self.widget_draw_order;
+            widget_draw_order.clear();
             self.editor_impl.calc_lines_layout(cx, document_inner, &mut self.lines_layout, | cx, line_index, start_y, viewport_start, viewport_end | {
                 let edit_info = &edit_info_cache[line_index];
                 let mut max_height = 0.0f32;
                 for (_token_index, live_ptr) in &edit_info.live_ptrs {
                     let node = live_registry.ptr_to_node(*live_ptr);
-                    
-                    if let Some(matched) = cx.registries.match_live_edit_widget(&live_registry, node){
-                        
+                    if let Some(matched) = cx.registries.match_live_widget(&live_registry, node){
                         max_height = max_height.max(matched.height);
-                    }
-
-                    let height = match node.value {
-                        LiveValue::Color(_) => {
-                            100.0//ColorPicker::default_height()
-                        }
-                        _ => 0.0
-                    };
-                    
-                    if start_y + height > viewport_start && start_y < viewport_end {
-                        match node.value {
-                            LiveValue::Color(_) => {
-                                //visible_editors.insert(*live_ptr);
-                                //line_editors.entry(*live_ptr).or_insert_with( || {
-                                //    Box::new(ColorPicker::new_from_ptr(cx, color_picker.unwrap()))
-                                //});
-                            }
-                            _ => ()
+                        if start_y + matched.height > viewport_start && start_y < viewport_end {
+                            // lets spawn it
+                            let ident = WidgetIdent(*live_ptr, matched.live_type);
+                            widgets.entry(ident).or_insert_with(||{
+                                Widget{
+                                    live_widget:cx.registries.clone().new_live_widget(cx, matched.live_type).unwrap(),
+                                    start_y,
+                                    height:matched.height
+                                }
+                            });
+                            visible_widgets.insert(ident);
+                            widget_draw_order.push((line_index, ident));
                         }
                     }
-                    max_height = max_height.max(height);
                 }
                 return max_height
             });
@@ -179,8 +185,41 @@ impl RustEditor {
                 &self.lines_layout
             );
 
-            // ok so now what. we should draw the visible editors
-            // however 'where' do we draw them
+            self.gc_widgets.clear();
+            
+            let mut last_line = None;
+            let origin = cx.get_turtle_pos()+ vec2(self.editor_impl.line_num_width,0.0);
+            let size = cx.get_turtle_size() - vec2(self.editor_impl.line_num_width,0.0);
+            for (line,ident) in &self.widget_draw_order{
+                if Some(line) != last_line{ // start a new draw segment with the turtle
+                    if last_line.is_some(){
+                        cx.end_turtle();
+                    }
+                    // lets look at the line height
+                    let ll = &self.lines_layout.lines[*line];
+                    cx.begin_turtle(Layout{
+                        abs_origin: Some(vec2(origin.x, origin.y + ll.start_y + ll.text_height)),
+                        abs_size: Some(vec2(size.x, ll.widget_height)),
+                        ..self.widget_layout
+                    });
+                }
+                let widget = self.widgets.get_mut(ident).unwrap();
+                widget.live_widget.draw_widget(cx);
+                last_line = Some(line)
+            }
+            if last_line.is_some(){
+                cx.end_turtle();
+            }
+            
+            // clean up the mess
+            for (ident, widget) in &mut self.widgets{
+                if !self.visible_widgets.contains(ident){
+                    self.gc_widgets.insert(*ident);
+                }
+            }
+            for ident in &self.gc_widgets{
+                self.widgets.remove(ident);
+            }
             
             // alright great. now we can draw the text
             self.editor_impl.draw_text(
