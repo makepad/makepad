@@ -411,7 +411,7 @@ macro_rules!main_app {
             //TODO do this with a macro to generate both entrypoints for App and Cx
             let mut cx = Cx::default();
             cx.live_register();
-            $ app ::live_register(&mut cx);
+            //$ app ::live_register(&mut cx);
             live_register(&mut cx);
             cx.live_expand();
             let mut app = None;
@@ -433,7 +433,7 @@ macro_rules!main_app {
         pub extern "C" fn create_wasm_app() -> u32 {
             let mut cx = Box::new(Cx::default());
             cx.live_register();
-            $ app ::live_register(&mut cx);
+            //$ app ::live_register(&mut cx);
             live_register(&mut cx);
             cx.live_expand();
             Box::into_raw(Box::new((0, Box::into_raw(cx)/*, Box::into_raw(cxafterdraw)*/))) as u32

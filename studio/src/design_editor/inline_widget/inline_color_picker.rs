@@ -4,6 +4,11 @@ use {
     crate::{
         design_editor::{
             inline_widget::*
+        },
+        code_editor::{
+            position::Position,
+            text::Text,
+            size::Size
         }
     }
 };
@@ -20,7 +25,7 @@ fn register_factory(cx: &mut Cx) {
             Box::new(InlineColorPicker::new(cx))
         }
         
-        fn can_edit_value(&self, live_registry: &LiveRegistry, live_ptr:LivePtr) -> CanEdit {
+        fn can_edit_value(&self, live_registry: &LiveRegistry, live_ptr: LivePtr) -> CanEdit {
             let node = live_registry.ptr_to_node(live_ptr);
             if let LiveValue::Color(_) = &node.value {
                 return CanEdit::Yes(100.0)
@@ -36,25 +41,49 @@ fn register_factory(cx: &mut Cx) {
 }
 
 impl InlineWidget for InlineColorPicker {
-    fn handle_inline_event(&mut self, cx: &mut Cx, event: &mut Event, live_ptr:LivePtr) -> InlineWidgetAction {
+    fn handle_inline_event(
+        &mut self,
+        cx: &mut Cx,
+        event: &mut Event,
+        live_ptr: LivePtr,
+    ) -> InlineWidgetAction {
         
-        match self.color_picker.handle_event(cx, event){
-            ColorPickerAction::Change{rgba}=>{
-                // alright now what.
+        match self.color_picker.handle_event(cx, event) {
+            ColorPickerAction::Change {rgba} => {
+                let live_registry_rc = cx.live_registry.clone();
+                let live_registry = live_registry_rc.borrow();
                 
+                let mut s = String::new();
+                s.push_str("#x");
+                rgba.append_hex_to_string(&mut s);
+                
+                // alright we are going to fetch some tokens.
+                let node = live_registry.ptr_to_node(live_ptr);
+                let token_id = node.origin.token_id().unwrap();
+                let doc = live_registry.token_id_to_origin_doc(token_id);
+                let token = doc.tokens[token_id.token_index() + 2];
+                
+                let start_pos = Position::from(token.span.start);
+                let end_pos = Position::from(token.span.end);
+                
+                return InlineWidgetAction::ReplaceText{
+                    position: start_pos,
+                    size: end_pos - start_pos,
+                    text: Text::from(s)
+                }
             }
-            _=>()
+            _ => ()
         }
         InlineWidgetAction::None
     }
     
-    fn draw_inline(&mut self, cx: &mut Cx, live_registry:&LiveRegistry, live_ptr:LivePtr) {
+    fn draw_inline(&mut self, cx: &mut Cx, live_registry: &LiveRegistry, live_ptr: LivePtr) {
         let node = live_registry.ptr_to_node(live_ptr);
         // alright so
         let color = if let LiveValue::Color(c) = &node.value {
             Vec4::from_u32(*c)
         }
-        else{
+        else {
             Vec4::default()
         };
         self.color_picker.size = 100.0;

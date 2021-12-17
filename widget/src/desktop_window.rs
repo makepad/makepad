@@ -245,14 +245,23 @@ impl DesktopWindow {
         }
         cx.turtle_new_line();
         
-        self.inner_view.begin(cx).unwrap();
-        Ok(())
+        if self.inner_view.begin(cx).is_ok(){
+            return Ok(())
+        }
+        self.end_inner(cx, true);
+        Err(())
+    }
+
+    pub fn end(&mut self, cx: &mut Cx) {
+        self.end_inner(cx, false);
     }
     
-    pub fn end(&mut self, cx: &mut Cx) {
-        self.inner_view.end(cx);
+    fn end_inner(&mut self, cx: &mut Cx, no_inner:bool) {
+        if !no_inner{
+            self.inner_view.end(cx);
+        }
         // lets draw a VR button top right over the UI.
-        // window fullscreen?
+        // window fullscreen? 
         
         // only support fullscreen on web atm
         if !cx.platform_type.is_desktop() && !self.window.is_fullscreen(cx) {
