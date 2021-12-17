@@ -16,20 +16,19 @@ live_register!{
 fn register_factory(cx: &mut Cx) {
     struct Factory();
     impl LiveWidgetFactory for Factory {
-        fn new_live_widget(&self, cx: &mut Cx) -> Box<dyn LiveWidget> {
+        fn new(&self, cx: &mut Cx) -> Box<dyn LiveWidget> {
             Box::new(LiveColorPicker::new(cx))
         }
         
         fn can_edit_value(&self, _live_registry: &LiveRegistry, node: &LiveNode) -> CanEdit {
-            if let LiveValue::Color(_) = &node.value{
+            if let LiveValue::Color(_) = &node.value {
                 return CanEdit::Yes(100.0)
             }
             CanEdit::No
         }
     }
-    let live_type_info = LiveColorPicker::live_type_info(cx);
-    cx.registries.get_or_create::<CxLiveWidgetRegistry>().register_live_widget(
-        live_type_info,
+    cx.registries.clone().get_or_create::<CxLiveWidgetRegistry>().register(
+        LiveColorPicker::live_type_info(cx),
         Box::new(Factory()),
         LiveId::from_str("color_picker").unwrap(),
     )
