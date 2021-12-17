@@ -321,27 +321,12 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         tb.add("    }");
         
         tb.add("    fn live_register(cx: &mut Cx) {");
-        
-        // generate frame component factory
-        if let Some(attr) = main_attribs.iter().find(|attr| attr.name == "register_as_frame_component"){
-            tb.add("{");
-            tb.add("    struct Factory();");
-            tb.add("    impl FrameComponentFactory for Factory{");
-            tb.add("        fn new_frame_component(&self, cx:&mut Cx) -> Box<dyn FrameComponent>{");
-            tb.add("            Box::new(").ident(&struct_name).add("::new(cx))");
-            tb.add("        }");
-            tb.add("    }");
-            tb.add("    cx.registries.get_or_create::<CxFrameComponentRegistry>()");
-            tb.add("    .register_frame_component");
-            tb.add("    (LiveType::of::<Self>(), Box::new(Factory()),").stream(attr.args.clone()).add(");");
-            tb.add("}");
-        }
-        
+
         for attr in main_attribs.iter().filter(|attr| attr.name == "live_register_hook"){
             if attr.args.is_none(){
                 return error_result("live_register_hook needs an argument")
             }
-            tb.stream(attr.args.clone()).add("(cx);");
+            tb.add("(").stream(attr.args.clone()).add(")(cx);");
         }
         
         // we need this here for shader enums to register without hassle

@@ -1,35 +1,10 @@
 use makepad_render::*;
+use crate::frame_registry::*;
 use std::collections::HashMap;
-use std::any::TypeId;
 
 live_register!{
     Frame: {{Frame}} {
     }
-}
-
-pub trait FrameComponentFactory {
-    fn new_frame_component(&self, cx: &mut Cx) -> Box<dyn FrameComponent>;
-}
-
-pub trait FrameComponent: LiveApply {
-    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event) -> Option<Box<dyn FrameComponentAction >>;
-    fn draw_component(&mut self, cx: &mut Cx);
-    fn apply_draw(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
-        self.apply_over(cx, nodes);
-        self.draw_component(cx);
-    }
-}
-
-#[derive(Clone)]
-pub struct FrameActionItem {
-    pub id: LiveId,
-    pub action: Box<dyn FrameComponentAction>
-}
-
-#[derive(Clone, IntoFrameComponentAction)]
-pub enum FrameActions {
-    None,
-    Actions(Vec<FrameActionItem>)
 }
 
 pub struct Frame { // draw info per UI element
@@ -41,9 +16,7 @@ pub struct Frame { // draw info per UI element
     pub create_order: Vec<LiveId>
 }
 
-
 impl LiveHook for Frame {}
-
 impl LiveNew for Frame {
     fn new(_cx: &mut Cx) -> Self {
         Self {
@@ -57,14 +30,7 @@ impl LiveNew for Frame {
     }
     
     fn live_register(cx: &mut Cx) {
-        struct Factory();
-        impl FrameComponentFactory for Factory {
-            fn new_frame_component(&self, cx: &mut Cx) -> Box<dyn FrameComponent> {
-                Box::new(Frame::new(cx))
-            }
-        }
-        cx.registries.get_or_create::<CxFrameComponentRegistry>()
-        .register_frame_component(LiveType::of::<Self>(), Box::new(Factory()));
+        register_as_frame_component!(Frame, cx);
     }
     
     fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo where Self: Sized + 'static {
@@ -76,7 +42,6 @@ impl LiveNew for Frame {
             // kind: LiveTypeKind::Class
         }
     }
-    
 }
 
 impl LiveApply for Frame {
@@ -185,10 +150,20 @@ impl LiveApply for Frame {
     }
 }
 
+impl FrameComponent for Frame {
+    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event) -> OptionFrameComponentAction {
+        self.handle_event(cx, event).into()
+    }
+    
+    fn draw_component(&mut self, cx: &mut Cx) {
+        self.draw(cx);
+    }
+}
+
 impl Frame {
     
     fn new_component(&mut self, cx: &mut Cx, apply_from: ApplyFrom, id: LiveId, live_type: LiveType, index: usize, nodes: &[LiveNode]) {
-        if let Some(mut component) = cx.registries.clone().get::<CxFrameComponentRegistry>().new_frame_component(cx, live_type) {
+        if let Some(mut component) = cx.registries.clone().get::<CxFrameComponentRegistry>().new(cx, live_type) {
             component.apply(cx, apply_from, index, nodes);
             self.components.insert(id, component);
         }
@@ -225,116 +200,3 @@ impl Frame {
         }
     }
 }
-
-impl Default for FrameActions {
-    fn default() -> Self {Self::None}
-}
-
-pub struct FrameActionsIterator {
-    iter: Option<std::vec::IntoIter<FrameActionItem >>
-}
-
-impl Iterator for FrameActionsIterator {
-    type Item = FrameActionItem;
-    fn next(&mut self) -> Option<Self::Item> {
-        if let Some(iter) = self.iter.as_mut() {
-            return iter.next()
-        }
-        else {
-            None
-        }
-    }
-}
-
-// and we'll implement IntoIterator
-impl IntoIterator for FrameActions {
-    type Item = FrameActionItem;
-    type IntoIter = FrameActionsIterator;
-    
-    fn into_iter(self) -> Self::IntoIter {
-        match self {
-            Self::None => FrameActionsIterator {iter: None},
-            Self::Actions(actions) => FrameActionsIterator {iter: Some(actions.into_iter())},
-        }
-    }
-}
-
-pub trait FrameComponentAction: 'static {
-    fn type_id(&self) -> TypeId;
-    fn box_clone(&self) -> Box<dyn FrameComponentAction>;
-}
-
-impl<T: 'static + ? Sized + Clone> FrameComponentAction for T {
-    fn type_id(&self) -> TypeId {
-        TypeId::of::<T>()
-    }
-    
-    fn box_clone(&self) -> Box<dyn FrameComponentAction> {
-        Box::new((*self).clone())
-    }
-}
-
-impl dyn FrameComponentAction {
-    pub fn is<T: FrameComponentAction >(&self) -> bool {
-        let t = TypeId::of::<T>();
-        let concrete = self.type_id();
-        t == concrete
-    }
-    pub fn cast<T: FrameComponentAction + Default + Clone>(&self) -> T {
-        if self.is::<T>() {
-            unsafe {&*(self as *const dyn FrameComponentAction as *const T)}.clone()
-        } else {
-            T::default()
-        }
-    }
-    
-    pub fn cast_id<T: FrameComponentAction + Default + Clone>(&self, id: LiveId) -> (LiveId, T) {
-        if self.is::<T>() {
-            (id, unsafe {&*(self as *const dyn FrameComponentAction as *const T)}.clone())
-        } else {
-            (id, T::default())
-        }
-    }
-}
-
-pub type OptionFrameComponentAction = Option<Box<dyn FrameComponentAction >>;
-
-impl Clone for Box<dyn FrameComponentAction> {
-    fn clone(&self) -> Box<dyn FrameComponentAction> {
-        self.as_ref().box_clone()
-    }
-}
-
-impl FrameComponent for Frame {
-    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event) -> OptionFrameComponentAction {
-        self.handle_event(cx, event).into()
-    }
-    
-    fn draw_component(&mut self, cx: &mut Cx) {
-        self.draw(cx);
-    }
-}
-
-pub struct CxFrameComponentRegistry {
-    factories: HashMap<TypeId, Box<dyn FrameComponentFactory >>
-}
-
-impl CxRegistryNew for CxFrameComponentRegistry{
-    fn new() -> Self {
-        Self {
-            factories: HashMap::new()
-        }
-    }
-}
-
-impl CxFrameComponentRegistry {
-    pub fn register_frame_component(&mut self, live_type: LiveType, component: Box<dyn FrameComponentFactory>) {
-        self.factories.insert(live_type, component);
-    }
-    
-    pub fn new_frame_component(&self, cx: &mut Cx, live_type: LiveType) -> Option<Box<dyn FrameComponent >> {
-        self.factories.get(&live_type)
-            .and_then( | cnew | Some(cnew.new_frame_component(cx)))
-    }
-}
-
