@@ -7,7 +7,7 @@ use crate::register_as_frame_component;
 live_register!{
     use makepad_render::shader::std::*;
     
-    color: #fff,
+    color: #xff00ff,
     
     Button: {{Button}} {
         bg_quad: {

@@ -4,7 +4,6 @@ pub mod cursor;
 pub mod cursor_set;
 pub mod delta;
 pub mod indent_cache;
-pub mod edit_info_cache;
 pub mod position;
 pub mod position_set;
 pub mod protocol;
