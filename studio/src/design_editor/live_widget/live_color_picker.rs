@@ -2,7 +2,7 @@ use {
     makepad_render::*,
     makepad_widget::color_picker::*,
     crate::{
-        code_editor::{
+        design_editor::{
             live_widget::*
         }
     }
@@ -28,7 +28,7 @@ fn register_factory(cx: &mut Cx) {
         }
     }
     let live_type_info = LiveColorPicker::live_type_info(cx);
-    cx.registries.register_live_widget(
+    cx.registries.get_or_create::<CxLiveWidgetRegistry>().register_live_widget(
         live_type_info,
         Box::new(Factory()),
         LiveId::from_str("color_picker").unwrap(),

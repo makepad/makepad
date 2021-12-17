@@ -28,7 +28,7 @@ pub use crate::{
     desktop_window::{DesktopWindow}, 
     scroll_view::{ScrollView},
     scroll_shadow::{ScrollShadow},
-    frame::{Frame, FrameActions, CxRegistriesExt, FrameComponent}
+    frame::{Frame, FrameActions, CxFrameComponentRegistry, FrameComponent}
 };
 
 pub fn live_register(cx:&mut Cx){
