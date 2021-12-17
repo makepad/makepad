@@ -140,21 +140,27 @@ impl LiveEditor {
             
             let widget_draw_order = &mut self.widget_draw_order;
             widget_draw_order.clear();
+            
             let registries = cx.registries.clone();
-            let registry = registries.get::<CxLiveWidgetRegistry>();
+            let widget_registry = registries.get::<CxLiveWidgetRegistry>();
+            
             self.editor_impl.calc_lines_layout(cx, document_inner, &mut self.lines_layout, | cx, line_index, start_y, viewport_start, viewport_end | {
+
                 let edit_info = &edit_info_cache[line_index];
                 let mut max_height = 0.0f32;
+
                 for (_token_index, live_ptr) in &edit_info.live_ptrs {
                     let node = live_registry.ptr_to_node(*live_ptr);
-                    if let Some(matched) = registry.match_live_widget(&live_registry, node) {
+
+                    if let Some(matched) = widget_registry.match_live_widget(&live_registry, node) {
                         max_height = max_height.max(matched.height);
+
                         if start_y + matched.height > viewport_start && start_y < viewport_end {
                             // lets spawn it
                             let ident = WidgetIdent(*live_ptr, matched.live_type);
                             widgets.entry(ident).or_insert_with( || {
                                 Widget {
-                                    live_widget: registry.new_live_widget(cx, matched.live_type).unwrap(),
+                                    live_widget: widget_registry.new(cx, matched.live_type).unwrap(),
                                 }
                             });
                             visible_widgets.insert(ident);

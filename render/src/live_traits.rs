@@ -10,6 +10,22 @@ pub use {
     }
 };
 
+pub trait LiveNewHelper{
+    
+}
+
+pub fn new_from_ptr_impl<CB>(cx:&mut Cx, live_ptr: LivePtr, cb:CB)
+where CB: FnOnce(&mut Cx, ApplyFrom, usize, &[LiveNode])->usize{
+    let live_registry_rc = cx.live_registry.clone();
+    let live_registry = live_registry_rc.borrow();
+    let doc = live_registry.ptr_to_doc(live_ptr);
+    let apply_from = ApplyFrom::NewFromDoc {file_id: live_ptr.file_id};
+    let next_index = cb(cx, apply_from, live_ptr.index as usize, &doc.nodes);
+    if next_index <= live_ptr.index as usize + 2 {
+        cx.apply_error_empty_object(live_error_origin!(), apply_from, live_ptr.index as usize, &doc.nodes);
+    }
+}
+
 pub trait LiveNew: LiveApply {
     fn new(cx: &mut Cx) -> Self;
     
