@@ -211,9 +211,8 @@ impl LiveEditor {
             }
             if last_line.is_some() {
                 cx.end_turtle();
+
             }
-            // clean up the mess
-            
             
             // alright great. now we can draw the text
             self.editor_impl.draw_text(
@@ -225,7 +224,6 @@ impl LiveEditor {
             
             self.editor_impl.draw_current_line(cx, &self.lines_layout, session.cursors.last());
             self.editor_impl.draw_linenums(cx, &self.lines_layout, session.cursors.last());
-            
             
             self.editor_impl.end(cx, &self.lines_layout);
         }
