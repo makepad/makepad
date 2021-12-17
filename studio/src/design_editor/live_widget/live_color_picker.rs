@@ -47,7 +47,7 @@ impl LiveWidget for LiveColorPicker {
 }
 
 #[derive(Live, LiveHook)]
-#[live_register_hook(register_factory)]
+#[live_register(register_factory)]
 pub struct LiveColorPicker {
     color_picker: ColorPicker
 }
