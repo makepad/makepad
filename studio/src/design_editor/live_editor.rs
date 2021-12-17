@@ -40,6 +40,7 @@ live_register!{
 pub struct WidgetIdent(LivePtr, LiveType);
 
 pub struct Widget {
+    live_ptr: LivePtr,
     inline_widget: Box<dyn InlineWidget>
 }
 
@@ -118,60 +119,92 @@ impl LiveEditor {
         self.editor_impl.redraw(cx);
     }
     
-    pub fn draw_line_editors(&mut self, _cx: &mut Cx, _document_inner: &DocumentInner) {
-        // alrigth so now what.
-        // we have to go draw our line editors
+    pub fn draw_widgets(&mut self, cx: &mut Cx) {
+        let live_registry_rc = cx.live_registry.clone();
+        let live_registry = live_registry_rc.borrow();
+
+        let mut last_line = None;
+        
+        let line_num_geom = vec2(self.editor_impl.line_num_width, 0.0);
+        let origin = cx.get_turtle_pos() + line_num_geom;
+        let size = cx.get_turtle_size() - line_num_geom;
+        
+        for (line, ident) in &self.widget_draw_order {
+            if Some(line) != last_line { // start a new draw segment with the turtle
+                if last_line.is_some() {
+                    cx.end_turtle();
+                }
+                // lets look at the line height
+                let ll = &self.lines_layout.lines[*line];
+                cx.begin_turtle(Layout {
+                    abs_origin: Some(vec2(origin.x, origin.y + ll.start_y + ll.text_height)),
+                    abs_size: Some(vec2(size.x, ll.widget_height)),
+                    ..self.widget_layout
+                });
+            }
+            let widget = self.widgets.get_mut(ident).unwrap();
+
+            widget.inline_widget.draw_inline(cx, &live_registry, widget.live_ptr);
+
+            last_line = Some(line)
+        }
+        if last_line.is_some() {
+            cx.end_turtle();
+        }
+    }
+    
+    pub fn calc_layout_with_widgets(&mut self, cx:&mut Cx, document_inner:&DocumentInner){
+        let mut edit_info_cache = document_inner.edit_info_cache.borrow_mut();
+        edit_info_cache.refresh(&document_inner.token_cache, cx);
+            
+        // first we generate the layout structure
+        let live_registry_rc = cx.live_registry.clone();
+        let live_registry = live_registry_rc.borrow();
+        
+        let widgets = &mut self.widgets;
+        
+        let visible_widgets = &mut self.visible_widgets;
+        visible_widgets.clear();
+        
+        let widget_draw_order = &mut self.widget_draw_order;
+        widget_draw_order.clear();
+        
+        let registries = cx.registries.clone();
+        let widget_registry = registries.get::<CxInlineWidgetRegistry>();
+        
+        self.editor_impl.calc_lines_layout(cx, document_inner, &mut self.lines_layout, | cx, line_index, start_y, viewport_start, viewport_end | {
+
+            let edit_info = &edit_info_cache[line_index];
+            let mut max_height = 0.0f32;
+
+            for (_token_index, live_ptr) in &edit_info.live_ptrs {
+                if let Some(matched) = widget_registry.match_inline_widget(&live_registry, *live_ptr) {
+                    max_height = max_height.max(matched.height);
+
+                    if start_y + matched.height > viewport_start && start_y < viewport_end {
+                        // lets spawn it
+                        let ident = WidgetIdent(*live_ptr, matched.live_type);
+                        widgets.entry(ident).or_insert_with( || {
+                            Widget {
+                                live_ptr: *live_ptr,
+                                inline_widget: widget_registry.new(cx, matched.live_type).unwrap(),
+                            }
+                        });
+                        visible_widgets.insert(ident);
+                        widget_draw_order.push((line_index, ident));
+                    }
+                }
+            }
+            return max_height
+        });
+        
+        widgets.retain( | ident, _ | visible_widgets.contains(ident));
     }
     
     pub fn draw(&mut self, cx: &mut Cx, state: &EditorState) {
         if let Ok((document_inner, session)) = self.editor_impl.begin(cx, state) {
             
-            let mut edit_info_cache = document_inner.edit_info_cache.borrow_mut();
-            edit_info_cache.refresh(&document_inner.token_cache, cx);
-            
-            // first we generate the layout structure
-            let live_registry_rc = cx.live_registry.clone();
-            let live_registry = live_registry_rc.borrow();
-            
-            let widgets = &mut self.widgets;
-            
-            let visible_widgets = &mut self.visible_widgets;
-            visible_widgets.clear();
-            
-            let widget_draw_order = &mut self.widget_draw_order;
-            widget_draw_order.clear();
-            
-            let registries = cx.registries.clone();
-            let widget_registry = registries.get::<CxInlineWidgetRegistry>();
-            
-            self.editor_impl.calc_lines_layout(cx, document_inner, &mut self.lines_layout, | cx, line_index, start_y, viewport_start, viewport_end | {
-
-                let edit_info = &edit_info_cache[line_index];
-                let mut max_height = 0.0f32;
-
-                for (_token_index, live_ptr) in &edit_info.live_ptrs {
-                    let node = live_registry.ptr_to_node(*live_ptr);
-
-                    if let Some(matched) = widget_registry.match_inline_widget(&live_registry, node) {
-                        max_height = max_height.max(matched.height);
-
-                        if start_y + matched.height > viewport_start && start_y < viewport_end {
-                            // lets spawn it
-                            let ident = WidgetIdent(*live_ptr, matched.live_type);
-                            widgets.entry(ident).or_insert_with( || {
-                                Widget {
-                                    inline_widget: widget_registry.new(cx, matched.live_type).unwrap(),
-                                }
-                            });
-                            visible_widgets.insert(ident);
-                            widget_draw_order.push((line_index, ident));
-                        }
-                    }
-                }
-                return max_height
-            });
-            
-            widgets.retain( | ident, _ | visible_widgets.contains(ident));
+            self.calc_layout_with_widgets(cx, document_inner);
             
             self.editor_impl.draw_selections(
                 cx,
@@ -193,33 +226,8 @@ impl LiveEditor {
                 &self.lines_layout
             );
             
-            let mut last_line = None;
-            
-            let line_num_geom = vec2(self.editor_impl.line_num_width, 0.0);
-            let origin = cx.get_turtle_pos() + line_num_geom;
-            let size = cx.get_turtle_size() - line_num_geom;
-            for (line, ident) in &self.widget_draw_order {
-                if Some(line) != last_line { // start a new draw segment with the turtle
-                    if last_line.is_some() {
-                        cx.end_turtle();
-                    }
-                    // lets look at the line height
-                    let ll = &self.lines_layout.lines[*line];
-                    cx.begin_turtle(Layout {
-                        abs_origin: Some(vec2(origin.x, origin.y + ll.start_y + ll.text_height)),
-                        abs_size: Some(vec2(size.x, ll.widget_height)),
-                        ..self.widget_layout
-                    });
-                }
-                let widget = self.widgets.get_mut(ident).unwrap();
-                widget.inline_widget.draw_inline(cx);
-                last_line = Some(line)
-            }
-            if last_line.is_some() {
-                cx.end_turtle();
+            self.draw_widgets(cx);
 
-            }
-            
             // alright great. now we can draw the text
             self.editor_impl.draw_text(
                 cx,
@@ -235,6 +243,7 @@ impl LiveEditor {
         }
     }
     
+    
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
@@ -244,8 +253,9 @@ impl LiveEditor {
         dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
     ) {
         for widget in self.widgets.values_mut(){
-            widget.inline_widget.handle_inline_event(cx, event);
+            widget.inline_widget.handle_inline_event(cx, event, widget.live_ptr);
         }
+
         self.editor_impl.handle_event(cx, state, event, &self.lines_layout, send_request, dispatch_action);
     }
 }
