@@ -6,45 +6,47 @@ use {
             SessionId,
         },
         code_editor::{
-            rust_editor::{
-                RustEditor
-            },
             code_editor_impl::{
                 CodeEditorAction
             },
             protocol::{Notification, Request, Response},
         },
+        design_editor::{
+            live_editor::{
+                LiveEditor
+            },
+        }
     },
     makepad_widget::{GenId, GenIdMap, GenIdAllocator},
     makepad_render::*,
 };
 
 enum EditorView {
-    RustEditor(RustEditor)
+    LiveEditor(LiveEditor)
 }
 
 impl EditorView {
     pub fn redraw(&self, cx: &mut Cx) {
         match self {
-            Self::RustEditor(e) => e.redraw(cx)
+            Self::LiveEditor(e) => e.redraw(cx)
         }
     }
 
     pub fn set_session_id(&mut self, session_id:Option<SessionId>) {
         match self {
-            Self::RustEditor(e) => e.set_session_id(session_id)
+            Self::LiveEditor(e) => e.set_session_id(session_id)
         }
     }
     
     pub fn session_id(&self)->Option<SessionId> {
         match self {
-            Self::RustEditor(e) => e.session_id()
+            Self::LiveEditor(e) => e.session_id()
         }
     }
     
     pub fn draw(&mut self, cx: &mut Cx, state: &EditorState) {
         match self {
-            Self::RustEditor(e) => e.draw(cx, state)
+            Self::LiveEditor(e) => e.draw(cx, state)
         }
     }
     
@@ -57,16 +59,16 @@ impl EditorView {
         dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
     ) {
         match self {
-            Self::RustEditor(e) => e.handle_event(cx, state, event, send_request, dispatch_action)
+            Self::LiveEditor(e) => e.handle_event(cx, state, event, send_request, dispatch_action)
         }
     }
 }
 
 live_register!{
-    use crate::code_editor::rust_editor::RustEditor;
+    use crate::design_editor::live_editor::LiveEditor;
     
     Editors: {{Editors}} {
-        rust_editor: RustEditor {},
+        live_editor: LiveEditor {},
     }
 }
 
@@ -75,7 +77,7 @@ pub struct Editors {
     #[rust] view_id_allocator: GenIdAllocator,
     #[rust] views_by_view_id: GenIdMap<EditorViewId, EditorView>,
     
-    rust_editor: Option<LivePtr>,
+    live_editor: Option<LivePtr>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -103,7 +105,7 @@ impl Editors {
         let view_id = EditorViewId(self.view_id_allocator.allocate());
 
         // TODO branch here on filetype somehow.
-        let mut view = EditorView::RustEditor(RustEditor::new_from_ptr(cx, self.rust_editor.unwrap()));
+        let mut view = EditorView::LiveEditor(LiveEditor::new_from_ptr(cx, self.live_editor.unwrap()));
 
         view.set_session_id(session_id);
         self.views_by_view_id.insert(

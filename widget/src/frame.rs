@@ -35,7 +35,7 @@ pub enum FrameActions {
 pub struct Frame { // draw info per UI element
     pub view: Option<View>,
     pub live_ptr: Option<LivePtr>,
-    pub components: HashMap<LiveId, Box<dyn FrameComponent>>,
+    pub components: HashMap<LiveId, Box<dyn FrameComponent >>,
     pub has_children_array: bool,
     pub children: Vec<LiveId>,
     pub create_order: Vec<LiveId>
@@ -59,14 +59,15 @@ impl LiveNew for Frame {
     fn live_register(cx: &mut Cx) {
         struct Factory();
         impl FrameComponentFactory for Factory {
-            fn new_frame_component(&self, cx: &mut Cx) -> Box<dyn FrameComponent>{
+            fn new_frame_component(&self, cx: &mut Cx) -> Box<dyn FrameComponent> {
                 Box::new(Frame::new(cx))
             }
         }
-        cx.registries.register_frame_component(LiveType::of::<Self>(),Box::new(Factory()));
+        cx.registries.get_or_create::<CxFrameComponentRegistry>()
+        .register_frame_component(LiveType::of::<Self>(), Box::new(Factory()));
     }
     
-    fn live_type_info(_cx:&mut Cx) -> LiveTypeInfo where Self: Sized + 'static {
+    fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo where Self: Sized + 'static {
         LiveTypeInfo {
             module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
             live_type: LiveType::of::<Self>(),
@@ -89,10 +90,10 @@ impl LiveApply for Frame {
             cx.apply_error_wrong_type_for_struct(live_error_origin!(), apply_from, start_index, nodes, id!(Frame));
             return nodes.skip_node(start_index);
         }
-
+        
         let live_registry_rc = cx.live_registry.clone();
         let live_registry = live_registry_rc.borrow();
-
+        
         if let ApplyFrom::ApplyClear = apply_from {
             self.create_order.truncate(0);
         }
@@ -187,7 +188,7 @@ impl LiveApply for Frame {
 impl Frame {
     
     fn new_component(&mut self, cx: &mut Cx, apply_from: ApplyFrom, id: LiveId, live_type: LiveType, index: usize, nodes: &[LiveNode]) {
-        if let Some(mut component) = cx.registries.clone().new_frame_component(cx, live_type) {
+        if let Some(mut component) = cx.registries.clone().get::<CxFrameComponentRegistry>().new_frame_component(cx, live_type) {
             component.apply(cx, apply_from, index, nodes);
             self.components.insert(id, component);
         }
@@ -314,25 +315,26 @@ impl FrameComponent for Frame {
     }
 }
 
-struct Registry {
+pub struct CxFrameComponentRegistry {
     factories: HashMap<TypeId, Box<dyn FrameComponentFactory >>
 }
 
-pub trait CxRegistriesExt{
-    fn register_frame_component(&self, live_type: LiveType, component: Box<dyn FrameComponentFactory>);
-    fn new_frame_component(&self, cx:&mut Cx, live_type: LiveType) -> Option<Box<dyn FrameComponent >>;
+impl CxRegistryNew for CxFrameComponentRegistry{
+    fn new() -> Self {
+        Self {
+            factories: HashMap::new()
+        }
+    }
 }
 
-impl CxRegistriesExt for CxRegistries {
-    fn register_frame_component(&self, live_type: LiveType, component: Box<dyn FrameComponentFactory>) {
-        let mut registry = self.get_or_create::<Registry,_>(|| Registry {factories: HashMap::new()});
-        registry.factories.insert(live_type, component);
+impl CxFrameComponentRegistry {
+    pub fn register_frame_component(&mut self, live_type: LiveType, component: Box<dyn FrameComponentFactory>) {
+        self.factories.insert(live_type, component);
     }
     
-    fn new_frame_component(&self, cx:&mut Cx, live_type: LiveType) -> Option<Box<dyn FrameComponent >> {
-         self.get::<Registry>()
-            .factories.get(&live_type)
-            .and_then(|cnew| Some(cnew.new_frame_component(cx)) )
+    pub fn new_frame_component(&self, cx: &mut Cx, live_type: LiveType) -> Option<Box<dyn FrameComponent >> {
+        self.factories.get(&live_type)
+            .and_then( | cnew | Some(cnew.new_frame_component(cx)))
     }
 }
 

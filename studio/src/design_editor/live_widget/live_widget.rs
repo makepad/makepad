@@ -51,7 +51,7 @@ impl LiveNew for LiveWidgetRegistry {
     fn live_register(_cx: &mut Cx) {}
     fn live_type_info(cx: &mut Cx) -> LiveTypeInfo {
         // alright so. lets fetch our registry
-        let registry = cx.registries.get::<Registry>();
+        let registry = cx.registries.get_or_create::<CxLiveWidgetRegistry>();
         let mut fields = Vec::new();
         for (_, item) in &registry.items {
             fields.push(LiveTypeField {
@@ -72,7 +72,7 @@ impl LiveNew for LiveWidgetRegistry {
 impl LiveApply for LiveWidgetRegistry {
     fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         if let Some(file_id) = apply_from.file_id() {
-            let mut registry = cx.registries.get_mut::<Registry>();
+            let mut registry = cx.registries.get_or_create::<CxLiveWidgetRegistry>();
             for (_, item) in &mut registry.items {
                 let index = nodes.child_by_name(index, item.id).unwrap();
                 item.live_ptr = Some(LivePtr {file_id, index: index as u32})
@@ -95,7 +95,7 @@ pub struct RegItem {
     live_type_info: LiveTypeInfo
 }
 
-struct Registry {
+pub struct CxLiveWidgetRegistry {
     items: BTreeMap<TypeId, RegItem>
 }
 
@@ -104,16 +104,17 @@ pub struct MatchedWidget {
     pub live_type: LiveType
 }
 
-pub trait CxRegistriesExt {
-    fn register_live_widget(&self, live_type_info: LiveTypeInfo, factory: Box<dyn LiveWidgetFactory>, id: LiveId);
-    fn new_live_widget(&self, cx: &mut Cx, live_type: LiveType) -> Option<Box<dyn LiveWidget >>;
-    fn match_live_widget(&self, live_registry: &LiveRegistry, node: &LiveNode) -> Option<MatchedWidget>;
+impl CxRegistryNew for CxLiveWidgetRegistry{
+    fn new() -> Self {
+        Self {
+            items: BTreeMap::new()
+        }
+    }
 }
 
-impl CxRegistriesExt for CxRegistries {
-    fn register_live_widget(&self, live_type_info: LiveTypeInfo, factory: Box<dyn LiveWidgetFactory>, id: LiveId) {
-        let mut registry = self.get_or_create::<Registry, _>( || Registry {items: BTreeMap::new()});
-        registry.items.insert(live_type_info.live_type, RegItem {
+impl CxLiveWidgetRegistry {
+    pub fn register_live_widget(&mut self, live_type_info: LiveTypeInfo, factory: Box<dyn LiveWidgetFactory>, id: LiveId) {
+        self.items.insert(live_type_info.live_type, RegItem {
             live_ptr: None,
             factory,
             live_type_info,
@@ -121,15 +122,14 @@ impl CxRegistriesExt for CxRegistries {
         });
     }
     
-    fn new_live_widget(&self, cx: &mut Cx, live_type: LiveType) -> Option<Box<dyn LiveWidget >> {
-        self.get::<Registry>()
-            .items.get(&live_type)
+    pub fn new_live_widget(&self, cx: &mut Cx, live_type: LiveType) -> Option<Box<dyn LiveWidget >> {
+        self.items.get(&live_type)
             .and_then( | cnew | Some(cnew.factory.new_from_ptr(cx, cnew.live_ptr.unwrap())))
     }
     
-    fn match_live_widget(&self, live_registry: &LiveRegistry, node: &LiveNode) -> Option<MatchedWidget> {
+    pub fn match_live_widget(&self, live_registry: &LiveRegistry, node: &LiveNode) -> Option<MatchedWidget> {
         let mut secondary = None;
-        for (live_type, item) in &self.get::<Registry>().items {
+        for (live_type, item) in &self.items {
             match item.factory.can_edit_value(live_registry, node) {
                 CanEdit::Yes(height) => {return Some(MatchedWidget {height, live_type: *live_type})},
                 CanEdit::Sortof(height) => {secondary = Some(MatchedWidget {height, live_type: *live_type})}

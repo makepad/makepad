@@ -8,7 +8,6 @@ use {
 };
 
 live_register!{
-    use makepad_render::shader_std::*;
     use crate::tab::Tab;
     
     TabBar: {{TabBar}} {

@@ -1,6 +1,5 @@
 pub mod char;
 pub mod code_editor_impl;
-pub mod rust_editor;
 pub mod cursor;
 pub mod cursor_set;
 pub mod delta;
@@ -17,4 +16,3 @@ pub mod text;
 pub mod token;
 pub mod token_cache;
 pub mod tokenizer;
-pub mod live_widget;

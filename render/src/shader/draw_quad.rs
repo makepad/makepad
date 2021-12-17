@@ -12,7 +12,6 @@ use {
 };
 
 live_register!{
-    use crate::shader_std::*;
     
     DrawQuad: {{DrawQuad}} {
         varying pos: vec2
