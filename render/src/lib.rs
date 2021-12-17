@@ -8,9 +8,10 @@ mod live_prims;
 #[macro_use]
 mod cx;
 mod cx_api;
+mod cx_registries;
 
 mod live_eval;
-mod live_traits;
+pub mod live_traits;
 mod live_cx;
 
 mod event;
@@ -80,10 +81,12 @@ pub use {
         cx_api::{
             CxPlatformApi
         },
-        cx::{
-            Cx,
+        cx_registries::{
             CxRegistries,
             CxRegistryNew,
+        },
+        cx::{
+            Cx,
             PlatformType
         },
         area::{
