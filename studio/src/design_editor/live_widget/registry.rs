@@ -1,8 +1,5 @@
 use {
     makepad_render::*,
-    std::collections::{
-        BTreeMap,
-    },
     std::any::TypeId,
 };
 
@@ -23,6 +20,7 @@ live_register!{
     LiveWidgetRegistry: {{LiveWidgetRegistry}} {}
 }
 
+// this generates a component registry 
 #[derive(LiveHook, LiveRegistry)]
 #[generate_registry(CxLiveWidgetRegistry, LiveWidget, LiveWidgetFactory)]
 pub struct LiveWidgetRegistry();
