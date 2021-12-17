@@ -6,12 +6,14 @@ use {
             DocumentInner
         },
         code_editor::{
-            live_widget::*,
             token::TokenKind,
             token_cache::TokenCache,
             edit_info_cache::EditInfoCache,
             protocol::Request,
             code_editor_impl::{CodeEditorImpl, CodeEditorAction, LinesLayout}
+        },
+        design_editor::{
+            live_widget::*,
         },
         editor_state::{
             SessionId
@@ -24,7 +26,7 @@ use {
 live_register!{
     use makepad_render::shader::std::*;
     
-    RustEditor: {{RustEditor}} {
+    LiveEditor: {{LiveEditor}} {
         color_picker: ColorPicker,
         widget_layout: Layout {
             align: Align {fx: 0.2, fy: 0.},
@@ -33,7 +35,6 @@ live_register!{
         editor_impl: {}
     }
 }
-pub trait LineEditor: std::any::Any {}
 
 #[derive(Copy, Clone, Hash, PartialEq, Eq)]
 pub struct WidgetIdent(LivePtr, LiveType);
@@ -43,7 +44,7 @@ pub struct Widget {
 }
 
 #[derive(Live, LiveHook)]
-pub struct RustEditor {
+pub struct LiveEditor {
     editor_impl: CodeEditorImpl,
     
     color_picker: Option<LivePtr>,
@@ -103,7 +104,7 @@ impl EditInfoCache {
     }
 }
 
-impl RustEditor {
+impl LiveEditor {
     
     pub fn set_session_id(&mut self, session_id: Option<SessionId>) {
         self.editor_impl.session_id = session_id;
@@ -139,20 +140,21 @@ impl RustEditor {
             
             let widget_draw_order = &mut self.widget_draw_order;
             widget_draw_order.clear();
-            
+            let registries = cx.registries.clone();
+            let registry = registries.get::<CxLiveWidgetRegistry>();
             self.editor_impl.calc_lines_layout(cx, document_inner, &mut self.lines_layout, | cx, line_index, start_y, viewport_start, viewport_end | {
                 let edit_info = &edit_info_cache[line_index];
                 let mut max_height = 0.0f32;
                 for (_token_index, live_ptr) in &edit_info.live_ptrs {
                     let node = live_registry.ptr_to_node(*live_ptr);
-                    if let Some(matched) = cx.registries.match_live_widget(&live_registry, node) {
+                    if let Some(matched) = registry.match_live_widget(&live_registry, node) {
                         max_height = max_height.max(matched.height);
                         if start_y + matched.height > viewport_start && start_y < viewport_end {
                             // lets spawn it
                             let ident = WidgetIdent(*live_ptr, matched.live_type);
                             widgets.entry(ident).or_insert_with( || {
                                 Widget {
-                                    live_widget: cx.registries.clone().new_live_widget(cx, matched.live_type).unwrap(),
+                                    live_widget: registry.new_live_widget(cx, matched.live_type).unwrap(),
                                 }
                             });
                             visible_widgets.insert(ident);

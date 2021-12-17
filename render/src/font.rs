@@ -25,8 +25,6 @@ pub use {
 
 
 live_register!{
-    use crate::shader_std::*;
-    
     DrawTrapezoidText: {{DrawTrapezoidText}} {
         
         varying v_p0: vec2;

@@ -298,6 +298,10 @@ impl Default for Cx {
 #[derive(Clone)]
 pub struct CxRegistries(pub Rc<RefCell<HashMap<TypeId, Box<dyn Any >> >>);
 
+pub trait CxRegistryNew{
+    fn new()->Self;
+}
+
 impl CxRegistries {
     pub fn new() -> Self {
         Self (Rc::new(RefCell::new(HashMap::new())))
@@ -311,18 +315,8 @@ impl CxRegistries {
                 .downcast_ref::<T>().unwrap()
         )
     }
-    
-    pub fn get_mut<T: 'static>(&self) -> std::cell::RefMut<'_, T> {
-        std::cell::RefMut::map(
-            self.0.borrow_mut(),
-            | v | v
-                .get_mut(&TypeId::of::<T>()).unwrap()
-                .downcast_mut::<T>().unwrap()
-        )
-    }
 
-    pub fn get_or_create<T: 'static, CB>(&self, new_cb:CB) -> std::cell::RefMut<'_, T> 
-    where CB: FnOnce()->T
+    pub fn get_or_create<T: 'static + CxRegistryNew>(&self) -> std::cell::RefMut<'_, T> 
     {
         let reg = self.0.borrow_mut();
         std::cell::RefMut::map(
@@ -330,10 +324,9 @@ impl CxRegistries {
             | v |
             match v.entry(TypeId::of::<T>()) {
                 Entry::Occupied(o) => o.into_mut(),
-                Entry::Vacant(v) => v.insert(Box::new(new_cb()))
+                Entry::Vacant(v) => v.insert(Box::new(T::new()))
             }
             .downcast_mut::<T>().unwrap()
         )
     }
 }
-

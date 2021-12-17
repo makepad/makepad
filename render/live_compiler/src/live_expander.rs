@@ -78,7 +78,15 @@ impl<'a> LiveExpander<'a> {
                     in_index += 1;
                     continue;
                 }
-                LiveValue::Use(_) => {
+                LiveValue::Use(module_id) => {
+                    // lets verify it points anywhere
+                    if self.live_registry.module_id_and_name_to_doc(*module_id, in_node.id).is_none(){
+                        self.errors.push(LiveError {
+                            origin: live_error_origin!(),
+                            span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()),
+                            message: format!("Use statement invalid target {}::{}", module_id, in_node.id)
+                        });
+                    }
                     let index = out_doc.nodes.append_child_index(current_parent.last().unwrap().1);
                     let old_len = out_doc.nodes.len();
                     out_doc.nodes.insert(index, in_node.clone());

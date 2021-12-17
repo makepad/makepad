@@ -35,7 +35,9 @@ pub fn live_register_impl(input: TokenStream) -> TokenStream {
         return tb.end();
     }
     else {
-        return parser.unexpected();
+        tb.add("pub fn live_register(cx:&mut Cx) {");
+        tb.add("}");
+        return tb.end();
     }
 }
 
