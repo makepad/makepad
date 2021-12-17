@@ -322,9 +322,9 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         
         tb.add("    fn live_register(cx: &mut Cx) {");
 
-        for attr in main_attribs.iter().filter(|attr| attr.name == "live_register_hook"){
+        for attr in main_attribs.iter().filter(|attr| attr.name == "live_register"){
             if attr.args.is_none(){
-                return error_result("live_register_hook needs an argument")
+                return error_result("live_register needs an argument")
             }
             tb.add("(").stream(attr.args.clone()).add(")(cx);");
         }
