@@ -1,7 +1,8 @@
 #![allow(unused)]
 use makepad_render::*;
 use crate::button_logic::*;
-use crate::frame::*;
+use crate::frame_registry::*;
+use crate::register_as_frame_component;
 
 live_register!{
     use makepad_render::shader::std::*;
@@ -86,7 +87,9 @@ live_register!{
 }
 
 #[derive(Live, LiveHook)]
-#[register_as_frame_component]
+#[live_register_hook(|cx:&mut Cx|{
+    register_as_frame_component!(Button, cx)
+})]
 pub struct Button {
     #[rust] pub button_logic: ButtonLogic,
     #[default_state(default_state)] pub animator: Animator,

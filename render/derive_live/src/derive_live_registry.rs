@@ -9,15 +9,6 @@ pub fn derive_live_registry_impl(input: TokenStream) -> TokenStream {
     parser.eat_ident("pub");
     if parser.eat_ident("struct") {
         if let Some(struct_name) = parser.eat_any_ident() {
-            // alright we HAVE to have a generate_registry arg
-            //
-            
-            /*
-            let _generic = parser.eat_generic();
-            let _types = parser.eat_all_types();
-            let _where_clause = parser.eat_where_clause(None); //Some("LiveUpdateHooks"));
-            */
-            // ok we need to have an attribute with generate_registry
             
             let attr = main_attribs.iter().find( | attr | attr.name == "generate_registry");
             if attr.is_none() || attr.unwrap().args.is_none() {
@@ -96,7 +87,7 @@ pub fn derive_live_registry_impl(input: TokenStream) -> TokenStream {
             tb.add("        }");
             tb.add("    }");
             tb.add("}");
-            tb.add(" impl LiveApply for LiveWidgetRegistry {");
+            tb.add(" impl LiveApply for ").ident(&struct_name).add(" {");
             tb.add("     fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {");
             tb.add("         if let Some(file_id) = apply_from.file_id() {");
             tb.add("             let mut registry = cx.registries.get_or_create::<").ident(&registry).add(">();");
