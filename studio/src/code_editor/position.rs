@@ -5,6 +5,7 @@ use {
             size::Size,
         }
     },
+    makepad_render::makepad_live_compiler::TextPos,
     std::{
         cmp::Ordering,
         ops::{Add, AddAssign, Sub},
@@ -111,6 +112,15 @@ impl Sub for Position {
                 line: self.line - other.line,
                 column: self.column,
             }
+        }
+    }
+}
+
+impl From<TextPos> for Position {
+    fn from(text_pos: TextPos) -> Position {
+        Position{
+            line:text_pos.line as usize,
+            column:text_pos.column as usize
         }
     }
 }

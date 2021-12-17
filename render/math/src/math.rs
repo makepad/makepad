@@ -394,7 +394,7 @@ impl Vec4 {
         return (r<<24)|(g<<16)|(b<<8)|a;
     }
     
-    pub fn to_hex_string(&self) -> String {
+    pub fn append_hex_to_string(&self, out:&mut String) {
         fn int_to_hex(d: u8) -> char {
             if d >= 10 {
                 return (d + 55) as char;
@@ -405,14 +405,12 @@ impl Vec4 {
         let r = (self.x * 255.0) as u8;
         let g = (self.y * 255.0) as u8;
         let b = (self.z * 255.0) as u8;
-        let mut out = String::new();
         out.push(int_to_hex((r >> 4) & 0xf));
         out.push(int_to_hex((r) & 0xf));
         out.push(int_to_hex((g >> 4) & 0xf));
         out.push(int_to_hex((g) & 0xf));
         out.push(int_to_hex((b >> 4) & 0xf));
         out.push(int_to_hex((b) & 0xf));
-        return out
     }
     
     pub fn color(value: &str) -> Vec4 {

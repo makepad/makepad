@@ -40,7 +40,6 @@ impl App {
         self.scroll_view.handle_event(cx, event);
         if let Event::NextFrame(..) = event {
             // spawn 1000 buttons into the live structure
-            cx.profile_start(0);
             let mut out = Vec::new();
             out.open();
             for i in 0..1 {
@@ -55,7 +54,6 @@ impl App {
             out.close();
             // now apply it to frame to create i t
             self.frame.apply_clear(cx, &out);
-            cx.profile_end(0);
             cx.new_next_frame();
             cx.redraw_all();
         }

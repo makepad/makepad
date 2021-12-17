@@ -6,9 +6,6 @@ use {
             DocumentInner
         },
         code_editor::{
-            token::TokenKind,
-            token_cache::TokenCache,
-            edit_info_cache::EditInfoCache,
             protocol::Request,
             code_editor_impl::{CodeEditorImpl, CodeEditorAction, LinesLayout}
         },
@@ -19,7 +16,7 @@ use {
             SessionId
         },
     },
-    makepad_render::makepad_live_compiler::{TextPos, LivePtr},
+    makepad_render::makepad_live_compiler::{LivePtr},
     makepad_render::*,
 };
 
@@ -59,52 +56,6 @@ pub struct LiveEditor {
     #[rust] widgets: HashMap<WidgetIdent, Widget>,
 }
 
-impl EditInfoCache {
-    
-    pub fn refresh(&mut self, token_cache: &TokenCache, cx: &mut Cx) {
-        if self.is_clean {
-            return
-        }
-        self.is_clean = true;
-        
-        let live_registry_rc = cx.live_registry.clone();
-        let live_registry = live_registry_rc.borrow();
-        
-        let file_id = LiveFileId(10);
-        
-        let live_file = &live_registry.live_files[file_id.to_index()];
-        let expanded = &live_registry.expanded[file_id.to_index()];
-        
-        if self.lines.len() != token_cache.len() {
-            panic!();
-        }
-        for (line, line_cache) in self.lines.iter_mut().enumerate() {
-            if line_cache.is_clean { // line not dirty
-                continue
-            }
-            line_cache.is_clean = true;
-            if line_cache.live_ptrs.len() != 0 {
-                panic!();
-            }
-            let tokens_line = &token_cache[line];
-            let mut column = 0;
-            for (editor_token_index, token) in tokens_line.tokens().iter().enumerate() {
-                if let TokenKind::Identifier = token.kind {
-                    if let Some(live_token_index) = live_file.document.find_token_by_pos(TextPos {line: line as u32, column}) {
-                        let match_token_id = makepad_live_compiler::TokenId::new(file_id, live_token_index);
-                        if let Some(node_index) = expanded.nodes.first_node_with_token_id(match_token_id) {
-                            let live_ptr = LivePtr {file_id, index: node_index as u32};
-                            
-                            line_cache.live_ptrs.push((editor_token_index, live_ptr));
-                        }
-                    }
-                }
-                column += token.len as u32;
-            }
-        }
-    }
-}
-
 impl LiveEditor {
     
     pub fn set_session_id(&mut self, session_id: Option<SessionId>) {
@@ -122,7 +73,7 @@ impl LiveEditor {
     pub fn draw_widgets(&mut self, cx: &mut Cx) {
         let live_registry_rc = cx.live_registry.clone();
         let live_registry = live_registry_rc.borrow();
-
+        
         let mut last_line = None;
         
         let line_num_geom = vec2(self.editor_impl.line_num_width, 0.0);
@@ -143,9 +94,9 @@ impl LiveEditor {
                 });
             }
             let widget = self.widgets.get_mut(ident).unwrap();
-
+            
             widget.inline_widget.draw_inline(cx, &live_registry, widget.live_ptr);
-
+            
             last_line = Some(line)
         }
         if last_line.is_some() {
@@ -153,10 +104,10 @@ impl LiveEditor {
         }
     }
     
-    pub fn calc_layout_with_widgets(&mut self, cx:&mut Cx, document_inner:&DocumentInner){
-        let mut edit_info_cache = document_inner.edit_info_cache.borrow_mut();
-        edit_info_cache.refresh(&document_inner.token_cache, cx);
-            
+    pub fn calc_layout_with_widgets(&mut self, cx: &mut Cx, document_inner: &DocumentInner) {
+        let mut live_edit_cache = document_inner.live_edit_cache.borrow_mut();
+        live_edit_cache.refresh(&document_inner.token_cache, cx);
+        
         // first we generate the layout structure
         let live_registry_rc = cx.live_registry.clone();
         let live_registry = live_registry_rc.borrow();
@@ -172,26 +123,26 @@ impl LiveEditor {
         let registries = cx.registries.clone();
         let widget_registry = registries.get::<CxInlineWidgetRegistry>();
         
-        self.editor_impl.calc_lines_layout(cx, document_inner, &mut self.lines_layout, | cx, line_index, start_y, viewport_start, viewport_end | {
-
-            let edit_info = &edit_info_cache[line_index];
+        self.editor_impl.calc_lines_layout(cx, document_inner, &mut self.lines_layout, | cx, line, start_y, viewport_start, viewport_end | {
+            
+            let edit_info = &live_edit_cache[line];
             let mut max_height = 0.0f32;
-
-            for (_token_index, live_ptr) in &edit_info.live_ptrs {
-                if let Some(matched) = widget_registry.match_inline_widget(&live_registry, *live_ptr) {
+            
+            for item in &edit_info.items {
+                if let Some(matched) = widget_registry.match_inline_widget(&live_registry, item.live_ptr) {
                     max_height = max_height.max(matched.height);
-
+                    
                     if start_y + matched.height > viewport_start && start_y < viewport_end {
                         // lets spawn it
-                        let ident = WidgetIdent(*live_ptr, matched.live_type);
+                        let ident = WidgetIdent(item.live_ptr, matched.live_type);
                         widgets.entry(ident).or_insert_with( || {
                             Widget {
-                                live_ptr: *live_ptr,
+                                live_ptr: item.live_ptr,
                                 inline_widget: widget_registry.new(cx, matched.live_type).unwrap(),
                             }
                         });
                         visible_widgets.insert(ident);
-                        widget_draw_order.push((line_index, ident));
+                        widget_draw_order.push((line, ident));
                     }
                 }
             }
@@ -227,7 +178,7 @@ impl LiveEditor {
             );
             
             self.draw_widgets(cx);
-
+            
             // alright great. now we can draw the text
             self.editor_impl.draw_text(
                 cx,
@@ -238,7 +189,6 @@ impl LiveEditor {
             
             self.editor_impl.draw_current_line(cx, &self.lines_layout, session.cursors.last());
             self.editor_impl.draw_linenums(cx, &self.lines_layout, session.cursors.last());
-            
             self.editor_impl.end(cx, &self.lines_layout);
         }
     }
@@ -252,10 +202,23 @@ impl LiveEditor {
         send_request: &mut dyn FnMut(Request),
         dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
     ) {
-        for widget in self.widgets.values_mut(){
-            widget.inline_widget.handle_inline_event(cx, event, widget.live_ptr);
+        
+        for widget in self.widgets.values_mut() {
+            match widget.inline_widget.handle_inline_event(cx, event, widget.live_ptr) {
+                InlineWidgetAction::ReplaceText {position, size, text} => {
+                    state.replace_text_direct(
+                        self.editor_impl.session_id.unwrap(),
+                        position,
+                        size,
+                        text,
+                        send_request
+                    );
+                    self.editor_impl.redraw(cx);
+                }
+                _ => ()
+            }
         }
-
+        
         self.editor_impl.handle_event(cx, state, event, &self.lines_layout, send_request, dispatch_action);
     }
 }
