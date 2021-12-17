@@ -87,8 +87,8 @@ live_register!{
 }
 
 #[derive(Live, LiveHook)]
-#[live_register_hook(|cx:&mut Cx|{
-    register_as_frame_component!(Button, cx)
+#[live_register(|cx:&mut Cx|{
+    register_as_frame_component!(cx, Button);
 })]
 pub struct Button {
     #[rust] pub button_logic: ButtonLogic,

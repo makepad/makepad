@@ -30,7 +30,7 @@ impl LiveNew for Frame {
     }
     
     fn live_register(cx: &mut Cx) {
-        register_as_frame_component!(Frame, cx);
+        register_as_frame_component!(cx, Frame);
     }
     
     fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo where Self: Sized + 'static {

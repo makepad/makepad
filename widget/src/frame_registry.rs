@@ -108,7 +108,7 @@ impl Clone for Box<dyn FrameComponentAction> {
 
 #[macro_export]
 macro_rules!register_as_frame_component {
-    ( $ ty: ident, $cx:expr) => {
+    ( $cx:expr, $ ty: ident) => {
         {
             struct Factory();
             impl FrameComponentFactory for Factory {
