@@ -6,6 +6,8 @@ mod desktop_window;
 mod scroll_shadow;
 mod scroll_bar;
 mod scroll_view;
+#[macro_use]
+mod frame_registry;
 mod frame;
 mod window_menu;
 pub mod frame_template;
@@ -28,7 +30,8 @@ pub use crate::{
     desktop_window::{DesktopWindow}, 
     scroll_view::{ScrollView},
     scroll_shadow::{ScrollShadow},
-    frame::{Frame, FrameActions, CxFrameComponentRegistry, FrameComponent}
+    frame::{Frame},
+    frame_registry::{FrameActions, CxFrameComponentRegistry, FrameComponent}
 };
 
 pub fn live_register(cx:&mut Cx){
