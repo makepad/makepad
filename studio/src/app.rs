@@ -24,10 +24,8 @@ pub struct App {
 impl App {
     pub fn live_register(cx: &mut Cx) {
         makepad_widget::live_register(cx);
-        crate::design_editor::live_widget::live_color_picker::live_register(cx);
-        crate::design_editor::live_widget::live_widget::live_register(cx);
+        crate::design_editor::live_register(cx);
         crate::code_editor::code_editor_impl::live_register(cx);
-        crate::design_editor::live_editor::live_register(cx);
         crate::editors::live_register(cx);
         crate::app_inner::live_register(cx);
     }

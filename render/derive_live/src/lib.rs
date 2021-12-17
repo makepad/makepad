@@ -10,6 +10,13 @@ use crate::live_register_macro::*;
 mod live_macro;
 use crate::live_macro::*;
 
+mod derive_live_registry;
+use crate::derive_live_registry::*;
+
+mod derive_into_fcaction;
+use crate::derive_into_fcaction::*;
+
+
 #[path = "../../../micro_serde/derive/src/macro_lib.rs"]
 mod macro_lib;
 
@@ -38,11 +45,6 @@ pub fn derive_live_apply(input: TokenStream) -> TokenStream {
     derive_live_hook_impl(input)
 }
 
-#[proc_macro_derive(IntoFrameComponentAction)]
-pub fn derive_into_frame_component_action(input: TokenStream) -> TokenStream {
-    derive_into_frame_component_action_impl(input)
-}
-
 #[proc_macro]
 pub fn live(input: TokenStream) -> TokenStream {
     live_impl(input)
@@ -64,5 +66,14 @@ pub fn live_register(input: TokenStream) -> TokenStream {
     live_register_impl(input)
 }
 
+#[proc_macro_derive(LiveRegistry,attributes(generate_registry))]
+pub fn derive_live_registry(input: TokenStream) -> TokenStream {
+    derive_live_registry_impl(input)
+}
 
+// move elsewhere
+#[proc_macro_derive(IntoFrameComponentAction)]
+pub fn derive_into_frame_component_action(input: TokenStream) -> TokenStream {
+    derive_into_frame_component_action_impl(input)
+}
 
