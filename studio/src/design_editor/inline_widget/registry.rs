@@ -3,27 +3,14 @@ use {
     std::any::TypeId,
 };
 
-pub enum LiveWidgetAction {
+pub enum InlineWidgetAction {
     None
 }
-pub trait LiveWidget: LiveApply {
-    fn handle_widget_event(&mut self, cx: &mut Cx, event: &mut Event) -> LiveWidgetAction;
-    fn draw_widget(&mut self, cx: &mut Cx);
-}
 
-pub trait LiveWidgetFactory {
-    fn new(&self, cx: &mut Cx) -> Box<dyn LiveWidget>;
-    fn can_edit_value(&self, live_registry: &LiveRegistry, node: &LiveNode) -> CanEdit;
+pub trait InlineWidget: LiveApply {
+    fn handle_inline_event(&mut self, cx: &mut Cx, event: &mut Event) -> InlineWidgetAction;
+    fn draw_inline(&mut self, cx: &mut Cx);
 }
-
-live_register!{
-    LiveWidgetRegistry: {{LiveWidgetRegistry}} {}
-}
-
-// this generates a component registry 
-#[derive(LiveHook, LiveRegistry)]
-#[generate_registry(CxLiveWidgetRegistry, LiveWidget, LiveWidgetFactory)]
-pub struct LiveWidgetRegistry();
 
 pub enum CanEdit {
     No,
@@ -31,13 +18,27 @@ pub enum CanEdit {
     Sortof(f32)
 }
 
+pub trait InlineWidgetFactory {
+    fn new(&self, cx: &mut Cx) -> Box<dyn InlineWidget>;
+    fn can_edit_value(&self, live_registry: &LiveRegistry, node: &LiveNode) -> CanEdit;
+}
+
+live_register!{
+    InlineWidgetRegistry: {{InlineWidgetRegistry}} {}
+}
+
+// this generates a component registry 
+#[derive(LiveHook, LiveRegistry)]
+#[generate_registry(CxInlineWidgetRegistry, InlineWidget, InlineWidgetFactory)]
+pub struct InlineWidgetRegistry();
+
 pub struct MatchedWidget {
     pub height: f32,
     pub live_type: LiveType
 }
 
-impl CxLiveWidgetRegistry {
-    pub fn match_live_widget(&self, live_registry: &LiveRegistry, node: &LiveNode) -> Option<MatchedWidget> {
+impl CxInlineWidgetRegistry {
+    pub fn match_inline_widget(&self, live_registry: &LiveRegistry, node: &LiveNode) -> Option<MatchedWidget> {
         let mut secondary = None;
         for (live_type, item) in &self.items {
             match item.factory.can_edit_value(live_registry, node) {
