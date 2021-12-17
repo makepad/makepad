@@ -6,6 +6,6 @@ pub mod live_editor;
 
 pub fn live_register(cx: &mut Cx){
     crate::design_editor::inline_widget::inline_color_picker::live_register(cx);
-    crate::design_editor::inline_widget::registry::live_register(cx);
+    crate::design_editor::inline_widget::inline_registry::live_register(cx);
     crate::design_editor::live_editor::live_register(cx);
 }

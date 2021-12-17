@@ -1,3 +1,3 @@
 pub mod inline_color_picker;
-pub mod registry;
-pub use registry::*;
+pub mod inline_registry;
+pub use inline_registry::*;
