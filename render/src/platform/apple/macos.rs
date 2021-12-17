@@ -55,8 +55,6 @@ impl Cx {
         
         cocoa_app.event_loop( | cocoa_app, events | {
             
-            self.mtl_compile_shaders(&metal_cx);
-            
             //let mut paint_dirty = false;
             for mut event in events {
                 
@@ -114,7 +112,8 @@ impl Cx {
                     Event::Paint => {
                         
                         let _vsync = self.process_desktop_paint_callbacks(cocoa_app.time_now());
-                        
+                        self.mtl_compile_shaders(&metal_cx);
+            
                         // construct or destruct windows
                         for (index, window) in self.windows.iter_mut().enumerate() {
                             
