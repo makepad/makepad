@@ -1,5 +1,12 @@
 use {
     makepad_render::*,
+    crate::{
+        code_editor::{
+            position::Position,
+            text::Text,
+            size::Size
+        }
+    },
     std::any::TypeId,
 };
 
@@ -12,7 +19,12 @@ live_register!{
 pub struct InlineWidgetRegistry();
 
 pub enum InlineWidgetAction {
-    None
+    None,
+    ReplaceText{
+        position:Position,
+        size: Size,
+        text: Text
+    }
 }
 
 pub trait InlineWidget: LiveApply {

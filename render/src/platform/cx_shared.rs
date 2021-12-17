@@ -192,14 +192,16 @@ impl Cx {
         // self.profile();
         self.in_redraw_cycle = true;
         self.redraw_id += 1;
-        
+
         std::mem::swap(&mut self.redraw_views, &mut self.new_redraw_views);
         std::mem::swap(&mut self.redraw_views_and_children, &mut self.new_redraw_views_and_children);
-        
-        self.redraw_all_views = self.redraw_all_views;
-        self.new_redraw_all_views = false;
+        self.redraw_all_views = self.new_redraw_all_views;
+
+        self.new_redraw_all_views = false; 
         self.new_redraw_views.truncate(0);
         self.new_redraw_views_and_children.truncate(0);
+        
+        //println!("{:?}, {:?}, {:?}", self.redraw_views, self.redraw_views_and_children, self.redraw_all_views);
         
         self.align_list.truncate(0);
         

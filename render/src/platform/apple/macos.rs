@@ -45,8 +45,6 @@ impl Cx {
         let mut metal_windows: Vec<MetalWindow> = Vec::new();
         
         //self.mtl_compile_all_shaders(&metal_cx);
-        
-        
         self.call_event_handler(&mut Event::Construct);
         
         self.redraw_all();
@@ -59,7 +57,6 @@ impl Cx {
             for mut event in events {
                 
                 self.process_desktop_pre_event(&mut event);
-                
                 match &event {
                     Event::WindowResizeLoop(wr) => {
                         for metal_window in &mut metal_windows {
@@ -113,7 +110,7 @@ impl Cx {
                         
                         let _vsync = self.process_desktop_paint_callbacks(cocoa_app.time_now());
                         self.mtl_compile_shaders(&metal_cx);
-            
+                        
                         // construct or destruct windows
                         for (index, window) in self.windows.iter_mut().enumerate() {
                             
@@ -269,6 +266,8 @@ impl Cx {
                                 }
                             }
                         }
+                         //self.profile_end(0);
+                        
                     },
                     Event::None => {
                     },

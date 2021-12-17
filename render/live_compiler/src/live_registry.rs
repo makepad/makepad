@@ -16,7 +16,6 @@ use {
     }
 };
 
-
 #[derive(Default)]
 pub struct LiveFile {
     pub module_id: LiveModuleId,
