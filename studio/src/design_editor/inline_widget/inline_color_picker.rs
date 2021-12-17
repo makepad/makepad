@@ -20,7 +20,8 @@ fn register_factory(cx: &mut Cx) {
             Box::new(InlineColorPicker::new(cx))
         }
         
-        fn can_edit_value(&self, _live_registry: &LiveRegistry, node: &LiveNode) -> CanEdit {
+        fn can_edit_value(&self, live_registry: &LiveRegistry, live_ptr:LivePtr) -> CanEdit {
+            let node = live_registry.ptr_to_node(live_ptr);
             if let LiveValue::Color(_) = &node.value {
                 return CanEdit::Yes(100.0)
             }
@@ -35,14 +36,29 @@ fn register_factory(cx: &mut Cx) {
 }
 
 impl InlineWidget for InlineColorPicker {
-    fn handle_inline_event(&mut self, cx: &mut Cx, event: &mut Event) -> InlineWidgetAction {
-        self.color_picker.handle_event(cx, event);
+    fn handle_inline_event(&mut self, cx: &mut Cx, event: &mut Event, live_ptr:LivePtr) -> InlineWidgetAction {
+        
+        match self.color_picker.handle_event(cx, event){
+            ColorPickerAction::Change{rgba}=>{
+                // alright now what.
+                
+            }
+            _=>()
+        }
         InlineWidgetAction::None
     }
     
-    fn draw_inline(&mut self, cx: &mut Cx) {
+    fn draw_inline(&mut self, cx: &mut Cx, live_registry:&LiveRegistry, live_ptr:LivePtr) {
+        let node = live_registry.ptr_to_node(live_ptr);
+        // alright so
+        let color = if let LiveValue::Color(c) = &node.value {
+            Vec4::from_u32(*c)
+        }
+        else{
+            Vec4::default()
+        };
         self.color_picker.size = 100.0;
-        self.color_picker.draw(cx, Vec4::default(), 1.0);
+        self.color_picker.draw(cx, color, 1.0);
     }
 }
 
