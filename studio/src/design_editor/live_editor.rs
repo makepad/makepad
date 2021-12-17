@@ -13,7 +13,7 @@ use {
             code_editor_impl::{CodeEditorImpl, CodeEditorAction, LinesLayout}
         },
         design_editor::{
-            live_widget::*,
+            inline_widget::*,
         },
         editor_state::{
             SessionId
@@ -40,7 +40,7 @@ live_register!{
 pub struct WidgetIdent(LivePtr, LiveType);
 
 pub struct Widget {
-    live_widget: Box<dyn LiveWidget>
+    inline_widget: Box<dyn InlineWidget>
 }
 
 #[derive(Live, LiveHook)]
@@ -142,7 +142,7 @@ impl LiveEditor {
             widget_draw_order.clear();
             
             let registries = cx.registries.clone();
-            let widget_registry = registries.get::<CxLiveWidgetRegistry>();
+            let widget_registry = registries.get::<CxInlineWidgetRegistry>();
             
             self.editor_impl.calc_lines_layout(cx, document_inner, &mut self.lines_layout, | cx, line_index, start_y, viewport_start, viewport_end | {
 
@@ -152,7 +152,7 @@ impl LiveEditor {
                 for (_token_index, live_ptr) in &edit_info.live_ptrs {
                     let node = live_registry.ptr_to_node(*live_ptr);
 
-                    if let Some(matched) = widget_registry.match_live_widget(&live_registry, node) {
+                    if let Some(matched) = widget_registry.match_inline_widget(&live_registry, node) {
                         max_height = max_height.max(matched.height);
 
                         if start_y + matched.height > viewport_start && start_y < viewport_end {
@@ -160,7 +160,7 @@ impl LiveEditor {
                             let ident = WidgetIdent(*live_ptr, matched.live_type);
                             widgets.entry(ident).or_insert_with( || {
                                 Widget {
-                                    live_widget: widget_registry.new(cx, matched.live_type).unwrap(),
+                                    inline_widget: widget_registry.new(cx, matched.live_type).unwrap(),
                                 }
                             });
                             visible_widgets.insert(ident);
@@ -212,7 +212,7 @@ impl LiveEditor {
                     });
                 }
                 let widget = self.widgets.get_mut(ident).unwrap();
-                widget.live_widget.draw_widget(cx);
+                widget.inline_widget.draw_inline(cx);
                 last_line = Some(line)
             }
             if last_line.is_some() {
@@ -244,7 +244,7 @@ impl LiveEditor {
         dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
     ) {
         for widget in self.widgets.values_mut(){
-            widget.live_widget.handle_widget_event(cx, event);
+            widget.inline_widget.handle_inline_event(cx, event);
         }
         self.editor_impl.handle_event(cx, state, event, &self.lines_layout, send_request, dispatch_action);
     }

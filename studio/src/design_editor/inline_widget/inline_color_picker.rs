@@ -3,21 +3,21 @@ use {
     makepad_widget::color_picker::*,
     crate::{
         design_editor::{
-            live_widget::*
+            inline_widget::*
         }
     }
 };
 
 live_register!{
-    LiveColorPicker: {{LiveColorPicker}} {
+    InlineColorPicker: {{InlineColorPicker}} {
     }
 }
 
 fn register_factory(cx: &mut Cx) {
     struct Factory();
-    impl LiveWidgetFactory for Factory {
-        fn new(&self, cx: &mut Cx) -> Box<dyn LiveWidget> {
-            Box::new(LiveColorPicker::new(cx))
+    impl InlineWidgetFactory for Factory {
+        fn new(&self, cx: &mut Cx) -> Box<dyn InlineWidget> {
+            Box::new(InlineColorPicker::new(cx))
         }
         
         fn can_edit_value(&self, _live_registry: &LiveRegistry, node: &LiveNode) -> CanEdit {
@@ -27,20 +27,20 @@ fn register_factory(cx: &mut Cx) {
             CanEdit::No
         }
     }
-    cx.registries.clone().get_or_create::<CxLiveWidgetRegistry>().register(
-        LiveColorPicker::live_type_info(cx),
+    cx.registries.clone().get_or_create::<CxInlineWidgetRegistry>().register(
+        InlineColorPicker::live_type_info(cx),
         Box::new(Factory()),
         LiveId::from_str("color_picker").unwrap(),
     )
 }
 
-impl LiveWidget for LiveColorPicker {
-    fn handle_widget_event(&mut self, cx: &mut Cx, event: &mut Event) -> LiveWidgetAction {
+impl InlineWidget for InlineColorPicker {
+    fn handle_inline_event(&mut self, cx: &mut Cx, event: &mut Event) -> InlineWidgetAction {
         self.color_picker.handle_event(cx, event);
-        LiveWidgetAction::None
+        InlineWidgetAction::None
     }
     
-    fn draw_widget(&mut self, cx: &mut Cx) {
+    fn draw_inline(&mut self, cx: &mut Cx) {
         self.color_picker.size = 100.0;
         self.color_picker.draw(cx, Vec4::default(), 1.0);
     }
@@ -48,6 +48,6 @@ impl LiveWidget for LiveColorPicker {
 
 #[derive(Live, LiveHook)]
 #[live_register(register_factory)]
-pub struct LiveColorPicker {
+pub struct InlineColorPicker {
     color_picker: ColorPicker
 }
