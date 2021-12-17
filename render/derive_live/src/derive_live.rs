@@ -371,7 +371,8 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
             tb.add("            Box::new(").ident(&struct_name).add("::new(cx))");
             tb.add("        }");
             tb.add("    }");
-            tb.add("    cx.registries.register_frame_component");
+            tb.add("    cx.registries.get_or_create::<CxFrameComponentRegistry>()");
+            tb.add("    .register_frame_component");
             tb.add("    (LiveType::of::<Self>(), Box::new(Factory()),").stream(attr.args.clone()).add(");");
             tb.add("}");
         }

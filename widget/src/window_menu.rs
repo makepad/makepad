@@ -2,7 +2,6 @@
 use makepad_render::*;
 
 live_register!{
-    use makepad_render::shader_std::*;
 }
 
 #[derive(Clone)]

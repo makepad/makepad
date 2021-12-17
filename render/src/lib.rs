@@ -83,6 +83,7 @@ pub use {
         cx::{
             Cx,
             CxRegistries,
+            CxRegistryNew,
             PlatformType
         },
         area::{

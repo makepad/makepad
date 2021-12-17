@@ -16,9 +16,7 @@ use {
 };
 
 live_register!{
-    use crate::shader_std::*;
-    //TextStyle:{}
-    //Wrapping:{}
+
     DrawText: {{DrawText}} {
         //debug: true;
         wrapping: Wrapping::None
