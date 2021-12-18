@@ -8,7 +8,6 @@ use {
         code_editor::{
             position::Position,
             text::Text,
-            size::Size
         }
     }
 };

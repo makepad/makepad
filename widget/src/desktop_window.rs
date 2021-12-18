@@ -161,7 +161,7 @@ impl DesktopWindow {
         self.pass.set_depth_texture(cx, &self.depth_texture, PassClearDepth::ClearWith(1.0));
         
         self.main_view.begin(cx).unwrap();
-        
+
         /*self.caption_view.set_layout(cx, Layout {
             walk: Walk::wh(Width::Filled, Height::Computed),
             ..Layout::default()
@@ -248,6 +248,8 @@ impl DesktopWindow {
         if self.inner_view.begin(cx).is_ok(){
             return Ok(())
         }
+        //println!("INNERVIEW NO REDRAW {:?}", cx.views[self.inner_view.view_id].codeflow_parent_id);
+
         self.end_inner(cx, true);
         Err(())
     }

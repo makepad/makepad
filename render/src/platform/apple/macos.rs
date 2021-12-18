@@ -78,6 +78,8 @@ impl Cx {
                                 // redraw just this windows root draw list
                                 if re.old_geom.inner_size != re.new_geom.inner_size {
                                     if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
+                                        //println!("REDRAW PASS");
+                                        //self.redraw_all();
                                         self.redraw_pass_and_child_passes(main_pass_id);
                                     }
                                 }
