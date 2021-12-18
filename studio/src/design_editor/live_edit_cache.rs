@@ -82,7 +82,7 @@ impl LiveEditCache {
                 continue
             }
             line_cache.is_clean = true;
-            if line_cache.items.len() != 0 {
+            if line_cache.items.len() != 0 { 
                 panic!();
             }
             let tokens_line = &token_cache[line];

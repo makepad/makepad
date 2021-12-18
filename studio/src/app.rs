@@ -23,7 +23,7 @@ pub struct App {
 
 impl App {
     pub fn live_register(cx: &mut Cx) {
-        println!("{}", std::mem::size_of::<LiveNode>());
+        //println!("{}", std::mem::size_of::<LiveNode>());
         makepad_widget::live_register(cx);
         crate::design_editor::live_register(cx);
         crate::code_editor::code_editor_impl::live_register(cx);

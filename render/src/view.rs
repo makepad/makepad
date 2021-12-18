@@ -252,6 +252,7 @@ impl View {
         Ok(())
     }
     
+    
     pub fn view_will_redraw(&self, cx: &mut Cx) -> bool {
         cx.view_will_redraw(self.view_id)
     }

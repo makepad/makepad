@@ -174,37 +174,33 @@ impl Cx {
     }
     
     pub fn view_will_redraw(&self, view_id: usize) -> bool {
+        
         if self.redraw_all_views {
             return true;
         }
         // figure out if areas are in some way a child of view_id, then we need to redraw
         for check_view_id in &self.redraw_views {
-            if *check_view_id == view_id {
-                return true
-            }
-            let mut vw = *check_view_id;
-            while let Some(next_vw) = self.views[vw].codeflow_parent_id {
-                vw = next_vw;
+            let mut next_vw = Some(*check_view_id);
+            while let Some(vw) = next_vw{
                 if vw == view_id {
                     return true
                 }
+                next_vw = self.views[vw].codeflow_parent_id;
             }
         }
         // figure out if areas are in some way a parent of view_id, then redraw
         for check_view_id in &self.redraw_views_and_children {
-            if *check_view_id == view_id {
-                return true
-            }
-            let mut vw = view_id;
-            while let Some(next_vw) = self.views[vw].codeflow_parent_id {
-                vw = next_vw;
-                if vw == view_id {
+            let mut next_vw = Some(view_id);
+            while let Some(vw) = next_vw{
+                if vw == *check_view_id {
                     return true
                 }
+                next_vw = self.views[vw].codeflow_parent_id;
             }
         }
         false
     }
+    
     
     pub fn update_area_refs(&mut self, old_area: Area, new_area: Area) -> Area {
         if old_area == Area::Empty {
