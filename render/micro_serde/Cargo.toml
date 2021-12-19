@@ -7,4 +7,4 @@ description = "microserde."
 edition = "2018"
 
 [dependencies]
-makepad-microserde-derive = { path = "derive", version = "0.1" }
+makepad-micro-serde-derive = { path = "derive", version = "0.1" }

@@ -6,10 +6,10 @@ pub use {
     makepad_shader_compiler::{
         ShaderTy
     },
-    makepad_live_compiler::{
+    makepad_shader_compiler::makepad_live_compiler::{
         LiveId,
     }, 
-    makepad_math::{
+    makepad_shader_compiler::makepad_math::{
         Vec2,
         Rect
     },

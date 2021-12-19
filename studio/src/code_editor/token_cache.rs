@@ -1,11 +1,9 @@
 use {
-    crate::{
-        code_editor::{
-            delta::{Delta, OperationRange},
-            text::Text,
-            token::Token,
-            tokenizer::{Cursor, State},
-        }
+    makepad_render::makepad_live_tokenizer::{
+        delta::{Delta, OperationRange},
+        text::Text,
+        token::TokenWithLen,
+        tokenizer::{Cursor, State},
     },
     std::{iter, ops::{Deref, Index}, slice::Iter},
 };
@@ -107,7 +105,7 @@ pub struct Line {
 }
 
 impl Line {
-    pub fn tokens(&self) -> &[Token] {
+    pub fn tokens(&self) -> &[TokenWithLen] {
         &self.token_info.as_ref().unwrap().tokens
     }
 }
@@ -115,6 +113,6 @@ impl Line {
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
 struct TokenInfo {
     start_state: State,
-    tokens: Vec<Token>,
+    tokens: Vec<TokenWithLen>,
     end_state: State,
 }

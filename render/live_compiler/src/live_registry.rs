@@ -2,13 +2,14 @@
 use {
     std::collections::{HashMap, HashSet},
     makepad_id_macros::*,
+    makepad_live_tokenizer::LiveId,
     crate::{
         live_error::{LiveError, LiveFileError},
         live_parser::LiveParser,
         live_document::LiveDocument,
         live_node::{LiveNode, LiveValue, LiveType, LiveTypeInfo,LiveNodeOrigin},
         live_node_vec::{LiveNodeSlice},
-        live_id::{LiveId, LiveFileId, LivePtr, LiveModuleId},
+        live_ptr::{LiveFileId, LivePtr, LiveModuleId},
         token::TokenId,
         span::{Span, TextPos},
         lex::lex,
@@ -88,6 +89,15 @@ impl LiveRegistry {
     pub fn ptr_to_nodes_index(&self, live_ptr: LivePtr) -> (&[LiveNode], usize) {
         let doc = &self.expanded[live_ptr.file_id.to_index()];
         (&doc.nodes, live_ptr.index as usize)
+    }
+    
+    pub fn path_str_to_file_id(&self, path: &str) -> Option<LiveFileId>{
+        for (index,file) in self.live_files.iter().enumerate(){
+            if file.file_name == path{
+                return Some(LiveFileId(index as u16))
+            }
+        }
+        None
     }
     
     pub fn token_id_to_origin_doc(&self, token_id: TokenId) -> &LiveDocument {
@@ -262,6 +272,7 @@ impl LiveRegistry {
             Err(msg) => return Err(msg.to_live_file_error(file_name)), //panic!("Parse error {}", msg.to_live_file_error(file, &source)),
             Ok(ld) => ld
         };
+
         document.strings = lex_result.strings;
         document.tokens = lex_result.tokens;
         
@@ -350,9 +361,20 @@ impl LiveRegistry {
             self.live_files[file_id.to_index()] = live_file;
             self.expanded[file_id.to_index()].recompile = true;
         }
-        
         return Ok(file_id)
     }
+    
+    /*
+    pub fn update_live_file(
+        &mut self,
+        file_name: &str,
+        file_id: LiveFileId,
+        source: String,
+        live_type_infos: Vec<LiveTypeInfo>,
+        start_pos: TextPos,
+    ) -> Result<(), LiveFileError> {
+        Ok(())
+    }*/
     
     pub fn expand_all_documents(&mut self, errors: &mut Vec<LiveError>) {
 

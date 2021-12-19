@@ -1,11 +1,9 @@
 use {
     crate::{
-        code_editor::{
-            position::Position,
-            range::Range,
-            size::Size,
-            text::Text
-        }
+        position::Position,
+        range::Range,
+        size::Size,
+        text::Text
     },
     std::{
         cmp::Ordering,

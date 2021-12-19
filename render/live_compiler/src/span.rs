@@ -1,12 +1,22 @@
 use{
     std::fmt,
-    crate::live_id::LiveFileId,
+    makepad_live_tokenizer::Position,
+    crate::live_ptr::LiveFileId,
 };
 
 #[derive(Clone, Copy, Default, Eq, Ord, PartialOrd, PartialEq)]
 pub struct TextPos {
     pub line: u32,
     pub column: u32
+}
+
+impl From<TextPos> for Position {
+    fn from(text_pos: TextPos) -> Position {
+        Position{
+            line:text_pos.line as usize,
+            column:text_pos.column as usize
+        }
+    }
 }
 
 #[derive(Clone, Copy, Default, Eq, Ord, PartialOrd, PartialEq)]

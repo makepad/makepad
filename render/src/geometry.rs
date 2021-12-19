@@ -4,7 +4,7 @@ pub use {
         cell::RefCell,
         hash::{Hash, Hasher},
     },
-    makepad_live_compiler::*,
+    makepad_shader_compiler::makepad_live_compiler::*,
     makepad_shader_compiler::ShaderTy,
     crate::{
         platform::CxPlatformGeometry,

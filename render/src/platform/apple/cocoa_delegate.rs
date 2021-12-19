@@ -3,7 +3,7 @@ use {
         ffi::CStr,
         os::raw::{c_void}
     },
-    makepad_math::{
+    makepad_shader_compiler::makepad_math::{
         Vec2,
     },
     crate::{

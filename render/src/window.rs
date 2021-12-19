@@ -4,7 +4,7 @@ pub use {
         cell::RefCell
     },
 
-    makepad_live_compiler::*,
+    makepad_shader_compiler::makepad_live_compiler::*,
     crate::{
         event::{
             WindowGeom

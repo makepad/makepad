@@ -5,7 +5,7 @@ use {
             server::{Connection, Server},
         }
     },
-    makepad_micro_serde::*,
+    makepad_render::makepad_micro_serde::*,
     makepad_render::*,
     std::{
         env,

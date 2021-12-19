@@ -17,10 +17,10 @@ mod derive_into_fcaction;
 use crate::derive_into_fcaction::*;
 
 
-#[path = "../../../micro_serde/derive/src/macro_lib.rs"]
+#[path = "../../micro_serde/derive/src/macro_lib.rs"]
 mod macro_lib;
 
-#[path = "../../live_compiler/src/live_id.rs"]
+#[path = "../../live_tokenizer/src/live_id.rs"]
 mod live_id;
 
 #[path = "../../math/src/colorhex.rs"]
