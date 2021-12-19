@@ -911,18 +911,20 @@ impl CodeEditorImpl {
             
             (FullToken::Ident(_), _) => self.text_color_identifier,
             (FullToken::Bool(_), _) => self.text_color_bool,
-            (FullToken::Number, _) => self.text_color_number,
+            
+            (FullToken::Float(_), _) |
+            (FullToken::Int(_), _) |
+            (FullToken::OtherNumber, _) => self.text_color_number,
+            
             (FullToken::Punct(_), _) => self.text_color_punctuator,
             (FullToken::String, _) => self.text_color_string,
             (FullToken::Whitespace, _) => self.text_color_whitespace,
-            (FullToken::Color(c), _) => self.text_color_color,
+            (FullToken::Color(_), _) => self.text_color_color,
             (FullToken::Unknown, _) => self.text_color_unknown,
             (FullToken::Open(_), _) |
             (FullToken::Close(_), _) => self.text_color_punctuator,
         }
     }
-    
-    
     
     pub fn handle_event(
         &mut self,
