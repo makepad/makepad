@@ -2,7 +2,7 @@ use {
     makepad_render::makepad_live_tokenizer::{
         delta::{Delta, OperationRange},
         text::Text,
-        token::TokenWithLen,
+        full_token::TokenWithLen,
         tokenizer::{Cursor, State},
     },
     std::{iter, ops::{Deref, Index}, slice::Iter},

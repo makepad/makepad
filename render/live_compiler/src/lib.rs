@@ -3,8 +3,8 @@
 pub mod util;
 //pub mod math;
 pub mod span;
-pub mod token;
 pub mod lex;
+pub mod live_token;
 pub mod live_error;
 pub mod live_parser;
 pub mod live_node;
@@ -54,7 +54,7 @@ pub use {
             FittedString,
             //LiveTypeKind,
         },
-        token::{TokenWithSpan, Token, TokenId},
+        live_token::{TokenWithSpan, LiveToken, TokenId},
         span::{
             Span,
             TextPos
