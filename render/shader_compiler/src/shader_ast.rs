@@ -848,65 +848,64 @@ impl DrawShaderDef {
 }
 
 impl BinOp {
-    pub fn from_assign_op(token: Token) -> Option<BinOp> {
+    pub fn from_assign_op(token: LiveToken) -> Option<BinOp> {
         match token {
-            Token::Punct(id!( =)) => Some(BinOp::Assign),
-            Token::Punct(id!( +=)) => Some(BinOp::AddAssign),
-            Token::Punct(id!( -=)) => Some(BinOp::SubAssign),
-            Token::Punct(id!( *=)) => Some(BinOp::MulAssign),
-            Token::Punct(id!( /=)) => Some(BinOp::DivAssign),
+            LiveToken::Punct(id!( =)) => Some(BinOp::Assign),
+            LiveToken::Punct(id!( +=)) => Some(BinOp::AddAssign),
+            LiveToken::Punct(id!( -=)) => Some(BinOp::SubAssign),
+            LiveToken::Punct(id!( *=)) => Some(BinOp::MulAssign),
+            LiveToken::Punct(id!( /=)) => Some(BinOp::DivAssign),
             _ => None,
         }
     }
     
-    pub fn from_or_op(token: Token) -> Option<BinOp> {
+    pub fn from_or_op(token: LiveToken) -> Option<BinOp> {
         match token {
-            Token::Punct(id!( ||)) => Some(BinOp::Or),
+            LiveToken::Punct(id!( ||)) => Some(BinOp::Or),
             _ => None,
         }
     }
     
-    pub fn from_and_op(token: Token) -> Option<BinOp> {
+    pub fn from_and_op(token: LiveToken) -> Option<BinOp> {
         match token {
-            Token::Punct(id!( &&)) => Some(BinOp::And),
+            LiveToken::Punct(id!( &&)) => Some(BinOp::And),
             _ => None,
         }
     }
     
-    pub fn from_eq_op(token: Token) -> Option<BinOp> {
+    pub fn from_eq_op(token: LiveToken) -> Option<BinOp> {
         match token {
-            Token::Punct(id!( ==)) => Some(BinOp::Eq),
-            Token::Punct(id!( !=)) => Some(BinOp::Ne),
+            LiveToken::Punct(id!( ==)) => Some(BinOp::Eq),
+            LiveToken::Punct(id!( !=)) => Some(BinOp::Ne),
             _ => None,
         }
     }
     
-    pub fn from_rel_op(token: Token) -> Option<BinOp> {
+    pub fn from_rel_op(token: LiveToken) -> Option<BinOp> {
         match token {
-            Token::Punct(id!(<)) => Some(BinOp::Lt),
-            Token::Punct(id!( <=)) => Some(BinOp::Le),
-            Token::Punct(id!(>)) => Some(BinOp::Gt),
-            Token::Punct(id!( >=)) => Some(BinOp::Ge),
+            LiveToken::Punct(id!(<)) => Some(BinOp::Lt),
+            LiveToken::Punct(id!( <=)) => Some(BinOp::Le),
+            LiveToken::Punct(id!(>)) => Some(BinOp::Gt),
+            LiveToken::Punct(id!( >=)) => Some(BinOp::Ge),
             _ => None,
         }
     }
     
-    pub fn from_add_op(token: Token) -> Option<BinOp> {
+    pub fn from_add_op(token: LiveToken) -> Option<BinOp> {
         match token {
-            Token::Punct(id!( +)) => Some(BinOp::Add),
-            Token::Punct(id!(-)) => Some(BinOp::Sub),
+            LiveToken::Punct(id!( +)) => Some(BinOp::Add),
+            LiveToken::Punct(id!(-)) => Some(BinOp::Sub),
             _ => None,
         }
     }
     
-    pub fn from_mul_op(token: Token) -> Option<BinOp> {
+    pub fn from_mul_op(token: LiveToken) -> Option<BinOp> {
         match token {
-            Token::Punct(id!(*)) => Some(BinOp::Mul),
-            Token::Punct(id!( /)) => Some(BinOp::Div),
+            LiveToken::Punct(id!(*)) => Some(BinOp::Mul),
+            LiveToken::Punct(id!( /)) => Some(BinOp::Div),
             _ => None,
         }
-    }
-    
+    } 
 }
 
 impl fmt::Display for BinOp {
@@ -938,10 +937,10 @@ impl fmt::Display for BinOp {
 }
 
 impl UnOp {
-    pub fn from_un_op(token: Token) -> Option<UnOp> {
+    pub fn from_un_op(token: LiveToken) -> Option<UnOp> {
         match token {
-            Token::Punct(id!(!)) => Some(UnOp::Not),
-            Token::Punct(id!(-)) => Some(UnOp::Neg),
+            LiveToken::Punct(id!(!)) => Some(UnOp::Not),
+            LiveToken::Punct(id!(-)) => Some(UnOp::Neg),
             _ => None,
         }
     }
@@ -1206,12 +1205,12 @@ impl Lit {
         }
     }
     
-    pub fn from_token(token: Token) -> Option<Lit> {
+    pub fn from_token(token: LiveToken) -> Option<Lit> {
         match token {
-            Token::Bool(v) => Some(Lit::Bool(v)),
-            Token::Int(v) => Some(Lit::Int(v as i32)),
-            Token::Float(v) => Some(Lit::Float(v as f32)),
-            Token::Color(v) => Some(Lit::Color(v)),
+            LiveToken::Bool(v) => Some(Lit::Bool(v)),
+            LiveToken::Int(v) => Some(Lit::Int(v as i32)),
+            LiveToken::Float(v) => Some(Lit::Float(v as f32)),
+            LiveToken::Color(v) => Some(Lit::Color(v)),
             _ => None
         }
     }

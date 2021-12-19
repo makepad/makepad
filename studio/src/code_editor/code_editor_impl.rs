@@ -22,7 +22,7 @@ use {
         range_set::{RangeSet, Span},
         size::Size,
         text::{Text},
-        token::{TokenKind, Delim},
+        full_token::{FullToken, Delim},
     },
     makepad_render::*,
     makepad_widget::{
@@ -125,13 +125,16 @@ live_register!{
         
         line_num_width: 45.0,
         
+        text_color_type_name: #56c9b1;
         text_color_comment: #638d54
         text_color_lifetime: #d4d4d4
         text_color_identifier: #d4d4d4
         text_color_function_identifier: #dcdcae
+        text_color_macro_identifier: #dcdcae
         text_color_branch_keyword: #c485be
         text_color_loop_keyword: #ff8c00
         text_color_other_keyword: #5b9bd3
+        text_color_bool: #5b9bd3
         text_color_number: #b6ceaa
         text_color_punctuator: #d4d4d4
         text_color_string: #cc917b
@@ -235,15 +238,18 @@ pub struct CodeEditorImpl {
     caret_blink_timeout: f64,
     
     text_color_color: Vec4,
+    text_color_type_name: Vec4,
     text_color_linenum: Vec4,
     text_color_linenum_current: Vec4,
     text_color_comment: Vec4,
     text_color_lifetime: Vec4,
     text_color_identifier: Vec4,
+    text_color_macro_identifier: Vec4,
     text_color_function_identifier: Vec4,
     text_color_branch_keyword: Vec4,
     text_color_loop_keyword: Vec4,
     text_color_other_keyword: Vec4,
+    text_color_bool: Vec4,
     text_color_number: Vec4,
     text_color_punctuator: Vec4,
     text_color_string: Vec4,
@@ -752,7 +758,7 @@ impl CodeEditorImpl {
                 
                 //self.code_text.font_scale = scale;
                 
-                self.code_text.color = self.text_color(token.kind, next_token.map( | next_token | next_token.kind));
+                self.code_text.color = self.text_color(token.token, next_token.map( | next_token | next_token.token));
                 
                 self.code_text.draw_chunk(
                     cx,
@@ -842,28 +848,81 @@ impl CodeEditorImpl {
         }
     }
     
-    fn text_color(&self, kind: TokenKind, next_kind: Option<TokenKind>) -> Vec4 {
-        match (kind, next_kind) {
-            (TokenKind::Comment, _) => self.text_color_comment,
-            (
-                TokenKind::Ident(_),
-                Some(TokenKind::Open(Delim::Paren)),
-            ) => self.text_color_function_identifier,
-            (TokenKind::Lifetime, _) => self.text_color_lifetime,
-            (TokenKind::Ident(_), _) => self.text_color_identifier,
-            (TokenKind::Branch(_),_) => self.text_color_branch_keyword,
-            (TokenKind::Loop(_),_) => self.text_color_loop_keyword,
-            (TokenKind::Keyword(_), _) => self.text_color_other_keyword,
-            (TokenKind::Number, _) => self.text_color_number,
-            (TokenKind::Punct(_), _) => self.text_color_punctuator,
-            (TokenKind::String, _) => self.text_color_string,
-            (TokenKind::Whitespace, _) => self.text_color_whitespace,
-            (TokenKind::Color, _) => self.text_color_color,
-            (TokenKind::Unknown, _) => self.text_color_unknown,
-            (TokenKind::Open(_),_) |
-            (TokenKind::Close(_),_)  => self.text_color_punctuator,
+    fn text_color(&self, token: FullToken, next_token: Option<FullToken>) -> Vec4 {
+        match (token, next_token) {
+            (FullToken::Comment, _) => self.text_color_comment,
+
+            (FullToken::Ident(_), Some(FullToken::Open(Delim::Paren))) => self.text_color_function_identifier,
+            (FullToken::Ident(_), Some(FullToken::Punct(id!(!)))) => self.text_color_macro_identifier,
+            
+            (FullToken::Lifetime, _) => self.text_color_lifetime,
+            
+            (FullToken::Ident(id!(if)), _) |
+            (FullToken::Ident(id!(else)), _) |
+            (FullToken::Ident(id!(match)), _) => self.text_color_branch_keyword,
+            
+            (FullToken::Ident(id!(for)), _) |
+            (FullToken::Ident(id!(while)), _) |
+            (FullToken::Ident(id!(break)), _) |
+            (FullToken::Ident(id!(continue)), _) |
+            (FullToken::Ident(id!(loop)), _) => self.text_color_loop_keyword,
+            
+            (FullToken::Ident(id!(abstract)), _) |
+            (FullToken::Ident(id!(async)), _) |
+            (FullToken::Ident(id!(as)), _) |
+            (FullToken::Ident(id!(await)), _) |
+            (FullToken::Ident(id!(become)), _) |
+            (FullToken::Ident(id!(box)), _) |
+            (FullToken::Ident(id!(const)), _) |
+            (FullToken::Ident(id!(crate)), _) |
+            (FullToken::Ident(id!(do)), _) |
+            (FullToken::Ident(id!(dyn)), _) |
+            (FullToken::Ident(id!(enum)), _) |
+            (FullToken::Ident(id!(extern)), _) |
+            (FullToken::Ident(id!(false)), _) |
+            (FullToken::Ident(id!(final)), _) |
+            (FullToken::Ident(id!(fn)), _) |
+            (FullToken::Ident(id!(impl)), _) |
+            (FullToken::Ident(id!(in)), _) |
+            (FullToken::Ident(id!(let)), _) |
+            (FullToken::Ident(id!(macro)), _) |
+            (FullToken::Ident(id!(mod)), _) |
+            (FullToken::Ident(id!(move)), _) |
+            (FullToken::Ident(id!(mut)), _) |
+            (FullToken::Ident(id!(override)), _) |
+            (FullToken::Ident(id!(priv)), _) |
+            (FullToken::Ident(id!(pub)), _) |
+            (FullToken::Ident(id!(ref)), _) |
+            (FullToken::Ident(id!(self)), _) |
+            (FullToken::Ident(id!(static)), _) |
+            (FullToken::Ident(id!(struct)), _) |
+            (FullToken::Ident(id!(super)), _) |
+            (FullToken::Ident(id!(trait)), _) |
+            (FullToken::Ident(id!(true)), _) |
+            (FullToken::Ident(id!(typeof)), _) |
+            (FullToken::Ident(id!(unsafe)), _) |
+            (FullToken::Ident(id!(use)), _) |
+            (FullToken::Ident(id!(unsized)), _) |
+            (FullToken::Ident(id!(virtual)), _) |
+            (FullToken::Ident(id!(yield)), _) |
+            (FullToken::Ident(id!(where)), _) => self.text_color_other_keyword,
+            
+            (FullToken::Ident(i), _) if i.is_capitalised() => self.text_color_type_name,
+            
+            (FullToken::Ident(_), _) => self.text_color_identifier,
+            (FullToken::Bool(_), _) => self.text_color_bool,
+            (FullToken::Number, _) => self.text_color_number,
+            (FullToken::Punct(_), _) => self.text_color_punctuator,
+            (FullToken::String, _) => self.text_color_string,
+            (FullToken::Whitespace, _) => self.text_color_whitespace,
+            (FullToken::Color, _) => self.text_color_color,
+            (FullToken::Unknown, _) => self.text_color_unknown,
+            (FullToken::Open(_), _) |
+            (FullToken::Close(_), _) => self.text_color_punctuator,
         }
     }
+    
+    
     
     pub fn handle_event(
         &mut self,

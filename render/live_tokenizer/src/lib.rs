@@ -6,7 +6,7 @@ pub mod range;
 pub mod range_set;
 pub mod size;
 pub mod text;
-pub mod token;
+pub mod full_token;
 pub mod tokenizer;
 pub mod live_id;
 
@@ -21,7 +21,7 @@ pub use {
     range_set::*,
     size::*,
     text::*,
-    token::*,
+    full_token::*,
     tokenizer::*,
     live_id::*,
 };

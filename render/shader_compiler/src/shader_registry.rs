@@ -159,13 +159,13 @@ impl ShaderRegistry {
                     // lets get the first token
                     let origin_doc = live_registry.token_id_to_origin_doc(node.origin.token_id().unwrap());
                     match origin_doc.tokens[token_start as usize].token {
-                        Token::Ident(id!(fn)) => {
+                        LiveToken::Ident(id!(fn)) => {
                             if let Some(struct_ptr) = struct_ptr {
                                 return LiveNodeFindResult::PossibleStatic(StructPtr(struct_ptr), FnPtr(now_ptr));
                             }
                             return LiveNodeFindResult::Function(FnPtr(now_ptr));
                         }
-                        Token::Ident(id!(const)) => {
+                        LiveToken::Ident(id!(const)) => {
                             return LiveNodeFindResult::Const(ConstPtr(now_ptr));
                         }
                         _ => LiveNodeFindResult::NotFound
@@ -392,7 +392,7 @@ impl ShaderRegistry {
                                 //Some(struct_full_ptr)
                             );
                             match origin_doc.tokens[token_start as usize].token {
-                                Token::Ident(id!(fn)) => {
+                                LiveToken::Ident(id!(fn)) => {
                                     
                                     let fn_def = parser.expect_method_def(
                                         FnPtr(prop_ptr),
@@ -531,7 +531,7 @@ impl ShaderRegistry {
                             );
                             
                             match origin_doc.tokens[token_start as usize].token {
-                                Token::Ident(id!(fn)) => {
+                                LiveToken::Ident(id!(fn)) => {
                                     let fn_def = parser.expect_method_def(
                                         FnPtr(prop_ptr),
                                         Ident(prop.id),
