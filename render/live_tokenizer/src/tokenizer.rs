@@ -137,6 +137,7 @@ impl InitialState {
                 )
             }
             ('#', ch1, ch2) if ch1 == 'x' && ch2.is_hex() || ch1.is_hex() => self.color(cursor),
+            ('.', ch1, _) if ch1.is_digit(10) => self.number(cursor),
             ('!', _, _)
                 | ('#', _, _)
                 | ('$', _, _)
@@ -159,7 +160,7 @@ impl InitialState {
                 | ('_', _, _)
                 | ('|', _, _) => {
                 let id = cursor.id_from_1();
-                cursor.skip(1);
+                 cursor.skip(1);
                 (
                     State::Initial(InitialState),
                     FullToken::Punct(id),
@@ -222,7 +223,7 @@ impl InitialState {
     }
     
     fn number(self, cursor: &mut Cursor) -> (State, FullToken) {
-        debug_assert!(cursor.peek(0).is_digit(10));
+        //debug_assert!(cursor.peek(0).is_digit(10));
         match (cursor.peek(0), cursor.peek(1)) {
             ('0', 'b') => {
                 cursor.skip(2);
@@ -252,8 +253,9 @@ impl InitialState {
                 
                 match cursor.peek(0) {
                     '.' if cursor.peek(1) != '.' && !cursor.peek(0).is_identifier_start() => {
+                        cursor.skip(1);
                         if cursor.skip_digits(10) {
-                            if cursor.peek(0) == 'E' || cursor.peek(1) == 'e' {
+                            if cursor.peek(0) == 'E' || cursor.peek(0) == 'e' {
                                 if !cursor.skip_exponent() {
                                     return (State::Initial(InitialState), FullToken::Unknown);
                                 }
@@ -567,7 +569,7 @@ impl<'a> Cursor<'a> {
     fn skip_exponent(&mut self) -> bool {
         debug_assert!(self.peek(0) == 'E' || self.peek(0) == 'e');
         self.skip(1);
-        if self.peek(0) == '+' || self.peek(1) == '-' {
+        if self.peek(0) == '+' || self.peek(0) == '-' {
             self.skip(1);
         }
         self.skip_digits(10)
