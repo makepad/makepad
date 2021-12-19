@@ -248,7 +248,6 @@ impl DesktopWindow {
         if self.inner_view.begin(cx).is_ok(){
             return Ok(())
         }
-        //println!("INNERVIEW NO REDRAW {:?}", cx.views[self.inner_view.view_id].codeflow_parent_id);
 
         self.end_inner(cx, true);
         Err(())

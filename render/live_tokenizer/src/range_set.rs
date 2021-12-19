@@ -1,10 +1,8 @@
 use {
     crate::{
-        code_editor::{
-            position::Position,
-            range::Range,
-            size::Size
-        }
+        position::Position,
+        range::Range,
+        size::Size
     },
     std::{
         collections::{btree_map::Entry, BTreeMap},

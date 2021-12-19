@@ -1,5 +1,5 @@
 [package]
-name = "makepad-microserde-derive"
+name = "makepad-micro-serde-derive"
 version = "0.1.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"

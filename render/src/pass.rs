@@ -3,7 +3,7 @@ pub use {
         rc::Rc,
         cell::RefCell
     },
-    makepad_live_compiler::*,
+    makepad_shader_compiler::makepad_live_compiler::*,
     crate::{
         platform::{
             CxPlatformPass,

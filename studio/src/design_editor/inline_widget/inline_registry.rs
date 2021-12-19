@@ -1,11 +1,9 @@
 use {
     makepad_render::*,
-    crate::{
-        code_editor::{
-            position::Position,
-            text::Text,
-            size::Size
-        }
+    makepad_render::makepad_live_tokenizer::{
+        position::Position,
+        text::Text,
+        size::Size
     },
     std::any::TypeId,
 };

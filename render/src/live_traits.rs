@@ -2,7 +2,7 @@ pub use {
     std::{
         any::TypeId,
     },
-    makepad_live_compiler::*,
+    makepad_shader_compiler::makepad_live_compiler::*,
     crate::{
         event::Event,
         cx::Cx,

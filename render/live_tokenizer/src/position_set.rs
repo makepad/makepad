@@ -1,9 +1,7 @@
 use {
     crate::{
-        code_editor::{
-            position::Position,
-            size::Size
-        }
+        position::Position,
+        size::Size
     },
     std::{ops::Deref, slice::Iter},
 };

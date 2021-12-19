@@ -1,5 +1,5 @@
 use {
-    makepad_math::*,
+    makepad_shader_compiler::makepad_math::*,
 };
 
 #[derive(Clone, Debug, Default,  PartialEq)]

@@ -3,7 +3,7 @@ use {
         fmt::Write,
         time::Instant,
     },
-    makepad_math::{
+    makepad_shader_compiler::makepad_math::{
         Vec2
     },
     crate::{

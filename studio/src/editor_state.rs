@@ -1,19 +1,22 @@
 use {
+    makepad_render::makepad_live_tokenizer::{
+        delta::{self, Delta, Whose},
+        position::Position,
+        position_set::PositionSet,
+        range_set::RangeSet,
+        size::Size,
+        text::Text,
+    },
+
     crate::{
         code_editor::{
             cursor_set::CursorSet,
-            delta::{self, Delta, Whose},
             indent_cache::IndentCache,
-            position::Position,
-            position_set::PositionSet,
-            protocol::{FileId, Request},
-            range_set::RangeSet,
-            size::Size,
-            text::Text,
+            protocol::{TextFileId, Request},
             token_cache::TokenCache,
         },
         design_editor::{
-            live_edit_cache::LiveEditCache,
+            inline_cache::InlineCache,
         },
         editors::EditorViewId,
     },
@@ -34,7 +37,7 @@ pub struct EditorState {
     pub document_id_allocator: GenIdAllocator,
     pub documents_by_document_id: GenIdMap<DocumentId, Document>,
     pub document_ids_by_path: HashMap<PathBuf, DocumentId>,
-    pub document_ids_by_file_id: GenIdMap<FileId, DocumentId>,
+    pub document_ids_by_file_id: GenIdMap<TextFileId, DocumentId>,
     pub outstanding_document_id_queue: VecDeque<DocumentId>,
 }
 
@@ -111,7 +114,7 @@ impl EditorState {
 
     pub fn handle_open_file_response(
         &mut self,
-        file_id: FileId,
+        file_id: TextFileId,
         revision: usize,
         text: Text,
         send_request: &mut dyn FnMut(Request),
@@ -120,7 +123,7 @@ impl EditorState {
         let document = &mut self.documents_by_document_id[document_id];
         let token_cache = TokenCache::new(&text);
         let indent_cache = IndentCache::new(&text);
-        let live_edit_cache = RefCell::new(LiveEditCache::new(&text));
+        let inline_cache = RefCell::new(InlineCache::new(&text));
         
         document.inner = Some(DocumentInner {
             file_id,
@@ -128,7 +131,7 @@ impl EditorState {
             text,
             token_cache,
             indent_cache,
-            live_edit_cache,
+            inline_cache,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             outstanding_deltas: VecDeque::new(),
@@ -510,7 +513,7 @@ impl EditorState {
 
     pub fn handle_apply_delta_response(
         &mut self,
-        file_id: FileId,
+        file_id: TextFileId,
         send_request: &mut dyn FnMut(Request),
     ) {
         let document_id = self.document_ids_by_file_id[file_id];
@@ -530,7 +533,7 @@ impl EditorState {
 
     pub fn handle_delta_applied_notification(
         &mut self,
-        file_id: FileId,
+        file_id: TextFileId,
         delta: Delta,
     ) -> DocumentId {
         let document_id = self.document_ids_by_file_id[file_id];
@@ -622,7 +625,7 @@ impl Document {
         let inner = self.inner.as_mut().unwrap();
         inner.token_cache.invalidate(&delta);
         inner.indent_cache.invalidate(&delta);
-        inner.live_edit_cache.borrow_mut().invalidate(&delta);
+        inner.inline_cache.borrow_mut().invalidate(&delta);
         inner.text.apply_delta(delta);
         inner.token_cache.refresh(&inner.text);
         inner.indent_cache.refresh(&inner.text);
@@ -653,12 +656,12 @@ impl Document {
 }
 
 pub struct DocumentInner {
-    pub file_id: FileId,
+    pub file_id: TextFileId,
     pub revision: usize,
     pub text: Text,
     pub token_cache: TokenCache,
     pub indent_cache: IndentCache,
-    pub live_edit_cache: RefCell<LiveEditCache>,
+    pub inline_cache: RefCell<InlineCache>,
     pub undo_stack: Vec<Edit>,
     pub redo_stack: Vec<Edit>,
     pub outstanding_deltas: VecDeque<Delta>,

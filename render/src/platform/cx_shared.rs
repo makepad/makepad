@@ -1,6 +1,6 @@
 use {
     std::collections::HashMap,
-    makepad_math::{
+    makepad_shader_compiler::makepad_math::{
         Vec2,
     },
     crate::{

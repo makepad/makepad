@@ -1,12 +1,14 @@
 use {
     crate::{
         code_editor::{
-            delta::Delta,
             protocol::{
-                DirectoryEntry, Error, FileId, FileNodeData, FileTreeData, Notification, Request, Response,
+                DirectoryEntry, Error, TextFileId, FileNodeData, FileTreeData, Notification, Request, Response,
             },
-            text::Text,
         },
+    },
+    makepad_render::makepad_live_tokenizer::{
+        delta::Delta,
+        text::Text
     },
     makepad_widget::{GenIdMap,GenIdAllocator},
     std::{
@@ -92,7 +94,7 @@ impl Connection {
         Ok(FileTreeData { path, root })
     }
 
-    pub fn open_file(&self, path: PathBuf) -> Result<(FileId, usize, Text), Error> {
+    pub fn open_file(&self, path: PathBuf) -> Result<(TextFileId, usize, Text), Error> {
         let mut shared_guard = self.shared.write().unwrap();
 
         match shared_guard.file_ids_by_path.get(&path) {
@@ -122,7 +124,7 @@ impl Connection {
                 Ok((file_id, their_revision, text))
             }
             None => {
-                let file_id = FileId(shared_guard.file_id_allocator.allocate());
+                let file_id = TextFileId(shared_guard.file_id_allocator.allocate());
 
                 let bytes = fs::read(&path).map_err(|error| Error::Unknown(error.to_string()))?;
                 let text: Text = String::from_utf8_lossy(&bytes)
@@ -159,10 +161,10 @@ impl Connection {
 
     fn apply_delta(
         &self,
-        file_id: FileId,
+        file_id: TextFileId,
         their_revision: usize,
         delta: Delta,
-    ) -> Result<FileId, Error> {
+    ) -> Result<TextFileId, Error> {
         let shared_guard = self.shared.read().unwrap();
 
         let mut file_guard = shared_guard
@@ -211,7 +213,7 @@ impl Connection {
         Ok(file_id)
     }
 
-    fn close_file(&self, file_id: FileId) -> Result<FileId, Error> {
+    fn close_file(&self, file_id: TextFileId) -> Result<TextFileId, Error> {
         let mut shared_guard = self.shared.write().unwrap();
 
         let mut file_guard = shared_guard
@@ -280,8 +282,8 @@ impl fmt::Debug for dyn NotificationSender {
 struct Shared {
     path: PathBuf,
     file_id_allocator: GenIdAllocator,
-    files_by_file_id: GenIdMap<FileId, Mutex<File>>,
-    file_ids_by_path: HashMap<PathBuf, FileId>,
+    files_by_file_id: GenIdMap<TextFileId, Mutex<File>>,
+    file_ids_by_path: HashMap<PathBuf, TextFileId>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

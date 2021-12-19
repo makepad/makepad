@@ -1,7 +1,5 @@
 use {
-    makepad_live_compiler::*,
     makepad_shader_compiler::*,
- 
     crate::{
         platform::{
             CxPlatformShader            

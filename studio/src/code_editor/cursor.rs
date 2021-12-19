@@ -1,7 +1,8 @@
-use crate::{
-    code_editor::{
-        position::Position, range::Range
-    }
+use {
+    makepad_render::makepad_live_tokenizer::{
+        position::Position,
+        range::Range,
+    },    
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]

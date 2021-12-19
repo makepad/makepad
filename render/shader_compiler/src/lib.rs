@@ -22,6 +22,12 @@ pub mod generate_metal;
 //#[cfg(any(target_os = "windows", test))]
 pub mod generate_hlsl;
 
+pub use makepad_live_compiler;
+pub use makepad_live_compiler::makepad_math;
+pub use makepad_live_compiler::makepad_live_tokenizer;
+pub use makepad_live_compiler::makepad_derive_live;
+pub use makepad_live_compiler::makepad_micro_serde;
+
 pub use {
     crate::{
         shader_ast::{
