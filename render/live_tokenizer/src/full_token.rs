@@ -1,12 +1,12 @@
 use crate::live_id::LiveId;
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TokenWithLen {
     pub len: usize,
     pub token: FullToken,
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum FullToken {
     Punct(LiveId),
     Ident(LiveId),
@@ -17,9 +17,10 @@ pub enum FullToken {
     String,
     Bool(bool),
     Color(u32),
-
-    Number,
-
+    Float(f64),
+    Int(i64),
+    
+    OtherNumber,
     Lifetime,
     Comment,
     Whitespace,

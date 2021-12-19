@@ -8,7 +8,7 @@ use {
     std::{iter, ops::{Deref, Index}, slice::Iter},
 };
 
-#[derive(Clone, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug,PartialEq)]
 pub struct TokenCache {
     lines: Vec<Line>,
 }
@@ -25,7 +25,7 @@ impl TokenCache {
     pub fn invalidate(&mut self, delta: &Delta) {
         for operation_range in delta.operation_ranges() {
             match operation_range {
-                OperationRange::Insert(range) => {
+                OperationRange::Insert(range) => { 
                     self.lines[range.start.line] = Line::default();
                     self.lines.splice(
                         range.start.line..range.start.line,
@@ -42,6 +42,7 @@ impl TokenCache {
 
     pub fn refresh(&mut self, text: &Text) {
         let mut state = State::default();
+        let mut scratch = String::new();
         for (index, line) in self.lines.iter_mut().enumerate() {
             match line.token_info {
                 Some(TokenInfo {
@@ -54,7 +55,7 @@ impl TokenCache {
                 _ => {
                     let start_state = state;
                     let mut tokens = Vec::new();
-                    let mut cursor = Cursor::new(&text.as_lines()[index]);
+                    let mut cursor = Cursor::new(&text.as_lines()[index], &mut scratch);
                     loop {
                         let (next_state, token) = state.next(&mut cursor);
                         state = next_state;
@@ -99,7 +100,7 @@ impl<'a> IntoIterator for &'a TokenCache {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Default,PartialEq)]
 pub struct Line {
     token_info: Option<TokenInfo>
 }
@@ -110,7 +111,7 @@ impl Line {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 struct TokenInfo {
     start_state: State,
     tokens: Vec<TokenWithLen>,
