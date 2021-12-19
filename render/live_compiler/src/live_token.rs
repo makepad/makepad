@@ -22,16 +22,19 @@ impl fmt::Display for TokenWithSpan {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum LiveToken {
-    Eof,
     Punct(LiveId),
     Ident(LiveId),
+    
     Open(Delim),
     Close(Delim),
+    
     String{index:u32, len:u32},
     Bool(bool),
     Int(i64),
     Float(f64),
     Color(u32),
+
+    Eof,
 }
 
 impl fmt::Display for LiveToken {
