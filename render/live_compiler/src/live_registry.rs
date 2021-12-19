@@ -10,7 +10,7 @@ use {
         live_node::{LiveNode, LiveValue, LiveType, LiveTypeInfo,LiveNodeOrigin},
         live_node_vec::{LiveNodeSlice},
         live_ptr::{LiveFileId, LivePtr, LiveModuleId},
-        token::TokenId,
+        live_token::TokenId,
         span::{Span, TextPos},
         lex::lex,
         live_expander::{LiveExpander} 
@@ -35,7 +35,7 @@ pub struct LiveRegistry {
     pub dep_graph: HashMap<LiveModuleId, HashSet<LiveModuleId >>, // this contains all the dependencies a crate has
     pub expanded: Vec<LiveDocument>,
 }
-
+ 
 impl Default for LiveRegistry{
     fn default()->Self{
         

@@ -12,7 +12,7 @@ use {
     },
     makepad_live_tokenizer::LiveId,
     crate::{
-        token::TokenId,
+        live_token::TokenId,
         live_node::{LiveNode, LiveValue, LiveNodeOrigin, InlineString, FittedString},
     }
 };

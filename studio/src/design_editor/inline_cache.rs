@@ -4,7 +4,7 @@ use {
         text::Text,
         range::Range,
         position::Position,
-        token::{Delim, TokenKind},
+        full_token::{Delim, FullToken},
     },
     crate::code_editor::{
         token_cache::TokenCache,
@@ -61,35 +61,35 @@ impl InlineCache {
             let mut column = 0;
             for token in token_line.tokens() {
                 match state {
-                    State::Scan => match token.kind {
-                        TokenKind::Ident(id!(live_register)) => {state = State::Bang}
+                    State::Scan => match token.token {
+                        FullToken::Ident(id!(live_register)) => {state = State::Bang}
                         _ => ()
                     }
-                    State::Bang => match token.kind {
-                        TokenKind::Punct(id!(!)) => {state = State::Brace}
-                        TokenKind::Whitespace | TokenKind::Comment => (),
+                    State::Bang => match token.token {
+                        FullToken::Punct(id!(!)) => {state = State::Brace}
+                        FullToken::Whitespace | FullToken::Comment => (),
                         _ => {state = State::Scan}
                     }
-                    State::Brace => match token.kind {
-                        TokenKind::Open(Delim::Brace) => {state = State::First}
-                        TokenKind::Whitespace | TokenKind::Comment => (),
+                    State::Brace => match token.token {
+                        FullToken::Open(Delim::Brace) => {state = State::First}
+                        FullToken::Whitespace | FullToken::Comment => (),
                         _ => {state = State::Scan}
                     }
-                    State::First => match token.kind {
-                        TokenKind::Whitespace | TokenKind::Comment => (),
+                    State::First => match token.token {
+                        FullToken::Whitespace | FullToken::Comment => (),
                         _=>{state = State::Stack(Position {line, column}, 0)}
                     }
                     State::Stack(start, depth) => {
-                        match token.kind {
-                            TokenKind::Open(_) => {state = State::Stack(start, depth + 1)}
-                            TokenKind::Close(_) => {
+                        match token.token {
+                            FullToken::Open(_) => {state = State::Stack(start, depth + 1)}
+                            FullToken::Close(_) => {
                                 if depth == 0 { // end of scan
                                     state = State::Term(start, Position {line, column});
                                     break 'outer
                                 }
                                 state = State::Stack(start, depth - 1)
                             }
-                            TokenKind::Whitespace | TokenKind::Comment => (),
+                            FullToken::Whitespace | FullToken::Comment => (),
                             _ => ()
                         }
                     }
@@ -157,7 +157,7 @@ impl InlineCache {
             let tokens_line = &token_cache[line];
             let mut column = 0;
             for (edit_token_index, token) in tokens_line.tokens().iter().enumerate() {
-                if let TokenKind::Ident(_) = token.kind {
+                if let FullToken::Ident(_) = token.token {
                     if let Some(live_token_index) = live_file.document.find_token_by_pos(TextPos {line: line as u32, column}) {
                         let match_token_id = makepad_live_compiler::TokenId::new(file_id, live_token_index);
                         if let Some(node_index) = expanded.nodes.first_node_with_token_id(match_token_id) {

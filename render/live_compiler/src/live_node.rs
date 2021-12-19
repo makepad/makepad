@@ -6,7 +6,7 @@ use {
     makepad_live_tokenizer::LiveId,
     crate::{
         live_ptr::{LiveFileId, LiveModuleId, LivePtr},
-        token::TokenId,
+        live_token::TokenId,
     }
 };
 
