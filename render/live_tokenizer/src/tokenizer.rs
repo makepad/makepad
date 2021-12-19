@@ -216,7 +216,9 @@ impl InitialState {
     
     fn identifier_tail(self, start: usize, cursor: &mut Cursor) -> (State, FullToken) {
         while cursor.skip_if( | ch | ch.is_identifier_continue()) {}
-        (State::Initial(InitialState), FullToken::Ident(LiveId::from_char_slice(cursor.slice_from_start(start))))
+        (State::Initial(InitialState), FullToken::Ident(
+            LiveId::from_str(cursor.from_start_to_scratch(start)).unwrap()
+        ))
     }
     
     fn number(self, cursor: &mut Cursor) -> (State, FullToken) {
@@ -227,21 +229,27 @@ impl InitialState {
                 if !cursor.skip_digits(2) {
                     return (State::Initial(InitialState), FullToken::Unknown);
                 }
+                return (State::Initial(InitialState), FullToken::OtherNumber)
             }
             ('0', 'o') => {
                 cursor.skip(2);
                 if !cursor.skip_digits(8) {
                     return (State::Initial(InitialState), FullToken::Unknown);
                 }
+                return (State::Initial(InitialState), FullToken::OtherNumber)
             }
             ('0', 'x') => {
                 cursor.skip(2);
                 if !cursor.skip_digits(16) {
                     return (State::Initial(InitialState), FullToken::Unknown);
                 }
+                return (State::Initial(InitialState), FullToken::OtherNumber)
             }
             _ => {
+                let start = cursor.index();
+                // normal number
                 cursor.skip_digits(10);
+                
                 match cursor.peek(0) {
                     '.' if cursor.peek(1) != '.' && !cursor.peek(0).is_identifier_start() => {
                         if cursor.skip_digits(10) {
@@ -251,18 +259,47 @@ impl InitialState {
                                 }
                             }
                         }
+                        if cursor.skip_suffix() {
+                            return (State::Initial(InitialState), FullToken::OtherNumber)
+                        }
+                        // parse as float
+                        if let Ok(value) = cursor.from_start_to_scratch(start).parse::<f64>() {
+                            return (State::Initial(InitialState), FullToken::Float(value))
+                        }
+                        else {
+                            return (State::Initial(InitialState), FullToken::Unknown)
+                        }
                     }
                     'E' | 'e' => {
                         if !cursor.skip_exponent() {
                             return (State::Initial(InitialState), FullToken::Unknown);
                         }
+                        if cursor.skip_suffix() {
+                            return (State::Initial(InitialState), FullToken::OtherNumber)
+                        }
+                        // parse as float
+                        if let Ok(value) = cursor.from_start_to_scratch(start).parse::<f64>() {
+                            return (State::Initial(InitialState), FullToken::Float(value))
+                        }
+                        else {
+                            return (State::Initial(InitialState), FullToken::Unknown)
+                        }
                     }
-                    _ => {}
+                    _ => {
+                        if cursor.skip_suffix() {
+                            return (State::Initial(InitialState), FullToken::OtherNumber)
+                        }
+                        // normal number
+                        if let Ok(value) = cursor.from_start_to_scratch(start).parse::<i64>() {
+                            return (State::Initial(InitialState), FullToken::Int(value))
+                        }
+                        else {
+                            return (State::Initial(InitialState), FullToken::Unknown)
+                        }
+                    }
                 }
             }
         };
-        cursor.skip_suffix();
-        (State::Initial(InitialState), FullToken::Number)
     }
     
     fn color(self, cursor: &mut Cursor) -> (State, FullToken) {
@@ -284,10 +321,10 @@ impl InitialState {
                 start
             }
         };
-        if let Ok(col) = colorhex::hex_chars_to_u32(cursor.slice_from_start(start)){
+        if let Ok(col) = colorhex::hex_bytes_to_u32(cursor.from_start_to_scratch(start).as_bytes()) {
             (State::Initial(InitialState), FullToken::Color(col))
         }
-        else{
+        else {
             (State::Initial(InitialState), FullToken::Unknown)
         }
     }
@@ -464,21 +501,25 @@ impl RawDoubleQuotedStringTailState {
 #[derive(Debug)]
 pub struct Cursor<'a> {
     chars: &'a [char],
+    scratch: &'a mut String,
     index: usize,
 }
 
 impl<'a> Cursor<'a> {
-    pub fn new(chars: &'a [char]) -> Cursor<'a> {
-        Cursor {chars, index: 0}
+    pub fn new(chars: &'a [char], scratch: &'a mut String) -> Cursor<'a> {
+        Cursor {chars, scratch, index: 0}
     }
     
     fn index(&self) -> usize {
         self.index
     }
     
-    
-    fn slice_from_start(&self, start: usize) -> &[char] {
-        &self.chars[start..self.index]
+    fn from_start_to_scratch(&mut self, start: usize) -> &str {
+        self.scratch.truncate(0);
+        for i in start..self.index {
+            self.scratch.push(self.chars[i]);
+        }
+        &self.scratch
     }
     
     
@@ -549,11 +590,13 @@ impl<'a> Cursor<'a> {
         has_skip_digits
     }
     
-    fn skip_suffix(&mut self) {
+    fn skip_suffix(&mut self) -> bool {
         if self.peek(0).is_identifier_start() {
             self.skip(1);
             while self.skip_if( | ch | ch.is_identifier_continue()) {}
+            return true
         }
+        false
     }
 }
 

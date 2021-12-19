@@ -130,27 +130,6 @@ impl LiveId {
         }
     }
     
-    pub const fn from_char_slice(id_bytes: &[char]) -> Self {
-        let mut x = 0xd6e8_feb8_6659_fd93u64;
-        let mut i = 0;
-        while i < id_bytes.len() {
-            x = x.overflowing_add(id_bytes[i] as u64).0;
-            x ^= x >> 32;
-            x = x.overflowing_mul(0xd6e8_feb8_6659_fd93).0;
-            x ^= x >> 32;
-            x = x.overflowing_mul(0xd6e8_feb8_6659_fd93).0;
-            x ^= x >> 32;
-            i += 1;
-        }
-        // use high bit to mark id as capitalised
-        if id_bytes[0] >= 'A' && id_bytes[0] <= 'Z' {
-            return Self(x|0x8000_0000_0000_0000)
-        }
-        else{
-            return Self(x&0x7fff_ffff_ffff_ffff)
-        }
-    }
-    
     // merges 2 ids in a nonsymmetric fashion
     /*
     pub const fn add_id(&self, id: LiveId) -> Self {
