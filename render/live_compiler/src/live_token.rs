@@ -1,6 +1,7 @@
 use{
     std::fmt,
     makepad_live_tokenizer::LiveId,
+    makepad_live_tokenizer::Delim,
     crate::{
         live_ptr::{LiveFileId},
         span::Span
@@ -10,9 +11,8 @@ use{
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TokenWithSpan {
     pub span: Span,
-    pub token: Token,
+    pub token: LiveToken,
 }
-
 
 impl fmt::Display for TokenWithSpan {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -21,16 +21,12 @@ impl fmt::Display for TokenWithSpan {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub enum Token {
+pub enum LiveToken {
     Eof,
     Punct(LiveId),
     Ident(LiveId),
-    OpenParen,
-    OpenBrace,
-    OpenBracket,
-    CloseParen,
-    CloseBrace,
-    CloseBracket,
+    Open(Delim),
+    Close(Delim),
     String{index:u32, len:u32},
     Bool(bool),
     Int(i64),
@@ -38,23 +34,23 @@ pub enum Token {
     Color(u32),
 }
 
-impl fmt::Display for Token {
+impl fmt::Display for LiveToken {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
-            Token::Eof => write!(f, "<eof>"),
-            Token::String{..} => write!(f, "\"STRINGDATANOTAVAILABLE\""),
-            Token::Punct(id) => write!(f, "{}", id),
-            Token::Ident(id) => write!(f, "{}", id),
-            Token::OpenParen=>write!(f, "("),
-            Token::OpenBrace=>write!(f, "{{"),
-            Token::OpenBracket=>write!(f, "["),
-            Token::CloseParen=>write!(f, ")"),
-            Token::CloseBrace=>write!(f, "}}"),
-            Token::CloseBracket=>write!(f, "]"),
-            Token::Bool(lit) => write!(f, "{}", lit),
-            Token::Int(lit) => write!(f, "{}", lit),
-            Token::Float(lit) => write!(f, "{}", lit),
-            Token::Color(lit) => write!(f, "#{:x}", lit),
+            Self::Eof => write!(f, "<eof>"),
+            Self::String{..} => write!(f, "\"STRINGDATANOTAVAILABLE\""),
+            Self::Punct(id) => write!(f, "{}", id),
+            Self::Ident(id) => write!(f, "{}", id),
+            Self::Open(Delim::Paren)=>write!(f, "("),
+            Self::Open(Delim::Brace)=>write!(f, "{{"),
+            Self::Open(Delim::Bracket)=>write!(f, "["),
+            Self::Close(Delim::Paren)=>write!(f, ")"),
+            Self::Close(Delim::Brace)=>write!(f, "}}"),
+            Self::Close(Delim::Bracket)=>write!(f, "]"),
+            Self::Bool(lit) => write!(f, "{}", lit),
+            Self::Int(lit) => write!(f, "{}", lit),
+            Self::Float(lit) => write!(f, "{}", lit),
+            Self::Color(lit) => write!(f, "#{:x}", lit),
         }
     }
 }

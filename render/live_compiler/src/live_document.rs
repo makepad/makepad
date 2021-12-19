@@ -2,7 +2,7 @@
 use {
     crate::{
         span::{Span,TextPos},
-        token::{TokenWithSpan, TokenId},
+        live_token::{TokenWithSpan, TokenId},
         live_node::LiveNode,
     }
 };

@@ -2,7 +2,7 @@ use {
     crate::{
         char::CharExt,
         live_id::LiveId,
-        token::{TokenWithLen, Delim, TokenKind},
+        full_token::{TokenWithLen, Delim, FullToken},
     }
 };
 
@@ -26,7 +26,7 @@ impl State {
             return (self, None);
         }
         let start = cursor.index;
-        let (next_state, kind) = match self {
+        let (next_state, token) = match self {
             State::Initial(state) => state.next(cursor),
             State::BlockCommentTail(state) => state.next(cursor),
             State::DoubleQuotedStringTail(state) => state.next(cursor),
@@ -38,7 +38,7 @@ impl State {
             next_state,
             Some(TokenWithLen {
                 len: end - start,
-                kind,
+                token,
             }),
         )
     }
@@ -48,7 +48,7 @@ impl State {
 pub struct InitialState;
 
 impl InitialState {
-    fn next(self, cursor: &mut Cursor<'_>) -> (State, TokenKind) {
+    fn next(self, cursor: &mut Cursor<'_>) -> (State, FullToken) {
         match (cursor.peek(0), cursor.peek(1), cursor.peek(2)) {
             ('r', '#', '"') | ('r', '#', '#') => self.raw_string(cursor),
             ('b', 'r', '"') | ('b', 'r', '#') => self.raw_byte_string(cursor),
@@ -57,7 +57,7 @@ impl InitialState {
                 cursor.skip(3);
                 (
                     State::Initial(InitialState),
-                    TokenKind::Punct(id),
+                    FullToken::Punct(id),
                 )
             }
             ('/', '/', _) => self.line_comment(cursor),
@@ -88,7 +88,7 @@ impl InitialState {
                 cursor.skip(2);
                 (
                     State::Initial(InitialState),
-                    TokenKind::Punct(id),
+                    FullToken::Punct(id),
                 )
             }
             ('\'', _, _) => self.char_or_lifetime(cursor),
@@ -97,42 +97,42 @@ impl InitialState {
                 cursor.skip(1);
                 (
                     State::Initial(InitialState),
-                    TokenKind::Open(Delim::Paren),
+                    FullToken::Open(Delim::Paren),
                 )
             }
             (')', _, _) => {
                 cursor.skip(1);
                 (
                     State::Initial(InitialState),
-                    TokenKind::Close(Delim::Paren),
+                    FullToken::Close(Delim::Paren),
                 )
             }
             ('[', _, _) => {
                 cursor.skip(1);
                 (
                     State::Initial(InitialState),
-                    TokenKind::Open(Delim::Bracket),
+                    FullToken::Open(Delim::Bracket),
                 )
             }
             (']', _, _) => {
                 cursor.skip(1);
                 (
                     State::Initial(InitialState),
-                    TokenKind::Close(Delim::Bracket),
+                    FullToken::Close(Delim::Bracket),
                 )
             }
             ('{', _, _) => {
                 cursor.skip(1);
                 (
                     State::Initial(InitialState),
-                    TokenKind::Open(Delim::Brace),
+                    FullToken::Open(Delim::Brace),
                 )
             }
             ('}', _, _) => {
                 cursor.skip(1);
                 (
                     State::Initial(InitialState),
-                    TokenKind::Close(Delim::Brace),
+                    FullToken::Close(Delim::Brace),
                 )
             }
             ('#', ch1, ch2) if ch1 == 'x' && ch2.is_hex() || ch1.is_hex() => self.color(cursor),
@@ -161,471 +161,82 @@ impl InitialState {
                 cursor.skip(1);
                 (
                     State::Initial(InitialState),
-                    TokenKind::Punct(id),
+                    FullToken::Punct(id),
                 )
             }
-            (ch, _, _) if ch.is_identifier_start() => self.identifier_or_keyword(cursor),
+            (ch, _, _) if ch.is_identifier_start() => self.identifier_or_bool(cursor),
             (ch, _, _) if ch.is_digit(10) => self.number(cursor),
             (ch, _, _) if ch.is_whitespace() => self.whitespace(cursor),
             _ => {
                 cursor.skip(1);
-                (State::Initial(InitialState), TokenKind::Unknown)
+                (State::Initial(InitialState), FullToken::Unknown)
             }
         }
     }
     
-    fn line_comment(self, cursor: &mut Cursor) -> (State, TokenKind) {
+    fn line_comment(self, cursor: &mut Cursor) -> (State, FullToken) {
         debug_assert!(cursor.peek(0) == '/' && cursor.peek(1) == '/');
         cursor.skip(2);
         while cursor.skip_if( | ch | ch != '\0') {}
-        (State::Initial(InitialState), TokenKind::Comment)
+        (State::Initial(InitialState), FullToken::Comment)
     }
     
-    fn block_comment(self, cursor: &mut Cursor<'_>) -> (State, TokenKind) {
+    fn block_comment(self, cursor: &mut Cursor<'_>) -> (State, FullToken) {
         debug_assert!(cursor.peek(0) == '/' && cursor.peek(1) == '*');
         cursor.skip(2);
         BlockCommentTailState {depth: 0}.next(cursor)
     }
     
-    fn identifier_or_keyword(self, cursor: &mut Cursor) -> (State, TokenKind) {
+    fn identifier_or_bool(self, cursor: &mut Cursor) -> (State, FullToken) {
         debug_assert!(cursor.peek(0).is_identifier_start());
         let start = cursor.index();
         match cursor.peek(0) {
-            'a' => {
-                cursor.skip(1);
-                match cursor.peek(0) {
-                    'b' => {
-                        cursor.skip(1);
-                        self.identifier_or_keyword_tail("stract",  start, cursor)
-                    }
-                    's' => {
-                        cursor.skip(1);
-                        match cursor.peek(0) {
-                            'y' => self.identifier_or_keyword_tail("nc", start, cursor),
-                            _ => self.identifier_or_keyword_tail("",  start, cursor),
-                        }
-                    }
-                    'w' => {
-                        cursor.skip(1);
-                        self.identifier_or_keyword_tail("ait", start, cursor)
-                    }
-                    _ => self.identifier_tail(start, cursor),
-                }
-            }
-            'b' => {
-                cursor.skip(1);
-                match cursor.peek(0) {
-                    'e' => {
-                        cursor.skip(1);
-                        self.identifier_or_keyword_tail("come", start, cursor)
-                    }
-                    'o' => {
-                        cursor.skip(1);
-                        self.identifier_or_keyword_tail("x", start, cursor)
-                    }
-                    'r' => {
-                        cursor.skip(1);
-                        self.identifier_or_keyword_tail("reak",  start, cursor)
-                    }
-                    _ => self.identifier_tail(start, cursor),
-                }
-            }
-            'c' => {
-                cursor.skip(1);
-                match cursor.peek(0) {
-                    'o' => {
-                        cursor.skip(1);
-                        match cursor.peek(0) {
-                            'n' => {
-                                cursor.skip(1);
-                                match cursor.peek(0) {
-                                    's' => {
-                                        cursor.skip(1);
-                                        self.identifier_or_keyword_tail("t",  start, cursor)
-                                    }
-                                    't' => {
-                                        cursor.skip(1);
-                                        self.identifier_or_keyword_tail(
-                                            "inue",
-                                            start,
-                                            cursor,
-                                        )
-                                    }
-                                    _ => self.identifier_tail(start, cursor),
-                                }
-                            }
-                            _ => self.identifier_tail(start, cursor),
-                        }
-                    }
-                    'r' => {
-                        cursor.skip(1);
-                        self.identifier_or_keyword_tail("ate",  start, cursor)
-                    }
-                    _ => self.identifier_tail(start, cursor),
-                }
-            }
-            'd' => {
-                cursor.skip(1);
-                match cursor.peek(0) {
-                    'o' => {
-                        cursor.skip(1);
-                        self.identifier_or_keyword_tail("", start, cursor)
-                    }
-                    'y' => {
-                        cursor.skip(1);
-                        self.identifier_or_keyword_tail("n", start, cursor)
-                    }
-                    _ => self.identifier_tail(start, cursor),
-                }
-            }
-            'e' => {
-                cursor.skip(1);
-                match cursor.peek(0) {
-                    'l' => {
-                        cursor.skip(1);
-                        self.identifier_or_branch_tail("se", start, cursor)
-                    }
-                    'n' => {
-                        cursor.skip(1);
-                        self.identifier_or_keyword_tail("um", start, cursor)
-                    }
-                    'x' => {
-                        cursor.skip(1);
-                        self.identifier_or_keyword_tail("tern", start, cursor)
-                    }
-                    _ => self.identifier_tail(start, cursor),
-                }
-            }
             'f' => {
                 cursor.skip(1);
-                match cursor.peek(0) {
-                    'a' => {
-                        cursor.skip(1);
-                        self.identifier_or_keyword_tail("lse", start, cursor)
+                if "alse".chars().all( | expected | cursor.skip_if( | actual | actual == expected)){
+                    if !cursor.peek(0).is_identifier_continue() {
+                        return (State::Initial(InitialState), FullToken::Bool(false));
                     }
-                    'i' => {
-                        cursor.skip(1);
-                        self.identifier_or_keyword_tail("nal", start, cursor)
-                    }
-                    'n' => {
-                        cursor.skip(1);
-                        self.identifier_or_keyword_tail("", start, cursor)
-                    }
-                    'o' => {
-                        cursor.skip(1);
-                        self.identifier_or_keyword_tail("r", start, cursor)
-                    }
-                    _ => self.identifier_tail(start, cursor),
                 }
-            }
-            'i' => {
-                cursor.skip(1);
-                match cursor.peek(0) {
-                    'f' => {
-                        cursor.skip(1);
-                        self.identifier_or_branch_tail("", start, cursor)
-                    }
-                    'm' => {
-                        cursor.skip(1);
-                        self.identifier_or_keyword_tail("pl", start, cursor)
-                    }
-                    'n' => {
-                        cursor.skip(1);
-                        self.identifier_or_keyword_tail("", start, cursor)
-                    }
-                    _ => self.identifier_tail(start, cursor),
-                }
-            }
-            'l' => {
-                cursor.skip(1);
-                match cursor.peek(0) {
-                    'e' => {
-                        cursor.skip(1);
-                        self.identifier_or_keyword_tail("t", start, cursor)
-                    }
-                    'o' => {
-                        cursor.skip(1);
-                        self.identifier_or_loop_tail("op", start, cursor)
-                    }
-                    _ => self.identifier_tail(start, cursor),
-                }
-            }
-            'm' => {
-                cursor.skip(1);
-                match cursor.peek(0) {
-                    'a' => {
-                        cursor.skip(1);
-                        match cursor.peek(0) {
-                            'c' => {
-                                cursor.skip(1);
-                                self.identifier_or_keyword_tail("ro", start, cursor)
-                            }
-                            't' => {
-                                cursor.skip(1);
-                                self.identifier_or_branch_tail("ch", start, cursor)
-                            }
-                            _ => self.identifier_tail(start, cursor),
-                        }
-                    }
-                    'o' => {
-                        cursor.skip(1);
-                        match cursor.peek(0) {
-                            'd' => {
-                                cursor.skip(1);
-                                self.identifier_or_keyword_tail("", start, cursor)
-                            }
-                            'v' => {
-                                cursor.skip(1);
-                                self.identifier_or_keyword_tail("e",start, cursor)
-                            }
-                            _ => self.identifier_tail(start, cursor),
-                        }
-                    }
-                    'u' => {
-                        cursor.skip(1);
-                        self.identifier_or_keyword_tail("t", start, cursor)
-                    }
-                    _ => self.identifier_tail(start, cursor),
-                }
-            }
-            'o' => {
-                cursor.skip(1);
-                self.identifier_or_keyword_tail("verride", start, cursor)
-            }
-            'p' => {
-                cursor.skip(1);
-                match cursor.peek(0) {
-                    'r' => {
-                        cursor.skip(1);
-                        self.identifier_or_keyword_tail("iv", start, cursor)
-                    }
-                    'u' => {
-                        cursor.skip(1);
-                        self.identifier_or_keyword_tail("b", start, cursor)
-                    }
-                    _ => self.identifier_tail(start, cursor),
-                }
-            }
-            'r' => {
-                cursor.skip(1);
-                match cursor.peek(0) {
-                    'e' => {
-                        cursor.skip(1);
-                        match cursor.peek(0) {
-                            'f' => {
-                                cursor.skip(1);
-                                self.identifier_or_keyword_tail("", start, cursor)
-                            }
-                            't' => {
-                                cursor.skip(1);
-                                self.identifier_or_keyword_tail("urn", start, cursor)
-                            }
-                            _ => self.identifier_tail(start, cursor),
-                        }
-                    }
-                    _ => self.identifier_tail(start, cursor),
-                }
-            }
-            's' => {
-                cursor.skip(1);
-                match cursor.peek(0) {
-                    'e' => {
-                        cursor.skip(1);
-                        self.identifier_or_keyword_tail("lf", start, cursor)
-                    }
-                    't' => {
-                        cursor.skip(1);
-                        match cursor.peek(0) {
-                            'a' => {
-                                cursor.skip(1);
-                                self.identifier_or_keyword_tail("tic", start, cursor)
-                            }
-                            'r' => {
-                                cursor.skip(1);
-                                self.identifier_or_keyword_tail("uct", start, cursor)
-                            }
-                            _ => self.identifier_tail(start, cursor),
-                        }
-                    }
-                    'u' => {
-                        cursor.skip(1);
-                        self.identifier_or_keyword_tail("per", start, cursor)
-                    }
-                    _ => self.identifier_tail(start, cursor),
-                }
+                self.identifier_tail(start, cursor)
             }
             't' => {
                 cursor.skip(1);
-                match cursor.peek(0) {
-                    'r' => {
-                        cursor.skip(1);
-                        match cursor.peek(0) {
-                            'a' => {
-                                cursor.skip(1);
-                                self.identifier_or_keyword_tail("it", start, cursor)
-                            }
-                            'u' => {
-                                cursor.skip(1);
-                                self.identifier_or_keyword_tail("e",  start, cursor)
-                            }
-                            _ => self.identifier_tail(start, cursor),
-                        }
+                if "rue".chars().all( | expected | cursor.skip_if( | actual | actual == expected)){
+                    if !cursor.peek(0).is_identifier_continue() {
+                        return (State::Initial(InitialState), FullToken::Bool(true));
                     }
-                    'y' => {
-                        cursor.skip(1);
-                        match cursor.peek(0) {
-                            'p' => {
-                                cursor.skip(1);
-                                match cursor.peek(0) {
-                                    'e' => {
-                                        cursor.skip(1);
-                                        match cursor.peek(0) {
-                                            'o' => {
-                                                cursor.skip(1);
-                                                self.identifier_or_keyword_tail(
-                                                    "f",
-                                                    start,
-                                                    cursor,
-                                                )
-                                            }
-                                            _ => self.identifier_or_keyword_tail(
-                                                "",
-                                                start,
-                                                cursor,
-                                            ),
-                                        }
-                                    }
-                                    _ => self.identifier_tail(start, cursor),
-                                }
-                            }
-                            _ => self.identifier_tail(start, cursor),
-                        }
-                    }
-                    _ => self.identifier_tail(start, cursor),
                 }
-            }
-            'u' => {
-                cursor.skip(1);
-                match cursor.peek(0) {
-                    'n' => {
-                        cursor.skip(1);
-                        match cursor.peek(0) {
-                            's' => {
-                                cursor.skip(1);
-                                match cursor.peek(0) {
-                                    'a' => {
-                                        cursor.skip(1);
-                                        self.identifier_or_keyword_tail(
-                                            "fe",
-                                            start,
-                                            cursor,
-                                        )
-                                    }
-                                    'i' => {
-                                        cursor.skip(1);
-                                        self.identifier_or_keyword_tail(
-                                            "zed",
-                                            start,
-                                            cursor,
-                                        )
-                                    }
-                                    _ => self.identifier_tail(start, cursor),
-                                }
-                            }
-                            _ => self.identifier_tail(start, cursor),
-                        }
-                    }
-                    's' => {
-                        cursor.skip(1);
-                        self.identifier_or_keyword_tail("e", start, cursor)
-                    }
-                    _ => self.identifier_tail(start, cursor),
-                }
-            }
-            'v' => {
-                cursor.skip(1);
-                self.identifier_or_keyword_tail("irtual", start, cursor)
-            }
-            'w' => {
-                cursor.skip(1);
-                match cursor.peek(0) {
-                    'h' => {
-                        cursor.skip(1);
-                        match cursor.peek(0) {
-                            'e' => {
-                                cursor.skip(1);
-                                self.identifier_or_keyword_tail("re", start, cursor)
-                            }
-                            'i' => {
-                                cursor.skip(1);
-                                self.identifier_or_keyword_tail("le", start, cursor)
-                            }
-                            _ => self.identifier_tail(start, cursor),
-                        }
-                    }
-                    _ => self.identifier_tail(start, cursor),
-                }
-            }
-            'y' => {
-                cursor.skip(1);
-                self.identifier_or_keyword_tail("ield", start, cursor)
-            }
+                self.identifier_tail(start, cursor)
+            },
             _ => self.identifier_tail(start, cursor),
         }
     }
     
-    fn identifier_or_keyword_tail(self, string: &str, start: usize, cursor: &mut Cursor,) -> (State, TokenKind) {
-        if string.chars().all( | expected | cursor.skip_if( | actual | actual == expected)){
-            if !cursor.peek(0).is_identifier_continue() {
-                return (State::Initial(InitialState), TokenKind::Keyword(LiveId::from_char_slice(cursor.slice_from_start(start))));
-            }
-        }
-        self.identifier_tail(start, cursor)
-    }
-
-    fn identifier_or_branch_tail(self, string: &str, start: usize, cursor: &mut Cursor,) -> (State, TokenKind) {
-        if string.chars().all( | expected | cursor.skip_if( | actual | actual == expected)){
-            if !cursor.peek(0).is_identifier_continue() {
-                return (State::Initial(InitialState), TokenKind::Branch(LiveId::from_char_slice(cursor.slice_from_start(start))));
-            }
-        }
-        self.identifier_tail(start, cursor)
-    }
-
-    fn identifier_or_loop_tail(self, string: &str, start: usize, cursor: &mut Cursor,) -> (State, TokenKind) {
-        if string.chars().all( | expected | cursor.skip_if( | actual | actual == expected)){
-            if !cursor.peek(0).is_identifier_continue() {
-                return (State::Initial(InitialState), TokenKind::Loop(LiveId::from_char_slice(cursor.slice_from_start(start))));
-            }
-        }
-        self.identifier_tail(start, cursor)
-    }
-
-    
-    fn identifier_tail(self, start: usize, cursor: &mut Cursor) -> (State, TokenKind) {
+    fn identifier_tail(self, start: usize, cursor: &mut Cursor) -> (State, FullToken) {
         while cursor.skip_if( | ch | ch.is_identifier_continue()) {}
-        (State::Initial(InitialState), TokenKind::Ident(LiveId::from_char_slice(cursor.slice_from_start(start))))
+        (State::Initial(InitialState), FullToken::Ident(LiveId::from_char_slice(cursor.slice_from_start(start))))
     }
     
-    fn number(self, cursor: &mut Cursor) -> (State, TokenKind) {
+    fn number(self, cursor: &mut Cursor) -> (State, FullToken) {
         debug_assert!(cursor.peek(0).is_digit(10));
         match (cursor.peek(0), cursor.peek(1)) {
             ('0', 'b') => {
                 cursor.skip(2);
                 if !cursor.skip_digits(2) {
-                    return (State::Initial(InitialState), TokenKind::Unknown);
+                    return (State::Initial(InitialState), FullToken::Unknown);
                 }
             }
             ('0', 'o') => {
                 cursor.skip(2);
                 if !cursor.skip_digits(8) {
-                    return (State::Initial(InitialState), TokenKind::Unknown);
+                    return (State::Initial(InitialState), FullToken::Unknown);
                 }
             }
             ('0', 'x') => {
                 cursor.skip(2);
                 if !cursor.skip_digits(16) {
-                    return (State::Initial(InitialState), TokenKind::Unknown);
+                    return (State::Initial(InitialState), FullToken::Unknown);
                 }
             }
             _ => {
@@ -635,14 +246,14 @@ impl InitialState {
                         if cursor.skip_digits(10) {
                             if cursor.peek(0) == 'E' || cursor.peek(1) == 'e' {
                                 if !cursor.skip_exponent() {
-                                    return (State::Initial(InitialState), TokenKind::Unknown);
+                                    return (State::Initial(InitialState), FullToken::Unknown);
                                 }
                             }
                         }
                     }
                     'E' | 'e' => {
                         if !cursor.skip_exponent() {
-                            return (State::Initial(InitialState), TokenKind::Unknown);
+                            return (State::Initial(InitialState), FullToken::Unknown);
                         }
                     }
                     _ => {}
@@ -650,28 +261,28 @@ impl InitialState {
             }
         };
         cursor.skip_suffix();
-        (State::Initial(InitialState), TokenKind::Number)
+        (State::Initial(InitialState), FullToken::Number)
     }
     
-    fn color(self, cursor: &mut Cursor) -> (State, TokenKind) {
+    fn color(self, cursor: &mut Cursor) -> (State, FullToken) {
         match (cursor.peek(0), cursor.peek(1)) {
             ('#', 'x') => {
                 cursor.skip(2);
                 if !cursor.skip_digits(16) {
-                    return (State::Initial(InitialState), TokenKind::Unknown);
+                    return (State::Initial(InitialState), FullToken::Unknown);
                 }
             }
             _ => {
                 cursor.skip(1);
                 if !cursor.skip_digits(16) {
-                    return (State::Initial(InitialState), TokenKind::Unknown);
+                    return (State::Initial(InitialState), FullToken::Unknown);
                 }
             }
         };
-        (State::Initial(InitialState), TokenKind::Color)
+        (State::Initial(InitialState), FullToken::Color)
     }
     
-    fn char_or_lifetime(self, cursor: &mut Cursor) -> (State, TokenKind) {
+    fn char_or_lifetime(self, cursor: &mut Cursor) -> (State, FullToken) {
         if cursor.peek(1).is_identifier_start() && cursor.peek(2) != '\'' {
             debug_assert!(cursor.peek(0) == '\'');
             cursor.skip(2);
@@ -679,44 +290,44 @@ impl InitialState {
             if cursor.peek(0) == '\'' {
                 cursor.skip(1);
                 cursor.skip_suffix();
-                (State::Initial(InitialState), TokenKind::String)
+                (State::Initial(InitialState), FullToken::String)
             } else {
-                (State::Initial(InitialState), TokenKind::Lifetime)
+                (State::Initial(InitialState), FullToken::Lifetime)
             }
         } else {
             self.single_quoted_string(cursor)
         }
     }
     
-    fn byte(self, cursor: &mut Cursor) -> (State, TokenKind) {
+    fn byte(self, cursor: &mut Cursor) -> (State, FullToken) {
         debug_assert!(cursor.peek(0) == 'b');
         cursor.skip(1);
         self.single_quoted_string(cursor)
     }
     
-    fn string(self, cursor: &mut Cursor) -> (State, TokenKind) {
+    fn string(self, cursor: &mut Cursor) -> (State, FullToken) {
         self.double_quoted_string(cursor)
     }
     
-    fn byte_string(self, cursor: &mut Cursor) -> (State, TokenKind) {
+    fn byte_string(self, cursor: &mut Cursor) -> (State, FullToken) {
         debug_assert!(cursor.peek(0) == 'b');
         cursor.skip(1);
         self.double_quoted_string(cursor)
     }
     
-    fn raw_string(self, cursor: &mut Cursor) -> (State, TokenKind) {
+    fn raw_string(self, cursor: &mut Cursor) -> (State, FullToken) {
         debug_assert!(cursor.peek(0) == 'r');
         cursor.skip(1);
         self.raw_double_quoted_string(cursor)
     }
     
-    fn raw_byte_string(self, cursor: &mut Cursor) -> (State, TokenKind) {
+    fn raw_byte_string(self, cursor: &mut Cursor) -> (State, FullToken) {
         debug_assert!(cursor.peek(0) == 'b' && cursor.peek(1) == 'r');
         cursor.skip(2);
         self.raw_double_quoted_string(cursor)
     }
     
-    fn single_quoted_string(self, cursor: &mut Cursor) -> (State, TokenKind) {
+    fn single_quoted_string(self, cursor: &mut Cursor) -> (State, FullToken) {
         debug_assert!(cursor.peek(0) == '\'');
         cursor.skip(1);
         loop {
@@ -726,21 +337,21 @@ impl InitialState {
                     cursor.skip_suffix();
                     break;
                 }
-                ('\0', _) => return (State::Initial(InitialState), TokenKind::Unknown),
+                ('\0', _) => return (State::Initial(InitialState), FullToken::Unknown),
                 ('\\', '\'') | ('\\', '\\') => cursor.skip(2),
                 _ => cursor.skip(1),
             }
         }
-        (State::Initial(InitialState), TokenKind::String)
+        (State::Initial(InitialState), FullToken::String)
     }
     
-    fn double_quoted_string(self, cursor: &mut Cursor) -> (State, TokenKind) {
+    fn double_quoted_string(self, cursor: &mut Cursor) -> (State, FullToken) {
         debug_assert!(cursor.peek(0) == '"');
         cursor.skip(1);
         DoubleQuotedStringTailState.next(cursor)
     }
     
-    fn raw_double_quoted_string(self, cursor: &mut Cursor) -> (State, TokenKind) {
+    fn raw_double_quoted_string(self, cursor: &mut Cursor) -> (State, FullToken) {
         let mut start_hash_count = 0;
         while cursor.skip_if( | ch | ch == '#') {
             start_hash_count += 1;
@@ -748,11 +359,11 @@ impl InitialState {
         RawDoubleQuotedStringTailState {start_hash_count}.next(cursor)
     }
     
-    fn whitespace(self, cursor: &mut Cursor) -> (State, TokenKind) {
+    fn whitespace(self, cursor: &mut Cursor) -> (State, FullToken) {
         debug_assert!(cursor.peek(0).is_whitespace());
         cursor.skip(1);
         while cursor.skip_if( | ch | ch.is_whitespace()) {}
-        (State::Initial(InitialState), TokenKind::Whitespace)
+        (State::Initial(InitialState), FullToken::Whitespace)
     }
 }
 
@@ -762,7 +373,7 @@ pub struct BlockCommentTailState {
 }
 
 impl BlockCommentTailState {
-    fn next(self, cursor: &mut Cursor<'_>) -> (State, TokenKind) {
+    fn next(self, cursor: &mut Cursor<'_>) -> (State, FullToken) {
         let mut state = self;
         loop {
             match (cursor.peek(0), cursor.peek(1)) {
@@ -773,12 +384,12 @@ impl BlockCommentTailState {
                 ('*', '/') => {
                     cursor.skip(2);
                     if state.depth == 0 {
-                        break (State::Initial(InitialState), TokenKind::Comment);
+                        break (State::Initial(InitialState), FullToken::Comment);
                     }
                     state.depth -= 1;
                 }
                 ('\0', _) => {
-                    break (State::BlockCommentTail(state), TokenKind::Comment);
+                    break (State::BlockCommentTail(state), FullToken::Comment);
                 }
                 _ => cursor.skip(1),
             }
@@ -790,18 +401,18 @@ impl BlockCommentTailState {
 pub struct DoubleQuotedStringTailState;
 
 impl DoubleQuotedStringTailState {
-    fn next(self, cursor: &mut Cursor<'_>) -> (State, TokenKind) {
+    fn next(self, cursor: &mut Cursor<'_>) -> (State, FullToken) {
         loop {
             match (cursor.peek(0), cursor.peek(1)) {
                 ('"', _) => {
                     cursor.skip(1);
                     cursor.skip_suffix();
-                    break (State::Initial(InitialState), TokenKind::String);
+                    break (State::Initial(InitialState), FullToken::String);
                 }
                 ('\0', _) => {
                     break (
                         State::DoubleQuotedStringTail(DoubleQuotedStringTailState),
-                        TokenKind::String,
+                        FullToken::String,
                     );
                 }
                 ('\\', '"') => cursor.skip(2),
@@ -817,7 +428,7 @@ pub struct RawDoubleQuotedStringTailState {
 }
 
 impl RawDoubleQuotedStringTailState {
-    fn next(self, cursor: &mut Cursor<'_>) -> (State, TokenKind) {
+    fn next(self, cursor: &mut Cursor<'_>) -> (State, FullToken) {
         loop {
             match cursor.peek(0) {
                 '"' => {
@@ -828,11 +439,11 @@ impl RawDoubleQuotedStringTailState {
                     }
                     if end_hash_count == self.start_hash_count {
                         cursor.skip_suffix();
-                        break (State::Initial(InitialState), TokenKind::String);
+                        break (State::Initial(InitialState), FullToken::String);
                     }
                 }
                 '\0' => {
-                    break (State::RawDoubleQuotedStringTail(self), TokenKind::String);
+                    break (State::RawDoubleQuotedStringTail(self), FullToken::String);
                 }
                 _ => cursor.skip(1),
             }

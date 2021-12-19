@@ -3,12 +3,12 @@ use{
     makepad_math::{
         colorhex::hex_bytes_to_u32
     },
-    makepad_live_tokenizer::LiveId,
+    makepad_live_tokenizer::{LiveId, Delim},
     crate::{
         live_ptr::{LiveFileId},
         live_error::{LiveError, LiveErrorOrigin},
         span::{Span, TextPos},
-        token::{Token, TokenWithSpan},
+        live_token::{LiveToken,  TokenWithSpan},
     }
 };
 
@@ -90,19 +90,19 @@ C: Iterator<Item = char>,
                 if self.ch_0 == '"' {
                     self.skip_char();
                 }
-                Token::String {
+                LiveToken::String {
                     index: start as u32,
                     len: (self.strings.len() - start) as u32
                 }
             }
-            ('\0', _) => Token::Eof,
+            ('\0', _) => LiveToken::Eof,
             ('!', '=') => {
                 self.skip_two_chars();
-                Token::Punct(id!( !=))
+                LiveToken::Punct(id!( !=))
             }
             ('!', _) => {
                 self.skip_char();
-                Token::Punct(id!(!))
+                LiveToken::Punct(id!(!))
             }
             ('#', _) => {
                 self.skip_char();
@@ -114,7 +114,7 @@ C: Iterator<Item = char>,
                     self.temp_hex.push(ch as u8)
                 }
                 if let Ok(color) = hex_bytes_to_u32(&self.temp_hex) {
-                    Token::Color(color)
+                    LiveToken::Color(color)
                 }
                 else {
                     return Err(span.error(self, "Cannot parse color".into()));
@@ -122,36 +122,36 @@ C: Iterator<Item = char>,
             }
             ('&', '&') => {
                 self.skip_two_chars();
-                Token::Punct(id!( &&))
+                LiveToken::Punct(id!( &&))
             }
             
             ('*', '=') => {
                 self.skip_two_chars();
-                Token::Punct(id!( *=))
+                LiveToken::Punct(id!( *=))
             }
             ('*', _) => {
                 self.skip_char();
-                Token::Punct(id!(*))
+                LiveToken::Punct(id!(*))
             }
             ('+', '=') => {
                 self.skip_two_chars();
-                Token::Punct(id!( +=))
+                LiveToken::Punct(id!( +=))
             }
             ('+', _) => {
                 self.skip_char();
-                Token::Punct(id!( +))
+                LiveToken::Punct(id!( +))
             }
             (',', _) => {
                 self.skip_char();
-                Token::Punct(id!(,))
+                LiveToken::Punct(id!(,))
             }
             ('-', '=') => {
                 self.skip_two_chars();
-                Token::Punct(id!( -=))
+                LiveToken::Punct(id!( -=))
             }
             ('-', '>') => {
                 self.skip_two_chars();
-                Token::Punct(id!( ->))
+                LiveToken::Punct(id!( ->))
             }
             ('-', '.') => {
                 self.temp_string.truncate(0);
@@ -160,7 +160,7 @@ C: Iterator<Item = char>,
                 self.temp_string.push('0');
                 self.temp_string.push('.');
                 self.read_chars_while( | ch | ch.is_ascii_digit());
-                Token::Float(self.temp_string.parse::<f64>().unwrap())
+                LiveToken::Float(self.temp_string.parse::<f64>().unwrap())
             }
             ('-', ch) | ('.', ch) | (ch, _) if ch.is_ascii_digit() => {
                 self.temp_string.truncate(0);
@@ -193,100 +193,100 @@ C: Iterator<Item = char>,
                     false
                 };
                 if has_frac_part || has_exp_part {
-                    Token::Float(self.temp_string.parse::<f64>().unwrap())
+                    LiveToken::Float(self.temp_string.parse::<f64>().unwrap())
                 } else {
-                    Token::Int(self.temp_string.parse::<i64>().map_err( | _ | {
+                    LiveToken::Int(self.temp_string.parse::<i64>().map_err( | _ | {
                         span.error(self, "overflowing integer literal".into())
                     }) ?)
                 }
             }
             ('-', _) => {
                 self.skip_char();
-                Token::Punct(id!(-))
+                LiveToken::Punct(id!(-))
             }
             ('.', '.') => {
                 self.skip_two_chars();
-                Token::Punct(id!(..))
+                LiveToken::Punct(id!(..))
             }
             ('.', _) => {
                 self.skip_char();
-                Token::Punct(id!(.))
+                LiveToken::Punct(id!(.))
             }
             ('/', '=') => {
                 self.skip_two_chars();
-                Token::Punct(id!( /=))
+                LiveToken::Punct(id!( /=))
             }
             ('/', _) => {
                 self.skip_char();
-                Token::Punct(id!( /))
+                LiveToken::Punct(id!( /))
             }
             (':', ':') => {
                 self.skip_two_chars();
-                Token::Punct(id!(::))
+                LiveToken::Punct(id!(::))
             }
             (':', _) => {
                 self.skip_char();
-                Token::Punct(id!(:))
+                LiveToken::Punct(id!(:))
             }
             (';', _) => {
                 self.skip_char();
-                Token::Punct(id!(;))
+                LiveToken::Punct(id!(;))
             }
             ('<', '=') => {
                 self.skip_two_chars();
-                Token::Punct(id!( <=))
+                LiveToken::Punct(id!( <=))
             }
             ('<', _) => {
                 self.skip_char();
-                Token::Punct(id!(<))
+                LiveToken::Punct(id!(<))
             }
             ('=', '=') => {
                 self.skip_two_chars();
-                Token::Punct(id!( ==))
+                LiveToken::Punct(id!( ==))
             }
             ('=', '>') => {
                 self.skip_two_chars();
-                Token::Punct(id!( =>))
+                LiveToken::Punct(id!( =>))
             }
             ('=', _) => {
                 self.skip_char();
-                Token::Punct(id!( =))
+                LiveToken::Punct(id!( =))
             }
             ('>', '=') => {
                 self.skip_two_chars();
-                Token::Punct(id!( >=))
+                LiveToken::Punct(id!( >=))
             }
             ('>', _) => {
                 self.skip_char();
-                Token::Punct(id!(>))
+                LiveToken::Punct(id!(>))
             }
             ('?', _) => {
                 self.skip_char();
-                Token::Punct(id!( ?))
+                LiveToken::Punct(id!( ?))
             }
             ('&', '=') => {
                 self.skip_two_chars();
-                Token::Punct(id!( &=))
+                LiveToken::Punct(id!( &=))
             }
             ('&', _) => {
                 self.skip_char();
-                Token::Punct(id!(&))
+                LiveToken::Punct(id!(&))
             }
             ('|', '=') => {
                 self.skip_two_chars();
-                Token::Punct(id!( |=))
+                LiveToken::Punct(id!( |=))
             }
             ('|', _) => {
                 self.skip_char();
-                Token::Punct(id!( |))
+                LiveToken::Punct(id!( |))
             }
             ('^', '=') => {
                 self.skip_two_chars();
-                Token::Punct(id!( ^=))
+                LiveToken::Punct(id!( ^=))
             }
             ('^', _) => {
                 self.skip_char();
-                Token::Punct(id!( ^))
+                LiveToken::Punct(id!( ^))
             }
             (ch, _) if ch.is_ascii_alphabetic() || ch == '_' => {
                 // you cant give ids a _ at start or _ at end or __ in the middle
@@ -319,12 +319,12 @@ C: Iterator<Item = char>,
                 }
                 
                 match self.temp_string.as_str() {
-                    "true" => Token::Bool(true),
-                    "false" => Token::Bool(false),
+                    "true" => LiveToken::Bool(true),
+                    "false" => LiveToken::Bool(false),
                     _ => {
                         match LiveId::from_str(&self.temp_string) {
                             Err(collide) => return Err(span.error(self, format!("Id has collision {} with {}, please rename one of them", self.temp_string, collide).into())),
-                            Ok(id) => Token::Ident(id)
+                            Ok(id) => LiveToken::Ident(id)
                         }
                     }
                 }
@@ -332,7 +332,7 @@ C: Iterator<Item = char>,
             ('(', _) => {
                 self.skip_char();
                 self.group_stack.push(')');
-                Token::OpenParen
+                LiveToken::Open(Delim::Paren)
             }
             (')', _) => {
                 if let Some(exp) = self.group_stack.pop() {
@@ -344,12 +344,12 @@ C: Iterator<Item = char>,
                     return Err(span.error(self, "Got ) but no matching (".into()));
                 }
                 self.skip_char();
-                Token::CloseParen
+                LiveToken::Close(Delim::Paren)
             }
             ('[', _) => {
                 self.skip_char();
                 self.group_stack.push(']');
-                Token::OpenBracket
+                LiveToken::Open(Delim::Bracket)
             }
             (']', _) => {
                 if let Some(exp) = self.group_stack.pop() {
@@ -361,12 +361,12 @@ C: Iterator<Item = char>,
                     return Err(span.error(self, "Got ] but no matching [".into()));
                 }
                 self.skip_char();
-                Token::CloseBracket
+                LiveToken::Close(Delim::Bracket)
             }
             ('{', _) => {
                 self.skip_char();
                 self.group_stack.push('}');
-                Token::OpenBrace
+                LiveToken::Open(Delim::Brace)
             }
             ('}', _) => {
                 if let Some(exp) = self.group_stack.pop() {
@@ -378,7 +378,7 @@ C: Iterator<Item = char>,
                     return Err(span.error(self, "Got } but no matching {".into()));
                 }
                 self.skip_char();
-                Token::CloseBrace
+                LiveToken::Close(Delim::Brace)
             }
             _ => {
                 return Err(span.error(self, format!("unexpected character `{}`", self.ch_0).into()))
@@ -477,7 +477,7 @@ C: Iterator<Item = char>,
             None
         } else {
             Some(self.read_token_with_span().map( | token_with_span | {
-                if token_with_span.token == Token::Eof {
+                if token_with_span.token == LiveToken::Eof {
                     self.is_done = true
                 }
                 token_with_span
@@ -519,7 +519,7 @@ C: IntoIterator<Item = char>,
             },
             Ok(tok) => {
                 tokens.push(tok);
-                if tok.token == Token::Eof {
+                if tok.token == LiveToken::Eof {
                     break
                 }
             }
@@ -537,7 +537,7 @@ struct SpanTracker {
 }
 
 impl SpanTracker {
-    fn token<C>(&self, lex: &Lex<C>, token: Token) -> TokenWithSpan {
+    fn token<C>(&self, lex: &Lex<C>, token: LiveToken) -> TokenWithSpan {
         TokenWithSpan {
             span: Span{
                 file_id:self.file_id,
