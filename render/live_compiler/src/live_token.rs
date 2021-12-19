@@ -1,7 +1,10 @@
 use{
     std::fmt,
-    makepad_live_tokenizer::LiveId,
-    makepad_live_tokenizer::Delim,
+    makepad_live_tokenizer::{
+        LiveId,
+        Delim,
+        FullToken
+    },
     crate::{
         live_ptr::{LiveFileId},
         span::Span
@@ -35,6 +38,22 @@ pub enum LiveToken {
     Color(u32),
 
     Eof,
+}
+
+impl LiveToken{
+    pub fn from_full_token(full_token:FullToken)->Option<Self>{
+        match full_token{
+            FullToken::Punct(p)=>Some(LiveToken::Punct(p)),
+            FullToken::Ident(p)=>Some(LiveToken::Ident(p)),
+            FullToken::Open(p)=>Some(LiveToken::Open(p)),
+            FullToken::Close(p)=>Some(LiveToken::Close(p)),
+            FullToken::Bool(p)=>Some(LiveToken::Bool(p)),
+            FullToken::Int(p)=>Some(LiveToken::Int(p)),
+            FullToken::Float(p)=>Some(LiveToken::Float(p)),
+            FullToken::Color(p)=>Some(LiveToken::Color(p)),
+            _=>None
+        }
+    }
 }
 
 impl fmt::Display for LiveToken {
