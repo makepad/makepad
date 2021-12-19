@@ -164,7 +164,7 @@ impl Text {
         }
     }
 }
-
+/*
 pub trait CharVecToString{
     fn to_string(&self, start:usize, len:usize)->String;
     fn compare_string(&self, s:&str, start:usize, end:usize)->bool;
@@ -195,7 +195,7 @@ impl CharVecToString for Vec<char>{
         }
         true
     }
-}
+}*/
 
 impl AddAssign for Text {
     fn add_assign(&mut self, other: Text) {
