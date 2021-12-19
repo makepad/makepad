@@ -23,7 +23,7 @@ mod macro_lib;
 #[path = "../../live_tokenizer/src/live_id.rs"]
 mod live_id;
 
-#[path = "../../math/src/colorhex.rs"]
+#[path = "../../live_tokenizer/src/colorhex.rs"]
 mod colorhex;
 
 

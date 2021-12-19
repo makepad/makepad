@@ -915,7 +915,7 @@ impl CodeEditorImpl {
             (FullToken::Punct(_), _) => self.text_color_punctuator,
             (FullToken::String, _) => self.text_color_string,
             (FullToken::Whitespace, _) => self.text_color_whitespace,
-            (FullToken::Color, _) => self.text_color_color,
+            (FullToken::Color(c), _) => self.text_color_color,
             (FullToken::Unknown, _) => self.text_color_unknown,
             (FullToken::Open(_), _) |
             (FullToken::Close(_), _) => self.text_color_punctuator,

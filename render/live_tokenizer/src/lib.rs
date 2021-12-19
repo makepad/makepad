@@ -1,4 +1,5 @@
-pub mod char;
+pub mod char_ext;
+pub mod vec4_ext;
 pub mod delta;
 pub mod position;
 pub mod position_set;
@@ -9,11 +10,12 @@ pub mod text;
 pub mod full_token;
 pub mod tokenizer;
 pub mod live_id;
+pub mod colorhex;
 
 pub use makepad_micro_serde;
 
 pub use {
-    crate::char::*,
+    crate::char_ext::*,
     delta::*,
     position::*,
     position_set::*,
