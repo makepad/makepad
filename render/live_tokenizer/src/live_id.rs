@@ -68,6 +68,9 @@ impl LiveIdMap {
                 "ended"
             ];
             for item in &fill {
+                if map.contains(item){
+                    eprintln!("WE HAVE AN ID COLLISION!");
+                }
                 map.add(item);
             }
             IDMAP = Some(map)
