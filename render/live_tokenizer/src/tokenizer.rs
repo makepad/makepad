@@ -1,9 +1,10 @@
 use {
     crate::{
-        char::CharExt,
+        char_ext::CharExt,
         live_id::LiveId,
         full_token::{TokenWithLen, Delim, FullToken},
-    }
+        colorhex
+    },
 };
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
@@ -193,7 +194,7 @@ impl InitialState {
         match cursor.peek(0) {
             'f' => {
                 cursor.skip(1);
-                if "alse".chars().all( | expected | cursor.skip_if( | actual | actual == expected)){
+                if "alse".chars().all( | expected | cursor.skip_if( | actual | actual == expected)) {
                     if !cursor.peek(0).is_identifier_continue() {
                         return (State::Initial(InitialState), FullToken::Bool(false));
                     }
@@ -202,7 +203,7 @@ impl InitialState {
             }
             't' => {
                 cursor.skip(1);
-                if "rue".chars().all( | expected | cursor.skip_if( | actual | actual == expected)){
+                if "rue".chars().all( | expected | cursor.skip_if( | actual | actual == expected)) {
                     if !cursor.peek(0).is_identifier_continue() {
                         return (State::Initial(InitialState), FullToken::Bool(true));
                     }
@@ -265,21 +266,30 @@ impl InitialState {
     }
     
     fn color(self, cursor: &mut Cursor) -> (State, FullToken) {
-        match (cursor.peek(0), cursor.peek(1)) {
+        let start = match (cursor.peek(0), cursor.peek(1)) {
             ('#', 'x') => {
                 cursor.skip(2);
+                let start = cursor.index();
                 if !cursor.skip_digits(16) {
                     return (State::Initial(InitialState), FullToken::Unknown);
                 }
+                start
             }
             _ => {
                 cursor.skip(1);
+                let start = cursor.index();
                 if !cursor.skip_digits(16) {
                     return (State::Initial(InitialState), FullToken::Unknown);
                 }
+                start
             }
         };
-        (State::Initial(InitialState), FullToken::Color)
+        if let Ok(col) = colorhex::hex_chars_to_u32(cursor.slice_from_start(start)){
+            (State::Initial(InitialState), FullToken::Color(col))
+        }
+        else{
+            (State::Initial(InitialState), FullToken::Unknown)
+        }
     }
     
     fn char_or_lifetime(self, cursor: &mut Cursor) -> (State, FullToken) {
@@ -546,3 +556,4 @@ impl<'a> Cursor<'a> {
         }
     }
 }
+

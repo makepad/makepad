@@ -38,6 +38,7 @@ pub use {
     makepad_shader_compiler::makepad_micro_serde,
     //makepad_microserde::*,
     makepad_shader_compiler::makepad_live_compiler::{
+        vec4_ext::*,
         live_error_origin,
         LiveErrorOrigin,
         LiveNodeOrigin,

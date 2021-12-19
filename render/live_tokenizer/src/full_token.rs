@@ -8,18 +8,22 @@ pub struct TokenWithLen {
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum FullToken {
+    Punct(LiveId),
+    Ident(LiveId),
+    
+    Open(Delim),
+    Close(Delim),
+
+    String,
+    Bool(bool),
+    Color(u32),
+
+    Number,
+
+    Lifetime,
     Comment,
     Whitespace,
     Unknown,
-    Punct(LiveId),
-    Ident(LiveId),
-    Lifetime,
-    Open(Delim),
-    Close(Delim),
-    Bool(bool),
-    String,
-    Number,
-    Color,
 }
 
 impl FullToken {
