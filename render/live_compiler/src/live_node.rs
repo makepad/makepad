@@ -3,8 +3,9 @@ use {
     makepad_math::{
         Vec2, Vec3, Vec4
     },
+    makepad_live_tokenizer::LiveId,
     crate::{
-        live_id::{LiveId, LiveFileId, LiveModuleId, LivePtr},
+        live_ptr::{LiveFileId, LiveModuleId, LivePtr},
         token::TokenId,
     }
 };

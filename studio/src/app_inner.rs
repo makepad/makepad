@@ -483,8 +483,19 @@ impl AppInner {
             }
             PanelKind::Tab(panel) => {
                 self.dock.redraw_tab_bar(cx, panel_id);
-                if let Some(code_editor_view_id) = panel.editor_view_id {
-                    self.editors.redraw_view(cx, code_editor_view_id);
+                
+                if let Some(tab_id) = self.dock.selected_tab_id(cx, panel_id) {
+                    let tab = &state.tabs_by_tab_id[tab_id];
+                    match tab.kind {
+                        TabKind::FileTree => {
+                            self.file_tree.redraw(cx);
+                        }
+                        TabKind::CodeEditor {..} => {
+                            if let Some(code_editor_view_id) = panel.editor_view_id {
+                                self.editors.redraw_view(cx, code_editor_view_id);
+                            }
+                        }
+                    }
                 }
             }
         }

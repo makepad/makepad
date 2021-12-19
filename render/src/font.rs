@@ -10,7 +10,7 @@ pub use {
     makepad_internal_iter::*,
     makepad_path::PathIterator,
     makepad_derive_live::*,
-    makepad_live_compiler::*,
+    makepad_shader_compiler::makepad_live_compiler::*,
     crate::{
         cx::Cx,
         live_traits::*,

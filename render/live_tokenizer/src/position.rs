@@ -1,11 +1,8 @@
 use {
     crate::{
-        code_editor::{
-            delta::{Delta, OperationSpan},
-            size::Size,
-        }
+        delta::{Delta, OperationSpan},
+        size::Size,
     },
-    makepad_render::makepad_live_compiler::TextPos,
     std::{
         cmp::Ordering,
         ops::{Add, AddAssign, Sub},
@@ -115,7 +112,7 @@ impl Sub for Position {
         }
     }
 }
-
+/*
 impl From<TextPos> for Position {
     fn from(text_pos: TextPos) -> Position {
         Position{
@@ -123,4 +120,4 @@ impl From<TextPos> for Position {
             column:text_pos.column as usize
         }
     }
-}
+}*/

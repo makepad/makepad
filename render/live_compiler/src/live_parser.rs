@@ -3,6 +3,7 @@ use {
         iter::Cloned,
         slice::Iter
     },
+    makepad_live_tokenizer::LiveId,
     makepad_id_macros::*,
     makepad_math::{
         Vec2,
@@ -11,7 +12,7 @@ use {
     },
     crate::{
         token::{Token, TokenWithSpan, TokenId},
-        live_id::{LiveId, LiveFileId, LiveModuleId},
+        live_ptr::{LiveFileId, LiveModuleId},
         span::{Span, TextPos},
         live_error::{LiveError, LiveErrorOrigin},
         live_document::LiveDocument,

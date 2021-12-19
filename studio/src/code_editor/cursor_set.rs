@@ -1,12 +1,18 @@
-use crate::{
-    code_editor::{
-        cursor::Cursor,
+use {
+    crate::{
+        code_editor::{
+            cursor::Cursor,
+        },
+    },
+    makepad_render::makepad_live_tokenizer::{
         delta::{Delta, Whose},
         position::Position,
-        position_set::{self, PositionSet},
-        range_set::{self, RangeSet},
+        position_set,
+        position_set::{PositionSet},
+        range_set,
+        range_set::{RangeSet},
         text::Text,
-    }
+    },
 };
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]

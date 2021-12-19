@@ -33,9 +33,11 @@ mod geometry;
 mod shader;
 
 pub use {
-    makepad_derive_live::*,
+    makepad_shader_compiler::makepad_derive_live::*,
+    makepad_shader_compiler::makepad_live_tokenizer,
+    makepad_shader_compiler::makepad_micro_serde,
     //makepad_microserde::*,
-    makepad_live_compiler::{
+    makepad_shader_compiler::makepad_live_compiler::{
         live_error_origin,
         LiveErrorOrigin,
         LiveNodeOrigin,
@@ -70,7 +72,7 @@ pub use {
         LiveNodeVec,
     },
     makepad_shader_compiler,
-    makepad_live_compiler,
+    makepad_shader_compiler::makepad_live_compiler,
     makepad_shader_compiler::{
         ShaderRegistry,
         ShaderEnum,

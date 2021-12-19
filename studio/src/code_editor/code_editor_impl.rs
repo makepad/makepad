@@ -2,6 +2,7 @@ use {
     crate::{
         editor_state::{
             EditorState,
+            Document,
             DocumentInner,
             DocumentId,
             Session,
@@ -10,16 +11,18 @@ use {
         code_editor::{
             cursor::Cursor,
             indent_cache::IndentCache,
-            position::Position,
-            position_set::PositionSet,
             protocol::Request,
-            range::Range,
-            range_set::{RangeSet, Span},
-            size::Size,
-            text::{Text},
-            token::{Delimiter, Keyword, Punctuator, TokenKind},
             token_cache::TokenCache,
         },
+    },
+    makepad_render::makepad_live_tokenizer::{
+        position::Position,
+        position_set::PositionSet,
+        range::Range,
+        range_set::{RangeSet, Span},
+        size::Size,
+        text::{Text},
+        token::{TokenKind, Delim},
     },
     makepad_render::*,
     makepad_widget::{
@@ -123,6 +126,7 @@ live_register!{
         line_num_width: 45.0,
         
         text_color_comment: #638d54
+        text_color_lifetime: #d4d4d4
         text_color_identifier: #d4d4d4
         text_color_function_identifier: #dcdcae
         text_color_branch_keyword: #c485be
@@ -234,6 +238,7 @@ pub struct CodeEditorImpl {
     text_color_linenum: Vec4,
     text_color_linenum_current: Vec4,
     text_color_comment: Vec4,
+    text_color_lifetime: Vec4,
     text_color_identifier: Vec4,
     text_color_function_identifier: Vec4,
     text_color_branch_keyword: Vec4,
@@ -273,7 +278,7 @@ impl CodeEditorImpl {
         self.scroll_view.redraw(cx);
     }
     
-    pub fn begin<'a>(&mut self, cx: &mut Cx, state: &'a EditorState) -> Result<(&'a DocumentInner, &'a Session), ()> {
+    pub fn begin<'a>(&mut self, cx: &mut Cx, state: &'a EditorState) -> Result<(&'a Document, &'a DocumentInner, &'a Session), ()> {
         if let Some(session_id) = self.session_id {
             
             let session = &state.sessions_by_session_id[session_id];
@@ -285,7 +290,7 @@ impl CodeEditorImpl {
                 
                 self.handle_select_scroll_in_draw(cx);
                 self.begin_instances(cx);
-                return Ok((document_inner, session))
+                return Ok((document, document_inner, session))
             }
         }
         Err(())
@@ -841,19 +846,22 @@ impl CodeEditorImpl {
         match (kind, next_kind) {
             (TokenKind::Comment, _) => self.text_color_comment,
             (
-                TokenKind::Identifier,
-                Some(TokenKind::Punctuator(Punctuator::OpenDelimiter(Delimiter::Paren))),
+                TokenKind::Ident(_),
+                Some(TokenKind::Open(Delim::Paren)),
             ) => self.text_color_function_identifier,
-            (TokenKind::Identifier, _) => self.text_color_identifier,
-            (TokenKind::Keyword(Keyword::Branch), _) => self.text_color_branch_keyword,
-            (TokenKind::Keyword(Keyword::Loop), _) => self.text_color_loop_keyword,
-            (TokenKind::Keyword(Keyword::Other), _) => self.text_color_other_keyword,
+            (TokenKind::Lifetime, _) => self.text_color_lifetime,
+            (TokenKind::Ident(_), _) => self.text_color_identifier,
+            (TokenKind::Branch(_),_) => self.text_color_branch_keyword,
+            (TokenKind::Loop(_),_) => self.text_color_loop_keyword,
+            (TokenKind::Keyword(_), _) => self.text_color_other_keyword,
             (TokenKind::Number, _) => self.text_color_number,
-            (TokenKind::Punctuator(_), _) => self.text_color_punctuator,
+            (TokenKind::Punct(_), _) => self.text_color_punctuator,
             (TokenKind::String, _) => self.text_color_string,
             (TokenKind::Whitespace, _) => self.text_color_whitespace,
             (TokenKind::Color, _) => self.text_color_color,
             (TokenKind::Unknown, _) => self.text_color_unknown,
+            (TokenKind::Open(_),_) |
+            (TokenKind::Close(_),_)  => self.text_color_punctuator,
         }
     }
     

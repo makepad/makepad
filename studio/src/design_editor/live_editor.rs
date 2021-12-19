@@ -104,9 +104,9 @@ impl LiveEditor {
         }
     }
     
-    pub fn calc_layout_with_widgets(&mut self, cx: &mut Cx, document_inner: &DocumentInner) {
-        let mut live_edit_cache = document_inner.live_edit_cache.borrow_mut();
-        live_edit_cache.refresh(&document_inner.token_cache, cx);
+    pub fn calc_layout_with_widgets(&mut self, cx: &mut Cx, path:&str, document_inner: &DocumentInner) {
+        let mut inline_cache = document_inner.inline_cache.borrow_mut();
+        inline_cache.refresh(cx, path, &document_inner.token_cache);
         
         // first we generate the layout structure
         let live_registry_rc = cx.live_registry.clone();
@@ -125,7 +125,7 @@ impl LiveEditor {
         
         self.editor_impl.calc_lines_layout(cx, document_inner, &mut self.lines_layout, | cx, line, start_y, viewport_start, viewport_end | {
             
-            let edit_info = &live_edit_cache[line];
+            let edit_info = &inline_cache[line];
             let mut max_height = 0.0f32;
             
             for item in &edit_info.items {
@@ -153,9 +153,9 @@ impl LiveEditor {
     }
     
     pub fn draw(&mut self, cx: &mut Cx, state: &EditorState) {
-        if let Ok((document_inner, session)) = self.editor_impl.begin(cx, state) {
+        if let Ok((document, document_inner, session)) = self.editor_impl.begin(cx, state) {
             
-            self.calc_layout_with_widgets(cx, document_inner);
+            self.calc_layout_with_widgets(cx, &document.path.clone().into_os_string().into_string().unwrap(), document_inner);
             
             self.editor_impl.draw_selections(
                 cx,
@@ -193,7 +193,6 @@ impl LiveEditor {
         }
     }
     
-    
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
@@ -206,13 +205,33 @@ impl LiveEditor {
         for widget in self.widgets.values_mut() {
             match widget.inline_widget.handle_inline_event(cx, event, widget.live_ptr) {
                 InlineWidgetAction::ReplaceText {position, size, text} => {
+                    let session_id = self.editor_impl.session_id.unwrap();
                     state.replace_text_direct(
-                        self.editor_impl.session_id.unwrap(),
+                        session_id,
                         position,
                         size,
                         text,
                         send_request
                     );
+                    
+                    // ok so. what do we know.
+                    // we can scan here in this doc
+                    // to the live_register! token
+                    // then we scan down to the first non-comment token
+                    // we can then paren-scan down
+                    // to the last matching }
+                    // this is the thing we need to feed the DSL system.
+                    // we can give it a start position
+                    // and an iterator range
+                    // aaaaand go!
+                    
+                    // ok we're going to send it straight to the DSL.
+                    /*let session = &state.sessions_by_session_id[session_id];
+                    let document = &state.documents_by_document_id[session.document_id];
+                    let inner_document = document.inner.as_ref().unwrap();
+                    *///let text = inner_document.text.to_string();
+                    //let iter = inner_document.text.as_lines().iter().flat_map(|line| line.iter().cloned().chain(std::iter::once('\n')));
+                    
                     self.editor_impl.redraw(cx);
                 }
                 _ => ()
@@ -222,4 +241,5 @@ impl LiveEditor {
         self.editor_impl.handle_event(cx, state, event, &self.lines_layout, send_request, dispatch_action);
     }
 }
+
 

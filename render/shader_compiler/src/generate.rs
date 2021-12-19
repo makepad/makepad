@@ -7,7 +7,7 @@ use{
     },
     makepad_live_compiler::{
         id,
-        PrettyPrintedF32,
+        makepad_math::PrettyPrintedF32,
         LiveId,
         Span
     },

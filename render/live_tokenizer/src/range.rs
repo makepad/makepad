@@ -1,7 +1,5 @@
 use crate::{
-    code_editor::{
-        position::Position
-    }
+    position::Position
 };
 
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]

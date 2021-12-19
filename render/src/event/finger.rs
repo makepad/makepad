@@ -1,5 +1,5 @@
 use {
-    makepad_math::*,
+    makepad_shader_compiler::makepad_math::*,
     //makepad_microserde::*,
     crate::{
         event::{

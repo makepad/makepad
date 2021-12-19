@@ -10,7 +10,7 @@ use {
         rc::Weak,
         cell::RefCell,
     },
-    makepad_live_compiler::{
+    makepad_shader_compiler::makepad_live_compiler::{
         //LiveType,
         //LiveId,
         LiveRegistry
@@ -76,8 +76,8 @@ use {
     }
 };
 
-pub use makepad_derive_live::*;
-pub use makepad_math::*;
+pub use makepad_shader_compiler::makepad_derive_live::*;
+pub use makepad_shader_compiler::makepad_math::*;
 
 pub struct Cx {
     pub platform_type: PlatformType,
