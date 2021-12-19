@@ -10,10 +10,6 @@ edition = "2018"
 path="../render"
 version="0.2"
 
-[dependencies.makepad-micro-serde]
-path="../micro_serde"
-version="0.1"
-
 [dependencies.makepad-widget]
 path="../widget"  
 version="0.1"

@@ -2,7 +2,7 @@
 // OK ANIMATION
 use {
     std::f64::consts::PI,
-    makepad_live_compiler::*,
+    makepad_shader_compiler::makepad_live_compiler::*,
     makepad_derive_live::*,
     crate::{
         event::NextFrame,

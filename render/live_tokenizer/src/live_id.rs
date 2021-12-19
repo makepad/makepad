@@ -76,80 +76,6 @@ impl LiveIdMap {
     }
 }
 
-#[derive(Clone, Copy, Default, Debug, Eq, Ord, PartialOrd, Hash, PartialEq)]
-pub struct LiveFileId(pub u16);
-
-impl LiveFileId {
-    pub fn index(index: usize) -> LiveFileId {LiveFileId(index as u16)}
-    pub fn to_index(&self) -> usize {self.0 as usize}
-}
-
-
-
-//TODO FIX THIS THING TO BE N LEVELS OF MODULES
-#[derive(Default, Clone, Eq, Hash, Debug, Copy, PartialEq)]
-pub struct LiveModuleId(pub LiveId, pub LiveId);
-
-impl LiveModuleId {
-    pub fn from_str(module_path: &str) -> Result<Self,
-    String> {
-        // ok lets split off the first 2 things from module_path
-        let bytes = module_path.as_bytes();
-        let len = bytes.len();
-        // we have to find the first :
-        let mut crate_id = LiveId(0);
-        let mut i = 0;
-        while i < len {
-            if bytes[i] == ':' as u8 {
-                crate_id = LiveId::from_str(std::str::from_utf8(&bytes[0..i]).unwrap()) ?;
-                i += 2;
-                break
-            }
-            i += 1;
-        }
-        if i == len { // module_path is only one thing
-            return Ok(LiveModuleId(LiveId(0), LiveId::from_str(std::str::from_utf8(&bytes[0..len]).unwrap()) ?));
-        }
-        return Ok(LiveModuleId(crate_id, LiveId::from_str(std::str::from_utf8(&bytes[i..len]).unwrap()) ?));
-    }
-
-}
-
-impl fmt::Display for LiveModuleId {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}::{}", self.0, self.1)
-    }
-}
-/*
-#[derive(Clone, Debug, Eq, Hash, Ord, PartialOrd, Copy, PartialEq)]
-pub struct LocalPtr(pub usize);
-*/
-#[derive(Clone, Debug, Eq, Hash, Copy, Ord, PartialOrd, PartialEq)]
-pub struct LivePtr {
-    pub file_id: LiveFileId,
-    pub index: u32,
-}
-
-impl LivePtr{
-    pub fn node_index(&self)->usize{
-        self.index as usize
-    }
-    
-    pub fn with_index(&self, index:usize)->Self{
-        Self{file_id:self.file_id, index:index as u32}
-    }
-
-    pub fn from_index(file_id:LiveFileId, index:usize)->Self{
-        Self{file_id, index:index as u32}
-    }
-
-}
-
-impl fmt::Display for LivePtr {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}_{}", self.file_id.0, self.index)
-    }
-}
 
 #[derive(Clone, Default, Eq, Hash, Copy, PartialEq)]
 pub struct LiveId(pub u64);
@@ -184,7 +110,6 @@ impl LiveId {
     // from https://nullprogram.com/blog/2018/07/31/
     // i have no idea what im doing with start value and finalisation.
     pub const fn from_bytes(id_bytes: &[u8], start: usize, end: usize) -> Self {
-        //let id_len = id_bytes.len();
         let mut x = 0xd6e8_feb8_6659_fd93u64;
         let mut i = start;
         while i < end {
@@ -198,6 +123,27 @@ impl LiveId {
         }
         // use high bit to mark id as capitalised
         if id_bytes[0] >= 'A' as u8 && id_bytes[0] <= 'Z' as u8{
+            return Self(x|0x8000_0000_0000_0000)
+        }
+        else{
+            return Self(x&0x7fff_ffff_ffff_ffff)
+        }
+    }
+    
+    pub const fn from_char_slice(id_bytes: &[char]) -> Self {
+        let mut x = 0xd6e8_feb8_6659_fd93u64;
+        let mut i = 0;
+        while i < id_bytes.len() {
+            x = x.overflowing_add(id_bytes[i] as u64).0;
+            x ^= x >> 32;
+            x = x.overflowing_mul(0xd6e8_feb8_6659_fd93).0;
+            x ^= x >> 32;
+            x = x.overflowing_mul(0xd6e8_feb8_6659_fd93).0;
+            x ^= x >> 32;
+            i += 1;
+        }
+        // use high bit to mark id as capitalised
+        if id_bytes[0] >= 'A' && id_bytes[0] <= 'Z' {
             return Self(x|0x8000_0000_0000_0000)
         }
         else{

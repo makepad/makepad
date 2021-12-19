@@ -1,14 +1,14 @@
 use {
     makepad_render::*,
     makepad_widget::color_picker::*,
+    makepad_render::makepad_live_tokenizer::{
+        position::Position,
+        text::Text,
+    },
     crate::{
         design_editor::{
             inline_widget::*
         },
-        code_editor::{
-            position::Position,
-            text::Text,
-        }
     }
 };
 

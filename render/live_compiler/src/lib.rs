@@ -12,19 +12,25 @@ pub mod live_node_vec;
 pub mod live_document;
 pub mod live_registry; 
 pub mod live_expander;
-pub mod live_id;
+pub mod live_ptr;
 
 pub use makepad_id_macros::*;
+pub use makepad_math;
+pub use makepad_derive_live;
 pub use makepad_math::*;
+pub use makepad_live_tokenizer;
+pub use makepad_live_tokenizer::makepad_micro_serde;
+
 pub use {
+    makepad_live_tokenizer::LiveId,
+
     crate::{
         live_registry::{
             LiveRegistry,
             LiveDocNodes,
         },
-        live_id::{
+        live_ptr::{
             LiveModuleId,
-            LiveId,
             LivePtr,
             LiveFileId,
         },

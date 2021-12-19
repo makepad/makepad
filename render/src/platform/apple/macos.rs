@@ -1,5 +1,5 @@
 use {
-    makepad_live_compiler::Vec2,
+    makepad_shader_compiler::makepad_math::Vec2,
     
     crate::{
         platform::{

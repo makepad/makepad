@@ -10,7 +10,7 @@ use {
         generate_metal,
         generate_metal::MetalGeneratedShader,
     },
-    makepad_live_compiler::*,
+    makepad_shader_compiler::makepad_live_compiler::*,
     crate::{
         platform::{
             apple::frameworks::*,
