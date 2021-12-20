@@ -90,17 +90,12 @@ impl DrawVars {
     pub fn redraw_view(&self, cx: &mut Cx) {
         cx.redraw_view_of(self.area);
     }
-    /*
-    pub fn live_type() -> LiveType {
-        LiveType(std::any::TypeId::of::<DrawVars>())
-    }*/
     
     pub fn live_type_info(_cx:&mut Cx) -> LiveTypeInfo {
         LiveTypeInfo {
             module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
             live_type: std::any::TypeId::of::<Self>(),
             fields: Vec::new(),
-            //kind: LiveTypeKind::DrawVars,
             type_name: LiveId::from_str("DrawVars").unwrap()
         }
     }

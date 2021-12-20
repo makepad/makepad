@@ -1,12 +1,14 @@
 use {
     std::fmt,
     makepad_math::{
-        Vec2, Vec3, Vec4
+        Vec2,
+        Vec3,
+        Vec4
     },
-    makepad_live_tokenizer::LiveId,
+    makepad_live_tokenizer::{LiveId},
     crate::{
         live_ptr::{LiveFileId, LiveModuleId, LivePtr},
-        live_token::TokenId,
+        live_token::{LiveToken, TokenId},
     }
 };
 
@@ -40,7 +42,7 @@ pub enum LiveValue {
     ExprBinOp(LiveBinOp),
     ExprUnOp(LiveUnOp),
     ExprMember(LiveId),
-    ExprCall{ident:LiveId, args:usize},
+    ExprCall {ident: LiveId, args: usize},
     // enum thing
     BareEnum {base: LiveId, variant: LiveId},
     // tree items
@@ -61,10 +63,56 @@ pub enum LiveValue {
     Use (LiveModuleId),
 }
 
-impl LiveNode{
-    pub fn empty()->Self{
-        Self{
-            origin:LiveNodeOrigin::empty(),
+impl LiveValue {
+    pub fn update_from_live_token(&mut self, token: &LiveToken) -> bool {
+        match self {
+            Self::DocumentString {string_start, string_count} => {
+                if let LiveToken::String {index, len} = token {
+                    *string_start = *index as usize;
+                    *string_count = *len as usize;
+                    return true
+                }
+            },
+            Self::Color(o) => if let LiveToken::Color(i) = token {
+                *o = *i;
+                return true
+            },
+            Self::Bool(o) => if let LiveToken::Bool(i) = token {
+                *o = *i;
+                return true
+            },
+            Self::Int(o) => {
+                if let LiveToken::Int(i) = token {
+                    *o = *i;
+                    return true
+                }
+                if let LiveToken::Float(v) = token {
+                    *self = LiveValue::Float(*v);
+                    return true
+                }
+            }
+            Self::Float(o) => {
+                if let LiveToken::Float(i) = token {
+                    *o = *i;
+                    return true
+                }
+                if let LiveToken::Int(v) = token {
+                    *self = LiveValue::Int(*v);
+                    return true
+                }
+            }
+            _=>()
+            
+        }
+        false
+    }
+}
+
+impl LiveNode {
+    
+    pub fn empty() -> Self {
+        Self {
+            origin: LiveNodeOrigin::empty(),
             id: LiveId(0),
             value: LiveValue::None
         }
@@ -74,84 +122,84 @@ impl LiveNode{
 #[derive(Copy, Clone, PartialEq)]
 pub struct LiveNodeOrigin(u64);
 
-impl fmt::Debug for LiveNodeOrigin{
+impl fmt::Debug for LiveNodeOrigin {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "token_id:{:?} node_index:{:?} edit_info:{:?}", self.token_id(), self.node_index(), self.edit_info())
     }
 }
 
-// this layout can be reshuffled and just be made bigger. 
+// this layout can be reshuffled and just be made bigger.
 // However it keeps the LiveNode size at 40 bytes which is nice for now.
 // 10 bit file id (1024)
 // 18 bit token id (262k tokens, avg tokensize: 5 = 1.25 megs of code)
 // 18 bits node index (262k nodes *40 bytes = 10 megs. We are at 70kb now for the UI)
-// 10 bits edit_info file_id 
-// 7 bits (128) edit_info index 
+// 10 bits edit_info file_id
+// 7 bits (128) edit_info index
 // 1 bit 'id_is_nonunique'
 
-impl LiveNodeOrigin{
-    pub fn empty()->Self{
-        Self(0)
+impl LiveNodeOrigin {
+    pub fn empty() -> Self {
+        Self (0)
     }
     
-    pub fn from_token_id(token_id:TokenId)->Self{
-        Self(token_id.to_bits() as u64)
+    pub fn from_token_id(token_id: TokenId) -> Self {
+        Self (token_id.to_bits() as u64)
     }
     
-    pub fn token_id(&self)->Option<TokenId>{
-        TokenId::from_bits((self.0&0x0fff_ffff) as u32)
+    pub fn token_id(&self) -> Option<TokenId> {
+        TokenId::from_bits((self.0 & 0x0fff_ffff) as u32)
     }
     
-    pub fn set_node_index(&mut self, index:usize){
-        if index == 0 || index > 0x3ffff{
+    pub fn set_node_index(&mut self, index: usize) {
+        if index == 0 || index > 0x3ffff {
             panic!();
         }
         self.0 = (self.0 & 0xFFFF_C000_0fff_ffff) | ((index as u64) << 28);
     }
     
-     pub fn node_index(&self)->Option<usize>{
-        if self.0&0x0000_03FFF_F000_0000 != 0{
-            return Some(((self.0>>28)&0x3ffff) as usize)
+    pub fn node_index(&self) -> Option<usize> {
+        if self.0 & 0x0000_03FFF_F000_0000 != 0 {
+            return Some(((self.0 >> 28) & 0x3ffff) as usize)
         }
-        else{
+        else {
             None
         }
     }
     
-    pub fn with_edit_info(mut self, edit_info:Option<LiveEditInfo>)->Self{
-        if let Some(edit_info) = edit_info{
+    pub fn with_edit_info(mut self, edit_info: Option<LiveEditInfo>) -> Self {
+        if let Some(edit_info) = edit_info {
             self.set_edit_info(edit_info)
         }
         self
     }
     
-    pub fn with_id_non_unique(mut self, non_unique:bool)->Self{
-        if non_unique{
+    pub fn with_id_non_unique(mut self, non_unique: bool) -> Self {
+        if non_unique {
             self.set_id_non_unique();
         }
         self
     }
     
-    pub fn set_optional_edit_info(&mut self, edit_info:Option<LiveEditInfo>){
-        if let Some(edit_info) = edit_info{
+    pub fn set_optional_edit_info(&mut self, edit_info: Option<LiveEditInfo>) {
+        if let Some(edit_info) = edit_info {
             self.set_edit_info(edit_info)
         }
     }
     
-    pub fn set_edit_info(&mut self, edit_info:LiveEditInfo){
+    pub fn set_edit_info(&mut self, edit_info: LiveEditInfo) {
         return
-        self.0 = (self.0&0x8000_03FF_FFFF_FFFF) |  (edit_info.0 as u64) << 46;
+        self.0 = (self.0 & 0x8000_03FF_FFFF_FFFF) | (edit_info.0 as u64) << 46;
     }
     
-    pub fn edit_info(&self)->Option<LiveEditInfo>{
-        LiveEditInfo::from_bits(((self.0&0x7fff_fc00_0000_0000)>>46) as u32)
+    pub fn edit_info(&self) -> Option<LiveEditInfo> {
+        LiveEditInfo::from_bits(((self.0 & 0x7fff_fc00_0000_0000) >> 46) as u32)
     }
     
-    pub fn set_id_non_unique(&mut self){
+    pub fn set_id_non_unique(&mut self) {
         self.0 |= 0x8000_0000_0000_0000;
     }
     
-    pub fn id_non_unique(&self)->bool{
+    pub fn id_non_unique(&self) -> bool {
         self.0 & 0x8000_0000_0000_0000 != 0
     }
     
@@ -159,52 +207,52 @@ impl LiveNodeOrigin{
 
 pub struct LiveEditInfo(u32);
 
-impl fmt::Debug for LiveEditInfo{
+impl fmt::Debug for LiveEditInfo {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "{:?}:{:?}", self.file_id(), self.edit_info_index())
     }
 }
 
-impl LiveEditInfo{
-    pub fn new(file_id: LiveFileId, edit_info_index: usize)->Self{
+impl LiveEditInfo {
+    pub fn new(file_id: LiveFileId, edit_info_index: usize) -> Self {
         let file_id = file_id.to_index();
-        if file_id == 0 || file_id > 0x3ff || edit_info_index&0xf != 0 || edit_info_index > 0x7f0{
+        if file_id == 0 || file_id > 0x3ff || edit_info_index & 0xf != 0 || edit_info_index > 0x7f0 {
             panic!();
         }
         LiveEditInfo(
             (((file_id as u32) & 0x3ff)) |
-            (((edit_info_index as u32)<<6)) 
+            (((edit_info_index as u32) << 6))
         )
     }
     
-    pub fn is_empty(&self)->bool{
-        (self.0&0x3ff) == 0
+    pub fn is_empty(&self) -> bool {
+        (self.0 & 0x3ff) == 0
     }
     
-    pub fn edit_info_index(&self)->usize{
-        (((self.0) as usize)>>6)&0x7f0
+    pub fn edit_info_index(&self) -> usize {
+        (((self.0) as usize) >> 6) & 0x7f0
     }
     
-    pub fn file_id(&self)->LiveFileId{
-        LiveFileId((self.0&0x3ff) as u16)
+    pub fn file_id(&self) -> LiveFileId {
+        LiveFileId((self.0 & 0x3ff) as u16)
     }
     
-    pub fn to_bits(&self)->u32{self.0}
-    pub fn from_bits(v:u32)->Option<Self>{
-        if (v&0xFFFE0000)!=0{
+    pub fn to_bits(&self) -> u32 {self.0}
+    pub fn from_bits(v: u32) -> Option<Self> {
+        if (v & 0xFFFE0000) != 0 {
             panic!();
         }
-        if v == 0{
+        if v == 0 {
             return None
         }
-        return Some(Self(v))
+        return Some(Self (v))
     }
 }
 
 //#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Copy, Hash)]
 //pub struct LiveType(pub core::any::TypeId);
 pub type LiveType = std::any::TypeId;
- 
+
 /*
 #[derive(Clone, Debug)]
 pub enum LiveTypeKind {
@@ -500,7 +548,7 @@ impl LiveValue {
             Self::ExprBinOp(_) => 13,
             Self::ExprUnOp(_) => 14,
             Self::ExprMember(_) => 15,
-            Self::ExprCall{..} => 16,
+            Self::ExprCall {..} => 16,
             
             Self::BareEnum {..} => 17,
             Self::Array => 18,

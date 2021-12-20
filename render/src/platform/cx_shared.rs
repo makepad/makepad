@@ -144,6 +144,11 @@ impl Cx {
     
     pub(crate) fn call_signals_and_triggers(&mut self)
     {
+        if self.live_edit{
+            self.live_edit = false;
+            self.call_event_handler(&mut Event::LiveEdit);
+        }
+        
         let mut counter = 0;
         while self.signals.len() != 0 {
             counter += 1;

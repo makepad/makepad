@@ -215,11 +215,6 @@ impl Cx {
                                         // its a render window
                                         windows_need_repaint -= 1;
                                         for metal_window in &mut metal_windows {if metal_window.window_id == window_id {
-                                            /* metal_window.set_vsync_enable(windows_need_repaint == 0 && vsync);
-                                            metal_window.set_buffer_count(
-                                                if metal_window.window_geom.is_fullscreen {3}else {2}
-                                            );*/
-                                            
                                             let dpi_factor = metal_window.window_geom.dpi_factor;
                                             
                                             metal_window.resize_core_animation_layer(&metal_cx);
@@ -231,14 +226,6 @@ impl Cx {
                                                 &mut metal_cx,
                                                 metal_window.is_resizing
                                             );
-                                            
-                                            //let pass = &mut self.passes[*pass_id];
-                                            /*
-                                            if pass.paint_flush_counter < 30{
-                                                pass.paint_flush_counter += 1;
-                                                pass.paint_dirty  = true;
-                                                paint_dirty = true;
-                                            }*/
                                             
                                             // call redraw if we guessed the dpi wrong on startup
                                             if metal_window.first_draw {
@@ -279,6 +266,7 @@ impl Cx {
                     },
                     _ => {
                         self.call_event_handler(&mut event);
+                        self.call_signals_and_triggers();
                     }
                 }
                 
