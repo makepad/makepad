@@ -50,6 +50,12 @@ impl EditorView {
         }
     }
     
+    pub fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        match self {
+            Self::LiveEditor(e) => e.apply(cx, apply_from, index, nodes)
+        }
+    }
+    
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
@@ -72,12 +78,24 @@ live_register!{
     }
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live)]
 pub struct Editors {
     #[rust] view_id_allocator: GenIdAllocator,
     #[rust] views_by_view_id: GenIdMap<EditorViewId, EditorView>,
     
     live_editor: Option<LivePtr>,
+}
+
+impl LiveHook for Editors{
+    fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+        if let ApplyFrom::ApplyOver = apply_from{
+            for editor_view in self.views_by_view_id.values_mut(){
+                if let Some(live_editor) = nodes.child_by_name(index, id!(live_editor)){
+                    editor_view.apply(cx, apply_from, live_editor, nodes);
+                }
+            }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]

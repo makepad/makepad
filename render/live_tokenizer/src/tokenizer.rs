@@ -7,6 +7,31 @@ use {
     },
 };
 
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct TokenPos {
+    pub line: usize,
+    pub index: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct TokenRange {
+    pub start: TokenPos,
+    pub end: TokenPos
+}
+
+impl TokenRange{
+    pub fn is_in_range(&self, pos:TokenPos)->bool{
+        if self.start.line == self.end.line{
+            pos.line == self.start.line && pos.index >= self.start.index && pos.index < self.end.index
+        }
+        else{
+            pos.line == self.start.line && pos.index >= self.start.index ||
+            pos.line > self.start.line && pos.line < self.end.line ||
+            pos.line == self.end.line && pos.index < self.end.index
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum State {
     Initial(InitialState),

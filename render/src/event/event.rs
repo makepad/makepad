@@ -23,7 +23,7 @@ pub enum Event {
     Destruct,
     Draw,
     Paint,
-    Redraw,
+    LiveEdit,
     AppFocus,
     AppFocusLost,
     NextFrame(NextFrameEvent),

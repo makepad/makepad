@@ -174,7 +174,7 @@ impl DesktopWindow {
                 _ => true
             }; 
             if process_chrome {
-                match PlatformType::MsWindows { //cx.platform_type {
+                match cx.platform_type {
                     PlatformType::MsWindows | PlatformType::Unknown | PlatformType::Linux {..} => {
                         
                         self.caption_bg.begin(cx, Layout {

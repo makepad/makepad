@@ -2,6 +2,7 @@ use {
     std::{
         fmt::Write,
         ops::Deref,
+        ops::DerefMut,
         iter
     },
     makepad_derive_live::{
@@ -912,6 +913,11 @@ impl<'a> LiveNodeReader<'a> {
         &self.nodes[self.index].value
     }
     
+    pub fn origin(&self) -> &LiveNodeOrigin {
+        if self.eot {panic!();}
+        &self.nodes[self.index].origin
+    }
+    
     pub fn node(&self) -> &LiveNode {
         if self.eot {panic!();}
         &self.nodes[self.index]
@@ -1013,3 +1019,117 @@ impl<'a> Deref for LiveNodeReader<'a> {
     type Target = LiveValue;
     fn deref(&self) -> &Self::Target {&self.nodes[self.index].value}
 }
+
+
+pub struct LiveNodeMutReader<'a> {
+    eot: bool,
+    depth: usize,
+    index: usize,
+    nodes: &'a mut [LiveNode]
+}
+
+impl<'a> LiveNodeMutReader<'a> {
+    pub fn new(index: usize, nodes: &'a mut [LiveNode]) -> Self {
+        Self {
+            eot: false,
+            depth: 0,
+            index,
+            nodes
+        }
+    }
+
+    pub fn value(&mut self) -> &mut LiveValue {
+        if self.eot {panic!();}
+        &mut self.nodes[self.index].value
+    }
+    
+    pub fn origin(&mut self) -> &mut LiveNodeOrigin {
+        if self.eot {panic!();}
+        &mut self.nodes[self.index].origin
+    }
+    
+    pub fn node(&mut self) -> &mut LiveNode {
+        if self.eot {panic!();}
+        &mut self.nodes[self.index]
+    }
+    
+    pub fn node_slice(&self) -> &[LiveNode] {
+        if self.eot {panic!()}
+        self.nodes.node_slice(self.index)
+    }
+    
+    pub fn children_slice(&self) -> &[LiveNode] {
+        if self.eot {panic!()}
+        self.nodes.children_slice(self.index)
+    }
+    
+    pub fn count_children(&self) -> usize {self.nodes.count_children(self.index)}
+    
+    pub fn clone_child(&self, out_vec: &mut Vec<LiveNode>) {
+        if self.eot {panic!();}
+        self.nodes.clone_child(self.index, out_vec)
+    }
+    
+    pub fn to_string(&self, max_depth: usize) -> String {
+        if self.eot {panic!();}
+        self.nodes.to_string(self.index, max_depth)
+    }
+    
+    pub fn skip(&mut self) {
+        if self.eot {panic!();}
+        self.index = self.nodes.skip_node(self.index);
+        if self.nodes[self.index].value.is_close() { // standing on a close node
+            if self.depth == 1 {
+                self.eot = true;
+                self.index += 1;
+            }
+        }
+    }
+    
+    pub fn walk(&mut self) {
+        if self.eot {panic!();}
+        if self.nodes[self.index].value.is_open() {
+            self.depth += 1;
+        }
+        else if self.nodes[self.index].value.is_close() {
+            if self.depth == 0 {panic!()}
+            self.depth -= 1;
+            if self.depth == 0 {
+                self.eot = true;
+            }
+        }
+        self.index += 1;
+    }
+    
+    pub fn is_eot(&mut self) -> bool {
+        return self.eot
+    }
+    
+    pub fn id(&mut self) -> LiveId {
+        self.nodes[self.index].id
+    }
+    
+    pub fn index(&mut self) -> usize {
+        self.index
+    }
+    
+    pub fn depth(&mut self) -> usize {
+        self.depth
+    }
+    
+    pub fn nodes(&mut self) -> &mut [LiveNode] {
+        self.nodes
+    }
+    
+}
+
+
+impl<'a> Deref for LiveNodeMutReader<'a> {
+    type Target = LiveValue;
+    fn deref(&self) -> &Self::Target {&self.nodes[self.index].value}
+}
+
+impl<'a> DerefMut for LiveNodeMutReader<'a> {
+    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.nodes[self.index].value}
+}
+

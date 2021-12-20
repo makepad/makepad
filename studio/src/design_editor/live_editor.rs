@@ -104,7 +104,7 @@ impl LiveEditor {
         }
     }
     
-    pub fn calc_layout_with_widgets(&mut self, cx: &mut Cx, path:&str, document_inner: &DocumentInner) {
+    pub fn calc_layout_with_widgets(&mut self, cx: &mut Cx, path: &str, document_inner: &DocumentInner) {
         let mut inline_cache = document_inner.inline_cache.borrow_mut();
         inline_cache.refresh(cx, path, &document_inner.token_cache);
         
@@ -154,8 +154,9 @@ impl LiveEditor {
     
     pub fn draw(&mut self, cx: &mut Cx, state: &EditorState) {
         if let Ok((document, document_inner, session)) = self.editor_impl.begin(cx, state) {
+            let path = document.path.clone().into_os_string().into_string().unwrap();
             
-            self.calc_layout_with_widgets(cx, &document.path.clone().into_os_string().into_string().unwrap(), document_inner);
+            self.calc_layout_with_widgets(cx, &path, document_inner);
             
             self.editor_impl.draw_selections(
                 cx,
@@ -205,7 +206,9 @@ impl LiveEditor {
         for widget in self.widgets.values_mut() {
             match widget.inline_widget.handle_inline_event(cx, event, widget.live_ptr) {
                 InlineWidgetAction::ReplaceText {position, size, text} => {
+                    cx.profile_start(0);
                     let session_id = self.editor_impl.session_id.unwrap();
+                    
                     state.replace_text_direct(
                         session_id,
                         position,
@@ -214,26 +217,39 @@ impl LiveEditor {
                         send_request
                     );
                     
-                    // ok so. what do we know.
-                    // we can scan here in this doc
-                    // to the live_register! token
-                    // then we scan down to the first non-comment token
-                    // we can then paren-scan down
-                    // to the last matching }
-                    // this is the thing we need to feed the DSL system.
-                    // we can give it a start position
-                    // and an iterator range
-                    // aaaaand go!
-                    
-                    // ok we're going to send it straight to the DSL.
-                    /*let session = &state.sessions_by_session_id[session_id];
+                    let session = &state.sessions_by_session_id[session_id];
                     let document = &state.documents_by_document_id[session.document_id];
-                    let inner_document = document.inner.as_ref().unwrap();
-                    *///let text = inner_document.text.to_string();
-                    //let iter = inner_document.text.as_lines().iter().flat_map(|line| line.iter().cloned().chain(std::iter::once('\n')));
+                    let document_inner = document.inner.as_ref().unwrap();
                     
+                    let mut inline_cache = document_inner.inline_cache.borrow_mut();
+                    inline_cache.refresh_token_range(&document_inner.token_cache);
+                    
+                    let token_cache = &document_inner.token_cache;
+                    let lines = &document_inner.text.as_lines();
+                    let path = document.path.clone().into_os_string().into_string().unwrap();
+                    
+                    let live_registry_rc = cx.live_registry.clone();
+                    let mut live_registry = live_registry_rc.borrow_mut();
+                    
+                    // ok now what.
+                    match live_registry.update_live_file(
+                        &path,
+                        inline_cache.token_range.unwrap(),
+                        | line | {
+                            (&lines[line], &token_cache[line].tokens())
+                        }
+                    ){
+                        Ok(true)=>{
+                            cx.live_edit = true;
+                        }
+                        Ok(false)=>(),
+                        Err(_)=>{
+                        }
+                    };
+                    
+                    cx.profile_end(0);
                     self.editor_impl.redraw(cx);
-                }
+                } 
                 _ => ()
             }
         }

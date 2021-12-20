@@ -1,9 +1,7 @@
 #![allow(dead_code)]
 
 pub mod util;
-//pub mod math;
 pub mod span;
-pub mod lex;
 pub mod live_token;
 pub mod live_error;
 pub mod live_parser;
