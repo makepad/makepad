@@ -2,9 +2,8 @@ use {
     makepad_render::makepad_live_tokenizer::{
         delta::{Delta, OperationRange},
         text::Text,
-        range::Range,
-        position::Position,
         full_token::{Delim, FullToken},
+        tokenizer::{TokenRange, TokenPos}
     },
     crate::code_editor::{
         token_cache::TokenCache,
@@ -31,7 +30,7 @@ pub struct Line {
 
 pub struct InlineCache {
     pub lines: Vec<Line>,
-    pub register_range: Option<Range>,
+    pub token_range: Option<TokenRange>,
     pub is_clean: bool,
 }
 
@@ -39,27 +38,27 @@ impl InlineCache {
     pub fn new(text: &Text) -> InlineCache {
         InlineCache {
             is_clean: false,
-            register_range: None,
+            token_range: None,
             lines: (0..text.as_lines().len())
                 .map( | _ | Line::default())
                 .collect::<Vec<_ >> (),
         }
     }
     
-    pub fn parse_live_register_range(&mut self, token_cache: &TokenCache) {
+    pub fn refresh_token_range(&mut self, token_cache: &TokenCache) {
         enum State {
             Scan,
             Bang,
             Brace,
             First,
-            Stack(Position, usize),
-            Term(Position, Position)
+            Stack(TokenPos, usize),
+            Term(TokenPos, TokenPos)
         }
         let mut state = State::Scan;
         // first we scan for live_register!{ident
         'outer: for (line, token_line) in token_cache.iter().enumerate() {
-            let mut column = 0;
-            for token in token_line.tokens() {
+            //let mut column = 0;
+            for (index,token) in token_line.tokens().iter().enumerate() {
                 match state {
                     State::Scan => match token.token {
                         FullToken::Ident(id!(live_register)) => {state = State::Bang}
@@ -77,14 +76,14 @@ impl InlineCache {
                     }
                     State::First => match token.token {
                         FullToken::Whitespace | FullToken::Comment => (),
-                        _=>{state = State::Stack(Position {line, column}, 0)}
+                        _=>{state = State::Stack(TokenPos {line, index}, 0)}
                     }
                     State::Stack(start, depth) => {
                         match token.token {
                             FullToken::Open(_) => {state = State::Stack(start, depth + 1)}
                             FullToken::Close(_) => {
                                 if depth == 0 { // end of scan
-                                    state = State::Term(start, Position {line, column});
+                                    state = State::Term(start, TokenPos {line, index});
                                     break 'outer
                                 }
                                 state = State::Stack(start, depth - 1)
@@ -95,13 +94,12 @@ impl InlineCache {
                     }
                     State::Term(_,_)=>panic!()
                 }
-                column += token.len;
+                //column += token.len;
             }
         }
         if let State::Term(start,end) = state{
             // alright we have a range.
-            println!("WE HAVE A RANGE");
-            self.register_range = Some(Range{start, end})
+            self.token_range = Some(TokenRange{start, end})
         }
     }
     
@@ -131,9 +129,14 @@ impl InlineCache {
         }
         self.is_clean = true;
         
-        //if self.register_range.is_none() {
-        self.parse_live_register_range(token_cache);
-        //}
+        if self.token_range.is_none() {
+            self.refresh_token_range(token_cache);
+        }
+        
+        if self.token_range.is_none(){
+            return
+        }
+        let range = self.token_range.unwrap();
         
         let live_registry_rc = cx.live_registry.clone();
         let live_registry = live_registry_rc.borrow();
@@ -146,10 +149,21 @@ impl InlineCache {
         if self.lines.len() != token_cache.len() {
             panic!();
         }
-        for (line, line_cache) in self.lines.iter_mut().enumerate() {
+
+        for line_cache in self.lines[0..range.start.line].iter_mut() {
+            line_cache.items.clear();
+            line_cache.is_clean = true;
+        }
+        for line_cache in self.lines[range.end.line..].iter_mut() {
+            line_cache.items.clear();
+            line_cache.is_clean = true;
+        }
+        for (line, line_cache) in self.lines[range.start.line..range.end.line].iter_mut().enumerate() {
+            let line = line + range.start.line;
             if line_cache.is_clean { // line not dirty
                 continue
             }
+            
             line_cache.is_clean = true;
             if line_cache.items.len() != 0 {
                 panic!();

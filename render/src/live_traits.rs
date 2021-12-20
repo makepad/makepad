@@ -65,10 +65,22 @@ pub trait LiveNew: LiveApply {
         return ret
     }
     
-    fn new_from_module_path_id(cx: &mut Cx, module_path: &str, id: LiveId) -> Option<Self> where Self: Sized {
+    fn new_as_main_module(cx: &mut Cx, module_path: &str, id: LiveId) -> Option<Self> where Self: Sized {
+        let module_id = LiveModuleId::from_str(module_path).unwrap();
+        {
+            let live_registry_rc = cx.live_registry.clone();
+            let mut live_registry = live_registry_rc.borrow_mut();
+            if let Some(file_id) = live_registry.module_id_to_file_id.get(&module_id) {
+                live_registry.main_module = Some(*file_id);
+            }
+        }
+        Self::new_from_module(cx, module_id, id)
+    }
+    
+    fn new_from_module(cx: &mut Cx, module_id: LiveModuleId, id: LiveId) -> Option<Self> where Self: Sized {
         let live_registry_rc = cx.live_registry.clone();
         let live_registry = live_registry_rc.borrow();
-        if let Some(file_id) = live_registry.module_id_to_file_id.get(&LiveModuleId::from_str(module_path).unwrap()) {
+        if let Some(file_id) = live_registry.module_id_to_file_id.get(&module_id) {
             let doc = live_registry.file_id_to_doc(*file_id);
             if let Some(index) = doc.nodes.child_by_name(0, id) {
                 let mut ret = Self::new(cx);
@@ -90,11 +102,29 @@ pub trait LiveApplyValue {
 
 pub trait LiveApply: LiveHook {
     fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize;
+    
     fn apply_over(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
         self.apply(cx, ApplyFrom::ApplyOver, 0, nodes);
     }
+    
     fn apply_clear(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
         self.apply(cx, ApplyFrom::ApplyClear, 0, nodes);
+    }
+    
+    fn handle_live_edit_event(&mut self, cx:&mut Cx, event:&Event, id:LiveId){
+        match event{
+            Event::LiveEdit=>{
+                let live_registry_rc = cx.live_registry.clone();
+                let live_registry = live_registry_rc.borrow();
+                if let Some(main_apply) = &live_registry.main_apply{
+                    if let Some(index) = main_apply.child_by_name(0, id){
+                        self.apply(cx, ApplyFrom::ApplyOver, index, main_apply);
+                    }
+                }
+            }
+            _=>()
+        }
+        
     }
     //fn type_id(&self) -> TypeId;
 }
@@ -166,14 +196,6 @@ impl ApplyFrom {
 
 pub trait LiveHook {
     fn apply_value_unknown(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
-        /*if let ApplyFrom::Animate = apply_from {
-            match nodes[index].id {
-                id!(from) | id!(track) => {
-                    return nodes.skip_node(index)
-                }
-                _ => ()
-            }
-        }*/
         if !nodes[index].id.is_capitalised() {
             cx.apply_error_no_matching_field(live_error_origin!(), apply_from, index, nodes);
         }

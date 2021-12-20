@@ -152,6 +152,7 @@ pub struct Cx {
     pub new_next_frames: HashSet<NextFrame>,
     pub next_frames: HashSet<NextFrame>,
     
+    pub live_edit: bool, 
     pub signals: HashMap<Signal, Vec<u64 >>,
     pub triggers: HashMap<Area, Vec<u64 >>,
     
@@ -279,6 +280,7 @@ impl Default for Cx {
             new_next_frames: HashSet::new(),
             next_frames: HashSet::new(),
             
+            live_edit: false,
             signals: HashMap::new(),
             triggers: HashMap::new(),
             
