@@ -23,7 +23,6 @@ pub struct App {
 
 impl App {
     pub fn live_register(cx: &mut Cx) {
-        //println!("{}", std::mem::size_of::<LiveNode>());
         makepad_widget::live_register(cx);
         crate::design_editor::live_register(cx);
         crate::code_editor::code_editor_impl::live_register(cx);
@@ -32,7 +31,10 @@ impl App {
     }
     
     pub fn new_app(cx: &mut Cx) -> Self {
-        Self::new_from_module_path_id(cx, &module_path!(), id!(App)).unwrap()
+        cx.profile_start(1);
+        let ret = Self::new_as_main_module(cx, &module_path!(), id!(App)).unwrap();
+        cx.profile_end(1);
+        ret
     }
     
     pub fn draw(&mut self, cx: &mut Cx) {
@@ -40,6 +42,7 @@ impl App {
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
+        self.handle_live_edit_event(cx, event, id!(App));
         self.inner.handle_event(cx, event, &mut self.state);
     }
 }
