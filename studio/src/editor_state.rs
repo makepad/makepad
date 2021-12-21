@@ -437,6 +437,7 @@ impl EditorState {
         let session = &self.sessions_by_session_id[session_id];
         let document = &mut self.documents_by_document_id[session.document_id];
         let document_inner = document.inner.as_mut().unwrap();
+
         let inverse_delta = delta.clone().invert(&document_inner.text);
         document_inner.undo_stack.push(Edit {
             cursors: session.cursors.clone(),
@@ -446,7 +447,7 @@ impl EditorState {
         let session = &mut self.sessions_by_session_id[session_id];
         session.apply_delta(&delta, Whose::Ours);
 
-        self.apply_our_delta(session_id, delta, send_request);
+        self.apply_delta(session_id, delta, send_request);
     }
 
     pub fn undo(&mut self, session_id: SessionId, send_request: &mut dyn FnMut(Request)) {
@@ -464,7 +465,7 @@ impl EditorState {
             session.cursors = undo.cursors;
             session.update_selections_and_carets();
     
-            self.apply_our_delta(session_id, undo.delta, send_request);
+            self.apply_delta(session_id, undo.delta, send_request);
         }
     }
 
@@ -483,11 +484,11 @@ impl EditorState {
             session.cursors = redo.cursors;
             session.update_selections_and_carets();
     
-            self.apply_our_delta(session_id, redo.delta, send_request);
+            self.apply_delta(session_id, redo.delta, send_request);
         }
     }
 
-    fn apply_our_delta(
+    fn apply_delta(
         &mut self,
         session_id: SessionId,
         delta: Delta,
@@ -551,17 +552,6 @@ impl EditorState {
         transform_edit_stack(&mut document_inner.undo_stack, delta.clone());
         transform_edit_stack(&mut document_inner.redo_stack, delta.clone());
 
-        self.apply_their_delta(document_id, delta);
-
-        document_id
-    }
-
-    fn apply_their_delta(
-        &mut self,
-        document_id: DocumentId,
-        delta: Delta,
-    ) {
-        let document = &self.documents_by_document_id[document_id];
         for session_id in document.session_ids.iter().cloned() {
             let session = &mut self.sessions_by_session_id[session_id];
             session.apply_delta(&delta, Whose::Theirs);
@@ -571,6 +561,8 @@ impl EditorState {
         let document_inner = document.inner.as_mut().unwrap();
         document_inner.revision += 1;
         document.apply_delta(delta);
+
+        document_id
     }
 }
 
