@@ -12,7 +12,7 @@ use {
         code_editor::{
             cursor_set::CursorSet,
             indent_cache::IndentCache,
-            protocol::{TextFileId, Request},
+            protocol::{TextFileTag, TextFileId, Request},
             token_cache::TokenCache,
         },
         design_editor::{
@@ -20,7 +20,7 @@ use {
         },
         editors::EditorViewId,
     },
-    makepad_widget::{GenId, GenIdMap,GenIdAllocator},
+    makepad_render::*,
     std::{
         cell::RefCell,
         collections::{HashMap, HashSet, VecDeque},
@@ -32,12 +32,12 @@ use {
 
 #[derive(Default)]
 pub struct EditorState {
-    pub session_id_allocator: GenIdAllocator,
-    pub sessions_by_session_id: GenIdMap<SessionId, Session>,
-    pub document_id_allocator: GenIdAllocator,
-    pub documents_by_document_id: GenIdMap<DocumentId, Document>,
+    pub session_id_allocator: GenIdAllocator<SessionTag>,
+    pub sessions_by_session_id: GenIdMap<SessionTag, Session>,
+    pub document_id_allocator: GenIdAllocator<DocumentTag>,
+    pub documents_by_document_id: GenIdMap<DocumentTag, Document>,
     pub document_ids_by_path: HashMap<PathBuf, DocumentId>,
-    pub document_ids_by_file_id: GenIdMap<TextFileId, DocumentId>,
+    pub document_ids_by_file_id: GenIdMap<TextFileTag, DocumentId>,
     pub outstanding_document_id_queue: VecDeque<DocumentId>,
 }
 
@@ -52,7 +52,7 @@ impl EditorState {
         send_request: &mut dyn FnMut(Request),
     ) -> SessionId {
         let document_id = self.get_or_create_document(path, send_request);
-        let session_id = SessionId(self.session_id_allocator.allocate());
+        let session_id = self.session_id_allocator.allocate();
         let session = Session {
             session_view: None,
             cursors: CursorSet::new(),
@@ -79,7 +79,7 @@ impl EditorState {
             self.destroy_document(document_id, send_request);
         }
         self.sessions_by_session_id.remove(session_id);
-        self.session_id_allocator.deallocate(session_id.0);
+        self.session_id_allocator.deallocate(session_id);
     }
 
     pub fn get_or_create_document(
@@ -94,7 +94,7 @@ impl EditorState {
                 *document_id
             },
             None => {
-                let document_id = DocumentId(self.document_id_allocator.allocate());
+                let document_id = self.document_id_allocator.allocate();
                 self.documents_by_document_id.insert(
                     document_id,
                     Document {
@@ -162,7 +162,7 @@ impl EditorState {
         let file_id = inner.file_id;
         self.document_ids_by_file_id.remove(file_id);
         self.documents_by_document_id.remove(document_id);
-        self.document_id_allocator.deallocate(document_id.0);
+        self.document_id_allocator.deallocate(document_id);
         send_request(Request::CloseFile(file_id))
     }
 
@@ -437,6 +437,7 @@ impl EditorState {
         let session = &self.sessions_by_session_id[session_id];
         let document = &mut self.documents_by_document_id[session.document_id];
         let document_inner = document.inner.as_mut().unwrap();
+
         let inverse_delta = delta.clone().invert(&document_inner.text);
         document_inner.undo_stack.push(Edit {
             cursors: session.cursors.clone(),
@@ -446,7 +447,7 @@ impl EditorState {
         let session = &mut self.sessions_by_session_id[session_id];
         session.apply_delta(&delta, Whose::Ours);
 
-        self.apply_our_delta(session_id, delta, send_request);
+        self.apply_delta(session_id, delta, send_request);
     }
 
     pub fn undo(&mut self, session_id: SessionId, send_request: &mut dyn FnMut(Request)) {
@@ -464,7 +465,7 @@ impl EditorState {
             session.cursors = undo.cursors;
             session.update_selections_and_carets();
     
-            self.apply_our_delta(session_id, undo.delta, send_request);
+            self.apply_delta(session_id, undo.delta, send_request);
         }
     }
 
@@ -483,11 +484,11 @@ impl EditorState {
             session.cursors = redo.cursors;
             session.update_selections_and_carets();
     
-            self.apply_our_delta(session_id, redo.delta, send_request);
+            self.apply_delta(session_id, redo.delta, send_request);
         }
     }
 
-    fn apply_our_delta(
+    fn apply_delta(
         &mut self,
         session_id: SessionId,
         delta: Delta,
@@ -551,17 +552,6 @@ impl EditorState {
         transform_edit_stack(&mut document_inner.undo_stack, delta.clone());
         transform_edit_stack(&mut document_inner.redo_stack, delta.clone());
 
-        self.apply_their_delta(document_id, delta);
-
-        document_id
-    }
-
-    fn apply_their_delta(
-        &mut self,
-        document_id: DocumentId,
-        delta: Delta,
-    ) {
-        let document = &self.documents_by_document_id[document_id];
         for session_id in document.session_ids.iter().cloned() {
             let session = &mut self.sessions_by_session_id[session_id];
             session.apply_delta(&delta, Whose::Theirs);
@@ -571,18 +561,13 @@ impl EditorState {
         let document_inner = document.inner.as_mut().unwrap();
         document_inner.revision += 1;
         document.apply_delta(delta);
+
+        document_id
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct SessionId(pub GenId);
-
-impl AsRef<GenId> for SessionId {
-    fn as_ref(&self) -> &GenId {
-        &self.0
-    }
-}
-
+pub enum SessionTag {}
+pub type SessionId = GenId<SessionTag>;
 
 pub struct Session {
     pub session_view: Option<EditorViewId>,
@@ -604,14 +589,8 @@ impl Session {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct DocumentId(pub GenId);
-
-impl AsRef<GenId> for DocumentId {
-    fn as_ref(&self) -> &GenId {
-        &self.0
-    }
-}
+pub enum DocumentTag {}
+pub type DocumentId = GenId<DocumentTag>;
 
 pub struct Document {
     pub session_ids: HashSet<SessionId>,
