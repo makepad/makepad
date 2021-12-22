@@ -11,6 +11,7 @@ use {
         },
         design_editor::{
             inline_widget::*,
+            inline_cache::InlineEditBind
         },
         editor_state::{
             SessionId
@@ -37,7 +38,7 @@ live_register!{
 pub struct WidgetIdent(LivePtr, LiveType);
 
 pub struct Widget {
-    live_ptr: LivePtr,
+    bind: InlineEditBind,
     inline_widget: Box<dyn InlineWidget>
 }
 
@@ -95,7 +96,7 @@ impl LiveEditor {
             }
             let widget = self.widgets.get_mut(ident).unwrap();
             
-            widget.inline_widget.draw_inline(cx, &live_registry, widget.live_ptr);
+            widget.inline_widget.draw_inline(cx, &live_registry, widget.bind);
             
             last_line = Some(line)
         }
@@ -128,16 +129,16 @@ impl LiveEditor {
             let edit_info = &inline_cache[line];
             let mut max_height = 0.0f32;
             
-            for item in &edit_info.items {
-                if let Some(matched) = widget_registry.match_inline_widget(&live_registry, item.live_ptr) {
+            for bind in &edit_info.items {
+                if let Some(matched) = widget_registry.match_inline_widget(&live_registry, *bind) {
                     max_height = max_height.max(matched.height);
                     
                     if start_y + matched.height > viewport_start && start_y < viewport_end {
                         // lets spawn it
-                        let ident = WidgetIdent(item.live_ptr, matched.live_type);
+                        let ident = WidgetIdent(bind.live_ptr, matched.live_type);
                         widgets.entry(ident).or_insert_with( || {
                             Widget {
-                                live_ptr: item.live_ptr,
+                                bind:*bind,
                                 inline_widget: widget_registry.new(cx, matched.live_type).unwrap(),
                             }
                         });
@@ -204,9 +205,8 @@ impl LiveEditor {
     ) {
         
         for widget in self.widgets.values_mut() {
-            match widget.inline_widget.handle_inline_event(cx, event, widget.live_ptr) {
+            match widget.inline_widget.handle_inline_event(cx, event, widget.bind) {
                 InlineWidgetAction::ReplaceText {position, size, text} => {
-                    cx.profile_start(0);
                     let session_id = self.editor_impl.session_id.unwrap();
                     
                     state.replace_text_direct(
@@ -238,18 +238,14 @@ impl LiveEditor {
                         | line | {
                             (&lines[line], &token_cache[line].tokens())
                         }
-                    ){
-                        Ok(true)=>{
-                            cx.live_edit = true;
-                        }
-                        Ok(false)=>(),
-                        Err(_)=>{
-                        }
+                    ) {
+                        Ok(true) => {cx.live_edit = true;}
+                        Ok(false) => (),
+                        Err(_) => {}
                     };
                     
-                    cx.profile_end(0);
                     self.editor_impl.redraw(cx);
-                } 
+                }
                 _ => ()
             }
         }
@@ -257,5 +253,3 @@ impl LiveEditor {
         self.editor_impl.handle_event(cx, state, event, &self.lines_layout, send_request, dispatch_action);
     }
 }
-
-

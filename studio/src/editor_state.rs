@@ -354,10 +354,10 @@ impl EditorState {
                     let mut delimiter_count = 0;
                     let token_info = &document_inner.token_cache[line];
                     for token in token_info.tokens() {
-                        if token.token.is_open_delimiter() {
+                        if token.token.is_open() {
                             delimiter_count += 1;
                         }
-                        if token.token.is_close_delimiter() {
+                        if token.token.is_close() {
                             delimiter_count -= 1;
                         }
                     }

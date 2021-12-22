@@ -1253,7 +1253,7 @@ impl CodeEditorImpl {
                     && head.column < token.span.end.column as usize {
                     // great we found the token.
                     // now lets see if we can look it up
-                    let match_token_id = makepad_live_compiler::TokenId::new(LiveFileId(16), token_index);
+                    let match_token_id = makepad_live_compiler::LiveTokenId::new(LiveFileId(16), token_index);
                     for (node_index, node) in expanded.nodes.iter().enumerate() {
                         if let Some(token_id) = node.origin.token_id() {
                             if token_id == match_token_id {

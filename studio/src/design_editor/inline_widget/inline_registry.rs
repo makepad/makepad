@@ -5,6 +5,11 @@ use {
         text::Text,
         size::Size
     },
+    crate::{
+        design_editor::{
+            inline_cache::InlineEditBind
+        },
+    },
     std::any::TypeId,
 };
 
@@ -26,8 +31,8 @@ pub enum InlineWidgetAction {
 }
 
 pub trait InlineWidget: LiveApply {
-    fn handle_inline_event(&mut self, cx: &mut Cx, event: &mut Event, live_ptr:LivePtr) -> InlineWidgetAction;
-    fn draw_inline(&mut self, cx: &mut Cx, live_registry:&LiveRegistry, live_ptr:LivePtr);
+    fn handle_inline_event(&mut self, cx: &mut Cx, event: &mut Event, bind: InlineEditBind) -> InlineWidgetAction;
+    fn draw_inline(&mut self, cx: &mut Cx, live_registry:&LiveRegistry, bind: InlineEditBind);
 }
 
 pub enum CanEdit {
@@ -38,7 +43,7 @@ pub enum CanEdit {
 
 pub trait InlineWidgetFactory {
     fn new(&self, cx: &mut Cx) -> Box<dyn InlineWidget>;
-    fn can_edit_value(&self, live_registry: &LiveRegistry, live_ptr: LivePtr) -> CanEdit;
+    fn can_edit_value(&self, live_registry: &LiveRegistry, bind: InlineEditBind) -> CanEdit;
 }
 
 pub struct MatchedWidget {
@@ -47,10 +52,10 @@ pub struct MatchedWidget {
 }
 
 impl CxInlineWidgetRegistry {
-    pub fn match_inline_widget(&self, live_registry: &LiveRegistry, live_ptr:LivePtr) -> Option<MatchedWidget> {
+    pub fn match_inline_widget(&self, live_registry: &LiveRegistry, bind: InlineEditBind) -> Option<MatchedWidget> {
         let mut secondary = None;
         for (live_type, item) in &self.items {
-            match item.factory.can_edit_value(live_registry, live_ptr) {
+            match item.factory.can_edit_value(live_registry, bind) {
                 CanEdit::Yes(height) => {return Some(MatchedWidget {height, live_type: *live_type})},
                 CanEdit::Sortof(height) => {secondary = Some(MatchedWidget {height, live_type: *live_type})}
                 _ => ()

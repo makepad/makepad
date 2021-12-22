@@ -1,5 +1,9 @@
 use {
-    std::fmt,
+    std::{
+        fmt,
+        ops::Deref,
+        ops::DerefMut,
+    },
     makepad_math::{
         Vec2,
         Vec3,
@@ -8,7 +12,7 @@ use {
     makepad_live_tokenizer::{LiveId},
     crate::{
         live_ptr::{LiveFileId, LiveModuleId, LivePtr},
-        live_token::{LiveToken, TokenId},
+        live_token::{LiveToken, LiveTokenId},
     }
 };
 
@@ -101,7 +105,7 @@ impl LiveValue {
                     return true
                 }
             }
-            _=>()
+            _ => ()
             
         }
         false
@@ -117,6 +121,25 @@ impl LiveNode {
             value: LiveValue::None
         }
     }
+
+    pub fn is_token_id_inside_dsl(&self, other_token: LiveTokenId) -> bool {
+        if let Some(token_id) = self.origin.token_id(){
+            if token_id.file_id() != other_token.file_id() {
+                return false
+            }
+        }
+        else{
+            return false;
+        }
+        match &self.value {
+            LiveValue::DSL {token_start, token_count} => {
+                let token_index = other_token.token_index();
+                token_index as u32 >= *token_start && (token_index as u32) < token_start + token_count
+            }
+            _ => false
+        }
+    }
+    
 }
 
 #[derive(Copy, Clone, PartialEq)]
@@ -142,12 +165,12 @@ impl LiveNodeOrigin {
         Self (0)
     }
     
-    pub fn from_token_id(token_id: TokenId) -> Self {
+    pub fn from_token_id(token_id: LiveTokenId) -> Self {
         Self (token_id.to_bits() as u64)
     }
     
-    pub fn token_id(&self) -> Option<TokenId> {
-        TokenId::from_bits((self.0 & 0x0fff_ffff) as u32)
+    pub fn token_id(&self) -> Option<LiveTokenId> {
+        LiveTokenId::from_bits((self.0 & 0x0fff_ffff) as u32)
     }
     
     pub fn set_node_index(&mut self, index: usize) {
@@ -419,14 +442,7 @@ impl LiveValue {
             _ => false
         }
     }
-    /*
-    pub fn is_id(&self) -> bool {
-        match self {
-            Self::BareClass |
-            Self::NamedClass {..} => true,
-            _ => false
-        }
-    }*/
+    
     pub fn is_expr(&self) -> bool {
         match self {
             Self::Expr => true,
@@ -565,3 +581,13 @@ impl LiveValue {
         }
     }
 }
+
+impl Deref for LiveNode {
+    type Target = LiveValue;
+    fn deref(&self) -> &Self::Target {&self.value}
+}
+
+impl DerefMut for LiveNode {
+    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.value}
+}
+

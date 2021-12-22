@@ -4,8 +4,11 @@ live_register!{
     use makepad_render::shader::std::*;
     
     DrawScrollBar: {{DrawScrollBar}} {
+        debug : true
         draw_depth: 5.0
+        
         const border_radius: float = 1.5;
+        
         instance pressed: float;
         instance hover: float;
         

@@ -434,6 +434,15 @@ impl DrawVars {
     }
     
     pub fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode], geometry_fields: &dyn GeometryFields) {
+        // alright. so.if we are ApplyFrom::
+        if let ApplyFrom::LiveEdit = apply_from{
+            // alright, we might have to update something here.
+            // in our update structure there might be DSL nodes.
+            // which in turn means 
+            println!("LIVE EDIT!");
+            return
+        }
+        
         if apply_from.is_from_doc() {
             self.init_slicer(cx);
         }

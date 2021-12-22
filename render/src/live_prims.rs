@@ -70,7 +70,7 @@ live_primitive!(
     LiveValue,
     LiveValue::None,
     fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
-        if nodes[index].value.is_array() {
+        if nodes[index].is_array() {
             if let Some(_) = Animator::last_keyframe_value_from_array(index, nodes) {
                 self.apply(cx, apply_from, index, nodes);
             }
