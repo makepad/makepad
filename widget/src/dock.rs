@@ -32,7 +32,7 @@ pub struct Dock {
     tab_bar: Option<LivePtr>,
     splitter: Option<LivePtr>,
     
-    #[rust] panels_by_panel_id: GenIdMap<PanelId, Panel>,
+    #[rust] panels_by_panel_id: GenIdMap<PanelTag, Panel>,
     #[rust] panel_ids: Vec<PanelId>,
     #[rust] panel_id_stack: Vec<PanelId>,
     #[rust] drag: Option<Drag>,
@@ -136,7 +136,7 @@ impl Dock {
     }
     
     fn get_or_create_split_panel(&mut self, cx: &mut Cx, panel_id: PanelId) -> &mut SplitPanel {
-        if !self.panels_by_panel_id.contains(panel_id) {
+        if !self.panels_by_panel_id.contains_id(panel_id) {
             self.panels_by_panel_id.insert(
                 panel_id,
                 Panel::Split(SplitPanel {
@@ -148,7 +148,7 @@ impl Dock {
     }
     
     fn get_or_create_tab_panel(&mut self, cx: &mut Cx, panel_id: PanelId) -> &mut TabPanel {
-        if !self.panels_by_panel_id.contains(panel_id) {
+        if !self.panels_by_panel_id.contains_id(panel_id) {
             self.panels_by_panel_id.insert(
                 panel_id,
                 Panel::Tab(TabPanel {
@@ -275,14 +275,8 @@ impl Dock {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct PanelId(pub GenId);
-
-impl AsRef<GenId> for PanelId {
-    fn as_ref(&self) -> &GenId {
-        &self.0
-    }
-}
+pub enum PanelTag {}
+pub type PanelId = GenId<PanelTag>;
 
 enum Panel {
     Split(SplitPanel),

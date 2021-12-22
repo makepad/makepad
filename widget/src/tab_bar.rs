@@ -43,7 +43,7 @@ pub struct TabBar {
     tab: Option<LivePtr>,
     
     #[rust] is_dragged: bool,
-    #[rust] tabs_by_tab_id: GenIdMap<TabId, Tab>,
+    #[rust] tabs_by_tab_id: GenIdMap<TabTag, Tab>,
     #[rust] tab_ids: Vec<TabId>,
     #[rust] selected_tab_id: Option<TabId>,
     #[rust] next_selected_tab_id: Option<TabId>,
@@ -77,7 +77,7 @@ impl TabBar {
     }
     
     pub fn get_or_create_tab(&mut self, cx: &mut Cx, tab_id: TabId) -> &mut Tab {
-        if !self.tabs_by_tab_id.contains(tab_id) {
+        if !self.tabs_by_tab_id.contains_id(tab_id) {
             self.tabs_by_tab_id.insert(tab_id, Tab::new_from_ptr(cx, self.tab.unwrap()));
         }
         &mut self.tabs_by_tab_id[tab_id]
@@ -182,14 +182,8 @@ impl TabBar {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct TabId(pub GenId);
-
-impl AsRef<GenId> for TabId {
-    fn as_ref(&self) -> &GenId {
-        &self.0
-    }
-}
+pub enum TabTag {}
+pub type TabId = GenId<TabTag>;
 
 pub enum TabBarAction {
     ReceivedDraggedItem(DraggedItem),
