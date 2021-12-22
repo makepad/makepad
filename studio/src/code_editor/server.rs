@@ -6,11 +6,13 @@ use {
             },
         },
     },
-    makepad_render::makepad_live_tokenizer::{
-        delta::Delta,
-        text::Text
+    makepad_render::{
+        makepad_live_tokenizer::{
+            delta::Delta,
+            text::Text
+        },
+        *
     },
-    makepad_widget::{GenIdMap,GenIdAllocator},
     std::{
         collections::{HashMap, VecDeque},
         fmt, fs, mem,

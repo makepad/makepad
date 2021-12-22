@@ -16,7 +16,6 @@ mod live_cx;
 
 mod event;
 mod area;
-
 mod turtle;
 mod font;
 mod window;
@@ -31,6 +30,8 @@ mod draw_vars;
 mod geometry;
 
 mod shader;
+
+mod gen_id;
 
 pub use {
     makepad_shader_compiler::makepad_derive_live::*,
@@ -208,6 +209,7 @@ pub use {
                 GeometryQuad2D,
             },
         },
-    }
+    },
+    self::gen_id::{GenId, GenIdAllocator, GenIdMap},
 };
 
