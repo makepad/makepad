@@ -1,6 +1,5 @@
 use {
     crate::{
-        genid::{GenId, GenIdMap},
         splitter::{SplitterAction, Splitter, SplitterAlign},
         tab_bar::{TabBarAction, TabBar, TabId},
     },

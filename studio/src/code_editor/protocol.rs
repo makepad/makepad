@@ -3,8 +3,7 @@ use {
         delta::Delta,
         text::Text
     },
-    makepad_render::makepad_micro_serde::{SerBin, DeBin, DeBinErr},
-    makepad_widget::{GenId},
+    makepad_render::{makepad_micro_serde::{SerBin, DeBin, DeBinErr}, *},
     std::{
         ffi::OsString,
         path::PathBuf

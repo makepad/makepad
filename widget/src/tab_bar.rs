@@ -1,6 +1,5 @@
 use {
     crate::{
-        genid::{GenId, GenIdMap},
         tab::{TabAction, Tab},
         scroll_view::ScrollView
     },

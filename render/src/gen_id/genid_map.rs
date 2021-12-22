@@ -1,5 +1,5 @@
 use {
-    crate::genid::GenId,
+    super::GenId,
     std::{
         marker::PhantomData,
         mem,
