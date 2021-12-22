@@ -7,10 +7,10 @@ use {
         editors::{EditorViewId},
     },
     makepad_widget::{
-        dock::{PanelId},
-        file_tree::{FileNodeId},
+        dock::{PanelTag, PanelId},
+        file_tree::{FileNodeTag, FileNodeId},
         splitter::{SplitterAlign},
-        tab_bar::TabId,
+        tab_bar::{TabTag, TabId},
     },
     makepad_render::*,
     std::{
@@ -20,17 +20,17 @@ use {
 };
 
 pub struct AppState {
-    pub panel_id_allocator: GenIdAllocator,
-    pub panels_by_panel_id: GenIdMap<PanelId, Panel>,
+    pub panel_id_allocator: GenIdAllocator<PanelTag>,
+    pub panels_by_panel_id: GenIdMap<PanelTag, Panel>,
     pub root_panel_id: PanelId,
     pub side_bar_panel_id: PanelId,
     pub selected_panel_id: PanelId,
     pub content_panel_id: PanelId,
-    pub tab_id_allocator: GenIdAllocator,
-    pub tabs_by_tab_id: GenIdMap<TabId, Tab>,
+    pub tab_id_allocator: GenIdAllocator<TabTag>,
+    pub tabs_by_tab_id: GenIdMap<TabTag, Tab>,
     pub file_tree_tab_id: TabId,
-    pub file_node_id_allocator: GenIdAllocator,
-    pub file_nodes_by_file_node_id: GenIdMap<FileNodeId, FileNode>,
+    pub file_node_id_allocator: GenIdAllocator<FileNodeTag>,
+    pub file_nodes_by_file_node_id: GenIdMap<FileNodeTag, FileNode>,
     pub path: PathBuf,
     pub root_file_node_id: FileNodeId,
     pub editor_state: EditorState,
@@ -40,7 +40,7 @@ impl AppState {
     pub fn new() -> AppState {
         let mut file_node_id_allocator = GenIdAllocator::new();
         let mut file_nodes_by_file_node_id = GenIdMap::new();
-        let root_file_node_id = FileNodeId(file_node_id_allocator.allocate());
+        let root_file_node_id = file_node_id_allocator.allocate();
         file_nodes_by_file_node_id.insert(
             root_file_node_id,
             FileNode {
@@ -55,9 +55,9 @@ impl AppState {
         let mut tab_id_allocator = GenIdAllocator::new();
         let mut tabs_by_tab_id = GenIdMap::new();
         
-        let root_panel_id = PanelId(panel_id_allocator.allocate());
-        let side_bar_panel_id = PanelId(panel_id_allocator.allocate());
-        let file_tree_tab_id = TabId(tab_id_allocator.allocate());
+        let root_panel_id = panel_id_allocator.allocate();
+        let side_bar_panel_id = panel_id_allocator.allocate();
+        let file_tree_tab_id = tab_id_allocator.allocate();
         
         panels_by_panel_id.insert(
             side_bar_panel_id,
@@ -78,7 +78,7 @@ impl AppState {
             },
         );
         
-        let content_panel_id = PanelId(panel_id_allocator.allocate());
+        let content_panel_id = panel_id_allocator.allocate();
         panels_by_panel_id.insert(
             content_panel_id,
             Panel {
@@ -136,12 +136,12 @@ impl AppState {
     
     pub fn load_file_tree(&mut self, tree_data: FileTreeData) {
         fn create_file_node(
-            file_node_id_allocator: &mut GenIdAllocator,
-            file_nodes_by_file_node_id: &mut GenIdMap<FileNodeId, FileNode>,
+            file_node_id_allocator: &mut GenIdAllocator<FileNodeTag>,
+            file_nodes_by_file_node_id: &mut GenIdMap<FileNodeTag, FileNode>,
             parent_edge: Option<FileEdge>,
             node: FileNodeData,
         ) -> FileNodeId {
-            let file_node_id = FileNodeId(file_node_id_allocator.allocate());
+            let file_node_id = file_node_id_allocator.allocate();
             let name = parent_edge.as_ref().map_or_else(
                 || String::from("root"),
                 | edge | edge.name.to_string_lossy().into_owned(),

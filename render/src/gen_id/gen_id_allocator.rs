@@ -1,18 +1,25 @@
-use super::GenId;
+use {
+    super::GenId,
+    std::{fmt, marker::PhantomData},
+};
 
-#[derive(Debug, Default)]
-pub struct GenIdAllocator {
+pub struct GenIdAllocator<Tag> {
     entries: Vec<Entry>,
-    free_entry_indices: Vec<usize>,
+    free_list: Vec<usize>,
+    tag: PhantomData<Tag>,
 }
 
-impl GenIdAllocator {
+impl<Tag> GenIdAllocator<Tag> {
     pub fn new() -> Self {
-        Self::default()
+        Self {
+            entries: Vec::new(),
+            free_list: Vec::new(),
+            tag: PhantomData,
+        }
     }
 
-    pub fn allocate(&mut self) -> GenId {
-        match self.free_entry_indices.pop() {
+    pub fn allocate(&mut self) -> GenId<Tag> {
+        match self.free_list.pop() {
             Some(index) => {
                 let entry = &mut self.entries[index];
                 debug_assert!(!entry.is_used);
@@ -21,34 +28,53 @@ impl GenIdAllocator {
                 GenId {
                     index,
                     generation: entry.generation,
+                    tag: PhantomData,
                 }
             }
             None => {
+                let index = self.entries.len();
                 self.entries.push(Entry {
                     is_used: true,
                     generation: 0,
                 });
                 GenId {
-                    index: self.entries.len() - 1,
+                    index,
                     generation: 0,
+                    tag: PhantomData,
                 }
             }
         }
     }
 
-    pub fn deallocate(&mut self, id: GenId) {
+    pub fn deallocate(&mut self, id: GenId<Tag>) {
         let entry = &mut self.entries[id.index];
         assert!(entry.is_used && entry.generation == id.generation);
         entry.is_used = false;
-        self.free_entry_indices.push(id.index);
+        self.free_list.push(id.index);
     }
 
     pub fn clear(&mut self) {
-        self.entries.clear()
+        self.entries.clear();
+        self.free_list.clear();
     }
 }
 
-#[derive(Clone, Debug)]
+impl<Tag> Default for GenIdAllocator<Tag> {
+    fn default() -> Self {
+        GenIdAllocator::new()
+    }
+}
+
+impl<Tag> fmt::Debug for GenIdAllocator<Tag> {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Map")
+            .field("entries", &self.entries)
+            .field("free_list", &self.free_list)
+            .finish()
+    }
+}
+
+#[derive(Debug)]
 struct Entry {
     is_used: bool,
     generation: usize,
