@@ -180,7 +180,7 @@ impl AppInner {
                                     .unwrap(),
                             );
                             state.tabs_by_tab_id.remove(tab_id);
-                            state.tab_id_allocator.deallocate(tab_id.0);
+                            state.tab_id_allocator.deallocate(tab_id);
                             self.dock.set_next_selected_tab(cx, panel_id, tab_id, true);
                             self.dock.redraw_tab_bar(cx, panel_id);
                         }
@@ -322,8 +322,8 @@ impl AppInner {
     ) -> PanelId {
         let panel = &state.panels_by_panel_id[panel_id];
         let parent_panel_id = panel.parent_panel_id;
-        let new_parent_panel_id = PanelId(state.panel_id_allocator.allocate());
-        let new_panel_id = PanelId(state.panel_id_allocator.allocate());
+        let new_parent_panel_id = state.panel_id_allocator.allocate();
+        let new_panel_id = state.panel_id_allocator.allocate();
         
         let panel = &mut state.panels_by_panel_id[panel_id];
         panel.parent_panel_id = Some(new_parent_panel_id);
@@ -393,7 +393,7 @@ impl AppInner {
         next_tab_id: Option<TabId>,
         path: PathBuf,
     ) {
-        let tab_id = TabId(state.tab_id_allocator.allocate());
+        let tab_id = state.tab_id_allocator.allocate();
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         let session_id = state.editor_state.create_session(path, &mut {
             let request_sender = &self.io.request_sender;
