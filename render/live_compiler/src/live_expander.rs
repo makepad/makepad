@@ -40,7 +40,7 @@ impl<'a> LiveExpander<'a> {
                 if nodes[*item].id != *live_id {
                     panic!()
                 }
-                if !nodes[*item].value.is_open() {
+                if !nodes[*item].is_open() {
                     panic!()
                 }
             }
@@ -229,7 +229,7 @@ impl<'a> LiveExpander<'a> {
                 }
                 Err(insert_point) => {
                     // ok so. if we are inserting an expression, just do the whole thing in one go.
-                    if in_node.value.is_expr() {
+                    if in_node.is_expr() {
                         // splice it in
                         let old_len = out_doc.nodes.len();
                         out_doc.nodes.splice(insert_point..insert_point, in_doc.nodes.node_slice(in_index).iter().cloned());
@@ -243,7 +243,7 @@ impl<'a> LiveExpander<'a> {
                     out_doc.nodes.insert(insert_point, in_node.clone());
                     self.shift_parent_stack(&mut current_parent, &out_doc.nodes, insert_point - 1, old_len, out_doc.nodes.len());
                     
-                    if in_node.value.is_open() {
+                    if in_node.is_open() {
                         level_overwrite.push(false);
                     }
                     insert_point

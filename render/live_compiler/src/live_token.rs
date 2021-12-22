@@ -1,5 +1,9 @@
 use {
-    std::fmt,
+    std::{
+        fmt,
+        ops::Deref,
+        ops::DerefMut,
+    },
     makepad_live_tokenizer::{
         LiveId,
         Delim,
@@ -15,6 +19,15 @@ use {
 pub struct TokenWithSpan {
     pub span: Span,
     pub token: LiveToken,
+}
+
+impl Deref for TokenWithSpan {
+    type Target = LiveToken;
+    fn deref(&self) -> &Self::Target {&self.token}
+}
+
+impl DerefMut for TokenWithSpan {
+    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.token}
 }
 
 impl fmt::Display for TokenWithSpan {
@@ -41,6 +54,21 @@ pub enum LiveToken {
 }
 
 impl LiveToken {
+    
+    pub fn is_open(&self) -> bool {
+        match self {
+            LiveToken::Open(_) => true,
+            _ => false
+        }
+    }
+    
+    pub fn is_close(&self) -> bool {
+        match self {
+            LiveToken::Close(_) => true,
+            _ => false
+        }
+    }
+    
     pub fn is_open_delim(&self, delim: Delim) -> bool {
         match self {
             LiveToken::Open(d) => *d == delim,
@@ -50,7 +78,7 @@ impl LiveToken {
     
     pub fn is_close_delim(&self, delim: Delim) -> bool {
         match self {
-            LiveToken::Open(d) => *d == delim,
+            LiveToken::Close(d) => *d == delim,
             _ => false
         }
     }
@@ -62,6 +90,47 @@ impl LiveToken {
         }
     }
     
+    
+    pub fn is_float(&self) -> bool {
+        match self {
+            LiveToken::Float(_) => true,
+            _ => false
+        }
+    }
+    
+        
+    pub fn is_color(&self) -> bool {
+        match self {
+            LiveToken::Color(_) => true,
+            _ => false
+        }
+    }
+
+    pub fn is_bool(&self) -> bool {
+        match self {
+            LiveToken::Bool(_) => true,
+            _ => false
+        }
+    }
+
+    pub fn is_parsed_number(&self) -> bool {
+        match self {
+            LiveToken::Int(_) => true,
+            LiveToken::Float(_) => true,
+            _ => false
+        }
+    }
+    
+    pub fn is_value_type(&self) -> bool {
+        match self {
+            LiveToken::Color(_) => true,
+            LiveToken::Bool(_) => true,
+            LiveToken::Int(_) => true,
+            LiveToken::Float(_) => true,
+            _ => false
+        }
+    }
+        
     pub fn is_ident(&self) -> bool {
         match self {
             LiveToken::Ident(_) => true,
@@ -75,8 +144,8 @@ impl LiveToken {
             _ => false
         }
     }
-
-    pub fn is_punct_id(&self, id:LiveId) -> bool {
+    
+    pub fn is_punct_id(&self, id: LiveId) -> bool {
         match self {
             LiveToken::Punct(v) => *v == id,
             _ => false
@@ -134,13 +203,13 @@ impl fmt::Display for LiveToken {
     }
 }
 
-impl TokenId {
+impl LiveTokenId {
     pub fn new(file_id: LiveFileId, token: usize) -> Self {
         let file_id = file_id.to_index();
         if file_id == 0 || file_id > 0x3ff || token > 0x3ffff {
             panic!();
         }
-        TokenId(
+        LiveTokenId(
             (((file_id as u32) & 0x3ff) << 18) |
             ((token as u32) & 0x3ffff)
         )
@@ -171,9 +240,9 @@ impl TokenId {
 }
 
 #[derive(Clone, Copy, Eq, Ord, PartialOrd, PartialEq)]
-pub struct TokenId(u32);
+pub struct LiveTokenId(u32);
 
-impl fmt::Debug for TokenId {
+impl fmt::Debug for LiveTokenId {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "TokenId(token_index:{}, file_id:{})", self.token_index(), self.file_id().to_index())
     }

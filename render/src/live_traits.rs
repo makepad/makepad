@@ -118,7 +118,7 @@ pub trait LiveApply: LiveHook {
                 let live_registry = live_registry_rc.borrow();
                 if let Some(main_apply) = &live_registry.main_apply{
                     if let Some(index) = main_apply.child_by_name(0, id){
-                        self.apply(cx, ApplyFrom::ApplyOver, index, main_apply);
+                        self.apply(cx, ApplyFrom::LiveEdit, index, main_apply);
                     }
                 }
             }
@@ -168,7 +168,10 @@ pub trait LiveAnimate {
 #[derive(Debug, Clone, Copy)]
 pub enum ApplyFrom {
     NewFromDoc {file_id: LiveFileId}, // newed from DSL
-    UpdateFromDoc {file_id: LiveFileId}, // live DSL updated
+    UpdateFromDoc {file_id: LiveFileId}, // live DSL substantially updated
+
+    LiveEdit, // applying a live edit mutation
+    
     New, // Bare new without file info
     Animate, // from animate
     ApplyOver, // called from bare apply_live() call

@@ -13,7 +13,7 @@ use {
     },
     makepad_live_tokenizer::LiveId,
     crate::{
-        live_token::TokenId,
+        live_token::LiveTokenId,
         live_node::{LiveNode, LiveValue, LiveNodeOrigin, InlineString, FittedString},
     }
 };
@@ -34,7 +34,7 @@ pub trait LiveNodeSlice {
     fn child_by_path(&self, parent_index: usize, path: &[LiveId]) -> Option<usize>;
     fn child_value_by_path(&self, parent_index: usize, path: &[LiveId]) -> Option<&LiveValue>;
     
-    fn first_node_with_token_id(&self, match_token_id:TokenId)->Option<usize>;
+    fn first_node_with_token_id(&self, match_token_id:LiveTokenId, also_in_dsl:bool)->Option<usize>;
     
     fn scope_up_by_name(&self, parent_index: usize, name: LiveId) -> Option<usize>;
     fn scope_up_down_by_name(&self, parent_index: usize, name: LiveId) -> Option<usize>;
@@ -52,8 +52,7 @@ pub trait LiveNodeVec {
     
     fn insert_children_from_other(&mut self, from_index: usize, insert_start: usize, other: &[LiveNode]);
     fn insert_children_from_self(&mut self, from_index: usize, insert_start: usize);
-    //fn insert_children_from_self2(&mut self, from_index: usize, insert_start: usize);
-    
+
     fn replace_or_insert_last_node_by_path(&mut self, start_index: usize, path: &[LiveId], other: &[LiveNode]);
     fn replace_or_insert_first_node_by_path(&mut self, start_index: usize, path: &[LiveId], other: &[LiveNode]);
     
@@ -83,13 +82,27 @@ pub trait LiveNodeVec {
 // accessing the Gen structure like a tree
 impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
     
-    fn first_node_with_token_id(&self, match_token_id:TokenId) -> Option<usize> {
+    fn first_node_with_token_id(&self, match_token_id:LiveTokenId, also_in_dsl:bool) -> Option<usize> {
         for (node_index, node) in self.as_ref().iter().enumerate() {
             if let Some(token_id) = node.origin.token_id() {
                 if token_id == match_token_id {
                     return Some(node_index)
                 }
+                // lets see if we are a DSL node then match the token range
+                if also_in_dsl && token_id.file_id() == match_token_id.file_id(){
+                    match node.value{
+                        LiveValue::DSL{token_start, token_count}=>{
+                            let index = match_token_id.token_index() as u32;
+                            if index>=token_start && index <=token_start + token_count{
+                                return Some(node_index);
+                            }
+                        }
+                        _=>()
+                    }
+                }
             }
+            // we might have to do a range scan
+            
         }
         None
     }
@@ -103,13 +116,13 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         let mut index = child_index - 1;
         // we are going to scan backwards
         loop {
-            if self_ref[index].value.is_open() {
+            if self_ref[index].is_open() {
                 if stack_depth == 0 {
                     return Some(index)
                 }
                 stack_depth -= 1;
             }
-            else if self_ref[index].value.is_close() {
+            else if self_ref[index].is_close() {
                 stack_depth += 1;
             }
             if index == 0 {
@@ -129,15 +142,15 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         let mut index = index;
         // scan backwards to find a node with this name
         loop {
-            if self_ref[index].value.is_open() {
+            if self_ref[index].is_open() {
                 if stack_depth>0 {
                     stack_depth -= 1;
                 }
             }
-            else if self_ref[index].value.is_close() {
+            else if self_ref[index].is_close() {
                 stack_depth += 1;
             }
-            if stack_depth == 0 && self_ref[index].id == name && !self_ref[index].value.is_close() { // valuenode
+            if stack_depth == 0 && self_ref[index].id == name && !self_ref[index].is_close() { // valuenode
                 return Some(index)
             }
             
@@ -158,12 +171,12 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         let mut index = start_index;
         // scan backwards to find a node with this name
         loop {
-            if self_ref[index].value.is_open() {
+            if self_ref[index].is_open() {
                 if stack_depth>0 {
                     stack_depth -= 1;
                 }
             }
-            else if self_ref[index].value.is_close() {
+            else if self_ref[index].is_close() {
                 stack_depth += 1;
             }
             if stack_depth == 0 {
@@ -171,7 +184,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
                     return Some(index)
                 }
                 // scan child down
-                if self_ref[index].value.is_open() {
+                if self_ref[index].is_open() {
                     if let Some(child_index) = self.child_by_name(index, name) {
                         if child_index != start_index {
                             return Some(child_index)
@@ -194,11 +207,11 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         let mut stack_depth = 0;
         let mut index = parent_index;
         let mut child_count = 0;
-        if !self_ref[index].value.is_open() {
+        if !self_ref[index].is_open() {
             panic!()
         }
         while index < self_ref.len() {
-            if self_ref[index].value.is_open() {
+            if self_ref[index].is_open() {
                 if stack_depth == 1 {
                     if child_number == child_count {
                         return Some(index);
@@ -207,7 +220,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
                 }
                 stack_depth += 1;
             }
-            else if self_ref[index].value.is_close() {
+            else if self_ref[index].is_close() {
                 stack_depth -= 1;
                 if stack_depth == 0 {
                     return None
@@ -231,8 +244,8 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
     
     fn first_child(&self, parent_index: usize) -> Option<usize> {
         let self_ref = self.as_ref();
-        if self_ref[parent_index].value.is_open() {
-            if self_ref[parent_index + 1].value.is_close() {
+        if self_ref[parent_index].is_open() {
+            if self_ref[parent_index + 1].is_close() {
                 return None
             }
             return Some(parent_index + 1) // our first child
@@ -245,13 +258,13 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         let mut index = child_index;
         let mut stack_depth = 0;
         while index < self_ref.len() {
-            if self_ref[index].value.is_open() {
+            if self_ref[index].is_open() {
                 if stack_depth == 0 && index != child_index {
                     return Some(index)
                 }
                 stack_depth += 1;
             }
-            else if self_ref[index].value.is_close() {
+            else if self_ref[index].is_close() {
                 if stack_depth == 0 { // double close
                     return None;
                 }
@@ -273,18 +286,18 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         let mut index = parent_index;
         //let mut child_count = 0;
         let mut found_child = None;
-        if !self_ref[index].value.is_open() {
+        if !self_ref[index].is_open() {
             panic!()
         }
         while index < self_ref.len() {
-            if self_ref[index].value.is_open() {
+            if self_ref[index].is_open() {
                 if stack_depth == 1 {
                     found_child = Some(index);
                     //child_count += 1;
                 }
                 stack_depth += 1;
             }
-            else if self_ref[index].value.is_close() {
+            else if self_ref[index].is_close() {
                 stack_depth -= 1;
                 if stack_depth == 0 {
                     return found_child
@@ -310,7 +323,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
     }
     
     fn children_slice(&self, start_index: usize) -> &[LiveNode] {
-        if !self.as_ref()[start_index].value.is_open() {
+        if !self.as_ref()[start_index].is_open() {
             &self.as_ref()[start_index..start_index]
         }
         else {
@@ -318,64 +331,20 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
             &self.as_ref()[start_index + 1..next_index - 1]
         }
     }
-    /*
-    // the entire replaceable childrange.
-    fn child_range(&self, parent_index: usize) -> (usize, usize) {
-        let self_ref = self.as_ref();
-        let mut stack_depth = 0;
-        let mut index = parent_index;
-        //let mut child_count = 0;
-        let mut first_child = None;
-        if !self_ref[index].value.is_open() {
-            panic!()
-        }
-        while index < self_ref.len() {
-            if self_ref[index].value.is_open() {
-                if stack_depth == 1 {
-                    if first_child.is_none() {
-                        first_child = Some(index)
-                    }
-                    //child_count += 1;
-                }
-                stack_depth += 1;
-            }
-            else if self_ref[index].value.is_close() {
-                stack_depth -= 1;
-                if first_child.is_none() {
-                    first_child = Some(index)
-                }
-                if stack_depth == 0 {
-                    return (first_child.unwrap(), index);
-                }
-            }
-            else {
-                if stack_depth == 1 {
-                    if first_child.is_none() {
-                        first_child = Some(index)
-                    }
-                    //child_count += 1;
-                }
-                else if stack_depth == 0 {
-                    panic!()
-                }
-            }
-            index += 1;
-        }
-        panic!()
-    }*/
+
     
     fn append_child_index(&self, parent_index: usize) -> usize {
         let self_ref = self.as_ref();
         let mut stack_depth = 0;
         let mut index = parent_index;
-        if !self_ref[index].value.is_open() {
+        if !self_ref[index].is_open() {
             panic!()
         }
         while index < self_ref.len() {
-            if self_ref[index].value.is_open() {
+            if self_ref[index].is_open() {
                 stack_depth += 1;
             }
-            else if self_ref[index].value.is_close() {
+            else if self_ref[index].is_close() {
                 stack_depth -= 1;
                 if stack_depth == 0 {
                     return index
@@ -390,11 +359,11 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         let self_ref = self.as_ref();
         let mut stack_depth = 0;
         let mut index = parent_index;
-        if !self_ref[index].value.is_open() {
+        if !self_ref[index].is_open() {
             panic!()
         }
         while index < self_ref.len() {
-            if self_ref[index].value.is_open() {
+            if self_ref[index].is_open() {
                 if stack_depth == 1 {
                     if !self_ref[index].origin.id_non_unique() && self_ref[index].id == child_name {
                         return Ok(index);
@@ -402,7 +371,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
                 }
                 stack_depth += 1;
             }
-            else if self_ref[index].value.is_close() {
+            else if self_ref[index].is_close() {
                 stack_depth -= 1;
                 if stack_depth == 0 {
                     return Err(index)
@@ -437,7 +406,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         let mut stack_depth = 1;
         let mut index = child_index;
         while index < self_ref.len() {
-            if self_ref[index].value.is_open() {
+            if self_ref[index].is_open() {
                 if stack_depth == 1 {
                     if self_ref[index].id == child_name {
                         return Some(index);
@@ -445,7 +414,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
                 }
                 stack_depth += 1;
             }
-            else if self_ref[index].value.is_close() {
+            else if self_ref[index].is_close() {
                 stack_depth -= 1;
                 if stack_depth == 0 {
                     return None
@@ -494,17 +463,17 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         let mut stack_depth = 0;
         let mut index = parent_index;
         let mut count = 0;
-        if !self_ref[index].value.is_open() {
+        if !self_ref[index].is_open() {
             panic!()
         }
         while index < self_ref.len() {
-            if self_ref[index].value.is_open() {
+            if self_ref[index].is_open() {
                 if stack_depth == 1 {
                     count += 1;
                 }
                 stack_depth += 1;
             }
-            else if self_ref[index].value.is_close() {
+            else if self_ref[index].is_close() {
                 stack_depth -= 1;
                 if stack_depth == 0 {
                     return count
@@ -528,10 +497,10 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         let mut index = node_index;
         let mut stack_depth = 0;
         while index < self_ref.len() {
-            if self_ref[index].value.is_open() {
+            if self_ref[index].is_open() {
                 stack_depth += 1;
             }
-            else if self_ref[index].value.is_close() {
+            else if self_ref[index].is_close() {
                 if stack_depth == 0 {
                     panic!()
                 }
@@ -558,10 +527,10 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         let mut stack_depth = 0;
         while index < self_ref.len() {
             out.push(self_ref[index].clone());
-            if self_ref[index].value.is_open() {
+            if self_ref[index].is_open() {
                 stack_depth += 1;
             }
-            else if self_ref[index].value.is_close() {
+            else if self_ref[index].is_close() {
                 stack_depth -= 1;
                 if stack_depth == 0 {
                     return
@@ -589,10 +558,10 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         while index < self_ref.len() {
             let node = &self_ref[index];
             if stack_depth > max_depth {
-                if node.value.is_open() {
+                if node.is_open() {
                     stack_depth += 1;
                 }
-                else if node.value.is_close() {
+                else if node.is_close() {
                     stack_depth -= 1;
                 }
                 index += 1;
@@ -722,7 +691,7 @@ impl LiveNodeVec for Vec<LiveNode> {
     
     fn insert_children_from_other(&mut self, source_index: usize, insert_point: usize, other: &[LiveNode]) {
         
-        if !other[source_index].value.is_open() {
+        if !other[source_index].is_open() {
             panic!();
         }
         let next_source = other.skip_node(source_index);
@@ -733,7 +702,7 @@ impl LiveNodeVec for Vec<LiveNode> {
     
     fn insert_children_from_self(&mut self, source_index: usize, insert_point: usize) {
         // get the # of children here
-        if !self[source_index].value.is_open() {
+        if !self[source_index].is_open() {
             panic!();
         }
         let next_source = self.skip_node(source_index);
@@ -907,17 +876,7 @@ impl<'a> LiveNodeReader<'a> {
             None
         }
     }
-    
-    pub fn value(&self) -> &LiveValue {
-        if self.eot {panic!();}
-        &self.nodes[self.index].value
-    }
-    
-    pub fn origin(&self) -> &LiveNodeOrigin {
-        if self.eot {panic!();}
-        &self.nodes[self.index].origin
-    }
-    
+
     pub fn node(&self) -> &LiveNode {
         if self.eot {panic!();}
         &self.nodes[self.index]
@@ -970,7 +929,7 @@ impl<'a> LiveNodeReader<'a> {
         if self.eot {panic!();}
         self.index = self.nodes.skip_node(self.index);
         // check eot
-        if self.nodes[self.index].value.is_close() { // standing on a close node
+        if self.nodes[self.index].is_close() { // standing on a close node
             if self.depth == 1 {
                 self.eot = true;
                 self.index += 1;
@@ -980,10 +939,10 @@ impl<'a> LiveNodeReader<'a> {
     
     pub fn walk(&mut self) {
         if self.eot {panic!();}
-        if self.nodes[self.index].value.is_open() {
+        if self.nodes[self.index].is_open() {
             self.depth += 1;
         }
-        else if self.nodes[self.index].value.is_close() {
+        else if self.nodes[self.index].is_close() {
             if self.depth == 0 {panic!()}
             self.depth -= 1;
             if self.depth == 0 {
@@ -996,11 +955,7 @@ impl<'a> LiveNodeReader<'a> {
     pub fn is_eot(&self) -> bool {
         return self.eot
     }
-    
-    pub fn id(&self) -> LiveId {
-        self.nodes[self.index].id
-    }
-    
+
     pub fn index(&self) -> usize {
         self.index
     }
@@ -1016,8 +971,8 @@ impl<'a> LiveNodeReader<'a> {
 }
 
 impl<'a> Deref for LiveNodeReader<'a> {
-    type Target = LiveValue;
-    fn deref(&self) -> &Self::Target {&self.nodes[self.index].value}
+    type Target = LiveNode;
+    fn deref(&self) -> &Self::Target {&self.nodes[self.index]}
 }
 
 
@@ -1038,16 +993,6 @@ impl<'a> LiveNodeMutReader<'a> {
         }
     }
 
-    pub fn value(&mut self) -> &mut LiveValue {
-        if self.eot {panic!();}
-        &mut self.nodes[self.index].value
-    }
-    
-    pub fn origin(&mut self) -> &mut LiveNodeOrigin {
-        if self.eot {panic!();}
-        &mut self.nodes[self.index].origin
-    }
-    
     pub fn node(&mut self) -> &mut LiveNode {
         if self.eot {panic!();}
         &mut self.nodes[self.index]
@@ -1078,7 +1023,7 @@ impl<'a> LiveNodeMutReader<'a> {
     pub fn skip(&mut self) {
         if self.eot {panic!();}
         self.index = self.nodes.skip_node(self.index);
-        if self.nodes[self.index].value.is_close() { // standing on a close node
+        if self.nodes[self.index].is_close() { // standing on a close node
             if self.depth == 1 {
                 self.eot = true;
                 self.index += 1;
@@ -1088,7 +1033,7 @@ impl<'a> LiveNodeMutReader<'a> {
     
     pub fn walk(&mut self) {
         if self.eot {panic!();}
-        if self.nodes[self.index].value.is_open() {
+        if self.nodes[self.index].is_open() {
             self.depth += 1;
         }
         else if self.nodes[self.index].value.is_close() {
@@ -1104,11 +1049,7 @@ impl<'a> LiveNodeMutReader<'a> {
     pub fn is_eot(&mut self) -> bool {
         return self.eot
     }
-    
-    pub fn id(&mut self) -> LiveId {
-        self.nodes[self.index].id
-    }
-    
+
     pub fn index(&mut self) -> usize {
         self.index
     }
@@ -1123,13 +1064,11 @@ impl<'a> LiveNodeMutReader<'a> {
     
 }
 
-
 impl<'a> Deref for LiveNodeMutReader<'a> {
-    type Target = LiveValue;
-    fn deref(&self) -> &Self::Target {&self.nodes[self.index].value}
+    type Target = LiveNode;
+    fn deref(&self) -> &Self::Target {&self.nodes[self.index]}
 }
 
 impl<'a> DerefMut for LiveNodeMutReader<'a> {
-    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.nodes[self.index].value}
+    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.nodes[self.index]}
 }
-

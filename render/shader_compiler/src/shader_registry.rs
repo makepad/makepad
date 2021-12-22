@@ -66,15 +66,22 @@ impl ShaderRegistry {
         let mut offsets = BTreeMap::new();
         let mut table = Vec::new();
         let mut offset = 0;
+        
         for callee in draw_shader_def.all_fns.borrow().iter() {
             let fn_decl = self.all_fns.get(callee).unwrap();
             if fn_decl.span.file_id == filter_file_id {
+                
                 let sub_table = fn_decl.const_table.borrow();
+
                 table.extend(sub_table.as_ref().unwrap().iter());
+
                 offsets.insert(*callee, offset);
+
                 offset += sub_table.as_ref().unwrap().len();
+                
             }
         }
+        
         let size = table.len();
         let align_gap = 4 - (size - ((size >> 2) << 2));
         for _ in 0..align_gap {

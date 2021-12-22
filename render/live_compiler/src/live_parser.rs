@@ -11,7 +11,7 @@ use {
         Vec4
     },
     crate::{
-        live_token::{LiveToken, TokenWithSpan, TokenId},
+        live_token::{LiveToken, TokenWithSpan, LiveTokenId},
         live_ptr::{LiveFileId, LiveModuleId},
         span::{Span, TextPos},
         live_error::{LiveError, LiveErrorOrigin},
@@ -423,8 +423,8 @@ impl<'a> LiveParser<'a> {
         return Err(self.error(format!("Eof in named enum")))
     }
     
-    fn get_token_id(&self) -> TokenId {
-        TokenId::new(self.file_id, self.token_index)
+    fn get_token_id(&self) -> LiveTokenId {
+        LiveTokenId::new(self.file_id, self.token_index)
     }
     
     fn expect_live_value(&mut self, prop_id: LiveId, origin: LiveNodeOrigin, ld: &mut LiveDocument) -> Result<(), LiveError> {
@@ -1054,44 +1054,44 @@ impl<'a> LiveParser<'a> {
 #[derive(Debug)]
 enum Expr {
     Bin {
-        token_id: TokenId,
+        token_id: LiveTokenId,
         op: LiveBinOp,
         left_expr: Box<Expr>,
         right_expr: Box<Expr>,
     },
     Un {
-        token_id: TokenId,
+        token_id: LiveTokenId,
         op: LiveUnOp,
         expr: Box<Expr>,
     },
     Call {
-        token_id: TokenId,
+        token_id: LiveTokenId,
         ident: LiveId,
         arg_exprs: Vec<Expr>,
     },
     Member {
-        token_id: TokenId,
+        token_id: LiveTokenId,
         ident: LiveId,
         expr: Box<Expr>
     },
     Var {
-        token_id: TokenId,
+        token_id: LiveTokenId,
         ident: LiveId,
     },
     Bool {
-        token_id: TokenId,
+        token_id: LiveTokenId,
         v: bool
     },
     Int {
-        token_id: TokenId,
+        token_id: LiveTokenId,
         v: i64
     },
     Float {
-        token_id: TokenId,
+        token_id: LiveTokenId,
         v: f64
     },
     Color {
-        token_id: TokenId,
+        token_id: LiveTokenId,
         v: u32
     }
 }

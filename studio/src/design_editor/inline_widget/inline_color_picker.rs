@@ -1,13 +1,15 @@
 use {
     makepad_render::*,
     makepad_widget::color_picker::*,
+    makepad_render::makepad_live_compiler::LiveToken,
     makepad_render::makepad_live_tokenizer::{
         position::Position,
         text::Text,
     },
     crate::{
         design_editor::{
-            inline_widget::*
+            inline_widget::*,
+            inline_cache::InlineEditBind
         },
     }
 };
@@ -24,10 +26,20 @@ fn register_factory(cx: &mut Cx) {
             Box::new(InlineColorPicker::new(cx))
         }
         
-        fn can_edit_value(&self, live_registry: &LiveRegistry, live_ptr: LivePtr) -> CanEdit {
-            let node = live_registry.ptr_to_node(live_ptr);
-            if let LiveValue::Color(_) = &node.value {
-                return CanEdit::Yes(100.0)
+        fn can_edit_value(&self, live_registry: &LiveRegistry, bind: InlineEditBind) -> CanEdit {
+            let node = live_registry.ptr_to_node(bind.live_ptr);
+            match &node.value {
+                LiveValue::Color(_) => {
+                    return CanEdit::Yes(100.0)
+                }
+                LiveValue::DSL {..} => {
+                    let doc = live_registry.token_id_to_origin_doc(bind.live_token_id);
+                    let token = doc.tokens[bind.live_token_id.token_index()];
+                    if token.is_color(){
+                        return CanEdit::Yes(100.0)
+                    } 
+                }
+                _ => ()
             }
             CanEdit::No
         }
@@ -44,7 +56,7 @@ impl InlineWidget for InlineColorPicker {
         &mut self,
         cx: &mut Cx,
         event: &mut Event,
-        live_ptr: LivePtr,
+        bind: InlineEditBind
     ) -> InlineWidgetAction {
         
         match self.color_picker.handle_event(cx, event) {
@@ -57,33 +69,43 @@ impl InlineWidget for InlineColorPicker {
                 rgba.append_hex_to_string(&mut s);
                 
                 // alright we are going to fetch some tokens.
-                let node = live_registry.ptr_to_node(live_ptr);
-                let token_id = node.origin.token_id().unwrap();
+                let token_id = bind.live_token_id;
                 let doc = live_registry.token_id_to_origin_doc(token_id);
-                let token = doc.tokens[token_id.token_index() + 2];
+                let token = doc.tokens[token_id.token_index()];
                 
                 let start_pos = Position::from(token.span.start);
                 let end_pos = Position::from(token.span.end);
                 
-                return InlineWidgetAction::ReplaceText{
+                return InlineWidgetAction::ReplaceText {
                     position: start_pos,
                     size: end_pos - start_pos,
                     text: Text::from(s)
                 }
             }
             _ => ()
-        }
+        } 
         InlineWidgetAction::None
     }
     
-    fn draw_inline(&mut self, cx: &mut Cx, live_registry: &LiveRegistry, live_ptr: LivePtr) {
-        let node = live_registry.ptr_to_node(live_ptr);
+    fn draw_inline(&mut self, cx: &mut Cx, live_registry: &LiveRegistry, bind: InlineEditBind) {
+        let node = live_registry.ptr_to_node(bind.live_ptr);
         // alright so
-        let color = if let LiveValue::Color(c) = &node.value {
-            Vec4::from_u32(*c)
-        }
-        else {
-            Vec4::default()
+        let color = match &node.value{
+            LiveValue::Color(c) =>{
+                Vec4::from_u32(*c)
+            }
+            LiveValue::DSL{..}=>{
+                let token_id = bind.live_token_id;
+                let doc = live_registry.token_id_to_origin_doc(token_id);
+                let token = doc.tokens[token_id.token_index()].token;
+                match token{
+                    LiveToken::Color(c)=>{
+                        Vec4::from_u32(c)
+                    }
+                    _=>Vec4::default()
+                }
+            }
+            _=>Vec4::default()
         };
         self.color_picker.size = 100.0;
         self.color_picker.draw(cx, color, 1.0);
