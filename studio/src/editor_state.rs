@@ -1,13 +1,4 @@
 use {
-    makepad_render::makepad_live_tokenizer::{
-        delta::{self, Delta, Whose},
-        position::Position,
-        position_set::PositionSet,
-        range_set::RangeSet,
-        size::Size,
-        text::Text,
-    },
-
     crate::{
         code_editor::{
             cursor_set::CursorSet,
@@ -20,7 +11,17 @@ use {
         },
         editors::EditorViewId,
     },
-    makepad_render::*,
+    makepad_render::{
+        makepad_live_tokenizer::{
+            delta::{self, Delta, Whose},
+            position::Position,
+            position_set::PositionSet,
+            range_set::RangeSet,
+            size::Size,
+            text::Text,
+        },
+        *,
+    },
     std::{
         cell::RefCell,
         collections::{HashMap, HashSet, VecDeque},
