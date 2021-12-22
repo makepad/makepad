@@ -22,7 +22,7 @@ pub struct InlineEditBind {
     pub live_token_id: LiveTokenId,
     pub edit_token_index: usize,
 }
-
+ 
 #[derive(Debug, Default)]
 pub struct Line {
     pub is_clean: bool,
