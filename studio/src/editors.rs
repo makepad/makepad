@@ -17,7 +17,6 @@ use {
             },
         }
     },
-    makepad_widget::{GenId, GenIdMap, GenIdAllocator},
     makepad_render::*,
 };
 
