@@ -20,11 +20,9 @@ pub mod splitter;
 pub mod tab;
 pub mod tab_bar;
 pub mod tab_close_button;
-pub mod genid;
 pub mod bare_window;
 
 pub use crate::{
-    genid::{GenId, GenIdMap, GenIdAllocator},
     button_logic::{ButtonLogic, ButtonAction},
     button::{Button},
     desktop_window::{DesktopWindow}, 

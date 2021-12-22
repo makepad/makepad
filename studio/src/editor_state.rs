@@ -20,7 +20,7 @@ use {
         },
         editors::EditorViewId,
     },
-    makepad_widget::{GenId, GenIdMap,GenIdAllocator},
+    makepad_render::*,
     std::{
         cell::RefCell,
         collections::{HashMap, HashSet, VecDeque},

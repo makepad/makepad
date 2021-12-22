@@ -10,7 +10,6 @@ use {
         dock::{PanelId},
         file_tree::{FileNodeId},
         splitter::{SplitterAlign},
-        genid::{GenIdAllocator, GenIdMap},
         tab_bar::TabId,
     },
     makepad_render::*,
