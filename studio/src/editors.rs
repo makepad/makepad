@@ -124,7 +124,7 @@ impl Editors {
             view,
         );
         if let Some(session_id) = session_id {
-            let session = &mut state.sessions_by_session_id[session_id];
+            let session = &mut state.sessions[session_id];
             session.session_view = Some(view_id);
         }
         view_id
@@ -144,12 +144,12 @@ impl Editors {
     ) {
         let view = &mut self.views_by_view_id[view_id];
         if let Some(session_id) = view.session_id() {
-            let session = &mut state.sessions_by_session_id[session_id];
+            let session = &mut state.sessions[session_id];
             session.session_view = None;
         }
         view.set_session_id(session_id);
         if let Some(session_id) = view.session_id() {
-            let session = &mut state.sessions_by_session_id[session_id];
+            let session = &mut state.sessions[session_id];
             session.session_view = Some(view_id);
             view.redraw(cx);
         }
@@ -222,9 +222,9 @@ impl Editors {
         state: &EditorState,
         document_id: DocumentId,
     ) {
-        let document = &state.documents_by_document_id[document_id];
+        let document = &state.documents[document_id];
         for session_id in &document.session_ids {
-            let session = &state.sessions_by_session_id[*session_id];
+            let session = &state.sessions[*session_id];
             if let Some(view_id) = session.session_view {
                 let view = &mut self.views_by_view_id[view_id];
                 view.redraw(cx);
