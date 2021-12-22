@@ -2,7 +2,7 @@ use {
     crate::{
         code_editor::{
             protocol::{
-                DirectoryEntry, Error, TextFileId, FileNodeData, FileTreeData, Notification, Request, Response,
+                DirectoryEntry, Error, TextFileTag, TextFileId, FileNodeData, FileTreeData, Notification, Request, Response,
             },
         },
     },
@@ -126,7 +126,7 @@ impl Connection {
                 Ok((file_id, their_revision, text))
             }
             None => {
-                let file_id = TextFileId(shared_guard.file_id_allocator.allocate());
+                let file_id = shared_guard.file_id_allocator.allocate();
 
                 let bytes = fs::read(&path).map_err(|error| Error::Unknown(error.to_string()))?;
                 let text: Text = String::from_utf8_lossy(&bytes)
@@ -241,7 +241,7 @@ impl Connection {
             drop(file_guard);
             shared_guard.file_ids_by_path.remove(&path);
             shared_guard.files_by_file_id.remove(file_id);
-            shared_guard.file_id_allocator.deallocate(file_id.0);
+            shared_guard.file_id_allocator.deallocate(file_id);
         } else {
             drop(file_guard);
         }
@@ -283,8 +283,8 @@ impl fmt::Debug for dyn NotificationSender {
 #[derive(Debug)]
 struct Shared {
     path: PathBuf,
-    file_id_allocator: GenIdAllocator,
-    files_by_file_id: GenIdMap<TextFileId, Mutex<File>>,
+    file_id_allocator: GenIdAllocator<TextFileTag>,
+    files_by_file_id: GenIdMap<TextFileTag, Mutex<File>>,
     file_ids_by_path: HashMap<PathBuf, TextFileId>,
 }
 

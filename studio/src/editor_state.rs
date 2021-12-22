@@ -12,7 +12,7 @@ use {
         code_editor::{
             cursor_set::CursorSet,
             indent_cache::IndentCache,
-            protocol::{TextFileId, Request},
+            protocol::{TextFileTag, TextFileId, Request},
             token_cache::TokenCache,
         },
         design_editor::{
@@ -32,12 +32,12 @@ use {
 
 #[derive(Default)]
 pub struct EditorState {
-    pub session_id_allocator: GenIdAllocator,
-    pub sessions_by_session_id: GenIdMap<SessionId, Session>,
-    pub document_id_allocator: GenIdAllocator,
-    pub documents_by_document_id: GenIdMap<DocumentId, Document>,
+    pub session_id_allocator: GenIdAllocator<SessionTag>,
+    pub sessions_by_session_id: GenIdMap<SessionTag, Session>,
+    pub document_id_allocator: GenIdAllocator<DocumentTag>,
+    pub documents_by_document_id: GenIdMap<DocumentTag, Document>,
     pub document_ids_by_path: HashMap<PathBuf, DocumentId>,
-    pub document_ids_by_file_id: GenIdMap<TextFileId, DocumentId>,
+    pub document_ids_by_file_id: GenIdMap<TextFileTag, DocumentId>,
     pub outstanding_document_id_queue: VecDeque<DocumentId>,
 }
 
@@ -52,7 +52,7 @@ impl EditorState {
         send_request: &mut dyn FnMut(Request),
     ) -> SessionId {
         let document_id = self.get_or_create_document(path, send_request);
-        let session_id = SessionId(self.session_id_allocator.allocate());
+        let session_id = self.session_id_allocator.allocate();
         let session = Session {
             session_view: None,
             cursors: CursorSet::new(),
@@ -79,7 +79,7 @@ impl EditorState {
             self.destroy_document(document_id, send_request);
         }
         self.sessions_by_session_id.remove(session_id);
-        self.session_id_allocator.deallocate(session_id.0);
+        self.session_id_allocator.deallocate(session_id);
     }
 
     pub fn get_or_create_document(
@@ -94,7 +94,7 @@ impl EditorState {
                 *document_id
             },
             None => {
-                let document_id = DocumentId(self.document_id_allocator.allocate());
+                let document_id = self.document_id_allocator.allocate();
                 self.documents_by_document_id.insert(
                     document_id,
                     Document {
@@ -162,7 +162,7 @@ impl EditorState {
         let file_id = inner.file_id;
         self.document_ids_by_file_id.remove(file_id);
         self.documents_by_document_id.remove(document_id);
-        self.document_id_allocator.deallocate(document_id.0);
+        self.document_id_allocator.deallocate(document_id);
         send_request(Request::CloseFile(file_id))
     }
 
@@ -566,15 +566,8 @@ impl EditorState {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct SessionId(pub GenId);
-
-impl AsRef<GenId> for SessionId {
-    fn as_ref(&self) -> &GenId {
-        &self.0
-    }
-}
-
+pub enum SessionTag {}
+pub type SessionId = GenId<SessionTag>;
 
 pub struct Session {
     pub session_view: Option<EditorViewId>,
@@ -596,14 +589,8 @@ impl Session {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct DocumentId(pub GenId);
-
-impl AsRef<GenId> for DocumentId {
-    fn as_ref(&self) -> &GenId {
-        &self.0
-    }
-}
+pub enum DocumentTag {}
+pub type DocumentId = GenId<DocumentTag>;
 
 pub struct Document {
     pub session_ids: HashSet<SessionId>,

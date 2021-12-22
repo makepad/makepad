@@ -79,8 +79,8 @@ live_register!{
 
 #[derive(Live)]
 pub struct Editors {
-    #[rust] view_id_allocator: GenIdAllocator,
-    #[rust] views_by_view_id: GenIdMap<EditorViewId, EditorView>,
+    #[rust] view_id_allocator: GenIdAllocator<EditorViewTag>,
+    #[rust] views_by_view_id: GenIdMap<EditorViewTag, EditorView>,
     
     live_editor: Option<LivePtr>,
 }
@@ -88,7 +88,7 @@ pub struct Editors {
 impl LiveHook for Editors{
     fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         if let ApplyFrom::ApplyOver = apply_from{
-            for editor_view in self.views_by_view_id.values_mut(){
+            for editor_view in self.views_by_view_id.values_mut() {
                 if let Some(live_editor) = nodes.child_by_name(index, id!(live_editor)){
                     editor_view.apply(cx, apply_from, live_editor, nodes);
                 }
@@ -97,14 +97,8 @@ impl LiveHook for Editors{
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct EditorViewId(pub GenId);
-
-impl AsRef<GenId> for EditorViewId {
-    fn as_ref(&self) -> &GenId {
-        &self.0
-    }
-}
+pub enum EditorViewTag {}
+pub type EditorViewId = GenId<EditorViewTag>;
 
 impl Editors {
     
@@ -119,7 +113,7 @@ impl Editors {
         state: &mut EditorState,
         session_id: Option<SessionId>,
     ) -> EditorViewId {
-        let view_id = EditorViewId(self.view_id_allocator.allocate());
+        let view_id = self.view_id_allocator.allocate();
 
         // TODO branch here on filetype somehow.
         let mut view = EditorView::LiveEditor(LiveEditor::new_from_ptr(cx, self.live_editor.unwrap()));

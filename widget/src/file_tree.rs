@@ -404,7 +404,7 @@ impl FileTree {
         
         let visible_nodes = &self.visible_nodes;
         let selected_node_id = self.selected_node_id;
-        self.tree_nodes.retain(|node_id,_| visible_nodes.contains(node_id) || Some(*node_id) == selected_node_id)
+        self.tree_nodes.retain(|node_id,_| visible_nodes.contains(&node_id) || Some(*node_id) == selected_node_id)
     }
     
     pub fn is_even(count: usize) -> f32 {
@@ -579,12 +579,5 @@ impl FileTree {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct FileNodeId(pub GenId);
-
-impl AsRef<GenId> for FileNodeId {
-    fn as_ref(&self) -> &GenId {
-        &self.0
-    }
-}
-
+pub enum FileNodeTag {}
+pub type FileNodeId = GenId<FileNodeTag>;
