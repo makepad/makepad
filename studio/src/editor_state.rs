@@ -25,7 +25,6 @@ use {
     std::{
         cell::RefCell,
         collections::{HashMap, HashSet, VecDeque},
-        iter,
         mem,
         path::PathBuf,
     },
@@ -328,52 +327,6 @@ impl EditorState {
 
         let (_, new_delta_1) = delta_0.clone().transform(delta_1);
         let delta = delta_0.compose(new_delta_1);
-
-        self.edit(session_id, delta, send_request);
-
-        self.autoindent(session_id, send_request);
-    }
-
-    fn autoindent(
-        &mut self,
-        session_id: SessionId,
-        send_request: &mut dyn FnMut(Request)
-    ) {
-        let session = &self.sessions[session_id];
-        let document = &self.documents[session.document_id];
-        let document_inner = document.inner.as_ref().unwrap();
-        
-        let mut builder = delta::Builder::new();
-        let mut position = Position::origin();
-        for distance in session.carets.distances() {
-            position += distance;
-            builder.retain(distance);
-            let indent_count = (0..position.line).rev().find_map(|line| {
-                let indent_info = &document_inner.indent_cache[line];
-                indent_info.leading_whitespace().map(|leading_whitespace| {
-                    let mut indent_count = (leading_whitespace + 3) / 4;
-                    let mut delimiter_count = 0;
-                    let token_info = &document_inner.token_cache[line];
-                    for token in token_info.tokens() {
-                        if token.token.is_open() {
-                            delimiter_count += 1;
-                        }
-                        if token.token.is_close() {
-                            delimiter_count -= 1;
-                        }
-                    }
-                    if delimiter_count > 0 {
-                        indent_count += 1;
-                    }
-                    indent_count
-                })
-            }).unwrap_or(0);
-            let text = Text::from(vec![iter::repeat(' ').take(indent_count * 4).collect::<Vec<_>>()]);
-            let len = text.len();
-            builder.insert(text);
-            position += len;
-        }
-        let delta = builder.build();
 
         self.edit(session_id, delta, send_request);
     }
