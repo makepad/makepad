@@ -12,21 +12,22 @@ use {
         ops::{Deref, Index},
         slice::Iter,
     },
-    makepad_render::makepad_live_compiler::{TextPos, LivePtr},
+    makepad_render::makepad_live_compiler::{LiveTokenId, TextPos, LivePtr},
     makepad_render::*,
 };
 
-#[derive(Debug)]
-pub struct LineItem {
+#[derive(Debug, Clone, Copy)]
+pub struct InlineEditBind {
     pub live_ptr: LivePtr,
+    pub live_token_id: LiveTokenId,
     pub edit_token_index: usize,
 }
 
 #[derive(Debug, Default)]
 pub struct Line {
     pub is_clean: bool,
-    pub items: Vec<LineItem>
-}
+    pub items: Vec<InlineEditBind>
+} 
 
 pub struct InlineCache {
     pub lines: Vec<Line>,
@@ -58,7 +59,7 @@ impl InlineCache {
         // first we scan for live_register!{ident
         'outer: for (line, token_line) in token_cache.iter().enumerate() {
             //let mut column = 0;
-            for (index,token) in token_line.tokens().iter().enumerate() {
+            for (index, token) in token_line.tokens().iter().enumerate() {
                 match state {
                     State::Scan => match token.token {
                         FullToken::Ident(id!(live_register)) => {state = State::Bang}
@@ -76,7 +77,7 @@ impl InlineCache {
                     }
                     State::First => match token.token {
                         FullToken::Whitespace | FullToken::Comment => (),
-                        _=>{state = State::Stack(TokenPos {line, index}, 0)}
+                        _ => {state = State::Stack(TokenPos {line, index}, 0)}
                     }
                     State::Stack(start, depth) => {
                         match token.token {
@@ -92,14 +93,14 @@ impl InlineCache {
                             _ => ()
                         }
                     }
-                    State::Term(_,_)=>panic!()
+                    State::Term(_, _) => panic!()
                 }
                 //column += token.len;
             }
         }
-        if let State::Term(start,end) = state{
+        if let State::Term(start, end) = state {
             // alright we have a range.
-            self.token_range = Some(TokenRange{start, end})
+            self.token_range = Some(TokenRange {start, end})
         }
     }
     
@@ -133,7 +134,7 @@ impl InlineCache {
             self.refresh_token_range(token_cache);
         }
         
-        if self.token_range.is_none(){
+        if self.token_range.is_none() {
             return
         }
         let range = self.token_range.unwrap();
@@ -149,7 +150,7 @@ impl InlineCache {
         if self.lines.len() != token_cache.len() {
             panic!();
         }
-
+        
         for line_cache in self.lines[0..range.start.line].iter_mut() {
             line_cache.items.clear();
             line_cache.is_clean = true;
@@ -160,7 +161,7 @@ impl InlineCache {
         }
         for (line, line_cache) in self.lines[range.start.line..range.end.line].iter_mut().enumerate() {
             let line = line + range.start.line;
-            if line_cache.is_clean { // line not dirty
+            if line_cache.is_clean { 
                 continue
             }
             
@@ -171,19 +172,40 @@ impl InlineCache {
             let tokens_line = &token_cache[line];
             let mut column = 0;
             for (edit_token_index, token) in tokens_line.tokens().iter().enumerate() {
-                if let FullToken::Ident(_) = token.token {
+                
+                // try to filter things a bit before plugging it into the expensive search process
+                let is_prop_assign = token.is_ident() && edit_token_index>2 && tokens_line.tokens()[edit_token_index - 1].is_punct_id(id!(:));
+                
+                if is_prop_assign || token.is_value_type() {
+                    
                     if let Some(live_token_index) = live_file.document.find_token_by_pos(TextPos {line: line as u32, column}) {
-                        let match_token_id = makepad_live_compiler::TokenId::new(file_id, live_token_index);
-                        if let Some(node_index) = expanded.nodes.first_node_with_token_id(match_token_id) {
-                            let live_ptr = LivePtr {file_id, index: node_index as u32};
+                        //let live_token = &origin.tokens[live_token_index];
+                        
+                        let live_token_id = makepad_live_compiler::LiveTokenId::new(file_id, live_token_index);
+                        let search_in_dsl = token.is_value_type();
+                        
+                        if let Some(node_index) = expanded.nodes.first_node_with_token_id(live_token_id, search_in_dsl) {
                             
-                            line_cache.items.push(LineItem {
+                            let live_token_id = if token.is_ident() { // get the thing after the :
+                                makepad_live_compiler::LiveTokenId::new(file_id, live_token_index + 2)
+                            }
+                            else {
+                                live_token_id
+                            };
+                            
+                            let live_ptr = LivePtr {file_id, index: node_index as u32};
+                            // if its a DSL, we should filter here
+                            //let live_node = live_registry.ptr_to_node(live_ptr);
+                            let bind = InlineEditBind {
                                 live_ptr,
+                                live_token_id,
                                 edit_token_index: edit_token_index
-                            });
+                            };
+                            line_cache.items.push(bind);
                         }
                     }
                 }
+                
                 column += token.len as u32;
             }
         }

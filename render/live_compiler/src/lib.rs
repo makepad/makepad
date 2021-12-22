@@ -52,7 +52,7 @@ pub use {
             FittedString,
             //LiveTypeKind,
         },
-        live_token::{TokenWithSpan, LiveToken, TokenId},
+        live_token::{TokenWithSpan, LiveToken, LiveTokenId},
         span::{
             Span,
             TextPos
