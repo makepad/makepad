@@ -2,7 +2,7 @@
 use {
     crate::{
         span::{Span,TextPos},
-        live_token::{TokenWithSpan, TokenId},
+        live_token::{TokenWithSpan, LiveTokenId},
         live_node::LiveNode,
     }
 };
@@ -106,7 +106,7 @@ impl LiveDocument {
         //self.scopes.truncate(0);
     }
     
-    pub fn token_id_to_span(&self, token_id: TokenId) -> Span {
+    pub fn token_id_to_span(&self, token_id: LiveTokenId) -> Span {
         self.tokens[token_id.token_index() as usize].span
     }
     /*

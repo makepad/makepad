@@ -777,12 +777,15 @@ impl CxPlatformShader {
         let descriptor = RcObjcId::from_owned(NonNull::new(unsafe {
             msg_send![class!(MTLRenderPipelineDescriptor), new]
         }).unwrap());
+        
         let vertex_function = RcObjcId::from_owned(NonNull::new(unsafe {
             msg_send![library.as_id(), newFunctionWithName: str_to_ns_string("vertex_main")]
         }).unwrap());
+        
         let fragment_function = RcObjcId::from_owned(NonNull::new(unsafe {
             msg_send![library.as_id(), newFunctionWithName: str_to_ns_string("fragment_main")]
         }).unwrap());
+        
         let render_pipeline_state = RcObjcId::from_owned(NonNull::new(unsafe {
             let _: () = msg_send![descriptor.as_id(), setVertexFunction: vertex_function];
             let _: () = msg_send![descriptor.as_id(), setFragmentFunction: fragment_function];

@@ -125,7 +125,7 @@ impl AppInner {
                 state,
                 state.content_panel_id,
                 None,
-                state.file_path_join(&["studio/src/code_editor/code_editor_impl.rs"])
+                state.file_path_join(&["widget/src/file_tree.rs"])
             );
         }
         

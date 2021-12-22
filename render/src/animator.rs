@@ -467,7 +467,7 @@ impl Animator {
             let mut redraw = false;
             while state_index < state_nodes.len() {
                 let state_node = &mut state_nodes[state_index];
-                if state_node.value.is_array() {
+                if state_node.is_array() {
                     // ok so. lets compute our value and store it in the last slot
                     let (play_ended, play_redraw) = Self::update_timeline_value(cx, state_index, state_nodes, nf.time);
                     if !play_ended {
@@ -519,7 +519,7 @@ impl Animator {
     // this find the last keyframe value from an array node
     pub fn update_timeline_value(cx: &mut Cx, index: usize, nodes: &mut [LiveNode], ext_time: f64) -> (bool, bool) {
         // OK so. we have an array with keyframes
-        if nodes[index].value.is_array() {
+        if nodes[index].is_array() {
             let mut node_iter = nodes.first_child(index);
             
             // compute the animation time from the id
@@ -568,11 +568,11 @@ impl Animator {
             let mut prev_kf: Option<KeyFrame> = None;
             let mut last_child_index = node_iter.unwrap();
             while let Some(node_index) = node_iter {
-                if nodes[node_index + 1].value.is_close() { // at last slot
+                if nodes[node_index + 1].is_close() { // at last slot
                     last_child_index = node_index;
                     break;
                 }
-                let next_kf = if nodes[node_index].value.is_value_type() { // we hit a bare value node
+                let next_kf = if nodes[node_index].is_value_type() { // we hit a bare value node
                     if prev_kf.is_some() {
                         KeyFrame {
                             ease: Ease::Linear,
@@ -682,7 +682,7 @@ impl Animator {
         if let Some(reader) = reader.first_child() {
             if reader.is_object() {
                 if let Some(reader) = reader.child_by_name(id!(time)) {
-                    return match reader.value() {
+                    return match &reader.value {
                         LiveValue::Float(v) => *v,
                         LiveValue::Int(v) => *v as f64,
                         _ => 1.0
@@ -757,7 +757,7 @@ impl Animator {
         reader.walk();
         while !reader.is_eot() {
             if reader.is_array() {
-                path.push(reader.id());
+                path.push(reader.id);
                 if let Some(last_value) = Self::last_keyframe_value_from_array(reader.index(), reader.nodes()) {
                     state.replace_or_insert_first_node_by_path(0, &path, live_array!{
                         [(track), (reader.nodes()[last_value].value.clone())]
@@ -768,14 +768,14 @@ impl Animator {
             }
             else {
                 if reader.is_expr() {
-                    path.push(reader.id());
+                    path.push(reader.id);
                     state.replace_or_insert_last_node_by_path(0, &path, reader.node_slice());
                     path.pop();
                     reader.skip();
                     continue;
                 }
                 else if reader.is_open() {
-                    path.push(reader.id());
+                    path.push(reader.id);
                     if reader.is_enum() {
                         state.replace_or_insert_last_node_by_path(0, &path, reader.node_slice());
                     }
@@ -784,9 +784,9 @@ impl Animator {
                     path.pop();
                 }
                 else {
-                    path.push(reader.id());
+                    path.push(reader.id);
                     state.replace_or_insert_first_node_by_path(0, &path, live_array!{
-                        [(track), (reader.value().clone())]
+                        [(track), (reader.value.clone())]
                     });
                     path.pop();
                 }
@@ -855,7 +855,7 @@ impl Animator {
         while !reader.is_eot() {
 
             if reader.is_array() {
-                path.push(reader.id());
+                path.push(reader.id);
                 let (first_index, last_index) = if let Some(state_child) = state.child_by_path(0, &path) {
                     if let Some(last_index) = state.last_child(state_child) {
                         (state_child + 1, last_index)
@@ -898,20 +898,20 @@ impl Animator {
             }
             else {
                 if reader.is_expr() {
-                    path.push(reader.id());
+                    path.push(reader.id);
                     state.replace_or_insert_last_node_by_path(0, &path, reader.node_slice());
                     path.pop();
                     reader.skip();
                     continue;
                 }
                 if reader.is_open() {
-                    path.push(reader.id());
+                    path.push(reader.id);
                 }
                 else if reader.is_close() {
                     path.pop();
                 }
                 else {
-                    path.push(reader.id());
+                    path.push(reader.id);
                     
                     let (first_index, last_index) = if let Some(state_child) = state.child_by_path(0, &path) {
                         if let Some(last_index) = state.last_child(state_child) {

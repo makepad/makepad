@@ -10,7 +10,7 @@ use {
         live_node::{LiveNode, LiveValue, LiveType, LiveTypeInfo, LiveNodeOrigin},
         live_node_vec::{LiveNodeSlice, LiveNodeVec, LiveNodeMutReader},
         live_ptr::{LiveFileId, LivePtr, LiveModuleId},
-        live_token::{LiveToken, TokenId, TokenWithSpan},
+        live_token::{LiveToken, LiveTokenId, TokenWithSpan},
         span::{Span, TextPos},
         live_expander::{LiveExpander}
     }
@@ -99,11 +99,11 @@ impl LiveRegistry {
         None
     }
     
-    pub fn token_id_to_origin_doc(&self, token_id: TokenId) -> &LiveDocument {
+    pub fn token_id_to_origin_doc(&self, token_id: LiveTokenId) -> &LiveDocument {
         &self.live_files[token_id.file_id().to_index()].document
     }
     
-    pub fn token_id_to_expanded_doc(&self, token_id: TokenId) -> &LiveDocument {
+    pub fn token_id_to_expanded_doc(&self, token_id: LiveTokenId) -> &LiveDocument {
         &self.expanded[token_id.file_id().to_index()]
     }
     
@@ -220,7 +220,7 @@ impl LiveRegistry {
         live_error.to_live_file_error(&live_file.file_name)
     }
     
-    pub fn token_id_to_span(&self, token_id: TokenId) -> Span {
+    pub fn token_id_to_span(&self, token_id: LiveTokenId) -> Span {
         self.live_files[token_id.file_id().to_index()].document.token_id_to_span(token_id)
     }
     /*
@@ -233,7 +233,7 @@ impl LiveRegistry {
                 self.dep_order.remove(other_index);
                 self.dep_order.insert(self_index, (module_id, token_id));
             }
-        }
+        } 
         else {
             self.dep_order.insert(self_index, (module_id, token_id));
         }
@@ -372,7 +372,7 @@ impl LiveRegistry {
                                     live_tokens.push(TokenWithSpan {span: span, token: live_token})
                                 }
                                 else {
-                                    if live_tokens[live_index].token.is_parse_equal(live_token) { // token value changed
+                                    if live_tokens[live_index].is_parse_equal(live_token) { // token value changed
                                         if live_tokens[live_index].token != live_token {
                                             live_tokens[live_index].token = live_token;
                                             mutations.push(live_index);
@@ -381,9 +381,9 @@ impl LiveRegistry {
                                     else { // token value changed in a way that changes parsing
                                         // lets special case the {{id}} situation
                                         if live_index > 2
-                                            && live_tokens[live_index - 2].token.is_open_delim(Delim::Brace)
-                                            && live_tokens[live_index - 1].token.is_open_delim(Delim::Brace)
-                                            && live_tokens[live_index].token.is_int()
+                                            && live_tokens[live_index - 2].is_open_delim(Delim::Brace)
+                                            && live_tokens[live_index - 1].is_open_delim(Delim::Brace)
+                                            && live_tokens[live_index].is_int()
                                             && live_token.is_ident() {
                                             // ignore it.
                                         }
@@ -434,10 +434,12 @@ impl LiveRegistry {
             let document = &self.live_files[file_id.to_index()].document;
             let live_tokens = &document.tokens;
             
-            if *mutation > 2
-                && live_tokens[mutation - 2].token.is_ident()
-                && live_tokens[mutation - 1].token.is_punct_id(id!(:)) {
-                let token_id = TokenId::new(file_id, mutation - 2);
+            let is_prop_assign = *mutation > 2
+                && live_tokens[mutation - 2].is_ident()
+                && live_tokens[mutation - 1].is_punct_id(id!(:));
+            
+            if is_prop_assign || live_tokens[*mutation].is_value_type() {
+                let token_id = LiveTokenId::new(file_id, mutation - 2);
                 
                 // ok lets scan for this one.
                 let mut file_dep_iter = FileDepIter::new(file_id);
@@ -450,18 +452,28 @@ impl LiveRegistry {
                     reader.walk();
                     while !reader.is_eot() {
                         if reader.is_open() {
-                            path.push(reader.id())
+                            path.push(reader.id)
                         }
                         else if reader.is_close() {
                             path.pop();
                         }
-                        else if reader.origin().token_id() == Some(token_id) {
+                        // ok this is a direct patch
+                        else if is_prop_assign && reader.origin.token_id() == Some(token_id){
+                                
                             if !reader.update_from_live_token(&live_tokens[*mutation].token) {
                                 println!("update_from_live_token returns false investigate! {:?}", reader.node());
                             }
                             if self.main_module == Some(file_id) {
                                 // ok so. lets write by path here
-                                path.push(reader.id());
+                                path.push(reader.id);
+                                main_apply.replace_or_insert_last_node_by_path(0, &path, reader.node_slice());
+                                path.pop();
+                            }
+                        }
+                        else if reader.is_token_id_inside_dsl(token_id){
+                            if self.main_module == Some(file_id) {
+                                // ok so. lets write by path here
+                                path.push(reader.id);
                                 main_apply.replace_or_insert_last_node_by_path(0, &path, reader.node_slice());
                                 path.pop();
                             }
@@ -474,7 +486,9 @@ impl LiveRegistry {
             }
         }
         main_apply.close();
+        //println!("{}", main_apply.to_string(0,100));
         self.main_apply = Some(main_apply);
+        
     }
     
     pub fn register_live_file(
