@@ -1,6 +1,6 @@
 use {
     makepad_render::*,
-    makepad_widget::color_picker::*,
+    makepad_component::color_picker::*,
     makepad_render::makepad_live_compiler::LiveToken,
     makepad_render::makepad_live_tokenizer::{
         position::Position,

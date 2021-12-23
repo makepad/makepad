@@ -6,7 +6,7 @@ use {
         },
         editors::{EditorViewId},
     },
-    makepad_widget::{
+    makepad_component::{
         dock::{PanelTag, PanelId},
         file_tree::{FileNodeTag, FileNodeId},
         splitter::{SplitterAlign},

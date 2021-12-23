@@ -25,7 +25,7 @@ use {
         full_token::{FullToken, Delim},
     },
     makepad_render::*,
-    makepad_widget::{
+    makepad_component::{
         ScrollView,
         ScrollShadow
     },

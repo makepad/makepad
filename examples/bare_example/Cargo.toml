@@ -10,6 +10,6 @@ edition = "2018"
 path="../../render"
 version="0.2"
 
-[dependencies.makepad-widget]
-path="../../widget"
+[dependencies.makepad-component]
+path="../../component"
 version="0.1"
