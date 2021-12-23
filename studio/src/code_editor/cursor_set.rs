@@ -8,9 +8,10 @@ use {
         delta::{Delta, Whose},
         position::Position,
         position_set,
-        position_set::{PositionSet},
+        position_set::PositionSet,
+        range::Range,
         range_set,
-        range_set::{RangeSet},
+        range_set::RangeSet,
         text::Text,
     },
 };
@@ -18,23 +19,30 @@ use {
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct CursorSet {
     cursors: Vec<Cursor>,
+    last_inserted_index: usize,
 }
 
 impl CursorSet {
     pub fn new() -> CursorSet {
-        CursorSet::default()
+        CursorSet {
+            cursors: vec![Cursor::new()],
+            last_inserted_index: 0,
+        }
+    }
+
+    pub fn last_inserted(&self) -> &Cursor {
+        &self.cursors[self.last_inserted_index]
     }
 
     pub fn selections(&self) -> RangeSet {
         let mut builder = range_set::Builder::new();
         for cursor in &self.cursors {
-            builder.include(cursor.range());
+            builder.include(Range {
+                start: cursor.start(),
+                end: cursor.end()
+            });
         }
         builder.build()
-    }
-
-    pub fn last(&self) -> Cursor {
-        *self.cursors.last().unwrap()
     }
 
     pub fn carets(&self) -> PositionSet {
@@ -46,110 +54,99 @@ impl CursorSet {
     }
 
     pub fn add(&mut self, position: Position) {
-        self.cursors.push(Cursor {
+        let index = self.cursors.iter().position(|cursor| {
+            cursor.start() > position
+        }).unwrap_or_else(|| self.cursors.len());
+        if index > 0 && position < self.cursors[index - 1].end() {
+            return;
+        }
+        self.cursors.insert(index, Cursor {
             head: position,
             tail: position,
-            max_column: position.column,
+            max_column: position.column
         });
+        self.last_inserted_index = index;
+        self.normalize();
     }
 
     pub fn move_left(&mut self, text: &Text, select: bool) {
         for cursor in &mut self.cursors {
-            if cursor.head.column == 0 {
-                if cursor.head.line > 0 {
-                    cursor.head.line -= 1;
-                    cursor.head.column = text.as_lines()[cursor.head.line].len();
-                }
-            } else {
-                cursor.head.column -= 1;
-            }
-            if !select {
-                cursor.tail = cursor.head;
-            }
-            cursor.max_column = cursor.head.column;
+            cursor.move_left(text, select);
         }
+        self.normalize();
     }
 
     pub fn move_right(&mut self, text: &Text, select: bool) {
         for cursor in &mut self.cursors {
-            if cursor.head.column == text.as_lines()[cursor.head.line].len() {
-                if cursor.head.line < text.as_lines().len() {
-                    cursor.head.line += 1;
-                    cursor.head.column = 0;
-                }
-            } else {
-                cursor.head.column += 1;
-            }
-            if !select {
-                cursor.tail = cursor.head;
-            }
-            cursor.max_column = cursor.head.column;
+            cursor.move_right(text, select);
         }
+        self.normalize();
     }
 
     pub fn move_up(&mut self, text: &Text, select: bool) {
         for cursor in &mut self.cursors {
-            if cursor.head.line == 0 {
-                continue;
-            }
-            cursor.head.line -= 1;
-            cursor.head.column = cursor
-                .max_column
-                .min(text.as_lines()[cursor.head.line].len());
-            if !select {
-                cursor.tail = cursor.head;
-            }
+            cursor.move_up(text, select);
         }
+        self.normalize();
     }
 
     pub fn move_down(&mut self, text: &Text, select: bool) {
         for cursor in &mut self.cursors {
-            if cursor.head.line == text.as_lines().len() - 1 {
-                continue;
-            }
-            cursor.head.line += 1;
-            cursor.head.column = cursor
-                .max_column
-                .min(text.as_lines()[cursor.head.line].len());
-            if !select {
-                cursor.tail = cursor.head;
-            }
+            cursor.move_down(text, select);
         }
+        self.normalize();
     }
 
     pub fn move_to(&mut self, position: Position, select: bool) {
-        let cursors = &mut self.cursors;
-        if !select {
-            cursors.drain(..cursors.len() - 1);
+        if select {
+            self.cursors[self.last_inserted_index].move_to(position, true);
+            self.normalize();
+        } else {
+            self.cursors.clear();
+            self.cursors.push(Cursor {
+                head: position,
+                tail: position,
+                max_column: position.column,
+            });
+            self.last_inserted_index = 0;
         }
-        let mut cursor = cursors.last_mut().unwrap();
-        cursor.head = position;
-        if !select {
-            cursor.tail = position;
-        }
-        cursor.max_column = position.column;
     }
 
     pub fn apply_delta(&mut self, delta: &Delta, whose: Whose) {
         for cursor in &mut self.cursors {
-            let new_head = cursor.head.apply_delta(&delta);
-            let new_tail = match whose {
-                Whose::Ours => new_head,
+            cursor.head = cursor.head.apply_delta(&delta);
+            cursor.tail = match whose {
+                Whose::Ours => cursor.head,
                 Whose::Theirs => cursor.tail.apply_delta(&delta),
             };
-            *cursor = Cursor {
-                head: new_head,
-                tail: new_tail,
-                max_column: new_head.column.max(new_tail.column),
-            };
+            cursor.max_column = cursor.head.column;
+        }
+    }
+
+    fn normalize(&mut self) {
+        let mut index = 0;
+        while index + 1 < self.cursors.len() {
+            if self.cursors[index].tail >= self.cursors[index + 1].head {
+                self.cursors[index + 1].head = self.cursors[index].head;
+                self.cursors.remove(index);
+                if self.last_inserted_index > index {
+                    self.last_inserted_index -= 1;
+                }
+            } else if self.cursors[index].head >= self.cursors[index + 1].tail {
+                self.cursors[index + 1].tail = self.cursors[index].tail;
+                self.cursors.remove(index);
+                if self.last_inserted_index > index {
+                    self.last_inserted_index -= 1;
+                }
+            } else {
+                index += 1;
+            }
         }
     }
 }
 
 impl Default for CursorSet {
     fn default() -> CursorSet {
-        CursorSet {
-            cursors: vec![Cursor::default()],
-        }
+        CursorSet::new()
     }
 }

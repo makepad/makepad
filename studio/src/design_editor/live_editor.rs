@@ -189,8 +189,8 @@ impl LiveEditor {
                 &self.lines_layout,
             );
             
-            self.editor_impl.draw_current_line(cx, &self.lines_layout, session.cursors.last());
-            self.editor_impl.draw_linenums(cx, &self.lines_layout, session.cursors.last());
+            self.editor_impl.draw_current_line(cx, &self.lines_layout, *session.cursors.last_inserted());
+            self.editor_impl.draw_linenums(cx, &self.lines_layout, *session.cursors.last_inserted());
             self.editor_impl.end(cx, &self.lines_layout);
         }
     }
