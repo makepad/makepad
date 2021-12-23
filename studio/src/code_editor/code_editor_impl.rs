@@ -287,8 +287,8 @@ impl CodeEditorImpl {
     pub fn begin<'a>(&mut self, cx: &mut Cx, state: &'a EditorState) -> Result<(&'a Document, &'a DocumentInner, &'a Session), ()> {
         if let Some(session_id) = self.session_id {
             
-            let session = &state.sessions_by_session_id[session_id];
-            let document = &state.documents_by_document_id[session.document_id];
+            let session = &state.sessions[session_id];
+            let document = &state.documents[session.document_id];
             
             if let Some(document_inner) = document.inner.as_ref() {
                 self.text_glyph_size = self.code_text.text_style.font_size * self.code_text.get_monospace_base(cx);
@@ -394,7 +394,7 @@ impl CodeEditorImpl {
         self.text_glyph_size = self.code_text.text_style.font_size * self.code_text.get_monospace_base(cx);
         if self.scroll_view.begin(cx).is_ok() {
             if let Some(session_id) = self.session_id {
-                let session = &state.sessions_by_session_id[session_id];
+                let session = &state.sessions[session_id];
                 let document = &state.documents_by_document_id[session.document_id];
                 if let Some(document_inner) = document.inner.as_ref() {
                     self.handle_select_scroll_in_draw(cx);
@@ -962,8 +962,8 @@ impl CodeEditorImpl {
                 cx.set_key_focus(self.scroll_view.area());
                 cx.set_down_mouse_cursor(MouseCursor::Text);
                 if let Some(session_id) = self.session_id {
-                    let session = &state.sessions_by_session_id[session_id];
-                    let document = &state.documents_by_document_id[session.document_id];
+                    let session = &state.sessions[session_id];
+                    let document = &state.documents[session.document_id];
                     let document_inner = document.inner.as_ref().unwrap();
                     let position = self.vec2_to_position(&document_inner.text, f.rel, lines_layout);
                     match f.modifiers {
@@ -987,8 +987,8 @@ impl CodeEditorImpl {
             HitEvent::FingerMove(fe) => {
                 self.reset_caret_blink(cx);
                 if let Some(session_id) = self.session_id {
-                    let session = &state.sessions_by_session_id[session_id];
-                    let document = &state.documents_by_document_id[session.document_id];
+                    let session = &state.sessions[session_id];
+                    let document = &state.documents[session.document_id];
                     let document_inner = document.inner.as_ref().unwrap();
                     let position = self.vec2_to_position(&document_inner.text, fe.rel, lines_layout);
                     if self.last_move_position != Some(position) {
@@ -1059,7 +1059,7 @@ impl CodeEditorImpl {
                 self.reset_caret_blink(cx);
                 if let Some(session_id) = self.session_id {
                     state.insert_backspace(session_id, send_request);
-                    let session = &state.sessions_by_session_id[session_id];
+                    let session = &state.sessions[session_id];
                     self.keep_last_cursor_in_view(cx, state, lines_layout);
                     dispatch_action(cx, CodeEditorAction::RedrawViewsForDocument(session.document_id))
                 }
@@ -1076,7 +1076,7 @@ impl CodeEditorImpl {
                     } else {
                         state.undo(session_id, send_request);
                     }
-                    let session = &state.sessions_by_session_id[session_id];
+                    let session = &state.sessions[session_id];
                     dispatch_action(cx, CodeEditorAction::RedrawViewsForDocument(session.document_id))
                 }
             }
@@ -1115,7 +1115,7 @@ impl CodeEditorImpl {
                 self.reset_caret_blink(cx);
                 if let Some(session_id) = self.session_id {
                     state.insert_newline(session_id, send_request);
-                    let session = &state.sessions_by_session_id[session_id];
+                    let session = &state.sessions[session_id];
                     self.keep_last_cursor_in_view(cx, state, lines_layout);
                     dispatch_action(cx, CodeEditorAction::RedrawViewsForDocument(session.document_id))
                 }
@@ -1125,8 +1125,8 @@ impl CodeEditorImpl {
                     // TODO: The code below belongs in a function on EditorState
                     let mut string = String::new();
                     
-                    let session = &state.sessions_by_session_id[session_id];
-                    let document = &state.documents_by_document_id[session.document_id];
+                    let session = &state.sessions[session_id];
+                    let document = &state.documents[session.document_id];
                     let document_inner = document.inner.as_ref().unwrap();
                     
                     let mut start = Position::origin();
@@ -1151,7 +1151,7 @@ impl CodeEditorImpl {
                         input.into(),
                         send_request,
                     );
-                    let session = &state.sessions_by_session_id[session_id];
+                    let session = &state.sessions[session_id];
                     self.keep_last_cursor_in_view(cx, state, lines_layout);
                     dispatch_action(cx, CodeEditorAction::RedrawViewsForDocument(session.document_id))
                 }
@@ -1225,8 +1225,8 @@ impl CodeEditorImpl {
             if select_scroll.at_end {
                 self.select_scroll = None;
             }
-            let session = &state.sessions_by_session_id[self.session_id.unwrap()];
-            let document = &state.documents_by_document_id[session.document_id];
+            let session = &state.sessions[self.session_id.unwrap()];
+            let document = &state.documents[session.document_id];
             let document_inner = document.inner.as_ref().unwrap();
             let position = self.vec2_to_position(&document_inner.text, rel, lines_layout);
             state.move_cursors_to(self.session_id.unwrap(), position, true);
@@ -1237,10 +1237,10 @@ impl CodeEditorImpl {
     
     fn fetch_cursor_context(&mut self, cx: &mut Cx, state: &EditorState) {
         if let Some(session_id) = self.session_id {
-            let session = &state.sessions_by_session_id[session_id];
-            let document = &state.documents_by_document_id[session.document_id];
+            let session = &state.sessions[session_id];
+            let document = &state.documents[session.document_id];
             let _document_inner = document.inner.as_ref().unwrap();
-            let last_cursor = session.cursors.last();
+            let last_cursor = session.cursors.last_inserted();
             let head = last_cursor.head;
             
             let lr_cp = cx.live_registry.clone();
@@ -1270,8 +1270,8 @@ impl CodeEditorImpl {
     
     fn keep_last_cursor_in_view(&mut self, cx: &mut Cx, state: &EditorState, line_layout: &LinesLayout) {
         if let Some(session_id) = self.session_id {
-            let session = &state.sessions_by_session_id[session_id];
-            let last_cursor = session.cursors.last();
+            let session = &state.sessions[session_id];
+            let last_cursor = session.cursors.last_inserted();
             
             // ok so. we need to compute the head
             let pos = self.position_to_vec2(last_cursor.head, line_layout);
