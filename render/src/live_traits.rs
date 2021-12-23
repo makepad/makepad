@@ -118,6 +118,7 @@ pub trait LiveApply: LiveHook {
                 let live_registry = live_registry_rc.borrow();
                 if let Some(main_apply) = &live_registry.main_apply{
                     if let Some(index) = main_apply.child_by_name(0, id){
+                        println!("{}", main_apply.to_string(0,100));
                         self.apply(cx, ApplyFrom::LiveEdit, index, main_apply);
                     }
                 }
