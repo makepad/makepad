@@ -14,7 +14,7 @@ use {
     },
     makepad_render::makepad_live_compiler::{LiveTokenId, TextPos, LivePtr},
     makepad_render::*,
-};
+}; 
 
 #[derive(Debug, Clone, Copy)]
 pub struct InlineEditBind {

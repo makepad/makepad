@@ -9,7 +9,7 @@ use {
         editors::{Editors},
     },
     makepad_render::*,
-    makepad_widget::{
+    makepad_component::{
         DesktopWindow,
         dock::{Dock, DockAction, DragPosition, PanelId},
         file_tree::{FileTreeAction, FileNodeId, FileTree},
@@ -125,7 +125,7 @@ impl AppInner {
                 state,
                 state.content_panel_id,
                 None,
-                state.file_path_join(&["widget/src/file_tree.rs"])
+                state.file_path_join(&["component/src/file_tree.rs"])
             );
         }
         
