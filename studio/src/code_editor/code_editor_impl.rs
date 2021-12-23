@@ -1240,7 +1240,7 @@ impl CodeEditorImpl {
             let session = &state.sessions[session_id];
             let document = &state.documents[session.document_id];
             let _document_inner = document.inner.as_ref().unwrap();
-            let last_cursor = session.cursors.last();
+            let last_cursor = session.cursors.last_inserted();
             let head = last_cursor.head;
             
             let lr_cp = cx.live_registry.clone();
@@ -1271,7 +1271,7 @@ impl CodeEditorImpl {
     fn keep_last_cursor_in_view(&mut self, cx: &mut Cx, state: &EditorState, line_layout: &LinesLayout) {
         if let Some(session_id) = self.session_id {
             let session = &state.sessions[session_id];
-            let last_cursor = session.cursors.last();
+            let last_cursor = session.cursors.last_inserted();
             
             // ok so. we need to compute the head
             let pos = self.position_to_vec2(last_cursor.head, line_layout);
