@@ -189,8 +189,8 @@ impl LiveEditor {
                 &self.lines_layout,
             );
             
-            self.editor_impl.draw_current_line(cx, &self.lines_layout, session.cursors.last());
-            self.editor_impl.draw_linenums(cx, &self.lines_layout, session.cursors.last());
+            self.editor_impl.draw_current_line(cx, &self.lines_layout, *session.cursors.last_inserted());
+            self.editor_impl.draw_linenums(cx, &self.lines_layout, *session.cursors.last_inserted());
             self.editor_impl.end(cx, &self.lines_layout);
         }
     }
@@ -217,8 +217,8 @@ impl LiveEditor {
                         send_request
                     );
                     
-                    let session = &state.sessions_by_session_id[session_id];
-                    let document = &state.documents_by_document_id[session.document_id];
+                    let session = &state.sessions[session_id];
+                    let document = &state.documents[session.document_id];
                     let document_inner = document.inner.as_ref().unwrap();
                     
                     let mut inline_cache = document_inner.inline_cache.borrow_mut();
