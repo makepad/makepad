@@ -36,8 +36,8 @@ live_register!{
     use makepad_render::shader::std::*;
     
     DrawSelection: {{DrawSelection}} {
-        const gloopiness: float = 8.;
-        const border_radius: float = 2.;
+        const GLOOPINESS: 8.
+        const BORDER_RADIUS: 2.
         
         fn vertex(self) -> vec4 { // custom vertex shader because we widen the draweable area a bit for the gloopiness
             let shift: vec2 = -self.draw_scroll.xy;
@@ -56,12 +56,12 @@ live_register!{
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
             sdf.box(0., 0., self.rect_size.x, self.rect_size.y, border_radius);
             if self.prev_w > 0. {
-                sdf.box(self.prev_x, -self.rect_size.y, self.prev_w, self.rect_size.y, border_radius);
-                sdf.gloop(gloopiness);
+                sdf.box(self.prev_x, -self.rect_size.y, self.prev_w, self.rect_size.y, BORDER_RADIUS);
+                sdf.gloop(GLOOPINESS);
             }
             if self.next_w > 0. {
-                sdf.box(self.next_x, self.rect_size.y, self.next_w, self.rect_size.y, border_radius);
-                sdf.gloop(gloopiness);
+                sdf.box(self.next_x, self.rect_size.y, self.next_w, self.rect_size.y, BORDER_RADIUS);
+                sdf.gloop(GLOOPINESS);
             }
             return sdf.fill(self.color);
         }

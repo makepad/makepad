@@ -14,7 +14,7 @@ use{
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub enum ShaderParserDep {
-    Const(ConstPtr),
+//    Const(ConstPtr),
     Struct(StructPtr),
     Function(Option<StructPtr>, FnPtr)
 }
@@ -342,6 +342,7 @@ impl<'a> ShaderParser<'a> {
     }
     
     // lets parse a function.
+    /*
     pub fn expect_field(&mut self, ident: Ident, var_def_ptr: VarDefPtr) -> Result<Option<StructFieldDef>, LiveError> {
         let span = self.begin_span();
         let decl_ty = self.expect_ident(live_error_origin!()) ?;
@@ -361,14 +362,11 @@ impl<'a> ShaderParser<'a> {
                     ty_expr
                 })))
             }
-            Ident(id!(const)) => {
-                return Ok(None)
-            },
             _ => {
                 return Err(span.error(self, live_error_origin!(), format!("unexpected decl type in struct `{}`", decl_ty).into()))
             }
         }
-    }
+    }*/
     
     // lets parse a function.
     pub fn expect_method_def(mut self, fn_ptr: FnPtr, outer_ident: Ident) -> Result<Option<FnDef>, LiveError> {
@@ -578,7 +576,7 @@ impl<'a> ShaderParser<'a> {
                                 return Err(span.error(self, live_error_origin!(), format!("Struct not found `{}`", ident_path).into()))
                             }
                             LiveNodeFindResult::Function(_)
-                                | LiveNodeFindResult::Const(_)
+                            //    | LiveNodeFindResult::Const(_)
                                 | LiveNodeFindResult::Component(_)
                                 | LiveNodeFindResult::LiveValue(_, _)
                                 | LiveNodeFindResult::PossibleStatic(_, _) => {
@@ -1134,7 +1132,7 @@ impl<'a> ShaderParser<'a> {
                                     LiveNodeFindResult::PossibleStatic(_, _)
                                         | LiveNodeFindResult::Function(_)
                                         | LiveNodeFindResult::Component(_)
-                                        | LiveNodeFindResult::Const(_)
+                                    //    | LiveNodeFindResult::Const(_)
                                         | LiveNodeFindResult::LiveValue(_, _) => {
                                         return Err(span.error(self, live_error_origin!(), format!("Not a struct `{}`", ident_path).into()))
                                     }
@@ -1198,7 +1196,7 @@ impl<'a> ShaderParser<'a> {
                                     }
                                     LiveNodeFindResult::Component(_)
                                         | LiveNodeFindResult::Struct(_)
-                                        | LiveNodeFindResult::Const(_)
+                                    //    | LiveNodeFindResult::Const(_)
                                         | LiveNodeFindResult::LiveValue(_, _) => {
                                         Err(span.error(self, live_error_origin!(), format!("Not a function `{}`", ident_path).into()))
                                     }
@@ -1276,10 +1274,10 @@ impl<'a> ShaderParser<'a> {
                                     LiveNodeFindResult::LiveValue(value_ptr, ty) => {
                                         var_resolve = VarResolve::LiveValue(value_ptr, ty);
                                     }
-                                    LiveNodeFindResult::Const(const_ptr) => {
-                                        self.type_deps.push(ShaderParserDep::Const(const_ptr));
-                                        var_resolve = VarResolve::Const(const_ptr);
-                                    }
+                                    //LiveNodeFindResult::Const(const_ptr) => {
+                                    //    self.type_deps.push(ShaderParserDep::Const(const_ptr));
+                                    //    var_resolve = VarResolve::Const(const_ptr);
+                                    // }
                                     LiveNodeFindResult::Function(fn_ptr) => {
                                         self.type_deps.push(ShaderParserDep::Function(None, fn_ptr));
                                         var_resolve = VarResolve::Function(fn_ptr);

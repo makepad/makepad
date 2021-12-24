@@ -14,7 +14,7 @@ use {
 live_register!{
     
     DrawQuad: {{DrawQuad}} {
-        varying pos: vec2
+        varying pos: vec2(0.0,0.0)
         
         fn scroll(self) -> vec2 {
             return self.draw_scroll.xy

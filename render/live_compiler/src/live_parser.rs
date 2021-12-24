@@ -198,12 +198,13 @@ impl<'a> LiveParser<'a> {
             value: LiveValue::DSL {
                 token_start: token_start as u32,
                 token_count: (token_index - token_start) as u32,
+                expanded_token_id: None
             }
         });
         
         Ok(())
     }
-    
+    /*
     fn expect_const(&mut self, ld: &mut LiveDocument) -> Result<(), LiveError> {
         let token_start = self.token_index - 1;
         let token_id = self.get_token_id();
@@ -223,7 +224,7 @@ impl<'a> LiveParser<'a> {
         });
         
         Ok(())
-    }
+    }*/
     
     fn possible_edit_info(&mut self, ld: &mut LiveDocument) -> Result<Option<LiveEditInfo>, LiveError> {
         // metadata is .{key:value}
@@ -319,29 +320,23 @@ impl<'a> LiveParser<'a> {
         Ok(None)
     }
     
-    fn expect_var_def(&mut self, ld: &mut LiveDocument) -> Result<(), LiveError> {
-        
-        let token_start = self.token_index - 1;
+    fn expect_annotate(&mut self, with:LiveId, ld: &mut LiveDocument) -> Result<(), LiveError> {
         
         let token_id = self.get_token_id();
         
         let real_prop_id = self.expect_ident() ?;
+
         let edit_info = self.possible_edit_info(ld) ?;
+
         let origin = LiveNodeOrigin::from_token_id(token_id).with_edit_info(edit_info);
-        self.expect_token(LiveToken::Punct(id!(:))) ?;
-        self.expect_var_def_type() ?;
-        
+
         ld.nodes.push(LiveNode {
             origin: origin,
             id: real_prop_id,
-            value: LiveValue::DSL {
-                token_start: token_start as u32,
-                token_count: (self.token_index - token_start) as u32,
-            }
+            value: LiveValue::Annotate(with)
         });
         
-        if self.accept_token(LiveToken::Punct(id!( =))) {
-            // ok we now emit a value
+        if self.accept_token(LiveToken::Punct(id!(:))){
             self.expect_live_value(real_prop_id, origin, ld) ?;
         }
         
@@ -514,48 +509,72 @@ impl<'a> LiveParser<'a> {
             },
             LiveToken::Ident(id!(vec2)) => {
                 self.skip_token();
-                self.expect_token(LiveToken::Open(Delim::Paren)) ?;
-                let x = self.expect_float() ?;
-                self.expect_token(LiveToken::Punct(id!(,))) ?;
-                let y = self.expect_float() ?;
-                self.expect_token(LiveToken::Close(Delim::Paren)) ?;
-                ld.nodes.push(LiveNode {
-                    origin,
-                    id: prop_id,
-                    value: LiveValue::Vec2(Vec2 {x: x as f32, y: y as f32})
-                });
+                if self.accept_token(LiveToken::Open(Delim::Paren)){
+                    let x = self.expect_float() ?;
+                    self.expect_token(LiveToken::Punct(id!(,))) ?;
+                    let y = self.expect_float() ?;
+                    self.expect_token(LiveToken::Close(Delim::Paren)) ?;
+                    ld.nodes.push(LiveNode {
+                        origin,
+                        id: prop_id,
+                        value: LiveValue::Vec2(Vec2 {x: x as f32, y: y as f32})
+                    });
+                }
+                else{
+                    ld.nodes.push(LiveNode {
+                        origin,
+                        id: prop_id,
+                        value: LiveValue::Id(id!(vec2))
+                    });                    
+                }
             },
             LiveToken::Ident(id!(vec3)) => {
                 self.skip_token();
-                self.expect_token(LiveToken::Open(Delim::Paren)) ?;
-                let x = self.expect_float() ?;
-                self.expect_token(LiveToken::Punct(id!(,))) ?;
-                let y = self.expect_float() ?;
-                self.expect_token(LiveToken::Punct(id!(,))) ?;
-                let z = self.expect_float() ?;
-                self.expect_token(LiveToken::Close(Delim::Paren)) ?;
-                ld.nodes.push(LiveNode {
-                    origin,
-                    id: prop_id,
-                    value: LiveValue::Vec3(Vec3 {x: x as f32, y: y as f32, z: z as f32})
-                });
+                if self.accept_token(LiveToken::Open(Delim::Paren)){
+                    let x = self.expect_float() ?;
+                    self.expect_token(LiveToken::Punct(id!(,))) ?;
+                    let y = self.expect_float() ?;
+                    self.expect_token(LiveToken::Punct(id!(,))) ?;
+                    let z = self.expect_float() ?;
+                    self.expect_token(LiveToken::Close(Delim::Paren)) ?;
+                    ld.nodes.push(LiveNode {
+                        origin,
+                        id: prop_id,
+                        value: LiveValue::Vec3(Vec3 {x: x as f32, y: y as f32, z: z as f32})
+                    });
+                }
+                else{
+                    ld.nodes.push(LiveNode {
+                        origin,
+                        id: prop_id,
+                        value: LiveValue::Id(id!(vec3))
+                    });                    
+                }
             },
             LiveToken::Ident(id!(vec4)) => {
                 self.skip_token();
-                self.expect_token(LiveToken::Open(Delim::Paren)) ?;
-                let x = self.expect_float() ?;
-                self.expect_token(LiveToken::Punct(id!(,))) ?;
-                let y = self.expect_float() ?;
-                self.expect_token(LiveToken::Punct(id!(,))) ?;
-                let z = self.expect_float() ?;
-                self.expect_token(LiveToken::Punct(id!(,))) ?;
-                let w = self.expect_float() ?;
-                self.expect_token(LiveToken::Close(Delim::Paren)) ?;
-                ld.nodes.push(LiveNode {
-                    origin,
-                    id: prop_id,
-                    value: LiveValue::Vec4(Vec4 {x: x as f32, y: y as f32, z: z as f32, w: w as f32})
-                });
+                if self.accept_token(LiveToken::Open(Delim::Paren)){
+                    let x = self.expect_float() ?;
+                    self.expect_token(LiveToken::Punct(id!(,))) ?;
+                    let y = self.expect_float() ?;
+                    self.expect_token(LiveToken::Punct(id!(,))) ?;
+                    let z = self.expect_float() ?;
+                    self.expect_token(LiveToken::Punct(id!(,))) ?;
+                    let w = self.expect_float() ?;
+                    self.expect_token(LiveToken::Close(Delim::Paren)) ?;
+                    ld.nodes.push(LiveNode {
+                        origin,
+                        id: prop_id,
+                        value: LiveValue::Vec4(Vec4 {x: x as f32, y: y as f32, z: z as f32, w: w as f32})
+                    });
+                }
+                else{
+                    ld.nodes.push(LiveNode {
+                        origin,
+                        id: prop_id,
+                        value: LiveValue::Id(id!(vec4))
+                    });                    
+                }
             },
             LiveToken::Ident(base) => { // we're gonna parse a class or an enum
                 self.skip_token();
@@ -625,14 +644,14 @@ impl<'a> LiveParser<'a> {
         }
         return Err(self.error(format!("Could not find ending token {} whilst scanning", scan_token)));
     }
-    
+    /*
     fn expect_var_def_type(&mut self) -> Result<(), LiveError> {
         self.expect_ident() ?;
         if self.accept_token(LiveToken::Ident(id!(in))) {
             self.expect_ident() ?;
         }
         Ok(())
-    }
+    }*/
     
     fn expect_value_literal(&mut self) -> Result<(), LiveError> {
         match self.peek_token() {
@@ -683,13 +702,13 @@ impl<'a> LiveParser<'a> {
                             id!(use) => {
                                 self.expect_use(ld) ?;
                                 self.accept_optional_delim();
-                            }
+                            }/*
                             id!(const) => {
                                 self.expect_const(ld) ?;
                                 self.accept_optional_delim();
-                            }
+                            }*/
                             _ => {
-                                self.expect_var_def(ld) ?;
+                                self.expect_annotate(prop_id, ld) ?;
                                 self.accept_optional_delim();
                             }
                         }

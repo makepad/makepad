@@ -56,7 +56,7 @@ pub fn derive_live_registry_impl(input: TokenStream) -> TokenStream {
             tb.add("    pub fn new(&self, cx: &mut Cx, live_type: LiveType) -> Option<Box<dyn ").ident(&component).add(" >> {");
             tb.add("        self.items.get(&live_type)");
             tb.add("            .and_then( | cnew | Some({");
-            tb.add("                let mut ret = cnew.factory.new(cx);");
+            tb.add("                let mut ret = cnew.factory.new(cx);if cnew.live_ptr.is_none(){panic!(\"Component liveptr is none, did you include the registry in the main DSL flow?\");};");
             tb.add("                makepad_render::live_traits::new_from_ptr_impl(cx, cnew.live_ptr.unwrap(),|cx, from, index, nodes| ret.apply(cx, from, index, nodes));");
             tb.add("                ret");
             tb.add("             }))");
@@ -92,7 +92,7 @@ pub fn derive_live_registry_impl(input: TokenStream) -> TokenStream {
             tb.add("         if let Some(file_id) = apply_from.file_id() {");
             tb.add("             let mut registry = cx.registries.get_or_create::<").ident(&registry).add(">();");
             tb.add("             for item in registry.items.values_mut() {");
-            tb.add("                 let index = nodes.child_by_name(index, item.id).unwrap();");
+            tb.add("                 let index = nodes.child_by_name(index, item.id).expect(\"Registry item found, but child node not. Make sure the registry is live_register called last otherwise the DSL nodes aren't populated\");");
             tb.add("                 item.live_ptr = Some(LivePtr {file_id, index: index as u32})");
             tb.add("             }");
             tb.add("         }");

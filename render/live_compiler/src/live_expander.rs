@@ -105,7 +105,7 @@ impl<'a> LiveExpander<'a> {
                     
                     let out_value = &out_doc.nodes[overwrite].value;
                     let out_edit_info = out_doc.nodes[overwrite].origin.edit_info();
-                    
+
                     let ret_val = if in_value.is_expr() && out_value.is_expr() || in_value.is_expr() && out_value.is_value_type() {
                         // replace range
                         let next_index = out_doc.nodes.skip_node(overwrite);
@@ -201,9 +201,9 @@ impl<'a> LiveExpander<'a> {
                         level_overwrite.push(true);
                         overwrite
                     }
-                    else if out_value.is_dsl() && in_value.is_value_type() { // this is allowed
+                    else if out_value.is_annotate() && in_value.is_value_type() { // this is allowed
                         // see if we have a node after to overwrite
-                        if let Some(overwrite) = out_doc.nodes.next_child_by_name(overwrite + 1, in_node.id) {
+                        if let Some(overwrite) = out_doc.nodes.sibling_by_name(overwrite + 1, in_node.id) {
                             out_doc.nodes[overwrite] = in_node.clone();
                             overwrite
                         }
@@ -392,8 +392,10 @@ impl<'a> LiveExpander<'a> {
             in_index += 1;
         }
         out_doc.nodes.push(in_doc.nodes.last().unwrap().clone());
+
+        // this stores the node index on nodes that don't have a node index
         for i in 1..out_doc.nodes.len() {
-            if !out_doc.nodes[i].origin.node_index().is_some() {
+            if !out_doc.nodes[i].origin.node_index().is_some() && out_doc.nodes[i].value.is_dsl(){
                 out_doc.nodes[i].origin.set_node_index(i);
             }
         }

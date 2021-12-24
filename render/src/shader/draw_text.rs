@@ -30,7 +30,8 @@ live_register!{
         
         uniform brightness: float
         uniform curve: float
-        texture texture: texture2D
+
+        texture texture:texture2d
         
         varying tex_coord1: vec2
         varying tex_coord2: vec2
