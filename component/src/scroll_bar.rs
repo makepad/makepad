@@ -4,13 +4,12 @@ live_register!{
     use makepad_render::shader::std::*;
     
     DrawScrollBar: {{DrawScrollBar}} {
-        debug : true
         draw_depth: 5.0
         
-        const border_radius: float = 1.5;
+        const BORDER_RADIUS: 1.5
         
-        instance pressed: float;
-        instance hover: float;
+        instance pressed: 0.0
+        instance hover: 0.0
         
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -20,7 +19,7 @@ live_register!{
                     self.rect_size.y * self.norm_scroll,
                     self.rect_size.x * 0.5,
                     self.rect_size.y * self.norm_handle,
-                    border_radius
+                    BORDER_RADIUS
                 );
             }
             else {
@@ -29,7 +28,7 @@ live_register!{
                     1.,
                     self.rect_size.x * self.norm_handle,
                     self.rect_size.y * 0.5,
-                    border_radius
+                    BORDER_RADIUS
                 );
             }
             return sdf.fill_keep(mix(#5, mix(#7, #9, self.pressed), self.hover));

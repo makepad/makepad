@@ -243,15 +243,15 @@ impl DrawVars {
                     //println!("{}", file.source);
                     println!("Error {}", e.to_live_file_error(&file.file_name));
                 }
-                Ok(draw_shader_def) => {
+                Ok(()) => {
                     // OK! SO the shader parsed
                     let draw_shader_id = cx.draw_shaders.len();
                     
-                    let const_table = DrawShaderConstTable::default();
-                    //let mut const_table = cx.shader_registry.compute_const_table(&draw_shader_def, NONE)
+                    //let const_table = DrawShaderConstTable::default();
+                    let mut const_table = cx.shader_registry.compute_const_table(draw_shader_ptr);
                     
                     let mut mapping = CxDrawShaderMapping::from_draw_shader_def(
-                        draw_shader_def,
+                        cx.shader_registry.draw_shader_defs.get(&draw_shader_ptr).unwrap(),
                         const_table,
                         DRAW_SHADER_INPUT_PACKING
                     );

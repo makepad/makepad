@@ -1,6 +1,14 @@
 use makepad_render::*;
 use std::any::TypeId;
 
+live_register!{
+    FrameComponentRegistry: {{FrameComponentRegistry}} {}
+}
+
+#[derive(LiveHook, LiveRegistry)]
+#[generate_registry(CxFrameComponentRegistry, FrameComponent, FrameComponentFactory)]
+pub struct FrameComponentRegistry();
+
 pub trait FrameComponentFactory {
     fn new(&self, cx: &mut Cx) -> Box<dyn FrameComponent>;
 }
@@ -121,9 +129,3 @@ macro_rules!register_as_frame_component {
         }
     }
 }
-
-
-// this generates a component registry 
-#[derive(LiveHook, LiveRegistry)]
-#[generate_registry(CxFrameComponentRegistry, FrameComponent, FrameComponentFactory)]
-pub struct FrameComponentRegistry();

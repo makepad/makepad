@@ -8,16 +8,16 @@ live_register!{
     
     Tab: {{Tab}} {
         name_text: {
-            instance hover: float
-            instance selected: float
+            instance hover: 0.0
+            instance selected: 0.0
             fn get_color(self) -> vec4 {
                 return mix(#82, #ff, self.selected)
             }
         }
         
         bg_quad: {
-            const border_width: float = 1.0
-            const border_color: vec4 = #28
+            const BORDER_WIDTH:  1.0
+            const BORDER_COLOR:  #28
             
             instance hover: float
             instance selected: float
@@ -30,7 +30,7 @@ live_register!{
                 sdf.line_to(0.0, self.rect_size.y)
                 sdf.move_to(self.rect_size.x, 0.0)
                 sdf.line_to(self.rect_size.x, self.rect_size.y)
-                return sdf.stroke(border_color, border_width)
+                return sdf.stroke(BORDER_COLOR, BORDER_WIDTH)
             }
         }
         

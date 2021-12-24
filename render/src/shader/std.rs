@@ -9,15 +9,15 @@ pub use {
 
 live_register!{
     
-    const PI: float = 3.141592653589793;
-    const E: float = 2.718281828459045;
-    const LN2: float = 0.6931471805599453;
-    const LN10: float = 2.302585092994046;
-    const LOG2E: float = 1.4426950408889634;
-    const LOG10E: float = 0.4342944819032518;
-    const SQRT1_2: float = 0.70710678118654757;
-    const TORAD: float = 0.017453292519943295;
-    const GOLDEN: float = 1.618033988749895;
+    const PI: 3.141592653589793
+    const E: 2.718281828459045
+    const LN2:  0.6931471805599453
+    const LN10:  2.302585092994046
+    const LOG2E:  1.4426950408889634
+    const LOG10E: 0.4342944819032518
+    const SQRT1_2:  0.70710678118654757
+    const TORAD: 0.017453292519943295
+    const GOLDEN:  1.618033988749895
     
     Math: Namespace{
         fn rotate_2d(v: vec2, a: float)->vec2 {

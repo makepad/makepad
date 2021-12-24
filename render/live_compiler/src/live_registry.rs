@@ -202,7 +202,7 @@ impl LiveRegistry {
         None
     }
     
-    pub fn find_scope_ptr_via_origin(&self, origin: LiveNodeOrigin, item: LiveId) -> Option<LivePtr> {
+    pub fn find_scope_ptr_via_origin2(&self, origin: LiveNodeOrigin, item: LiveId) -> Option<LivePtr> {
         // ok lets start
         let token_id = origin.token_id().unwrap();
         let index = origin.node_index().unwrap();
