@@ -10,6 +10,9 @@ mod scroll_view;
 mod frame_registry;
 mod frame;
 mod window_menu;
+
+pub use makepad_render;
+
 pub mod frame_template;
 pub mod empty_template;
 
@@ -29,7 +32,7 @@ pub use crate::{
     scroll_view::{ScrollView},
     scroll_shadow::{ScrollShadow},
     frame::{Frame},
-    frame_registry::{FrameActions, CxFrameComponentRegistry, FrameComponent}
+    frame_registry::{FrameActions, CxFrameComponentRegistry, FrameComponent, FrameComponentRegistry}
 };
 
 pub fn live_register(cx:&mut Cx){
@@ -49,4 +52,5 @@ pub fn live_register(cx:&mut Cx){
     crate::tab::live_register(cx);
     crate::tab_bar::live_register(cx);
     crate::dock::live_register(cx);
+    crate::frame_registry::live_register(cx);
 }

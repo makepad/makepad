@@ -1,4 +1,4 @@
-MyFlow: Flow {
+MyFlow: UxFlow {
     input x: float = 1.0
     output a: float = 1.0
     sum: Sum {a: x, b: 2.0}
@@ -7,17 +7,6 @@ MyFlow: Flow {
 Frame {
     flow: MyFlow{
         x <- mouse.x
-        a -> prop.prop.prop
+        a -> [prop.prop.prop]
     }
 }
-
-what if flow objects are like Frame components
-a custom deserialiser/interpreter
-they get a handle input
-
-
-How do we write TO UI components? via apply structures
-Hwo do we read events from UI Components? via the AnyAction trait interface.
-
-
-

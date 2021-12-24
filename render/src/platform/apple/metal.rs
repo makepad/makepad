@@ -175,8 +175,8 @@ impl Cx {
                     
                     let ct = &sh.mapping.const_table.table;
                     if ct.len()>0 {
-                        let () = msg_send![encoder, setVertexBytes: ct.as_ptr() as *const std::ffi::c_void length: (ct.len() * 4) as u64 atIndex: 7u64];
-                        let () = msg_send![encoder, setFragmentBytes: ct.as_ptr() as *const std::ffi::c_void length: (ct.len() * 4) as u64 atIndex: 5u64];
+                        let () = msg_send![encoder, setVertexBytes: ct.as_ptr() as *const std::ffi::c_void length: (ct.len() * 4) as u64 atIndex: 3u64];
+                        let () = msg_send![encoder, setFragmentBytes: ct.as_ptr() as *const std::ffi::c_void length: (ct.len() * 4) as u64 atIndex: 3u64];
                     }
                 }
                 //encoder.set_vertex_bytes(2, (pass_uniforms.len() * 4) as u64, pass_uniforms.as_ptr() as *const std::ffi::c_void);
@@ -644,7 +644,12 @@ impl Cx {
                     &cx_shader.mapping.const_table,
                     &self.shader_registry
                 );
+
+                if cx_shader.mapping.flags.debug{
+                    println!("{}", gen.mtlsl);
+                }
                 cx_shader.platform.update(metal_cx, gen);
+
             }
         }
         self.draw_shader_compile_set.clear();
@@ -672,71 +677,6 @@ impl MetalCx {
             device: device
         }
     }
-    
-    /*
-    pub fn update_platform_texture_image2d(&self, cxtexture: &mut CxTexture) {
-        
-        if cxtexture.desc.width.is_none() || cxtexture.desc.height.is_none() {
-            println!("update_platform_texture_image2d without width/height");
-            return;
-        }
-        
-        let width = cxtexture.desc.width.unwrap();
-        let height = cxtexture.desc.height.unwrap();
-        
-        // allocate new texture if descriptor change
-        if cxtexture.platform.alloc_desc != cxtexture.desc {
-            cxtexture.platform.mtl_texture = None;
-            
-            let mdesc: ObjcId = unsafe {msg_send![class!(MTLTextureDescriptor), new]};
-            unsafe {
-                let () = msg_send![mdesc, setTextureType: MTLTextureType::D2];
-                let () = msg_send![mdesc, setStorageMode: MTLStorageMode::Managed];
-                let () = msg_send![mdesc, setUsage: MTLTextureUsage::RenderTarget];
-                let () = msg_send![mdesc, setWidth: width as u64];
-                let () = msg_send![mdesc, setHeight: height as u64];
-            }
-            
-            match cxtexture.desc.format {
-                TextureFormat::Default | TextureFormat::ImageBGRA => {
-                    let () = unsafe {msg_send![mdesc, setPixelFormat: MTLPixelFormat::BGRA8Unorm]};
-                    
-                    let tex: ObjcId = unsafe {msg_send![self.device, newTextureWithDescriptor: mdesc]};
-                    
-                    cxtexture.platform.mtl_texture = Some(tex);
-                    
-                    if cxtexture.image_u32.len() != width * height {
-                        println!("update_platform_texture_image2d with wrong buffer_u32 size!");
-                        cxtexture.platform.mtl_texture = None;
-                        return;
-                    }
-                    let region = MTLRegion {
-                        origin: MTLOrigin {x: 0, y: 0, z: 0},
-                        size: MTLSize {width: width as u64, height: height as u64, depth: 1}
-                    };
-                    if let Some(mtl_texture) = cxtexture.platform.mtl_texture {
-                        let () = unsafe {msg_send![
-                            mtl_texture,
-                            replaceRegion: region
-                            mipmapLevel: 0
-                            withBytes: cxtexture.image_u32.as_ptr() as *const std::ffi::c_void
-                            bytesPerRow: (width * std::mem::size_of::<u32>()) as u64
-                        ]};
-                    }
-                },
-                _ => {
-                    println!("update_platform_texture_image2d with unsupported format");
-                    return;
-                }
-            }
-            cxtexture.platform.alloc_desc = cxtexture.desc.clone();
-            cxtexture.platform.width = width as u64;
-            cxtexture.platform.height = height as u64;
-        }
-        
-        cxtexture.update_image = false;
-    }
-    */
 }
 
 /**************************************************************************************************/

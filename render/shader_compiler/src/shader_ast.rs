@@ -45,21 +45,17 @@ pub struct VarDefPtr(pub LivePtr);
 impl Deref for VarDefPtr{type Target = LivePtr;fn deref(&self) -> &Self::Target {&self.0}}
 impl DerefMut for VarDefPtr{fn deref_mut(&mut self) -> &mut Self::Target {&mut self.0}} 
 
-
 #[derive(Clone, Default, Debug)]
 pub struct DrawShaderConstTable {
     pub table: Vec<f32>,
     pub offsets: BTreeMap<FnPtr, usize>
 }
 
-
 #[derive(Clone, Copy, Default, Debug)]
 pub struct DrawShaderFlags{
     pub debug: bool,
     pub draw_call_nocompare: bool,
     pub draw_call_always: bool,
-//    pub no_v_scroll: bool,
-//    pub no_h_scroll: bool
 }
 
 #[derive(Clone, Default, Debug)]

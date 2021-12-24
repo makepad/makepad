@@ -29,8 +29,9 @@ pub trait LiveNodeSlice {
     
     fn child_by_number(&self, parent_index: usize, child_number: usize) -> Option<usize>;
     fn child_or_append_index_by_name(&self, parent_index: usize, name: LiveId) -> Result<usize, usize>;
-    fn next_child_by_name(&self, child_index: usize, name: LiveId) -> Option<usize>;
+    //fn next_child_by_name(&self, child_index: usize, name: LiveId) -> Option<usize>;
     fn child_by_name(&self, parent_index: usize, name: LiveId) -> Option<usize>;
+    fn sibling_by_name(&self, start_index: usize, name: LiveId) -> Option<usize>;
     fn child_by_path(&self, parent_index: usize, path: &[LiveId]) -> Option<usize>;
     fn child_value_by_path(&self, parent_index: usize, path: &[LiveId]) -> Option<&LiveValue>;
     
@@ -91,7 +92,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
                 // lets see if we are a DSL node then match the token range
                 if also_in_dsl && token_id.file_id() == match_token_id.file_id(){
                     match node.value{
-                        LiveValue::DSL{token_start, token_count}=>{
+                        LiveValue::DSL{token_start, token_count, ..}=>{
                             let index = match_token_id.token_index() as u32;
                             if index>=token_start && index <=token_start + token_count{
                                 return Some(node_index);
@@ -175,11 +176,20 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
                 if stack_depth>0 {
                     stack_depth -= 1;
                 }
+                if stack_depth == 0{
+                    if let Some(child_index) = self.child_by_name(index, name) {
+                        if child_index != start_index {
+                            return Some(child_index)
+                        }
+                    }
+                }
             }
             else if self_ref[index].is_close() {
                 stack_depth += 1;
             }
+            /*
             if stack_depth == 0 {
+                
                 if self_ref[index].id == name && index != start_index && !self_ref[index].value.is_close() { // valuenode
                     return Some(index)
                 }
@@ -191,8 +201,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
                         }
                     }
                 }
-            }
-            
+            }*/
             if index == 0 {
                 break
             }
@@ -400,8 +409,40 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
             None
         }
     }
+/*
+    fn sibling_by_name(&self, start_index: usize, name: LiveId) -> Option<usize>{
+        let self_ref = self.as_ref();
+        let mut stack_depth = 0;
+        let mut index = start_index;
+        while index < self_ref.len() {
+            if self_ref[index].is_open() {
+                if stack_depth == 0 {
+                    if !self_ref[index].origin.id_non_unique() && self_ref[index].id == name {
+                        return Some(index);
+                    }
+                }
+                stack_depth += 1;
+            }
+            else if self_ref[index].is_close() {
+                if stack_depth == 0 {
+                    return None
+                }
+                stack_depth -= 1;
+            }
+            else {
+                if stack_depth == 0 {
+                    if !self_ref[index].origin.id_non_unique() && self_ref[index].id == name {
+                        return Some(index);
+                    }
+                }
+            }
+            index += 1;
+        }
+        None
+    }*/
+
     
-    fn next_child_by_name(&self, child_index: usize, child_name: LiveId) -> Option<usize> {
+    fn sibling_by_name(&self, child_index: usize, child_name: LiveId) -> Option<usize> {
         let self_ref = self.as_ref();
         let mut stack_depth = 1;
         let mut index = child_index;
@@ -422,7 +463,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
             }
             else {
                 if stack_depth == 1 {
-                    if child_name != LiveId::empty() && self_ref[index].id == child_name {
+                    if !self_ref[index].origin.id_non_unique() && self_ref[index].id == child_name {
                         return Some(index);
                     }
                 }
@@ -665,11 +706,15 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
                 LiveValue::DSL {
                     token_start,
                     token_count,
+                    expanded_token_id
                 } => {
                     writeln!(f, "<DSL> {} :token_start:{}, token_count:{}", node.id, token_start, token_count).unwrap();
                 },
                 LiveValue::Use(module_path) => {
                     writeln!(f, "<Use> {}::{}", module_path, node.id).unwrap();
+                }
+                LiveValue::Annotate(with) => {
+                    writeln!(f, "<Annotate> {} {}", with, node.id).unwrap();
                 }
                 
             }
