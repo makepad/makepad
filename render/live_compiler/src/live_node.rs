@@ -63,7 +63,9 @@ pub enum LiveValue {
     DSL {
         token_start: u32,
         token_count: u32,
+        expanded_token_id: Option<u32>
     },
+    Annotate(LiveId),
     Use (LiveModuleId),
 }
 
@@ -132,7 +134,7 @@ impl LiveNode {
             return false;
         }
         match &self.value {
-            LiveValue::DSL {token_start, token_count} => {
+            LiveValue::DSL {token_start, token_count, ..} => {
                 let token_index = other_token.token_index();
                 token_index as u32 >= *token_start && (token_index as u32) < token_start + token_count
             }
@@ -153,12 +155,19 @@ impl fmt::Debug for LiveNodeOrigin {
 
 // this layout can be reshuffled and just be made bigger.
 // However it keeps the LiveNode size at 40 bytes which is nice for now.
+
 // 10 bit file id (1024)
 // 18 bit token id (262k tokens, avg tokensize: 5 = 1.25 megs of code)
-// 18 bits node index (262k nodes *40 bytes = 10 megs. We are at 70kb now for the UI)
-// 10 bits edit_info file_id
+    // used to find original token of property
+
+// 10 bit first def file_id
+// 18 bit first def token_id
+
 // 7 bits (128) edit_info index
+
 // 1 bit 'id_is_nonunique'
+
+// ok if we are a DSL node then what else do we need. we need a node index pointer.
 
 impl LiveNodeOrigin {
     pub fn empty() -> Self {
@@ -225,7 +234,6 @@ impl LiveNodeOrigin {
     pub fn id_non_unique(&self) -> bool {
         self.0 & 0x8000_0000_0000_0000 != 0
     }
-    
 }
 
 pub struct LiveEditInfo(u32);
@@ -477,6 +485,13 @@ impl LiveValue {
             _ => false
         }
     }
+
+    pub fn is_annotate(&self) -> bool {
+        match self {
+            Self::Annotate {..} => true,
+            _ => false
+        }
+    }
     
     pub fn is_value_type(&self) -> bool {
         match self {
@@ -577,7 +592,8 @@ impl LiveValue {
             Self::Close => 25,
             
             Self::DSL {..} => 26,
-            Self::Use {..} => 27
+            Self::Annotate {..} => 27,
+            Self::Use {..} => 28
         }
     }
 }

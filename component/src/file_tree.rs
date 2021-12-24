@@ -13,29 +13,33 @@ live_register!{
     use makepad_render::shader::std::*;
     
     DrawBgQuad: {{DrawBgQuad}} {
-        const color_even: vec4 = #25
-        const color_odd: vec4 = #28
-        const color_selected: vec4 = #x11466E
+        debug: true
+        
+        instance x: 1.0,
+        
+        const COLOR_EVEN: #25
+        const COLOR_ODD: #28
+        const COLOR_SELECTED: #x11466E
         
         fn pixel(self) -> vec4 {
             return mix(
                 mix(
-                    color_even,
-                    color_odd,
+                    COLOR_EVEN,
+                    COLOR_ODD,
                     self.is_even
                 ),
-                color_selected,
+                COLOR_SELECTED,
                 self.selected
             ) + #3 * self.hover;
         }
     }
     
     DrawNameText: {{DrawNameText}} {
-        const color_file: vec4 = #9d
-        const color_folder: vec4 = #ff
+        const COLOR_FILE: #9d
+        const COLOR_FOLDER: #ff
         
         fn get_color(self) -> vec4 {
-            return mix(color_file, color_folder, self.is_folder) * self.scale
+            return mix(COLOR_FILE, COLOR_FOLDER, self.is_folder) * self.scale
         }
         
         text_style: {
@@ -129,7 +133,7 @@ live_register!{
                 opened: [{value: 1.0, ease: Ease::OutExp}],
             }
         }
-        is_folder:false,
+        is_folder: false,
         indent_width: 10.0
         min_drag_distance: 10.0
     }
@@ -211,7 +215,7 @@ pub struct FileTreeNode {
     icon_walk: Walk,
     
     is_folder: bool,
-    min_drag_distance: f32, 
+    min_drag_distance: f32,
     
     opened: f32,
     hover: f32,
@@ -261,7 +265,7 @@ impl FileTreeNode {
         self.name_text.font_scale = scale;
     }
     
-    pub fn draw_folder(&mut self, cx: &mut Cx, name: &str, is_even: f32, node_height: f32, depth:usize, scale:f32) {
+    pub fn draw_folder(&mut self, cx: &mut Cx, name: &str, is_even: f32, node_height: f32, depth: usize, scale: f32) {
         self.set_draw_state(is_even, scale);
         
         self.layout.walk.height = Height::Fixed(scale * node_height);
@@ -277,7 +281,7 @@ impl FileTreeNode {
         self.bg_quad.end(cx);
     }
     
-    pub fn draw_file(&mut self, cx: &mut Cx, name: &str, is_even: f32, node_height: f32, depth:usize, scale:f32) {
+    pub fn draw_file(&mut self, cx: &mut Cx, name: &str, is_even: f32, node_height: f32, depth: usize, scale: f32) {
         self.set_draw_state(is_even, scale);
         
         self.layout.walk.height = Height::Fixed(scale * node_height);
@@ -327,7 +331,7 @@ impl FileTreeNode {
             self.closed_state.unwrap()
         );
     }
-     
+    
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
@@ -404,7 +408,7 @@ impl FileTree {
         
         let visible_nodes = &self.visible_nodes;
         let selected_node_id = self.selected_node_id;
-        self.tree_nodes.retain(|node_id,_| visible_nodes.contains(&node_id) || Some(*node_id) == selected_node_id)
+        self.tree_nodes.retain( | node_id, _ | visible_nodes.contains(&node_id) || Some(*node_id) == selected_node_id)
     }
     
     pub fn is_even(count: usize) -> f32 {
@@ -435,7 +439,7 @@ impl FileTree {
     ) -> Result<(), ()> {
         let scale = self.stack.last().cloned().unwrap_or(1.0);
         
-        if scale > 0.2{
+        if scale > 0.2 {
             self.count += 1;
         }
         
@@ -478,7 +482,7 @@ impl FileTree {
     pub fn file(&mut self, cx: &mut Cx, node_id: FileNodeId, name: &str) {
         let scale = self.stack.last().cloned().unwrap_or(1.0);
         
-        if scale > 0.2{
+        if scale > 0.2 {
             self.count += 1;
         }
         if self.should_node_draw(cx) {

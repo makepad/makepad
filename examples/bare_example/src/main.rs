@@ -1,16 +1,12 @@
-use makepad_render::*;
-use makepad_widget::*;
-use makepad_live_compiler::LiveBinOp;
-use makepad_live_compiler::LiveUnOp;
+use makepad_component::*;
+use makepad_component::makepad_render::*;
 
 live_register!{
-    use makepad_widget::frame::Frame;
-    use makepad_widget::button::Button;
-    use makepad_widget::filetree::FileTree;
+    use makepad_component::frame::Frame;
+    use makepad_component::button::Button;
     App: {{App}} {
         scroll_view: {h_show: true, v_show: true, view: {layout: {line_wrap: LineWrap::NewLine}}}
         frame: {
-
         }
     }
 }
@@ -19,6 +15,7 @@ main_app!(App);
 #[derive(Live, LiveHook)]
 pub struct App {
     frame: Frame,
+    frame_component_registry: FrameComponentRegistry,
     desktop_window: DesktopWindow,
     scroll_view: ScrollView,
     #[rust] offset: u64
@@ -26,13 +23,12 @@ pub struct App {
 
 impl App {
     pub fn live_register(cx: &mut Cx) {
-        makepad_widget::live_register(cx);
+        makepad_component::live_register(cx);
     }
     
     pub fn new_app(cx: &mut Cx) -> Self {
-        println!("{}", std::mem::size_of::<LiveNode2>());
         //println!("{}", get_local_doc!(cx, id!(App)).nodes.to_string(0,100));
-        Self::new_from_module_path_id(cx, &module_path!(), id!(App)).unwrap()
+        Self::new_as_main_module(cx, &module_path!(), id!(App)).unwrap()
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
@@ -42,7 +38,7 @@ impl App {
             // spawn 1000 buttons into the live structure
             let mut out = Vec::new();
             out.open();
-            for i in 0..1 {
+            for i in 0..1000 {
                 out.push_live(live_object!{
                     [id_num!(btn, i)]: Button {
                         layout:{walk:{margin:{l:((((i+self.offset) as f32)*0.01).sin()*10.0)}}}

@@ -7,16 +7,13 @@ use crate::register_as_frame_component;
 live_register!{
     use makepad_render::shader::std::*;
     
-    color: #xff00ff,
-    
     Button: {{Button}} {
         bg_quad: {
-            instance color: vec4 = #333
-            instance hover: float
-            instance pressed: float
+            instance hover: 0.0
+            instance pressed: 0.0
             
-            const shadow: float = 3.0
-            const border_radius: float = 2.5
+            const SHADOW: 3.0
+            const BORDER_RADIUS: 2.5
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -31,11 +28,11 @@ live_register!{
                 sdf.fill(mix(#0007, #0, self.hover));
                 sdf.blur = 0.001;
                 sdf.box(
-                    shadow,
-                    shadow,
+                    SHADOW,
+                    SHADOW,
                     self.rect_size.x - shadow * 2.,
                     self.rect_size.y - shadow * 2.,
-                    border_radius
+                    BORDER_RADIUS
                 );
                 return sdf.fill(mix(mix(#3, #4, self.hover), #2a, self.pressed));
             }
