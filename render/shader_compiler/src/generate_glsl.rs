@@ -182,13 +182,11 @@ impl<'a> DrawShaderGenerator<'a> {
         
         // alright so. we have our fn deps which have struct deps
         // and we have struct deps in our struct deps.
-        let mut all_consts = BTreeSet::new();
         let mut all_constructor_fns = BTreeSet::new();
         
         for callee in fn_deps.iter().rev() {
             let decl = self.shader_registry.all_fns.get(callee).unwrap();
             all_constructor_fns.extend(decl.constructor_fn_deps.borrow().as_ref().unwrap().iter().cloned());
-            all_consts.extend(decl.const_refs.borrow().as_ref().unwrap().iter().cloned());
         }
         
         // all our live ref uniforms
@@ -205,12 +203,6 @@ impl<'a> DrawShaderGenerator<'a> {
         for (ty_lit, param_tys) in all_constructor_fns
         {
             generate_cons_fn(self.backend_writer, self.string, ty_lit, &param_tys);
-        }
-        
-        for const_node_ptr in all_consts
-        {
-            let const_decl = self.shader_registry.consts.get(&const_node_ptr).unwrap();
-            self.generate_const_def(const_node_ptr, const_decl);
         }
         
         for fn_iter in fn_deps.iter().rev() {
@@ -381,18 +373,7 @@ impl<'a> DrawShaderGenerator<'a> {
         }
         writeln!(self.string, "}};").unwrap();
     }
-    
-    fn generate_const_def(&mut self, ptr: ConstPtr, def: &ConstDef) {
-        write!(self.string, "const ").unwrap();
-        self.write_var_decl(
-            &ptr,
-            def.ty_expr.ty.borrow().as_ref().unwrap(),
-        );
-        write!(self.string, " = ").unwrap();
-        self.generate_expr(&def.expr);
-        writeln!(self.string, ";").unwrap();
-    }
-    
+
     fn generate_uniform_decl(&mut self, decl: &DrawShaderFieldDef) {
         write!(self.string, "uniform ").unwrap();
         self.write_var_decl(

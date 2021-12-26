@@ -204,7 +204,7 @@ impl<'a> DrawShaderAnalyser<'a> {
         let mut pixel_structs = Vec::new();
         let mut vertex_structs = Vec::new();
         let mut all_live_refs = BTreeMap::new();
-        let mut all_const_refs = BTreeSet::new();
+
         for pixel_fn in &pixel_fns {
             let fn_decl = self.shader_registry.all_fns.get(pixel_fn).unwrap();
             // lets collect all structs
@@ -225,15 +225,13 @@ impl<'a> DrawShaderAnalyser<'a> {
         for any_fn in all_fns.iter().rev() {
             let fn_def = self.shader_registry.all_fns.get(any_fn).unwrap();
             all_live_refs.extend(fn_def.live_refs.borrow().as_ref().cloned().unwrap());
-            all_const_refs.extend(fn_def.const_refs.borrow().as_ref().unwrap());
             // fill in fns where hidden args is none
-            if fn_def.hidden_args.borrow().is_none() {
+           // if fn_def.hidden_args.borrow().is_none() {
                 self.analyse_hidden_args(fn_def);
-            }
-        }
+           // }
+        } 
         
         *self.draw_shader_def.all_live_refs.borrow_mut() = all_live_refs;
-        *self.draw_shader_def.all_const_refs.borrow_mut() = all_const_refs;
         
         *self.draw_shader_def.all_fns.borrow_mut() = all_fns;
         *self.draw_shader_def.vertex_fns.borrow_mut() = vertex_fns;

@@ -30,10 +30,10 @@ pub struct DrawShaderPtr(pub LivePtr);
 impl Deref for DrawShaderPtr{type Target = LivePtr;fn deref(&self) -> &Self::Target {&self.0}}
 impl DerefMut for DrawShaderPtr{fn deref_mut(&mut self) -> &mut Self::Target {&mut self.0}} 
 
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
-pub struct ConstPtr(pub LivePtr);
-impl Deref for ConstPtr{type Target = LivePtr;fn deref(&self) -> &Self::Target {&self.0}}
-impl DerefMut for ConstPtr{fn deref_mut(&mut self) -> &mut Self::Target {&mut self.0}} 
+//#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
+//pub struct ConstPtr(pub LivePtr);
+//impl Deref for ConstPtr{type Target = LivePtr;fn deref(&self) -> &Self::Target {&self.0}}
+//impl DerefMut for ConstPtr{fn deref_mut(&mut self) -> &mut Self::Target {&mut self.0}} 
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq, Ord, PartialOrd)]
 pub struct ValuePtr(pub LivePtr);
@@ -66,7 +66,7 @@ pub struct DrawShaderDef {
     pub methods: Vec<FnPtr>,
     pub enums: Vec<LiveType>,
     // analysis results:
-    pub all_const_refs: RefCell<BTreeSet<ConstPtr>>,
+    //pub all_const_refs: RefCell<BTreeSet<ConstPtr>>,
     pub all_live_refs: RefCell<BTreeMap<ValuePtr, Ty >>,
     pub all_fns: RefCell<Vec<FnPtr >>,
     pub vertex_fns: RefCell<Vec<FnPtr >>,
@@ -186,7 +186,7 @@ pub struct FnDef {
     
     pub hidden_args: RefCell<Option<BTreeSet<HiddenArgKind >> >,
     pub draw_shader_refs: RefCell<Option<BTreeSet<Ident >> >,
-    pub const_refs: RefCell<Option<BTreeSet<ConstPtr >> >,
+    //pub const_refs: RefCell<Option<BTreeSet<ConstPtr >> >,
     pub live_refs: RefCell<Option<BTreeMap<ValuePtr, Ty >> >,
     
     pub struct_refs: RefCell<Option<BTreeSet<StructPtr >> >,
@@ -431,7 +431,6 @@ pub enum PlainCallType {
 pub enum VarResolve {
     NotFound,
     Function(FnPtr),
-    Const(ConstPtr),
     LiveValue(ValuePtr, TyLit)
 }
 
@@ -439,7 +438,6 @@ pub enum VarResolve {
 pub enum VarKind {
     Local {ident: Ident, shadow: ScopeSymShadow},
     MutLocal {ident: Ident, shadow: ScopeSymShadow},
-    Const(ConstPtr),
     LiveValue(ValuePtr)
 }
 
@@ -722,7 +720,6 @@ impl FnDef {
             has_return: Cell::new(false),
             hidden_args:RefCell::new(None),
             closure_sites: RefCell::new(None),
-            const_refs: RefCell::new(None),
             live_refs: RefCell::new(None),
             struct_refs: RefCell::new(None),
             draw_shader_refs: RefCell::new(None),
@@ -742,7 +739,6 @@ impl FnDef {
         //*self.closure_deps.borrow_mut() = Some(BTreeSet::new());
         *self.constructor_fn_deps.borrow_mut() = Some(BTreeSet::new());
         *self.draw_shader_refs.borrow_mut() = Some(BTreeSet::new());
-        *self.const_refs.borrow_mut() = Some(BTreeSet::new());
         *self.live_refs.borrow_mut() = Some(BTreeMap::new());
         *self.const_table.borrow_mut() = Some(Vec::new());
         *self.const_table_spans.borrow_mut() = Some(Vec::new());
@@ -1075,7 +1071,30 @@ impl Ty {
                 Ty::ClosureDecl=>panic!()
             }
         }
-    }    
+    }
+    
+    pub fn from_live_node(index:usize, nodes:&[LiveNode])->Option<Self>{
+        match &nodes[index].value{
+            LiveValue::Id(id)=>match id{
+                id!(bool)=>Some(Self::Bool),
+                id!(int)=>Some(Self::Int),
+                id!(float)=>Some(Self::Float),
+                id!(vec2)=>Some(Self::Vec2),
+                id!(vec3)=>Some(Self::Vec3),
+                id!(vec4)=>Some(Self::Vec4),
+                id!(texture2d)=>Some(Self::Texture2D),
+                _=>None
+            }
+            LiveValue::Bool(_)=>Some(Self::Int),
+            LiveValue::Int(_)=>Some(Self::Int),
+            LiveValue::Float(_)=>Some(Self::Float),
+            LiveValue::Color(_)=>Some(Self::Vec4),
+            LiveValue::Vec2(_)=>Some(Self::Vec2),
+            LiveValue::Vec3(_)=>Some(Self::Vec3),
+            LiveValue::Vec4(_) =>Some(Self::Vec4),
+            _=>None
+        }
+    }
 }
 
 impl fmt::Display for Ty {
@@ -1333,12 +1352,6 @@ impl fmt::Display for StructPtr {
 impl fmt::Display for FnPtr {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "fn_{}", self.0)
-    }
-}
-
-impl fmt::Display for ConstPtr {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "const_{}", self.0)
     }
 }
 

@@ -232,9 +232,6 @@ impl<'a> DepAnalyser<'a> {
     fn dep_analyse_var_expr(&mut self, _span: Span, ty:Option<&Ty>, kind: &Cell<Option<VarKind >>) {
         // alright so. a var expr..
         match kind.get().unwrap() {
-            VarKind::Const(const_ptr) =>{
-                self.fn_def.const_refs.borrow_mut().as_mut().unwrap().insert(const_ptr);
-            }
             VarKind::LiveValue(value_ptr)=>{
                 self.fn_def.live_refs.borrow_mut().as_mut().unwrap().insert(value_ptr, ty.unwrap().clone());
             }

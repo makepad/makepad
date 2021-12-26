@@ -18,11 +18,11 @@ live_register!{
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(
-                    shadow,
-                    shadow,
-                    self.rect_size.x - shadow * (1. + self.pressed),
-                    self.rect_size.y - shadow * (1. + self.pressed),
-                    border_radius
+                    SHADOW,
+                    SHADOW,
+                    self.rect_size.x - SHADOW * (1. + self.pressed),
+                    self.rect_size.y - SHADOW * (1. + self.pressed),
+                    BORDER_RADIUS
                 );
                 sdf.blur = 6.0;
                 sdf.fill(mix(#0007, #0, self.hover));
@@ -30,8 +30,8 @@ live_register!{
                 sdf.box(
                     SHADOW,
                     SHADOW,
-                    self.rect_size.x - shadow * 2.,
-                    self.rect_size.y - shadow * 2.,
+                    self.rect_size.x - SHADOW * 2.,
+                    self.rect_size.y - SHADOW * 2.,
                     BORDER_RADIUS
                 );
                 return sdf.fill(mix(mix(#3, #4, self.hover), #2a, self.pressed));

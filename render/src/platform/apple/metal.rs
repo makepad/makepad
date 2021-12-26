@@ -710,7 +710,12 @@ impl CxPlatformShader {
             Some(library) => library,
             None => {
                 let description: ObjcId = unsafe {msg_send![error, localizedDescription]};
-                panic!("{}", nsstring_to_string(description));
+                let string = nsstring_to_string(description);
+                println!("{}", string);
+                for (index,line) in shader.mtlsl.split("\n").enumerate(){
+                    println!("{}: {}", index+1, line);
+                }
+                panic!("{}", string);
             }
         });
 
