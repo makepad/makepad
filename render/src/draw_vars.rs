@@ -248,7 +248,7 @@ impl DrawVars {
                     let draw_shader_id = cx.draw_shaders.len();
                     
                     //let const_table = DrawShaderConstTable::default();
-                    let mut const_table = cx.shader_registry.compute_const_table(draw_shader_ptr);
+                    let const_table = cx.shader_registry.compute_const_table(draw_shader_ptr);
                     
                     let mut mapping = CxDrawShaderMapping::from_draw_shader_def(
                         cx.shader_registry.draw_shader_defs.get(&draw_shader_ptr).unwrap(),
@@ -397,6 +397,10 @@ impl DrawVars {
                     return nodes.skip_node(index)
                 }
             }
+        }
+        
+        if  nodes[index].value.is_id() || nodes[index].id.is_capitalised(){
+            return nodes.skip_node(index)
         }
         
         if let Some(draw_shader) = self.draw_shader {
@@ -661,7 +665,6 @@ impl CxDrawShaderMapping {
                     if let LiveValue::Float(float) = node.value {
                         let o = input.offset;
                         self.live_uniforms_buf[o] = float as f32;
-                        
                     }
                 },
                 2 => { // float

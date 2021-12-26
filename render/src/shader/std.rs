@@ -93,7 +93,7 @@ live_register!{
         field blur: float
         field aa: float
         field scale_factor: float
-        field field: float
+        field dist: float
         
         fn antialias(p: vec2) -> float {
             return 1.0 / length(vec2(length(dFdx(p)), length(dFdy(p))));
@@ -112,7 +112,7 @@ live_register!{
                 blur:0.00001
                 aa: antialias(pos)
                 scale_factor:1.0
-                field:0.0
+                dist:0.0
             };
         }
         
@@ -198,58 +198,58 @@ live_register!{
         }
         
         fn union(inout self) {
-            self.old_shape = self.shape = min(self.field, self.old_shape);
+            self.old_shape = self.shape = min(self.dist, self.old_shape);
         }
         
         fn intersect(inout self) {
-            self.old_shape = self.shape = max(self.field, self.old_shape);
+            self.old_shape = self.shape = max(self.dist, self.old_shape);
         }
         
         fn subtract(inout self) {
-            self.old_shape = self.shape = max(-self.field, self.old_shape);
+            self.old_shape = self.shape = max(-self.dist, self.old_shape);
         }
         
         fn gloop(inout self, k: float) {
-            let h = clamp(0.5 + 0.5 * (self.old_shape - self.field) / k, 0.0, 1.0);
-            self.old_shape = self.shape = mix(self.old_shape, self.field, h) - k * h * (1.0 - h);
+            let h = clamp(0.5 + 0.5 * (self.old_shape - self.dist) / k, 0.0, 1.0);
+            self.old_shape = self.shape = mix(self.old_shape, self.dist, h) - k * h * (1.0 - h);
         }
         
         fn blend(inout self, k: float) {
-            self.old_shape = self.shape = mix(self.old_shape, self.field, k);
+            self.old_shape = self.shape = mix(self.old_shape, self.dist, k);
         }
         
         fn circle(inout self, x: float, y: float, r: float) {
             let c = self.pos - vec2(x, y);
             let len = sqrt(c.x*c.x+c.y*c.y);
-            self.field = (len - r) / self.scale_factor;
+            self.dist = (len - r) / self.scale_factor;
             self.old_shape = self.shape;
-            self.shape = min(self.shape, self.field);
+            self.shape = min(self.shape, self.dist);
         }
         
         fn box(inout self, x: float, y: float, w: float, h: float, r: float) {
             let p = self.pos - vec2(x, y);
             let size = vec2(0.5 * w, 0.5 * h);
             let bp = max(abs(p - size.xy) - (size.xy - vec2(2. * r, 2. * r).xy), vec2(0., 0.));
-            self.field = (length(bp) - 2. * r) / self.scale_factor;
+            self.dist = (length(bp) - 2. * r) / self.scale_factor;
             self.old_shape = self.shape;
-            self.shape = min(self.shape, self.field);
+            self.shape = min(self.shape, self.dist);
         }
         
         fn rect(inout self, x: float, y: float, w: float, h: float) {
             let s = vec2(w, h) * 0.5;
             let d = abs(vec2(x, y) - self.pos + s) - s;
             let dm = min(d, vec2(0., 0.));
-            self.field = max(dm.x, dm.y) + length(max(d, vec2(0., 0.)));
+            self.dist = max(dm.x, dm.y) + length(max(d, vec2(0., 0.)));
             self.old_shape = self.shape;
-            self.shape = min(self.shape, self.field);
+            self.shape = min(self.shape, self.dist);
         }
         
         fn hexagon(inout self, x: float, y: float, r: float) {
             let dx = abs(x - self.pos.x) * 1.15;
             let dy = abs(y - self.pos.y);
-            self.field = max(dy + cos(60.0 * TORAD) * dx - r, dx - r);
+            self.dist = max(dy + cos(60.0 * TORAD) * dx - r, dx - r);
             self.old_shape = self.shape;
-            self.shape = min(self.shape, self.field);
+            self.shape = min(self.shape, self.dist);
         }
         
         fn move_to(inout self, x: float, y: float) {
@@ -264,10 +264,10 @@ live_register!{
             let ba = p - self.last_pos;
             let h = clamp(dot(pa, ba) / dot(ba, ba), 0.0, 1.0);
             let s = sign(pa.x * ba.y - pa.y * ba.x);
-            self.field = length(pa - ba * h) / self.scale_factor;
+            self.dist = length(pa - ba * h) / self.scale_factor;
             self.old_shape = self.shape;
-            self.shape = min(self.shape, self.field);
-            self.clip = max(self.clip, self.field * s);
+            self.shape = min(self.shape, self.dist);
+            self.clip = max(self.clip, self.dist * s);
             self.has_clip = 1.0;
             self.last_pos = p;
         }

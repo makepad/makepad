@@ -706,17 +706,13 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
                 LiveValue::DSL {
                     token_start,
                     token_count,
-                    expanded_token_id
+                    expand_index
                 } => {
-                    writeln!(f, "<DSL> {} :token_start:{}, token_count:{}", node.id, token_start, token_count).unwrap();
+                    writeln!(f, "<DSL> {} :token_start:{}, token_count:{} expand_index:{:?}", node.id, token_start, token_count,expand_index).unwrap();
                 },
                 LiveValue::Use(module_path) => {
                     writeln!(f, "<Use> {}::{}", module_path, node.id).unwrap();
                 }
-                LiveValue::Annotate(with) => {
-                    writeln!(f, "<Annotate> {} {}", with, node.id).unwrap();
-                }
-                
             }
             index += 1;
         }

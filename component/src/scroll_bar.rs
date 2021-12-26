@@ -5,7 +5,6 @@ live_register!{
     
     DrawScrollBar: {{DrawScrollBar}} {
         draw_depth: 5.0
-        
         const BORDER_RADIUS: 1.5
         
         instance pressed: 0.0
