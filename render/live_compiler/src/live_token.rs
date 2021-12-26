@@ -11,13 +11,13 @@ use {
     },
     crate::{
         live_ptr::{LiveFileId},
-        span::Span
+        span::TextSpan
     }
 };
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct TokenWithSpan {
-    pub span: Span,
+    pub span: TextSpan,
     pub token: LiveToken,
 }
 

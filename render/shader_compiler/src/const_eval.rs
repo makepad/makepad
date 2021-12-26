@@ -4,7 +4,7 @@ use{
         LiveError,
         LiveErrorOrigin,
         live_error_origin,
-        Span
+        TokenSpan
     },
     crate::{
         shader_ast::*,
@@ -20,7 +20,7 @@ impl ConstEvaluator {
     pub fn const_eval_expr(&self, expr: &Expr) -> Result<Val, LiveError> {
         self.try_const_eval_expr(expr).ok_or_else(|| LiveError {
             origin:live_error_origin!(),
-            span: expr.span,
+            span: expr.span.text_span,
             message: String::from("expression is not const"),
         })
     }
@@ -90,7 +90,7 @@ impl ConstEvaluator {
 
     fn try_const_eval_cond_expr(
         &self,
-        _span: Span,
+        _span: TokenSpan,
         expr: &Expr,
         expr_if_true: &Expr,
         expr_if_false: &Expr,
@@ -108,7 +108,7 @@ impl ConstEvaluator {
     #[allow(clippy::float_cmp)]
     fn try_const_eval_bin_expr(
         &self,
-        _span: Span,
+        _span: TokenSpan,
         op: BinOp,
         left_expr: &Expr,
         right_expr: &Expr,
@@ -185,7 +185,7 @@ impl ConstEvaluator {
         }
     }
 
-    fn try_const_eval_un_expr(&self, _span: Span, op: UnOp, expr: &Expr) -> Option<Val> {
+    fn try_const_eval_un_expr(&self, _span: TokenSpan, op: UnOp, expr: &Expr) -> Option<Val> {
         let val = self.try_const_eval_expr(expr);
         let val = val?;
         if self.options.no_const_collapse{
@@ -206,7 +206,7 @@ impl ConstEvaluator {
 
     fn try_const_eval_field_expr(
         &self,
-        _span: Span,
+        _span: TokenSpan,
         expr: &Expr,
         _field_ident: Ident,
     ) -> Option<Val> {
@@ -216,7 +216,7 @@ impl ConstEvaluator {
 
     fn try_const_eval_index_expr(
         &self,
-        _span: Span,
+        _span: TokenSpan,
         expr: &Expr,
         _index_expr: &Expr,
     ) -> Option<Val> {
@@ -238,7 +238,7 @@ impl ConstEvaluator {
 
     fn try_const_eval_var_expr(
         &self,
-        _span: Span,
+        _span: TokenSpan,
         _kind: &Cell<Option<VarKind>>,
         //_ident_path: IdentPath,
     ) -> Option<Val> {
@@ -248,7 +248,7 @@ impl ConstEvaluator {
     fn try_const_eval_struct_cons(
         &self,
         _struct_ptr: StructPtr,
-        _span: Span,
+        _span: TokenSpan,
         args: &Vec<(Ident,Expr)>,
     ) -> Option<Val> {
         for arg in args{
@@ -257,7 +257,7 @@ impl ConstEvaluator {
         None
     }
 
-    fn try_const_eval_lit_expr(&self, _span: Span, lit: Lit) -> Option<Val> {
+    fn try_const_eval_lit_expr(&self, _span: TokenSpan, lit: Lit) -> Option<Val> {
         Some(lit.to_val())
     }
 }

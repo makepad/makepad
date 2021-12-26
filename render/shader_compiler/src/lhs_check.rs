@@ -76,65 +76,65 @@ impl<'a> LhsChecker<'a> {
     
     fn lhs_check_closure(
         &mut self,
-        span: Span,
+        span: TokenSpan,
     ) -> Result<(), LiveError> {
         return Err(LiveError {
             origin: live_error_origin!(),
-            span,
+            span:span.text_span,
             message: String::from("expression is not a valid left hand side"),
         });
     }
     
     fn lhs_check_cond_expr(
         &mut self,
-        span: Span,
+        span: TokenSpan,
         _expr: &Expr,
         _expr_if_true: &Expr,
         _expr_if_false: &Expr,
     ) -> Result<(), LiveError> {
         return Err(LiveError {
             origin: live_error_origin!(),
-            span,
+            span:span.text_span,
             message: String::from("expression is not a valid left hand side"),
         });
     }
     
     fn lhs_check_bin_expr(
         &mut self,
-        span: Span,
+        span: TokenSpan,
         _op: BinOp,
         _left_expr: &Expr,
         _right_expr: &Expr,
     ) -> Result<(), LiveError> {
         return Err(LiveError {
             origin:live_error_origin!(),
-            span,
+            span:span.text_span,
             message: String::from("expression is not a valid left hand side"),
         });
     }
     
-    fn lhs_check_un_expr(&mut self, span: Span, _op: UnOp, _expr: &Expr) -> Result<(), LiveError> {
+    fn lhs_check_un_expr(&mut self, span: TokenSpan, _op: UnOp, _expr: &Expr) -> Result<(), LiveError> {
         return Err(LiveError {
             origin:live_error_origin!(),
-            span,
+            span:span.text_span,
             message: String::from("expression is not a valid left hand side"),
         });
     }
     
     fn lhs_check_all_call_expr(
         &mut self,
-        span: Span,
+        span: TokenSpan,
     ) -> Result<(), LiveError> {
         return Err(LiveError {
             origin:live_error_origin!(),
-            span,
+            span:span.text_span,
             message: String::from("expression is not a valid left hand side"),
         });
     }
     
     fn lhs_check_field_expr(
         &mut self,
-        span: Span,
+        span: TokenSpan,
         expr: &Expr,
         field_ident: Ident,
     ) -> Result<(), LiveError> {
@@ -149,7 +149,7 @@ impl<'a> LhsChecker<'a> {
                     _=>{
                         Err(LiveError {
                             origin:live_error_origin!(),
-                            span,
+                            span:span.text_span,
                             message: String::from("Can only assign to varying values for shader self"),
                         })
                     }
@@ -163,7 +163,7 @@ impl<'a> LhsChecker<'a> {
     
     fn lhs_check_index_expr(
         &mut self,
-        _span: Span,
+        _span: TokenSpan,
         expr: &Expr,
         _index_expr: &Expr,
     ) -> Result<(), LiveError> {
@@ -172,20 +172,20 @@ impl<'a> LhsChecker<'a> {
     
     fn lhs_check_call_expr(
         &mut self,
-        span: Span,
+        span: TokenSpan,
         _ident_path: IdentPath,
         _arg_exprs: &[Expr],
     ) -> Result<(), LiveError> {
         return Err(LiveError {
             origin:live_error_origin!(),
-            span,
+            span:span.text_span,
             message: String::from("expression is not a valid left hand side"),
         });
     }
     
     fn lhs_check_var_expr(
         &mut self,
-        span: Span,
+        span: TokenSpan,
         kind: &Cell<Option<VarKind >>,
     ) -> Result<(), LiveError> {
         if let VarKind::MutLocal{..} = kind.get().unwrap(){
@@ -194,7 +194,7 @@ impl<'a> LhsChecker<'a> {
         else{
             Err(LiveError {
                 origin:live_error_origin!(),
-                span,
+                span:span.text_span,
                 message: String::from("expression is not a valid left hand side"),
             })
         }
@@ -213,7 +213,7 @@ impl<'a> LhsChecker<'a> {
         });
     }*/
     
-    fn lhs_check_lit_expr(&mut self, _span: Span, _lit: Lit) -> Result<(), LiveError> {
+    fn lhs_check_lit_expr(&mut self, _span: TokenSpan, _lit: Lit) -> Result<(), LiveError> {
         Ok(())
     }
 }

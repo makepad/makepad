@@ -177,7 +177,7 @@ impl DrawVars {
                             after_draw_vars: &mut bool,
                             live_type: LiveType,
                             draw_shader_def: &mut DrawShaderDef,
-                            span: Span
+                            span: TokenSpan
                         ) {
                             if let Some(lf) = live_registry.live_type_infos.get(&live_type) {
                                 

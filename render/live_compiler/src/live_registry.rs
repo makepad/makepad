@@ -11,7 +11,7 @@ use {
         live_node_vec::{LiveNodeSlice, LiveNodeVec, LiveNodeMutReader},
         live_ptr::{LiveFileId, LivePtr, LiveModuleId},
         live_token::{LiveToken, LiveTokenId, TokenWithSpan},
-        span::{Span, TextPos},
+        span::{TextSpan, TokenSpan, TextPos},
         live_expander::{LiveExpander}
     }
 };
@@ -112,18 +112,18 @@ impl LiveRegistry {
     }
     
     // this looks at the 'id' before the live token id
-    pub fn get_node_prefix(&self, origin:LiveNodeOrigin) -> Option<LiveId> {
-        if !origin.node_has_prefix(){
+    pub fn get_node_prefix(&self, origin: LiveNodeOrigin) -> Option<LiveId> {
+        if !origin.node_has_prefix() {
             return None
         }
         let first_def = origin.first_def().unwrap();
         let token_index = first_def.token_index();
-        if token_index == 0{
+        if token_index == 0 {
             return None;
         }
         let doc = &self.live_files[first_def.file_id().to_index()].document;
-        let token = doc.tokens[token_index-1];
-        if let LiveToken::Ident(id) = token.token{
+        let token = doc.tokens[token_index - 1];
+        if let LiveToken::Ident(id) = token.token {
             return Some(id)
         }
         None
@@ -220,7 +220,7 @@ impl LiveRegistry {
         None
     }
     
-    pub fn find_scope_ptr_via_expand_index(&self, file_id:LiveFileId, index:usize, item: LiveId) -> Option<LivePtr> {
+    pub fn find_scope_ptr_via_expand_index(&self, file_id: LiveFileId, index: usize, item: LiveId) -> Option<LivePtr> {
         // ok lets start
         // let token_id = origin.token_id().unwrap();
         //let index = origin.node_index().unwrap();
@@ -238,10 +238,10 @@ impl LiveRegistry {
         live_error.to_live_file_error(&live_file.file_name)
     }
     
-    pub fn token_id_to_span(&self, token_id: LiveTokenId) -> Span {
+    pub fn token_id_to_span(&self, token_id: LiveTokenId) -> TokenSpan {
         self.live_files[token_id.file_id().to_index()].document.token_id_to_span(token_id)
     }
-
+    
     pub fn tokenize_from_str(source: &str, start_pos: TextPos, file_id: LiveFileId) -> Result<(Vec<TokenWithSpan>, Vec<char>), LiveError> {
         let mut line_chars = Vec::new();
         let mut state = State::default();
@@ -256,7 +256,7 @@ impl LiveRegistry {
             loop {
                 let (next_state, full_token) = state.next(&mut cursor);
                 if let Some(full_token) = full_token {
-                    let span = Span {
+                    let span = TextSpan {
                         file_id,
                         start: pos,
                         end: TextPos {column: pos.column + full_token.len as u32, line: pos.line}
@@ -296,7 +296,7 @@ impl LiveRegistry {
             pos.line += 1;
             pos.column = 0;
         }
-        tokens.push(TokenWithSpan {span: Span::default(), token: LiveToken::Eof});
+        tokens.push(TokenWithSpan {span: TextSpan::default(), token: LiveToken::Eof});
         Ok((tokens, strings))
     }
     
@@ -328,7 +328,7 @@ impl LiveRegistry {
                 
                 if range.is_in_range(TokenPos {line: line, index: token_index}) {
                     // ok so. now we filter the token
-                    let span = Span {
+                    let span = TextSpan {
                         file_id,
                         start: TextPos {column: column as u32, line: line as u32},
                         end: TextPos {column: (column + full_token.len) as u32, line: line as u32}
@@ -461,8 +461,8 @@ impl LiveRegistry {
                             path.pop();
                         }
                         // ok this is a direct patch
-                        else if is_prop_assign && reader.origin.token_id() == Some(token_id){
-                                
+                        else if is_prop_assign && reader.origin.token_id() == Some(token_id) {
+                            
                             if !reader.update_from_live_token(&live_tokens[*mutation].token) {
                                 println!("update_from_live_token returns false investigate! {:?}", reader.node());
                             }
@@ -473,7 +473,7 @@ impl LiveRegistry {
                                 path.pop();
                             }
                         }
-                        else if reader.is_token_id_inside_dsl(token_id){
+                        else if reader.is_token_id_inside_dsl(token_id) {
                             if self.main_module == Some(file_id) {
                                 // ok so. lets write by path here
                                 path.push(reader.id);
@@ -491,7 +491,6 @@ impl LiveRegistry {
         main_apply.close();
         //println!("{}", main_apply.to_string(0,100));
         self.main_apply = Some(main_apply);
-        
     }
     
     pub fn register_live_file(

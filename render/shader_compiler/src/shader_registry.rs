@@ -331,7 +331,8 @@ impl ShaderRegistry {
                     &mut parser_deps,
                     if let Some(struct_ptr) = struct_ptr {Some(FnSelfKind::Struct(struct_ptr))}else {None},
                     expand_index.unwrap() as usize,
-                    fn_node.origin.token_id().unwrap().file_id()
+                    fn_node.origin.token_id().unwrap().file_id(),
+                    token_start as usize
                     //Some(struct_full_ptr)
                 );
                 
@@ -406,7 +407,8 @@ impl ShaderRegistry {
                                 &mut parser_deps,
                                 Some(FnSelfKind::Struct(struct_ptr)),
                                 expand_index.unwrap() as usize,
-                                prop.origin.token_id().unwrap().file_id()
+                                prop.origin.token_id().unwrap().file_id(),
+                                token_start as usize
                                 //Some(struct_full_ptr)
                             );
                             match origin_doc.tokens[token_start as usize].token {
@@ -427,7 +429,7 @@ impl ShaderRegistry {
                                 _ => {
                                     return Err(LiveError {
                                         origin: live_error_origin!(),
-                                        span: live_registry.token_id_to_span(prop.origin.token_id().unwrap()),
+                                        span: live_registry.token_id_to_span(prop.origin.token_id().unwrap()).text_span,
                                         message: format!("Unexpected DSL node")
                                     })
                                     /*
@@ -454,7 +456,7 @@ impl ShaderRegistry {
                                 // TODO support structs as fields here
                                 return Err(LiveError {
                                     origin: live_error_origin!(),
-                                    span: live_registry.token_id_to_span(prop.origin.token_id().unwrap()),
+                                    span: live_registry.token_id_to_span(prop.origin.token_id().unwrap()).text_span,
                                     message: format!("Type not found for struct field {}", type_name)
                                 })
                             }
@@ -462,7 +464,7 @@ impl ShaderRegistry {
                         _ => {
                             return Err(LiveError {
                                 origin: live_error_origin!(),
-                                span: live_registry.token_id_to_span(prop.origin.token_id().unwrap()),
+                                span: live_registry.token_id_to_span(prop.origin.token_id().unwrap()).text_span,
                                 message: format!("Cannot use {:?} in struct", prop.value)
                             })
                         }
@@ -497,20 +499,20 @@ impl ShaderRegistry {
     // lets compile the thing
     pub fn analyse_draw_shader<F>(&mut self, live_registry: &LiveRegistry, draw_shader_ptr: DrawShaderPtr, mut ext_self: F) -> Result<(),
         LiveError>
-    where F: FnMut(&LiveRegistry, &ShaderRegistry, Span, DrawShaderQuery, LiveType, &mut DrawShaderDef)
+    where F: FnMut(&LiveRegistry, &ShaderRegistry, TokenSpan, DrawShaderQuery, LiveType, &mut DrawShaderDef)
     {
         let mut draw_shader_def = DrawShaderDef::default();
         
         // lets insert the 2D drawshader uniforms
-        draw_shader_def.add_uniform(id_from_str!(camera_projection).unwrap(), id_from_str!(pass).unwrap(), Ty::Mat4, Span::default());
-        draw_shader_def.add_uniform(id_from_str!(camera_view).unwrap(), id_from_str!(pass).unwrap(), Ty::Mat4, Span::default());
-        draw_shader_def.add_uniform(id_from_str!(camera_inv).unwrap(), id_from_str!(pass).unwrap(), Ty::Mat4, Span::default());
-        draw_shader_def.add_uniform(id_from_str!(dpi_factor).unwrap(), id_from_str!(pass).unwrap(), Ty::Float, Span::default());
-        draw_shader_def.add_uniform(id_from_str!(dpi_dilate).unwrap(), id_from_str!(pass).unwrap(), Ty::Float, Span::default());
-        draw_shader_def.add_uniform(id_from_str!(view_transform).unwrap(), id_from_str!(view).unwrap(), Ty::Mat4, Span::default());
-        draw_shader_def.add_uniform(id_from_str!(draw_clip).unwrap(), id_from_str!(draw).unwrap(), Ty::Vec4, Span::default());
-        draw_shader_def.add_uniform(id_from_str!(draw_scroll).unwrap(), id_from_str!(draw).unwrap(), Ty::Vec4, Span::default());
-        draw_shader_def.add_uniform(id_from_str!(draw_zbias).unwrap(), id_from_str!(draw).unwrap(), Ty::Float, Span::default());
+        draw_shader_def.add_uniform(id_from_str!(camera_projection).unwrap(), id_from_str!(pass).unwrap(), Ty::Mat4, TokenSpan::default());
+        draw_shader_def.add_uniform(id_from_str!(camera_view).unwrap(), id_from_str!(pass).unwrap(), Ty::Mat4, TokenSpan::default());
+        draw_shader_def.add_uniform(id_from_str!(camera_inv).unwrap(), id_from_str!(pass).unwrap(), Ty::Mat4, TokenSpan::default());
+        draw_shader_def.add_uniform(id_from_str!(dpi_factor).unwrap(), id_from_str!(pass).unwrap(), Ty::Float, TokenSpan::default());
+        draw_shader_def.add_uniform(id_from_str!(dpi_dilate).unwrap(), id_from_str!(pass).unwrap(), Ty::Float, TokenSpan::default());
+        draw_shader_def.add_uniform(id_from_str!(view_transform).unwrap(), id_from_str!(view).unwrap(), Ty::Mat4, TokenSpan::default());
+        draw_shader_def.add_uniform(id_from_str!(draw_clip).unwrap(), id_from_str!(draw).unwrap(), Ty::Vec4, TokenSpan::default());
+        draw_shader_def.add_uniform(id_from_str!(draw_scroll).unwrap(), id_from_str!(draw).unwrap(), Ty::Vec4, TokenSpan::default());
+        draw_shader_def.add_uniform(id_from_str!(draw_zbias).unwrap(), id_from_str!(draw).unwrap(), Ty::Float, TokenSpan::default());
         
         let (doc, class_node) = live_registry.ptr_to_doc_node(draw_shader_ptr.0);
         
@@ -549,7 +551,7 @@ impl ShaderRegistry {
                             if ty.is_none() {
                                 return Err(LiveError {
                                     origin: live_error_origin!(),
-                                    span,
+                                    span: span.text_span,
                                     message: format!("Invalid type for shader {:?}", prop.value)
                                 })
                             }
@@ -646,7 +648,7 @@ impl ShaderRegistry {
                                 _ => {
                                     return Err(LiveError {
                                         origin: live_error_origin!(),
-                                        span,
+                                        span: span.text_span,
                                         message: format!("Unexpected variable prefix {:?}", before)
                                     })
                                 }
@@ -675,6 +677,7 @@ impl ShaderRegistry {
                                 Some(FnSelfKind::DrawShader(draw_shader_ptr)),
                                 expand_index.unwrap() as usize,
                                 prop.origin.token_id().unwrap().file_id(),
+                                token_start as usize
                                 //None
                             );
                             
@@ -740,7 +743,7 @@ impl ShaderRegistry {
                         if field_a.ident == field_b.ident && !field_a.ident.0.is_empty() {
                             return Err(LiveError {
                                 origin: live_error_origin!(),
-                                span: field_a.span,
+                                span: field_a.span.text_span,
                                 message: format!("Field double declaration  {}", field_b.ident)
                             })
                         }
@@ -752,7 +755,7 @@ impl ShaderRegistry {
                 if !method_set.contains(&id!(vertex)) {
                     return Err(LiveError {
                         origin: live_error_origin!(),
-                        span: live_registry.token_id_to_span(class_node.origin.token_id().unwrap()),
+                        span: live_registry.token_id_to_span(class_node.origin.token_id().unwrap()).text_span,
                         message: format!("analyse_draw_shader missing vertex method")
                     })
                 }
@@ -760,7 +763,7 @@ impl ShaderRegistry {
                 if !method_set.contains(&id!(pixel)) {
                     return Err(LiveError {
                         origin: live_error_origin!(),
-                        span: live_registry.token_id_to_span(class_node.origin.token_id().unwrap()),
+                        span: live_registry.token_id_to_span(class_node.origin.token_id().unwrap()).text_span,
                         message: format!("analyse_draw_shader missing pixel method")
                     })
                 }
@@ -783,7 +786,7 @@ impl ShaderRegistry {
             }
             _ => return Err(LiveError {
                 origin: live_error_origin!(),
-                span: live_registry.token_id_to_span(class_node.origin.token_id().unwrap()),
+                span: live_registry.token_id_to_span(class_node.origin.token_id().unwrap()).text_span,
                 message: format!("analyse_draw_shader could not find shader class")
             })
         }

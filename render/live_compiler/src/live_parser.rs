@@ -13,7 +13,7 @@ use {
     crate::{
         live_token::{LiveToken, TokenWithSpan, LiveTokenId},
         live_ptr::{LiveFileId, LiveModuleId},
-        span::{Span, TextPos},
+        span::{TextSpan, TextPos},
         live_error::{LiveError, LiveErrorOrigin},
         live_document::LiveDocument,
         live_node::{LiveNode, LiveValue, LiveTypeInfo, LiveBinOp, LiveUnOp, LiveNodeOrigin, LiveEditInfo},
@@ -46,7 +46,7 @@ impl<'a> LiveParser<'a> {
 
 impl<'a> LiveParser<'a> {
     
-    fn peek_span(&self) -> Span {
+    fn peek_span(&self) -> TextSpan {
         self.token_with_span.span
     }
     

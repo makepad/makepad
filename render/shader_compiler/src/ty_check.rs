@@ -59,7 +59,7 @@ impl<'a> TyChecker<'a> {
     
     fn ty_check_array_ty_expr(
         &mut self,
-        _span: Span,
+        _span: TokenSpan,
         elem_ty_expr: &TyExpr,
         len: u32,
     ) -> Result<Ty, LiveError> {
@@ -68,13 +68,13 @@ impl<'a> TyChecker<'a> {
         Ok(Ty::Array {elem_ty, len})
     }
     
-    fn ty_check_lit_ty_expr(&mut self, _span: Span, ty_lit: TyLit) -> Result<Ty, LiveError> {
+    fn ty_check_lit_ty_expr(&mut self, _span: TokenSpan, ty_lit: TyLit) -> Result<Ty, LiveError> {
         Ok(ty_lit.to_ty())
     }
     
     pub fn ty_check_expr_with_expected_ty(
         &mut self,
-        span: Span,
+        span: TokenSpan,
         expr: &Expr,
         expected_ty: &Ty,
     ) -> Result<Ty, LiveError> {
@@ -82,7 +82,7 @@ impl<'a> TyChecker<'a> {
         if &actual_ty != expected_ty {
             return Err(LiveError {
                 origin: live_error_origin!(),
-                span,
+                span:span.text_span,
                 message: format!(
                     "can't match expected type `{}` with actual type `{}",
                     expected_ty,
@@ -182,7 +182,7 @@ impl<'a> TyChecker<'a> {
     
     fn ty_check_cond_expr(
         &mut self,
-        span: Span,
+        span: TokenSpan,
         expr: &Expr,
         expr_if_true: &Expr,
         expr_if_false: &Expr,
@@ -195,7 +195,7 @@ impl<'a> TyChecker<'a> {
     
     fn ty_check_bin_expr(
         &mut self,
-        span: Span,
+        span: TokenSpan,
         op: BinOp,
         left_expr: &Expr,
         right_expr: &Expr,
@@ -360,7 +360,7 @@ impl<'a> TyChecker<'a> {
         }
         .ok_or_else( || LiveError {
             origin: live_error_origin!(),
-            span,
+            span:span.text_span,
             message: format!(
                 "can't apply binary operator `{}` to operands of type `{}` and `{}",
                 op,
@@ -371,7 +371,7 @@ impl<'a> TyChecker<'a> {
         })
     }
     
-    fn ty_check_un_expr(&mut self, span: Span, op: UnOp, expr: &Expr) -> Result<Ty, LiveError> {
+    fn ty_check_un_expr(&mut self, span: TokenSpan, op: UnOp, expr: &Expr) -> Result<Ty, LiveError> {
         let ty = self.ty_check_expr(expr) ?;
         match op {
             UnOp::Not => match ty {
@@ -389,7 +389,7 @@ impl<'a> TyChecker<'a> {
         }
         .ok_or_else( || LiveError {
             origin: live_error_origin!(),
-            span,
+            span:span.text_span,
             message: format!(
                 "can't apply unary operator `{}` to operand of type `{}`",
                 op,
@@ -440,7 +440,7 @@ impl<'a> TyChecker<'a> {
     
     fn ty_check_plain_call_expr(
         &mut self,
-        span: Span,
+        span: TokenSpan,
         ident: Option<Ident>,
         arg_exprs: &[Expr],
         fn_ptr: Option<FnPtr>,
@@ -461,7 +461,7 @@ impl<'a> TyChecker<'a> {
                         if closure_args.len() > 0{
                             return Err(LiveError {
                                 origin: live_error_origin!(),
-                                span,
+                                span:span.text_span,
                                 message: format!("Cannot pass closures to closures, please implement"),
                             })
                         }
@@ -485,14 +485,14 @@ impl<'a> TyChecker<'a> {
         }
         return Err(LiveError {
             origin: live_error_origin!(),
-            span,
+            span:span.text_span,
             message: format!("Function not found {}", ident.unwrap()),
         }) 
     }
     
     fn ty_check_method_call_expr(
         &mut self,
-        span: Span,
+        span: TokenSpan,
         ident: Ident,
         arg_exprs: &[Expr],
         closure_site_index: &Cell<Option<usize>>,
@@ -518,7 +518,7 @@ impl<'a> TyChecker<'a> {
                     }
                     return Err(LiveError {
                         origin: live_error_origin!(),
-                        span,
+                        span:span.text_span,
                         message: format!("shader method `{}` is not type checked `{}`", ident, ty),
                     });
                 }
@@ -541,7 +541,7 @@ impl<'a> TyChecker<'a> {
                     }
                     return Err(LiveError {
                         origin: live_error_origin!(),
-                        span,
+                        span:span.text_span,
                         message: format!("struct method `{}` is not type checked `{}`", ident, ty),
                     });
                 }
@@ -550,7 +550,7 @@ impl<'a> TyChecker<'a> {
         }
         Err(LiveError {
             origin: live_error_origin!(),
-            span,
+            span:span.text_span,
             message: format!("method `{}` is not defined on type `{}`", ident, ty),
         })
     }
@@ -558,7 +558,7 @@ impl<'a> TyChecker<'a> {
     
     fn ty_check_builtin_call_expr(
         &mut self,
-        span: Span,
+        span: TokenSpan,
         ident: Ident,
         arg_exprs: &[Expr],
     ) -> Result<Ty, LiveError> {
@@ -589,13 +589,13 @@ impl<'a> TyChecker<'a> {
                 write!(message, "{}{}", sep, arg_ty).unwrap();
                 sep = ", ";
             }
-            LiveError {origin: live_error_origin!(), span, message}
+            LiveError {origin: live_error_origin!(), span:span.text_span, message}
         }) ? .clone())
     }
     
     fn check_call_args(
         &mut self,
-        span: Span,
+        span: TokenSpan,
         fn_ptr: FnPtr,
         arg_exprs: &[Expr],
         fn_def: &FnDef,
@@ -604,7 +604,7 @@ impl<'a> TyChecker<'a> {
         match self.check_params_against_args(span, &fn_def.params, arg_exprs) {
            Err(err)=> Err(LiveError {
                 origin: live_error_origin!(),
-                span,
+                span:span.text_span,
                 message: format!("function: `{}`: {}", self.shader_registry.fn_ident_from_ptr(self.live_registry, fn_ptr), err.message)
             }),
             Ok(closure_args)=>{
@@ -613,7 +613,7 @@ impl<'a> TyChecker<'a> {
                     if closure_site_index.is_none(){
                         return Err(LiveError {
                             origin: live_error_origin!(),
-                            span,
+                            span:span.text_span,
                             message: format!("Closures not supported here {}", self.shader_registry.fn_ident_from_ptr(self.live_registry, fn_ptr))
                         });
                     }
@@ -631,14 +631,14 @@ impl<'a> TyChecker<'a> {
     
     fn check_params_against_args(
         &mut self,
-        span: Span,
+        span: TokenSpan,
         params: &[Param],
         arg_exprs: &[Expr],
     ) -> Result<Vec<ClosureSiteArg>, LiveError> {
         if arg_exprs.len() < params.len() {
             return Err(LiveError {
                 origin: live_error_origin!(),
-                span,
+                span:span.text_span,
                 message: format!(
                     "not enough arguments expected {}, got {}",
                     params.len(),
@@ -650,7 +650,7 @@ impl<'a> TyChecker<'a> {
         if arg_exprs.len() > params.len() {
             return Err(LiveError {
                 origin: live_error_origin!(),
-                span,
+                span:span.text_span,
                 message: format!(
                     "too many arguments for call expected {}, got {}",
                     params.len(),
@@ -682,7 +682,7 @@ impl<'a> TyChecker<'a> {
             if arg_ty != param_ty {
                 return Err(LiveError {
                     origin: live_error_origin!(),
-                    span,
+                    span:span.text_span,
                     message: format!(
                         "wrong type for argument {} expected `{}`, got `{}`",
                         param_index + 1,
@@ -703,7 +703,7 @@ impl<'a> TyChecker<'a> {
     
     fn ty_check_field_expr(
         &mut self,
-        span: Span,
+        span: TokenSpan,
         expr: &Expr,
         field_ident: Ident,
     ) -> Result<Ty, LiveError> {
@@ -725,7 +725,7 @@ impl<'a> TyChecker<'a> {
                 })
                     .ok_or_else( || LiveError {
                     origin: live_error_origin!(),
-                    span,
+                    span:span.text_span,
                     message: format!("field `{}` is not defined on type `{}`", field_ident, ty),
                 }) ?;
                 Ok(match ty {
@@ -756,20 +756,20 @@ impl<'a> TyChecker<'a> {
             Ty::Struct(struct_ptr) => {
                 Ok(self.shader_registry.structs.get(&struct_ptr) .unwrap() .find_field(field_ident) .ok_or(LiveError {
                     origin: live_error_origin!(),
-                    span,
+                    span:span.text_span,
                     message: format!("field `{}` is not defined on type `{:?}`", field_ident, struct_ptr),
                 }) ? .ty_expr .ty .borrow() .as_ref() .unwrap() .clone())
             },
             Ty::DrawShader(shader_ptr) => {
                 Ok(self.shader_registry.draw_shader_defs.get(&shader_ptr).unwrap().find_field(field_ident) .ok_or(LiveError {
                     origin: live_error_origin!(),
-                    span,
+                    span:span.text_span,
                     message: format!("field `{}` is not defined on shader `{:?}`", field_ident, shader_ptr),
                 }) ? .ty_expr .ty .borrow() .as_ref() .unwrap() .clone())
             }
             _ => Err(LiveError {
                 origin: live_error_origin!(),
-                span,
+                span:span.text_span,
                 message: format!("can't access field on value of type `{}`", ty).into(),
             }),
         }
@@ -777,7 +777,7 @@ impl<'a> TyChecker<'a> {
     
     fn ty_check_index_expr(
         &mut self,
-        span: Span,
+        span: TokenSpan,
         expr: &Expr,
         index_expr: &Expr,
     ) -> Result<Ty, LiveError> {
@@ -793,7 +793,7 @@ impl<'a> TyChecker<'a> {
             _ => {
                 return Err(LiveError {
                     origin: live_error_origin!(),
-                    span,
+                    span:span.text_span,
                     message: format!("can't index into value of type `{}`", ty).into(),
                 })
             }
@@ -801,7 +801,7 @@ impl<'a> TyChecker<'a> {
         if index_ty != Ty::Int {
             return Err(LiveError {
                 origin: live_error_origin!(),
-                span,
+                span:span.text_span,
                 message: "index is not an integer".into(),
             });
         }
@@ -811,7 +811,7 @@ impl<'a> TyChecker<'a> {
     #[allow(clippy::redundant_closure_call)]
     fn ty_check_cons_call_expr(
         &mut self,
-        span: Span,
+        span: TokenSpan,
         ty_lit: TyLit,
         arg_exprs: &[Expr],
     ) -> Result<Ty, LiveError> {
@@ -845,7 +845,7 @@ impl<'a> TyChecker<'a> {
                 if actual_slots < expected_slots {
                     return Err(LiveError {
                         origin: live_error_origin!(),
-                        span,
+                        span:span.text_span,
                         message: format!(
                             "not enough components for call to constructor `{}`: expected {}, got {}",
                             ty_lit,
@@ -858,7 +858,7 @@ impl<'a> TyChecker<'a> {
                 if actual_slots > expected_slots {
                     return Err(LiveError {
                         origin: live_error_origin!(),
-                        span,
+                        span:span.text_span,
                         message: format!(
                             "too many components for call to constructor `{}`: expected {}, got {}",
                             ty_lit,
@@ -872,7 +872,7 @@ impl<'a> TyChecker<'a> {
             }
             _ => Err(LiveError {
                 origin: live_error_origin!(),
-                span,
+                span:span.text_span,
                 message: format!(
                     "can't construct value of type `{}` with arguments of types `{}`",
                     ty,
@@ -885,7 +885,7 @@ impl<'a> TyChecker<'a> {
     
     fn ty_check_var_expr(
         &mut self,
-        span: Span,
+        span: TokenSpan,
         kind: &Cell<Option<VarKind >>,
         var_resolve: VarResolve,
         ident: Option<Ident>,
@@ -910,7 +910,7 @@ impl<'a> TyChecker<'a> {
                             
                             return Err(LiveError {
                                 origin: live_error_origin!(),
-                                span,
+                                span:span.text_span,
                                 message: format!("`{}` is a closure and cannot be used as a variable", ident),
                             })
                         }
@@ -928,7 +928,7 @@ impl<'a> TyChecker<'a> {
             VarResolve::Function(fn_ptr) => {
                 return Err(LiveError {
                     origin: live_error_origin!(),
-                    span,
+                    span:span.text_span,
                     message: format!("`{}` implement using functions as closure args", ident.unwrap()),
                 })
             }
@@ -936,7 +936,7 @@ impl<'a> TyChecker<'a> {
                  
                 return Err(LiveError {
                     origin: live_error_origin!(),
-                    span,
+                    span:span.text_span,
                     message: format!("`{}` is not defined in this scope", ident.unwrap()),
                 })
             }
@@ -946,7 +946,7 @@ impl<'a> TyChecker<'a> {
     fn ty_check_struct_cons(
         &mut self,
         struct_ptr: StructPtr,
-        span: Span,
+        span: TokenSpan,
         args: &Vec<(Ident, Expr)>,
     ) -> Result<Ty, LiveError> {
 
@@ -961,7 +961,7 @@ impl<'a> TyChecker<'a> {
                 if field_ty.as_ref() != my_ty.as_ref() {
                     return Err(LiveError {
                         origin: live_error_origin!(),
-                        span,
+                        span:span.text_span,
                         message: format!("field `{}` is the wrong type {} instead of {}", ident, my_ty.as_ref().unwrap(), field_ty.as_ref().unwrap()),
                     })
                 }
@@ -969,7 +969,7 @@ impl<'a> TyChecker<'a> {
             else {
                 return Err(LiveError {
                     origin: live_error_origin!(),
-                    span,
+                    span:span.text_span,
                     message: format!("`{}` is not a valid struct field", ident),
                 })
             }
@@ -979,7 +979,7 @@ impl<'a> TyChecker<'a> {
             if args.iter().position( | (ident, expr) | ident == &field.ident).is_none() {
                 return Err(LiveError {
                     origin: live_error_origin!(),
-                    span,
+                    span:span.text_span,
                     message: format!("`{}` field is missing", field.ident),
                 })
             }
@@ -989,7 +989,7 @@ impl<'a> TyChecker<'a> {
                 if args[i].0 == args[j].0 { // duplicate
                     return Err(LiveError {
                         origin: live_error_origin!(),
-                        span,
+                        span:span.text_span,
                         message: format!("`{}` field is duplicated", args[i].0),
                     })
                 }
@@ -999,7 +999,7 @@ impl<'a> TyChecker<'a> {
         Ok(Ty::Struct(struct_ptr))
     }
     
-    fn ty_check_lit_expr(&mut self, _span: Span, lit: Lit) -> Result<Ty, LiveError> {
+    fn ty_check_lit_expr(&mut self, _span: TokenSpan, lit: Lit) -> Result<Ty, LiveError> {
         Ok(lit.to_ty())
     }
 }

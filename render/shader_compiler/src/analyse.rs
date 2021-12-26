@@ -10,7 +10,7 @@ use{
         LiveError,
         LiveErrorOrigin,
         LiveId,
-        Span
+        TokenSpan
     },
     crate::{
         shader_ast::*,
@@ -298,7 +298,7 @@ impl<'a> DrawShaderAnalyser<'a> {
                     _ => {
                         return Err(LiveError {
                             origin: live_error_origin!(),
-                            span: decl.span,
+                            span: decl.span.text_span,
                             message: String::from(
                                 "attribute must be either a floating-point scalar or vector or mat4",
                             ),
@@ -314,7 +314,7 @@ impl<'a> DrawShaderAnalyser<'a> {
                     _ => {
                         return Err(LiveError {
                             origin: live_error_origin!(),
-                            span: decl.span,
+                            span: decl.span.text_span,
                             message: String::from(
                                 "attribute must be either a floating-point scalar or vector or mat4",
                             ),
@@ -330,7 +330,7 @@ impl<'a> DrawShaderAnalyser<'a> {
                     _ => {
                         return Err(LiveError {
                             origin: live_error_origin!(),
-                            span: decl.span,
+                            span: decl.span.text_span,
                             message: String::from("texture must be a texture2D"),
                         })
                     }
@@ -348,7 +348,7 @@ impl<'a> DrawShaderAnalyser<'a> {
                     _ => {
                         return Err(LiveError {
                             origin: live_error_origin!(),
-                            span: decl.span,
+                            span: decl.span.text_span,
                             message: String::from(
                                 "varying must be either a floating-point scalar or vector",
                             ),
@@ -379,7 +379,7 @@ impl<'a> DrawShaderAnalyser<'a> {
                 _ => {
                     return Err(LiveError {
                         origin: live_error_origin!(),
-                        span: def.span,
+                        span: def.span.text_span,
                         message: String::from(
                             "function `vertex` must return a value of type `vec4`",
                         ),
@@ -392,7 +392,7 @@ impl<'a> DrawShaderAnalyser<'a> {
                 _ => {
                     return Err(LiveError {
                         origin: live_error_origin!(),
-                        span: def.span,
+                        span: def.span.text_span,
                         message: String::from(
                             "function `fragment` must return a value of type `vec4`",
                         ),
@@ -404,7 +404,7 @@ impl<'a> DrawShaderAnalyser<'a> {
                 Ty::Array {..} => {
                     return Err(LiveError {
                         origin: live_error_origin!(),
-                        span: def.span,
+                        span: def.span.text_span,
                         message: String::from("functions can't return arrays"),
                     })
                 }
@@ -443,7 +443,7 @@ impl<'a> DrawShaderAnalyser<'a> {
             if call_stack.contains(&sub_ptr) {
                 return Err(LiveError {
                     origin: live_error_origin!(),
-                    span: sub_decl.span,
+                    span: sub_decl.span.text_span,
                     message: format!("Struct has recursively dependency"),
                 });
             }
@@ -481,7 +481,7 @@ impl<'a> DrawShaderAnalyser<'a> {
             if call_stack.contains(&callee_decl.fn_ptr) {
                 return Err(LiveError {
                     origin: live_error_origin!(),
-                    span: def.span,
+                    span: def.span.text_span,
                     message: format!("function `{}` recursively calls `{}`", def.ident, callee_decl.ident),
                 });
             }
@@ -527,7 +527,7 @@ impl<'a> ConstAnalyser<'a> {
         if expected_ty != actual_ty {
             return Err(LiveError {
                 origin: live_error_origin!(),
-                span: self.const_def.span,
+                span: self.const_def.span.text_span,
                 message: String::from("Declared type and inferred type not the same"),
             } .into());
         }
@@ -643,7 +643,7 @@ impl<'a> FnDefAnalyser<'a> {
                 if !self.fn_def.has_return.get() {
                     return Err(LiveError {
                         origin: live_error_origin!(),
-                        span: self.fn_def.span,
+                        span: self.fn_def.span.text_span,
                         message: format!(
                             "Function has no return",
                         ),
@@ -683,7 +683,7 @@ impl<'a> FnDefAnalyser<'a> {
                     if closure_def.params.len() != params.len() {
                         return Err(LiveError {
                             origin: live_error_origin!(),
-                            span: closure_def.span,
+                            span: closure_def.span.text_span,
                             message: format!(
                                 "Closure does not have the same number of arguments as function decl: {} expected: {}",
                                 closure_def.params.len(),
@@ -713,7 +713,7 @@ impl<'a> FnDefAnalyser<'a> {
                             if expr.ty.borrow().as_ref() != return_ty.borrow().as_ref() {
                                 return Err(LiveError {
                                     origin: live_error_origin!(),
-                                    span: closure_def.span,
+                                    span: closure_def.span.text_span,
                                     message: format!(
                                         "Closure return type not correct: {} expected: {}",
                                         expr.ty.borrow().as_ref().unwrap(),
@@ -761,7 +761,7 @@ impl<'a> FnDefAnalyser<'a> {
         if self.scopes.closure_sites.borrow().len()>0 {
             return Err(LiveError {
                 origin: live_error_origin!(),
-                span: self.fn_def.span,
+                span: self.fn_def.span.text_span,
                 message: format!("Nesting closures is not supported at the moment"),
             });
             
@@ -813,22 +813,22 @@ impl<'a> FnDefAnalyser<'a> {
         }
     }
     
-    fn analyse_break_stmt(&self, span: Span) -> Result<(), LiveError> {
+    fn analyse_break_stmt(&self, span: TokenSpan) -> Result<(), LiveError> {
         if !self.is_inside_loop {
             return Err(LiveError {
                 origin: live_error_origin!(),
-                span,
+                span:span.text_span,
                 message: String::from("break outside loop"),
             } .into());
         }
         Ok(())
     }
     
-    fn analyse_continue_stmt(&self, span: Span) -> Result<(), LiveError> {
+    fn analyse_continue_stmt(&self, span: TokenSpan) -> Result<(), LiveError> {
         if !self.is_inside_loop {
             return Err(LiveError {
                 origin: live_error_origin!(),
-                span,
+                span:span.text_span,
                 message: String::from("continue outside loop"),
             } .into());
         }
@@ -837,7 +837,7 @@ impl<'a> FnDefAnalyser<'a> {
     
     fn analyse_for_stmt(
         &mut self,
-        span: Span,
+        span: TokenSpan,
         ident: Ident,
         from_expr: &Expr,
         to_expr: &Expr,
@@ -871,21 +871,21 @@ impl<'a> FnDefAnalyser<'a> {
             if step == 0 {
                 return Err(LiveError {
                     origin: live_error_origin!(),
-                    span,
+                    span:span.text_span,
                     message: String::from("step must not be zero"),
                 } .into());
             }
             if from < to && step < 0 {
                 return Err(LiveError {
                     origin: live_error_origin!(),
-                    span,
+                    span:span.text_span,
                     message: String::from("step must not be positive"),
                 } .into());
             }
             if from > to && step > 0 {
                 return Err(LiveError {
                     origin: live_error_origin!(),
-                    span,
+                    span:span.text_span,
                     message: String::from("step must not be negative"),
                 } .into());
             }
@@ -908,7 +908,7 @@ impl<'a> FnDefAnalyser<'a> {
     
     fn analyse_if_stmt(
         &mut self,
-        span: Span,
+        span: TokenSpan,
         expr: &Expr,
         block_if_true: &Block,
         block_if_false: &Option<Box<Block >>,
@@ -931,7 +931,7 @@ impl<'a> FnDefAnalyser<'a> {
     
     fn analyse_match_stmt(
         &mut self,
-        span: Span,
+        span: TokenSpan,
         expr: &Expr,
         matches: &Vec<Match>,
     ) -> Result<(), LiveError> {
@@ -950,7 +950,7 @@ impl<'a> FnDefAnalyser<'a> {
                 if match_item.enum_name.0 != shader_enum.enum_name{
                     return Err(LiveError {
                         origin: live_error_origin!(),
-                        span,
+                        span:span.text_span,
                         message: format!("Enum name mismatched, expected {} got {}", shader_enum.enum_name, match_item.enum_name.0),
                     } .into())
                 } 
@@ -961,7 +961,7 @@ impl<'a> FnDefAnalyser<'a> {
                 else{
                     return Err(LiveError {
                         origin: live_error_origin!(),
-                        span,
+                        span:span.text_span,
                         message: format!("Variant not found on enum {}::{}", match_item.enum_name.0, match_item.enum_variant.0),
                     } .into())
                 }
@@ -975,7 +975,7 @@ impl<'a> FnDefAnalyser<'a> {
         else {
             Err(LiveError {
                 origin: live_error_origin!(),
-                span,
+                span:span.text_span,
                 message: String::from("Can only match on enum types"),
             } .into())
         }
@@ -983,7 +983,7 @@ impl<'a> FnDefAnalyser<'a> {
     
     fn analyse_let_stmt(
         &mut self,
-        span: Span,
+        span: TokenSpan,
         ty: &RefCell<Option<Ty >>,
         ident: Ident,
         ty_expr: &Option<TyExpr>,
@@ -994,7 +994,7 @@ impl<'a> FnDefAnalyser<'a> {
             if expr.is_none() {
                 return Err(LiveError {
                     origin: live_error_origin!(),
-                    span,
+                    span:span.text_span,
                     message: format!("cannot define an uninitialised variable `{}`", ident),
                 });
             }
@@ -1014,7 +1014,7 @@ impl<'a> FnDefAnalyser<'a> {
             if ty == Ty::Void {
                 return Err(LiveError {
                     origin: live_error_origin!(),
-                    span,
+                    span:span.text_span,
                     message: String::from("init expression cannot be void")
                 });
             }
@@ -1025,7 +1025,7 @@ impl<'a> FnDefAnalyser<'a> {
         } else {
             return Err(LiveError {
                 origin: live_error_origin!(),
-                span,
+                span:span.text_span,
                 message: format!("can't infer type of variable `{}`", ident),
             });
         });
@@ -1039,7 +1039,7 @@ impl<'a> FnDefAnalyser<'a> {
         Ok(())
     }
     
-    fn analyse_return_stmt(&mut self, span: Span, expr: &Option<Expr>) -> Result<(), LiveError> {
+    fn analyse_return_stmt(&mut self, span: TokenSpan, expr: &Option<Expr>) -> Result<(), LiveError> {
         
         self.fn_def.has_return.set(true);
         if let Some(expr) = expr {
@@ -1064,21 +1064,21 @@ impl<'a> FnDefAnalyser<'a> {
         } else if self.fn_def.return_ty.borrow().as_ref().unwrap() != &Ty::Void {
             return Err(LiveError {
                 origin: live_error_origin!(),
-                span,
+                span:span.text_span,
                 message: String::from("missing return expression"),
             } .into());
         }
         Ok(())
     }
     
-    fn analyse_block_stmt(&mut self, _span: Span, block: &Block) -> Result<(), LiveError> {
+    fn analyse_block_stmt(&mut self, _span: TokenSpan, block: &Block) -> Result<(), LiveError> {
         self.scopes.push_scope();
         self.analyse_block(block) ?;
         self.scopes.pop_scope();
         Ok(())
     }
     
-    fn analyse_expr_stmt(&mut self, _span: Span, expr: &Expr) -> Result<(), LiveError> {
+    fn analyse_expr_stmt(&mut self, _span: TokenSpan, expr: &Expr) -> Result<(), LiveError> {
         self.ty_checker().ty_check_expr(expr) ?;
         self.const_evaluator().try_const_eval_expr(expr);
         self.const_gatherer().const_gather_expr(expr);

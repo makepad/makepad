@@ -54,7 +54,8 @@ pub use {
         },
         live_token::{TokenWithSpan, LiveToken, LiveTokenId},
         span::{
-            Span,
+            TextSpan,
+            TokenSpan,
             TextPos
         },
         live_error::{
