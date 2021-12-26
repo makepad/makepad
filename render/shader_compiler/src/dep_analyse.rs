@@ -1,7 +1,7 @@
 use{
     std::cell::Cell,
     makepad_live_compiler::{
-        Span
+        TokenSpan
     },
     crate::{
         shader_ast::*,
@@ -86,7 +86,7 @@ impl<'a> DepAnalyser<'a> {
     
     fn dep_analyse_cond_expr(
         &mut self,
-        _span: Span,
+        _span: TokenSpan,
         expr: &Expr,
         expr_if_true: &Expr,
         expr_if_false: &Expr,
@@ -98,7 +98,7 @@ impl<'a> DepAnalyser<'a> {
     
     fn dep_analyse_bin_expr(
         &mut self,
-        _span: Span,
+        _span: TokenSpan,
         _op: BinOp,
         left_expr: &Expr,
         right_expr: &Expr,
@@ -107,13 +107,13 @@ impl<'a> DepAnalyser<'a> {
         self.dep_analyse_expr(right_expr);
     }
     
-    fn dep_analyse_un_expr(&mut self, _span: Span, _op: UnOp, expr: &Expr) {
+    fn dep_analyse_un_expr(&mut self, _span: TokenSpan, _op: UnOp, expr: &Expr) {
         self.dep_analyse_expr(expr);
     }
     
     fn dep_analyse_method_call_expr(
         &mut self,
-        _span: Span,
+        _span: TokenSpan,
         method_ident: Ident,
         arg_exprs: &[Expr],
     ) {
@@ -148,7 +148,7 @@ impl<'a> DepAnalyser<'a> {
     
     fn dep_analyse_builtin_call_expr(
         &mut self,
-        _span: Span,
+        _span: TokenSpan,
         ident: Ident,
         arg_exprs: &[Expr],
     ) {
@@ -166,7 +166,7 @@ impl<'a> DepAnalyser<'a> {
     
     fn dep_analyse_plain_call_expr(
         &mut self,
-        _span: Span,
+        _span: TokenSpan,
         //ident: Ident,
         arg_exprs: &[Expr],
         fn_ptr: FnPtr,
@@ -180,7 +180,7 @@ impl<'a> DepAnalyser<'a> {
         set.as_mut().unwrap().insert(fn_ptr);
     }
     
-    fn dep_analyse_field_expr(&mut self, _span: Span, expr: &Expr, field_ident: Ident) {
+    fn dep_analyse_field_expr(&mut self, _span: TokenSpan, expr: &Expr, field_ident: Ident) {
         // so we have to store which 'shader props' we use
         match expr.ty.borrow().as_ref().unwrap(){
             Ty::DrawShader(_)=>{
@@ -193,12 +193,12 @@ impl<'a> DepAnalyser<'a> {
        
     }
     
-    fn dep_analyse_index_expr(&mut self, _span: Span, expr: &Expr, index_expr: &Expr) {
+    fn dep_analyse_index_expr(&mut self, _span: TokenSpan, expr: &Expr, index_expr: &Expr) {
         self.dep_analyse_expr(expr);
         self.dep_analyse_expr(index_expr);
     }
     
-    fn dep_analyse_cons_call_expr(&mut self, _span: Span, ty_lit: TyLit, arg_exprs: &[Expr]) {
+    fn dep_analyse_cons_call_expr(&mut self, _span: TokenSpan, ty_lit: TyLit, arg_exprs: &[Expr]) {
         for arg_expr in arg_exprs {
             self.dep_analyse_expr(arg_expr);
         }
@@ -219,7 +219,7 @@ impl<'a> DepAnalyser<'a> {
     fn dep_analyse_struct_cons(
         &mut self,
         struct_ptr: StructPtr,
-        _span: Span,
+        _span: TokenSpan,
         args: &Vec<(Ident,Expr)>,
     ) {
         // alright we have a struct constructor
@@ -229,7 +229,7 @@ impl<'a> DepAnalyser<'a> {
         }
     }    
     
-    fn dep_analyse_var_expr(&mut self, _span: Span, ty:Option<&Ty>, kind: &Cell<Option<VarKind >>) {
+    fn dep_analyse_var_expr(&mut self, _span: TokenSpan, ty:Option<&Ty>, kind: &Cell<Option<VarKind >>) {
         // alright so. a var expr..
         match kind.get().unwrap() {
             VarKind::LiveValue(value_ptr)=>{
@@ -250,5 +250,5 @@ impl<'a> DepAnalyser<'a> {
         
     }
 
-    fn dep_analyse_lit_expr(&mut self, _span: Span, _lit: Lit) {}
+    fn dep_analyse_lit_expr(&mut self, _span: TokenSpan, _lit: Lit) {}
 }

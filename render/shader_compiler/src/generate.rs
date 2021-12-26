@@ -9,7 +9,7 @@ use{
         id,
         makepad_math::PrettyPrintedF32,
         LiveId,
-        Span
+        TokenSpan
     },
     crate::{
         shader_ast::*,
@@ -227,17 +227,17 @@ impl<'a> BlockGenerator<'a> {
         }
     }
     
-    fn generate_break_stmt(&mut self, _span: Span) {
+    fn generate_break_stmt(&mut self, _span: TokenSpan) {
         writeln!(self.string, "break;").unwrap();
     }
     
-    fn generate_continue_stmt(&mut self, _span: Span) {
+    fn generate_continue_stmt(&mut self, _span: TokenSpan) {
         writeln!(self.string, "continue;").unwrap();
     }
     
     fn generate_for_stmt(
         &mut self,
-        _span: Span,
+        _span: TokenSpan,
         ident: Ident,
         from_expr: &Expr,
         to_expr: &Expr,
@@ -294,7 +294,7 @@ impl<'a> BlockGenerator<'a> {
     
     fn generate_if_stmt(
         &mut self,
-        _span: Span,
+        _span: TokenSpan,
         expr: &Expr,
         block_if_true: &Block,
         block_if_false: &Option<Box<Block >>,
@@ -312,7 +312,7 @@ impl<'a> BlockGenerator<'a> {
     
     fn generate_match_stmt(
         &mut self,
-        _span: Span,
+        _span: TokenSpan,
         expr: &Expr,
         matches: &Vec<Match>,
     ) {
@@ -331,7 +331,7 @@ impl<'a> BlockGenerator<'a> {
     
     fn generate_let_stmt(
         &mut self,
-        _span: Span,
+        _span: TokenSpan,
         ty: &RefCell<Option<Ty >>,
         ident: Ident,
         _ty_expr: &Option<TyExpr>,
@@ -353,7 +353,7 @@ impl<'a> BlockGenerator<'a> {
         writeln!(self.string, ";").unwrap();
     }
     
-    fn generate_return_stmt(&mut self, _span: Span, expr: &Option<Expr>) {
+    fn generate_return_stmt(&mut self, _span: TokenSpan, expr: &Option<Expr>) {
         write!(self.string, "return").unwrap();
         if let Some(expr) = expr {
             write!(self.string, " ").unwrap();
@@ -362,12 +362,12 @@ impl<'a> BlockGenerator<'a> {
         writeln!(self.string, ";").unwrap();
     }
     
-    fn generate_block_stmt(&mut self, _span: Span, block: &Block) {
+    fn generate_block_stmt(&mut self, _span: TokenSpan, block: &Block) {
         self.generate_block(block);
         writeln!(self.string).unwrap();
     }
     
-    fn generate_expr_stmt(&mut self, _span: Span, expr: &Expr) {
+    fn generate_expr_stmt(&mut self, _span: TokenSpan, expr: &Expr) {
         self.generate_expr(expr);
         writeln!(self.string, ";").unwrap();
     }
@@ -541,7 +541,7 @@ impl<'a> ExprGenerator<'a> {
     
     fn generate_cond_expr(
         &mut self,
-        _span: Span,
+        _span: TokenSpan,
         expr: &Expr,
         expr_if_true: &Expr,
         expr_if_false: &Expr,
@@ -555,7 +555,7 @@ impl<'a> ExprGenerator<'a> {
         write!(self.string, ")").unwrap();
     }
     
-    fn generate_bin_expr(&mut self, _span: Span, op: BinOp, left_expr: &Expr, right_expr: &Expr) {
+    fn generate_bin_expr(&mut self, _span: TokenSpan, op: BinOp, left_expr: &Expr, right_expr: &Expr) {
         
         // if left_expr or right_expr is a matrix, HLSL needs to use mul()
         let left_is_mat = match left_expr.ty.borrow().as_ref().unwrap() {
@@ -637,12 +637,12 @@ impl<'a> ExprGenerator<'a> {
         write!(self.string, ")").unwrap();
     }
     
-    fn generate_un_expr(&mut self, _span: Span, op: UnOp, expr: &Expr) {
+    fn generate_un_expr(&mut self, _span: TokenSpan, op: UnOp, expr: &Expr) {
         write!(self.string, "{}", op).unwrap();
         self.generate_expr(expr);
     }
     
-    fn generate_method_call_expr(&mut self, _span: Span, ident: Ident, arg_exprs: &[Expr], closure_site_index: &Cell<Option<usize >>) {
+    fn generate_method_call_expr(&mut self, _span: TokenSpan, ident: Ident, arg_exprs: &[Expr], closure_site_index: &Cell<Option<usize >>) {
         // alright so. what if we have
         // lets check if this is a call with closure args
         
@@ -673,7 +673,7 @@ impl<'a> ExprGenerator<'a> {
     }
     
     
-    fn generate_call_body(&mut self, _span: Span, fn_def: &FnDef, arg_exprs: &[Expr], closure_site_index: &Cell<Option<usize >>) {
+    fn generate_call_body(&mut self, _span: TokenSpan, fn_def: &FnDef, arg_exprs: &[Expr], closure_site_index: &Cell<Option<usize >>) {
         // lets create a fn name for this thing.
         if let Some(closure_site_index) = closure_site_index.get() {
             // ok so.. we have closure args. this means we have a callsite
@@ -740,7 +740,7 @@ impl<'a> ExprGenerator<'a> {
         }
     }
     
-    fn generate_field_expr(&mut self, _span: Span, expr: &Expr, field_ident: Ident, ty:&Ty) {
+    fn generate_field_expr(&mut self, _span: TokenSpan, expr: &Expr, field_ident: Ident, ty:&Ty) {
         match expr.ty.borrow().as_ref() {
             Some(Ty::DrawShader(_)) => {
                 self.backend_writer.generate_draw_shader_field_expr(&mut self.string, field_ident, ty);
@@ -760,7 +760,7 @@ impl<'a> ExprGenerator<'a> {
     fn generate_struct_cons(
         &mut self,
         struct_ptr: StructPtr,
-        _span: Span,
+        _span: TokenSpan,
         args: &Vec<(Ident, Expr)>,
     ) {
         let struct_decl = self.shader_registry.structs.get(&struct_ptr).unwrap();
@@ -777,7 +777,7 @@ impl<'a> ExprGenerator<'a> {
         write!(self.string, "{}", sep2).unwrap();
     }
     
-    fn generate_index_expr(&mut self, _span: Span, expr: &Expr, index_expr: &Expr) {
+    fn generate_index_expr(&mut self, _span: TokenSpan, expr: &Expr, index_expr: &Expr) {
         self.generate_expr(expr);
         write!(self.string, "[").unwrap();
         self.generate_expr(index_expr);
@@ -785,7 +785,7 @@ impl<'a> ExprGenerator<'a> {
     }
     
     
-    fn generate_builtin_call_expr(&mut self, _span: Span, ident: Ident, arg_exprs: &[Expr]) {
+    fn generate_builtin_call_expr(&mut self, _span: TokenSpan, ident: Ident, arg_exprs: &[Expr]) {
         // lets create a fn name for this thing.
         
         self.backend_writer.write_builtin_call_ident(&mut self.string, ident, arg_exprs);
@@ -804,7 +804,7 @@ impl<'a> ExprGenerator<'a> {
     }
     
     
-    fn generate_plain_call_expr(&mut self, _span: Span, _ident: Option<Ident>, fn_ptr: Option<FnPtr>, arg_exprs: &[Expr], closure_site_index: &Cell<Option<usize >>, param_index: &Cell<Option<usize >>) {
+    fn generate_plain_call_expr(&mut self, _span: TokenSpan, _ident: Option<Ident>, fn_ptr: Option<FnPtr>, arg_exprs: &[Expr], closure_site_index: &Cell<Option<usize >>, param_index: &Cell<Option<usize >>) {
         // lets create a fn name for this thing.
         if param_index.get().is_some(){ // its a closure
             self.generate_closure_call_expr(_span, arg_exprs, param_index);
@@ -816,7 +816,7 @@ impl<'a> ExprGenerator<'a> {
     }
     
     
-    fn generate_closure_call_expr(&mut self, _span: Span, arg_exprs: &[Expr], param_index: &Cell<Option<usize >>) {
+    fn generate_closure_call_expr(&mut self, _span: TokenSpan, arg_exprs: &[Expr], param_index: &Cell<Option<usize >>) {
         
         let param_index = param_index.get().unwrap();
         
@@ -858,14 +858,14 @@ impl<'a> ExprGenerator<'a> {
     fn generate_macro_call_expr(
         &mut self,
         _analysis: &Cell<Option<MacroCallAnalysis >>,
-        _span: Span,
+        _span: TokenSpan,
         _ident: Ident,
         _arg_exprs: &[Expr],
     ) {
         
     }
     
-    fn generate_cons_call_expr(&mut self, _span: Span, ty_lit: TyLit, arg_exprs: &[Expr]) {
+    fn generate_cons_call_expr(&mut self, _span: TokenSpan, ty_lit: TyLit, arg_exprs: &[Expr]) {
         // lets build the constructor name
         let mut cons_name = format!("consfn_{}", ty_lit);
         for arg_expr in arg_exprs {
@@ -886,7 +886,7 @@ impl<'a> ExprGenerator<'a> {
         write!(self.string, ")").unwrap();
     }
     
-    fn generate_var_expr(&mut self, _span: Span, kind: &Cell<Option<VarKind >>, _ty: &Option<Ty>) {
+    fn generate_var_expr(&mut self, _span: TokenSpan, kind: &Cell<Option<VarKind >>, _ty: &Option<Ty>) {
         // ok so we have a few varkinds
         match kind.get().unwrap() {
             VarKind::Local {ident, shadow} => {
@@ -903,7 +903,7 @@ impl<'a> ExprGenerator<'a> {
         }
     }
     
-    fn generate_lit_expr(&mut self, _span: Span, lit: Lit) {
+    fn generate_lit_expr(&mut self, _span: TokenSpan, lit: Lit) {
         write!(self.string, "{}", lit).unwrap();
     }
     

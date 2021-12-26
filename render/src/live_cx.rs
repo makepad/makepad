@@ -122,7 +122,7 @@ impl Cx {
             let err = LiveError {
                 origin,
                 message,
-                span: live_registry.token_id_to_span(*token_id)
+                span: live_registry.token_id_to_span(*token_id).text_span
             };
             println!("Apply error: {} {:?}", live_registry.live_error_to_live_file_error(err), nodes[index].value);
         }
