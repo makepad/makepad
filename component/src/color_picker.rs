@@ -56,7 +56,7 @@ live_register!{
             sdf.circle(rect_puk.x, rect_puk.y, puck_size);
             sdf.rect(cx - rsize, cy - rsize, rsize * 2.0, rsize * 2.0);
             sdf.intersect();
-            sdf.fill(color);
+            sdf.fill(color); 
             sdf.circle(rect_puk.x, rect_puk.y, puck_size - 1. - 2. * self.hover + self.pressed);
             sdf.rect(cx - rsize, cy - rsize, rsize * 2.0, rsize * 2.0);
             sdf.intersect();
