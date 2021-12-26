@@ -153,24 +153,24 @@ impl ShaderRegistry {
             }
             
             let now_ptr = LivePtr {file_id, index: index as u32};
-            let first_def = node.origin.first_def().unwrap();
+            //let first_def = node.origin.first_def().unwrap();
             match node.value {
-                LiveValue::Bool(_) if live_registry.get_prefix_at(node.id, first_def) == Some(id!(const)) => {
+                LiveValue::Bool(_) if live_registry.get_node_prefix(node.origin) == Some(id!(const)) => {
                     return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Bool)
                 },
-                LiveValue::Int(_) if live_registry.get_prefix_at(node.id, first_def) == Some(id!(const)) => {
+                LiveValue::Int(_) if live_registry.get_node_prefix(node.origin) == Some(id!(const)) => {
                     return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Int)
                 }
-                LiveValue::Float(_) if live_registry.get_prefix_at(node.id, first_def) == Some(id!(const)) => {
+                LiveValue::Float(_) if live_registry.get_node_prefix(node.origin) == Some(id!(const)) => {
                     return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Float)
                 }
-                LiveValue::Color(_) if live_registry.get_prefix_at(node.id, first_def) == Some(id!(const)) => {
+                LiveValue::Color(_) if live_registry.get_node_prefix(node.origin) == Some(id!(const)) => {
                     return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Vec4)
                 }
-                LiveValue::Vec2(_) if live_registry.get_prefix_at(node.id, first_def) == Some(id!(const)) => {
+                LiveValue::Vec2(_) if live_registry.get_node_prefix(node.origin) == Some(id!(const)) => {
                     return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Vec2)
                 }
-                LiveValue::Vec3(_) if live_registry.get_prefix_at(node.id, first_def) == Some(id!(const)) => {
+                LiveValue::Vec3(_) if live_registry.get_node_prefix(node.origin) == Some(id!(const)) => {
                     return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Vec3)
                 }
                 LiveValue::DSL {token_start, ..} => {
@@ -439,7 +439,7 @@ impl ShaderRegistry {
                                 }
                             }
                         },
-                        LiveValue::Id(type_name) if live_registry.get_prefix_at(prop.id, first_def) == Some(id!(field)) => {
+                        LiveValue::Id(type_name) if live_registry.get_node_prefix(prop.origin) == Some(id!(field)) => {
                             // lets fetch the span
                             let span = live_registry.token_id_to_span(prop.origin.token_id().unwrap());
                             
@@ -544,7 +544,7 @@ impl ShaderRegistry {
                         LiveValue::Vec3(_) |
                         LiveValue::Vec4(_) => {
                             let first_def = prop.origin.first_def().unwrap();
-                            let before = live_registry.get_prefix_at(prop.id, first_def);
+                            let before = live_registry.get_node_prefix(prop.origin);
                             let span = live_registry.token_id_to_span(first_def);
                             let ty = ShaderTy::from_live_node(node_index, &doc.nodes);
                             if ty.is_none() {

@@ -206,6 +206,17 @@ impl LiveNodeOrigin {
         LiveEditInfo::from_bits(((self.0 & 0x7f00_0000_0000_0000) >> 56) as u32)
     }
     
+    pub fn with_node_has_prefix(mut self, node_has_prefix: bool) -> Self {
+        if node_has_prefix {
+            self.0 |= 0x4000_0000_0000_0000;
+        }
+        self
+    }
+    
+    pub fn node_has_prefix(&self) -> bool {
+        self.0 & 0x4000_0000_0000_0000 != 0
+    }
+    
     pub fn with_id_non_unique(mut self, non_unique: bool) -> Self {
         if non_unique {
             self.0 |= 0x8000_0000_0000_0000;
@@ -228,19 +239,19 @@ impl fmt::Debug for LiveEditInfo {
 
 impl LiveEditInfo {
     pub fn new(edit_info_index: usize) -> Self {
-        if edit_info_index & 0xf != 0 || edit_info_index > 0x7e0 {
+        if edit_info_index & 0xf != 0 || edit_info_index > 0x3e0 {
             panic!();
         }
         LiveEditInfo(((edit_info_index as u32)>>4)+1)
     }
     
     pub fn edit_info_index(&self) -> usize {
-        (((self.0) as usize - 1) << 4) & 0x7f0
+        (((self.0) as usize - 1) << 4) & 0x3f0
     }
     
     pub fn to_bits(&self) -> u32 {self.0}
     pub fn from_bits(v: u32) -> Option<Self> {
-        if (v & 0xFFFE0000) != 0 {
+        if (v & 0xFFFF_FF00) != 0 {
             panic!();
         }
         if v == 0 {
