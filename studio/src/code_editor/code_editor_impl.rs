@@ -84,7 +84,7 @@ live_register!{
             sdf.line_to(1., self.rect_size.y + 1.);
             return sdf.stroke(col, thickness);
         }
-    }
+    } 
     
     CodeEditorImpl: {{CodeEditorImpl}} {
         scroll_view: {
@@ -95,7 +95,7 @@ live_register!{
         }
         
         code_text: {
-            draw_depth: 1.0
+            //draw_depth: 1.0
             text_style: {
                 font: {
                     path: "resources/LiberationMono-Regular.ttf"
@@ -108,19 +108,19 @@ live_register!{
         }
         
         line_num_text: code_text {
-            draw_depth: 4.5
+            //draw_depth: 4.5
             no_h_scroll: true
         }
         
         line_num_quad: {
             color: #x1e
-            draw_depth: 4.0
+            //draw_depth: 4.0
             no_h_scroll: true
             no_v_scroll: true
         }
         
         scroll_shadow: {
-            draw_depth: 4.0
+            //draw_depth: 4.0
         }
         
         line_num_width: 45.0,
@@ -148,22 +148,22 @@ live_register!{
         
         selection_quad: {
             color: #294e75
-            draw_depth: 0.0
+            //draw_depth: 0.0
         }
         
         indent_lines_quad: {
             color: #fff
-            draw_depth: 1.5
+            //draw_depth: 1.5
         }
         
         caret_quad: {
-            draw_depth: 2.0
+            //draw_depth: 2.0
             color: #b0b0b0
         }
         
         current_line_quad: {
             no_h_scroll: true
-            draw_depth: 0.0
+            //draw_depth: 0.0
             color: #6663
         }
         
@@ -443,8 +443,8 @@ impl CodeEditorImpl {
         self.code_text.begin_many_instances(cx);
         self.indent_lines_quad.new_draw_call(cx);
         self.caret_quad.begin_many_instances(cx);
-        self.line_num_quad.new_draw_call(cx);
-        self.line_num_text.begin_many_instances(cx);
+        //self.line_num_quad.new_draw_call(cx);
+        //self.line_num_text.begin_many_instances(cx);
     }
     
     pub fn end_instances(&mut self, cx: &mut Cx) {
