@@ -1,7 +1,7 @@
 use{
     std::cell::Cell,
     makepad_live_compiler::{
-        Span
+        TokenSpan
     },
     crate::{
         shader_ast::*,
@@ -102,7 +102,7 @@ impl<'a> ConstGatherer<'a> {
 
     fn const_gather_cond_expr(
         &self,
-        _span: Span,
+        _span: TokenSpan,
         expr: &Expr,
         expr_if_true: &Expr,
         expr_if_false: &Expr,
@@ -113,20 +113,20 @@ impl<'a> ConstGatherer<'a> {
     }
 
     #[allow(clippy::float_cmp)]
-    fn const_gather_bin_expr(&self, _span: Span, _op: BinOp, left_expr: &Expr, right_expr: &Expr) {
+    fn const_gather_bin_expr(&self, _span: TokenSpan, _op: BinOp, left_expr: &Expr, right_expr: &Expr) {
         self.const_gather_expr(left_expr);
         self.const_gather_expr(right_expr);
     }
 
-    fn const_gather_un_expr(&self, _span: Span, _op: UnOp, expr: &Expr) {
+    fn const_gather_un_expr(&self, _span: TokenSpan, _op: UnOp, expr: &Expr) {
         self.const_gather_expr(expr);
     }
 
-    fn const_gather_field_expr(&self, _span: Span, expr: &Expr, _field_ident: Ident) {
+    fn const_gather_field_expr(&self, _span: TokenSpan, expr: &Expr, _field_ident: Ident) {
         self.const_gather_expr(expr);
     }
 
-    fn const_gather_index_expr(&self, _span: Span, expr: &Expr, _index_expr: &Expr) {
+    fn const_gather_index_expr(&self, _span: TokenSpan, expr: &Expr, _index_expr: &Expr) {
         self.const_gather_expr(expr);
     }
 
@@ -136,14 +136,14 @@ impl<'a> ConstGatherer<'a> {
         }
     }
 
-    fn const_gather_var_expr(&self, _span: Span, _kind: &Cell<Option<VarKind>>) {}
+    fn const_gather_var_expr(&self, _span: TokenSpan, _kind: &Cell<Option<VarKind>>) {}
 
-    fn const_gather_lit_expr(&self, _span: Span, _lit: Lit) {}
+    fn const_gather_lit_expr(&self, _span: TokenSpan, _lit: Lit) {}
 
     fn const_gather_struct_cons(
         &self,
         _struct_ptr: StructPtr,
-        _span: Span,
+        _span: TokenSpan,
         args: &Vec<(Ident,Expr)>,
     ) {
         for arg in args{
@@ -151,7 +151,7 @@ impl<'a> ConstGatherer<'a> {
         }
     }
 
-    fn write_span(&self, span: &Span) {
+    fn write_span(&self, span: &TokenSpan) {
         let index = self.fn_def.const_table.borrow().as_ref().unwrap().len();
         self.fn_def
             .const_table_spans
