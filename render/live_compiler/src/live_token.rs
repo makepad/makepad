@@ -206,12 +206,11 @@ impl fmt::Display for LiveToken {
 impl LiveTokenId {
     pub fn new(file_id: LiveFileId, token: usize) -> Self {
         let file_id = file_id.to_index();
-        if file_id == 0 || file_id > 0x3ff || token > 0x3ffff {
+        if file_id > 0x3fe || token > 0x3ffff {
             panic!();
         }
         LiveTokenId(
-            (((file_id as u32) & 0x3ff) << 18) |
-            ((token as u32) & 0x3ffff)
+            (((file_id as u32 + 1) & 0x3ff) << 18) | ((token as u32) & 0x3ffff)
         )
     }
     
@@ -224,7 +223,7 @@ impl LiveTokenId {
     }
     
     pub fn file_id(&self) -> LiveFileId {
-        LiveFileId(((self.0 >> 18) & 0x3ff) as u16)
+        LiveFileId((((self.0 >> 18) & 0x3ff) - 1) as u16)
     }
     
     pub fn to_bits(&self) -> u32 {self.0}

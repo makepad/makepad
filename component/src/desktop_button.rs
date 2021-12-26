@@ -5,7 +5,6 @@ live_register!{
     use makepad_render::shader::std::*;
     
     DrawDesktopButton: {{DrawDesktopButton}} {
-        debug: false,
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
             sdf.aa *= 3.0;

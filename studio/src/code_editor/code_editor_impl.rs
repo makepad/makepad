@@ -54,7 +54,7 @@ live_register!{
         
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-            sdf.box(0., 0., self.rect_size.x, self.rect_size.y, border_radius);
+            sdf.box(0., 0., self.rect_size.x, self.rect_size.y, BORDER_RADIUS);
             if self.prev_w > 0. {
                 sdf.box(self.prev_x, -self.rect_size.y, self.prev_w, self.rect_size.y, BORDER_RADIUS);
                 sdf.gloop(GLOOPINESS);

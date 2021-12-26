@@ -31,7 +31,7 @@ live_register!{
         uniform brightness: float
         uniform curve: float
 
-        texture texture:texture2d
+        texture tex:texture2d
         
         varying tex_coord1: vec2
         varying tex_coord2: vec2
@@ -98,20 +98,20 @@ live_register!{
             }
             else if dx > 2.75 { 
                 s = (
-                    sample2d(self.texture, self.tex_coord3.xy + vec2(0., 0.)).z
-                        + sample2d(self.texture, self.tex_coord3.xy + vec2(dp, 0.)).z
-                        + sample2d(self.texture, self.tex_coord3.xy + vec2(0., dp)).z
-                        + sample2d(self.texture, self.tex_coord3.xy + vec2(dp, dp)).z
+                    sample2d(self.tex, self.tex_coord3.xy + vec2(0., 0.)).z
+                        + sample2d(self.tex, self.tex_coord3.xy + vec2(dp, 0.)).z
+                        + sample2d(self.tex, self.tex_coord3.xy + vec2(0., dp)).z
+                        + sample2d(self.tex, self.tex_coord3.xy + vec2(dp, dp)).z
                 ) * 0.25;
             }
             else if dx > 1.75 {
-                s = sample2d(self.texture, self.tex_coord3.xy).z;
+                s = sample2d(self.tex, self.tex_coord3.xy).z;
             }
             else if dx > 1.3 {
-                s = sample2d(self.texture, self.tex_coord2.xy).y;
+                s = sample2d(self.tex, self.tex_coord2.xy).y;
             }
             else {
-                s = sample2d(self.texture, self.tex_coord1.xy).x;
+                s = sample2d(self.tex, self.tex_coord1.xy).x;
             }
             
             s = pow(s, self.curve);
