@@ -393,7 +393,6 @@ impl ShaderRegistry {
                 while let Some(node_index) = node_iter {
                     let prop_ptr = struct_ptr.with_index(node_index);
                     let prop = &doc.nodes[node_index];
-                    let first_def = prop.origin.first_def().unwrap();
                     
                     match prop.value {
                         LiveValue::DSL {token_start, token_count, expand_index} => {

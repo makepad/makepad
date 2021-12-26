@@ -169,37 +169,26 @@ impl InlineCache {
             if line_cache.items.len() != 0 {
                 panic!();
             }
-            let tokens_line = &token_cache[line];
+            let tokens_line = &token_cache[line].tokens();
             let mut column = 0;
-            for (edit_token_index, token) in tokens_line.tokens().iter().enumerate() {
+            for (edit_token_index, token) in tokens_line.iter().enumerate() {
                 
                 // try to filter things a bit before plugging it into the expensive search process
                 let is_prop_assign = 
                     token.is_ident() 
-                    && edit_token_index>2 
-                    && tokens_line.tokens()[edit_token_index - 1].is_punct_id(id!(:));
+                    && edit_token_index+1 < tokens_line.len()
+                    && tokens_line[edit_token_index + 1].is_punct_id(id!(:));
 
-                let is_field_assign = 
-                    token.is_ident() 
-                    && edit_token_index>3 
-                    && tokens_line.tokens()[edit_token_index - 2].is_ident() 
-                    && tokens_line.tokens()[edit_token_index - 1].is_punct_id(id!(:));
-
-                if is_prop_assign || is_field_assign || token.is_value_type() {
+                if is_prop_assign || token.is_value_type() {
                     
                     if let Some(live_token_index) = live_file.document.find_token_by_pos(TextPos {line: line as u32, column}) {
-                        //let live_token = &origin.tokens[live_token_index];
-                        
+
                         let live_token_id = makepad_live_compiler::LiveTokenId::new(file_id, live_token_index);
                         let search_in_dsl = token.is_value_type();
                         
                         if let Some(node_index) = expanded.nodes.first_node_with_token_id(live_token_id, search_in_dsl) {
                             
-                            let live_token_id = if is_field_assign{ // get the thing after the :
-                                // check the next 
-                                makepad_live_compiler::LiveTokenId::new(file_id, live_token_index + 3)
-                            }
-                            else if is_prop_assign {
+                            let live_token_id = if is_prop_assign{ // get the thing after the :
                                 makepad_live_compiler::LiveTokenId::new(file_id, live_token_index + 2)
                             }
                             else{    

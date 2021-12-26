@@ -81,7 +81,7 @@ impl<'a> LiveExpander<'a> {
                 }
                 LiveValue::Use(module_id) => {
                     // lets verify it points anywhere
-                    if self.live_registry.module_id_and_name_to_doc(*module_id, in_node.id).is_none(){
+                    if self.live_registry.module_id_and_name_to_doc(*module_id, in_node.id).is_none() {
                         self.errors.push(LiveError {
                             origin: live_error_origin!(),
                             span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()),
@@ -103,15 +103,14 @@ impl<'a> LiveExpander<'a> {
             let out_index = match out_doc.nodes.child_or_append_index_by_name(current_parent.last().unwrap().1, in_node.id) {
                 Ok(overwrite) => {
                     let out_value = &out_doc.nodes[overwrite].value;
-
-                    let edit_info = out_doc.nodes[overwrite].origin.edit_info();
-                    let first_def = out_doc.nodes[overwrite].origin.first_def();
-
-                    if in_node.origin.edit_info().is_some(){
+                    
+                    let out_origin = out_doc.nodes[overwrite].origin;
+                    
+                    if in_node.origin.edit_info().is_some() {
                         self.errors.push(LiveError {
                             origin: live_error_origin!(),
                             span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()),
-                            message: format!("Cannot define edit info after first prop def of {}",in_node.id)
+                            message: format!("Cannot define edit info after first prop def of {}", in_node.id)
                         });
                     }
                     let ret_val = if in_value.is_expr() && out_value.is_expr() || in_value.is_expr() && out_value.is_value_type() {
@@ -124,9 +123,7 @@ impl<'a> LiveExpander<'a> {
                         self.shift_parent_stack(&mut current_parent, &out_doc.nodes, overwrite, old_len, out_doc.nodes.len());
                         
                         in_index = in_doc.nodes.skip_node(in_index);
-                        out_doc.nodes[overwrite].origin
-                            .set_first_def(first_def)
-                            .set_edit_info(edit_info);
+                        out_doc.nodes[overwrite].origin.inherit_origin(out_origin);
                         continue;
                     }
                     else if !in_value.is_class() && out_value.variant_id() == in_value.variant_id() { // same type
@@ -220,9 +217,9 @@ impl<'a> LiveExpander<'a> {
                         in_index = in_doc.nodes.skip_node(in_index);
                         continue;
                     };
-                    out_doc.nodes[overwrite].origin
-                        .set_edit_info(edit_info)
-                        .set_first_def(first_def);
+                    
+                    out_doc.nodes[overwrite].origin.inherit_origin(out_origin);
+                    
                     ret_val
                 }
                 Err(insert_point) => {
@@ -335,7 +332,7 @@ impl<'a> LiveExpander<'a> {
                         for field in &live_type_info.fields {
                             let lti = &field.live_type_info;
                             if let Some(file_id) = self.live_registry.module_id_to_file_id.get(&lti.module_id) {
-
+                                
                                 if *file_id == self.in_file_id { // clone on self
                                     if let Some(index) = out_doc.nodes.child_by_name(0, lti.type_name) {
                                         let node_insert_point = insert_point;
@@ -361,7 +358,7 @@ impl<'a> LiveExpander<'a> {
                                         
                                         out_doc.nodes[node_insert_point].id = field.id;
                                     }
-                                    else{
+                                    else {
                                         self.errors.push(LiveError {
                                             origin: live_error_origin!(),
                                             span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()),
@@ -390,10 +387,10 @@ impl<'a> LiveExpander<'a> {
             in_index += 1;
         }
         out_doc.nodes.push(in_doc.nodes.last().unwrap().clone());
-
+        
         // this stores the node index on nodes that don't have a node index
         for i in 1..out_doc.nodes.len() {
-            if out_doc.nodes[i].value.is_dsl(){
+            if out_doc.nodes[i].value.is_dsl() {
                 out_doc.nodes[i].value.set_dsl_expand_index_if_none(i);
             }
         }
