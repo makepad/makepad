@@ -206,10 +206,14 @@ impl LiveNodeOrigin {
         LiveEditInfo::from_bits(((self.0 & 0x7f00_0000_0000_0000) >> 56) as u32)
     }
     
-    pub fn with_node_has_prefix(mut self, node_has_prefix: bool) -> Self {
+    pub fn set_node_has_prefix(&mut self, node_has_prefix: bool) {
         if node_has_prefix {
             self.0 |= 0x4000_0000_0000_0000;
         }
+    }
+    
+    pub fn with_node_has_prefix(mut self, node_has_prefix: bool) -> Self {
+        self.set_node_has_prefix(node_has_prefix);
         self
     }
     
@@ -226,6 +230,15 @@ impl LiveNodeOrigin {
     
     pub fn id_non_unique(&self) -> bool {
         self.0 & 0x8000_0000_0000_0000 != 0
+    }
+    
+    pub fn inherit_origin(&mut self, origin:Self){
+        let edit_info = origin.edit_info();
+        let first_def = origin.first_def();
+        let node_has_prefix = origin.node_has_prefix();
+        self.set_edit_info(edit_info);
+        self.set_first_def(first_def);
+        self.set_node_has_prefix(node_has_prefix);
     }
 }
 
