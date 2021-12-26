@@ -22,7 +22,7 @@ live_register!{
                     SHADOW,
                     self.rect_size.x - SHADOW * (1. + self.pressed),
                     self.rect_size.y - SHADOW * (1. + self.pressed),
-                    BORDER_RADIUS
+                    BORDER_RADIUS 
                 );
                 sdf.blur = 6.0;
                 sdf.fill(mix(#0007, #0, self.hover));

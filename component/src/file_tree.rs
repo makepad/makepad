@@ -13,8 +13,6 @@ live_register!{
     use makepad_render::shader::std::*;
     
     DrawBgQuad: {{DrawBgQuad}} {
-        debug:true
-        
         const COLOR_EVEN: #25
         const COLOR_ODD: #28
         const COLOR_SELECTED: #x11466E
