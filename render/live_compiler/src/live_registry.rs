@@ -7,7 +7,7 @@ use {
         live_error::{LiveError, LiveErrorOrigin, LiveFileError},
         live_parser::LiveParser,
         live_document::LiveDocument,
-        live_node::{LiveNode, LiveValue, LiveType, LiveTypeInfo},
+        live_node::{LiveNodeOrigin, LiveNode, LiveValue, LiveType, LiveTypeInfo},
         live_node_vec::{LiveNodeSlice, LiveNodeVec, LiveNodeMutReader},
         live_ptr::{LiveFileId, LivePtr, LiveModuleId},
         live_token::{LiveToken, LiveTokenId, TokenWithSpan},
@@ -112,14 +112,19 @@ impl LiveRegistry {
     }
     
     // this looks at the 'id' before the live token id
-    pub fn get_prefix_at(&self, node_id:LiveId, first_def:LiveTokenId) -> Option<LiveId> {
+    pub fn get_node_prefix(&self, origin:LiveNodeOrigin) -> Option<LiveId> {
+        if !origin.node_has_prefix(){
+            return None
+        }
+        let first_def = origin.first_def().unwrap();
         let token_index = first_def.token_index();
+        if token_index == 0{
+            return None;
+        }
         let doc = &self.live_files[first_def.file_id().to_index()].document;
-        let token = doc.tokens[token_index];
+        let token = doc.tokens[token_index-1];
         if let LiveToken::Ident(id) = token.token{
-            if id != node_id{
-                return Some(id)
-            }
+            return Some(id)
         }
         None
     }

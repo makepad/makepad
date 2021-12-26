@@ -241,7 +241,8 @@ impl CocoaApp {
     }
     
     pub fn startup_focus_hack(&mut self) {
-        unsafe {
+                /*
+        unsafe { 
             if !self.startup_focus_hack_ran {
                 self.startup_focus_hack_ran = true;
                 let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
@@ -269,7 +270,7 @@ impl CocoaApp {
                     }
                 }
             }
-        }
+        }*/
     }
     
     /*    pub fn init_app_after_first_window(&mut self) {
