@@ -20,19 +20,26 @@ impl From<TextPos> for Position {
 }
 
 #[derive(Clone, Copy, Default, Eq, Ord, PartialOrd, PartialEq)]
-pub struct Span {
+pub struct TextSpan {
     pub file_id: LiveFileId,
     pub start: TextPos,
     pub end: TextPos
 }
 
-impl fmt::Display for Span {
+#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialOrd, PartialEq)]
+pub struct TokenSpan {
+    pub text_span: TextSpan,
+    pub start_index: usize,
+    pub end_index: usize
+}
+
+impl fmt::Display for TextSpan {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Span(start:{}, end:{}, file_id:{})", self.start, self.end, self.file_id.to_index())
     }
 }
 
-impl fmt::Debug for Span {
+impl fmt::Debug for TextSpan {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         write!(f, "Span(start:{}, end:{}, file_id:{})", self.start, self.end, self.file_id.to_index())
     }

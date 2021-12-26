@@ -1,6 +1,6 @@
 use {
     std::fmt,
-    crate::span::Span
+    crate::span::TextSpan
 };
 
 #[derive(Clone, Default, PartialEq)]
@@ -12,7 +12,7 @@ pub struct LiveErrorOrigin {
 #[derive(Clone)]
 pub struct LiveError {
     pub origin: LiveErrorOrigin,
-    pub span: Span,
+    pub span: TextSpan,
     pub message: String,
 }
 
@@ -20,7 +20,7 @@ pub struct LiveError {
 pub struct LiveFileError {
     pub origin: LiveErrorOrigin,
     pub file: String,
-    pub span: Span,
+    pub span: TextSpan,
     pub message: String,
 }
 

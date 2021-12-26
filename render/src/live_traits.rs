@@ -10,12 +10,12 @@ pub use {
     }
 };
 
-pub trait LiveNewHelper{
+pub trait LiveNewHelper {
     
 }
 
-pub fn new_from_ptr_impl<CB>(cx:&mut Cx, live_ptr: LivePtr, cb:CB)
-where CB: FnOnce(&mut Cx, ApplyFrom, usize, &[LiveNode])->usize{
+pub fn new_from_ptr_impl<CB>(cx: &mut Cx, live_ptr: LivePtr, cb: CB)
+where CB: FnOnce(&mut Cx, ApplyFrom, usize, &[LiveNode]) -> usize {
     let live_registry_rc = cx.live_registry.clone();
     let live_registry = live_registry_rc.borrow();
     let doc = live_registry.ptr_to_doc(live_ptr);
@@ -31,7 +31,7 @@ pub trait LiveNew: LiveApply {
     
     fn live_register(_cx: &mut Cx) {}
     
-    fn live_type_info(cx:&mut Cx) -> LiveTypeInfo;
+    fn live_type_info(cx: &mut Cx) -> LiveTypeInfo;
     
     fn new_apply(cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Self where Self: Sized {
         let mut ret = Self::new(cx);
@@ -111,19 +111,19 @@ pub trait LiveApply: LiveHook {
         self.apply(cx, ApplyFrom::ApplyClear, 0, nodes);
     }
     
-    fn handle_live_edit_event(&mut self, cx:&mut Cx, event:&Event, id:LiveId){
-        match event{
-            Event::LiveEdit=>{
+    fn handle_live_edit_event(&mut self, cx: &mut Cx, event: &Event, id: LiveId) {
+        match event {
+            Event::LiveEdit => {
                 let live_registry_rc = cx.live_registry.clone();
                 let live_registry = live_registry_rc.borrow();
-                if let Some(main_apply) = &live_registry.main_apply{
-                    if let Some(index) = main_apply.child_by_name(0, id){
-                        println!("{}", main_apply.to_string(0,100));
+                if let Some(main_apply) = &live_registry.main_apply {
+                    if let Some(index) = main_apply.child_by_name(0, id) {
+                        println!("{}", main_apply.to_string(0, 100));
                         self.apply(cx, ApplyFrom::LiveEdit, index, main_apply);
                     }
                 }
             }
-            _=>()
+            _ => ()
         }
         
     }
@@ -170,7 +170,7 @@ pub trait LiveAnimate {
 pub enum ApplyFrom {
     NewFromDoc {file_id: LiveFileId}, // newed from DSL
     UpdateFromDoc {file_id: LiveFileId}, // live DSL substantially updated
-
+    
     LiveEdit, // applying a live edit mutation
     
     New, // Bare new without file info
@@ -235,14 +235,14 @@ impl<T> LiveNew for Option<T> where T: LiveApply + LiveNew + 'static {
         ret
     }
     
-    fn live_type_info(_cx:&mut Cx) -> LiveTypeInfo {
+    fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
         T::live_type_info(_cx)
     }
 }
 
 impl dyn LiveApply {
-    pub fn type_id(&self)->std::any::TypeId{ std::any::TypeId::of::<Self>()}
-
+    pub fn type_id(&self) -> std::any::TypeId {std::any::TypeId::of::<Self>()}
+    
     pub fn is<T: LiveApply + 'static >(&self) -> bool {
         let t = TypeId::of::<T>();
         let concrete = self.type_id();

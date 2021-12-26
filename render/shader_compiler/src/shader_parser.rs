@@ -40,7 +40,8 @@ impl<'a> ShaderParser<'a> {
         type_deps: &'a mut Vec<ShaderParserDep>,
         self_kind: Option<FnSelfKind>,
         dsl_expand_index: usize,
-        origin_file_id: LiveFileId
+        origin_file_id: LiveFileId,
+        token_start: usize
     ) -> Self {
         let mut tokens_with_span = tokens.iter().cloned();
         let token_with_span = tokens_with_span.next().unwrap();
@@ -53,7 +54,7 @@ impl<'a> ShaderParser<'a> {
             type_deps,
             tokens_with_span,
             token_with_span,
-            token_index: 0,
+            token_index: token_start,
             end: TextPos::default(),
             self_kind
         }
@@ -62,7 +63,7 @@ impl<'a> ShaderParser<'a> {
 
 impl<'a> ShaderParser<'a> {
     
-    fn peek_span(&self) -> Span {
+    fn peek_span(&self) -> TextSpan {
         self.token_with_span.span
     }
     
@@ -193,6 +194,7 @@ impl<'a> ShaderParser<'a> {
         SpanTracker {
             file_id: self.token_with_span.span.file_id,
             start: self.token_with_span.span.start,
+            start_index: self.token_index
         }
     }
     
@@ -1379,27 +1381,33 @@ impl<'a> ShaderParser<'a> {
     }
 }
 
+
 pub struct SpanTracker {
     pub file_id: LiveFileId,
     pub start: TextPos,
+    pub start_index: usize,
 }
 
 impl SpanTracker {
     pub fn end<F, R>(&self, parser: &mut ShaderParser, f: F) -> R
     where
-    F: FnOnce(Span) -> R,
+    F: FnOnce(TokenSpan) -> R,
     {
-        f(Span {
-            file_id: self.file_id,
-            start: self.start,
-            end: parser.token_end(),
+        f(TokenSpan {
+            text_span: TextSpan {
+                file_id: self.file_id,
+                start: self.start,
+                end: parser.token_end(),
+            },
+            start_index: self.start_index,
+            end_index: parser.token_index
         })
     }
     
     pub fn error(&self, parser: &mut ShaderParser, origin: LiveErrorOrigin, message: String) -> LiveError {
         LiveError {
             origin,
-            span: Span {
+            span: TextSpan {
                 file_id: self.file_id,
                 start: self.start,
                 end: parser.token_end(),

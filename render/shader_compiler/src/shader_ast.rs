@@ -81,7 +81,7 @@ pub struct DrawShaderDef {
 
 #[derive(Clone, Debug)]
 pub struct DrawShaderFieldDef {
-    pub span: Span,
+    pub span: TokenSpan,
     pub ident: Ident,
     pub ty_expr: TyExpr,
     pub kind: DrawShaderFieldKind
@@ -124,7 +124,7 @@ pub enum DrawShaderFieldKind {
 
 #[derive(Clone, Debug)]
 pub struct ConstDef {
-    pub span: Span,
+    pub span: TokenSpan,
     pub ident: Ident,
     pub ty_expr: TyExpr,
     pub expr: Expr,
@@ -182,7 +182,7 @@ pub struct FnDef {
     
     // the const table (per function)
     pub const_table: RefCell<Option<Vec<f32 >> >,
-    pub const_table_spans: RefCell<Option<Vec<(usize, Span) >> >,
+    pub const_table_spans: RefCell<Option<Vec<(usize, TokenSpan) >> >,
     
     pub hidden_args: RefCell<Option<BTreeSet<HiddenArgKind >> >,
     pub draw_shader_refs: RefCell<Option<BTreeSet<Ident >> >,
@@ -196,7 +196,7 @@ pub struct FnDef {
     pub closure_sites: RefCell<Option<Vec<ClosureSite >> >,
     
     // base
-    pub span: Span,
+    pub span: TokenSpan,
     pub return_ty: RefCell<Option<Ty >>,
     pub params: Vec<Param>,
     pub return_ty_expr: Option<TyExpr>,
@@ -209,14 +209,14 @@ pub struct ClosureDefIndex(pub usize);
 
 #[derive(Clone, Debug)]
 pub struct ClosureParam {
-    pub span: Span,
+    pub span: TokenSpan,
     pub ident: Ident,
     pub shadow: Cell<Option<ScopeSymShadow >>
 }
 
 #[derive(Clone, Debug)]
 pub struct ClosureDef {
-    pub span: Span,
+    pub span: TokenSpan,
     pub closed_over_syms: RefCell<Option<Vec<Sym >> >,
     pub params: Vec<ClosureParam>,
     pub kind: ClosureDefKind
@@ -243,7 +243,7 @@ pub struct ClosureSiteArg {
 
 #[derive(Clone, Debug)]
 pub struct StructDef {
-    pub span: Span,
+    pub span: TokenSpan,
     //pub ident: Ident,
     pub struct_refs: RefCell<Option<BTreeSet<StructPtr >> >,
     pub fields: Vec<StructFieldDef>,
@@ -253,7 +253,7 @@ pub struct StructDef {
 #[derive(Clone, Debug)]
 pub struct StructFieldDef {
     pub var_def_ptr: VarDefPtr,
-    pub span: Span,
+    pub span: TokenSpan,
     pub ident: Ident,
     pub ty_expr: TyExpr,
 }
@@ -268,7 +268,7 @@ impl StructDef {
 
 #[derive(Clone, Debug)]
 pub struct Param {
-    pub span: Span,
+    pub span: TokenSpan,
     pub is_inout: bool,
     pub ident: Ident,
     pub shadow: Cell<Option<ScopeSymShadow >>,
@@ -283,13 +283,13 @@ pub struct Block {
 #[derive(Clone, Debug)]
 pub enum Stmt {
     Break {
-        span: Span,
+        span: TokenSpan,
     },
     Continue {
-        span: Span,
+        span: TokenSpan,
     },
     For {
-        span: Span,
+        span: TokenSpan,
         ident: Ident,
         from_expr: Expr,
         to_expr: Expr,
@@ -297,19 +297,19 @@ pub enum Stmt {
         block: Box<Block>,
     },
     If {
-        span: Span,
+        span: TokenSpan,
         expr: Expr,
         block_if_true: Box<Block>,
         block_if_false: Option<Box<Block >>,
     },
     Match {
-        span: Span,
+        span: TokenSpan,
         expr: Expr,
         matches: Vec<Match>,
     },
 
     Let {
-        span: Span,
+        span: TokenSpan,
         ty: RefCell<Option<Ty >>,
         shadow: Cell<Option<ScopeSymShadow >>,
         ident: Ident,
@@ -317,22 +317,22 @@ pub enum Stmt {
         expr: Option<Expr>,
     },
     Return {
-        span: Span,
+        span: TokenSpan,
         expr: Option<Expr>,
     },
     Block {
-        span: Span,
+        span: TokenSpan,
         block: Box<Block>,
     },
     Expr {
-        span: Span,
+        span: TokenSpan,
         expr: Expr,
     },
 }
 
 #[derive(Clone, Debug)]
 pub struct Match {
-    pub span: Span,
+    pub span: TokenSpan,
     pub enum_name: Ident,
     pub enum_variant: Ident,
     pub enum_value: Cell<Option<usize>>,
@@ -341,7 +341,7 @@ pub struct Match {
 
 #[derive(Clone, Debug)]
 pub struct Expr {
-    pub span: Span,
+    pub span: TokenSpan,
     pub ty: RefCell<Option<Ty >>,
     pub const_val: RefCell<Option<Option<Val >> >,
     pub const_index: Cell<Option<usize >>,
@@ -351,41 +351,41 @@ pub struct Expr {
 #[derive(Clone, Debug)]
 pub enum ExprKind {
     Cond {
-        span: Span,
+        span: TokenSpan,
         expr: Box<Expr>,
         expr_if_true: Box<Expr>,
         expr_if_false: Box<Expr>,
     },
     Bin {
-        span: Span,
+        span: TokenSpan,
         op: BinOp,
         left_expr: Box<Expr>,
         right_expr: Box<Expr>,
     },
     Un {
-        span: Span,
+        span: TokenSpan,
         op: UnOp,
         expr: Box<Expr>,
     },
     Field {
-        span: Span,
+        span: TokenSpan,
         expr: Box<Expr>,
         field_ident: Ident,
     },
     Index {
-        span: Span,
+        span: TokenSpan,
         expr: Box<Expr>,
         index_expr: Box<Expr>,
     },
     MethodCall {
-        span: Span,
+        span: TokenSpan,
         ident: Ident,
         closure_site_index: Cell<Option<usize >>,
         arg_exprs: Vec<Expr>,
     },
     PlainCall { // not very pretty but otherwise closures cannot override a normal fn
         // possible solution is to capture it in a refcell sub-enum.
-        span: Span,
+        span: TokenSpan,
         fn_ptr: Option<FnPtr>,
         ident: Option<Ident>,
         param_index: Cell<Option<usize >>, // used by the closure case
@@ -393,30 +393,30 @@ pub enum ExprKind {
         arg_exprs: Vec<Expr>,
     },
     BuiltinCall {
-        span: Span,
+        span: TokenSpan,
         ident: Ident,
         arg_exprs: Vec<Expr>,
     },
     ClosureDef(ClosureDefIndex),
     ConsCall {
-        span: Span,
+        span: TokenSpan,
         ty_lit: TyLit,
         arg_exprs: Vec<Expr>,
     },
     StructCons {
         struct_ptr: StructPtr,
-        span: Span,
+        span: TokenSpan,
         args: Vec<(Ident, Expr)>
     },
     Var {
-        span: Span,
+        span: TokenSpan,
         ident: Option<Ident>,
         kind: Cell<Option<VarKind >>,
         var_resolve: VarResolve,
         //ident_path: IdentPath,
     },
     Lit {
-        span: Span,
+        span: TokenSpan,
         lit: Lit,
     },
 }
@@ -443,7 +443,7 @@ pub enum VarKind {
 
 #[derive(Clone, Debug)]
 pub struct TyExpr {
-    pub span: Span,
+    pub span: TokenSpan,
     pub ty: RefCell<Option<Ty >>,
     pub kind: TyExprKind,
 }
@@ -589,7 +589,7 @@ pub struct Sym {
 
 #[derive(Clone, Debug)]
 pub struct ScopeSym {
-    pub span: Span,
+    pub span: TokenSpan,
     pub sym: Sym,
     pub referenced: Cell<bool>,
     pub kind: ScopeSymKind
@@ -615,7 +615,7 @@ impl Scopes {
         }
     }
     
-    pub fn find_sym_on_scopes(&self, ident: Ident, _span: Span,) -> Option<&ScopeSym> {
+    pub fn find_sym_on_scopes(&self, ident: Ident, _span: TokenSpan) -> Option<&ScopeSym> {
         let ret = self.scopes.iter().rev().find_map( | scope | scope.get(&ident));
         if ret.is_some() {
             return Some(ret.unwrap())
@@ -655,7 +655,7 @@ impl Scopes {
         ret
     }
     
-    pub fn insert_sym(&mut self, span: Span, ident: Ident, ty: Ty, sym_kind: ScopeSymKind) -> ScopeSymShadow {
+    pub fn insert_sym(&mut self, span: TokenSpan, ident: Ident, ty: Ty, sym_kind: ScopeSymKind) -> ScopeSymShadow {
         
         if let Some(item) = self.scopes.last_mut().unwrap().get_mut(&ident) {
             item.sym.shadow = ScopeSymShadow(item.sym.shadow.0 + 1);
@@ -700,7 +700,7 @@ impl FnDef {
 
     pub fn new(
         fn_ptr: FnPtr,
-        span: Span,
+        span: TokenSpan,
         ident: Ident,
         self_kind: Option<FnSelfKind>,
         params: Vec<Param>,
@@ -781,7 +781,7 @@ impl DrawShaderDef {
         uniform_blocks
     }
     
-    pub fn add_uniform(&mut self, id:LiveId, block:LiveId, ty:Ty, span:Span){
+    pub fn add_uniform(&mut self, id:LiveId, block:LiveId, ty:Ty, span:TokenSpan){
         self.fields.push(
             DrawShaderFieldDef {
                 kind: DrawShaderFieldKind::Uniform {
@@ -795,7 +795,7 @@ impl DrawShaderDef {
         )
     }
     
-    pub fn add_instance(&mut self, id:LiveId, ty:Ty, span:Span, live_field_kind:LiveFieldKind){
+    pub fn add_instance(&mut self, id:LiveId, ty:Ty, span:TokenSpan, live_field_kind:LiveFieldKind){
         self.fields.push(
             DrawShaderFieldDef { 
                 kind: DrawShaderFieldKind::Instance { 
@@ -810,7 +810,7 @@ impl DrawShaderDef {
         )
     }   
 
-    pub fn add_geometry(&mut self, id:LiveId, ty:Ty, span:Span){
+    pub fn add_geometry(&mut self, id:LiveId, ty:Ty, span:TokenSpan){
         self.fields.push(
             DrawShaderFieldDef {
                 kind: DrawShaderFieldKind::Geometry {
@@ -825,7 +825,7 @@ impl DrawShaderDef {
     }  
     
      
-    pub fn add_texture(&mut self, id:LiveId, ty:Ty, span:Span){
+    pub fn add_texture(&mut self, id:LiveId, ty:Ty, span:TokenSpan){
         self.fields.push(
             DrawShaderFieldDef {
                 kind: DrawShaderFieldKind::Texture {
@@ -1033,7 +1033,7 @@ impl Ty {
     pub fn to_ty_expr(&self) -> TyExpr {
         TyExpr {
             ty: RefCell::new(None),
-            span: Span::default(),
+            span: TokenSpan::default(),
             kind: match self{
                 Ty::Void=> panic!(),
                 Ty::Bool=> TyExprKind::Lit{ty_lit:TyLit::Bool},
