@@ -4,11 +4,12 @@ live_register!{
     use makepad_render::shader::std::*;
     
     Splitter: {{Splitter}} {
-        split_bar_size: 2.0
+        split_bar_size: 12.0
         bar_quad: {
-            instance pressed: float;
-            instance hover: float;
-            
+            debug:true
+            instance pressed: float
+            instance hover: float
+
             fn pixel(self) -> vec4 {
                 return mix(#2, mix(#7, #f, self.pressed), self.hover);
             }

@@ -59,7 +59,6 @@ impl<'a> DrawShaderGenerator<'a> {
         self.generate_geometry_struct();
         self.generate_instance_struct();
         self.generate_varying_struct();
-        self.generate_const_decls();
         
         let vertex_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(id!(vertex))).unwrap();
         let pixel_def = self.shader_registry.draw_shader_method_decl_from_ident(self.draw_shader_def, Ident(id!(pixel))).unwrap();
@@ -337,21 +336,6 @@ impl<'a> DrawShaderGenerator<'a> {
             }
         }
         writeln!(self.string, "}};").unwrap();
-    }
-    
-    fn generate_const_decls(&mut self) {
-        for const_node_ptr in self.draw_shader_def.all_const_refs.borrow().iter() {
-            let const_def = self.shader_registry.consts.get(const_node_ptr).unwrap();
-            
-            write!(self.string, "static const ").unwrap();
-            self.write_var_decl(
-                &const_node_ptr,
-                const_def.ty_expr.ty.borrow().as_ref().unwrap(),
-            );
-            write!(self.string, " = ").unwrap();
-            self.generate_expr(&const_def.expr);
-            writeln!(self.string, ";").unwrap();
-        }
     }
     
     fn generate_vertex_main(&mut self) {

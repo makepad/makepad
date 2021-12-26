@@ -198,7 +198,7 @@ impl<'a> LiveParser<'a> {
             value: LiveValue::DSL {
                 token_start: token_start as u32,
                 token_count: (token_index - token_start) as u32,
-                expanded_token_id: None
+                expand_index: None
             }
         });
         
@@ -260,7 +260,7 @@ impl<'a> LiveParser<'a> {
                             id: LiveId::empty(),
                             value: LiveValue::Close
                         });
-                        return Ok(Some(LiveEditInfo::new(self.file_id, edit_info_index)));
+                        return Ok(Some(LiveEditInfo::new(edit_info_index)));
                     }
                     LiveToken::Ident(prop_id) => {
                         self.skip_token();
@@ -320,22 +320,22 @@ impl<'a> LiveParser<'a> {
         Ok(None)
     }
     
-    fn expect_annotate(&mut self, with:LiveId, ld: &mut LiveDocument) -> Result<(), LiveError> {
+    fn expect_annotated_value(&mut self, token_id:LiveTokenId, prop_id:LiveId, ld: &mut LiveDocument) -> Result<(), LiveError> {
         
-        let token_id = self.get_token_id();
-        
+        //let token_id = self.get_token_id();
         let real_prop_id = self.expect_ident() ?;
-
+        if prop_id == real_prop_id{
+            return Err(self.error(format!("Prefix cannot have same id as name {}", prop_id)))
+        }
         let edit_info = self.possible_edit_info(ld) ?;
-
         let origin = LiveNodeOrigin::from_token_id(token_id).with_edit_info(edit_info);
-
+/*
         ld.nodes.push(LiveNode {
             origin: origin,
             id: real_prop_id,
             value: LiveValue::Annotate(with)
         });
-        
+  */      
         if self.accept_token(LiveToken::Punct(id!(:))){
             self.expect_live_value(real_prop_id, origin, ld) ?;
         }
@@ -702,13 +702,9 @@ impl<'a> LiveParser<'a> {
                             id!(use) => {
                                 self.expect_use(ld) ?;
                                 self.accept_optional_delim();
-                            }/*
-                            id!(const) => {
-                                self.expect_const(ld) ?;
-                                self.accept_optional_delim();
-                            }*/
+                            }
                             _ => {
-                                self.expect_annotate(prop_id, ld) ?;
+                                self.expect_annotated_value(token_id, prop_id, ld) ?;
                                 self.accept_optional_delim();
                             }
                         }

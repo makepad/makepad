@@ -7,7 +7,7 @@ use {
         live_error::{LiveError, LiveErrorOrigin, LiveFileError},
         live_parser::LiveParser,
         live_document::LiveDocument,
-        live_node::{LiveNode, LiveValue, LiveType, LiveTypeInfo, LiveNodeOrigin},
+        live_node::{LiveNode, LiveValue, LiveType, LiveTypeInfo},
         live_node_vec::{LiveNodeSlice, LiveNodeVec, LiveNodeMutReader},
         live_ptr::{LiveFileId, LivePtr, LiveModuleId},
         live_token::{LiveToken, LiveTokenId, TokenWithSpan},
@@ -42,9 +42,9 @@ impl Default for LiveRegistry {
             main_module: None,
             file_ids: HashMap::new(),
             module_id_to_file_id: HashMap::new(),
-            live_files: vec![LiveFile::default()],
+            live_files: Vec::new(),
             live_type_infos: HashMap::new(),
-            expanded: vec![LiveDocument::default()],
+            expanded: Vec::new(),
             main_apply: None
         }
     }
@@ -109,6 +109,19 @@ impl LiveRegistry {
     
     pub fn module_id_to_file_id(&self, module_id: LiveModuleId) -> Option<LiveFileId> {
         self.module_id_to_file_id.get(&module_id).cloned()
+    }
+    
+    // this looks at the 'id' before the live token id
+    pub fn get_prefix_at(&self, node_id:LiveId, first_def:LiveTokenId) -> Option<LiveId> {
+        let token_index = first_def.token_index();
+        let doc = &self.live_files[first_def.file_id().to_index()].document;
+        let token = doc.tokens[token_index];
+        if let LiveToken::Ident(id) = token.token{
+            if id != node_id{
+                return Some(id)
+            }
+        }
+        None
     }
     
     pub fn module_id_and_name_to_doc(&self, module_id: LiveModuleId, name: LiveId) -> Option<LiveDocNodes> {
@@ -202,11 +215,11 @@ impl LiveRegistry {
         None
     }
     
-    pub fn find_scope_ptr_via_origin2(&self, origin: LiveNodeOrigin, item: LiveId) -> Option<LivePtr> {
+    pub fn find_scope_ptr_via_expand_index(&self, file_id:LiveFileId, index:usize, item: LiveId) -> Option<LivePtr> {
         // ok lets start
-        let token_id = origin.token_id().unwrap();
-        let index = origin.node_index().unwrap();
-        let file_id = token_id.file_id();
+        // let token_id = origin.token_id().unwrap();
+        //let index = origin.node_index().unwrap();
+        //let file_id = token_id.file_id();
         let doc = self.file_id_to_doc(file_id);
         match self.find_scope_target_via_start(item, index, &doc.nodes) {
             Some(LiveScopeTarget::LocalPtr(index)) => Some(LivePtr {file_id: file_id, index: index as u32}),
@@ -223,22 +236,7 @@ impl LiveRegistry {
     pub fn token_id_to_span(&self, token_id: LiveTokenId) -> Span {
         self.live_files[token_id.file_id().to_index()].document.token_id_to_span(token_id)
     }
-    /*
-    pub fn insert_dep_order(&mut self, module_id: LiveModuleId, token_id: TokenId, own_module_id: LiveModuleId) {
-        let self_index = self.dep_order.iter().position( | v | v.0 == own_module_id).unwrap();
-        if let Some(other_index) = self.dep_order.iter().position( | v | v.0 == module_id) {
-            // if other_index is > self index. we should move self later
-            
-            if other_index > self_index {
-                self.dep_order.remove(other_index);
-                self.dep_order.insert(self_index, (module_id, token_id));
-            }
-        } 
-        else {
-            self.dep_order.insert(self_index, (module_id, token_id));
-        }
-    }*/
-    
+
     pub fn tokenize_from_str(source: &str, start_pos: TextPos, file_id: LiveFileId) -> Result<(Vec<TokenWithSpan>, Vec<char>), LiveError> {
         let mut line_chars = Vec::new();
         let mut state = State::default();
@@ -572,18 +570,6 @@ impl LiveRegistry {
         
         return Ok(file_id)
     }
-    
-    /*
-    pub fn update_live_file(
-        &mut self,
-        file_name: &str,
-        file_id: LiveFileId,
-        source: String,
-        live_type_infos: Vec<LiveTypeInfo>,
-        start_pos: TextPos,
-    ) -> Result<(), LiveFileError> {
-        Ok(())
-    }*/
     
     pub fn expand_all_documents(&mut self, errors: &mut Vec<LiveError>) {
         

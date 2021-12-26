@@ -102,10 +102,18 @@ impl<'a> LiveExpander<'a> {
             
             let out_index = match out_doc.nodes.child_or_append_index_by_name(current_parent.last().unwrap().1, in_node.id) {
                 Ok(overwrite) => {
-                    
                     let out_value = &out_doc.nodes[overwrite].value;
-                    let out_edit_info = out_doc.nodes[overwrite].origin.edit_info();
 
+                    let edit_info = out_doc.nodes[overwrite].origin.edit_info();
+                    let first_def = out_doc.nodes[overwrite].origin.first_def();
+
+                    if in_node.origin.edit_info().is_some(){
+                        self.errors.push(LiveError {
+                            origin: live_error_origin!(),
+                            span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()),
+                            message: format!("Cannot define edit info after first prop def of {}",in_node.id)
+                        });
+                    }
                     let ret_val = if in_value.is_expr() && out_value.is_expr() || in_value.is_expr() && out_value.is_value_type() {
                         // replace range
                         let next_index = out_doc.nodes.skip_node(overwrite);
@@ -116,7 +124,9 @@ impl<'a> LiveExpander<'a> {
                         self.shift_parent_stack(&mut current_parent, &out_doc.nodes, overwrite, old_len, out_doc.nodes.len());
                         
                         in_index = in_doc.nodes.skip_node(in_index);
-                        out_doc.nodes[overwrite].origin.set_optional_edit_info(out_edit_info);
+                        out_doc.nodes[overwrite].origin
+                            .set_first_def(first_def)
+                            .set_edit_info(edit_info);
                         continue;
                     }
                     else if !in_value.is_class() && out_value.variant_id() == in_value.variant_id() { // same type
@@ -201,20 +211,6 @@ impl<'a> LiveExpander<'a> {
                         level_overwrite.push(true);
                         overwrite
                     }
-                    else if out_value.is_annotate() && in_value.is_value_type() { // this is allowed
-                        // see if we have a node after to overwrite
-                        if let Some(overwrite) = out_doc.nodes.sibling_by_name(overwrite + 1, in_node.id) {
-                            out_doc.nodes[overwrite] = in_node.clone();
-                            overwrite
-                        }
-                        else {
-                            // POTENTIAL SHIFT
-                            let old_len = out_doc.nodes.len();
-                            out_doc.nodes.insert(overwrite + 1, in_node.clone());
-                            self.shift_parent_stack(&mut current_parent, &out_doc.nodes, overwrite, old_len, out_doc.nodes.len());
-                            overwrite + 1
-                        }
-                    }
                     else {
                         self.errors.push(LiveError {
                             origin: live_error_origin!(),
@@ -224,7 +220,9 @@ impl<'a> LiveExpander<'a> {
                         in_index = in_doc.nodes.skip_node(in_index);
                         continue;
                     };
-                    out_doc.nodes[overwrite].origin.set_optional_edit_info(out_edit_info);
+                    out_doc.nodes[overwrite].origin
+                        .set_edit_info(edit_info)
+                        .set_first_def(first_def);
                     ret_val
                 }
                 Err(insert_point) => {
@@ -395,8 +393,8 @@ impl<'a> LiveExpander<'a> {
 
         // this stores the node index on nodes that don't have a node index
         for i in 1..out_doc.nodes.len() {
-            if !out_doc.nodes[i].origin.node_index().is_some() && out_doc.nodes[i].value.is_dsl(){
-                out_doc.nodes[i].origin.set_node_index(i);
+            if out_doc.nodes[i].value.is_dsl(){
+                out_doc.nodes[i].value.set_dsl_expand_index_if_none(i);
             }
         }
     }

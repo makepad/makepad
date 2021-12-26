@@ -895,9 +895,6 @@ impl<'a> ExprGenerator<'a> {
             VarKind::MutLocal {ident, shadow} => {
                 write!(self.string, "{}", DisplayVarName(ident, shadow)).unwrap();
             }
-            VarKind::Const(const_node_ptr) => {
-                write!(self.string, "{}", const_node_ptr).unwrap();
-            }
             VarKind::LiveValue(value_node_ptr) => {
                 // this is a live value.. also prefix needed
                 self.backend_writer.generate_live_value_prefix(self.string);

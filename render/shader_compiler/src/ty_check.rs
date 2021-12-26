@@ -921,17 +921,6 @@ impl<'a> TyChecker<'a> {
         }
         // use the suggestion
         match var_resolve {
-            VarResolve::Const(const_node_ptr) => {
-                // scope values take precedence
-                
-                // ok we have a const, and we can fetch it,
-                // and it has a type
-                let const_decl = self.shader_registry.consts.get(&const_node_ptr).unwrap();
-                kind.set(Some(VarKind::Const(const_node_ptr)));
-                return Ok(const_decl.ty_expr.ty.borrow().clone().unwrap());
-                //kind.set(Some(VarKind::Const(value_ptr)));
-                //return Ok(ty_lit.to_ty());
-            },
             VarResolve::LiveValue(value_ptr, ty_lit) => {
                 kind.set(Some(VarKind::LiveValue(value_ptr)));
                 return Ok(ty_lit.to_ty());

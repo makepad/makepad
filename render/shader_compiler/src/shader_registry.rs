@@ -1,7 +1,7 @@
 use {
     std::{
         collections::{BTreeMap, HashSet, HashMap},
-        cell::RefCell,
+        cell::{Cell, RefCell},
     },
     makepad_live_compiler::*,
     crate::{
@@ -14,7 +14,6 @@ use {
 
 
 pub struct ShaderRegistry {
-    pub consts: HashMap<ConstPtr, ConstDef>,
     pub all_fns: HashMap<FnPtr, FnDef>,
     pub draw_shader_defs: HashMap<DrawShaderPtr, DrawShaderDef>,
     pub structs: HashMap<StructPtr, StructDef>,
@@ -31,7 +30,6 @@ impl ShaderRegistry {
     pub fn new() -> Self {
         Self {
             structs: HashMap::new(),
-            consts: HashMap::new(),
             enums: HashMap::new(),
             draw_shader_defs: HashMap::new(),
             all_fns: HashMap::new(),
@@ -47,7 +45,7 @@ pub enum LiveNodeFindResult {
     Struct(StructPtr),
     Function(FnPtr),
     PossibleStatic(StructPtr, FnPtr),
-//    Const(ConstPtr),
+    //    Const(ConstPtr),
     LiveValue(ValuePtr, TyLit)
 }
 
@@ -155,24 +153,25 @@ impl ShaderRegistry {
             }
             
             let now_ptr = LivePtr {file_id, index: index as u32};
+            let first_def = node.origin.first_def().unwrap();
             match node.value {
-                LiveValue::Annotate(with) => {
-                    if with == id!(const) {
-                        // find sibling by name
-                        if let Some(index) = nodes.sibling_by_name(index + 1, node.id) {
-                            let now_ptr = LivePtr {file_id, index: index as u32};
-                            match nodes[index].value {
-                                LiveValue::Bool(_) => return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Bool),
-                                LiveValue::Int(_) => return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Int),
-                                LiveValue::Float(_) => return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Float),
-                                LiveValue::Color(_) => return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Vec4),
-                                LiveValue::Vec2(_) => return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Vec2),
-                                LiveValue::Vec3(_) => return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Vec3),
-                                _ => return LiveNodeFindResult::NotFound
-                            };
-                        }
-                    }
-                    return LiveNodeFindResult::NotFound
+                LiveValue::Bool(_) if live_registry.get_prefix_at(node.id, first_def) == Some(id!(const)) => {
+                    return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Bool)
+                },
+                LiveValue::Int(_) if live_registry.get_prefix_at(node.id, first_def) == Some(id!(const)) => {
+                    return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Int)
+                }
+                LiveValue::Float(_) if live_registry.get_prefix_at(node.id, first_def) == Some(id!(const)) => {
+                    return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Float)
+                }
+                LiveValue::Color(_) if live_registry.get_prefix_at(node.id, first_def) == Some(id!(const)) => {
+                    return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Vec4)
+                }
+                LiveValue::Vec2(_) if live_registry.get_prefix_at(node.id, first_def) == Some(id!(const)) => {
+                    return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Vec2)
+                }
+                LiveValue::Vec3(_) if live_registry.get_prefix_at(node.id, first_def) == Some(id!(const)) => {
+                    return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Vec3)
                 }
                 LiveValue::DSL {token_start, ..} => {
                     // lets get the first token
@@ -184,9 +183,6 @@ impl ShaderRegistry {
                             }
                             return LiveNodeFindResult::Function(FnPtr(now_ptr));
                         }
-                        //LiveToken::Ident(id!(const)) => {
-                        //    return LiveNodeFindResult::Const(ConstPtr(now_ptr));
-                        //}
                         _ => LiveNodeFindResult::NotFound
                     }
                 }
@@ -322,7 +318,7 @@ impl ShaderRegistry {
         // alright lets parse and analyse a plain fn
         let fn_node = live_registry.ptr_to_node(fn_ptr.0);
         match fn_node.value {
-            LiveValue::DSL {token_start, token_count} => {
+            LiveValue::DSL {token_start, token_count, expand_index} => {
                 let id = fn_node.id;
                 let mut parser_deps = Vec::new();
                 // lets parse this thing
@@ -334,7 +330,8 @@ impl ShaderRegistry {
                     origin_doc.get_tokens(token_start as usize, token_count as usize),
                     &mut parser_deps,
                     if let Some(struct_ptr) = struct_ptr {Some(FnSelfKind::Struct(struct_ptr))}else {None},
-                    fn_node.origin
+                    expand_index.unwrap() as usize,
+                    fn_node.origin.token_id().unwrap().file_id()
                     //Some(struct_full_ptr)
                 );
                 
@@ -396,9 +393,10 @@ impl ShaderRegistry {
                 while let Some(node_index) = node_iter {
                     let prop_ptr = struct_ptr.with_index(node_index);
                     let prop = &doc.nodes[node_index];
+                    let first_def = prop.origin.first_def().unwrap();
                     
                     match prop.value {
-                        LiveValue::DSL {token_start, token_count} => {
+                        LiveValue::DSL {token_start, token_count, expand_index} => {
                             let id = prop.id;
                             let origin_doc = &live_registry.token_id_to_origin_doc(prop.origin.token_id().unwrap());
                             
@@ -408,7 +406,8 @@ impl ShaderRegistry {
                                 origin_doc.get_tokens(token_start as usize, token_count as usize),
                                 &mut parser_deps,
                                 Some(FnSelfKind::Struct(struct_ptr)),
-                                prop.origin
+                                expand_index.unwrap() as usize,
+                                prop.origin.token_id().unwrap().file_id()
                                 //Some(struct_full_ptr)
                             );
                             match origin_doc.tokens[token_start as usize].token {
@@ -440,51 +439,26 @@ impl ShaderRegistry {
                                 }
                             }
                         },
-                        LiveValue::Annotate(ident) if ident == id!(field) => {
-
-                            if let Some(index) = doc.nodes.sibling_by_name(node_index + 1, prop.id) {
-                                let node = &doc.nodes[index];
-                                match node.value {
-                                    LiveValue::Id(type_name)=>{ // its a typename
-                                        // lets fetch the span
-                                        let span = live_registry.token_id_to_span(node.origin.token_id().unwrap());
-
-                                        if let Some(ty_lit) = TyLit::from_id(type_name){
-                                            struct_def.fields.push(StructFieldDef {
-                                                var_def_ptr: VarDefPtr(prop_ptr),
-                                                span,
-                                                ident: Ident(prop.id),
-                                                ty_expr: ty_lit.to_ty().to_ty_expr()
-                                            })
-                                        }
-                                        else{
-                                            // TODO support structs as fields here
-                                            return Err(LiveError {
-                                                origin: live_error_origin!(),
-                                                span: live_registry.token_id_to_span(prop.origin.token_id().unwrap()),
-                                                message: format!("Type not found for struct field {}", type_name)
-                                            })
-                                        }
-                                    },
-                                    _ => {
-                                        return Err(LiveError {
-                                            origin: live_error_origin!(),
-                                            span: live_registry.token_id_to_span(prop.origin.token_id().unwrap()),
-                                            message: format!("only use typenames for struct field, no values")
-                                        })
-                                    }
-                                };
+                        LiveValue::Id(type_name) if live_registry.get_prefix_at(prop.id, first_def) == Some(id!(field)) => {
+                            // lets fetch the span
+                            let span = live_registry.token_id_to_span(prop.origin.token_id().unwrap());
+                            
+                            if let Some(ty_lit) = TyLit::from_id(type_name) {
+                                struct_def.fields.push(StructFieldDef {
+                                    var_def_ptr: VarDefPtr(prop_ptr),
+                                    span,
+                                    ident: Ident(prop.id),
+                                    ty_expr: ty_lit.to_ty().to_ty_expr()
+                                })
                             }
-                            else{
+                            else {
+                                // TODO support structs as fields here
                                 return Err(LiveError {
                                     origin: live_error_origin!(),
                                     span: live_registry.token_id_to_span(prop.origin.token_id().unwrap()),
-                                    message: format!("field does not have a type")
+                                    message: format!("Type not found for struct field {}", type_name)
                                 })
                             }
-                        },
-                        LiveValue::Id(_) if struct_def.fields.iter().find(|field| field.ident == Ident(prop.id)).is_some()=>{
-                            // lets check if we are a field
                         },
                         _ => {
                             return Err(LiveError {
@@ -561,21 +535,123 @@ impl ShaderRegistry {
                     let prop = &doc.nodes[node_index];
                     let prop_ptr = draw_shader_ptr.with_index(node_index);
                     match prop.value {
-                        // if we have a float or a vec2/3/4
-                        // we should look to set a default value
-                        LiveValue::Bool(val) => {
-                            match prop.id {
-                                id!(debug) => {
-                                    draw_shader_def.flags.debug = val;
-                                }
-                                id!(draw_call_compare) => {
-                                    draw_shader_def.flags.draw_call_nocompare = val;
-                                }
-                                id!(draw_call_always) => {
-                                    draw_shader_def.flags.draw_call_always = val;
-                                }
-                                _ => {} // could be input value
+                        LiveValue::Bool(_) |
+                        LiveValue::Id(_) |
+                        LiveValue::Int(_) |
+                        LiveValue::Float(_) |
+                        LiveValue::Color(_) |
+                        LiveValue::Vec2(_) |
+                        LiveValue::Vec3(_) |
+                        LiveValue::Vec4(_) => {
+                            let first_def = prop.origin.first_def().unwrap();
+                            let before = live_registry.get_prefix_at(prop.id, first_def);
+                            let span = live_registry.token_id_to_span(first_def);
+                            let ty = ShaderTy::from_live_node(node_index, &doc.nodes);
+                            if ty.is_none() {
+                                return Err(LiveError {
+                                    origin: live_error_origin!(),
+                                    span,
+                                    message: format!("Invalid type for shader {:?}", prop.value)
+                                })
                             }
+                            let ty_expr = ty.unwrap().to_ty_expr();
+                            match before {
+                                Some(id!(geometry)) => {
+                                    draw_shader_def.fields.push(DrawShaderFieldDef {
+                                        kind: DrawShaderFieldKind::Geometry {
+                                            is_used_in_pixel_shader: Cell::new(false),
+                                            var_def_ptr: Some(VarDefPtr(prop_ptr)),
+                                        },
+                                        span,
+                                        ident: Ident(prop.id),
+                                        ty_expr
+                                    });
+                                },
+                                Some(id!(instance)) => {
+                                    let decl = DrawShaderFieldDef {
+                                        kind: DrawShaderFieldKind::Instance {
+                                            is_used_in_pixel_shader: Cell::new(false),
+                                            live_field_kind: LiveFieldKind::Live,
+                                            var_def_ptr: Some(VarDefPtr(prop_ptr)),
+                                        },
+                                        span,
+                                        ident: Ident(prop.id),
+                                        ty_expr
+                                    };
+                                    // find from the start the first instancefield
+                                    // without a var_def_node_prt
+                                    if let Some(index) = draw_shader_def.fields.iter().position( | field | {
+                                        if let DrawShaderFieldKind::Instance {var_def_ptr, ..} = field.kind {
+                                            if var_def_ptr.is_none() {
+                                                return true
+                                            }
+                                        }
+                                        false
+                                    }) {
+                                        draw_shader_def.fields.insert(index, decl);
+                                    }
+                                    else {
+                                        draw_shader_def.fields.push(decl);
+                                    }
+                                    
+                                },
+                                Some(id!(uniform)) => {
+                                    draw_shader_def.fields.push(DrawShaderFieldDef {
+                                        kind:DrawShaderFieldKind::Uniform {
+                                            var_def_ptr: Some(VarDefPtr(prop_ptr)),
+                                            block_ident: Ident(id!(user)),
+                                        },
+                                        span,
+                                        ident: Ident(prop.id),
+                                        ty_expr
+                                    });
+                                },
+                                Some(id!(varying)) => {
+                                    draw_shader_def.fields.push(DrawShaderFieldDef {
+                                        kind:DrawShaderFieldKind::Varying {
+                                            var_def_ptr: VarDefPtr(prop_ptr),
+                                        },
+                                        span,
+                                        ident: Ident(prop.id),
+                                        ty_expr
+                                    });
+                                },
+                                Some(id!(texture)) => {
+                                    draw_shader_def.fields.push(DrawShaderFieldDef {
+                                        kind:DrawShaderFieldKind::Texture {
+                                            var_def_ptr: Some(VarDefPtr(prop_ptr)),
+                                        },
+                                        span,
+                                        ident: Ident(prop.id),
+                                        ty_expr
+                                    });
+                                }
+                                Some(id!(const)) => {
+                                },
+                                None => {
+                                    if let LiveValue::Bool(val) = prop.value {
+                                        match prop.id {
+                                            id!(debug) => {
+                                                draw_shader_def.flags.debug = val;
+                                            }
+                                            id!(draw_call_compare) => {
+                                                draw_shader_def.flags.draw_call_nocompare = val;
+                                            }
+                                            id!(draw_call_always) => {
+                                                draw_shader_def.flags.draw_call_always = val;
+                                            }
+                                            _ => {} // could be input value
+                                        }
+                                    }
+                                },
+                                _ => {
+                                    return Err(LiveError {
+                                        origin: live_error_origin!(),
+                                        span,
+                                        message: format!("Unexpected variable prefix {:?}", before)
+                                    })
+                                }
+                            };
                         }
                         LiveValue::Class {live_type, ..} => {
                             if prop.id == id!(geometry) {
@@ -589,7 +665,7 @@ impl ShaderRegistry {
                                 );
                             }
                         }
-                        LiveValue::DSL {token_start, token_count} => {
+                        LiveValue::DSL {token_start, token_count, expand_index} => {
                             let origin_doc = live_registry.token_id_to_origin_doc(prop.origin.token_id().unwrap());
                             
                             let parser = ShaderParser::new(
@@ -598,7 +674,8 @@ impl ShaderRegistry {
                                 origin_doc.get_tokens(token_start as usize, token_count as usize),
                                 &mut parser_deps,
                                 Some(FnSelfKind::DrawShader(draw_shader_ptr)),
-                                prop.origin
+                                expand_index.unwrap() as usize,
+                                prop.origin.token_id().unwrap().file_id(),
                                 //None
                             );
                             
@@ -652,23 +729,6 @@ impl ShaderRegistry {
                             }
                             
                         },
-                        LiveValue::Annotate(ident) => {
-                            // find the init value / type ident
-                            if let Some(index) = doc.nodes.sibling_by_name(node_index + 1, prop.id) {
-                                let node = &doc.nodes[index];
-                                
-                                
-                            }
-                            else{
-                                let span = live_registry.token_id_to_span(prop.origin.token_id().unwrap());
-                                return Err(LiveError {
-                                    origin: live_error_origin!(),
-                                    span,
-                                    message: format!("No value/ident found for annotation {}", prop.id)
-                                })
-                            }
-                        },
-                        
                         _ => ()
                     }
                     node_iter = doc.nodes.next_child(node_index);

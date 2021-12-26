@@ -239,17 +239,10 @@ impl ConstEvaluator {
     fn try_const_eval_var_expr(
         &self,
         _span: Span,
-        kind: &Cell<Option<VarKind>>,
+        _kind: &Cell<Option<VarKind>>,
         //_ident_path: IdentPath,
     ) -> Option<Val> {
-        match kind.get().unwrap() {
-            VarKind::Const(_const_node_ptr) =>{
-                // we should walk into the const for const-eval
-                None
-                //todo!()
-            }
-            _ => None,
-        }
+        None
     }
 
     fn try_const_eval_struct_cons(
