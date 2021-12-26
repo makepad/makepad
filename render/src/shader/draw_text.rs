@@ -251,7 +251,8 @@ impl DrawText {
         let atlas_page = &mut cxfont.atlas_pages[atlas_page_id];
         
         let mi = if let Some(mi) = &mut self.many_instances {mi} else {return};
-        
+        let zbias_step = 0.00001;
+        let mut char_depth = self.draw_depth;
         for wc in chunk {
             
             let unicode = *wc as usize;
@@ -321,12 +322,12 @@ impl DrawText {
             self.font_t2.y = tc.ty2;
             self.rect_pos = vec2(scaled_min_pos_x, scaled_min_pos_y);
             self.rect_size = vec2(w * self.font_scale / dpi_factor, h * self.font_scale / dpi_factor);
-            self.char_depth = self.draw_depth + 0.00001 * min_pos_x;
+            self.char_depth = char_depth;
             self.base.x = walk_x;
             self.base.y = pos.y;
             self.font_size = self.text_style.font_size;
             self.char_offset = char_offset as f32;
-            
+            char_depth += zbias_step;
             mi.instances.extend_from_slice(self.draw_vars.as_slice());
             walk_x += advance;
             char_offset += 1;

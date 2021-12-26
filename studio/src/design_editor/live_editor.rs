@@ -179,7 +179,7 @@ impl LiveEditor {
                 &self.lines_layout
             );
             
-            self.draw_widgets(cx);
+            
             
             // alright great. now we can draw the text
             self.editor_impl.draw_text(
@@ -190,7 +190,11 @@ impl LiveEditor {
             );
             
             self.editor_impl.draw_current_line(cx, &self.lines_layout, *session.cursors.last_inserted());
+            
+            self.draw_widgets(cx);
+            
             self.editor_impl.draw_linenums(cx, &self.lines_layout, *session.cursors.last_inserted());
+
             self.editor_impl.end(cx, &self.lines_layout);
         }
     }

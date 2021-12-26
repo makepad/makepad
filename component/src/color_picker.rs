@@ -8,8 +8,6 @@ live_register!{
         instance hover: float
         instance pressed: float
         
-        draw_depth: 5.0
-        
         fn circ_to_rect(u: float, v: float) -> vec2 {
             let u2 = u * u;
             let v2 = v * v;
