@@ -399,7 +399,7 @@ impl DrawVars {
             }
         }
         
-        if  nodes[index].value.is_id() || nodes[index].id.is_capitalised(){
+        if nodes[index].origin.node_has_prefix(){
             return nodes.skip_node(index)
         }
         
