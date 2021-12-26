@@ -4,9 +4,8 @@ live_register!{
     use makepad_render::shader::std::*;
     
     Splitter: {{Splitter}} {
-        split_bar_size: 12.0
+        split_bar_size: 2.0
         bar_quad: {
-            debug:true
             instance pressed: float
             instance hover: float
 

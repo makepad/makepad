@@ -204,27 +204,7 @@ impl<'a> LiveParser<'a> {
         
         Ok(())
     }
-    /*
-    fn expect_const(&mut self, ld: &mut LiveDocument) -> Result<(), LiveError> {
-        let token_start = self.token_index - 1;
-        let token_id = self.get_token_id();
-        let const_id = self.expect_ident() ?;
-        self.expect_token(LiveToken::Punct(id!(:))) ?;
-        self.expect_ident() ?;
-        self.expect_token(LiveToken::Punct(id!( =))) ?;
-        self.expect_value_literal() ?;
-        
-        ld.nodes.push(LiveNode {
-            origin: LiveNodeOrigin::from_token_id(token_id),
-            id: const_id,
-            value: LiveValue::DSL {
-                token_start: token_start as u32,
-                token_count: (self.token_index - token_start) as u32,
-            }
-        });
-        
-        Ok(())
-    }*/
+
     
     fn possible_edit_info(&mut self, ld: &mut LiveDocument) -> Result<Option<LiveEditInfo>, LiveError> {
         // metadata is .{key:value}
@@ -240,8 +220,8 @@ impl<'a> LiveParser<'a> {
             }
             let edit_info_index = ld.edit_info.len();
             
-            if edit_info_index > 0x7f0{
-                return Err(self.error(format!("Used more than 128 .{{..}} edit info fields in a file, we dont have the bitspace for that in our u64.")))
+            if edit_info_index > 0x3e0{
+                return Err(self.error(format!("Used more than 64 .{{..}} edit info fields in a file, we dont have the bitspace for that in our u64.")))
             }
             
             ld.edit_info.push(LiveNode {
@@ -320,22 +300,12 @@ impl<'a> LiveParser<'a> {
         Ok(None)
     }
     
-    fn expect_annotated_value(&mut self, token_id:LiveTokenId, prop_id:LiveId, ld: &mut LiveDocument) -> Result<(), LiveError> {
-        
-        //let token_id = self.get_token_id();
+    fn expect_node_with_prefix(&mut self, ld: &mut LiveDocument) -> Result<(), LiveError> {
+        let token_id = self.get_token_id();
         let real_prop_id = self.expect_ident() ?;
-        if prop_id == real_prop_id{
-            return Err(self.error(format!("Prefix cannot have same id as name {}", prop_id)))
-        }
         let edit_info = self.possible_edit_info(ld) ?;
-        let origin = LiveNodeOrigin::from_token_id(token_id).with_edit_info(edit_info);
-/*
-        ld.nodes.push(LiveNode {
-            origin: origin,
-            id: real_prop_id,
-            value: LiveValue::Annotate(with)
-        });
-  */      
+        let origin = LiveNodeOrigin::from_token_id(token_id).with_edit_info(edit_info).with_node_has_prefix(true);
+
         if self.accept_token(LiveToken::Punct(id!(:))){
             self.expect_live_value(real_prop_id, origin, ld) ?;
         }
@@ -704,7 +674,7 @@ impl<'a> LiveParser<'a> {
                                 self.accept_optional_delim();
                             }
                             _ => {
-                                self.expect_annotated_value(token_id, prop_id, ld) ?;
+                                self.expect_node_with_prefix(ld) ?;
                                 self.accept_optional_delim();
                             }
                         }
