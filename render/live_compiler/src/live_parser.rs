@@ -69,7 +69,7 @@ impl<'a> LiveParser<'a> {
     fn error(&mut self, message: String) -> LiveError {
         LiveError {
             origin: live_error_origin!(),
-            span: self.token_with_span.span,
+            span: self.token_with_span.span.into(),
             message,
         }
     }

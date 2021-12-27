@@ -238,7 +238,7 @@ impl LiveTokenId {
     }
 }
 
-#[derive(Clone, Copy, Eq, Ord, PartialOrd, PartialEq)]
+#[derive(Clone, Default, Copy, Eq, Ord, PartialOrd, PartialEq)]
 pub struct LiveTokenId(u32);
 
 impl fmt::Debug for LiveTokenId {
