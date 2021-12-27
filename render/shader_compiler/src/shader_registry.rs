@@ -388,7 +388,7 @@ impl ShaderRegistry {
                     panic!()
                 }
                 let mut struct_def = StructDef {
-                    span: live_registry.token_id_to_span(struct_node.origin.token_id().unwrap()),
+                    span: struct_node.origin.token_id().unwrap().into(),
                     struct_refs: RefCell::new(None),
                     fields: Vec::new(),
                     methods: Vec::new()
@@ -436,7 +436,7 @@ impl ShaderRegistry {
                                 _ => {
                                     return Err(LiveError {
                                         origin: live_error_origin!(),
-                                        span: live_registry.token_id_to_span(prop.origin.token_id().unwrap()).text_span,
+                                        span: prop.origin.token_id().unwrap().into(),
                                         message: format!("Unexpected DSL node")
                                     })
                                     /*
@@ -449,12 +449,11 @@ impl ShaderRegistry {
                         },
                         LiveValue::Id(type_name) if live_registry.get_node_prefix(prop.origin) == Some(id!(field)) => {
                             // lets fetch the span
-                            let span = live_registry.token_id_to_span(prop.origin.token_id().unwrap());
                             
                             if let Some(ty_lit) = TyLit::from_id(type_name) {
                                 struct_def.fields.push(StructFieldDef {
                                     var_def_ptr: VarDefPtr(prop_ptr),
-                                    span,
+                                    span:prop.origin.token_id().unwrap().into(),
                                     ident: Ident(prop.id),
                                     ty_expr: ty_lit.to_ty().to_ty_expr()
                                 })
@@ -463,7 +462,7 @@ impl ShaderRegistry {
                                 // TODO support structs as fields here
                                 return Err(LiveError {
                                     origin: live_error_origin!(),
-                                    span: live_registry.token_id_to_span(prop.origin.token_id().unwrap()).text_span,
+                                    span: prop.origin.token_id().unwrap().into(),
                                     message: format!("Type not found for struct field {}", type_name)
                                 })
                             }
@@ -471,7 +470,7 @@ impl ShaderRegistry {
                         _ => {
                             return Err(LiveError {
                                 origin: live_error_origin!(),
-                                span: live_registry.token_id_to_span(prop.origin.token_id().unwrap()).text_span,
+                                span: prop.origin.token_id().unwrap().into(),
                                 message: format!("Cannot use {:?} in struct", prop.value)
                             })
                         }
@@ -529,7 +528,7 @@ impl ShaderRegistry {
                 ext_self(
                     live_registry,
                     self,
-                    live_registry.token_id_to_span(class_node.origin.token_id().unwrap()),
+                    class_node.origin.token_id().unwrap().into(),
                     DrawShaderQuery::DrawShader,
                     live_type,
                     &mut draw_shader_def
@@ -553,12 +552,11 @@ impl ShaderRegistry {
                         LiveValue::Vec4(_) => {
                             let first_def = prop.origin.first_def().unwrap();
                             let before = live_registry.get_node_prefix(prop.origin);
-                            let span = live_registry.token_id_to_span(first_def);
                             let ty = ShaderTy::from_live_node(node_index, &doc.nodes);
                             if ty.is_none() {
                                 return Err(LiveError {
                                     origin: live_error_origin!(),
-                                    span: span.text_span,
+                                    span: first_def.into(),
                                     message: format!("Invalid type for shader {:?}", prop.value)
                                 })
                             }
@@ -570,7 +568,7 @@ impl ShaderRegistry {
                                             is_used_in_pixel_shader: Cell::new(false),
                                             var_def_ptr: Some(VarDefPtr(prop_ptr)),
                                         },
-                                        span,
+                                        span: first_def.into(),
                                         ident: Ident(prop.id),
                                         ty_expr
                                     });
@@ -582,7 +580,7 @@ impl ShaderRegistry {
                                             live_field_kind: LiveFieldKind::Live,
                                             var_def_ptr: Some(VarDefPtr(prop_ptr)),
                                         },
-                                        span,
+                                        span: first_def.into(),
                                         ident: Ident(prop.id),
                                         ty_expr
                                     };
@@ -609,7 +607,7 @@ impl ShaderRegistry {
                                             var_def_ptr: Some(VarDefPtr(prop_ptr)),
                                             block_ident: Ident(id!(user)),
                                         },
-                                        span,
+                                        span: first_def.into(),
                                         ident: Ident(prop.id),
                                         ty_expr
                                     });
@@ -619,7 +617,7 @@ impl ShaderRegistry {
                                         kind: DrawShaderFieldKind::Varying {
                                             var_def_ptr: VarDefPtr(prop_ptr),
                                         },
-                                        span,
+                                        span: first_def.into(),
                                         ident: Ident(prop.id),
                                         ty_expr
                                     });
@@ -629,7 +627,7 @@ impl ShaderRegistry {
                                         kind: DrawShaderFieldKind::Texture {
                                             var_def_ptr: Some(VarDefPtr(prop_ptr)),
                                         },
-                                        span,
+                                        span: first_def.into(),
                                         ident: Ident(prop.id),
                                         ty_expr
                                     });
@@ -655,7 +653,7 @@ impl ShaderRegistry {
                                 _ => {
                                     return Err(LiveError {
                                         origin: live_error_origin!(),
-                                        span: span.text_span,
+                                        span: first_def.into(),
                                         message: format!("Unexpected variable prefix {:?}", before)
                                     })
                                 }
@@ -666,7 +664,7 @@ impl ShaderRegistry {
                                 ext_self(
                                     live_registry,
                                     self,
-                                    live_registry.token_id_to_span(prop.origin.token_id().unwrap()),
+                                    prop.origin.token_id().unwrap().into(),
                                     DrawShaderQuery::Geometry,
                                     live_type,
                                     &mut draw_shader_def
@@ -704,7 +702,7 @@ impl ShaderRegistry {
                                 _ => {
                                     return Err(LiveError {
                                         origin: live_error_origin!(),
-                                        span: token.span,
+                                        span: token.span.into(),
                                         message: format!("Unexpected in shader body {}", token)
                                     })
                                     /*
@@ -750,7 +748,7 @@ impl ShaderRegistry {
                         if field_a.ident == field_b.ident && !field_a.ident.0.is_empty() {
                             return Err(LiveError {
                                 origin: live_error_origin!(),
-                                span: field_a.span.text_span,
+                                span: field_a.span.into(),
                                 message: format!("Field double declaration  {}", field_b.ident)
                             })
                         }
@@ -762,7 +760,7 @@ impl ShaderRegistry {
                 if !method_set.contains(&id!(vertex)) {
                     return Err(LiveError {
                         origin: live_error_origin!(),
-                        span: live_registry.token_id_to_span(class_node.origin.token_id().unwrap()).text_span,
+                        span: class_node.origin.token_id().unwrap().into(),
                         message: format!("analyse_draw_shader missing vertex method")
                     })
                 }
@@ -770,7 +768,7 @@ impl ShaderRegistry {
                 if !method_set.contains(&id!(pixel)) {
                     return Err(LiveError {
                         origin: live_error_origin!(),
-                        span: live_registry.token_id_to_span(class_node.origin.token_id().unwrap()).text_span,
+                        span: class_node.origin.token_id().unwrap().into(),
                         message: format!("analyse_draw_shader missing pixel method")
                     })
                 }
@@ -793,7 +791,7 @@ impl ShaderRegistry {
             }
             _ => return Err(LiveError {
                 origin: live_error_origin!(),
-                span: live_registry.token_id_to_span(class_node.origin.token_id().unwrap()).text_span,
+                span: class_node.origin.token_id().unwrap().into(),
                 message: format!("analyse_draw_shader could not find shader class")
             })
         }

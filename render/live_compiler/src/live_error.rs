@@ -1,6 +1,8 @@
 use {
     std::fmt,
-    crate::span::TextSpan
+    std::convert::Into,
+    crate::live_token::LiveTokenId,
+    crate::span::{TextSpan,TokenSpan}
 };
 
 #[derive(Clone, Default, PartialEq)]
@@ -9,10 +11,44 @@ pub struct LiveErrorOrigin {
     pub line:usize
 }
 
+
+#[derive(Clone)]
+pub enum LiveErrorSpan {
+    Text(TextSpan),
+    Token(TokenSpan)
+}
+
+impl LiveErrorSpan{
+    fn into_text_span(self)->Option<TextSpan>{
+        match self{
+            Self::Text(span)=>Some(span),
+            _=>None
+        }
+    }
+}
+
+impl Into<LiveErrorSpan> for TextSpan{
+    fn into(self)->LiveErrorSpan{
+        LiveErrorSpan::Text(self)
+    }
+}
+
+impl Into<LiveErrorSpan> for TokenSpan{
+    fn into(self)->LiveErrorSpan{
+        LiveErrorSpan::Token(self)
+    }
+}
+
+impl Into<LiveErrorSpan> for LiveTokenId{
+    fn into(self)->LiveErrorSpan{
+        LiveErrorSpan::Token(TokenSpan{token_id:self, len:1})
+    }
+}
+
 #[derive(Clone)]
 pub struct LiveError {
     pub origin: LiveErrorOrigin,
-    pub span: TextSpan,
+    pub span: LiveErrorSpan,
     pub message: String,
 }
 
@@ -42,12 +78,12 @@ impl fmt::Display for LiveFileError {
 
 impl LiveError{
     
-    pub fn to_live_file_error(&self, file:&str)->LiveFileError{
+    pub fn into_live_file_error(self, file:&str)->LiveFileError{
         LiveFileError {
             origin: self.origin.clone(),
             file: file.to_string(),
-            span: self.span,
-            message: self.to_string(),
+            span: self.span.into_text_span().unwrap(),
+            message: self.message,
         }
     }
 }
