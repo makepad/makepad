@@ -23,7 +23,7 @@ impl<'a> ConstGatherer<'a> {
                 expr.const_index.set(Some(
                     self.fn_def.const_table.borrow().as_ref().unwrap().len(),
                 ));
-                self.write_span(&expr.span);
+                self.write_span(&expr.span, 4);
                 self.write_f32(val.x);
                 self.write_f32(val.y);
                 self.write_f32(val.z);
@@ -34,7 +34,7 @@ impl<'a> ConstGatherer<'a> {
                 expr.const_index.set(Some(
                     self.fn_def.const_table.borrow().as_ref().unwrap().len(),
                 ));
-                self.write_span(&expr.span);
+                self.write_span(&expr.span, 1);
                 self.write_f32(*val);
                 return;
             }
@@ -151,14 +151,18 @@ impl<'a> ConstGatherer<'a> {
         }
     }
 
-    fn write_span(&self, span: &TokenSpan) {
+    fn write_span(&self, span: &TokenSpan, slots:usize) {
         let index = self.fn_def.const_table.borrow().as_ref().unwrap().len();
         self.fn_def
             .const_table_spans
             .borrow_mut()
             .as_mut()
             .unwrap()
-            .push((index, span.clone()));            
+            .push(ConstTableSpan{
+                token_id: span.to_token_id(),
+                offset: index,
+                slots
+            });            
     }
 
     fn write_f32(&self, val: f32) {
