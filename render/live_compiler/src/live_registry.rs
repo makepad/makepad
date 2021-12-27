@@ -4,14 +4,14 @@ use {
     makepad_id_macros::*,
     makepad_live_tokenizer::{Delim, TokenPos, TokenRange, TokenWithLen, FullToken, LiveId, State, Cursor},
     crate::{
-        live_error::{LiveError, LiveErrorOrigin, LiveFileError},
+        live_error::{LiveError, LiveErrorSpan, LiveErrorOrigin, LiveFileError},
         live_parser::LiveParser,
         live_document::LiveDocument,
         live_node::{LiveNodeOrigin, LiveNode, LiveValue, LiveType, LiveTypeInfo},
         live_node_vec::{LiveNodeSlice, LiveNodeVec, LiveNodeMutReader},
         live_ptr::{LiveFileId, LivePtr, LiveModuleId},
         live_token::{LiveToken, LiveTokenId, TokenWithSpan},
-        span::{TextSpan, TokenSpan, TextPos},
+        span::{TextSpan, TextPos},
         live_expander::{LiveExpander}
     }
 };
@@ -236,11 +236,30 @@ impl LiveRegistry {
     }
     
     pub fn live_error_to_live_file_error(&self, live_error: LiveError) -> LiveFileError {
-        let live_file = &self.live_files[live_error.span.file_id.to_index()];
-        live_error.to_live_file_error(&live_file.file_name)
+        match live_error.span{
+            LiveErrorSpan::Text(text_span)=>{
+                let live_file = &self.live_files[text_span.file_id.to_index()];
+                LiveFileError{
+                    origin: live_error.origin,
+                    file: live_file.file_name.clone(),
+                    span: text_span,
+                    message:live_error.message
+                }
+            }
+            LiveErrorSpan::Token(token_span)=>{
+                let live_file = &self.live_files[token_span.token_id.file_id().to_index()];
+                let token = live_file.document.tokens[token_span.token_id.token_index()];
+                LiveFileError{
+                    origin: live_error.origin,
+                    file: live_file.file_name.clone(),
+                    span: token.span,
+                    message:live_error.message
+                }
+            }
+        }
     }
     
-    pub fn token_id_to_span(&self, token_id: LiveTokenId) -> TokenSpan {
+    pub fn token_id_to_span(&self, token_id: LiveTokenId) -> TextSpan {
         self.live_files[token_id.file_id().to_index()].document.token_id_to_span(token_id)
     }
     
@@ -267,7 +286,7 @@ impl LiveRegistry {
                         FullToken::Unknown | FullToken::OtherNumber | FullToken::Lifetime => {
                             return Err(LiveError {
                                 origin: live_error_origin!(),
-                                span: span,
+                                span: span.into(),
                                 message: format!("Error tokenizing")
                             })
                         },
@@ -340,7 +359,7 @@ impl LiveRegistry {
                         FullToken::Unknown | FullToken::OtherNumber | FullToken::Lifetime => {
                             return Err(LiveError {
                                 origin: live_error_origin!(),
-                                span: span,
+                                span: span.into(),
                                 message: format!("Error tokenizing")
                             })
                         },
@@ -519,14 +538,14 @@ impl LiveRegistry {
         let file_id = LiveFileId::new(self.live_files.len());
         
         let (tokens, strings) = match Self::tokenize_from_str(&source, start_pos, file_id) {
-            Err(msg) => return Err(msg.to_live_file_error(file_name)), //panic!("Lex error {}", msg),
+            Err(msg) => return Err(msg.into_live_file_error(file_name)), //panic!("Lex error {}", msg),
             Ok(lex_result) => lex_result
         };
         
         let mut parser = LiveParser::new(&tokens, &live_type_infos, file_id);
         
         let mut document = match parser.parse_live_document() {
-            Err(msg) => return Err(msg.to_live_file_error(file_name)), //panic!("Parse error {}", msg.to_live_file_error(file, &source)),
+            Err(msg) => return Err(msg.into_live_file_error(file_name)), //panic!("Parse error {}", msg.to_live_file_error(file, &source)),
             Ok(ld) => ld
         };
         

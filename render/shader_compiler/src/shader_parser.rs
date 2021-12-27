@@ -99,7 +99,7 @@ impl<'a> ShaderParser<'a> {
     fn error(&mut self, origin: LiveErrorOrigin, message: String) -> LiveError {
         LiveError {
             origin,
-            span: self.token_with_span.span,
+            span: self.token_with_span.span.into(),
             message,
         }
     }
@@ -1394,13 +1394,8 @@ impl SpanTracker {
     F: FnOnce(TokenSpan) -> R,
     {
         f(TokenSpan {
-            text_span: TextSpan {
-                file_id: self.file_id,
-                start: self.start,
-                end: parser.token_end(),
-            },
-            start_index: self.start_index,
-            end_index: parser.token_index
+            token_id: LiveTokenId::new(self.file_id, self.start_index),
+            len: parser.token_index - self.start_index
         })
     }
     
@@ -1411,7 +1406,7 @@ impl SpanTracker {
                 file_id: self.file_id,
                 start: self.start,
                 end: parser.token_end(),
-            },
+            }.into(),
             message,
         }
     }

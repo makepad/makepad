@@ -159,7 +159,7 @@ impl<'a> ConstGatherer<'a> {
             .as_mut()
             .unwrap()
             .push(ConstTableSpan{
-                token_id: span.to_token_id(),
+                token_id: span.token_id,
                 offset: index,
                 slots
             });            

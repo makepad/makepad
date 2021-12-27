@@ -29,19 +29,17 @@ pub struct TextSpan {
     pub end: TextPos
 }
 
-#[derive(Clone, Copy, Debug, Default, Eq, Ord, PartialOrd, PartialEq)]
+#[derive(Clone, Copy, Default, Debug,  Eq, Ord, PartialOrd, PartialEq)]
 pub struct TokenSpan {
-    pub text_span: TextSpan,
-    pub start_index: usize,
-    pub end_index: usize
+    pub token_id: LiveTokenId,
+    pub len: usize
 }
 
-impl TokenSpan{
-    pub fn to_token_id(&self)->LiveTokenId{
-        LiveTokenId::new(self.text_span.file_id, self.start_index)
+impl Into<TokenSpan> for LiveTokenId{
+    fn into(self)->TokenSpan{
+        TokenSpan{token_id:self, len:1}
     }
 }
-
 
 impl fmt::Display for TextSpan {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {

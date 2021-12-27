@@ -1,8 +1,8 @@
 //use makepad_id_macros2::*;
 use {
     crate::{
-        span::{TokenSpan, TextPos},
-        live_token::{TokenWithSpan, LiveTokenId},
+        span::{TextPos, TextSpan},
+        live_token::{TokenWithSpan,LiveTokenId},
         live_node::LiveNode,
     }
 };
@@ -106,13 +106,8 @@ impl LiveDocument {
         //self.scopes.truncate(0);
     }
     
-    pub fn token_id_to_span(&self, token_id: LiveTokenId) -> TokenSpan {
-        let token_index = token_id.token_index() as usize;
-        TokenSpan{
-            text_span: self.tokens[token_index].span,
-            start_index: token_index,
-            end_index: token_index
-        }
+    pub fn token_id_to_span(&self, token_id: LiveTokenId) -> TextSpan {
+        self.tokens[token_id.token_index() as usize].span
     }
     /*
     pub fn scan_for_object_path_from(&self, object_path: &[Id], start:LocalPtr) -> Option<LocalPtr> {

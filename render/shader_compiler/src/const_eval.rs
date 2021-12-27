@@ -20,7 +20,7 @@ impl ConstEvaluator {
     pub fn const_eval_expr(&self, expr: &Expr) -> Result<Val, LiveError> {
         self.try_const_eval_expr(expr).ok_or_else(|| LiveError {
             origin:live_error_origin!(),
-            span: expr.span.text_span,
+            span: expr.span.into(),
             message: String::from("expression is not const"),
         })
     }

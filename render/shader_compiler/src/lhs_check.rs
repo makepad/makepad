@@ -80,7 +80,7 @@ impl<'a> LhsChecker<'a> {
     ) -> Result<(), LiveError> {
         return Err(LiveError {
             origin: live_error_origin!(),
-            span:span.text_span,
+            span:span.into(),
             message: String::from("expression is not a valid left hand side"),
         });
     }
@@ -94,7 +94,7 @@ impl<'a> LhsChecker<'a> {
     ) -> Result<(), LiveError> {
         return Err(LiveError {
             origin: live_error_origin!(),
-            span:span.text_span,
+            span:span.into(),
             message: String::from("expression is not a valid left hand side"),
         });
     }
@@ -108,7 +108,7 @@ impl<'a> LhsChecker<'a> {
     ) -> Result<(), LiveError> {
         return Err(LiveError {
             origin:live_error_origin!(),
-            span:span.text_span,
+            span:span.into(),
             message: String::from("expression is not a valid left hand side"),
         });
     }
@@ -116,7 +116,7 @@ impl<'a> LhsChecker<'a> {
     fn lhs_check_un_expr(&mut self, span: TokenSpan, _op: UnOp, _expr: &Expr) -> Result<(), LiveError> {
         return Err(LiveError {
             origin:live_error_origin!(),
-            span:span.text_span,
+            span:span.into(),
             message: String::from("expression is not a valid left hand side"),
         });
     }
@@ -127,7 +127,7 @@ impl<'a> LhsChecker<'a> {
     ) -> Result<(), LiveError> {
         return Err(LiveError {
             origin:live_error_origin!(),
-            span:span.text_span,
+            span:span.into(),
             message: String::from("expression is not a valid left hand side"),
         });
     }
@@ -149,7 +149,7 @@ impl<'a> LhsChecker<'a> {
                     _=>{
                         Err(LiveError {
                             origin:live_error_origin!(),
-                            span:span.text_span,
+                            span:span.into(),
                             message: String::from("Can only assign to varying values for shader self"),
                         })
                     }
@@ -178,7 +178,7 @@ impl<'a> LhsChecker<'a> {
     ) -> Result<(), LiveError> {
         return Err(LiveError {
             origin:live_error_origin!(),
-            span:span.text_span,
+            span:span.into(),
             message: String::from("expression is not a valid left hand side"),
         });
     }
@@ -194,7 +194,7 @@ impl<'a> LhsChecker<'a> {
         else{
             Err(LiveError {
                 origin:live_error_origin!(),
-                span:span.text_span,
+                span:span.into(),
                 message: String::from("expression is not a valid left hand side"),
             })
         }
