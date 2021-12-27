@@ -1,7 +1,10 @@
 use{
     std::fmt,
     makepad_live_tokenizer::Position,
-    crate::live_ptr::LiveFileId,
+    crate::{
+        live_token::LiveTokenId,
+        live_ptr::LiveFileId
+    }
 };
 
 #[derive(Clone, Copy, Default, Eq, Ord, PartialOrd, PartialEq)]
@@ -32,6 +35,13 @@ pub struct TokenSpan {
     pub start_index: usize,
     pub end_index: usize
 }
+
+impl TokenSpan{
+    pub fn to_token_id(&self)->LiveTokenId{
+        LiveTokenId::new(self.text_span.file_id, self.start_index)
+    }
+}
+
 
 impl fmt::Display for TextSpan {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {

@@ -33,7 +33,8 @@ pub struct LiveRegistry {
     pub live_type_infos: HashMap<LiveType, LiveTypeInfo>,
     pub expanded: Vec<LiveDocument>,
     pub main_module: Option<LiveFileId>,
-    pub main_apply: Option<Vec<LiveNode >>
+    pub mutated_apply: Option<Vec<LiveNode >>,
+    pub mutated_tokens: Option<Vec<(LiveTokenId, LiveToken)>>
 }
 
 impl Default for LiveRegistry {
@@ -45,7 +46,8 @@ impl Default for LiveRegistry {
             live_files: Vec::new(),
             live_type_infos: HashMap::new(),
             expanded: Vec::new(),
-            main_apply: None
+            mutated_apply: None,
+            mutated_tokens: None
         }
     }
 }
@@ -429,10 +431,14 @@ impl LiveRegistry {
         file_id: LiveFileId,
         mutations: &[usize],
     ) {
-        let mut main_apply = Vec::new();
-        main_apply.open();
+        let mut mutated_tokens = Vec::new();
+        let mut mutated_apply = Vec::new();
+        mutated_apply.open();
         
         for mutation in mutations {
+            let token_id = LiveTokenId::new(file_id, *mutation);
+            // ok this becomes the patch-map for shader constants
+            
             // ok so. lets see if we have a prop:value change
             let document = &self.live_files[file_id.to_index()].document;
             let live_tokens = &document.tokens;
@@ -440,6 +446,9 @@ impl LiveRegistry {
             let is_prop_assign = *mutation > 2
                 && live_tokens[mutation - 2].is_ident()
                 && live_tokens[mutation - 1].is_punct_id(id!(:));
+            
+            mutated_tokens.push((token_id, live_tokens[*mutation].token));
+            // this is the patch map for live_uniforms
             
             if is_prop_assign || live_tokens[*mutation].is_value_type() {
                 let token_id = LiveTokenId::new(file_id, mutation - 2);
@@ -469,7 +478,7 @@ impl LiveRegistry {
                             if self.main_module == Some(file_id) {
                                 // ok so. lets write by path here
                                 path.push(reader.id);
-                                main_apply.replace_or_insert_last_node_by_path(0, &path, reader.node_slice());
+                                mutated_apply.replace_or_insert_last_node_by_path(0, &path, reader.node_slice());
                                 path.pop();
                             }
                         }
@@ -477,7 +486,7 @@ impl LiveRegistry {
                             if self.main_module == Some(file_id) {
                                 // ok so. lets write by path here
                                 path.push(reader.id);
-                                main_apply.replace_or_insert_last_node_by_path(0, &path, reader.node_slice());
+                                mutated_apply.replace_or_insert_last_node_by_path(0, &path, reader.node_slice());
                                 path.pop();
                             }
                         }
@@ -488,9 +497,10 @@ impl LiveRegistry {
                 }
             }
         }
-        main_apply.close();
+        mutated_apply.close();
         //println!("{}", main_apply.to_string(0,100));
-        self.main_apply = Some(main_apply);
+        self.mutated_tokens = Some(mutated_tokens);
+        self.mutated_apply = Some(mutated_apply);
     }
     
     pub fn register_live_file(

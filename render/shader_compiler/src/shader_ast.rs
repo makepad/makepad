@@ -46,9 +46,23 @@ impl Deref for VarDefPtr{type Target = LivePtr;fn deref(&self) -> &Self::Target 
 impl DerefMut for VarDefPtr{fn deref_mut(&mut self) -> &mut Self::Target {&mut self.0}} 
 
 #[derive(Clone, Default, Debug)]
+pub struct ConstTableItem{
+    pub offset: usize,
+    pub slots: usize
+}
+
+#[derive(Clone, Debug)]
+pub struct ConstTableSpan{
+    pub token_id: LiveTokenId,
+    pub offset: usize,
+    pub slots: usize
+}
+
+#[derive(Clone, Default, Debug)]
 pub struct DrawShaderConstTable {
     pub table: Vec<f32>,
-    pub offsets: BTreeMap<FnPtr, usize>
+    pub offsets: BTreeMap<FnPtr, usize>,
+    pub table_index: BTreeMap<LiveTokenId, ConstTableItem>
 }
 
 #[derive(Clone, Copy, Default, Debug)]
@@ -182,7 +196,7 @@ pub struct FnDef {
     
     // the const table (per function)
     pub const_table: RefCell<Option<Vec<f32 >> >,
-    pub const_table_spans: RefCell<Option<Vec<(usize, TokenSpan) >> >,
+    pub const_table_spans: RefCell<Option<Vec<ConstTableSpan>> >,
     
     pub hidden_args: RefCell<Option<BTreeSet<HiddenArgKind >> >,
     pub draw_shader_refs: RefCell<Option<BTreeSet<Ident >> >,
