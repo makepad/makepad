@@ -67,19 +67,25 @@ impl ShaderRegistry {
         let mut offsets = BTreeMap::new();
         let mut table = Vec::new();
         let mut offset = 0;
+        let mut table_index = BTreeMap::new();
         
         for callee in draw_shader_def.all_fns.borrow().iter() {
             let fn_decl = self.all_fns.get(callee).unwrap();
             //if fn_decl.span.file_id == filter_file_id {
             let sub_table = fn_decl.const_table.borrow();
-            
             table.extend(sub_table.as_ref().unwrap().iter());
             
+            for ct_span in fn_decl.const_table_spans.borrow().as_ref().unwrap().iter() {
+                table_index.insert(
+                    ct_span.token_id,
+                    ConstTableItem {
+                        offset: offset + ct_span.offset,
+                        slots: ct_span.slots
+                    }
+                );
+            }
             offsets.insert(*callee, offset);
-            
             offset += sub_table.as_ref().unwrap().len();
-            
-            //}
         }
         
         let size = table.len();
@@ -89,7 +95,8 @@ impl ShaderRegistry {
         }
         DrawShaderConstTable {
             table,
-            offsets
+            offsets,
+            table_index
         }
     }
     
@@ -598,7 +605,7 @@ impl ShaderRegistry {
                                 },
                                 Some(id!(uniform)) => {
                                     draw_shader_def.fields.push(DrawShaderFieldDef {
-                                        kind:DrawShaderFieldKind::Uniform {
+                                        kind: DrawShaderFieldKind::Uniform {
                                             var_def_ptr: Some(VarDefPtr(prop_ptr)),
                                             block_ident: Ident(id!(user)),
                                         },
@@ -609,7 +616,7 @@ impl ShaderRegistry {
                                 },
                                 Some(id!(varying)) => {
                                     draw_shader_def.fields.push(DrawShaderFieldDef {
-                                        kind:DrawShaderFieldKind::Varying {
+                                        kind: DrawShaderFieldKind::Varying {
                                             var_def_ptr: VarDefPtr(prop_ptr),
                                         },
                                         span,
@@ -619,7 +626,7 @@ impl ShaderRegistry {
                                 },
                                 Some(id!(texture)) => {
                                     draw_shader_def.fields.push(DrawShaderFieldDef {
-                                        kind:DrawShaderFieldKind::Texture {
+                                        kind: DrawShaderFieldKind::Texture {
                                             var_def_ptr: Some(VarDefPtr(prop_ptr)),
                                         },
                                         span,

@@ -156,6 +156,10 @@ impl Cx {
             println!("Error parsing live file {}", err);
         }
     }
+     
+    pub fn update_shader_tables_with_tokens(&mut self, mutated_tokens:Vec<(LiveTokenId, LiveToken)>){
+        
+    }
     /*(&mut self, live_type: LiveType, factory: Box<dyn LiveFactory>) {
         self.live_factories.borrow_mut().insert(live_type, factory);
     }*/
