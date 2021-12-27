@@ -84,7 +84,7 @@ impl<'a> LiveExpander<'a> {
                     if self.live_registry.module_id_and_name_to_doc(*module_id, in_node.id).is_none() {
                         self.errors.push(LiveError {
                             origin: live_error_origin!(),
-                            span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).text_span,
+                            span: in_node.origin.token_id().unwrap().into(),
                             message: format!("Use statement invalid target {}::{}", module_id, in_node.id)
                         });
                     }
@@ -109,7 +109,7 @@ impl<'a> LiveExpander<'a> {
                     if in_node.origin.edit_info().is_some() {
                         self.errors.push(LiveError {
                             origin: live_error_origin!(),
-                            span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).text_span,
+                            span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).into(),
                             message: format!("Cannot define edit info after first prop def of {}", in_node.id)
                         });
                     }
@@ -211,7 +211,7 @@ impl<'a> LiveExpander<'a> {
                     else {
                         self.errors.push(LiveError {
                             origin: live_error_origin!(),
-                            span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).text_span,
+                            span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).into(),
                             message: format!("Cannot switch node type for {} {:?} to {:?}", in_node.id, out_value, in_value)
                         });
                         in_index = in_doc.nodes.skip_node(in_index);
@@ -262,7 +262,7 @@ impl<'a> LiveExpander<'a> {
                                         if live_type != old_live_type {
                                             self.errors.push(LiveError {
                                                 origin: live_error_origin!(),
-                                                span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).text_span,
+                                                span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).into(),
                                                 message: format!("Class override with wrong type {}", in_node.id)
                                             });
                                         }
@@ -287,7 +287,7 @@ impl<'a> LiveExpander<'a> {
                                         if live_type != old_live_type {
                                             self.errors.push(LiveError {
                                                 origin: live_error_origin!(),
-                                                span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).text_span,
+                                                span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).into(),
                                                 message: format!("Class override with wrong type {}", in_node.id)
                                             });
                                         }
@@ -361,7 +361,7 @@ impl<'a> LiveExpander<'a> {
                                     else {
                                         self.errors.push(LiveError {
                                             origin: live_error_origin!(),
-                                            span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).text_span,
+                                            span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).into(),
                                             message: format!("Typename {}, not defined in file where it was expected", lti.type_name)
                                         });
                                     }
