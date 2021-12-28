@@ -33,8 +33,6 @@ pub struct LiveRegistry {
     pub live_type_infos: HashMap<LiveType, LiveTypeInfo>,
     pub expanded: Vec<LiveDocument>,
     pub main_module: Option<LiveFileId>,
-    pub mutated_apply: Option<Vec<LiveNode >>,
-    pub mutated_tokens: Option<Vec<(LiveTokenId, LiveToken)>>
 }
 
 impl Default for LiveRegistry {
@@ -46,8 +44,8 @@ impl Default for LiveRegistry {
             live_files: Vec::new(),
             live_type_infos: HashMap::new(),
             expanded: Vec::new(),
-            mutated_apply: None,
-            mutated_tokens: None
+            //mutated_apply: None,
+            //mutated_tokens: None
         }
     }
 }
@@ -62,6 +60,11 @@ pub struct LiveDocNodes<'a> {
 pub enum LiveScopeTarget {
     LocalPtr(usize),
     LivePtr(LivePtr)
+}
+
+pub enum LiveEditResult {
+    ReparseDocument(LiveFileId),
+    Mutation {tokens: Vec<LiveTokenId>, apply: Vec<LiveNode>, live_ptrs: Vec<LivePtr>},
 }
 
 impl LiveRegistry {
@@ -236,24 +239,24 @@ impl LiveRegistry {
     }
     
     pub fn live_error_to_live_file_error(&self, live_error: LiveError) -> LiveFileError {
-        match live_error.span{
-            LiveErrorSpan::Text(text_span)=>{
+        match live_error.span {
+            LiveErrorSpan::Text(text_span) => {
                 let live_file = &self.live_files[text_span.file_id.to_index()];
-                LiveFileError{
+                LiveFileError {
                     origin: live_error.origin,
                     file: live_file.file_name.clone(),
                     span: text_span,
-                    message:live_error.message
+                    message: live_error.message
                 }
             }
-            LiveErrorSpan::Token(token_span)=>{
+            LiveErrorSpan::Token(token_span) => {
                 let live_file = &self.live_files[token_span.token_id.file_id().to_index()];
                 let token = live_file.document.tokens[token_span.token_id.token_index()];
-                LiveFileError{
+                LiveFileError {
                     origin: live_error.origin,
                     file: live_file.file_name.clone(),
                     span: token.span,
-                    message:live_error.message
+                    message: live_error.message
                 }
             }
         }
@@ -322,12 +325,12 @@ impl LiveRegistry {
     }
     
     // called by the live editor to update a live file
-    pub fn update_live_file<'a, CB>(
+    pub fn live_edit_diff_and_apply<'a, CB>(
         &mut self,
         file_name: &str,
         range: TokenRange,
         mut get_line: CB
-    ) -> Result<bool, LiveError>
+    ) -> Result<Option<LiveEditResult>, LiveError>
     where CB: FnMut(usize) -> (&'a [char], &'a [TokenWithLen])
     {
         let file_id = *self.file_ids.get(file_name).unwrap();
@@ -338,7 +341,7 @@ impl LiveRegistry {
         let old_strings = &document.strings;
         let mut new_strings: Vec<char> = Vec::new();
         
-        let mut mutations = Vec::new();
+        let mut mutated_tokens = Vec::new();
         let mut parse_changed = false;
         
         for line in range.start.line..range.end.line {
@@ -379,7 +382,7 @@ impl LiveRegistry {
                                 let old_chars = &old_strings[index as usize ..(index + len) as usize];
                                 // compare string or len/position
                                 if new_chars != old_chars || new_strings.len() as u32 != index || new_len as u32 != len {
-                                    mutations.push(live_index);
+                                    mutated_tokens.push(LiveTokenId::new(file_id, live_index));
                                 }
                             }
                             else { // cant replace a sttring type with something else without a reparse
@@ -399,7 +402,7 @@ impl LiveRegistry {
                                     if live_tokens[live_index].is_parse_equal(live_token) { // token value changed
                                         if live_tokens[live_index].token != live_token {
                                             live_tokens[live_index].token = live_token;
-                                            mutations.push(live_index);
+                                            mutated_tokens.push(LiveTokenId::new(file_id, live_index));
                                         }
                                     }
                                     else { // token value changed in a way that changes parsing
@@ -409,6 +412,7 @@ impl LiveRegistry {
                                             && live_tokens[live_index - 1].is_open_delim(Delim::Brace)
                                             && live_tokens[live_index].is_int()
                                             && live_token.is_ident() {
+                                            
                                             // ignore it.
                                         }
                                         else {
@@ -433,44 +437,42 @@ impl LiveRegistry {
         }
         
         if parse_changed {
-            println!("WE HAVE TO REPARSE {:?}", range);
-            return Ok(true)
+            return Ok(Some(LiveEditResult::ReparseDocument(file_id)));
         }
-        else if mutations.len()>0 { // we got mutations
+        else if mutated_tokens.len()>0 { // we got mutations
             document.strings = new_strings;
-            self.apply_mutations(file_id, &mutations);
-            return Ok(true)
+            
+            let (apply,live_ptrs) = self.update_documents_and_compute_diff(&mutated_tokens);
+            
+            return Ok(Some(LiveEditResult::Mutation {tokens: mutated_tokens, apply, live_ptrs}))
         }
         
-        Ok(false)
+        Ok(None)
     }
     
-    fn apply_mutations(
+    fn update_documents_and_compute_diff(
         &mut self,
-        file_id: LiveFileId,
-        mutations: &[usize],
-    ) {
-        let mut mutated_tokens = Vec::new();
-        let mut mutated_apply = Vec::new();
-        mutated_apply.open();
-        
-        for mutation in mutations {
-            let token_id = LiveTokenId::new(file_id, *mutation);
+        mutated_tokens: &[LiveTokenId]
+    ) -> (Vec<LiveNode>, Vec<LivePtr>) {
+        //let mutated_tokens = self.mutated_tokens.take().unwrap();
+        let mut diff = Vec::new();
+        let mut live_ptrs = Vec::new();
+        diff.open();
+        for token_id in mutated_tokens {
+            let token_index = token_id.token_index();
+            let file_id = token_id.file_id();
             // ok this becomes the patch-map for shader constants
             
             // ok so. lets see if we have a prop:value change
             let document = &self.live_files[file_id.to_index()].document;
             let live_tokens = &document.tokens;
             
-            let is_prop_assign = *mutation > 2
-                && live_tokens[mutation - 2].is_ident()
-                && live_tokens[mutation - 1].is_punct_id(id!(:));
+            let is_prop_assign = token_index > 2
+                && live_tokens[token_index - 2].is_ident()
+                && live_tokens[token_index - 1].is_punct_id(id!(:));
             
-            mutated_tokens.push((token_id, live_tokens[*mutation].token));
-            // this is the patch map for live_uniforms
-            
-            if is_prop_assign || live_tokens[*mutation].is_value_type() {
-                let token_id = LiveTokenId::new(file_id, mutation - 2);
+            if is_prop_assign || live_tokens[token_index].is_value_type() {
+                let token_id = LiveTokenId::new(file_id, token_index - 2);
                 
                 // ok lets scan for this one.
                 let mut file_dep_iter = FileDepIter::new(file_id);
@@ -490,14 +492,15 @@ impl LiveRegistry {
                         }
                         // ok this is a direct patch
                         else if is_prop_assign && reader.origin.token_id() == Some(token_id) {
-                            
-                            if !reader.update_from_live_token(&live_tokens[*mutation].token) {
+                            let live_ptr = LivePtr{file_id, index:reader.index() as u32};
+                            if !reader.update_from_live_token(&live_tokens[token_index].token) {
                                 println!("update_from_live_token returns false investigate! {:?}", reader.node());
                             }
+                            live_ptrs.push(live_ptr);
                             if self.main_module == Some(file_id) {
                                 // ok so. lets write by path here
                                 path.push(reader.id);
-                                mutated_apply.replace_or_insert_last_node_by_path(0, &path, reader.node_slice());
+                                diff.replace_or_insert_last_node_by_path(0, &path, reader.node_slice());
                                 path.pop();
                             }
                         }
@@ -505,7 +508,7 @@ impl LiveRegistry {
                             if self.main_module == Some(file_id) {
                                 // ok so. lets write by path here
                                 path.push(reader.id);
-                                mutated_apply.replace_or_insert_last_node_by_path(0, &path, reader.node_slice());
+                                diff.replace_or_insert_last_node_by_path(0, &path, reader.node_slice());
                                 path.pop();
                             }
                         }
@@ -516,10 +519,8 @@ impl LiveRegistry {
                 }
             }
         }
-        mutated_apply.close();
-        //println!("{}", main_apply.to_string(0,100));
-        self.mutated_tokens = Some(mutated_tokens);
-        self.mutated_apply = Some(mutated_apply);
+        diff.close();
+        (diff, live_ptrs)
     }
     
     pub fn register_live_file(
@@ -555,8 +556,8 @@ impl LiveRegistry {
         // update our live type info
         for live_type_info in live_type_infos {
             if let Some(info) = self.live_type_infos.get(&live_type_info.live_type) {
-                if info.module_id != live_type_info.module_id ||
-                info.live_type != live_type_info.live_type {
+                if info.module_id != live_type_info.module_id
+                    || info.live_type != live_type_info.live_type {
                     panic!()
                 }
             };
