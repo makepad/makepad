@@ -148,22 +148,18 @@ live_register!{
         
         selection_quad: {
             color: #294e75
-            //draw_depth: 0.0
         }
         
         indent_lines_quad: {
             color: #fff
-            //draw_depth: 1.5
         }
         
         caret_quad: {
-            //draw_depth: 2.0
             color: #b0b0b0
         }
         
         current_line_quad: {
             no_h_scroll: true
-            //draw_depth: 0.0
             color: #6663
         }
         
@@ -974,7 +970,6 @@ impl CodeEditorImpl {
                             state.move_cursors_to(session_id, position, shift);
                         }
                     }
-                    self.fetch_cursor_context(cx, state);
                     self.scroll_view.redraw(cx);
                 }
             }
@@ -995,7 +990,6 @@ impl CodeEditorImpl {
                         self.last_move_position = Some(position);
                         state.move_cursors_to(session_id, position, true);
                         self.handle_select_scroll_in_finger_move(&fe);
-                        self.fetch_cursor_context(cx, state);
                         self.scroll_view.redraw(cx);
                     }
                 }
@@ -1009,7 +1003,6 @@ impl CodeEditorImpl {
                 if let Some(session_id) = self.session_id {
                     state.move_cursors_left(session_id, shift);
                     self.keep_last_cursor_in_view(cx, state, lines_layout);
-                    self.fetch_cursor_context(cx, state);
                     self.scroll_view.redraw(cx);
                 }
             }
@@ -1022,7 +1015,6 @@ impl CodeEditorImpl {
                 if let Some(session_id) = self.session_id {
                     state.move_cursors_right(session_id, shift);
                     self.keep_last_cursor_in_view(cx, state, lines_layout);
-                    self.fetch_cursor_context(cx, state);
                     self.scroll_view.redraw(cx);
                 }
             }
@@ -1035,7 +1027,6 @@ impl CodeEditorImpl {
                 if let Some(session_id) = self.session_id {
                     state.move_cursors_up(session_id, shift);
                     self.keep_last_cursor_in_view(cx, state, lines_layout);
-                    self.fetch_cursor_context(cx, state);
                     self.scroll_view.redraw(cx);
                 }
             }
@@ -1048,7 +1039,6 @@ impl CodeEditorImpl {
                 if let Some(session_id) = self.session_id {
                     state.move_cursors_down(session_id, shift);
                     self.keep_last_cursor_in_view(cx, state, lines_layout);
-                    self.fetch_cursor_context(cx, state);
                     self.scroll_view.redraw(cx);
                 }
             }
@@ -1234,39 +1224,6 @@ impl CodeEditorImpl {
         }
     }
     
-    
-    fn fetch_cursor_context(&mut self, cx: &mut Cx, state: &EditorState) {
-        if let Some(session_id) = self.session_id {
-            let session = &state.sessions[session_id];
-            let document = &state.documents[session.document_id];
-            let _document_inner = document.inner.as_ref().unwrap();
-            let last_cursor = session.cursors.last_inserted();
-            let head = last_cursor.head;
-            
-            let lr_cp = cx.live_registry.clone();
-            let lr = lr_cp.borrow();
-            let live_file = &lr.live_files[16];
-            let expanded = &lr.expanded[16];
-            for (token_index, token) in live_file.document.tokens.iter().enumerate() {
-                if head.line == token.span.start.line as usize
-                    && head.column >= token.span.start.column as usize
-                    && head.column < token.span.end.column as usize {
-                    // great we found the token.
-                    // now lets see if we can look it up
-                    let match_token_id = makepad_live_compiler::LiveTokenId::new(LiveFileId(16), token_index);
-                    for (node_index, node) in expanded.nodes.iter().enumerate() {
-                        if let Some(token_id) = node.origin.token_id() {
-                            if token_id == match_token_id {
-                                println!("{} {:?} {:?}", node_index, node, token);
-                                //break;
-                            }
-                        }
-                    }
-                    break
-                }
-            }
-        }
-    }
     
     fn keep_last_cursor_in_view(&mut self, cx: &mut Cx, state: &EditorState, line_layout: &LinesLayout) {
         if let Some(session_id) = self.session_id {

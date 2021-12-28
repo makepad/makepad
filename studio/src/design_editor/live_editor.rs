@@ -138,7 +138,7 @@ impl LiveEditor {
                         let ident = WidgetIdent(bind.live_ptr, matched.live_type);
                         widgets.entry(ident).or_insert_with( || {
                             Widget {
-                                bind:*bind,
+                                bind: *bind,
                                 inline_widget: widget_registry.new(cx, matched.live_type).unwrap(),
                             }
                         });
@@ -194,9 +194,35 @@ impl LiveEditor {
             self.draw_widgets(cx);
             
             self.editor_impl.draw_linenums(cx, &self.lines_layout, *session.cursors.last_inserted());
-
+            
             self.editor_impl.end(cx, &self.lines_layout);
         }
+    }
+    
+    fn process_live_edit(cx: &mut Cx, state: &mut EditorState, session_id: SessionId) {
+        let session = &state.sessions[session_id];
+        let document = &state.documents[session.document_id];
+        let document_inner = document.inner.as_ref().unwrap();
+        
+        let mut inline_cache = document_inner.inline_cache.borrow_mut();
+        inline_cache.refresh_live_register_range(&document_inner.token_cache);
+        
+        let token_cache = &document_inner.token_cache;
+        let lines = &document_inner.text.as_lines();
+        let path = document.path.clone().into_os_string().into_string().unwrap();
+        
+        let live_registry_rc = cx.live_registry.clone();
+        let mut live_registry = live_registry_rc.borrow_mut();
+        
+        // ok now what.
+        match live_registry.live_edit_file(&path, inline_cache.live_register_range.unwrap(), | line | {
+            (&lines[line], &token_cache[line].tokens())
+        }) {
+            Ok(result) => {
+                cx.live_edit_result = result;
+            }
+            Err(_) => {}
+        };
     }
     
     pub fn handle_event(
@@ -207,11 +233,11 @@ impl LiveEditor {
         send_request: &mut dyn FnMut(Request),
         dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
     ) {
-        
+        let mut live_edit = false;
+        let session_id = self.editor_impl.session_id.unwrap();
         for widget in self.widgets.values_mut() {
             match widget.inline_widget.handle_inline_event(cx, event, widget.bind) {
                 InlineWidgetAction::ReplaceText {position, size, text} => {
-                    let session_id = self.editor_impl.session_id.unwrap();
                     
                     state.replace_text_direct(
                         session_id,
@@ -220,41 +246,24 @@ impl LiveEditor {
                         text,
                         send_request
                     );
-                    
-                    let session = &state.sessions[session_id];
-                    let document = &state.documents[session.document_id];
-                    let document_inner = document.inner.as_ref().unwrap();
-                    
-                    let mut inline_cache = document_inner.inline_cache.borrow_mut();
-                    inline_cache.refresh_token_range(&document_inner.token_cache);
-                    
-                    let token_cache = &document_inner.token_cache;
-                    let lines = &document_inner.text.as_lines();
-                    let path = document.path.clone().into_os_string().into_string().unwrap();
-                    
-                    let live_registry_rc = cx.live_registry.clone();
-                    let mut live_registry = live_registry_rc.borrow_mut();
-                    
-                    // ok now what.
-                    match live_registry.live_edit_diff_and_apply(
-                        &path,
-                        inline_cache.token_range.unwrap(),
-                        | line | {
-                            (&lines[line], &token_cache[line].tokens())
-                        }
-                    ) {
-                        Ok(result) => {
-                            cx.live_edit_result = result;
-                        }
-                        Err(_) => {}
-                    };
-                    
+                    live_edit = true;
                     self.editor_impl.redraw(cx);
                 }
                 _ => ()
             }
         }
+        // what if the code editor changes something?
+        self.editor_impl.handle_event(cx, state, event, &self.lines_layout, send_request, &mut |cx, action|{
+            match action{
+                CodeEditorAction::RedrawViewsForDocument(_)=>{
+                    live_edit = true;
+                }
+            }
+            dispatch_action(cx, action);
+        });
         
-        self.editor_impl.handle_event(cx, state, event, &self.lines_layout, send_request, dispatch_action);
+        if live_edit{
+            Self::process_live_edit(cx, state, session_id);
+        }
     }
 }
