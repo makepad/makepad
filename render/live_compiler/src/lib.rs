@@ -64,6 +64,6 @@ pub use {
             LiveErrorOrigin,
             LiveFileError
         },
-        live_document::{LiveDocument}
+        live_document::{LiveOriginal, LiveExpanded}
     }
 };

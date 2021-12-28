@@ -14,7 +14,7 @@ use {
     },
     makepad_render::makepad_live_compiler::{LiveTokenId, TextPos, LivePtr},
     makepad_render::*,
-}; 
+};
 
 #[derive(Debug, Clone, Copy)]
 pub struct InlineEditBind {
@@ -22,16 +22,16 @@ pub struct InlineEditBind {
     pub live_token_id: LiveTokenId,
     pub edit_token_index: usize,
 }
- 
+
 #[derive(Debug, Default)]
 pub struct Line {
     pub is_clean: bool,
     pub items: Vec<InlineEditBind>
-} 
+}
 
 pub struct InlineCache {
     pub lines: Vec<Line>,
-    pub token_range: Option<TokenRange>,
+    pub live_register_range: Option<TokenRange>,
     pub is_clean: bool,
 }
 
@@ -39,14 +39,14 @@ impl InlineCache {
     pub fn new(text: &Text) -> InlineCache {
         InlineCache {
             is_clean: false,
-            token_range: None,
+            live_register_range: None,
             lines: (0..text.as_lines().len())
                 .map( | _ | Line::default())
                 .collect::<Vec<_ >> (),
         }
     }
     
-    pub fn refresh_token_range(&mut self, token_cache: &TokenCache) {
+    pub fn refresh_live_register_range(&mut self, token_cache: &TokenCache) {
         enum State {
             Scan,
             Bang,
@@ -100,7 +100,7 @@ impl InlineCache {
         }
         if let State::Term(start, end) = state {
             // alright we have a range.
-            self.token_range = Some(TokenRange {start, end})
+            self.live_register_range = Some(TokenRange {start, end})
         }
     }
     
@@ -130,14 +130,14 @@ impl InlineCache {
         }
         self.is_clean = true;
         
-        if self.token_range.is_none() {
-            self.refresh_token_range(token_cache);
+        if self.live_register_range.is_none() {
+            self.refresh_live_register_range(token_cache);
         }
         
-        if self.token_range.is_none() {
+        if self.live_register_range.is_none() {
             return
         }
-        let range = self.token_range.unwrap();
+        let range = self.live_register_range.unwrap();
         
         let live_registry_rc = cx.live_registry.clone();
         let live_registry = live_registry_rc.borrow();
@@ -145,7 +145,7 @@ impl InlineCache {
         let file_id = live_registry.path_str_to_file_id(path).unwrap();
         
         let live_file = &live_registry.live_files[file_id.to_index()];
-        let expanded = &live_registry.expanded[file_id.to_index()];
+        let expanded = &live_file.expanded;
         
         if self.lines.len() != token_cache.len() {
             panic!();
@@ -161,7 +161,7 @@ impl InlineCache {
         }
         for (line, line_cache) in self.lines[range.start.line..range.end.line].iter_mut().enumerate() {
             let line = line + range.start.line;
-            if line_cache.is_clean { 
+            if line_cache.is_clean {
                 continue
             }
             
@@ -174,26 +174,24 @@ impl InlineCache {
             for (edit_token_index, token) in tokens_line.iter().enumerate() {
                 
                 // try to filter things a bit before plugging it into the expensive search process
-                let is_prop_assign = 
-                    token.is_ident() 
-                    && edit_token_index+1 < tokens_line.len()
+                let is_prop_assign =
+                token.is_ident()
+                    && edit_token_index + 1 < tokens_line.len()
                     && tokens_line[edit_token_index + 1].is_punct_id(id!(:));
-
+                
                 if is_prop_assign || token.is_value_type() {
                     
-                    if let Some(live_token_index) = live_file.document.find_token_by_pos(TextPos {line: line as u32, column}) {
-
+                    if let Some(live_token_index) = live_file.original.find_token_by_pos(TextPos {line: line as u32, column}) {
+                        
                         let live_token_id = makepad_live_compiler::LiveTokenId::new(file_id, live_token_index);
                         let search_in_dsl = token.is_value_type();
                         
                         if let Some(node_index) = expanded.nodes.first_node_with_token_id(live_token_id, search_in_dsl) {
                             
-                            let live_token_id = if is_prop_assign{ // get the thing after the :
+                            let live_token_id = if is_prop_assign { // get the thing after the :
                                 makepad_live_compiler::LiveTokenId::new(file_id, live_token_index + 2)
-                            }
-                            else{    
-                                live_token_id
-                            };
+                            } 
+                            else {live_token_id};
                             
                             let live_ptr = LivePtr {file_id, index: node_index as u32};
                             // if its a DSL, we should filter here
@@ -202,7 +200,7 @@ impl InlineCache {
                                 live_ptr,
                                 live_token_id,
                                 edit_token_index: edit_token_index
-                            };
+                            }; 
                             line_cache.items.push(bind);
                         }
                     }
