@@ -236,15 +236,16 @@ impl LiveEditor {
                     let mut live_registry = live_registry_rc.borrow_mut();
                     
                     // ok now what.
-                    match live_registry.update_live_file(
+                    match live_registry.live_edit_diff_and_apply(
                         &path,
                         inline_cache.token_range.unwrap(),
                         | line | {
                             (&lines[line], &token_cache[line].tokens())
                         }
                     ) {
-                        Ok(true) => {cx.live_edit = true;}
-                        Ok(false) => (),
+                        Ok(result) => {
+                            cx.live_edit_result = result;
+                        }
                         Err(_) => {}
                     };
                     

@@ -114,17 +114,17 @@ pub trait LiveApply: LiveHook {
     fn handle_live_edit_event(&mut self, cx: &mut Cx, event: &Event, id: LiveId) {
         match event {
             Event::LiveEdit => {
-                let (mutated_apply, mutated_tokens) = {
-                    let live_registry_rc = cx.live_registry.clone();
-                    let mut live_registry = live_registry_rc.borrow_mut();
-                    let mutated_apply = live_registry.mutated_apply.take().unwrap();
-                    let mutated_tokens = live_registry.mutated_tokens.take().unwrap();
-                    (mutated_apply, mutated_tokens)
-                };
-                cx.update_shader_tables_with_tokens(mutated_tokens);
-                if let Some(index) = mutated_apply.child_by_name(0, id) {
-                    println!("{}", mutated_apply.to_string(0, 100));
-                    self.apply(cx, ApplyFrom::LiveEdit, index, &mutated_apply);
+                match cx.live_edit_result.take().unwrap() {
+                    LiveEditResult::ReparseDocument(_) => {
+                        
+                    }
+                    LiveEditResult::Mutation {tokens, apply, live_ptrs} => {
+                        cx.update_shader_tables_with_live_edit(&tokens, &live_ptrs);
+                        if let Some(index) = apply.child_by_name(0, id) {
+                            //println!("{}", mutated_apply.to_string(0, 100));
+                            self.apply(cx, ApplyFrom::LiveEdit, index, &apply);
+                        }
+                    }
                 }
             }
             _ => ()

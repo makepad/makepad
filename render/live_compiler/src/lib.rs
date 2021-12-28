@@ -24,6 +24,7 @@ pub use {
     makepad_live_tokenizer::vec4_ext,
     crate::{
         live_registry::{
+            LiveEditResult,
             LiveRegistry,
             LiveDocNodes,
         },

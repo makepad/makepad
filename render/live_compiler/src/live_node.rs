@@ -518,6 +518,35 @@ impl LiveValue {
             _ => false
         }
     }
+    
+    pub fn as_float(&self) -> Option<f64> {
+        match self {
+            Self::Float(v) => Some(*v),
+            Self::Int(v) => Some(*v as f64),
+            _ => None
+        }
+    }
+    pub fn as_vec2(&self) -> Option<Vec2> {
+        match self {
+            Self::Vec2(v) => Some(*v),
+            _ => None
+        }
+    }    
+    pub fn as_vec3(&self) -> Option<Vec3> {
+        match self {
+            Self::Vec3(v) => Some(*v),
+            _ => None
+        }
+    }    
+
+    pub fn as_vec4(&self) -> Option<Vec4> {
+        match self {
+            Self::Vec4(v) => Some(*v),
+            Self::Color(c) => Some(Vec4::from_u32(*c)),
+            _ => None
+        }
+    }    
+
     /*
     pub fn named_class_id(&self) -> Option<Id> {
         match self {
