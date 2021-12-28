@@ -24,16 +24,16 @@ pub enum ShaderCompileResult {
     Ok
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DrawShaderInput {
     pub id: LiveId,
     pub ty: ShaderTy,
     pub offset: usize,
     pub slots: usize,
-    pub value_ptr: Option<ValuePtr>
+    pub live_ptr: Option<LivePtr>
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum DrawShaderInputPacking {
     Attribute,
     UniformsGLSL,
@@ -47,7 +47,7 @@ pub struct DrawShaderFingerprint {
     draw_shader_id: usize
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct DrawShaderInputs {
     pub inputs: Vec<DrawShaderInput>,
     pub packing_method: DrawShaderInputPacking,
@@ -359,44 +359,46 @@ impl DrawVars {
         self.init_shader(cx, draw_shader_ptr, geometry_fields)
     }
     
-    pub fn apply_value(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
-        fn apply_slots(cx: &mut Cx, slots: usize, output: &mut [f32], offset: usize, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
-            match slots {
-                1 => {
-                    let mut v: f32 = 0.0;
-                    let index = v.apply(cx, apply_from, index, nodes);
-                    output[offset + 0] = v;
-                    return index;
-                }
-                2 => {
-                    let mut v: Vec2 = Vec2::default();
-                    let index = v.apply(cx, apply_from, index, nodes);
-                    output[offset + 0] = v.x;
-                    output[offset + 1] = v.y;
-                    return index;
-                }
-                3 => {
-                    let mut v: Vec3 = Vec3::default();
-                    let index = v.apply(cx, apply_from, index, nodes);
-                    output[offset + 0] = v.x;
-                    output[offset + 1] = v.y;
-                    output[offset + 2] = v.z;
-                    return index;
-                }
-                4 => {
-                    let mut v: Vec4 = Vec4::default();
-                    let index = v.apply(cx, apply_from, index, nodes);
-                    output[offset + 0] = v.x;
-                    output[offset + 1] = v.y;
-                    output[offset + 2] = v.z;
-                    output[offset + 3] = v.w;
-                    return index;
-                }
-                _ => {
-                    return nodes.skip_node(index)
-                }
+    pub fn apply_slots(cx: &mut Cx, slots: usize, output: &mut [f32], offset: usize, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        match slots {
+            1 => {
+                let mut v: f32 = 0.0;
+                let index = v.apply(cx, apply_from, index, nodes);
+                output[offset + 0] = v;
+                return index;
+            }
+            2 => {
+                let mut v: Vec2 = Vec2::default();
+                let index = v.apply(cx, apply_from, index, nodes);
+                output[offset + 0] = v.x;
+                output[offset + 1] = v.y;
+                return index;
+            }
+            3 => {
+                let mut v: Vec3 = Vec3::default();
+                let index = v.apply(cx, apply_from, index, nodes);
+                output[offset + 0] = v.x;
+                output[offset + 1] = v.y;
+                output[offset + 2] = v.z;
+                return index;
+            }
+            4 => {
+                let mut v: Vec4 = Vec4::default();
+                let index = v.apply(cx, apply_from, index, nodes);
+                output[offset + 0] = v.x;
+                output[offset + 1] = v.y;
+                output[offset + 2] = v.z;
+                output[offset + 3] = v.w;
+                return index;
+            }
+            _ => {
+                return nodes.skip_node(index)
             }
         }
+    }
+    
+    pub fn apply_value(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        
         
         if nodes[index].origin.node_has_prefix(){
             return nodes.skip_node(index)
@@ -409,14 +411,14 @@ impl DrawVars {
                 let offset = input.offset;
                 let slots = input.slots;
                 if input.id == id {
-                    return apply_slots(cx, slots, &mut self.user_uniforms, offset, apply_from, index, nodes);
+                    return Self::apply_slots(cx, slots, &mut self.user_uniforms, offset, apply_from, index, nodes);
                 }
             }
             for input in &sh.mapping.var_instances.inputs {
                 let offset = (self.var_instances.len() - sh.mapping.var_instances.total_slots) + input.offset;
                 let slots = input.slots;
                 if input.id == id {
-                    return apply_slots(cx, slots, &mut self.var_instances, offset, apply_from, index, nodes);
+                    return Self::apply_slots(cx, slots, &mut self.var_instances, offset, apply_from, index, nodes);
                 }
             }
         }
@@ -440,9 +442,6 @@ impl DrawVars {
         // alright. so.if we are ApplyFrom::
         if let ApplyFrom::LiveEdit = apply_from{
             // alright, we might have to update something here.
-            // in our update structure there might be DSL nodes.
-            // which in turn means 
-            println!("LIVE EDIT!");
             return
         }
         
@@ -464,7 +463,7 @@ impl DrawShaderInputs {
         }
     }
     
-    pub fn push(&mut self, id: LiveId, ty: ShaderTy, value_ptr: Option<ValuePtr>) {
+    pub fn push(&mut self, id: LiveId, ty: ShaderTy, live_ptr: Option<LivePtr>) {
         let slots = ty.slots();
         match self.packing_method {
             DrawShaderInputPacking::Attribute => {
@@ -473,7 +472,7 @@ impl DrawShaderInputs {
                     offset: self.total_slots,
                     slots,
                     ty,
-                    value_ptr
+                    live_ptr
                 });
                 self.total_slots += slots;
             }
@@ -483,7 +482,7 @@ impl DrawShaderInputs {
                     offset: self.total_slots,
                     slots,
                     ty,
-                    value_ptr
+                    live_ptr
                 });
                 self.total_slots += slots;
             }
@@ -496,7 +495,7 @@ impl DrawShaderInputs {
                     offset: self.total_slots,
                     slots,
                     ty,
-                    value_ptr
+                    live_ptr
                 });
                 self.total_slots += slots;
             }
@@ -510,7 +509,7 @@ impl DrawShaderInputs {
                     offset: self.total_slots,
                     slots,
                     ty,
-                    value_ptr
+                    live_ptr
                 });
                 self.total_slots += aligned_slots;
             }
@@ -633,7 +632,7 @@ impl CxDrawShaderMapping {
         
         // ok now the live uniforms
         for (value_node_ptr, ty) in draw_shader_def.all_live_refs.borrow().iter() {
-            live_uniforms.push(LiveId(0), ty.clone(), Some(*value_node_ptr));
+            live_uniforms.push(LiveId(0), ty.clone(), Some(value_node_ptr.0));
         }
         
         CxDrawShaderMapping {
@@ -660,14 +659,14 @@ impl CxDrawShaderMapping {
         for input in &self.live_uniforms.inputs {
             match input.slots {
                 1 => { // float
-                    let node = live_registry.ptr_to_node(input.value_ptr.unwrap().0);
+                    let node = live_registry.ptr_to_node(input.live_ptr.unwrap());
                     if let LiveValue::Float(float) = node.value {
                         let o = input.offset;
                         self.live_uniforms_buf[o] = float as f32;
                     }
                 },
                 2 => { // float
-                    let node = live_registry.ptr_to_node(input.value_ptr.unwrap().0);
+                    let node = live_registry.ptr_to_node(input.live_ptr.unwrap());
                     if let LiveValue::Vec2(value) = node.value {
                         let o = input.offset;
                         self.live_uniforms_buf[o + 0] = value.x;
@@ -675,7 +674,7 @@ impl CxDrawShaderMapping {
                     }
                 },
                 3 => { // float
-                    let node = live_registry.ptr_to_node(input.value_ptr.unwrap().0);
+                    let node = live_registry.ptr_to_node(input.live_ptr.unwrap());
                     if let LiveValue::Vec3(value) = node.value {
                         let o = input.offset;
                         self.live_uniforms_buf[o + 0] = value.x;
@@ -684,7 +683,7 @@ impl CxDrawShaderMapping {
                     }
                 },
                 4 => { // color
-                    let node = live_registry.ptr_to_node(input.value_ptr.unwrap().0);
+                    let node = live_registry.ptr_to_node(input.live_ptr.unwrap());
                     if let LiveValue::Color(color_u32) = node.value {
                         let o = input.offset;
                         let color = Vec4::from_u32(color_u32);

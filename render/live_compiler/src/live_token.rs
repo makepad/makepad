@@ -4,6 +4,7 @@ use {
         ops::Deref,
         ops::DerefMut,
     },
+    makepad_math::Vec4,
     makepad_live_tokenizer::{
         LiveId,
         Delim,
@@ -54,6 +55,20 @@ pub enum LiveToken {
 }
 
 impl LiveToken {
+
+    pub fn as_float(&self) -> Option<f64> {
+        match self {
+            Self::Float(v) => Some(*v),
+            Self::Int(v) => Some(*v as f64),
+            _ => None
+        }
+    }
+    pub fn as_vec4(&self) -> Option<Vec4> {
+        match self {
+            Self::Color(c) => Some(Vec4::from_u32(*c)),
+            _ => None
+        }
+    }    
     
     pub fn is_open(&self) -> bool {
         match self {
