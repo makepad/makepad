@@ -13,6 +13,7 @@ use {
     makepad_shader_compiler::makepad_live_compiler::{
         //LiveType,
         //LiveId,
+        LiveEditResult,
         LiveRegistry
     },
     makepad_shader_compiler::{
@@ -152,7 +153,6 @@ pub struct Cx {
     pub new_next_frames: HashSet<NextFrame>,
     pub next_frames: HashSet<NextFrame>,
     
-    pub live_edit: bool, 
     pub signals: HashMap<Signal, Vec<u64 >>,
     pub triggers: HashMap<Area, Vec<u64 >>,
     
@@ -160,6 +160,8 @@ pub struct Cx {
     
     pub live_registry: Rc<RefCell<LiveRegistry >>,
     pub shader_registry: ShaderRegistry,
+    
+    pub live_edit_result: Option<LiveEditResult>,
     
     pub command_settings: HashMap<CommandId, CxCommandSetting>,
     
@@ -280,7 +282,6 @@ impl Default for Cx {
             new_next_frames: HashSet::new(),
             next_frames: HashSet::new(),
             
-            live_edit: false,
             signals: HashMap::new(),
             triggers: HashMap::new(),
             
@@ -292,6 +293,8 @@ impl Default for Cx {
             command_settings: HashMap::new(),
             
             platform: CxPlatform {..Default::default()},
+            
+            live_edit_result: None,
             
             event_handler: None
         }
