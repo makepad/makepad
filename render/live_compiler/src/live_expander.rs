@@ -4,7 +4,7 @@ use {
     crate::{
         live_ptr::{LiveFileId, LivePtr},
         live_error::{LiveError, LiveErrorOrigin},
-        live_document::{LiveDocument},
+        live_document::{LiveOriginal, LiveExpanded},
         live_node::{LiveValue, LiveNode, /*LiveTypeKind*/},
         live_node_vec::{LiveNodeSlice, LiveNodeVec},
         live_registry::{LiveRegistry, LiveScopeTarget},
@@ -47,10 +47,10 @@ impl<'a> LiveExpander<'a> {
         }
     }
     
-    pub fn expand(&mut self, in_doc: &LiveDocument, out_doc: &mut LiveDocument) {
+    pub fn expand(&mut self, in_doc: &LiveOriginal, out_doc: &mut LiveExpanded) {
         
         // ok first copy the edit_info over.
-        out_doc.edit_info = in_doc.edit_info.clone();
+        //out_doc.edit_info = in_doc.edit_info.clone();
         
         out_doc.nodes.push(in_doc.nodes[0].clone());
         let mut current_parent = vec![(LiveId(0), 0usize)];
@@ -275,7 +275,7 @@ impl<'a> LiveExpander<'a> {
                                 }
                             }
                             LiveScopeTarget::LivePtr(live_ptr) => {
-                                let doc = &self.live_registry.expanded[live_ptr.file_id.to_index()];
+                                let doc = &self.live_registry.live_files[live_ptr.file_id.to_index()].expanded;
                                 
                                 let old_len = out_doc.nodes.len();
                                 out_doc.nodes.insert_children_from_other(live_ptr.node_index(), out_index + 1, &doc.nodes);
@@ -320,7 +320,7 @@ impl<'a> LiveExpander<'a> {
                     if has_deref_hop {
                         // ok so we need the lti of the deref hop and clone all children
                         if let Some(file_id) = self.live_registry.module_id_to_file_id.get(&live_type_info.module_id) {
-                            let doc = &self.live_registry.expanded[file_id.to_index()];
+                            let doc = &self.live_registry.live_files[file_id.to_index()].expanded;
                             if let Some(index) = doc.nodes.child_by_name(0, live_type_info.type_name) {
                                 let old_len = out_doc.nodes.len();
                                 out_doc.nodes.insert_children_from_other(index, out_index + 1, &doc.nodes);
@@ -345,7 +345,7 @@ impl<'a> LiveExpander<'a> {
                                     }
                                 }
                                 else {
-                                    let other_nodes = &self.live_registry.expanded[file_id.to_index()].nodes;
+                                    let other_nodes = &self.live_registry.live_files[file_id.to_index()].expanded.nodes;
                                     if other_nodes.len() == 0 {
                                         panic!("Dependency order wrong, someday i'll learn to program. {} {} {}", file_id.0, self.in_file_id.0, lti.type_name);
                                     }

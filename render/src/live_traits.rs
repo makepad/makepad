@@ -46,16 +46,10 @@ pub trait LiveNew: LiveApply {
     }
     
     fn new_from_ptr(cx: &mut Cx, live_ptr: LivePtr) -> Self where Self: Sized {
-        let live_registry_rc = cx.live_registry.clone();
-        let live_registry = live_registry_rc.borrow();
-        let doc = live_registry.ptr_to_doc(live_ptr);
-        
         let mut ret = Self::new(cx);
-        let apply_from = ApplyFrom::NewFromDoc {file_id: live_ptr.file_id};
-        let next_index = ret.apply(cx, apply_from, live_ptr.index as usize, &doc.nodes);
-        if next_index <= live_ptr.index as usize + 2 {
-            cx.apply_error_empty_object(live_error_origin!(), apply_from, live_ptr.index as usize, &doc.nodes);
-        }
+        new_from_ptr_impl(cx, live_ptr, |cx, apply_from, index, nodes|{
+            ret.apply(cx, apply_from, index, nodes)
+        });
         return ret
     }
     
@@ -116,7 +110,16 @@ pub trait LiveApply: LiveHook {
             Event::LiveEdit => {
                 match cx.live_edit_result.take().unwrap() {
                     LiveEditResult::ReparseDocument(_) => {
-                        
+                        // ok so main_module needs a reload.
+                        let live_registry_rc = cx.live_registry.clone();
+                        let live_registry = live_registry_rc.borrow();
+                        if let Some(file_id) = live_registry.main_module {
+                            let doc = live_registry.file_id_to_doc(file_id);
+                            if let Some(index) = doc.nodes.child_by_name(0, id) {
+                                self.apply(cx, ApplyFrom::UpdateFromDoc {file_id}, index, &doc.nodes);
+                            }
+                        }
+                        cx.redraw_all();
                     }
                     LiveEditResult::Mutation {tokens, apply, live_ptrs} => {
                         cx.update_shader_tables_with_live_edit(&tokens, &live_ptrs);
