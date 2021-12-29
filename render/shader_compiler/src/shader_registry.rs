@@ -56,6 +56,12 @@ pub enum DrawShaderQuery {
 
 impl ShaderRegistry {
     
+    pub fn flush_registry(&mut self){
+        self.all_fns.clear();
+        self.draw_shader_defs.clear();
+        self.structs.clear();
+    }
+    
     pub fn register_enum(&mut self, live_type: LiveType, shader_enum: ShaderEnum) {
         self.enums.insert(live_type, shader_enum);
     }

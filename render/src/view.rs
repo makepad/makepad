@@ -298,16 +298,26 @@ impl View {
 
 impl Cx {
     
-    pub fn new_draw_call(&mut self, draw_vars: &DrawVars) -> &mut DrawItem {
+    pub fn new_draw_call(&mut self, draw_vars: &DrawVars) -> Option<&mut DrawItem> {
         return self.get_draw_call(false, draw_vars);
     }
     
-    pub fn append_to_draw_call(&mut self, draw_vars: &DrawVars) -> &mut DrawItem {
+    pub fn append_to_draw_call(&mut self, draw_vars: &DrawVars) -> Option<&mut DrawItem> {
         return self.get_draw_call(true, draw_vars);
     }
     
-    pub fn get_draw_call(&mut self, append: bool, draw_vars: &DrawVars) -> &mut DrawItem {
-        let sh = &self.draw_shaders[draw_vars.draw_shader.unwrap().draw_shader_id];
+    pub fn get_draw_call(&mut self, append: bool, draw_vars: &DrawVars) -> Option<&mut DrawItem> {
+        
+        if draw_vars.draw_shader.is_none(){
+            return None
+        }
+        let draw_shader = draw_vars.draw_shader.unwrap();
+        
+        if draw_shader.draw_shader_generation != self.draw_shader_generation{
+            return None
+        }
+        
+        let sh = &self.draw_shaders[draw_shader.draw_shader_id];
         
         let current_view_id = *self.view_stack.last().unwrap();
         let cxview = &mut self.views[current_view_id];
@@ -315,7 +325,7 @@ impl Cx {
         
         if append && !sh.mapping.flags.draw_call_always {
             if let Some(index) = cxview.find_appendable_drawcall(sh, draw_vars) {
-                return &mut cxview.draw_items[index];
+                return Some(&mut cxview.draw_items[index]);
             }
         }
         
@@ -331,7 +341,7 @@ impl Cx {
                 sub_view_id: None,
                 draw_call: Some(DrawCall::new(&sh.mapping, draw_vars))
             });
-            return &mut cxview.draw_items[draw_item_id];
+            return Some(&mut cxview.draw_items[draw_item_id]);
         }
         // reuse an older one, keeping all GPU resources attached
         let mut draw_item = &mut cxview.draw_items[draw_item_id];
@@ -343,16 +353,21 @@ impl Cx {
         else {
             draw_item.draw_call = Some(DrawCall::new(&sh.mapping, draw_vars))
         }
-        return draw_item;
+        return Some(draw_item);
     }
     
-    pub fn begin_many_instances(&mut self, draw_vars: &DrawVars) -> ManyInstances {
+    pub fn begin_many_instances(&mut self, draw_vars: &DrawVars) -> Option<ManyInstances> {
+        
         let draw_item = self.append_to_draw_call(draw_vars);
+        if draw_item.is_none(){
+            return None
+        }
+        let draw_item = draw_item.unwrap();
         let draw_call = draw_item.draw_call.as_mut().unwrap();
         let mut instances = None;
         
         std::mem::swap(&mut instances, &mut draw_call.instances);
-        ManyInstances {
+        Some(ManyInstances {
             instance_area: InstanceArea {
                 view_id: draw_item.view_id,
                 draw_item_id: draw_item.draw_item_id,
@@ -362,12 +377,15 @@ impl Cx {
             },
             aligned: None,
             instances: instances.unwrap()
-        }
+        })
     }
     
-    pub fn begin_many_aligned_instances(&mut self, draw_vars: &DrawVars) -> ManyInstances {
+    pub fn begin_many_aligned_instances(&mut self, draw_vars: &DrawVars) -> Option<ManyInstances> {
         let mut li = self.begin_many_instances(draw_vars);
-        li.aligned = Some(self.align_list.len());
+        if li.is_none(){
+            return None;
+        }
+        li.as_mut().unwrap().aligned = Some(self.align_list.len());
         self.align_list.push(Area::Empty);
         li
     }
@@ -390,6 +408,10 @@ impl Cx {
     pub fn add_instance(&mut self, draw_vars: &DrawVars) -> Area {
         let data = draw_vars.as_slice();
         let draw_item = self.append_to_draw_call(draw_vars);
+        if draw_item.is_none(){
+            return Area::Empty
+        }
+        let draw_item = draw_item.unwrap();
         let draw_call = draw_item.draw_call.as_mut().unwrap();
         let instance_count = data.len() / draw_call.total_instance_slots;
         let check = data.len() % draw_call.total_instance_slots;
@@ -410,11 +432,16 @@ impl Cx {
     pub fn add_aligned_instance(&mut self, draw_vars: &DrawVars) -> Area {
         let data = draw_vars.as_slice();
         let draw_item = self.append_to_draw_call(draw_vars);
+        if draw_item.is_none(){
+            return Area::Empty
+        }
+        let draw_item = draw_item.unwrap();
         let draw_call = draw_item.draw_call.as_mut().unwrap();
         let instance_count = data.len() / draw_call.total_instance_slots;
         let check = data.len() % draw_call.total_instance_slots;
         if check > 0 {
-            panic!("Data not multiple of total slots");
+            println!("Data not multiple of total slots");
+            return Area::Empty
         }
         let ia: Area = (InstanceArea {
             view_id: draw_item.view_id,

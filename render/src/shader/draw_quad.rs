@@ -98,7 +98,7 @@ impl DrawQuad {
 
     pub fn begin_many_instances(&mut self, cx: &mut Cx){
         let mi = cx.begin_many_aligned_instances(&self.draw_vars);
-        self.many_instances = Some(mi);        
+        self.many_instances = mi;   
     }
 
     pub fn end_many_instances(&mut self, cx: &mut Cx) {

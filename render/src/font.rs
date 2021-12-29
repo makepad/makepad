@@ -152,15 +152,27 @@ impl Cx {
         font_id
     }
     
-    pub fn after_draw(&mut self) {
+    pub fn with_draw_font_atlas<T>(&mut self, mut cb:T) where T:FnMut(&mut Cx, &mut CxDrawFontAtlas){
         if self.draw_font_atlas.is_none() {
             self.draw_font_atlas = Some(Box::new(CxDrawFontAtlas::new(self)));
         }
         let mut draw_font_atlas = None;
         std::mem::swap(&mut self.draw_font_atlas, &mut draw_font_atlas);
-        draw_font_atlas.as_mut().unwrap().draw_font_atlas(self);
+        cb(self, draw_font_atlas.as_mut().unwrap());
         std::mem::swap(&mut self.draw_font_atlas, &mut draw_font_atlas);
         
+    }
+    
+    pub fn after_draw(&mut self) {
+        self.with_draw_font_atlas(|cx, dfa|{
+            dfa.draw(cx);
+        })
+    }
+    
+     pub fn after_handle_event(&mut self, event: &mut Event) {
+         self.with_draw_font_atlas(|cx, dfa|{
+            dfa.handle_event(cx, event);
+        })
     }
     
     pub fn reset_font_atlas_and_redraw(&mut self) {
@@ -194,7 +206,11 @@ impl DrawTrapezoidText {
     // test api for directly drawing a glyph
     pub fn draw_char(&mut self, cx: &mut Cx, c: char, font_id: usize, font_size: f32) {
         // now lets make a draw_character function
-        let mut many = cx.begin_many_instances(&self.draw_vars);
+        let many = cx.begin_many_instances(&self.draw_vars);
+        if many.is_none(){
+            return
+        }
+        let mut many = many.unwrap();
         
         let trapezoids = {
             let cxfont = cx.fonts[font_id].as_ref().unwrap();
@@ -339,7 +355,28 @@ impl CxDrawFontAtlas {
         }
     }
     
-    pub fn draw_font_atlas(&mut self, cx: &mut Cx) {
+    pub fn handle_event(&mut self, cx:&mut Cx, event:&mut Event){
+        match event {
+            Event::LiveEdit(live_edit_event) => {
+                match live_edit_event {
+                    LiveEditEvent::ReparseDocument(_) => {
+                        let live_registry_rc = cx.live_registry.clone();
+                        let live_registry = live_registry_rc.borrow();
+                        if let Some(file_id) = live_registry.module_id_to_file_id.get(&LiveModuleId::from_str(&module_path!()).unwrap()) {
+                            let doc = live_registry.file_id_to_doc(*file_id);
+                            if let Some(index) = doc.nodes.child_by_name(0, id!(DrawTrapezoidText)) {
+                                self.draw_trapezoid_text.apply(cx, ApplyFrom::UpdateFromDoc {file_id:*file_id}, index, &doc.nodes);
+                            }
+                        }
+                    }
+                    _=>()
+                }
+            }
+            _ => ()
+        }
+    }
+    
+    pub fn draw(&mut self, cx: &mut Cx) {
         //let start = Cx::profile_time_ns();
         
         // we need to start a pass that just uses the texture
@@ -360,13 +397,13 @@ impl CxDrawFontAtlas {
             let mut atlas_todo = Vec::new();
             std::mem::swap(&mut cx.fonts_atlas.atlas_todo, &mut atlas_todo);
             
-            let mut many = cx.begin_many_instances(&self.draw_trapezoid_text.draw_vars);
-            
-            for todo in atlas_todo {
-                self.draw_trapezoid_text.draw_todo(cx, todo, &mut many);
+            if let Some(mut many) = cx.begin_many_instances(&self.draw_trapezoid_text.draw_vars){
+                for todo in atlas_todo {
+                    self.draw_trapezoid_text.draw_todo(cx, todo, &mut many);
+                }
+                
+                cx.end_many_instances(many);
             }
-            
-            cx.end_many_instances(many);
             
             self.counter += 1;
             self.atlas_view.end(cx);
