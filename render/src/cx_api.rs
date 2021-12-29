@@ -421,6 +421,7 @@ macro_rules!main_app {
                     return
                 }
                 app.as_mut().unwrap().handle_event(cx, &mut event);
+                cx.after_handle_event(&mut event);
             });
         }
         
@@ -449,6 +450,7 @@ macro_rules!main_app {
                     return;
                 };
                 (*appcx.0).handle_event(cx, &mut event);
+                cx.after_handle_event(&mut event);
             })
         }
     }

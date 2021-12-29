@@ -66,7 +66,8 @@ pub enum LiveScopeTarget {
     LivePtr(LivePtr)
 }
 
-pub enum LiveEditResult {
+#[derive(Clone, Debug, PartialEq)]
+pub enum LiveEditEvent {
     ReparseDocument(LiveFileId),
     Mutation {tokens: Vec<LiveTokenId>, apply: Vec<LiveNode>, live_ptrs: Vec<LivePtr>},
 }
@@ -334,7 +335,7 @@ impl LiveRegistry {
         file_name: &str,
         range: TokenRange,
         mut get_line: CB
-    ) -> Result<Option<LiveEditResult>, Vec<LiveError >>
+    ) -> Result<Option<LiveEditEvent>, Vec<LiveError >>
     where CB: FnMut(usize) -> (&'a [char], &'a [TokenWithLen])
     {
         let file_id = *self.file_ids.get(file_name).unwrap();
@@ -448,28 +449,27 @@ impl LiveRegistry {
                 Err(msg) => return Err(vec![msg]), //panic!("Parse error {}", msg.to_live_file_error(file, &source)),
                 Ok(ld) => ld
             };
-            // copy over the new values
+
             original.nodes = new_original.nodes;
             original.edit_info = new_original.edit_info;
             
             let mut errors = Vec::new();
             
-            live_file.reexpand = true;
+            live_file.reexpand = true; 
             
-            println!("EXPANDING");
             self.expand_all_documents(&mut errors);
             if errors.len()>0 {
                 return Err(errors);
             }
             
-            return Ok(Some(LiveEditResult::ReparseDocument(file_id)));
+            return Ok(Some(LiveEditEvent::ReparseDocument(file_id)));
         }
         else if mutated_tokens.len()>0 { // we got mutations
             original.strings = new_strings;
             
             let (apply, live_ptrs) = self.update_documents_from_mutated_tokens(&mutated_tokens);
             
-            return Ok(Some(LiveEditResult::Mutation {tokens: mutated_tokens, apply, live_ptrs}))
+            return Ok(Some(LiveEditEvent::Mutation {tokens: mutated_tokens, apply, live_ptrs}))
         }
         
         Ok(None)
@@ -488,15 +488,10 @@ impl LiveRegistry {
             let file_id = token_id.file_id();
             // ok this becomes the patch-map for shader constants
             
-            // ok so. lets see if we have a prop:value change
-            
-            let mut expanded_nodes = Vec::new();
-            std::mem::swap(&mut expanded_nodes, &mut self.live_files[file_id.to_index()].expanded.nodes);
-            
-            let live_file = &self.live_files[file_id.to_index()];
-            let original = &live_file.original;
-            
-            let live_tokens = &original.tokens;
+            //let live_file = &self.live_files[file_id.to_index()];
+            //let original = &live_file.original;
+            let mut live_tokens = Vec::new();
+            std::mem::swap(&mut live_tokens, &mut self.live_files[file_id.to_index()].original.tokens);
             
             let is_prop_assign = token_index > 2
                 && live_tokens[token_index - 2].is_ident()
@@ -509,7 +504,11 @@ impl LiveRegistry {
                 let mut file_dep_iter = FileDepIter::new(file_id);
                 let mut path = Vec::new();
                 while let Some(file_id) = file_dep_iter.pop_todo() {
-                    // TODO add in-DSL token scans
+                    let is_main = self.main_module == Some(file_id);
+
+                    let mut expanded_nodes = Vec::new();
+                    std::mem::swap(&mut expanded_nodes, &mut self.live_files[file_id.to_index()].expanded.nodes);
+                            
                     let mut reader = LiveNodeMutReader::new(0, &mut expanded_nodes);
                     path.truncate(0);
                     reader.walk();
@@ -527,7 +526,7 @@ impl LiveRegistry {
                                 println!("update_from_live_token returns false investigate! {:?}", reader.node());
                             }
                             live_ptrs.push(live_ptr);
-                            if self.main_module == Some(file_id) {
+                            if is_main {
                                 // ok so. lets write by path here
                                 path.push(reader.id);
                                 diff.replace_or_insert_last_node_by_path(0, &path, reader.node_slice());
@@ -535,7 +534,7 @@ impl LiveRegistry {
                             }
                         }
                         else if reader.is_token_id_inside_dsl(token_id) {
-                            if self.main_module == Some(file_id) {
+                            if is_main {
                                 // ok so. lets write by path here
                                 path.push(reader.id);
                                 diff.replace_or_insert_last_node_by_path(0, &path, reader.node_slice());
@@ -544,12 +543,11 @@ impl LiveRegistry {
                         }
                         reader.walk();
                     }
-                    
+                    std::mem::swap(&mut expanded_nodes, &mut self.live_files[file_id.to_index()].expanded.nodes);
                     file_dep_iter.scan_next(&self.live_files);
                 }
             }
-            
-            std::mem::swap(&mut expanded_nodes, &mut self.live_files[file_id.to_index()].expanded.nodes);
+            std::mem::swap(&mut live_tokens, &mut self.live_files[file_id.to_index()].original.tokens);
         }
         diff.close();
         (diff, live_ptrs)

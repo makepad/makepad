@@ -193,7 +193,7 @@ impl DrawText {
     pub fn begin_many_instances(&mut self, cx: &mut Cx) {
         self.update_draw_call_vars(cx);
         let mi = cx.begin_many_aligned_instances(&self.draw_vars);
-        self.many_instances = Some(mi);
+        self.many_instances = mi;
     }
     
     pub fn end_many_instances(&mut self, cx: &mut Cx) {

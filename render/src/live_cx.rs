@@ -205,8 +205,17 @@ impl Cx {
         }
     }
     
-    pub fn update_shader_tables_with_live_edit(&mut self, mutated_tokens: &[LiveTokenId], live_ptrs: &[LivePtr]) {
+    pub fn flush_draw_shaders(&mut self){
+        self.draw_shader_generation += 1;
+        self.shader_registry.flush_registry();
+        self.draw_shaders.clear();
+        self.draw_shader_ptr_to_id.clear();
+        self.draw_shader_fingerprints.clear();
+    }
+    
+    pub fn update_shader_tables_with_live_edit(&mut self, mutated_tokens: &[LiveTokenId], live_ptrs: &[LivePtr])->bool {
         // OK now.. we have to access our token tables
+        let mut change = false;
         let live_registry_rc = self.live_registry.clone();
         let live_registry = live_registry_rc.borrow();
         //println!("{:?}", live_ptrs);
@@ -217,6 +226,7 @@ impl Cx {
                 if let Some(input) = mapping.live_uniforms.inputs.iter().find( | input | input.live_ptr == Some(*live_ptr)) {
                     let node = live_registry.ptr_to_node(*live_ptr);
                     Self::update_buffer_from_live_value(input.slots, &mut mapping.live_uniforms_buf, input.offset, &node.value);
+                    change = true;
                 }
             }
             for token_id in mutated_tokens{
@@ -225,10 +235,12 @@ impl Cx {
                     let token = &doc.tokens[token_id.token_index()];
                     
                     Self::update_buffer_from_live_token(table_item.slots, &mut mapping.const_table.table, table_item.offset, token);
+                    change = true;
                 }
             }
             
         }
+        change
     }
 }
 
