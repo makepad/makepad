@@ -197,9 +197,10 @@ impl LiveEditor {
             
             self.editor_impl.end(cx, &self.lines_layout);
         }
-    }
+    } 
     
     fn process_live_edit(cx: &mut Cx, state: &mut EditorState, session_id: SessionId) {
+        cx.profile_start(1);
         let session = &state.sessions[session_id];
         let document = &state.documents[session.document_id];
         let document_inner = document.inner.as_ref().unwrap();
@@ -218,11 +219,12 @@ impl LiveEditor {
         match live_registry.live_edit_file(&path, inline_cache.live_register_range.unwrap(), | line | {
             (&lines[line], &token_cache[line].tokens())
         }) {
-            Ok(result) => {
-                cx.live_edit_result = result;
+            Ok(event) => {
+                cx.live_edit_event = event;
             }
             Err(_) => {}
         };
+        cx.profile_start(1);
     }
     
     pub fn handle_event(

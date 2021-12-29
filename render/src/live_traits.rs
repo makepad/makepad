@@ -107,9 +107,11 @@ pub trait LiveApply: LiveHook {
     
     fn handle_live_edit_event(&mut self, cx: &mut Cx, event: &Event, id: LiveId) {
         match event {
-            Event::LiveEdit => {
-                match cx.live_edit_result.take().unwrap() {
-                    LiveEditResult::ReparseDocument(_) => {
+            Event::LiveEdit(live_edit_event) => {
+                match live_edit_event {
+                    LiveEditEvent::ReparseDocument(_) => {
+                        cx.flush_draw_shaders();
+                        
                         // ok so main_module needs a reload.
                         let live_registry_rc = cx.live_registry.clone();
                         let live_registry = live_registry_rc.borrow();
@@ -121,7 +123,7 @@ pub trait LiveApply: LiveHook {
                         }
                         cx.redraw_all();
                     }
-                    LiveEditResult::Mutation {tokens, apply, live_ptrs} => {
+                    LiveEditEvent::Mutation {tokens, apply, live_ptrs} => {
                         cx.update_shader_tables_with_live_edit(&tokens, &live_ptrs);
                         if let Some(index) = apply.child_by_name(0, id) {
                             //println!("{}", mutated_apply.to_string(0, 100));

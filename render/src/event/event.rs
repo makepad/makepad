@@ -2,6 +2,7 @@ use {
     std::{
         collections::HashMap
     },
+    makepad_shader_compiler::makepad_live_compiler::LiveEditEvent,
     crate::{
         cx::Cx,
         area::Area,
@@ -23,7 +24,7 @@ pub enum Event {
     Destruct,
     Draw,
     Paint,
-    LiveEdit,
+    LiveEdit(LiveEditEvent),
     AppFocus,
     AppFocusLost,
     NextFrame(NextFrameEvent),
