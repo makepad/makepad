@@ -102,18 +102,19 @@ pub struct Cx {
     pub geometries_refs: HashMap<GeometryFingerprint, Weak<Geometry >>,
     
     pub platform_draw_shaders: Vec<CxPlatformDrawShader>,
-    pub draw_shader_generation: u64,
+    pub draw_shader_generation: u64, 
     pub draw_shaders: Vec<CxDrawShader>,
     pub draw_shader_ptr_to_id: HashMap<DrawShaderPtr, usize>,
     pub draw_shader_compile_set: BTreeSet<DrawShaderPtr>,
     pub draw_shader_fingerprints: Vec<DrawShaderFingerprint>,
+    pub draw_shader_error_set: HashSet<DrawShaderPtr>,
     
     pub fonts: Vec<Option<CxFont >>,
     pub fonts_atlas: CxFontsAtlas,
     pub path_to_font_id: HashMap<String, usize>,
     pub draw_font_atlas: Option<Box<CxDrawFontAtlas >>,
     
-    pub in_redraw_cycle: bool,
+    pub in_redraw_cycle: bool, 
     pub default_dpi_factor: f32,
     pub current_dpi_factor: f32,
     pub window_stack: Vec<usize>,
@@ -239,6 +240,7 @@ impl Default for Cx {
             draw_shader_ptr_to_id: HashMap::new(),
             draw_shader_compile_set: BTreeSet::new(),
             draw_shader_fingerprints: Vec::new(),
+            draw_shader_error_set: HashSet::new(),
             
             fonts: Vec::new(),
             fonts_atlas: CxFontsAtlas::new(),

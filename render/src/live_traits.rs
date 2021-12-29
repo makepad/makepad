@@ -14,14 +14,14 @@ pub trait LiveNewHelper {
     
 }
 
-pub fn new_from_ptr_impl<CB>(cx: &mut Cx, live_ptr: LivePtr, cb: CB)
-where CB: FnOnce(&mut Cx, ApplyFrom, usize, &[LiveNode]) -> usize {
+pub fn from_ptr_impl<CB>(cx: &mut Cx, live_ptr: LivePtr, cb: CB)
+where CB: FnOnce(&mut Cx, LiveFileId, usize, &[LiveNode]) -> usize {
     let live_registry_rc = cx.live_registry.clone();
     let live_registry = live_registry_rc.borrow();
     let doc = live_registry.ptr_to_doc(live_ptr);
-    let apply_from = ApplyFrom::NewFromDoc {file_id: live_ptr.file_id};
-    let next_index = cb(cx, apply_from, live_ptr.index as usize, &doc.nodes);
+    let next_index = cb(cx, live_ptr.file_id, live_ptr.index as usize, &doc.nodes);
     if next_index <= live_ptr.index as usize + 2 {
+        let apply_from = ApplyFrom::NewFromDoc {file_id: live_ptr.file_id};
         cx.apply_error_empty_object(live_error_origin!(), apply_from, live_ptr.index as usize, &doc.nodes);
     }
 }
@@ -47,8 +47,8 @@ pub trait LiveNew: LiveApply {
     
     fn new_from_ptr(cx: &mut Cx, live_ptr: LivePtr) -> Self where Self: Sized {
         let mut ret = Self::new(cx);
-        new_from_ptr_impl(cx, live_ptr, |cx, apply_from, index, nodes|{
-            ret.apply(cx, apply_from, index, nodes)
+        from_ptr_impl(cx, live_ptr, |cx, file_id, index, nodes|{
+            ret.apply(cx, ApplyFrom::NewFromDoc {file_id}, index, nodes)
         });
         return ret
     }
@@ -111,7 +111,6 @@ pub trait LiveApply: LiveHook {
                 match live_edit_event {
                     LiveEditEvent::ReparseDocument(_) => {
                         cx.flush_draw_shaders();
-                        
                         // ok so main_module needs a reload.
                         let live_registry_rc = cx.live_registry.clone();
                         let live_registry = live_registry_rc.borrow();
@@ -248,39 +247,3 @@ impl<T> LiveNew for Option<T> where T: LiveApply + LiveNew + 'static {
         T::live_type_info(_cx)
     }
 }
-
-impl dyn LiveApply {
-    pub fn type_id(&self) -> std::any::TypeId {std::any::TypeId::of::<Self>()}
-    
-    pub fn is<T: LiveApply + 'static >(&self) -> bool {
-        let t = TypeId::of::<T>();
-        let concrete = self.type_id();
-        t == concrete
-    }
-    pub fn cast<T: LiveApply + 'static >(&self) -> Option<&T> {
-        if self.is::<T>() {
-            Some(unsafe {&*(self as *const dyn LiveApply as *const T)})
-        } else {
-            None
-        }
-    }
-    pub fn cast_mut<T: LiveApply + 'static >(&mut self) -> Option<&mut T> {
-        if self.is::<T>() {
-            Some(unsafe {&mut *(self as *const dyn LiveApply as *mut T)})
-        } else {
-            None
-        }
-    }
-}
-
-/*
-pub trait FrameComponent: LiveApply {
-    fn handle_event_dyn(&mut self, cx: &mut Cx, event: &mut Event) -> Option<Box<dyn AnyAction >>;
-    fn draw_dyn(&mut self, cx: &mut Cx);
-    fn apply_draw(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
-        self.apply_over(cx, nodes);
-        self.draw_dyn(cx);
-    }
-}
-*/
-

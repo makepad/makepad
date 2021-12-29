@@ -1273,7 +1273,7 @@ impl<'a> ShaderParser<'a> {
                     ty: RefCell::new(None),
                     const_val: RefCell::new(None),
                     const_index: Cell::new(None),
-                    kind: ExprKind::Lit {span, lit: Lit::Int(v as i32)},
+                    kind: ExprKind::Lit {span, lit: Lit::Float(v as f32)},
                 }))
             }
             LiveToken::Float(v) => {

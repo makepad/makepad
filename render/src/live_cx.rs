@@ -211,6 +211,7 @@ impl Cx {
         self.draw_shaders.clear();
         self.draw_shader_ptr_to_id.clear();
         self.draw_shader_fingerprints.clear();
+        self.draw_shader_error_set.clear();
     }
     
     pub fn update_shader_tables_with_live_edit(&mut self, mutated_tokens: &[LiveTokenId], live_ptrs: &[LivePtr])->bool {
