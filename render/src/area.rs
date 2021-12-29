@@ -283,7 +283,7 @@ impl Area {
             Area::Instance(inst) => {
                 let cxview = &mut cx.views[inst.view_id];
                 if cxview.redraw_id != inst.redraw_id {
-                    println!("set_rect called on invalid area pointer, use mark/sweep correctly!");
+                    //println!("set_rect called on invalid area pointer, use mark/sweep correctly!");
                     return;
                 }
                 let draw_call = cxview.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();

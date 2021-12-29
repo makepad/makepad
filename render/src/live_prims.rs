@@ -18,21 +18,6 @@ macro_rules!get_component {
         $ frame.get_component( $ comp_id).map_or(None, | v | v.cast_mut::< $ ty>())
     }
 }
-/*
-#[macro_export]
-macro_rules!module_path_obj {
-    () => {
-        ModulePath::from_str(&module_path!()).unwrap()
-    }
-}*/
-
-/*
-#[macro_export]
-macro_rules!let_action {
-    ( $ item: expr, $ comp_id: expr, $ ty: expr) => {
-        let ($comp_id, $ty) = $item.action.cast_id($item.id)
-    }
-}*/
 
 #[macro_export]
 macro_rules!live_primitive {

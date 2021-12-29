@@ -131,12 +131,6 @@ impl<'a> TyChecker<'a> {
                 ident,
                 ref arg_exprs,
             } => self.ty_check_builtin_call_expr(span, ident, arg_exprs),
-            /*ExprKind::ClosureCall {
-                span,
-                ident,
-                ref arg_exprs,
-                ref param_index,
-            } => self.ty_check_closure_call_expr(span, ident, arg_exprs, param_index),*/
             ExprKind::ClosureDef(index) => self.ty_check_closure_def(index),
             ExprKind::ConsCall {
                 span,

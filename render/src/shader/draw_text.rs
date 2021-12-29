@@ -96,7 +96,7 @@ live_register!{
             if dx > 7.0 {
                 s = 0.7;
             }
-            else if dx > 2.75 { 
+            else if dx > 2.75 {
                 s = (
                     sample2d(self.tex, self.tex_coord3.xy + vec2(0., 0.)).z
                         + sample2d(self.tex, self.tex_coord3.xy + vec2(dp, 0.)).z

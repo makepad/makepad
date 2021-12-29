@@ -416,7 +416,7 @@ impl LiveRegistry {
                                         if live_index > 2
                                             && live_tokens[live_index - 2].is_open_delim(Delim::Brace)
                                             && live_tokens[live_index - 1].is_open_delim(Delim::Brace)
-                                            && live_tokens[live_index].is_int()
+                                            && live_tokens[live_index].is_ident()
                                             && live_token.is_ident() {
                                             
                                             // ignore it.
@@ -438,13 +438,20 @@ impl LiveRegistry {
                 column += full_token.len;
             }
         }
-        if live_index < live_tokens.len() - 1 {
+        
+        // make sure token list is properly terminated
+        if live_index < live_tokens.len()-1{ // the tokenlist shortened
+            if live_tokens[live_index].token != LiveToken::Eof{
+                live_tokens[live_index].token = LiveToken::Eof;
+            }  
             parse_changed = true;
+        }
+        else if live_tokens.last().unwrap().token != LiveToken::Eof{
+            live_tokens.push(TokenWithSpan{token:LiveToken::Eof, span:TextSpan{file_id, start:TextPos::default(), end:TextPos::default()}});
         }
         
         if parse_changed {
             let mut parser = LiveParser::new(&original.tokens, &live_file.live_type_infos, file_id);
-            
             let new_original = match parser.parse_live_document() {
                 Err(msg) => return Err(vec![msg]), //panic!("Parse error {}", msg.to_live_file_error(file, &source)),
                 Ok(ld) => ld

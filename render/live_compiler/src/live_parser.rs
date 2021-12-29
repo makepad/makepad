@@ -23,6 +23,7 @@ use {
 pub struct LiveParser<'a> {
     pub token_index: usize,
     pub file_id: LiveFileId,
+    pub live_type_info_counter: usize,
     pub live_type_infos: &'a [LiveTypeInfo],
     pub tokens_with_span: Cloned<Iter<'a, TokenWithSpan >>,
     pub token_with_span: TokenWithSpan,
@@ -34,6 +35,7 @@ impl<'a> LiveParser<'a> {
         let mut tokens_with_span = tokens.iter().cloned();
         let token_with_span = tokens_with_span.next().unwrap();
         LiveParser {
+            live_type_info_counter: 0,
             file_id,
             tokens_with_span,
             live_type_infos,
@@ -66,9 +68,9 @@ impl<'a> LiveParser<'a> {
         self.token_index += 1;
     }
     
-    fn error(&mut self, message: String) -> LiveError {
+    fn error(&mut self, message: String, origin:LiveErrorOrigin) -> LiveError {
         LiveError {
-            origin: live_error_origin!(),
+            origin,
             span: self.token_with_span.span.into(),
             message,
         }
@@ -107,17 +109,17 @@ impl<'a> LiveParser<'a> {
                 self.skip_token();
                 Ok(ident)
             }
-            token => Err(self.error(format!("expected ident, unexpected token `{}`", token))),
+            token => Err(self.error(format!("expected ident, unexpected token `{}`", token), live_error_origin!())),
         }
     }
     
-    fn expect_int(&mut self) -> Result<i64, LiveError> {
+    fn expect_int2(&mut self) -> Result<i64, LiveError> {
         match self.peek_token() {
             LiveToken::Int(v) => {
                 self.skip_token();
                 Ok(v)
             }
-            token => Err(self.error(format!("expected int, unexpected token `{}`", token))),
+            token => Err(self.error(format!("expected int, unexpected token `{}`", token), live_error_origin!())),
         }
     }
     
@@ -131,14 +133,14 @@ impl<'a> LiveParser<'a> {
                 self.skip_token();
                 Ok(v as f64)
             }
-            token => Err(self.error(format!("expected float, unexpected token `{}`", token))),
+            token => Err(self.error(format!("expected float, unexpected token `{}`", token), live_error_origin!())),
         }
     }
     
     fn expect_token(&mut self, expected: LiveToken) -> Result<(), LiveError> {
         let actual = self.peek_token();
         if actual != expected {
-            return Err(self.error(format!("expected {} unexpected token `{}`", expected, actual)));
+            return Err(self.error(format!("expected {} unexpected token `{}`", expected, actual), live_error_origin!()));
         }
         self.skip_token();
         Ok(())
@@ -221,7 +223,7 @@ impl<'a> LiveParser<'a> {
             let edit_info_index = ld.edit_info.len();
             
             if edit_info_index > 0x3e0{
-                return Err(self.error(format!("Used more than 64 .{{..}} edit info fields in a file, we dont have the bitspace for that in our u64.")))
+                return Err(self.error(format!("Used more than 64 .{{..}} edit info fields in a file, we dont have the bitspace for that in our u64."), live_error_origin!()))
             }
             
             ld.edit_info.push(LiveNode {
@@ -287,14 +289,14 @@ impl<'a> LiveParser<'a> {
                                     value: LiveValue::DocumentString {string_start: index as usize, string_count: len as usize}
                                 });
                             },
-                            other => return Err(self.error(format!("Unexpected token {} in edit_info", other)))
+                            other => return Err(self.error(format!("Unexpected token {} in edit_info", other), live_error_origin!()))
                         }
                         self.accept_optional_delim();
                     },
-                    other => return Err(self.error(format!("Unexpected token {} in edit_info", other)))
+                    other => return Err(self.error(format!("Unexpected token {} in edit_info", other), live_error_origin!()))
                 }
             }
-            return Err(self.error(format!("Eof in edit info")))
+            return Err(self.error(format!("Eof in edit info"), live_error_origin!()))
         }
         
         Ok(None)
@@ -332,7 +334,7 @@ impl<'a> LiveParser<'a> {
             self.expect_live_value(LiveId::empty(), LiveNodeOrigin::from_token_id(self.get_token_id()).with_id_non_unique(true), ld) ?;
             self.accept_token(LiveToken::Punct(id!(,)));
         }
-        return Err(self.error(format!("Eof in array body")))
+        return Err(self.error(format!("Eof in array body"), live_error_origin!()))
     }
     
     
@@ -356,7 +358,7 @@ impl<'a> LiveParser<'a> {
             self.expect_live_value(LiveId::empty(), LiveNodeOrigin::from_token_id(self.get_token_id()).with_id_non_unique(true), ld) ?;
             self.accept_token(LiveToken::Punct(id!(,)));
         }
-        return Err(self.error(format!("Eof in object body")))
+        return Err(self.error(format!("Eof in object body"), live_error_origin!()))
     }
     
     
@@ -385,7 +387,7 @@ impl<'a> LiveParser<'a> {
             self.expect_live_value(prop_id, LiveNodeOrigin::from_token_id(token_id).with_edit_info(edit_info), ld) ?;
             self.accept_token(LiveToken::Punct(id!(,)));
         }
-        return Err(self.error(format!("Eof in named enum")))
+        return Err(self.error(format!("Eof in named enum"), live_error_origin!()))
     }
     
     fn get_token_id(&self) -> LiveTokenId {
@@ -400,10 +402,14 @@ impl<'a> LiveParser<'a> {
                 // if we get an OpenBrace immediately after, we are a rust_type
                 if self.peek_token() == LiveToken::Open(Delim::Brace) {
                     self.skip_token();
-                    let val = self.expect_int() ?;
                     
-                    if val< 0 || val >= self.live_type_infos.len() as i64 {
-                        return Err(self.error(format!("live_type index out of range {}", val)));
+                    let val = self.live_type_info_counter;
+                    self.live_type_info_counter += 1;
+                    
+                    self.accept_ident();
+                    
+                    if val >= self.live_type_infos.len() {
+                        return Err(self.error(format!("live_type index out of range {}", val), live_error_origin!()));
                     }
                     ld.nodes.push(LiveNode {
                         origin,
@@ -584,7 +590,7 @@ impl<'a> LiveParser<'a> {
                     }
                 }
             },
-            other => return Err(self.error(format!("Unexpected token {} in property value", other)))
+            other => return Err(self.error(format!("Unexpected token {} in property value", other), live_error_origin!()))
         }
         Ok(())
     }
@@ -600,7 +606,7 @@ impl<'a> LiveParser<'a> {
                 }
                 LiveToken::Close(_) => {
                     if stack_depth == 0 {
-                        return Err(self.error(format!("Found closing )}}] whilst scanning for {}", scan_token)));
+                        return Err(self.error(format!("Found closing )}}] whilst scanning for {}", scan_token), live_error_origin!()));
                     }
                     stack_depth -= 1;
                 }
@@ -612,7 +618,7 @@ impl<'a> LiveParser<'a> {
             }
             self.skip_token();
         }
-        return Err(self.error(format!("Could not find ending token {} whilst scanning", scan_token)));
+        return Err(self.error(format!("Could not find ending token {} whilst scanning", scan_token), live_error_origin!()));
     }
     /*
     fn expect_var_def_type(&mut self) -> Result<(), LiveError> {
@@ -636,7 +642,7 @@ impl<'a> LiveParser<'a> {
             LiveToken::Ident(id!(vec3)) => {todo!()}
             _ => ()
         }
-        Err(self.error(format!("Expected value literal")))
+        Err(self.error(format!("Expected value literal"), live_error_origin!()))
     }
     
     fn expect_live_class(&mut self, root: bool, prop_id: LiveId, ld: &mut LiveOriginal) -> Result<(), LiveError> {
@@ -645,7 +651,7 @@ impl<'a> LiveParser<'a> {
             match self.peek_token() {
                 LiveToken::Close(Delim::Brace) => {
                     if root {
-                        return Err(self.error(format!("Unexpected token }} in root")))
+                        return Err(self.error(format!("Unexpected token }} in root"), live_error_origin!()))
                     }
                     let token_id = self.get_token_id();
                     self.skip_token();
@@ -690,13 +696,13 @@ impl<'a> LiveParser<'a> {
                         self.accept_optional_delim();
                     }
                 },
-                other => return Err(self.error(format!("Unexpected token {} in class body of {}", other, prop_id)))
+                other => return Err(self.error(format!("Unexpected token {} in class body of {}", other, prop_id), live_error_origin!()))
             }
         }
         if root {
             return Ok(())
         }
-        return Err(self.error(format!("Eof in class body")))
+        return Err(self.error(format!("Eof in class body"), live_error_origin!()))
     }
     
     pub fn accept_optional_delim(&mut self) {
@@ -1014,7 +1020,7 @@ impl<'a> LiveParser<'a> {
                 self.expect_token(LiveToken::Close(Delim::Paren)) ?;
                 Ok(expr)
             }
-            token => Err(self.error(format!("Unexpected token {} in class expression", token)))
+            token => Err(self.error(format!("Unexpected token {} in class expression", token), live_error_origin!()))
         }
     }
     

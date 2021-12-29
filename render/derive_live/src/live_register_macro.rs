@@ -76,7 +76,7 @@ fn token_parser_to_whitespace_matching_string(parser: &mut TokenParser, span: Sp
     fn parse_type_ident(in_delim: Delimiter, parser: &mut TokenParser, out: &mut String, live_types: &mut Vec<TokenStream>) -> bool {
         if in_delim == Delimiter::Brace && parser.is_group_with_delim(Delimiter::Brace) {
             parser.open_group();
-            write!(out, "{{{{{0}}}}}", live_types.len()).unwrap();
+            write!(out, "{{{{dummy}}}}").unwrap();
             live_types.push(parser.eat_level());
             true
         }

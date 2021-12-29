@@ -20,6 +20,7 @@ pub trait FrameComponent: LiveApply {
         self.apply_over(cx, nodes);
         self.draw_component(cx);
     }
+    fn type_id(&self) -> TypeId;
 }
 
 #[derive(Clone)]
@@ -83,28 +84,7 @@ impl<T: 'static + ? Sized + Clone> FrameComponentAction for T {
     }
 }
 
-impl dyn FrameComponentAction {
-    pub fn is<T: FrameComponentAction >(&self) -> bool {
-        let t = TypeId::of::<T>();
-        let concrete = self.type_id();
-        t == concrete
-    }
-    pub fn cast<T: FrameComponentAction + Default + Clone>(&self) -> T {
-        if self.is::<T>() {
-            unsafe {&*(self as *const dyn FrameComponentAction as *const T)}.clone()
-        } else {
-            T::default()
-        }
-    }
-    
-    pub fn cast_id<T: FrameComponentAction + Default + Clone>(&self, id: LiveId) -> (LiveId, T) {
-        if self.is::<T>() {
-            (id, unsafe {&*(self as *const dyn FrameComponentAction as *const T)}.clone())
-        } else {
-            (id, T::default())
-        }
-    }
-}
+generate_clone_cast_api!(FrameComponentAction);
 
 pub type OptionFrameComponentAction = Option<Box<dyn FrameComponentAction >>;
 

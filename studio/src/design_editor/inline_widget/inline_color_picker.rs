@@ -52,6 +52,9 @@ fn register_factory(cx: &mut Cx) {
 }
 
 impl InlineWidget for InlineColorPicker {
+    
+    fn type_id(&self)->LiveType{LiveType::of::<Self>()}
+    
     fn handle_inline_event(
         &mut self,
         cx: &mut Cx,
