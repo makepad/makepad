@@ -35,7 +35,7 @@ live_register!{
     }
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live)]
 pub struct TabBar {
     
     scroll_view: ScrollView,
@@ -47,6 +47,18 @@ pub struct TabBar {
     #[rust] tab_ids: Vec<TabId>,
     #[rust] selected_tab_id: Option<TabId>,
     #[rust] next_selected_tab_id: Option<TabId>,
+}
+
+
+impl LiveHook for TabBar{
+    fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+        if let Some(index) = nodes.child_by_name(index, id!(tab)){
+            for tab in self.tabs_by_tab_id.values_mut() {
+                tab.apply(cx, apply_from, index, nodes);
+            }
+        }
+        self.scroll_view.redraw(cx);
+    }
 }
 
 impl TabBar {

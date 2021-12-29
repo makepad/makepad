@@ -8,7 +8,7 @@ use {
 
 live_register!{
     use crate::tab_bar::TabBar
-    use crate::splitter::Splitter 
+    use crate::splitter::Splitter
     Dock: {{Dock}} {
         drag_quad: {
             draw_depth: 10.0
@@ -23,7 +23,7 @@ live_register!{
     }
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live)]
 pub struct Dock {
     
     view: View,
@@ -36,6 +36,22 @@ pub struct Dock {
     #[rust] panel_ids: Vec<PanelId>,
     #[rust] panel_id_stack: Vec<PanelId>,
     #[rust] drag: Option<Drag>,
+}
+
+impl LiveHook for Dock {
+    fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+        for panel in self.panels_by_panel_id.values_mut() {
+            match panel {
+                Panel::Split(panel) => if let Some(index) = nodes.child_by_name(index, id!(splitter)) {
+                    panel.splitter.apply(cx, apply_from, index, nodes);
+                }
+                Panel::Tab(panel) => if let Some(index) = nodes.child_by_name(index, id!(tab_bar)) {
+                    panel.tab_bar.apply(cx, apply_from, index, nodes);
+                }
+            }
+        }
+        self.view.redraw(cx);
+    }
 }
 
 impl Dock {
@@ -62,7 +78,7 @@ impl Dock {
         self.view.end(cx);
     }
     
-    pub fn begin_split_panel(&mut self, cx: &mut Cx, panel_id: PanelId, axis:Axis, align:SplitterAlign) {
+    pub fn begin_split_panel(&mut self, cx: &mut Cx, panel_id: PanelId, axis: Axis, align: SplitterAlign) {
         self.panel_ids.push(panel_id);
         let panel = self.get_or_create_split_panel(cx, panel_id);
         panel.splitter.set_axis(axis);
@@ -173,12 +189,12 @@ impl Dock {
         panel.tab_bar.selected_tab_id()
     }
     
-    pub fn set_selected_tab_id(&mut self, cx: &mut Cx, panel_id: PanelId, tab_id: Option<TabId>, should_animate:bool) {
+    pub fn set_selected_tab_id(&mut self, cx: &mut Cx, panel_id: PanelId, tab_id: Option<TabId>, should_animate: bool) {
         let panel = self.get_or_create_tab_panel(cx, panel_id);
         panel.tab_bar.set_selected_tab_id(cx, tab_id, should_animate);
     }
     
-    pub fn set_next_selected_tab(&mut self, cx: &mut Cx, panel_id: PanelId, tab_id: TabId, should_animate:bool) {
+    pub fn set_next_selected_tab(&mut self, cx: &mut Cx, panel_id: PanelId, tab_id: TabId, should_animate: bool) {
         let panel = self.get_or_create_tab_panel(cx, panel_id);
         panel.tab_bar.set_next_selected_tab(cx, tab_id, should_animate);
     }
@@ -205,8 +221,8 @@ impl Dock {
                     panel
                         .splitter
                         .handle_event(cx, event, &mut | cx, action | match action {
-                        SplitterAction::Changed{axis, align} => {
-                            dispatch_action(cx, DockAction::SplitPanelChanged{panel_id:*panel_id, axis, align});
+                        SplitterAction::Changed {axis, align} => {
+                            dispatch_action(cx, DockAction::SplitPanelChanged {panel_id: *panel_id, axis, align});
                         }
                     });
                 }
@@ -330,7 +346,7 @@ pub enum DragPosition {
 }
 
 pub enum DockAction {
-    SplitPanelChanged{panel_id:PanelId, axis:Axis, align:SplitterAlign},
+    SplitPanelChanged {panel_id: PanelId, axis: Axis, align: SplitterAlign},
     TabBarReceivedDraggedItem(PanelId, DraggedItem),
     TabWasPressed(PanelId, TabId),
     TabCloseWasPressed(PanelId, TabId),

@@ -78,7 +78,7 @@ impl InlineCache {
                     State::First => match token.token {
                         FullToken::Whitespace | FullToken::Comment => (),
                         _ => {state = State::Stack(TokenPos {line, index}, 0)}
-                    }
+                    } 
                     State::Stack(start, depth) => {
                         match token.token {
                             FullToken::Open(_) => {state = State::Stack(start, depth + 1)}
@@ -101,6 +101,14 @@ impl InlineCache {
         if let State::Term(start, end) = state {
             // alright we have a range.
             self.live_register_range = Some(TokenRange {start, end})
+        }
+    }
+    
+    pub fn invalidate_all(&mut self) {
+        self.is_clean = false;
+        for line in &mut self.lines{
+            line.items.truncate(0);
+            line.is_clean = false;
         }
     }
     
@@ -185,7 +193,7 @@ impl InlineCache {
                         
                         let live_token_id = makepad_live_compiler::LiveTokenId::new(file_id, live_token_index);
                         let search_in_dsl = token.is_value_type();
-                        
+                          
                         if let Some(node_index) = expanded.nodes.first_node_with_token_id(live_token_id, search_in_dsl) {
                             
                             let live_token_id = if is_prop_assign { // get the thing after the :

@@ -17,7 +17,7 @@ use {
             SessionId
         },
     },
-    makepad_render::makepad_live_compiler::{LivePtr},
+    makepad_render::makepad_live_compiler::{LivePtr, LiveEditEvent},
     makepad_render::*,
 };
 
@@ -25,7 +25,6 @@ live_register!{
     use makepad_render::shader::std::*;
     
     LiveEditor: {{LiveEditor}} {
-        color_picker: ColorPicker,
         widget_layout: Layout {
             align: Align {fx: 0.2, fy: 0.},
             padding: Padding {l: 0, t: .0, r: 0, b: 0}
@@ -42,11 +41,9 @@ pub struct Widget {
     inline_widget: Box<dyn InlineWidget>
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live)]
 pub struct LiveEditor {
     editor_impl: CodeEditorImpl,
-    
-    color_picker: Option<LivePtr>,
     
     widget_layout: Layout,
     
@@ -56,6 +53,18 @@ pub struct LiveEditor {
     #[rust] visible_widgets: HashSet<WidgetIdent>,
     #[rust] widgets: HashMap<WidgetIdent, Widget>,
 }
+
+impl LiveHook for LiveEditor{
+    fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+        let registries = cx.registries.clone();
+        for widget in self.widgets.values_mut(){
+            registries.get::<CxInlineWidgetRegistry>().apply(cx, apply_from, index, nodes, widget.inline_widget.as_mut());
+        }
+        self.editor_impl.redraw(cx);
+    }
+}
+
+
 
 impl LiveEditor {
     
@@ -200,7 +209,6 @@ impl LiveEditor {
     } 
     
     fn process_live_edit(cx: &mut Cx, state: &mut EditorState, session_id: SessionId) {
-        cx.profile_start(1);
         let session = &state.sessions[session_id];
         let document = &state.documents[session.document_id];
         let document_inner = document.inner.as_ref().unwrap();
@@ -220,11 +228,21 @@ impl LiveEditor {
             (&lines[line], &token_cache[line].tokens())
         }) {
             Ok(event) => {
+                match event{
+                    Some(LiveEditEvent::ReparseDocument(_))=>{
+                        inline_cache.invalidate_all();
+                    }
+                    _=>()
+                }
                 cx.live_edit_event = event;
             }
-            Err(_) => {}
+            Err(errors) => {
+                for e in errors{
+                    let _e = live_registry.live_error_to_live_file_error(e);
+                    //println!("Parse errors {}", e);
+                }
+            }
         };
-        cx.profile_start(1);
     }
     
     pub fn handle_event(

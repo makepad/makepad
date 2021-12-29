@@ -13,6 +13,7 @@ live_register!{
     use makepad_render::shader::std::*;
     
     DrawBgQuad: {{DrawBgQuad}} {
+
         const COLOR_EVEN: #25
         const COLOR_ODD: #28
         const COLOR_SELECTED: #x11466E
@@ -239,10 +240,13 @@ pub struct FileTree {
 
 impl LiveHook for FileTree{
     fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        for tree_node in self.tree_nodes.values_mut() {
+        for (file_node_id, tree_node) in &mut self.tree_nodes {
             if tree_node.is_folder{
                 if let Some(index) = nodes.child_by_name(index, id!(folder_node)){
                     tree_node.apply(cx, apply_from, index, nodes);
+                    if self.open_nodes.contains(file_node_id){
+                        tree_node.set_folder_is_open(cx, true, false); 
+                    }
                 }
             }
             else{
