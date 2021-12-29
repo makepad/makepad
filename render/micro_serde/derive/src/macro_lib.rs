@@ -68,7 +68,7 @@ impl TokenBuilder {
     
     pub fn add(&mut self, what: &str) -> &mut Self {
         let b = what.as_bytes();
-        let mut o = 0;
+        let mut o = 0; 
         while o < b.len() {
             let c0 = b[o] as char;
             let c1 = if o + 1 < b.len() {b[o + 1] as char}else {'\0'};
@@ -87,7 +87,7 @@ impl TokenBuilder {
                     self.punct(std::str::from_utf8(&b[o..o + 2]).unwrap());
                     o += 2;
                 }
-                ('+', _) | ('-', _) | ('*', _) | ('/', _) |
+                ('+', _) | ('-', _) | ('*', _) | ('/', _) | ('#', _) |
                 ('=', _) | ('<', _) | ('>', _) | ('?', _) | (';', _) | ('&', _) |
                 ('^', _) | (':', _) | (',', _) | ('!', _) | ('.', _) | ('|', _) => {
                     self.punct(std::str::from_utf8(&b[o..o + 1]).unwrap());
@@ -139,6 +139,24 @@ impl TokenBuilder {
                     self.string(std::str::from_utf8(&b[o + 1..e]).unwrap());
                     o = e + 1;
                 }
+                ('\'',_)=>{
+                    let mut e = o+1;
+                    while e < b.len() {
+                        let c = b[e] as char;
+                        if c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_' {
+                            e += 1;
+                        } else {
+                            break;
+                        }
+                    }
+                    if o == e {
+                        panic!("Unexpected character {}", b[e] as char);
+                    }
+                    let ident = std::str::from_utf8(&b[o+1..e]).unwrap();
+                    self.lifetime_mark();
+                    self.ident(ident);
+                    o = e;                    
+                }
                 _ => {
                     let mut e = o;
                     while e < b.len() {
@@ -173,6 +191,11 @@ impl TokenBuilder {
         for (last, c) in s.chars().identify_last() {
             self.extend(TokenTree::from(Punct::new(c, if last {Spacing::Alone} else {Spacing::Joint})));
         }
+        self
+    }
+
+    pub fn lifetime_mark(&mut self) -> &mut Self {
+        self.extend(TokenTree::from(Punct::new('\'', Spacing::Joint)));
         self
     }
     

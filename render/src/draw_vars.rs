@@ -108,6 +108,9 @@ impl DrawVars {
     
     pub fn init_shader(&mut self, cx: &mut Cx, draw_shader_ptr: DrawShaderPtr, geometry_fields: &dyn GeometryFields) {
         self.draw_shader = None;
+        if cx.draw_shader_error_set.contains(&draw_shader_ptr){
+            return
+        }
         if let Some(draw_shader_id) = cx.draw_shader_ptr_to_id.get(&draw_shader_ptr) {
             self.draw_shader = Some(DrawShader {
                 draw_shader_generation: cx.draw_shader_generation,
@@ -236,6 +239,7 @@ impl DrawVars {
             // ok lets print an error
             match result {
                 Err(e) => {
+                    cx.draw_shader_error_set.insert(draw_shader_ptr);
                     // ok so. lets get the source for this file id
                     let err = live_registry.live_error_to_live_file_error(e);
                     println!("Error {}", err);

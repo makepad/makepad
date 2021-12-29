@@ -53,11 +53,18 @@ pub fn derive_live_registry_impl(input: TokenStream) -> TokenStream {
             tb.add("            id,");
             tb.add("        });");
             tb.add("    }");
+
+            tb.add("    pub fn apply(&self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode], obj:&mut (dyn ").ident(&component).add(" + 'static)){");
+            tb.add("         if let Some(reg_item) = self.items.get(&obj.type_id()){");
+            tb.add("            makepad_render::live_traits::from_ptr_impl(cx, reg_item.live_ptr.unwrap(),|cx, file_id, index, nodes| obj.apply(cx, ApplyFrom::UpdateFromDoc {file_id}, index, nodes));");
+            tb.add("         }");
+            tb.add("    }");
+            
             tb.add("    pub fn new(&self, cx: &mut Cx, live_type: LiveType) -> Option<Box<dyn ").ident(&component).add(" >> {");
             tb.add("        self.items.get(&live_type)");
-            tb.add("            .and_then( | cnew | Some({");
-            tb.add("                let mut ret = cnew.factory.new(cx);if cnew.live_ptr.is_none(){panic!(\"Component liveptr is none, did you include the registry in the main DSL flow?\");};");
-            tb.add("                makepad_render::live_traits::new_from_ptr_impl(cx, cnew.live_ptr.unwrap(),|cx, from, index, nodes| ret.apply(cx, from, index, nodes));");
+            tb.add("            .and_then( | reg_item | Some({");
+            tb.add("                let mut ret = reg_item.factory.new(cx);if reg_item.live_ptr.is_none(){panic!(\"Component liveptr is none, did you include the registry in the main DSL flow?\");};");
+            tb.add("                makepad_render::live_traits::from_ptr_impl(cx, reg_item.live_ptr.unwrap(),|cx, file_id, index, nodes| ret.apply(cx, ApplyFrom::NewFromDoc {file_id}, index, nodes));");
             tb.add("                ret");
             tb.add("             }))");
             tb.add("    }");
