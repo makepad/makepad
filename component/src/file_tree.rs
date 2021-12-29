@@ -218,7 +218,7 @@ pub struct FileTreeNode {
     selected: f32,
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live)]
 pub struct FileTree {
     scroll_view: ScrollView,
     file_node: Option<LivePtr>,
@@ -235,6 +235,24 @@ pub struct FileTree {
     #[rust] tree_nodes: HashMap<FileNodeId, FileTreeNode>,
     #[rust] count: usize,
     #[rust] stack: Vec<f32>,
+}
+
+impl LiveHook for FileTree{
+    fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+        for tree_node in self.tree_nodes.values_mut() {
+            if tree_node.is_folder{
+                if let Some(index) = nodes.child_by_name(index, id!(folder_node)){
+                    tree_node.apply(cx, apply_from, index, nodes);
+                }
+            }
+            else{
+                if let Some(index) = nodes.child_by_name(index, id!(file_node)){
+                    tree_node.apply(cx, apply_from, index, nodes);
+                }
+            }
+        }
+        self.scroll_view.redraw(cx);
+    }
 }
 
 pub enum FileTreeAction {

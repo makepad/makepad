@@ -144,8 +144,9 @@ impl Cx {
     
     pub(crate) fn call_signals_and_triggers(&mut self)
     {
-        if self.live_edit_result.is_some(){
-            self.call_event_handler(&mut Event::LiveEdit);
+        if self.live_edit_event.is_some(){
+            let ev = self.live_edit_event.take().unwrap();
+            self.call_event_handler(&mut Event::LiveEdit(ev));
         }
         
         let mut counter = 0;

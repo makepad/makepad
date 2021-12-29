@@ -1,9 +1,6 @@
 use {
     makepad_shader_compiler::*,
     crate::{
-        platform::{
-            CxPlatformShader            
-        },
         cx::Cx,
         area::Area,
         geometry::{GeometryFields},
@@ -15,6 +12,7 @@ use {
 
 #[derive(Copy, Clone, PartialEq, Debug)]
 pub struct DrawShader {
+    pub draw_shader_generation: u64,
     pub draw_shader_id: usize,
     pub draw_shader_ptr: DrawShaderPtr
 }
@@ -38,7 +36,7 @@ pub enum DrawShaderInputPacking {
     Attribute,
     UniformsGLSL,
     UniformsHLSL,
-    UniformsMetal 
+    UniformsMetal
 }
 
 #[derive(Debug, PartialEq)]
@@ -91,7 +89,7 @@ impl DrawVars {
         cx.redraw_view_of(self.area);
     }
     
-    pub fn live_type_info(_cx:&mut Cx) -> LiveTypeInfo {
+    pub fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
         LiveTypeInfo {
             module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
             live_type: std::any::TypeId::of::<Self>(),
@@ -109,9 +107,10 @@ impl DrawVars {
     }
     
     pub fn init_shader(&mut self, cx: &mut Cx, draw_shader_ptr: DrawShaderPtr, geometry_fields: &dyn GeometryFields) {
-        
+        self.draw_shader = None;
         if let Some(draw_shader_id) = cx.draw_shader_ptr_to_id.get(&draw_shader_ptr) {
             self.draw_shader = Some(DrawShader {
+                draw_shader_generation: cx.draw_shader_generation,
                 draw_shader_ptr,
                 draw_shader_id: *draw_shader_id
             });
@@ -131,17 +130,17 @@ impl DrawVars {
                 if node.value.is_dsl() {
                     fingerprint.push(node.clone());
                 }
-                match node.id{
-                    id!(draw_call_group)=>if let LiveValue::Id(id) = node.value{
+                match node.id {
+                    id!(draw_call_group) => if let LiveValue::Id(id) = node.value {
                         self.draw_call_group = id;
                     }
-                    id!(no_h_scroll)=>if let LiveValue::Bool(v) = node.value{
+                    id!(no_h_scroll) => if let LiveValue::Bool(v) = node.value {
                         self.no_h_scroll = v;
                     }
-                    id!(no_v_scroll)=>if let LiveValue::Bool(v) = node.value{
+                    id!(no_v_scroll) => if let LiveValue::Bool(v) = node.value {
                         self.no_v_scroll = v;
                     }
-                    _=>()
+                    _ => ()
                 }
                 node_iter = doc.nodes.next_child(node_index);
             }
@@ -150,14 +149,13 @@ impl DrawVars {
             for fp in &cx.draw_shader_fingerprints {
                 if fp.fingerprint == fingerprint {
                     self.draw_shader = Some(DrawShader {
+                        draw_shader_generation: cx.draw_shader_generation,
                         draw_shader_ptr,
                         draw_shader_id: fp.draw_shader_id
                     });
-                    //self.geometry_id = geometry_fields.get_geometry_id();
                     return;
                 }
             }
-            
             fn live_type_to_shader_ty(live_type: LiveType) -> Option<ShaderTy> {
                 if live_type == LiveType::of::<f32>() {Some(ShaderTy::Float)}
                 else if live_type == LiveType::of::<Vec2>() {Some(ShaderTy::Vec2)}
@@ -275,7 +273,7 @@ impl DrawVars {
                     cx.draw_shaders.push(CxDrawShader {
                         field: class_node.id,
                         type_name: shader_type_name,
-                        platform: CxPlatformShader::default(),
+                        platform: None,
                         mapping: mapping
                     });
                     // ok so. maybe we should fill the live_uniforms buffer?
@@ -284,9 +282,10 @@ impl DrawVars {
                     cx.draw_shader_compile_set.insert(draw_shader_ptr);
                     // now we simply queue it somewhere somehow to compile.
                     self.draw_shader = Some(DrawShader {
+                        draw_shader_generation: cx.draw_shader_generation,
                         draw_shader_id,
                         draw_shader_ptr
-                    });
+                    }); 
                     
                     // self.geometry_id = geometry_fields.get_geometry_id();
                     //println!("{:?}", self.geometry_id);
@@ -302,6 +301,9 @@ impl DrawVars {
             // we could iterate our uniform and instance props
             // call get_write_ref and write into it
             if let Some(inst) = self.area.valid_instance(cx) {
+                if draw_shader.draw_shader_generation != cx.draw_shader_generation{
+                    return;
+                }
                 let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
                 let cxview = &mut cx.views[inst.view_id];
                 let draw_call = cxview.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
@@ -345,15 +347,11 @@ impl DrawVars {
     }
     
     pub fn before_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, _nodes: &[LiveNode], geometry_fields: &dyn GeometryFields) {
-        if self.draw_shader.is_some() {
-            
-            return
-        }
+        
         let draw_shader_ptr = if let Some(file_id) = apply_from.file_id() {
             DrawShaderPtr(LivePtr::from_index(file_id, index))
         }
         else {
-            
             return
         };
         self.init_shader(cx, draw_shader_ptr, geometry_fields)
@@ -400,12 +398,15 @@ impl DrawVars {
     pub fn apply_value(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         
         
-        if nodes[index].origin.node_has_prefix(){
+        if nodes[index].origin.node_has_prefix() {
             return nodes.skip_node(index)
         }
         
         if let Some(draw_shader) = self.draw_shader {
             let id = nodes[index].id;
+            if draw_shader.draw_shader_generation != cx.draw_shader_generation{
+                return nodes.skip_node(index);
+            }
             let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
             for input in &sh.mapping.user_uniforms.inputs {
                 let offset = input.offset;
@@ -422,8 +423,8 @@ impl DrawVars {
                 }
             }
         }
-        else{
-            panic!("no shader applying {}", nodes[index].id);
+        else { // our shader simply didnt compile
+            return nodes.skip_node(index);
         }
         let unknown_shader_props = match nodes[index].id {
             id!(debug) => false,
@@ -440,7 +441,7 @@ impl DrawVars {
     
     pub fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode], geometry_fields: &dyn GeometryFields) {
         // alright. so.if we are ApplyFrom::
-        if let ApplyFrom::LiveEdit = apply_from{
+        if let ApplyFrom::LiveEdit = apply_from {
             // alright, we might have to update something here.
             return
         }
@@ -702,6 +703,6 @@ impl CxDrawShaderMapping {
 pub struct CxDrawShader {
     pub field: LiveId,
     pub type_name: LiveId,
-    pub platform: CxPlatformShader,
+    pub platform: Option<usize>,
     pub mapping: CxDrawShaderMapping
 }

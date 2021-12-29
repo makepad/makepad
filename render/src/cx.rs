@@ -13,7 +13,7 @@ use {
     makepad_shader_compiler::makepad_live_compiler::{
         //LiveType,
         //LiveId,
-        LiveEditResult,
+        LiveEditEvent,
         LiveRegistry
     },
     makepad_shader_compiler::{
@@ -26,6 +26,7 @@ use {
         },
         platform::{
             CxPlatform,
+            CxPlatformDrawShader,
             CxPlatformTexture,
         },
         event::{
@@ -100,6 +101,8 @@ pub struct Cx {
     pub geometries_free: Rc<RefCell<Vec<usize >> >,
     pub geometries_refs: HashMap<GeometryFingerprint, Weak<Geometry >>,
     
+    pub platform_draw_shaders: Vec<CxPlatformDrawShader>,
+    pub draw_shader_generation: u64,
     pub draw_shaders: Vec<CxDrawShader>,
     pub draw_shader_ptr_to_id: HashMap<DrawShaderPtr, usize>,
     pub draw_shader_compile_set: BTreeSet<DrawShaderPtr>,
@@ -109,7 +112,6 @@ pub struct Cx {
     pub fonts_atlas: CxFontsAtlas,
     pub path_to_font_id: HashMap<String, usize>,
     pub draw_font_atlas: Option<Box<CxDrawFontAtlas >>,
-    
     
     pub in_redraw_cycle: bool,
     pub default_dpi_factor: f32,
@@ -161,7 +163,7 @@ pub struct Cx {
     pub live_registry: Rc<RefCell<LiveRegistry >>,
     pub shader_registry: ShaderRegistry,
     
-    pub live_edit_result: Option<LiveEditResult>,
+    pub live_edit_event: Option<LiveEditEvent>,
     
     pub command_settings: HashMap<CommandId, CxCommandSetting>,
     
@@ -230,6 +232,9 @@ impl Default for Cx {
             geometries_free: Rc::new(RefCell::new(Vec::new())),
             geometries_refs: HashMap::new(),
             
+            platform_draw_shaders: Vec::new(),
+            
+            draw_shader_generation: 0,
             draw_shaders: Vec::new(),
             draw_shader_ptr_to_id: HashMap::new(),
             draw_shader_compile_set: BTreeSet::new(),
@@ -294,8 +299,8 @@ impl Default for Cx {
             
             platform: CxPlatform {..Default::default()},
             
-            live_edit_result: None,
-            
+            live_edit_event: None,
+             
             event_handler: None
         }
     }
