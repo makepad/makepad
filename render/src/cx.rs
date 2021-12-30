@@ -3,7 +3,6 @@ use {
         collections::{
             HashMap,
             HashSet,
-            BTreeSet,
         },
         time::Instant,
         rc::Rc,
@@ -17,12 +16,14 @@ use {
         LiveRegistry
     },
     makepad_shader_compiler::{
-        DrawShaderPtr,
         ShaderRegistry
     },
     crate::{
         cx_registries::{
             CxRegistries
+        },
+        cx_draw_shaders::{
+            CxDrawShaders
         },
         platform::{
             CxPlatform,
@@ -70,10 +71,6 @@ use {
             CxGeometry,
             GeometryFingerprint
         },
-        draw_vars::{
-            CxDrawShader,
-            DrawShaderFingerprint,
-        },
         turtle::Turtle,
     }
 };
@@ -102,12 +99,7 @@ pub struct Cx {
     pub geometries_refs: HashMap<GeometryFingerprint, Weak<Geometry >>,
     
     pub platform_draw_shaders: Vec<CxPlatformDrawShader>,
-    pub draw_shader_generation: u64, 
-    pub draw_shaders: Vec<CxDrawShader>,
-    pub draw_shader_ptr_to_id: HashMap<DrawShaderPtr, usize>,
-    pub draw_shader_compile_set: BTreeSet<DrawShaderPtr>,
-    pub draw_shader_fingerprints: Vec<DrawShaderFingerprint>,
-    pub draw_shader_error_set: HashSet<DrawShaderPtr>,
+    pub draw_shaders: CxDrawShaders,
     
     pub fonts: Vec<Option<CxFont >>,
     pub fonts_atlas: CxFontsAtlas,
@@ -235,12 +227,7 @@ impl Default for Cx {
             
             platform_draw_shaders: Vec::new(),
             
-            draw_shader_generation: 0,
-            draw_shaders: Vec::new(),
-            draw_shader_ptr_to_id: HashMap::new(),
-            draw_shader_compile_set: BTreeSet::new(),
-            draw_shader_fingerprints: Vec::new(),
-            draw_shader_error_set: HashSet::new(),
+            draw_shaders: CxDrawShaders::default(),
             
             fonts: Vec::new(),
             fonts_atlas: CxFontsAtlas::new(),

@@ -158,30 +158,30 @@ impl Splitter {
                 }
                 match f.hover_state {
                     HoverState::In => {
-                        self.animate_to(cx, self.hover_state.unwrap());
+                        self.animate_to(cx, self.hover_state);
                     },
                     HoverState::Out => {
-                        self.animate_to(cx, self.default_state.unwrap());
+                        self.animate_to(cx, self.default_state);
                     },
                     _ => ()
                 }
             },
             HitEvent::FingerDown(_) => {
-                self.animate_to(cx, self.pressed_state.unwrap());
+                self.animate_to(cx, self.pressed_state);
                 self.drag_start_align = Some(self.align);
             }
             HitEvent::FingerUp(f) => {
                 self.drag_start_align = None;
                 if f.is_over {
                     if f.input_type.has_hovers() {
-                        self.animate_to(cx, self.hover_state.unwrap());
+                        self.animate_to(cx, self.hover_state);
                     }
                     else {
-                        self.animate_to(cx, self.default_state.unwrap());
+                        self.animate_to(cx, self.default_state);
                     }
                 }
                 else {
-                    self.animate_to(cx, self.default_state.unwrap());
+                    self.animate_to(cx, self.default_state);
                 }
             }
             HitEvent::FingerMove(f) => {

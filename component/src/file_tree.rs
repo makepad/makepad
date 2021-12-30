@@ -330,8 +330,8 @@ impl FileTreeNode {
             cx,
             is_selected,
             should_animate,
-            self.selected_state.unwrap(),
-            self.unselected_state.unwrap()
+            self.selected_state,
+            self.unselected_state
         )
     }
     
@@ -345,8 +345,8 @@ impl FileTreeNode {
             cx,
             is_open,
             should_animate,
-            self.opened_state.unwrap(),
-            self.closed_state.unwrap()
+            self.opened_state,
+            self.closed_state
         );
     }
     
@@ -364,10 +364,10 @@ impl FileTreeNode {
                 cx.set_hover_mouse_cursor(MouseCursor::Hand);
                 match f.hover_state {
                     HoverState::In => {
-                        self.animate_to(cx, self.hover_state.unwrap());
+                        self.animate_to(cx, self.hover_state);
                     }
                     HoverState::Out => {
-                        self.animate_to(cx, self.default_state.unwrap());
+                        self.animate_to(cx, self.default_state);
                     }
                     _ => {}
                 }
@@ -378,14 +378,14 @@ impl FileTreeNode {
                 }
             }
             HitEvent::FingerDown(_) => {
-                self.animate_to(cx, self.selected_state.unwrap());
+                self.animate_to(cx, self.selected_state);
                 if self.is_folder {
                     if self.opened > 0.2 {
-                        self.animate_to(cx, self.closed_state.unwrap());
+                        self.animate_to(cx, self.closed_state);
                         dispatch_action(cx, FileTreeNodeAction::Closing);
                     }
                     else {
-                        self.animate_to(cx, self.opened_state.unwrap());
+                        self.animate_to(cx, self.opened_state);
                         dispatch_action(cx, FileTreeNodeAction::Opening);
                     }
                     

@@ -33,8 +33,7 @@ fn register_factory(cx: &mut Cx) {
                     return CanEdit::Yes(100.0)
                 }
                 LiveValue::DSL {..} => {
-                    let doc = live_registry.token_id_to_origin_doc(bind.live_token_id);
-                    let token = doc.tokens[bind.live_token_id.token_index()];
+                    let token = live_registry.token_id_to_token(bind.live_token_id);
                     if token.is_color(){
                         return CanEdit::Yes(100.0)
                     } 
@@ -72,10 +71,7 @@ impl InlineWidget for InlineColorPicker {
                 rgba.append_hex_to_string(&mut s);
 
                 // alright we are going to fetch some tokens.
-                let token_id = bind.live_token_id;
-                let doc = live_registry.token_id_to_origin_doc(token_id);
-                let token = doc.tokens[token_id.token_index()];
-
+                let token = live_registry.token_id_to_token(bind.live_token_id);
                 let start_pos = Position::from(token.span.start);
                 let end_pos = Position::from(token.span.end);
                 
@@ -98,9 +94,7 @@ impl InlineWidget for InlineColorPicker {
                 Vec4::from_u32(*c)
             }
             LiveValue::DSL{..}=>{
-                let token_id = bind.live_token_id;
-                let doc = live_registry.token_id_to_origin_doc(token_id);
-                let token = doc.tokens[token_id.token_index()].token;
+                let token = live_registry.token_id_to_token(bind.live_token_id).token;
                 match token{
                     LiveToken::Color(c)=>{
                         Vec4::from_u32(c)

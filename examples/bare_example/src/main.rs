@@ -5,7 +5,11 @@ live_register!{
     use makepad_component::frame::Frame;
     use makepad_component::button::Button;
     App: {{App}} {
-        scroll_view: {h_show: true, v_show: true, view: {layout: {line_wrap: LineWrap::NewLine}}}
+        scroll_view: {
+            h_show: true,
+            v_show: true,
+            view: {layout: {line_wrap: LineWrap::NewLine}}
+        }
         frame: {
         }
     }
@@ -27,21 +31,23 @@ impl App {
     }
     
     pub fn new_app(cx: &mut Cx) -> Self {
-        //println!("{}", get_local_doc!(cx, id!(App)).nodes.to_string(0,100));
         Self::new_as_main_module(cx, &module_path!(), id!(App)).unwrap()
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
+
         self.desktop_window.handle_event(cx, event);
         self.scroll_view.handle_event(cx, event);
+
         if let Event::NextFrame(..) = event {
             // spawn 1000 buttons into the live structure
             let mut out = Vec::new();
             out.open();
+            
             for i in 0..1000 {
                 out.push_live(live_object!{
                     [id_num!(btn, i)]: Button {
-                        layout:{walk:{margin:{l:((((i+self.offset) as f32)*0.01).sin()*10.0)}}}
+                        layout: {walk: {margin: {l: ((((i + self.offset) as f32) * 0.01).sin() * 10.0)}}}
                         label: (format!("B{}", i + self.offset))
                     },
                 });
@@ -53,9 +59,7 @@ impl App {
             cx.new_next_frame();
             cx.redraw_all();
         }
-        if let Event::Construct = event {
-            
-        }
+
         for item in self.frame.handle_event(cx, event) {
             if let ButtonAction::IsPressed = item.action.cast() {
                 println!("Clicked on button {}", item.id);
@@ -68,7 +72,6 @@ impl App {
             return;
         }
         if self.scroll_view.begin(cx).is_ok() {
-            
             //if let Some(button) = get_component!(id!(b1), Button, self.frame) {
             //    button.label = "Btn1 label override".to_string();
             // }

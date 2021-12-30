@@ -108,12 +108,12 @@ impl DrawVars {
     
     pub fn init_shader(&mut self, cx: &mut Cx, draw_shader_ptr: DrawShaderPtr, geometry_fields: &dyn GeometryFields) {
         self.draw_shader = None;
-        if cx.draw_shader_error_set.contains(&draw_shader_ptr){
+        if cx.draw_shaders.error_set.contains(&draw_shader_ptr){
             return
         }
-        if let Some(draw_shader_id) = cx.draw_shader_ptr_to_id.get(&draw_shader_ptr) {
+        if let Some(draw_shader_id) = cx.draw_shaders.ptr_to_id.get(&draw_shader_ptr) {
             self.draw_shader = Some(DrawShader {
-                draw_shader_generation: cx.draw_shader_generation,
+                draw_shader_generation: cx.draw_shaders.generation,
                 draw_shader_ptr,
                 draw_shader_id: *draw_shader_id
             });
@@ -130,8 +130,15 @@ impl DrawVars {
             let mut fingerprint = Vec::new();
             while let Some(node_index) = node_iter {
                 let node = &doc.nodes[node_index];
-                if node.value.is_dsl() {
-                    fingerprint.push(node.clone());
+                match node.value{
+                    LiveValue::DSL{token_start, token_count,..}=>{
+                        fingerprint.push(LiveNode{
+                            id: node.id,
+                            origin: node.origin,
+                            value: LiveValue::DSL{token_start, token_count, expand_index:None}
+                        });
+                    }
+                    _=>()
                 }
                 match node.id {
                     id!(draw_call_group) => if let LiveValue::Id(id) = node.value {
@@ -149,16 +156,20 @@ impl DrawVars {
             }
             
             // see if we have it already
-            for fp in &cx.draw_shader_fingerprints {
-                if fp.fingerprint == fingerprint {
-                    self.draw_shader = Some(DrawShader {
-                        draw_shader_generation: cx.draw_shader_generation,
-                        draw_shader_ptr,
-                        draw_shader_id: fp.draw_shader_id
-                    });
-                    return;
-                }
+            if let Some(fp) = cx.draw_shaders.fingerprints.iter().find(|fp| fp.fingerprint == fingerprint){
+                self.draw_shader = Some(DrawShader {
+                    draw_shader_generation: cx.draw_shaders.generation,
+                    draw_shader_ptr,
+                    draw_shader_id: fp.draw_shader_id
+                });
+                return;
             }
+            
+            // see if another variant errored
+            if cx.draw_shaders.error_fingerprints.iter().find(|fp| **fp == fingerprint).is_some(){
+                 return;
+            }
+            
             fn live_type_to_shader_ty(live_type: LiveType) -> Option<ShaderTy> {
                 if live_type == LiveType::of::<f32>() {Some(ShaderTy::Float)}
                 else if live_type == LiveType::of::<Vec2>() {Some(ShaderTy::Vec2)}
@@ -239,14 +250,15 @@ impl DrawVars {
             // ok lets print an error
             match result {
                 Err(e) => {
-                    cx.draw_shader_error_set.insert(draw_shader_ptr);
+                    cx.draw_shaders.error_set.insert(draw_shader_ptr);
+                    cx.draw_shaders.error_fingerprints.push(fingerprint);
                     // ok so. lets get the source for this file id
                     let err = live_registry.live_error_to_live_file_error(e);
                     println!("Error {}", err);
                 }
                 Ok(()) => {
                     // OK! SO the shader parsed
-                    let draw_shader_id = cx.draw_shaders.len();
+                    let draw_shader_id = cx.draw_shaders.shaders.len(); 
                     
                     //let const_table = DrawShaderConstTable::default();
                     let const_table = cx.shader_registry.compute_const_table(draw_shader_ptr);
@@ -270,11 +282,11 @@ impl DrawVars {
                         }
                         _ => LiveId(0)
                     };
-                    cx.draw_shader_fingerprints.push(DrawShaderFingerprint {
+                    cx.draw_shaders.fingerprints.push(DrawShaderFingerprint {
                         draw_shader_id,
                         fingerprint
                     });
-                    cx.draw_shaders.push(CxDrawShader {
+                    cx.draw_shaders.shaders.push(CxDrawShader {
                         field: class_node.id,
                         type_name: shader_type_name,
                         platform: None,
@@ -282,11 +294,11 @@ impl DrawVars {
                     });
                     // ok so. maybe we should fill the live_uniforms buffer?
                     
-                    cx.draw_shader_ptr_to_id.insert(draw_shader_ptr, draw_shader_id);
-                    cx.draw_shader_compile_set.insert(draw_shader_ptr);
+                    cx.draw_shaders.ptr_to_id.insert(draw_shader_ptr, draw_shader_id);
+                    cx.draw_shaders.compile_set.insert(draw_shader_ptr);
                     // now we simply queue it somewhere somehow to compile.
                     self.draw_shader = Some(DrawShader {
-                        draw_shader_generation: cx.draw_shader_generation,
+                        draw_shader_generation: cx.draw_shaders.generation,
                         draw_shader_id,
                         draw_shader_ptr
                     }); 
@@ -305,7 +317,7 @@ impl DrawVars {
             // we could iterate our uniform and instance props
             // call get_write_ref and write into it
             if let Some(inst) = self.area.valid_instance(cx) {
-                if draw_shader.draw_shader_generation != cx.draw_shader_generation{
+                if draw_shader.draw_shader_generation != cx.draw_shaders.generation{
                     return;
                 }
                 let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
@@ -408,7 +420,7 @@ impl DrawVars {
         
         if let Some(draw_shader) = self.draw_shader {
             let id = nodes[index].id;
-            if draw_shader.draw_shader_generation != cx.draw_shader_generation{
+            if draw_shader.draw_shader_generation != cx.draw_shaders.generation{
                 return nodes.skip_node(index);
             }
             let sh = &cx.draw_shaders[draw_shader.draw_shader_id];

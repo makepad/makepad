@@ -354,7 +354,7 @@ impl Cx {
                 else {
                     let cxview = &cx.views[view_id];
                     let draw_call = cxview.draw_items[draw_item_id].draw_call.as_ref().unwrap();
-                    let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
+                    let sh = &cx.draw_shaders.shaders[draw_call.draw_shader.draw_shader_id];
                     let slots = sh.mapping.instances.total_slots;
                     let instances = draw_call.instances.as_ref().unwrap().len() / slots;
                     writeln!(

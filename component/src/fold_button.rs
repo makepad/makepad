@@ -1,15 +1,13 @@
 #![allow(unused)]
 use makepad_render::*;
 use crate::button_logic::*;
-use crate::frame_registry::*;
-use crate::register_as_frame_component;
 
 live_register!{
     use makepad_render::shader::std::*;
     
-    Button: {{Button}} {
+    FoldButton: {{FoldButton}} {
         bg_quad: {
-            instance hover: 0.0
+            instance opened: 0.0
             instance pressed: 0.0
             
             const SHADOW: 3.0
@@ -51,8 +49,7 @@ live_register!{
         default_state: {
             from: {all: Play::Forward {duration: 0.1}}
             apply:{
-                bg_quad: {pressed: 0.0, hover: 0.0}
-                label_text: {color: #9}
+                bg_quad: {hover: 0.0}
             }
         }
         
@@ -63,21 +60,29 @@ live_register!{
             }
             apply: {
                 bg_quad: {
-                    pressed: 0.0,
                     hover: [{time: 0.0, value: 1.0}],
                 }
-                label_text: {color: [{time: 0.0, value: #f}]}
             }
         }
         
-        pressed_state: {
+        closed_state: {
+            track: open,
             from: {all: Play::Forward {duration: 0.2}}
             apply: {
                 bg_quad: {
-                    pressed: [{time: 0.0, value: 1.0}],
+                    opened: [{time: 1.0, value: 0.0}],
+                }
+            }
+        }
+        
+        opened_state: {
+            track: open,
+            from: {all: Play::Forward {duration: 0.2}}
+            apply: {
+                bg_quad: {
+                    opened: [{time: 1.0, value: 1.0}],
                     hover: 1.0,
                 }
-                label_text: {color: [{time: 0.0, value: #c}]}
             }
         }
     }
@@ -119,9 +124,9 @@ impl Button {
         let res = self.button_logic.handle_event(cx, event, self.bg_quad.draw_vars.area);
         
         match res.state {
-            ButtonState::Pressed => self.animate_to(cx, self.pressed_state),
-            ButtonState::Default => self.animate_to(cx, self.default_state),
-            ButtonState::Hover => self.animate_to(cx, self.hover_state),
+            ButtonState::Pressed => self.animate_to(cx, self.pressed_state.unwrap()),
+            ButtonState::Default => self.animate_to(cx, self.default_state.unwrap()),
+            ButtonState::Hover => self.animate_to(cx, self.hover_state.unwrap()),
             _ => ()
         };
         res.action
