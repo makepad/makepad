@@ -1,4 +1,5 @@
 use makepad_render::*;
+
 mod button_logic;
 mod button;
 mod desktop_button;
@@ -6,6 +7,8 @@ mod desktop_window;
 mod scroll_shadow;
 mod scroll_bar;
 mod scroll_view;
+mod component_gc;
+
 #[macro_use]
 mod frame_registry;
 mod frame;
@@ -24,8 +27,10 @@ pub mod tab;
 pub mod tab_bar;
 pub mod tab_close_button;
 pub mod bare_window;
+pub mod fold_button;
 
 pub use crate::{
+    component_gc::ComponentGc,
     button_logic::{ButtonLogic, ButtonAction},
     button::{Button},
     desktop_window::{DesktopWindow}, 
@@ -37,6 +42,7 @@ pub use crate::{
 
 pub fn live_register(cx:&mut Cx){
     crate::frame::live_register(cx);
+    crate::fold_button::live_register(cx);
     crate::color_picker::live_register(cx);
     crate::scroll_shadow::live_register(cx);
     crate::button::live_register(cx);

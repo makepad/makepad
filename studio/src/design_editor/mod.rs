@@ -1,4 +1,4 @@
-use makepad_render::*;
+use makepad_component::makepad_render::*;
 
 pub mod design_editor;
 pub mod inline_widget;

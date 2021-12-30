@@ -17,7 +17,7 @@ use {
             },
         }
     },
-    makepad_render::*,
+    makepad_component::makepad_render::*,
 };
 
 enum EditorView {
