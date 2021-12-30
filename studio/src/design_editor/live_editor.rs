@@ -54,15 +54,11 @@ pub struct LiveEditor {
     editor_impl: CodeEditorImpl,
 
     widget_layout: Layout,
-    
     fold_button: Option<LivePtr>,
     
     #[rust] lines_layout: LinesLayout,
-    
     #[rust] widget_draw_order: Vec<(usize, WidgetIdent)>,
-    
     #[rust] widgets: ComponentGc<WidgetIdent, Widget>,
-
     #[rust] fold_buttons: ComponentGc<usize, FoldButton>,
 }
 
@@ -71,6 +67,11 @@ impl LiveHook for LiveEditor{
         let registries = cx.registries.clone();
         for widget in self.widgets.values_mut(){
             registries.get::<CxInlineWidgetRegistry>().apply(cx, apply_from, index, nodes, widget.inline_widget.as_mut());
+        }
+        if let Some(index) = nodes.child_by_name(index, id!(fold_button)){
+            for fold_button in self.fold_buttons.values_mut(){
+                fold_button.apply(cx, apply_from, index, nodes);
+            }
         }
         self.editor_impl.redraw(cx);
     }
@@ -107,14 +108,12 @@ impl LiveEditor {
                 }
                 // lets look at the line height
                 let ll = &self.lines_layout.lines[*line];
-                
+
                 cx.begin_turtle(Layout {
                     abs_origin: Some(vec2(origin.x, origin.y + ll.start_y + ll.text_height)),
                     abs_size: Some(vec2(size.x, ll.widget_height)),
                     ..self.widget_layout
                 });
-                // lets draw the close button
-                
             }
             let widget = self.widgets.get_mut(ident).unwrap();
             
@@ -124,6 +123,23 @@ impl LiveEditor {
         }
         if last_line.is_some() {
             cx.end_turtle();
+        }
+    }
+    
+    pub fn draw_fold_buttons(&mut self, cx:&mut Cx){
+        let mut last_line = None;
+        let origin = cx.get_turtle_pos();
+        
+        for (line, _) in &self.widget_draw_order {
+            if Some(line) != last_line { // start a new draw segment with the turtle
+                let ll = &self.lines_layout.lines[*line];
+                
+                let fb = self.fold_buttons.get_or_insert_with_ptr(cx, *line, self.fold_button, |cx,ptr|{
+                    FoldButton::new_from_ptr(cx, ptr)
+                });
+                fb.draw_abs(cx, vec2(origin.x, origin.y + ll.start_y));
+            }
+            last_line = Some(line)
         }
     }
     
@@ -210,6 +226,8 @@ impl LiveEditor {
             
             self.editor_impl.draw_linenums(cx, &self.lines_layout, *session.cursors.last_inserted());
             
+            self.draw_fold_buttons(cx);
+            
             self.editor_impl.end(cx, &self.lines_layout);
         }
     } 
@@ -275,6 +293,11 @@ impl LiveEditor {
                 }
                 _ => ()
             }
+        }
+        for fold_button in self.fold_buttons.values_mut(){
+            fold_button.handle_event(cx, event, &mut |cx, action|{
+                
+            });
         }
         // what if the code editor changes something?
         self.editor_impl.handle_event(cx, state, event, &self.lines_layout, send_request, &mut |cx, action|{
