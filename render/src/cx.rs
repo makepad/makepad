@@ -27,7 +27,6 @@ use {
         },
         platform::{
             CxPlatform,
-            CxPlatformDrawShader,
             CxPlatformTexture,
         },
         event::{
@@ -98,7 +97,6 @@ pub struct Cx {
     pub geometries_free: Rc<RefCell<Vec<usize >> >,
     pub geometries_refs: HashMap<GeometryFingerprint, Weak<Geometry >>,
     
-    pub platform_draw_shaders: Vec<CxPlatformDrawShader>,
     pub draw_shaders: CxDrawShaders,
     
     pub fonts: Vec<Option<CxFont >>,
@@ -224,8 +222,6 @@ impl Default for Cx {
             geometries: Vec::new(),
             geometries_free: Rc::new(RefCell::new(Vec::new())),
             geometries_refs: HashMap::new(),
-            
-            platform_draw_shaders: Vec::new(),
             
             draw_shaders: CxDrawShaders::default(),
             

@@ -12,7 +12,7 @@ use {
         splitter::{SplitterAlign},
         tab_bar::{TabTag, TabId},
     },
-    makepad_render::*,
+    makepad_component::makepad_render::*,
     std::{
         ffi::OsString,
         path::{ PathBuf},

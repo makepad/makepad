@@ -1,4 +1,5 @@
 use {
+    makepad_component::makepad_render,
     makepad_render::*,
     makepad_render::makepad_live_tokenizer::{
         position::Position,
@@ -32,8 +33,8 @@ pub enum InlineWidgetAction {
 
 pub trait InlineWidget: LiveApply {
     fn type_id(&self)->LiveType;
-    fn handle_inline_event(&mut self, cx: &mut Cx, event: &mut Event, bind: InlineEditBind) -> InlineWidgetAction;
-    fn draw_inline(&mut self, cx: &mut Cx, live_registry:&LiveRegistry, bind: InlineEditBind);
+    fn handle_widget_event(&mut self, cx: &mut Cx, event: &mut Event, bind: InlineEditBind) -> InlineWidgetAction;
+    fn draw_widget(&mut self, cx: &mut Cx, live_registry:&LiveRegistry, bind: InlineEditBind);
 }
 
 generate_ref_cast_api!(InlineWidget);

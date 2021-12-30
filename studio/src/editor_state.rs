@@ -11,6 +11,7 @@ use {
         },
         editors::EditorViewId,
     },
+    makepad_component::makepad_render,
     makepad_render::{
         makepad_live_tokenizer::{
             delta::{self, Delta, Whose},
