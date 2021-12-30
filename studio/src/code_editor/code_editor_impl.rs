@@ -72,13 +72,7 @@ live_register!{
             //return #f00;
             let col = self.color;
             let thickness = 0.8 + self.dpi_dilate * 0.5;
-            //if indent_id == indent_sel {
-            //    col *= vec4(1., 1., 1., 1.);
-            //    thickness *= 1.3;
-            // }
-            // else {
             col *= vec4(0.75, 0.75, 0.75, 0.75);
-            //}
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
             sdf.move_to(1., -1.);
             sdf.line_to(1., self.rect_size.y + 1.);
@@ -453,7 +447,7 @@ impl CodeEditorImpl {
     pub fn reset_caret_blink(&mut self, cx: &mut Cx) {
         cx.stop_timer(self.caret_blink_timer);
         self.caret_blink_timer = cx.start_timer(self.caret_blink_timeout, true);
-        self.animate_cut(cx, self.show_caret_state.unwrap());
+        self.animate_cut(cx, self.show_caret_state);
     }
     /*
     fn compute_line_scale(&self, line: usize, indent_cache: &IndentCache) -> f32 {
@@ -939,11 +933,11 @@ impl CodeEditorImpl {
             self.scroll_view.redraw(cx);
         }
         if event.is_timer(self.caret_blink_timer) {
-            if self.animator_is_in_state(cx, self.show_caret_state.unwrap()) {
-                self.animate_to(cx, self.hide_caret_state.unwrap())
+            if self.animator_is_in_state(cx, self.show_caret_state) {
+                self.animate_to(cx, self.hide_caret_state)
             }
             else {
-                self.animate_to(cx, self.show_caret_state.unwrap())
+                self.animate_to(cx, self.show_caret_state)
             }
         }
         
@@ -1075,33 +1069,33 @@ impl CodeEditorImpl {
                 modifiers,
                 ..
             }) if modifiers.alt => {
-                self.animate_to(cx, self.folded_state.unwrap())
+                self.animate_to(cx, self.folded_state)
             }
             HitEvent::KeyDown(KeyEvent {
                 key_code: KeyCode::Alt,
                 modifiers,
                 ..
             }) if modifiers.control => {
-                self.animate_to(cx, self.folded_state.unwrap())
+                self.animate_to(cx, self.folded_state)
             }
             HitEvent::KeyUp(KeyEvent {
                 key_code: KeyCode::Control,
                 modifiers,
                 ..
             }) if modifiers.alt => {
-                self.animate_to(cx, self.unfolded_state.unwrap())
+                self.animate_to(cx, self.unfolded_state)
             }
             HitEvent::KeyUp(KeyEvent {
                 key_code: KeyCode::Alt,
                 modifiers,
                 ..
             }) if modifiers.control => {
-                self.animate_to(cx, self.unfolded_state.unwrap())
+                self.animate_to(cx, self.unfolded_state)
             }
             HitEvent::KeyDown(KeyEvent {
                 key_code: KeyCode::Return,
                 ..
-            }) => {
+            }) => { 
                 self.reset_caret_blink(cx);
                 if let Some(session_id) = self.session_id {
                     state.insert_newline(session_id, send_request);

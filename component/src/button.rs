@@ -101,6 +101,7 @@ pub struct Button {
 
 impl FrameComponent for Button {
     fn type_id(&self)->LiveType{LiveType::of::<Self>()}
+    
     fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event) -> OptionFrameComponentAction {
         self.handle_event(cx, event).into()
     }
@@ -118,9 +119,9 @@ impl Button {
         let res = self.button_logic.handle_event(cx, event, self.bg_quad.draw_vars.area);
         
         match res.state {
-            ButtonState::Pressed => self.animate_to(cx, self.pressed_state.unwrap()),
-            ButtonState::Default => self.animate_to(cx, self.default_state.unwrap()),
-            ButtonState::Hover => self.animate_to(cx, self.hover_state.unwrap()),
+            ButtonState::Pressed => self.animate_to(cx, self.pressed_state),
+            ButtonState::Default => self.animate_to(cx, self.default_state),
+            ButtonState::Hover => self.animate_to(cx, self.hover_state),
             _ => ()
         };
         res.action

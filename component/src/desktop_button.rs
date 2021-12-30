@@ -151,9 +151,9 @@ impl DesktopButton {
         self.animator_handle_event(cx, event);
         let res = self.button_logic.handle_event(cx, event, self.bg.draw_vars.area);
         match res.state {
-            ButtonState::Pressed => self.animate_to(cx, self.pressed_state.unwrap()),
-            ButtonState::Default => self.animate_to(cx, self.default_state.unwrap()),
-            ButtonState::Hover => self.animate_to(cx, self.hover_state.unwrap()),
+            ButtonState::Pressed => self.animate_to(cx, self.pressed_state),
+            ButtonState::Default => self.animate_to(cx, self.default_state),
+            ButtonState::Hover => self.animate_to(cx, self.hover_state),
             _ => ()
         };
         res.action

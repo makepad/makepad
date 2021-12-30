@@ -27,6 +27,7 @@ pub struct InlineEditBind {
 #[derive(Debug, Default)]
 pub struct Line {
     pub is_clean: bool,
+    pub is_open: bool,
     pub items: Vec<InlineEditBind>
 }
 

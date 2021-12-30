@@ -9,6 +9,7 @@ mod live_prims;
 mod cx;
 mod cx_api;
 mod cx_registries;
+mod cx_draw_shaders;
 
 mod live_eval;
 pub mod live_traits;

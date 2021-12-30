@@ -205,15 +205,6 @@ impl Cx {
         }
     }
     
-    pub fn flush_draw_shaders(&mut self){
-        self.draw_shader_generation += 1;
-        self.shader_registry.flush_registry();
-        self.draw_shaders.clear();
-        self.draw_shader_ptr_to_id.clear();
-        self.draw_shader_fingerprints.clear();
-        self.draw_shader_error_set.clear();
-    }
-    
     pub fn update_shader_tables_with_live_edit(&mut self, mutated_tokens: &[LiveTokenId], live_ptrs: &[LivePtr])->bool {
         // OK now.. we have to access our token tables
         let mut change = false;
@@ -221,7 +212,7 @@ impl Cx {
         let live_registry = live_registry_rc.borrow();
         //println!("{:?}", live_ptrs);
         
-        for shader in &mut self.draw_shaders {
+        for shader in &mut self.draw_shaders.shaders {
             let mapping = &mut shader.mapping;
             for live_ptr in live_ptrs {
                 if let Some(input) = mapping.live_uniforms.inputs.iter().find( | input | input.live_ptr == Some(*live_ptr)) {
