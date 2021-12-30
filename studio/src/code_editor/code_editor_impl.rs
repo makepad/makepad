@@ -542,6 +542,7 @@ impl CodeEditorImpl {
         // the second iteration.
         for (next_line_index, next_line) in text.as_lines()[lines_layout.view_start..lines_layout.view_end].iter().enumerate() {
             let line_index = next_line_index + lines_layout.view_start;
+            let draw_height = lines_layout.lines[line_index].text_height;
             let line_height = lines_layout.lines[line_index].total_height;
             // Rotate so that the next line becomes the current line, the current line becomes the
             // previous line, and the previous line becomes the next line.
@@ -564,7 +565,7 @@ impl CodeEditorImpl {
                         },
                         size: Vec2 {
                             x: (end - start) as f32 * self.text_glyph_size.x,
-                            y: line_height,
+                            y: draw_height,
                         },
                     });
                 }

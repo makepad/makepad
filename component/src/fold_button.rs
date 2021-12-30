@@ -14,7 +14,7 @@ live_register!{
                 let sz = 3.;
                 let c = vec2(5.0, 0.5 * self.rect_size.y);
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.clear(#2);
+                sdf.clear(vec4(0.));
                 // we have 3 points, and need to rotate around its center
                 sdf.rotate(self.opened * 0.5 * PI + 0.5 * PI, c.x, c.y);
                 sdf.move_to(c.x - sz, c.y + sz);
@@ -26,9 +26,12 @@ live_register!{
             }
         }
         
+        abs_size: vec2(32,12)
+        abs_offset: vec2(4.,0.)
+        
         walk: Walk {
             width: Width::Fixed(15),
-            height: Height::Fixed(15),
+            height: Height::Fixed(12),
             margin: Margin {l: 1.0, r: 1.0, t: 1.0, b: 1.0},
         }
         
@@ -68,7 +71,7 @@ live_register!{
 #[derive(Live, LiveHook)]
 pub struct FoldButton {
     #[rust] pub button_logic: ButtonLogic,
-    #[default_state(default_state)] pub animator: Animator,
+    #[default_state(default_state, closed_state)] pub animator: Animator,
     
     default_state: Option<LivePtr>,
     hover_state: Option<LivePtr>,
@@ -78,6 +81,8 @@ pub struct FoldButton {
     opened: f32,
     
     bg_quad: DrawQuad,
+    abs_size: Vec2,
+    abs_offset: Vec2,
     walk: Walk,
 }
 
@@ -115,8 +120,15 @@ impl FoldButton {
         };
     }
     
-    pub fn draw(&mut self, cx: &mut Cx, label: Option<&str>) {
+    pub fn draw(&mut self, cx: &mut Cx) {
         self.bg_quad.draw_walk(cx, self.walk);
+    }
+    
+    pub fn draw_abs(&mut self, cx: &mut Cx, pos:Vec2) {
+        self.bg_quad.draw_abs(cx, Rect{
+            pos: pos + self.abs_offset,
+            size: self.abs_size
+        });
     }
 }
 
