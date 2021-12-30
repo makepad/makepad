@@ -12,12 +12,13 @@ use {
         ops::{Deref, Index},
         slice::Iter,
     },
-    makepad_render::makepad_live_compiler::{LiveTokenId, TextPos, LivePtr},
+    makepad_render::makepad_live_compiler::{LiveTokenId, LiveToken, TextPos, LivePtr},
     makepad_render::*,
 };
 
 #[derive(Debug, Clone, Copy)]
 pub struct InlineEditBind {
+    pub live_token: LiveToken,
     pub live_ptr: LivePtr,
     pub live_token_id: LiveTokenId,
     pub edit_token_index: usize,
@@ -78,7 +79,7 @@ impl InlineCache {
                     State::First => match token.token {
                         FullToken::Whitespace | FullToken::Comment => (),
                         _ => {state = State::Stack(TokenPos {line, index}, 0)}
-                    } 
+                    }
                     State::Stack(start, depth) => {
                         match token.token {
                             FullToken::Open(_) => {state = State::Stack(start, depth + 1)}
@@ -106,7 +107,7 @@ impl InlineCache {
     
     pub fn invalidate_all(&mut self) {
         self.is_clean = false;
-        for line in &mut self.lines{
+        for line in &mut self.lines {
             line.items.truncate(0);
             line.is_clean = false;
         }
@@ -167,6 +168,7 @@ impl InlineCache {
             line_cache.items.clear();
             line_cache.is_clean = true;
         }
+
         for (line, line_cache) in self.lines[range.start.line..range.end.line].iter_mut().enumerate() {
             let line = line + range.start.line;
             if line_cache.is_clean {
@@ -193,22 +195,23 @@ impl InlineCache {
                         
                         let live_token_id = makepad_live_compiler::LiveTokenId::new(file_id, live_token_index);
                         let search_in_dsl = token.is_value_type();
-                          
+                        
                         if let Some(node_index) = expanded.nodes.first_node_with_token_id(live_token_id, search_in_dsl) {
                             
                             let live_token_id = if is_prop_assign { // get the thing after the :
                                 makepad_live_compiler::LiveTokenId::new(file_id, live_token_index + 2)
-                            } 
+                            }
                             else {live_token_id};
                             
                             let live_ptr = LivePtr {file_id, index: node_index as u32};
                             // if its a DSL, we should filter here
                             //let live_node = live_registry.ptr_to_node(live_ptr);
                             let bind = InlineEditBind {
+                                live_token: *live_file.original.tokens[live_token_index],
                                 live_ptr,
                                 live_token_id,
                                 edit_token_index: edit_token_index
-                            }; 
+                            };
                             line_cache.items.push(bind);
                         }
                     }

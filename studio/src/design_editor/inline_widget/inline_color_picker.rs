@@ -70,12 +70,12 @@ impl InlineWidget for InlineColorPicker {
                 let mut s = String::new();
                 s.push_str("#x");
                 rgba.append_hex_to_string(&mut s);
-                
+
                 // alright we are going to fetch some tokens.
                 let token_id = bind.live_token_id;
                 let doc = live_registry.token_id_to_origin_doc(token_id);
                 let token = doc.tokens[token_id.token_index()];
-                
+
                 let start_pos = Position::from(token.span.start);
                 let end_pos = Position::from(token.span.end);
                 

@@ -398,7 +398,7 @@ impl LiveRegistry {
                             new_strings.extend(new_chars);
                             live_index += 1;
                         },
-                        _ => match LiveToken::from_full_token(full_token.token) {
+                        _ =>match LiveToken::from_full_token(full_token.token) {
                             Some(live_token) => {
                                 if live_index >= live_tokens.len() { // just append
                                     parse_changed = true;
@@ -426,9 +426,9 @@ impl LiveRegistry {
                                             live_tokens[live_index].token = live_token;
                                         }
                                     }
+                                    // always update the spans
+                                    live_tokens[live_index].span = span;
                                 }
-                                // always update the spans
-                                live_tokens[live_index].span = span;
                                 live_index += 1;
                             },
                             _ => ()
@@ -438,17 +438,12 @@ impl LiveRegistry {
                 column += full_token.len;
             }
         }
-        
-        // make sure token list is properly terminated
         if live_index < live_tokens.len()-1{ // the tokenlist shortened
-            if live_tokens[live_index].token != LiveToken::Eof{
-                live_tokens[live_index].token = LiveToken::Eof;
-            }  
             parse_changed = true;
         }
-        else if live_tokens.last().unwrap().token != LiveToken::Eof{
-            live_tokens.push(TokenWithSpan{token:LiveToken::Eof, span:TextSpan{file_id, start:TextPos::default(), end:TextPos::default()}});
-        }
+        
+        live_tokens.truncate(live_index);
+        live_tokens.push(TokenWithSpan{token:LiveToken::Eof, span:TextSpan{file_id, start:TextPos::default(), end:TextPos::default()}});
         
         if parse_changed {
             let mut parser = LiveParser::new(&original.tokens, &live_file.live_type_infos, file_id);

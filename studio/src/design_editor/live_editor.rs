@@ -17,7 +17,7 @@ use {
             SessionId
         },
     },
-    makepad_render::makepad_live_compiler::{LivePtr, LiveEditEvent},
+    makepad_render::makepad_live_compiler::{LiveTokenId, LiveEditEvent},
     makepad_render::*,
 };
 
@@ -33,8 +33,8 @@ live_register!{
     }
 }
 
-#[derive(Copy, Clone, Hash, PartialEq, Eq)]
-pub struct WidgetIdent(LivePtr, LiveType);
+#[derive(Copy, Debug, Clone, Hash, PartialEq, Eq)]
+pub struct WidgetIdent(LiveTokenId, LiveType);
 
 pub struct Widget {
     bind: InlineEditBind,
@@ -64,8 +64,6 @@ impl LiveHook for LiveEditor{
     }
 }
 
-
-
 impl LiveEditor {
     
     pub fn set_session_id(&mut self, session_id: Option<SessionId>) {
@@ -89,7 +87,6 @@ impl LiveEditor {
         let line_num_geom = vec2(self.editor_impl.line_num_width, 0.0);
         let origin = cx.get_turtle_pos() + line_num_geom;
         let size = cx.get_turtle_size() - line_num_geom;
-        
         for (line, ident) in &self.widget_draw_order {
             if Some(line) != last_line { // start a new draw segment with the turtle
                 if last_line.is_some() {
@@ -104,6 +101,7 @@ impl LiveEditor {
                 });
             }
             let widget = self.widgets.get_mut(ident).unwrap();
+            //println!("{} {:#?}", line, widget.bind);
             
             widget.inline_widget.draw_inline(cx, &live_registry, widget.bind);
             
@@ -144,7 +142,7 @@ impl LiveEditor {
                     
                     if start_y + matched.height > viewport_start && start_y < viewport_end {
                         // lets spawn it
-                        let ident = WidgetIdent(bind.live_ptr, matched.live_type);
+                        let ident = WidgetIdent(bind.live_token_id, matched.live_type);
                         widgets.entry(ident).or_insert_with( || {
                             Widget {
                                 bind: *bind,
@@ -189,7 +187,6 @@ impl LiveEditor {
             );
             
             
-            
             // alright great. now we can draw the text
             self.editor_impl.draw_text(
                 cx,
@@ -199,11 +196,8 @@ impl LiveEditor {
             );
             
             self.editor_impl.draw_current_line(cx, &self.lines_layout, *session.cursors.last_inserted());
-            
             self.draw_widgets(cx);
-            
             self.editor_impl.draw_linenums(cx, &self.lines_layout, *session.cursors.last_inserted());
-            
             self.editor_impl.end(cx, &self.lines_layout);
         }
     } 
@@ -222,7 +216,7 @@ impl LiveEditor {
         
         let live_registry_rc = cx.live_registry.clone();
         let mut live_registry = live_registry_rc.borrow_mut();
-        
+        inline_cache.invalidate_all();
         // ok now what.
         match live_registry.live_edit_file(&path, inline_cache.live_register_range.unwrap(), | line | {
             (&lines[line], &token_cache[line].tokens())
@@ -230,7 +224,7 @@ impl LiveEditor {
             Ok(event) => {
                 match event{
                     Some(LiveEditEvent::ReparseDocument(_))=>{
-                        inline_cache.invalidate_all();
+                        
                     }
                     _=>()
                 }
