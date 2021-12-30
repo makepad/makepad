@@ -216,7 +216,6 @@ impl LiveEditor {
         
         let live_registry_rc = cx.live_registry.clone();
         let mut live_registry = live_registry_rc.borrow_mut();
-        inline_cache.invalidate_all();
         // ok now what.
         match live_registry.live_edit_file(&path, inline_cache.live_register_range.unwrap(), | line | {
             (&lines[line], &token_cache[line].tokens())
@@ -224,7 +223,7 @@ impl LiveEditor {
             Ok(event) => {
                 match event{
                     Some(LiveEditEvent::ReparseDocument(_))=>{
-                        
+                        inline_cache.invalidate_all();
                     }
                     _=>()
                 }
@@ -233,7 +232,6 @@ impl LiveEditor {
             Err(errors) => {
                 for e in errors{
                     let _e = live_registry.live_error_to_live_file_error(e);
-                    //println!("Parse errors {}", e);
                 }
             }
         };
