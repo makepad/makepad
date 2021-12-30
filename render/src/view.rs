@@ -15,10 +15,12 @@ pub use {
         area::{Area, ViewArea, InstanceArea},
         live_traits::*,
         turtle::{Layout, Width, Height, Walk, Rect},
-        draw_vars::{
+        cx_draw_shaders::{
             CxDrawShaderMapping,
             CxDrawShader,
             DrawShader,
+        },
+        draw_vars::{
             DrawVars,
             DRAW_CALL_USER_UNIFORMS,
             DRAW_CALL_TEXTURE_SLOTS
