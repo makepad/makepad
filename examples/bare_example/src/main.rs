@@ -8,7 +8,11 @@ live_register!{
         scroll_view: {
             h_show: true,
             v_show: true,
-            view: {layout: {line_wrap: LineWrap::NewLine}}
+            view: {
+                layout: {
+                    line_wrap: LineWrap::NewLine
+                }
+            }
         }
         frame: {
         }
@@ -35,10 +39,10 @@ impl App {
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
-
+        
         self.desktop_window.handle_event(cx, event);
         self.scroll_view.handle_event(cx, event);
-
+        
         if let Event::NextFrame(..) = event {
             // spawn 1000 buttons into the live structure
             let mut out = Vec::new();
@@ -59,7 +63,7 @@ impl App {
             cx.new_next_frame();
             cx.redraw_all();
         }
-
+        
         for item in self.frame.handle_event(cx, event) {
             if let ButtonAction::IsPressed = item.action.cast() {
                 println!("Clicked on button {}", item.id);

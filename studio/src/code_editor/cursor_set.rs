@@ -4,7 +4,7 @@ use {
             cursor::Cursor,
         },
     },
-    makepad_render::makepad_live_tokenizer::{
+    makepad_component::makepad_render::makepad_live_tokenizer::{
         delta::{Delta, Whose},
         position::Position,
         position_set,

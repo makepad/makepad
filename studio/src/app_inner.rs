@@ -8,7 +8,7 @@ use {
         },
         editors::{Editors},
     },
-    makepad_render::*,
+    makepad_component::makepad_render::*,
     makepad_component::{
         DesktopWindow,
         dock::{Dock, DockAction, DragPosition, PanelId},

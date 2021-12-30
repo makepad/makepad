@@ -1,5 +1,4 @@
 use {
-    std::collections::{HashSet, HashMap,},
     crate::{
         editor_state::{
             EditorState,
@@ -17,14 +16,23 @@ use {
             SessionId
         },
     },
+    makepad_component::{
+        makepad_render,
+        fold_button::FoldButton,
+        ComponentGc,
+    },
     makepad_render::makepad_live_compiler::{LiveTokenId, LiveEditEvent},
     makepad_render::*,
 };
 
 live_register!{
     use makepad_render::shader::std::*;
+    use makepad_component::fold_button::FoldButton;
     
     LiveEditor: {{LiveEditor}} {
+        fold_button: FoldButton{
+            bg_quad:{no_h_scroll: true}
+        }
         widget_layout: Layout {
             align: Align {fx: 0.2, fy: 0.},
             padding: Padding {l: 0, t: .0, r: 0, b: 0}
@@ -44,14 +52,18 @@ pub struct Widget {
 #[derive(Live)]
 pub struct LiveEditor {
     editor_impl: CodeEditorImpl,
-    
+
     widget_layout: Layout,
+    
+    fold_button: Option<LivePtr>,
     
     #[rust] lines_layout: LinesLayout,
     
     #[rust] widget_draw_order: Vec<(usize, WidgetIdent)>,
-    #[rust] visible_widgets: HashSet<WidgetIdent>,
-    #[rust] widgets: HashMap<WidgetIdent, Widget>,
+    
+    #[rust] widgets: ComponentGc<WidgetIdent, Widget>,
+
+    #[rust] fold_buttons: ComponentGc<usize, FoldButton>,
 }
 
 impl LiveHook for LiveEditor{
@@ -89,20 +101,24 @@ impl LiveEditor {
         let size = cx.get_turtle_size() - line_num_geom;
         for (line, ident) in &self.widget_draw_order {
             if Some(line) != last_line { // start a new draw segment with the turtle
+                
                 if last_line.is_some() {
                     cx.end_turtle();
                 }
                 // lets look at the line height
                 let ll = &self.lines_layout.lines[*line];
+                
                 cx.begin_turtle(Layout {
                     abs_origin: Some(vec2(origin.x, origin.y + ll.start_y + ll.text_height)),
                     abs_size: Some(vec2(size.x, ll.widget_height)),
                     ..self.widget_layout
                 });
+                // lets draw the close button
+                
             }
             let widget = self.widgets.get_mut(ident).unwrap();
             
-            widget.inline_widget.draw_inline(cx, &live_registry, widget.bind);
+            widget.inline_widget.draw_widget(cx, &live_registry, widget.bind);
             
             last_line = Some(line)
         }
@@ -120,9 +136,6 @@ impl LiveEditor {
         let live_registry = live_registry_rc.borrow();
         
         let widgets = &mut self.widgets;
-        
-        let visible_widgets = &mut self.visible_widgets;
-        visible_widgets.clear();
         
         let widget_draw_order = &mut self.widget_draw_order;
         widget_draw_order.clear();
@@ -142,13 +155,12 @@ impl LiveEditor {
                     if start_y + matched.height > viewport_start && start_y < viewport_end {
                         // lets spawn it
                         let ident = WidgetIdent(bind.live_token_id, matched.live_type);
-                        widgets.entry(ident).or_insert_with( || {
+                        widgets.get_or_insert(cx, ident, |cx|{
                             Widget {
                                 bind: *bind,
                                 inline_widget: widget_registry.new(cx, matched.live_type).unwrap(),
                             }
                         });
-                        visible_widgets.insert(ident);
                         widget_draw_order.push((line, ident));
                     }
                 }
@@ -156,7 +168,7 @@ impl LiveEditor {
             return max_height
         });
         
-        widgets.retain( | ident, _ | visible_widgets.contains(ident));
+        widgets.retain_visible();
     }
     
     pub fn draw(&mut self, cx: &mut Cx, state: &EditorState) {
@@ -248,7 +260,7 @@ impl LiveEditor {
         let mut live_edit = false;
         let session_id = self.editor_impl.session_id.unwrap();
         for widget in self.widgets.values_mut() {
-            match widget.inline_widget.handle_inline_event(cx, event, widget.bind) {
+            match widget.inline_widget.handle_widget_event(cx, event, widget.bind) {
                 InlineWidgetAction::ReplaceText {position, size, text} => {
                     
                     state.replace_text_direct(

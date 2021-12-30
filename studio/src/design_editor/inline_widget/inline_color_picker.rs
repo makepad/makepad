@@ -1,4 +1,5 @@
 use {
+    makepad_component::makepad_render,
     makepad_render::*,
     makepad_component::color_picker::*,
     makepad_render::makepad_live_compiler::LiveToken,
@@ -54,7 +55,7 @@ impl InlineWidget for InlineColorPicker {
     
     fn type_id(&self)->LiveType{LiveType::of::<Self>()}
     
-    fn handle_inline_event(
+    fn handle_widget_event(
         &mut self,
         cx: &mut Cx,
         event: &mut Event,
@@ -86,7 +87,7 @@ impl InlineWidget for InlineColorPicker {
         InlineWidgetAction::None
     }
     
-    fn draw_inline(&mut self, cx: &mut Cx, live_registry: &LiveRegistry, bind: InlineEditBind) {
+    fn draw_widget(&mut self, cx: &mut Cx, live_registry: &LiveRegistry, bind: InlineEditBind) {
         let node = live_registry.ptr_to_node(bind.live_ptr);
         // alright so
         let color = match &node.value{

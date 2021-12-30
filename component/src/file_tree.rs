@@ -1,9 +1,9 @@
 use {
     std::{
-        collections::{HashSet, HashMap},
-        collections::hash_map::Entry
+        collections::{HashSet},
     },
     crate::{
+        component_gc::ComponentGc,
         scroll_view::ScrollView
     },
     makepad_render::*,
@@ -232,27 +232,18 @@ pub struct FileTree {
     #[rust] dragging_node_id: Option<FileNodeId>,
     #[rust] selected_node_id: Option<FileNodeId>,
     #[rust] open_nodes: HashSet<FileNodeId>,
-    #[rust] visible_nodes: HashSet<FileNodeId>,
-    #[rust] tree_nodes: HashMap<FileNodeId, FileTreeNode>,
+
+    #[rust] tree_nodes: ComponentGc<FileNodeId, (FileTreeNode, LiveId)>,
+
     #[rust] count: usize,
     #[rust] stack: Vec<f32>,
 }
 
 impl LiveHook for FileTree{
     fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        for (file_node_id, tree_node) in &mut self.tree_nodes {
-            if tree_node.is_folder{
-                if let Some(index) = nodes.child_by_name(index, id!(folder_node)){
-                    tree_node.apply(cx, apply_from, index, nodes);
-                    if self.open_nodes.contains(file_node_id){
-                        tree_node.set_folder_is_open(cx, true, false); 
-                    }
-                }
-            }
-            else{
-                if let Some(index) = nodes.child_by_name(index, id!(file_node)){
-                    tree_node.apply(cx, apply_from, index, nodes);
-                }
+        for (_, (tree_node, id)) in self.tree_nodes.iter_mut() {
+            if let Some(index) = nodes.child_by_name(index, *id){
+                tree_node.apply(cx, apply_from, index, nodes);
             }
         }
         self.scroll_view.redraw(cx);
@@ -402,7 +393,6 @@ impl FileTree {
     
     pub fn begin(&mut self, cx: &mut Cx) -> Result<(), ()> {
         self.scroll_view.begin(cx) ?;
-        self.visible_nodes.clear();
         self.count = 0;
         Ok(())
     }
@@ -419,14 +409,13 @@ impl FileTree {
                 height: Height::Fixed(self.node_height.min(height_left - walk)),
                 margin: Margin::default()
             });
-            walk += self.node_height;
+            walk += self.node_height.max(1.0);
         }
         
         self.scroll_view.end(cx);
         
-        let visible_nodes = &self.visible_nodes;
         let selected_node_id = self.selected_node_id;
-        self.tree_nodes.retain( | node_id, _ | visible_nodes.contains(&node_id) || Some(*node_id) == selected_node_id)
+        self.tree_nodes.retain_visible_and(| node_id, _ | Some(*node_id) == selected_node_id);
     }
     
     pub fn is_even(count: usize) -> f32 {
@@ -464,17 +453,15 @@ impl FileTree {
         let is_open = self.open_nodes.contains(&node_id);
         
         if self.should_node_draw(cx) {
-            self.visible_nodes.insert(node_id);
-            let tree_node = match self.tree_nodes.entry(node_id) {
-                Entry::Occupied(o) => o.into_mut(),
-                Entry::Vacant(v) => v.insert({
-                    let mut tree_node = FileTreeNode::new_from_ptr(cx, self.folder_node.unwrap());
+            
+            let (tree_node,_) = self.tree_nodes.get_or_insert_with_ptr(cx, node_id, self.folder_node, |cx,ptr|{
+                let mut tree_node = FileTreeNode::new_from_ptr(cx, ptr);
                     if is_open {
                         tree_node.set_folder_is_open(cx, true, false)
                     }
-                    tree_node
-                })
-            };
+                    (tree_node, id!(folder_node))
+            });
+
             tree_node.draw_folder(cx, name, Self::is_even(self.count), self.node_height, self.stack.len(), scale);
             self.stack.push(tree_node.opened * scale);
             if tree_node.opened == 0.0 {
@@ -504,11 +491,9 @@ impl FileTree {
             self.count += 1;
         }
         if self.should_node_draw(cx) {
-            self.visible_nodes.insert(node_id);
-            let tree_node = match self.tree_nodes.entry(node_id) {
-                Entry::Occupied(o) => o.into_mut(),
-                Entry::Vacant(v) => v.insert(FileTreeNode::new_from_ptr(cx, self.file_node.unwrap()))
-            };
+            let (tree_node,_) = self.tree_nodes.get_or_insert_with_ptr(cx, node_id, self.file_node, |cx,ptr|{
+                (FileTreeNode::new_from_ptr(cx, ptr), id!(file_node))
+            });
             tree_node.draw_file(cx, name, Self::is_even(self.count), self.node_height, self.stack.len(), scale);
         }
     }
@@ -534,7 +519,7 @@ impl FileTree {
         else {
             self.open_nodes.remove(&node_id);
         }
-        if let Some(tree_node) = self.tree_nodes.get_mut(&node_id) {
+        if let Some((tree_node,_)) = self.tree_nodes.get_mut(&node_id) {
             tree_node.set_folder_is_open(cx, is_open, should_animate);
         }
     }
@@ -569,7 +554,7 @@ impl FileTree {
         }
         
         let mut actions = Vec::new();
-        for (node_id, node) in &mut self.tree_nodes {
+        for (node_id, (node,_)) in self.tree_nodes.iter_mut() {
             node.handle_event(cx, event, &mut | _, e | actions.push((*node_id, e)));
         }
         
@@ -584,7 +569,7 @@ impl FileTree {
                 FileTreeNodeAction::WasClicked => {
                     if let Some(last_selected) = self.selected_node_id {
                         if last_selected != node_id {
-                            self.tree_nodes.get_mut(&last_selected).unwrap().set_is_selected(cx, false, true);
+                            self.tree_nodes.get_mut(&last_selected).unwrap().0.set_is_selected(cx, false, true);
                         }
                     }
                     self.selected_node_id = Some(node_id);

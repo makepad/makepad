@@ -8,60 +8,41 @@ live_register!{
     FoldButton: {{FoldButton}} {
         bg_quad: {
             instance opened: 0.0
-            instance pressed: 0.0
-            
-            const SHADOW: 3.0
-            const BORDER_RADIUS: 2.5
+            instance hover: 0.0
             
             fn pixel(self) -> vec4 {
+                let sz = 3.;
+                let c = vec2(5.0, 0.5 * self.rect_size.y);
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(
-                    SHADOW,
-                    SHADOW,
-                    self.rect_size.x - SHADOW * (1. + self.pressed),
-                    self.rect_size.y - SHADOW * (1. + self.pressed),
-                    BORDER_RADIUS 
-                );
-                sdf.blur = 6.0;
-                sdf.fill(mix(#0007, #0, self.hover));
-                sdf.blur = 0.001;
-                sdf.box(
-                    SHADOW,
-                    SHADOW,
-                    self.rect_size.x - SHADOW * 2.,
-                    self.rect_size.y - SHADOW * 2.,
-                    BORDER_RADIUS
-                );
-                return sdf.fill(mix(mix(#3, #4, self.hover), #2a, self.pressed));
+                sdf.clear(#2);
+                // we have 3 points, and need to rotate around its center
+                sdf.rotate(self.opened * 0.5 * PI + 0.5 * PI, c.x, c.y);
+                sdf.move_to(c.x - sz, c.y + sz);
+                sdf.line_to(c.x, c.y - sz);
+                sdf.line_to(c.x + sz, c.y + sz);
+                sdf.close_path();
+                sdf.fill(mix(#a, #f, self.hover));
+                return sdf.result;
             }
         }
         
-        layout: Layout {
-            align: Align {fx: 0.5, fy: 0.5},
-            walk: Walk {
-                width: Width::Computed,
-                height: Height::Computed,
-                margin: Margin {l: 1.0, r: 1.0, t: 1.0, b: 1.0},
-            }
-            padding: Padding {l: 16.0, t: 12.0, r: 16.0, b: 12.0}
+        walk: Walk {
+            width: Width::Fixed(15),
+            height: Height::Fixed(15),
+            margin: Margin {l: 1.0, r: 1.0, t: 1.0, b: 1.0},
         }
         
         default_state: {
             from: {all: Play::Forward {duration: 0.1}}
-            apply:{
+            apply: {
                 bg_quad: {hover: 0.0}
             }
         }
         
         hover_state: {
-            from: {
-                all: Play::Forward {duration: 0.1}
-                pressed_state: Play::Forward {duration: 0.01}
-            }
+            from: {all: Play::Forward {duration: 0.1}}
             apply: {
-                bg_quad: {
-                    hover: [{time: 0.0, value: 1.0}],
-                }
+                bg_quad: {hover: [{time: 0.0, value: 1.0}],}
             }
         }
         
@@ -69,9 +50,8 @@ live_register!{
             track: open,
             from: {all: Play::Forward {duration: 0.2}}
             apply: {
-                bg_quad: {
-                    opened: [{time: 1.0, value: 0.0}],
-                }
+                opened: [{value: 0.0, ease: Ease::OutExp}],
+                bg_quad: {opened: (opened)}
             }
         }
         
@@ -79,62 +59,65 @@ live_register!{
             track: open,
             from: {all: Play::Forward {duration: 0.2}}
             apply: {
-                bg_quad: {
-                    opened: [{time: 1.0, value: 1.0}],
-                    hover: 1.0,
-                }
+                opened: [{value: 1.0, ease: Ease::OutExp}],
             }
         }
     }
 }
 
 #[derive(Live, LiveHook)]
-#[live_register(|cx:&mut Cx|{
-    register_as_frame_component!(cx, Button);
-})]
-pub struct Button {
+pub struct FoldButton {
     #[rust] pub button_logic: ButtonLogic,
     #[default_state(default_state)] pub animator: Animator,
+    
     default_state: Option<LivePtr>,
     hover_state: Option<LivePtr>,
-    pressed_state: Option<LivePtr>,
+    closed_state: Option<LivePtr>,
+    opened_state: Option<LivePtr>,
+    
+    opened: f32,
+    
     bg_quad: DrawQuad,
-    label_text: DrawText,
-    layout: Layout,
-    label: String
+    walk: Walk,
 }
 
-impl FrameComponent for Button {
-    fn type_id(&self)->LiveType{LiveType::of::<Self>()}
-    
-    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event) -> OptionFrameComponentAction {
-        self.handle_event(cx, event).into()
-    }
-    
-    fn draw_component(&mut self, cx: &mut Cx) {
-        self.draw(cx, None);
-    }
+pub enum FoldButtonAction {
+    None,
+    Opening,
+    Closing
 }
 
-impl Button {
+impl FoldButton {
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonAction {
-        
+    pub fn handle_event(
+        &mut self,
+        cx: &mut Cx,
+        event: &mut Event,
+        dispatch_action: &mut dyn FnMut(&mut Cx, FoldButtonAction),
+    ) {
         self.animator_handle_event(cx, event);
         let res = self.button_logic.handle_event(cx, event, self.bg_quad.draw_vars.area);
         
         match res.state {
-            ButtonState::Pressed => self.animate_to(cx, self.pressed_state.unwrap()),
-            ButtonState::Default => self.animate_to(cx, self.default_state.unwrap()),
-            ButtonState::Hover => self.animate_to(cx, self.hover_state.unwrap()),
+            ButtonState::Pressed => {
+                if self.opened > 0.2 {
+                    self.animate_to(cx, self.closed_state);
+                    dispatch_action(cx, FoldButtonAction::Closing)
+                }
+                else {
+                    self.animate_to(cx, self.opened_state);
+                    dispatch_action(cx, FoldButtonAction::Opening)
+                }
+            }
+            ButtonState::Default => self.animate_to(cx, self.default_state),
+            ButtonState::Hover => self.animate_to(cx, self.hover_state),
             _ => ()
         };
-        res.action
     }
     
     pub fn draw(&mut self, cx: &mut Cx, label: Option<&str>) {
-        self.bg_quad.begin(cx, self.layout);
-        self.label_text.draw_walk(cx, label.unwrap_or(&self.label));
-        self.bg_quad.end(cx);
+        self.bg_quad.draw_walk(cx, self.walk);
     }
 }
+
+
