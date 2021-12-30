@@ -15,6 +15,7 @@ use {
             token_cache::TokenCache,
         },
     },
+    makepad_component::makepad_render,
     makepad_render::makepad_live_tokenizer::{
         position::Position,
         position_set::PositionSet,
@@ -1095,7 +1096,7 @@ impl CodeEditorImpl {
             HitEvent::KeyDown(KeyEvent {
                 key_code: KeyCode::Return,
                 ..
-            }) => { 
+            }) => {
                 self.reset_caret_blink(cx);
                 if let Some(session_id) = self.session_id {
                     state.insert_newline(session_id, send_request);

@@ -81,7 +81,7 @@ impl Cx {
                 if sh.platform.is_none() { // shader didnt compile somehow
                     continue;
                 }
-                let shp = &self.platform_draw_shaders[sh.platform.unwrap()];
+                let shp = &self.draw_shaders.platform[sh.platform.unwrap()];
                 
                 if draw_call.instance_dirty {
                     draw_call.instance_dirty = false;
@@ -649,7 +649,7 @@ impl Cx {
                     println!("{}", gen.mtlsl);
                 }
                 // lets see if we have the shader already
-                for (index,ds) in self.platform_draw_shaders.iter().enumerate(){
+                for (index,ds) in self.draw_shaders.platform.iter().enumerate(){
                     if ds.mtlsl == gen.mtlsl{
                         cx_shader.platform = Some(index);
                         break;
@@ -657,8 +657,8 @@ impl Cx {
                 }
                 if cx_shader.platform.is_none(){
                     if let Some(shp) = CxPlatformDrawShader::new(metal_cx, gen){
-                        cx_shader.platform = Some(self.platform_draw_shaders.len());
-                        self.platform_draw_shaders.push(shp);
+                        cx_shader.platform = Some(self.draw_shaders.platform.len());
+                        self.draw_shaders.platform.push(shp);
                     }
                 }
             }

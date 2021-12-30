@@ -10,6 +10,9 @@ use {
     makepad_shader_compiler::makepad_live_compiler::*,
     makepad_shader_compiler::*,
     crate::{
+        platform::{
+            CxPlatformDrawShader,
+        },
         cx::Cx
     }
 };
@@ -17,6 +20,7 @@ use {
 #[derive(Default)]
 pub struct CxDrawShaders{
     pub shaders: Vec<CxDrawShader>,
+    pub platform: Vec<CxPlatformDrawShader>,
     pub generation: u64,
     pub ptr_to_id: HashMap<DrawShaderPtr, usize>,
     pub compile_set: BTreeSet<DrawShaderPtr>,
@@ -64,7 +68,6 @@ pub struct CxDrawShader {
     pub mapping: CxDrawShaderMapping
 }
 
-
 #[derive(Debug, PartialEq)]
 pub struct DrawShaderFingerprint {
     pub fingerprint: Vec<LiveNode>,
@@ -103,8 +106,6 @@ pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPac
 pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsMetal;
 #[cfg(any(target_os = "windows", test))]
 pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsHLSL;
-
-
 
 impl DrawShaderInputs {
     pub fn new(packing_method: DrawShaderInputPacking) -> Self {

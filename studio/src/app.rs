@@ -6,7 +6,7 @@ use {
             inline_widget::InlineWidgetRegistry
         }
     },
-    makepad_render::*,
+    makepad_component::makepad_render::*,
 };
 
 live_register!{
@@ -31,9 +31,7 @@ impl App {
     }
     
     pub fn new_app(cx: &mut Cx) -> Self {
-        cx.profile_start(0);
         let ret = Self::new_as_main_module(cx, &module_path!(), id!(App)).unwrap();
-        cx.profile_end(0);
         ret
     }
     
