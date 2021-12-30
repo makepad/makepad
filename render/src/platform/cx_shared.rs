@@ -22,7 +22,7 @@ use {
 
 impl Cx {
     
-    pub(crate) fn process_tap_count(&mut self, digit: usize, pos: Vec2, time: f64) -> u32 {
+    pub (crate) fn process_tap_count(&mut self, digit: usize, pos: Vec2, time: f64) -> u32 {
         if digit >= self.fingers.len() {
             return 0
         };
@@ -39,7 +39,7 @@ impl Cx {
     }
     
     
-    pub(crate) fn compute_passes_to_repaint(&mut self, passes_todo: &mut Vec<usize>, windows_need_repaint: &mut usize) {
+    pub (crate) fn compute_passes_to_repaint(&mut self, passes_todo: &mut Vec<usize>, windows_need_repaint: &mut usize) {
         passes_todo.truncate(0);
         
         // we need this because we don't mark the entire deptree of passes dirty every small paint
@@ -97,20 +97,20 @@ impl Cx {
         }
     }
     
-    pub(crate) fn any_views_need_redrawing(&self) -> bool {
+    pub (crate) fn any_views_need_redrawing(&self) -> bool {
         self.new_redraw_all_views
             || self.new_redraw_views.len() != 0
             || self.new_redraw_views_and_children.len() != 0
     }
     
-    pub(crate) fn process_key_down(&mut self, key_event: KeyEvent) {
+    pub (crate) fn process_key_down(&mut self, key_event: KeyEvent) {
         if let Some(_) = self.keys_down.iter().position( | k | k.key_code == key_event.key_code) {
             return;
         }
         self.keys_down.push(key_event);
     }
     
-    pub(crate) fn process_key_up(&mut self, key_event: &KeyEvent) {
+    pub (crate) fn process_key_up(&mut self, key_event: &KeyEvent) {
         for i in 0..self.keys_down.len() {
             if self.keys_down[i].key_code == key_event.key_code {
                 self.keys_down.remove(i);
@@ -119,12 +119,12 @@ impl Cx {
         }
     }
     
-
+    
     
     // event handler wrappers
     
     
-    pub(crate) fn call_event_handler(&mut self, event: &mut Event)
+    pub (crate) fn call_event_handler(&mut self, event: &mut Event)
     {
         self.event_id += 1;
         
@@ -142,12 +142,15 @@ impl Cx {
         }
     }
     
-    pub(crate) fn call_signals_and_triggers(&mut self)
-    {
-        if self.live_edit_event.is_some(){
+    pub (crate) fn call_live_edit_and_maybe_draw(&mut self) {
+        if self.live_edit_event.is_some() {
             let ev = self.live_edit_event.take().unwrap();
             self.call_event_handler(&mut Event::LiveEdit(ev));
         }
+    }
+    
+    pub (crate) fn call_signals_and_triggers(&mut self)
+    {
         
         let mut counter = 0;
         while self.signals.len() != 0 {
@@ -164,7 +167,7 @@ impl Cx {
                 break
             }
         }
-
+        
         let mut counter = 0;
         while self.triggers.len() != 0 {
             counter += 1;
@@ -180,10 +183,10 @@ impl Cx {
                 break
             }
         }
-
+        
     }
     
-    pub(crate) fn call_all_keys_up(&mut self)
+    pub (crate) fn call_all_keys_up(&mut self)
     {
         let mut keys_down = Vec::new();
         std::mem::swap(&mut keys_down, &mut self.keys_down);
@@ -192,17 +195,17 @@ impl Cx {
         }
     }
     
-    pub(crate) fn call_draw_event(&mut self)
+    pub (crate) fn call_draw_event(&mut self)
     {
         // self.profile();
         self.in_redraw_cycle = true;
         self.redraw_id += 1;
-
+        
         std::mem::swap(&mut self.redraw_views, &mut self.new_redraw_views);
         std::mem::swap(&mut self.redraw_views_and_children, &mut self.new_redraw_views_and_children);
         self.redraw_all_views = self.new_redraw_all_views;
-
-        self.new_redraw_all_views = false; 
+        
+        self.new_redraw_all_views = false;
         self.new_redraw_views.truncate(0);
         self.new_redraw_views_and_children.truncate(0);
         
@@ -213,7 +216,7 @@ impl Cx {
         self.call_event_handler(&mut Event::Draw);
         
         self.in_redraw_cycle = false;
-
+        
         if self.view_stack.len()>0 {
             panic!("View stack disaligned, forgot an end_view(cx)");
         }
@@ -228,7 +231,7 @@ impl Cx {
         }
     }
     
-    pub(crate) fn call_next_frame_event(&mut self, time: f64)
+    pub (crate) fn call_next_frame_event(&mut self, time: f64)
     {
         std::mem::swap(&mut self.next_frames, &mut self.new_next_frames);
         self.new_next_frames.clear();
