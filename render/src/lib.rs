@@ -90,6 +90,8 @@ pub use {
             CxRegistries,
             CxRegistryNew,
         },
+        cx_draw_shaders::{
+        },
         cx::{
             Cx,
             PlatformType
@@ -191,7 +193,6 @@ pub use {
             AnimatorAction
         },
         draw_vars::{
-            DrawShader,
             DrawVars
         },
         geometry::{
