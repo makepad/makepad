@@ -211,6 +211,7 @@ impl Area {
                     return Rect::default()
                 }
                 if cx.draw_shader_generation != draw_call.draw_shader.draw_shader_generation {
+                    //println!("Generation invalid get_rect {} {:?} {} {}",cxview.debug_id, inst, cx.draw_shader_generation, draw_call.draw_shader.draw_shader_generation);
                     return Rect::default()
                 }
                 let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
@@ -251,6 +252,7 @@ impl Area {
                 }
                 let draw_call = &cxview.draw_items[inst.draw_item_id].draw_call.as_ref().unwrap();
                 if cx.draw_shader_generation != draw_call.draw_shader.draw_shader_generation {
+                    println!("Generation invalid abs_to_rel {} {:?} {} {}",cxview.debug_id,inst, cx.draw_shader_generation, draw_call.draw_shader.draw_shader_generation);
                     return abs;
                 }
                 
