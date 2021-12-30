@@ -28,7 +28,7 @@ pub enum InlineWidgetAction {
         size: Size,
         text: Text
     }
-}
+} 
 
 pub trait InlineWidget: LiveApply {
     fn type_id(&self)->LiveType;
