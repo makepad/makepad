@@ -132,8 +132,8 @@ impl Tab {
             cx,
             is_selected,
             should_animate,
-            self.selected_state.unwrap(),
-            self.unselected_state.unwrap()
+            self.selected_state,
+            self.unselected_state
         );
     }
     
@@ -181,7 +181,7 @@ impl Tab {
         match self.close_button.handle_event(cx, event) {
             TabCloseButtonAction::WasPressed => dispatch_action(cx, TabAction::CloseWasPressed),
             TabCloseButtonAction::HoverIn => block_hover_out = true,
-            TabCloseButtonAction::HoverOut => self.animate_to(cx, self.default_state.unwrap()),
+            TabCloseButtonAction::HoverOut => self.animate_to(cx, self.default_state),
             _ => ()
         };
         
@@ -190,10 +190,10 @@ impl Tab {
                 cx.set_hover_mouse_cursor(MouseCursor::Hand);
                 match f.hover_state {
                     HoverState::In => {
-                        self.animate_to(cx, self.hover_state.unwrap());
+                        self.animate_to(cx, self.hover_state);
                     }
                     HoverState::Out => if !block_hover_out {
-                        self.animate_to(cx, self.default_state.unwrap());
+                        self.animate_to(cx, self.default_state);
                     }
                     _ => {}
                 }

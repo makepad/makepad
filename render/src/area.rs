@@ -210,8 +210,8 @@ impl Area {
                     println!("No instances but everything else valid?");
                     return Rect::default()
                 }
-                if cx.draw_shader_generation != draw_call.draw_shader.draw_shader_generation {
-                    println!("Generation invalid get_rect {} {:?} {} {}",cxview.debug_id, inst, cx.draw_shader_generation, draw_call.draw_shader.draw_shader_generation);
+                if cx.draw_shaders.generation != draw_call.draw_shader.draw_shader_generation {
+                    println!("Generation invalid get_rect {} {:?} {} {}",cxview.debug_id, inst, cx.draw_shaders.generation, draw_call.draw_shader.draw_shader_generation);
                     return Rect::default()
                 }
                 let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
@@ -251,8 +251,8 @@ impl Area {
                     return abs;
                 }
                 let draw_call = &cxview.draw_items[inst.draw_item_id].draw_call.as_ref().unwrap();
-                if cx.draw_shader_generation != draw_call.draw_shader.draw_shader_generation {
-                    println!("Generation invalid abs_to_rel {} {:?} {} {}",cxview.debug_id,inst, cx.draw_shader_generation, draw_call.draw_shader.draw_shader_generation);
+                if cx.draw_shaders.generation != draw_call.draw_shader.draw_shader_generation {
+                    println!("Generation invalid abs_to_rel {} {:?} {} {}",cxview.debug_id,inst, cx.draw_shaders.generation, draw_call.draw_shader.draw_shader_generation);
                     return abs;
                 }
                 
@@ -289,7 +289,7 @@ impl Area {
                     return;
                 }
                 let draw_call = cxview.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
-                if cx.draw_shader_generation != draw_call.draw_shader.draw_shader_generation {
+                if cx.draw_shaders.generation != draw_call.draw_shader.draw_shader_generation {
                     return;
                 }
                 let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id]; // ok now we have to patch x/y/w/h into it
@@ -320,7 +320,7 @@ impl Area {
                     println!("get_instance_read_ref called on invalid area pointer, use mark/sweep correctly!");
                     return None;
                 }
-                if cx.draw_shader_generation != draw_call.draw_shader.draw_shader_generation {
+                if cx.draw_shaders.generation != draw_call.draw_shader.draw_shader_generation {
                     return None;
                 }
                 let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
@@ -366,7 +366,7 @@ impl Area {
                     return None;
                 }
                 let draw_call = cxview.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
-                if cx.draw_shader_generation != draw_call.draw_shader.draw_shader_generation {
+                if cx.draw_shaders.generation != draw_call.draw_shader.draw_shader_generation {
                     return None;
                 }
                 let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];

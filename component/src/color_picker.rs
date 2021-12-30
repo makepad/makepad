@@ -203,16 +203,16 @@ impl ColorPicker {
                 
                 match fe.hover_state {
                     HoverState::In => {
-                        self.animate_to(cx, self.hover_state.unwrap());
+                        self.animate_to(cx, self.hover_state);
                     },
                     HoverState::Out => {
-                        self.animate_to(cx, self.default_state.unwrap());
+                        self.animate_to(cx, self.default_state);
                     },
                     _ => ()
                 }
             },
             HitEvent::FingerDown(fe) => {
-                self.animate_to(cx, self.pressed_state.unwrap());
+                self.animate_to(cx, self.pressed_state);
                 cx.set_down_mouse_cursor(MouseCursor::Arrow);
                 let rsize = (self.size * 0.28) / 2.0f32.sqrt();
                 let vx = fe.rel.x - 0.5 * self.size;
@@ -232,14 +232,14 @@ impl ColorPicker {
             HitEvent::FingerUp(fe) => {
                 if fe.is_over {
                     if fe.input_type.has_hovers() {
-                        self.animate_to(cx, self.hover_state.unwrap());
+                        self.animate_to(cx, self.hover_state);
                     }
                     else {
-                        self.animate_to(cx, self.default_state.unwrap());
+                        self.animate_to(cx, self.default_state);
                     }
                 }
                 else {
-                    self.animate_to(cx, self.default_state.unwrap());
+                    self.animate_to(cx, self.default_state);
                 }
                 self.drag_mode = ColorPickerDragMode::None;
                 return ColorPickerAction::DoneChanging;

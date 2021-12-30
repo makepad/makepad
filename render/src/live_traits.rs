@@ -150,7 +150,7 @@ pub struct LiveBody {
 pub trait LiveAnimate {
     fn init_animator(&mut self, cx: &mut Cx);
     fn apply_animator(&mut self, cx: &mut Cx);
-    fn toggle_animator(&mut self, cx: &mut Cx, is_state_1: bool, should_animate: bool, state1: LivePtr, state2: LivePtr,) {
+    fn toggle_animator(&mut self, cx: &mut Cx, is_state_1: bool, should_animate: bool, state1: Option<LivePtr>, state2: Option<LivePtr>,) {
         if is_state_1 {
             if should_animate {
                 self.animate_to(cx, state1)
@@ -168,9 +168,9 @@ pub trait LiveAnimate {
             }
         }
     }
-    fn animator_is_in_state(&mut self, cx: &mut Cx, state: LivePtr) -> bool;
-    fn animate_cut(&mut self, cx: &mut Cx, state: LivePtr);
-    fn animate_to(&mut self, cx: &mut Cx, state: LivePtr);
+    fn animator_is_in_state(&mut self, cx: &mut Cx, state: Option<LivePtr>) -> bool;
+    fn animate_cut(&mut self, cx: &mut Cx, state: Option<LivePtr>);
+    fn animate_to(&mut self, cx: &mut Cx, state: Option<LivePtr>);
     fn animator_handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> bool;
 }
 

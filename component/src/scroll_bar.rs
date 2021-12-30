@@ -317,7 +317,7 @@ impl ScrollBar {
             
             match event.hits(cx, self.bar_quad.draw_vars.area) {
                 HitEvent::FingerDown(fe) => {
-                    self.animate_to(cx, self.pressed_state.unwrap());
+                    self.animate_to(cx, self.pressed_state);
                     let rel = match self.axis {
                         Axis::Horizontal => fe.rel.x,
                         Axis::Vertical => fe.rel.y
@@ -339,10 +339,10 @@ impl ScrollBar {
                         cx.set_hover_mouse_cursor(MouseCursor::Default);
                         match fe.hover_state {
                             HoverState::In => {
-                                self.animate_to(cx, self.hover_state.unwrap());
+                                self.animate_to(cx, self.hover_state);
                             },
                             HoverState::Out => {
-                                self.animate_to(cx, self.default_state.unwrap());
+                                self.animate_to(cx, self.default_state);
                             },
                             _ => ()
                         }
@@ -352,14 +352,14 @@ impl ScrollBar {
                     self.drag_point = None;
                     if fe.is_over {
                         if fe.input_type.has_hovers() {
-                            self.animate_to(cx, self.hover_state.unwrap());
+                            self.animate_to(cx, self.hover_state);
                         }
                         else {
-                            self.animate_to(cx, self.default_state.unwrap());
+                            self.animate_to(cx, self.default_state);
                         }
                     }
                     else {
-                        self.animate_to(cx, self.default_state.unwrap());
+                        self.animate_to(cx, self.default_state);
                     }
                     return ScrollBarEvent::ScrollDone;
                 },

@@ -113,6 +113,10 @@ impl LiveRegistry {
         &self.live_files[token_id.file_id().to_index()].original
     }
     
+    pub fn token_id_to_token(&self, token_id: LiveTokenId) -> &TokenWithSpan {
+        &self.live_files[token_id.file_id().to_index()].original.tokens[token_id.token_index()]
+    }
+    
     pub fn token_id_to_expanded_doc(&self, token_id: LiveTokenId) -> &LiveExpanded {
         &self.live_files[token_id.file_id().to_index()].expanded
     }

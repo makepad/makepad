@@ -103,10 +103,10 @@ impl FrameTemplate {
                 cx.set_hover_mouse_cursor(MouseCursor::Hand);
                 match f.hover_state {
                     HoverState::In => {
-                        self.animate_to(cx, self.hover_state.unwrap());
+                        self.animate_to(cx, self.hover_state);
                     }
                     HoverState::Out =>  {
-                        self.animate_to(cx, self.default_state.unwrap());
+                        self.animate_to(cx, self.default_state);
                     }
                     _ => {}
                 }
