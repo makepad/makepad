@@ -313,7 +313,7 @@ impl Cx {
         }
         let draw_shader = draw_vars.draw_shader.unwrap();
         
-        if draw_shader.draw_shader_generation != self.draw_shader_generation{
+        if draw_shader.draw_shader_generation != self.draw_shaders.generation{
             return None
         }
         
