@@ -833,7 +833,7 @@ impl CodeEditorImpl {
                     },
                     size: Vec2 {
                         x: rect.size.x,
-                        y: line.total_height,
+                        y: line.text_height,
                     },
                 },
             );
@@ -931,9 +931,6 @@ impl CodeEditorImpl {
             self.scroll_view.redraw(cx);
         }
         
-        if self.scroll_view.handle_event(cx, event) {
-            self.scroll_view.redraw(cx);
-        }
         if event.is_timer(self.caret_blink_timer) {
             if self.animator_is_in_state(cx, self.show_caret_state) {
                 self.animate_to(cx, self.hide_caret_state)

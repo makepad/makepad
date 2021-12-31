@@ -636,8 +636,8 @@ impl Cx {
     
     pub fn mtl_compile_shaders(&mut self, metal_cx: &MetalCx) {
         for draw_shader_ptr in &self.draw_shaders.compile_set {
-            if let Some(draw_shader_id) = self.draw_shaders.ptr_to_id.get(&draw_shader_ptr) {
-                let cx_shader = &mut self.draw_shaders.shaders[*draw_shader_id];
+            if let Some(item) = self.draw_shaders.ptr_to_item.get(&draw_shader_ptr) {
+                let cx_shader = &mut self.draw_shaders.shaders[item.draw_shader_id];
                 let draw_shader_def = self.shader_registry.draw_shader_defs.get(&draw_shader_ptr);
                 let gen = generate_metal::generate_shader(
                     draw_shader_def.as_ref().unwrap(),

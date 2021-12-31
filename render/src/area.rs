@@ -177,8 +177,8 @@ impl Area {
                 }
                 else {
                     let draw_call = cxview.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
-                    draw_call.no_h_scroll = hor;
-                    draw_call.no_v_scroll = ver;
+                    draw_call.options.no_h_scroll = hor;
+                    draw_call.options.no_v_scroll = ver;
                 }
             },
             Area::View(view_area) => {

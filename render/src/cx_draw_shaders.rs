@@ -17,12 +17,62 @@ use {
     }
 };
 
+#[derive(Default, Debug, Clone, PartialEq)]
+pub struct CxDrawShaderOptions{
+    pub draw_call_group: LiveId,
+    pub debug_id: Option<LiveId>,
+    pub no_h_scroll: bool,
+    pub no_v_scroll: bool
+}
+
+impl CxDrawShaderOptions{
+    pub fn from_ptr(cx:&Cx, draw_shader_ptr:DrawShaderPtr)->Self{
+        let live_registry_cp = cx.live_registry.clone();
+        let live_registry = live_registry_cp.borrow();
+        let doc = live_registry.ptr_to_doc(draw_shader_ptr.0);
+        let mut ret = Self::default();
+        // copy in per-instance settings from the DSL
+        let mut node_iter = doc.nodes.first_child(draw_shader_ptr.node_index());
+        while let Some(node_index) = node_iter {
+            let node = &doc.nodes[node_index];
+            match node.id {
+                id!(draw_call_group) => if let LiveValue::Id(id) = node.value {
+                    ret.draw_call_group = id;
+                }
+                id!(debug_id) => if let LiveValue::Id(id) = node.value {
+                    ret.debug_id = Some(id);
+                }
+                id!(no_h_scroll) => if let LiveValue::Bool(v) = node.value {
+                    ret.no_h_scroll = v;
+                }
+                id!(no_v_scroll) => if let LiveValue::Bool(v) = node.value {
+                    ret.no_v_scroll = v;
+                }
+                _ => ()
+            }
+            node_iter = doc.nodes.next_child(node_index);
+        }
+        ret
+    }
+    
+    pub fn appendable_drawcall(&self, other:&Self)->bool{
+        self == other
+    }
+}
+
+#[derive(Default)]
+pub struct CxDrawShaderItem{
+    pub draw_shader_id: usize, 
+    pub options: CxDrawShaderOptions
+} 
+
+
 #[derive(Default)]
 pub struct CxDrawShaders{
     pub shaders: Vec<CxDrawShader>,
     pub platform: Vec<CxPlatformDrawShader>,
     pub generation: u64,
-    pub ptr_to_id: HashMap<DrawShaderPtr, usize>,
+    pub ptr_to_item: HashMap<DrawShaderPtr, CxDrawShaderItem>,
     pub compile_set: BTreeSet<DrawShaderPtr>,
     pub fingerprints: Vec<DrawShaderFingerprint>,
     pub error_set: HashSet<DrawShaderPtr>,
@@ -34,7 +84,7 @@ impl Cx{
         self.draw_shaders.generation += 1;
         self.shader_registry.flush_registry();
         self.draw_shaders.shaders.clear();
-        self.draw_shaders.ptr_to_id.clear();
+        self.draw_shaders.ptr_to_item.clear();
         self.draw_shaders.fingerprints.clear();
         self.draw_shaders.error_set.clear();
         self.draw_shaders.error_fingerprints.clear();
@@ -62,7 +112,7 @@ pub struct DrawShader {
 }
 
 pub struct CxDrawShader {
-    pub field: LiveId,
+    pub class_prop: LiveId,
     pub type_name: LiveId,
     pub platform: Option<usize>,
     pub mapping: CxDrawShaderMapping
@@ -72,6 +122,31 @@ pub struct CxDrawShader {
 pub struct DrawShaderFingerprint {
     pub fingerprint: Vec<LiveNode>,
     pub draw_shader_id: usize
+}
+
+impl DrawShaderFingerprint{
+    pub fn from_ptr(cx:&Cx, draw_shader_ptr:DrawShaderPtr)->Vec<LiveNode>{
+        let live_registry_cp = cx.live_registry.clone();
+        let live_registry = live_registry_cp.borrow();
+        let doc = live_registry.ptr_to_doc(draw_shader_ptr.0);
+        let mut node_iter = doc.nodes.first_child(draw_shader_ptr.node_index());
+        let mut fingerprint = Vec::new();
+        while let Some(node_index) = node_iter {
+            let node = &doc.nodes[node_index];
+            match node.value{
+                LiveValue::DSL{token_start, token_count,..}=>{
+                    fingerprint.push(LiveNode{
+                        id: node.id,
+                        origin: node.origin,
+                        value: LiveValue::DSL{token_start, token_count, expand_index:None}
+                    });
+                }
+                _=>()
+            }
+            node_iter = doc.nodes.next_child(node_index);
+        }
+        fingerprint
+    }
 }
 
 #[derive(Clone, Debug)]

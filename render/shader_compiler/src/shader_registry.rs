@@ -560,6 +560,10 @@ impl ShaderRegistry {
                             let before = live_registry.get_node_prefix(prop.origin);
                             let ty = ShaderTy::from_live_node(node_index, &doc.nodes);
                             if ty.is_none() {
+                                if !prop.origin.node_has_prefix(){
+                                    node_iter = doc.nodes.next_child(node_index);
+                                    continue;
+                                }
                                 return Err(LiveError {
                                     origin: live_error_origin!(),
                                     span: first_def.into(),
