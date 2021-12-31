@@ -311,7 +311,7 @@ impl Cx {
             log!("Profile {} time {}", id, (inst.elapsed().as_nanos() as f64) / 1000000f64);
         }
     }
-    
+   
     pub fn debug_draw_tree(&self, dump_instances: bool, view_id: usize) {
         fn debug_draw_tree_recur(cx:&Cx, dump_instances: bool, s: &mut String, view_id: usize, depth: usize) {
             if view_id >= cx.views.len() {
@@ -361,7 +361,7 @@ impl Cx {
                         s,
                         "{}{}({}) sid:{} inst:{} scroll:{}",
                         indent,
-                        sh.field,
+                        draw_call.options.debug_id.unwrap_or(sh.class_prop),
                         sh.type_name,
                         draw_call.draw_shader.draw_shader_id,
                         instances,

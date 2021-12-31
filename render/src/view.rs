@@ -16,6 +16,7 @@ pub use {
         live_traits::*,
         turtle::{Layout, Width, Height, Walk, Rect},
         cx_draw_shaders::{
+            CxDrawShaderOptions,
             CxDrawShaderMapping,
             CxDrawShader,
             DrawShader,
@@ -530,16 +531,14 @@ pub struct UserUniforms {
 pub struct DrawCall {
     pub draw_shader: DrawShader, // if shader_id changed, delete gl vao
     
-    pub draw_call_group: LiveId,
+    pub options: CxDrawShaderOptions,
+    
     pub instances: Option<Vec<f32 >>,
     pub total_instance_slots: usize,
     
     pub draw_uniforms: DrawUniforms, // draw uniforms
     pub geometry_id: Option<usize>,
     pub user_uniforms: [f32; DRAW_CALL_USER_UNIFORMS], // user uniforms
-    
-    pub no_v_scroll: bool,
-    pub no_h_scroll: bool,
     
     pub texture_slots: [Option<usize>; DRAW_CALL_TEXTURE_SLOTS],
     pub instance_dirty: bool,
@@ -553,9 +552,7 @@ impl DrawCall {
 
         DrawCall {
             geometry_id: draw_vars.geometry_id,
-            no_h_scroll: draw_vars.no_h_scroll,
-            no_v_scroll: draw_vars.no_v_scroll,
-            draw_call_group: draw_vars.draw_call_group,
+            options: draw_vars.options.clone(),
             draw_shader: draw_vars.draw_shader.unwrap(),
             instances: Some(Vec::new()),
             total_instance_slots: mapping.instances.total_slots,
@@ -581,17 +578,16 @@ impl DrawCall {
         }
         self.instance_dirty = true;
         self.uniforms_dirty = true;
-        self.no_h_scroll = draw_vars.no_h_scroll;
-        self.no_v_scroll = draw_vars.no_v_scroll;
+        self.options = draw_vars.options.clone();
     }
     
     pub fn set_local_scroll(&mut self, scroll: Vec2, local_scroll: Vec2) {
         self.draw_uniforms.draw_scroll.x = scroll.x;
-        if !self.no_h_scroll {
+        if !self.options.no_h_scroll {
             self.draw_uniforms.draw_scroll.x += local_scroll.x;
         }
         self.draw_uniforms.draw_scroll.y = scroll.y;
-        if !self.no_v_scroll {
+        if !self.options.no_v_scroll {
             self.draw_uniforms.draw_scroll.y += local_scroll.y;
         }
         self.draw_uniforms.draw_scroll.z = local_scroll.x;
@@ -760,13 +756,7 @@ impl CxView {
                             }
                             if diff{continue}
                         }
-                        if draw_call.draw_call_group != draw_vars.draw_call_group {
-                            continue
-                        }
-                        if draw_call.no_v_scroll != draw_vars.no_v_scroll {
-                            continue
-                        }
-                        if draw_call.no_h_scroll != draw_vars.no_h_scroll {
+                        if !draw_call.options.appendable_drawcall(&draw_vars.options) {
                             continue
                         }
                         return Some(i)

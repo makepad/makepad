@@ -141,6 +141,7 @@ impl LiveEditor {
             }
             last_line = Some(line)
         }
+        self.fold_buttons.retain_visible();
     }
     
     pub fn calc_layout_with_widgets(&mut self, cx: &mut Cx, path: &str, document_inner: &DocumentInner) {
@@ -275,6 +276,11 @@ impl LiveEditor {
         send_request: &mut dyn FnMut(Request),
         dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
     ) {
+
+        if self.editor_impl.scroll_view.handle_event(cx, event) {
+            self.editor_impl.scroll_view.redraw(cx);
+        }
+
         let mut live_edit = false;
         let session_id = self.editor_impl.session_id.unwrap();
         for widget in self.widgets.values_mut() {
