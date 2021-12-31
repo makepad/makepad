@@ -113,8 +113,6 @@ pub struct Cx {
     pub turtles: Vec<Turtle>,
     pub align_list: Vec<Area>,
     
-    //pub live_factories: Rc<RefCell<HashMap<LiveType, Box<dyn LiveFactory >> >>,
-    
     pub registries: CxRegistries,
     
     pub new_redraw_views: Vec<usize>,
@@ -238,8 +236,6 @@ impl Default for Cx {
             view_stack: Vec::new(),
             turtles: Vec::new(),
             align_list: Vec::new(),
-            
-            //live_factories: Rc::new(RefCell::new(HashMap::new())),
             
             new_redraw_views: Vec::new(),
             new_redraw_views_and_children: Vec::new(),

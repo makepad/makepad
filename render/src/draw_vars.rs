@@ -24,11 +24,9 @@ pub const DRAW_CALL_VAR_INSTANCES: usize = 16;
 #[repr(C)]
 pub struct DrawVars {
     pub area: Area,
-    pub draw_call_group: LiveId,
     pub var_instance_start: usize,
     pub var_instance_slots: usize,
-    pub no_h_scroll: bool,
-    pub no_v_scroll: bool,
+    pub options: CxDrawShaderOptions,
     pub draw_shader: Option<DrawShader>,
     pub geometry_id: Option<usize>,
     pub user_uniforms: [f32; DRAW_CALL_USER_UNIFORMS],
@@ -65,55 +63,30 @@ impl DrawVars {
     
     pub fn init_shader(&mut self, cx: &mut Cx, draw_shader_ptr: DrawShaderPtr, geometry_fields: &dyn GeometryFields) {
         self.draw_shader = None;
+        
         if cx.draw_shaders.error_set.contains(&draw_shader_ptr){
             return
         }
-        if let Some(draw_shader_id) = cx.draw_shaders.ptr_to_id.get(&draw_shader_ptr) {
+        
+        if let Some(item) = cx.draw_shaders.ptr_to_item.get(&draw_shader_ptr) {
             self.draw_shader = Some(DrawShader {
                 draw_shader_generation: cx.draw_shaders.generation,
                 draw_shader_ptr,
-                draw_shader_id: *draw_shader_id
+                draw_shader_id: item.draw_shader_id
             });
-            //self.geometry_id = geometry_fields.get_geometry_id();
+            self.options = item.options.clone();
         }
         else {
-            let live_registry_cp = cx.live_registry.clone();
-            let live_registry = live_registry_cp.borrow();
-            
-            let doc = live_registry.ptr_to_doc(draw_shader_ptr.0);
-            
             // create a fingerprint from all the dsl nodes only
-            let mut node_iter = doc.nodes.first_child(draw_shader_ptr.node_index());
-            let mut fingerprint = Vec::new();
-            while let Some(node_index) = node_iter {
-                let node = &doc.nodes[node_index];
-                match node.value{
-                    LiveValue::DSL{token_start, token_count,..}=>{
-                        fingerprint.push(LiveNode{
-                            id: node.id,
-                            origin: node.origin,
-                            value: LiveValue::DSL{token_start, token_count, expand_index:None}
-                        });
-                    }
-                    _=>()
-                }
-                match node.id {
-                    id!(draw_call_group) => if let LiveValue::Id(id) = node.value {
-                        self.draw_call_group = id;
-                    }
-                    id!(no_h_scroll) => if let LiveValue::Bool(v) = node.value {
-                        self.no_h_scroll = v;
-                    }
-                    id!(no_v_scroll) => if let LiveValue::Bool(v) = node.value {
-                        self.no_v_scroll = v;
-                    }
-                    _ => ()
-                }
-                node_iter = doc.nodes.next_child(node_index);
-            }
+            let fingerprint = DrawShaderFingerprint::from_ptr(cx, draw_shader_ptr);
             
             // see if we have it already
             if let Some(fp) = cx.draw_shaders.fingerprints.iter().find(|fp| fp.fingerprint == fingerprint){
+                self.options = CxDrawShaderOptions::from_ptr(cx, draw_shader_ptr);
+                cx.draw_shaders.ptr_to_item.insert(draw_shader_ptr, CxDrawShaderItem{
+                    draw_shader_id: fp.draw_shader_id,
+                    options: self.options.clone()
+                });
                 self.draw_shader = Some(DrawShader {
                     draw_shader_generation: cx.draw_shaders.generation,
                     draw_shader_ptr,
@@ -136,6 +109,9 @@ impl DrawVars {
             }
             // ok ! we have to compile it
             //let live_factories = &cx.live_factories;
+            let live_registry_cp = cx.live_registry.clone();
+            let live_registry = live_registry_cp.borrow();
+            
             let result = cx.shader_registry.analyse_draw_shader(&live_registry, draw_shader_ptr, | live_registry, shader_registry, span, draw_shader_query, live_type, draw_shader_def | {
                 match draw_shader_query {
                     DrawShaderQuery::DrawShader => {
@@ -244,14 +220,17 @@ impl DrawVars {
                         fingerprint
                     });
                     cx.draw_shaders.shaders.push(CxDrawShader {
-                        field: class_node.id,
+                        class_prop: class_node.id,
                         type_name: shader_type_name,
                         platform: None,
                         mapping: mapping
                     });
                     // ok so. maybe we should fill the live_uniforms buffer?
-                    
-                    cx.draw_shaders.ptr_to_id.insert(draw_shader_ptr, draw_shader_id);
+                    self.options = CxDrawShaderOptions::from_ptr(cx, draw_shader_ptr);
+                    cx.draw_shaders.ptr_to_item.insert(draw_shader_ptr, CxDrawShaderItem{
+                        draw_shader_id,
+                        options: self.options.clone()
+                    });                    
                     cx.draw_shaders.compile_set.insert(draw_shader_ptr);
                     // now we simply queue it somewhere somehow to compile.
                     self.draw_shader = Some(DrawShader {
@@ -401,6 +380,7 @@ impl DrawVars {
         }
         let unknown_shader_props = match nodes[index].id {
             id!(debug) => false,
+            id!(debug_id) => false,
             id!(no_v_scroll) => false,
             id!(no_h_scroll) => false,
             id!(draw_call_group) => false,

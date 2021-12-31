@@ -36,7 +36,7 @@ impl<K: std::cmp::Eq + std::hash::Hash + Copy,V> ComponentGc<K,V>{
         let visible = &self.visible;
         self.map.retain( | k, v | visible.contains(&k) || cb(k,v));
         self.visible.clear();
-    }
+    } 
     
     pub fn get_or_insert_with_ptr<'a, CB>(&'a mut self, cx:&mut Cx, key:K, ptr:Option<LivePtr>, cb:CB)->&'a mut V
     where CB: FnOnce(&mut Cx, LivePtr)->V{
