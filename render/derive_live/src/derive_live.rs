@@ -143,12 +143,10 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
             tb.add("    }");
             
             
-            tb.add("    fn animator_handle_event(&mut self, cx: &mut Cx, event: &mut Event)->bool{");
-            tb.add("        if let AnimatorAction::Animating{redraw} = self.animator.handle_event(cx, event) {");
-            tb.add("            self.apply_animator(cx);");
-            tb.add("            return redraw;");
-            tb.add("        }");
-            tb.add("        false");
+            tb.add("    fn animator_handle_event(&mut self, cx: &mut Cx, event: &mut Event)->AnimatorAction{");
+            tb.add("        let ret = self.animator.handle_event(cx, event);");
+            tb.add("        if ret.is_animating(){self.apply_animator(cx);}");
+            tb.add("        ret");
             tb.add("    }");
             tb.add("}");
             Some(kv)
@@ -267,7 +265,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
             tb.add("    if let Some(file_id) = apply_from.file_id() {");
             for def in &animator_kv.unwrap() {
                 tb.add("    if let Some(index) = nodes.child_by_path(start_index, &[");
-                tb.add("        self.animator.get_state_id(cx, self.").ident(def).add(",LiveId(").suf_u64(LiveId::from_str(def).unwrap().0).add(")),");
+                tb.add("        self.animator.get_state_id_of(cx, self.").ident(def).add(",LiveId(").suf_u64(LiveId::from_str(def).unwrap().0).add(")),");
                 tb.add("        id!(apply)");
                 tb.add("        ]) {");
                 tb.add("            self.apply(cx, ApplyFrom::Animate, index, nodes);");

@@ -347,7 +347,7 @@ impl FileTreeNode {
         event: &mut Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, FileTreeNodeAction),
     ) {
-        if self.animator_handle_event(cx, event) {
+        if self.animator_handle_event(cx, event).must_redraw() {
             self.bg_quad.draw_vars.redraw_view(cx);
         }
         match event.hits(cx, self.bg_quad.draw_vars.area) {

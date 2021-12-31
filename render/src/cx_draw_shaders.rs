@@ -64,8 +64,7 @@ impl CxDrawShaderOptions{
 pub struct CxDrawShaderItem{
     pub draw_shader_id: usize, 
     pub options: CxDrawShaderOptions
-} 
-
+}
 
 #[derive(Default)]
 pub struct CxDrawShaders{

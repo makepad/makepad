@@ -155,11 +155,16 @@ fn parse_value(prop_id:TokenStream, parser:&mut TokenParser, tb:&mut TokenBuilde
             tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:").stream(Some(prop_id)).add(",value:LiveValue::Bool(").ident(&s).add(")},");
         }
         else{
-            if let Ok(value) = s.parse::<f64>(){
-                tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:").stream(Some(prop_id)).add(",value:LiveValue::Float(").unsuf_f64(value).add(")},");
+            if s.chars().position(|c| c == '.').is_some(){
+                if let Ok(value) = s.parse::<f64>(){
+                    tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:").stream(Some(prop_id)).add(",value:LiveValue::Float(").unsuf_f64(value).add(")},");
+                }
+                else{
+                    return Err(error("Value cant be parsed"));
+                }
             }
             else if let Ok(value) = s.parse::<i64>(){
-                tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:").stream(Some(prop_id)).add(",value:LiveValue::Float(").unsuf_i64(value).add(")},");
+                tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:").stream(Some(prop_id)).add(",value:LiveValue::Int(").unsuf_i64(value).add(")},");
             }
             else{
                 return Err(error("Value cant be parsed"));

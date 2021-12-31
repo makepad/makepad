@@ -18,7 +18,7 @@ use {
     },
     makepad_component::{
         makepad_render,
-        fold_button::FoldButton,
+        fold_button::{FoldButton,FoldButtonAction},
         ComponentGc,
     },
     makepad_render::makepad_live_compiler::{LiveTokenId, LiveEditEvent},
@@ -45,6 +45,7 @@ live_register!{
 pub struct WidgetIdent(LiveTokenId, LiveType);
 
 pub struct Widget {
+    opened: f32,
     bind: InlineEditBind,
     inline_widget: Box<dyn InlineWidget>
 }
@@ -59,7 +60,7 @@ pub struct LiveEditor {
     #[rust] lines_layout: LinesLayout,
     #[rust] widget_draw_order: Vec<(usize, WidgetIdent)>,
     #[rust] widgets: ComponentGc<WidgetIdent, Widget>,
-    #[rust] fold_buttons: ComponentGc<usize, FoldButton>,
+    #[rust] fold_buttons: ComponentGc<usize, (FoldButton, usize)>,
 }
 
 impl LiveHook for LiveEditor{
@@ -69,7 +70,7 @@ impl LiveHook for LiveEditor{
             registries.get::<CxInlineWidgetRegistry>().apply(cx, apply_from, index, nodes, widget.inline_widget.as_mut());
         }
         if let Some(index) = nodes.child_by_name(index, id!(fold_button)){
-            for fold_button in self.fold_buttons.values_mut(){
+            for (fold_button,_) in self.fold_buttons.values_mut(){
                 fold_button.apply(cx, apply_from, index, nodes);
             }
         }
@@ -134,8 +135,8 @@ impl LiveEditor {
             if Some(line) != last_line { // start a new draw segment with the turtle
                 let ll = &self.lines_layout.lines[*line];
                 
-                let fb = self.fold_buttons.get_or_insert_with_ptr(cx, *line, self.fold_button, |cx,ptr|{
-                    FoldButton::new_from_ptr(cx, ptr)
+                let (fb,_) = self.fold_buttons.get_or_insert_with_ptr(cx, *line, self.fold_button, |cx,ptr|{
+                    (FoldButton::new_from_ptr(cx, ptr), *line)
                 });
                 fb.draw_abs(cx, vec2(origin.x, origin.y + ll.start_y));
             }
@@ -160,6 +161,7 @@ impl LiveEditor {
         let registries = cx.registries.clone();
         let widget_registry = registries.get::<CxInlineWidgetRegistry>();
         
+        
         self.editor_impl.calc_lines_layout(cx, document_inner, &mut self.lines_layout, | cx, line, start_y, viewport_start, viewport_end | {
             
             let edit_info = &inline_cache[line];
@@ -167,13 +169,16 @@ impl LiveEditor {
             
             for bind in &edit_info.items {
                 if let Some(matched) = widget_registry.match_inline_widget(&live_registry, *bind) {
-                    max_height = max_height.max(matched.height);
-                    
+                    let cache_line = &inline_cache.lines[line];
+
+                    max_height = max_height.max(matched.height * cache_line.opened);
+
                     if start_y + matched.height > viewport_start && start_y < viewport_end {
                         // lets spawn it
                         let ident = WidgetIdent(bind.live_token_id, matched.live_type);
                         widgets.get_or_insert(cx, ident, |cx|{
                             Widget {
+                                opened: cache_line.opened,
                                 bind: *bind,
                                 inline_widget: widget_registry.new(cx, matched.live_type).unwrap(),
                             }
@@ -286,7 +291,6 @@ impl LiveEditor {
         for widget in self.widgets.values_mut() {
             match widget.inline_widget.handle_widget_event(cx, event, widget.bind) {
                 InlineWidgetAction::ReplaceText {position, size, text} => {
-                    
                     state.replace_text_direct(
                         session_id,
                         position,
@@ -300,11 +304,25 @@ impl LiveEditor {
                 _ => ()
             }
         }
-        for fold_button in self.fold_buttons.values_mut(){
-            fold_button.handle_event(cx, event, &mut |cx, action|{
-                
-            });
+
+        let mut fold_actions = Vec::new();
+        for (fold_button, line) in self.fold_buttons.values_mut(){
+            fold_button.handle_event(cx, event, &mut |_, action| fold_actions.push((action, *line)));
         }
+        for (action, line) in fold_actions{
+            match action{
+                FoldButtonAction::Animating(opened)=>{
+                    let session = &state.sessions[session_id];
+                    let document = &state.documents[session.document_id];
+                    let document_inner = document.inner.as_ref().unwrap();
+                    let mut inline_cache = document_inner.inline_cache.borrow_mut();
+                    inline_cache.lines[line].opened = opened;
+                    self.editor_impl.redraw(cx);
+                }
+                _=>()
+            }
+        }
+        
         // what if the code editor changes something?
         self.editor_impl.handle_event(cx, state, event, &self.lines_layout, send_request, &mut |cx, action|{
             match action{
