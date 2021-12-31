@@ -6,7 +6,7 @@ pub use {
     crate::{
         event::Event,
         cx::Cx,
-        animator::Animator
+        animator::{Animator,AnimatorAction}
     }
 };
 
@@ -147,6 +147,7 @@ pub struct LiveBody {
     pub live_type_infos: Vec<LiveTypeInfo>
 }
 
+
 pub trait LiveAnimate {
     fn init_animator(&mut self, cx: &mut Cx);
     fn apply_animator(&mut self, cx: &mut Cx);
@@ -171,7 +172,7 @@ pub trait LiveAnimate {
     fn animator_is_in_state(&mut self, cx: &mut Cx, state: Option<LivePtr>) -> bool;
     fn animate_cut(&mut self, cx: &mut Cx, state: Option<LivePtr>);
     fn animate_to(&mut self, cx: &mut Cx, state: Option<LivePtr>);
-    fn animator_handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> bool;
+    fn animator_handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> AnimatorAction;
 }
 
 #[derive(Debug, Clone, Copy)]

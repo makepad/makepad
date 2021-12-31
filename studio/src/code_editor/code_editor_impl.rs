@@ -927,7 +927,7 @@ impl CodeEditorImpl {
         send_request: &mut dyn FnMut(Request),
         dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
     ) {
-        if self.animator_handle_event(cx, event) {
+        if self.animator_handle_event(cx, event).must_redraw() {
             self.scroll_view.redraw(cx);
         }
         
