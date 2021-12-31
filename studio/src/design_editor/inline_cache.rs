@@ -119,7 +119,8 @@ impl InlineCache {
     }
     
     pub fn invalidate(&mut self, delta: &Delta) {
-        // if we get a insert/delete with the same ranges
+
+        // detect no-op line wise, to keep the folding state
         let ranges = delta.operation_ranges();
         if ranges.count() == 2 {
             let mut ranges = delta.operation_ranges();
@@ -132,7 +133,6 @@ impl InlineCache {
                             line.is_clean = false;
                             line.items.clear();
                         }
-                        println!("NO-OP DETECTED");
                         return
                     }
                 }
