@@ -90,7 +90,8 @@ pub struct FoldButton {
 pub enum FoldButtonAction {
     None,
     Opening,
-    Closing
+    Closing,
+    Animating(f32)
 }
 
 impl FoldButton {
@@ -101,7 +102,11 @@ impl FoldButton {
         event: &mut Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, FoldButtonAction),
     ) {
-        self.animator_handle_event(cx, event);
+        if self.animator_handle_event(cx, event).is_animating(){
+            if self.animator.is_track_animating(cx, self.closed_state){
+                dispatch_action(cx, FoldButtonAction::Animating(self.opened))
+            }
+        };
         let res = self.button_logic.handle_event(cx, event, self.bg_quad.draw_vars.area);
         
         match res.state {

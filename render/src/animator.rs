@@ -1,5 +1,4 @@
-#![allow(unused)]
-// OK ANIMATION
+
 use {
     std::f64::consts::PI,
     makepad_shader_compiler::makepad_live_compiler::*,
@@ -58,11 +57,11 @@ impl Play {
         match self {
             Self::Forward {duration, redraw} => {
                 if *duration == 0.0{return (true, 1.0, *redraw)}
-                (time > *duration, time / duration, *redraw)
+                (time > *duration, time.min(*duration) / duration, *redraw)
             },
             Self::Reverse {duration, end, redraw} => {
                 if *duration == 0.0{return (true, 1.0, *redraw)}
-                (time > *duration, end - (time / duration), *redraw)
+                (time > *duration, end - (time.min(*duration) / duration), *redraw)
             },
             Self::Loop {duration, end, redraw} => {
                 if *duration == 0.0{return (true, 1.0, *redraw)}
@@ -440,6 +439,20 @@ pub enum AnimatorAction {
     None
 }
 
+impl AnimatorAction{
+    pub fn must_redraw(&self)->bool{
+        match self{
+            Self::Animating{redraw}=>*redraw,
+            _=>false
+        }
+    }
+    pub fn is_animating(&self)->bool{
+        match self{
+            Self::Animating{..}=>true,
+            _=>false
+        }
+    }
+}
 impl Animator {
     
     pub fn swap_out_state(&mut self) -> Vec<LiveNode> {
@@ -466,7 +479,7 @@ impl Animator {
             let mut ended = true;
             let mut redraw = false;
             while state_index < state_nodes.len() {
-                let state_node = &mut state_nodes[state_index];
+                let state_node = &state_nodes[state_index];
                 if state_node.is_array() {
                     // ok so. lets compute our value and store it in the last slot
                     let (play_ended, play_redraw) = Self::update_timeline_value(cx, state_index, state_nodes, nf.time);
@@ -499,18 +512,7 @@ impl Animator {
             if !ended {
                 self.next_frame = cx.new_next_frame();
             }
-            else {
-                //println!("ENDED!");
-                
-                // mark all states ended
-                let mut track = state_nodes.child_by_name(0, id!(tracks)).unwrap();
-                let mut node_iter = state_nodes.first_child(track);
-                while let Some(node_index) = node_iter {
-                    let ended = state_nodes.child_by_name(node_index, id!(ended)).unwrap();
-                    state_nodes[ended].value = LiveValue::Bool(true);
-                    node_iter = state_nodes.next_child(node_index);
-                }
-            }
+            
             return AnimatorAction::Animating {redraw}
         }
         AnimatorAction::None
@@ -524,17 +526,22 @@ impl Animator {
             
             // compute the animation time from the id
             let (ended, time, redraw) = if let Some(id_index) = node_iter {
-                if let LiveValue::Id(id) = &nodes[id_index].value {
+                if let LiveValue::Id(id) = nodes[id_index].value {
                     // ok so now we have to find our id in tracks
-                    if let Some(LiveValue::Bool(ended)) = nodes.child_value_by_path(0, &[id!(tracks), *id, id!(ended)]) {
-                        if *ended {
-                            return (true, false)
+                    if let Some(index) = nodes.child_by_path(0, &[id!(tracks), id, id!(ended)]) {
+                        if let LiveValue::Int(ended) = &mut nodes[index].value{
+                            if *ended>0{
+                                if *ended == 1{
+                                    *ended += 1;
+                                }
+                                return (*ended>1, false)
+                            }
                         }
                     }
                     else {
                         panic!();
                     }
-                    let track_index = nodes.child_by_path(0, &[id!(tracks), *id]).unwrap();
+                    let track_index = nodes.child_by_path(0, &[id!(tracks), id]).unwrap();
                     let time_index = nodes.child_by_name(track_index, id!(time)).unwrap();
                     
                     let start_time = match &nodes[time_index].value {
@@ -558,7 +565,15 @@ impl Animator {
                         Play::new(cx)
                     };
                     node_iter = nodes.next_child(id_index);
-                    play.get_ended_time(ext_time - start_time)
+
+                    let (ended, time, redraw) = play.get_ended_time(ext_time - start_time);
+
+                    if ended{ // mark ended step 1
+                        if let Some(index) = nodes.child_by_path(0, &[id!(tracks), id, id!(ended)]) {
+                            nodes[index].value = LiveValue::Int(1);
+                        }
+                    }
+                    (ended, time, redraw)
                 }
                 else {panic!()}
             }
@@ -608,19 +623,19 @@ impl Animator {
                         let new_val = match a {
                             LiveValue::Int(va) => match b {
                                 LiveValue::Int(vb) => {
-                                    LiveValue::Float((((vb - va) as f64) * mix + *va as f64))
+                                    LiveValue::Float(((vb - va) as f64) * mix + *va as f64)
                                 }
                                 LiveValue::Float(vb) => {
-                                    LiveValue::Float((((vb - *va as f64) as f64) * mix + *va as f64))
+                                    LiveValue::Float(((vb - *va as f64) as f64) * mix + *va as f64)
                                 }
                                 _ => LiveValue::None
                             }
                             LiveValue::Float(va) => match b {
                                 LiveValue::Int(vb) => {
-                                    LiveValue::Float((((*vb as f64 - va) as f64) * mix + *va as f64))
+                                    LiveValue::Float(((*vb as f64 - va) as f64) * mix + *va as f64)
                                 }
                                 LiveValue::Float(vb) => {
-                                    LiveValue::Float((((vb - va)) * mix + *va))
+                                    LiveValue::Float(((vb - va)) * mix + *va)
                                 }
                                 _ => LiveValue::None
                             }
@@ -693,19 +708,26 @@ impl Animator {
         return 1.0
     }
     
-    pub fn get_state_id(&mut self, cx: &mut Cx, live_ptr: Option<LivePtr>, default:LiveId)->LiveId{
+    pub fn get_track_and_state_id_of(&self, cx: &mut Cx, live_ptr: Option<LivePtr>)->Option<(LiveId,LiveId)>{
         if let Some(live_ptr) = live_ptr{
             let live_registry = cx.live_registry.borrow();
             let (nodes, index) = live_registry.ptr_to_nodes_index(live_ptr);
-            let track = if let Some(LiveValue::Id(id)) = nodes.child_value_by_path(index,&[id!(track)]){
-                *id
+            Some(if let Some(LiveValue::Id(id)) = nodes.child_value_by_path(index,&[id!(track)]){
+                (*id, nodes[index].id)
             }
             else{
-                LiveId(1)
-            };
-            let state_id = nodes[index].id;
+                (LiveId(1), nodes[index].id)
+            })
+        }
+        else{
+            None
+        }
+    }
+    
+    pub fn get_state_id_of(&self, cx: &mut Cx, live_ptr: Option<LivePtr>, default:LiveId)->LiveId{
+        if let Some((track_id,_)) = self.get_track_and_state_id_of(cx, live_ptr){
             if let Some(state) = self.state.as_ref(){
-                if let Some(LiveValue::Id(id)) = &state.child_value_by_path(0, &[id!(tracks),track, id!(state_id)]){
+                if let Some(LiveValue::Id(id)) = &state.child_value_by_path(0, &[id!(tracks), track_id, id!(state_id)]){
                     return *id
                 }
             }
@@ -713,19 +735,23 @@ impl Animator {
         default
     }
     
-    pub fn is_in_state(&mut self, cx: &mut Cx, live_ptr: Option<LivePtr>)->bool{
-        if let Some(live_ptr) = live_ptr{
-            let live_registry = cx.live_registry.borrow();
-            let (nodes, index) = live_registry.ptr_to_nodes_index(live_ptr);
-            let track = if let Some(LiveValue::Id(id)) = nodes.child_value_by_path(index,&[id!(track)]){
-                *id
+    pub fn is_track_animating(&self, cx: &mut Cx, live_ptr: Option<LivePtr>)->bool{
+        if let Some((track_id,_)) = self.get_track_and_state_id_of(cx, live_ptr){
+            if let Some(state) = self.state.as_ref(){
+                if let Some(LiveValue::Int(ended)) = state.child_value_by_path(0, &[id!(tracks), track_id, id!(ended)]) {
+                    if *ended < 2 {
+                        return true
+                    }
+                }
             }
-            else{
-                LiveId(1)
-            };
-            let state_id = nodes[index].id;
+        }
+        false
+    }
+    
+    pub fn is_in_state(&self, cx: &mut Cx, live_ptr: Option<LivePtr>)->bool{
+        if let Some((track_id,state_id)) = self.get_track_and_state_id_of(cx, live_ptr){
             let state = self.state.as_ref().unwrap();
-            if let Some(LiveValue::Id(id)) = &state.child_value_by_path(0, &[id!(tracks),track, id!(state_id)]){
+            if let Some(LiveValue::Id(id)) = &state.child_value_by_path(0, &[id!(tracks), track_id, id!(state_id)]){
                 return *id == state_id;
             }
         }
@@ -762,7 +788,7 @@ impl Animator {
         }
         
         state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track], live_object!{
-            [track]: {state_id: (state_id), ended: true}
+            [track]: {state_id: (state_id), ended: 2}
         });
         
         let mut reader =if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(apply)){
@@ -862,7 +888,7 @@ impl Animator {
         let mut path = Vec::new();
 
         state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track], live_object!{
-            [track]: {state_id: (state_id), ended:false, time:void}
+            [track]: {state_id: (state_id), ended:0, time:void}
         });
         
         if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(from)){
