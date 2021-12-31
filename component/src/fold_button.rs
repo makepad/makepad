@@ -7,6 +7,7 @@ live_register!{
     
     FoldButton: {{FoldButton}} {
         bg_quad: {
+            debug_id: fold_button,
             instance opened: 0.0
             instance hover: 0.0
             

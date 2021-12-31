@@ -227,14 +227,14 @@ impl Splitter {
             Axis::Horizontal => Margin {
                 l: 3.0,
                 t: 0.0,
-                r: 7.0,
+                r: 3.0,
                 b: 0.0,
             },
             Axis::Vertical => Margin {
                 l: 0.0,
                 t: 3.0,
                 r: 0.0,
-                b: 7.0,
+                b: 3.0,
             },
         }
     }
