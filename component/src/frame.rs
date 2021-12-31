@@ -60,7 +60,7 @@ impl LiveApply for Frame {
         let live_registry = live_registry_rc.borrow();
         
         if let ApplyFrom::ApplyClear = apply_from {
-            self.create_order.truncate(0);
+            self.create_order.clear();
         }
         let mut index = start_index + 1;
         while index<nodes.len() {
@@ -71,7 +71,7 @@ impl LiveApply for Frame {
             match nodes[index].id {
                 id!(children) => {
                     self.has_children_array = true;
-                    self.children.truncate(0);
+                    self.children.clear();
                     let mut node_iter = nodes.first_child(index);
                     while let Some(index) = node_iter {
                         if let LiveValue::Id(id) = nodes[index].value {

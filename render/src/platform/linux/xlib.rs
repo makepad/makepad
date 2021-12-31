@@ -693,7 +693,7 @@ impl XlibApp {
                 // process all signals in the queue
                 let mut proc_signals = if let Ok(mut signals) = self.signals.lock() {
                     let sigs = signals.clone();
-                    signals.truncate(0);
+                    signals.clear();
                     sigs
                 }
                 else {

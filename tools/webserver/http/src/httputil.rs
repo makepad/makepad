@@ -100,7 +100,7 @@ impl HttpHeader {
                 return None
             }
             lines.push(line.clone());
-            line.truncate(0);
+            line.clear();
         }
         if lines.len() <2{
             return None;

@@ -424,7 +424,7 @@ impl Win32Window {
                 for sig in sigs.iter() {
                     winuser::PostMessageW(hwnd, winuser::WM_USER, sig.0, sig.1 as isize);
                 }
-                sigs.truncate(0);
+                sigs.clear();
             }
             
         }

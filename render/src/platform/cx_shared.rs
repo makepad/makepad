@@ -40,7 +40,7 @@ impl Cx {
     
     
     pub (crate) fn compute_passes_to_repaint(&mut self, passes_todo: &mut Vec<usize>, windows_need_repaint: &mut usize) {
-        passes_todo.truncate(0);
+        passes_todo.clear();
         
         // we need this because we don't mark the entire deptree of passes dirty every small paint
         loop { // loop untill we don't propagate anymore
@@ -206,12 +206,12 @@ impl Cx {
         self.redraw_all_views = self.new_redraw_all_views;
         
         self.new_redraw_all_views = false;
-        self.new_redraw_views.truncate(0);
-        self.new_redraw_views_and_children.truncate(0);
+        self.new_redraw_views.clear();
+        self.new_redraw_views_and_children.clear();
         
         //println!("{:?}, {:?}, {:?}", self.redraw_views, self.redraw_views_and_children, self.redraw_all_views);
         
-        self.align_list.truncate(0);
+        self.align_list.clear();
         
         self.call_event_handler(&mut Event::Draw);
         
