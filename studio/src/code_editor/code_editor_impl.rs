@@ -83,7 +83,7 @@ live_register!{
     
     CodeEditorImpl: {{CodeEditorImpl}} {
         scroll_view: {
-            v_scroll: {smoothing: 0.15},
+            //v_scroll: {smoothing: 0.15},
             view: {
                 debug_id: code_editor_view
             }
