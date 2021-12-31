@@ -179,13 +179,13 @@ impl DrawText {
     }
     
     pub fn draw_rel(&mut self, cx: &mut Cx, pos: Vec2, val: &str) {
-        self.buf.truncate(0);
+        self.buf.clear();
         self.buf_push_str(val);
         self.draw(cx, pos + cx.get_turtle_origin());
     }
     
     pub fn draw_abs(&mut self, cx: &mut Cx, pos: Vec2, val: &str) {
-        self.buf.truncate(0);
+        self.buf.clear();
         self.buf_push_str(val);
         self.draw(cx, pos);
     }
@@ -361,7 +361,7 @@ impl DrawText {
         let mut width = 0.0;
         let mut elipct = 0;
         
-        self.buf.truncate(0);
+        self.buf.clear();
         
         let mut iter = text.chars().peekable();
         let font_size_logical = self.text_style.font_size * 96.0 / (72.0 * cx.fonts[font_id].as_ref().unwrap().ttf_font.units_per_em);
@@ -428,7 +428,7 @@ impl DrawText {
                 self.draw_chunk(cx, rect.pos, 0, None);
                 
                 width = 0.0;
-                self.buf.truncate(0);
+                self.buf.clear();
                 if newline {
                     cx.turtle_new_line_min_height(self.font_size * self.text_style.line_spacing * self.font_scale);
                 }

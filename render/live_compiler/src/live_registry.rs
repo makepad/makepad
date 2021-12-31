@@ -283,7 +283,7 @@ impl LiveRegistry {
         let mut tokens = Vec::new();
         let mut pos = start_pos;
         for line_str in source.lines() {
-            line_chars.truncate(0);
+            line_chars.clear();
             line_chars.extend(line_str.chars());
             let mut cursor = Cursor::new(&line_chars, &mut scratch);
             loop {
@@ -516,7 +516,7 @@ impl LiveRegistry {
                     std::mem::swap(&mut expanded_nodes, &mut self.live_files[file_id.to_index()].expanded.nodes);
                             
                     let mut reader = LiveNodeMutReader::new(0, &mut expanded_nodes);
-                    path.truncate(0);
+                    path.clear();
                     reader.walk();
                     while !reader.is_eot() {
                         if reader.is_open() {
@@ -724,7 +724,7 @@ impl LiveRegistry {
             let mut out_doc = LiveExpanded::new();
             std::mem::swap(&mut out_doc, &mut self.live_files[file_id.to_index()].expanded);
             
-            out_doc.nodes.truncate(0);
+            out_doc.nodes.clear();
 
             let in_doc = &self.live_files[file_id.to_index()].original;
             

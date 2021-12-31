@@ -163,7 +163,7 @@ impl WebSocketChannels{
                                 let _ = tx_socket.send(ws_msg.take());
                             }
                             
-                            msg_stack.truncate(0);
+                            msg_stack.clear();
                         }
                         last_start = Instant::now()
                     } 

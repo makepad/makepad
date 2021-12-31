@@ -331,7 +331,7 @@ impl CodeEditorImpl {
             panic!()
         }
         
-        lines_layout.lines.truncate(0);
+        lines_layout.lines.clear();
         
         let mut start_y = 0.0;
         let text_scale = 1.0;
@@ -633,7 +633,7 @@ impl CodeEditorImpl {
         cursor: Cursor
     ) {
         fn linenum_fill(buf: &mut Vec<char>, line: usize) {
-            buf.truncate(0);
+            buf.clear();
             let mut scale = 10000;
             let mut fill = false;
             loop {
