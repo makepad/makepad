@@ -178,7 +178,7 @@ impl Cx {
     pub fn reset_font_atlas_and_redraw(&mut self) {
         for cxfont in &mut self.fonts {
             if let Some(cxfont) = cxfont {
-                cxfont.atlas_pages.truncate(0);
+                cxfont.atlas_pages.clear();
             }
         }
         self.fonts_atlas.alloc_xpos = 0.;

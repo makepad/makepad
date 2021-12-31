@@ -370,17 +370,17 @@ live_primitive!(
     fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Str(v) => {
-                self.truncate(0);
+                self.clear();
                 self.push_str(v);
                 index + 1
             }
             LiveValue::FittedString(v) => {
-                self.truncate(0);
+                self.clear();
                 self.push_str(v.as_str());
                 index + 1
             }
             LiveValue::InlineString(v) => {
-                self.truncate(0);
+                self.clear();
                 self.push_str(v.as_str());
                 index + 1
             }

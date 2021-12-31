@@ -135,7 +135,7 @@ impl WebSocket {
         match state {
             WebSocketState::Data => {
                 self.mask_counter = 0;
-                self.data.truncate(0);
+                self.data.clear();
             }
             WebSocketState::Opcode => {
                 self.is_ping = false;

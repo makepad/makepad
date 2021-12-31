@@ -65,7 +65,7 @@ impl LiveOriginal {
 
     pub fn get_string(&self, string_start: usize, string_count: usize, out:&mut String) {
         let chunk = &self.strings[string_start..(string_start + string_count)];
-        out.truncate(0);
+        out.clear();
         for chr in chunk {
             out.push(*chr);
         }
