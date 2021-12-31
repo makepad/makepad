@@ -45,7 +45,6 @@ live_register!{
 pub struct WidgetIdent(LiveTokenId, LiveType);
 
 pub struct Widget {
-    opened: f32,
     bind: InlineEditBind,
     inline_widget: Box<dyn InlineWidget>
 }
@@ -172,19 +171,21 @@ impl LiveEditor {
             for bind in &edit_info.items {
                 if let Some(matched) = widget_registry.match_inline_widget(&live_registry, *bind) {
                     let cache_line = &inline_cache.lines[line];
-
-                    max_height = max_height.max(matched.height * cache_line.opened);
-
-                    if start_y + matched.height > viewport_start && start_y < viewport_end {
+                    
+                    let widget_height = matched.height * cache_line.opened;
+                   
+                    max_height = max_height.max(widget_height);
+                    
+                    if  start_y + matched.height > viewport_start && start_y < viewport_end {
                         // lets spawn it
                         let ident = WidgetIdent(bind.live_token_id, matched.live_type);
                         widgets.get_or_insert(cx, ident, |cx|{
                             Widget {
-                                opened: cache_line.opened,
                                 bind: *bind,
                                 inline_widget: widget_registry.new(cx, matched.live_type).unwrap(),
                             }
                         });
+                        
                         widget_draw_order.push((line, ident));
                     }
                 }
