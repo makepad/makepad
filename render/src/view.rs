@@ -568,7 +568,7 @@ impl DrawCall {
     pub fn reuse_in_place(&mut self, mapping: &CxDrawShaderMapping, draw_vars: &DrawVars) {
         self.draw_shader = draw_vars.draw_shader.unwrap();
         self.geometry_id = draw_vars.geometry_id;
-        self.instances.as_mut().unwrap().truncate(0);
+        self.instances.as_mut().unwrap().clear();
         self.total_instance_slots = mapping.instances.total_slots;
         for i in 0..mapping.user_uniforms.total_slots {
             self.user_uniforms[i] = draw_vars.user_uniforms[i];

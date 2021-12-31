@@ -60,7 +60,7 @@ pub struct LiveEditor {
     #[rust] lines_layout: LinesLayout,
     #[rust] widget_draw_order: Vec<(usize, WidgetIdent)>,
     #[rust] widgets: ComponentGc<WidgetIdent, Widget>,
-    #[rust] fold_buttons: ComponentGc<usize, (FoldButton, usize)>,
+    #[rust] fold_buttons: ComponentGc<u64, FoldButton>,
 }
 
 impl LiveHook for LiveEditor{
@@ -70,7 +70,7 @@ impl LiveHook for LiveEditor{
             registries.get::<CxInlineWidgetRegistry>().apply(cx, apply_from, index, nodes, widget.inline_widget.as_mut());
         }
         if let Some(index) = nodes.child_by_name(index, id!(fold_button)){
-            for (fold_button,_) in self.fold_buttons.values_mut(){
+            for fold_button in self.fold_buttons.values_mut(){
                 fold_button.apply(cx, apply_from, index, nodes);
             }
         }
@@ -127,16 +127,18 @@ impl LiveEditor {
         }
     }
     
-    pub fn draw_fold_buttons(&mut self, cx:&mut Cx){
+    pub fn draw_fold_buttons(&mut self, cx:&mut Cx, document_inner: &DocumentInner){
         let mut last_line = None;
         let origin = cx.get_turtle_pos();
+        
+        let inline_cache = document_inner.inline_cache.borrow_mut();
         
         for (line, _) in &self.widget_draw_order {
             if Some(line) != last_line { // start a new draw segment with the turtle
                 let ll = &self.lines_layout.lines[*line];
-                
-                let (fb,_) = self.fold_buttons.get_or_insert_with_ptr(cx, *line, self.fold_button, |cx,ptr|{
-                    (FoldButton::new_from_ptr(cx, ptr), *line)
+                let fold_button_id = inline_cache[*line].fold_button_id.unwrap();
+                let fb = self.fold_buttons.get_or_insert_with_ptr(cx, fold_button_id, self.fold_button, |cx,ptr|{
+                    FoldButton::new_from_ptr(cx, ptr)
                 });
                 fb.draw_abs(cx, vec2(origin.x, origin.y + ll.start_y));
             }
@@ -232,7 +234,7 @@ impl LiveEditor {
             
             self.editor_impl.draw_linenums(cx, &self.lines_layout, *session.cursors.last_inserted());
             
-            self.draw_fold_buttons(cx);
+            self.draw_fold_buttons(cx, document_inner);
             
             self.editor_impl.end(cx, &self.lines_layout);
         }
@@ -306,17 +308,19 @@ impl LiveEditor {
         }
 
         let mut fold_actions = Vec::new();
-        for (fold_button, line) in self.fold_buttons.values_mut(){
-            fold_button.handle_event(cx, event, &mut |_, action| fold_actions.push((action, *line)));
+        for (fold_button_id, fold_button) in self.fold_buttons.iter_mut(){
+            fold_button.handle_event(cx, event, &mut |_, action| fold_actions.push((action, *fold_button_id)));
         }
-        for (action, line) in fold_actions{
+        for (action, fold_button_id) in fold_actions{
             match action{
                 FoldButtonAction::Animating(opened)=>{
                     let session = &state.sessions[session_id];
                     let document = &state.documents[session.document_id];
                     let document_inner = document.inner.as_ref().unwrap();
                     let mut inline_cache = document_inner.inline_cache.borrow_mut();
-                    inline_cache.lines[line].opened = opened;
+                    if let Some(line) = inline_cache.iter_mut().find(|line| line.fold_button_id == Some(fold_button_id)){
+                        line.opened = opened;
+                    }
                     self.editor_impl.redraw(cx);
                 }
                 _=>()

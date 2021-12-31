@@ -10,7 +10,7 @@ use {
         token_cache::TokenCache,
     },
     std::{
-        ops::{Deref, Index},
+        ops::{Deref, DerefMut, Index},
         slice::Iter,
     },
     makepad_render::makepad_live_compiler::{LiveTokenId, LiveToken, TextPos, LivePtr},
@@ -27,12 +27,14 @@ pub struct InlineEditBind {
 
 #[derive(Debug, Default)]
 pub struct Line {
+    pub fold_button_id: Option<u64>,
     pub is_clean: bool,
     pub opened: f32,
     pub items: Vec<InlineEditBind>
 }
 
 pub struct InlineCache {
+    pub fold_button_alloc: u64,
     pub lines: Vec<Line>,
     pub live_register_range: Option<TokenRange>,
     pub is_clean: bool,
@@ -41,6 +43,7 @@ pub struct InlineCache {
 impl InlineCache {
     pub fn new(text: &Text) -> InlineCache {
         InlineCache {
+            fold_button_alloc: 0,
             is_clean: false,
             live_register_range: None,
             lines: (0..text.as_lines().len())
@@ -110,12 +113,31 @@ impl InlineCache {
     pub fn invalidate_all(&mut self) {
         self.is_clean = false;
         for line in &mut self.lines {
-            line.items.truncate(0);
+            line.items.clear();
             line.is_clean = false;
         }
     }
     
     pub fn invalidate(&mut self, delta: &Delta) {
+        // if we get a insert/delete with the same ranges
+        let ranges = delta.operation_ranges();
+        if ranges.count() == 2 {
+            let mut ranges = delta.operation_ranges();
+            if let OperationRange::Insert(del_range) = ranges.next().unwrap() {
+                if let OperationRange::Delete(insert_range) = ranges.next().unwrap() {
+                    if del_range.start.line == insert_range.start.line &&
+                    del_range.end.line == insert_range.end.line {
+                        self.is_clean = false;
+                        for line in &mut self.lines[insert_range.start.line..insert_range.end.line] {
+                            line.is_clean = false;
+                            line.items.clear();
+                        }
+                        println!("NO-OP DETECTED");
+                        return
+                    }
+                }
+            }
+        }
         for operation_range in delta.operation_ranges() {
             match operation_range {
                 OperationRange::Insert(range) => {
@@ -170,7 +192,7 @@ impl InlineCache {
             line_cache.items.clear();
             line_cache.is_clean = true;
         }
-
+        
         for (line, line_cache) in self.lines[range.start.line..range.end.line].iter_mut().enumerate() {
             let line = line + range.start.line;
             if line_cache.is_clean {
@@ -181,6 +203,12 @@ impl InlineCache {
             if line_cache.items.len() != 0 {
                 panic!();
             }
+            if line_cache.fold_button_id.is_none(){
+                line_cache.fold_button_id = Some(self.fold_button_alloc);
+                self.fold_button_alloc += 1;
+            }
+            
+            
             let tokens_line = &token_cache[line].tokens();
             let mut column = 0;
             for (edit_token_index, token) in tokens_line.iter().enumerate() {
@@ -231,6 +259,12 @@ impl Deref for InlineCache {
     
     fn deref(&self) -> &Self::Target {
         &self.lines
+    }
+}
+
+impl DerefMut for InlineCache {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.lines
     }
 }
 

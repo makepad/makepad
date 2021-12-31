@@ -542,7 +542,7 @@ impl<'a> Cursor<'a> {
     }
     
     fn from_start_to_scratch(&mut self, start: usize) -> &str {
-        self.scratch.truncate(0);
+        self.scratch.clear();
         for i in start..self.index {
             self.scratch.push(self.chars[i]);
         }
