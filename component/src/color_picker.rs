@@ -163,7 +163,7 @@ impl ColorPicker {
                 self.val = 1.0 - clamp((vy + rsize) / (2.0 * rsize), 0.0, 1.0);
             },
             ColorPickerDragMode::Wheel => {
-                self.hue = vx.atan2(vy) / std::f32::consts::PI * 0.5 - 0.33333;
+                self.hue = (vx.atan2(vy) / std::f32::consts::PI * 0.5) - 0.33333+1.0;
             },
             _ => ()
         }
