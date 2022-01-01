@@ -30,13 +30,29 @@ live_register!{
     use makepad_component::fold_button::FoldButton;
     
     LiveEditor: {{LiveEditor}} {
+        
+        zoomin_state: {
+            duration: 0.3,
+            ease:Ease::OutExp
+            apply: {zoomout:0.0}
+        }
+        
+        zoomout_state: {
+            from: {all: Play::Forward {duration: 0.3, redraw: true}}
+            apply: {
+                zoomout: [{value: 1.0, ease: Ease::OutExp}],
+            }
+        }
+        
         fold_button: FoldButton{
             bg_quad:{no_h_scroll: true}
         }
+        
         widget_layout: Layout {
             align: Align {fx: 0.2, fy: 0.},
             padding: Padding {l: 0, t: .0, r: 0, b: 0}
         }
+        
         editor_impl: {}
     }
 }
@@ -55,6 +71,12 @@ pub struct LiveEditor {
 
     widget_layout: Layout,
     fold_button: Option<LivePtr>,
+
+    zoomout: f32,
+    zoomout_state: Option<LivePtr>,
+    zoomin_state: Option<LivePtr>,
+    
+    #[default_state(zoomin_state)] animator: Animator,
     
     #[rust] lines_layout: LinesLayout,
     #[rust] widget_draw_order: Vec<(usize, WidgetIdent)>,
@@ -172,7 +194,7 @@ impl LiveEditor {
                 if let Some(matched) = widget_registry.match_inline_widget(&live_registry, *bind) {
                     let cache_line = &inline_cache.lines[line];
                     
-                    let widget_height = matched.height * cache_line.opened;
+                    let widget_height = matched.height * cache_line.line_opened;
                    
                     max_height = max_height.max(widget_height);
                     
@@ -320,7 +342,7 @@ impl LiveEditor {
                     let document_inner = document.inner.as_ref().unwrap();
                     let mut inline_cache = document_inner.inline_cache.borrow_mut();
                     if let Some(line) = inline_cache.iter_mut().find(|line| line.fold_button_id == Some(fold_button_id)){
-                        line.opened = opened;
+                        line.line_opened = opened;
                     }
                     self.editor_impl.redraw(cx);
                 }

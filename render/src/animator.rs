@@ -26,20 +26,20 @@ pub struct KeyFrame {
 
 #[derive(Copy, Clone, Debug, PartialEq, Live, LiveHook)]
 pub enum Play {
-    #[pick {duration: 1.0, redraw: false}]
-    Forward {duration: f64, redraw: bool},
+    #[pick {duration: 1.0}]
+    Forward {duration: f64},
     
-    #[live {duration: 1.0, end: 1.0, redraw: false}]
-    Reverse {duration: f64, end: f64, redraw: bool},
+    #[live {duration: 1.0, end: 1.0}]
+    Reverse {duration: f64, end: f64},
     
-    #[live {duration: 1.0, end: 1.0, redraw: false}]
-    Loop {duration: f64, end: f64, redraw: bool},
+    #[live {duration: 1.0, end: 1.0}]
+    Loop {duration: f64, end: f64},
     
-    #[live {duration: 1.0, end: 1.0, redraw: false}]
-    ReverseLoop {duration: f64, end: f64, redraw: bool},
+    #[live {duration: 1.0, end: 1.0}]
+    ReverseLoop {duration: f64, end: f64},
     
-    #[live {duration: 1.0, end: 1.0, redraw: false}]
-    BounceLoop {duration: f64, end: f64, redraw: bool},
+    #[live {duration: 1.0, end: 1.0}]
+    BounceLoop {duration: f64, end: f64},
 }
 
 impl Play {
@@ -53,31 +53,31 @@ impl Play {
         }
     }
     
-    pub fn get_ended_time(&self, time: f64) -> (bool, f64, bool) {
+    pub fn get_ended_time(&self, time: f64) -> (bool, f64) {
         match self {
-            Self::Forward {duration, redraw} => {
-                if *duration == 0.0{return (true, 1.0, *redraw)}
-                (time > *duration, time.min(*duration) / duration, *redraw)
+            Self::Forward {duration} => {
+                if *duration == 0.0{return (true, 1.0)}
+                (time > *duration, time.min(*duration) / duration)
             },
-            Self::Reverse {duration, end, redraw} => {
-                if *duration == 0.0{return (true, 1.0, *redraw)}
-                (time > *duration, end - (time.min(*duration) / duration), *redraw)
+            Self::Reverse {duration, end} => {
+                if *duration == 0.0{return (true, 1.0)}
+                (time > *duration, end - (time.min(*duration) / duration))
             },
-            Self::Loop {duration, end, redraw} => {
-                if *duration == 0.0{return (true, 1.0, *redraw)}
-                (false, (time / duration) % end, *redraw)
+            Self::Loop {duration, end} => {
+                if *duration == 0.0{return (true, 1.0)}
+                (false, (time / duration) % end)
             },
-            Self::ReverseLoop {end, duration, redraw} => {
-                if *duration == 0.0{return (true, 1.0, *redraw)}
-                (false, end - (time / duration) % end, *redraw)
+            Self::ReverseLoop {end, duration} => {
+                if *duration == 0.0{return (true, 1.0)}
+                (false, end - (time / duration) % end)
             },
-            Self::BounceLoop {end, duration, redraw} => {
-                if *duration == 0.0{return (true, 1.0, *redraw)}
+            Self::BounceLoop {end, duration} => {
+                if *duration == 0.0{return (true, 1.0)}
                 let mut local_time = (time / duration) % (end * 2.0);
                 if local_time > *end {
                     local_time = 2.0 * end - local_time;
                 };
-                (false, local_time, *redraw)
+                (false, local_time)
             },
         }
     }
@@ -525,10 +525,12 @@ impl Animator {
             let mut node_iter = nodes.first_child(index);
             
             // compute the animation time from the id
-            let (ended, time, redraw) = if let Some(id_index) = node_iter {
-                if let LiveValue::Id(id) = nodes[id_index].value {
+            let (ended, time, redraw, track_id) = if let Some(id_index) = node_iter {
+                if let LiveValue::Id(track_id) = nodes[id_index].value {
                     // ok so now we have to find our id in tracks
-                    if let Some(index) = nodes.child_by_path(0, &[id!(tracks), id, id!(ended)]) {
+                    let track_index = nodes.child_by_path(0, &[id!(tracks), track_id]).unwrap();
+
+                    if let Some(index) = nodes.child_by_name(track_index, id!(ended)) {
                         if let LiveValue::Int(ended) = &mut nodes[index].value{
                             if *ended>0{
                                 if *ended == 1{
@@ -541,7 +543,6 @@ impl Animator {
                     else {
                         panic!();
                     }
-                    let track_index = nodes.child_by_path(0, &[id!(tracks), id]).unwrap();
                     let time_index = nodes.child_by_name(track_index, id!(time)).unwrap();
                     
                     let start_time = match &nodes[time_index].value {
@@ -566,19 +567,32 @@ impl Animator {
                     };
                     node_iter = nodes.next_child(id_index);
 
-                    let (ended, time, redraw) = play.get_ended_time(ext_time - start_time);
+                    let (ended, time) = play.get_ended_time(ext_time - start_time);
 
                     if ended{ // mark ended step 1
-                        if let Some(index) = nodes.child_by_path(0, &[id!(tracks), id, id!(ended)]) {
+                        if let Some(index) = nodes.child_by_name(track_index, id!(ended)) {
                             nodes[index].value = LiveValue::Int(1);
                         }
                     }
-                    (ended, time, redraw)
+                    
+                    let redraw = if let Some(index) = nodes.child_by_name(track_index, id!(redraw)) {
+                        if let LiveValue::Bool(redraw) = &nodes[index].value{
+                            *redraw
+                        }else{false}
+                    }else{false};
+                    
+                    (ended, time, redraw, track_id)
                 }
                 else {panic!()}
             }
             else {panic!()};
             
+            let default_ease = if let Some(ease_index) = nodes.child_by_path(0, &[id!(tracks), track_id, id!(ease)]){
+                Ease::new_apply(cx, ApplyFrom::New, ease_index, nodes)
+            }
+            else{
+                Ease::Linear
+            };
             
             let mut prev_kf: Option<KeyFrame> = None;
             let mut last_child_index = node_iter.unwrap();
@@ -590,21 +604,25 @@ impl Animator {
                 let next_kf = if nodes[node_index].is_value_type() { // we hit a bare value node
                     if prev_kf.is_some() {
                         KeyFrame {
-                            ease: Ease::Linear,
+                            ease: default_ease.clone(),
                             time: 1.0,
                             value: nodes[node_index].value.clone()
                         }
                     }
                     else {
                         KeyFrame {
-                            ease: Ease::Linear,
+                            ease: default_ease.clone(),
                             time: 0.0,
                             value: nodes[node_index].value.clone()
                         }
                     }
                 }
                 else { // try to deserialize a keyframe
-                    KeyFrame::new_apply(cx, ApplyFrom::New, node_index, nodes)
+                    let mut kf = KeyFrame::new_apply(cx, ApplyFrom::New, node_index, nodes);
+                    if nodes.child_by_name(node_index, id!(ease)).is_none(){
+                        kf.ease = default_ease.clone();
+                    }
+                    kf
                 };
                 
                 if let Some(prev_kf) = prev_kf {
@@ -891,6 +909,7 @@ impl Animator {
             [track]: {state_id: (state_id), ended:0, time:void}
         });
         
+        // copy in from track
         if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(from)){
             if let Some(reader) = reader.child_by_name(from_id) {
                 state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(play)], reader.node_slice());
@@ -898,8 +917,23 @@ impl Animator {
             else if let Some(reader) = reader.child_by_name(id!(all)) {
                 state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(play)], reader.node_slice());
             }
-            state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(time)], live_array!{void});
         }
+        else if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(duration)){ // we dont have a from. we should use duration property and construct a play::forward
+            state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(play)], live_object!{
+                play: Play::Forward{duration:(reader.node().value.as_float().unwrap_or(1.0))}
+            });
+        }
+        
+        // copy ease default if we have one
+        if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(ease)){
+            state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(ease)], reader.node_slice());
+        }
+
+        if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(redraw)){
+            state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(redraw)], reader.node_slice());
+        }
+
+        state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(time)], live_array!{void});
 
         path.push(id!(state));
         reader.walk();

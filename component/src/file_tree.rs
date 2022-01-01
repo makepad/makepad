@@ -13,7 +13,7 @@ live_register!{
     use makepad_render::shader::std::*;
     
     DrawBgQuad: {{DrawBgQuad}} {
-
+        
         const COLOR_EVEN: #25
         const COLOR_ODD: #28
         const COLOR_SELECTED: #x11466E
@@ -79,7 +79,7 @@ live_register!{
         }
         
         default_state: {
-            from: {all: Play::Forward {duration: 0.2}}
+            duration: 0.2
             apply: {
                 hover: 0.0,
                 bg_quad: {hover: (hover)}
@@ -89,13 +89,13 @@ live_register!{
         }
         
         hover_state: {
-            from: {all: Play::Forward {duration: 0.1}}
+            duration: 0.1
             apply: {hover: [{time: 0.0, value: 1.0}]},
         }
         
         unselected_state: {
             track: select,
-            from: {all: Play::Forward {duration: 0.1, redraw: true}}
+            duration: 0.1,
             apply: {
                 selected: 0.0,
                 bg_quad: {selected: (selected)}
@@ -106,7 +106,7 @@ live_register!{
         
         selected_state: {
             track: select,
-            from: {all: Play::Forward {duration: 0.1, redraw: true}}
+            duration: 0.1,
             apply: {
                 selected: [{time: 0.0, value: 1.0}],
             }
@@ -114,9 +114,11 @@ live_register!{
         
         closed_state: {
             track: open,
-            from: {all: Play::Forward {duration: 0.3, redraw: true}}
+            duration: 0.3
+            redraw: true
+            ease: Ease::OutExp
             apply: {
-                opened: [{value: 0.0, ease: Ease::OutExp}],
+                opened: 0.0,
                 bg_quad: {opened: (opened)}
                 name_text: {opened: (opened)}
                 icon_quad: {opened: (opened)}
@@ -125,9 +127,11 @@ live_register!{
         
         opened_state: {
             track: open,
-            from: {all: Play::Forward {duration: 0.3, redraw: true}}
+            duration: 0.3
+            redraw: true
+            ease: Ease::OutExp
             apply: {
-                opened: [{value: 1.0, ease: Ease::OutExp}],
+                opened: 1.0,
             }
         }
         is_folder: false,
@@ -232,17 +236,17 @@ pub struct FileTree {
     #[rust] dragging_node_id: Option<FileNodeId>,
     #[rust] selected_node_id: Option<FileNodeId>,
     #[rust] open_nodes: HashSet<FileNodeId>,
-
+    
     #[rust] tree_nodes: ComponentGc<FileNodeId, (FileTreeNode, LiveId)>,
-
+    
     #[rust] count: usize,
     #[rust] stack: Vec<f32>,
 }
 
-impl LiveHook for FileTree{
+impl LiveHook for FileTree {
     fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         for (_, (tree_node, id)) in self.tree_nodes.iter_mut() {
-            if let Some(index) = nodes.child_by_name(index, *id){
+            if let Some(index) = nodes.child_by_name(index, *id) {
                 tree_node.apply(cx, apply_from, index, nodes);
             }
         }
@@ -415,7 +419,7 @@ impl FileTree {
         self.scroll_view.end(cx);
         
         let selected_node_id = self.selected_node_id;
-        self.tree_nodes.retain_visible_and(| node_id, _ | Some(*node_id) == selected_node_id);
+        self.tree_nodes.retain_visible_and( | node_id, _ | Some(*node_id) == selected_node_id);
     }
     
     pub fn is_even(count: usize) -> f32 {
@@ -454,14 +458,14 @@ impl FileTree {
         
         if self.should_node_draw(cx) {
             
-            let (tree_node,_) = self.tree_nodes.get_or_insert_with_ptr(cx, node_id, self.folder_node, |cx,ptr|{
+            let (tree_node, _) = self.tree_nodes.get_or_insert_with_ptr(cx, node_id, self.folder_node, | cx, ptr | {
                 let mut tree_node = FileTreeNode::new_from_ptr(cx, ptr);
-                    if is_open {
-                        tree_node.set_folder_is_open(cx, true, false)
-                    }
-                    (tree_node, id!(folder_node))
+                if is_open {
+                    tree_node.set_folder_is_open(cx, true, false)
+                }
+                (tree_node, id!(folder_node))
             });
-
+            
             tree_node.draw_folder(cx, name, Self::is_even(self.count), self.node_height, self.stack.len(), scale);
             self.stack.push(tree_node.opened * scale);
             if tree_node.opened == 0.0 {
@@ -491,7 +495,7 @@ impl FileTree {
             self.count += 1;
         }
         if self.should_node_draw(cx) {
-            let (tree_node,_) = self.tree_nodes.get_or_insert_with_ptr(cx, node_id, self.file_node, |cx,ptr|{
+            let (tree_node, _) = self.tree_nodes.get_or_insert_with_ptr(cx, node_id, self.file_node, | cx, ptr | {
                 (FileTreeNode::new_from_ptr(cx, ptr), id!(file_node))
             });
             tree_node.draw_file(cx, name, Self::is_even(self.count), self.node_height, self.stack.len(), scale);
@@ -519,7 +523,7 @@ impl FileTree {
         else {
             self.open_nodes.remove(&node_id);
         }
-        if let Some((tree_node,_)) = self.tree_nodes.get_mut(&node_id) {
+        if let Some((tree_node, _)) = self.tree_nodes.get_mut(&node_id) {
             tree_node.set_folder_is_open(cx, is_open, should_animate);
         }
     }
@@ -554,7 +558,7 @@ impl FileTree {
         }
         
         let mut actions = Vec::new();
-        for (node_id, (node,_)) in self.tree_nodes.iter_mut() {
+        for (node_id, (node, _)) in self.tree_nodes.iter_mut() {
             node.handle_event(cx, event, &mut | _, e | actions.push((*node_id, e)));
         }
         
