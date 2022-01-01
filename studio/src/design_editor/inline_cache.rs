@@ -29,7 +29,8 @@ pub struct InlineEditBind {
 pub struct Line {
     pub fold_button_id: Option<u64>,
     pub is_clean: bool,
-    pub opened: f32,
+    pub line_opened: f32,
+    pub line_zoomout: f32,
     pub items: Vec<InlineEditBind>
 }
 

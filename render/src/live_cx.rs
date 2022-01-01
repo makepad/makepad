@@ -151,7 +151,7 @@ impl Cx {
             live_body.code,
             live_body.live_type_infos,
             TextPos {line: live_body.line as u32, column: live_body.column as u32}
-        );
+        ); 
         //println!("END");
         if let Err(err) = result {
             println!("Error parsing live file {}", err);

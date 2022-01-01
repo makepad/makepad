@@ -49,7 +49,7 @@ live_register!{
         }
         
         default_state: {
-            from: {all: Play::Forward {duration: 0.1}}
+            duration: 0.1,
             apply:{
                 bg_quad: {pressed: 0.0, hover: 0.0}
                 label_text: {color: #9}
@@ -71,7 +71,7 @@ live_register!{
         }
         
         pressed_state: {
-            from: {all: Play::Forward {duration: 0.2}}
+            duration: 0.2,
             apply: {
                 bg_quad: {
                     pressed: [{time: 0.0, value: 1.0}],
