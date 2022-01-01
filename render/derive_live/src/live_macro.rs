@@ -73,11 +73,11 @@ fn parse_value(prop_id:TokenStream, parser:&mut TokenParser, tb:&mut TokenBuilde
             // now check if we have a , eot or ( or {
             if parser.is_punct_alone(',') || parser.is_eot(){
                 tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:").stream(Some(prop_id)).add(",value:LiveValue::BareEnum{");
-                tb.add("class:LiveId(").suf_u64(class_id).add("), variant:LiveId(").suf_u64(variant_id).add(")}},");
+                tb.add("base:LiveId(").suf_u64(class_id).add("), variant:LiveId(").suf_u64(variant_id).add(")}},");
             }
             else if parser.is_brace(){
-                tb.add("LiveNode{id:").stream(Some(prop_id.clone())).add(",value:LiveValue::NamedEnum{");
-                tb.add("class:LiveId(").suf_u64(class_id).add("), variant:LiveId(").suf_u64(variant_id).add(")}},");
+                tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:").stream(Some(prop_id.clone())).add(",value:LiveValue::NamedEnum{");
+                tb.add("base:LiveId(").suf_u64(class_id).add("), variant:LiveId(").suf_u64(variant_id).add(")}},");
                 parser.open_group();
                 while !parser.eat_eot(){
                     let prop = parser.expect_any_ident()?;
@@ -92,7 +92,7 @@ fn parse_value(prop_id:TokenStream, parser:&mut TokenParser, tb:&mut TokenBuilde
             }
             else if parser.is_paren(){
                 tb.add("LiveNode{origin:LiveNodeOrigin::empty(), id:").stream(Some(prop_id.clone())).add(",value:LiveValue::TupleEnum{");
-                tb.add("class:LiveId(").suf_u64(class_id).add("), variant:LiveId(").suf_u64(variant_id).add(")}},");
+                tb.add("base:LiveId(").suf_u64(class_id).add("), variant:LiveId(").suf_u64(variant_id).add(")}},");
                 parser.open_group();
                 while !parser.eat_eot(){
                     let mut prop_id_ts = TokenBuilder::new();

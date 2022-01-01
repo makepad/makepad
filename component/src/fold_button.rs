@@ -27,8 +27,8 @@ live_register!{
             }
         }
         
-        abs_size: vec2(32,12)
-        abs_offset: vec2(4.,0.)
+        abs_size: vec2(32, 12)
+        abs_offset: vec2(4., 0.)
         
         walk: Walk {
             width: Width::Fixed(15),
@@ -51,20 +51,20 @@ live_register!{
         }
         
         closed_state: {
-            track: open,
-            from: {all: Play::Forward {duration: 0.2}}
+            track: open
+            duration: 0.2
+            ease: Ease::OutExp
             apply: {
-                opened: [{value: 0.0, ease: Ease::OutExp}],
+                opened: 0.0,
                 bg_quad: {opened: (opened)}
             }
         }
         
         opened_state: {
             track: open,
-            from: {all: Play::Forward {duration: 0.2}}
-            apply: {
-                opened: [{value: 1.0, ease: Ease::OutExp}],
-            }
+            duration: 0.2
+            ease: Ease::OutExp,
+            apply: {opened: 1.0,}
         }
     }
 }
@@ -102,8 +102,8 @@ impl FoldButton {
         event: &mut Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, FoldButtonAction),
     ) {
-        if self.animator_handle_event(cx, event).is_animating(){
-            if self.animator.is_track_animating(cx, self.closed_state){
+        if self.animator_handle_event(cx, event).is_animating() {
+            if self.animator.is_track_animating(cx, self.closed_state) {
                 dispatch_action(cx, FoldButtonAction::Animating(self.opened))
             }
         };
@@ -130,8 +130,8 @@ impl FoldButton {
         self.bg_quad.draw_walk(cx, self.walk);
     }
     
-    pub fn draw_abs(&mut self, cx: &mut Cx, pos:Vec2) {
-        self.bg_quad.draw_abs(cx, Rect{
+    pub fn draw_abs(&mut self, cx: &mut Cx, pos: Vec2) {
+        self.bg_quad.draw_abs(cx, Rect {
             pos: pos + self.abs_offset,
             size: self.abs_size
         });
