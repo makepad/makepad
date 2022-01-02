@@ -191,9 +191,12 @@ impl LiveEditor {
         for (line, _) in &self.widget_draw_order {
             if Some(line) != last_line { // start a new draw segment with the turtle
                 let layout = &self.lines_layout.lines[*line];
+                let line_opened = inline_cache[*line].line_opened;
                 let fold_button_id = inline_cache[*line].fold_button_id.unwrap();
                 let fb = self.fold_buttons.get_or_insert_with_ptr(cx, fold_button_id, self.fold_button, | cx, ptr | {
-                    FoldButton::new_from_ptr(cx, ptr)
+                    let mut btn = FoldButton::new_from_ptr(cx, ptr);
+                    btn.set_is_opened(cx, line_opened > 0.5, false);
+                    btn 
                 });
                 
                 fb.draw_abs(cx, vec2(origin.x, origin.y + layout.start_y), 1.0 - layout.zoom_out);
