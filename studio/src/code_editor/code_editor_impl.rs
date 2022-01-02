@@ -153,23 +153,19 @@ live_register!{
             apply: {caret_quad: {color: #0000}}
         }
         
-        /*zoom_in_state: {
+        zoom_in_state: {
             track: zoom
-            exp: 0.97 // when you interrupt an exp. then what we toggle the invert
-            duration: 0.6,
+            from:{all:Play::Exp{speed1:0.96,speed2:0.97}}
             redraw: true
-            ease: Ease::OutExp
             apply: {zoom_out: [{time:0.0,value:1.0},{time:1.0,value:0.0}]}
         } 
         zoom_out_state: { 
             track: zoom
-            exp: 0.93 // when you interrupt an exp. then what we toggle the invert
-            duration: 0.4,
+            from:{all:Play::Exp{speed1:0.98,speed2:0.95}}
             redraw: true
-            ease: Ease::OutExp
             apply: {zoom_out: [{time:0.0,value:0.0},{time:1.0,value:1.0}]}
-        }*/
-        
+        }
+        /*
         zoom_in_state: {
             track: zoom
             duration: 0.6,
@@ -183,7 +179,7 @@ live_register!{
             redraw: true
             ease: Ease::OutExp
             apply: {zoom_out: 1.0}
-        }
+        }*/
         
         max_zoom_out: 0.92
         
