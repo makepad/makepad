@@ -63,7 +63,7 @@ live_register!{
         opened_state: {
             track: open,
             duration: 0.2
-            ease: Ease::OutExp,
+            ease: Ease::OutExp
             apply: {opened: 1.0,}
         }
     }

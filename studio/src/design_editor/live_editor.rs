@@ -21,7 +21,10 @@ use {
         fold_button::{FoldButton, FoldButtonAction},
         ComponentGc,
     },
-    makepad_render::makepad_live_compiler::{LiveTokenId, LiveEditEvent},
+    makepad_render::makepad_live_compiler,
+    makepad_live_compiler::makepad_live_tokenizer,
+    makepad_live_compiler::{LiveTokenId, LiveEditEvent},
+    makepad_live_tokenizer::{FullToken, TokenWithLen},
     makepad_render::*,
 };
 
@@ -41,6 +44,8 @@ live_register!{
             padding: Padding {l: 0, t: .0, r: 0, b: 0}
         }
         
+        zoom_indent_depth: 8
+        
         editor_impl: {}
     }
 }
@@ -59,6 +64,8 @@ pub struct LiveEditor {
     
     widget_layout: Layout,
     fold_button: Option<LivePtr>,
+    
+    zoom_indent_depth: usize,
     
     #[rust] lines_layout: LinesLayout,
     #[rust] widget_draw_order: Vec<(usize, WidgetIdent)>,
@@ -161,6 +168,8 @@ impl LiveEditor {
         let mut inline_cache = document_inner.inline_cache.borrow_mut();
         inline_cache.refresh(cx, path, &document_inner.token_cache);
         
+        let token_cache = &document_inner.token_cache;
+        
         // first we generate the layout structure
         let live_registry_rc = cx.live_registry.clone();
         let live_registry = live_registry_rc.borrow();
@@ -169,9 +178,9 @@ impl LiveEditor {
         
         let widget_draw_order = &mut self.widget_draw_order;
         
-        
         let registries = cx.registries.clone();
         let widget_registry = registries.get::<CxInlineWidgetRegistry>();
+        let zoom_indent_depth = self.zoom_indent_depth;
         
         self.editor_impl.calc_lines_layout(cx, document_inner, &mut self.lines_layout, | cx, input | {
             if input.clear {
@@ -179,6 +188,29 @@ impl LiveEditor {
             }
             let edit_info = &inline_cache[input.line];
             let mut max_height = 0.0f32;
+            
+            let ws = document_inner.indent_cache[input.line].virtual_leading_whitespace();
+            // ok so. we have to determine wether we are going to fold.
+            // if a line starts with # or a comment: fold it
+            let mut zoom_out = 0.0;
+            let mut zoom_column = 0;
+            
+            match token_cache[input.line].tokens().first() {
+                Some(TokenWithLen {token: FullToken::Comment, ..}) |
+                Some(TokenWithLen {token: FullToken::Punct(id!(#)), ..}) |
+                None => {
+                    zoom_out = input.zoom_out
+                }
+                Some(TokenWithLen {token: FullToken::Whitespace, ..}) if token_cache[input.line].tokens().len() == 1 => {
+                    zoom_out = input.zoom_out
+                }
+                _ => ()
+            }
+            
+            if ws >= zoom_indent_depth {
+                zoom_column = zoom_indent_depth;
+                zoom_out = input.zoom_out;
+            }
             
             for bind in &edit_info.items {
                 if let Some(matched) = widget_registry.match_inline_widget(&live_registry, *bind) {
@@ -202,9 +234,12 @@ impl LiveEditor {
                     }
                 }
             }
-            return LineLayoutOutput {widget_height: max_height}
+            return LineLayoutOutput {
+                zoom_out,
+                zoom_column,
+                widget_height: max_height
+            }
         });
-        
         widgets.retain_visible();
     }
     
@@ -218,7 +253,7 @@ impl LiveEditor {
                 cx,
                 &path,
                 document_inner,
-            ); 
+            );
             
             self.editor_impl.draw_selections(
                 cx,
