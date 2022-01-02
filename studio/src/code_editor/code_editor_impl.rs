@@ -12,7 +12,6 @@ use {
             cursor::Cursor,
             indent_cache::IndentCache,
             protocol::Request,
-            token_cache::TokenCache,
         },
     },
     makepad_live_tokenizer::{
@@ -22,7 +21,6 @@ use {
         range_set::{RangeSet, Span},
         size::Size,
         text::{Text},
-        full_token::{FullToken, Delim},
     },
     makepad_component::makepad_render,
     makepad_render::makepad_live_tokenizer,
@@ -122,25 +120,10 @@ live_register!{
         line_num_width: 45.0,
         padding_top: 30.0,
         
-        text_color_type_name: #56c9b1;
-        text_color_comment: #638d54
-        text_color_lifetime: #d4d4d4
-        text_color_identifier: #d4d4d4
-        text_color_function_identifier: #dcdcae
-        text_color_macro_identifier: #dcdcae
-        text_color_branch_keyword: #c485be
-        text_color_loop_keyword: #ff8c00
-        text_color_other_keyword: #5b9bd3
-        text_color_bool: #5b9bd3
-        text_color_number: #b6ceaa
-        text_color_punctuator: #d4d4d4
-        text_color_string: #cc917b
-        text_color_whitespace: #6e6e6e
-        text_color_unknown: #808080
-        text_color_color: #cc917b
         text_color_linenum: #88
         text_color_linenum_current: #d4
-        
+        text_color_indent_line: #808080
+
         selection_quad: {
             color: #294e75
         }
@@ -196,7 +179,7 @@ live_register!{
 pub struct CodeEditorImpl {
     #[rust] pub session_id: Option<SessionId>,
     
-    #[rust] text_glyph_size: Vec2,
+    #[rust] pub text_glyph_size: Vec2,
     #[rust] caret_blink_timer: Timer,
     #[rust] select_scroll: Option<SelectScroll>,
     #[rust] last_move_position: Option<Position>,
@@ -226,6 +209,10 @@ pub struct CodeEditorImpl {
     line_num_text: DrawText,
     indent_lines_quad: DrawIndentLines,
     
+    text_color_linenum: Vec4,
+    text_color_linenum_current: Vec4,
+    text_color_indent_line: Vec4,
+
     current_line_quad: DrawColor,
     
     scroll_shadow: ScrollShadow,
@@ -233,24 +220,6 @@ pub struct CodeEditorImpl {
     pub line_num_width: f32,
     caret_blink_timeout: f64,
     
-    text_color_color: Vec4,
-    text_color_type_name: Vec4,
-    text_color_linenum: Vec4,
-    text_color_linenum_current: Vec4,
-    text_color_comment: Vec4,
-    text_color_lifetime: Vec4,
-    text_color_identifier: Vec4,
-    text_color_macro_identifier: Vec4,
-    text_color_function_identifier: Vec4,
-    text_color_branch_keyword: Vec4,
-    text_color_loop_keyword: Vec4,
-    text_color_other_keyword: Vec4,
-    text_color_bool: Vec4,
-    text_color_number: Vec4,
-    text_color_punctuator: Vec4,
-    text_color_string: Vec4,
-    text_color_whitespace: Vec4,
-    text_color_unknown: Vec4,
 }
 
 #[derive(Live, LiveHook)]
@@ -450,7 +419,6 @@ impl CodeEditorImpl {
             let center_line = if !view_rect.contains(last_pos) {
                 let start = view_rect.pos + view_rect.size * 0.5;
                 let pos = self.vec2_to_position(&document_inner.text, start, lines_layout);
-                let start = self.position_to_vec2(pos, lines_layout);
                 pos
             }
             else {
@@ -684,7 +652,7 @@ impl CodeEditorImpl {
             let indent_count = (indent_info.virtual_leading_whitespace() + 3) / 4;
             for indent in 0..indent_count {
                 let indent_lines_column = indent * 4;
-                self.indent_lines_quad.color = self.text_color_unknown; // TODO: Colored indent guides
+                self.indent_lines_quad.color = self.text_color_indent_line; // TODO: Colored indent guides
                 self.indent_lines_quad.draw_abs(
                     cx,
                     Rect {
@@ -700,54 +668,6 @@ impl CodeEditorImpl {
         }
     }
     
-    pub fn draw_text(
-        &mut self,
-        cx: &mut Cx,
-        text: &Text,
-        token_cache: &TokenCache,
-        lines_layout: &LinesLayout,
-    ) {
-        let origin = cx.get_turtle_pos();
-        //let mut start_y = visible_lines.start_y;
-        for (line_index, (chars, token_info)) in text
-            .as_lines()
-            .iter()
-            .zip(token_cache.iter())
-            .skip(lines_layout.view_start)
-            .take(lines_layout.view_end - lines_layout.view_start)
-            .enumerate()
-        {
-            let line_index = line_index + lines_layout.view_start;
-
-            let layout = &lines_layout.lines[line_index];
-            let mut start_x = origin.x + self.line_num_width + layout.zoom_displace;
-            let mut start = 0;
-            
-            let mut token_iter = token_info.tokens().iter().peekable();
-            while let Some(token) = token_iter.next() {
-                
-                let next_token = token_iter.peek();
-                let end_x = start_x + token.len as f32 * self.text_glyph_size.x * layout.font_scale;
-                let end = start + token.len;
-                
-                // check if we are whitespace. ifso, just skip rendering
-                if !token.token.is_whitespace() {
-                    self.code_text.font_scale = layout.font_scale;
-                    self.code_text.color = self.text_color(token.token, next_token.map( | next_token | next_token.token));
-                    self.code_text.draw_chunk(
-                        cx,
-                        Vec2 {x: start_x, y: layout.start_y + origin.y},
-                        0,
-                        Some(&chars[start..end])
-                    );
-                }
-                start = end;
-                start_x = end_x;
-            }
-            
-            //start_y = end_y;
-        }
-    }
     
     pub fn draw_carets(
         &mut self,
@@ -797,6 +717,24 @@ impl CodeEditorImpl {
         }
     }
     
+    pub fn draw_code_chunk(
+        &mut self,
+        cx: &mut Cx,
+        font_scale: f32,
+        color: Vec4,
+        pos: Vec2,
+        chunk: &[char],
+    ) {
+        self.code_text.font_scale = font_scale;
+        self.code_text.color = color;
+        self.code_text.draw_chunk(
+            cx,
+            pos,
+            0,
+            Some(chunk)
+        );
+    }
+    
     pub fn draw_current_line(
         &mut self,
         cx: &mut Cx,
@@ -819,116 +757,6 @@ impl CodeEditorImpl {
                     },
                 },
             );
-        }
-    }
-    
-    fn text_color(&self, token: FullToken, next_token: Option<FullToken>) -> Vec4 {
-        match (token, next_token) {
-            (FullToken::Comment, _) => self.text_color_comment,
-            (FullToken::Ident(i), _) if i.is_capitalised() => self.text_color_type_name,
-            (FullToken::Ident(id), Some(FullToken::Open(Delim::Paren))) => self.text_color_function_identifier,
-            (FullToken::Ident(_), Some(FullToken::Punct(id!(!)))) => self.text_color_macro_identifier,
-            
-            (FullToken::Lifetime, _) => self.text_color_lifetime,
-            
-            (FullToken::Ident(id!(if)), _) |
-            (FullToken::Ident(id!(else)), _) |
-            (FullToken::Ident(id!(match)), _) => self.text_color_branch_keyword,
-            
-            (FullToken::Ident(id!(for)), _) |
-            (FullToken::Ident(id!(while)), _) |
-            (FullToken::Ident(id!(break)), _) |
-            (FullToken::Ident(id!(continue)), _) |
-            (FullToken::Ident(id!(loop)), _) => self.text_color_loop_keyword,
-            
-            (FullToken::Ident(id!(abstract)), _) |
-            (FullToken::Ident(id!(async)), _) |
-            (FullToken::Ident(id!(as)), _) |
-            (FullToken::Ident(id!(await)), _) |
-            (FullToken::Ident(id!(become)), _) |
-            (FullToken::Ident(id!(box)), _) |
-            (FullToken::Ident(id!(const)), _) |
-            (FullToken::Ident(id!(crate)), _) |
-            (FullToken::Ident(id!(do)), _) |
-            (FullToken::Ident(id!(dyn)), _) |
-            (FullToken::Ident(id!(enum)), _) |
-            (FullToken::Ident(id!(extern)), _) |
-            (FullToken::Ident(id!(false)), _) |
-            (FullToken::Ident(id!(final)), _) |
-            (FullToken::Ident(id!(fn)), _) |
-            (FullToken::Ident(id!(impl)), _) |
-            (FullToken::Ident(id!(in)), _) |
-            (FullToken::Ident(id!(let)), _) |
-            (FullToken::Ident(id!(macro)), _) |
-            (FullToken::Ident(id!(mod)), _) |
-            (FullToken::Ident(id!(move)), _) |
-            (FullToken::Ident(id!(mut)), _) |
-            (FullToken::Ident(id!(override)), _) |
-            (FullToken::Ident(id!(priv)), _) |
-            (FullToken::Ident(id!(pub)), _) |
-            (FullToken::Ident(id!(ref)), _) |
-            (FullToken::Ident(id!(self)), _) |
-            (FullToken::Ident(id!(static)), _) |
-            (FullToken::Ident(id!(struct)), _) |
-            (FullToken::Ident(id!(super)), _) |
-            (FullToken::Ident(id!(trait)), _) |
-            (FullToken::Ident(id!(true)), _) |
-            (FullToken::Ident(id!(typeof)), _) |
-            (FullToken::Ident(id!(unsafe)), _) |
-            (FullToken::Ident(id!(use)), _) |
-            (FullToken::Ident(id!(unsized)), _) |
-            (FullToken::Ident(id!(virtual)), _) |
-            (FullToken::Ident(id!(yield)), _) |
-            (FullToken::Ident(id!(where)), _) |
-            
-            (FullToken::Ident(id!(u8)), _) |
-            (FullToken::Ident(id!(i8)), _) |
-            (FullToken::Ident(id!(u16)), _) |
-            (FullToken::Ident(id!(i16)), _) |
-            (FullToken::Ident(id!(u32)), _) |
-            (FullToken::Ident(id!(i32)), _) |
-            (FullToken::Ident(id!(f32)), _) |
-            (FullToken::Ident(id!(u64)), _) |
-            (FullToken::Ident(id!(i64)), _) |
-            (FullToken::Ident(id!(f64)), _) |
-            (FullToken::Ident(id!(usize)), _) |
-            (FullToken::Ident(id!(isize)), _) |
-            (FullToken::Ident(id!(bool)), _) |
-
-            (FullToken::Ident(id!(instance)), _) |
-            (FullToken::Ident(id!(uniform)), _) |
-            (FullToken::Ident(id!(texture)), _) |
-            (FullToken::Ident(id!(float)), _) |
-            (FullToken::Ident(id!(vec2)), _) |
-            (FullToken::Ident(id!(vec3)), _) |
-            (FullToken::Ident(id!(vec4)), _) |
-            (FullToken::Ident(id!(mat2)), _) |
-            (FullToken::Ident(id!(mat3)), _) |
-            (FullToken::Ident(id!(mat4)), _) |
-            (FullToken::Ident(id!(ivec2)), _) |
-            (FullToken::Ident(id!(ivec3)), _) |
-            (FullToken::Ident(id!(ivec4)), _) |
-            (FullToken::Ident(id!(bvec2)), _) |
-            (FullToken::Ident(id!(bvec3)), _) |
-            (FullToken::Ident(id!(bvec4)), _) 
-            
-            => self.text_color_other_keyword,
-            
-            
-            (FullToken::Ident(_), _) => self.text_color_identifier,
-            (FullToken::Bool(_), _) => self.text_color_bool,
-            
-            (FullToken::Float(_), _) |
-            (FullToken::Int(_), _) |
-            (FullToken::OtherNumber, _) => self.text_color_number,
-            
-            (FullToken::Punct(_), _) => self.text_color_punctuator,
-            (FullToken::String, _) => self.text_color_string,
-            (FullToken::Whitespace, _) => self.text_color_whitespace,
-            (FullToken::Color(_), _) => self.text_color_color,
-            (FullToken::Unknown, _) => self.text_color_unknown,
-            (FullToken::Open(_), _) |
-            (FullToken::Close(_), _) => self.text_color_punctuator,
         }
     }
     
