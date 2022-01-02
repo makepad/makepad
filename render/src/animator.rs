@@ -933,7 +933,7 @@ impl Animator {
         else {
             0.0
         };
-        
+
         state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track], live_object!{
             [track]: {state_id: (state_id), ended: 0, time: void, exp: (1.0-old_exp)},
         });
