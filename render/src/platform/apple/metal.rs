@@ -551,7 +551,7 @@ impl MetalWindow {
             let () = msg_send![ca_layer, setPixelFormat: MTLPixelFormat::BGRA8Unorm];
             let () = msg_send![ca_layer, setPresentsWithTransaction: NO];
             let () = msg_send![ca_layer, setMaximumDrawableCount: 3];
-            let () = msg_send![ca_layer, setDisplaySyncEnabled: NO];
+            let () = msg_send![ca_layer, setDisplaySyncEnabled: YES];
             let () = msg_send![ca_layer, setNeedsDisplayOnBoundsChange: YES];
             let () = msg_send![ca_layer, setAutoresizingMask: (1 << 4) | (1 << 1)];
             let () = msg_send![ca_layer, setAllowsNextDrawableTimeout: NO];
