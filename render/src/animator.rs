@@ -28,7 +28,10 @@ pub struct KeyFrame {
 pub enum Play {
     #[pick {duration: 1.0}]
     Forward {duration: f64},
-    
+
+    #[live {factor: 0.6}]
+    Exp {factor: f64},
+
     #[live {duration: 1.0, end: 1.0}]
     Reverse {duration: f64, end: f64},
     
@@ -43,6 +46,7 @@ pub enum Play {
 }
 
 impl Play {
+    /*
     pub fn duration(&self) -> f64 {
         match self {
             Self::Forward {duration, ..} => *duration,
@@ -51,10 +55,20 @@ impl Play {
             Self::ReverseLoop {duration, ..} => *duration,
             Self::BounceLoop {duration, ..} => *duration,
         }
+    }*/
+    
+    pub fn as_exp(&self)->Option<f64>{
+        match self {
+            Self::Exp {factor} => {
+                Some(*factor)
+            },
+            _=>None
+        }
     }
     
     pub fn get_ended_time(&self, time: f64) -> (bool, f64) {
         match self {
+            Self::Exp {..} => panic!(),
             Self::Forward {duration} => {
                 if *duration == 0.0{return (true, 1.0)}
                 (time > *duration, time.min(*duration) / duration)
@@ -227,7 +241,7 @@ impl Ease {
             Self::InExp => {
                 if t < 0.001 {
                     return 0.;
-                }
+                } 
                 else {
                     return 2.0f64.powf(10. * (t - 1.));
                 }
@@ -552,13 +566,13 @@ impl Animator {
                             ext_time
                         }
                         LiveValue::Float(time) => {
-                            
                             *time
                         }
                         _ => panic!()
                     };
                     // alright we have the start time.
                     // next we deserialize 'play'
+
                     let play = if let Some(play_index) = nodes.child_by_name(track_index, id!(play)) {
                         Play::new_apply(cx, ApplyFrom::New, play_index, nodes)
                     }
@@ -567,7 +581,15 @@ impl Animator {
                     };
                     node_iter = nodes.next_child(id_index);
 
-                    let (ended, time) = play.get_ended_time(ext_time - start_time);
+                    let (ended, time) = if let Some(factor) = play.as_exp(){
+                        let next_time = start_time * factor.abs();
+                        nodes[time_index].value = LiveValue::Float(next_time);
+                        if next_time < 0.001{ (true, 1.0) }
+                        else {(false, 1.0 - next_time)}
+                    }
+                    else{
+                        play.get_ended_time(ext_time - start_time)
+                    };
 
                     if ended{ // mark ended step 1
                         if let Some(index) = nodes.child_by_name(track_index, id!(ended)) {
@@ -918,6 +940,21 @@ impl Animator {
                 state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(play)], reader.node_slice());
             }
         }
+        else if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(exp)){ // we dont have a from. we should use duration property and construct a play::forward
+            let v = reader.node().value.as_float().unwrap_or(0.6);
+            // however.. if we interrupt we also need to to keep track of some kind of time
+            state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(play)], live_object!{
+                play: Play::Exp{factor:(v)}
+            });
+            let old_time = if let Some(LiveValue::Float(v)) = state.child_value_by_path(0, &[id!(tracks), track, id!(time)]) {
+                *v
+            }
+            else {
+                0.0
+            };
+            state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(time)], live_array!{(1.0-old_time)});
+        
+        }
         else if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(duration)){ // we dont have a from. we should use duration property and construct a play::forward
             state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(play)], live_object!{
                 play: Play::Forward{duration:(reader.node().value.as_float().unwrap_or(1.0))}
@@ -932,9 +969,7 @@ impl Animator {
         if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(redraw)){
             state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(redraw)], reader.node_slice());
         }
-
-        state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(time)], live_array!{void});
-
+        
         path.push(id!(state));
         reader.walk();
         while !reader.is_eot() {

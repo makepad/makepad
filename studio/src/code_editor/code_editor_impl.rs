@@ -153,20 +153,36 @@ live_register!{
             apply: {caret_quad: {color: #0000}}
         }
         
+        /*zoom_in_state: {
+            track: zoom
+            exp: 0.97 // when you interrupt an exp. then what we toggle the invert
+            duration: 0.6,
+            redraw: true
+            ease: Ease::OutExp
+            apply: {zoom_out: [{time:0.0,value:1.0},{time:1.0,value:0.0}]}
+        } 
+        zoom_out_state: { 
+            track: zoom
+            exp: 0.93 // when you interrupt an exp. then what we toggle the invert
+            duration: 0.4,
+            redraw: true
+            ease: Ease::OutExp
+            apply: {zoom_out: [{time:0.0,value:0.0},{time:1.0,value:1.0}]}
+        }*/
+        
         zoom_in_state: {
             track: zoom
-            duration: 0.3,
+            duration: 0.6,
             redraw: true
             ease: Ease::OutExp
             apply: {zoom_out: 0.0}
-        }
-        
-        zoom_out_state: {
+        } 
+        zoom_out_state: { 
             track: zoom
-            duration: 0.3,
+            duration: 0.4,
             redraw: true
             ease: Ease::OutExp
-            apply: {zoom_out: 1.0,}
+            apply: {zoom_out: 1.0}
         }
         
         max_zoom_out: 0.92
@@ -279,15 +295,7 @@ impl CodeEditorImpl {
         self.scroll_shadow.draw(cx, &self.scroll_view, vec2(self.line_num_width, 0.));
         self.scroll_view.end(cx);
     }
-/*    
-    pub fn get_character_width(&self) -> f32 {
-        self.text_glyph_size.x
-    }
-    
-    pub fn get_character_height(&self) -> f32 {
-        self.text_glyph_size.y
-    }*/
-    
+
     // lets calculate visible lines
     pub fn calc_lines_layout<T>(
         &mut self,
@@ -297,9 +305,9 @@ impl CodeEditorImpl {
         mut compute_height: T,
     )
     where T: FnMut(&mut Cx, LineLayoutInput) -> LineLayoutOutput
-    {
+    { 
         self.calc_lines_layout_inner(cx, document_inner, lines_layout, &mut compute_height);
-        // this does the animation zooming
+        // this keeps the animation zooming properly focussed around a cursor/line
         if let Some(center_line) = self.zoom_anim_center {
             if self.animator.is_track_of_animating(cx, self.zoom_out_state) {
                 let next_pos = self.position_to_vec2(center_line, lines_layout);
@@ -402,8 +410,7 @@ impl CodeEditorImpl {
         self.selection_quad.end_many_instances(cx);
         self.code_text.end_many_instances(cx);
         self.caret_quad.end_many_instances(cx);
-        self.line_num_text.end_many_instances(cx);
-    }
+    } 
     
     pub fn start_zoom_anim(&mut self, cx: &mut Cx, state: &mut EditorState, lines_layout: &LinesLayout, anim: Option<LivePtr>) {
         if let Some(session_id) = self.session_id {
