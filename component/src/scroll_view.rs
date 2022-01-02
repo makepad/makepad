@@ -68,18 +68,18 @@ impl ScrollView{
         let mut changed = false;
         if self.h_show {
             if self.h_scroll.set_scroll_pos(cx, pos.x) {
-                let scroll_pos = self.h_scroll.get_scroll_pos();
-                cx.set_view_scroll_x(self.view.view_id, scroll_pos);
                 changed = true;
             }
+            let scroll_pos = self.h_scroll.get_scroll_pos();
+            cx.set_view_scroll_x(self.view.view_id, scroll_pos);
         }
         if self.v_show {
             if self.v_scroll.set_scroll_pos(cx, pos.y) {
-                let scroll_pos = self.v_scroll.get_scroll_pos();
-                cx.set_view_scroll_y(self.view.view_id, scroll_pos);
                 changed = true;
             }
-        }
+            let scroll_pos = self.v_scroll.get_scroll_pos();
+            cx.set_view_scroll_y(self.view.view_id, scroll_pos);
+        } 
         changed
     }
     
@@ -93,6 +93,23 @@ impl ScrollView{
                 self.v_scroll.get_scroll_view_total()
             }else {0.}
         }
+    }
+    
+    pub fn get_scroll_view_visible(&mut self) -> Vec2 {
+        Vec2 {
+            x: if self.h_show {
+                self.h_scroll.get_scroll_view_visible()
+            }else {0.},
+            y: if self.v_show {
+                self.v_scroll.get_scroll_view_visible()
+            }else {0.}
+        }
+    }
+
+    pub fn get_viewport_rect(&mut self, cx: &mut Cx)->Rect {
+        let pos = self.get_scroll_pos(cx);
+        let size = self.get_scroll_view_visible();
+        Rect{pos, size}
     }
     
     pub fn scroll_into_view(&mut self, cx: &mut Cx, rect: Rect) {
