@@ -123,7 +123,7 @@ live_register!{
         text_color_linenum: #88
         text_color_linenum_current: #d4
         text_color_indent_line: #808080
-
+        
         selection_quad: {
             color: #294e75
         }
@@ -155,31 +155,16 @@ live_register!{
         
         zoom_in_state: {
             track: zoom
-            from:{all:Play::Exp{speed1:0.96,speed2:0.97}}
+            from: {all: Play::Exp {speed1: 0.96, speed2: 0.97}}
             redraw: true
-            apply: {zoom_out: [{time:0.0,value:1.0},{time:1.0,value:0.0}]}
-        } 
-        zoom_out_state: { 
-            track: zoom
-            from:{all:Play::Exp{speed1:0.98,speed2:0.95}}
-            redraw: true
-            apply: {zoom_out: [{time:0.0,value:0.0},{time:1.0,value:1.0}]}
+            apply: {zoom_out: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
         }
-        /*
-        zoom_in_state: {
+        zoom_out_state: {
             track: zoom
-            duration: 0.6,
+            from: {all: Play::Exp {speed1: 0.98, speed2: 0.95}}
             redraw: true
-            ease: Ease::OutExp
-            apply: {zoom_out: 0.0}
-        } 
-        zoom_out_state: { 
-            track: zoom
-            duration: 0.4,
-            redraw: true
-            ease: Ease::OutExp
-            apply: {zoom_out: 1.0}
-        }*/
+            apply: {zoom_out: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]}
+        }
         
         max_zoom_out: 0.92
         
@@ -224,7 +209,7 @@ pub struct CodeEditorImpl {
     text_color_linenum: Vec4,
     text_color_linenum_current: Vec4,
     text_color_indent_line: Vec4,
-
+    
     current_line_quad: DrawColor,
     
     scroll_shadow: ScrollShadow,
@@ -291,7 +276,7 @@ impl CodeEditorImpl {
         self.scroll_shadow.draw(cx, &self.scroll_view, vec2(self.line_num_width, 0.));
         self.scroll_view.end(cx);
     }
-
+    
     // lets calculate visible lines
     pub fn calc_lines_layout<T>(
         &mut self,
@@ -301,7 +286,7 @@ impl CodeEditorImpl {
         mut compute_height: T,
     )
     where T: FnMut(&mut Cx, LineLayoutInput) -> LineLayoutOutput
-    { 
+    {
         self.calc_lines_layout_inner(cx, document_inner, lines_layout, &mut compute_height);
         // this keeps the animation zooming properly focussed around a cursor/line
         if let Some(center_line) = self.zoom_anim_center {
@@ -370,6 +355,7 @@ impl CodeEditorImpl {
                 total_height: text_height + widget_height,
                 font_scale,
                 zoom_out: output.zoom_out,
+                zoom_column: output.zoom_column,
                 zoom_displace: output.zoom_column as f32 * self.text_glyph_size.x * (1.0 - font_scale)
             });
             
@@ -406,7 +392,7 @@ impl CodeEditorImpl {
         self.selection_quad.end_many_instances(cx);
         self.code_text.end_many_instances(cx);
         self.caret_quad.end_many_instances(cx);
-    } 
+    }
     
     pub fn start_zoom_anim(&mut self, cx: &mut Cx, state: &mut EditorState, lines_layout: &LinesLayout, anim: Option<LivePtr>) {
         if let Some(session_id) = self.session_id {
@@ -500,9 +486,24 @@ impl CodeEditorImpl {
                 };
                 if span.is_included {
                     
-                    // alright so. now
-                    let start_x = start_x + start as f32 * self.text_glyph_size.x;
-                    let end_x = (end - start) as f32 * self.text_glyph_size.x;
+                    // alright so. the chars till zoom_displace
+                    // are normal. and beyond it they are scaled
+                    let end_x = if end > layout.zoom_column {
+                        start_x + end as f32 * self.text_glyph_size.x * layout.font_scale
+                            + layout.zoom_displace
+                    }
+                    else {
+                        start_x + end as f32 * self.text_glyph_size.x
+                    };
+                    let start_x = if start > layout.zoom_column {
+                        start_x + start as f32 * self.text_glyph_size.x * layout.font_scale
+                            + layout.zoom_displace
+                    }
+                    else {
+                        start_x + start as f32 * self.text_glyph_size.x
+                    };
+                    
+                    let size_x = end_x - start_x;
                     
                     selected_rects_on_next_line.push(Rect {
                         pos: Vec2 {
@@ -510,7 +511,7 @@ impl CodeEditorImpl {
                             y: start_y,
                         },
                         size: Vec2 {
-                            x: end_x,
+                            x: size_x,
                             y: draw_height,
                         },
                     });
@@ -656,17 +657,37 @@ impl CodeEditorImpl {
             for indent in 0..indent_count {
                 let indent_lines_column = indent * 4;
                 self.indent_lines_quad.color = self.text_color_indent_line; // TODO: Colored indent guides
-                self.indent_lines_quad.draw_abs(
-                    cx,
-                    Rect {
-                        pos: Vec2 {
-                            x: origin.x + self.line_num_width + indent_lines_column as f32 * self.text_glyph_size.x,
-                            y: layout.start_y + origin.y,
+                if indent_lines_column >= layout.zoom_column {
+                    self.indent_lines_quad.draw_abs(
+                        cx,
+                        Rect {
+                            pos: Vec2 {
+                                x: origin.x
+                                    + self.line_num_width
+                                    + indent_lines_column as f32 * self.text_glyph_size.x * layout.font_scale
+                                    + layout.zoom_displace,
+                                y: layout.start_y + origin.y,
+                            },
+                            size: vec2(self.text_glyph_size.x * layout.font_scale, layout.total_height),
                         },
-                        size: vec2(self.text_glyph_size.x, layout.total_height),
-                    },
-                );
+                    );
+                }
+                else {
+                    self.indent_lines_quad.draw_abs(
+                        cx,
+                        Rect {
+                            pos: Vec2 {
+                                x: origin.x
+                                    + self.line_num_width
+                                    + indent_lines_column as f32 * self.text_glyph_size.x,
+                                y: layout.start_y + origin.y,
+                            },
+                            size: vec2(self.text_glyph_size.x, layout.total_height),
+                        },
+                    );
+                }
             }
+            
             //start_y += line_height;
         }
     }
@@ -700,19 +721,41 @@ impl CodeEditorImpl {
                         if selections.contains_position(*caret) {
                             continue;
                         }
-                        self.caret_quad.draw_abs(
-                            cx,
-                            Rect {
-                                pos: Vec2 {
-                                    x: start_x + caret.column as f32 * self.text_glyph_size.x,
-                                    y: layout.start_y + origin.y,
+                        
+                        if caret.column >= layout.zoom_column {
+                            self.caret_quad.draw_abs(
+                                cx,
+                                Rect {
+                                    pos: Vec2 {
+                                        x: start_x
+                                            + caret.column as f32 * self.text_glyph_size.x * layout.font_scale
+                                            + layout.zoom_displace,
+                                        y: layout.start_y + origin.y,
+                                    },
+                                    size: Vec2 {
+                                        x: 1.5 * layout.font_scale,
+                                        y: self.text_glyph_size.y * layout.font_scale,
+                                    },
                                 },
-                                size: Vec2 {
-                                    x: 2.0,
-                                    y: self.text_glyph_size.y,
+                            );
+                        }
+                        else {
+                            self.caret_quad.draw_abs(
+                                cx,
+                                Rect {
+                                    pos: Vec2 {
+                                        x: start_x + caret.column as f32 * self.text_glyph_size.x,
+                                        y: layout.start_y + origin.y,
+                                    },
+                                    size: Vec2 {
+                                        x: 1.5,
+                                        y: self.text_glyph_size.y * layout.font_scale,
+                                    },
                                 },
-                            },
-                        );
+                            );
+                        }
+                        
+                        
                     }
                     _ => break,
                 }
@@ -1130,6 +1173,7 @@ pub struct LineLayout {
     pub font_scale: f32,
     
     pub zoom_out: f32,
+    pub zoom_column: usize,
     pub zoom_displace: f32
 }
 

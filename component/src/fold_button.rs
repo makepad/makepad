@@ -23,7 +23,7 @@ live_register!{
                 sdf.line_to(c.x + sz, c.y + sz);
                 sdf.close_path();
                 sdf.fill(mix(#a, #f, self.hover));
-                return sdf.result*self.fade;
+                return sdf.result * self.fade;
             }
         }
         
@@ -51,6 +51,22 @@ live_register!{
         }
         
         closed_state: {
+            track: zoom
+            from: {all: Play::Exp {speed1: 0.96, speed2: 0.97}}
+            redraw: true
+            apply: {
+                opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
+                bg_quad: {opened: (opened)}
+            }
+        }
+        opened_state: {
+            track: zoom
+            from: {all: Play::Exp {speed1: 0.98, speed2: 0.95}}
+            redraw: true
+            apply: {opened: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]}
+        }
+        /*
+        closed_state: {
             track: open
             duration: 0.2
             ease: Ease::OutExp
@@ -65,7 +81,7 @@ live_register!{
             duration: 0.2
             ease: Ease::OutExp
             apply: {opened: 1.0,}
-        }
+        }*/
     }
 }
 
@@ -131,7 +147,7 @@ impl FoldButton {
     }
     
     pub fn draw_abs(&mut self, cx: &mut Cx, pos: Vec2, fade: f32) {
-        self.bg_quad.apply_over(cx, live!{fade:(fade)});
+        self.bg_quad.apply_over(cx, live!{fade: (fade)});
         self.bg_quad.draw_abs(cx, Rect {
             pos: pos + self.abs_offset,
             size: self.abs_size
