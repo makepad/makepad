@@ -38,7 +38,7 @@ impl App {
     pub fn draw(&mut self, cx: &mut Cx) {
         self.inner.draw(cx, &mut self.state);
     }
-    
+     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
         self.handle_live_edit_event(cx, event, id!(App));
         self.inner.handle_event(cx, event, &mut self.state);
