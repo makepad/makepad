@@ -10,7 +10,7 @@ live_register!{
             debug_id: fold_button,
             instance opened: 0.0
             instance hover: 0.0
-            
+            uniform fade: 0.0
             fn pixel(self) -> vec4 {
                 let sz = 3.;
                 let c = vec2(5.0, 0.5 * self.rect_size.y);
@@ -23,7 +23,7 @@ live_register!{
                 sdf.line_to(c.x + sz, c.y + sz);
                 sdf.close_path();
                 sdf.fill(mix(#a, #f, self.hover));
-                return sdf.result;
+                return sdf.result*self.fade;
             }
         }
         
@@ -103,7 +103,7 @@ impl FoldButton {
         dispatch_action: &mut dyn FnMut(&mut Cx, FoldButtonAction),
     ) {
         if self.animator_handle_event(cx, event).is_animating() {
-            if self.animator.is_track_animating(cx, self.closed_state) {
+            if self.animator.is_track_of_animating(cx, self.closed_state) {
                 dispatch_action(cx, FoldButtonAction::Animating(self.opened))
             }
         };
@@ -130,7 +130,8 @@ impl FoldButton {
         self.bg_quad.draw_walk(cx, self.walk);
     }
     
-    pub fn draw_abs(&mut self, cx: &mut Cx, pos: Vec2) {
+    pub fn draw_abs(&mut self, cx: &mut Cx, pos: Vec2, fade: f32) {
+        self.bg_quad.apply_over(cx, live!{fade:(fade)});
         self.bg_quad.draw_abs(cx, Rect {
             pos: pos + self.abs_offset,
             size: self.abs_size

@@ -226,6 +226,11 @@ impl ScrollBar {
     pub fn get_scroll_view_total(&self) -> f32 {
         return self.view_total;
     }
+
+    pub fn get_scroll_view_visible(&self) -> f32 {
+        return self.view_visible;
+    }
+
     
     pub fn set_scroll_target(&mut self, cx: &mut Cx, scroll_pos_target: f32) -> bool {
         // clamp scroll_pos to

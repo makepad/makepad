@@ -79,7 +79,7 @@ live_register!{
             sdf.line_to(1., self.rect_size.y + 1.);
             return sdf.stroke(col, thickness);
         }
-    } 
+    }
     
     CodeEditorImpl: {{CodeEditorImpl}} {
         scroll_view: {
@@ -119,6 +119,7 @@ live_register!{
         }
         
         line_num_width: 45.0,
+        padding_top: 30.0,
         
         text_color_type_name: #56c9b1;
         text_color_comment: #638d54
@@ -139,7 +140,7 @@ live_register!{
         text_color_linenum: #88
         text_color_linenum_current: #d4
         
-        folding_depth: 4
+        zoom_indent_depth: 8
         
         selection_quad: {
             color: #294e75
@@ -160,31 +161,33 @@ live_register!{
         
         show_caret_state: {
             track: caret,
-            from: {all: Play::Forward {duration: 0.0}}
+            duration: 0.0
             apply: {caret_quad: {color: #b0}}
         }
         
         hide_caret_state: {
             track: caret,
-            from: {all: Play::Forward {duration: 0.0}}
+            duration: 0.0
             apply: {caret_quad: {color: #0000}}
         }
         
-        folded_state: {
-            track: folding,
-            from: {all: Play::Forward {duration: 0.2, redraw: true}}
-            apply: {
-                folded_new: [{value: 0.1, ease: Ease::OutExp}],
-            }
+        zoom_in_state: {
+            track: zoom
+            duration: 0.3,
+            redraw: true
+            ease: Ease::OutExp
+            apply: {zoom_out: 0.0}
         }
         
-        unfolded_state: {
-            track: folding,
-            from: {all: Play::Forward {duration: 0.6, redraw: true}}
-            apply: {
-                folded_new: [{value: 1.0, ease: Ease::OutExp}],
-            }
+        zoom_out_state: {
+            track: zoom
+            duration: 0.3,
+            redraw: true
+            ease: Ease::OutExp
+            apply: {zoom_out: 1.0,}
         }
+        
+        max_zoom_out: 0.92
         
         caret_blink_timeout: 0.5
     }
@@ -198,20 +201,24 @@ pub struct CodeEditorImpl {
     #[rust] caret_blink_timer: Timer,
     #[rust] select_scroll: Option<SelectScroll>,
     #[rust] last_move_position: Option<Position>,
+    #[rust] zoom_anim_start: Option<(Position, Vec2, Vec2)>,
     
     pub scroll_view: ScrollView,
     
     show_caret_state: Option<LivePtr>,
     hide_caret_state: Option<LivePtr>,
     
-    folded_state: Option<LivePtr>,
-    unfolded_state: Option<LivePtr>,
+    pub zoom_out: f32,
+    pub max_zoom_out: f32,
     
-    folded_new: f32,
-    folded_old: f32,
-    folding_depth: usize,
+    padding_top: f32,
     
-    #[default_state(show_caret_state, unfolded_state)]
+    zoom_out_state: Option<LivePtr>,
+    zoom_in_state: Option<LivePtr>,
+    
+    zoom_indent_depth: usize,
+    
+    #[default_state(show_caret_state, zoom_in_state)]
     animator: Animator,
     
     selection_quad: DrawSelection,
@@ -269,6 +276,18 @@ pub enum CodeEditorAction {
     RedrawViewsForDocument(DocumentId)
 }
 
+pub struct LineLayoutInput{
+    pub clear:bool, 
+    pub line:usize,
+    pub start_y: f32,
+    pub viewport_start: f32, 
+    pub viewport_end: f32
+}
+
+pub struct LineLayoutOutput{
+    pub widget_height: f32
+}
+
 impl CodeEditorImpl {
     
     pub fn redraw(&self, cx: &mut Cx) {
@@ -295,10 +314,12 @@ impl CodeEditorImpl {
     
     pub fn end(&mut self, cx: &mut Cx, lines_layout: &LinesLayout) {
         self.end_instances(cx);
-        
+        // lets get the viewport rect
+        // then append that to the end
+        let visible = self.scroll_view.get_scroll_view_visible();
         cx.set_turtle_bounds(Vec2 {
             x: lines_layout.max_line_width,
-            y: lines_layout.total_height,
+            y: lines_layout.total_height + visible.y - self.text_glyph_size.y,
         });
         self.scroll_shadow.draw(cx, &self.scroll_view, vec2(self.line_num_width, 0.));
         self.scroll_view.end(cx);
@@ -312,54 +333,92 @@ impl CodeEditorImpl {
         self.text_glyph_size.y
     }
     
+
     // lets calculate visible lines
     pub fn calc_lines_layout<T>(
         &mut self,
         cx: &mut Cx,
-        di: &DocumentInner,
+        document_inner: &DocumentInner,
+        session: &Session,
         lines_layout: &mut LinesLayout,
         mut compute_height: T,
     )
-    where T: FnMut(&mut Cx, usize, f32, f32, f32) -> f32
+    where T: FnMut(&mut Cx, LineLayoutInput) -> LineLayoutOutput
+    {
+        // ok so we have a last cursor pos
+        self.calc_lines_layout_inner(cx, document_inner, lines_layout, &mut compute_height);
+        if let Some((center_line, start, scroll)) = self.zoom_anim_start{
+            if self.animator.is_track_of_animating(cx, self.zoom_out_state){
+                let now = self.position_to_vec2(center_line, lines_layout);
+                // lets scroll with the delta y
+                self.scroll_view.set_scroll_pos(cx, vec2(scroll.x, scroll.y + (now.y - start.y)));
+                self.calc_lines_layout_inner(cx, document_inner, lines_layout, &mut compute_height);
+            }
+        }
+        
+    } 
+
+    // lets calculate visible lines
+    fn calc_lines_layout_inner<T>(
+        &mut self,
+        cx: &mut Cx,
+        document_inner: &DocumentInner,
+        lines_layout: &mut LinesLayout,
+        compute_height: &mut T, 
+    )
+    where T: FnMut(&mut Cx, LineLayoutInput) -> LineLayoutOutput
     {
         let viewport_size = cx.get_turtle_size();
         let viewport_start = cx.get_scroll_pos();
         
         let viewport_end = viewport_start + viewport_size;
         
-        if di.text.as_lines().len() != di.indent_cache.len() {
+        if document_inner.text.as_lines().len() != document_inner.indent_cache.len() {
             panic!()
         }
         
         lines_layout.lines.clear();
         
-        let mut start_y = 0.0;
-        let text_scale = 1.0;
+        let mut start_y = self.padding_top;
+        
         let mut start_line_y = None;
         let mut start = None;
         let mut end = None;
         let mut max_line_width = 0;
         
-        for (line_index, text_line) in di.text.as_lines().iter().enumerate() {
+        for (line_index, text_line) in document_inner.text.as_lines().iter().enumerate() {
             
             max_line_width = text_line.len().max(max_line_width);
             
-            let widget_height = compute_height(
+            let ws = document_inner.indent_cache[line_index].virtual_leading_whitespace();
+            let (font_scale, zoom_out) = if ws >= self.zoom_indent_depth {
+                (1.0 - self.zoom_out * self.max_zoom_out, self.zoom_out)
+            }
+            else {
+                (1.0, 1.0)
+            };
+            
+            let output = compute_height(
                 cx,
-                line_index,
-                start_y + self.get_character_height(),
-                viewport_start.y,
-                viewport_end.y
+                LineLayoutInput{
+                    clear: line_index == 0,
+                    line: line_index,
+                    start_y: start_y + self.get_character_height(),
+                    viewport_start: viewport_start.y,
+                    viewport_end: viewport_end.y
+                }
             );
             
-            let text_height = self.get_character_height();
+            let widget_height = output.widget_height * font_scale;
+            let text_height = self.get_character_height() * font_scale;
             
-            lines_layout.lines.push(LineInfo {
+            lines_layout.lines.push(LineLayout {
                 start_y,
                 text_height,
                 widget_height,
                 total_height: text_height + widget_height,
-                text_scale
+                font_scale,
+                zoom_out
             });
             
             let end_y = start_y + text_height + widget_height;
@@ -376,54 +435,9 @@ impl CodeEditorImpl {
         lines_layout.total_height = start_y;
         lines_layout.max_line_width = max_line_width as f32 * self.get_character_width();
         lines_layout.view_start = start.unwrap_or(0);
-        lines_layout.view_end = end.unwrap_or(di.text.as_lines().len());
+        lines_layout.view_end = end.unwrap_or(document_inner.text.as_lines().len());
         lines_layout.start_y = start_line_y.unwrap_or(0.0);
     }
-    
-    /*
-    pub fn draw(&mut self, cx: &mut Cx, state: &EditorState) {
-        self.text_glyph_size = self.code_text.text_style.font_size * self.code_text.get_monospace_base(cx);
-        if self.scroll_view.begin(cx).is_ok() {
-            if let Some(session_id) = self.session_id {
-                let session = &state.sessions[session_id];
-                let document = &state.documents_by_document_id[session.document_id];
-                if let Some(document_inner) = document.inner.as_ref() {
-                    self.handle_select_scroll_in_draw(cx);
-                    self.begin_instances(cx);
-                    
-                    let visible_lines =
-                    self.visible_lines(cx, document_inner.text.as_lines().len(), &document_inner.indent_cache);
-                    
-                    self.draw_selections(
-                        cx,
-                        &session.selections,
-                        &document_inner.text,
-                        visible_lines,
-                    );
-                    self.draw_indent_guides(
-                        cx,
-                        &document_inner.indent_cache,
-                        visible_lines,
-                    );
-                    self.draw_text(
-                        cx,
-                        &document_inner.text,
-                        &document_inner.token_cache,
-                        visible_lines,
-                    );
-                    
-                    self.draw_current_line(cx, session.cursors.last());
-                    self.draw_carets(cx, &session.selections, &session.carets, visible_lines);
-                    self.set_turtle_bounds(cx, &document_inner.text);
-                    self.end_instances(cx);
-                    self.draw_linenums(cx, visible_lines, session.cursors.last());
-                    
-                    self.scroll_shadow.draw(cx, &self.scroll_view, vec2(self.line_num_width, 0.));
-                }
-            }
-            self.scroll_view.end(cx);
-        }
-    }*/
     
     pub fn begin_instances(&mut self, cx: &mut Cx) {
         // this makes a single area pointer cover all the items drawn
@@ -434,8 +448,6 @@ impl CodeEditorImpl {
         self.code_text.begin_many_instances(cx);
         self.indent_lines_quad.new_draw_call(cx);
         self.caret_quad.begin_many_instances(cx);
-        //self.line_num_quad.new_draw_call(cx);
-        //self.line_num_text.begin_many_instances(cx);
     }
     
     pub fn end_instances(&mut self, cx: &mut Cx) {
@@ -445,61 +457,40 @@ impl CodeEditorImpl {
         self.line_num_text.end_many_instances(cx);
     }
     
+    pub fn start_zoom_anim(&mut self, cx:&mut Cx, state: &mut EditorState, lines_layout:&LinesLayout, anim:Option<LivePtr>){
+        if let Some(session_id) = self.session_id{
+            let session = &state.sessions[session_id];
+            let document = &state.documents[session.document_id];
+            let document_inner = document.inner.as_ref().unwrap();
+
+            let last_cursor = session.cursors.last_inserted();
+            let last_pos = self.position_to_vec2(last_cursor.head, lines_layout);
+
+            let view_rect = self.scroll_view.get_viewport_rect(cx);
+            // check if our last_pos is visible
+            let (center_line, start) = if !view_rect.contains(last_pos){
+                let start = view_rect.pos + view_rect.size * 0.5;
+                let pos = self.vec2_to_position(&document_inner.text, start, lines_layout);
+                let start = self.position_to_vec2(pos, lines_layout);
+                (pos, start)
+            }
+            else{
+                (last_cursor.head, last_pos)
+            };
+            println!("CENTERING AROUND {:?}", center_line);
+            self.zoom_anim_start = Some(
+                (center_line, start, view_rect.pos)
+            );
+            self.animate_to(cx, anim)
+        }
+    }
+    
     pub fn reset_caret_blink(&mut self, cx: &mut Cx) {
         cx.stop_timer(self.caret_blink_timer);
         self.caret_blink_timer = cx.start_timer(self.caret_blink_timeout, true);
         self.animate_cut(cx, self.show_caret_state);
     }
-    /*
-    fn compute_line_scale(&self, line: usize, indent_cache: &IndentCache) -> f32 {
-        let ws = indent_cache[line].virtual_leading_whitespace();
-        if ws >= self.folding_depth {
-            self.folded_new
-        }
-        else {
-            1.0
-        }
-    }*/
-    
-    /*    
-    fn visible_lines(&mut self, cx: &mut Cx, line_count: usize, indent_cache: &IndentCache) -> VisibleLines {
-        let Rect {
-            pos: origin,
-            size: viewport_size,
-        } = cx.get_turtle_rect();
-        
-        let viewport_start = self.scroll_view.get_scroll_pos(cx);
-        let viewport_end = viewport_start + viewport_size;
-        
-        let mut start_y = 0.0;
-        
-        let start = (0..line_count).find_map( | line | {
-            
-            let end_y = start_y + self.compute_line_scale(line, indent_cache) * self.text_glyph_size.y;
-            
-            if end_y >= viewport_start.y {
-                return Some(line);
-            }
-            start_y = end_y;
-            None
-        }).unwrap_or(line_count);
-        
-        let visible_start_y = origin.y + start_y;
-        let end = (start..line_count).find_map( | line | {
-            if start_y >= viewport_end.y {
-                return Some(line);
-            }
-            start_y += self.compute_line_scale(line, indent_cache) * self.text_glyph_size.y;
-            None
-        }).unwrap_or(line_count);
-        
-        VisibleLines {
-            start,
-            end,
-            start_y: visible_start_y,
-        }
-    }*/
-    
+   
     pub fn draw_selections(
         &mut self,
         cx: &mut Cx,
@@ -656,7 +647,7 @@ impl CodeEditorImpl {
         
         let Rect {pos: origin, size: viewport_size,} = cx.get_turtle_rect();
         
-        let mut start_y = lines_layout.start_y + origin.y;
+        //let mut start_y = lines_layout.start_y + origin.y;
         let start_x = origin.x;
         
         self.line_num_quad.draw_abs(cx, Rect {
@@ -666,17 +657,26 @@ impl CodeEditorImpl {
         
         
         for i in lines_layout.view_start..lines_layout.view_end {
-            let line_height = lines_layout.lines[i].total_height;
+            let layout = &lines_layout.lines[i];
+            
             if i == cursor.head.line {
                 self.line_num_text.color = self.text_color_linenum_current;
             }
             else {
                 self.line_num_text.color = self.text_color_linenum;
             }
-            let end_y = start_y + line_height;
+            
             linenum_fill(&mut self.line_num_text.buf, i + 1);
-            self.line_num_text.draw_chunk(cx, Vec2 {x: start_x, y: start_y,}, 0, None);
-            start_y = end_y;
+
+            self.line_num_text.font_scale = layout.font_scale;
+            
+            // lets scale around the right side center
+            let right_side = self.line_num_text.buf.len() as f32 * self.text_glyph_size.x;
+            
+            self.line_num_text.draw_chunk(cx, Vec2 {
+                x: start_x + right_side * (1.0 - layout.font_scale),
+                y: layout.start_y + origin.y,
+            }, 0, None);
         }
     }
     
@@ -687,7 +687,7 @@ impl CodeEditorImpl {
         lines_layout: &LinesLayout,
     ) {
         let origin = cx.get_turtle_pos();
-        let mut start_y = lines_layout.start_y + origin.y;
+        //let mut start_y = lines_layout.start_y + origin.y;
         for (line_index, indent_info) in indent_cache
             .iter()
             .skip(lines_layout.view_start)
@@ -695,7 +695,8 @@ impl CodeEditorImpl {
             .enumerate()
         {
             let line_index = line_index + lines_layout.view_start;
-            let line_height = lines_layout.lines[line_index].total_height;
+            let layout = &lines_layout.lines[line_index];
+            //let line_height = .total_height;
             let indent_count = (indent_info.virtual_leading_whitespace() + 3) / 4;
             for indent in 0..indent_count {
                 let indent_lines_column = indent * 4;
@@ -705,13 +706,13 @@ impl CodeEditorImpl {
                     Rect {
                         pos: Vec2 {
                             x: origin.x + self.line_num_width + indent_lines_column as f32 * self.text_glyph_size.x,
-                            y: start_y,
+                            y: layout.start_y + origin.y,
                         },
-                        size: vec2(self.text_glyph_size.x, line_height),
+                        size: vec2(self.text_glyph_size.x, layout.total_height),
                     },
                 );
             }
-            start_y += line_height;
+            //start_y += line_height;
         }
     }
     
@@ -737,27 +738,29 @@ impl CodeEditorImpl {
             //let scale = self.compute_line_scale(line, indent_cache);
             
             //let end_y = start_y + self.text_glyph_size.y;
-            let line = &lines_layout.lines[line_index];
-            let mut start_x = origin.x + self.line_num_width;
+            let layout = &lines_layout.lines[line_index];
+            let scale_displace = (self.zoom_indent_depth as f32) * self.text_glyph_size.x * (1.0 - layout.font_scale);
+            let mut start_x = origin.x + self.line_num_width + scale_displace;
             let mut start = 0;
             
             let mut token_iter = token_info.tokens().iter().peekable();
             while let Some(token) = token_iter.next() {
                 
                 let next_token = token_iter.peek();
-                let end_x = start_x + token.len as f32 * self.text_glyph_size.x;
+                let end_x = start_x + token.len as f32 * self.text_glyph_size.x * layout.font_scale;
                 let end = start + token.len;
                 
-                //self.code_text.font_scale = scale;
-                
-                self.code_text.color = self.text_color(token.token, next_token.map( | next_token | next_token.token));
-                
-                self.code_text.draw_chunk(
-                    cx,
-                    Vec2 {x: start_x, y: line.start_y + origin.y},
-                    0,
-                    Some(&chars[start..end])
-                );
+                // check if we are whitespace. ifso, just skip rendering
+                if !token.token.is_whitespace() {
+                    self.code_text.font_scale = layout.font_scale;
+                    self.code_text.color = self.text_color(token.token, next_token.map( | next_token | next_token.token));
+                    self.code_text.draw_chunk(
+                        cx,
+                        Vec2 {x: start_x, y: layout.start_y + origin.y},
+                        0,
+                        Some(&chars[start..end])
+                    );
+                }
                 start = end;
                 start_x = end_x;
             }
@@ -784,9 +787,9 @@ impl CodeEditorImpl {
         }
         let origin = cx.get_turtle_pos();
         let start_x = origin.x + self.line_num_width;
-        let mut start_y = lines_layout.start_y + origin.y;
+        //let mut start_y = lines_layout.start_y + origin.y;
         for line_index in lines_layout.view_start..lines_layout.view_end {
-            let line_height = lines_layout.lines[line_index].total_height;
+            let layout = &lines_layout.lines[line_index];
             loop {
                 match caret_iter.peek() {
                     Some(caret) if caret.line == line_index => {
@@ -799,7 +802,7 @@ impl CodeEditorImpl {
                             Rect {
                                 pos: Vec2 {
                                     x: start_x + caret.column as f32 * self.text_glyph_size.x,
-                                    y: start_y,
+                                    y: layout.start_y + origin.y,
                                 },
                                 size: Vec2 {
                                     x: 2.0,
@@ -811,7 +814,6 @@ impl CodeEditorImpl {
                     _ => break,
                 }
             }
-            start_y += line_height;
         }
     }
     
@@ -843,7 +845,7 @@ impl CodeEditorImpl {
     fn text_color(&self, token: FullToken, next_token: Option<FullToken>) -> Vec4 {
         match (token, next_token) {
             (FullToken::Comment, _) => self.text_color_comment,
-
+            
             (FullToken::Ident(_), Some(FullToken::Open(Delim::Paren))) => self.text_color_function_identifier,
             (FullToken::Ident(_), Some(FullToken::Punct(id!(!)))) => self.text_color_macro_identifier,
             
@@ -1063,33 +1065,20 @@ impl CodeEditorImpl {
                     dispatch_action(cx, CodeEditorAction::RedrawViewsForDocument(session.document_id))
                 }
             }
-            HitEvent::KeyDown(KeyEvent {
-                key_code: KeyCode::Control,
-                modifiers,
-                ..
-            }) if modifiers.alt => {
-                self.animate_to(cx, self.folded_state)
-            }
+
             HitEvent::KeyDown(KeyEvent {
                 key_code: KeyCode::Alt,
                 modifiers,
                 ..
-            }) if modifiers.control => {
-                self.animate_to(cx, self.folded_state)
-            }
-            HitEvent::KeyUp(KeyEvent {
-                key_code: KeyCode::Control,
-                modifiers,
-                ..
-            }) if modifiers.alt => {
-                self.animate_to(cx, self.unfolded_state)
-            }
+            })  => {
+                self.start_zoom_anim(cx, state, lines_layout, self.zoom_out_state);
+            } 
             HitEvent::KeyUp(KeyEvent {
                 key_code: KeyCode::Alt,
                 modifiers,
                 ..
-            }) if modifiers.control => {
-                self.animate_to(cx, self.unfolded_state)
+            })  => {
+                self.start_zoom_anim(cx, state, lines_layout, self.zoom_in_state);
             }
             HitEvent::KeyDown(KeyEvent {
                 key_code: KeyCode::Return,
@@ -1277,14 +1266,15 @@ pub struct SelectScroll {
 }
 
 #[derive(Clone, Debug)]
-pub struct LineInfo {
+pub struct LineLayout {
     pub start_y: f32,
     pub text_height: f32,
     pub widget_height: f32,
     pub total_height: f32,
-    pub text_scale: f32,
+    pub font_scale: f32,
+    pub zoom_out: f32
 }
-
+ 
 #[derive(Clone, Default, Debug)]
 pub struct LinesLayout {
     pub view_start: usize,
@@ -1292,5 +1282,5 @@ pub struct LinesLayout {
     pub start_y: f32,
     pub max_line_width: f32,
     pub total_height: f32,
-    pub lines: Vec<LineInfo>
+    pub lines: Vec<LineLayout>
 }

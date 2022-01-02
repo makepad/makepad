@@ -753,7 +753,7 @@ impl Animator {
         default
     }
     
-    pub fn is_track_animating(&self, cx: &mut Cx, live_ptr: Option<LivePtr>)->bool{
+    pub fn is_track_of_animating(&self, cx: &mut Cx, live_ptr: Option<LivePtr>)->bool{
         if let Some((track_id,_)) = self.get_track_and_state_id_of(cx, live_ptr){
             if let Some(state) = self.state.as_ref(){
                 if let Some(LiveValue::Int(ended)) = state.child_value_by_path(0, &[id!(tracks), track_id, id!(ended)]) {
