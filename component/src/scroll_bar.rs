@@ -215,6 +215,19 @@ impl ScrollBar {
         return false
     }
     
+    
+    pub fn set_scroll_pos_no_clip(&mut self, cx: &mut Cx, scroll_pos: f32) -> bool {
+        // clamp scroll_pos to
+        if self.scroll_pos != scroll_pos {
+            self.scroll_pos = scroll_pos;
+            self.scroll_target = scroll_pos;
+            self.update_shader_scroll_pos(cx);
+            self.next_frame = cx.new_next_frame();
+            return true
+        };
+        return false
+    }
+    
     pub fn get_scroll_target(&mut self) -> f32 {
         return self.scroll_target
     }
