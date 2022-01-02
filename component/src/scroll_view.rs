@@ -83,6 +83,22 @@ impl ScrollView{
         changed
     }
     
+    pub fn set_scroll_pos_no_clip(&mut self, cx: &mut Cx, pos: Vec2)->bool {
+        let mut changed = false;
+        if self.h_show {
+            if self.h_scroll.set_scroll_pos_no_clip(cx, pos.x) {
+                changed = true;
+            }
+            cx.set_view_scroll_x(self.view.view_id, pos.x);
+        }
+        if self.v_show {
+            if self.v_scroll.set_scroll_pos_no_clip(cx, pos.y) {
+                changed = true;
+            }
+            cx.set_view_scroll_y(self.view.view_id, pos.y);
+        } 
+        changed
+    }
     
     pub fn get_scroll_view_total(&mut self) -> Vec2 {
         Vec2 {

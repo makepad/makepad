@@ -13,7 +13,6 @@ use {
             inline_cache::InlineEditBind
         },
         editor_state::{
-            Session,
             SessionId
         },
     },
@@ -158,7 +157,7 @@ impl LiveEditor {
         self.fold_buttons.retain_visible();
     }
     
-    pub fn calc_layout_with_widgets(&mut self, cx: &mut Cx, path: &str, document_inner: &DocumentInner, session:&Session) {
+    pub fn calc_layout_with_widgets(&mut self, cx: &mut Cx, path: &str, document_inner: &DocumentInner) {
         let mut inline_cache = document_inner.inline_cache.borrow_mut();
         inline_cache.refresh(cx, path, &document_inner.token_cache);
         
@@ -174,7 +173,7 @@ impl LiveEditor {
         let registries = cx.registries.clone();
         let widget_registry = registries.get::<CxInlineWidgetRegistry>();
         
-        self.editor_impl.calc_lines_layout(cx, document_inner, session, &mut self.lines_layout, | cx, input | {
+        self.editor_impl.calc_lines_layout(cx, document_inner, &mut self.lines_layout, | cx, input | {
             if input.clear {
                 widget_draw_order.clear();
             }
@@ -219,8 +218,7 @@ impl LiveEditor {
                 cx,
                 &path,
                 document_inner,
-                session
-            );
+            ); 
             
             self.editor_impl.draw_selections(
                 cx,
