@@ -15,8 +15,7 @@ use {
             token_cache::TokenCache,
         },
     },
-    makepad_component::makepad_render,
-    makepad_render::makepad_live_tokenizer::{
+    makepad_live_tokenizer::{
         position::Position,
         position_set::PositionSet,
         range::Range,
@@ -25,6 +24,8 @@ use {
         text::{Text},
         full_token::{FullToken, Delim},
     },
+    makepad_component::makepad_render,
+    makepad_render::makepad_live_tokenizer,
     makepad_render::*,
     makepad_component::{
         ScrollView,
@@ -140,8 +141,6 @@ live_register!{
         text_color_linenum: #88
         text_color_linenum_current: #d4
         
-        zoom_indent_depth: 8
-        
         selection_quad: {
             color: #294e75
         }
@@ -217,8 +216,6 @@ pub struct CodeEditorImpl {
     zoom_out_state: Option<LivePtr>,
     zoom_in_state: Option<LivePtr>,
     
-    zoom_indent_depth: usize,
-    
     #[default_state(show_caret_state, zoom_in_state)]
     animator: Animator,
     
@@ -277,18 +274,6 @@ pub enum CodeEditorAction {
     RedrawViewsForDocument(DocumentId)
 }
 
-pub struct LineLayoutInput {
-    pub clear: bool,
-    pub line: usize,
-    pub start_y: f32,
-    pub viewport_start: f32,
-    pub viewport_end: f32
-}
-
-pub struct LineLayoutOutput {
-    pub widget_height: f32
-}
-
 impl CodeEditorImpl {
     
     pub fn redraw(&self, cx: &mut Cx) {
@@ -318,22 +303,21 @@ impl CodeEditorImpl {
         
         let visible = self.scroll_view.get_scroll_view_visible();
         cx.set_turtle_bounds(Vec2 {
-            x: lines_layout.max_line_width,
+            x: lines_layout.max_line_width + self.line_num_width + self.text_glyph_size.x * 4.0,
             y: lines_layout.total_height + visible.y - self.text_glyph_size.y,
         });
         
         self.scroll_shadow.draw(cx, &self.scroll_view, vec2(self.line_num_width, 0.));
         self.scroll_view.end(cx);
     }
-    
+/*    
     pub fn get_character_width(&self) -> f32 {
         self.text_glyph_size.x
     }
     
     pub fn get_character_height(&self) -> f32 {
         self.text_glyph_size.y
-    }
-    
+    }*/
     
     // lets calculate visible lines
     pub fn calc_lines_layout<T>(
@@ -346,21 +330,22 @@ impl CodeEditorImpl {
     where T: FnMut(&mut Cx, LineLayoutInput) -> LineLayoutOutput
     {
         self.calc_lines_layout_inner(cx, document_inner, lines_layout, &mut compute_height);
+        // this does the animation zooming
         if let Some(center_line) = self.zoom_anim_center {
-            let next_pos = self.position_to_vec2(center_line, lines_layout);
-            let last_pos = self.zoom_last_pos.unwrap();
             if self.animator.is_track_of_animating(cx, self.zoom_out_state) {
+                let next_pos = self.position_to_vec2(center_line, lines_layout);
+                let last_pos = self.zoom_last_pos.unwrap();
                 let pos = self.scroll_view.get_scroll_pos(cx);
                 self.scroll_view.set_scroll_pos_no_clip(cx, vec2(pos.x, pos.y + (next_pos.y - last_pos.y)));
                 self.calc_lines_layout_inner(cx, document_inner, lines_layout, &mut compute_height);
-            }  
-            self.zoom_last_pos = Some(next_pos);
+                self.zoom_last_pos = Some(next_pos);
+            }
         }
-    } 
+    }
     
     // lets calculate visible lines
     fn calc_lines_layout_inner<T>(
-        &mut self, 
+        &mut self,
         cx: &mut Cx,
         document_inner: &DocumentInner,
         lines_layout: &mut LinesLayout,
@@ -390,27 +375,20 @@ impl CodeEditorImpl {
             
             max_line_width = text_line.len().max(max_line_width);
             
-            let ws = document_inner.indent_cache[line_index].virtual_leading_whitespace();
-            let (font_scale, zoom_out) = if ws >= self.zoom_indent_depth {
-                (1.0 - self.zoom_out * self.max_zoom_out, self.zoom_out)
-            }
-            else {
-                (1.0, 1.0)
-            };
-            
             let output = compute_height(
                 cx,
                 LineLayoutInput {
+                    zoom_out: self.zoom_out,
                     clear: line_index == 0,
                     line: line_index,
-                    start_y: start_y + self.get_character_height(),
+                    start_y: start_y + self.text_glyph_size.y,
                     viewport_start: viewport_start.y,
                     viewport_end: viewport_end.y
                 }
             );
-            
+            let font_scale = 1.0 - self.max_zoom_out * output.zoom_out;
             let widget_height = output.widget_height * font_scale;
-            let text_height = self.get_character_height() * font_scale;
+            let text_height = self.text_glyph_size.y * font_scale;
             
             lines_layout.lines.push(LineLayout {
                 start_y,
@@ -418,7 +396,8 @@ impl CodeEditorImpl {
                 widget_height,
                 total_height: text_height + widget_height,
                 font_scale,
-                zoom_out
+                zoom_out: output.zoom_out,
+                zoom_displace: output.zoom_column as f32 * self.text_glyph_size.x * (1.0 - font_scale)
             });
             
             let end_y = start_y + text_height + widget_height;
@@ -433,7 +412,7 @@ impl CodeEditorImpl {
         }
         // unwrap the computed values
         lines_layout.total_height = start_y;
-        lines_layout.max_line_width = max_line_width as f32 * self.get_character_width();
+        lines_layout.max_line_width = max_line_width as f32 * self.text_glyph_size.x;
         lines_layout.view_start = start.unwrap_or(0);
         lines_layout.view_end = end.unwrap_or(document_inner.text.as_lines().len());
         lines_layout.start_y = start_line_y.unwrap_or(0.0);
@@ -531,8 +510,10 @@ impl CodeEditorImpl {
         // the second iteration.
         for (next_line_index, next_line) in text.as_lines()[lines_layout.view_start..lines_layout.view_end].iter().enumerate() {
             let line_index = next_line_index + lines_layout.view_start;
-            let draw_height = lines_layout.lines[line_index].text_height;
-            let line_height = lines_layout.lines[line_index].total_height;
+            
+            let layout = &lines_layout.lines[line_index];
+            let draw_height = layout.text_height;
+            let line_height = layout.total_height;
             // Rotate so that the next line becomes the current line, the current line becomes the
             // previous line, and the previous line becomes the next line.
             mem::swap(&mut selected_rects_on_previous_line, &mut selected_rects_on_current_line);
@@ -547,13 +528,18 @@ impl CodeEditorImpl {
                     next_line.len() + 1
                 };
                 if span.is_included {
+                    
+                    // alright so. now
+                    let start_x = start_x + start as f32 * self.text_glyph_size.x;
+                    let end_x = (end - start) as f32 * self.text_glyph_size.x;
+                    
                     selected_rects_on_next_line.push(Rect {
                         pos: Vec2 {
-                            x: start_x + start as f32 * self.text_glyph_size.x,
+                            x: start_x,
                             y: start_y,
                         },
                         size: Vec2 {
-                            x: (end - start) as f32 * self.text_glyph_size.x,
+                            x: end_x,
                             y: draw_height,
                         },
                     });
@@ -719,7 +705,6 @@ impl CodeEditorImpl {
         cx: &mut Cx,
         text: &Text,
         token_cache: &TokenCache,
-        //indent_cache: &IndentCache,
         lines_layout: &LinesLayout,
     ) {
         let origin = cx.get_turtle_pos();
@@ -733,12 +718,9 @@ impl CodeEditorImpl {
             .enumerate()
         {
             let line_index = line_index + lines_layout.view_start;
-            //let scale = self.compute_line_scale(line, indent_cache);
-            
-            //let end_y = start_y + self.text_glyph_size.y;
+
             let layout = &lines_layout.lines[line_index];
-            let scale_displace = (self.zoom_indent_depth as f32) * self.text_glyph_size.x * (1.0 - layout.font_scale);
-            let mut start_x = origin.x + self.line_num_width + scale_displace;
+            let mut start_x = origin.x + self.line_num_width + layout.zoom_displace;
             let mut start = 0;
             
             let mut token_iter = token_info.tokens().iter().peekable();
@@ -843,8 +825,8 @@ impl CodeEditorImpl {
     fn text_color(&self, token: FullToken, next_token: Option<FullToken>) -> Vec4 {
         match (token, next_token) {
             (FullToken::Comment, _) => self.text_color_comment,
-            
-            (FullToken::Ident(_), Some(FullToken::Open(Delim::Paren))) => self.text_color_function_identifier,
+            (FullToken::Ident(i), _) if i.is_capitalised() => self.text_color_type_name,
+            (FullToken::Ident(id), Some(FullToken::Open(Delim::Paren))) => self.text_color_function_identifier,
             (FullToken::Ident(_), Some(FullToken::Punct(id!(!)))) => self.text_color_macro_identifier,
             
             (FullToken::Lifetime, _) => self.text_color_lifetime,
@@ -897,9 +879,41 @@ impl CodeEditorImpl {
             (FullToken::Ident(id!(unsized)), _) |
             (FullToken::Ident(id!(virtual)), _) |
             (FullToken::Ident(id!(yield)), _) |
-            (FullToken::Ident(id!(where)), _) => self.text_color_other_keyword,
+            (FullToken::Ident(id!(where)), _) |
             
-            (FullToken::Ident(i), _) if i.is_capitalised() => self.text_color_type_name,
+            (FullToken::Ident(id!(u8)), _) |
+            (FullToken::Ident(id!(i8)), _) |
+            (FullToken::Ident(id!(u16)), _) |
+            (FullToken::Ident(id!(i16)), _) |
+            (FullToken::Ident(id!(u32)), _) |
+            (FullToken::Ident(id!(i32)), _) |
+            (FullToken::Ident(id!(f32)), _) |
+            (FullToken::Ident(id!(u64)), _) |
+            (FullToken::Ident(id!(i64)), _) |
+            (FullToken::Ident(id!(f64)), _) |
+            (FullToken::Ident(id!(usize)), _) |
+            (FullToken::Ident(id!(isize)), _) |
+            (FullToken::Ident(id!(bool)), _) |
+
+            (FullToken::Ident(id!(instance)), _) |
+            (FullToken::Ident(id!(uniform)), _) |
+            (FullToken::Ident(id!(texture)), _) |
+            (FullToken::Ident(id!(float)), _) |
+            (FullToken::Ident(id!(vec2)), _) |
+            (FullToken::Ident(id!(vec3)), _) |
+            (FullToken::Ident(id!(vec4)), _) |
+            (FullToken::Ident(id!(mat2)), _) |
+            (FullToken::Ident(id!(mat3)), _) |
+            (FullToken::Ident(id!(mat4)), _) |
+            (FullToken::Ident(id!(ivec2)), _) |
+            (FullToken::Ident(id!(ivec3)), _) |
+            (FullToken::Ident(id!(ivec4)), _) |
+            (FullToken::Ident(id!(bvec2)), _) |
+            (FullToken::Ident(id!(bvec3)), _) |
+            (FullToken::Ident(id!(bvec4)), _) 
+            
+            => self.text_color_other_keyword,
+            
             
             (FullToken::Ident(_), _) => self.text_color_identifier,
             (FullToken::Bool(_), _) => self.text_color_bool,
@@ -1261,6 +1275,21 @@ pub struct SelectScroll {
     pub at_end: bool
 }
 
+pub struct LineLayoutInput {
+    pub clear: bool,
+    pub zoom_out: f32,
+    pub line: usize,
+    pub start_y: f32,
+    pub viewport_start: f32,
+    pub viewport_end: f32
+}
+
+pub struct LineLayoutOutput {
+    pub widget_height: f32,
+    pub zoom_out: f32,
+    pub zoom_column: usize,
+}
+
 #[derive(Clone, Debug)]
 pub struct LineLayout {
     pub start_y: f32,
@@ -1268,7 +1297,9 @@ pub struct LineLayout {
     pub widget_height: f32,
     pub total_height: f32,
     pub font_scale: f32,
-    pub zoom_out: f32
+    
+    pub zoom_out: f32,
+    pub zoom_displace: f32
 }
 
 #[derive(Clone, Default, Debug)]
