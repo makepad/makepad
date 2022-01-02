@@ -28,10 +28,10 @@ pub struct KeyFrame {
 pub enum Play {
     #[pick {duration: 1.0}]
     Forward {duration: f64},
-
-    #[live {factor: 0.6}]
-    Exp {factor: f64},
-
+    
+    #[live {speed1: 0.9,speed2:1.0}]
+    Exp {speed1: f64, speed2: f64},
+    
     #[live {duration: 1.0, end: 1.0}]
     Reverse {duration: f64, end: f64},
     
@@ -57,12 +57,12 @@ impl Play {
         }
     }*/
     
-    pub fn as_exp(&self)->Option<f64>{
+    pub fn as_exp(&self) -> Option<(f64,f64)> {
         match self {
-            Self::Exp {factor} => {
-                Some(*factor)
+            Self::Exp {speed1, speed2} => {
+                Some((*speed1,*speed2))
             },
-            _=>None
+            _ => None
         }
     }
     
@@ -70,23 +70,23 @@ impl Play {
         match self {
             Self::Exp {..} => panic!(),
             Self::Forward {duration} => {
-                if *duration == 0.0{return (true, 1.0)}
+                if *duration == 0.0 {return (true, 1.0)}
                 (time > *duration, time.min(*duration) / duration)
             },
             Self::Reverse {duration, end} => {
-                if *duration == 0.0{return (true, 1.0)}
+                if *duration == 0.0 {return (true, 1.0)}
                 (time > *duration, end - (time.min(*duration) / duration))
             },
             Self::Loop {duration, end} => {
-                if *duration == 0.0{return (true, 1.0)}
+                if *duration == 0.0 {return (true, 1.0)}
                 (false, (time / duration) % end)
             },
             Self::ReverseLoop {end, duration} => {
-                if *duration == 0.0{return (true, 1.0)}
+                if *duration == 0.0 {return (true, 1.0)}
                 (false, end - (time / duration) % end)
             },
             Self::BounceLoop {end, duration} => {
-                if *duration == 0.0{return (true, 1.0)}
+                if *duration == 0.0 {return (true, 1.0)}
                 let mut local_time = (time / duration) % (end * 2.0);
                 if local_time > *end {
                     local_time = 2.0 * end - local_time;
@@ -241,7 +241,7 @@ impl Ease {
             Self::InExp => {
                 if t < 0.001 {
                     return 0.;
-                } 
+                }
                 else {
                     return 2.0f64.powf(10. * (t - 1.));
                 }
@@ -453,17 +453,17 @@ pub enum AnimatorAction {
     None
 }
 
-impl AnimatorAction{
-    pub fn must_redraw(&self)->bool{
-        match self{
-            Self::Animating{redraw}=>*redraw,
-            _=>false
+impl AnimatorAction {
+    pub fn must_redraw(&self) -> bool {
+        match self {
+            Self::Animating {redraw} => *redraw,
+            _ => false
         }
     }
-    pub fn is_animating(&self)->bool{
-        match self{
-            Self::Animating{..}=>true,
-            _=>false
+    pub fn is_animating(&self) -> bool {
+        match self {
+            Self::Animating {..} => true,
+            _ => false
         }
     }
 }
@@ -543,11 +543,11 @@ impl Animator {
                 if let LiveValue::Id(track_id) = nodes[id_index].value {
                     // ok so now we have to find our id in tracks
                     let track_index = nodes.child_by_path(0, &[id!(tracks), track_id]).unwrap();
-
+                    
                     if let Some(index) = nodes.child_by_name(track_index, id!(ended)) {
-                        if let LiveValue::Int(ended) = &mut nodes[index].value{
-                            if *ended>0{
-                                if *ended == 1{
+                        if let LiveValue::Int(ended) = &mut nodes[index].value {
+                            if *ended>0 {
+                                if *ended == 1 {
                                     *ended += 1;
                                 }
                                 return (*ended>1, false)
@@ -570,9 +570,7 @@ impl Animator {
                         }
                         _ => panic!()
                     };
-                    // alright we have the start time.
-                    // next we deserialize 'play'
-
+                    
                     let play = if let Some(play_index) = nodes.child_by_name(track_index, id!(play)) {
                         Play::new_apply(cx, ApplyFrom::New, play_index, nodes)
                     }
@@ -580,28 +578,32 @@ impl Animator {
                         Play::new(cx)
                     };
                     node_iter = nodes.next_child(id_index);
-
-                    let (ended, time) = if let Some(factor) = play.as_exp(){
-                        let next_time = start_time * factor.abs();
-                        nodes[time_index].value = LiveValue::Float(next_time);
-                        if next_time < 0.001{ (true, 1.0) }
-                        else {(false, 1.0 - next_time)}
+                    
+                    let (ended, time) = if let Some((speed1, speed2)) = play.as_exp() {
+                        let exp_index = nodes.child_by_name(track_index, id!(exp)).unwrap();
+                        let exp_now = nodes[exp_index].value.as_float().unwrap();
+                        let exp_next = exp_now * speed1;
+                        nodes[exp_index].value = LiveValue::Float(exp_next);
+                        let speed_index = nodes.child_by_path(track_index, &[id!(play), id!(speed1)]).unwrap();
+                        nodes[speed_index].value = LiveValue::Float(speed1*speed2);
+                        if exp_next < 0.001 {(true, 1.0)}
+                        else {(false, 1.0 - exp_next)}
                     }
-                    else{
+                    else {
                         play.get_ended_time(ext_time - start_time)
                     };
-
-                    if ended{ // mark ended step 1
+                    
+                    if ended { // mark ended step 1
                         if let Some(index) = nodes.child_by_name(track_index, id!(ended)) {
                             nodes[index].value = LiveValue::Int(1);
                         }
                     }
                     
                     let redraw = if let Some(index) = nodes.child_by_name(track_index, id!(redraw)) {
-                        if let LiveValue::Bool(redraw) = &nodes[index].value{
+                        if let LiveValue::Bool(redraw) = &nodes[index].value {
                             *redraw
-                        }else{false}
-                    }else{false};
+                        }else {false}
+                    }else {false};
                     
                     (ended, time, redraw, track_id)
                 }
@@ -609,10 +611,10 @@ impl Animator {
             }
             else {panic!()};
             
-            let default_ease = if let Some(ease_index) = nodes.child_by_path(0, &[id!(tracks), track_id, id!(ease)]){
+            let default_ease = if let Some(ease_index) = nodes.child_by_path(0, &[id!(tracks), track_id, id!(ease)]) {
                 Ease::new_apply(cx, ApplyFrom::New, ease_index, nodes)
             }
-            else{
+            else {
                 Ease::Linear
             };
             
@@ -641,7 +643,7 @@ impl Animator {
                 }
                 else { // try to deserialize a keyframe
                     let mut kf = KeyFrame::new_apply(cx, ApplyFrom::New, node_index, nodes);
-                    if nodes.child_by_name(node_index, id!(ease)).is_none(){
+                    if nodes.child_by_name(node_index, id!(ease)).is_none() {
                         kf.ease = default_ease.clone();
                     }
                     kf
@@ -748,26 +750,25 @@ impl Animator {
         return 1.0
     }
     
-    pub fn get_track_and_state_id_of(&self, cx: &mut Cx, live_ptr: Option<LivePtr>)->Option<(LiveId,LiveId)>{
-        if let Some(live_ptr) = live_ptr{
+    pub fn get_track_and_state_id_of(&self, cx: &mut Cx, live_ptr: Option<LivePtr>) -> Option<(LiveId, LiveId)> {
+        if let Some(live_ptr) = live_ptr {
             let live_registry = cx.live_registry.borrow();
             let (nodes, index) = live_registry.ptr_to_nodes_index(live_ptr);
-            Some(if let Some(LiveValue::Id(id)) = nodes.child_value_by_path(index,&[id!(track)]){
+            Some(if let Some(LiveValue::Id(id)) = nodes.child_value_by_path(index, &[id!(track)]) {
                 (*id, nodes[index].id)
-            }
-            else{
+            } else {
                 (LiveId(1), nodes[index].id)
             })
         }
-        else{
+        else {
             None
         }
     }
     
-    pub fn get_state_id_of(&self, cx: &mut Cx, live_ptr: Option<LivePtr>, default:LiveId)->LiveId{
-        if let Some((track_id,_)) = self.get_track_and_state_id_of(cx, live_ptr){
-            if let Some(state) = self.state.as_ref(){
-                if let Some(LiveValue::Id(id)) = &state.child_value_by_path(0, &[id!(tracks), track_id, id!(state_id)]){
+    pub fn get_state_id_of(&self, cx: &mut Cx, live_ptr: Option<LivePtr>, default: LiveId) -> LiveId {
+        if let Some((track_id, _)) = self.get_track_and_state_id_of(cx, live_ptr) {
+            if let Some(state) = self.state.as_ref() {
+                if let Some(LiveValue::Id(id)) = &state.child_value_by_path(0, &[id!(tracks), track_id, id!(state_id)]) {
                     return *id
                 }
             }
@@ -775,9 +776,9 @@ impl Animator {
         default
     }
     
-    pub fn is_track_of_animating(&self, cx: &mut Cx, live_ptr: Option<LivePtr>)->bool{
-        if let Some((track_id,_)) = self.get_track_and_state_id_of(cx, live_ptr){
-            if let Some(state) = self.state.as_ref(){
+    pub fn is_track_of_animating(&self, cx: &mut Cx, live_ptr: Option<LivePtr>) -> bool {
+        if let Some((track_id, _)) = self.get_track_and_state_id_of(cx, live_ptr) {
+            if let Some(state) = self.state.as_ref() {
                 if let Some(LiveValue::Int(ended)) = state.child_value_by_path(0, &[id!(tracks), track_id, id!(ended)]) {
                     if *ended < 2 {
                         return true
@@ -788,18 +789,18 @@ impl Animator {
         false
     }
     
-    pub fn is_in_state(&self, cx: &mut Cx, live_ptr: Option<LivePtr>)->bool{
-        if let Some((track_id,state_id)) = self.get_track_and_state_id_of(cx, live_ptr){
+    pub fn is_in_state(&self, cx: &mut Cx, live_ptr: Option<LivePtr>) -> bool {
+        if let Some((track_id, state_id)) = self.get_track_and_state_id_of(cx, live_ptr) {
             let state = self.state.as_ref().unwrap();
-            if let Some(LiveValue::Id(id)) = &state.child_value_by_path(0, &[id!(tracks), track_id, id!(state_id)]){
+            if let Some(LiveValue::Id(id)) = &state.child_value_by_path(0, &[id!(tracks), track_id, id!(state_id)]) {
                 return *id == state_id;
             }
         }
         false
     }
     
-    pub fn cut_to_live(&mut self, cx: &mut Cx,  live_ptr: Option<LivePtr>/*, state_id: Id*/) {
-        if let Some(live_ptr) = live_ptr{
+    pub fn cut_to_live(&mut self, cx: &mut Cx, live_ptr: Option<LivePtr>/*, state_id: Id*/) {
+        if let Some(live_ptr) = live_ptr {
             let live_registry_rc = cx.live_registry.clone();
             let live_registry = live_registry_rc.borrow();
             let (nodes, index) = live_registry.ptr_to_nodes_index(live_ptr);
@@ -809,14 +810,14 @@ impl Animator {
     }
     
     // hard cut / initialisate the state to a certain state
-    pub fn cut_to(&mut self, cx: &mut Cx,  state_id: LiveId, index: usize, nodes: &[LiveNode]) {
+    pub fn cut_to(&mut self, cx: &mut Cx, state_id: LiveId, index: usize, nodes: &[LiveNode]) {
         // if we dont have a state object, lets create a template
         let mut state = self.swap_out_state();
         // ok lets fetch the track
-        let track = if let Some(LiveValue::Id(id)) = nodes.child_value_by_path(index,&[id!(track)]){
+        let track = if let Some(LiveValue::Id(id)) = nodes.child_value_by_path(index, &[id!(track)]) {
             *id
         }
-        else{
+        else {
             LiveId(1)
         };
         
@@ -831,10 +832,10 @@ impl Animator {
             [track]: {state_id: (state_id), ended: 2}
         });
         
-        let mut reader =if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(apply)){
+        let mut reader = if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(apply)) {
             reader
         }
-        else{
+        else {
             cx.apply_animate_missing_apply_block(live_error_origin!(), index, nodes);
             self.swap_in_state(state);
             return
@@ -842,7 +843,7 @@ impl Animator {
         
         let mut path = Vec::new();
         path.push(id!(state));
-
+        
         reader.walk();
         while !reader.is_eot() {
             if reader.is_array() {
@@ -886,7 +887,7 @@ impl Animator {
     }
     
     pub fn animate_to_live(&mut self, cx: &mut Cx, live_ptr: Option<LivePtr>/*,state_id: Id*/) {
-        if let Some(live_ptr) = live_ptr{
+        if let Some(live_ptr) = live_ptr {
             let live_registry_rc = cx.live_registry.clone();
             let live_registry = live_registry_rc.borrow();
             let (nodes, index) = live_registry.ptr_to_nodes_index(live_ptr);
@@ -896,23 +897,23 @@ impl Animator {
     
     pub fn animate_to(&mut self, cx: &mut Cx, state_id: LiveId, index: usize, nodes: &[LiveNode]) {
         
-        let mut reader =if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(apply)){
+        let mut reader = if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(apply)) {
             reader
         }
-        else{
+        else {
             cx.apply_animate_missing_apply_block(live_error_origin!(), index, nodes);
             return
         };
-
+        
         let mut state = self.swap_out_state();
         if state.len() == 0 { // call cut first
             panic!();
         }
-
-        let track = if let Some(LiveValue::Id(id)) = nodes.child_value_by_path(index,&[id!(track)]){
+        
+        let track = if let Some(LiveValue::Id(id)) = nodes.child_value_by_path(index, &[id!(track)]) {
             *id
         }
-        else{
+        else {
             LiveId(1)
         };
         
@@ -926,13 +927,19 @@ impl Animator {
         };
         
         let mut path = Vec::new();
-
-        state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track], live_object!{
-            [track]: {state_id: (state_id), ended:0, time:void}
-        });
+        let old_exp = if let Some(LiveValue::Float(v)) = state.child_value_by_path(0, &[id!(tracks), track, id!(exp)]) {
+            *v
+        }
+        else {
+            0.0
+        };
         
+        state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track], live_object!{
+            [track]: {state_id: (state_id), ended: 0, time: void, exp: (1.0-old_exp)},
+        });
+
         // copy in from track
-        if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(from)){
+        if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(from)) {
             if let Some(reader) = reader.child_by_name(from_id) {
                 state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(play)], reader.node_slice());
             }
@@ -940,40 +947,25 @@ impl Animator {
                 state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(play)], reader.node_slice());
             }
         }
-        else if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(exp)){ // we dont have a from. we should use duration property and construct a play::forward
-            let v = reader.node().value.as_float().unwrap_or(0.6);
-            // however.. if we interrupt we also need to to keep track of some kind of time
+        else if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(duration)) { // we dont have a from. we should use duration property and construct a play::forward
             state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(play)], live_object!{
-                play: Play::Exp{factor:(v)}
-            });
-            let old_time = if let Some(LiveValue::Float(v)) = state.child_value_by_path(0, &[id!(tracks), track, id!(time)]) {
-                *v
-            }
-            else {
-                0.0
-            };
-            state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(time)], live_array!{(1.0-old_time)});
-        
-        }
-        else if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(duration)){ // we dont have a from. we should use duration property and construct a play::forward
-            state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(play)], live_object!{
-                play: Play::Forward{duration:(reader.node().value.as_float().unwrap_or(1.0))}
+                play: Play::Forward {duration: (reader.node().value.as_float().unwrap_or(1.0))}
             });
         }
         
         // copy ease default if we have one
-        if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(ease)){
+        if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(ease)) {
             state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(ease)], reader.node_slice());
         }
-
-        if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(redraw)){
+        
+        if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(redraw)) {
             state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track, id!(redraw)], reader.node_slice());
         }
         
         path.push(id!(state));
         reader.walk();
         while !reader.is_eot() {
-
+            
             if reader.is_array() {
                 path.push(reader.id);
                 let (first_index, last_index) = if let Some(state_child) = state.child_by_path(0, &path) {
