@@ -168,7 +168,7 @@ live_register!{
         
         max_zoom_out: 0.92
         
-        caret_blink_timeout: 0.5
+        caret_blink_timeout: 0.1
     }
 }
 
@@ -486,8 +486,6 @@ impl CodeEditorImpl {
                 };
                 if span.is_included {
                     
-                    // alright so. the chars till zoom_displace
-                    // are normal. and beyond it they are scaled
                     let end_x = if end > layout.zoom_column {
                         start_x + end as f32 * self.text_glyph_size.x * layout.font_scale
                             + layout.zoom_displace
@@ -731,7 +729,7 @@ impl CodeEditorImpl {
                                             + caret.column as f32 * self.text_glyph_size.x * layout.font_scale
                                             + layout.zoom_displace,
                                         y: layout.start_y + origin.y,
-                                    },
+                                    }, 
                                     size: Vec2 {
                                         x: 1.5 * layout.font_scale,
                                         y: self.text_glyph_size.y * layout.font_scale,
