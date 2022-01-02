@@ -201,7 +201,8 @@ pub struct CodeEditorImpl {
     #[rust] caret_blink_timer: Timer,
     #[rust] select_scroll: Option<SelectScroll>,
     #[rust] last_move_position: Option<Position>,
-    #[rust] zoom_anim_start: Option<(Position, Vec2, Vec2)>,
+    #[rust] zoom_anim_center: Option<Position>,
+    #[rust] zoom_last_pos: Option<Vec2>,
     
     pub scroll_view: ScrollView,
     
@@ -276,15 +277,15 @@ pub enum CodeEditorAction {
     RedrawViewsForDocument(DocumentId)
 }
 
-pub struct LineLayoutInput{
-    pub clear:bool, 
-    pub line:usize,
+pub struct LineLayoutInput {
+    pub clear: bool,
+    pub line: usize,
     pub start_y: f32,
-    pub viewport_start: f32, 
+    pub viewport_start: f32,
     pub viewport_end: f32
 }
 
-pub struct LineLayoutOutput{
+pub struct LineLayoutOutput {
     pub widget_height: f32
 }
 
@@ -314,13 +315,13 @@ impl CodeEditorImpl {
     
     pub fn end(&mut self, cx: &mut Cx, lines_layout: &LinesLayout) {
         self.end_instances(cx);
-        // lets get the viewport rect
-        // then append that to the end
+        
         let visible = self.scroll_view.get_scroll_view_visible();
         cx.set_turtle_bounds(Vec2 {
             x: lines_layout.max_line_width,
             y: lines_layout.total_height + visible.y - self.text_glyph_size.y,
         });
+        
         self.scroll_shadow.draw(cx, &self.scroll_view, vec2(self.line_num_width, 0.));
         self.scroll_view.end(cx);
     }
@@ -333,38 +334,37 @@ impl CodeEditorImpl {
         self.text_glyph_size.y
     }
     
-
+    
     // lets calculate visible lines
     pub fn calc_lines_layout<T>(
         &mut self,
         cx: &mut Cx,
         document_inner: &DocumentInner,
-        session: &Session,
         lines_layout: &mut LinesLayout,
         mut compute_height: T,
     )
     where T: FnMut(&mut Cx, LineLayoutInput) -> LineLayoutOutput
     {
-        // ok so we have a last cursor pos
         self.calc_lines_layout_inner(cx, document_inner, lines_layout, &mut compute_height);
-        if let Some((center_line, start, scroll)) = self.zoom_anim_start{
-            if self.animator.is_track_of_animating(cx, self.zoom_out_state){
-                let now = self.position_to_vec2(center_line, lines_layout);
-                // lets scroll with the delta y
-                self.scroll_view.set_scroll_pos(cx, vec2(scroll.x, scroll.y + (now.y - start.y)));
+        if let Some(center_line) = self.zoom_anim_center {
+            let next_pos = self.position_to_vec2(center_line, lines_layout);
+            let last_pos = self.zoom_last_pos.unwrap();
+            if self.animator.is_track_of_animating(cx, self.zoom_out_state) {
+                let pos = self.scroll_view.get_scroll_pos(cx);
+                self.scroll_view.set_scroll_pos_no_clip(cx, vec2(pos.x, pos.y + (next_pos.y - last_pos.y)));
                 self.calc_lines_layout_inner(cx, document_inner, lines_layout, &mut compute_height);
-            }
+            }  
+            self.zoom_last_pos = Some(next_pos);
         }
-        
     } 
-
+    
     // lets calculate visible lines
     fn calc_lines_layout_inner<T>(
-        &mut self,
+        &mut self, 
         cx: &mut Cx,
         document_inner: &DocumentInner,
         lines_layout: &mut LinesLayout,
-        compute_height: &mut T, 
+        compute_height: &mut T,
     )
     where T: FnMut(&mut Cx, LineLayoutInput) -> LineLayoutOutput
     {
@@ -400,7 +400,7 @@ impl CodeEditorImpl {
             
             let output = compute_height(
                 cx,
-                LineLayoutInput{
+                LineLayoutInput {
                     clear: line_index == 0,
                     line: line_index,
                     start_y: start_y + self.get_character_height(),
@@ -457,30 +457,28 @@ impl CodeEditorImpl {
         self.line_num_text.end_many_instances(cx);
     }
     
-    pub fn start_zoom_anim(&mut self, cx:&mut Cx, state: &mut EditorState, lines_layout:&LinesLayout, anim:Option<LivePtr>){
-        if let Some(session_id) = self.session_id{
+    pub fn start_zoom_anim(&mut self, cx: &mut Cx, state: &mut EditorState, lines_layout: &LinesLayout, anim: Option<LivePtr>) {
+        if let Some(session_id) = self.session_id {
             let session = &state.sessions[session_id];
             let document = &state.documents[session.document_id];
             let document_inner = document.inner.as_ref().unwrap();
-
+            
             let last_cursor = session.cursors.last_inserted();
             let last_pos = self.position_to_vec2(last_cursor.head, lines_layout);
-
+            
             let view_rect = self.scroll_view.get_viewport_rect(cx);
             // check if our last_pos is visible
-            let (center_line, start) = if !view_rect.contains(last_pos){
+            let center_line = if !view_rect.contains(last_pos) {
                 let start = view_rect.pos + view_rect.size * 0.5;
                 let pos = self.vec2_to_position(&document_inner.text, start, lines_layout);
                 let start = self.position_to_vec2(pos, lines_layout);
-                (pos, start)
+                pos
             }
-            else{
-                (last_cursor.head, last_pos)
+            else {
+                last_cursor.head
             };
-            println!("CENTERING AROUND {:?}", center_line);
-            self.zoom_anim_start = Some(
-                (center_line, start, view_rect.pos)
-            );
+            self.zoom_anim_center = Some(center_line);
+            self.zoom_last_pos = Some(self.position_to_vec2(center_line, lines_layout));
             self.animate_to(cx, anim)
         }
     }
@@ -490,7 +488,7 @@ impl CodeEditorImpl {
         self.caret_blink_timer = cx.start_timer(self.caret_blink_timeout, true);
         self.animate_cut(cx, self.show_caret_state);
     }
-   
+    
     pub fn draw_selections(
         &mut self,
         cx: &mut Cx,
@@ -667,7 +665,7 @@ impl CodeEditorImpl {
             }
             
             linenum_fill(&mut self.line_num_text.buf, i + 1);
-
+            
             self.line_num_text.font_scale = layout.font_scale;
             
             // lets scale around the right side center
@@ -1065,19 +1063,17 @@ impl CodeEditorImpl {
                     dispatch_action(cx, CodeEditorAction::RedrawViewsForDocument(session.document_id))
                 }
             }
-
+            
             HitEvent::KeyDown(KeyEvent {
                 key_code: KeyCode::Alt,
-                modifiers,
                 ..
-            })  => {
+            }) => {
                 self.start_zoom_anim(cx, state, lines_layout, self.zoom_out_state);
-            } 
+            }
             HitEvent::KeyUp(KeyEvent {
                 key_code: KeyCode::Alt,
-                modifiers,
                 ..
-            })  => {
+            }) => {
                 self.start_zoom_anim(cx, state, lines_layout, self.zoom_in_state);
             }
             HitEvent::KeyDown(KeyEvent {
@@ -1274,7 +1270,7 @@ pub struct LineLayout {
     pub font_scale: f32,
     pub zoom_out: f32
 }
- 
+
 #[derive(Clone, Default, Debug)]
 pub struct LinesLayout {
     pub view_start: usize,
