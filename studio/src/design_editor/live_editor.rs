@@ -89,7 +89,6 @@ pub struct LiveEditor {
     
     zoom_indent_depth: usize,
     
-    
     text_color_color: Vec4,
     text_color_type_name: Vec4,
     text_color_comment: Vec4,
@@ -346,7 +345,7 @@ impl LiveEditor {
         cx: &mut Cx,
         text: &Text,
         token_cache: &TokenCache,
-    ) { 
+    ) {
         let lines_layout = &self.lines_layout;
         let origin = cx.get_turtle_pos();
         //let mut start_y = visible_lines.start_y;
@@ -475,16 +474,12 @@ impl LiveEditor {
             (FullToken::Ident(id!(ivec4)), _) |
             (FullToken::Ident(id!(bvec2)), _) |
             (FullToken::Ident(id!(bvec3)), _) |
-            (FullToken::Ident(id!(bvec4)), _)
-            
-                => self.text_color_other_keyword,
-            
-            
+            (FullToken::Ident(id!(bvec4)), _) => self.text_color_other_keyword,
             (FullToken::Ident(_), _) => self.text_color_identifier,
             (FullToken::Bool(_), _) => self.text_color_bool,
             
             (FullToken::Float(_), _) |
-            (FullToken::Int(_), _) |
+            (FullToken::Int(_), _) | 
             (FullToken::OtherNumber, _) => self.text_color_number,
             
             (FullToken::Punct(_), _) => self.text_color_punctuator,
