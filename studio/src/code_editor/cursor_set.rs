@@ -14,6 +14,7 @@ use {
         range_set::RangeSet,
         text::Text,
     },
+    std::slice,
 };
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -27,6 +28,12 @@ impl CursorSet {
         CursorSet {
             cursors: vec![Cursor::new()],
             last_inserted_index: 0,
+        }
+    }
+
+    pub fn iter(&self) -> Iter<'_> {
+        Iter {
+            iter: self.cursors.iter(),
         }
     }
 
@@ -148,5 +155,26 @@ impl CursorSet {
 impl Default for CursorSet {
     fn default() -> CursorSet {
         CursorSet::new()
+    }
+}
+
+impl<'a> IntoIterator for &'a CursorSet {
+    type Item = &'a Cursor;
+    type IntoIter = Iter<'a>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
+    }
+}
+
+pub struct Iter<'a> {
+    iter: slice::Iter<'a, Cursor>
+}
+
+impl<'a> Iterator for Iter<'a> {
+    type Item = &'a Cursor;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        self.iter.next()
     }
 }
