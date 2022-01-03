@@ -168,7 +168,7 @@ live_register!{
         
         max_zoom_out: 0.92
         
-        caret_blink_timeout: 0.1
+        caret_blink_timeout: 0.5
     }
 }
 
@@ -632,7 +632,7 @@ impl CodeEditorImpl {
                 y: layout.start_y + origin.y,
             }, 0, None);
         }
-    }
+    } 
     
     pub fn draw_indent_guides(
         &mut self,
@@ -655,35 +655,31 @@ impl CodeEditorImpl {
             for indent in 0..indent_count {
                 let indent_lines_column = indent * 4;
                 self.indent_lines_quad.color = self.text_color_indent_line; // TODO: Colored indent guides
-                if indent_lines_column >= layout.zoom_column {
-                    self.indent_lines_quad.draw_abs(
-                        cx,
-                        Rect {
-                            pos: Vec2 {
-                                x: origin.x
-                                    + self.line_num_width
-                                    + indent_lines_column as f32 * self.text_glyph_size.x * layout.font_scale
-                                    + layout.zoom_displace,
-                                y: layout.start_y + origin.y,
-                            },
-                            size: vec2(self.text_glyph_size.x * layout.font_scale, layout.total_height),
+                let rect = if indent_lines_column >= layout.zoom_column {
+                    Rect {
+                        pos: Vec2 {
+                            x: origin.x
+                                + self.line_num_width
+                                + indent_lines_column as f32 * self.text_glyph_size.x * layout.font_scale
+                                + layout.zoom_displace,
+                            y: layout.start_y + origin.y,
                         },
-                    );
+                        size: vec2(self.text_glyph_size.x * layout.font_scale, layout.total_height),
+                    }
                 }
                 else {
-                    self.indent_lines_quad.draw_abs(
-                        cx,
-                        Rect {
-                            pos: Vec2 {
-                                x: origin.x
-                                    + self.line_num_width
-                                    + indent_lines_column as f32 * self.text_glyph_size.x,
-                                y: layout.start_y + origin.y,
-                            },
-                            size: vec2(self.text_glyph_size.x, layout.total_height),
+                    Rect {
+                        pos: Vec2 {
+                            x: origin.x
+                                + self.line_num_width
+                                + indent_lines_column as f32 * self.text_glyph_size.x,
+                            y: layout.start_y + origin.y,
                         },
-                    );
-                }
+                        size: vec2(self.text_glyph_size.x, layout.total_height),
+                    }
+                    
+                };
+                self.indent_lines_quad.draw_abs(cx, rect);
             }
             
             //start_y += line_height;
@@ -720,40 +716,33 @@ impl CodeEditorImpl {
                             continue;
                         }
                         
-                        if caret.column >= layout.zoom_column {
-                            self.caret_quad.draw_abs(
-                                cx,
-                                Rect {
-                                    pos: Vec2 {
-                                        x: start_x
-                                            + caret.column as f32 * self.text_glyph_size.x * layout.font_scale
-                                            + layout.zoom_displace,
-                                        y: layout.start_y + origin.y,
-                                    }, 
-                                    size: Vec2 {
-                                        x: 1.5 * layout.font_scale,
-                                        y: self.text_glyph_size.y * layout.font_scale,
-                                    },
+                        let rect = if caret.column >= layout.zoom_column {
+                            Rect {
+                                pos: Vec2 {
+                                    x: start_x
+                                        + caret.column as f32 * self.text_glyph_size.x * layout.font_scale
+                                        + layout.zoom_displace,
+                                    y: layout.start_y + origin.y,
                                 },
-                            );
+                                size: Vec2 {
+                                    x: 1.5 * layout.font_scale,
+                                    y: self.text_glyph_size.y * layout.font_scale,
+                                },
+                            }
                         }
                         else {
-                            self.caret_quad.draw_abs(
-                                cx,
-                                Rect {
-                                    pos: Vec2 {
-                                        x: start_x + caret.column as f32 * self.text_glyph_size.x,
-                                        y: layout.start_y + origin.y,
-                                    },
-                                    size: Vec2 {
-                                        x: 1.5,
-                                        y: self.text_glyph_size.y * layout.font_scale,
-                                    },
+                            Rect {
+                                pos: Vec2 {
+                                    x: start_x + caret.column as f32 * self.text_glyph_size.x,
+                                    y: layout.start_y + origin.y,
                                 },
-                            );
-                        }
-                        
-                        
+                                size: Vec2 {
+                                    x: 1.5,
+                                    y: self.text_glyph_size.y * layout.font_scale,
+                                },
+                            }
+                        };
+                        self.caret_quad.draw_abs(cx, rect);
                     }
                     _ => break,
                 }
@@ -1096,9 +1085,10 @@ impl CodeEditorImpl {
             
             // ok so. we need to compute the head
             let pos = self.position_to_vec2(last_cursor.head, line_layout);
+            
             let rect = Rect {
-                pos: pos + self.text_glyph_size * vec2(0.0, -1.0),
-                size: self.text_glyph_size * vec2(5.0, 3.0)
+                pos: pos + self.text_glyph_size * vec2(-2.0, -1.0) - vec2(self.line_num_width,0.),
+                size: self.text_glyph_size * vec2(4.0, 3.0) + vec2(self.line_num_width,0.)
             };
             self.scroll_view.scroll_into_view(cx, rect);
         }
@@ -1107,27 +1097,42 @@ impl CodeEditorImpl {
     // coordinate maps a text position to a 2d position
     fn position_to_vec2(&self, position: Position, lines_layout: &LinesLayout) -> Vec2 {
         // we need to compute the position in the editor space
-        let line = &lines_layout.lines[position.line];
+        let layout = &lines_layout.lines[position.line];
+        let x = if position.column >= layout.zoom_column{
+            let base = layout.zoom_column as f32 * self.text_glyph_size.x * layout.font_scale + self.line_num_width;
+            (position.column - layout.zoom_column) as f32 * self.text_glyph_size.x * layout.font_scale + base
+        }
+        else{
+            position.column as f32 * self.text_glyph_size.x + self.line_num_width
+        };
         vec2(
-            position.column as f32 * self.text_glyph_size.x,
-            line.start_y,
+            x,
+            layout.start_y,
         )
     }
     
     fn vec2_to_position(&self, text: &Text, vec2: Vec2, lines_layout: &LinesLayout) -> Position {
         
         if vec2.y < 0.0 {
-            return Position {
+            return Position { 
                 line: 0,
                 column: 0
             }
         }
-        for (line, info) in lines_layout.lines.iter().enumerate() {
-            if vec2.y >= info.start_y && vec2.y <= info.start_y + info.total_height {
+        for (line, layout) in lines_layout.lines.iter().enumerate() {
+            if vec2.y >= layout.start_y && vec2.y <= layout.start_y + layout.total_height {
+                let start_x = vec2.x - self.line_num_width;
+                let zoom_start = layout.zoom_column as f32 * self.text_glyph_size.x;
+                let column = if start_x >= zoom_start{
+                    let scale_x = self.text_glyph_size.x * layout.font_scale;
+                    ((start_x + 0.5 * scale_x - zoom_start) / scale_x) as usize + layout.zoom_column
+                }
+                else{
+                    ((start_x + 0.5 * self.text_glyph_size.x) / self.text_glyph_size.x) as usize
+                };
                 return Position {
                     line,
-                    column: (((vec2.x - self.line_num_width + 0.5 * self.text_glyph_size.x) / self.text_glyph_size.x) as usize)
-                        .min(text.as_lines()[line].len()),
+                    column: column.min(text.as_lines()[line].len()),
                 }
             }
         }
