@@ -12,6 +12,7 @@ use {
         range::Range,
         range_set,
         range_set::RangeSet,
+        size::Size,
         text::Text,
     },
     std::slice,
@@ -122,6 +123,12 @@ impl CursorSet {
     pub fn apply_delta(&mut self, delta: &Delta) {
         for cursor in &mut self.cursors {
             cursor.apply_delta(delta);
+        }
+    }
+
+    pub fn apply_offsets(&mut self, offsets: &[Size]) {
+        for (cursor, &offset) in self.cursors.iter_mut().zip(offsets) {
+            cursor.apply_offset(offset);
         }
     }
 
