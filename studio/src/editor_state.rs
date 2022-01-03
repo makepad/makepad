@@ -228,7 +228,7 @@ impl EditorState {
         let delta = builder.build();
         
         let mut offsets = Vec::new();
-        for cursor in &session.cursors {
+        for _ in &session.cursors {
             offsets.push(Size::zero());
         }
 
@@ -378,6 +378,7 @@ impl EditorState {
 
         let session = &mut self.sessions[session_id];
         session.apply_delta(&delta);
+        session.apply_offsets(offsets);
 
         self.apply_delta(session_id, delta, send_request);
     }
@@ -511,7 +512,12 @@ pub struct Session {
 
 impl Session {
     fn apply_delta(&mut self, delta: &Delta) {
-        self.cursors.apply_delta(&delta);
+        self.cursors.apply_delta(delta);
+        self.update_selections_and_carets();
+    }
+
+    fn apply_offsets(&mut self, offsets: &[Size]) {
+        self.cursors.apply_offsets(offsets);
         self.update_selections_and_carets();
     }
 
