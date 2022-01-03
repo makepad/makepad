@@ -125,8 +125,8 @@ impl InlineCache {
         let ranges = delta.operation_ranges();
         if ranges.count() == 2 {
             let mut ranges = delta.operation_ranges();
-            if let OperationRange::Insert(del_range) = ranges.next().unwrap() {
-                if let OperationRange::Delete(insert_range) = ranges.next().unwrap() {
+            if let OperationRange::Delete(del_range) = ranges.next().unwrap() {
+                if let OperationRange::Insert(insert_range) = ranges.next().unwrap() {
                     if del_range.start.line == insert_range.start.line &&
                     del_range.end.line == insert_range.end.line {
                         self.is_clean = false;
