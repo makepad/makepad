@@ -87,7 +87,8 @@ impl Cx {
                     draw_call.instance_dirty = false;
                     // update the instance buffer data
                     self.platform.bytes_written += draw_call.instances.as_ref().unwrap().len() * 4;
-                    draw_call.platform.instance_buffer.cpu_write().update(metal_cx, &draw_call.instances.as_ref().unwrap());
+                    draw_call.platform.instance_buffer.next();
+                    draw_call.platform.instance_buffer.get_mut().cpu_write().update(metal_cx, &draw_call.instances.as_ref().unwrap());
                 }
                 
                 // update the zbias uniform if we have it.
@@ -122,12 +123,14 @@ impl Cx {
                 let geometry = &mut self.geometries[geometry_id];
                 
                 if geometry.dirty {
-                    geometry.platform.index_buffer.cpu_write().update(metal_cx, &geometry.indices);
-                    geometry.platform.vertex_buffer.cpu_write().update(metal_cx, &geometry.vertices);
+                    geometry.platform.index_buffer.next();
+                    geometry.platform.index_buffer.get_mut().cpu_write().update(metal_cx, &geometry.indices);
+                    geometry.platform.vertex_buffer.next();
+                    geometry.platform.vertex_buffer.get_mut().cpu_write().update(metal_cx, &geometry.vertices);
                     geometry.dirty = false;
                 }
                 
-                if let Some(inner) = geometry.platform.vertex_buffer.cpu_read().inner.as_ref() {
+                if let Some(inner) = geometry.platform.vertex_buffer.get().cpu_read().inner.as_ref() {
                     unsafe {msg_send![
                         encoder,
                         setVertexBuffer: inner.buffer.as_id()
@@ -137,7 +140,7 @@ impl Cx {
                 }
                 else {println!("Drawing error: vertex_buffer None")}
                 
-                if let Some(inner) = draw_call.platform.instance_buffer.cpu_read().inner.as_ref() {
+                if let Some(inner) = draw_call.platform.instance_buffer.get().cpu_read().inner.as_ref() {
                     unsafe {msg_send![
                         encoder,
                         setVertexBuffer: inner.buffer.as_id()
@@ -214,7 +217,7 @@ impl Cx {
                     }
                 }
                 self.platform.draw_calls_done += 1;
-                if let Some(inner) = geometry.platform.index_buffer.cpu_read().inner.as_ref() {
+                if let Some(inner) = geometry.platform.index_buffer.get().cpu_read().inner.as_ref() {
                     
                     let () = unsafe {msg_send![
                         encoder,
@@ -228,9 +231,9 @@ impl Cx {
                 }
                 else {println!("Drawing error: index_buffer None")}
                 
-                gpu_read_guards.push(draw_call.platform.instance_buffer.gpu_read());
-                gpu_read_guards.push(geometry.platform.vertex_buffer.gpu_read());
-                gpu_read_guards.push(geometry.platform.index_buffer.gpu_read());
+                gpu_read_guards.push(draw_call.platform.instance_buffer.get().gpu_read());
+                gpu_read_guards.push(geometry.platform.vertex_buffer.get().gpu_read());
+                gpu_read_guards.push(geometry.platform.index_buffer.get().gpu_read());
             }
         }
     }
@@ -803,13 +806,33 @@ impl CxPlatformDrawShader {
 #[derive(Default)]
 pub struct CxPlatformDrawCall {
     //pub uni_dr: MetalBuffer,
-    instance_buffer: MetalRwLock<MetalBuffer>,
+    instance_buffer: MetalBufferQueue,
 }
 
 #[derive(Default)]
 pub struct CxPlatformGeometry {
-    vertex_buffer: MetalRwLock<MetalBuffer>,
-    index_buffer: MetalRwLock<MetalBuffer>,
+    vertex_buffer: MetalBufferQueue,
+    index_buffer: MetalBufferQueue,
+}
+
+#[derive(Default)]
+struct MetalBufferQueue {
+    queue: [MetalRwLock<MetalBuffer>; 3],
+    index: usize,
+}
+
+impl MetalBufferQueue {
+    fn get(&self) -> &MetalRwLock<MetalBuffer> {
+        &self.queue[self.index]
+    }
+
+    fn get_mut(&mut self) -> &mut MetalRwLock<MetalBuffer> {
+        &mut self.queue[self.index]
+    }
+
+    fn next(&mut self) {
+        self.index = (self.index + 1) % self.queue.len();
+    }
 }
 
 #[derive(Default)]
