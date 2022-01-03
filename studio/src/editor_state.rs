@@ -304,38 +304,34 @@ impl EditorState {
         let document_inner = document.inner.as_ref().unwrap();
 
         let mut builder_0 = delta::Builder::new();
-        for span in session.selections.spans() {
-            if span.is_included {
-                builder_0.delete(span.len);
-            } else {
-                builder_0.retain(span.len);
-            }
+        let mut position = Position::origin();
+        for cursor in &session.cursors {
+            builder_0.retain(cursor.start() - position);
+            builder_0.delete(cursor.end() - cursor.start());
+            position = cursor.end();
         }
         let delta_0 = builder_0.build();
 
         let mut builder_1 = delta::Builder::new();
         let mut position = Position::origin();
-        for distance in session.carets.distances() {
-            position += distance;
-            if !session.selections.contains_position(position) {
-                if position.column == 0 {
-                    if position.line != 0 {
-                        builder_1.retain(Size {
-                            line: distance.line - 1,
-                            column: document_inner.text.as_lines()[position.line - 1].len(),
-                        });
-                        builder_1.delete(Size { line: 1, column: 0 })
-                    }
-                } else {
-                    builder_1.retain(Size {
-                        line: distance.line,
-                        column: distance.column - 1,
-                    });
-                    builder_1.delete(Size { line: 0, column: 1 });
+        for cursor in &session.cursors {
+            if cursor.start().column == 0 {
+                if cursor.start().line == 0 {
+                    continue;
                 }
+                builder_1.retain(Position {
+                    line: cursor.start().line - 1,
+                    column: document_inner.text.as_lines()[cursor.start().line - 1].len(),
+                } - position);
+                builder_1.delete(Size { line: 1, column: 0 });
             } else {
-                builder_1.retain(distance);
+                builder_1.retain(Position {
+                    line: cursor.start().line,
+                    column: cursor.start().column - 1,
+                } - position);
+                builder_1.delete(Size { line: 0, column: 1 });
             }
+            position = cursor.start();
         }
         let delta_1 = builder_1.build();
 
