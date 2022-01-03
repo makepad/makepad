@@ -1,6 +1,8 @@
 use {
+    crate::code_editor::token_cache::TokenCache,
     makepad_component::makepad_render::makepad_live_tokenizer::{
         delta::{Delta, OperationRange},
+        full_token::FullToken,
         text::Text,
     },
     std::{
@@ -14,13 +16,13 @@ pub struct IndentCache {
 }
 
 impl IndentCache {
-    pub fn new(text: &Text) -> IndentCache {
+    pub fn new(text: &Text, token_cache: &TokenCache) -> IndentCache {
         let mut cache = IndentCache {
             lines: (0..text.as_lines().len())
                 .map(|_| Line::default())
                 .collect::<Vec<_>>(),
         };
-        cache.refresh(text);
+        cache.refresh(text, token_cache);
         cache
     }
 
@@ -42,7 +44,7 @@ impl IndentCache {
         }
     }
 
-    pub fn refresh(&mut self, text: &Text) {
+    pub fn refresh(&mut self, text: &Text, token_cache: &TokenCache) {
         for (index, line) in self.lines.iter_mut().enumerate() {
             if line.leading_whitespace.is_some() {
                 continue;
@@ -55,25 +57,17 @@ impl IndentCache {
         }
 
         let mut leading_whitespace_above = 0;
-        for (index, line) in self.lines.iter_mut().enumerate() {
-            if let Some(leading_whitespace) = line.leading_whitespace.unwrap() {
-                leading_whitespace_above = match text
-                    .as_lines()[index]
-                    .iter()
-                    .rev()
-                    .find(|ch| !ch.is_whitespace())
-                {
-                    Some('{') => leading_whitespace + 4,
-                    _ => leading_whitespace,
-                };
+        for line_info in self.lines.iter_mut() {
+            if let Some(leading_whitespace) = line_info.leading_whitespace.unwrap() {
+                leading_whitespace_above = leading_whitespace;
             }
-            line.leading_whitespace_above = Some(leading_whitespace_above);
+            line_info.leading_whitespace_above = Some(leading_whitespace_above);
         }
 
         let mut leading_whitespace_below = 0;
         for line_info in self.lines.iter_mut().rev() {
-            if let Some(non_whitespace_start) = line_info.leading_whitespace.unwrap() {
-                leading_whitespace_below = non_whitespace_start
+            if let Some(leading_whitespace) = line_info.leading_whitespace.unwrap() {
+                leading_whitespace_below = leading_whitespace;
             }
             line_info.leading_whitespace_below = Some(leading_whitespace_below);
         }
@@ -120,6 +114,6 @@ impl Line {
     pub fn virtual_leading_whitespace(&self) -> usize {
         self.leading_whitespace_above
             .unwrap()
-            .min(self.leading_whitespace_below.unwrap())
+            .max(self.leading_whitespace_below.unwrap())
     }
 }
