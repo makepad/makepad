@@ -259,6 +259,17 @@ impl EditorState {
         for cursor in &session.cursors {
             builder_1.retain(cursor.start() - position);
             builder_1.insert(text.clone());
+            
+            // Inject closing delimiter if necessary
+            if text.len().line == 0 && text.len().column == 1 {
+                match text.as_lines()[0][0] {
+                    '(' => builder_1.insert(Text::from(vec![vec![')']])),
+                    '[' => builder_1.insert(Text::from(vec![vec![']']])),
+                    '{' => builder_1.insert(Text::from(vec![vec!['}']])),
+                    _ => {}
+                }
+            }
+
             offsets.push(text.len());
             position = cursor.end();
         }
