@@ -2,6 +2,7 @@ use {
     makepad_component::makepad_render::makepad_live_tokenizer::{
         delta::Delta,
         position::Position,
+        size::Size,
         text::Text,
     },    
 };
@@ -99,6 +100,12 @@ impl Cursor {
     pub fn apply_delta(&mut self, delta: &Delta) {
         self.head = self.head.apply_delta(&delta);
         self.tail = self.tail.apply_delta(&delta);
+        self.max_column = self.head.column;
+    }
+
+    pub fn apply_offset(&mut self, offset: Size) {
+        self.head += offset;
+        self.tail = self.head;
         self.max_column = self.head.column;
     }
 }
