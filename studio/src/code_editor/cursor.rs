@@ -1,5 +1,6 @@
 use {
     makepad_component::makepad_render::makepad_live_tokenizer::{
+        delta::Delta,
         position::Position,
         text::Text,
     },    
@@ -93,5 +94,11 @@ impl Cursor {
             self.tail = position;
         }
         self.max_column = position.column;
+    }
+
+    pub fn apply_delta(&mut self, delta: &Delta) {
+        self.head = self.head.apply_delta(&delta);
+        self.tail = self.tail.apply_delta(&delta);
+        self.max_column = self.head.column;
     }
 }
