@@ -43,11 +43,16 @@ pub enum FullToken {
 }
 
 impl FullToken {
-
-
-    pub fn is_whitespace(&self)->bool{
+    pub fn is_whitespace(&self)-> bool {
         match self {
-            FullToken::Whitespace  => true,
+            FullToken::Whitespace => true,
+            _ => false
+        }
+    }
+
+    pub fn is_comment(&self) -> bool {
+        match self {
+            FullToken::Comment => true,
             _ => false
         }
     }
