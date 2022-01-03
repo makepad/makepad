@@ -55,9 +55,17 @@ impl IndentCache {
         }
 
         let mut leading_whitespace_above = 0;
-        for line in self.lines.iter_mut() {
+        for (index, line) in self.lines.iter_mut().enumerate() {
             if let Some(leading_whitespace) = line.leading_whitespace.unwrap() {
-                leading_whitespace_above = leading_whitespace;
+                leading_whitespace_above = match text
+                    .as_lines()[index]
+                    .iter()
+                    .rev()
+                    .find(|ch| !ch.is_whitespace())
+                {
+                    Some('{') => leading_whitespace + 4,
+                    _ => leading_whitespace,
+                };
             }
             line.leading_whitespace_above = Some(leading_whitespace_above);
         }

@@ -650,12 +650,7 @@ impl CodeEditorImpl {
         {
             let line_index = line_index + lines_layout.view_start;
             let layout = &lines_layout.lines[line_index];
-            // If the line is empty, add one to the amount of leading whitespace so that
-            // indent guides are drawn correctly after an opening delimiter on the previous line.
-            let leading_whitespace = indent_info.leading_whitespace().unwrap_or_else(|| {
-                indent_info.virtual_leading_whitespace() + 1
-            });
-            let indent_count = (leading_whitespace + 3) / 4;
+            let indent_count = (indent_info.virtual_leading_whitespace() + 3) / 4;
             for indent in 0..indent_count {
                 let indent_lines_column = indent * 4;
                 self.indent_lines_quad.color = self.text_color_indent_line; // TODO: Colored indent guides
