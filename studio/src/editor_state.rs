@@ -123,7 +123,7 @@ impl EditorState {
         let document_id = self.outstanding_document_queue.pop_front().unwrap();
         let document = &mut self.documents[document_id];
         let token_cache = TokenCache::new(&text);
-        let indent_cache = IndentCache::new(&text);
+        let indent_cache = IndentCache::new(&text, &token_cache);
         let inline_cache = RefCell::new(InlineCache::new(&text));
         
         document.inner = Some(DocumentInner {
@@ -556,7 +556,7 @@ impl Document {
         inner.inline_cache.borrow_mut().invalidate(&delta);
         inner.text.apply_delta(delta);
         inner.token_cache.refresh(&inner.text);
-        inner.indent_cache.refresh(&inner.text);
+        inner.indent_cache.refresh(&inner.text, &inner.token_cache);
     }
 
     fn schedule_apply_delta_request(
