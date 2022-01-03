@@ -37,12 +37,7 @@ impl Position {
                         distance -= count;
                         operation_span_slot = operation_span_iter.next();
                     }
-                    Ordering::Equal => {
-                        position += distance;
-                        distance = Size::zero();
-                        operation_span_slot = operation_span_iter.next();
-                    }
-                    Ordering::Greater => {
+                    Ordering::Equal | Ordering::Greater => {
                         break position + distance;
                     }
                 },
@@ -55,10 +50,7 @@ impl Position {
                         distance -= count;
                         operation_span_slot = operation_span_iter.next();
                     }
-                    Ordering::Equal => {
-                        distance = Size::zero();
-                    }
-                    Ordering::Greater => {
+                    Ordering::Equal | Ordering::Greater => {
                         break position;
                     }
                 },

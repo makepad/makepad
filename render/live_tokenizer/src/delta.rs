@@ -398,13 +398,6 @@ impl Builder {
             [.., Operation::Insert(last_text)] => {
                 *last_text += text;
             }
-            [.., Operation::Insert(second_to_last_text), Operation::Delete(_)] => {
-                *second_to_last_text += text;
-            }
-            [.., last_operation @ Operation::Delete(_)] => {
-                let operation = mem::replace(last_operation, Operation::Insert(text));
-                self.operations.push(operation);
-            }
             _ => self.operations.push(Operation::Insert(text)),
         }
     }
@@ -413,9 +406,16 @@ impl Builder {
         if count.is_zero() {
             return;
         }
-        match self.operations.last_mut() {
-            Some(Operation::Delete(last_count)) => {
+        match self.operations.as_mut_slice() {
+            [.., Operation::Delete(last_count)] => {
                 *last_count += count;
+            }
+            [.., Operation::Delete(second_to_last_count), Operation::Insert(_)] => {
+                *second_to_last_count += count;
+            }
+            [.., last_operation @ Operation::Insert(_)] => {
+                let operation = mem::replace(last_operation, Operation::Delete(count));
+                self.operations.push(operation);
             }
             _ => self.operations.push(Operation::Delete(count)),
         }
