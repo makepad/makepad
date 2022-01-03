@@ -240,25 +240,20 @@ impl EditorState {
         let session = &self.sessions[session_id];
 
         let mut builder_0 = delta::Builder::new();
-        for span in session.selections.spans() {
-            if span.is_included {
-                builder_0.delete(span.len);
-            } else {
-                builder_0.retain(span.len);
-            }
+        let mut position = Position::origin();
+        for cursor in &session.cursors {
+            builder_0.retain(cursor.start() - position);
+            builder_0.delete(cursor.end() - cursor.start());
+            position = cursor.end();
         }
         let delta_0 = builder_0.build();
 
         let mut builder_1 = delta::Builder::new();
         let mut position = Position::origin();
-        for distance in session.carets.distances() {
-            position += distance;
-            builder_1.retain(distance);
-            if session.selections.contains_position(position) {
-                continue;
-            }
+        for cursor in &session.cursors {
+            builder_1.retain(cursor.start() - position);
             builder_1.insert(text.clone());
-            position += text.len();
+            position = cursor.end();
         }
         let delta_1 = builder_1.build();
 
