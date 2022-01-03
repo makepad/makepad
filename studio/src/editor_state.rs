@@ -269,55 +269,22 @@ impl EditorState {
         send_request: &mut dyn FnMut(Request)
     ) {
         let session = &self.sessions[session_id];
-        let document = &self.documents[session.document_id];
-        let document_inner = document.inner.as_ref().unwrap();
 
         let mut builder_0 = delta::Builder::new();
-        for span in session.selections.spans() {
-            if span.is_included {
-                builder_0.delete(span.len);
-            } else {
-                builder_0.retain(span.len);
-            }
+        let mut position = Position::origin();
+        for cursor in &session.cursors {
+            builder_0.retain(cursor.start() - position);
+            builder_0.delete(cursor.end() - cursor.start());
+            position = cursor.end();
         }
         let delta_0 = builder_0.build();
 
         let mut builder_1 = delta::Builder::new();
         let mut position = Position::origin();
-        for distance in session.carets.distances() {
-            if distance.line == 0 {
-                position += distance;
-                builder_1.retain(distance);
-            } else {
-                position.line += distance.line;
-                position.column = 0;
-                builder_1.retain(Size {
-                    line: distance.line,
-                    column: 0,
-                });
-                let indent_info = &document_inner.indent_cache[position.line];
-                match indent_info.leading_whitespace() {
-                    Some(_) => {
-                        position.column += distance.column;
-                        builder_1.retain(Size {
-                            line: 0,
-                            column: distance.column
-                        });
-                    }
-                    None => {
-                        builder_1.delete(Size {
-                            line: 0,
-                            column: distance.column
-                        });
-                    }
-                }
-            }
-            if session.selections.contains_position(position) {
-                continue;
-            }
-            let text = Text::from(vec![vec![], vec![]]);
-            builder_1.insert(text.clone());
-            position += text.len();
+        for cursor in &session.cursors {
+            builder_1.retain(cursor.start() - position);
+            builder_1.insert(Text::from(vec![vec![], vec![]]));
+            position = cursor.end();
         }
         let delta_1 = builder_1.build();
 
