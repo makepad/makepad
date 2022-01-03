@@ -14,7 +14,7 @@ use {
     makepad_component::makepad_render,
     makepad_render::{
         makepad_live_tokenizer::{
-            delta::{self, Delta, Whose},
+            delta::{self, Delta},
             position::Position,
             position_set::PositionSet,
             range_set::RangeSet,
@@ -219,17 +219,21 @@ impl EditorState {
         text: Text,
         send_request: &mut dyn FnMut(Request),
     ) {
+        let session = &self.sessions[session_id];
+
         let mut builder = delta::Builder::new();
-        
-        // we need to retain from 0 to position
         builder.retain(position - Position::origin());
         builder.delete(size);
         builder.insert(text);
         let delta = builder.build();
         
-        self.edit(session_id, delta, send_request);
-    }
+        let mut offsets = Vec::new();
+        for cursor in &session.cursors {
+            offsets.push(Size::zero());
+        }
 
+        self.edit(session_id, delta, &offsets, send_request);
+    }
 
     pub fn insert_text(
         &mut self,
@@ -238,6 +242,8 @@ impl EditorState {
         send_request: &mut dyn FnMut(Request),
     ) {
         let session = &self.sessions[session_id];
+
+        let mut offsets = Vec::new();
 
         let mut builder_0 = delta::Builder::new();
         let mut position = Position::origin();
@@ -253,6 +259,7 @@ impl EditorState {
         for cursor in &session.cursors {
             builder_1.retain(cursor.start() - position);
             builder_1.insert(text.clone());
+            offsets.push(text.len());
             position = cursor.end();
         }
         let delta_1 = builder_1.build();
@@ -260,7 +267,7 @@ impl EditorState {
         let (_, new_delta_1) = delta_0.clone().transform(delta_1);
         let delta = delta_0.compose(new_delta_1);
 
-        self.edit(session_id, delta, send_request);
+        self.edit(session_id, delta, &offsets, send_request);
     }
 
     pub fn insert_newline(
@@ -269,6 +276,8 @@ impl EditorState {
         send_request: &mut dyn FnMut(Request)
     ) {
         let session = &self.sessions[session_id];
+
+        let mut offsets = Vec::new();
 
         let mut builder_0 = delta::Builder::new();
         let mut position = Position::origin();
@@ -283,7 +292,10 @@ impl EditorState {
         let mut position = Position::origin();
         for cursor in &session.cursors {
             builder_1.retain(cursor.start() - position);
-            builder_1.insert(Text::from(vec![vec![], vec![]]));
+            let text = Text::from(vec![vec![], vec![]]);
+            let len = text.len();
+            builder_1.insert(text);
+            offsets.push(len);
             position = cursor.end();
         }
         let delta_1 = builder_1.build();
@@ -291,7 +303,7 @@ impl EditorState {
         let (_, new_delta_1) = delta_0.clone().transform(delta_1);
         let delta = delta_0.compose(new_delta_1);
 
-        self.edit(session_id, delta, send_request);
+        self.edit(session_id, delta, &offsets, send_request);
     }
 
     pub fn insert_backspace(
@@ -302,6 +314,8 @@ impl EditorState {
         let session = &self.sessions[session_id];
         let document = &self.documents[session.document_id];
         let document_inner = document.inner.as_ref().unwrap();
+
+        let mut offsets = Vec::new();
 
         let mut builder_0 = delta::Builder::new();
         let mut position = Position::origin();
@@ -315,6 +329,9 @@ impl EditorState {
         let mut builder_1 = delta::Builder::new();
         let mut position = Position::origin();
         for cursor in &session.cursors {
+            if cursor.head != cursor.tail {
+                continue;
+            }
             if cursor.start().column == 0 {
                 if cursor.start().line == 0 {
                     continue;
@@ -331,6 +348,7 @@ impl EditorState {
                 } - position);
                 builder_1.delete(Size { line: 0, column: 1 });
             }
+            offsets.push(Size::zero());
             position = cursor.start();
         }
         let delta_1 = builder_1.build();
@@ -338,13 +356,14 @@ impl EditorState {
         let (_, new_delta_1) = delta_0.clone().transform(delta_1);
         let delta = delta_0.compose(new_delta_1);
 
-        self.edit(session_id, delta, send_request);
+        self.edit(session_id, delta, &offsets, send_request);
     }
 
     fn edit(
         &mut self,
         session_id: SessionId,
         delta: Delta,
+        offsets: &[Size],
         send_request: &mut dyn FnMut(Request),
     ) {
         let session = &self.sessions[session_id];
@@ -358,7 +377,7 @@ impl EditorState {
         });
 
         let session = &mut self.sessions[session_id];
-        session.apply_delta(&delta, Whose::Ours);
+        session.apply_delta(&delta);
 
         self.apply_delta(session_id, delta, send_request);
     }
@@ -417,7 +436,7 @@ impl EditorState {
             }
 
             let other_session = &mut self.sessions[other_session_id];
-            other_session.apply_delta(&delta, Whose::Theirs);
+            other_session.apply_delta(&delta);
         }
 
         let document = &mut self.documents[document_id];
@@ -467,7 +486,7 @@ impl EditorState {
 
         for session_id in document.session_ids.iter().cloned() {
             let session = &mut self.sessions[session_id];
-            session.apply_delta(&delta, Whose::Theirs);
+            session.apply_delta(&delta);
         }
 
         let document = &mut self.documents[document_id];
@@ -491,8 +510,8 @@ pub struct Session {
 }
 
 impl Session {
-    fn apply_delta(&mut self, delta: &Delta, whose: Whose) {
-        self.cursors.apply_delta(&delta, whose);
+    fn apply_delta(&mut self, delta: &Delta) {
+        self.cursors.apply_delta(&delta);
         self.update_selections_and_carets();
     }
 
@@ -569,7 +588,7 @@ fn transform_edit_stack(edit_stack: &mut Vec<Edit>, delta: Delta) {
     let mut delta = delta;
     for edit in edit_stack.iter_mut().rev() {
         let edit_delta = mem::replace(&mut edit.delta, Delta::identity());
-        edit.cursors.apply_delta(&delta, Whose::Theirs);
+        edit.cursors.apply_delta(&delta);
         let (new_delta, new_edit_delta) = delta.transform(edit_delta);
         delta = new_delta;
         edit.delta = new_edit_delta;

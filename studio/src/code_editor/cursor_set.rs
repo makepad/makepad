@@ -5,7 +5,7 @@ use {
         },
     },
     makepad_component::makepad_render::makepad_live_tokenizer::{
-        delta::{Delta, Whose},
+        delta::Delta,
         position::Position,
         position_set,
         position_set::PositionSet,
@@ -119,14 +119,9 @@ impl CursorSet {
         }
     }
 
-    pub fn apply_delta(&mut self, delta: &Delta, whose: Whose) {
+    pub fn apply_delta(&mut self, delta: &Delta) {
         for cursor in &mut self.cursors {
-            cursor.head = cursor.head.apply_delta(&delta);
-            cursor.tail = match whose {
-                Whose::Ours => cursor.head,
-                Whose::Theirs => cursor.tail.apply_delta(&delta),
-            };
-            cursor.max_column = cursor.head.column;
+            cursor.apply_delta(delta);
         }
     }
 
