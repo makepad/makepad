@@ -37,7 +37,7 @@ live_register!{
     use makepad_render::shader::std::*;
     use makepad_component::fold_button::FoldButton;
     
-    LiveEditor: {{LiveEditor}} {
+    LiveEditor: {{LiveEditor}} { 
         
         
         fold_button: FoldButton {
@@ -389,6 +389,109 @@ impl LiveEditor {
         }
     }
     
+    fn process_live_edit(cx: &mut Cx, state: &mut EditorState, session_id: SessionId) {
+        let session = &state.sessions[session_id];
+        let document = &state.documents[session.document_id];
+        let document_inner = document.inner.as_ref().unwrap();
+        
+        let mut inline_cache = document_inner.inline_cache.borrow_mut();
+        inline_cache.refresh_live_register_range(&document_inner.token_cache);
+        
+        let token_cache = &document_inner.token_cache;
+        let lines = &document_inner.text.as_lines();
+        let path = document.path.clone().into_os_string().into_string().unwrap();
+        
+        let live_registry_rc = cx.live_registry.clone();
+        let mut live_registry = live_registry_rc.borrow_mut();
+        // ok now what.
+        match live_registry.live_edit_file(&path, inline_cache.live_register_range.unwrap(), | line | {
+            (&lines[line], &token_cache[line].tokens())
+        }) {
+            Ok(event) => {
+                match event {
+                    Some(LiveEditEvent::ReparseDocument(_)) => {
+                        inline_cache.invalidate_all();
+                    }
+                    _ => ()
+                }
+                cx.live_edit_event = event;
+            }
+            Err(errors) => {
+                for e in errors {
+                    let e = live_registry.live_error_to_live_file_error(e);
+                    eprintln!("PARSE ERROR {}",e);
+                }
+            }
+        };
+    }
+    
+    pub fn handle_event(
+        &mut self,
+        cx: &mut Cx,
+        state: &mut EditorState,
+        event: &mut Event,
+        send_request: &mut dyn FnMut(Request),
+        dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
+    ) {
+        
+        if self.editor_impl.scroll_view.handle_event(cx, event) {
+            self.editor_impl.scroll_view.redraw(cx);
+        }
+        
+        let mut live_edit = false;
+        let session_id = self.editor_impl.session_id.unwrap();
+        for widget in self.widgets.values_mut() {
+            match widget.inline_widget.handle_widget_event(cx, event, widget.bind) {
+                InlineWidgetAction::ReplaceText {position, size, text} => {
+                    state.replace_text_direct(
+                        session_id,
+                        position,
+                        size,
+                        text,
+                        send_request
+                    );
+                    live_edit = true;
+                    self.editor_impl.redraw(cx);
+                }
+                _ => ()
+            }
+        }
+        
+        let mut fold_actions = Vec::new();
+        for (fold_button_id, fold_button) in self.fold_buttons.iter_mut() {
+            fold_button.handle_event(cx, event, &mut | _, action | fold_actions.push((action, *fold_button_id)));
+        }
+        for (action, fold_button_id) in fold_actions {
+            match action {
+                FoldButtonAction::Animating(opened) => {
+                    let session = &state.sessions[session_id];
+                    let document = &state.documents[session.document_id];
+                    let document_inner = document.inner.as_ref().unwrap();
+                    let mut inline_cache = document_inner.inline_cache.borrow_mut();
+                    if let Some(line) = inline_cache.iter_mut().find( | line | line.fold_button_id == Some(fold_button_id)) {
+                        line.line_opened = opened;
+                    }
+                    self.editor_impl.redraw(cx);
+                }
+                _ => ()
+            }
+        }
+        
+        // what if the code editor changes something?
+        self.editor_impl.handle_event(cx, state, event, &self.lines_layout, send_request, &mut | cx, action | {
+            match action {
+                CodeEditorAction::RedrawViewsForDocument(_) => {
+                    live_edit = true;
+                }
+            }
+            dispatch_action(cx, action);
+        });
+        
+        if live_edit {
+            Self::process_live_edit(cx, state, session_id);
+        }
+    }
+    
     fn text_color(&self, token: FullToken, next_token: Option<FullToken>) -> Vec4 {
         match (token, next_token) {
             (FullToken::Comment, _) => self.text_color_comment,
@@ -495,105 +598,4 @@ impl LiveEditor {
         }
     }
     
-    fn process_live_edit(cx: &mut Cx, state: &mut EditorState, session_id: SessionId) {
-        let session = &state.sessions[session_id];
-        let document = &state.documents[session.document_id];
-        let document_inner = document.inner.as_ref().unwrap();
-        
-        let mut inline_cache = document_inner.inline_cache.borrow_mut();
-        inline_cache.refresh_live_register_range(&document_inner.token_cache);
-        
-        let token_cache = &document_inner.token_cache;
-        let lines = &document_inner.text.as_lines();
-        let path = document.path.clone().into_os_string().into_string().unwrap();
-        
-        let live_registry_rc = cx.live_registry.clone();
-        let mut live_registry = live_registry_rc.borrow_mut();
-        // ok now what.
-        match live_registry.live_edit_file(&path, inline_cache.live_register_range.unwrap(), | line | {
-            (&lines[line], &token_cache[line].tokens())
-        }) {
-            Ok(event) => {
-                match event {
-                    Some(LiveEditEvent::ReparseDocument(_)) => {
-                        inline_cache.invalidate_all();
-                    }
-                    _ => ()
-                }
-                cx.live_edit_event = event;
-            }
-            Err(errors) => {
-                for e in errors {
-                    let _e = live_registry.live_error_to_live_file_error(e);
-                }
-            }
-        };
-    }
-    
-    pub fn handle_event(
-        &mut self,
-        cx: &mut Cx,
-        state: &mut EditorState,
-        event: &mut Event,
-        send_request: &mut dyn FnMut(Request),
-        dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
-    ) {
-        
-        if self.editor_impl.scroll_view.handle_event(cx, event) {
-            self.editor_impl.scroll_view.redraw(cx);
-        }
-        
-        let mut live_edit = false;
-        let session_id = self.editor_impl.session_id.unwrap();
-        for widget in self.widgets.values_mut() {
-            match widget.inline_widget.handle_widget_event(cx, event, widget.bind) {
-                InlineWidgetAction::ReplaceText {position, size, text} => {
-                    state.replace_text_direct(
-                        session_id,
-                        position,
-                        size,
-                        text,
-                        send_request
-                    );
-                    live_edit = true;
-                    self.editor_impl.redraw(cx);
-                }
-                _ => ()
-            }
-        }
-        
-        let mut fold_actions = Vec::new();
-        for (fold_button_id, fold_button) in self.fold_buttons.iter_mut() {
-            fold_button.handle_event(cx, event, &mut | _, action | fold_actions.push((action, *fold_button_id)));
-        }
-        for (action, fold_button_id) in fold_actions {
-            match action {
-                FoldButtonAction::Animating(opened) => {
-                    let session = &state.sessions[session_id];
-                    let document = &state.documents[session.document_id];
-                    let document_inner = document.inner.as_ref().unwrap();
-                    let mut inline_cache = document_inner.inline_cache.borrow_mut();
-                    if let Some(line) = inline_cache.iter_mut().find( | line | line.fold_button_id == Some(fold_button_id)) {
-                        line.line_opened = opened;
-                    }
-                    self.editor_impl.redraw(cx);
-                }
-                _ => ()
-            }
-        }
-        
-        // what if the code editor changes something?
-        self.editor_impl.handle_event(cx, state, event, &self.lines_layout, send_request, &mut | cx, action | {
-            match action {
-                CodeEditorAction::RedrawViewsForDocument(_) => {
-                    live_edit = true;
-                }
-            }
-            dispatch_action(cx, action);
-        });
-        
-        if live_edit {
-            Self::process_live_edit(cx, state, session_id);
-        }
-    }
 }
