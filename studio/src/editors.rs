@@ -174,6 +174,7 @@ impl Editors {
                 CodeEditorAction::RedrawViewsForDocument(document_id) => {
                     self.redraw_views_for_document(cx, state, document_id);
                 }
+                _=>()
             }
         }
     }

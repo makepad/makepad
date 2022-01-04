@@ -237,7 +237,8 @@ pub struct DrawIndentLines {
 }
 
 pub enum CodeEditorAction {
-    RedrawViewsForDocument(DocumentId)
+    RedrawViewsForDocument(DocumentId),
+    CursorBlink
 }
 
 impl CodeEditorImpl {
@@ -807,10 +808,11 @@ impl CodeEditorImpl {
         
         if event.is_timer(self.caret_blink_timer) {
             if self.animator_is_in_state(cx, self.show_caret_state) {
-                self.animate_to(cx, self.hide_caret_state)
+                self.animate_to(cx, self.hide_caret_state);
+                dispatch_action(cx, CodeEditorAction::CursorBlink);
             }
             else {
-                self.animate_to(cx, self.show_caret_state)
+                self.animate_to(cx, self.show_caret_state);
             }
         }
         
