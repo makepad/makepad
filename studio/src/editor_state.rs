@@ -413,6 +413,7 @@ impl EditorState {
 
         let inverse_delta = delta.clone().invert(&document_inner.text);
         document_inner.undo_stack.push(Edit {
+            injected_char_stack: session.injected_char_stack.clone(),
             cursors: session.cursors.clone(),
             delta: inverse_delta,
         });
@@ -431,6 +432,7 @@ impl EditorState {
         if let Some(undo) = document_inner.undo_stack.pop() {
             let inverse_delta = undo.delta.clone().invert(&document_inner.text);
             document_inner.redo_stack.push(Edit {
+                injected_char_stack: session.injected_char_stack.clone(),
                 cursors: session.cursors.clone(),
                 delta: inverse_delta,
             });
@@ -450,6 +452,7 @@ impl EditorState {
         if let Some(redo) = document_inner.redo_stack.pop() {
             let inverse_delta = redo.delta.clone().invert(&document_inner.text);
             document_inner.undo_stack.push(Edit {
+                injected_char_stack: session.injected_char_stack.clone(),
                 cursors: session.cursors.clone(),
                 delta: inverse_delta,
             });
@@ -628,6 +631,7 @@ pub struct DocumentInner {
 
 #[derive(Debug)]
 pub struct Edit {
+    pub injected_char_stack: Vec<char>,
     pub cursors: CursorSet,
     pub delta: Delta,
 }
