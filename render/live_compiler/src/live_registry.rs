@@ -43,6 +43,7 @@ pub struct LiveRegistry {
 impl Default for LiveRegistry {
     fn default() -> Self {
         Self {
+            
             main_module: None,
             file_ids: HashMap::new(),
             module_id_to_file_id: HashMap::new(),
@@ -347,11 +348,13 @@ impl LiveRegistry {
         let live_file = &mut self.live_files[file_id.to_index()];
         let original = &mut live_file.original;
         
-        let live_tokens = &mut original.tokens;
+        let mut live_tokens = &mut original.tokens;
+        let mut new_tokens = Vec::new();
         let old_strings = &original.strings;
         let mut new_strings: Vec<char> = Vec::new();
         
         let mut mutated_tokens = Vec::new();
+        
         let mut parse_changed = false;
         
         for line in range.start.line..range.end.line {
@@ -385,7 +388,11 @@ impl LiveRegistry {
                                 len: new_len as u32
                             };
                             if live_index >= live_tokens.len() { // just append
-                                parse_changed = true;
+                                if !parse_changed {
+                                    new_tokens = live_tokens.clone();
+                                    live_tokens = &mut new_tokens;
+                                    parse_changed = true;
+                                }
                                 live_tokens.push(TokenWithSpan {span: span, token: new_string});
                             }
                             else if let LiveToken::String {index, len} = live_tokens[live_index].token {
@@ -396,16 +403,24 @@ impl LiveRegistry {
                                 }
                             }
                             else { // cant replace a sttring type with something else without a reparse
-                                parse_changed = true;
+                                if !parse_changed {
+                                    new_tokens = live_tokens.clone();
+                                    live_tokens = &mut new_tokens;
+                                    parse_changed = true;
+                                }
                                 live_tokens[live_index] = TokenWithSpan {span: span, token: new_string};
                             }
                             new_strings.extend(new_chars);
                             live_index += 1;
                         },
-                        _ =>match LiveToken::from_full_token(full_token.token) {
+                        _ => match LiveToken::from_full_token(full_token.token) {
                             Some(live_token) => {
                                 if live_index >= live_tokens.len() { // just append
-                                    parse_changed = true;
+                                    if !parse_changed {
+                                        new_tokens = live_tokens.clone();
+                                        live_tokens = &mut new_tokens;
+                                        parse_changed = true;
+                                    }
                                     live_tokens.push(TokenWithSpan {span: span, token: live_token})
                                 }
                                 else {
@@ -422,11 +437,13 @@ impl LiveRegistry {
                                             && live_tokens[live_index - 1].is_open_delim(Delim::Brace)
                                             && live_tokens[live_index].is_ident()
                                             && live_token.is_ident() {
-                                            
-                                            // ignore it.
                                         }
                                         else {
-                                            parse_changed = true;
+                                            if !parse_changed {
+                                                new_tokens = live_tokens.clone();
+                                                live_tokens = &mut new_tokens;
+                                                parse_changed = true;
+                                            }
                                             live_tokens[live_index].token = live_token;
                                         }
                                     }
@@ -442,28 +459,36 @@ impl LiveRegistry {
                 column += full_token.len;
             }
         }
-        if live_index < live_tokens.len()-1{ // the tokenlist shortened
-            parse_changed = true;
+        if live_index < live_tokens.len() - 1 { // the tokenlist shortened
+            if !parse_changed{
+                new_tokens = live_tokens.clone();
+                live_tokens = &mut new_tokens;
+                parse_changed = true;
+            }
         }
         
         live_tokens.truncate(live_index);
-        live_tokens.push(TokenWithSpan{token:LiveToken::Eof, span:TextSpan{file_id, start:TextPos::default(), end:TextPos::default()}});
+        live_tokens.push(TokenWithSpan {token: LiveToken::Eof, span: TextSpan {file_id, start: TextPos::default(), end: TextPos::default()}});
         
         if parse_changed {
-            let mut parser = LiveParser::new(&original.tokens, &live_file.live_type_infos, file_id);
-            let new_original = match parser.parse_live_document() {
+            let mut parser = LiveParser::new(&new_tokens, &live_file.live_type_infos, file_id);
+            match parser.parse_live_document() {
                 Err(msg) => return Err(vec![msg]), //panic!("Parse error {}", msg.to_live_file_error(file, &source)),
-                Ok(ld) => ld
+                Ok(ld) => { // only swap it out when it parses
+                    original.tokens = new_tokens;
+                    original.strings = new_strings;
+                    original.nodes = ld.nodes;
+                    original.edit_info = ld.edit_info;
+                }
             };
-
-            original.nodes = new_original.nodes;
-            original.edit_info = new_original.edit_info;
             
             let mut errors = Vec::new();
             
-            live_file.reexpand = true; 
+            live_file.reexpand = true;
             
+            // possibly recover from error here to leave it all working
             self.expand_all_documents(&mut errors);
+            
             if errors.len()>0 {
                 return Err(errors);
             }
@@ -511,10 +536,10 @@ impl LiveRegistry {
                 let mut path = Vec::new();
                 while let Some(file_id) = file_dep_iter.pop_todo() {
                     let is_main = self.main_module == Some(file_id);
-
+                    
                     let mut expanded_nodes = Vec::new();
                     std::mem::swap(&mut expanded_nodes, &mut self.live_files[file_id.to_index()].expanded.nodes);
-                            
+                    
                     let mut reader = LiveNodeMutReader::new(0, &mut expanded_nodes);
                     path.clear();
                     reader.walk();
@@ -725,7 +750,7 @@ impl LiveRegistry {
             std::mem::swap(&mut out_doc, &mut self.live_files[file_id.to_index()].expanded);
             
             out_doc.nodes.clear();
-
+            
             let in_doc = &self.live_files[file_id.to_index()].original;
             
             let mut live_document_expander = LiveExpander {
