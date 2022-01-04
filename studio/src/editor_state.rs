@@ -56,6 +56,7 @@ impl EditorState {
         let session_id = self.session_id_allocator.allocate();
         let session = Session {
             session_view: None,
+            injected_char_stack: Vec::new(),
             cursors: CursorSet::new(),
             selections: RangeSet::new(),
             carets: PositionSet::new(),
@@ -171,6 +172,7 @@ impl EditorState {
         let session = &mut self.sessions[session_id];
         session.cursors.add(position);
         session.update_selections_and_carets();
+        session.injected_char_stack.clear();
     }
 
     pub fn move_cursors_left(&mut self, session_id: SessionId, select: bool) {
@@ -187,6 +189,7 @@ impl EditorState {
         let document_inner = document.inner.as_ref().unwrap();
         session.cursors.move_right(&document_inner.text, select);
         session.update_selections_and_carets();
+        session.injected_char_stack.clear();
     }
 
     pub fn move_cursors_up(&mut self, session_id: SessionId, select: bool) {
@@ -195,6 +198,7 @@ impl EditorState {
         let document_inner = document.inner.as_ref().unwrap();
         session.cursors.move_up(&document_inner.text, select);
         session.update_selections_and_carets();
+        session.injected_char_stack.clear();
     }
 
     pub fn move_cursors_down(&mut self, session_id: SessionId, select: bool) {
@@ -203,12 +207,14 @@ impl EditorState {
         let document_inner = document.inner.as_ref().unwrap();
         session.cursors.move_down(&document_inner.text, select);
         session.update_selections_and_carets();
+        session.injected_char_stack.clear();
     }
 
     pub fn move_cursors_to(&mut self, session_id: SessionId, position: Position, select: bool) {
         let session = &mut self.sessions[session_id];
         session.cursors.move_to(position, select);
         session.update_selections_and_carets();
+        session.injected_char_stack.clear();
     }
 
     pub fn replace_text_direct(
@@ -243,6 +249,33 @@ impl EditorState {
     ) {
         let session = &self.sessions[session_id];
 
+        if let Some(ch) = text.as_lines().first().and_then(|line| line.first()) {
+            if let Some(injected_char) = session.injected_char_stack.last() {
+                if ch == injected_char {
+                    let session = &mut self.sessions[session_id];
+                    let document = &self.documents[session.document_id];
+                    let document_inner = document.inner.as_ref().unwrap();
+                    session.cursors.move_right(&document_inner.text, false);
+                    session.update_selections_and_carets();
+                    session.injected_char_stack.pop();
+                    return;
+                }
+            }
+        }
+
+        let injected_char = text
+            .as_lines()
+            .first()
+            .and_then(|line| line.first())
+            .and_then(|ch| {
+                match ch {
+                    '(' => Some(')'),
+                    '[' => Some(']'),
+                    '{' => Some('}'),
+                    _ => None,
+                }
+            });
+
         let mut offsets = Vec::new();
 
         let mut builder_0 = delta::Builder::new();
@@ -259,17 +292,9 @@ impl EditorState {
         for cursor in &session.cursors {
             builder_1.retain(cursor.start() - position);
             builder_1.insert(text.clone());
-            
-            // Inject closing delimiter if necessary
-            if text.len().line == 0 && text.len().column == 1 {
-                match text.as_lines()[0][0] {
-                    '(' => builder_1.insert(Text::from(vec![vec![')']])),
-                    '[' => builder_1.insert(Text::from(vec![vec![']']])),
-                    '{' => builder_1.insert(Text::from(vec![vec!['}']])),
-                    _ => {}
-                }
+            if let Some(injected_char) = injected_char {
+                builder_1.insert(Text::from(vec![vec![injected_char]]));
             }
-
             offsets.push(text.len());
             position = cursor.end();
         }
@@ -279,6 +304,11 @@ impl EditorState {
         let delta = delta_0.compose(new_delta_1);
 
         self.edit(session_id, delta, &offsets, send_request);
+
+        let session = &mut self.sessions[session_id];
+        if let Some(injected_char) = injected_char {
+            session.injected_char_stack.push(injected_char);
+        }
     }
 
     pub fn insert_newline(
@@ -515,6 +545,7 @@ pub type SessionId = GenId<SessionTag>;
 
 pub struct Session {
     pub session_view: Option<EditorViewId>,
+    pub injected_char_stack: Vec<char>,
     pub cursors: CursorSet,
     pub selections: RangeSet,
     pub carets: PositionSet,
