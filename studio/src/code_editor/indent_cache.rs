@@ -1,8 +1,6 @@
 use {
-    crate::code_editor::token_cache::TokenCache,
     makepad_component::makepad_render::makepad_live_tokenizer::{
         delta::{Delta, OperationRange},
-        full_token::FullToken,
         text::Text,
     },
     std::{
@@ -16,13 +14,13 @@ pub struct IndentCache {
 }
 
 impl IndentCache {
-    pub fn new(text: &Text, token_cache: &TokenCache) -> IndentCache {
+    pub fn new(text: &Text) -> IndentCache {
         let mut cache = IndentCache {
             lines: (0..text.as_lines().len())
                 .map(|_| Line::default())
                 .collect::<Vec<_>>(),
         };
-        cache.refresh(text, token_cache);
+        cache.refresh(text);
         cache
     }
 
@@ -44,7 +42,7 @@ impl IndentCache {
         }
     }
 
-    pub fn refresh(&mut self, text: &Text, token_cache: &TokenCache) {
+    pub fn refresh(&mut self, text: &Text) {
         for (index, line) in self.lines.iter_mut().enumerate() {
             if line.leading_whitespace.is_some() {
                 continue;
