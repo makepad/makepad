@@ -27,6 +27,7 @@ pub struct LiveFile {
     pub deps: BTreeSet<LiveModuleId>,
     
     pub original: LiveOriginal,
+    pub next_original: Option<LiveOriginal>,
     pub expanded: LiveExpanded,
     
     pub live_type_infos: Vec<LiveTypeInfo>,
@@ -340,7 +341,7 @@ impl LiveRegistry {
         file_name: &str,
         range: TokenRange,
         mut get_line: CB
-    ) -> Result<Option<LiveEditEvent>, Vec<LiveError >>
+    ) -> Result<Option<LiveEditEvent>, LiveError>
     where CB: FnMut(usize) -> (&'a [char], &'a [TokenWithLen])
     {
         let file_id = *self.file_ids.get(file_name).unwrap();
@@ -373,11 +374,11 @@ impl LiveRegistry {
                     
                     match full_token.token {
                         FullToken::Unknown | FullToken::OtherNumber | FullToken::Lifetime => {
-                            return Err(vec![LiveError {
+                            return Err(LiveError {
                                 origin: live_error_origin!(),
                                 span: span.into(),
                                 message: format!("Error tokenizing")
-                            }])
+                            })
                         },
                         FullToken::String => {
                             let new_len = full_token.len - 2;
@@ -471,31 +472,22 @@ impl LiveRegistry {
         live_tokens.push(TokenWithSpan {token: LiveToken::Eof, span: TextSpan {file_id, start: TextPos::default(), end: TextPos::default()}});
         
         if parse_changed {
+            // we have to be able to delay this to onkeyup 
             let mut parser = LiveParser::new(&new_tokens, &live_file.live_type_infos, file_id);
             match parser.parse_live_document() {
-                Err(msg) => return Err(vec![msg]), //panic!("Parse error {}", msg.to_live_file_error(file, &source)),
-                Ok(ld) => { // only swap it out when it parses
-                    original.tokens = new_tokens;
-                    original.strings = new_strings;
-                    original.nodes = ld.nodes;
-                    original.edit_info = ld.edit_info;
+                Err(msg) => return Err(msg), //panic!("Parse error {}", msg.to_live_file_error(file, &source)),
+                Ok(mut ld) => { // only swap it out when it parses
+                    ld.strings = new_strings;
+                    ld.tokens = new_tokens;
+                    live_file.next_original = Some(ld);
                 }
             };
             
-            let mut errors = Vec::new();
-            
-            live_file.reexpand = true;
-            
-            // possibly recover from error here to leave it all working
-            self.expand_all_documents(&mut errors);
-            
-            if errors.len()>0 {
-                return Err(errors);
-            }
-            
             return Ok(Some(LiveEditEvent::ReparseDocument(file_id)));
         }
-        else if mutated_tokens.len()>0 { // we got mutations
+        else if mutated_tokens.len()>0 { // its a hotpatch
+            // means if we had a next_original its now cancelled
+            live_file.next_original = None;
             original.strings = new_strings;
             
             let (apply, live_ptrs) = self.update_documents_from_mutated_tokens(&mutated_tokens);
@@ -504,6 +496,23 @@ impl LiveRegistry {
         }
         
         Ok(None)
+    }
+    
+    pub fn process_next_originals_and_expand(&mut self)->Result<(), Vec<LiveError>>{
+        for live_file in &mut self.live_files{
+            if live_file.next_original.is_some(){
+                live_file.original = live_file.next_original.take().unwrap();
+                live_file.reexpand = true;
+            }
+        }
+        
+        let mut errors = Vec::new();
+        self.expand_all_documents(&mut errors);
+        
+        if errors.len()>0 {
+            return Err(errors);
+        }
+        return Ok(())
     }
     
     fn update_documents_from_mutated_tokens(
@@ -658,6 +667,7 @@ impl LiveRegistry {
             source,
             live_type_infos,
             original,
+            next_original: None,
             expanded: LiveExpanded::new()
         };
         self.module_id_to_file_id.insert(own_module_id, file_id);
