@@ -67,7 +67,7 @@ live_register!{
         text_color_whitespace: #6e6e6e
         text_color_unknown: #808080
         text_color_color: #cc917b
-        
+
         editor_impl: {}
     }
 }
@@ -88,6 +88,7 @@ pub struct LiveEditor {
     fold_button: Option<LivePtr>,
     
     zoom_indent_depth: usize,
+
     
     text_color_color: Vec4,
     text_color_type_name: Vec4,
@@ -106,6 +107,7 @@ pub struct LiveEditor {
     text_color_whitespace: Vec4,
     text_color_unknown: Vec4,
     
+    #[rust] delayed_reparse_document: Option<LiveEditEvent>,
     #[rust] lines_layout: LinesLayout,
     #[rust] widget_draw_order: Vec<(usize, WidgetIdent)>,
     #[rust] widgets: ComponentGc<WidgetIdent, Widget>,
@@ -389,7 +391,7 @@ impl LiveEditor {
         }
     }
     
-    fn process_live_edit(cx: &mut Cx, state: &mut EditorState, session_id: SessionId) {
+    fn process_live_edit(&mut self, cx: &mut Cx, state: &mut EditorState, session_id: SessionId) {
         let session = &state.sessions[session_id];
         let document = &state.documents[session.document_id];
         let document_inner = document.inner.as_ref().unwrap();
@@ -411,16 +413,18 @@ impl LiveEditor {
                 match event {
                     Some(LiveEditEvent::ReparseDocument(_)) => {
                         inline_cache.invalidate_all();
+                        self.delayed_reparse_document = event;
+                    }
+                    Some(_)=>{
+                        self.delayed_reparse_document = None;
+                        cx.live_edit_event = event;
                     }
                     _ => ()
                 }
-                cx.live_edit_event = event;
             }
-            Err(errors) => {
-                for e in errors {
-                    let e = live_registry.live_error_to_live_file_error(e);
-                    eprintln!("PARSE ERROR {}",e);
-                }
+            Err(e) => {
+                let e = live_registry.live_error_to_live_file_error(e);
+                eprintln!("PARSE ERROR {}",e);
             }
         };
     }
@@ -478,17 +482,36 @@ impl LiveEditor {
         }
         
         // what if the code editor changes something?
+        let delayed_reparse_document = &mut self.delayed_reparse_document;
         self.editor_impl.handle_event(cx, state, event, &self.lines_layout, send_request, &mut | cx, action | {
             match action {
                 CodeEditorAction::RedrawViewsForDocument(_) => {
                     live_edit = true;
+                }
+                CodeEditorAction::CursorBlink=>{
+                    if delayed_reparse_document.is_some(){
+                        let live_registry_rc = cx.live_registry.clone();
+                        let mut live_registry = live_registry_rc.borrow_mut();
+                        let live_edit_event = delayed_reparse_document.take();
+                        match live_registry.process_next_originals_and_expand(){
+                            Err(errs)=>{
+                                for e in errs{
+                                    let e = live_registry.live_error_to_live_file_error(e);
+                                    eprintln!("PARSE ERROR {}",e);
+                                }
+                            }
+                            Ok(())=>{
+                                cx.live_edit_event = live_edit_event
+                            }
+                        }
+                    }
                 }
             }
             dispatch_action(cx, action);
         });
         
         if live_edit {
-            Self::process_live_edit(cx, state, session_id);
+            self.process_live_edit(cx, state, session_id);
         }
     }
     
