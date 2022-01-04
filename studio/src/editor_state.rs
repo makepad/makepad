@@ -134,6 +134,7 @@ impl EditorState {
             token_cache,
             indent_cache,
             inline_cache,
+            edit_group: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             outstanding_deltas: VecDeque::new(),
@@ -238,7 +239,7 @@ impl EditorState {
             offsets.push(Size::zero());
         }
 
-        self.edit(session_id, delta, &offsets, send_request);
+        self.edit(session_id, None, delta, &offsets, send_request);
     }
 
     pub fn insert_text(
@@ -303,7 +304,7 @@ impl EditorState {
         let (_, new_delta_1) = delta_0.clone().transform(delta_1);
         let delta = delta_0.compose(new_delta_1);
 
-        self.edit(session_id, delta, &offsets, send_request);
+        self.edit(session_id, Some(EditGroup::Char), delta, &offsets, send_request);
 
         let session = &mut self.sessions[session_id];
         if let Some(injected_char) = injected_char {
@@ -344,7 +345,7 @@ impl EditorState {
         let (_, new_delta_1) = delta_0.clone().transform(delta_1);
         let delta = delta_0.compose(new_delta_1);
 
-        self.edit(session_id, delta, &offsets, send_request);
+        self.edit(session_id, None, delta, &offsets, send_request);
     }
 
     pub fn insert_backspace(
@@ -397,12 +398,13 @@ impl EditorState {
         let (_, new_delta_1) = delta_0.clone().transform(delta_1);
         let delta = delta_0.compose(new_delta_1);
 
-        self.edit(session_id, delta, &offsets, send_request);
+        self.edit(session_id, Some(EditGroup::Backspace), delta, &offsets, send_request);
     }
 
     fn edit(
         &mut self,
         session_id: SessionId,
+        edit_group: Option<EditGroup>,
         delta: Delta,
         offsets: &[Size],
         send_request: &mut dyn FnMut(Request),
@@ -412,11 +414,27 @@ impl EditorState {
         let document_inner = document.inner.as_mut().unwrap();
 
         let inverse_delta = delta.clone().invert(&document_inner.text);
-        document_inner.undo_stack.push(Edit {
-            injected_char_stack: session.injected_char_stack.clone(),
-            cursors: session.cursors.clone(),
-            delta: inverse_delta,
+        let group_undo = edit_group.map_or(false, |edit_group| {
+            document_inner.edit_group.map_or(false, |current_edit_group| {
+                current_edit_group == edit_group
+            })
         });
+        if group_undo {
+            let edit = document_inner.undo_stack.pop().unwrap();
+            document_inner.undo_stack.push(Edit {
+                injected_char_stack: edit.injected_char_stack,
+                cursors: edit.cursors,
+                delta: inverse_delta.compose(edit.delta),
+            });
+        } else {
+            document_inner.edit_group = edit_group;
+            document_inner.undo_stack.push(Edit {
+                injected_char_stack: session.injected_char_stack.clone(),
+                cursors: session.cursors.clone(),
+                delta: inverse_delta,
+            });
+        }
+        document_inner.redo_stack.clear();
 
         let session = &mut self.sessions[session_id];
         session.apply_delta(&delta);
@@ -430,6 +448,8 @@ impl EditorState {
         let document = &mut self.documents[session.document_id];
         let document_inner = document.inner.as_mut().unwrap();
         if let Some(undo) = document_inner.undo_stack.pop() {
+            document_inner.edit_group = None;
+
             let inverse_delta = undo.delta.clone().invert(&document_inner.text);
             document_inner.redo_stack.push(Edit {
                 injected_char_stack: session.injected_char_stack.clone(),
@@ -450,6 +470,8 @@ impl EditorState {
         let document = &mut self.documents[session.document_id];
         let document_inner = document.inner.as_mut().unwrap();
         if let Some(redo) = document_inner.redo_stack.pop() {
+            document_inner.edit_group = None;
+
             let inverse_delta = redo.delta.clone().invert(&document_inner.text);
             document_inner.undo_stack.push(Edit {
                 injected_char_stack: session.injected_char_stack.clone(),
@@ -624,9 +646,16 @@ pub struct DocumentInner {
     pub token_cache: TokenCache,
     pub indent_cache: IndentCache,
     pub inline_cache: RefCell<InlineCache>,
+    pub edit_group: Option<EditGroup>,
     pub undo_stack: Vec<Edit>,
     pub redo_stack: Vec<Edit>,
     pub outstanding_deltas: VecDeque<Delta>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EditGroup {
+    Char,
+    Backspace,
 }
 
 #[derive(Debug)]
