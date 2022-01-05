@@ -939,7 +939,17 @@ impl CodeEditorImpl {
                     dispatch_action(cx, CodeEditorAction::RedrawViewsForDocument(session.document_id))
                 }
             }
-            
+            HitEvent::KeyDown(KeyEvent {
+                key_code: KeyCode::Delete,
+                ..
+            }) => {
+                self.reset_caret_blink(cx);
+                if let Some(session_id) = self.session_id {
+                    state.delete(session_id, send_request);
+                    let session = &state.sessions[session_id];
+                    dispatch_action(cx, CodeEditorAction::RedrawViewsForDocument(session.document_id))
+                }
+            }
             HitEvent::KeyDown(KeyEvent {
                 key_code: KeyCode::Alt,
                 ..
