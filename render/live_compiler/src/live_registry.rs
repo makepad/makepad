@@ -70,7 +70,7 @@ pub enum LiveScopeTarget {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum LiveEditEvent {
-    ReparseDocument(LiveFileId),
+    ReparseDocument,
     Mutation {tokens: Vec<LiveTokenId>, apply: Vec<LiveNode>, live_ptrs: Vec<LivePtr>},
 }
 
@@ -483,7 +483,7 @@ impl LiveRegistry {
                 }
             };
             
-            return Ok(Some(LiveEditEvent::ReparseDocument(file_id)));
+            return Ok(Some(LiveEditEvent::ReparseDocument));
         }
         else if mutated_tokens.len()>0 { // its a hotpatch
             // means if we had a next_original its now cancelled

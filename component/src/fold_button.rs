@@ -37,17 +37,13 @@ live_register!{
         }
         
         default_state: {
-            from: {all: Play::Forward {duration: 0.1}}
-            apply: {
-                bg_quad: {hover: 0.0}
-            }
+            duration: 0.1
+            apply: {bg_quad: {hover: 0.0}}
         }
         
         hover_state: {
-            from: {all: Play::Forward {duration: 0.1}}
-            apply: {
-                bg_quad: {hover: [{time: 0.0, value: 1.0}],}
-            }
+            duration: 0.0
+            apply: {bg_quad: {hover: 1.0}}
         }
         
         closed_state: {
@@ -59,6 +55,7 @@ live_register!{
                 bg_quad: {opened: (opened)}
             }
         }
+        
         opened_state: {
             track: zoom
             from: {all: Play::Exp {speed1: 0.98, speed2: 0.95}}
