@@ -32,6 +32,10 @@ impl CursorSet {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.cursors.len()
+    }
+
     pub fn iter(&self) -> Iter<'_> {
         Iter {
             iter: self.cursors.iter(),
@@ -124,6 +128,7 @@ impl CursorSet {
         for cursor in &mut self.cursors {
             cursor.apply_delta(delta);
         }
+        self.normalize();
     }
 
     pub fn apply_offsets(&mut self, offsets: &[Size]) {
