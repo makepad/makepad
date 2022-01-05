@@ -61,13 +61,10 @@ impl AppState {
         
         panels_by_panel_id.insert(
             side_bar_panel_id,
-            Panel {
-                parent_panel_id: Some(root_panel_id),
-                kind: PanelKind::Tab(TabPanel {
-                    tab_ids: vec![file_tree_tab_id],
-                    editor_view_id: None,
-                }),
-            },
+            Panel::Tab(TabPanel {
+                tab_ids: vec![file_tree_tab_id],
+                editor_view_id: None,
+            }),
         );
         
         tabs_by_tab_id.insert(
@@ -81,25 +78,19 @@ impl AppState {
         let content_panel_id = panel_id_allocator.allocate();
         panels_by_panel_id.insert(
             content_panel_id,
-            Panel {
-                parent_panel_id: Some(root_panel_id),
-                kind: PanelKind::Tab(TabPanel {
-                    tab_ids: vec![],
-                    editor_view_id: None,
-                }),
-            },
+            Panel::Tab(TabPanel {
+                tab_ids: vec![],
+                editor_view_id: None,
+            }),
         );
         
         panels_by_panel_id.insert(
             root_panel_id,
-            Panel {
-                parent_panel_id: None,
-                kind: PanelKind::Split(SplitPanel {
-                    axis: Axis::Horizontal,
-                    align: SplitterAlign::FromStart(200.0),
-                    child_panel_ids: [side_bar_panel_id, content_panel_id],
-                }),
-            },
+            Panel::Split(SplitPanel {
+                axis: Axis::Horizontal,
+                align: SplitterAlign::FromStart(200.0),
+                child_panel_ids: [side_bar_panel_id, content_panel_id],
+            }),
         );
         
         AppState {
@@ -118,6 +109,15 @@ impl AppState {
             root_file_node_id,
             editor_state: EditorState::new(),
         }
+    }
+    
+    pub fn find_parent_panel_id(&self, child_id: PanelId)->Option<PanelId>{
+        for (panel_id, panel) in self.panels_by_panel_id.iter(){
+            if panel.is_child_of(child_id){
+                return Some(panel_id)
+            }
+        }
+        None
     }
     
     pub fn file_node_path(&self, file_node_id: FileNodeId) -> PathBuf {
@@ -187,38 +187,39 @@ impl AppState {
 }
 
 #[derive(Debug)]
-pub struct Panel {
-    pub parent_panel_id: Option<PanelId>,
-    pub kind: PanelKind,
+pub enum Panel{
+    Split(SplitPanel),
+    Tab(TabPanel),
 }
 
 impl Panel {
     pub fn as_split_panel_mut(&mut self) -> &mut SplitPanel {
-        match &mut self.kind {
-            PanelKind::Split(panel) => panel,
+        match self{
+            Self::Split(panel) => panel,
             _ => panic!(),
         }
     }
     
     pub fn as_tab_panel(&self) -> &TabPanel {
-        match &self.kind {
-            PanelKind::Tab(panel) => panel,
+        match self {
+            Self::Tab(panel) => panel,
             _ => panic!(),
         }
     }
     
     pub fn as_tab_panel_mut(&mut self) -> &mut TabPanel {
-        match &mut self.kind {
-            PanelKind::Tab(panel) => panel,
+        match self{
+            Self::Tab(panel) => panel,
             _ => panic!(),
         }
     }
-}
 
-#[derive(Clone, Debug)]
-pub enum PanelKind {
-    Split(SplitPanel),
-    Tab(TabPanel),
+    pub fn is_child_of(&self, panel_id: PanelId) -> bool {
+        match self {
+            Self::Split(panel) => panel.child_panel_ids[0] == panel_id || panel.child_panel_ids[1] == panel_id,
+            _ => false,
+        }
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -240,6 +241,7 @@ pub struct Tab {
 }
 
 pub enum TabKind {
+    LogView,
     FileTree,
     CodeEditor {session_id: SessionId},
 }

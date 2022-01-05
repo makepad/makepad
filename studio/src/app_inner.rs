@@ -1,11 +1,12 @@
 use {
     crate::{
         app_io::AppIO,
-        app_state::{PanelKind, TabKind, AppState, SplitPanel, TabPanel, Panel, Tab},
+        app_state::{TabKind, AppState, SplitPanel, TabPanel, Panel, Tab},
         editor_state::{SessionId},
         code_editor::{
-            protocol::{FileTreeData,Notification, Request, Response, ResponseOrNotification},
+            protocol::{FileTreeData, Notification, Request, Response, ResponseOrNotification},
         },
+        log_view::{LogView},
         editors::{Editors},
     },
     makepad_component::makepad_render::*,
@@ -34,6 +35,7 @@ pub struct AppInner {
     window: DesktopWindow,
     dock: Dock,
     file_tree: FileTree,
+    log_view: LogView,
     editors: Editors,
     
     #[rust(AppIO::new(cx))] io: AppIO
@@ -54,8 +56,8 @@ impl AppInner {
     
     fn draw_panel(&mut self, cx: &mut Cx, state: &AppState, panel_id: PanelId) {
         let panel = &state.panels_by_panel_id[panel_id];
-        match &panel.kind {
-            PanelKind::Split(SplitPanel {child_panel_ids, axis, align}) => {
+        match panel {
+            Panel::Split(SplitPanel {child_panel_ids, axis, align}) => {
                 
                 self.dock.begin_split_panel(cx, panel_id, *axis, *align);
                 self.draw_panel(cx, state, child_panel_ids[0]);
@@ -63,7 +65,7 @@ impl AppInner {
                 self.draw_panel(cx, state, child_panel_ids[01]);
                 self.dock.end_split_panel(cx);
             }
-            PanelKind::Tab(TabPanel {tab_ids, ..}) => {
+            Panel::Tab(TabPanel {tab_ids, ..}) => {
                 self.dock.begin_tab_panel(cx, panel_id);
                 if self.dock.begin_tab_bar(cx).is_ok() {
                     for tab_id in tab_ids {
@@ -75,6 +77,9 @@ impl AppInner {
                 if let Some(tab_id) = self.dock.selected_tab_id(cx, panel_id) {
                     let tab = &state.tabs_by_tab_id[tab_id];
                     match tab.kind {
+                        TabKind::LogView => {
+                            self.log_view.draw(cx, &state.editor_state)
+                        }
                         TabKind::FileTree => {
                             if self.file_tree.begin(cx).is_ok() {
                                 self.draw_file_node(cx, state, state.root_file_node_id);
@@ -98,7 +103,7 @@ impl AppInner {
     
     fn draw_file_node(&mut self, cx: &mut Cx, state: &AppState, file_node_id: FileNodeId) {
         let file_node = &state.file_nodes_by_file_node_id[file_node_id];
-       // println!("DRAWING NODE {}", &file_node.name);
+        // println!("DRAWING NODE {}", &file_node.name);
         match &file_node.child_edges {
             Some(child_edges) => {
                 if self.file_tree.begin_folder(cx, file_node_id, &file_node.name).is_ok()
@@ -134,11 +139,11 @@ impl AppInner {
         for action in actions {
             match action {
                 DockAction::SplitPanelChanged {panel_id, axis, align} => {
-                    if let PanelKind::Split(panel) = &mut state.panels_by_panel_id[panel_id].kind {
+                    if let Panel::Split(panel) = &mut state.panels_by_panel_id[panel_id]{
                         panel.axis = axis;
                         panel.align = align;
                     }
-                    // do shit here
+                    // do shit here 
                     self.dock.redraw(cx);
                     self.redraw_panel(cx, state, panel_id);
                 }
@@ -235,13 +240,13 @@ impl AppInner {
         let mut panel_id_stack = vec![state.root_panel_id];
         while let Some(panel_id) = panel_id_stack.pop() {
             let panel = &state.panels_by_panel_id[panel_id];
-            match &panel.kind {
-                PanelKind::Split(SplitPanel {child_panel_ids, ..}) => {
+            match panel {
+                Panel::Split(SplitPanel {child_panel_ids, ..}) => {
                     for child_id in child_panel_ids {
                         panel_id_stack.push(*child_id);
                     }
                 }
-                PanelKind::Tab(TabPanel {
+                Panel::Tab(TabPanel {
                     editor_view_id,
                     ..
                 }) => {
@@ -313,6 +318,8 @@ impl AppInner {
         self.file_tree.redraw(cx);
     }
     
+    
+    
     fn split_tab_panel(
         &mut self,
         cx: &mut Cx,
@@ -320,43 +327,38 @@ impl AppInner {
         panel_id: PanelId,
         position: DragPosition,
     ) -> PanelId {
-        let panel = &state.panels_by_panel_id[panel_id];
-        let parent_panel_id = panel.parent_panel_id;
+        //let panel = &state.panels_by_panel_id[panel_id];
+        // lets find the parent_panel_id
+        
+        let parent_panel_id = state.find_parent_panel_id(panel_id);
         let new_parent_panel_id = state.panel_id_allocator.allocate();
         let new_panel_id = state.panel_id_allocator.allocate();
         
-        let panel = &mut state.panels_by_panel_id[panel_id];
-        panel.parent_panel_id = Some(new_parent_panel_id);
+        //let panel = &mut state.panels_by_panel_id[panel_id];
         
         state.panels_by_panel_id.insert(
             new_panel_id,
-            Panel {
-                parent_panel_id: Some(new_parent_panel_id),
-                kind: PanelKind::Tab(TabPanel {
-                    tab_ids: Vec::new(),
-                    editor_view_id: None,
-                }),
-            },
+            Panel::Tab(TabPanel {
+                tab_ids: Vec::new(),
+                editor_view_id: None,
+            }),
         );
         
         state.panels_by_panel_id.insert(
             new_parent_panel_id,
-            Panel {
-                parent_panel_id,
-                kind: PanelKind::Split(SplitPanel {
-                    axis: match position {
-                        DragPosition::Left | DragPosition::Right => Axis::Horizontal,
-                        DragPosition::Top | DragPosition::Bottom => Axis::Vertical,
-                        _ => panic!(),
-                    },
-                    align: SplitterAlign::Weighted(0.5),
-                    child_panel_ids: match position {
-                        DragPosition::Left | DragPosition::Top => [new_panel_id, panel_id],
-                        DragPosition::Right | DragPosition::Bottom => [panel_id, new_panel_id],
-                        _ => panic!(),
-                    },
-                }),
-            },
+            Panel::Split(SplitPanel {
+                axis: match position {
+                    DragPosition::Left | DragPosition::Right => Axis::Horizontal,
+                    DragPosition::Top | DragPosition::Bottom => Axis::Vertical,
+                    _ => panic!(),
+                },
+                align: SplitterAlign::Weighted(0.5),
+                child_panel_ids: match position {
+                    DragPosition::Left | DragPosition::Top => [new_panel_id, panel_id],
+                    DragPosition::Right | DragPosition::Bottom => [panel_id, new_panel_id],
+                    _ => panic!(),
+                },
+            }),
         );
         
         if let Some(parent_panel_id) = parent_panel_id {
@@ -427,7 +429,7 @@ impl AppInner {
         self.select_tab(cx, state, panel_id, tab_id, false);
     }
     
-    fn select_tab(&mut self, cx: &mut Cx, state: &mut AppState, panel_id: PanelId, tab_id: TabId, should_animate:bool) {
+    fn select_tab(&mut self, cx: &mut Cx, state: &mut AppState, panel_id: PanelId, tab_id: TabId, should_animate: bool) {
         let tab = &state.tabs_by_tab_id[tab_id];
         self.dock.set_selected_tab_id(cx, panel_id, Some(tab_id), should_animate);
         self.dock.redraw_tab_bar(cx, panel_id);
@@ -475,18 +477,21 @@ impl AppInner {
     }
     
     fn redraw_panel(&mut self, cx: &mut Cx, state: &AppState, panel_id: PanelId) {
-        match &state.panels_by_panel_id[panel_id].kind {
-            PanelKind::Split(panel) => {
+        match &state.panels_by_panel_id[panel_id] {
+            Panel::Split(panel) => {
                 for child_panel_id in panel.child_panel_ids {
                     self.redraw_panel(cx, state, child_panel_id);
                 }
             }
-            PanelKind::Tab(panel) => {
+            Panel::Tab(panel) => {
                 self.dock.redraw_tab_bar(cx, panel_id);
                 
                 if let Some(tab_id) = self.dock.selected_tab_id(cx, panel_id) {
                     let tab = &state.tabs_by_tab_id[tab_id];
                     match tab.kind {
+                        TabKind::LogView => {
+                            self.log_view.redraw(cx);
+                        }
                         TabKind::FileTree => {
                             self.file_tree.redraw(cx);
                         }
