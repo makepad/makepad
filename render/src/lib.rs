@@ -59,6 +59,7 @@ pub use {
         LiveRegistry,
         LiveDocNodes,
         LiveId,
+        LiveIdMap,
         LiveFileId,
         LivePtr,
         LiveNode,
