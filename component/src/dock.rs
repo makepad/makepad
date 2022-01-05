@@ -268,8 +268,12 @@ impl Dock {
 }
 
 
-pub enum PanelTag {}
-pub type PanelId = GenId<PanelTag>;
+#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq)]
+pub struct PanelId(pub LiveId);
+impl From<LiveId> for PanelId{
+    fn from(live_id:LiveId)->PanelId{PanelId(live_id)}
+}
+
 
 enum Panel {
     Split(SplitPanel),

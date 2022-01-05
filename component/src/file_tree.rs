@@ -590,5 +590,9 @@ impl FileTree {
     }
 }
 
-pub enum FileNodeTag {}
-pub type FileNodeId = GenId<FileNodeTag>;
+#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq)]
+pub struct FileNodeId(pub LiveId);
+impl From<LiveId> for FileNodeId{
+    fn from(live_id:LiveId)->FileNodeId{FileNodeId(live_id)}
+}
+

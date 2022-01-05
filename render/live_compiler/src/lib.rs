@@ -20,7 +20,10 @@ pub use makepad_live_tokenizer;
 pub use makepad_live_tokenizer::makepad_micro_serde;
 
 pub use {
-    makepad_live_tokenizer::LiveId,
+    makepad_live_tokenizer::{
+        LiveId,
+        LiveIdMap
+    },
     makepad_live_tokenizer::vec4_ext,
     crate::{
         live_registry::{
