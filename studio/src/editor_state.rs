@@ -56,6 +56,7 @@ impl EditorState {
         let session_id = self.session_id_allocator.allocate();
         let session = Session {
             session_view: None,
+            injected_char_stack: Vec::new(),
             cursors: CursorSet::new(),
             selections: RangeSet::new(),
             carets: PositionSet::new(),
@@ -133,6 +134,7 @@ impl EditorState {
             token_cache,
             indent_cache,
             inline_cache,
+            edit_group: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             outstanding_deltas: VecDeque::new(),
@@ -171,6 +173,7 @@ impl EditorState {
         let session = &mut self.sessions[session_id];
         session.cursors.add(position);
         session.update_selections_and_carets();
+        session.injected_char_stack.clear();
     }
 
     pub fn move_cursors_left(&mut self, session_id: SessionId, select: bool) {
@@ -187,6 +190,7 @@ impl EditorState {
         let document_inner = document.inner.as_ref().unwrap();
         session.cursors.move_right(&document_inner.text, select);
         session.update_selections_and_carets();
+        session.injected_char_stack.clear();
     }
 
     pub fn move_cursors_up(&mut self, session_id: SessionId, select: bool) {
@@ -195,6 +199,7 @@ impl EditorState {
         let document_inner = document.inner.as_ref().unwrap();
         session.cursors.move_up(&document_inner.text, select);
         session.update_selections_and_carets();
+        session.injected_char_stack.clear();
     }
 
     pub fn move_cursors_down(&mut self, session_id: SessionId, select: bool) {
@@ -203,12 +208,14 @@ impl EditorState {
         let document_inner = document.inner.as_ref().unwrap();
         session.cursors.move_down(&document_inner.text, select);
         session.update_selections_and_carets();
+        session.injected_char_stack.clear();
     }
 
     pub fn move_cursors_to(&mut self, session_id: SessionId, position: Position, select: bool) {
         let session = &mut self.sessions[session_id];
         session.cursors.move_to(position, select);
         session.update_selections_and_carets();
+        session.injected_char_stack.clear();
     }
 
     pub fn replace_text_direct(
@@ -232,7 +239,7 @@ impl EditorState {
             offsets.push(Size::zero());
         }
 
-        self.edit(session_id, delta, &offsets, send_request);
+        self.edit(session_id, None, delta, &offsets, send_request);
     }
 
     pub fn insert_text(
@@ -242,6 +249,33 @@ impl EditorState {
         send_request: &mut dyn FnMut(Request),
     ) {
         let session = &self.sessions[session_id];
+
+        if let Some(ch) = text.as_lines().first().and_then(|line| line.first()) {
+            if let Some(injected_char) = session.injected_char_stack.last() {
+                if ch == injected_char {
+                    let session = &mut self.sessions[session_id];
+                    let document = &self.documents[session.document_id];
+                    let document_inner = document.inner.as_ref().unwrap();
+                    session.cursors.move_right(&document_inner.text, false);
+                    session.update_selections_and_carets();
+                    session.injected_char_stack.pop();
+                    return;
+                }
+            }
+        }
+
+        let injected_char = text
+            .as_lines()
+            .first()
+            .and_then(|line| line.first())
+            .and_then(|ch| {
+                match ch {
+                    '(' => Some(')'),
+                    '[' => Some(']'),
+                    '{' => Some('}'),
+                    _ => None,
+                }
+            });
 
         let mut offsets = Vec::new();
 
@@ -259,17 +293,9 @@ impl EditorState {
         for cursor in &session.cursors {
             builder_1.retain(cursor.start() - position);
             builder_1.insert(text.clone());
-            
-            // Inject closing delimiter if necessary
-            if text.len().line == 0 && text.len().column == 1 {
-                match text.as_lines()[0][0] {
-                    '(' => builder_1.insert(Text::from(vec![vec![')']])),
-                    '[' => builder_1.insert(Text::from(vec![vec![']']])),
-                    '{' => builder_1.insert(Text::from(vec![vec!['}']])),
-                    _ => {}
-                }
+            if let Some(injected_char) = injected_char {
+                builder_1.insert(Text::from(vec![vec![injected_char]]));
             }
-
             offsets.push(text.len());
             position = cursor.end();
         }
@@ -278,7 +304,12 @@ impl EditorState {
         let (_, new_delta_1) = delta_0.clone().transform(delta_1);
         let delta = delta_0.compose(new_delta_1);
 
-        self.edit(session_id, delta, &offsets, send_request);
+        self.edit(session_id, Some(EditGroup::Char), delta, &offsets, send_request);
+
+        let session = &mut self.sessions[session_id];
+        if let Some(injected_char) = injected_char {
+            session.injected_char_stack.push(injected_char);
+        }
     }
 
     pub fn insert_newline(
@@ -314,7 +345,7 @@ impl EditorState {
         let (_, new_delta_1) = delta_0.clone().transform(delta_1);
         let delta = delta_0.compose(new_delta_1);
 
-        self.edit(session_id, delta, &offsets, send_request);
+        self.edit(session_id, None, delta, &offsets, send_request);
     }
 
     pub fn insert_backspace(
@@ -367,12 +398,55 @@ impl EditorState {
         let (_, new_delta_1) = delta_0.clone().transform(delta_1);
         let delta = delta_0.compose(new_delta_1);
 
-        self.edit(session_id, delta, &offsets, send_request);
+        self.edit(session_id, Some(EditGroup::Backspace), delta, &offsets, send_request);
+    }
+
+    pub fn delete(&mut self, session_id: SessionId, send_request: &mut dyn FnMut(Request)) {
+        let session = &self.sessions[session_id];
+        let document = &self.documents[session.document_id];
+        let document_inner = document.inner.as_ref().unwrap();
+
+        let mut offsets = Vec::new();
+
+        let mut builder_0 = delta::Builder::new();
+        let mut position = Position::origin();
+        for cursor in &session.cursors {
+            builder_0.retain(cursor.start() - position);
+            builder_0.delete(cursor.end() - cursor.start());
+            position = cursor.end();
+        }
+        let delta_0 = builder_0.build();
+
+        let mut builder_1 = delta::Builder::new();
+        let mut position = Position::origin();
+        for cursor in &session.cursors {
+            if cursor.head != cursor.tail {
+                continue;
+            }
+            builder_1.retain(cursor.start() - position);
+            if cursor.start().column == document_inner.text.as_lines()[cursor.start().line].len() {
+                if cursor.start().line == document_inner.text.as_lines().len() - 1 {
+                    continue;
+                }
+                builder_1.delete(Size { line: 1, column: 0 });
+            } else {
+                builder_1.delete(Size { line: 0, column: 1 });
+            }
+            offsets.push(Size::zero());
+            position = cursor.start();
+        }
+        let delta_1 = builder_1.build();
+
+        let (_, new_delta_1) = delta_0.clone().transform(delta_1);
+        let delta = delta_0.compose(new_delta_1);
+
+        self.edit(session_id, Some(EditGroup::Backspace), delta, &offsets, send_request);
     }
 
     fn edit(
         &mut self,
         session_id: SessionId,
+        edit_group: Option<EditGroup>,
         delta: Delta,
         offsets: &[Size],
         send_request: &mut dyn FnMut(Request),
@@ -382,10 +456,27 @@ impl EditorState {
         let document_inner = document.inner.as_mut().unwrap();
 
         let inverse_delta = delta.clone().invert(&document_inner.text);
-        document_inner.undo_stack.push(Edit {
-            cursors: session.cursors.clone(),
-            delta: inverse_delta,
+        let group_undo = edit_group.map_or(false, |edit_group| {
+            document_inner.edit_group.map_or(false, |current_edit_group| {
+                current_edit_group == edit_group
+            })
         });
+        if group_undo {
+            let edit = document_inner.undo_stack.pop().unwrap();
+            document_inner.undo_stack.push(Edit {
+                injected_char_stack: edit.injected_char_stack,
+                cursors: edit.cursors,
+                delta: inverse_delta.compose(edit.delta),
+            });
+        } else {
+            document_inner.edit_group = edit_group;
+            document_inner.undo_stack.push(Edit {
+                injected_char_stack: session.injected_char_stack.clone(),
+                cursors: session.cursors.clone(),
+                delta: inverse_delta,
+            });
+        }
+        document_inner.redo_stack.clear();
 
         let session = &mut self.sessions[session_id];
         session.apply_delta(&delta);
@@ -399,8 +490,11 @@ impl EditorState {
         let document = &mut self.documents[session.document_id];
         let document_inner = document.inner.as_mut().unwrap();
         if let Some(undo) = document_inner.undo_stack.pop() {
+            document_inner.edit_group = None;
+
             let inverse_delta = undo.delta.clone().invert(&document_inner.text);
             document_inner.redo_stack.push(Edit {
+                injected_char_stack: session.injected_char_stack.clone(),
                 cursors: session.cursors.clone(),
                 delta: inverse_delta,
             });
@@ -418,8 +512,11 @@ impl EditorState {
         let document = &mut self.documents[session.document_id];
         let document_inner = document.inner.as_mut().unwrap();
         if let Some(redo) = document_inner.redo_stack.pop() {
+            document_inner.edit_group = None;
+
             let inverse_delta = redo.delta.clone().invert(&document_inner.text);
             document_inner.undo_stack.push(Edit {
+                injected_char_stack: session.injected_char_stack.clone(),
                 cursors: session.cursors.clone(),
                 delta: inverse_delta,
             });
@@ -515,6 +612,7 @@ pub type SessionId = GenId<SessionTag>;
 
 pub struct Session {
     pub session_view: Option<EditorViewId>,
+    pub injected_char_stack: Vec<char>,
     pub cursors: CursorSet,
     pub selections: RangeSet,
     pub carets: PositionSet,
@@ -590,13 +688,21 @@ pub struct DocumentInner {
     pub token_cache: TokenCache,
     pub indent_cache: IndentCache,
     pub inline_cache: RefCell<InlineCache>,
+    pub edit_group: Option<EditGroup>,
     pub undo_stack: Vec<Edit>,
     pub redo_stack: Vec<Edit>,
     pub outstanding_deltas: VecDeque<Delta>,
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum EditGroup {
+    Char,
+    Backspace,
+}
+
 #[derive(Debug)]
 pub struct Edit {
+    pub injected_char_stack: Vec<char>,
     pub cursors: CursorSet,
     pub delta: Delta,
 }
