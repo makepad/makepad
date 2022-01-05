@@ -1,7 +1,6 @@
 use {
     std::{
-        ops::Deref,
-        ops::DerefMut,
+        ops::{Index, IndexMut, Deref, DerefMut},
         collections::{HashSet, HashMap,},
         collections::hash_map::Entry
     },
@@ -64,4 +63,17 @@ impl<K,V> Deref for ComponentGc<K,V> {
 
 impl<K,V> DerefMut for ComponentGc<K,V> {
     fn deref_mut(&mut self) -> &mut Self::Target {&mut self.map}
+}
+
+impl<K: std::cmp::Eq + std::hash::Hash + Copy, V> Index<K> for ComponentGc<K,V>{
+    type Output = V;
+    fn index(&self, index:K)->&Self::Output{
+        self.map.get(&index).unwrap()
+    }
+}
+
+impl<K: std::cmp::Eq + std::hash::Hash + Copy, V> IndexMut<K> for ComponentGc<K,V>{
+    fn index_mut(&mut self, index:K)->&mut Self::Output{
+        self.map.get_mut(&index).unwrap()
+    }
 }

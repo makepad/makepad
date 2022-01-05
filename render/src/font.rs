@@ -359,7 +359,7 @@ impl CxDrawFontAtlas {
         match event {
             Event::LiveEdit(live_edit_event) => {
                 match live_edit_event {
-                    LiveEditEvent::ReparseDocument(_) => {
+                    LiveEditEvent::ReparseDocument => {
                         let live_registry_rc = cx.live_registry.clone();
                         let live_registry = live_registry_rc.borrow();
                         if let Some(file_id) = live_registry.module_id_to_file_id.get(&LiveModuleId::from_str(&module_path!()).unwrap()) {

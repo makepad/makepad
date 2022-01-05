@@ -18,7 +18,7 @@ pub use makepad_render;
 
 pub mod frame_template;
 pub mod empty_template;
-
+pub mod fold_list;
 pub mod color_picker;
 pub mod dock;
 pub mod file_tree;

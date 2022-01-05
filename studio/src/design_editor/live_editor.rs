@@ -37,7 +37,7 @@ live_register!{
     use makepad_render::shader::std::*;
     use makepad_component::fold_button::FoldButton;
     
-    LiveEditor: {{LiveEditor}} { 
+    LiveEditor: {{LiveEditor}} {
         
         
         fold_button: FoldButton {
@@ -67,7 +67,7 @@ live_register!{
         text_color_whitespace: #6e6e6e
         text_color_unknown: #808080
         text_color_color: #cc917b
-
+        
         editor_impl: {}
     }
 }
@@ -88,7 +88,7 @@ pub struct LiveEditor {
     fold_button: Option<LivePtr>,
     
     zoom_indent_depth: usize,
-
+    
     
     text_color_color: Vec4,
     text_color_type_name: Vec4,
@@ -198,7 +198,7 @@ impl LiveEditor {
                 let fb = self.fold_buttons.get_or_insert_with_ptr(cx, fold_button_id, self.fold_button, | cx, ptr | {
                     let mut btn = FoldButton::new_from_ptr(cx, ptr);
                     btn.set_is_opened(cx, line_opened > 0.5, false);
-                    btn 
+                    btn
                 });
                 
                 fb.draw_abs(cx, vec2(origin.x, origin.y + layout.start_y), 1.0 - layout.zoom_out);
@@ -411,11 +411,11 @@ impl LiveEditor {
         }) {
             Ok(event) => {
                 match event {
-                    Some(LiveEditEvent::ReparseDocument(_)) => {
+                    Some(LiveEditEvent::ReparseDocument) => {
                         inline_cache.invalidate_all();
                         self.delayed_reparse_document = event;
                     }
-                    Some(_)=>{
+                    Some(_) => {
                         self.delayed_reparse_document = None;
                         cx.live_edit_event = event;
                     }
@@ -424,7 +424,7 @@ impl LiveEditor {
             }
             Err(e) => {
                 let e = live_registry.live_error_to_live_file_error(e);
-                eprintln!("PARSE ERROR {}",e);
+                eprintln!("PARSE ERROR {}", e);
             }
         };
     }
@@ -437,7 +437,6 @@ impl LiveEditor {
         send_request: &mut dyn FnMut(Request),
         dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
     ) {
-        
         if self.editor_impl.scroll_view.handle_event(cx, event) {
             self.editor_impl.scroll_view.redraw(cx);
         }
@@ -488,19 +487,19 @@ impl LiveEditor {
                 CodeEditorAction::RedrawViewsForDocument(_) => {
                     live_edit = true;
                 }
-                CodeEditorAction::CursorBlink=>{
-                    if delayed_reparse_document.is_some(){
+                CodeEditorAction::CursorBlink => {
+                    if delayed_reparse_document.is_some() {
                         let live_registry_rc = cx.live_registry.clone();
                         let mut live_registry = live_registry_rc.borrow_mut();
                         let live_edit_event = delayed_reparse_document.take();
-                        match live_registry.process_next_originals_and_expand(){
-                            Err(errs)=>{
-                                for e in errs{
+                        match live_registry.process_next_originals_and_expand() {
+                            Err(errs) => {
+                                for e in errs {
                                     let e = live_registry.live_error_to_live_file_error(e);
-                                    eprintln!("PARSE ERROR {}",e);
+                                    eprintln!("PARSE ERROR {}", e);
                                 }
                             }
-                            Ok(())=>{
+                            Ok(()) => {
                                 cx.live_edit_event = live_edit_event
                             }
                         }
@@ -608,7 +607,7 @@ impl LiveEditor {
             (FullToken::Bool(_), _) => self.text_color_bool,
             
             (FullToken::Float(_), _) |
-            (FullToken::Int(_), _) | 
+            (FullToken::Int(_), _) |
             (FullToken::OtherNumber, _) => self.text_color_number,
             
             (FullToken::Punct(_), _) => self.text_color_punctuator,

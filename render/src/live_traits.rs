@@ -109,7 +109,7 @@ pub trait LiveApply: LiveHook {
         match event {
             Event::LiveEdit(live_edit_event) => {
                 match live_edit_event {
-                    LiveEditEvent::ReparseDocument(_) => {
+                    LiveEditEvent::ReparseDocument => {
                         cx.flush_draw_shaders();
                         // ok so main_module needs a reload.
                         let live_registry_rc = cx.live_registry.clone();
