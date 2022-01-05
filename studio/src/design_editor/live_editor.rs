@@ -20,7 +20,7 @@ use {
     makepad_component::{
         makepad_render,
         fold_button::{FoldButton, FoldButtonAction},
-        ComponentGc,
+        ComponentMap,
     },
     makepad_render::makepad_live_compiler,
     makepad_live_compiler::makepad_live_tokenizer,
@@ -110,8 +110,8 @@ pub struct LiveEditor {
     #[rust] delayed_reparse_document: Option<LiveEditEvent>,
     #[rust] lines_layout: LinesLayout,
     #[rust] widget_draw_order: Vec<(usize, WidgetIdent)>,
-    #[rust] widgets: ComponentGc<WidgetIdent, Widget>,
-    #[rust] fold_buttons: ComponentGc<u64, FoldButton>,
+    #[rust] widgets: ComponentMap<WidgetIdent, Widget>,
+    #[rust] fold_buttons: ComponentMap<u64, FoldButton>,
 }
 
 impl LiveHook for LiveEditor {

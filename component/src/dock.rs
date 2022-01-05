@@ -2,7 +2,7 @@ use {
     crate::{
         splitter::{SplitterAction, Splitter, SplitterAlign},
         tab_bar::{TabBarAction, TabBar, TabId},
-        component_gc::ComponentGc
+        component_map::ComponentMap
     },
     makepad_render::*,
 };
@@ -33,7 +33,7 @@ pub struct Dock {
     tab_bar: Option<LivePtr>,
     splitter: Option<LivePtr>,
     
-    #[rust] panels: ComponentGc<PanelId, Panel>,
+    #[rust] panels: ComponentMap<PanelId, Panel>,
     #[rust] panel_id_stack: Vec<PanelId>,
     #[rust] drag: Option<Drag>,
 }
