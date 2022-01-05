@@ -109,6 +109,10 @@ impl Line {
         self.leading_whitespace.unwrap()
     }
 
+    pub fn leading_whitespace_above(&self) -> usize {
+        self.leading_whitespace_above.unwrap()
+    }
+
     pub fn virtual_leading_whitespace(&self) -> usize {
         self.leading_whitespace_above
             .unwrap()

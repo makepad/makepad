@@ -24,7 +24,7 @@ use {
     std::{
         cell::RefCell,
         collections::{HashMap, HashSet, VecDeque},
-        mem,
+        iter, mem,
         path::PathBuf,
     },
 };
@@ -320,6 +320,8 @@ impl EditorState {
 
     pub fn insert_newline(&mut self, session_id: SessionId, send_request: &mut dyn FnMut(Request)) {
         let session = &self.sessions[session_id];
+        let document = &self.documents[session.document_id];
+        let document_inner = document.inner.as_ref().unwrap();
 
         let mut offsets = Vec::new();
 
@@ -384,35 +386,72 @@ impl EditorState {
         let mut builder_1 = delta::Builder::new();
         let mut position = Position::origin();
         for cursor in &session.cursors {
-            if cursor.head != cursor.tail {
-                continue;
-            }
-            if cursor.start().column == 0 {
-                if cursor.start().line == 0 {
-                    continue;
-                }
-                builder_1.retain(
-                    Position {
-                        line: cursor.start().line - 1,
-                        column: document_inner.text.as_lines()[cursor.start().line - 1].len(),
-                    } - position,
-                );
-                builder_1.delete(Size { line: 1, column: 0 });
-            } else {
-                builder_1.retain(
-                    Position {
-                        line: cursor.start().line,
-                        column: cursor.start().column - 1,
-                    } - position,
-                );
-                builder_1.delete(Size { line: 0, column: 1 });
-                if let Some(last_injected_char_inverse) = last_injected_char_inverse {
-                    println!("PENIS {:?}", last_injected_char_inverse);
-                    if document_inner.text.as_lines()[cursor.start().line]
-                        [cursor.start().column - 1]
-                        == last_injected_char_inverse
+            offsets.push(Size::zero());
+            if cursor.head == cursor.tail {
+                if cursor.start().column == 0 {
+                    if cursor.start().line != 0 {
+                        builder_1.retain(
+                            Position {
+                                line: cursor.start().line - 1,
+                                column: document_inner.text.as_lines()[cursor.start().line - 1]
+                                    .len(),
+                            } - position,
+                        );
+                        builder_1.delete(Size { line: 1, column: 0 });
+                    }
+                } else {
+                    // This is sort of a hack. I designed the multiple cursor system so that all
+                    // cursors are applied at once, but operations such as the one below are much
+                    // easier to implement if you apply one cursor at a time. In the future I'd
+                    // like to refactor the editor to always apply one cursor at a time, but in the
+                    // meantime I'll work around this problem by only performing this operation if
+                    // there is just a single cursor.
+                    if session.cursors.len() == 1
+                        && document_inner.text.as_lines()[cursor.start().line]
+                            [..cursor.start().column]
+                            .iter()
+                            .all(|&ch| ch.is_whitespace())
                     {
+                        if cursor.start().line == 0 {
+                            builder_1.retain(
+                                Position {
+                                    line: cursor.start().line,
+                                    column: 0,
+                                } - position,
+                            );
+                            builder_1.delete(Size {
+                                line: 0,
+                                column: cursor.start().column,
+                            })
+                        } else {
+                            builder_1.retain(
+                                Position {
+                                    line: cursor.start().line - 1,
+                                    column: document_inner.text.as_lines()[cursor.start().line - 1]
+                                    .len(),
+                                } - position,
+                            );
+                            builder_1.delete(Size {
+                                line: 1,
+                                column: cursor.start().column,
+                            });
+                        }
+                    } else {
+                        builder_1.retain(
+                            Position {
+                                line: cursor.start().line,
+                                column: cursor.start().column - 1,
+                            } - position,
+                        );
                         builder_1.delete(Size { line: 0, column: 1 });
+                        if let Some(last_injected_char_inverse) = last_injected_char_inverse {
+                            if document_inner.text.as_lines()[cursor.start().line]
+                                [cursor.start().column - 1]
+                                == last_injected_char_inverse
+                            {
+                                builder_1.delete(Size { line: 0, column: 1 });
+                            }
+                        }
                     }
                 }
             }
