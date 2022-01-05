@@ -1,3 +1,4 @@
+use makepad_micro_serde::{DeBin, DeBinErr, SerBin};
 use {
     crate::{
         delta::{Delta, Operation},
@@ -7,7 +8,6 @@ use {
     },
     std::{fmt, iter, mem, ops::AddAssign},
 };
-use makepad_micro_serde::{SerBin, DeBin, DeBinErr};
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq, SerBin, DeBin)]
 pub struct Text {
@@ -70,24 +70,31 @@ impl Text {
             },
         }
     }
-    
-    pub fn append_to_string(&self, range: Range, out:&mut String){
+
+    pub fn append_to_string(&self, range: Range, out: &mut String) {
         if range.start.line == range.end.line {
-            for c in self.lines[range.start.line][range.start.column..range.end.column].iter(){
-                out.push(*c);
-            }
+            out.extend(
+                self.lines[range.start.line][range.start.column..range.end.column]
+                    .iter()
+                    .cloned(),
+            );
         } else {
-            for c in self.lines[range.start.line][range.start.column..].iter(){
-                out.push(*c);
-            }
-            for line in self.lines[range.start.line + 1..range.end.line].iter(){
-                for c in line{
-                    out.push(*c)
-                }
-            }
-            for c in self.lines[range.end.line][..range.end.column].iter(){
-                out.push(*c)
-            }
+            out.extend(
+                self.lines[range.start.line][range.start.column..]
+                    .iter()
+                    .cloned()
+                    .chain(iter::once('\n'))
+                    .chain(
+                        self.lines[range.start.line + 1..range.end.line]
+                            .iter()
+                            .flat_map(|line| line.iter().cloned().chain(iter::once('\n'))),
+                    )
+                    .chain(
+                        self.lines[range.end.line][..range.end.column]
+                            .iter()
+                            .cloned(),
+                    ),
+            );
         }
     }
 
@@ -178,7 +185,7 @@ impl CharVecToString for Vec<char>{
         }
         return s
     }
-    
+
     fn compare_string(&self, s:&str, start:usize, end:usize)->bool{
         let mut i = start;
         for s in s.chars(){
@@ -244,8 +251,8 @@ impl From<&str> for Text {
         Text::from(
             string
                 .lines()
-                .map( | line | line.chars().collect::<Vec<_ >> ())
-                .collect::<Vec<_ >> ()
+                .map(|line| line.chars().collect::<Vec<_>>())
+                .collect::<Vec<_>>(),
         )
     }
 }
