@@ -401,6 +401,48 @@ impl EditorState {
         self.edit(session_id, Some(EditGroup::Backspace), delta, &offsets, send_request);
     }
 
+    pub fn delete(&mut self, session_id: SessionId, send_request: &mut dyn FnMut(Request)) {
+        let session = &self.sessions[session_id];
+        let document = &self.documents[session.document_id];
+        let document_inner = document.inner.as_ref().unwrap();
+
+        let mut offsets = Vec::new();
+
+        let mut builder_0 = delta::Builder::new();
+        let mut position = Position::origin();
+        for cursor in &session.cursors {
+            builder_0.retain(cursor.start() - position);
+            builder_0.delete(cursor.end() - cursor.start());
+            position = cursor.end();
+        }
+        let delta_0 = builder_0.build();
+
+        let mut builder_1 = delta::Builder::new();
+        let mut position = Position::origin();
+        for cursor in &session.cursors {
+            if cursor.head != cursor.tail {
+                continue;
+            }
+            builder_1.retain(cursor.start() - position);
+            if cursor.start().column == document_inner.text.as_lines()[cursor.start().line].len() {
+                if cursor.start().line == document_inner.text.as_lines().len() - 1 {
+                    continue;
+                }
+                builder_1.delete(Size { line: 1, column: 0 });
+            } else {
+                builder_1.delete(Size { line: 0, column: 1 });
+            }
+            offsets.push(Size::zero());
+            position = cursor.start();
+        }
+        let delta_1 = builder_1.build();
+
+        let (_, new_delta_1) = delta_0.clone().transform(delta_1);
+        let delta = delta_0.compose(new_delta_1);
+
+        self.edit(session_id, Some(EditGroup::Backspace), delta, &offsets, send_request);
+    }
+
     fn edit(
         &mut self,
         session_id: SessionId,
