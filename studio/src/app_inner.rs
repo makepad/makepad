@@ -317,8 +317,6 @@ impl AppInner {
         self.file_tree.redraw(cx);
     }
     
-    
-    
     fn split_tab_panel(
         &mut self,
         cx: &mut Cx,

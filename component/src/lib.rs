@@ -7,7 +7,7 @@ mod desktop_window;
 mod scroll_shadow;
 mod scroll_bar;
 mod scroll_view;
-mod component_gc;
+mod component_map;
 
 #[macro_use]
 mod frame_registry;
@@ -30,7 +30,7 @@ pub mod bare_window;
 pub mod fold_button;
 
 pub use crate::{
-    component_gc::ComponentGc,
+    component_map::ComponentMap,
     button_logic::{ButtonLogic, ButtonAction},
     button::{Button},
     desktop_window::{DesktopWindow}, 

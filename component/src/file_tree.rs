@@ -3,7 +3,7 @@ use {
         collections::{HashSet},
     },
     crate::{
-        component_gc::ComponentGc,
+        component_map::ComponentMap,
         scroll_view::ScrollView
     },
     makepad_render::*,
@@ -237,7 +237,7 @@ pub struct FileTree {
     #[rust] selected_node_id: Option<FileNodeId>,
     #[rust] open_nodes: HashSet<FileNodeId>,
     
-    #[rust] tree_nodes: ComponentGc<FileNodeId, (FileTreeNode, LiveId)>,
+    #[rust] tree_nodes: ComponentMap<FileNodeId, (FileTreeNode, LiveId)>,
     
     #[rust] count: usize,
     #[rust] stack: Vec<f32>,
