@@ -3,7 +3,7 @@
         collections::{HashSet},
     },
     crate::{
-        component_gc::ComponentGc,
+        component_map::ComponentMap,
         scroll_view::ScrollView
     },
     makepad_render::*,
@@ -219,7 +219,7 @@ pub struct FoldList {
     #[rust] _selected_node_ids: HashSet<FoldListNodeId>,
     #[rust] _open_nodes: HashSet<FoldListNodeId>,
     
-    #[rust] fold_nodes: ComponentGc<FoldListNodeId, FoldListNode>,
+    #[rust] fold_nodes: ComponentMap<FoldListNodeId, FoldListNode>,
     
     #[rust] count: usize,
     #[rust] stack: Vec<f32>,

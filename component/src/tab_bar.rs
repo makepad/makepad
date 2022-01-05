@@ -1,6 +1,6 @@
 use {
     crate::{
-        component_gc::ComponentGc,
+        component_map::ComponentMap,
         tab::{TabAction, Tab},
         scroll_view::ScrollView
     },
@@ -46,7 +46,7 @@ pub struct TabBar {
     #[rust] tab_order: Vec<TabId>,
     
     #[rust] is_dragged: bool,
-    #[rust] tabs: ComponentGc<TabId, Tab>,
+    #[rust] tabs: ComponentMap<TabId, Tab>,
 
     #[rust] selected_tab_id: Option<TabId>,
     #[rust] next_selected_tab_id: Option<TabId>,

@@ -8,12 +8,12 @@ use {
 };
 
 #[derive(Clone)]
-pub struct ComponentGc<K,V>{
+pub struct ComponentMap<K,V>{
     map: HashMap<K,V>,
     visible: HashSet<K>
 }
 
-impl<K,V> Default for ComponentGc<K,V>{
+impl<K,V> Default for ComponentMap<K,V>{
     fn default()->Self{
         Self{
             map: HashMap::new(),
@@ -22,7 +22,7 @@ impl<K,V> Default for ComponentGc<K,V>{
     }
 }
 
-impl<K: std::cmp::Eq + std::hash::Hash + Copy,V> ComponentGc<K,V>{
+impl<K: std::cmp::Eq + std::hash::Hash + Copy,V> ComponentMap<K,V>{
     pub fn retain_visible(&mut self) {
         let visible = &self.visible;
         self.map.retain( | k, _ | visible.contains(&k));
@@ -56,23 +56,23 @@ impl<K: std::cmp::Eq + std::hash::Hash + Copy,V> ComponentGc<K,V>{
     }
 }
  
-impl<K,V> Deref for ComponentGc<K,V> {
+impl<K,V> Deref for ComponentMap<K,V> {
     type Target = HashMap<K,V>;
     fn deref(&self) -> &Self::Target {&self.map}
 }
 
-impl<K,V> DerefMut for ComponentGc<K,V> {
+impl<K,V> DerefMut for ComponentMap<K,V> {
     fn deref_mut(&mut self) -> &mut Self::Target {&mut self.map}
 }
 
-impl<K: std::cmp::Eq + std::hash::Hash + Copy, V> Index<K> for ComponentGc<K,V>{
+impl<K: std::cmp::Eq + std::hash::Hash + Copy, V> Index<K> for ComponentMap<K,V>{
     type Output = V;
     fn index(&self, index:K)->&Self::Output{
         self.map.get(&index).unwrap()
     }
 }
 
-impl<K: std::cmp::Eq + std::hash::Hash + Copy, V> IndexMut<K> for ComponentGc<K,V>{
+impl<K: std::cmp::Eq + std::hash::Hash + Copy, V> IndexMut<K> for ComponentMap<K,V>{
     fn index_mut(&mut self, index:K)->&mut Self::Output{
         self.map.get_mut(&index).unwrap()
     }
