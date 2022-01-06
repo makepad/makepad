@@ -218,7 +218,6 @@ impl SplitPanel{
 #[derive(Clone, Debug)]
 pub struct TabPanel {
     pub tab_ids: Vec<TabId>,
-    //pub editor_view_id: Option<EditorViewId>,
 }
 
 pub struct Tab {
