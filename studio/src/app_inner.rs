@@ -2,7 +2,6 @@ use {
     crate::{
         app_io::AppIO,
         app_state::{TabKind, AppState, SplitPanel, TabPanel, Panel, Tab},
-        editor_state::{SessionId},
         code_editor::{
             protocol::{FileTreeData, Notification, Request, Response, ResponseOrNotification},
         },
@@ -87,11 +86,10 @@ impl AppInner {
                             }
                         }
                         TabKind::CodeEditor {..} => {
-                            let panel = state.panels[panel_id].as_tab_panel();
                             self.editors.draw(
                                 cx,
                                 &state.editor_state,
-                                panel.editor_view_id.unwrap(),
+                                panel_id.into(),
                             );
                         }
                     }
@@ -165,14 +163,12 @@ impl AppInner {
                                 .get_mut(&panel_id)
                                 .unwrap()
                                 .as_tab_panel_mut();
-                            if let Some(editor_view_id) = panel.editor_view_id {
-                                self.editors.set_view_session_id(
-                                    cx,
-                                    &mut state.editor_state,
-                                    editor_view_id,
-                                    None,
-                                );
-                            }
+                            self.editors.set_view_session_id(
+                                cx,
+                                &mut state.editor_state,
+                                panel_id.into(),
+                                None,
+                            );
                             state.editor_state.destroy_session(session_id, &mut {
                                 let request_sender = &self.io.request_sender;
                                 move | request | request_sender.send(request).unwrap()
@@ -245,16 +241,13 @@ impl AppInner {
                         panel_id_stack.push(*child_id);
                     }
                 }
-                Panel::Tab(TabPanel {
-                    editor_view_id,
-                    ..
-                }) => {
-                    if let Some(code_editor_view_id) = editor_view_id {
+                Panel::Tab(_)=>{
+                    if self.editors.has_editor(panel_id.into()){
                         let request_sender = &self.io.request_sender;
                         self.editors.handle_event(
                             cx,
                             &mut state.editor_state,
-                            *code_editor_view_id,
+                            panel_id.into(),
                             event,
                             &mut | request | request_sender.send(request).unwrap(),
                         );
@@ -332,7 +325,6 @@ impl AppInner {
         let new_panel_id = state.panels.insert_unique(
             Panel::Tab(TabPanel {
                 tab_ids: Vec::new(),
-                editor_view_id: None,
             }),
         );
         
@@ -424,40 +416,14 @@ impl AppInner {
         self.dock.redraw_tab_bar(cx, panel_id);
         match tab.kind {
             TabKind::CodeEditor {session_id} => {
-                self.set_code_editor_view_session_id(cx, state, panel_id, session_id);
-            }
-            _ => {}
-        }
-    }
-    
-    fn set_code_editor_view_session_id(
-        &mut self,
-        cx: &mut Cx,
-        state: &mut AppState,
-        panel_id: PanelId,
-        session_id: SessionId,
-    ) {
-        let panel = state
-            .panels
-            .get_mut(&panel_id)
-            .unwrap()
-            .as_tab_panel_mut();
-        match panel.editor_view_id {
-            Some(view_id) => {
                 self.editors.set_view_session_id(
                     cx,
                     &mut state.editor_state,
-                    view_id,
+                    panel_id.into(),
                     Some(session_id),
                 );
             }
-            None => {
-                panel.editor_view_id = Some(self.editors.create_view(
-                    cx,
-                    &mut state.editor_state,
-                    Some(session_id),
-                ));
-            }
+            _ => {}
         }
     }
     
@@ -472,7 +438,7 @@ impl AppInner {
                     self.redraw_panel(cx, state, child_panel_id);
                 }
             }
-            Panel::Tab(panel) => {
+            Panel::Tab(_) => {
                 self.dock.redraw_tab_bar(cx, panel_id);
                 
                 if let Some(tab_id) = self.dock.selected_tab_id(cx, panel_id) {
@@ -485,9 +451,7 @@ impl AppInner {
                             self.file_tree.redraw(cx);
                         }
                         TabKind::CodeEditor {..} => {
-                            if let Some(code_editor_view_id) = panel.editor_view_id {
-                                self.editors.redraw_view(cx, code_editor_view_id);
-                            }
+                            self.editors.redraw_view(cx, panel_id.into());
                         }
                     }
                 }

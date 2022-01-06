@@ -195,8 +195,9 @@ impl LiveEditor {
                 let layout = &self.lines_layout.lines[*line];
                 let line_opened = inline_cache[*line].line_opened;
                 let fold_button_id = inline_cache[*line].fold_button_id.unwrap();
-                let fb = self.fold_buttons.get_or_insert_with_ptr(cx, fold_button_id, self.fold_button, | cx, ptr | {
-                    let mut btn = FoldButton::new_from_ptr(cx, ptr);
+                let fold_button = self.fold_button.unwrap();
+                let fb = self.fold_buttons.get_or_insert(cx, fold_button_id, | cx | {
+                    let mut btn = FoldButton::new_from_ptr(cx, fold_button);
                     btn.set_is_opened(cx, line_opened > 0.5, false);
                     btn
                 });

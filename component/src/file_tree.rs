@@ -457,9 +457,9 @@ impl FileTree {
         let is_open = self.open_nodes.contains(&node_id);
         
         if self.should_node_draw(cx) {
-            
-            let (tree_node, _) = self.tree_nodes.get_or_insert_with_ptr(cx, node_id, self.folder_node, | cx, ptr | {
-                let mut tree_node = FileTreeNode::new_from_ptr(cx, ptr);
+            let folder_node = self.folder_node.unwrap();
+            let (tree_node, _) = self.tree_nodes.get_or_insert(cx, node_id, | cx | {
+                let mut tree_node = FileTreeNode::new_from_ptr(cx, folder_node);
                 if is_open {
                     tree_node.set_folder_is_open(cx, true, false)
                 }
@@ -495,8 +495,9 @@ impl FileTree {
             self.count += 1;
         }
         if self.should_node_draw(cx) {
-            let (tree_node, _) = self.tree_nodes.get_or_insert_with_ptr(cx, node_id, self.file_node, | cx, ptr | {
-                (FileTreeNode::new_from_ptr(cx, ptr), id!(file_node))
+            let file_node = self.file_node.unwrap();
+            let (tree_node, _) = self.tree_nodes.get_or_insert(cx, node_id, | cx | {
+                (FileTreeNode::new_from_ptr(cx, file_node), id!(file_node))
             });
             tree_node.draw_file(cx, name, Self::is_even(self.count), self.node_height, self.stack.len(), scale);
         }

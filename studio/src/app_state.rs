@@ -4,7 +4,6 @@ use {
         code_editor::{
             protocol::{FileNodeData, FileTreeData},
         },
-        editors::{EditorViewId},
     },
     makepad_component::{
         dock::{PanelId},
@@ -50,7 +49,6 @@ impl AppState {
             id!(file_tree),
             Panel::Tab(TabPanel {
                 tab_ids: vec![id!(file_tree).into()],
-                editor_view_id: None,
             }),
         );
         
@@ -66,7 +64,6 @@ impl AppState {
             id!(content),
             Panel::Tab(TabPanel {
                 tab_ids: vec![],
-                editor_view_id: None,
             }),
         );
         
@@ -209,7 +206,7 @@ pub struct SplitPanel {
 #[derive(Clone, Debug)]
 pub struct TabPanel {
     pub tab_ids: Vec<TabId>,
-    pub editor_view_id: Option<EditorViewId>,
+    //pub editor_view_id: Option<EditorViewId>,
 }
 
 pub struct Tab {
