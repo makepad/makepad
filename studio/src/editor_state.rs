@@ -338,7 +338,42 @@ impl EditorState {
         let mut position = Position::origin();
         for cursor in &session.cursors {
             builder_1.retain(cursor.start() - position);
-            let text = Text::from(vec![vec![], vec![]]);
+            // This is sort of a hack. I designed the multiple cursor system so that all
+            // cursors are applied at once, but operations such autoindenting are much
+            // easier to implement if you apply one cursor at a time. In the future I'd
+            // like to refactor the editor to always apply one cursor at a time, but in the
+            // meantime I'll work around this problem by only performing autoindenting if
+            // there is just a single cursor.
+            let indent_count = if sessions.cursors.len() == 1 {
+                let indent_info = &document_inner.indent_cache[cursor.start().line];
+                let mut indent_count = (indent_info.virtual_leading_whitespace() + 3) / 4;
+                if indent_info.leading_whitespace().is_some() {
+                    if let Some(last_non_whitespace_char) = document_inner.text.as_lines()
+                        [..cursor.start().line]
+                        .iter()
+                        .flat_map(|line| line.iter().cloned())
+                        .chain(
+                            document_inner.text.as_lines()[cursor.start().line][..cursor.start().column]
+                                .iter()
+                                .cloned(),
+                        )
+                        .rev()
+                        .find(|ch| !ch.is_whitespace())
+                    {
+                        match last_non_whitespace_char {
+                            '(' | '[' | '{' => indent_count += 1,
+                            _ => {}
+                        }
+                    }
+                };
+                indent_count
+            } else {
+                0
+            };
+            let text = Text::from(vec![
+                vec![],
+                iter::repeat(' ').take(indent_count * 4).collect::<Vec<_>>(),
+            ]);
             let len = text.len();
             builder_1.insert(text);
             offsets.push(len);
@@ -401,10 +436,10 @@ impl EditorState {
                     }
                 } else {
                     // This is sort of a hack. I designed the multiple cursor system so that all
-                    // cursors are applied at once, but operations such as the one below are much
+                    // cursors are applied at once, but operations such as autodedenting are much
                     // easier to implement if you apply one cursor at a time. In the future I'd
                     // like to refactor the editor to always apply one cursor at a time, but in the
-                    // meantime I'll work around this problem by only performing this operation if
+                    // meantime I'll work around this problem by only performing autodedenting if
                     // there is just a single cursor.
                     if session.cursors.len() == 1
                         && document_inner.text.as_lines()[cursor.start().line]
@@ -428,7 +463,7 @@ impl EditorState {
                                 Position {
                                     line: cursor.start().line - 1,
                                     column: document_inner.text.as_lines()[cursor.start().line - 1]
-                                    .len(),
+                                        .len(),
                                 } - position,
                             );
                             builder_1.delete(Size {
