@@ -1,6 +1,6 @@
 //use crate::id::Id;
 use {
-    std::collections::{HashMap, BTreeSet},
+    std::collections::{HashMap, HashSet, BTreeSet},
     makepad_id_macros::*,
     makepad_live_tokenizer::{Delim, TokenPos, TokenRange, TokenWithLen, FullToken, LiveId, State, Cursor},
     crate::{
@@ -38,13 +38,17 @@ pub struct LiveRegistry {
     pub module_id_to_file_id: HashMap<LiveModuleId, LiveFileId>,
     pub live_files: Vec<LiveFile>,
     pub live_type_infos: HashMap<LiveType, LiveTypeInfo>,
+    pub ignore_no_dsl: HashSet<LiveId>,
     pub main_module: Option<LiveFileId>,
 }
 
 impl Default for LiveRegistry {
     fn default() -> Self {
+        let mut ignore_no_dsl = HashSet::new();
+        ignore_no_dsl.insert(id!(Namespace));
+        ignore_no_dsl.insert(id!(Struct));
         Self {
-            
+            ignore_no_dsl,
             main_module: None,
             file_ids: HashMap::new(),
             module_id_to_file_id: HashMap::new(),
@@ -70,11 +74,17 @@ pub enum LiveScopeTarget {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum LiveEditEvent {
-    ReparseDocument(LiveFileId),
+    ReparseDocument,
     Mutation {tokens: Vec<LiveTokenId>, apply: Vec<LiveNode>, live_ptrs: Vec<LivePtr>},
 }
 
 impl LiveRegistry {
+    pub fn add_ignore_no_dsl(&mut self, live_ids:&[LiveId]){
+        for id in live_ids{
+            self.ignore_no_dsl.insert(*id);
+        }
+    }
+    
     pub fn ptr_to_node(&self, live_ptr: LivePtr) -> &LiveNode {
         let doc = &self.live_files[live_ptr.file_id.to_index()].expanded;
         &doc.resolve_ptr(live_ptr.index as usize)
@@ -483,7 +493,7 @@ impl LiveRegistry {
                 }
             };
             
-            return Ok(Some(LiveEditEvent::ReparseDocument(file_id)));
+            return Ok(Some(LiveEditEvent::ReparseDocument));
         }
         else if mutated_tokens.len()>0 { // its a hotpatch
             // means if we had a next_original its now cancelled
@@ -701,9 +711,8 @@ impl LiveRegistry {
                 }
             }
             else {
-                let index = dep_order.len();
-                dep_order.push(current);
-                index
+                dep_order.insert(parent_index, current);
+                parent_index
             };
             
             for dep in &file.deps {
@@ -742,10 +751,8 @@ impl LiveRegistry {
             }
         }
         
-        //self.top_level_file = self.module_id_to_file_id.get(dep_order.last().unwrap()).cloned();
-        
-        for crate_module in dep_order {
-            let file_id = if let Some(file_id) = self.module_id_to_file_id.get(&crate_module) {
+        for module_id in dep_order {
+            let file_id = if let Some(file_id) = self.module_id_to_file_id.get(&module_id) {
                 file_id
             }
             else {
@@ -765,7 +772,7 @@ impl LiveRegistry {
             
             let mut live_document_expander = LiveExpander {
                 live_registry: self,
-                in_crate: crate_module.0,
+                in_crate: module_id.0,
                 in_file_id: *file_id,
                 errors
             };

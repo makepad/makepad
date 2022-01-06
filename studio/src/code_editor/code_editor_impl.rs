@@ -159,6 +159,7 @@ live_register!{
             redraw: true
             apply: {zoom_out: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
         }
+
         zoom_out_state: {
             track: zoom
             from: {all: Play::Exp {speed1: 0.98, speed2: 0.95}}
