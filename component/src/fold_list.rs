@@ -1,4 +1,4 @@
- use {
+use {
     std::{
         collections::{HashSet},
     },
@@ -285,29 +285,12 @@ impl FoldListNode {
         }
     }
     
-    pub fn set_is_selected(&mut self, cx: &mut Cx, is_selected: bool, should_animate: bool) {
-        self.toggle_animator(
-            cx,
-            is_selected,
-            should_animate,
-            self.selected_state,
-            self.unselected_state
-        )
+    pub fn set_is_selected(&mut self, cx: &mut Cx, is_selected: bool, animate: Animate) {
+        self.toggle_animator(cx, is_selected, animate, self.selected_state, self.unselected_state)
     }
     
-    pub fn set_node_is_open(
-        &mut self,
-        cx: &mut Cx,
-        is_open: bool,
-        should_animate: bool,
-    ) {
-        self.toggle_animator(
-            cx,
-            is_open,
-            should_animate,
-            self.opened_state,
-            self.closed_state
-        );
+    pub fn set_node_is_open(&mut self, cx: &mut Cx, is_open: bool, animate: Animate) {
+        self.toggle_animator(cx, is_open, animate, self.opened_state, self.closed_state);
     }
     
     pub fn handle_event(
@@ -361,7 +344,7 @@ impl FoldList {
         self.scroll_view.begin(cx) ?;
         self.count = 0;
         Ok(())
-    }
+    } 
     
     pub fn end(&mut self, cx: &mut Cx) {
         // lets fill the space left with blanks
@@ -376,7 +359,7 @@ impl FoldList {
                 margin: Margin::default()
             });
             walk += self.node_height.max(1.0);
-        }
+        } 
         
         self.scroll_view.end(cx);
         
@@ -387,6 +370,11 @@ impl FoldList {
     pub fn is_even(count: usize) -> f32 {
         if count % 2 == 1 {0.0}else {1.0}
     }
+    
+     pub fn redraw(&mut self, cx: &mut Cx) {
+        self.scroll_view.redraw(cx);
+    }
+    
     /*
     pub fn should_node_draw(&mut self, cx: &mut Cx) -> bool {
         let scale = self.stack.last().cloned().unwrap_or(1.0);

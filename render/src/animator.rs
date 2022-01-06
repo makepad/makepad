@@ -11,6 +11,12 @@ use {
     
 };
 
+#[derive(Debug, Clone, Copy)]
+pub enum Animate{
+    Yes,
+    No
+}
+
 // deserialisable DSL structure
 #[derive(Debug, Clone, Live, LiveHook)]
 pub struct KeyFrame {
