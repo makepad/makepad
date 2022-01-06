@@ -6,8 +6,8 @@ use {
             protocol::{Request, TextFileId},
             token_cache::TokenCache,
         },
-        design_editor::inline_cache::InlineCache,
         editors::EditorViewId,
+        design_editor::inline_cache::InlineCache,
     },
     makepad_component::makepad_render,
     makepad_render::{
@@ -24,7 +24,6 @@ use {
     std::{
         cell::RefCell,
         collections::{HashMap, HashSet, VecDeque},
-        iter,
         mem,
         path::PathBuf,
     },
@@ -311,8 +310,8 @@ impl EditorState {
     
     pub fn insert_newline(&mut self, session_id: SessionId, send_request: &mut dyn FnMut(Request)) {
         let session = &self.sessions[session_id];
-        let document = &self.documents[session.document_id];
-        let document_inner = document.inner.as_ref().unwrap();
+        //let document = &self.documents[session.document_id];
+        //let document_inner = document.inner.as_ref().unwrap();
         
         let mut offsets = Vec::new();
         
