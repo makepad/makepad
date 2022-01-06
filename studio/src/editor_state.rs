@@ -148,12 +148,6 @@ impl EditorState {
         }
     }
     
-    pub fn get_session_and_doc(&self, session_id: SessionId)->(&Session,&DocumentInner){
-        let session = &self.sessions[session_id];
-        let document = &self.documents[session.document_id];
-        (session, document.inner.as_ref().unwrap())
-    }
-    
     fn destroy_document_deferred(
         &mut self,
         document_id: DocumentId,
