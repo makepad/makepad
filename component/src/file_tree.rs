@@ -590,9 +590,6 @@ impl FileTree {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct FileNodeId(pub LiveId);
-impl From<LiveId> for FileNodeId{
-    fn from(live_id:LiveId)->FileNodeId{FileNodeId(live_id)}
-}
 

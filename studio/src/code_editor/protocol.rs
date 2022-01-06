@@ -63,5 +63,17 @@ pub enum Error {
     Unknown(String),
 }
 
-pub enum TextFileTag {}
-pub type TextFileId = GenId<TextFileTag>;
+#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
+pub struct TextFileId(pub LiveId);
+
+impl SerBin for TextFileId {
+    fn ser_bin(&self, s: &mut Vec<u8>) {
+        self.0.0.ser_bin(s);
+    }
+}
+
+impl DeBin for TextFileId {
+    fn de_bin(o: &mut usize, d: &[u8]) -> Result<Self, DeBinErr> {
+        Ok(TextFileId(LiveId(DeBin::de_bin(o, d)?)))
+    }
+}

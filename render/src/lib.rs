@@ -31,9 +31,7 @@ mod draw_vars;
 mod geometry;
 
 mod shader;
-
-mod gen_id;
-
+//mod gen_id;
 pub use {
     makepad_shader_compiler::makepad_derive_live::*,
     makepad_shader_compiler::makepad_live_tokenizer,
@@ -213,6 +211,5 @@ pub use {
             },
         },
     },
-    self::gen_id::{GenId, GenIdAllocator, GenIdMap},
 };
 

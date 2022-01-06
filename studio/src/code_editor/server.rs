@@ -2,7 +2,7 @@ use {
     crate::{
         code_editor::{
             protocol::{
-                DirectoryEntry, Error, TextFileTag, TextFileId, FileNodeData, FileTreeData, Notification, Request, Response,
+                DirectoryEntry, Error, TextFileId, FileNodeData, FileTreeData, Notification, Request, Response,
             },
         },
     },
@@ -32,8 +32,7 @@ impl Server {
             next_connection_id: 0,
             shared: Arc::new(RwLock::new(Shared {
                 path: path.into(),
-                file_id_allocator: GenIdAllocator::new(),
-                files_by_file_id: GenIdMap::new(),
+                files: LiveIdMap::new(),
                 file_ids_by_path: HashMap::new(),
             })),
         }
@@ -101,7 +100,7 @@ impl Connection {
 
         match shared_guard.file_ids_by_path.get(&path) {
             Some(&file_id) => {
-                let mut file_guard = shared_guard.files_by_file_id[file_id].lock().unwrap();
+                let mut file_guard = shared_guard.files[file_id].lock().unwrap();
 
                 let their_revision = file_guard.our_revision;
                 let text = file_guard.text.clone();
@@ -126,8 +125,6 @@ impl Connection {
                 Ok((file_id, their_revision, text))
             }
             None => {
-                let file_id = shared_guard.file_id_allocator.allocate();
-
                 let bytes = fs::read(&path).map_err(|error| Error::Unknown(error.to_string()))?;
                 let text: Text = String::from_utf8_lossy(&bytes)
                     .lines()
@@ -151,7 +148,7 @@ impl Connection {
                     participants_by_connection_id,
                 });
 
-                shared_guard.files_by_file_id.insert(file_id, file);
+                let file_id = shared_guard.files.insert_unique(file);
                 shared_guard.file_ids_by_path.insert(path, file_id);
 
                 drop(shared_guard);
@@ -169,12 +166,7 @@ impl Connection {
     ) -> Result<TextFileId, Error> {
         let shared_guard = self.shared.read().unwrap();
 
-        let mut file_guard = shared_guard
-            .files_by_file_id
-            .get(file_id)
-            .unwrap()
-            .lock()
-            .unwrap();
+        let mut file_guard = shared_guard.files[file_id].lock().unwrap();
 
         let unseen_delta_count = file_guard.our_revision - their_revision;
         let seen_delta_count = file_guard.outstanding_deltas.len() - unseen_delta_count;
@@ -218,11 +210,7 @@ impl Connection {
     fn close_file(&self, file_id: TextFileId) -> Result<TextFileId, Error> {
         let mut shared_guard = self.shared.write().unwrap();
 
-        let mut file_guard = shared_guard
-            .files_by_file_id
-            .get(file_id)
-            .unwrap()
-            .lock()
+        let mut file_guard = shared_guard.files[file_id].lock()
             .map_err(|_| Error::NotAParticipant)?;
 
         if !file_guard
@@ -240,8 +228,7 @@ impl Connection {
             let path = mem::replace(&mut file_guard.path, PathBuf::new());
             drop(file_guard);
             shared_guard.file_ids_by_path.remove(&path);
-            shared_guard.files_by_file_id.remove(file_id);
-            shared_guard.file_id_allocator.deallocate(file_id);
+            shared_guard.files.remove(&file_id);
         } else {
             drop(file_guard);
         }
@@ -283,8 +270,7 @@ impl fmt::Debug for dyn NotificationSender {
 #[derive(Debug)]
 struct Shared {
     path: PathBuf,
-    file_id_allocator: GenIdAllocator<TextFileTag>,
-    files_by_file_id: GenIdMap<TextFileTag, Mutex<File>>,
+    files: LiveIdMap<TextFileId, Mutex<File>>,
     file_ids_by_path: HashMap<PathBuf, TextFileId>,
 }
 
