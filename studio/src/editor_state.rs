@@ -24,6 +24,7 @@ use {
     std::{
         cell::RefCell,
         collections::{HashMap, HashSet, VecDeque},
+        iter,
         mem,
         path::PathBuf,
     },
@@ -310,8 +311,8 @@ impl EditorState {
     
     pub fn insert_newline(&mut self, session_id: SessionId, send_request: &mut dyn FnMut(Request)) {
         let session = &self.sessions[session_id];
-        //let document = &self.documents[session.document_id];
-        //let document_inner = document.inner.as_ref().unwrap();
+        let document = &self.documents[session.document_id];
+        let document_inner = document.inner.as_ref().unwrap();
         
         let mut offsets = Vec::new();
         
@@ -334,7 +335,7 @@ impl EditorState {
             // like to refactor the editor to always apply one cursor at a time, but in the
             // meantime I'll work around this problem by only performing autoindenting if
             // there is just a single cursor.
-            let indent_count = if sessions.cursors.len() == 1 {
+            let indent_count = if session.cursors.len() == 1 {
                 let indent_info = &document_inner.indent_cache[cursor.start().line];
                 let mut indent_count = (indent_info.virtual_leading_whitespace() + 3) / 4;
                 if indent_info.leading_whitespace().is_some() {
@@ -454,11 +455,7 @@ impl EditorState {
                                     line: cursor.start().line - 1,
                                     column: document_inner.text.as_lines()[cursor.start().line - 1]
                                         .len(),
-<<<<<<< HEAD
                                 } - position,
-=======
-                                } -position,
->>>>>>> a324ff5ef5685a45ae0c068475d6d3e494ff609c
                             );
                             builder_1.delete(Size {
                                 line: 1,
