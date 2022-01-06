@@ -63,9 +63,9 @@ impl AppInner {
                 self.draw_panel(cx, state, child_panel_ids[01]);
                 self.dock.end_split_panel(cx);
             }
-            Panel::Tab(TabPanel {tab_ids, ..}) => {
+            Panel::Tab(TabPanel {tab_ids, selected_tab}) => {
                 self.dock.begin_tab_panel(cx, panel_id);
-                if self.dock.begin_tab_bar(cx).is_ok() {
+                if self.dock.begin_tab_bar(cx, *selected_tab).is_ok() {
                     for tab_id in tab_ids {
                         let tab = &state.tabs[*tab_id];
                         self.dock.draw_tab(cx, *tab_id, &tab.name);
@@ -150,7 +150,7 @@ impl AppInner {
                     }
                 }
                 DockAction::TabWasPressed(panel_id, tab_id) => {
-                    self.select_tab(cx, state, panel_id, tab_id, true)
+                    self.select_tab(cx, state, panel_id, tab_id, Animate::Yes)
                 }
                 DockAction::TabCloseWasPressed(panel_id, tab_id) => {
                     let tab = &state.tabs[tab_id];
@@ -167,9 +167,11 @@ impl AppInner {
                                 let request_sender = &self.io.request_sender;
                                 move | request | request_sender.send(request).unwrap()
                             });
+                            
                             panel.tab_ids.remove(panel.tab_position(tab_id));
                             state.tabs.remove(&tab_id);
-                            self.dock.set_next_selected_tab(cx, panel_id, tab_id, true);
+
+                            self.dock.set_next_selected_tab(cx, panel_id, tab_id, Animate::Yes);
                             self.dock.redraw_tab_bar(cx, panel_id);
                         }
                         _ => {}
@@ -268,7 +270,7 @@ impl AppInner {
         match response {
             Response::LoadFileTree(response) => {
                 self.load_file_tree(cx, state, response.unwrap());
-                self.select_tab(cx, state, id!(file_tree).into(), id!(file_tree).into(), false);
+                self.select_tab(cx, state, id!(file_tree).into(), id!(file_tree).into(), Animate::No);
             }
             response => {
                 self.editors.handle_response(cx, &mut state.editor_state, response, &mut {
@@ -291,7 +293,7 @@ impl AppInner {
     fn load_file_tree(&mut self, cx: &mut Cx, state: &mut AppState, file_tree_data: FileTreeData) {
         self.file_tree.forget();
         state.load_file_tree(file_tree_data);
-        self.file_tree.set_folder_is_open(cx, id!(root).into(), true, false);
+        self.file_tree.set_folder_is_open(cx, id!(root).into(), true, Animate::No);
         self.file_tree.redraw(cx);
     }
     
@@ -307,6 +309,7 @@ impl AppInner {
         let new_panel_id = state.panels.insert_unique(
             Panel::Tab(TabPanel {
                 tab_ids: Vec::new(),
+                selected_tab: None
             }),
         );
         
@@ -366,12 +369,14 @@ impl AppInner {
             }
             None => panel.tab_ids.push(tab_id),
         }
-        self.select_tab(cx, state, panel_id, tab_id, false);
+        self.select_tab(cx, state, panel_id, tab_id, Animate::No);
     }
     
-    fn select_tab(&mut self, cx: &mut Cx, state: &mut AppState, panel_id: PanelId, tab_id: TabId, should_animate: bool) {
+    fn select_tab(&mut self, cx: &mut Cx, state: &mut AppState, panel_id: PanelId, tab_id: TabId, animate: Animate) {
+        let tab_panel = state.panels[panel_id].as_tab_panel_mut();
         let tab = &state.tabs[tab_id];
-        self.dock.set_selected_tab_id(cx, panel_id, Some(tab_id), should_animate);
+        tab_panel.selected_tab = Some(tab_panel.tab_position(tab_id));
+        self.dock.set_selected_tab_id(cx, panel_id, Some(tab_id), animate);
         self.dock.redraw_tab_bar(cx, panel_id);
         match tab.kind {
             TabKind::CodeEditor {session_id} => {

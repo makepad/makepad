@@ -189,6 +189,7 @@ pub use {
             Ease,
             Play,
             Animator,
+            Animate,
             AnimatorAction
         },
         draw_vars::{
