@@ -554,6 +554,6 @@ impl FoldList {
     }*/
 }
 
-pub enum FoldListNodeTag {}
-pub type FoldListNodeId = GenId<FoldListNodeTag>;
 
+#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
+pub struct FoldListNodeId(pub LiveId);
