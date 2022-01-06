@@ -3,7 +3,7 @@ use {
         collections::{HashSet},
     },
     crate::{
-        component_gc::ComponentGc,
+        component_map::ComponentMap,
         scroll_view::ScrollView
     },
     makepad_render::*,
@@ -237,7 +237,7 @@ pub struct FileTree {
     #[rust] selected_node_id: Option<FileNodeId>,
     #[rust] open_nodes: HashSet<FileNodeId>,
     
-    #[rust] tree_nodes: ComponentGc<FileNodeId, (FileTreeNode, LiveId)>,
+    #[rust] tree_nodes: ComponentMap<FileNodeId, (FileTreeNode, LiveId)>,
     
     #[rust] count: usize,
     #[rust] stack: Vec<f32>,
@@ -320,29 +320,12 @@ impl FileTreeNode {
         }
     }
     
-    fn set_is_selected(&mut self, cx: &mut Cx, is_selected: bool, should_animate: bool) {
-        self.toggle_animator(
-            cx,
-            is_selected,
-            should_animate,
-            self.selected_state,
-            self.unselected_state
-        )
+    fn set_is_selected(&mut self, cx: &mut Cx, is_selected: bool, animate: Animate) {
+        self.toggle_animator(cx, is_selected, animate, self.selected_state, self.unselected_state)
     }
     
-    pub fn set_folder_is_open(
-        &mut self,
-        cx: &mut Cx,
-        is_open: bool,
-        should_animate: bool,
-    ) {
-        self.toggle_animator(
-            cx,
-            is_open,
-            should_animate,
-            self.opened_state,
-            self.closed_state
-        );
+    pub fn set_folder_is_open(&mut self, cx: &mut Cx, is_open: bool, animate: Animate) {
+        self.toggle_animator(cx, is_open, animate, self.opened_state, self.closed_state);
     }
     
     pub fn handle_event(
@@ -457,11 +440,11 @@ impl FileTree {
         let is_open = self.open_nodes.contains(&node_id);
         
         if self.should_node_draw(cx) {
-            
-            let (tree_node, _) = self.tree_nodes.get_or_insert_with_ptr(cx, node_id, self.folder_node, | cx, ptr | {
-                let mut tree_node = FileTreeNode::new_from_ptr(cx, ptr);
+            let folder_node = self.folder_node.unwrap();
+            let (tree_node, _) = self.tree_nodes.get_or_insert(cx, node_id, | cx | {
+                let mut tree_node = FileTreeNode::new_from_ptr(cx, folder_node);
                 if is_open {
-                    tree_node.set_folder_is_open(cx, true, false)
+                    tree_node.set_folder_is_open(cx, true, Animate::No)
                 }
                 (tree_node, id!(folder_node))
             });
@@ -495,8 +478,9 @@ impl FileTree {
             self.count += 1;
         }
         if self.should_node_draw(cx) {
-            let (tree_node, _) = self.tree_nodes.get_or_insert_with_ptr(cx, node_id, self.file_node, | cx, ptr | {
-                (FileTreeNode::new_from_ptr(cx, ptr), id!(file_node))
+            let file_node = self.file_node.unwrap();
+            let (tree_node, _) = self.tree_nodes.get_or_insert(cx, node_id, | cx | {
+                (FileTreeNode::new_from_ptr(cx, file_node), id!(file_node))
             });
             tree_node.draw_file(cx, name, Self::is_even(self.count), self.node_height, self.stack.len(), scale);
         }
@@ -515,7 +499,7 @@ impl FileTree {
         cx: &mut Cx,
         node_id: FileNodeId,
         is_open: bool,
-        should_animate: bool,
+        animate: Animate,
     ) {
         if is_open {
             self.open_nodes.insert(node_id);
@@ -524,7 +508,7 @@ impl FileTree {
             self.open_nodes.remove(&node_id);
         }
         if let Some((tree_node, _)) = self.tree_nodes.get_mut(&node_id) {
-            tree_node.set_folder_is_open(cx, is_open, should_animate);
+            tree_node.set_folder_is_open(cx, is_open, animate);
         }
     }
     
@@ -573,7 +557,7 @@ impl FileTree {
                 FileTreeNodeAction::WasClicked => {
                     if let Some(last_selected) = self.selected_node_id {
                         if last_selected != node_id {
-                            self.tree_nodes.get_mut(&last_selected).unwrap().0.set_is_selected(cx, false, true);
+                            self.tree_nodes.get_mut(&last_selected).unwrap().0.set_is_selected(cx, false, Animate::Yes);
                         }
                     }
                     self.selected_node_id = Some(node_id);
@@ -590,5 +574,6 @@ impl FileTree {
     }
 }
 
-pub enum FileNodeTag {}
-pub type FileNodeId = GenId<FileNodeTag>;
+#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
+pub struct FileNodeId(pub LiveId);
+

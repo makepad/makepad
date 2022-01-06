@@ -7,7 +7,7 @@ mod desktop_window;
 mod scroll_shadow;
 mod scroll_bar;
 mod scroll_view;
-mod component_gc;
+mod component_map;
 
 #[macro_use]
 mod frame_registry;
@@ -18,7 +18,7 @@ pub use makepad_render;
 
 pub mod frame_template;
 pub mod empty_template;
-
+pub mod fold_list;
 pub mod color_picker;
 pub mod dock;
 pub mod file_tree;
@@ -30,7 +30,7 @@ pub mod bare_window;
 pub mod fold_button;
 
 pub use crate::{
-    component_gc::ComponentGc,
+    component_map::ComponentMap,
     button_logic::{ButtonLogic, ButtonAction},
     button::{Button},
     desktop_window::{DesktopWindow}, 
@@ -50,6 +50,7 @@ pub fn live_register(cx:&mut Cx){
     crate::desktop_window::live_register(cx);
     crate::bare_window::live_register(cx);
     crate::window_menu::live_register(cx);
+    crate::fold_list::live_register(cx);
     crate::scroll_view::live_register(cx);
     crate::scroll_bar::live_register(cx);
     crate::file_tree::live_register(cx);
