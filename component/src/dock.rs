@@ -103,10 +103,10 @@ impl Dock {
         let _ = self.panel_id_stack.pop().unwrap();
     }
     
-    pub fn begin_tab_bar(&mut self, cx: &mut Cx) -> Result<(), ()> {
+    pub fn begin_tab_bar(&mut self, cx: &mut Cx, selected_tab:Option<usize>) -> Result<(), ()> {
         let panel_id = *self.panel_id_stack.last().unwrap();
         let panel = self.panels[panel_id].as_tab_panel_mut();
-        if let Err(error) = panel.tab_bar.begin(cx) {
+        if let Err(error) = panel.tab_bar.begin(cx, selected_tab) {
             self.contents(cx);
             return Err(error);
         }
@@ -170,14 +170,14 @@ impl Dock {
         panel.tab_bar.selected_tab_id()
     }
     
-    pub fn set_selected_tab_id(&mut self, cx: &mut Cx, panel_id: PanelId, tab_id: Option<TabId>, should_animate: bool) {
+    pub fn set_selected_tab_id(&mut self, cx: &mut Cx, panel_id: PanelId, tab_id: Option<TabId>, animate: Animate) {
         let panel = self.get_or_create_tab_panel(cx, panel_id);
-        panel.tab_bar.set_selected_tab_id(cx, tab_id, should_animate);
+        panel.tab_bar.set_selected_tab_id(cx, tab_id, animate);
     }
     
-    pub fn set_next_selected_tab(&mut self, cx: &mut Cx, panel_id: PanelId, tab_id: TabId, should_animate: bool) {
+    pub fn set_next_selected_tab(&mut self, cx: &mut Cx, panel_id: PanelId, tab_id: TabId, animate: Animate) {
         let panel = self.get_or_create_tab_panel(cx, panel_id);
-        panel.tab_bar.set_next_selected_tab(cx, tab_id, should_animate);
+        panel.tab_bar.set_next_selected_tab(cx, tab_id, animate);
     }
     
     pub fn redraw(&mut self, cx: &mut Cx) {

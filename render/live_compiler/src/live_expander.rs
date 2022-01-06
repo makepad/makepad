@@ -301,6 +301,13 @@ impl<'a> LiveExpander<'a> {
                         };
                         //overwrite value, this copies the Class
                     }
+                    else if !self.live_registry.ignore_no_dsl.contains(clone){
+                        self.errors.push(LiveError {
+                            origin: live_error_origin!(),
+                            span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).into(),
+                            message: format!("Can't find live definition of {} did you forget to call live_register for it?", clone)
+                        });
+                    }
                     current_parent.push((out_doc.nodes[out_index].id, out_index));
                 },
                 LiveValue::Class {live_type, ..} => {
@@ -347,7 +354,12 @@ impl<'a> LiveExpander<'a> {
                                 else {
                                     let other_nodes = &self.live_registry.live_files[file_id.to_index()].expanded.nodes;
                                     if other_nodes.len() == 0 {
-                                        panic!("Dependency order wrong, someday i'll learn to program. {} {} {}", file_id.0, self.in_file_id.0, lti.type_name);
+                                        panic!(
+                                            "Dependency order bug finding {}, file {} not registered before {}",
+                                            lti.type_name,
+                                            self.live_registry.file_id_to_file_name(*file_id),
+                                            self.live_registry.file_id_to_file_name(self.in_file_id),
+                                        );
                                     }
                                     if let Some(index) = other_nodes.child_by_name(0, lti.type_name) {
                                         let node_insert_point = insert_point;
@@ -366,6 +378,13 @@ impl<'a> LiveExpander<'a> {
                                         });
                                     }
                                 }
+                            }
+                            else if !self.live_registry.ignore_no_dsl.contains(&lti.type_name){
+                                self.errors.push(LiveError {
+                                    origin: live_error_origin!(),
+                                    span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).into(),
+                                    message: format!("Can't find live definition of {} did you forget to call live_register for it?", lti.type_name)
+                                });
                             }
                         }
                     }

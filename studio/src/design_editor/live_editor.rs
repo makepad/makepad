@@ -198,7 +198,7 @@ impl LiveEditor {
                 let fold_button = self.fold_button.unwrap();
                 let fb = self.fold_buttons.get_or_insert(cx, fold_button_id, | cx | {
                     let mut btn = FoldButton::new_from_ptr(cx, fold_button);
-                    btn.set_is_opened(cx, line_opened > 0.5, false);
+                    btn.set_is_opened(cx, line_opened > 0.5, Animate::No);
                     btn
                 });
                 
@@ -443,6 +443,9 @@ impl LiveEditor {
         }
         
         let mut live_edit = false;
+        if self.editor_impl.session_id.is_none(){
+            return
+        }
         let session_id = self.editor_impl.session_id.unwrap();
         for widget in self.widgets.values_mut() {
             match widget.inline_widget.handle_widget_event(cx, event, widget.bind) {
