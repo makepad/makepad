@@ -196,11 +196,23 @@ impl Panel {
     }
 }
 
+impl TabPanel{
+    pub fn tab_position(&self, find_id:TabId)->usize{
+        self.tab_ids.iter().position(|id| *id == find_id).unwrap()
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct SplitPanel {
     pub axis: Axis,
     pub align: SplitterAlign,
     pub child_panel_ids: [PanelId; 2],
+}
+
+impl SplitPanel{
+    pub fn child_position(&self, find_id:PanelId)->usize{
+        self.child_panel_ids.iter().position( | id | *id == find_id).unwrap()
+    }
 }
 
 #[derive(Clone, Debug)]
