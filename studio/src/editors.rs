@@ -17,6 +17,10 @@ use {
             },
         }
     },
+    makepad_component::{
+        ComponentMap,
+        dock::PanelId,
+    },
     makepad_component::makepad_render::*,
 };
 
@@ -77,9 +81,16 @@ live_register!{
     }
 }
 
+
+#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq)]
+pub struct EditorViewId(pub PanelId);
+impl From<PanelId> for EditorViewId{
+    fn from(panel_id:PanelId)->Self{Self(panel_id)}
+}
+
 #[derive(Live)]
 pub struct Editors {
-    #[rust] editor_views: LiveIdMap<EditorViewId, EditorView>,
+    #[rust] editor_views: ComponentMap<EditorViewId, EditorView>,
     
     live_editor: Option<LivePtr>,
 }
@@ -94,33 +105,11 @@ impl LiveHook for Editors{
     }
 }
 
-
-#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
-pub struct EditorViewId(pub LiveId);
-
 impl Editors {
     
     pub fn draw(&mut self, cx: &mut Cx, state: &EditorState, view_id: EditorViewId) {
         let view = &mut self.editor_views[view_id];
         view.draw(cx, state);
-    }
-    
-    pub fn create_view(
-        &mut self,
-        cx: &mut Cx,
-        state: &mut EditorState,
-        session_id: Option<SessionId>,
-    ) -> EditorViewId {
-        // TODO branch here on filetype somehow.
-        let mut view = EditorView::LiveEditor(LiveEditor::new_from_ptr(cx, self.live_editor.unwrap()));
-
-        view.set_session_id(session_id);
-        let view_id = self.editor_views.insert_unique(view);
-        if let Some(session_id) = session_id {
-            let session = &mut state.sessions[session_id];
-            session.session_view = Some(view_id);
-        }
-        view_id
     }
     
     pub fn view_session_id(&self, view_id: EditorViewId) -> Option<SessionId> {
@@ -135,7 +124,11 @@ impl Editors {
         view_id: EditorViewId,
         session_id: Option<SessionId>,
     ) {
-        let view = &mut self.editor_views[view_id];
+        let live_editor = self.live_editor.unwrap();
+        let view = self.editor_views.get_or_insert(cx, view_id.into(), |cx|{
+            EditorView::LiveEditor(LiveEditor::new_from_ptr(cx, live_editor))
+        });
+        
         if let Some(session_id) = view.session_id() {
             let session = &mut state.sessions[session_id];
             session.session_view = None;
@@ -146,6 +139,10 @@ impl Editors {
             session.session_view = Some(view_id);
             view.redraw(cx);
         }
+    }
+    
+    pub fn has_editor(&self, view_id: EditorViewId)->bool{
+        self.editor_views.get(&view_id).is_some()
     }
     
     pub fn redraw_view(&mut self, cx: &mut Cx, view_id: EditorViewId) {

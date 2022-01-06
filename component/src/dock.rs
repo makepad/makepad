@@ -146,17 +146,19 @@ impl Dock {
     }
     
     fn get_or_create_split_panel(&mut self, cx: &mut Cx, panel_id: PanelId) -> &mut SplitPanel {
-        self.panels.get_or_insert_with_ptr(cx, panel_id, self.splitter, |cx, ptr|{
+        let splitter = self.splitter.unwrap();
+        self.panels.get_or_insert(cx, panel_id, |cx|{
             Panel::Split(SplitPanel {
-                splitter: Splitter::new_from_ptr(cx, ptr),
+                splitter: Splitter::new_from_ptr(cx, splitter),
             })
         }).as_split_panel_mut()
     }
     
     fn get_or_create_tab_panel(&mut self, cx: &mut Cx, panel_id: PanelId) -> &mut TabPanel {
-        self.panels.get_or_insert_with_ptr(cx, panel_id, self.tab_bar, |cx, ptr|{
+        let tab_bar = self.tab_bar.unwrap();
+        self.panels.get_or_insert(cx, panel_id, |cx|{
             Panel::Tab(TabPanel {
-                tab_bar: TabBar::new_from_ptr(cx, ptr),
+                tab_bar: TabBar::new_from_ptr(cx, tab_bar),
                 contents_rect: Rect::default(),
             })
         }).as_tab_panel_mut()
