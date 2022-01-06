@@ -79,8 +79,7 @@ live_register!{
 
 #[derive(Live)]
 pub struct Editors {
-    #[rust] view_id_allocator: GenIdAllocator<EditorViewTag>,
-    #[rust] views_by_view_id: GenIdMap<EditorViewTag, EditorView>,
+    #[rust] editor_views: LiveIdMap<EditorViewId, EditorView>,
     
     live_editor: Option<LivePtr>,
 }
@@ -88,20 +87,21 @@ pub struct Editors {
 impl LiveHook for Editors{
     fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         if let Some(index) = nodes.child_by_name(index, id!(live_editor)){
-            for editor_view in self.views_by_view_id.values_mut() {
+            for editor_view in self.editor_views.values_mut() {
                 editor_view.apply(cx, apply_from, index, nodes);
             }
         }
     }
 }
 
-pub enum EditorViewTag {}
-pub type EditorViewId = GenId<EditorViewTag>;
+
+#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
+pub struct EditorViewId(pub LiveId);
 
 impl Editors {
     
     pub fn draw(&mut self, cx: &mut Cx, state: &EditorState, view_id: EditorViewId) {
-        let view = &mut self.views_by_view_id[view_id];
+        let view = &mut self.editor_views[view_id];
         view.draw(cx, state);
     }
     
@@ -111,16 +111,11 @@ impl Editors {
         state: &mut EditorState,
         session_id: Option<SessionId>,
     ) -> EditorViewId {
-        let view_id = self.view_id_allocator.allocate();
-
         // TODO branch here on filetype somehow.
         let mut view = EditorView::LiveEditor(LiveEditor::new_from_ptr(cx, self.live_editor.unwrap()));
 
         view.set_session_id(session_id);
-        self.views_by_view_id.insert(
-            view_id,
-            view,
-        );
+        let view_id = self.editor_views.insert_unique(view);
         if let Some(session_id) = session_id {
             let session = &mut state.sessions[session_id];
             session.session_view = Some(view_id);
@@ -129,7 +124,7 @@ impl Editors {
     }
     
     pub fn view_session_id(&self, view_id: EditorViewId) -> Option<SessionId> {
-        let view = &self.views_by_view_id[view_id];
+        let view = &self.editor_views[view_id];
         view.session_id()
     }
     
@@ -140,7 +135,7 @@ impl Editors {
         view_id: EditorViewId,
         session_id: Option<SessionId>,
     ) {
-        let view = &mut self.views_by_view_id[view_id];
+        let view = &mut self.editor_views[view_id];
         if let Some(session_id) = view.session_id() {
             let session = &mut state.sessions[session_id];
             session.session_view = None;
@@ -154,7 +149,7 @@ impl Editors {
     }
     
     pub fn redraw_view(&mut self, cx: &mut Cx, view_id: EditorViewId) {
-        let view = &mut self.views_by_view_id[view_id];
+        let view = &mut self.editor_views[view_id];
         view.redraw(cx);
     }
     
@@ -166,7 +161,7 @@ impl Editors {
         event: &mut Event,
         send_request: &mut dyn FnMut(Request),
     ) {
-        let view = &mut self.views_by_view_id[view_id];
+        let view = &mut self.editor_views[view_id];
         let mut actions = Vec::new();
         view.handle_event(cx, state, event, send_request, &mut | _, action | actions.push(action));
         for action in actions {
@@ -225,7 +220,7 @@ impl Editors {
         for session_id in &document.session_ids {
             let session = &state.sessions[*session_id];
             if let Some(view_id) = session.session_view {
-                let view = &mut self.views_by_view_id[view_id];
+                let view = &mut self.editor_views[view_id];
                 view.redraw(cx);
             }
         }

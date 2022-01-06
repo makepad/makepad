@@ -267,13 +267,8 @@ impl Dock {
     }
 }
 
-
-#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct PanelId(pub LiveId);
-impl From<LiveId> for PanelId{
-    fn from(live_id:LiveId)->PanelId{PanelId(live_id)}
-}
-
 
 enum Panel {
     Split(SplitPanel),
