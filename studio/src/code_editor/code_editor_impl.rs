@@ -398,9 +398,7 @@ impl CodeEditorImpl {
     
     pub fn start_zoom_anim(&mut self, cx: &mut Cx, state: &mut EditorState, lines_layout: &LinesLayout, anim: Option<LivePtr>) {
         if let Some(session_id) = self.session_id {
-            let session = &state.sessions[session_id];
-            let document = &state.documents[session.document_id];
-            let document_inner = document.inner.as_ref().unwrap();
+            let (session, doc) = state.get_session_and_doc(session_id);
             
             let last_cursor = session.cursors.last_inserted();
             let last_pos = self.position_to_vec2(last_cursor.head, lines_layout);
@@ -409,7 +407,7 @@ impl CodeEditorImpl {
             // check if our last_pos is visible
             let center_line = if !view_rect.contains(last_pos) {
                 let start = view_rect.pos + view_rect.size * 0.5;
-                let pos = self.vec2_to_position(&document_inner.text, start, lines_layout);
+                let pos = self.vec2_to_position(&doc.text, start, lines_layout);
                 pos
             }
             else {
@@ -852,10 +850,8 @@ impl CodeEditorImpl {
             HitEvent::FingerMove(fe) => {
                 self.reset_caret_blink(cx);
                 if let Some(session_id) = self.session_id {
-                    let session = &state.sessions[session_id];
-                    let document = &state.documents[session.document_id];
-                    let document_inner = document.inner.as_ref().unwrap();
-                    let position = self.vec2_to_position(&document_inner.text, fe.rel, lines_layout);
+                    let (_, doc) = state.get_session_and_doc(session_id);
+                    let position = self.vec2_to_position(&doc.text, fe.rel, lines_layout);
                     if self.last_move_position != Some(position) {
                         self.last_move_position = Some(position);
                         state.move_cursors_to(session_id, position, true);
@@ -979,16 +975,13 @@ impl CodeEditorImpl {
                 if let Some(session_id) = self.session_id {
                     // TODO: The code below belongs in a function on EditorState
                     let mut string = String::new();
-                    
-                    let session = &state.sessions[session_id];
-                    let document = &state.documents[session.document_id];
-                    let document_inner = document.inner.as_ref().unwrap();
+                    let (session, doc) = state.get_session_and_doc(session_id);
                     
                     let mut start = Position::origin();
                     for span in session.selections.spans() {
                         let end = start + span.len;
                         if span.is_included {
-                            document_inner.text.append_to_string(Range {start, end}, &mut string);
+                            doc.text.append_to_string(Range {start, end}, &mut string);
                         }
                         start = end;
                     }
@@ -1080,10 +1073,8 @@ impl CodeEditorImpl {
             if select_scroll.at_end {
                 self.select_scroll = None;
             }
-            let session = &state.sessions[self.session_id.unwrap()];
-            let document = &state.documents[session.document_id];
-            let document_inner = document.inner.as_ref().unwrap();
-            let position = self.vec2_to_position(&document_inner.text, rel, lines_layout);
+            let (_, doc) = state.get_session_and_doc(self.session_id.unwrap());
+            let position = self.vec2_to_position(&doc.text, rel, lines_layout);
             state.move_cursors_to(self.session_id.unwrap(), position, true);
             self.scroll_view.redraw(cx);
         }

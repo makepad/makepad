@@ -36,16 +36,7 @@ impl<K: std::cmp::Eq + std::hash::Hash + Copy,V> ComponentMap<K,V>{
         self.map.retain( | k, v | visible.contains(&k) || cb(k,v));
         self.visible.clear();
     } 
-    /*
-    pub fn get_or_insert_with_ptr<'a, CB>(&'a mut self, cx:&mut Cx, key:K, ptr:Option<LivePtr>, cb:CB)->&'a mut V
-    where CB: FnOnce(&mut Cx, LivePtr)->V{
-        self.visible.insert(key);
-        match self.map.entry(key){
-            Entry::Occupied(o) => o.into_mut(),
-            Entry::Vacant(v) => v.insert(cb(cx, ptr.unwrap()))
-        }
-    }
-    */
+
     pub fn get_or_insert<'a, CB>(&'a mut self, cx:&mut Cx, key:K, cb:CB)->&'a mut V
     where CB: FnOnce(&mut Cx)->V{
         self.visible.insert(key);
