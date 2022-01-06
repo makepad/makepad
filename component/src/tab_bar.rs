@@ -93,8 +93,9 @@ impl TabBar {
     }
     
     fn get_or_create_tab(&mut self, cx:&mut Cx, tab_id: TabId)->&mut Tab{
-        self.tabs.get_or_insert_with_ptr(cx, tab_id, self.tab, |cx, ptr|{
-             Tab::new_from_ptr(cx, ptr)
+        let tab = self.tab.unwrap();
+        self.tabs.get_or_insert(cx, tab_id, |cx|{
+             Tab::new_from_ptr(cx, tab)
         })
     }
     
