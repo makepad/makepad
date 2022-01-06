@@ -2,6 +2,7 @@ use {
     crate::{
         splitter::{SplitterAction, Splitter, SplitterAlign},
         tab_bar::{TabBarAction, TabBar, TabId},
+        component_map::ComponentMap
     },
     makepad_render::*,
 };
@@ -32,15 +33,14 @@ pub struct Dock {
     tab_bar: Option<LivePtr>,
     splitter: Option<LivePtr>,
     
-    #[rust] panels_by_panel_id: GenIdMap<PanelTag, Panel>,
-    #[rust] panel_ids: Vec<PanelId>,
+    #[rust] panels: ComponentMap<PanelId, Panel>,
     #[rust] panel_id_stack: Vec<PanelId>,
     #[rust] drag: Option<Drag>,
 }
 
 impl LiveHook for Dock {
     fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        for panel in self.panels_by_panel_id.values_mut() {
+        for panel in self.panels.values_mut() {
             match panel {
                 Panel::Split(panel) => if let Some(index) = nodes.child_by_name(index, id!(splitter)) {
                     panel.splitter.apply(cx, apply_from, index, nodes);
@@ -58,28 +58,23 @@ impl Dock {
     
     pub fn begin(&mut self, cx: &mut Cx) -> Result<(), ()> {
         self.view.begin(cx) ?;
-        self.panel_ids.clear();
         Ok(())
     }
     
     pub fn end(&mut self, cx: &mut Cx) {
-        if self
-        .drag_view
-            .begin(cx)
-            .is_ok()
-        {
+        if self .drag_view.begin(cx).is_ok(){
             if let Some(drag) = self.drag.as_ref() {
-                let panel = self.panels_by_panel_id[drag.panel_id].as_tab_panel();
+                let panel = self.panels[drag.panel_id].as_tab_panel();
                 let rect = compute_drag_rect(panel.contents_rect, drag.position);
                 self.drag_quad.draw_abs(cx, rect);
             }
             self.drag_view.end(cx);
         }
+        self.panels.retain_visible();
         self.view.end(cx);
     }
     
     pub fn begin_split_panel(&mut self, cx: &mut Cx, panel_id: PanelId, axis: Axis, align: SplitterAlign) {
-        self.panel_ids.push(panel_id);
         let panel = self.get_or_create_split_panel(cx, panel_id);
         panel.splitter.set_axis(axis);
         panel.splitter.set_align(align);
@@ -89,18 +84,17 @@ impl Dock {
     
     pub fn middle_split_panel(&mut self, cx: &mut Cx) {
         let panel_id = *self.panel_id_stack.last().unwrap();
-        let panel = self.panels_by_panel_id[panel_id].as_split_panel_mut();
+        let panel = self.panels[panel_id].as_split_panel_mut();
         panel.splitter.middle(cx);
     }
     
     pub fn end_split_panel(&mut self, cx: &mut Cx) {
         let panel_id = self.panel_id_stack.pop().unwrap();
-        let panel = self.panels_by_panel_id[panel_id].as_split_panel_mut();
+        let panel = self.panels[panel_id].as_split_panel_mut();
         panel.splitter.end(cx);
     }
     
     pub fn begin_tab_panel(&mut self, cx: &mut Cx, panel_id: PanelId) {
-        self.panel_ids.push(panel_id);
         self.get_or_create_tab_panel(cx, panel_id);
         self.panel_id_stack.push(panel_id);
     }
@@ -109,10 +103,10 @@ impl Dock {
         let _ = self.panel_id_stack.pop().unwrap();
     }
     
-    pub fn begin_tab_bar(&mut self, cx: &mut Cx) -> Result<(), ()> {
+    pub fn begin_tab_bar(&mut self, cx: &mut Cx, selected_tab:Option<usize>) -> Result<(), ()> {
         let panel_id = *self.panel_id_stack.last().unwrap();
-        let panel = self.panels_by_panel_id[panel_id].as_tab_panel_mut();
-        if let Err(error) = panel.tab_bar.begin(cx) {
+        let panel = self.panels[panel_id].as_tab_panel_mut();
+        if let Err(error) = panel.tab_bar.begin(cx, selected_tab) {
             self.contents(cx);
             return Err(error);
         }
@@ -121,14 +115,14 @@ impl Dock {
     
     pub fn end_tab_bar(&mut self, cx: &mut Cx) {
         let panel_id = *self.panel_id_stack.last().unwrap();
-        let panel = self.panels_by_panel_id[panel_id].as_tab_panel_mut();
+        let panel = self.panels[panel_id].as_tab_panel_mut();
         panel.tab_bar.end(cx);
         self.contents(cx);
     }
     
     pub fn draw_tab(&mut self, cx: &mut Cx, tab_id: TabId, name: &str) {
         let panel_id = *self.panel_id_stack.last().unwrap();
-        let panel = self.panels_by_panel_id[panel_id].as_tab_panel_mut();
+        let panel = self.panels[panel_id].as_tab_panel_mut();
         panel.tab_bar.draw_tab(cx, tab_id, name);
     }
     
@@ -140,7 +134,7 @@ impl Dock {
     
     fn contents(&mut self, cx: &mut Cx) {
         let panel_id = *self.panel_id_stack.last().unwrap();
-        let panel = self.panels_by_panel_id[panel_id].as_tab_panel_mut();
+        let panel = self.panels[panel_id].as_tab_panel_mut();
         cx.turtle_new_line();
         panel.contents_rect = Rect {
             pos: cx.get_turtle_pos(),
@@ -152,51 +146,38 @@ impl Dock {
     }
     
     fn get_or_create_split_panel(&mut self, cx: &mut Cx, panel_id: PanelId) -> &mut SplitPanel {
-        if !self.panels_by_panel_id.contains_id(panel_id) {
-            self.panels_by_panel_id.insert(
-                panel_id,
-                Panel::Split(SplitPanel {
-                    splitter: Splitter::new_from_ptr(cx, self.splitter.unwrap()),
-                }),
-            );
-        }
-        self.panels_by_panel_id[panel_id].as_split_panel_mut()
+        let splitter = self.splitter.unwrap();
+        self.panels.get_or_insert(cx, panel_id, |cx|{
+            Panel::Split(SplitPanel {
+                splitter: Splitter::new_from_ptr(cx, splitter),
+            })
+        }).as_split_panel_mut()
     }
     
     fn get_or_create_tab_panel(&mut self, cx: &mut Cx, panel_id: PanelId) -> &mut TabPanel {
-        if !self.panels_by_panel_id.contains_id(panel_id) {
-            self.panels_by_panel_id.insert(
-                panel_id,
-                Panel::Tab(TabPanel {
-                    tab_bar: TabBar::new_from_ptr(cx, self.tab_bar.unwrap()),
-                    contents_rect: Rect::default(),
-                }),
-            );
-        }
-        self.panels_by_panel_id[panel_id].as_tab_panel_mut()
+        let tab_bar = self.tab_bar.unwrap();
+        self.panels.get_or_insert(cx, panel_id, |cx|{
+            Panel::Tab(TabPanel {
+                tab_bar: TabBar::new_from_ptr(cx, tab_bar),
+                contents_rect: Rect::default(),
+            })
+        }).as_tab_panel_mut()
     }
-    
-    pub fn forget(&mut self) {
-        self.panels_by_panel_id.clear();
-    }
-    
-    pub fn forget_panel_id(&mut self, panel_id: PanelId) {
-        self.panels_by_panel_id.remove(panel_id);
-    }
+
     
     pub fn selected_tab_id(&mut self, cx: &mut Cx, panel_id: PanelId) -> Option<TabId> {
         let panel = self.get_or_create_tab_panel(cx, panel_id);
         panel.tab_bar.selected_tab_id()
     }
     
-    pub fn set_selected_tab_id(&mut self, cx: &mut Cx, panel_id: PanelId, tab_id: Option<TabId>, should_animate: bool) {
+    pub fn set_selected_tab_id(&mut self, cx: &mut Cx, panel_id: PanelId, tab_id: Option<TabId>, animate: Animate) {
         let panel = self.get_or_create_tab_panel(cx, panel_id);
-        panel.tab_bar.set_selected_tab_id(cx, tab_id, should_animate);
+        panel.tab_bar.set_selected_tab_id(cx, tab_id, animate);
     }
     
-    pub fn set_next_selected_tab(&mut self, cx: &mut Cx, panel_id: PanelId, tab_id: TabId, should_animate: bool) {
+    pub fn set_next_selected_tab(&mut self, cx: &mut Cx, panel_id: PanelId, tab_id: TabId, animate: Animate) {
         let panel = self.get_or_create_tab_panel(cx, panel_id);
-        panel.tab_bar.set_next_selected_tab(cx, tab_id, should_animate);
+        panel.tab_bar.set_next_selected_tab(cx, tab_id, animate);
     }
     
     pub fn redraw(&mut self, cx: &mut Cx) {
@@ -214,8 +195,7 @@ impl Dock {
         event: &mut Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, DockAction),
     ) {
-        for panel_id in &self.panel_ids {
-            let panel = &mut self.panels_by_panel_id[*panel_id];
+        for (panel_id, panel) in self.panels.iter_mut() {
             match panel {
                 Panel::Split(panel) => {
                     panel
@@ -253,8 +233,7 @@ impl Dock {
         match event {
             Event::FingerDrag(event) => {
                 self.drag = None;
-                for panel_id in &self.panel_ids {
-                    let panel = &mut self.panels_by_panel_id[*panel_id];
+                for (panel_id, panel) in self.panels.iter_mut() {
                     if let Panel::Tab(panel) = panel {
                         if panel.contents_rect.contains(event.abs) {
                             self.drag = Some(Drag {
@@ -269,8 +248,7 @@ impl Dock {
             }
             Event::FingerDrop(event) => {
                 self.drag = None;
-                for panel_id in &self.panel_ids {
-                    let panel = &mut self.panels_by_panel_id[*panel_id];
+                for (panel_id, panel) in self.panels.iter_mut() {
                     if let Panel::Tab(panel) = panel {
                         if panel.contents_rect.contains(event.abs) {
                             dispatch_action(
@@ -291,8 +269,8 @@ impl Dock {
     }
 }
 
-pub enum PanelTag {}
-pub type PanelId = GenId<PanelTag>;
+#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
+pub struct PanelId(pub LiveId);
 
 enum Panel {
     Split(SplitPanel),
