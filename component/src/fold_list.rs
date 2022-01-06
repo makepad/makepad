@@ -36,7 +36,7 @@ live_register!{
         const COLOR_FOLDER: #ff
         
         fn get_color(self) -> vec4 {
-            return mix(COLOR_FILE, COLOR_FOLDER, self.is_folder) * self.scale
+            return mix(COLOR_FILE, COLOR_FOLDER, self.is_folder)
         }
         
         text_style: {
@@ -56,7 +56,7 @@ live_register!{
         }
     }
     
-    FileTreeNode: {{FileTreeNode}} {
+    FoldListNode: {{FoldListNode}} {
         
         layout: {
             walk: {
@@ -134,23 +134,14 @@ live_register!{
                 opened: 1.0,
             }
         }
-        is_folder: false,
+        
         indent_width: 10.0
         min_drag_distance: 10.0
     }
     
-    FileTree: {{FileTree}} {
+    FoldList: {{FoldList}} {
         node_height: 20.0,
-        file_node: FileTreeNode {
-            is_folder: false,
-            bg_quad: {is_folder: 0.0}
-            name_text: {is_folder: 0.0}
-        }
-        folder_node: FileTreeNode {
-            is_folder: true,
-            bg_quad: {is_folder: 1.0}
-            name_text: {is_folder: 1.0}
-        }
+        log_node: FoldListNode {}
         scroll_view: {
             view: {
                 layout: {direction: Direction::Down}
@@ -165,8 +156,6 @@ live_register!{
 struct DrawBgQuad {
     deref_target: DrawQuad,
     is_even: f32,
-    scale: f32,
-    is_folder: f32,
     selected: f32,
     hover: f32,
     opened: f32,
@@ -176,8 +165,6 @@ struct DrawBgQuad {
 struct DrawNameText {
     deref_target: DrawText,
     is_even: f32,
-    scale: f32,
-    is_folder: f32,
     selected: f32,
     hover: f32,
     opened: f32,
@@ -187,15 +174,13 @@ struct DrawNameText {
 struct DrawIconQuad {
     deref_target: DrawQuad,
     is_even: f32,
-    scale: f32,
-    is_folder: f32,
     selected: f32,
     hover: f32,
     opened: f32,
 }
 
 #[derive(Live, LiveHook)]
-pub struct FileTreeNode {
+pub struct FoldListNode {
     bg_quad: DrawBgQuad,
     icon_quad: DrawIconQuad,
     name_text: DrawNameText,
@@ -215,7 +200,6 @@ pub struct FileTreeNode {
     
     icon_walk: Walk,
     
-    is_folder: bool,
     min_drag_distance: f32,
     
     opened: f32,
@@ -224,83 +208,64 @@ pub struct FileTreeNode {
 }
 
 #[derive(Live)]
-pub struct FileTree {
+pub struct FoldList {
     scroll_view: ScrollView,
-    file_node: Option<LivePtr>,
-    folder_node: Option<LivePtr>,
+    log_node: Option<LivePtr>,
     
     filler_quad: DrawBgQuad,
     
     node_height: f32,
     
-    #[rust] dragging_node_id: Option<FileNodeId>,
-    #[rust] selected_node_id: Option<FileNodeId>,
-    #[rust] open_nodes: HashSet<FileNodeId>,
+    #[rust] _selected_node_ids: HashSet<FoldListNodeId>,
+    #[rust] _open_nodes: HashSet<FoldListNodeId>,
     
-    #[rust] tree_nodes: ComponentMap<FileNodeId, (FileTreeNode, LiveId)>,
+    #[rust] fold_nodes: ComponentMap<FoldListNodeId, FoldListNode>,
     
     #[rust] count: usize,
     #[rust] stack: Vec<f32>,
 }
 
-impl LiveHook for FileTree {
+impl LiveHook for FoldList {
     fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        for (_, (tree_node, id)) in self.tree_nodes.iter_mut() {
-            if let Some(index) = nodes.child_by_name(index, *id) {
-                tree_node.apply(cx, apply_from, index, nodes);
+        if let Some(index) = nodes.child_by_name(index, id!(log_node)) {
+            for (_, node) in self.fold_nodes.iter_mut() {
+                node.apply(cx, apply_from, index, nodes);
             }
         }
         self.scroll_view.redraw(cx);
     }
 }
 
-pub enum FileTreeAction {
-    WasClicked(FileNodeId),
-    ShouldStartDragging(FileNodeId),
-}
-
-pub enum FileTreeNodeAction {
-    None,
-    WasClicked,
+pub enum FoldNodeAction {
     Opening,
     Closing,
+    WasClicked,
     ShouldStartDragging,
+    None
 }
 
-impl FileTreeNode {
-    pub fn set_draw_state(&mut self, is_even: f32, scale: f32) {
-        self.bg_quad.scale = scale;
+pub enum FoldListAction {
+    WasClicked(FoldListNodeId),
+    None,
+}
+
+impl FoldListNode {
+    pub fn set_draw_state(&mut self, is_even: f32) {
         self.bg_quad.is_even = is_even;
-        self.name_text.scale = scale;
         self.name_text.is_even = is_even;
-        self.icon_quad.scale = scale;
         self.icon_quad.is_even = is_even;
-        self.name_text.font_scale = scale;
     }
     
-    pub fn draw_folder(&mut self, cx: &mut Cx, name: &str, is_even: f32, node_height: f32, depth: usize, scale: f32) {
-        self.set_draw_state(is_even, scale);
+    pub fn draw_node(&mut self, cx: &mut Cx, name: &str, is_even: f32, node_height: f32, depth: usize) {
+        self.set_draw_state(is_even);
         
-        self.layout.walk.height = Height::Fixed(scale * node_height);
+        self.layout.walk.height = Height::Fixed(node_height);
         
         self.bg_quad.begin(cx, self.layout);
         
         cx.walk_turtle(self.indent_walk(depth));
         
         self.icon_quad.draw_walk(cx, self.icon_walk);
-        cx.turtle_align_y();
-        
-        self.name_text.draw_walk(cx, name);
-        self.bg_quad.end(cx);
-    }
-    
-    pub fn draw_file(&mut self, cx: &mut Cx, name: &str, is_even: f32, node_height: f32, depth: usize, scale: f32) {
-        self.set_draw_state(is_even, scale);
-        
-        self.layout.walk.height = Height::Fixed(scale * node_height);
-        self.bg_quad.begin(cx, self.layout);
-        
-        cx.walk_turtle(self.indent_walk(depth));
         cx.turtle_align_y();
         
         self.name_text.draw_walk(cx, name);
@@ -320,11 +285,11 @@ impl FileTreeNode {
         }
     }
     
-    fn set_is_selected(&mut self, cx: &mut Cx, is_selected: bool, animate: Animate) {
+    pub fn set_is_selected(&mut self, cx: &mut Cx, is_selected: bool, animate: Animate) {
         self.toggle_animator(cx, is_selected, animate, self.selected_state, self.unselected_state)
     }
     
-    pub fn set_folder_is_open(&mut self, cx: &mut Cx, is_open: bool, animate: Animate) {
+    pub fn set_node_is_open(&mut self, cx: &mut Cx, is_open: bool, animate: Animate) {
         self.toggle_animator(cx, is_open, animate, self.opened_state, self.closed_state);
     }
     
@@ -332,7 +297,7 @@ impl FileTreeNode {
         &mut self,
         cx: &mut Cx,
         event: &mut Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, FileTreeNodeAction),
+        dispatch_action: &mut dyn FnMut(&mut Cx, FoldNodeAction),
     ) {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.bg_quad.draw_vars.redraw_view(cx);
@@ -352,23 +317,20 @@ impl FileTreeNode {
             }
             HitEvent::FingerMove(f) => {
                 if f.abs.distance(&f.abs_start) >= self.min_drag_distance {
-                    dispatch_action(cx, FileTreeNodeAction::ShouldStartDragging);
+                    dispatch_action(cx, FoldNodeAction::ShouldStartDragging);
                 }
             }
             HitEvent::FingerDown(_) => {
                 self.animate_to(cx, self.selected_state);
-                if self.is_folder {
-                    if self.opened > 0.2 {
-                        self.animate_to(cx, self.closed_state);
-                        dispatch_action(cx, FileTreeNodeAction::Closing);
-                    }
-                    else {
-                        self.animate_to(cx, self.opened_state);
-                        dispatch_action(cx, FileTreeNodeAction::Opening);
-                    }
-                    
+                if self.opened > 0.2 {
+                    self.animate_to(cx, self.closed_state);
+                    dispatch_action(cx, FoldNodeAction::Closing);
                 }
-                dispatch_action(cx, FileTreeNodeAction::WasClicked);
+                else {
+                    self.animate_to(cx, self.opened_state);
+                    dispatch_action(cx, FoldNodeAction::Opening);
+                }
+                dispatch_action(cx, FoldNodeAction::WasClicked);
             }
             _ => {}
         }
@@ -376,13 +338,13 @@ impl FileTreeNode {
 }
 
 
-impl FileTree {
+impl FoldList {
     
     pub fn begin(&mut self, cx: &mut Cx) -> Result<(), ()> {
         self.scroll_view.begin(cx) ?;
         self.count = 0;
         Ok(())
-    }
+    } 
     
     pub fn end(&mut self, cx: &mut Cx) {
         // lets fill the space left with blanks
@@ -397,18 +359,23 @@ impl FileTree {
                 margin: Margin::default()
             });
             walk += self.node_height.max(1.0);
-        }
+        } 
         
         self.scroll_view.end(cx);
         
-        let selected_node_id = self.selected_node_id;
-        self.tree_nodes.retain_visible_and( | node_id, _ | Some(*node_id) == selected_node_id);
+        //let selected_node_id = self.selected_node_id;
+        //self.tree_nodes.retain_visible_and( | node_id, _ | Some(*node_id) == selected_node_id);
     }
     
     pub fn is_even(count: usize) -> f32 {
         if count % 2 == 1 {0.0}else {1.0}
     }
     
+     pub fn redraw(&mut self, cx: &mut Cx) {
+        self.scroll_view.redraw(cx);
+    }
+    
+    /*
     pub fn should_node_draw(&mut self, cx: &mut Cx) -> bool {
         let scale = self.stack.last().cloned().unwrap_or(1.0);
         let height = self.node_height * scale;
@@ -424,11 +391,12 @@ impl FileTree {
             return false
         }
     }
-    
+    */
+    /*
     pub fn begin_folder(
         &mut self,
         cx: &mut Cx,
-        node_id: FileNodeId,
+        node_id: FoldListNodeId,
         name: &str,
     ) -> Result<(), ()> {
         let scale = self.stack.last().cloned().unwrap_or(1.0);
@@ -440,11 +408,11 @@ impl FileTree {
         let is_open = self.open_nodes.contains(&node_id);
         
         if self.should_node_draw(cx) {
-            let folder_node = self.folder_node.unwrap();
-            let (tree_node, _) = self.tree_nodes.get_or_insert(cx, node_id, | cx | {
-                let mut tree_node = FileTreeNode::new_from_ptr(cx, folder_node);
+            
+            let (tree_node, _) = self.tree_nodes.get_or_insert_with_ptr(cx, node_id, self.folder_node, | cx, ptr | {
+                let mut tree_node = FileTreeNode::new_from_ptr(cx, ptr);
                 if is_open {
-                    tree_node.set_folder_is_open(cx, true, Animate::No)
+                    tree_node.set_folder_is_open(cx, true, false)
                 }
                 (tree_node, id!(folder_node))
             });
@@ -465,12 +433,12 @@ impl FileTree {
             }
         }
         Ok(())
-    }
+    }*/
     
     pub fn end_folder(&mut self) {
         self.stack.pop();
     }
-    
+    /*
     pub fn file(&mut self, cx: &mut Cx, node_id: FileNodeId, name: &str) {
         let scale = self.stack.last().cloned().unwrap_or(1.0);
         
@@ -478,9 +446,8 @@ impl FileTree {
             self.count += 1;
         }
         if self.should_node_draw(cx) {
-            let file_node = self.file_node.unwrap();
-            let (tree_node, _) = self.tree_nodes.get_or_insert(cx, node_id, | cx | {
-                (FileTreeNode::new_from_ptr(cx, file_node), id!(file_node))
+            let (tree_node, _) = self.tree_nodes.get_or_insert_with_ptr(cx, node_id, self.file_node, | cx, ptr | {
+                (FileTreeNode::new_from_ptr(cx, ptr), id!(file_node))
             });
             tree_node.draw_file(cx, name, Self::is_even(self.count), self.node_height, self.stack.len(), scale);
         }
@@ -499,7 +466,7 @@ impl FileTree {
         cx: &mut Cx,
         node_id: FileNodeId,
         is_open: bool,
-        animate: Animate,
+        should_animate: bool,
     ) {
         if is_open {
             self.open_nodes.insert(node_id);
@@ -508,7 +475,7 @@ impl FileTree {
             self.open_nodes.remove(&node_id);
         }
         if let Some((tree_node, _)) = self.tree_nodes.get_mut(&node_id) {
-            tree_node.set_folder_is_open(cx, is_open, animate);
+            tree_node.set_folder_is_open(cx, is_open, should_animate);
         }
     }
     
@@ -548,22 +515,23 @@ impl FileTree {
         
         for (node_id, action) in actions {
             match action {
-                FileTreeNodeAction::Opening => {
+                FoldNodeAction::Opening => {
                     self.open_nodes.insert(node_id);
                 }
-                FileTreeNodeAction::Closing => {
+                FoldNodeAction::Closing => {
                     self.open_nodes.remove(&node_id);
                 }
-                FileTreeNodeAction::WasClicked => {
+                FoldNodeAction::WasClicked => {
+                    /*
                     if let Some(last_selected) = self.selected_node_id {
                         if last_selected != node_id {
-                            self.tree_nodes.get_mut(&last_selected).unwrap().0.set_is_selected(cx, false, Animate::Yes);
+                            self.tree_nodes.get_mut(&last_selected).unwrap().0.set_is_selected(cx, false, true);
                         }
                     }
-                    self.selected_node_id = Some(node_id);
+                    self.selected_node_id = Some(node_id);*/
                     dispatch_action(cx, FileTreeAction::WasClicked(node_id));
                 }
-                FileTreeNodeAction::ShouldStartDragging => {
+                FoldNodeAction::ShouldStartDragging => {
                     if self.dragging_node_id.is_none() {
                         dispatch_action(cx, FileTreeAction::ShouldStartDragging(node_id));
                     }
@@ -571,9 +539,9 @@ impl FileTree {
                 _ => ()
             }
         }
-    }
+    }*/
 }
 
-#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
-pub struct FileNodeId(pub LiveId);
 
+#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
+pub struct FoldListNodeId(pub LiveId);
