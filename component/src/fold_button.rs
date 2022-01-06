@@ -139,14 +139,8 @@ impl FoldButton {
         };
     }
     
-    pub fn set_is_opened(&mut self, cx: &mut Cx, is_opened: bool, should_animate: bool) {
-        self.toggle_animator(
-            cx,
-            is_opened,
-            should_animate,
-            self.opened_state,
-            self.closed_state
-        )
+    pub fn set_is_opened(&mut self, cx: &mut Cx, is_opened: bool, animate: Animate) {
+        self.toggle_animator(cx, is_opened, animate, self.opened_state, self.closed_state)
     }
     
     pub fn draw(&mut self, cx: &mut Cx) {

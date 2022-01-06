@@ -46,9 +46,26 @@ impl AppState {
         let mut tabs = LiveIdMap::new();
         
         panels.insert(
+            id!(log_view),
+            Panel::Tab(TabPanel {
+                tab_ids: vec![id!(log_view).into()],
+                selected_tab: Some(0)
+            }),
+        );
+        
+        tabs.insert(
+            id!(log_view),
+            Tab {
+                name: String::from("Log View"),
+                kind: TabKind::LogView,
+            },
+        );
+        
+        panels.insert(
             id!(file_tree),
             Panel::Tab(TabPanel {
                 tab_ids: vec![id!(file_tree).into()],
+                selected_tab: Some(0)
             }),
         );
         
@@ -64,11 +81,21 @@ impl AppState {
             id!(content),
             Panel::Tab(TabPanel {
                 tab_ids: vec![],
+                selected_tab: None
             }),
         );
         
         panels.insert(
             id!(root),
+            Panel::Split(SplitPanel {
+                axis: Axis::Vertical,
+                align: SplitterAlign::FromEnd(200.0),
+                child_panel_ids: [id!(above_log).into(), id!(log_view).into()],
+            }),
+        );
+        
+        panels.insert(
+            id!(above_log),
             Panel::Split(SplitPanel {
                 axis: Axis::Horizontal,
                 align: SplitterAlign::FromStart(200.0),
@@ -218,6 +245,7 @@ impl SplitPanel{
 #[derive(Clone, Debug)]
 pub struct TabPanel {
     pub tab_ids: Vec<TabId>,
+    pub selected_tab: Option<usize>
 }
 
 pub struct Tab {

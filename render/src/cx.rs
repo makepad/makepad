@@ -10,8 +10,8 @@ use {
         cell::RefCell,
     },
     makepad_shader_compiler::makepad_live_compiler::{
-        //LiveType,
-        //LiveId,
+        id,
+        LiveId,
         LiveEditEvent,
         LiveRegistry
     },
@@ -104,7 +104,7 @@ pub struct Cx {
     pub path_to_font_id: HashMap<String, usize>,
     pub draw_font_atlas: Option<Box<CxDrawFontAtlas >>,
     
-    pub in_redraw_cycle: bool, 
+    pub in_redraw_cycle: bool,
     pub default_dpi_factor: f32,
     pub current_dpi_factor: f32,
     pub window_stack: Vec<usize>,
@@ -201,6 +201,30 @@ impl Default for Cx {
             platform: CxPlatformTexture::default()
         }];
         
+        let mut live_registry = LiveRegistry::default();
+        live_registry.add_ignore_no_dsl(&[
+            id!(Margin),
+            id!(Walk),
+            id!(Align),
+            id!(Axis),
+            id!(Layout),
+            id!(Padding),
+            id!(f32),
+            id!(usize),
+            id!(f64),
+            id!(bool),
+            id!(DrawVars),
+            id!(Vec2),
+            id!(Vec3),
+            id!(Vec4),
+            id!(LivePtr),
+            id!(String),
+            id!(View),
+            id!(Pass),
+            id!(Texture),
+            id!(Window),
+        ]);
+        
         Self {
             platform_type: PlatformType::Unknown,
             gpu_info: GpuInfo::default(),
@@ -273,7 +297,7 @@ impl Default for Cx {
             
             profiles: HashMap::new(),
             
-            live_registry: Rc::new(RefCell::new(LiveRegistry::default())),
+            live_registry: Rc::new(RefCell::new(live_registry)),
             shader_registry: ShaderRegistry::new(),
             
             command_settings: HashMap::new(),
@@ -281,7 +305,7 @@ impl Default for Cx {
             platform: CxPlatform {..Default::default()},
             
             live_edit_event: None,
-             
+            
             event_handler: None
         }
     }

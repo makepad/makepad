@@ -16,8 +16,8 @@ live_register!{
         }
         
         bg_quad: {
-            const BORDER_WIDTH:  1.0
-            const BORDER_COLOR:  #28
+            const BORDER_WIDTH: 1.0
+            const BORDER_COLOR: #28
             
             instance hover: float
             instance selected: float
@@ -115,7 +115,7 @@ pub struct Tab {
 }
 
 pub enum TabAction {
-    WasPressed,
+    WasPressed, 
     CloseWasPressed,
     ReceivedDraggedItem(DraggedItem),
 }
@@ -126,15 +126,9 @@ impl Tab {
         self.is_selected
     }
     
-    pub fn set_is_selected(&mut self, cx: &mut Cx, is_selected: bool, should_animate: bool) {
+    pub fn set_is_selected(&mut self, cx: &mut Cx, is_selected: bool, animate: Animate) {
         self.is_selected = is_selected;
-        self.toggle_animator(
-            cx,
-            is_selected,
-            should_animate,
-            self.selected_state,
-            self.unselected_state
-        );
+        self.toggle_animator(cx, is_selected, animate, self.selected_state, self.unselected_state);
     }
     
     pub fn draw(&mut self, cx: &mut Cx, name: &str) {

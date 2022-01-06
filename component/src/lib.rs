@@ -50,6 +50,7 @@ pub fn live_register(cx:&mut Cx){
     crate::desktop_window::live_register(cx);
     crate::bare_window::live_register(cx);
     crate::window_menu::live_register(cx);
+    crate::fold_list::live_register(cx);
     crate::scroll_view::live_register(cx);
     crate::scroll_bar::live_register(cx);
     crate::file_tree::live_register(cx);
