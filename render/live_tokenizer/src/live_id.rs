@@ -330,7 +330,7 @@ impl std::hash::BuildHasher for LiveIdHasherBuilder {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct LiveIdMap<K, V>(HashMap<K, V, LiveIdHasherBuilder>);
 
 impl<K, V> Default for LiveIdMap<K, V>
