@@ -25,14 +25,12 @@ pub enum LogViewAction {
 }
 
 impl LogView {
-    
     pub fn redraw(&mut self, cx:&mut Cx){
         self.fold_list.redraw(cx)
     }
     
     pub fn draw(&mut self, cx: &mut Cx, _editor_state: &EditorState) {
         if self.fold_list.begin(cx).is_ok(){
-            println!("draw");
             self.fold_list.end(cx);
         }
     }

@@ -51,7 +51,7 @@ pub enum LiveValue {
     BareEnum {base: LiveId, variant: LiveId},
     // tree items
     Array,
-    Expr,
+    Expr{expand_index: Option<u32>},
     TupleEnum {base: LiveId, variant: LiveId},
     NamedEnum {base: LiveId, variant: LiveId},
     Object,
@@ -399,7 +399,7 @@ impl LiveValue {
     pub fn is_open(&self) -> bool {
         match self {
             Self::Array |
-            Self::Expr |
+            Self::Expr{..} |
             Self::TupleEnum {..} |
             Self::NamedEnum {..} |
             Self::Object | // subnodes including this one
@@ -434,7 +434,7 @@ impl LiveValue {
     
     pub fn is_expr(&self) -> bool {
         match self {
-            Self::Expr => true,
+            Self::Expr{..} => true,
             _ => false
         }
     }
@@ -474,7 +474,22 @@ impl LiveValue {
             _ => ()
         }
     }
-
+    pub fn set_expr_expand_index_if_none(&mut self, index:usize) {
+        match self {
+            Self::Expr {expand_index,..} => if expand_index.is_none(){
+                *expand_index = Some(index as u32)
+            },
+            _ => ()
+        }
+    }
+    
+    pub fn get_expr_expand_index(&self)->Option<u32>{
+        match self {
+            Self::Expr {expand_index,..} => *expand_index,
+            _ => None
+        }
+    }
+    
     pub fn is_id(&self)->bool{
         match self{
             Self::Id(_)=>true,
@@ -600,7 +615,7 @@ impl LiveValue {
             
             Self::BareEnum {..} => 17,
             Self::Array => 18,
-            Self::Expr => 19,
+            Self::Expr{..} => 19,
             Self::TupleEnum {..} => 20,
             Self::NamedEnum {..} => 21,
             Self::Object => 22,
