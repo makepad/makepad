@@ -9,6 +9,7 @@ use {
 
 live_register!{
     use crate::tab::Tab;
+    use crate::theme::*;
     
     TabBar: {{TabBar}} {
         tab: Tab {}
@@ -28,7 +29,7 @@ live_register!{
                 layout: {
                     walk: {
                         width: Width::Filled
-                        height: Height::Fixed(40.0)
+                        height: Height::Fixed((DIM_TAB_HEIGHT))
                     }
                 }
             }
@@ -96,20 +97,20 @@ impl TabBar {
         if let Some(selected_tab) = self.selected_tab{
             let tab_order_len = self.tab_order.len();
             let tab = self.get_or_create_tab(cx, tab_id);
-            tab.draw(cx, name);
             if tab_order_len  == selected_tab{
-                tab.set_is_selected(cx, false, Animate::No);
-            }
-            else{
                 tab.set_is_selected(cx, true, Animate::No);
             }
+            else{
+                tab.set_is_selected(cx, false, Animate::No);
+            }
+            tab.draw(cx, name);
             if tab_order_len == selected_tab{
                 self.selected_tab_id = Some(tab_id);
             }
             self.tab_order.push(tab_id);
         }
         else{
-            self.tab_order.push(tab_id);
+            self.tab_order.push(tab_id); 
             let tab = self.get_or_create_tab(cx, tab_id);
             tab.draw(cx, name);
         }

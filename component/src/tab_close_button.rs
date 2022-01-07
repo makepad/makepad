@@ -2,6 +2,7 @@ use makepad_render::*;
 
 live_register!{
     use makepad_render::shader::std::*;
+    use crate::theme::*;
     
     TabCloseButton: {{TabCloseButton}} {
         button_quad: {
@@ -19,7 +20,11 @@ live_register!{
                 sdf.line_to(max.x, max.y);
                 sdf.move_to(min.x, max.y);
                 sdf.line_to(max.x, min.y);
-                return sdf.stroke(vec4(1.0) * (0.5 * self.hover + 0.5), 1.0);
+                return sdf.stroke(mix(
+                    COLOR_TAB_CLOSE_DEFAULT,
+                    COLOR_TAB_CLOSE_HOVER,
+                    self.hover
+                ), 1.0);
             }
         }
         

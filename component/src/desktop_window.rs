@@ -7,7 +7,7 @@ live_register!{
     use crate::theme::*;
     DesktopWindow: {{DesktopWindow}} {
         clear_color: (COLOR_WINDOW_BG)
-        caption_bg: {color: #3d}
+        caption_bg: {color: (COLOR_WINDOW_CAPTION)}
         caption: "Desktop Window",
         main_view:{},
         inner_view:{},
