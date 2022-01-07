@@ -108,7 +108,7 @@ pub struct Splitter {
 impl Splitter {
     
     pub fn begin(&mut self, cx: &mut Cx) {
-        self.rect = cx.get_turtle_rect();
+        self.rect = cx.get_turtle_padded_rect();
         self.position = self.align.to_position(self.axis, self.rect);
         cx.begin_turtle(self.layout());
     }
@@ -124,7 +124,7 @@ impl Splitter {
                         pos: vec2(self.rect.pos.x + self.position, self.rect.pos.y),
                         size: vec2(self.split_bar_size, self.rect.size.y),
                     },
-                );
+                ); 
                 cx.set_turtle_pos(Vec2 {
                     x: self.rect.pos.x + self.position + self.split_bar_size,
                     y: self.rect.pos.y,

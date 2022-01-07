@@ -17,6 +17,9 @@ live_register!{
             draw_depth: 10
             color: #c
         }
+        bar_fill:{
+            color: (COLOR_TAB_BG_UNSELECTED)
+        }
         scroll_view: {
             v_show: false
             h_show: true
@@ -42,6 +45,9 @@ pub struct TabBar {
     
     scroll_view: ScrollView,
     draw_drag: DrawColor,
+
+    bar_fill: DrawColor,
+
     tab: Option<LivePtr>,
     
     #[rust] tab_order: Vec<TabId>,
@@ -90,6 +96,7 @@ impl TabBar {
             );
         }
         self.tabs.retain_visible();
+        self.bar_fill.draw_walk(cx, Walk{width:Width::Filled, height: Height::Filled, margin:Margin::default()});
         self.scroll_view.end(cx);
     }
     
