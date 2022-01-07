@@ -16,7 +16,7 @@ pub struct DepAnalyser<'a> {
     pub shader_registry: &'a ShaderRegistry,
     pub scopes: &'a Scopes,
 }
-
+ 
 impl<'a> DepAnalyser<'a> {
     pub fn dep_analyse_expr(&mut self, expr: &Expr) {
         match expr.kind {

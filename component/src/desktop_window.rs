@@ -4,8 +4,9 @@ use crate::window_menu::*;
 use crate::button_logic::*;
 
 live_register!{
+    use crate::theme::*;
     DesktopWindow: {{DesktopWindow}} {
-        clear_color: #x1e
+        clear_color: (COLOR_WINDOW_BG)
         caption_bg: {color: #3d}
         caption: "Desktop Window",
         main_view:{},

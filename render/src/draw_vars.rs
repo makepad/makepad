@@ -61,7 +61,7 @@ impl DrawVars {
         }
     }
     
-    pub fn init_shader(&mut self, cx: &mut Cx, draw_shader_ptr: DrawShaderPtr, geometry_fields: &dyn GeometryFields) {
+    pub fn init_shader(&mut self, cx: &mut Cx, apply_from: ApplyFrom, draw_shader_ptr: DrawShaderPtr, geometry_fields: &dyn GeometryFields) {
         self.draw_shader = None;
         
         if cx.draw_shaders.error_set.contains(&draw_shader_ptr){
@@ -201,7 +201,8 @@ impl DrawVars {
                         const_table,
                         DRAW_SHADER_INPUT_PACKING
                     );
-                    mapping.update_live_uniforms(&cx.live_registry.borrow());
+                    
+                    mapping.update_live_uniforms(cx, apply_from);
                     
                     let live_registry_rc = cx.live_registry.clone();
                     let live_registry = live_registry_rc.borrow();
@@ -306,7 +307,7 @@ impl DrawVars {
         else {
             return
         };
-        self.init_shader(cx, draw_shader_ptr, geometry_fields)
+        self.init_shader(cx, apply_from, draw_shader_ptr, geometry_fields)
     }
     
     pub fn apply_slots(cx: &mut Cx, slots: usize, output: &mut [f32], offset: usize, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
@@ -387,7 +388,7 @@ impl DrawVars {
             _ => true
         };
         if unknown_shader_props && nodes[index].value.is_value_type() {
-            cx.apply_error_no_matching_field(live_error_origin!(), apply_from, index, nodes);
+            cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
         }
         nodes.skip_node(index)
     }

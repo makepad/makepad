@@ -34,6 +34,7 @@ use {
 
 live_register!{
     use makepad_render::shader::std::*;
+    use makepad_component::theme::*;
     
     DrawSelection: {{DrawSelection}} {
         const GLOOPINESS: 8.
@@ -107,7 +108,7 @@ live_register!{
         }
         
         line_num_quad: {
-            color: #x1e
+            color: (COLOR_WINDOW_BG)
             //draw_depth: 4.0
             no_h_scroll: true
             no_v_scroll: true

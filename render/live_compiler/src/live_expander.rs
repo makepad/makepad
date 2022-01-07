@@ -390,7 +390,7 @@ impl<'a> LiveExpander<'a> {
                     }
                     current_parent.push((out_doc.nodes[out_index].id, out_index));
                 }
-                LiveValue::Expr => {
+                LiveValue::Expr{..} => {
                     panic!()
                 },
                 LiveValue::Array |
@@ -411,6 +411,9 @@ impl<'a> LiveExpander<'a> {
         for i in 1..out_doc.nodes.len() {
             if out_doc.nodes[i].value.is_dsl() {
                 out_doc.nodes[i].value.set_dsl_expand_index_if_none(i);
+            }
+            if out_doc.nodes[i].value.is_expr() {
+                out_doc.nodes[i].value.set_expr_expand_index_if_none(i);
             }
         }
     }

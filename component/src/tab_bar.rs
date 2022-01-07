@@ -161,7 +161,7 @@ impl TabBar {
             }
             cx.new_next_frame();
         }
-       
+        
     }
     pub fn redraw(&mut self, cx: &mut Cx) {
         self.scroll_view.redraw(cx)

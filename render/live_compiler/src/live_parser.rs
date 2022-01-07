@@ -744,7 +744,7 @@ impl<'a> LiveParser<'a> {
         ld.nodes.push(LiveNode {
             origin: origin,
             id: prop_id,
-            value: LiveValue::Expr
+            value: LiveValue::Expr{expand_index:None}
         });
         
         fn recur_walk(expr: Expr, ld: &mut LiveOriginal) {

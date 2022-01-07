@@ -186,6 +186,18 @@ impl ShaderRegistry {
                 LiveValue::Vec3(_) if live_registry.get_node_prefix(node.origin) == Some(id!(const)) => {
                     return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Vec3)
                 }
+                LiveValue::Vec4(_) if live_registry.get_node_prefix(node.origin) == Some(id!(const)) => {
+                    return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Vec4)
+                }
+                LiveValue::Expr{..} if live_registry.get_node_prefix(node.origin) == Some(id!(const)) => {
+                    // ok lets eval the expr to get a type
+                    if let Some(ty) = Ty::from_live_eval(live_eval(live_registry, index, &mut (index + 1), nodes, &mut None)){
+                        if let Some(ty_lit) = ty.maybe_ty_lit(){
+                            return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), ty_lit)
+                        }
+                    }
+                    return LiveNodeFindResult::NotFound;
+                }
                 LiveValue::DSL {token_start, ..} => {
                     // lets get the first token
                     let origin_doc = live_registry.token_id_to_origin_doc(node.origin.token_id().unwrap());
@@ -272,55 +284,6 @@ impl ShaderRegistry {
         Ok(())
     }
     
-    // lets compile the thing
-    /*
-    pub fn analyse_const(&mut self, live_registry: &LiveRegistry, const_ptr: ConstPtr) -> Result<(), LiveError> {
-        if self.consts.get(&const_ptr).is_some() {
-            return Ok(());
-        }
-        let const_node = live_registry.ptr_to_node(const_ptr.0);
-        match const_node.value {
-            LiveValue::DSL {token_start, token_count} => {
-                let mut parser_deps = Vec::new();
-                let id = const_node.id;
-                let origin_doc = &live_registry.token_id_to_origin_doc(const_node.origin.token_id().unwrap());
-                let mut parser = ShaderParser::new(
-                    live_registry,
-                    self,
-                    origin_doc.get_tokens(token_start as usize, token_count as usize),
-                    &mut parser_deps,
-                    None,
-                    const_node.origin
-                    //Some(struct_full_ptr)
-                );
-                
-                
-                let const_decl = parser.expect_const_def(Ident(id)) ?;
-                
-                
-                self.consts.insert(const_ptr, const_decl);
-                
-                
-                self.analyse_deps(live_registry, &parser_deps) ?;
-                
-                let mut ca = ConstAnalyser {
-                    live_registry,
-                    const_def: self.consts.get(&const_ptr).unwrap(),
-                    scopes: &mut Scopes::new(),
-                    shader_registry: self,
-                    options: ShaderAnalyseOptions {
-                        no_const_collapse: true
-                    },
-                };
-                
-                
-                
-                ca.analyse_const_decl() ?;
-            }
-            _ => panic!()
-        }
-        return Ok(())
-    }*/
     
     // lets compile the thing
     pub fn analyse_plain_fn(&mut self, live_registry: &LiveRegistry, struct_ptr: Option<StructPtr>, fn_ptr: FnPtr) -> Result<(), LiveError> {
@@ -555,10 +518,11 @@ impl ShaderRegistry {
                         LiveValue::Color(_) |
                         LiveValue::Vec2(_) |
                         LiveValue::Vec3(_) |
-                        LiveValue::Vec4(_) => {
+                        LiveValue::Vec4(_) | 
+                        LiveValue::Expr{..} => {
                             let first_def = prop.origin.first_def().unwrap();
                             let before = live_registry.get_node_prefix(prop.origin);
-                            let ty = ShaderTy::from_live_node(node_index, &doc.nodes);
+                            let ty = ShaderTy::from_live_node(live_registry, node_index, &doc.nodes);
                             if ty.is_none() {
                                 if !prop.origin.node_has_prefix(){
                                     node_iter = doc.nodes.next_child(node_index);
