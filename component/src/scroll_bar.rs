@@ -2,6 +2,7 @@ use makepad_render::*;
 
 live_register!{
     use makepad_render::shader::std::*;
+    use crate::theme::*;
     
     DrawScrollBar: {{DrawScrollBar}} {
         draw_depth: 5.0
@@ -30,7 +31,15 @@ live_register!{
                     BORDER_RADIUS
                 );
             }
-            return sdf.fill_keep(mix(#5, mix(#7, #9, self.pressed), self.hover));
+            return sdf.fill_keep(mix(
+                COLOR_SCROLL_BAR_DEFAULT,
+                mix(
+                    COLOR_SCROLL_BAR_HOVER,
+                    COLOR_SCROLL_BAR_PRESSED,
+                    self.pressed
+                ),
+                self.hover
+            ));
         }
     }
     
@@ -239,11 +248,11 @@ impl ScrollBar {
     pub fn get_scroll_view_total(&self) -> f32 {
         return self.view_total;
     }
-
+    
     pub fn get_scroll_view_visible(&self) -> f32 {
         return self.view_visible;
     }
-
+    
     
     pub fn set_scroll_target(&mut self, cx: &mut Cx, scroll_pos_target: f32) -> bool {
         // clamp scroll_pos to

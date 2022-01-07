@@ -2,17 +2,50 @@ use makepad_render::*;
 
 live_register!{
     use makepad_render::shader::std::*;
+    use crate::theme::*;
+    
+    DrawSplitter: {{DrawSplitter}} {
+        const BORDER_RADIUS: 1.0
+        const SPLITER_PAD: 1.0
+        const SPLITER_GRABBER:110.0
+        instance pressed: 0.0
+        instance hover: 0.0
+        
+        fn pixel(self) -> vec4 {
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+            sdf.clear(COLOR_SPLITTER_BG);
+            if self.is_vertical > 0.5 {
+                sdf.box(
+                    SPLITER_PAD,
+                    self.rect_size.y * 0.5 - SPLITER_GRABBER *0.5,
+                    self.rect_size.x-2.0*SPLITER_PAD,
+                    SPLITER_GRABBER,
+                    BORDER_RADIUS
+                );
+            }
+            else {
+                sdf.box(
+                    self.rect_size.x*0.5 - SPLITER_GRABBER *0.5,
+                    SPLITER_PAD,
+                    SPLITER_GRABBER,
+                    self.rect_size.y-2.0*SPLITER_PAD,
+                    BORDER_RADIUS
+                );
+            }
+            return sdf.fill_keep(mix(
+                COLOR_SPLITTER_BG,
+                mix(
+                    COLOR_SPLITTER_HOVER,
+                    COLOR_SPLITTER_PRESSED,
+                    self.pressed
+                ),
+                self.hover
+            )); 
+        }
+    }
     
     Splitter: {{Splitter}} {
-        split_bar_size: 2.0
-        bar_quad: {
-            instance pressed: float
-            instance hover: float
-
-            fn pixel(self) -> vec4 {
-                return mix(#2, mix(#7, #f, self.pressed), self.hover);
-            }
-        }
+        split_bar_size: (DIM_SPLITTER_SIZE)
         
         default_state: {
             from: {all: Play::Forward {duration: 0.1}}
@@ -48,6 +81,13 @@ live_register!{
 
 
 #[derive(Live, LiveHook)]
+#[repr(C)]
+pub struct DrawSplitter {
+    deref_target: DrawQuad,
+    is_vertical: f32,
+}
+
+#[derive(Live, LiveHook)]
 pub struct Splitter {
     #[rust(Axis::Horizontal)] pub axis: Axis,
     #[rust(SplitterAlign::Weighted(0.5))] pub align: SplitterAlign,
@@ -61,7 +101,7 @@ pub struct Splitter {
     pressed_state: Option<LivePtr>,
     
     layout: Layout,
-    bar_quad: DrawColor,
+    bar_quad: DrawSplitter,
     split_bar_size: f32,
 }
 
@@ -77,7 +117,8 @@ impl Splitter {
         cx.end_turtle();
         match self.axis {
             Axis::Horizontal => {
-                self.bar_quad.draw_abs(
+               self.bar_quad.is_vertical = 1.0;
+               self.bar_quad.draw_abs(
                     cx,
                     Rect {
                         pos: vec2(self.rect.pos.x + self.position, self.rect.pos.y),
@@ -90,6 +131,7 @@ impl Splitter {
                 });
             }
             Axis::Vertical => {
+                self.bar_quad.is_vertical = 0.0;
                 self.bar_quad.draw_abs(
                     cx,
                     Rect {

@@ -1,8 +1,8 @@
 use makepad_render::*;
 live_register!{
-
+    
     const COLOR_APP_BG: #26
-
+    
     const COLOR_WHITE: #FFF
     const COLOR_80_UP: #FFFFFFCC
     const COLOR_40_UP: #FFFFFF66
@@ -17,7 +17,7 @@ live_register!{
     
     const COLOR_WINDOW_BG: (COLOR_EDITOR_BG)
     const COLOR_WINDOW_CAPTION: (COLOR_APP_BG)
-
+    
     const COLOR_DOCK_BG: (blend(
         COLOR_APP_BG,
         COLOR_10_UP
@@ -29,7 +29,7 @@ live_register!{
     ))
     
     // TABS
-          
+    
     const COLOR_TAB_BG_SELECTED: (blend(
         COLOR_DOCK_BG,
         COLOR_15_DOWN
@@ -57,9 +57,11 @@ live_register!{
         COLOR_80_UP
     ))
     
+    const COLOR_DRAG_QUAD: #ffffff80
+    
     const DIM_TAB_HEIGHT: 28.0,
-
-    // FILETREE / LOG VIEW
+    
+    // even/odd BG items
     
     const COLOR_BG_EVEN: (blend(
         COLOR_EDITOR_BG,
@@ -71,12 +73,16 @@ live_register!{
         COLOR_EDITOR_BG,
         COLOR_25_DOWN
     ))
-
+    
     const COLOR_BG_HOVER: (blend(
         COLOR_EDITOR_BG,
         COLOR_10_UP
     ))
-
+    
+    
+    // FILETREE
+    
+    
     const COLOR_TREE_TEXT_DEFAULT: (blend(
         COLOR_DOCK_BG,
         COLOR_40_UP
@@ -91,7 +97,40 @@ live_register!{
         COLOR_DOCK_BG,
         COLOR_40_UP
     ))
-
-    const COLOR_DRAG_QUAD: #ffffff80
+    
+    
+    // SCROLL BAR
+    
+    
+    const COLOR_SCROLL_BAR_DEFAULT: #fff3
+    
+    const COLOR_SCROLL_BAR_HOVER: (blend(
+        COLOR_DOCK_BG,
+        COLOR_80_UP
+    ))
+    
+    const COLOR_SCROLL_BAR_PRESSED: (blend(
+        COLOR_DOCK_BG,
+        COLOR_40_UP
+    ))
+    
+    
+    // SPLITTER
+    
+    
+    const COLOR_SPLITTER_BG: (COLOR_APP_BG)
+ 
+    
+    const COLOR_SPLITTER_HOVER: (blend(
+        COLOR_DOCK_BG,
+        COLOR_80_UP
+    ))
+    
+    const COLOR_SPLITTER_PRESSED: (blend(
+        COLOR_DOCK_BG,
+        COLOR_40_UP
+    ))
+    
+    const DIM_SPLITTER_SIZE: 5.0    
 }
 
