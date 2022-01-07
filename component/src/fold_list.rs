@@ -18,13 +18,17 @@ live_register!{
         fn pixel(self) -> vec4 {
             return mix(
                 mix(
-                    COLOR_EVEN,
-                    COLOR_ODD,
-                    self.is_even
+                    mix(
+                        COLOR_BG_EVEN,
+                        COLOR_BG_ODD,
+                        self.is_even
+                    ),
+                    COLOR_BG_SELECTED,
+                    self.selected
                 ),
-                COLOR_SELECTED,
-                self.selected
-            ) + #3 * self.hover;
+                COLOR_BG_HOVER,
+                self.hover
+            );
         }
     }
     
