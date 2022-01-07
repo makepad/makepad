@@ -11,7 +11,6 @@ mod cx_api;
 mod cx_registries;
 mod cx_draw_shaders;
 
-mod live_eval;
 pub mod live_traits;
 mod live_cx;
 
@@ -42,6 +41,7 @@ pub use {
         live_error_origin,
         LiveErrorOrigin,
         LiveNodeOrigin,
+        LiveEvalError,
         id,
         id_num,
         Mat4,

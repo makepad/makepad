@@ -10,10 +10,12 @@ use {
 live_register!{
     use crate::tab_bar::TabBar
     use crate::splitter::Splitter
+    use crate::theme::*;
+    
     Dock: {{Dock}} {
         drag_quad: {
             draw_depth: 10.0
-            color: #ffffff80
+            color: (COLOR_DRAG_QUAD)
         }
         drag_view: {
             layout: {abs_origin: vec2(0, 0)}

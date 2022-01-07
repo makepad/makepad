@@ -10,6 +10,8 @@ use {
     makepad_shader_compiler::makepad_live_compiler::*,
     makepad_shader_compiler::*,
     crate::{
+        live_traits::*,
+        draw_vars::DrawVars,
         platform::{
             CxPlatformDrawShader,
         },
@@ -18,15 +20,15 @@ use {
 };
 
 #[derive(Default, Debug, Clone, PartialEq)]
-pub struct CxDrawShaderOptions{
+pub struct CxDrawShaderOptions {
     pub draw_call_group: LiveId,
     pub debug_id: Option<LiveId>,
     pub no_h_scroll: bool,
     pub no_v_scroll: bool
 }
 
-impl CxDrawShaderOptions{
-    pub fn from_ptr(cx:&Cx, draw_shader_ptr:DrawShaderPtr)->Self{
+impl CxDrawShaderOptions {
+    pub fn from_ptr(cx: &Cx, draw_shader_ptr: DrawShaderPtr) -> Self {
         let live_registry_cp = cx.live_registry.clone();
         let live_registry = live_registry_cp.borrow();
         let doc = live_registry.ptr_to_doc(draw_shader_ptr.0);
@@ -55,19 +57,19 @@ impl CxDrawShaderOptions{
         ret
     }
     
-    pub fn appendable_drawcall(&self, other:&Self)->bool{
+    pub fn appendable_drawcall(&self, other: &Self) -> bool {
         self == other
     }
 }
 
 #[derive(Default)]
-pub struct CxDrawShaderItem{
-    pub draw_shader_id: usize, 
+pub struct CxDrawShaderItem {
+    pub draw_shader_id: usize,
     pub options: CxDrawShaderOptions
 }
 
 #[derive(Default)]
-pub struct CxDrawShaders{
+pub struct CxDrawShaders {
     pub shaders: Vec<CxDrawShader>,
     pub platform: Vec<CxPlatformDrawShader>,
     pub generation: u64,
@@ -75,11 +77,11 @@ pub struct CxDrawShaders{
     pub compile_set: BTreeSet<DrawShaderPtr>,
     pub fingerprints: Vec<DrawShaderFingerprint>,
     pub error_set: HashSet<DrawShaderPtr>,
-    pub error_fingerprints: Vec<Vec<LiveNode>>,
-} 
+    pub error_fingerprints: Vec<Vec<LiveNode >>,
+}
 
-impl Cx{
-    pub fn flush_draw_shaders(&mut self){
+impl Cx {
+    pub fn flush_draw_shaders(&mut self) {
         self.draw_shaders.generation += 1;
         self.shader_registry.flush_registry();
         self.draw_shaders.shaders.clear();
@@ -123,8 +125,8 @@ pub struct DrawShaderFingerprint {
     pub draw_shader_id: usize
 }
 
-impl DrawShaderFingerprint{
-    pub fn from_ptr(cx:&Cx, draw_shader_ptr:DrawShaderPtr)->Vec<LiveNode>{
+impl DrawShaderFingerprint {
+    pub fn from_ptr(cx: &Cx, draw_shader_ptr: DrawShaderPtr) -> Vec<LiveNode> {
         let live_registry_cp = cx.live_registry.clone();
         let live_registry = live_registry_cp.borrow();
         let doc = live_registry.ptr_to_doc(draw_shader_ptr.0);
@@ -132,15 +134,15 @@ impl DrawShaderFingerprint{
         let mut fingerprint = Vec::new();
         while let Some(node_index) = node_iter {
             let node = &doc.nodes[node_index];
-            match node.value{
-                LiveValue::DSL{token_start, token_count,..}=>{
-                    fingerprint.push(LiveNode{
+            match node.value {
+                LiveValue::DSL {token_start, token_count, ..} => {
+                    fingerprint.push(LiveNode {
                         id: node.id,
                         origin: node.origin,
-                        value: LiveValue::DSL{token_start, token_count, expand_index:None}
+                        value: LiveValue::DSL {token_start, token_count, expand_index: None}
                     });
                 }
-                _=>()
+                _ => ()
             }
             node_iter = doc.nodes.next_child(node_index);
         }
@@ -381,47 +383,22 @@ impl CxDrawShaderMapping {
         }
     }
     
-    pub fn update_live_uniforms(&mut self, live_registry: &LiveRegistry) {
+    pub fn update_live_uniforms(&mut self, cx: &mut Cx, apply_from: ApplyFrom) {
         // and write em into the live_uniforms buffer
+        let live_registry = cx.live_registry.clone();
+        let live_registry = live_registry.borrow();
+        
         for input in &self.live_uniforms.inputs {
-            match input.slots {
-                1 => { // float
-                    let node = live_registry.ptr_to_node(input.live_ptr.unwrap());
-                    if let LiveValue::Float(float) = node.value {
-                        let o = input.offset;
-                        self.live_uniforms_buf[o] = float as f32;
-                    }
-                },
-                2 => { // float
-                    let node = live_registry.ptr_to_node(input.live_ptr.unwrap());
-                    if let LiveValue::Vec2(value) = node.value {
-                        let o = input.offset;
-                        self.live_uniforms_buf[o + 0] = value.x;
-                        self.live_uniforms_buf[o + 1] = value.y;
-                    }
-                },
-                3 => { // float
-                    let node = live_registry.ptr_to_node(input.live_ptr.unwrap());
-                    if let LiveValue::Vec3(value) = node.value {
-                        let o = input.offset;
-                        self.live_uniforms_buf[o + 0] = value.x;
-                        self.live_uniforms_buf[o + 1] = value.y;
-                        self.live_uniforms_buf[o + 2] = value.z;
-                    }
-                },
-                4 => { // color
-                    let node = live_registry.ptr_to_node(input.live_ptr.unwrap());
-                    if let LiveValue::Color(color_u32) = node.value {
-                        let o = input.offset;
-                        let color = Vec4::from_u32(color_u32);
-                        self.live_uniforms_buf[o + 0] = color.x;
-                        self.live_uniforms_buf[o + 1] = color.y;
-                        self.live_uniforms_buf[o + 2] = color.z;
-                        self.live_uniforms_buf[o + 3] = color.w;
-                    }
-                },
-                _ => panic!()
-            }
+            let (nodes,index) = live_registry.ptr_to_nodes_index(input.live_ptr.unwrap());
+            DrawVars::apply_slots(
+                cx,
+                input.slots,
+                &mut self.live_uniforms_buf,
+                input.offset,
+                apply_from,
+                index,
+                nodes
+            );
         }
     }
 }

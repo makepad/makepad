@@ -66,7 +66,7 @@ impl LiveApply for Window {
     fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
         
         if !nodes[start_index].value.is_structy_type() {
-            cx.apply_error_wrong_type_for_struct(live_error_origin!(), apply_from, start_index, nodes, id!(View));
+            cx.apply_error_wrong_type_for_struct(live_error_origin!(), start_index, nodes, id!(View));
             return nodes.skip_node(start_index);
         }
         
@@ -97,7 +97,7 @@ impl LiveApply for Window {
                     }
                 }
                 _=> {
-                    cx.apply_error_no_matching_field(live_error_origin!(), apply_from, index, nodes);
+                    cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
                     index = nodes.skip_node(index);
                 }
             }

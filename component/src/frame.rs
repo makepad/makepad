@@ -52,7 +52,7 @@ impl LiveApply for Frame {
         }
         
         if !nodes[start_index].value.is_structy_type() {
-            cx.apply_error_wrong_type_for_struct(live_error_origin!(), apply_from, start_index, nodes, id!(Frame));
+            cx.apply_error_wrong_type_for_struct(live_error_origin!(), start_index, nodes, id!(Frame));
             return nodes.skip_node(start_index);
         }
         
@@ -76,14 +76,14 @@ impl LiveApply for Frame {
                     while let Some(index) = node_iter {
                         if let LiveValue::Id(id) = nodes[index].value {
                             if self.components.get(&id).is_none() {
-                                cx.apply_error_cant_find_target(live_error_origin!(), apply_from, index, nodes, id);
+                                cx.apply_error_cant_find_target(live_error_origin!(), index, nodes, id);
                             }
                             else {
                                 self.children.push(id)
                             }
                         }
                         else {
-                            cx.apply_error_wrong_type_for_value(live_error_origin!(), apply_from, index, nodes);
+                            cx.apply_error_wrong_type_for_value(live_error_origin!(), index, nodes);
                         }
                         node_iter = nodes.next_child(index);
                     }
@@ -92,7 +92,7 @@ impl LiveApply for Frame {
                 }
                 component_id => {
                     if !nodes[index].value.is_structy_type() {
-                        cx.apply_error_no_matching_field(live_error_origin!(), apply_from, index, nodes);
+                        cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
                     }
                     else if let Some(component) = self.components.get_mut(&component_id) {
                         // exists
@@ -122,15 +122,15 @@ impl LiveApply for Frame {
                                     self.create_order.push(component_id);
                                 }
                                 else {
-                                    cx.apply_error_wrong_type_for_value(live_error_origin!(), apply_from, index, nodes);
+                                    cx.apply_error_wrong_type_for_value(live_error_origin!(), index, nodes);
                                 }
                             }
                             else {
-                                cx.apply_error_cant_find_target(live_error_origin!(), apply_from, index, nodes, target_id);
+                                cx.apply_error_cant_find_target(live_error_origin!(), index, nodes, target_id);
                             }
                         }
                         else {
-                            cx.apply_error_wrong_type_for_value(live_error_origin!(), apply_from, index, nodes);
+                            cx.apply_error_wrong_type_for_value(live_error_origin!(), index, nodes);
                         }
                     }
                     else { // apply or create component
@@ -139,7 +139,7 @@ impl LiveApply for Frame {
                             self.create_order.push(component_id);
                         }
                         else {
-                            cx.apply_error_wrong_type_for_value(live_error_origin!(), apply_from, index, nodes);
+                            cx.apply_error_wrong_type_for_value(live_error_origin!(), index, nodes);
                         }
                     }
                 }
