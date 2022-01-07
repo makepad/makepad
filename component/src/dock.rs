@@ -8,16 +8,47 @@ use {
 };
 
 live_register!{
+    use makepad_render::shader::std::*;
     use crate::tab_bar::TabBar
     use crate::splitter::Splitter
     use crate::theme::*;
     
+    DrawRoundCorner: {{DrawRoundCorner}} {
+        draw_depth: 6.0
+        border_radius: 10.0
+        fn pixel(self) -> vec4 {
+            
+            let pos = vec2(
+                mix(self.pos.x, 1.0 - self.pos.x, self.flip.x),
+                mix(self.pos.y, 1.0 - self.pos.y, self.flip.y)
+            )
+            
+            let sdf = Sdf2d::viewport(pos * self.rect_size);
+            sdf.rect(-10., -10., self.rect_size.x * 2.0, self.rect_size.y * 2.0);
+            sdf.box(
+                0.,
+                0.,
+                self.rect_size.x * 2.0,
+                self.rect_size.y * 2.0,
+                4.0
+            );
+            sdf.subtract()
+            return sdf.fill(COLOR_APP_BG);
+        }
+    }
+    
     Dock: {{Dock}} {
+        const BORDER_SIZE: 6.0
+        border_size: (BORDER_SIZE)
+        view: {
+            layout: {padding: {l: (BORDER_SIZE), t: 0.0, r: (BORDER_SIZE), b: (BORDER_SIZE)}}
+        }
+        padding_fill: {color: (COLOR_APP_BG)}
         drag_quad: {
             draw_depth: 10.0
             color: (COLOR_DRAG_QUAD)
         }
-        drag_view: {
+        overlay_view: {
             layout: {abs_origin: vec2(0, 0)}
             is_overlay: true
         }
@@ -26,11 +57,22 @@ live_register!{
     }
 }
 
+#[derive(Live, LiveHook)]
+#[repr(C)]
+pub struct DrawRoundCorner {
+    deref_target: DrawQuad,
+    border_radius: f32,
+    flip: Vec2,
+}
+
 #[derive(Live)]
 pub struct Dock {
     
     view: View,
     overlay_view: View,
+    round_corner: DrawRoundCorner,
+    padding_fill: DrawColor,
+    border_size: f32,
     drag_quad: DrawColor,
     tab_bar: Option<LivePtr>,
     splitter: Option<LivePtr>,
@@ -64,7 +106,7 @@ impl Dock {
     }
     
     pub fn end(&mut self, cx: &mut Cx) {
-        if self .overlay_view.begin(cx).is_ok(){
+        if self .overlay_view.begin(cx).is_ok() {
             if let Some(drag) = self.drag.as_ref() {
                 let panel = self.panels[drag.panel_id].as_tab_panel();
                 let rect = compute_drag_rect(panel.contents_rect, drag.position);
@@ -73,6 +115,43 @@ impl Dock {
             self.overlay_view.end(cx);
         }
         self.panels.retain_visible();
+        
+        // lets draw the borders here
+        for panel in self.panels.values() {
+            match panel {
+                Panel::Tab(panel) => {
+                    let rc = &mut self.round_corner;
+                    rc.flip = vec2(0.0, 0.0);
+                    let rad = vec2(rc.border_radius, rc.border_radius);
+                    let pos = panel.full_rect.pos;
+                    let size = panel.full_rect.size;
+                    rc.draw_abs(cx, Rect {pos, size: rad});
+                    rc.flip = vec2(1.0, 0.0);
+                    rc.draw_abs(cx, Rect {pos: pos + vec2(size.x - rad.x, 0.), size: rad});
+                    rc.flip = vec2(1.0, 1.0);
+                    rc.draw_abs(cx, Rect {pos: pos + vec2(size.x - rad.x, size.y - rad.y), size: rad});
+                    rc.flip = vec2(0.0, 1.0);
+                    rc.draw_abs(cx, Rect {pos: pos + vec2(0., size.y - rad.y), size: rad});
+                }
+                _ => ()
+            }
+        }
+        let pf = &mut self.padding_fill;
+        // lets get the turtle rect
+        let rect = cx.get_turtle_rect();
+        pf.draw_abs(cx, Rect {
+            pos: rect.pos,
+            size: vec2(self.border_size, rect.size.y)
+        });
+        pf.draw_abs(cx, Rect {
+            pos: rect.pos + vec2(rect.size.x - self.border_size, 0.0),
+            size: vec2(self.border_size, rect.size.y)
+        });
+        pf.draw_abs(cx, Rect {
+            pos: rect.pos + vec2(0., rect.size.y - self.border_size),
+            size: vec2(rect.size.x, self.border_size)
+        });
+        
         self.view.end(cx);
     }
     
@@ -97,7 +176,8 @@ impl Dock {
     }
     
     pub fn begin_tab_panel(&mut self, cx: &mut Cx, panel_id: PanelId) {
-        self.get_or_create_tab_panel(cx, panel_id);
+        let tab = self.get_or_create_tab_panel(cx, panel_id);
+        
         self.panel_id_stack.push(panel_id);
     }
     
@@ -105,9 +185,11 @@ impl Dock {
         let _ = self.panel_id_stack.pop().unwrap();
     }
     
-    pub fn begin_tab_bar(&mut self, cx: &mut Cx, selected_tab:Option<usize>) -> Result<(), ()> {
+    pub fn begin_tab_bar(&mut self, cx: &mut Cx, selected_tab: Option<usize>) -> Result<(), ()> {
         let panel_id = *self.panel_id_stack.last().unwrap();
         let panel = self.panels[panel_id].as_tab_panel_mut();
+        panel.full_rect = cx.get_turtle_rect();
+        
         if let Err(error) = panel.tab_bar.begin(cx, selected_tab) {
             self.contents(cx);
             return Err(error);
@@ -149,7 +231,7 @@ impl Dock {
     
     fn get_or_create_split_panel(&mut self, cx: &mut Cx, panel_id: PanelId) -> &mut SplitPanel {
         let splitter = self.splitter.unwrap();
-        self.panels.get_or_insert(cx, panel_id, |cx|{
+        self.panels.get_or_insert(cx, panel_id, | cx | {
             Panel::Split(SplitPanel {
                 splitter: Splitter::new_from_ptr(cx, splitter),
             })
@@ -158,14 +240,15 @@ impl Dock {
     
     fn get_or_create_tab_panel(&mut self, cx: &mut Cx, panel_id: PanelId) -> &mut TabPanel {
         let tab_bar = self.tab_bar.unwrap();
-        self.panels.get_or_insert(cx, panel_id, |cx|{
+        self.panels.get_or_insert(cx, panel_id, | cx | {
             Panel::Tab(TabPanel {
                 tab_bar: TabBar::new_from_ptr(cx, tab_bar),
                 contents_rect: Rect::default(),
+                full_rect: Rect::default(),
             })
         }).as_tab_panel_mut()
     }
-
+    
     
     pub fn selected_tab_id(&mut self, cx: &mut Cx, panel_id: PanelId) -> Option<TabId> {
         let panel = self.get_or_create_tab_panel(cx, panel_id);
@@ -309,6 +392,7 @@ struct SplitPanel {
 struct TabPanel {
     tab_bar: TabBar,
     contents_rect: Rect,
+    full_rect: Rect
 }
 
 struct Drag {

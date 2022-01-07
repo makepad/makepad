@@ -11,10 +11,9 @@ use {
 
 live_register!{
     use makepad_render::shader::std::*;
-    use crate::theme::*;
+    use makepad_component::theme::*;
     
     DrawBgQuad: {{DrawBgQuad}} {
-        
         fn pixel(self) -> vec4 {
             return mix(
                 mix(
@@ -33,7 +32,6 @@ live_register!{
     }
     
     DrawNameText: {{DrawNameText}} {
-        
         fn get_color(self) -> vec4 {
             return mix(
                 COLOR_TREE_TEXT_DEFAULT * self.scale,

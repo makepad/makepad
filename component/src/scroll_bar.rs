@@ -31,7 +31,7 @@ live_register!{
                     BORDER_RADIUS
                 );
             }
-            return sdf.fill_keep(mix(
+            return sdf.fill(mix(
                 COLOR_SCROLL_BAR_DEFAULT,
                 mix(
                     COLOR_SCROLL_BAR_HOVER,

@@ -176,6 +176,13 @@ impl InlineCache {
         let live_registry_rc = cx.live_registry.clone();
         let live_registry = live_registry_rc.borrow();
         
+        let path = if let Some(prefix) = path.strip_prefix("/Users/admin/makepad/edit_repo/"){
+            prefix
+        }
+        else{
+           path 
+        };
+        //println!("{}", &path.strip_prefix("/Users/admin/makepad/edit_repo/").unwrap());
         let file_id = live_registry.path_str_to_file_id(path).unwrap();
         
         let live_file = &live_registry.live_files[file_id.to_index()];
