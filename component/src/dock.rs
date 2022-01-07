@@ -30,7 +30,7 @@ live_register!{
 pub struct Dock {
     
     view: View,
-    drag_view: View,
+    overlay_view: View,
     drag_quad: DrawColor,
     tab_bar: Option<LivePtr>,
     splitter: Option<LivePtr>,
@@ -64,13 +64,13 @@ impl Dock {
     }
     
     pub fn end(&mut self, cx: &mut Cx) {
-        if self .drag_view.begin(cx).is_ok(){
+        if self .overlay_view.begin(cx).is_ok(){
             if let Some(drag) = self.drag.as_ref() {
                 let panel = self.panels[drag.panel_id].as_tab_panel();
                 let rect = compute_drag_rect(panel.contents_rect, drag.position);
                 self.drag_quad.draw_abs(cx, rect);
             }
-            self.drag_view.end(cx);
+            self.overlay_view.end(cx);
         }
         self.panels.retain_visible();
         self.view.end(cx);
@@ -246,7 +246,7 @@ impl Dock {
                         }
                     }
                 }
-                self.drag_view.redraw(cx);
+                self.overlay_view.redraw(cx);
             }
             Event::FingerDrop(event) => {
                 self.drag = None;
@@ -264,7 +264,7 @@ impl Dock {
                         }
                     }
                 }
-                self.drag_view.redraw(cx);
+                self.overlay_view.redraw(cx);
             }
             _ => {}
         }
