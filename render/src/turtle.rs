@@ -582,6 +582,18 @@ impl Cx {
         };
         return Rect::default();
     }
+    
+    pub fn get_turtle_padded_rect(&self) -> Rect {
+        if let Some(turtle) = self.turtles.last() {
+            let pad_lt = vec2(turtle.layout.padding.l,turtle.layout.padding.t);
+            let pad_br = vec2(turtle.layout.padding.r,turtle.layout.padding.b);
+            return Rect {
+                pos: turtle.origin + pad_lt,
+                size: vec2(turtle.width, turtle.height) - (pad_lt+pad_br)
+            }
+        };
+        return Rect::default();
+    }
 
     pub fn get_turtle_size(&self) -> Vec2 {
         if let Some(turtle) = self.turtles.last() {
@@ -832,7 +844,7 @@ impl Cx {
     
     pub fn get_width_left(&self) -> f32 {
         if let Some(turtle) = self.turtles.last() {
-            let nan_val = max_zero_keep_nan(turtle.width - turtle.width_used - (turtle.pos.x - turtle.origin.x));
+            let nan_val = max_zero_keep_nan(turtle.width - (turtle.layout.padding.r) - turtle.width_used - (turtle.pos.x - turtle.origin.x));
             if nan_val.is_nan() { // if we are a computed height, if some value is known, use that
                 if turtle.bound_right_bottom.x != std::f32::NEG_INFINITY {
                     return turtle.bound_right_bottom.x - turtle.origin.x
@@ -854,7 +866,7 @@ impl Cx {
     
     pub fn get_width_total(&self) -> f32 {
         if let Some(turtle) = self.turtles.last() {
-            let nan_val = max_zero_keep_nan(turtle.width/* - (turtle.layout.padding.l + turtle.layout.padding.r)*/);
+            let nan_val = max_zero_keep_nan(turtle.width - (turtle.layout.padding.l + turtle.layout.padding.r));
             if nan_val.is_nan() { // if we are a computed width, if some value is known, use that
                 if turtle.bound_right_bottom.x != std::f32::NEG_INFINITY {
                     return turtle.bound_right_bottom.x - turtle.origin.x + turtle.layout.padding.r
@@ -876,7 +888,7 @@ impl Cx {
     
     pub fn get_height_left(&self) -> f32 {
         if let Some(turtle) = self.turtles.last() {
-            let nan_val = max_zero_keep_nan(turtle.height - turtle.height_used - (turtle.pos.y - turtle.origin.y));
+            let nan_val = max_zero_keep_nan(turtle.height - ( turtle.layout.padding.b) - turtle.height_used - (turtle.pos.y - turtle.origin.y));
             if nan_val.is_nan() { // if we are a computed height, if some value is known, use that
                 if turtle.bound_right_bottom.y != std::f32::NEG_INFINITY {
                     return turtle.bound_right_bottom.y - turtle.origin.y
@@ -898,7 +910,7 @@ impl Cx {
     
     pub fn get_height_total(&self) -> f32 {
         if let Some(turtle) = self.turtles.last() {
-            let nan_val = max_zero_keep_nan(turtle.height /*- (turtle.layout.padding.t + turtle.layout.padding.b)*/);
+            let nan_val = max_zero_keep_nan(turtle.height - (turtle.layout.padding.t + turtle.layout.padding.b));
             if nan_val.is_nan() { // if we are a computed height, if some value is known, use that
                 if turtle.bound_right_bottom.y != std::f32::NEG_INFINITY {
                     return turtle.bound_right_bottom.y - turtle.origin.y + turtle.layout.padding.b

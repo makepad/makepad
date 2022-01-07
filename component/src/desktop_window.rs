@@ -10,7 +10,9 @@ live_register!{
         caption_bg: {color: (COLOR_WINDOW_CAPTION)}
         caption: "Desktop Window",
         main_view:{},
-        inner_view:{},
+        border_fill: {color: (COLOR_WINDOW_CAPTION)},
+        inner_view:{
+        },
         caption_view: {
             layout: {
                 walk: {
@@ -46,6 +48,8 @@ pub struct DesktopWindow {
     caption_text: DrawText,
     caption_bg: DrawColor,
     caption: String,
+    
+    border_fill: DrawColor,
     
     #[rust(WindowMenu::new(cx))] pub window_menu: WindowMenu,
     #[rust(Menu::main(vec![ 
