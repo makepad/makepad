@@ -22,7 +22,7 @@ where CB: FnOnce(&mut Cx, LiveFileId, usize, &[LiveNode]) -> usize {
     let next_index = cb(cx, live_ptr.file_id, live_ptr.index as usize, &doc.nodes);
     if next_index <= live_ptr.index as usize + 2 {
         let apply_from = ApplyFrom::NewFromDoc {file_id: live_ptr.file_id};
-        cx.apply_error_empty_object(live_error_origin!(), apply_from, live_ptr.index as usize, &doc.nodes);
+        cx.apply_error_empty_object(live_error_origin!(), live_ptr.index as usize, &doc.nodes);
     }
 }
 
@@ -210,7 +210,7 @@ impl ApplyFrom {
 pub trait LiveHook {
     fn apply_value_unknown(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         if !nodes[index].id.is_capitalised() {
-            cx.apply_error_no_matching_field(live_error_origin!(), apply_from, index, nodes);
+            cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
         }
         nodes.skip_node(index)
     }

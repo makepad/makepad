@@ -246,6 +246,44 @@ impl LiveRegistry {
         None
     }
     
+        pub fn find_scope_target_via_start2(&self, item: LiveId, index: usize, nodes: &[LiveNode]) -> Option<LiveScopeTarget> {
+        if let Some(index) = nodes.scope_up_down_by_name(index, item) {
+            if let LiveValue::Use(module_id) = &nodes[index].value {
+                // ok lets find it in that other doc
+                if let Some(file_id) = self.module_id_to_file_id(*module_id) {
+                    let doc = self.file_id_to_doc(file_id);
+                    if let Some(index) = doc.nodes.child_by_name(0, item) {
+                        return Some(LiveScopeTarget::LivePtr(
+                            LivePtr {file_id: file_id, index: index as u32}
+                        ))
+                    }
+                }
+            }
+            else {
+                return Some(LiveScopeTarget::LocalPtr(index))
+            }
+        }
+        // ok now look at the glob use * things
+        let mut node_iter = Some(1);
+        while let Some(index) = node_iter {
+            println!("Globbinug {} {} {:?}", index, nodes[index].id, nodes[index].value);
+            if let LiveValue::Use(module_id) = &nodes[index].value {
+                if nodes[index].id == LiveId::empty() { // glob
+                    if let Some(file_id) = self.module_id_to_file_id(*module_id) {
+                        let doc = self.file_id_to_doc(file_id);
+                        if let Some(index) = doc.nodes.child_by_name(0, item) {
+                            return Some(LiveScopeTarget::LivePtr(
+                                LivePtr {file_id: file_id, index: index as u32}
+                            ))
+                        }
+                    }
+                }
+            }
+            node_iter = nodes.next_child(index);
+        }
+        None
+    }
+    
     pub fn find_scope_ptr_via_expand_index(&self, file_id: LiveFileId, index: usize, item: LiveId) -> Option<LivePtr> {
         // ok lets start
         // let token_id = origin.token_id().unwrap();

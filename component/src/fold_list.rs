@@ -11,12 +11,9 @@ use {
 
 live_register!{
     use makepad_render::shader::std::*;
+    use crate::theme::*;
     
     DrawBgQuad: {{DrawBgQuad}} {
-        
-        const COLOR_EVEN: #25
-        const COLOR_ODD: #28
-        const COLOR_SELECTED: #x11466E
         
         fn pixel(self) -> vec4 {
             return mix(
@@ -32,9 +29,6 @@ live_register!{
     }
     
     DrawNameText: {{DrawNameText}} {
-        const COLOR_FILE: #9d
-        const COLOR_FOLDER: #ff
-        
         fn get_color(self) -> vec4 {
             return mix(COLOR_FILE, COLOR_FOLDER, self.is_folder)
         }
@@ -52,7 +46,7 @@ live_register!{
             sdf.box(0. * w, 0.35 * h, 0.87 * w, 0.39 * h, 0.75);
             sdf.box(0. * w, 0.28 * h, 0.5 * w, 0.3 * h, 1.);
             sdf.union();
-            return sdf.fill(#80);
+            return sdf.fill(COLOR_ICON);
         }
     }
     
@@ -360,9 +354,8 @@ impl FoldList {
             });
             walk += self.node_height.max(1.0);
         } 
-        
         self.scroll_view.end(cx);
-        
+         
         //let selected_node_id = self.selected_node_id;
         //self.tree_nodes.retain_visible_and( | node_id, _ | Some(*node_id) == selected_node_id);
     }
