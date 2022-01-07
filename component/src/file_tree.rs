@@ -14,24 +14,32 @@ live_register!{
     use crate::theme::*;
     
     DrawBgQuad: {{DrawBgQuad}} {
-         
+        
         fn pixel(self) -> vec4 {
             return mix(
                 mix(
-                    COLOR_EVEN,
-                    COLOR_ODD,
-                    self.is_even
+                    mix(
+                        COLOR_BG_EVEN,
+                        COLOR_BG_ODD,
+                        self.is_even
+                    ),
+                    COLOR_BG_SELECTED,
+                    self.selected
                 ),
-                COLOR_SELECTED,
-                self.selected
-            ) + #3 * self.hover;
+                COLOR_BG_HOVER,
+                self.hover
+            );
         }
     }
     
-    DrawNameText: {{DrawNameText}} { 
+    DrawNameText: {{DrawNameText}} {
         
         fn get_color(self) -> vec4 {
-            return mix(COLOR_FILE, COLOR_FOLDER, self.is_folder) * self.scale
+            return mix(
+                COLOR_TREE_TEXT_DEFAULT * self.scale,
+                COLOR_TREE_TEXT_HOVER,
+                self.hover
+            )
         }
         
         text_style: {

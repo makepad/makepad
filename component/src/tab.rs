@@ -5,6 +5,7 @@ use {
 
 live_register!{
     use makepad_render::shader::std::*;
+    use crate::theme::*;
     
     Tab: {{Tab}} {
         name_text: {
@@ -16,31 +17,34 @@ live_register!{
         }
         
         bg_quad: {
-            const BORDER_WIDTH: 1.0
-            const BORDER_COLOR: #28
-            
             instance hover: float
             instance selected: float
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                let color = mix(mix(#34, #28, self.selected), #f, mix(self.hover * 0.05, self.hover * -0.025, self.selected));
-                sdf.clear(color)
+                return mix(
+                    mix(
+                        COLOR_TAB_BG_UNSELECTED,
+                        COLOR_TAB_BG_SELECTED,
+                        self.selected
+                    ),
+                    #f,
+                    0.0//mix(self.hover * 0.05, self.hover * -0.025, self.selected)
+                );
+                /*sdf.clear(color)
                 sdf.move_to(0.0, 0.0)
                 sdf.line_to(0.0, self.rect_size.y)
                 sdf.move_to(self.rect_size.x, 0.0)
                 sdf.line_to(self.rect_size.x, self.rect_size.y)
-                return sdf.stroke(BORDER_COLOR, BORDER_WIDTH)
+                return sdf.stroke(BORDER_COLOR, BORDER_WIDTH)*/
             }
         }
-        
-        height: 40.0
         
         layout: Layout {
             align: Align {fx: 0.0, fy: 0.5},
             walk: Walk {
                 width: Width::Computed,
-                height: Height::Fixed(40.0),
+                height: Height::Filled, //Fixed((DIM_TAB_HEIGHT)),
             },
             padding: Padding {
                 l: 10.0,
@@ -106,7 +110,7 @@ pub struct Tab {
     
     close_button: TabCloseButton,
     
-    height: f32,
+    // height: f32,
     
     hover: f32,
     selected: f32,
@@ -115,7 +119,7 @@ pub struct Tab {
 }
 
 pub enum TabAction {
-    WasPressed, 
+    WasPressed,
     CloseWasPressed,
     ReceivedDraggedItem(DraggedItem),
 }
