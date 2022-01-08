@@ -13,6 +13,14 @@ live_register!{
         border_fill: {color: (COLOR_WINDOW_CAPTION)},
         inner_view:{
         },
+        caption_layout:{
+            padding:{t:2.0}
+            align: {fx: 0.5, fy: 0.5},
+            walk: {
+                width: Width::Filled, 
+                height: Height::Fixed(26.),
+            }
+        }
         caption_view: {
             layout: {
                 walk: {
@@ -36,7 +44,7 @@ pub struct DesktopWindow {
     main_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
     caption_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
     inner_view: View,
-    
+    caption_layout: Layout, 
     clear_color: Vec4,
     
     min_btn: DesktopButton,
@@ -223,11 +231,7 @@ impl DesktopWindow {
                         else {
                             cx.update_menu(&self.default_menu);
                         }
-                        self.caption_bg.begin(cx, Layout {
-                            align: Align {fx: 0.5, fy: 0.5},
-                            walk: Walk::wh(Width::Filled, Height::Fixed(26.)),
-                            ..Default::default()
-                        });
+                        self.caption_bg.begin(cx, self.caption_layout);
                         self.caption_size = Vec2 {x: cx.get_width_left(), y: cx.get_height_left()};
                         self.caption_text.draw_walk(cx, &self.caption);
                         self.caption_bg.end(cx);
