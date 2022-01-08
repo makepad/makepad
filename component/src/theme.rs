@@ -27,7 +27,7 @@ live_register!{
         COLOR_DOCK_BG,
         COLOR_15_DOWN
     ))
-    
+     
     // TABS
     
     const COLOR_TAB_BG_SELECTED: (blend(
@@ -123,12 +123,12 @@ live_register!{
     
     const COLOR_SPLITTER_HOVER: (blend(
         COLOR_DOCK_BG,
-        COLOR_80_UP
+        COLOR_40_UP
     ))
     
     const COLOR_SPLITTER_PRESSED: (blend(
         COLOR_DOCK_BG,
-        COLOR_40_UP
+        COLOR_10_UP
     ))
     
     const DIM_SPLITTER_SIZE: 5.0    
