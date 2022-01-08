@@ -26,8 +26,8 @@ live_register!{
             let sdf = Sdf2d::viewport(pos * self.rect_size);
             sdf.rect(-10., -10., self.rect_size.x * 2.0, self.rect_size.y * 2.0);
             sdf.box(
-                0.5,
-                0.5,
+                0.25,
+                0.25,
                 self.rect_size.x * 2.0,
                 self.rect_size.y * 2.0,
                 4.0
