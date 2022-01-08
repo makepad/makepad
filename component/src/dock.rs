@@ -176,8 +176,7 @@ impl Dock {
     }
     
     pub fn begin_tab_panel(&mut self, cx: &mut Cx, panel_id: PanelId) {
-        let tab = self.get_or_create_tab_panel(cx, panel_id);
-        
+        self.get_or_create_tab_panel(cx, panel_id);
         self.panel_id_stack.push(panel_id);
     }
     
