@@ -26,12 +26,13 @@ live_register!{
             let sdf = Sdf2d::viewport(pos * self.rect_size);
             sdf.rect(-10., -10., self.rect_size.x * 2.0, self.rect_size.y * 2.0);
             sdf.box(
-                0.,
-                0.,
+                0.5,
+                0.5,
                 self.rect_size.x * 2.0,
                 self.rect_size.y * 2.0,
                 4.0
             );
+            
             sdf.subtract()
             return sdf.fill(COLOR_APP_BG);
         }
