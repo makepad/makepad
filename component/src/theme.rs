@@ -106,12 +106,12 @@ live_register!{
     
     const COLOR_SCROLL_BAR_HOVER: (blend(
         COLOR_DOCK_BG,
-        COLOR_80_UP
+        COLOR_40_UP
     ))
     
     const COLOR_SCROLL_BAR_PRESSED: (blend(
         COLOR_DOCK_BG,
-        COLOR_40_UP
+        COLOR_10_UP
     ))
     
     

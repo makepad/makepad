@@ -71,7 +71,7 @@ live_register!{
             from: {all: Play::Forward {duration: 0.1}}
             apply: {
                 bar_quad: {
-                    pressed: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.25}],
+                    pressed: [{time: 0.0, value: 1.0}],
                     hover: 1.0,
                 }
             }
