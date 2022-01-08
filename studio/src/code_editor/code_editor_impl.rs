@@ -1126,7 +1126,7 @@ impl CodeEditorImpl {
     
     fn vec2_to_position(&self, text: &Text, vec2: Vec2, lines_layout: &LinesLayout) -> Position {
         
-        if vec2.y < 0.0 {
+        if vec2.y < self.padding_top {
             return Position { 
                 line: 0,
                 column: 0
