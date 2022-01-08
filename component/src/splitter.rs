@@ -46,7 +46,7 @@ live_register!{
     
     Splitter: {{Splitter}} {
         split_bar_size: (DIM_SPLITTER_SIZE)
-        
+        min_splitter_pos: 30.
         default_state: {
             from: {all: Play::Forward {duration: 0.1}}
             apply: {
@@ -99,6 +99,8 @@ pub struct Splitter {
     default_state: Option<LivePtr>,
     hover_state: Option<LivePtr>,
     pressed_state: Option<LivePtr>,
+    
+    min_splitter_pos: f32,
     
     layout: Layout,
     bar_quad: DrawSplitter,
@@ -238,9 +240,9 @@ impl Splitter {
                         Axis::Horizontal => {
                             let center = self.rect.size.x / 2.0;
                             if new_position < center - 30.0 {
-                                SplitterAlign::FromStart(new_position)
+                                SplitterAlign::FromStart(new_position.max(self.min_splitter_pos))
                             } else if new_position > center + 30.0 {
-                                SplitterAlign::FromEnd(self.rect.size.x - new_position)
+                                SplitterAlign::FromEnd((self.rect.size.x - new_position).max(self.min_splitter_pos))
                             } else {
                                 SplitterAlign::Weighted(new_position / self.rect.size.x)
                             }
@@ -248,9 +250,9 @@ impl Splitter {
                         Axis::Vertical => {
                             let center = self.rect.size.y / 2.0;
                             if new_position < center - 30.0 {
-                                SplitterAlign::FromStart(new_position)
+                                SplitterAlign::FromStart(new_position.max(self.min_splitter_pos))
                             } else if new_position > center + 30.0 {
-                                SplitterAlign::FromEnd(self.rect.size.y - new_position)
+                                SplitterAlign::FromEnd((self.rect.size.y - new_position).max(self.min_splitter_pos))
                             } else {
                                 SplitterAlign::Weighted(new_position / self.rect.size.y)
                             }
