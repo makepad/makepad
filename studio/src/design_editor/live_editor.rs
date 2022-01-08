@@ -381,7 +381,7 @@ impl LiveEditor {
                     self.editor_impl.draw_code_chunk(
                         cx,
                         layout.font_scale,
-                        self.text_color(token.token, next_token.map( | next_token | next_token.token)),
+                        self.text_color(&chars[start..end], token.token, next_token.map( | next_token | next_token.token)),
                         Vec2 {x: start_x, y: layout.start_y + origin.y},
                         &chars[start..end]
                     );
@@ -518,10 +518,17 @@ impl LiveEditor {
         }
     }
     
-    fn text_color(&self, token: FullToken, next_token: Option<FullToken>) -> Vec4 {
+    fn text_color(&self, text:&[char], token: FullToken, next_token: Option<FullToken>) -> Vec4 {
         match (token, next_token) {
             (FullToken::Comment, _) => self.text_color_comment,
-            (FullToken::Ident(id), _) if id.is_capitalised() => self.text_color_type_name,
+            (FullToken::Ident(id), _) if id.is_capitalised() => {
+                if text.len() > 1 && text[1].is_uppercase(){
+                    self.text_color_string
+                }
+                else{
+                    self.text_color_type_name
+                }
+            },
             (FullToken::Ident(_), Some(FullToken::Open(Delim::Paren))) => self.text_color_function_identifier,
             (FullToken::Ident(_), Some(FullToken::Punct(id!(!)))) => self.text_color_macro_identifier,
             
