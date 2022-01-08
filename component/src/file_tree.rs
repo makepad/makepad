@@ -3,6 +3,7 @@ use {
         collections::{HashSet},
     },
     crate::{
+        scroll_shadow::ScrollShadow,
         component_map::ComponentMap,
         scroll_view::ScrollView
     },
@@ -233,6 +234,8 @@ pub struct FileTree {
     filler_quad: DrawBgQuad,
     
     node_height: f32,
+
+    scroll_shadow: ScrollShadow,
     
     #[rust] dragging_node_id: Option<FileNodeId>,
     #[rust] selected_node_id: Option<FileNodeId>,
@@ -400,6 +403,7 @@ impl FileTree {
             walk += self.node_height.max(1.0);
         }
         
+        self.scroll_shadow.draw(cx, &self.scroll_view, vec2(0., 0.));
         self.scroll_view.end(cx);
         
         let selected_node_id = self.selected_node_id;
