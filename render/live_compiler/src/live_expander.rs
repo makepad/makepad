@@ -208,7 +208,11 @@ impl<'a> LiveExpander<'a> {
                         level_overwrite.push(true);
                         overwrite
                     }
-                    else {
+                    else if in_value.is_number_type() && out_value.is_number_type(){
+                        out_doc.nodes[overwrite] = in_node.clone();
+                        overwrite
+                    }
+                    else{
                         self.errors.push(LiveError {
                             origin: live_error_origin!(),
                             span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).into(),

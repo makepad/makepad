@@ -474,6 +474,7 @@ impl LiveValue {
             _ => ()
         }
     }
+    
     pub fn set_expr_expand_index_if_none(&mut self, index:usize) {
         match self {
             Self::Expr {expand_index,..} => if expand_index.is_none(){
@@ -523,6 +524,14 @@ impl LiveValue {
         }
     }
     
+    pub fn is_number_type(&self) -> bool {
+        match self {
+            Self::Int(_) |
+            Self::Float(_) => true,
+            _ => false
+        }
+    }
+    /*
     pub fn is_float_type(&self) -> bool {
         match self {
             Self::Float(_) |
@@ -532,7 +541,7 @@ impl LiveValue {
             Self::Vec4(_) => true,
             _ => false
         }
-    }
+    }*/
     
     pub fn as_float(&self) -> Option<f64> {
         match self {
@@ -541,6 +550,7 @@ impl LiveValue {
             _ => None
         }
     }
+    
     pub fn as_vec2(&self) -> Option<Vec2> {
         match self {
             Self::Vec2(v) => Some(*v),
