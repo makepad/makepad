@@ -18,7 +18,7 @@ use {
         },
     },
     makepad_component::{
-        makepad_render,
+        makepad_render, 
         fold_button::{FoldButton, FoldButtonAction},
         ComponentMap,
     },
