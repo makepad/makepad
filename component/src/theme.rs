@@ -59,7 +59,7 @@ live_register!{
     
     const COLOR_DRAG_QUAD: #ffffff80
     
-    const DIM_TAB_HEIGHT: 28.0,
+    const DIM_TAB_HEIGHT: 26.0,
     
     // even/odd BG items
     
