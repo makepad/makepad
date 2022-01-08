@@ -60,7 +60,7 @@ live_register!{
     const COLOR_DRAG_QUAD: #ffffff80
     
     const DIM_TAB_HEIGHT: 26.0,
-    
+
     // even/odd BG items
     
     const COLOR_BG_EVEN: (blend(
@@ -130,7 +130,12 @@ live_register!{
         COLOR_DOCK_BG,
         COLOR_10_UP
     ))
-    
+
+    const DIM_SPLITTER_HORIZONTAL: 16.0,
+    const DIM_SPLITTER_MIN_HORIZONTAL: (DIM_TAB_HEIGHT),
+    const DIM_SPLITTER_MAX_HORIZONTAL: (DIM_TAB_HEIGHT+DIM_SPLITTER_SIZE),
+    const DIM_SPLITTER_MIN_VERTICAL: (DIM_SPLITTER_HORIZONTAL),
+    const DIM_SPLITTER_MAX_VERTICAL: (DIM_SPLITTER_HORIZONTAL+DIM_SPLITTER_SIZE),
     const DIM_SPLITTER_SIZE: 5.0    
 }
 
