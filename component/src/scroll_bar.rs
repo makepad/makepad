@@ -6,8 +6,8 @@ live_register!{
     
     DrawScrollBar: {{DrawScrollBar}} {
         draw_depth: 5.0
-        const BORDER_RADIUS: 2.0
-        
+        const BORDER_RADIUS: 1.5
+        const BAR_WIDTH: 6.0
         instance pressed: 0.0
         instance hover: 0.0
         
@@ -17,7 +17,7 @@ live_register!{
                 sdf.box(
                     1.,
                     self.rect_size.y * self.norm_scroll,
-                    self.rect_size.x * 0.8,
+                    BAR_WIDTH,
                     self.rect_size.y * self.norm_handle,
                     BORDER_RADIUS
                 );
@@ -27,7 +27,7 @@ live_register!{
                     self.rect_size.x * self.norm_scroll,
                     1.,
                     self.rect_size.x * self.norm_handle,
-                    self.rect_size.y * 0.8,
+                    BAR_WIDTH,
                     BORDER_RADIUS
                 );
             }
