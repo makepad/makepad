@@ -194,7 +194,7 @@ impl<'a> LiveExpander<'a> {
                         self.shift_parent_stack(&mut current_parent, &out_doc.nodes, overwrite, old_len, out_doc.nodes.len());
                         level_overwrite.push(true);
                         overwrite
-                    }
+                    } 
                     else if in_value.is_clone() && out_value.is_object() {
                         // throw away whats in there
                         let next_index = out_doc.nodes.skip_node(overwrite);
