@@ -6,7 +6,7 @@ live_register!{
     
     DrawScrollBar: {{DrawScrollBar}} {
         draw_depth: 5.0
-        const BORDER_RADIUS: 1.5
+        const BORDER_RADIUS: 2.0
         
         instance pressed: 0.0
         instance hover: 0.0
@@ -17,7 +17,7 @@ live_register!{
                 sdf.box(
                     1.,
                     self.rect_size.y * self.norm_scroll,
-                    self.rect_size.x * 0.5,
+                    self.rect_size.x * 0.8,
                     self.rect_size.y * self.norm_handle,
                     BORDER_RADIUS
                 );
@@ -27,7 +27,7 @@ live_register!{
                     self.rect_size.x * self.norm_scroll,
                     1.,
                     self.rect_size.x * self.norm_handle,
-                    self.rect_size.y * 0.5,
+                    self.rect_size.y * 0.8,
                     BORDER_RADIUS
                 );
             }
@@ -44,7 +44,9 @@ live_register!{
     }
     
     ScrollBar: {{ScrollBar}} {
-        
+        bar_size: 10.0,
+        bar_side_margin: 3.0
+        min_handle_size: 30.0
         default_state: {
             from: {all: Play::Forward {duration: 0.1}}
             apply: {
@@ -80,8 +82,9 @@ live_register!{
 #[derive(Live, LiveHook)]
 pub struct ScrollBar {
     bar_quad: DrawScrollBar,
-    #[live(12.0)] pub bar_size: f32,
-    #[live(30.0)] pub min_handle_size: f32, //minimum size of the handle in pixels
+    pub bar_size: f32,
+    pub min_handle_size: f32, //minimum size of the handle in pixels
+    bar_side_margin: f32,
     #[live(Axis::Horizontal)] pub axis: Axis,
     
     default_state: Option<LivePtr>,
@@ -95,7 +98,6 @@ pub struct ScrollBar {
     
     #[rust] next_frame: NextFrame,
     #[rust(false)] visible: bool,
-    #[rust] bar_side_margin: f32,
     #[rust] view_area: Area,
     #[rust] view_total: f32, // the total view area
     #[rust] view_visible: f32, // the visible view area

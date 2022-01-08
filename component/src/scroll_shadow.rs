@@ -11,13 +11,13 @@ live_register!{
 
         shadow_size: 4.0,
         varying is_viz: float;
-                
+        
         fn scroll(self) -> vec2 {
             if self.shadow_is_top > 0.5 {
-                self.is_viz = clamp(self.draw_scroll.w * 0.1, 0., 1.);
+                self.is_viz = clamp(self.draw_scroll.w * 0.1, 0., 1.)*0.75;
             }
             else {
-                self.is_viz = clamp(self.draw_scroll.z * 0.1, 0., 1.);
+                self.is_viz = clamp(self.draw_scroll.z * 0.1, 0., 1.)*0.75;
             }
             return self.draw_scroll.xy;
         }
