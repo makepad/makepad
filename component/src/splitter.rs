@@ -201,10 +201,10 @@ impl Splitter {
                     Axis::Vertical => cx.set_hover_mouse_cursor(MouseCursor::RowResize),
                 }
                 match f.hover_state {
-                    HoverState::In => {
+                    HoverState::In => if !f.any_down {
                         self.animate_to(cx, self.hover_state);
                     },
-                    HoverState::Out => {
+                    HoverState::Out => if !f.any_down{
                         self.animate_to(cx, self.default_state);
                     },
                     _ => ()
