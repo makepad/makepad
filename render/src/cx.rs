@@ -77,6 +77,10 @@ use {
 pub use makepad_shader_compiler::makepad_derive_live::*;
 pub use makepad_shader_compiler::makepad_math::*;
 
+pub struct CxDraw<'a> {
+    pub cx:&'a mut Cx
+}
+
 pub struct Cx {
     pub platform_type: PlatformType,
     pub gpu_info: GpuInfo,
