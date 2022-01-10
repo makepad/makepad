@@ -92,9 +92,9 @@ impl Cx {
                 }
                 
                 // update the zbias uniform if we have it.
-                draw_call.set_zbias(*zbias);
-                draw_call.set_local_scroll(scroll, local_scroll);
-                draw_call.set_clip(clip);
+                draw_call.draw_uniforms.set_zbias(*zbias);
+                draw_call.draw_uniforms.set_local_scroll(scroll, local_scroll, &draw_call.options);
+                draw_call.draw_uniforms.set_clip(clip);
                 *zbias += zbias_step;
                 
                 if draw_call.uniforms_dirty {

@@ -114,14 +114,7 @@ impl Window {
         cx.windows[self.window_id].main_pass_id = Some(pass.pass_id);
         cx.passes[pass.pass_id].dep_of = CxPassDepOf::Window(self.window_id);
     }
-/*
-    pub fn begin(&mut self, cx: &mut Cx) {
-        // if we are not at ground level for viewports,
-        cx.windows[self.window_id].main_pass_id = None;
-        cx.window_stack.push(self.window_id);
-        
-    }*/
-    
+
     pub fn get_inner_size(&mut self, cx: &mut Cx) -> Vec2 {
         return cx.windows[self.window_id].get_inner_size()
     }
@@ -134,23 +127,7 @@ impl Window {
     pub fn set_position(&mut self, cx: &mut Cx, pos:Vec2) {
         return cx.windows[self.window_id].window_set_position = Some(pos);
     }
-    /*
-    pub fn handle_window(&mut self, _cx: &mut Cx, _event: &mut Event) -> bool {
-        false
-    }
-    */
-    /*
-    pub fn redraw_window_area(&mut self, cx: &mut Cx) {
-        if let Some(pass_id) = cx.windows[self.window_id].main_pass_id {
-            cx.redraw_pass_and_sub_passes(pass_id);
-        }
-    }*/
-    /*
-    pub fn end(&mut self, cx: &mut Cx) -> Area {
-        cx.window_stack.pop();
-        Area::Empty
-    }*/
-    
+
     pub fn minimize(&mut self, cx: &mut Cx) {
         cx.windows[self.window_id].window_command = CxWindowCmd::Minimize;
     }

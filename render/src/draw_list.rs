@@ -49,6 +49,47 @@ impl DrawUniforms {
     pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawUniforms>()] {
         unsafe {std::mem::transmute(self)}
     }
+    
+    pub fn get_local_scroll(&self) -> Vec4 {
+        self.draw_scroll
+    }
+    
+    pub fn set_zbias(&mut self, zbias: f32) {
+        self.draw_zbias = zbias;
+    }
+    
+    pub fn set_clip(&mut self, clip: (Vec2, Vec2)) {
+        self.draw_clip_x1 = clip.0.x;
+        self.draw_clip_y1 = clip.0.y;
+        self.draw_clip_x2 = clip.1.x;
+        self.draw_clip_y2 = clip.1.y;
+    }
+    
+    pub fn clip_and_scroll_rect(&self, x: f32, y: f32, w: f32, h: f32) -> Rect {
+        let mut x1 = x - self.draw_scroll.x;
+        let mut y1 = y - self.draw_scroll.y;
+        let mut x2 = x1 + w;
+        let mut y2 = y1 + h;
+        x1 = self.draw_clip_x1.max(x1).min(self.draw_clip_x2);
+        y1 = self.draw_clip_y1.max(y1).min(self.draw_clip_y2);
+        x2 = self.draw_clip_x1.max(x2).min(self.draw_clip_x2);
+        y2 = self.draw_clip_y1.max(y2).min(self.draw_clip_y2);
+        return Rect {pos: vec2(x1, y1), size: vec2(x2 - x1, y2 - y1)};
+    }
+    
+    pub fn set_local_scroll(&mut self, scroll: Vec2, local_scroll: Vec2, options: &CxDrawShaderOptions) {
+        self.draw_scroll.x = scroll.x;
+        if !options.no_h_scroll {
+            self.draw_scroll.x += local_scroll.x;
+        }
+        self.draw_scroll.y = scroll.y;
+        if !options.no_v_scroll {
+            self.draw_scroll.y += local_scroll.y;
+        }
+        self.draw_scroll.z = local_scroll.x;
+        self.draw_scroll.w = local_scroll.y;
+    }
+    
 }
 
 pub struct DrawItem {
@@ -96,6 +137,7 @@ impl DrawCall {
         }
     }
     
+    
     pub fn reuse_in_place(&mut self, mapping: &CxDrawShaderMapping, draw_vars: &DrawVars) {
         self.draw_shader = draw_vars.draw_shader.unwrap();
         self.geometry_id = draw_vars.geometry_id;
@@ -112,51 +154,12 @@ impl DrawCall {
         self.options = draw_vars.options.clone();
     }
     
-    pub fn set_local_scroll(&mut self, scroll: Vec2, local_scroll: Vec2) {
-        self.draw_uniforms.draw_scroll.x = scroll.x;
-        if !self.options.no_h_scroll {
-            self.draw_uniforms.draw_scroll.x += local_scroll.x;
-        }
-        self.draw_uniforms.draw_scroll.y = scroll.y;
-        if !self.options.no_v_scroll {
-            self.draw_uniforms.draw_scroll.y += local_scroll.y;
-        }
-        self.draw_uniforms.draw_scroll.z = local_scroll.x;
-        self.draw_uniforms.draw_scroll.w = local_scroll.y;
-    }
-    
-    pub fn get_local_scroll(&self) -> Vec4 {
-        self.draw_uniforms.draw_scroll
-    }
-    
-    pub fn set_zbias(&mut self, zbias: f32) {
-        self.draw_uniforms.draw_zbias = zbias;
-    }
-    
-    pub fn set_clip(&mut self, clip: (Vec2, Vec2)) {
-        self.draw_uniforms.draw_clip_x1 = clip.0.x;
-        self.draw_uniforms.draw_clip_y1 = clip.0.y;
-        self.draw_uniforms.draw_clip_x2 = clip.1.x;
-        self.draw_uniforms.draw_clip_y2 = clip.1.y;
-    }
-    
-    pub fn clip_and_scroll_rect(&self, x: f32, y: f32, w: f32, h: f32) -> Rect {
-        let mut x1 = x - self.draw_uniforms.draw_scroll.x;
-        let mut y1 = y - self.draw_uniforms.draw_scroll.y;
-        let mut x2 = x1 + w;
-        let mut y2 = y1 + h;
-        x1 = self.draw_uniforms.draw_clip_x1.max(x1).min(self.draw_uniforms.draw_clip_x2);
-        y1 = self.draw_uniforms.draw_clip_y1.max(y1).min(self.draw_uniforms.draw_clip_y2);
-        x2 = self.draw_uniforms.draw_clip_x1.max(x2).min(self.draw_uniforms.draw_clip_x2);
-        y2 = self.draw_uniforms.draw_clip_y1.max(y2).min(self.draw_uniforms.draw_clip_y2);
-        return Rect {pos: vec2(x1, y1), size: vec2(x2 - x1, y2 - y1)};
-    }
 }
 
 #[derive(Default, Clone)]
 #[repr(C)]
 pub struct ViewUniforms {
-   pub view_transform: [f32; 16],
+    pub view_transform: [f32; 16],
 }
 
 impl ViewUniforms {
@@ -278,14 +281,14 @@ impl DrawList {
                                     break;
                                 }
                             }
-                            if diff{continue}
+                            if diff {continue}
                             for i in 0..sh.mapping.textures.len() {
                                 if draw_call.texture_slots[i] != draw_vars.texture_slots[i] {
                                     diff = true;
                                     break;
                                 }
                             }
-                            if diff{continue}
+                            if diff {continue}
                         }
                         if !draw_call.options.appendable_drawcall(&draw_vars.options) {
                             continue
