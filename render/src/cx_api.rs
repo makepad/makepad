@@ -346,7 +346,7 @@ impl Cx {
                         sh.type_name,
                         draw_call.draw_shader.draw_shader_id,
                         instances,
-                        draw_call.get_local_scroll()
+                        draw_call.draw_uniforms.get_local_scroll()
                     ).unwrap();
                     // lets dump the instance geometry
                     if dump_instances {
