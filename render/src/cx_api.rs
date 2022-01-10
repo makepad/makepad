@@ -72,7 +72,7 @@ impl Cx {
                 CxPassDepOf::Window(window_id) => {
                     dpi_factor = match self.windows[window_id].window_state {
                         CxWindowState::Create {..} => {
-                            self.default_dpi_factor
+                            panic!();
                         },
                         CxWindowState::Created => {
                             self.windows[window_id].window_geom.dpi_factor
