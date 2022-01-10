@@ -279,7 +279,7 @@ impl Cx {
             
             self.process_live_style_errors();
             */
-            if self.any_views_need_redrawing()
+            if self.need_redrawing()
                 || self.new_next_frames.len() != 0 {
                 false
             } else {

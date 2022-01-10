@@ -19,7 +19,7 @@ use {
         },
         area::{
             Area,
-            ViewArea
+            DrawListArea
         },
         window::{
             CxWindowState
@@ -52,11 +52,11 @@ impl Cx {
     pub fn get_dpi_factor_of(&mut self, area: &Area) -> f32 {
         match area {
             Area::Instance(ia) => {
-                let pass_id = self.views[ia.view_id].pass_id;
+                let pass_id = self.draw_lists[ia.draw_list_id].pass_id;
                 return self.get_delegated_dpi_factor(pass_id)
             },
-            Area::View(va) => {
-                let pass_id = self.views[va.view_id].pass_id;
+            Area::DrawList(va) => {
+                let pass_id = self.draw_lists[va.draw_list_id].pass_id;
                 return self.get_delegated_dpi_factor(pass_id)
             },
             _ => ()
@@ -97,10 +97,10 @@ impl Cx {
         match area {
             Area::Empty => (),
             Area::Instance(instance) => {
-                self.redraw_pass_and_parent_passes(self.views[instance.view_id].pass_id);
+                self.redraw_pass_and_parent_passes(self.draw_lists[instance.draw_list_id].pass_id);
             },
-            Area::View(viewarea) => {
-                self.redraw_pass_and_parent_passes(self.views[viewarea.view_id].pass_id);
+            Area::DrawList(listarea) => {
+                self.redraw_pass_and_parent_passes(self.draw_lists[listarea.draw_list_id].pass_id);
             }
         }
     }
@@ -108,8 +108,8 @@ impl Cx {
     pub fn redraw_pass_and_parent_passes(&mut self, pass_id: usize) {
         let mut walk_pass_id = pass_id;
         loop {
-            if let Some(main_view_id) = self.passes[walk_pass_id].main_view_id {
-                self.redraw_view_and_children_of(Area::View(ViewArea {redraw_id: 0, view_id: main_view_id}));
+            if let Some(main_view_id) = self.passes[walk_pass_id].main_draw_list_id {
+                self.redraw_area_and_children(Area::DrawList(DrawListArea {redraw_id: 0, draw_list_id: main_view_id}));
             }
             match self.passes[walk_pass_id].dep_of.clone() {
                 CxPassDepOf::Pass(next_pass_id) => {
@@ -124,8 +124,8 @@ impl Cx {
     
     pub fn redraw_pass_and_child_passes(&mut self, pass_id: usize) {
         let cxpass = &self.passes[pass_id];
-        if let Some(main_view_id) = cxpass.main_view_id {
-            self.redraw_view_and_children_of(Area::View(ViewArea {redraw_id: 0, view_id: main_view_id}));
+        if let Some(main_list) = cxpass.main_draw_list_id {
+            self.redraw_area_and_children(Area::DrawList(DrawListArea {redraw_id: 0, draw_list_id: main_list}));
         }
         // lets redraw all subpasses as well
         for sub_pass_id in 0..self.passes.len() {
@@ -138,31 +138,31 @@ impl Cx {
     }
     
     pub fn redraw_all(&mut self) {
-        self.new_draw_event.redraw_all_views = true;
+        self.new_draw_event.redraw_all = true;
     }
     
-    pub fn redraw_view_of(&mut self, area: Area) {
-        if let Some(view_id) = area.view_id() {
-            if self.new_draw_event.redraw_views.iter().position( | v | *v == view_id).is_some() {
+    pub fn redraw_area(&mut self, area: Area) {
+        if let Some(draw_list_id) = area.draw_list_id() {
+            if self.new_draw_event.draw_lists.iter().position( | v | *v == draw_list_id).is_some() {
                 return;
             }
-            self.new_draw_event.redraw_views.push(view_id);
+            self.new_draw_event.draw_lists.push(draw_list_id);
         }
     }
     
-    pub fn redraw_view_and_children_of(&mut self, area: Area) {
-        if let Some(view_id) = area.view_id() {
-            if self.new_draw_event.redraw_views_and_children.iter().position( | v | *v == view_id).is_some() {
+    pub fn redraw_area_and_children(&mut self, area: Area) {
+        if let Some(draw_list_id) = area.draw_list_id() {
+            if self.new_draw_event.draw_lists_and_children.iter().position( | v | *v == draw_list_id).is_some() {
                 return;
             }
-            self.new_draw_event.redraw_views_and_children.push(view_id);
+            self.new_draw_event.draw_lists_and_children.push(draw_list_id);
         }
     }
 
 
-    pub fn set_view_scroll_x(&mut self, view_id: usize, scroll_pos: f32) {
-        let fac = self.get_delegated_dpi_factor(self.views[view_id].pass_id);
-        let cxview = &mut self.views[view_id];
+    pub fn set_view_scroll_x(&mut self, draw_list_id: usize, scroll_pos: f32) {
+        let fac = self.get_delegated_dpi_factor(self.draw_lists[draw_list_id].pass_id);
+        let cxview = &mut self.draw_lists[draw_list_id];
         cxview.unsnapped_scroll.x = scroll_pos;
         let snapped = scroll_pos - scroll_pos % (1.0 / fac);
         if cxview.snapped_scroll.x != snapped {
@@ -172,9 +172,9 @@ impl Cx {
     }
     
     
-    pub fn set_view_scroll_y(&mut self, view_id: usize, scroll_pos: f32) {
-        let fac = self.get_delegated_dpi_factor(self.views[view_id].pass_id);
-        let cxview = &mut self.views[view_id];
+    pub fn set_view_scroll_y(&mut self, draw_list_id: usize, scroll_pos: f32) {
+        let fac = self.get_delegated_dpi_factor(self.draw_lists[draw_list_id].pass_id);
+        let cxview = &mut self.draw_lists[draw_list_id];
         cxview.unsnapped_scroll.y = scroll_pos;
         let snapped = scroll_pos - scroll_pos % (1.0 / fac);
         if cxview.snapped_scroll.y != snapped {
@@ -293,9 +293,9 @@ impl Cx {
         }
     }
    
-    pub fn debug_draw_tree(&self, dump_instances: bool, view_id: usize) {
-        fn debug_draw_tree_recur(cx:&Cx, dump_instances: bool, s: &mut String, view_id: usize, depth: usize) {
-            if view_id >= cx.views.len() {
+    pub fn debug_draw_tree(&self, dump_instances: bool, draw_list_id: usize) {
+        fn debug_draw_tree_recur(cx:&Cx, dump_instances: bool, s: &mut String, draw_list_id: usize, depth: usize) {
+            if draw_list_id >= cx.draw_lists.len() {
                 writeln!(s, "---------- Drawlist still empty ---------").unwrap();
                 return
             }
@@ -303,18 +303,18 @@ impl Cx {
             for _i in 0..depth {
                 indent.push_str("|   ");
             }
-            let draw_items_len = cx.views[view_id].draw_items_len;
-            if view_id == 0 {
+            let draw_items_len = cx.draw_lists[draw_list_id].draw_items_len;
+            if draw_list_id == 0 {
                 writeln!(s, "---------- Begin Debug draw tree for redraw_id: {} ---------", cx.redraw_id).unwrap();
             }
-            let rect = cx.views[view_id].rect;
-            let scroll = cx.views[view_id].get_local_scroll();
+            let rect = cx.draw_lists[draw_list_id].rect;
+            let scroll = cx.draw_lists[draw_list_id].get_local_scroll();
             writeln!(
                 s,
                 "{}{} {}: len:{} rect:({}, {}, {}, {}) scroll:({}, {})",
                 indent,
-                cx.views[view_id].debug_id,
-                view_id,
+                cx.draw_lists[draw_list_id].debug_id,
+                draw_list_id,
                 draw_items_len,
                 rect.pos.x,
                 rect.pos.y,
@@ -329,11 +329,11 @@ impl Cx {
                 indent.push_str("|   ");
             }
             for draw_item_id in 0..draw_items_len {
-                if let Some(sub_view_id) = cx.views[view_id].draw_items[draw_item_id].sub_view_id {
+                if let Some(sub_view_id) = cx.draw_lists[draw_list_id].draw_items[draw_item_id].sub_view_id {
                     debug_draw_tree_recur(cx, dump_instances, s, sub_view_id, depth + 1);
                 }
                 else {
-                    let cxview = &cx.views[view_id];
+                    let cxview = &cx.draw_lists[draw_list_id];
                     let draw_call = cxview.draw_items[draw_item_id].draw_call.as_ref().unwrap();
                     let sh = &cx.draw_shaders.shaders[draw_call.draw_shader.draw_shader_id];
                     let slots = sh.mapping.instances.total_slots;
@@ -369,13 +369,13 @@ impl Cx {
                     }
                 }
             }
-            if view_id == 0 {
+            if draw_list_id == 0 {
                 writeln!(s, "---------- End Debug draw tree for redraw_id: {} ---------", cx.redraw_id).unwrap();
             }
         }
         
         let mut s = String::new();
-        debug_draw_tree_recur(self, dump_instances, &mut s, view_id, 0);
+        debug_draw_tree_recur(self, dump_instances, &mut s, draw_list_id, 0);
         println!("{}", s);
     }
 }

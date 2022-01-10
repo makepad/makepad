@@ -264,7 +264,7 @@ impl Splitter {
                             }
                         }
                     };
-                    cx.redraw_view_of(self.bar_quad.draw_vars.area);
+                    cx.redraw_area(self.bar_quad.draw_vars.area);
                     dispatch_action(cx, SplitterAction::Changed {axis: self.axis, align: self.align});
                 }
             }
