@@ -15,6 +15,15 @@ pub use {
     }
 };
 
+pub fn live_register(cx:&mut Cx) {
+    crate::draw_2d::draw_quad::live_register(cx);
+    crate::draw_2d::draw_color::live_register(cx);
+    crate::draw_2d::draw_text::live_register(cx);
+    crate::shader::geometry_gen::live_register(cx);
+    crate::shader::std::live_register(cx);
+    crate::font::live_register(cx);
+}
+
 impl LiveEvalError for Cx {
     fn apply_error_wrong_value_in_expression(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], ty: &str) {
         self.apply_error(origin, index, nodes, format!("wrong value in expression of type {} value: {:?}", ty, nodes[index].value))
@@ -40,14 +49,6 @@ impl LiveEvalError for Cx {
 
 
 impl Cx {
-    pub fn live_register(&mut self) {
-        crate::draw_2d::draw_quad::live_register(self);
-        crate::draw_2d::draw_color::live_register(self);
-        crate::draw_2d::draw_text::live_register(self);
-        crate::shader::geometry_gen::live_register(self);
-        crate::shader::std::live_register(self);
-        crate::font::live_register(self);
-    }
     
     pub fn apply_error_tuple_enum_arg_not_found(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], enum_id: LiveId, base: LiveId, arg: usize) {
         self.apply_error(origin, index, nodes, format!("tuple enum too many args for {}::{} arg no {}", enum_id, base, arg))
