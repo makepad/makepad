@@ -91,10 +91,6 @@ impl Cx {
     }
 
     
-    pub fn get_scroll_pos(&self) -> Vec2 {
-        let cxview = &self.views[*self.view_stack.last().unwrap()];
-        cxview.unsnapped_scroll
-    }
     
     pub fn redraw_pass_of(&mut self, area: Area) {
         // we walk up the stack of area
@@ -119,7 +115,7 @@ impl Cx {
                 CxPassDepOf::Pass(next_pass_id) => {
                     walk_pass_id = next_pass_id;
                 },
-                _ => {
+                _ => { 
                     break;
                 }
             }
@@ -142,65 +138,50 @@ impl Cx {
     }
     
     pub fn redraw_all(&mut self) {
-        self.new_redraw_all_views = true;
+        self.new_draw_event.redraw_all_views = true;
     }
     
     pub fn redraw_view_of(&mut self, area: Area) {
         if let Some(view_id) = area.view_id() {
-            if self.new_redraw_views.iter().position( | v | *v == view_id).is_some() {
+            if self.new_draw_event.redraw_views.iter().position( | v | *v == view_id).is_some() {
                 return;
             }
-            self.new_redraw_views.push(view_id);
+            self.new_draw_event.redraw_views.push(view_id);
         }
     }
     
     pub fn redraw_view_and_children_of(&mut self, area: Area) {
         if let Some(view_id) = area.view_id() {
-            if self.new_redraw_views_and_children.iter().position( | v | *v == view_id).is_some() {
+            if self.new_draw_event.redraw_views_and_children.iter().position( | v | *v == view_id).is_some() {
                 return;
             }
-            self.new_redraw_views_and_children.push(view_id);
+            self.new_draw_event.redraw_views_and_children.push(view_id);
+        }
+    }
+
+
+    pub fn set_view_scroll_x(&mut self, view_id: usize, scroll_pos: f32) {
+        let fac = self.get_delegated_dpi_factor(self.views[view_id].pass_id);
+        let cxview = &mut self.views[view_id];
+        cxview.unsnapped_scroll.x = scroll_pos;
+        let snapped = scroll_pos - scroll_pos % (1.0 / fac);
+        if cxview.snapped_scroll.x != snapped {
+            cxview.snapped_scroll.x = snapped;
+            self.passes[cxview.pass_id].paint_dirty = true;
         }
     }
     
-    pub fn is_xr_presenting(&mut self) -> bool {
-        if !self.in_redraw_cycle {
-            panic!("Cannot call is_xr_presenting outside of redraw flow");
-        }
-        if self.window_stack.len() == 0 {
-            panic!("Can only call is_xr_presenting inside of a window");
-        }
-        self.windows[*self.window_stack.last().unwrap()].window_geom.xr_is_presenting
-    }
     
-    pub fn view_will_redraw(&self, view_id: usize) -> bool {
-        
-        if self.redraw_all_views {
-            return true;
+    pub fn set_view_scroll_y(&mut self, view_id: usize, scroll_pos: f32) {
+        let fac = self.get_delegated_dpi_factor(self.views[view_id].pass_id);
+        let cxview = &mut self.views[view_id];
+        cxview.unsnapped_scroll.y = scroll_pos;
+        let snapped = scroll_pos - scroll_pos % (1.0 / fac);
+        if cxview.snapped_scroll.y != snapped {
+            cxview.snapped_scroll.y = snapped;
+            self.passes[cxview.pass_id].paint_dirty = true;
         }
-        // figure out if areas are in some way a child of view_id, then we need to redraw
-        for check_view_id in &self.redraw_views {
-            let mut next_vw = Some(*check_view_id);
-            while let Some(vw) = next_vw{
-                if vw == view_id {
-                    return true
-                }
-                next_vw = self.views[vw].codeflow_parent_id;
-            }
-        }
-        // figure out if areas are in some way a parent of view_id, then redraw
-        for check_view_id in &self.redraw_views_and_children {
-            let mut next_vw = Some(view_id);
-            while let Some(vw) = next_vw{
-                if vw == *check_view_id {
-                    return true
-                }
-                next_vw = self.views[vw].codeflow_parent_id;
-            }
-        }
-        false
     }
-    
     
     pub fn update_area_refs(&mut self, old_area: Area, new_area: Area) -> Area {
         if old_area == Area::Empty {
@@ -415,11 +396,6 @@ macro_rules!main_app {
                 if let Event::Construct = event {
                     app = Some( $ app::new_app(cx));
                 }
-                else if let Event::Draw = event {
-                    app.as_mut().unwrap().draw(cx);
-                    cx.after_draw();
-                    return
-                }
                 app.as_mut().unwrap().handle_event(cx, &mut event);
                 cx.after_handle_event(&mut event);
             });
@@ -444,11 +420,6 @@ macro_rules!main_app {
                 if let Event::Construct = event {
                     (*appcx.0) = Box::new( $ app::new_app(&mut cx));
                 }
-                else if let Event::Draw = event {
-                    (*appcx.0).draw(cx);
-                    cx.after_draw();
-                    return;
-                };
                 (*appcx.0).handle_event(cx, &mut event);
                 cx.after_handle_event(&mut event);
             })

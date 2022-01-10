@@ -85,7 +85,7 @@ pub enum FrameTemplateAction {
 
 impl FrameTemplate {
     
-    pub fn draw(&mut self, cx: &mut Cx) {
+    pub fn draw(&mut self, cx: &mut Cx2d) {
         self.bg_quad.begin(cx, self.layout);
         self.bg_quad.end(cx);
     }

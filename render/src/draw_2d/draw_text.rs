@@ -6,10 +6,11 @@ use {
     },
     crate::{
         cx::Cx,
+        draw_2d::cx_2d::Cx2d,
         live_traits::*,
-        turtle::{Walk, Width, Height, Margin},
+        draw_2d::turtle::{Walk, Width, Height, Margin},
         font::{CxFontsAtlasTodo, Font,},
-        view::ManyInstances,
+        draw_2d::view::ManyInstances,
         draw_vars::DrawVars,
         shader::geometry_gen::GeometryQuad2D,
     },
@@ -174,36 +175,36 @@ impl DrawText {
         }
     }
     
-    pub fn draw(&mut self, cx: &mut Cx, pos: Vec2) {
+    pub fn draw(&mut self, cx: &mut Cx2d, pos: Vec2) {
         self.draw_chunk(cx, pos, 0, None);
     }
     
-    pub fn draw_rel(&mut self, cx: &mut Cx, pos: Vec2, val: &str) {
+    pub fn draw_rel(&mut self, cx: &mut Cx2d, pos: Vec2, val: &str) {
         self.buf.clear();
         self.buf_push_str(val);
         self.draw(cx, pos + cx.get_turtle_origin());
     }
     
-    pub fn draw_abs(&mut self, cx: &mut Cx, pos: Vec2, val: &str) {
+    pub fn draw_abs(&mut self, cx: &mut Cx2d, pos: Vec2, val: &str) {
         self.buf.clear();
         self.buf_push_str(val);
         self.draw(cx, pos);
     }
     
-    pub fn begin_many_instances(&mut self, cx: &mut Cx) {
+    pub fn begin_many_instances(&mut self, cx: &mut Cx2d) {
         self.update_draw_call_vars(cx);
         let mi = cx.begin_many_aligned_instances(&self.draw_vars);
         self.many_instances = mi;
     }
     
-    pub fn end_many_instances(&mut self, cx: &mut Cx) {
+    pub fn end_many_instances(&mut self, cx: &mut Cx2d) {
         if let Some(mi) = self.many_instances.take() {
             let new_area = cx.end_many_instances(mi);
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
         }
     }
 
-    pub fn new_draw_call(&self, cx:&mut Cx){
+    pub fn new_draw_call(&self, cx:&mut Cx2d){
         cx.new_draw_call(&self.draw_vars);
     }
     
@@ -213,7 +214,7 @@ impl DrawText {
         self.draw_vars.user_uniforms[1] = self.text_style.curve;
     }
     
-    pub fn draw_chunk(&mut self, cx: &mut Cx, pos: Vec2, char_offset: usize, chunk: Option<&[char]>)
+    pub fn draw_chunk(&mut self, cx: &mut Cx2d, pos: Vec2, char_offset: usize, chunk: Option<&[char]>)
     {
         if !self.draw_vars.can_instance()
             || pos.x.is_nan()
@@ -238,7 +239,7 @@ impl DrawText {
         let mut walk_x = pos.x;
         let mut char_offset = char_offset;
         
-        let cxfont = cx.fonts[font_id].as_mut().unwrap();
+        let cxfont = cx.cx.fonts[font_id].as_mut().unwrap();
         let dpi_factor = cx.current_dpi_factor;
         
         let atlas_page_id = cxfont.get_atlas_page_id(dpi_factor, self.text_style.font_size);
@@ -299,7 +300,7 @@ impl DrawText {
             else {
                 // see if we can fit it
                 // allocate slot
-                cx.fonts_atlas.atlas_todo.push(CxFontsAtlasTodo {
+                cx.cx.fonts_atlas.atlas_todo.push(CxFontsAtlasTodo {
                     subpixel_x_fract,
                     subpixel_y_fract,
                     font_id,
@@ -309,7 +310,7 @@ impl DrawText {
                 });
                 
                 atlas_page.atlas_glyphs[glyph_id][subpixel_id] = Some(
-                    cx.fonts_atlas.alloc_atlas_glyph(w, h)
+                    cx.cx.fonts_atlas.alloc_atlas_glyph(w, h)
                 );
                 
                 atlas_page.atlas_glyphs[glyph_id][subpixel_id].as_ref().unwrap()
@@ -338,7 +339,7 @@ impl DrawText {
         }
     }
     
-    pub fn draw_walk(&mut self, cx: &mut Cx, text: &str) {
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, text: &str) {
         
         if !self.draw_vars.can_instance()
             || self.text_style.font.font_id.is_none() {

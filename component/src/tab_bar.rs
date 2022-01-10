@@ -74,7 +74,7 @@ impl LiveHook for TabBar{
 }
 
 impl TabBar {
-    pub fn begin(&mut self, cx: &mut Cx, selected_tab:Option<usize>) -> Result<(), ()> {
+    pub fn begin(&mut self, cx: &mut Cx2d, selected_tab:Option<usize>) -> Result<(), ()> {
         self.selected_tab = selected_tab;
         //if selected_tab.is_some(){
         //    self.selected_tab_id = None
@@ -84,7 +84,7 @@ impl TabBar {
         Ok(())
     }
     
-    pub fn end(&mut self, cx: &mut Cx) {
+    pub fn end(&mut self, cx: &mut Cx2d) {
         if self.is_dragged {
             self.draw_drag.draw_walk(
                 cx,
@@ -100,7 +100,7 @@ impl TabBar {
         self.scroll_view.end(cx);
     }
     
-    pub fn draw_tab(&mut self, cx: &mut Cx, tab_id: TabId, name: &str) {
+    pub fn draw_tab(&mut self, cx: &mut Cx2d, tab_id: TabId, name: &str) {
         if let Some(selected_tab) = self.selected_tab{
             let tab_order_len = self.tab_order.len();
             let tab = self.get_or_create_tab(cx, tab_id);

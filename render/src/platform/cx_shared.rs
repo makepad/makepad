@@ -9,6 +9,7 @@ use {
             CxPassDepOf
         },
         event::{
+            DrawEvent,
             SignalEvent,
             TriggerEvent,
             Event,
@@ -98,9 +99,9 @@ impl Cx {
     }
     
     pub (crate) fn any_views_need_redrawing(&self) -> bool {
-        self.new_redraw_all_views
-            || self.new_redraw_views.len() != 0
-            || self.new_redraw_views_and_children.len() != 0
+        self.new_draw_event.redraw_all_views
+            || self.new_draw_event.redraw_views.len() != 0
+            || self.new_draw_event.redraw_views_and_children.len() != 0
     }
     
     pub (crate) fn process_key_down(&mut self, key_event: KeyEvent) {
@@ -197,38 +198,12 @@ impl Cx {
     
     pub (crate) fn call_draw_event(&mut self)
     {
-        // self.profile();
-        self.in_redraw_cycle = true;
         self.redraw_id += 1;
         
-        std::mem::swap(&mut self.redraw_views, &mut self.new_redraw_views);
-        std::mem::swap(&mut self.redraw_views_and_children, &mut self.new_redraw_views_and_children);
-        self.redraw_all_views = self.new_redraw_all_views;
-        
-        self.new_redraw_all_views = false;
-        self.new_redraw_views.clear();
-        self.new_redraw_views_and_children.clear();
-        
-        //println!("{:?}, {:?}, {:?}", self.redraw_views, self.redraw_views_and_children, self.redraw_all_views);
-        
-        self.align_list.clear();
-        
-        self.call_event_handler(&mut Event::Draw);
-        
-        self.in_redraw_cycle = false;
-        
-        if self.view_stack.len()>0 {
-            panic!("View stack disaligned, forgot an end_view(cx)");
-        }
-        if self.pass_stack.len()>0 {
-            panic!("Pass stack disaligned, forgot an end_pass(cx)");
-        }
-        if self.window_stack.len()>0 {
-            panic!("Window stack disaligned, forgot an end_window(cx)");
-        }
-        if self.turtles.len()>0 {
-            panic!("Turtle stack disaligned, forgot an end_turtle()");
-        }
+        let mut draw_event = DrawEvent::default();
+        std::mem::swap(&mut draw_event, &mut self.new_draw_event);
+
+        self.call_event_handler(&mut Event::Draw(draw_event));
     }
     
     pub (crate) fn call_next_frame_event(&mut self, time: f64)

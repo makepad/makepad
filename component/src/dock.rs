@@ -101,12 +101,12 @@ impl LiveHook for Dock {
 
 impl Dock {
     
-    pub fn begin(&mut self, cx: &mut Cx) -> Result<(), ()> {
+    pub fn begin(&mut self, cx: &mut Cx2d) -> Result<(), ()> {
         self.view.begin(cx) ?;
         Ok(())
     }
     
-    pub fn end(&mut self, cx: &mut Cx) {
+    pub fn end(&mut self, cx: &mut Cx2d) {
         if self .overlay_view.begin(cx).is_ok() {
             if let Some(drag) = self.drag.as_ref() {
                 let panel = self.panels[drag.panel_id].as_tab_panel();
@@ -156,7 +156,7 @@ impl Dock {
         self.view.end(cx);
     }
     
-    pub fn begin_split_panel(&mut self, cx: &mut Cx, panel_id: PanelId, axis: Axis, align: SplitterAlign) {
+    pub fn begin_split_panel(&mut self, cx: &mut Cx2d, panel_id: PanelId, axis: Axis, align: SplitterAlign) {
         let panel = self.get_or_create_split_panel(cx, panel_id);
         panel.splitter.set_axis(axis);
         panel.splitter.set_align(align);
@@ -164,28 +164,28 @@ impl Dock {
         self.panel_id_stack.push(panel_id);
     }
     
-    pub fn middle_split_panel(&mut self, cx: &mut Cx) {
+    pub fn middle_split_panel(&mut self, cx: &mut Cx2d) {
         let panel_id = *self.panel_id_stack.last().unwrap();
         let panel = self.panels[panel_id].as_split_panel_mut();
         panel.splitter.middle(cx);
     }
     
-    pub fn end_split_panel(&mut self, cx: &mut Cx) {
+    pub fn end_split_panel(&mut self, cx: &mut Cx2d) {
         let panel_id = self.panel_id_stack.pop().unwrap();
         let panel = self.panels[panel_id].as_split_panel_mut();
         panel.splitter.end(cx);
     }
     
-    pub fn begin_tab_panel(&mut self, cx: &mut Cx, panel_id: PanelId) {
+    pub fn begin_tab_panel(&mut self, cx: &mut Cx2d, panel_id: PanelId) {
         self.get_or_create_tab_panel(cx, panel_id);
         self.panel_id_stack.push(panel_id);
     }
     
-    pub fn end_tab_panel(&mut self, _cx: &mut Cx) {
+    pub fn end_tab_panel(&mut self, _cx: &mut Cx2d) {
         let _ = self.panel_id_stack.pop().unwrap();
     }
     
-    pub fn begin_tab_bar(&mut self, cx: &mut Cx, selected_tab: Option<usize>) -> Result<(), ()> {
+    pub fn begin_tab_bar(&mut self, cx: &mut Cx2d, selected_tab: Option<usize>) -> Result<(), ()> {
         let panel_id = *self.panel_id_stack.last().unwrap();
         let panel = self.panels[panel_id].as_tab_panel_mut();
         panel.full_rect = cx.get_turtle_rect();
@@ -197,14 +197,14 @@ impl Dock {
         Ok(())
     }
     
-    pub fn end_tab_bar(&mut self, cx: &mut Cx) {
+    pub fn end_tab_bar(&mut self, cx: &mut Cx2d) {
         let panel_id = *self.panel_id_stack.last().unwrap();
         let panel = self.panels[panel_id].as_tab_panel_mut();
         panel.tab_bar.end(cx);
         self.contents(cx);
     }
     
-    pub fn draw_tab(&mut self, cx: &mut Cx, tab_id: TabId, name: &str) {
+    pub fn draw_tab(&mut self, cx: &mut Cx2d, tab_id: TabId, name: &str) {
         let panel_id = *self.panel_id_stack.last().unwrap();
         let panel = self.panels[panel_id].as_tab_panel_mut();
         panel.tab_bar.draw_tab(cx, tab_id, name);
@@ -216,7 +216,7 @@ impl Dock {
         self.redraw(cx);
     }
     
-    fn contents(&mut self, cx: &mut Cx) {
+    fn contents(&mut self, cx: &mut Cx2d) {
         let panel_id = *self.panel_id_stack.last().unwrap();
         let panel = self.panels[panel_id].as_tab_panel_mut();
         cx.turtle_new_line();

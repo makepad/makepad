@@ -282,7 +282,7 @@ impl FileTreeNode {
         self.name_text.font_scale = scale;
     }
     
-    pub fn draw_folder(&mut self, cx: &mut Cx, name: &str, is_even: f32, node_height: f32, depth: usize, scale: f32) {
+    pub fn draw_folder(&mut self, cx: &mut Cx2d, name: &str, is_even: f32, node_height: f32, depth: usize, scale: f32) {
         self.set_draw_state(is_even, scale);
         
         self.layout.walk.height = Height::Fixed(scale * node_height);
@@ -298,7 +298,7 @@ impl FileTreeNode {
         self.bg_quad.end(cx);
     }
     
-    pub fn draw_file(&mut self, cx: &mut Cx, name: &str, is_even: f32, node_height: f32, depth: usize, scale: f32) {
+    pub fn draw_file(&mut self, cx: &mut Cx2d, name: &str, is_even: f32, node_height: f32, depth: usize, scale: f32) {
         self.set_draw_state(is_even, scale);
         
         self.layout.walk.height = Height::Fixed(scale * node_height);
@@ -382,13 +382,13 @@ impl FileTreeNode {
 
 impl FileTree {
     
-    pub fn begin(&mut self, cx: &mut Cx) -> Result<(), ()> {
+    pub fn begin(&mut self, cx: &mut Cx2d) -> Result<(), ()> {
         self.scroll_view.begin(cx) ?;
         self.count = 0;
         Ok(())
     }
     
-    pub fn end(&mut self, cx: &mut Cx) {
+    pub fn end(&mut self, cx: &mut Cx2d) {
         // lets fill the space left with blanks
         let height_left = cx.get_height_left();
         let mut walk = 0.0;
@@ -414,7 +414,7 @@ impl FileTree {
         if count % 2 == 1 {0.0}else {1.0}
     }
     
-    pub fn should_node_draw(&mut self, cx: &mut Cx) -> bool {
+    pub fn should_node_draw(&mut self, cx: &mut Cx2d) -> bool {
         let scale = self.stack.last().cloned().unwrap_or(1.0);
         let height = self.node_height * scale;
         if scale > 0.01 && cx.turtle_line_is_visible(height, self.scroll_view.get_scroll_pos(cx)) {
@@ -432,7 +432,7 @@ impl FileTree {
     
     pub fn begin_folder(
         &mut self,
-        cx: &mut Cx,
+        cx: &mut Cx2d,
         node_id: FileNodeId,
         name: &str,
     ) -> Result<(), ()> {
@@ -476,7 +476,7 @@ impl FileTree {
         self.stack.pop();
     }
     
-    pub fn file(&mut self, cx: &mut Cx, node_id: FileNodeId, name: &str) {
+    pub fn file(&mut self, cx: &mut Cx2d, node_id: FileNodeId, name: &str) {
         let scale = self.stack.last().cloned().unwrap_or(1.0);
         
         if scale > 0.2 {

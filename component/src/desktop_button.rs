@@ -159,7 +159,7 @@ impl DesktopButton {
         res.action
     }
     
-    pub fn draw_desktop_button(&mut self, cx: &mut Cx, ty: DesktopButtonType) {
+    pub fn draw_desktop_button(&mut self, cx: &mut Cx2d, ty: DesktopButtonType) {
         let (w, h) = match ty {
             DesktopButtonType::WindowsMin
                 | DesktopButtonType::WindowsMax

@@ -47,7 +47,7 @@ impl EditorView {
         }
     }
     
-    pub fn draw(&mut self, cx: &mut Cx, state: &EditorState) {
+    pub fn draw(&mut self, cx: &mut Cx2d, state: &EditorState) {
         match self {
             Self::LiveEditor(e) => e.draw(cx, state)
         }
@@ -107,7 +107,7 @@ impl LiveHook for Editors{
 
 impl Editors {
     
-    pub fn draw(&mut self, cx: &mut Cx, state: &EditorState, view_id: EditorViewId) {
+    pub fn draw(&mut self, cx: &mut Cx2d, state: &EditorState, view_id: EditorViewId) {
         let view = &mut self.editor_views[view_id];
         view.draw(cx, state);
     }

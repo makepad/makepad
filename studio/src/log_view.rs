@@ -29,7 +29,7 @@ impl LogView {
         self.fold_list.redraw(cx)
     }
     
-    pub fn draw(&mut self, cx: &mut Cx, _editor_state: &EditorState) {
+    pub fn draw(&mut self, cx: &mut Cx2d, _editor_state: &EditorState) {
         if self.fold_list.begin(cx).is_ok(){
             self.fold_list.end(cx);
         }
