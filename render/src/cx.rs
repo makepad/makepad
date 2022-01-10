@@ -104,8 +104,6 @@ pub struct Cx {
     pub path_to_font_id: HashMap<String, usize>,
     pub draw_font_atlas: Option<Box<CxDrawFontAtlas >>,
     
-    pub default_dpi_factor: f32,
-    
     pub registries: CxRegistries,
     
     pub new_draw_event: DrawEvent,
@@ -240,7 +238,7 @@ impl Default for Cx {
             path_to_font_id: HashMap::new(),
             draw_font_atlas: None,
             
-            default_dpi_factor: 1.0,
+            //default_dpi_factor: 1.0,
             
             registries: CxRegistries::new(),
             

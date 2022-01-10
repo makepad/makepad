@@ -158,12 +158,12 @@ impl DrawCall {
 
 #[derive(Default, Clone)]
 #[repr(C)]
-pub struct ViewUniforms {
+pub struct DrawListUniforms {
     pub view_transform: [f32; 16],
 }
 
-impl ViewUniforms {
-    pub fn as_slice(&self) -> &[f32; std::mem::size_of::<ViewUniforms>()] {
+impl DrawListUniforms {
+    pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawListUniforms>()] {
         unsafe {std::mem::transmute(self)}
     }
 }
@@ -196,15 +196,11 @@ pub struct DrawList {
     pub draw_items: Vec<DrawItem>,
     pub draw_items_len: usize,
     
-    pub view_uniforms: ViewUniforms,
+    pub draw_list_uniforms: DrawListUniforms,
     pub platform: CxPlatformView,
     
     pub rect: Rect,
     pub is_clipped: bool,
-    pub is_overlay: bool,
-    pub always_redraw: bool,
-    
-    pub layout: Layout,
     
     pub debug: Option<DrawListDebug>
 }
@@ -310,7 +306,7 @@ impl DrawList {
     pub fn uniform_view_transform(&mut self, v: &Mat4) {
         //dump in uniforms
         for i in 0..16 {
-            self.view_uniforms.view_transform[i] = v.v[i];
+            self.draw_list_uniforms.view_transform[i] = v.v[i];
         }
     }
     
@@ -318,7 +314,7 @@ impl DrawList {
         //dump in uniforms
         let mut m = Mat4::default();
         for i in 0..16 {
-            m.v[i] = self.view_uniforms.view_transform[i];
+            m.v[i] = self.draw_list_uniforms.view_transform[i];
         }
         m
     }
