@@ -1,6 +1,6 @@
 use {
     std::{
-        collections::HashMap
+        collections::{HashMap, HashSet}
     },
     makepad_shader_compiler::makepad_live_compiler::LiveEditEvent,
     crate::{
@@ -92,12 +92,40 @@ impl DrawEvent{
             || self.draw_lists.len() != 0
             || self.draw_lists_and_children.len() != 0
     }
+    
+    pub fn draw_list_will_redraw(&self, cx:&Cx, draw_list_id:usize)->bool{
+         if self.redraw_all {
+            return true;
+        }
+        // figure out if areas are in some way a child of view_id, then we need to redraw
+        for check_draw_list_id in &self.draw_lists {
+            let mut next = Some(*check_draw_list_id);
+            while let Some(vw) = next{
+                if vw == draw_list_id {
+                    return true
+                }
+                next = cx.draw_lists[vw].codeflow_parent_id;
+            }
+        }
+        // figure out if areas are in some way a parent of view_id, then redraw
+        for check_draw_list_id in &self.draw_lists_and_children {
+            let mut next = Some(draw_list_id);
+            while let Some(vw) = next{
+                if vw == *check_draw_list_id {
+                    return true
+                }
+                next = cx.draw_lists[vw].codeflow_parent_id;
+            }
+        }
+        false
+    }
 }
 
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct NextFrameEvent {
     pub frame: u64,
-    pub time: f64
+    pub time: f64,
+    pub set: HashSet<NextFrame>
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -190,11 +218,11 @@ impl Event {
         }
     }
     
-    pub fn is_next_frame(&self, cx: &mut Cx, next_frame: NextFrame) -> Option<NextFrameEvent> {
+    pub fn is_next_frame<'a>(&'a self, next_frame: NextFrame) -> Option<&'a NextFrameEvent> {
         match self {
             Event::NextFrame(fe) => {
-                if cx.next_frames.contains(&next_frame) {
-                    return Some(fe.clone())
+                if fe.set.contains(&next_frame) {
+                    return Some(&fe)
                 }
             }
             _ => ()
