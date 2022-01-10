@@ -223,7 +223,7 @@ impl Area {
                     if let Some(rect_size) = sh.mapping.rect_size {
                         let w = buf[inst.instance_offset + rect_size + 0];
                         let h = buf[inst.instance_offset + rect_size + 1];
-                        return draw_call.clip_and_scroll_rect(x, y, w, h);
+                        return draw_call.draw_uniforms.clip_and_scroll_rect(x, y, w, h);
                     }
                 }
                 Rect::default()
