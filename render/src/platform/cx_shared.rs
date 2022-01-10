@@ -98,10 +98,8 @@ impl Cx {
         }
     }
     
-    pub (crate) fn any_views_need_redrawing(&self) -> bool {
-        self.new_draw_event.redraw_all_views
-            || self.new_draw_event.redraw_views.len() != 0
-            || self.new_draw_event.redraw_views_and_children.len() != 0
+    pub (crate) fn need_redrawing(&self) -> bool {
+        self.new_draw_event.will_redraw()
     }
     
     pub (crate) fn process_key_down(&mut self, key_event: KeyEvent) {

@@ -205,12 +205,12 @@ impl Tab {
             DragEvent::FingerDrag(f) => match f.state {
                 DragState::In => {
                     self.is_dragged = true;
-                    self.bg_quad.draw_vars.redraw_view(cx);
+                    self.bg_quad.draw_vars.redraw(cx);
                     *f.action = DragAction::Copy;
                 }
                 DragState::Out => {
                     self.is_dragged = false;
-                    self.bg_quad.draw_vars.redraw_view(cx);
+                    self.bg_quad.draw_vars.redraw(cx);
                 }
                 DragState::Over => match event {
                     Event::FingerDrag(event) => {
@@ -221,7 +221,7 @@ impl Tab {
             },
             DragEvent::FingerDrop(f) => {
                 self.is_dragged = false;
-                self.bg_quad.draw_vars.redraw_view(cx);
+                self.bg_quad.draw_vars.redraw(cx);
                 dispatch_action(cx, TabAction::ReceivedDraggedItem(f.dragged_item.clone()))
             }
             _ => {}
