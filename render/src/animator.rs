@@ -490,7 +490,7 @@ impl Animator {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> AnimatorAction {
         
-        if let Some(nf) = event.is_next_frame(cx, self.next_frame) {
+        if let Some(nf) = event.is_next_frame(self.next_frame) {
             
             let state_nodes = self.state.as_mut().unwrap();
             

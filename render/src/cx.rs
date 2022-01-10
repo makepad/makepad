@@ -128,7 +128,6 @@ pub struct Cx {
     pub new_drag_area: Area,
     
     pub new_next_frames: HashSet<NextFrame>,
-    pub next_frames: HashSet<NextFrame>,
     
     pub signals: HashMap<Signal, Vec<u64 >>,
     pub triggers: HashMap<Area, Vec<u64 >>,
@@ -238,8 +237,6 @@ impl Default for Cx {
             path_to_font_id: HashMap::new(),
             draw_font_atlas: None,
             
-            //default_dpi_factor: 1.0,
-            
             registries: CxRegistries::new(),
             
             new_draw_event: DrawEvent::default(),
@@ -264,7 +261,6 @@ impl Default for Cx {
             new_drag_area: Area::Empty,
             
             new_next_frames: HashSet::new(),
-            next_frames: HashSet::new(),
             
             signals: HashMap::new(),
             triggers: HashMap::new(),
