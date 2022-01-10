@@ -10,6 +10,7 @@ pub use {
             WindowGeom
         },
         area::Area,
+        pass::{Pass,CxPassDepOf},
         cx::Cx,
         live_traits::*,
     }
@@ -108,13 +109,18 @@ impl LiveApply for Window {
 
 
 impl Window {
-
+    
+    pub fn set_pass(&self, cx:&mut Cx, pass:&Pass){
+        cx.windows[self.window_id].main_pass_id = Some(pass.pass_id);
+        cx.passes[pass.pass_id].dep_of = CxPassDepOf::Window(self.window_id);
+    }
+/*
     pub fn begin(&mut self, cx: &mut Cx) {
         // if we are not at ground level for viewports,
         cx.windows[self.window_id].main_pass_id = None;
         cx.window_stack.push(self.window_id);
         
-    }
+    }*/
     
     pub fn get_inner_size(&mut self, cx: &mut Cx) -> Vec2 {
         return cx.windows[self.window_id].get_inner_size()
@@ -139,11 +145,11 @@ impl Window {
             cx.redraw_pass_and_sub_passes(pass_id);
         }
     }*/
-    
+    /*
     pub fn end(&mut self, cx: &mut Cx) -> Area {
         cx.window_stack.pop();
         Area::Empty
-    }
+    }*/
     
     pub fn minimize(&mut self, cx: &mut Cx) {
         cx.windows[self.window_id].window_command = CxWindowCmd::Minimize;

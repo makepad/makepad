@@ -115,13 +115,13 @@ pub struct Splitter {
 
 impl Splitter {
     
-    pub fn begin(&mut self, cx: &mut Cx) {
+    pub fn begin(&mut self, cx: &mut Cx2d) {
         self.rect = cx.get_turtle_padded_rect();
         self.position = self.align.to_position(self.axis, self.rect);
         cx.begin_turtle(self.layout());
     }
     
-    pub fn middle(&mut self, cx: &mut Cx) {
+    pub fn middle(&mut self, cx: &mut Cx2d) {
         cx.end_turtle();
         match self.axis {
             Axis::Horizontal => {
@@ -156,7 +156,7 @@ impl Splitter {
         cx.begin_turtle(Layout::default());
     }
     
-    pub fn end(&mut self, cx: &mut Cx) {
+    pub fn end(&mut self, cx: &mut Cx2d) {
         cx.end_turtle();
     }
     

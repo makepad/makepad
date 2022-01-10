@@ -4,7 +4,7 @@ use {
     crate::{
         cx::Cx,
         live_traits::*,
-        shader::draw_quad::DrawQuad
+        draw_2d::draw_quad::DrawQuad
     },
 };
 

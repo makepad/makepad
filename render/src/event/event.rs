@@ -22,8 +22,8 @@ pub enum Event {
     None,
     Construct,
     Destruct,
-    Draw,
     Paint,
+    Draw(DrawEvent),
     LiveEdit(LiveEditEvent),
     AppFocus,
     AppFocusLost,
@@ -77,6 +77,13 @@ pub enum DragEvent<'a>{
     FingerDrop(FingerDropHitEvent<'a>),
     DragEnd,
     None
+}
+
+#[derive(Clone, Default, Debug, PartialEq)]
+pub struct DrawEvent {
+    pub redraw_views: Vec<usize>,
+    pub redraw_views_and_children: Vec<usize>,
+    pub redraw_all_views: bool,
 }
 
 #[derive(Clone, Default, Debug, PartialEq)]

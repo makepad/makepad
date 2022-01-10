@@ -87,7 +87,7 @@ impl InlineWidget for InlineColorPicker {
         InlineWidgetAction::None
     }
     
-    fn draw_widget(&mut self, cx: &mut Cx, live_registry: &LiveRegistry, bind: InlineEditBind) {
+    fn draw_widget(&mut self, cx: &mut Cx2d, live_registry: &LiveRegistry, bind: InlineEditBind) {
         let node = live_registry.ptr_to_node(bind.live_ptr);
         // alright so
         let color = match &node.value{

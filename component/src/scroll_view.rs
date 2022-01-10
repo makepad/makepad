@@ -165,7 +165,7 @@ impl ScrollView{
         }
     }
     
-    pub fn end(&mut self, cx: &mut Cx) -> Area {
+    pub fn end(&mut self, cx: &mut Cx2d) -> Area {
 
         let view_id = self.view.view_id;
         let view_area = Area::View(ViewArea {view_id: view_id, redraw_id: cx.redraw_id});

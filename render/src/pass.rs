@@ -84,46 +84,6 @@ impl LiveApply for Pass {
 }
 
 impl Pass {
-
-    pub fn begin(&mut self, cx: &mut Cx) {
-        
-        
-        if let Some(window_id) = cx.window_stack.last() {
-            if cx.windows[*window_id].main_pass_id.is_none() { // we are the main pass of a window
-                let cxpass = &mut cx.passes[self.pass_id];
-                cx.windows[*window_id].main_pass_id = Some(self.pass_id);
-                cxpass.dep_of = CxPassDepOf::Window(*window_id);
-                cxpass.pass_size = cx.windows[*window_id].get_inner_size();
-                cx.current_dpi_factor = cx.get_delegated_dpi_factor(self.pass_id);
-            }
-            else if let Some(dep_of_pass_id) = cx.pass_stack.last() { 
-                let dep_of_pass_id = *dep_of_pass_id;
-                cx.passes[self.pass_id].dep_of = CxPassDepOf::Pass(dep_of_pass_id);
-                cx.passes[self.pass_id].pass_size = cx.passes[dep_of_pass_id].pass_size;
-                cx.current_dpi_factor = cx.get_delegated_dpi_factor(dep_of_pass_id);
-            }
-            else {
-                cx.passes[self.pass_id].dep_of = CxPassDepOf::None;
-                cx.passes[self.pass_id].override_dpi_factor = Some(1.0);
-                cx.current_dpi_factor = 1.0;
-            }
-        }
-        else {
-            cx.passes[self.pass_id].dep_of = CxPassDepOf::None;
-            cx.passes[self.pass_id].override_dpi_factor = Some(1.0);
-            cx.current_dpi_factor = 1.0;
-        }
-        
-        let cxpass = &mut cx.passes[self.pass_id];
-        cxpass.main_view_id = None;
-        cxpass.color_textures.truncate(0);
-        cx.pass_stack.push(self.pass_id);
-    }
-    
-    pub fn override_dpi_factor(&mut self, cx: &mut Cx, dpi_factor:f32){
-        cx.passes[self.pass_id].override_dpi_factor = Some(dpi_factor);
-        cx.current_dpi_factor = dpi_factor;
-    }
     
     pub fn make_dep_of_pass(&mut self, cx: &mut Cx, pass: &Pass) {
         let cxpass = &mut cx.passes[pass.pass_id];
@@ -141,6 +101,11 @@ impl Pass {
     pub fn set_window_clear_color(&mut self, cx: &mut Cx, clear_color: Vec4) {
         let cxpass = &mut cx.passes[self.pass_id];
         cxpass.clear_color = clear_color;
+    }
+    
+    pub fn clear_color_textures(&mut self, cx: &mut Cx) {
+        let cxpass = &mut cx.passes[self.pass_id];
+        cxpass.color_textures.truncate(0);
     }
     
     pub fn add_color_texture(&mut self, cx: &mut Cx, texture: &Texture, clear_color: PassClearColor) {
@@ -168,18 +133,6 @@ impl Pass {
         cxpass.debug = debug;
     }
 
-    
-    pub fn end(&mut self, cx: &mut Cx) {
-        cx.pass_stack.pop();
-        if cx.pass_stack.len()>0{
-            cx.current_dpi_factor = cx.get_delegated_dpi_factor(*cx.pass_stack.last().unwrap());
-        }
-    }
-    /*
-    pub fn redraw_pass_area(&mut self, cx: &mut Cx) {
-        cx.redraw_pass_and_child_passes(self.pass_id);
-    }*/
-    
 }
 
 #[derive(Clone)]

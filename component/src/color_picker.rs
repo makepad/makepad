@@ -253,7 +253,7 @@ impl ColorPicker {
         ColorPickerAction::None
     }
     
-    pub fn draw(&mut self, cx: &mut Cx, rgba: Vec4, height_scale: f32) {
+    pub fn draw(&mut self, cx: &mut Cx2d, rgba: Vec4, height_scale: f32) {
         if self.drag_mode == ColorPickerDragMode::None {
             // lets convert to rgba
             let old_rgba = self.to_rgba();

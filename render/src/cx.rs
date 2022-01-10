@@ -8,7 +8,7 @@ use {
         rc::Rc,
         rc::Weak,
         cell::RefCell,
-    },
+   },
     makepad_shader_compiler::makepad_live_compiler::{
         id,
         LiveId,
@@ -30,6 +30,7 @@ use {
             CxPlatformTexture,
         },
         event::{
+            DrawEvent,
             CxPerFinger,
             NUM_FINGERS,
             Event,
@@ -51,10 +52,10 @@ use {
         window::{
             CxWindow,
         },
+        draw_list::CxView,
         pass::{
             CxPass,
         },
-        view::CxView,
         font::{
             CxFont,
             CxFontsAtlas,
@@ -70,16 +71,11 @@ use {
             CxGeometry,
             GeometryFingerprint
         },
-        turtle::Turtle,
     }
 };
 
 pub use makepad_shader_compiler::makepad_derive_live::*;
 pub use makepad_shader_compiler::makepad_math::*;
-
-pub struct CxDraw<'a> {
-    pub cx:&'a mut Cx
-}
 
 pub struct Cx {
     pub platform_type: PlatformType,
@@ -108,23 +104,11 @@ pub struct Cx {
     pub path_to_font_id: HashMap<String, usize>,
     pub draw_font_atlas: Option<Box<CxDrawFontAtlas >>,
     
-    pub in_redraw_cycle: bool,
     pub default_dpi_factor: f32,
-    pub current_dpi_factor: f32,
-    pub window_stack: Vec<usize>,
-    pub pass_stack: Vec<usize>,
-    pub view_stack: Vec<usize>,
-    pub turtles: Vec<Turtle>,
-    pub align_list: Vec<Area>,
     
     pub registries: CxRegistries,
     
-    pub new_redraw_views: Vec<usize>,
-    pub new_redraw_views_and_children: Vec<usize>,
-    pub new_redraw_all_views: bool,
-    pub redraw_views: Vec<usize>,
-    pub redraw_views_and_children: Vec<usize>,
-    pub redraw_all_views: bool,
+    pub new_draw_event: DrawEvent,
     
     pub redraw_id: u64,
     pub repaint_id: u64,
@@ -256,23 +240,11 @@ impl Default for Cx {
             path_to_font_id: HashMap::new(),
             draw_font_atlas: None,
             
-            in_redraw_cycle: false,
             default_dpi_factor: 1.0,
-            current_dpi_factor: 1.0,
-            window_stack: Vec::new(),
-            pass_stack: Vec::new(),
-            view_stack: Vec::new(),
-            turtles: Vec::new(),
-            align_list: Vec::new(),
-            
-            new_redraw_views: Vec::new(),
-            new_redraw_views_and_children: Vec::new(),
-            new_redraw_all_views: true,
-            redraw_views: Vec::new(),
-            redraw_views_and_children: Vec::new(),
-            redraw_all_views: true,
             
             registries: CxRegistries::new(),
+            
+            new_draw_event: DrawEvent::default(),
             
             redraw_id: 1,
             event_id: 1,

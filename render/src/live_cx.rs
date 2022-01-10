@@ -41,9 +41,9 @@ impl LiveEvalError for Cx {
 
 impl Cx {
     pub fn live_register(&mut self) {
-        crate::shader::draw_quad::live_register(self);
-        crate::shader::draw_color::live_register(self);
-        crate::shader::draw_text::live_register(self);
+        crate::draw_2d::draw_quad::live_register(self);
+        crate::draw_2d::draw_color::live_register(self);
+        crate::draw_2d::draw_text::live_register(self);
         crate::shader::geometry_gen::live_register(self);
         crate::shader::std::live_register(self);
         crate::font::live_register(self);

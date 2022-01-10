@@ -135,7 +135,7 @@ impl Tab {
         self.toggle_animator(cx, is_selected, animate, self.selected_state, self.unselected_state);
     }
     
-    pub fn draw(&mut self, cx: &mut Cx, name: &str) {
+    pub fn draw(&mut self, cx: &mut Cx2d, name: &str) {
         //self.bg_quad.color = self.color(self.is_selected);
         self.bg_quad.begin(cx, self.layout);
         //self.name_text.color = self.name_color(self.is_selected);

@@ -143,7 +143,7 @@ impl LiveEditor {
         self.editor_impl.redraw(cx);
     }
     
-    pub fn draw_widgets(&mut self, cx: &mut Cx) {
+    pub fn draw_widgets(&mut self, cx: &mut Cx2d) {
         let live_registry_rc = cx.live_registry.clone();
         let live_registry = live_registry_rc.borrow();
         
@@ -184,7 +184,7 @@ impl LiveEditor {
         }
     }
     
-    pub fn draw_fold_buttons(&mut self, cx: &mut Cx, document_inner: &DocumentInner) {
+    pub fn draw_fold_buttons(&mut self, cx: &mut Cx2d, document_inner: &DocumentInner) {
         let mut last_line = None;
         let origin = cx.get_turtle_pos();
         
@@ -209,7 +209,7 @@ impl LiveEditor {
         self.fold_buttons.retain_visible();
     }
     
-    pub fn calc_layout_with_widgets(&mut self, cx: &mut Cx, path: &str, document_inner: &DocumentInner) {
+    pub fn calc_layout_with_widgets(&mut self, cx: &mut Cx2d, path: &str, document_inner: &DocumentInner) {
         let mut inline_cache = document_inner.inline_cache.borrow_mut();
         inline_cache.refresh(cx, path, &document_inner.token_cache);
         
@@ -288,7 +288,7 @@ impl LiveEditor {
         widgets.retain_visible();
     }
     
-    pub fn draw(&mut self, cx: &mut Cx, state: &EditorState) {
+    pub fn draw(&mut self, cx: &mut Cx2d, state: &EditorState) {
         if let Ok((document, document_inner, session)) = self.editor_impl.begin(cx, state) {
             let path = document.path.clone().into_os_string().into_string().unwrap();
             
@@ -348,7 +348,7 @@ impl LiveEditor {
     
     pub fn draw_text(
         &mut self,
-        cx: &mut Cx,
+        cx: &mut Cx2d,
         text: &Text,
         token_cache: &TokenCache,
     ) {

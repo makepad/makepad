@@ -7,6 +7,7 @@ pub use {
     crate::{
         area::Area,
         live_traits::*,
+        draw_2d::cx_2d::Cx2d,
         cx::Cx,
     }
 };
@@ -171,8 +172,7 @@ impl Height {
 }
 
 
-
-impl Cx {
+impl<'a> Cx2d<'a> {
     //pub fn debug_pt(&self, x:f32, y:f32, color:i32){
     //self.debug_pts.borrow_mut().push((x,y,color));
     //}
@@ -191,10 +191,6 @@ impl Cx {
     }
 
     pub fn begin_turtle_with_guard(&mut self, layout: Layout, guard_area: Area) {
-        
-        if !self.in_redraw_cycle {
-            panic!("calling begin_turtle outside of redraw cycle is not possible!");
-        }
         
         // fetch origin and size from parent
         let (mut origin, mut abs_size) = if let Some(parent) = self.turtles.last() {
@@ -539,9 +535,9 @@ impl Cx {
             let align_item = &self.align_list[i];
             match align_item {
                 Area::Instance(inst) => {
-                    let cxview = &mut self.views[inst.view_id];
+                    let cxview = &mut self.cx.views[inst.view_id];
                     let draw_call = cxview.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
-                    let sh = &self.draw_shaders[draw_call.draw_shader.draw_shader_id];
+                    let sh = &self.cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
                     for i in 0..inst.instance_count {
                         if let Some(rect_pos) = sh.mapping.rect_pos {
                             draw_call.instances.as_mut().unwrap()[inst.instance_offset + rect_pos + i * sh.mapping.instances.total_slots] += dx;
@@ -559,9 +555,9 @@ impl Cx {
             let align_item = &self.align_list[i];
             match align_item {
                 Area::Instance(inst) => {
-                    let cxview = &mut self.views[inst.view_id];
+                    let cxview = &mut self.cx.views[inst.view_id];
                     let draw_call = &mut cxview.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
-                    let sh = &self.draw_shaders[draw_call.draw_shader.draw_shader_id];
+                    let sh = &self.cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
                     for i in 0..inst.instance_count {
                         if let Some(rect_pos) = sh.mapping.rect_pos {
                             draw_call.instances.as_mut().unwrap()[inst.instance_offset + rect_pos + 1 + i * sh.mapping.instances.total_slots] += dy;

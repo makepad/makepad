@@ -22,6 +22,8 @@ pub struct App {
 }
 
 impl App {
+    
+    
     pub fn live_register(cx: &mut Cx) {
         makepad_component::live_register(cx);
         crate::design_editor::live_register(cx);
@@ -36,11 +38,7 @@ impl App {
         ret
     }
     
-    pub fn draw(&mut self, cx: &mut Cx) {
-        self.inner.draw(cx, &mut self.state);
-    }
-     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event:&mut Event) {
         self.handle_live_edit_event(cx, event, id!(App));
         self.inner.handle_event(cx, event, &mut self.state);
     }

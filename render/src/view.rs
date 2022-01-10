@@ -146,14 +146,14 @@ impl View {
         set_view_transform_recur(self.view_id, cx, mat);
     }
     
-    pub fn begin(&mut self, cx: &mut Cx) -> ViewRedraw {
+    pub fn begin(&mut self, cx: &mut Cx2d) -> ViewRedraw {
         
         if !cx.in_redraw_cycle {
             panic!("calling begin_view outside of redraw cycle is not possible!");
         }
         
         // check if we have a pass id parent
-        let pass_id = *cx.pass_stack.last().expect("No pass found when begin_view");
+        let pass_id = cx.draw_pass_id.expect("No pass found when begin_view");
         cx.views[self.view_id].pass_id = pass_id;
         
         let codeflow_parent_id = cx.view_stack.last();
@@ -260,7 +260,7 @@ impl View {
         cx.view_will_redraw(self.view_id)
     }
     
-    pub fn end(&mut self, cx: &mut Cx) -> Area {
+    pub fn end(&mut self, cx: &mut Cx2d) -> Area {
         // let view_id = self.view_id.unwrap();
         let view_area = Area::View(ViewArea {view_id: self.view_id, redraw_id: cx.redraw_id});
         let rect = cx.end_turtle_with_guard(view_area);
@@ -458,28 +458,6 @@ impl Cx {
         ia
     }
     
-    pub fn set_view_scroll_x(&mut self, view_id: usize, scroll_pos: f32) {
-        let fac = self.get_delegated_dpi_factor(self.views[view_id].pass_id);
-        let cxview = &mut self.views[view_id];
-        cxview.unsnapped_scroll.x = scroll_pos;
-        let snapped = scroll_pos - scroll_pos % (1.0 / fac);
-        if cxview.snapped_scroll.x != snapped {
-            cxview.snapped_scroll.x = snapped;
-            self.passes[cxview.pass_id].paint_dirty = true;
-        }
-    }
-    
-    
-    pub fn set_view_scroll_y(&mut self, view_id: usize, scroll_pos: f32) {
-        let fac = self.get_delegated_dpi_factor(self.views[view_id].pass_id);
-        let cxview = &mut self.views[view_id];
-        cxview.unsnapped_scroll.y = scroll_pos;
-        let snapped = scroll_pos - scroll_pos % (1.0 / fac);
-        if cxview.snapped_scroll.y != snapped {
-            cxview.snapped_scroll.y = snapped;
-            self.passes[cxview.pass_id].paint_dirty = true;
-        }
-    }
 }
 
 #[derive(Debug)]
