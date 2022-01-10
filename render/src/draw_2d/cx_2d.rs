@@ -41,7 +41,7 @@ impl<'a> DerefMut for Cx2d<'a> {fn deref_mut(&mut self) -> &mut Self::Target {se
 impl<'a> Cx2d<'a> {
     pub fn new(cx: &'a mut Cx, draw_event:&'a DrawEvent) -> Self {
         Self {
-            current_dpi_factor: cx.default_dpi_factor,
+            current_dpi_factor: 1.0,
             cx: cx,
             draw_event,
             pass_id: None,

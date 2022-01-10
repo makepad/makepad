@@ -145,7 +145,7 @@ impl Cx {
                 else {println!("Drawing error: instance_buffer None")}
                 
                 let pass_uniforms = self.passes[pass_id].pass_uniforms.as_slice();
-                let view_uniforms = draw_list.view_uniforms.as_slice();
+                let draw_list_uniforms = draw_list.draw_list_uniforms.as_slice();
                 let draw_uniforms = draw_call.draw_uniforms.as_slice();
                 
                 unsafe {
@@ -162,8 +162,8 @@ impl Cx {
                         let () = msg_send![encoder, setFragmentBytes: pass_uniforms.as_ptr() as *const std::ffi::c_void length: (pass_uniforms.len() * 4) as u64 atIndex: id];
                     }
                     if let Some(id) = shp.view_uniform_buffer_id {
-                        let () = msg_send![encoder, setVertexBytes: view_uniforms.as_ptr() as *const std::ffi::c_void length: (view_uniforms.len() * 4) as u64 atIndex: id];
-                        let () = msg_send![encoder, setFragmentBytes: view_uniforms.as_ptr() as *const std::ffi::c_void length: (view_uniforms.len() * 4) as u64 atIndex: id];
+                        let () = msg_send![encoder, setVertexBytes: draw_list_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_list_uniforms.len() * 4) as u64 atIndex: id];
+                        let () = msg_send![encoder, setFragmentBytes: draw_list_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_list_uniforms.len() * 4) as u64 atIndex: id];
                     }
                     if let Some(id) = shp.user_uniform_buffer_id {
                         let () = msg_send![encoder, setVertexBytes: draw_call.user_uniforms.as_ptr() as *const std::ffi::c_void length: (draw_call.user_uniforms.len() * 4) as u64 atIndex: id];

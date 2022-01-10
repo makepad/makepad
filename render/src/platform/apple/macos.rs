@@ -100,9 +100,6 @@ impl Cx {
                     },
                     Event::Paint => {
                         
-                        let _vsync = self.process_desktop_paint_callbacks(cocoa_app.time_now());
-                        self.mtl_compile_shaders(&metal_cx);
-                        
                         // construct or destruct windows
                         for (index, window) in self.windows.iter_mut().enumerate() {
                             
@@ -156,6 +153,10 @@ impl Cx {
                                 }}
                             }
                         }
+                        
+                        let _vsync = self.process_desktop_paint_callbacks(cocoa_app.time_now());
+                        self.mtl_compile_shaders(&metal_cx);
+
                         
                         // set a cursor
                         if !self.down_mouse_cursor.is_none() {
@@ -218,12 +219,13 @@ impl Cx {
                                             );
                                             
                                             // call redraw if we guessed the dpi wrong on startup
+                                            /*
                                             if metal_window.first_draw {
                                                 metal_window.first_draw = false;
                                                 if dpi_factor != self.default_dpi_factor {
                                                     self.redraw_pass_and_child_passes(*pass_id);
                                                 }
-                                            }
+                                            }*/
                                         }}
                                         
                                     }

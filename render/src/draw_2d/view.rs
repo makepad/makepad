@@ -45,6 +45,9 @@ pub type ViewRedraw = Result<(), ()>;
 #[derive(Debug)]
 pub struct View { // draw info per UI element
     pub draw_list_id: usize, //Option<usize>,
+    pub layout: Layout,
+    pub is_overlay: bool,
+    pub always_redraw: bool,
     pub redraw_id: u64,
     pub draw_lists_free: Rc<RefCell<Vec<usize >> >,
 }
@@ -70,8 +73,11 @@ impl LiveNew for View {
         };
         
         Self {
+            always_redraw: false,
+            is_overlay: false,
             draw_lists_free: draw_lists_free,
             redraw_id: 0,
+            layout: Layout::default(),
             draw_list_id,
         }
     }
@@ -104,9 +110,9 @@ impl LiveApply for View {
             match nodes[index].id {
                 id!(debug_id) => cx.draw_lists[self.draw_list_id].debug_id = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
                 id!(is_clipped) => cx.draw_lists[self.draw_list_id].is_clipped = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
-                id!(is_overlay) => cx.draw_lists[self.draw_list_id].is_overlay = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
-                id!(always_redraw) => cx.draw_lists[self.draw_list_id].always_redraw = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
-                id!(layout) => cx.draw_lists[self.draw_list_id].layout = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
+                id!(is_overlay) => self.is_overlay = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
+                id!(always_redraw) => self.always_redraw = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
+                id!(layout) => self.layout = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
                 _ => {
                     cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
                     index = nodes.skip_node(index);
@@ -120,9 +126,9 @@ impl LiveApply for View {
 impl View {
     
     pub fn set_is_clipped(&self, cx: &mut Cx, is_clipped: bool) {cx.draw_lists[self.draw_list_id].is_clipped = is_clipped;}
-    pub fn set_is_overlay(&self, cx: &mut Cx, is_overlay: bool) {cx.draw_lists[self.draw_list_id].is_overlay = is_overlay;}
-    pub fn set_always_redraw(&self, cx: &mut Cx, always_redraw: bool) {cx.draw_lists[self.draw_list_id].always_redraw = always_redraw;}
-    
+    //pub fn set_is_overlay(&self, cx: &mut Cx, is_overlay: bool) {cx.draw_lists[self.draw_list_id].is_overlay = is_overlay;}
+    //pub fn set_always_redraw(&self, cx: &mut Cx, always_redraw: bool) {cx.draw_lists[self.draw_list_id].always_redraw = always_redraw;}
+    /*
     pub fn set_layout(&self, cx: &mut Cx, layout: Layout) {
         cx.draw_lists[self.draw_list_id].layout = layout;
     }
@@ -130,7 +136,7 @@ impl View {
     pub fn layout(&self, cx: &mut Cx) -> Layout {
         cx.draw_lists[self.draw_list_id].layout
     }
-    
+    */
     
     pub fn lock_view_transform(&self, cx: &mut Cx, mat: &Mat4) {
         let draw_list = &mut cx.draw_lists[self.draw_list_id];
@@ -170,12 +176,12 @@ impl View {
         
         if cxpass.main_draw_list_id.is_none() {
             cxpass.main_draw_list_id = Some(self.draw_list_id);
-            cx.cx.draw_lists[self.draw_list_id].layout.abs_origin = Some(Vec2 {x: 0., y: 0.});
-            cx.cx.draw_lists[self.draw_list_id].layout.abs_size = Some(cxpass.pass_size);
+            self.layout.abs_origin = Some(Vec2 {x: 0., y: 0.});
+            self.layout.abs_size = Some(cxpass.pass_size);
         }
         
         // find the parent draw list id
-        let parent_id = if cx.cx.draw_lists[self.draw_list_id].is_overlay {
+        let parent_id = if self.is_overlay {
             if cxpass.main_draw_list_id.is_none() {
                 panic!("Cannot make overlay inside window without root view")
             };
@@ -192,8 +198,8 @@ impl View {
             
             if !cx.cx.draw_lists[self.draw_list_id].locked_view_transform {
                 for i in 0..16 {
-                    cx.cx.draw_lists[self.draw_list_id].view_uniforms.view_transform[i] =
-                    cx.cx.draw_lists[parent_id].view_uniforms.view_transform[i];
+                    cx.cx.draw_lists[self.draw_list_id].draw_list_uniforms.view_transform[i] =
+                    cx.cx.draw_lists[parent_id].draw_list_uniforms.view_transform[i];
                 }
             }
             
@@ -224,14 +230,14 @@ impl View {
         cx.cx.draw_lists[self.draw_list_id].codeflow_parent_id = codeflow_parent_id;
         
         // check redraw status
-        if !cx.cx.draw_lists[self.draw_list_id].always_redraw
+        if !self.always_redraw
             && cx.cx.draw_lists[self.draw_list_id].draw_items_len != 0
             && !view_will_redraw {
             
             // walk the turtle because we aren't drawing
             let w = Width::Fixed(cx.draw_lists[self.draw_list_id].rect.size.x);
             let h = Height::Fixed(cx.draw_lists[self.draw_list_id].rect.size.y);
-            cx.walk_turtle(Walk {width: w, height: h, margin: cx.draw_lists[self.draw_list_id].layout.walk.margin});
+            cx.walk_turtle(Walk {width: w, height: h, margin: self.layout.walk.margin});
             return Err(());
         }
         
@@ -254,7 +260,7 @@ impl View {
         let new_area = Area::DrawList(DrawListArea {draw_list_id: self.draw_list_id, redraw_id: cx.redraw_id});
         
         cx.update_area_refs(old_area, new_area);
-        cx.begin_turtle_with_guard(cx.draw_lists[self.draw_list_id].layout, new_area);
+        cx.begin_turtle_with_guard(self.layout, new_area);
         
         Ok(())
     }
