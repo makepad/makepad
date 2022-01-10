@@ -20,7 +20,7 @@ pub use {
 
 #[derive(Clone, Default, Hash, Ord, PartialOrd, Eq, Debug, PartialEq, Copy)]
 pub struct InstanceArea {
-    pub view_id: usize,
+    pub draw_list_id: usize,
     pub draw_item_id: usize,
     pub instance_offset: usize,
     pub instance_count: usize,
@@ -28,8 +28,8 @@ pub struct InstanceArea {
 }
 
 #[derive(Clone, Default, Hash, Ord, PartialOrd, Eq, Debug, PartialEq, Copy)]
-pub struct ViewArea {
-    pub view_id: usize,
+pub struct DrawListArea {
+    pub draw_list_id: usize,
     pub redraw_id: u64
 }
 
@@ -37,7 +37,7 @@ pub struct ViewArea {
 pub enum Area {
     Empty,
     Instance(InstanceArea),
-    View(ViewArea)
+    DrawList(DrawListArea)
 }
 
 impl Default for Area {
@@ -82,13 +82,13 @@ impl Area {
         false
     }
     
-    pub fn view_id(&self) -> Option<usize> {
+    pub fn draw_list_id(&self) -> Option<usize> {
         return match self {
             Area::Instance(inst) => {
-                Some(inst.view_id)
+                Some(inst.draw_list_id)
             },
-            Area::View(view) => {
-                Some(view.view_id)
+            Area::DrawList(list) => {
+                Some(list.draw_list_id)
             }
             _ => None
         }
@@ -109,15 +109,15 @@ impl Area {
                 if inst.instance_count == 0 {
                     return false
                 }
-                let cxview = &cx.views[inst.view_id];
-                if cxview.redraw_id != inst.redraw_id {
+                let draw_list = &cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
                     return false
                 }
                 return true
             },
-            Area::View(view_area) => {
-                let cxview = &cx.views[view_area.view_id];
-                if cxview.redraw_id != view_area.redraw_id {
+            Area::DrawList(list) => {
+                let draw_list = &cx.draw_lists[list.draw_list_id];
+                if draw_list.redraw_id != list.redraw_id {
                     return false
                 }
                 return true
@@ -129,17 +129,17 @@ impl Area {
     pub fn get_local_scroll_pos(&self, cx: &Cx) -> Vec2 {
         return match self {
             Area::Instance(inst) => {
-                let cxview = &cx.views[inst.view_id];
-                if cxview.redraw_id != inst.redraw_id {
+                let draw_list = &cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
                     Vec2::default()
                 }
                 else {
-                    cxview.unsnapped_scroll
+                    draw_list.unsnapped_scroll
                 }
             },
-            Area::View(view_area) => {
-                let cxview = &cx.views[view_area.view_id];
-                cxview.unsnapped_scroll
+            Area::DrawList(list) => {
+                let draw_list = &cx.draw_lists[list.draw_list_id];
+                draw_list.unsnapped_scroll
             },
             _ => Vec2::default(),
         }
@@ -148,21 +148,21 @@ impl Area {
     pub fn get_scroll_pos(&self, cx: &Cx) -> Vec2 {
         return match self {
             Area::Instance(inst) => {
-                let cxview = &cx.views[inst.view_id];
-                if cxview.redraw_id != inst.redraw_id {
+                let draw_list = &cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
                     Vec2::default()
                 }
                 else {
-                    let draw_call = &cxview.draw_items[inst.draw_item_id].draw_call.as_ref().unwrap();
+                    let draw_call = &draw_list.draw_items[inst.draw_item_id].draw_call.as_ref().unwrap();
                     Vec2 {
                         x: draw_call.draw_uniforms.draw_scroll.x,
                         y: draw_call.draw_uniforms.draw_scroll.y
                     }
                 }
             },
-            Area::View(view_area) => {
-                let cxview = &cx.views[view_area.view_id];
-                cxview.parent_scroll
+            Area::DrawList(list) => {
+                let draw_list = &cx.draw_lists[list.draw_list_id];
+                draw_list.parent_scroll
             },
             _ => Vec2::default(),
         }
@@ -171,20 +171,20 @@ impl Area {
     pub fn set_no_scroll(&self, cx: &mut Cx, hor: bool, ver: bool) {
         return match self {
             Area::Instance(inst) => {
-                let cxview = &mut cx.views[inst.view_id];
-                if cxview.redraw_id != inst.redraw_id {
+                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
                     return
                 }
                 else {
-                    let draw_call = cxview.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
+                    let draw_call = draw_list.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
                     draw_call.options.no_h_scroll = hor;
                     draw_call.options.no_v_scroll = ver;
                 }
             },
-            Area::View(view_area) => {
-                let cxview = &mut cx.views[view_area.view_id];
-                cxview.no_h_scroll = hor;
-                cxview.no_v_scroll = ver;
+            Area::DrawList(list) => {
+                let draw_list = &mut cx.draw_lists[list.draw_list_id];
+                draw_list.no_h_scroll = hor;
+                draw_list.no_v_scroll = ver;
             },
             _ => (),
         }
@@ -200,18 +200,18 @@ impl Area {
                     println!("get_rect called on instance_count ==0 area pointer, use mark/sweep correctly!");
                     return Rect::default()
                 }
-                let cxview = &cx.views[inst.view_id];
-                if cxview.redraw_id != inst.redraw_id {
+                let draw_list = &cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
                     return Rect::default();
                 }
-                let draw_call = &cxview.draw_items[inst.draw_item_id].draw_call.as_ref().unwrap();
+                let draw_call = &draw_list.draw_items[inst.draw_item_id].draw_call.as_ref().unwrap();
                 
                 if draw_call.instances.as_ref().unwrap().len() == 0 {
                     println!("No instances but everything else valid?");
                     return Rect::default()
                 }
                 if cx.draw_shaders.generation != draw_call.draw_shader.draw_shader_generation {
-                    println!("Generation invalid get_rect {} {:?} {} {}",cxview.debug_id, inst, cx.draw_shaders.generation, draw_call.draw_shader.draw_shader_generation);
+                    println!("Generation invalid get_rect {} {:?} {} {}",draw_list.debug_id, inst, cx.draw_shaders.generation, draw_call.draw_shader.draw_shader_generation);
                     return Rect::default()
                 }
                 let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
@@ -228,11 +228,11 @@ impl Area {
                 }
                 Rect::default()
             },
-            Area::View(view_area) => {
-                let cxview = &cx.views[view_area.view_id];
+            Area::DrawList(list) => {
+                let draw_list = &cx.draw_lists[list.draw_list_id];
                 Rect {
-                    pos: cxview.rect.pos - cxview.parent_scroll,
-                    size: cxview.rect.size
+                    pos: draw_list.rect.pos - draw_list.parent_scroll,
+                    size: draw_list.rect.size
                 }
             },
             _ => Rect::default(),
@@ -246,13 +246,13 @@ impl Area {
                     println!("abs_to_rel_scroll called on instance_count ==0 area pointer, use mark/sweep correctly!");
                     return abs
                 }
-                let cxview = &cx.views[inst.view_id];
-                if cxview.redraw_id != inst.redraw_id {
+                let draw_list = &cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
                     return abs;
                 }
-                let draw_call = &cxview.draw_items[inst.draw_item_id].draw_call.as_ref().unwrap();
+                let draw_call = &draw_list.draw_items[inst.draw_item_id].draw_call.as_ref().unwrap();
                 if cx.draw_shaders.generation != draw_call.draw_shader.draw_shader_generation {
-                    println!("Generation invalid abs_to_rel {} {:?} {} {}",cxview.debug_id,inst, cx.draw_shaders.generation, draw_call.draw_shader.draw_shader_generation);
+                    println!("Generation invalid abs_to_rel {} {:?} {} {}",draw_list.debug_id,inst, cx.draw_shaders.generation, draw_call.draw_shader.draw_shader_generation);
                     return abs;
                 }
                 
@@ -269,11 +269,11 @@ impl Area {
                 }
                 abs
             },
-            Area::View(view_area) => {
-                let cxview = &cx.views[view_area.view_id];
+            Area::DrawList(list) => {
+                let draw_list = &cx.draw_lists[list.draw_list_id];
                 Vec2 {
-                    x: abs.x - cxview.rect.pos.x + cxview.parent_scroll.x + cxview.unsnapped_scroll.x,
-                    y: abs.y - cxview.rect.pos.y - cxview.parent_scroll.y + cxview.unsnapped_scroll.y
+                    x: abs.x - draw_list.rect.pos.x + draw_list.parent_scroll.x + draw_list.unsnapped_scroll.x,
+                    y: abs.y - draw_list.rect.pos.y - draw_list.parent_scroll.y + draw_list.unsnapped_scroll.y
                 }
             },
             _ => abs,
@@ -283,7 +283,7 @@ impl Area {
     pub fn set_rect(&self, cx: &mut Cx, rect: &Rect) {
         match self {
             Area::Instance(inst) => {
-                let cxview = &mut cx.views[inst.view_id];
+                let cxview = &mut cx.draw_lists[inst.draw_list_id];
                 if cxview.redraw_id != inst.redraw_id {
                     //println!("set_rect called on invalid area pointer, use mark/sweep correctly!");
                     return;
@@ -303,9 +303,9 @@ impl Area {
                     buf[inst.instance_offset + rect_size + 1] = rect.size.y;
                 }
             },
-            Area::View(view_area) => {
-                let cxview = &mut cx.views[view_area.view_id];
-                cxview.rect = rect.clone()
+            Area::DrawList(list) => {
+                let draw_list = &mut cx.draw_lists[list.draw_list_id];
+                draw_list.rect = rect.clone()
             },
             _ => ()
         }
@@ -314,9 +314,9 @@ impl Area {
     pub fn get_read_ref<'a>(&self, cx: &'a Cx, id: LiveId, ty: ShaderTy) -> Option<DrawReadRef<'a >> {
         match self {
             Area::Instance(inst) => {
-                let cxview = &cx.views[inst.view_id];
-                let draw_call = &cxview.draw_items[inst.draw_item_id].draw_call.as_ref().unwrap();
-                if cxview.redraw_id != inst.redraw_id {
+                let draw_list = &cx.draw_lists[inst.draw_list_id];
+                let draw_call = &draw_list.draw_items[inst.draw_item_id].draw_call.as_ref().unwrap();
+                if draw_list.redraw_id != inst.redraw_id {
                     println!("get_instance_read_ref called on invalid area pointer, use mark/sweep correctly!");
                     return None;
                 }
@@ -361,11 +361,11 @@ impl Area {
     pub fn get_write_ref<'a>(&self, cx: &'a mut Cx, id: LiveId, ty: ShaderTy, name: &str) -> Option<DrawWriteRef<'a >> {
         match self {
             Area::Instance(inst) => {
-                let cxview = &mut cx.views[inst.view_id];
-                if cxview.redraw_id != inst.redraw_id {
+                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
                     return None;
                 }
-                let draw_call = cxview.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
+                let draw_call = draw_list.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
                 if cx.draw_shaders.generation != draw_call.draw_shader.draw_shader_generation {
                     return None;
                 }
@@ -376,7 +376,7 @@ impl Area {
                         panic!("get_write_ref {} wrong uniform type, expected {:?} got: {:?}!", name, input.ty, ty);
                     }
                     
-                    cx.passes[cxview.pass_id].paint_dirty = true;
+                    cx.passes[draw_list.pass_id].paint_dirty = true;
                     draw_call.uniforms_dirty = true;
                     
                     return Some(
@@ -392,7 +392,7 @@ impl Area {
                         panic!("get_write_ref {} wrong instance type, expected {:?} got: {:?}!", name, input.ty, ty);
                     }
                     
-                    cx.passes[cxview.pass_id].paint_dirty = true;
+                    cx.passes[draw_list.pass_id].paint_dirty = true;
                     draw_call.instance_dirty = true;
                     if inst.instance_count == 0 {
                         return None

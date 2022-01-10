@@ -298,7 +298,7 @@ impl FoldListNode {
         dispatch_action: &mut dyn FnMut(&mut Cx, FoldNodeAction),
     ) {
         if self.animator_handle_event(cx, event).must_redraw() {
-            self.bg_quad.draw_vars.redraw_view(cx);
+            self.bg_quad.draw_vars.redraw(cx);
         }
         match event.hits(cx, self.bg_quad.draw_vars.area) {
             HitEvent::FingerHover(f) => {
