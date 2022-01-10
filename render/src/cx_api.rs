@@ -28,7 +28,7 @@ use {
             Menu,
         },
         pass::{
-            CxPassDepOf
+            CxPassParent
         },
     }
 };
@@ -68,8 +68,8 @@ impl Cx {
         let mut dpi_factor = 1.0;
         let mut pass_id_walk = pass_id;
         for _ in 0..25 {
-            match self.passes[pass_id_walk].dep_of {
-                CxPassDepOf::Window(window_id) => {
+            match self.passes[pass_id_walk].parent {
+                CxPassParent::Window(window_id) => {
                     dpi_factor = match self.windows[window_id].window_state {
                         CxWindowState::Create {..} => {
                             panic!();
@@ -81,7 +81,7 @@ impl Cx {
                     };
                     break;
                 },
-                CxPassDepOf::Pass(next_pass_id) => {
+                CxPassParent::Pass(next_pass_id) => {
                     pass_id_walk = next_pass_id;
                 },
                 _ => {break;}
@@ -111,8 +111,8 @@ impl Cx {
             if let Some(main_view_id) = self.passes[walk_pass_id].main_draw_list_id {
                 self.redraw_area_and_children(Area::DrawList(DrawListArea {redraw_id: 0, draw_list_id: main_view_id}));
             }
-            match self.passes[walk_pass_id].dep_of.clone() {
-                CxPassDepOf::Pass(next_pass_id) => {
+            match self.passes[walk_pass_id].parent.clone() {
+                CxPassParent::Pass(next_pass_id) => {
                     walk_pass_id = next_pass_id;
                 },
                 _ => { 
@@ -129,7 +129,7 @@ impl Cx {
         }
         // lets redraw all subpasses as well
         for sub_pass_id in 0..self.passes.len() {
-            if let CxPassDepOf::Pass(dep_pass_id) = self.passes[sub_pass_id].dep_of.clone() {
+            if let CxPassParent::Pass(dep_pass_id) = self.passes[sub_pass_id].parent.clone() {
                 if dep_pass_id == pass_id {
                     self.redraw_pass_and_child_passes(sub_pass_id);
                 }
