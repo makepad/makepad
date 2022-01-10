@@ -81,9 +81,17 @@ pub enum DragEvent<'a>{
 
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct DrawEvent {
-    pub redraw_views: Vec<usize>,
-    pub redraw_views_and_children: Vec<usize>,
-    pub redraw_all_views: bool,
+    pub draw_lists: Vec<usize>,
+    pub draw_lists_and_children: Vec<usize>,
+    pub redraw_all: bool,
+}
+
+impl DrawEvent{
+    pub fn will_redraw(&self) -> bool {
+        self.redraw_all
+            || self.draw_lists.len() != 0
+            || self.draw_lists_and_children.len() != 0
+    }
 }
 
 #[derive(Clone, Default, Debug, PartialEq)]

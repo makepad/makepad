@@ -29,7 +29,7 @@ pub struct Cx2d<'a> {
     pub cx: &'a mut Cx,
     pub draw_event: &'a DrawEvent,
     pub pass_id: Option<usize>,
-    pub view_stack: Vec<usize>,
+    pub draw_list_stack: Vec<usize>,
     pub turtles: Vec<Turtle>,
     pub align_list: Vec<Area>,
     pub current_dpi_factor: f32,
@@ -45,19 +45,19 @@ impl<'a> Cx2d<'a> {
             cx: cx,
             draw_event,
             pass_id: None,
-            view_stack: Vec::new(),
+            draw_list_stack: Vec::new(),
             turtles: Vec::new(),
             align_list: Vec::new(),
         }
     }
     
     pub fn begin_pass(&mut self, pass:&Pass) {
-        
         if self.pass_id.is_some(){panic!()}
+        
         self.pass_id = Some(pass.pass_id);
         let cxpass = &mut self.passes[pass.pass_id];
 
-        cxpass.main_view_id = None;
+        cxpass.main_draw_list_id = None;
 
         match cxpass.dep_of{
             CxPassDepOf::Window(window_id)=>{
@@ -80,8 +80,8 @@ impl<'a> Cx2d<'a> {
             panic!();
         }
         self.pass_id = None;
-        if self.view_stack.len()>0 {
-            panic!("View stack disaligned, forgot an end_view(cx)");
+        if self.draw_list_stack.len()>0 {
+            panic!("Draw list stack disaligned, forgot an end_view(cx)");
         }
         if self.turtles.len()>0 {
             panic!("Turtle stack disaligned, forgot an end_turtle()");
@@ -89,33 +89,33 @@ impl<'a> Cx2d<'a> {
     }
     
     pub fn get_scroll_pos(&self) -> Vec2 {
-        let cxview = &self.views[*self.view_stack.last().unwrap()];
-        cxview.unsnapped_scroll
+        let draw_list = &self.draw_lists[*self.draw_list_stack.last().unwrap()];
+        draw_list.unsnapped_scroll
     }
 
     pub fn view_will_redraw(&self, view: &View) -> bool {
         
-        if self.draw_event.redraw_all_views {
+        if self.draw_event.redraw_all {
             return true;
         }
         // figure out if areas are in some way a child of view_id, then we need to redraw
-        for check_view_id in &self.draw_event.redraw_views {
-            let mut next_vw = Some(*check_view_id);
-            while let Some(vw) = next_vw{
-                if vw == view.view_id {
+        for check_draw_list_id in &self.draw_event.draw_lists {
+            let mut next = Some(*check_draw_list_id);
+            while let Some(vw) = next{
+                if vw == view.draw_list_id {
                     return true
                 }
-                next_vw = self.views[vw].codeflow_parent_id;
+                next = self.draw_lists[vw].codeflow_parent_id;
             }
         }
         // figure out if areas are in some way a parent of view_id, then redraw
-        for check_view_id in &self.draw_event.redraw_views_and_children {
-            let mut next_vw = Some(view.view_id);
-            while let Some(vw) = next_vw{
-                if vw == *check_view_id {
+        for check_draw_list_id in &self.draw_event.draw_lists_and_children {
+            let mut next = Some(view.draw_list_id);
+            while let Some(vw) = next{
+                if vw == *check_draw_list_id {
                     return true
                 }
-                next_vw = self.views[vw].codeflow_parent_id;
+                next = self.draw_lists[vw].codeflow_parent_id;
             }
         }
         false

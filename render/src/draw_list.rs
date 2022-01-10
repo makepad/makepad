@@ -12,7 +12,7 @@ pub use {
         cx::{
             Cx,
         },
-        area::{Area, ViewArea, InstanceArea},
+        area::{Area, DrawListArea, InstanceArea},
         live_traits::*,
         draw_2d::turtle::{Layout, Width, Height, Walk, Rect},
         cx_draw_shaders::{
@@ -53,7 +53,7 @@ impl DrawUniforms {
 
 pub struct DrawItem {
     pub draw_item_id: usize,
-    pub view_id: usize,
+    pub draw_list_id: usize,
     pub redraw_id: u64,
     
     pub sub_view_id: Option<usize>,
@@ -166,13 +166,13 @@ impl ViewUniforms {
 }
 
 #[derive(Clone)]
-pub enum CxViewDebug {
+pub enum DrawListDebug {
     DrawTree,
     Instances
 }
 
 #[derive(Default)]
-pub struct CxView {
+pub struct DrawList {
     pub debug_id: LiveId,
     
     pub alloc_generation: u64,
@@ -203,10 +203,10 @@ pub struct CxView {
     
     pub layout: Layout,
     
-    pub debug: Option<CxViewDebug>
+    pub debug: Option<DrawListDebug>
 }
 
-impl CxView {
+impl DrawList {
     pub fn new() -> Self {
         let mut ret = Self {
             is_clipped: true,

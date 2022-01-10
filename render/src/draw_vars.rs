@@ -40,8 +40,8 @@ impl DrawVars {
         self.draw_shader.is_some()
     }
     
-    pub fn redraw_view(&self, cx: &mut Cx) {
-        cx.redraw_view_of(self.area);
+    pub fn redraw(&self, cx: &mut Cx) {
+        cx.redraw_area(self.area);
     }
     
     pub fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
@@ -258,8 +258,8 @@ impl DrawVars {
                     return;
                 }
                 let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
-                let cxview = &mut cx.views[inst.view_id];
-                let draw_call = cxview.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
+                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                let draw_call = draw_list.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
                 
                 let repeat = inst.instance_count;
                 let stride = sh.mapping.instances.total_slots;
@@ -281,7 +281,7 @@ impl DrawVars {
                 }
                 // DONE!
                 
-                cx.passes[cxview.pass_id].paint_dirty = true;
+                cx.passes[draw_list.pass_id].paint_dirty = true;
                 draw_call.instance_dirty = true;
                 draw_call.uniforms_dirty = true;
             }

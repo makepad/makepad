@@ -42,7 +42,7 @@ impl Cx {
     fn render_view(
         &mut self,
         pass_id: usize,
-        view_id: usize,
+        draw_list_id: usize,
         scroll: Vec2,
         clip: (Vec2, Vec2),
         zbias: &mut f32,
@@ -52,15 +52,15 @@ impl Cx {
         metal_cx: &MetalCx,
     ) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
-        let draw_items_len = self.views[view_id].draw_items_len;
+        let draw_items_len = self.draw_lists[draw_list_id].draw_items_len;
         //self.views[view_id].set_clipping_uniforms();
-        self.views[view_id].uniform_view_transform(&Mat4::identity());
-        self.views[view_id].parent_scroll = scroll;
-        let local_scroll = self.views[view_id].get_local_scroll();
-        let clip = self.views[view_id].intersect_clip(clip);
+        self.draw_lists[draw_list_id].uniform_view_transform(&Mat4::identity());
+        self.draw_lists[draw_list_id].parent_scroll = scroll;
+        let local_scroll = self.draw_lists[draw_list_id].get_local_scroll();
+        let clip = self.draw_lists[draw_list_id].intersect_clip(clip);
         
         for draw_item_id in 0..draw_items_len {
-            if let Some(sub_view_id) = self.views[view_id].draw_items[draw_item_id].sub_view_id {
+            if let Some(sub_view_id) = self.draw_lists[draw_list_id].draw_items[draw_item_id].sub_view_id {
                 self.render_view(
                     pass_id,
                     sub_view_id,
@@ -74,9 +74,9 @@ impl Cx {
                 );
             }
             else {
-                let cxview = &mut self.views[view_id];
+                let draw_list = &mut self.draw_lists[draw_list_id];
                 //view.platform.uni_vw.update_with_f32_data(device, &view.uniforms);
-                let draw_call = cxview.draw_items[draw_item_id].draw_call.as_mut().unwrap();
+                let draw_call = draw_list.draw_items[draw_item_id].draw_call.as_mut().unwrap();
                 let sh = &self.draw_shaders[draw_call.draw_shader.draw_shader_id];
                 if sh.platform.is_none() { // shader didnt compile somehow
                     continue;
@@ -145,7 +145,7 @@ impl Cx {
                 else {println!("Drawing error: instance_buffer None")}
                 
                 let pass_uniforms = self.passes[pass_id].pass_uniforms.as_slice();
-                let view_uniforms = cxview.view_uniforms.as_slice();
+                let view_uniforms = draw_list.view_uniforms.as_slice();
                 let draw_uniforms = draw_call.draw_uniforms.as_slice();
                 
                 unsafe {
@@ -357,7 +357,7 @@ impl Cx {
     ) {
         self.platform.bytes_written = 0;
         self.platform.draw_calls_done = 0;
-        let view_id = self.passes[pass_id].main_view_id.unwrap();
+        let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
         
         let pool: ObjcId = unsafe {msg_send![class!(NSAutoreleasePool), new]};
         
@@ -384,7 +384,7 @@ impl Cx {
             let mut gpu_read_guards = Vec::new();
             self.render_view(
                 pass_id,
-                view_id,
+                draw_list_id,
                 Vec2::default(),
                 (Vec2 {x: -50000., y: -50000.}, Vec2 {x: 50000., y: 50000.}),
                 &mut zbias,
@@ -415,7 +415,7 @@ impl Cx {
         dpi_factor: f32,
         metal_cx: &MetalCx,
     ) {
-        let view_id = self.passes[pass_id].main_view_id.unwrap();
+        let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
         
         let pool: ObjcId = unsafe {msg_send![class!(NSAutoreleasePool), new]};
         let render_pass_descriptor: ObjcId = unsafe {msg_send![class!(MTLRenderPassDescriptorInternal), renderPassDescriptor]};
@@ -434,7 +434,7 @@ impl Cx {
         let mut gpu_read_guards = Vec::new();
         self.render_view(
             pass_id,
-            view_id,
+            draw_list_id,
             Vec2::default(),
             (Vec2 {x: -50000., y: -50000.}, Vec2 {x: 50000., y: 50000.}),
             &mut zbias,

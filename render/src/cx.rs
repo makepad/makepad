@@ -52,7 +52,7 @@ use {
         window::{
             CxWindow,
         },
-        draw_list::CxView,
+        draw_list::DrawList,
         pass::{
             CxPass,
         },
@@ -87,8 +87,8 @@ pub struct Cx {
     pub passes: Vec<CxPass>,
     pub passes_free: Rc<RefCell<Vec<usize >> >,
     
-    pub views: Vec<CxView>,
-    pub views_free: Rc<RefCell<Vec<usize >> >,
+    pub draw_lists: Vec<DrawList>,
+    pub draw_lists_free: Rc<RefCell<Vec<usize >> >,
     
     pub textures: Vec<CxTexture>,
     pub textures_free: Rc<RefCell<Vec<usize >> >,
@@ -223,8 +223,8 @@ impl Default for Cx {
             passes: Vec::new(),
             passes_free: Rc::new(RefCell::new(Vec::new())),
             
-            views: Vec::new(),
-            views_free: Rc::new(RefCell::new(Vec::new())),
+            draw_lists: Vec::new(),
+            draw_lists_free: Rc::new(RefCell::new(Vec::new())),
             
             textures: textures,
             textures_free: Rc::new(RefCell::new(Vec::new())),

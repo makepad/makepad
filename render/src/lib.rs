@@ -97,7 +97,7 @@ pub use {
         },
         area::{
             Area,
-            ViewArea,
+            DrawListArea,
             InstanceArea
         },
         event::{

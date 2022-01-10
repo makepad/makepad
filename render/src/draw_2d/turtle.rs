@@ -535,8 +535,8 @@ impl<'a> Cx2d<'a> {
             let align_item = &self.align_list[i];
             match align_item {
                 Area::Instance(inst) => {
-                    let cxview = &mut self.cx.views[inst.view_id];
-                    let draw_call = cxview.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
+                    let draw_list = &mut self.cx.draw_lists[inst.draw_list_id];
+                    let draw_call = draw_list.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
                     let sh = &self.cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
                     for i in 0..inst.instance_count {
                         if let Some(rect_pos) = sh.mapping.rect_pos {
@@ -555,8 +555,8 @@ impl<'a> Cx2d<'a> {
             let align_item = &self.align_list[i];
             match align_item {
                 Area::Instance(inst) => {
-                    let cxview = &mut self.cx.views[inst.view_id];
-                    let draw_call = &mut cxview.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
+                    let draw_list = &mut self.cx.draw_lists[inst.draw_list_id];
+                    let draw_call = &mut draw_list.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
                     let sh = &self.cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
                     for i in 0..inst.instance_count {
                         if let Some(rect_pos) = sh.mapping.rect_pos {
