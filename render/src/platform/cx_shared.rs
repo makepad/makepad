@@ -6,7 +6,7 @@ use {
     crate::{
         cx::Cx,
         pass::{
-            CxPassDepOf
+            CxPassParent
         },
         event::{
             DrawEvent,
@@ -48,9 +48,9 @@ impl Cx {
             let mut altered = false;
             for pass_id in 0..self.passes.len() {
                 if self.passes[pass_id].paint_dirty {
-                    let other = match self.passes[pass_id].dep_of {
-                        CxPassDepOf::Pass(dep_of_pass_id) => {
-                            Some(dep_of_pass_id)
+                    let other = match self.passes[pass_id].parent {
+                        CxPassParent::Pass(parent_pass_id) => {
+                            Some(parent_pass_id)
                         }
                         _ => None
                     };
@@ -70,11 +70,11 @@ impl Cx {
         for (pass_id, cxpass) in self.passes.iter().enumerate() {
             if cxpass.paint_dirty {
                 let mut inserted = false;
-                match cxpass.dep_of {
-                    CxPassDepOf::Window(_) => {
+                match cxpass.parent {
+                    CxPassParent::Window(_) => {
                         *windows_need_repaint += 1
                     },
-                    CxPassDepOf::Pass(dep_of_pass_id) => {
+                    CxPassParent::Pass(dep_of_pass_id) => {
                         if pass_id == dep_of_pass_id {
                             panic!()
                         }
@@ -86,7 +86,7 @@ impl Cx {
                             }
                         }
                     },
-                    CxPassDepOf::None => { // we need to be first
+                    CxPassParent::None => { // we need to be first
                         passes_todo.insert(0, pass_id);
                         inserted = true;
                     },
