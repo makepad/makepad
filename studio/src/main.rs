@@ -1,5 +1,4 @@
-use makepad_studio::app::App;
 use makepad_component::makepad_render::*;
-use makepad_studio::app::live_register;
+use makepad_studio::app::*;
  
-main_app!(App);
+main_app!(App); 
