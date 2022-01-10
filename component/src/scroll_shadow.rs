@@ -40,7 +40,7 @@ pub struct ScrollShadow {
 }
 
 impl ScrollShadow{
-    pub fn draw(&mut self, cx: &mut Cx, view:&View, offset:Vec2){
+    pub fn draw(&mut self, cx: &mut Cx2d, view:&View, offset:Vec2){
         let shadow_size = self.shadow_size;
         let rect = cx.get_turtle_rect();
 

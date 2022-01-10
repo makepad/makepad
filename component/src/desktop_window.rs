@@ -6,7 +6,9 @@ use crate::button_logic::*;
 live_register!{
     use crate::theme::*;
     DesktopWindow: {{DesktopWindow}} {
-        clear_color: (COLOR_WINDOW_BG)
+        pass:{
+            clear_color: (COLOR_WINDOW_BG)
+        }
         caption_bg: {color: (COLOR_WINDOW_CAPTION)}
         caption: "Desktop Window",
         main_view:{},
@@ -32,15 +34,14 @@ live_register!{
     }
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live)]
 pub struct DesktopWindow {
     #[rust] pub caption_size: Vec2,
 
+    window: Window,
     pass: Pass,
-    color_texture: Texture,
     depth_texture: Texture,
     
-    window: Window,
     main_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
     caption_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
     inner_view: View,
@@ -60,7 +61,7 @@ pub struct DesktopWindow {
     border_fill: DrawColor,
     
     #[rust(WindowMenu::new(cx))] pub window_menu: WindowMenu,
-    #[rust(Menu::main(vec![ 
+    #[rust(Menu::main(vec![
         Menu::sub("App", vec![
             //Menu::item("Quit App", Cx::command_quit()),
         ]),
@@ -72,6 +73,13 @@ pub struct DesktopWindow {
     
     // testing
     #[rust] pub inner_over_chrome: bool,
+}
+
+impl LiveHook for DesktopWindow{
+    fn after_new(&mut self, cx:&mut Cx){
+        self.window.set_pass(cx, &self.pass);
+        self.pass.set_depth_texture(cx, &self.depth_texture, PassClearDepth::ClearWith(1.0));
+    }
 }
 
 #[derive(Clone, PartialEq)]
@@ -161,24 +169,15 @@ impl DesktopWindow {
         }
     }
     
-    pub fn begin(&mut self, cx: &mut Cx, menu: Option<&Menu>) -> ViewRedraw {
+    pub fn begin(&mut self, cx: &mut Cx2d, menu: Option<&Menu>) -> ViewRedraw {
         
-        if !self.main_view.view_will_redraw(cx) {
+        if !cx.view_will_redraw(&self.main_view) {
             return Err(())
         }
 
-        self.window.begin(cx);
-        
-        self.pass.begin(cx);
-        self.pass.add_color_texture(cx, &self.color_texture, PassClearColor::ClearWith(self.clear_color));
-        self.pass.set_depth_texture(cx, &self.depth_texture, PassClearDepth::ClearWith(1.0));
+        cx.begin_pass(&self.pass);
         
         self.main_view.begin(cx).unwrap();
-
-        /*self.caption_view.set_layout(cx, Layout {
-            walk: Walk::wh(Width::Filled, Height::Computed),
-            ..Layout::default()
-        });*/
         
         if self.caption_view.begin(cx).is_ok() {
             // alright here we draw our platform buttons.
@@ -262,11 +261,11 @@ impl DesktopWindow {
         Err(())
     }
 
-    pub fn end(&mut self, cx: &mut Cx) {
+    pub fn end(&mut self, cx: &mut Cx2d) {
         self.end_inner(cx, false);
     }
     
-    fn end_inner(&mut self, cx: &mut Cx, no_inner:bool) {
+    fn end_inner(&mut self, cx: &mut Cx2d, no_inner:bool) {
         if !no_inner{
             self.inner_view.end(cx);
         }
@@ -288,9 +287,7 @@ impl DesktopWindow {
         
         self.main_view.end(cx);
         
-        self.pass.end(cx);
-        
-        self.window.end(cx);
+        cx.end_pass(&self.pass);
     }
 }
 

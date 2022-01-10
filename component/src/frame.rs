@@ -156,7 +156,7 @@ impl FrameComponent for Frame {
         self.handle_event(cx, event).into()
     }
     
-    fn draw_component(&mut self, cx: &mut Cx) {
+    fn draw_component(&mut self, cx: &mut Cx2d) {
         self.draw(cx);
     }
 }
@@ -194,7 +194,7 @@ impl Frame {
         }
     }
     
-    pub fn draw(&mut self, cx: &mut Cx) {
+    pub fn draw(&mut self, cx: &mut Cx2d) {
         for id in if self.has_children_array {&self.children}else {&self.create_order} {
             let component = self.components.get_mut(id).unwrap();
             component.draw_component(cx)

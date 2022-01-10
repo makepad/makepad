@@ -143,7 +143,7 @@ impl AppState {
             parent_edge: Option<FileEdge>,
             node: FileNodeData,
         ) -> FileNodeId {
-            let file_node_id = file_node_id.unwrap_or(file_nodes.unique_key());
+            let file_node_id = file_node_id.unwrap_or(file_nodes.alloc_key());
             let name = parent_edge.as_ref().map_or_else(
                 || String::from("root"),
                 | edge | edge.name.to_string_lossy().into_owned(),

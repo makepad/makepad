@@ -42,7 +42,7 @@ pub struct AppInner {
 
 impl AppInner {
     
-    pub fn draw(&mut self, cx: &mut Cx, state: &AppState) {
+    pub fn draw(&mut self, cx: &mut Cx2d, state: &AppState) {
         if self.window.begin(cx, None).is_ok() {
             if self.dock.begin(cx).is_ok() {
                 self.draw_panel(cx, state, id!(root).into());
@@ -53,7 +53,7 @@ impl AppInner {
         //cx.redraw_all();
     }
     
-    fn draw_panel(&mut self, cx: &mut Cx, state: &AppState, panel_id: PanelId) {
+    fn draw_panel(&mut self, cx: &mut Cx2d, state: &AppState, panel_id: PanelId) {
         let panel = &state.panels[panel_id];
         match panel {
             Panel::Split(SplitPanel {child_panel_ids, axis, align}) => {
@@ -98,7 +98,7 @@ impl AppInner {
         }
     }
     
-    fn draw_file_node(&mut self, cx: &mut Cx, state: &AppState, file_node_id: FileNodeId) {
+    fn draw_file_node(&mut self, cx: &mut Cx2d, state: &AppState, file_node_id: FileNodeId) {
         let file_node = &state.file_nodes[file_node_id];
         match &file_node.child_edges {
             Some(child_edges) => {
@@ -119,15 +119,21 @@ impl AppInner {
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, state: &mut AppState) {
         self.window.handle_event(cx, event);
         
-        if let Event::Construct = event {
-            self.send_request(Request::LoadFileTree());
-            self.create_code_editor_tab(
-                cx,
-                state,
-                id!(content).into(),
-                None,
-                state.file_path_join(&["component/src/file_tree.rs"])
-            );
+        match event{
+            Event::Construct => {
+                self.send_request(Request::LoadFileTree());
+                self.create_code_editor_tab(
+                    cx,
+                    state,
+                    id!(content).into(),
+                    None,
+                    state.file_path_join(&["component/src/file_tree.rs"])
+                );
+            }
+            Event::Draw(draw_event)=>{
+                self.draw(&mut Cx2d::new(cx, draw_event), state);
+            }
+            _=>()
         }
         
         let mut actions = Vec::new();

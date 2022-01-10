@@ -416,7 +416,7 @@ impl ScrollBar {
         ScrollBarEvent::None
     }
     
-    pub fn draw_scroll_bar(&mut self, cx: &mut Cx, axis: Axis, view_area: Area, view_rect: Rect, view_total: Vec2) -> f32 {
+    pub fn draw_scroll_bar(&mut self, cx: &mut Cx2d, axis: Axis, view_area: Area, view_rect: Rect, view_total: Vec2) -> f32 {
         
         self.view_area = view_area;
         self.axis = axis;
