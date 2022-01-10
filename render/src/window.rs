@@ -10,7 +10,7 @@ pub use {
             WindowGeom
         },
         area::Area,
-        pass::{Pass,CxPassDepOf},
+        pass::{Pass,CxPassParent},
         cx::Cx,
         live_traits::*,
     }
@@ -112,7 +112,7 @@ impl Window {
     
     pub fn set_pass(&self, cx:&mut Cx, pass:&Pass){
         cx.windows[self.window_id].main_pass_id = Some(pass.pass_id);
-        cx.passes[pass.pass_id].dep_of = CxPassDepOf::Window(self.window_id);
+        cx.passes[pass.pass_id].parent = CxPassParent::Window(self.window_id);
     }
 
     pub fn get_inner_size(&mut self, cx: &mut Cx) -> Vec2 {

@@ -85,9 +85,9 @@ impl LiveApply for Pass {
 
 impl Pass {
     
-    pub fn make_dep_of_pass(&mut self, cx: &mut Cx, pass: &Pass) {
+    pub fn make_parent_of_pass(&mut self, cx: &mut Cx, pass: &Pass) {
         let cxpass = &mut cx.passes[pass.pass_id];
-        cxpass.dep_of = CxPassDepOf::Pass(self.pass_id)
+        cxpass.parent = CxPassParent::Pass(self.pass_id)
     }
     
     pub fn set_size(&mut self, cx: &mut Cx, pass_size: Vec2) {
@@ -194,7 +194,7 @@ pub struct CxPass {
     pub clear_color: Vec4,
     pub override_dpi_factor: Option<f32>,
     pub main_draw_list_id: Option<usize>,
-    pub dep_of: CxPassDepOf,
+    pub parent: CxPassParent,
     pub paint_dirty: bool,
     pub pass_size: Vec2,
     pub pass_uniforms: PassUniforms,
@@ -216,7 +216,7 @@ impl Default for CxPass {
             clear_color: Vec4::default(),
             depth_init: 1.0,
             main_draw_list_id: None,
-            dep_of: CxPassDepOf::None,
+            parent: CxPassParent::None,
             paint_dirty: false,
             pass_size: Vec2::default(),
             platform: CxPlatformPass::default()
@@ -225,7 +225,7 @@ impl Default for CxPass {
 } 
 
 #[derive(Clone, Debug)]
-pub enum CxPassDepOf {
+pub enum CxPassParent {
     Window(usize),
     Pass(usize),
     None
