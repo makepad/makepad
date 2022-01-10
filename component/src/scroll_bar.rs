@@ -337,7 +337,7 @@ impl ScrollBar {
         };
         if self.visible {
             self.animator_handle_event(cx, event);
-            if let Some(_) = event.is_next_frame(cx, self.next_frame) {
+            if let Some(_) = event.is_next_frame(self.next_frame) {
                 if self.move_towards_scroll_target(cx) {
                     self.next_frame = cx.new_next_frame();
                 }

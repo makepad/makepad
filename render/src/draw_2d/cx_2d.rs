@@ -94,31 +94,7 @@ impl<'a> Cx2d<'a> {
     }
 
     pub fn view_will_redraw(&self, view: &View) -> bool {
-        
-        if self.draw_event.redraw_all {
-            return true;
-        }
-        // figure out if areas are in some way a child of view_id, then we need to redraw
-        for check_draw_list_id in &self.draw_event.draw_lists {
-            let mut next = Some(*check_draw_list_id);
-            while let Some(vw) = next{
-                if vw == view.draw_list_id {
-                    return true
-                }
-                next = self.draw_lists[vw].codeflow_parent_id;
-            }
-        }
-        // figure out if areas are in some way a parent of view_id, then redraw
-        for check_draw_list_id in &self.draw_event.draw_lists_and_children {
-            let mut next = Some(view.draw_list_id);
-            while let Some(vw) = next{
-                if vw == *check_draw_list_id {
-                    return true
-                }
-                next = self.draw_lists[vw].codeflow_parent_id;
-            }
-        }
-        false
+        self.draw_event.draw_list_will_redraw(self, view.draw_list_id)
     }
 }
 
