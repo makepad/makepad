@@ -255,7 +255,7 @@ impl Cx {
         else {
             for (index, color_texture) in self.passes[pass_id].color_textures.iter().enumerate() {
                 let color_attachments: ObjcId = unsafe {msg_send![render_pass_descriptor, colorAttachments]};
-                let color_attachment: ObjcId = unsafe {msg_send![color_attachments, objectAtIndexedSubscript: 0]};
+                let color_attachment: ObjcId = unsafe {msg_send![color_attachments, objectAtIndexedSubscript: index as u64]};
                 
                 let cxtexture = &mut self.textures[color_texture.texture_id as usize];
                 cxtexture.platform.update(metal_cx, AttachmentKind::Color, cxtexture.desc, dpi_factor * pass_size);
