@@ -12,7 +12,7 @@ mod cx_registries;
 mod cx_draw_shaders;
 
 pub mod live_traits;
-mod live_cx;
+pub mod live_cx;
 
 mod event;
 mod area;

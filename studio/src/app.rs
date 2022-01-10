@@ -23,7 +23,6 @@ pub struct App {
 
 impl App {
     
-    
     pub fn live_register(cx: &mut Cx) {
         makepad_component::live_register(cx);
         crate::design_editor::live_register(cx);
