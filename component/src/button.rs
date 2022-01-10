@@ -106,7 +106,7 @@ impl FrameComponent for Button {
         self.handle_event(cx, event).into()
     }
     
-    fn draw_component(&mut self, cx: &mut Cx) {
+    fn draw_component(&mut self, cx: &mut Cx2d) {
         self.draw(cx, None);
     }
 }
@@ -127,7 +127,7 @@ impl Button {
         res.action
     }
     
-    pub fn draw(&mut self, cx: &mut Cx, label: Option<&str>) {
+    pub fn draw(&mut self, cx: &mut Cx2d, label: Option<&str>) {
         self.bg_quad.begin(cx, self.layout);
         self.label_text.draw_walk(cx, label.unwrap_or(&self.label));
         self.bg_quad.end(cx);

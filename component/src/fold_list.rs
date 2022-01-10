@@ -254,7 +254,7 @@ impl FoldListNode {
         self.icon_quad.is_even = is_even;
     }
     
-    pub fn draw_node(&mut self, cx: &mut Cx, name: &str, is_even: f32, node_height: f32, depth: usize) {
+    pub fn draw_node(&mut self, cx: &mut Cx2d, name: &str, is_even: f32, node_height: f32, depth: usize) {
         self.set_draw_state(is_even);
         
         self.layout.walk.height = Height::Fixed(node_height);
@@ -338,13 +338,13 @@ impl FoldListNode {
 
 impl FoldList {
     
-    pub fn begin(&mut self, cx: &mut Cx) -> Result<(), ()> {
+    pub fn begin(&mut self, cx: &mut Cx2d) -> Result<(), ()> {
         self.scroll_view.begin(cx) ?;
         self.count = 0;
         Ok(())
     } 
     
-    pub fn end(&mut self, cx: &mut Cx) {
+    pub fn end(&mut self, cx: &mut Cx2d) {
         // lets fill the space left with blanks
         let height_left = cx.get_height_left();
         let mut walk = 0.0;

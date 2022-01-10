@@ -14,7 +14,10 @@ pub use {
         },
         area::{Area, ViewArea, InstanceArea},
         live_traits::*,
-        turtle::{Layout, Width, Height, Walk, Rect},
+        draw_2d::{
+            cx_2d::Cx2d,
+            turtle::{Layout, Width, Height, Walk, Rect},
+        },
         cx_draw_shaders::{
             CxDrawShaderOptions,
             CxDrawShaderMapping,
@@ -25,6 +28,13 @@ pub use {
             DrawVars,
             DRAW_CALL_USER_UNIFORMS,
             DRAW_CALL_TEXTURE_SLOTS
+        },
+        
+        draw_list::{
+            CxView,
+            CxViewDebug,
+            DrawItem,
+            DrawCall
         },
         geometry::Geometry
     }
@@ -148,30 +158,24 @@ impl View {
     
     pub fn begin(&mut self, cx: &mut Cx2d) -> ViewRedraw {
         
-        if !cx.in_redraw_cycle {
-            panic!("calling begin_view outside of redraw cycle is not possible!");
-        }
-        
         // check if we have a pass id parent
-        let pass_id = cx.draw_pass_id.expect("No pass found when begin_view");
-        cx.views[self.view_id].pass_id = pass_id;
+        let pass_id = cx.pass_id.expect("No pass found when begin_view");
+        cx.cx.views[self.view_id].pass_id = pass_id;
         
-        let codeflow_parent_id = cx.view_stack.last();
+        let codeflow_parent_id = cx.view_stack.last().cloned();
         
-        let view_will_redraw = cx.view_will_redraw(self.view_id);
+        let view_will_redraw = cx.view_will_redraw(self);
         
-        let cxpass = &mut cx.passes[pass_id];
+        let cxpass = &mut cx.cx.passes[pass_id];
         
         if cxpass.main_view_id.is_none() {
             cxpass.main_view_id = Some(self.view_id);
-            cx.views[self.view_id].layout.abs_origin = Some(Vec2 {x: 0., y: 0.});
-            cx.views[self.view_id].layout.abs_size = Some(cxpass.pass_size);
+            cx.cx.views[self.view_id].layout.abs_origin = Some(Vec2 {x: 0., y: 0.});
+            cx.cx.views[self.view_id].layout.abs_size = Some(cxpass.pass_size);
         }
         
-        let cxpass = &mut cx.passes[pass_id];
-        
         // find the parent draw list id
-        let parent_view_id = if cx.views[self.view_id].is_overlay {
+        let parent_view_id = if cx.cx.views[self.view_id].is_overlay {
             if cxpass.main_view_id.is_none() {
                 panic!("Cannot make overlay inside window without root view")
             };
@@ -186,14 +190,14 @@ impl View {
         if let Some(parent_view_id) = parent_view_id {
             // copy the view transform
             
-            if !cx.views[self.view_id].locked_view_transform {
+            if !cx.cx.views[self.view_id].locked_view_transform {
                 for i in 0..16 {
-                    cx.views[self.view_id].view_uniforms.view_transform[i] =
-                    cx.views[parent_view_id].view_uniforms.view_transform[i];
+                    cx.cx.views[self.view_id].view_uniforms.view_transform[i] =
+                    cx.cx.views[parent_view_id].view_uniforms.view_transform[i];
                 }
             }
             
-            let parent = &mut cx.views[parent_view_id];
+            let parent = &mut cx.cx.views[parent_view_id];
             
             // see if we need to add a new one
             if parent.draw_items_len >= parent.draw_items.len() {
@@ -201,7 +205,7 @@ impl View {
                     DrawItem {
                         view_id: parent_view_id,
                         draw_item_id: parent.draw_items.len(),
-                        redraw_id: cx.redraw_id,
+                        redraw_id: cx.cx.redraw_id,
                         sub_view_id: Some(self.view_id),
                         draw_call: None
                     }
@@ -211,17 +215,17 @@ impl View {
             else { // or reuse a sub list node
                 let draw_item = &mut parent.draw_items[parent.draw_items_len];
                 draw_item.sub_view_id = Some(self.view_id);
-                draw_item.redraw_id = cx.redraw_id;
+                draw_item.redraw_id = cx.cx.redraw_id;
                 parent.draw_items_len += 1;
             }
         }
         
         // set nesting draw list id for incremental repaint scanning
-        cx.views[self.view_id].codeflow_parent_id = codeflow_parent_id.cloned();
+        cx.cx.views[self.view_id].codeflow_parent_id = codeflow_parent_id;
         
         // check redraw status
-        if !cx.views[self.view_id].always_redraw
-            && cx.views[self.view_id].draw_items_len != 0
+        if !cx.cx.views[self.view_id].always_redraw
+            && cx.cx.views[self.view_id].draw_items_len != 0
             && !view_will_redraw {
             
             // walk the turtle because we aren't drawing
@@ -235,12 +239,12 @@ impl View {
             cx.passes[pass_id].paint_dirty = true;
         }
         
-        let cxview = &mut cx.views[self.view_id];
+        let cxview = &mut cx.cx.views[self.view_id];
         
         // update redarw id
         let last_redraw_id = cxview.redraw_id;
-        self.redraw_id = cx.redraw_id;
-        cxview.redraw_id = cx.redraw_id;
+        self.redraw_id = cx.cx.redraw_id;
+        cxview.redraw_id = cx.cx.redraw_id;
         
         cxview.draw_items_len = 0;
         
@@ -255,10 +259,6 @@ impl View {
         Ok(())
     }
     
-    
-    pub fn view_will_redraw(&self, cx: &mut Cx) -> bool {
-        cx.view_will_redraw(self.view_id)
-    }
     
     pub fn end(&mut self, cx: &mut Cx2d) -> Area {
         // let view_id = self.view_id.unwrap();
@@ -299,7 +299,7 @@ impl View {
 }
 
 
-impl Cx {
+impl<'a> Cx2d<'a> {
     
     pub fn new_draw_call(&mut self, draw_vars: &DrawVars) -> Option<&mut DrawItem> {
         return self.get_draw_call(false, draw_vars);
@@ -320,10 +320,10 @@ impl Cx {
             return None
         }
         
-        let sh = &self.draw_shaders[draw_shader.draw_shader_id];
+        let sh = &self.cx.draw_shaders[draw_shader.draw_shader_id];
         
         let current_view_id = *self.view_stack.last().unwrap();
-        let cxview = &mut self.views[current_view_id];
+        let cxview = &mut self.cx.views[current_view_id];
         let draw_item_id = cxview.draw_items_len;
         
         if append && !sh.mapping.flags.draw_call_always {
@@ -340,7 +340,7 @@ impl Cx {
             cxview.draw_items.push(DrawItem {
                 draw_item_id: draw_item_id,
                 view_id: current_view_id,
-                redraw_id: self.redraw_id,
+                redraw_id: self.cx.redraw_id,
                 sub_view_id: None,
                 draw_call: Some(DrawCall::new(&sh.mapping, draw_vars))
             });
@@ -349,7 +349,7 @@ impl Cx {
         // reuse an older one, keeping all GPU resources attached
         let mut draw_item = &mut cxview.draw_items[draw_item_id];
         draw_item.sub_view_id = None;
-        draw_item.redraw_id = self.redraw_id;
+        draw_item.redraw_id = self.cx.redraw_id;
         if let Some(dc) = &mut draw_item.draw_call {
             dc.reuse_in_place(&sh.mapping, draw_vars);
         }
@@ -458,6 +458,30 @@ impl Cx {
         ia
     }
     
+    pub fn set_view_scroll_x(&mut self, view_id: usize, scroll_pos: f32) {
+        let pass_id = self.views[view_id].pass_id;
+        let fac = self.get_delegated_dpi_factor(pass_id);
+        let cxview = &mut self.cx.views[view_id];
+        cxview.unsnapped_scroll.x = scroll_pos;
+        let snapped = scroll_pos - scroll_pos % (1.0 / fac);
+        if cxview.snapped_scroll.x != snapped {
+            cxview.snapped_scroll.x = snapped;
+            self.cx.passes[cxview.pass_id].paint_dirty = true;
+        }
+    }
+    
+    
+    pub fn set_view_scroll_y(&mut self, view_id: usize, scroll_pos: f32) {
+        let pass_id = self.views[view_id].pass_id;
+        let fac = self.get_delegated_dpi_factor(pass_id);
+        let cxview = &mut self.cx.views[view_id];
+        cxview.unsnapped_scroll.y = scroll_pos;
+        let snapped = scroll_pos - scroll_pos % (1.0 / fac);
+        if cxview.snapped_scroll.y != snapped {
+            cxview.snapped_scroll.y = snapped;
+            self.cx.passes[cxview.pass_id].paint_dirty = true;
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -472,301 +496,3 @@ pub struct AlignedInstance {
     pub inst: InstanceArea,
     pub index: usize
 }
-
-#[derive(Default, Clone)]
-#[repr(C)]
-pub struct DrawUniforms {
-    pub draw_clip_x1: f32,
-    pub draw_clip_y1: f32,
-    pub draw_clip_x2: f32,
-    pub draw_clip_y2: f32,
-    pub draw_scroll: Vec4,
-    pub draw_zbias: f32,
-    pub pad1: f32,
-    pub pad2: f32,
-    pub pad3: f32
-}
-
-impl DrawUniforms {
-    pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawUniforms>()] {
-        unsafe {std::mem::transmute(self)}
-    }
-}
-
-pub struct DrawItem {
-    pub draw_item_id: usize,
-    pub view_id: usize,
-    pub redraw_id: u64,
-    
-    pub sub_view_id: Option<usize>,
-    pub draw_call: Option<DrawCall>,
-}
-
-pub struct UserUniforms {
-    
-}
-
-pub struct DrawCall {
-    pub draw_shader: DrawShader, // if shader_id changed, delete gl vao
-    
-    pub options: CxDrawShaderOptions,
-    
-    pub instances: Option<Vec<f32 >>,
-    pub total_instance_slots: usize,
-    
-    pub draw_uniforms: DrawUniforms, // draw uniforms
-    pub geometry_id: Option<usize>,
-    pub user_uniforms: [f32; DRAW_CALL_USER_UNIFORMS], // user uniforms
-    
-    pub texture_slots: [Option<usize>; DRAW_CALL_TEXTURE_SLOTS],
-    pub instance_dirty: bool,
-    pub uniforms_dirty: bool,
-    pub platform: CxPlatformDrawCall
-}
-
-impl DrawCall {
-    
-    pub fn new(mapping: &CxDrawShaderMapping, draw_vars: &DrawVars) -> Self {
-
-        DrawCall {
-            geometry_id: draw_vars.geometry_id,
-            options: draw_vars.options.clone(),
-            draw_shader: draw_vars.draw_shader.unwrap(),
-            instances: Some(Vec::new()),
-            total_instance_slots: mapping.instances.total_slots,
-            draw_uniforms: DrawUniforms::default(),
-            user_uniforms: draw_vars.user_uniforms,
-            texture_slots: draw_vars.texture_slots,
-            instance_dirty: true,
-            uniforms_dirty: true,
-            platform: CxPlatformDrawCall::default()
-        }
-    }
-    
-    pub fn reuse_in_place(&mut self, mapping: &CxDrawShaderMapping, draw_vars: &DrawVars) {
-        self.draw_shader = draw_vars.draw_shader.unwrap();
-        self.geometry_id = draw_vars.geometry_id;
-        self.instances.as_mut().unwrap().clear();
-        self.total_instance_slots = mapping.instances.total_slots;
-        for i in 0..mapping.user_uniforms.total_slots {
-            self.user_uniforms[i] = draw_vars.user_uniforms[i];
-        }
-        for i in 0..mapping.textures.len() {
-            self.texture_slots[i] = draw_vars.texture_slots[i];
-        }
-        self.instance_dirty = true;
-        self.uniforms_dirty = true;
-        self.options = draw_vars.options.clone();
-    }
-    
-    pub fn set_local_scroll(&mut self, scroll: Vec2, local_scroll: Vec2) {
-        self.draw_uniforms.draw_scroll.x = scroll.x;
-        if !self.options.no_h_scroll {
-            self.draw_uniforms.draw_scroll.x += local_scroll.x;
-        }
-        self.draw_uniforms.draw_scroll.y = scroll.y;
-        if !self.options.no_v_scroll {
-            self.draw_uniforms.draw_scroll.y += local_scroll.y;
-        }
-        self.draw_uniforms.draw_scroll.z = local_scroll.x;
-        self.draw_uniforms.draw_scroll.w = local_scroll.y;
-    }
-    
-    pub fn get_local_scroll(&self) -> Vec4 {
-        self.draw_uniforms.draw_scroll
-    }
-    
-    pub fn set_zbias(&mut self, zbias: f32) {
-        self.draw_uniforms.draw_zbias = zbias;
-    }
-    
-    pub fn set_clip(&mut self, clip: (Vec2, Vec2)) {
-        self.draw_uniforms.draw_clip_x1 = clip.0.x;
-        self.draw_uniforms.draw_clip_y1 = clip.0.y;
-        self.draw_uniforms.draw_clip_x2 = clip.1.x;
-        self.draw_uniforms.draw_clip_y2 = clip.1.y;
-    }
-    
-    pub fn clip_and_scroll_rect(&self, x: f32, y: f32, w: f32, h: f32) -> Rect {
-        let mut x1 = x - self.draw_uniforms.draw_scroll.x;
-        let mut y1 = y - self.draw_uniforms.draw_scroll.y;
-        let mut x2 = x1 + w;
-        let mut y2 = y1 + h;
-        x1 = self.draw_uniforms.draw_clip_x1.max(x1).min(self.draw_uniforms.draw_clip_x2);
-        y1 = self.draw_uniforms.draw_clip_y1.max(y1).min(self.draw_uniforms.draw_clip_y2);
-        x2 = self.draw_uniforms.draw_clip_x1.max(x2).min(self.draw_uniforms.draw_clip_x2);
-        y2 = self.draw_uniforms.draw_clip_y1.max(y2).min(self.draw_uniforms.draw_clip_y2);
-        return Rect {pos: vec2(x1, y1), size: vec2(x2 - x1, y2 - y1)};
-    }
-}
-
-#[derive(Default, Clone)]
-#[repr(C)]
-pub struct ViewUniforms {
-    view_transform: [f32; 16],
-}
-
-impl ViewUniforms {
-    pub fn as_slice(&self) -> &[f32; std::mem::size_of::<ViewUniforms>()] {
-        unsafe {std::mem::transmute(self)}
-    }
-}
-
-#[derive(Clone)]
-pub enum CxViewDebug {
-    DrawTree,
-    Instances
-}
-
-#[derive(Default)]
-pub struct CxView {
-    pub debug_id: LiveId,
-    
-    pub alloc_generation: u64,
-    
-    pub codeflow_parent_id: Option<usize>, // the id of the parent we nest in, codeflow wise
-    
-    pub redraw_id: u64,
-    
-    pub pass_id: usize,
-    
-    pub locked_view_transform: bool,
-    pub no_v_scroll: bool, // this means we
-    pub no_h_scroll: bool,
-    pub parent_scroll: Vec2,
-    pub unsnapped_scroll: Vec2,
-    pub snapped_scroll: Vec2,
-    
-    pub draw_items: Vec<DrawItem>,
-    pub draw_items_len: usize,
-    
-    pub view_uniforms: ViewUniforms,
-    pub platform: CxPlatformView,
-    
-    pub rect: Rect,
-    pub is_clipped: bool,
-    pub is_overlay: bool,
-    pub always_redraw: bool,
-    
-    pub layout: Layout,
-    
-    pub debug: Option<CxViewDebug>
-}
-
-impl CxView {
-    pub fn new() -> Self {
-        let mut ret = Self {
-            is_clipped: true,
-            no_v_scroll: false,
-            no_h_scroll: false,
-            ..Self::default()
-        };
-        ret.uniform_view_transform(&Mat4::identity());
-        ret
-    }
-    
-    pub fn initialize(&mut self, pass_id: usize, is_clipped: bool, redraw_id: u64) {
-        self.is_clipped = is_clipped;
-        self.redraw_id = redraw_id;
-        self.pass_id = pass_id;
-        self.uniform_view_transform(&Mat4::identity());
-    }
-    
-    pub fn get_scrolled_rect(&self) -> Rect {
-        Rect {
-            pos: self.rect.pos + self.parent_scroll,
-            size: self.rect.size
-        }
-    }
-    
-    pub fn get_inverse_scrolled_rect(&self) -> Rect {
-        Rect {
-            pos: self.rect.pos - self.parent_scroll,
-            size: self.rect.size
-        }
-    }
-    
-    pub fn intersect_clip(&self, clip: (Vec2, Vec2)) -> (Vec2, Vec2) {
-        if self.is_clipped {
-            let min_x = self.rect.pos.x - self.parent_scroll.x;
-            let min_y = self.rect.pos.y - self.parent_scroll.y;
-            let max_x = self.rect.pos.x + self.rect.size.x - self.parent_scroll.x;
-            let max_y = self.rect.pos.y + self.rect.size.y - self.parent_scroll.y;
-            
-            (Vec2 {
-                x: min_x.max(clip.0.x),
-                y: min_y.max(clip.0.y)
-            }, Vec2 {
-                x: max_x.min(clip.1.x),
-                y: max_y.min(clip.1.y)
-            })
-        }
-        else {
-            clip
-        }
-    }
-    
-    pub fn find_appendable_drawcall(&mut self, sh: &CxDrawShader, draw_vars: &DrawVars) -> Option<usize> {
-        // find our drawcall to append to the current layer
-        if self.draw_items_len > 0 {
-            for i in (0..self.draw_items_len).rev() {
-                let draw_item = &mut self.draw_items[i];
-                if let Some(draw_call) = &draw_item.draw_call {
-                    if draw_item.sub_view_id.is_none() && draw_call.draw_shader == draw_vars.draw_shader.unwrap() {
-                        // lets compare uniforms and textures..
-                        if !sh.mapping.flags.draw_call_nocompare {
-                            if draw_call.geometry_id != draw_vars.geometry_id {
-                                continue
-                            }
-                            let mut diff = false;
-                            for i in 0..sh.mapping.user_uniforms.total_slots {
-                                if draw_call.user_uniforms[i] != draw_vars.user_uniforms[i] {
-                                    diff = true;
-                                    break;
-                                }
-                            }
-                            if diff{continue}
-                            for i in 0..sh.mapping.textures.len() {
-                                if draw_call.texture_slots[i] != draw_vars.texture_slots[i] {
-                                    diff = true;
-                                    break;
-                                }
-                            }
-                            if diff{continue}
-                        }
-                        if !draw_call.options.appendable_drawcall(&draw_vars.options) {
-                            continue
-                        }
-                        return Some(i)
-                    }
-                }
-            }
-        }
-        None
-    }
-    
-    pub fn get_local_scroll(&self) -> Vec2 {
-        let xs = if self.no_v_scroll {0.} else {self.snapped_scroll.x};
-        let ys = if self.no_h_scroll {0.} else {self.snapped_scroll.y};
-        Vec2 {x: xs, y: ys}
-    }
-    
-    pub fn uniform_view_transform(&mut self, v: &Mat4) {
-        //dump in uniforms
-        for i in 0..16 {
-            self.view_uniforms.view_transform[i] = v.v[i];
-        }
-    }
-    
-    pub fn get_view_transform(&self) -> Mat4 {
-        //dump in uniforms
-        let mut m = Mat4::default();
-        for i in 0..16 {
-            m.v[i] = self.view_uniforms.view_transform[i];
-        }
-        m
-    }
-}
-
-
-

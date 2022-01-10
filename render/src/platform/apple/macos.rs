@@ -59,31 +59,24 @@ impl Cx {
                 self.process_desktop_pre_event(&mut event);
                 match &event {
                     Event::WindowResizeLoop(wr) => {
-                        for metal_window in &mut metal_windows {
-                            if metal_window.window_id == wr.window_id {
-                                if wr.was_started {
-                                    metal_window.start_resize();
-                                }
-                                else {
-                                    metal_window.stop_resize();
-                                }
+                        if let Some(metal_window) = metal_windows.iter_mut().find(|w| w.window_id == wr.window_id){
+                            if wr.was_started {
+                                metal_window.start_resize();
+                            }
+                            else {
+                                metal_window.stop_resize();
                             }
                         }
                     },
                     Event::WindowGeomChange(re) => { // do this here because mac
-                        for metal_window in &mut metal_windows {
-                            if metal_window.window_id == re.window_id {
-                                metal_window.window_geom = re.new_geom.clone();
-                                self.windows[re.window_id].window_geom = re.new_geom.clone();
-                                // redraw just this windows root draw list
-                                if re.old_geom.inner_size != re.new_geom.inner_size {
-                                    if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
-                                        //println!("REDRAW PASS");
-                                        //self.redraw_all();
-                                        self.redraw_pass_and_child_passes(main_pass_id);
-                                    }
+                        if let Some(metal_window) = metal_windows.iter_mut().find(|w| w.window_id == re.window_id){
+                            metal_window.window_geom = re.new_geom.clone();
+                            self.windows[re.window_id].window_geom = re.new_geom.clone();
+                            // redraw just this windows root draw list
+                            if re.old_geom.inner_size != re.new_geom.inner_size {
+                                if let Some(main_pass_id) = self.windows[re.window_id].main_pass_id {
+                                    self.redraw_pass_and_child_passes(main_pass_id);
                                 }
-                                break;
                             }
                         }
                         // ok lets not redraw all, just this window
@@ -94,16 +87,13 @@ impl Cx {
                         self.windows[wc.window_id].window_state = CxWindowState::Closed;
                         //self.windows_free.push(wc.window_id);
                         // remove the d3d11/win32 window
-                        
-                        for index in 0..metal_windows.len() {
-                            if metal_windows[index].window_id == wc.window_id {
-                                metal_windows.remove(index);
-                                if metal_windows.len() == 0 {
-                                    cocoa_app.terminate_event_loop();
-                                }
-                                for metal_window in &mut metal_windows {
-                                    metal_window.cocoa_window.update_ptrs();
-                                }
+                        if let Some(index) = metal_windows.iter().position(|w| w.window_id == wc.window_id){
+                            metal_windows.remove(index);
+                            if metal_windows.len() == 0 {
+                                cocoa_app.terminate_event_loop();
+                            }
+                            for metal_window in &mut metal_windows {
+                                metal_window.cocoa_window.update_ptrs();
                             }
                         }
                         self.call_event_handler(&mut event);

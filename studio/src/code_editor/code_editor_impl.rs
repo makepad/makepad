@@ -249,7 +249,7 @@ impl CodeEditorImpl {
         self.scroll_view.redraw(cx);
     }
     
-    pub fn begin<'a>(&mut self, cx: &mut Cx, state: &'a EditorState) -> Result<(&'a Document, &'a DocumentInner, &'a Session), ()> {
+    pub fn begin<'a>(&mut self, cx: &mut Cx2d, state: &'a EditorState) -> Result<(&'a Document, &'a DocumentInner, &'a Session), ()> {
         if let Some(session_id) = self.session_id {
             
             let session = &state.sessions[session_id];
@@ -267,7 +267,7 @@ impl CodeEditorImpl {
         Err(())
     }
     
-    pub fn end(&mut self, cx: &mut Cx, lines_layout: &LinesLayout) {
+    pub fn end(&mut self, cx: &mut Cx2d, lines_layout: &LinesLayout) {
         self.end_instances(cx);
         
         let visible = self.scroll_view.get_scroll_view_visible();
@@ -283,7 +283,7 @@ impl CodeEditorImpl {
     // lets calculate visible lines
     pub fn calc_lines_layout<T>(
         &mut self,
-        cx: &mut Cx,
+        cx: &mut Cx2d,
         document_inner: &DocumentInner,
         lines_layout: &mut LinesLayout,
         mut compute_height: T,
@@ -307,7 +307,7 @@ impl CodeEditorImpl {
     // lets calculate visible lines
     fn calc_lines_layout_inner<T>(
         &mut self,
-        cx: &mut Cx,
+        cx: &mut Cx2d,
         document_inner: &DocumentInner,
         lines_layout: &mut LinesLayout,
         compute_height: &mut T,
@@ -380,7 +380,7 @@ impl CodeEditorImpl {
         lines_layout.start_y = start_line_y.unwrap_or(0.0);
     }
     
-    pub fn begin_instances(&mut self, cx: &mut Cx) {
+    pub fn begin_instances(&mut self, cx: &mut Cx2d) {
         // this makes a single area pointer cover all the items drawn
         // also enables a faster draw api because it doesnt have to look up the instance buffer every time
         // since this also locks in draw-call-order, some draw apis call new_draw_call here
@@ -391,7 +391,7 @@ impl CodeEditorImpl {
         self.caret_quad.begin_many_instances(cx);
     }
     
-    pub fn end_instances(&mut self, cx: &mut Cx) {
+    pub fn end_instances(&mut self, cx: &mut Cx2d) {
         self.selection_quad.end_many_instances(cx);
         self.code_text.end_many_instances(cx);
         self.caret_quad.end_many_instances(cx);
@@ -430,7 +430,7 @@ impl CodeEditorImpl {
     
     pub fn draw_selections(
         &mut self,
-        cx: &mut Cx,
+        cx: &mut Cx2d,
         selections: &RangeSet,
         text: &Text,
         lines_layout: &LinesLayout,
@@ -576,7 +576,7 @@ impl CodeEditorImpl {
     
     pub fn draw_linenums(
         &mut self,
-        cx: &mut Cx,
+        cx: &mut Cx2d,
         lines_layout: &LinesLayout,
         cursor: Cursor
     ) {
@@ -639,7 +639,7 @@ impl CodeEditorImpl {
     
     pub fn draw_indent_guides(
         &mut self,
-        cx: &mut Cx,
+        cx: &mut Cx2d,
         indent_cache: &IndentCache,
         lines_layout: &LinesLayout,
     ) {
@@ -691,7 +691,7 @@ impl CodeEditorImpl {
     
     pub fn draw_carets(
         &mut self,
-        cx: &mut Cx,
+        cx: &mut Cx2d,
         selections: &RangeSet,
         carets: &PositionSet,
         lines_layout: &LinesLayout,
@@ -754,7 +754,7 @@ impl CodeEditorImpl {
     
     pub fn draw_code_chunk(
         &mut self,
-        cx: &mut Cx,
+        cx: &mut Cx2d,
         font_scale: f32,
         color: Vec4,
         pos: Vec2,
@@ -772,7 +772,7 @@ impl CodeEditorImpl {
     
     pub fn draw_current_line(
         &mut self,
-        cx: &mut Cx,
+        cx: &mut Cx2d,
         lines_layout: &LinesLayout,
         cursor: Cursor,
     ) {

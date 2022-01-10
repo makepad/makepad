@@ -1,5 +1,5 @@
 use crate::cx::*;
-use crate::drawquad::DrawQuad;
+use crate::draw_2d::draw_quad::DrawQuad;
 
 #[derive(Clone, DrawQuad)]
 #[repr(C)]

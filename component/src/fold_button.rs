@@ -143,11 +143,11 @@ impl FoldButton {
         self.toggle_animator(cx, is_opened, animate, self.opened_state, self.closed_state)
     }
     
-    pub fn draw(&mut self, cx: &mut Cx) {
+    pub fn draw(&mut self, cx: &mut Cx2d) {
         self.bg_quad.draw_walk(cx, self.walk);
     }
     
-    pub fn draw_abs(&mut self, cx: &mut Cx, pos: Vec2, fade: f32) {
+    pub fn draw_abs(&mut self, cx: &mut Cx2d, pos: Vec2, fade: f32) {
         self.bg_quad.apply_over(cx, live!{fade: (fade)});
         self.bg_quad.draw_abs(cx, Rect {
             pos: pos + self.abs_offset,

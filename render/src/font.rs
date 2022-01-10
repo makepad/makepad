@@ -16,9 +16,10 @@ pub use {
         live_traits::*,
         shader::geometry_gen::GeometryQuad2D,
         draw_vars::DrawVars,
-        view::ManyInstances,
+        draw_2d::view::ManyInstances,
         pass::{Pass, PassClearColor},
-        view::View,
+        draw_2d::view::View,
+        draw_2d::cx_2d::Cx2d,
         texture::Texture,
     }
 };
@@ -163,12 +164,6 @@ impl Cx {
         
     }
     
-    pub fn after_draw(&mut self) {
-        self.with_draw_font_atlas(|cx, dfa|{
-            dfa.draw(cx);
-        })
-    }
-    
      pub fn after_handle_event(&mut self, event: &mut Event) {
          self.with_draw_font_atlas(|cx, dfa|{
             dfa.handle_event(cx, event);
@@ -204,7 +199,8 @@ pub struct DrawTrapezoidText {
 impl DrawTrapezoidText {
     
     // test api for directly drawing a glyph
-    pub fn draw_char(&mut self, cx: &mut Cx, c: char, font_id: usize, font_size: f32) {
+    /*
+    pub fn draw_char(&mut self, cx: &mut Cx, c: char, font_id: usize, font_size: f32, dpi_factor:f32) {
         // now lets make a draw_character function
         let many = cx.begin_many_instances(&self.draw_vars);
         if many.is_none(){
@@ -226,7 +222,7 @@ impl DrawTrapezoidText {
                 return
             }
             let glyph = &cxfont.ttf_font.glyphs[slot];
-            let dpi_factor = cx.current_dpi_factor;
+            //let dpi_factor = cx.current_dpi_factor;
             let pos = cx.get_turtle_pos();
             let font_scale_logical = font_size * 96.0 / (72.0 * font.units_per_em);
             let font_scale_pixels = font_scale_logical * dpi_factor;
@@ -261,7 +257,7 @@ impl DrawTrapezoidText {
         }
         
         cx.end_many_instances(many);
-    }
+    }*/
     
     // atlas drawing function used by CxAfterDraw
     pub fn draw_todo(&mut self, cx: &mut Cx, todo: CxFontsAtlasTodo, many: &mut ManyInstances) {
@@ -372,18 +368,20 @@ impl CxDrawFontAtlas {
                     _=>()
                 }
             }
+            Event::Draw(re)=>{
+                self.draw(&mut Cx2d::new(cx, re));
+            }
             _ => ()
         }
     }
     
-    pub fn draw(&mut self, cx: &mut Cx) {
+    pub fn draw(&mut self, cx: &mut Cx2d) {
         //let start = Cx::profile_time_ns();
-        
         // we need to start a pass that just uses the texture
         if cx.fonts_atlas.atlas_todo.len()>0 {
-            
-            self.atlas_pass.begin(cx);
-            self.atlas_pass.set_size(cx, cx.fonts_atlas.texture_size);
+            cx.begin_pass(&self.atlas_pass);
+            let texture_size = cx.fonts_atlas.texture_size;
+            self.atlas_pass.set_size(cx, texture_size);
             let clear = if cx.fonts_atlas.clear_buffer {
                 cx.fonts_atlas.clear_buffer = false;
                 PassClearColor::ClearWith(Vec4::default())
@@ -407,7 +405,7 @@ impl CxDrawFontAtlas {
             
             self.counter += 1;
             self.atlas_view.end(cx);
-            self.atlas_pass.end(cx);
+            cx.end_pass(&self.atlas_pass);
         }
         //println!("TOTALT TIME {}", Cx::profile_time_ns() - start);
     }

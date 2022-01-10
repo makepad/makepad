@@ -3,7 +3,7 @@
 use {
     std::{
         ops::{Index, IndexMut, Deref, DerefMut},
-        collections::{HashMap},
+        collections::{HashMap, HashSet},
         collections::hash_map::Entry,
         sync::Once,
         fmt,
@@ -331,12 +331,18 @@ impl std::hash::BuildHasher for LiveIdHasherBuilder {
 }
 
 #[derive(Clone, Debug)]
-pub struct LiveIdMap<K, V>(HashMap<K, V, LiveIdHasherBuilder>);
+pub struct LiveIdMap<K, V>{
+    map:HashMap<K, V, LiveIdHasherBuilder>,
+    alloc_set: HashSet<K, LiveIdHasherBuilder>
+}
 
 impl<K, V> Default for LiveIdMap<K, V>
 where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId> {
     fn default() -> Self {
-        Self (HashMap::with_hasher(LiveIdHasherBuilder {}))
+        Self {
+            map: HashMap::with_hasher(LiveIdHasherBuilder {}),
+            alloc_set: HashSet::with_hasher(LiveIdHasherBuilder {})
+        }
     }
 }
 
@@ -345,10 +351,11 @@ where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId>
 {
     pub fn new() -> Self {Self::default()}
     
-    pub fn unique_key(&self) -> K {
+    pub fn alloc_key(&mut self) -> K {
         loop {
-            let new_id = LiveId::gen();
-            if self.0.get(&new_id.into()).is_none() {
+            let new_id = LiveId::gen().into();
+            if self.map.get(&new_id).is_none() && !self.alloc_set.contains(&new_id){
+                self.alloc_set.insert(new_id);
                 return new_id.into()
             }
         }
@@ -356,19 +363,25 @@ where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId>
     
     pub fn insert_unique(&mut self, value: V) -> K {
         loop {
-            let new_id = LiveId::gen();
-            match self.0.entry(new_id.into()) {
+            let new_id = LiveId::gen().into();
+            if self.alloc_set.contains(&new_id){
+                continue
+            }
+            match self.map.entry(new_id) {
                 Entry::Occupied(_) => continue,
                 Entry::Vacant(v) => {
+                    
                     v.insert(value);
-                    return new_id.into()
+                    return new_id
                 }
             }
         }
     }
     
     pub fn insert(&mut self, k: impl Into<K>, value: V) {
-        match self.0.entry(k.into()) {
+        let k = k.into();
+        self.alloc_set.remove(&k);
+        match self.map.entry(k) {
             Entry::Occupied(_) => panic!(),
             Entry::Vacant(v) => v.insert(value)
         };
@@ -379,13 +392,13 @@ impl<K, V> Deref for LiveIdMap<K, V>
 where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId>
 {
     type Target = HashMap<K, V, LiveIdHasherBuilder>;
-    fn deref(&self) -> &Self::Target {&self.0}
+    fn deref(&self) -> &Self::Target {&self.map}
 }
 
 impl<K, V> DerefMut for LiveIdMap<K, V>
 where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId>
 {
-    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.0}
+    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.map}
 }
 
 impl<K, V> Index<K> for LiveIdMap<K, V>
@@ -393,7 +406,7 @@ where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId>
 {
     type Output = V;
     fn index(&self, index: K) -> &Self::Output {
-        self.0.get(&index).unwrap()
+        self.map.get(&index).unwrap()
     }
 }
 
@@ -401,6 +414,6 @@ impl<K, V> IndexMut<K> for LiveIdMap<K, V>
 where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId>
 {
     fn index_mut(&mut self, index: K) -> &mut Self::Output {
-        self.0.get_mut(&index).unwrap()
+        self.map.get_mut(&index).unwrap()
     }
 }

@@ -67,7 +67,7 @@ pub struct TabCloseButton {
 
 impl TabCloseButton {
     
-    pub fn draw(&mut self, cx: &mut Cx) {
+    pub fn draw(&mut self, cx: &mut Cx2d) {
         self.button_quad.draw_walk(
             cx,
             self.walk
