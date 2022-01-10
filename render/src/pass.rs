@@ -85,11 +85,6 @@ impl LiveApply for Pass {
 
 impl Pass {
     
-    pub fn make_parent_of_pass(&mut self, cx: &mut Cx, pass: &Pass) {
-        let cxpass = &mut cx.passes[pass.pass_id];
-        cxpass.parent = CxPassParent::Pass(self.pass_id)
-    }
-    
     pub fn set_size(&mut self, cx: &mut Cx, pass_size: Vec2) {
         let mut pass_size = pass_size;
         if pass_size.x < 1.0{pass_size.x = 1.0};
