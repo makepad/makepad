@@ -389,6 +389,7 @@ impl CxDrawFontAtlas {
             else {
                 PassClearColor::InitWith(Vec4::default())
             };
+            self.atlas_pass.clear_color_textures(cx);
             self.atlas_pass.add_color_texture(cx, &self.atlas_texture, clear);
             self.atlas_view.set_always_redraw(cx, true);
             self.atlas_view.begin(cx).unwrap();
