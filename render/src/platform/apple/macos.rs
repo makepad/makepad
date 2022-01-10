@@ -18,7 +18,7 @@ use {
         cx_api::{CxPlatformApi},
         cx::{Cx, PlatformType},
         window::{CxWindowState, CxWindowCmd},
-        pass::CxPassDepOf,
+        pass::CxPassParent,
         
     }
 };
@@ -200,8 +200,8 @@ impl Cx {
                         if passes_todo.len() > 0 {
                             self.repaint_id += 1;
                             for pass_id in &passes_todo {
-                                match self.passes[*pass_id].dep_of.clone() {
-                                    CxPassDepOf::Window(window_id) => {
+                                match self.passes[*pass_id].parent.clone() {
+                                    CxPassParent::Window(window_id) => {
                                         // find the accompanying render window
                                         // its a render window
                                         windows_need_repaint -= 1;
@@ -229,7 +229,7 @@ impl Cx {
                                         }}
                                         
                                     }
-                                    CxPassDepOf::Pass(parent_pass_id) => {
+                                    CxPassParent::Pass(parent_pass_id) => {
                                         let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
                                         self.draw_pass_to_texture(
                                             *pass_id,
@@ -237,7 +237,7 @@ impl Cx {
                                             &mut metal_cx,
                                         );
                                     },
-                                    CxPassDepOf::None => {
+                                    CxPassParent::None => {
                                         self.draw_pass_to_texture(
                                             *pass_id,
                                             1.0,

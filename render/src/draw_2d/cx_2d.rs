@@ -19,7 +19,7 @@ use {
         },
         pass::{
             Pass,
-            CxPassDepOf
+            CxPassParent
         },
         cx::Cx,
     }
@@ -59,12 +59,12 @@ impl<'a> Cx2d<'a> {
 
         cxpass.main_draw_list_id = None;
 
-        match cxpass.dep_of{
-            CxPassDepOf::Window(window_id)=>{
+        match cxpass.parent{
+            CxPassParent::Window(window_id)=>{
                 self.passes[pass.pass_id].pass_size = self.windows[window_id].get_inner_size();
                 self.current_dpi_factor = self.get_delegated_dpi_factor(pass.pass_id);
             }
-            CxPassDepOf::Pass(pass_id)=>{
+            CxPassParent::Pass(pass_id)=>{
                 self.passes[pass.pass_id].pass_size = self.passes[pass_id].pass_size;
                 self.current_dpi_factor = self.get_delegated_dpi_factor(pass_id);
             }
