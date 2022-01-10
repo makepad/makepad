@@ -1,5 +1,5 @@
 use {
-    std::collections::HashMap,
+    std::collections::{HashMap, HashSet},
     makepad_shader_compiler::makepad_math::{
         Vec2,
     },
@@ -141,7 +141,7 @@ impl Cx {
         }
     }
     
-    pub (crate) fn call_live_edit_and_maybe_draw(&mut self) {
+    pub (crate) fn call_live_edit(&mut self) {
         if self.live_edit_event.is_some() {
             let ev = self.live_edit_event.take().unwrap();
             self.call_event_handler(&mut Event::LiveEdit(ev));
@@ -206,8 +206,8 @@ impl Cx {
     
     pub (crate) fn call_next_frame_event(&mut self, time: f64)
     {
-        std::mem::swap(&mut self.next_frames, &mut self.new_next_frames);
-        self.new_next_frames.clear();
-        self.call_event_handler(&mut Event::NextFrame(NextFrameEvent {time: time, frame: self.repaint_id}));
+        let mut set = HashSet::default();
+        std::mem::swap(&mut set, &mut self.new_next_frames);
+        self.call_event_handler(&mut Event::NextFrame(NextFrameEvent {set, time: time, frame: self.repaint_id}));
     }
 }

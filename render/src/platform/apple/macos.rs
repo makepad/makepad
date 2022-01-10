@@ -258,7 +258,7 @@ impl Cx {
                     },
                     _ => {
                         self.call_event_handler(&mut event);
-                        self.call_live_edit_and_maybe_draw();
+                        self.call_live_edit();
                         self.call_signals_and_triggers();
                     }
                 }
