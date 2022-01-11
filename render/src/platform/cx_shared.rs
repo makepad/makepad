@@ -196,8 +196,6 @@ impl Cx {
     
     pub (crate) fn call_draw_event(&mut self)
     {
-        self.redraw_id += 1;
-        
         let mut draw_event = DrawEvent::default();
         std::mem::swap(&mut draw_event, &mut self.new_draw_event);
 

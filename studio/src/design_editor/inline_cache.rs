@@ -184,7 +184,6 @@ impl InlineCache {
         };
         //println!("{}", &path.strip_prefix("/Users/admin/makepad/edit_repo/").unwrap());
         let file_id = live_registry.path_str_to_file_id(path).unwrap();
-        
         let live_file = &live_registry.live_files[file_id.to_index()];
         let expanded = &live_file.expanded;
         
@@ -241,7 +240,7 @@ impl InlineCache {
                             }
                             else {live_token_id};
                             
-                            let live_ptr = LivePtr {file_id, index: node_index as u32};
+                            let live_ptr = LivePtr {file_id, index: node_index as u32, generation:live_file.generation};
                             // if its a DSL, we should filter here
                             //let live_node = live_registry.ptr_to_node(live_ptr);
                             let bind = InlineEditBind {

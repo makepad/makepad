@@ -26,6 +26,8 @@ pub struct LiveFile {
     pub source: String,
     pub deps: BTreeSet<LiveModuleId>,
     
+    pub generation: u32,
+    
     pub original: LiveOriginal,
     pub next_original: Option<LiveOriginal>,
     pub expanded: LiveExpanded,
@@ -86,8 +88,11 @@ impl LiveRegistry {
     }
     
     pub fn ptr_to_node(&self, live_ptr: LivePtr) -> &LiveNode {
-        let doc = &self.live_files[live_ptr.file_id.to_index()].expanded;
-        &doc.resolve_ptr(live_ptr.index as usize)
+        let doc = &self.live_files[live_ptr.file_id.to_index()];
+        if doc.generation != live_ptr.generation{
+            panic!();
+        }
+        &doc.expanded.resolve_ptr(live_ptr.index as usize)
     }
     
     pub fn file_id_to_file_name(&self, file_id: LiveFileId) -> &str {
@@ -95,21 +100,31 @@ impl LiveRegistry {
     }
     
     pub fn ptr_to_doc_node(&self, live_ptr: LivePtr) -> (&LiveExpanded, &LiveNode) {
-        let doc = &self.live_files[live_ptr.file_id.to_index()].expanded;
-        (doc, &doc.resolve_ptr(live_ptr.index as usize))
+        let doc = &self.live_files[live_ptr.file_id.to_index()];
+        if doc.generation != live_ptr.generation{
+            panic!();
+        }
+        (&doc.expanded, &doc.expanded.resolve_ptr(live_ptr.index as usize))
     }
     
     pub fn ptr_to_doc(&self, live_ptr: LivePtr) -> &LiveExpanded {
-        &self.live_files[live_ptr.file_id.to_index()].expanded
+        let doc = &self.live_files[live_ptr.file_id.to_index()];
+        if doc.generation != live_ptr.generation{
+            panic!();
+        }
+        &doc.expanded
     }
     
-    pub fn file_id_to_doc(&self, file_id: LiveFileId) -> &LiveExpanded {
-        &self.live_files[file_id.to_index()].expanded
+    pub fn file_id_to_file(&self, file_id: LiveFileId) -> &LiveFile {
+        &self.live_files[file_id.to_index()]
     }
     
     pub fn ptr_to_nodes_index(&self, live_ptr: LivePtr) -> (&[LiveNode], usize) {
-        let doc = &self.live_files[live_ptr.file_id.to_index()].expanded;
-        (&doc.nodes, live_ptr.index as usize)
+        let doc = &self.live_files[live_ptr.file_id.to_index()];
+        if doc.generation != live_ptr.generation{
+            panic!();
+        }
+        (&doc.expanded.nodes, live_ptr.index as usize)
     }
     
     pub fn path_str_to_file_id(&self, path: &str) -> Option<LiveFileId> {
@@ -214,10 +229,10 @@ impl LiveRegistry {
             if let LiveValue::Use(module_id) = &nodes[index].value {
                 // ok lets find it in that other doc
                 if let Some(file_id) = self.module_id_to_file_id(*module_id) {
-                    let doc = self.file_id_to_doc(file_id);
-                    if let Some(index) = doc.nodes.child_by_name(0, item) {
+                    let file = self.file_id_to_file(file_id);
+                    if let Some(index) = file.expanded.nodes.child_by_name(0, item) {
                         return Some(LiveScopeTarget::LivePtr(
-                            LivePtr {file_id: file_id, index: index as u32}
+                            LivePtr {file_id: file_id, index: index as u32, generation:file.generation}
                         ))
                     }
                 }
@@ -232,10 +247,10 @@ impl LiveRegistry {
             if let LiveValue::Use(module_id) = &nodes[index].value {
                 if nodes[index].id == LiveId::empty() { // glob
                     if let Some(file_id) = self.module_id_to_file_id(*module_id) {
-                        let doc = self.file_id_to_doc(file_id);
-                        if let Some(index) = doc.nodes.child_by_name(0, item) {
+                        let file = self.file_id_to_file(file_id);
+                        if let Some(index) = file.expanded.nodes.child_by_name(0, item) {
                             return Some(LiveScopeTarget::LivePtr(
-                                LivePtr {file_id: file_id, index: index as u32}
+                                LivePtr {file_id: file_id, index: index as u32, generation:file.generation}
                             ))
                         }
                     }
@@ -246,52 +261,15 @@ impl LiveRegistry {
         None
     }
     
-        pub fn find_scope_target_via_start2(&self, item: LiveId, index: usize, nodes: &[LiveNode]) -> Option<LiveScopeTarget> {
-        if let Some(index) = nodes.scope_up_down_by_name(index, item) {
-            if let LiveValue::Use(module_id) = &nodes[index].value {
-                // ok lets find it in that other doc
-                if let Some(file_id) = self.module_id_to_file_id(*module_id) {
-                    let doc = self.file_id_to_doc(file_id);
-                    if let Some(index) = doc.nodes.child_by_name(0, item) {
-                        return Some(LiveScopeTarget::LivePtr(
-                            LivePtr {file_id: file_id, index: index as u32}
-                        ))
-                    }
-                }
-            }
-            else {
-                return Some(LiveScopeTarget::LocalPtr(index))
-            }
-        }
-        // ok now look at the glob use * things
-        let mut node_iter = Some(1);
-        while let Some(index) = node_iter {
-            println!("Globbinug {} {} {:?}", index, nodes[index].id, nodes[index].value);
-            if let LiveValue::Use(module_id) = &nodes[index].value {
-                if nodes[index].id == LiveId::empty() { // glob
-                    if let Some(file_id) = self.module_id_to_file_id(*module_id) {
-                        let doc = self.file_id_to_doc(file_id);
-                        if let Some(index) = doc.nodes.child_by_name(0, item) {
-                            return Some(LiveScopeTarget::LivePtr(
-                                LivePtr {file_id: file_id, index: index as u32}
-                            ))
-                        }
-                    }
-                }
-            }
-            node_iter = nodes.next_child(index);
-        }
-        None
-    }
     
     pub fn find_scope_ptr_via_expand_index(&self, file_id: LiveFileId, index: usize, item: LiveId) -> Option<LivePtr> {
         // ok lets start
         // let token_id = origin.token_id().unwrap();
         //let index = origin.node_index().unwrap();
         //let file_id = token_id.file_id();
-        let doc = self.file_id_to_doc(file_id);
-        match self.find_scope_target_via_start(item, index, &doc.nodes) {
-            Some(LiveScopeTarget::LocalPtr(index)) => Some(LivePtr {file_id: file_id, index: index as u32}),
+        let file = self.file_id_to_file(file_id);
+        match self.find_scope_target_via_start(item, index, &file.expanded.nodes) {
+            Some(LiveScopeTarget::LocalPtr(index)) => Some(LivePtr {file_id: file_id, index: index as u32,generation:file.generation}),
             Some(LiveScopeTarget::LivePtr(ptr)) => Some(ptr),
             None => None
         }
@@ -551,6 +529,7 @@ impl LiveRegistry {
             if live_file.next_original.is_some(){
                 live_file.original = live_file.next_original.take().unwrap();
                 live_file.reexpand = true;
+                live_file.generation += 1; 
             }
         }
         
@@ -609,7 +588,7 @@ impl LiveRegistry {
                         }
                         // ok this is a direct patch
                         else if is_prop_assign && reader.origin.token_id() == Some(token_id) {
-                            let live_ptr = LivePtr {file_id, index: reader.index() as u32};
+                            let live_ptr = LivePtr {file_id, index: reader.index() as u32, generation:self.live_files[file_id.to_index()].generation};
                             if !reader.update_from_live_token(&live_tokens[token_index].token) {
                                 println!("update_from_live_token returns false investigate! {:?}", reader.node());
                             }
@@ -713,6 +692,7 @@ impl LiveRegistry {
             start_pos,
             deps,
             source,
+            generation:0,
             live_type_infos,
             original,
             next_original: None,
@@ -814,7 +794,7 @@ impl LiveRegistry {
                 in_file_id: *file_id,
                 errors
             };
-            live_document_expander.expand(in_doc, &mut out_doc);
+            live_document_expander.expand(in_doc, &mut out_doc, self.live_files[file_id.to_index()].generation);
             
             self.live_files[file_id.to_index()].reexpand = false;
             
