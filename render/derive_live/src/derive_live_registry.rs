@@ -98,9 +98,10 @@ pub fn derive_live_registry_impl(input: TokenStream) -> TokenStream {
             tb.add("     fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {");
             tb.add("         if let Some(file_id) = apply_from.file_id() {");
             tb.add("             let mut registry = cx.registries.get_or_create::<").ident(&registry).add(">();");
+            tb.add("             let generation = cx.live_registry.borrow().file_id_to_file(file_id).generation;");
             tb.add("             for item in registry.items.values_mut() {");
             tb.add("                 let index = nodes.child_by_name(index, item.id).expect(\"Registry item found, but child node not. Make sure the registry is live_register called last otherwise the DSL nodes aren't populated\");");
-            tb.add("                 item.live_ptr = Some(LivePtr {file_id, index: index as u32})");
+            tb.add("                 item.live_ptr = Some(LivePtr {file_id, index: index as u32, generation})");
             tb.add("             }");
             tb.add("         }");
             tb.add("         nodes.skip_node(index)");
