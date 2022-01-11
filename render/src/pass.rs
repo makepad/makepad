@@ -226,7 +226,6 @@ pub enum CxPassParent {
     None
 }
 
-
 impl CxPass {
     
     pub fn set_dpi_factor(&mut self, dpi_factor: f32) {

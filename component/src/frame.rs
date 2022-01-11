@@ -48,7 +48,7 @@ impl LiveApply for Frame {
     fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
         
         if let Some(file_id) = apply_from.file_id() {
-            self.live_ptr = Some(LivePtr::from_index(file_id, start_index));
+            self.live_ptr = Some(LivePtr::from_index(file_id, start_index, cx.live_registry.borrow().file_id_to_file(file_id).generation));
         }
         
         if !nodes[start_index].value.is_structy_type() {

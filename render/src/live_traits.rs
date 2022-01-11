@@ -74,10 +74,10 @@ pub trait LiveNew: LiveApply {
         let live_registry_rc = cx.live_registry.clone();
         let live_registry = live_registry_rc.borrow();
         if let Some(file_id) = live_registry.module_id_to_file_id.get(&module_id) {
-            let doc = live_registry.file_id_to_doc(*file_id);
-            if let Some(index) = doc.nodes.child_by_name(0, id) {
+            let file = live_registry.file_id_to_file(*file_id);
+            if let Some(index) = file.expanded.nodes.child_by_name(0, id) {
                 let mut ret = Self::new(cx);
-                ret.apply(cx, ApplyFrom::NewFromDoc {file_id: *file_id}, index, &doc.nodes);
+                ret.apply(cx, ApplyFrom::NewFromDoc {file_id: *file_id}, index, &file.expanded.nodes);
                 return Some(ret)
             }
         }
@@ -114,9 +114,9 @@ pub trait LiveApply: LiveHook {
                         let live_registry_rc = cx.live_registry.clone();
                         let live_registry = live_registry_rc.borrow();
                         if let Some(file_id) = live_registry.main_module {
-                            let doc = live_registry.file_id_to_doc(file_id);
-                            if let Some(index) = doc.nodes.child_by_name(0, id) {
-                                self.apply(cx, ApplyFrom::UpdateFromDoc {file_id}, index, &doc.nodes);
+                            let file = live_registry.file_id_to_file(file_id);
+                            if let Some(index) = file.expanded.nodes.child_by_name(0, id) {
+                                self.apply(cx, ApplyFrom::UpdateFromDoc {file_id}, index, &file.expanded.nodes);
                             }
                         }
                         cx.redraw_all();
