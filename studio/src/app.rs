@@ -33,6 +33,7 @@ impl App {
     }
     
     pub fn new_app(cx: &mut Cx) -> Self {
+        println!("{}", std::mem::size_of::<LiveNode>());
         let ret = Self::new_as_main_module(cx, &module_path!(), id!(App)).unwrap();
         ret
     }
