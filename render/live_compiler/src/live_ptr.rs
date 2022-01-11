@@ -51,10 +51,26 @@ impl fmt::Display for LiveModuleId {
 #[derive(Clone, Debug, Eq, Hash, Ord, PartialOrd, Copy, PartialEq)]
 pub struct LocalPtr(pub usize);
 */
+
+#[derive(Copy, Default, Clone, Debug, Eq, Hash, Ord, PartialOrd, PartialEq)]
+pub struct LiveFileGeneration(u16);
+
+impl LiveFileGeneration{
+    pub fn next_gen(&mut self){
+        self.0+=1
+    }
+}
+
+impl fmt::Display for LiveFileGeneration {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
 #[derive(Clone, Debug, Eq, Hash, Copy, Ord, PartialOrd, PartialEq)]
 pub struct LivePtr {
     pub file_id: LiveFileId,
-    pub generation: u32,
+    pub generation: LiveFileGeneration,
     pub index: u32,
 }
 
@@ -67,10 +83,9 @@ impl LivePtr{
         Self{file_id:self.file_id, index:index as u32, generation:self.generation}
     }
 
-    pub fn from_index(file_id:LiveFileId, index:usize, generation:u32)->Self{
+    pub fn from_index(file_id:LiveFileId, index:usize, generation:LiveFileGeneration)->Self{
         Self{file_id, index:index as u32, generation}
     }
-
 }
 
 impl fmt::Display for LivePtr {

@@ -158,7 +158,7 @@ impl ShaderRegistry {
         let ret = walk_recur(live_registry, None, base_ptr.file_id, base_ptr.generation, base_ptr.index as usize, &doc.nodes, ids);
         return ret;
         // ok so we got a node. great. now what
-        fn walk_recur(live_registry: &LiveRegistry, struct_ptr: Option<LivePtr>, file_id: LiveFileId, generation:u32, index: usize, nodes: &[LiveNode], ids: &[LiveId]) -> LiveNodeFindResult {
+        fn walk_recur(live_registry: &LiveRegistry, struct_ptr: Option<LivePtr>, file_id: LiveFileId, generation:LiveFileGeneration, index: usize, nodes: &[LiveNode], ids: &[LiveId]) -> LiveNodeFindResult {
             let node = &nodes[index];
             
             if ids.len() != 0 && !node.value.is_class() && !node.value.is_clone() && !node.value.is_object() {

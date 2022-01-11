@@ -2,7 +2,7 @@ use {
     makepad_id_macros::*,
     makepad_live_tokenizer::LiveId,
     crate::{
-        live_ptr::{LiveFileId, LivePtr},
+        live_ptr::{LiveFileId, LivePtr, LiveFileGeneration},
         live_error::{LiveError, LiveErrorOrigin},
         live_document::{LiveOriginal, LiveExpanded},
         live_node::{LiveValue, LiveNode, /*LiveTypeKind*/},
@@ -47,7 +47,7 @@ impl<'a> LiveExpander<'a> {
         }
     }
     
-    pub fn expand(&mut self, in_doc: &LiveOriginal, out_doc: &mut LiveExpanded, generation:u32) {
+    pub fn expand(&mut self, in_doc: &LiveOriginal, out_doc: &mut LiveExpanded, generation:LiveFileGeneration) {
         
         // ok first copy the edit_info over.
         //out_doc.edit_info = in_doc.edit_info.clone();

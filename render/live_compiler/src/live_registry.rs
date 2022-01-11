@@ -9,7 +9,7 @@ use {
         live_document::{LiveOriginal, LiveExpanded},
         live_node::{LiveNodeOrigin, LiveNode, LiveValue, LiveType, LiveTypeInfo},
         live_node_vec::{LiveNodeSlice, LiveNodeVec, LiveNodeMutReader},
-        live_ptr::{LiveFileId, LivePtr, LiveModuleId},
+        live_ptr::{LiveFileId, LivePtr, LiveModuleId, LiveFileGeneration},
         live_token::{LiveToken, LiveTokenId, TokenWithSpan},
         span::{TextSpan, TextPos},
         live_expander::{LiveExpander}
@@ -26,7 +26,7 @@ pub struct LiveFile {
     pub source: String,
     pub deps: BTreeSet<LiveModuleId>,
     
-    pub generation: u32,
+    pub generation: LiveFileGeneration,
     
     pub original: LiveOriginal,
     pub next_original: Option<LiveOriginal>,
@@ -34,6 +34,7 @@ pub struct LiveFile {
     
     pub live_type_infos: Vec<LiveTypeInfo>,
 }
+
 
 pub struct LiveRegistry {
     pub file_ids: HashMap<String, LiveFileId>,
@@ -89,7 +90,7 @@ impl LiveRegistry {
     
     pub fn generation_valid(&self, live_ptr: LivePtr) -> bool {
         let doc = &self.live_files[live_ptr.file_id.to_index()];
-        doc.generation == live_ptr.generation
+        doc.generation == live_ptr.generation 
     }
     
     pub fn ptr_to_node(&self, live_ptr: LivePtr) -> &LiveNode {
@@ -534,7 +535,7 @@ impl LiveRegistry {
             if live_file.next_original.is_some(){
                 live_file.original = live_file.next_original.take().unwrap();
                 live_file.reexpand = true;
-                live_file.generation += 1; 
+                live_file.generation.next_gen();
             }
         }
         
@@ -697,7 +698,7 @@ impl LiveRegistry {
             start_pos,
             deps,
             source,
-            generation:0,
+            generation:LiveFileGeneration::default(),
             live_type_infos,
             original,
             next_original: None,
