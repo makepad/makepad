@@ -95,7 +95,7 @@ impl LiveRegistry {
     pub fn ptr_to_node(&self, live_ptr: LivePtr) -> &LiveNode {
         let doc = &self.live_files[live_ptr.file_id.to_index()];
         if doc.generation != live_ptr.generation{
-            panic!();
+            panic!("ptr_to_node generation invalid for file {} gen:{} ptr:{}", doc.file_name, doc.generation, live_ptr.generation);
         }
         &doc.expanded.resolve_ptr(live_ptr.index as usize)
     }
@@ -107,7 +107,7 @@ impl LiveRegistry {
     pub fn ptr_to_doc_node(&self, live_ptr: LivePtr) -> (&LiveExpanded, &LiveNode) {
         let doc = &self.live_files[live_ptr.file_id.to_index()];
         if doc.generation != live_ptr.generation{
-            panic!();
+            panic!("ptr_to_doc_node generation invalid for file {} gen:{} ptr:{}", doc.file_name, doc.generation, live_ptr.generation);
         }
         (&doc.expanded, &doc.expanded.resolve_ptr(live_ptr.index as usize))
     }
@@ -115,7 +115,7 @@ impl LiveRegistry {
     pub fn ptr_to_doc(&self, live_ptr: LivePtr) -> &LiveExpanded {
         let doc = &self.live_files[live_ptr.file_id.to_index()];
         if doc.generation != live_ptr.generation{
-            panic!();
+            panic!("ptr_to_doc generation invalid for file {} gen:{} ptr:{}", doc.file_name, doc.generation, live_ptr.generation);
         }
         &doc.expanded
     }
@@ -127,7 +127,7 @@ impl LiveRegistry {
     pub fn ptr_to_nodes_index(&self, live_ptr: LivePtr) -> (&[LiveNode], usize) {
         let doc = &self.live_files[live_ptr.file_id.to_index()];
         if doc.generation != live_ptr.generation{
-            panic!();
+            panic!("ptr_to_nodes_index generation invalid for file {} gen:{} ptr:{}", doc.file_name, doc.generation, live_ptr.generation);
         }
         (&doc.expanded.nodes, live_ptr.index as usize)
     }
