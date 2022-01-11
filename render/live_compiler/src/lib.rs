@@ -40,6 +40,7 @@ pub use {
         live_ptr::{
             LiveModuleId,
             LivePtr,
+            LiveFileGeneration,
             LiveFileId,
         },
         live_node_vec::{
@@ -59,7 +60,7 @@ pub use {
             LiveUnOp,
             LiveNodeOrigin,
             InlineString,
-            FittedString,
+            FittedString, 
             //LiveTypeKind,
         },
         live_token::{TokenWithSpan, LiveToken, LiveTokenId},
