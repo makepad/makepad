@@ -54,6 +54,7 @@ pub struct LocalPtr(pub usize);
 #[derive(Clone, Debug, Eq, Hash, Copy, Ord, PartialOrd, PartialEq)]
 pub struct LivePtr {
     pub file_id: LiveFileId,
+    pub generation: u32,
     pub index: u32,
 }
 
@@ -63,11 +64,11 @@ impl LivePtr{
     }
     
     pub fn with_index(&self, index:usize)->Self{
-        Self{file_id:self.file_id, index:index as u32}
+        Self{file_id:self.file_id, index:index as u32, generation:self.generation}
     }
 
-    pub fn from_index(file_id:LiveFileId, index:usize)->Self{
-        Self{file_id, index:index as u32}
+    pub fn from_index(file_id:LiveFileId, index:usize, generation:u32)->Self{
+        Self{file_id, index:index as u32, generation}
     }
 
 }

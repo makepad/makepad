@@ -155,17 +155,17 @@ impl ShaderRegistry {
         
         let doc = &live_registry.ptr_to_doc(base_ptr);
         
-        let ret = walk_recur(live_registry, None, base_ptr.file_id, base_ptr.index as usize, &doc.nodes, ids);
+        let ret = walk_recur(live_registry, None, base_ptr.file_id, base_ptr.generation, base_ptr.index as usize, &doc.nodes, ids);
         return ret;
         // ok so we got a node. great. now what
-        fn walk_recur(live_registry: &LiveRegistry, struct_ptr: Option<LivePtr>, file_id: LiveFileId, index: usize, nodes: &[LiveNode], ids: &[LiveId]) -> LiveNodeFindResult {
+        fn walk_recur(live_registry: &LiveRegistry, struct_ptr: Option<LivePtr>, file_id: LiveFileId, generation:u32, index: usize, nodes: &[LiveNode], ids: &[LiveId]) -> LiveNodeFindResult {
             let node = &nodes[index];
             
             if ids.len() != 0 && !node.value.is_class() && !node.value.is_clone() && !node.value.is_object() {
                 return LiveNodeFindResult::NotFound;
             }
             
-            let now_ptr = LivePtr {file_id, index: index as u32};
+            let now_ptr = LivePtr {file_id, index: index as u32, generation};
             //let first_def = node.origin.first_def().unwrap();
             match node.value {
                 LiveValue::Bool(_) if live_registry.get_node_prefix(node.origin) == Some(id!(const)) => {
@@ -217,7 +217,7 @@ impl ShaderRegistry {
                     }
                     match nodes.child_by_name(index, ids[0]) {
                         Some(child_index) => {
-                            return walk_recur(live_registry, None, file_id, child_index, nodes, &ids[1..])
+                            return walk_recur(live_registry, None, file_id, generation, child_index, nodes, &ids[1..])
                         }
                         None => {
                             return LiveNodeFindResult::NotFound;
@@ -239,7 +239,7 @@ impl ShaderRegistry {
                             else {
                                 None
                             };
-                            return walk_recur(live_registry, struct_ptr, file_id, child_index, nodes, &ids[1..])
+                            return walk_recur(live_registry, struct_ptr, file_id,  generation, child_index, nodes, &ids[1..])
                         }
                         None => {
                             return LiveNodeFindResult::NotFound;
@@ -252,7 +252,7 @@ impl ShaderRegistry {
                     }
                     match nodes.child_by_name(index, ids[0]) {
                         Some(child_index) => {
-                            return walk_recur(live_registry, None, file_id, child_index, nodes, &ids[1..])
+                            return walk_recur(live_registry, None, file_id,  generation,  child_index, nodes, &ids[1..])
                         }
                         None => {
                             return LiveNodeFindResult::NotFound;

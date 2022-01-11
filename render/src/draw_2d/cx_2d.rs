@@ -39,7 +39,8 @@ impl<'a> Deref for Cx2d<'a> {type Target = Cx; fn deref(&self) -> &Self::Target 
 impl<'a> DerefMut for Cx2d<'a> {fn deref_mut(&mut self) -> &mut Self::Target {self.cx}}
 
 impl<'a> Cx2d<'a> {
-    pub fn new(cx: &'a mut Cx, draw_event:&'a DrawEvent) -> Self {
+    pub fn new(cx: &'a mut Cx, draw_event: &'a DrawEvent) -> Self {
+        cx.redraw_id += 1;
         Self {
             current_dpi_factor: 1.0,
             cx: cx,
@@ -51,32 +52,32 @@ impl<'a> Cx2d<'a> {
         }
     }
     
-    pub fn begin_pass(&mut self, pass:&Pass) {
-        if self.pass_id.is_some(){panic!()}
+    pub fn begin_pass(&mut self, pass: &Pass) {
+        if self.pass_id.is_some() {panic!()}
         
         self.pass_id = Some(pass.pass_id);
         let cxpass = &mut self.passes[pass.pass_id];
-
+        
         cxpass.main_draw_list_id = None;
-
-        match cxpass.parent{
-            CxPassParent::Window(window_id)=>{
+        
+        match cxpass.parent {
+            CxPassParent::Window(window_id) => {
                 self.passes[pass.pass_id].pass_size = self.windows[window_id].get_inner_size();
                 self.current_dpi_factor = self.get_delegated_dpi_factor(pass.pass_id);
             }
-            CxPassParent::Pass(pass_id)=>{
+            CxPassParent::Pass(pass_id) => {
                 self.passes[pass.pass_id].pass_size = self.passes[pass_id].pass_size;
                 self.current_dpi_factor = self.get_delegated_dpi_factor(pass_id);
             }
-            _=>{
+            _ => {
                 cxpass.override_dpi_factor = Some(1.0);
                 self.current_dpi_factor = 1.0;
             }
         }
     }
     
-    pub fn end_pass(&mut self, pass:&Pass){
-        if self.pass_id != Some(pass.pass_id){
+    pub fn end_pass(&mut self, pass: &Pass) {
+        if self.pass_id != Some(pass.pass_id) {
             panic!();
         }
         self.pass_id = None;
@@ -92,10 +93,8 @@ impl<'a> Cx2d<'a> {
         let draw_list = &self.draw_lists[*self.draw_list_stack.last().unwrap()];
         draw_list.unsnapped_scroll
     }
-
+    
     pub fn view_will_redraw(&self, view: &View) -> bool {
         self.draw_event.draw_list_will_redraw(self, view.draw_list_id)
     }
 }
-
-

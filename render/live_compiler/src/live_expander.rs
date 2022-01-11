@@ -47,7 +47,7 @@ impl<'a> LiveExpander<'a> {
         }
     }
     
-    pub fn expand(&mut self, in_doc: &LiveOriginal, out_doc: &mut LiveExpanded) {
+    pub fn expand(&mut self, in_doc: &LiveOriginal, out_doc: &mut LiveExpanded, generation:u32) {
         
         // ok first copy the edit_info over.
         //out_doc.edit_info = in_doc.edit_info.clone();
@@ -275,7 +275,7 @@ impl<'a> LiveExpander<'a> {
                                 
                                 //out_doc.nodes[out_index].value = out_doc.nodes[local_ptr].value.clone();
                                 if let LiveValue::Class {class_parent, ..} = &mut out_doc.nodes[out_index].value {
-                                    *class_parent = Some(LivePtr {file_id: self.in_file_id, index: out_index as u32});
+                                    *class_parent = Some(LivePtr {file_id: self.in_file_id, index: out_index as u32, generation});
                                 }
                             }
                             LiveScopeTarget::LivePtr(live_ptr) => {
@@ -299,7 +299,7 @@ impl<'a> LiveExpander<'a> {
                                 }
                                 out_doc.nodes[out_index].value = doc.nodes[live_ptr.node_index()].value.clone();
                                 if let LiveValue::Class {class_parent, ..} = &mut out_doc.nodes[out_index].value {
-                                    *class_parent = Some(LivePtr {file_id: self.in_file_id, index: out_index as u32});
+                                    *class_parent = Some(LivePtr {file_id: self.in_file_id, index: out_index as u32, generation});
                                 }
                             }
                         };
@@ -317,7 +317,7 @@ impl<'a> LiveExpander<'a> {
                 LiveValue::Class {live_type, ..} => {
                     // store the class context
                     if let LiveValue::Class {class_parent, ..} = &mut out_doc.nodes[out_index].value {
-                        *class_parent = Some(LivePtr {file_id: self.in_file_id, index: out_index as u32});
+                        *class_parent = Some(LivePtr {file_id: self.in_file_id, index: out_index as u32, generation});
                     }
                     
                     let mut insert_point = out_index + 1;
