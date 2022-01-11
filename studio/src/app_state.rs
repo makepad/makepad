@@ -1,8 +1,8 @@
 use {
     crate::{
         editor_state::{EditorState, SessionId},
-        code_editor::{
-            protocol::{FileNodeData, FileTreeData},
+        collab::{
+            collab_proto::{FileNodeData, FileTreeData},
         },
     },
     makepad_component::{

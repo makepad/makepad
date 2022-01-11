@@ -6,8 +6,10 @@ use {
         },
         code_editor::{
             token_cache::TokenCache,
-            protocol::Request,
             code_editor_impl::{CodeEditorImpl, CodeEditorAction, LinesLayout, LineLayoutOutput}
+        },
+        collab::{
+            collab_proto::CollabRequest,
         },
         design_editor::{
             inline_widget::*,
@@ -435,7 +437,7 @@ impl LiveEditor {
         cx: &mut Cx,
         state: &mut EditorState,
         event: &mut Event,
-        send_request: &mut dyn FnMut(Request),
+        send_request: &mut dyn FnMut(CollabRequest),
         dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
     ) {
         if self.editor_impl.scroll_view.handle_event(cx, event) {

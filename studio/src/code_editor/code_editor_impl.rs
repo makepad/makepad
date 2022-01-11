@@ -11,8 +11,11 @@ use {
         code_editor::{
             cursor::Cursor,
             indent_cache::IndentCache,
-            protocol::Request,
+            
         },
+        collab::{
+            collab_proto::CollabRequest,
+        }
     },
     makepad_live_tokenizer::{
         position::Position,
@@ -801,7 +804,7 @@ impl CodeEditorImpl {
         state: &mut EditorState,
         event: &mut Event,
         lines_layout: &LinesLayout,
-        send_request: &mut dyn FnMut(Request),
+        send_request: &mut dyn FnMut(CollabRequest),
         dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
     ) {
         if self.animator_handle_event(cx, event).must_redraw() {
