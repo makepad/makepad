@@ -9,7 +9,13 @@ use {
             code_editor_impl::{
                 CodeEditorAction
             },
-            protocol::{Notification, Request, Response},
+        },
+        collab::{
+            collab_proto::{
+                CollabNotification,
+                CollabRequest,
+                CollabResponse
+            },
         },
         design_editor::{
             live_editor::{
@@ -34,14 +40,14 @@ impl EditorView {
             Self::LiveEditor(e) => e.redraw(cx)
         }
     }
-
-    pub fn set_session_id(&mut self, session_id:Option<SessionId>) {
+    
+    pub fn set_session_id(&mut self, session_id: Option<SessionId>) {
         match self {
             Self::LiveEditor(e) => e.set_session_id(session_id)
         }
     }
     
-    pub fn session_id(&self)->Option<SessionId> {
+    pub fn session_id(&self) -> Option<SessionId> {
         match self {
             Self::LiveEditor(e) => e.session_id()
         }
@@ -58,13 +64,13 @@ impl EditorView {
             Self::LiveEditor(e) => e.apply(cx, apply_from, index, nodes)
         }
     }
-     
+    
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
         state: &mut EditorState,
         event: &mut Event,
-        send_request: &mut dyn FnMut(Request),
+        send_request: &mut dyn FnMut(CollabRequest),
         dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
     ) {
         match self {
@@ -84,8 +90,8 @@ live_register!{
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq)]
 pub struct EditorViewId(pub PanelId);
-impl From<PanelId> for EditorViewId{
-    fn from(panel_id:PanelId)->Self{Self(panel_id)}
+impl From<PanelId> for EditorViewId {
+    fn from(panel_id: PanelId) -> Self {Self (panel_id)}
 }
 
 #[derive(Live)]
@@ -95,9 +101,9 @@ pub struct Editors {
     live_editor: Option<LivePtr>,
 }
 
-impl LiveHook for Editors{
+impl LiveHook for Editors {
     fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        if let Some(index) = nodes.child_by_name(index, id!(live_editor)){
+        if let Some(index) = nodes.child_by_name(index, id!(live_editor)) {
             for editor_view in self.editor_views.values_mut() {
                 editor_view.apply(cx, apply_from, index, nodes);
             }
@@ -125,7 +131,7 @@ impl Editors {
         session_id: Option<SessionId>,
     ) {
         let live_editor = self.live_editor;
-        let view = self.editor_views.get_or_insert(cx, view_id.into(), |cx|{
+        let view = self.editor_views.get_or_insert(cx, view_id.into(), | cx | {
             EditorView::LiveEditor(LiveEditor::new_from_option_ptr(cx, live_editor))
         });
         
@@ -141,7 +147,7 @@ impl Editors {
         }
     }
     
-    pub fn has_editor(&self, view_id: EditorViewId)->bool{
+    pub fn has_editor(&self, view_id: EditorViewId) -> bool {
         self.editor_views.get(&view_id).is_some()
     }
     
@@ -156,7 +162,7 @@ impl Editors {
         state: &mut EditorState,
         view_id: EditorViewId,
         event: &mut Event,
-        send_request: &mut dyn FnMut(Request),
+        send_request: &mut dyn FnMut(CollabRequest),
     ) {
         let view = &mut self.editor_views[view_id];
         let mut actions = Vec::new();
@@ -166,26 +172,26 @@ impl Editors {
                 CodeEditorAction::RedrawViewsForDocument(document_id) => {
                     self.redraw_views_for_document(cx, state, document_id);
                 }
-                _=>()
+                _ => ()
             }
         }
     }
     
-    pub fn handle_response(
+    pub fn handle_collab_response(
         &mut self,
         cx: &mut Cx,
         state: &mut EditorState,
-        response: Response,
-        send_request: &mut dyn FnMut(Request),
+        response: CollabResponse,
+        send_request: &mut dyn FnMut(CollabRequest),
     ) {
         match response {
-            Response::OpenFile(response) => {
+            CollabResponse::OpenFile(response) => {
                 let (file_id, revision, text) = response.unwrap();
                 let document_id =
                 state.handle_open_file_response(file_id, revision, text, send_request);
                 self.redraw_views_for_document(cx, state, document_id);
             }
-            Response::ApplyDelta(response) => {
+            CollabResponse::ApplyDelta(response) => {
                 let file_id = response.unwrap();
                 state.handle_apply_delta_response(file_id, send_request);
             }
@@ -193,14 +199,14 @@ impl Editors {
         }
     }
     
-    pub fn handle_notification(
+    pub fn handle_collab_notification(
         &mut self,
         cx: &mut Cx,
         state: &mut EditorState,
-        notification: Notification,
+        notification: CollabNotification,
     ) {
         match notification {
-            Notification::DeltaWasApplied(file_id, delta) => {
+            CollabNotification::DeltaWasApplied(file_id, delta) => {
                 let document_id = state.handle_delta_applied_notification(file_id, delta);
                 self.redraw_views_for_document(cx, state, document_id);
             }

@@ -12,7 +12,7 @@ use {
 };
 
 #[derive(Clone, Debug, SerBin, DeBin)]
-pub enum Request {
+pub enum CollabRequest {
     LoadFileTree(),
     OpenFile(PathBuf),
     ApplyDelta(TextFileId, usize, Delta),
@@ -21,16 +21,16 @@ pub enum Request {
 
 #[derive(Clone, Debug, SerBin, DeBin)]
 pub enum ResponseOrNotification {
-    Response(Response),
-    Notification(Notification),
+    Response(CollabResponse),
+    Notification(CollabNotification),
 }
 
 #[derive(Clone, Debug, SerBin, DeBin)]
-pub enum Response {
-    LoadFileTree(Result<FileTreeData, Error>),
-    OpenFile(Result<(TextFileId, usize, Text), Error>),
-    ApplyDelta(Result<TextFileId, Error>),
-    CloseFile(Result<TextFileId, Error>),
+pub enum CollabResponse {
+    LoadFileTree(Result<FileTreeData, CollabError>),
+    OpenFile(Result<(TextFileId, usize, Text), CollabError>),
+    ApplyDelta(Result<TextFileId, CollabError>),
+    CloseFile(Result<TextFileId, CollabError>),
 }
 
 #[derive(Clone, Debug, SerBin, DeBin)]
@@ -52,12 +52,12 @@ pub struct DirectoryEntry {
 }
 
 #[derive(Clone, Debug, SerBin, DeBin)]
-pub enum Notification {
+pub enum CollabNotification {
     DeltaWasApplied(TextFileId, Delta),
 }
 
 #[derive(Clone, Debug, SerBin, DeBin)]
-pub enum Error {
+pub enum CollabError {
     AlreadyAParticipant,
     NotAParticipant,
     Unknown(String),
