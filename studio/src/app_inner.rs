@@ -1,10 +1,13 @@
 use {
     crate::{
-        app_io::AppIO,
-        app_state::{TabKind, AppState, SplitPanel, TabPanel, Panel, Tab},
-        code_editor::{
-            protocol::{FileTreeData, Notification, Request, Response, ResponseOrNotification},
+        collab::{
+            collab_client::CollabClient,
+            collab_proto::{FileTreeData, CollabNotification, CollabRequest, CollabResponse, ResponseOrNotification},
+        }, 
+        builder::{
+            builder_client::BuilderClient
         },
+        app_state::{TabKind, AppState, SplitPanel, TabPanel, Panel, Tab},
         log_view::{LogView},
         editors::{Editors},
     },
@@ -37,7 +40,10 @@ pub struct AppInner {
     log_view: LogView,
     editors: Editors,
     
-    #[rust(AppIO::new(cx))] io: AppIO
+    #[rust(CollabClient::new_with_local_server(cx))] collab_client: CollabClient,
+
+    #[rust(BuilderClient::new_with_local_server(cx))] builder_client: BuilderClient
+
 }
 
 impl AppInner {
@@ -120,7 +126,7 @@ impl AppInner {
         
         match event{
             Event::Construct => {
-                self.send_request(Request::LoadFileTree());
+                self.collab_client.send_request(CollabRequest::LoadFileTree());
                 self.create_code_editor_tab(
                     cx,
                     state,
@@ -169,7 +175,7 @@ impl AppInner {
                                 None,
                             );
                             state.editor_state.destroy_session(session_id, &mut {
-                                let request_sender = &self.io.request_sender;
+                                let request_sender = &self.collab_client.request_sender;
                                 move | request | request_sender.send(request).unwrap()
                             });
                             
@@ -238,7 +244,7 @@ impl AppInner {
                 }
                 Panel::Tab(_) => {
                     if self.editors.has_editor(panel_id.into()) {
-                        let request_sender = &self.io.request_sender;
+                        let request_sender = &self.collab_client.request_sender;
                         self.editors.handle_event(
                             cx,
                             &mut state.editor_state,
@@ -253,14 +259,14 @@ impl AppInner {
         
         match event {
             Event::Signal(event)
-            if event.signals.contains_key(&self.io.response_or_notification_signal) =>{
+            if event.signals.contains_key(&self.collab_client.response_or_notification_signal) =>{
                 loop {
-                    match self.io.response_or_notification_receiver.try_recv() {
+                    match self.collab_client.response_or_notification_receiver.try_recv() {
                         Ok(ResponseOrNotification::Response(response)) => {
-                            self.handle_response(cx, state, response)
+                            self.handle_collab_response(cx, state, response)
                         }
                         Ok(ResponseOrNotification::Notification(notification)) => {
-                            self.handle_notification(cx, state, notification)
+                            self.handle_collab_notification(cx, state, notification)
                         }
                         Err(TryRecvError::Empty) => break,
                         _ => panic!(),
@@ -271,26 +277,26 @@ impl AppInner {
         }
     }
     
-    fn handle_response(&mut self, cx: &mut Cx, state: &mut AppState, response: Response) {
+    fn handle_collab_response(&mut self, cx: &mut Cx, state: &mut AppState, response: CollabResponse) {
         match response {
-            Response::LoadFileTree(response) => {
+            CollabResponse::LoadFileTree(response) => {
                 self.load_file_tree(cx, state, response.unwrap());
                 self.select_tab(cx, state, id!(file_tree).into(), id!(file_tree).into(), Animate::No);
             }
             response => {
-                self.editors.handle_response(cx, &mut state.editor_state, response, &mut {
-                    let request_sender = &self.io.request_sender;
+                self.editors.handle_collab_response(cx, &mut state.editor_state, response, &mut {
+                    let request_sender = &self.collab_client.request_sender;
                     move | request | request_sender.send(request).unwrap()
                 })
             }
         };
     }
     
-    fn handle_notification(&mut self, cx: &mut Cx, state: &mut AppState, notification: Notification) {
+    fn handle_collab_notification(&mut self, cx: &mut Cx, state: &mut AppState, notification: CollabNotification) {
         match notification {
             notification => {
                 self.editors
-                    .handle_notification(cx, &mut state.editor_state, notification)
+                    .handle_collab_notification(cx, &mut state.editor_state, notification)
             }
         }
     }
@@ -357,7 +363,7 @@ impl AppInner {
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         
         let session_id = state.editor_state.create_session(path, &mut {
-            let request_sender = &self.io.request_sender;
+            let request_sender = &self.collab_client.request_sender;
             move | request | request_sender.send(request).unwrap()
         });
         
@@ -394,10 +400,6 @@ impl AppInner {
             }
             _ => {}
         }
-    }
-    
-    fn send_request(&mut self, request: Request) {
-        self.io.request_sender.send(request).unwrap();
     }
     
     fn redraw_panel(&mut self, cx: &mut Cx, state: &AppState, panel_id: PanelId) {
