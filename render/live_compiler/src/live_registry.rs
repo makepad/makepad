@@ -87,6 +87,11 @@ impl LiveRegistry {
         }
     }
     
+    pub fn generation_valid(&self, live_ptr: LivePtr) -> bool {
+        let doc = &self.live_files[live_ptr.file_id.to_index()];
+        doc.generation == live_ptr.generation
+    }
+    
     pub fn ptr_to_node(&self, live_ptr: LivePtr) -> &LiveNode {
         let doc = &self.live_files[live_ptr.file_id.to_index()];
         if doc.generation != live_ptr.generation{
