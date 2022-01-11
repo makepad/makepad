@@ -18,7 +18,12 @@ pub fn from_ptr_impl<CB>(cx: &mut Cx, live_ptr: LivePtr, cb: CB)
 where CB: FnOnce(&mut Cx, LiveFileId, usize, &[LiveNode]) -> usize {
     let live_registry_rc = cx.live_registry.clone();
     let live_registry = live_registry_rc.borrow();
+    if !live_registry.generation_valid(live_ptr){
+        println!("Generation invalid in new_from_ptr");
+        return
+    }
     let doc = live_registry.ptr_to_doc(live_ptr);
+
     let next_index = cb(cx, live_ptr.file_id, live_ptr.index as usize, &doc.nodes);
     if next_index <= live_ptr.index as usize + 2 {
         cx.apply_error_empty_object(live_error_origin!(), live_ptr.index as usize, &doc.nodes);
@@ -49,6 +54,16 @@ pub trait LiveNew: LiveApply {
         from_ptr_impl(cx, live_ptr, |cx, file_id, index, nodes|{
             ret.apply(cx, ApplyFrom::NewFromDoc {file_id}, index, nodes)
         });
+        return ret
+    }
+    
+    fn new_from_option_ptr(cx: &mut Cx, live_ptr: Option<LivePtr>) -> Self where Self: Sized {
+        let mut ret = Self::new(cx);
+        if let Some(live_ptr) = live_ptr{
+            from_ptr_impl(cx, live_ptr, |cx, file_id, index, nodes|{
+                ret.apply(cx, ApplyFrom::NewFromDoc {file_id}, index, nodes)
+            });
+        }
         return ret
     }
     

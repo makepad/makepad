@@ -809,9 +809,13 @@ impl Animator {
         if let Some(live_ptr) = live_ptr {
             let live_registry_rc = cx.live_registry.clone();
             let live_registry = live_registry_rc.borrow();
-            let (nodes, index) = live_registry.ptr_to_nodes_index(live_ptr);
-            
-            self.cut_to(cx, nodes[index].id, index, nodes);
+            if live_registry.generation_valid(live_ptr){
+                let (nodes, index) = live_registry.ptr_to_nodes_index(live_ptr);
+                self.cut_to(cx, nodes[index].id, index, nodes);
+            }
+            else{
+                println!("cut_to_live generaiton invalid")
+            }
         }
     }
     
@@ -896,8 +900,13 @@ impl Animator {
         if let Some(live_ptr) = live_ptr {
             let live_registry_rc = cx.live_registry.clone();
             let live_registry = live_registry_rc.borrow();
-            let (nodes, index) = live_registry.ptr_to_nodes_index(live_ptr);
-            self.animate_to(cx, nodes[index].id, index, nodes)
+            if live_registry.generation_valid(live_ptr){
+                let (nodes, index) = live_registry.ptr_to_nodes_index(live_ptr);
+                self.animate_to(cx, nodes[index].id, index, nodes)
+            }
+            else{
+                println!("animate_to_live generation invalid");
+            }
         }
     }
     
