@@ -25,6 +25,7 @@ pub enum LiveEval {
     Vec4(Vec4),
     Int(i64),
     Bool(bool),
+    String(String),
     Void
 }
 
@@ -38,6 +39,12 @@ pub trait LiveEvalError{
 
 pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, nodes: &[LiveNode], err:&mut Option<&mut dyn LiveEvalError>) -> LiveEval {
     match &nodes[*index].value {
+        LiveValue::Str(_) |
+        LiveValue::FittedString(_) |
+        LiveValue::InlineString(_) |
+        LiveValue::DocumentString {..} => {
+            LiveEval::String(live_registry.live_node_as_string(&nodes[*index]).unwrap())
+        }
         LiveValue::Float(v) => {
             *index += 1;
             return LiveEval::Float(*v);
@@ -90,6 +97,10 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
                     LiveValue::Vec3(val) => LiveEval::Vec3(*val),
                     LiveValue::Vec4(val) => LiveEval::Vec4(*val),
                     LiveValue::Color(c) => LiveEval::Vec4(Vec4::from_u32(*c)),
+                    LiveValue::Str(_) |
+                    LiveValue::FittedString(_) |
+                    LiveValue::InlineString(_) |
+                    LiveValue::DocumentString {..} => LiveEval::String(live_registry.live_node_as_string(&nodes[index]).unwrap()),
                     LiveValue::Expr{..} => { // expr depends on expr
                         live_eval(live_registry, index, &mut (index + 1), nodes, err)
                     }

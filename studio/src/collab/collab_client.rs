@@ -1,7 +1,7 @@
 use {
     crate::{
         collab::{
-            collab_proto::{CollabRequest, ResponseOrNotification},
+            collab_protocol::{CollabRequest, CollabClientAction},
             collab_server::{CollabConnection, CollabServer},
         }
     },
@@ -12,71 +12,115 @@ use {
         env,
         io::{Read, Write},
         net::{TcpListener, TcpStream},
-        sync::mpsc::{self, Receiver, Sender},
+        sync::mpsc::{self, Receiver, Sender, TryRecvError},
         thread,
     },
 };
 
+live_register!{
+    CollabClient: {{CollabClient}} {}
+}
+
+#[derive(Live)]
 pub struct CollabClient {
+    bind: Option<String>,
+    fs_root: String,
+    #[rust] inner: Option<CollabClientInner>
+}
+
+impl LiveHook for CollabClient {
+    fn after_apply(&mut self, cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
+        if self.inner.is_none() {
+            self.inner = Some(CollabClientInner::new_with_local_server(cx))
+        }
+    }
+}
+
+pub struct CollabClientInner {
     pub request_sender: Sender<CollabRequest>,
-    pub response_or_notification_signal: Signal,
-    pub response_or_notification_receiver: Receiver<ResponseOrNotification>,
+    pub action_signal: Signal,
+    pub action_receiver: Receiver<CollabClientAction>,
 }
 
 impl CollabClient {
+    pub fn send_request(&mut self, request: CollabRequest) {
+        self.inner.as_ref().unwrap().request_sender.send(request).unwrap();
+    }
+    
+    pub fn request_sender(&mut self) -> impl FnMut(CollabRequest) + '_ {
+        let request_sender = &self.inner.as_ref().unwrap().request_sender;
+        move | request | request_sender.send(request).unwrap()
+    }
+    
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> Vec<CollabClientAction> {
+        let mut a = Vec::new();
+        self.handle_event_with_fn(cx, event, &mut | _, v | a.push(v));
+        a
+    }
+    
+    pub fn handle_event_with_fn(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, CollabClientAction)) {
+        let inner = self.inner.as_ref().unwrap();
+        match event {
+            Event::Signal(event)
+            if event.signals.contains_key(&inner.action_signal) => {
+                loop {
+                    match inner.action_receiver.try_recv() {
+                        Ok(action) => dispatch_action(cx, action),
+                        Err(TryRecvError::Empty) => break,
+                        _ => panic!(),
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    
+}
+
+impl CollabClientInner {
     pub fn new_with_local_server(cx: &mut Cx) -> Self {
         let (request_sender, request_receiver) = mpsc::channel();
-        let response_or_notification_signal = cx.new_signal();
-        let (response_or_notification_sender, response_or_notification_receiver) = mpsc::channel();
-
+        let action_signal = cx.new_signal();
+        let (action_sender, action_receiver) = mpsc::channel();
+        
         let mut server = CollabServer::new(env::current_dir().unwrap());
         spawn_local_request_handler(
             request_receiver,
             server.connect(Box::new({
-                let response_or_notification_sender =
-                response_or_notification_sender.clone();
+                let action_sender = action_sender.clone();
                 move | notification | {
-                    response_or_notification_sender
-                        .send(ResponseOrNotification::Notification(notification))
-                        .unwrap();
-                    Cx::post_signal(response_or_notification_signal, 0);
+                    action_sender.send(CollabClientAction::Notification(notification)).unwrap();
+                    Cx::post_signal(action_signal, 0);
                 }
             })),
-            response_or_notification_signal,
-            response_or_notification_sender,
+            action_signal,
+            action_sender,
         );
         spawn_connection_listener(TcpListener::bind("127.0.0.1:0").unwrap(), server);
-
+        
         Self {
             request_sender,
-            response_or_notification_signal,
-            response_or_notification_receiver,
+            action_signal,
+            action_receiver
         }
     }
     
-    pub fn new_connect_remote(cx: &mut Cx, to_server:&str) -> Self {
+    pub fn new_connect_remote(cx: &mut Cx, to_server: &str) -> Self {
         let (request_sender, request_receiver) = mpsc::channel();
-        let response_or_notification_signal = cx.new_signal();
-        let (response_or_notification_sender, response_or_notification_receiver) = mpsc::channel();
-
+        let action_signal = cx.new_signal();
+        let (action_sender, action_receiver) = mpsc::channel();
+        
         let stream = TcpStream::connect(to_server).unwrap();
         spawn_request_sender(request_receiver, stream.try_clone().unwrap());
-        spawn_response_or_notification_receiver(
-            stream,
-            response_or_notification_signal,
-            response_or_notification_sender,
-        );
-         
+        spawn_response_or_notification_receiver(stream, action_signal, action_sender,);
+        
         Self {
             request_sender,
-            response_or_notification_signal,
-            response_or_notification_receiver,
+            action_signal,
+            action_receiver
         }
     }
     
-    pub fn send_request(&mut self, request: CollabRequest) {
-        self.request_sender.send(request).unwrap();
-    }
 }
 
 fn spawn_connection_listener(listener: TcpListener, mut server: CollabServer) {
@@ -85,22 +129,19 @@ fn spawn_connection_listener(listener: TcpListener, mut server: CollabServer) {
         for stream in listener.incoming() {
             let stream = stream.unwrap();
             println!("Incoming connection from {}", stream.peer_addr().unwrap());
-            let (response_or_notification_sender, response_or_notification_receiver) =
-            mpsc::channel();
+            let (action_sender, action_receiver) = mpsc::channel();
             let connection = server.connect(Box::new({
-                let response_or_notification_sender = response_or_notification_sender.clone();
+                let action_sender = action_sender.clone();
                 move | notification | {
-                    response_or_notification_sender
-                        .send(ResponseOrNotification::Notification(notification))
-                        .unwrap();
+                    action_sender.send(CollabClientAction::Notification(notification)).unwrap();
                 }
             }));
             spawn_remote_request_handler(
                 connection,
                 stream.try_clone().unwrap(),
-                response_or_notification_sender,
+                action_sender,
             );
-            spawn_response_or_notification_sender(response_or_notification_receiver, stream);
+            spawn_response_or_notification_sender(action_receiver, stream);
         }
     });
 }
@@ -108,7 +149,7 @@ fn spawn_connection_listener(listener: TcpListener, mut server: CollabServer) {
 fn spawn_remote_request_handler(
     connection: CollabConnection,
     mut stream: TcpStream,
-    response_or_notification_sender: Sender<ResponseOrNotification>,
+    action_sender: Sender<CollabClientAction>,
 ) {
     thread::spawn(move || loop {
         let mut len_bytes = [0; 8];
@@ -119,25 +160,23 @@ fn spawn_remote_request_handler(
         
         let request = DeBin::deserialize_bin(request_bytes.as_slice()).unwrap();
         let response = connection.handle_request(request);
-        response_or_notification_sender
-            .send(ResponseOrNotification::Response(response))
-            .unwrap();
+        action_sender.send(CollabClientAction::Response(response)).unwrap();
     });
 }
 
 fn spawn_response_or_notification_sender(
-    response_or_notification_receiver: Receiver<ResponseOrNotification>,
+    action_receiver: Receiver<CollabClientAction>,
     mut stream: TcpStream,
 ) {
     thread::spawn(move || loop {
-        let response_or_notification = response_or_notification_receiver.recv().unwrap();
-        let mut response_or_notification_bytes = Vec::new();
+        let action = action_receiver.recv().unwrap();
+        let mut action_bytes = Vec::new();
         
-        response_or_notification.ser_bin(&mut response_or_notification_bytes);
+        action.ser_bin(&mut action_bytes);
         
-        let len_bytes = response_or_notification_bytes.len().to_be_bytes();
+        let len_bytes = action_bytes.len().to_be_bytes();
         stream.write_all(&len_bytes).unwrap();
-        stream.write_all(&response_or_notification_bytes).unwrap();
+        stream.write_all(&action_bytes).unwrap();
     });
 }
 
@@ -154,37 +193,33 @@ fn spawn_request_sender(request_receiver: Receiver<CollabRequest>, mut stream: T
 
 fn spawn_response_or_notification_receiver(
     mut stream: TcpStream,
-    response_or_notification_signal: Signal,
-    response_or_notification_sender: Sender<ResponseOrNotification>,
+    action_signal: Signal,
+    action_sender: Sender<CollabClientAction>,
 ) {
     thread::spawn(move || loop {
         let mut len_bytes = [0; 8];
         stream.read_exact(&mut len_bytes).unwrap();
         
         let len = usize::from_be_bytes(len_bytes);
-        let mut response_or_notification_bytes = vec![0; len];
-        stream.read_exact(&mut response_or_notification_bytes).unwrap();
+        let mut action_bytes = vec![0; len];
+        stream.read_exact(&mut action_bytes).unwrap();
+        let action = DeBin::deserialize_bin(action_bytes.as_slice()).unwrap();
+        action_sender.send(action).unwrap();
         
-        let response_or_notification = DeBin::deserialize_bin(response_or_notification_bytes.as_slice()).unwrap();
-        
-        response_or_notification_sender.send(response_or_notification).unwrap();
-        
-        Cx::post_signal(response_or_notification_signal, 0);
+        Cx::post_signal(action_signal, 0);
     });
 }
 
 fn spawn_local_request_handler(
     request_receiver: Receiver<CollabRequest>,
     connection: CollabConnection,
-    response_or_notification_signal: Signal,
-    response_or_notification_sender: Sender<ResponseOrNotification>,
+    action_signal: Signal,
+    action_sender: Sender<CollabClientAction>,
 ) {
     thread::spawn(move || loop {
         let request = request_receiver.recv().unwrap();
         let response = connection.handle_request(request);
-        response_or_notification_sender
-            .send(ResponseOrNotification::Response(response))
-            .unwrap();
-        Cx::post_signal(response_or_notification_signal, 0);
+        action_sender.send(CollabClientAction::Response(response)).unwrap();
+        Cx::post_signal(action_signal, 0);
     });
 }

@@ -273,8 +273,12 @@ impl Dock {
         let panel = self.get_or_create_tab_panel(cx, panel_id);
         panel.tab_bar.redraw(cx);
     }
+
+    pub fn handle_event(&mut self, cx:&mut Cx, event:&mut Event)->Vec<DockAction>{
+        let mut a = Vec::new(); self.handle_event_with_fn(cx, event, &mut|_, v| a.push(v)); a
+    }
     
-    pub fn handle_event(
+    pub fn handle_event_with_fn(
         &mut self,
         cx: &mut Cx,
         event: &mut Event,

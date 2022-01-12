@@ -14,7 +14,7 @@ use {
             
         },
         collab::{
-            collab_proto::CollabRequest,
+            collab_protocol::CollabRequest,
         }
     },
     makepad_live_tokenizer::{
@@ -798,7 +798,7 @@ impl CodeEditorImpl {
         }
     }
     
-    pub fn handle_event(
+    pub fn handle_event_with_fn(
         &mut self,
         cx: &mut Cx,
         state: &mut EditorState,

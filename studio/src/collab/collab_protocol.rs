@@ -13,14 +13,14 @@ use {
 
 #[derive(Clone, Debug, SerBin, DeBin)]
 pub enum CollabRequest {
-    LoadFileTree(),
+    LoadFileTree{with_data: bool},
     OpenFile(PathBuf),
     ApplyDelta(TextFileId, usize, Delta),
     CloseFile(TextFileId),
 }
 
 #[derive(Clone, Debug, SerBin, DeBin)]
-pub enum ResponseOrNotification {
+pub enum CollabClientAction {
     Response(CollabResponse),
     Notification(CollabNotification),
 }
@@ -42,7 +42,7 @@ pub struct FileTreeData {
 #[derive(Clone, Debug, SerBin, DeBin)]
 pub enum FileNodeData {
     Directory {entries: Vec<DirectoryEntry>},
-    File,
+    File{data:Option<Vec<u8>>},
 }
 
 #[derive(Clone, Debug, SerBin, DeBin)]

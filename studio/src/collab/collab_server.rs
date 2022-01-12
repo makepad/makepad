@@ -1,7 +1,7 @@
 use {
     crate::{
         collab::{
-            collab_proto::{
+            collab_protocol::{
                 DirectoryEntry,
                 TextFileId,
                 FileNodeData,
@@ -21,11 +21,12 @@ use {
         *
     },
     std::{
-        collections::{HashMap, VecDeque}, 
+        cmp::Ordering,
+        collections::{HashMap, VecDeque},
         fmt,
         fs,
         mem,
-        path::{Path, PathBuf}, 
+        path::{Path, PathBuf},
         sync::{Arc, Mutex, RwLock},
     },
 };
@@ -67,7 +68,7 @@ pub struct CollabConnection {
 impl CollabConnection {
     pub fn handle_request(&self, request: CollabRequest) -> CollabResponse {
         match request {
-            CollabRequest::LoadFileTree() => CollabResponse::LoadFileTree(self.load_file_tree()),
+            CollabRequest::LoadFileTree {with_data} => CollabResponse::LoadFileTree(self.load_file_tree(with_data)),
             CollabRequest::OpenFile(path) => CollabResponse::OpenFile(self.open_file(path)),
             CollabRequest::ApplyDelta(path, revision, delta) => {
                 CollabResponse::ApplyDelta(self.apply_delta(path, revision, delta))
@@ -76,30 +77,63 @@ impl CollabConnection {
         }
     }
     
-    pub fn load_file_tree(&self) -> Result<FileTreeData, CollabError> {
-        fn get_directory_entries(path: &Path) -> Result<Vec<DirectoryEntry>, CollabError> {
+    pub fn load_file_tree(&self, with_data: bool) -> Result<FileTreeData, CollabError> {
+        fn get_directory_entries(path: &Path, with_data: bool) -> Result<Vec<DirectoryEntry>, CollabError> {
             let mut entries = Vec::new();
             for entry in fs::read_dir(path).map_err( | error | CollabError::Unknown(error.to_string())) ? {
                 let entry = entry.map_err( | error | CollabError::Unknown(error.to_string())) ?;
                 let entry_path = entry.path();
+                let name = entry.file_name();
+                if let Ok(name_string) = name.into_string() {
+                    if entry_path.is_dir() && name_string == "target"
+                        || name_string.starts_with('.') {
+                        continue;
+                    }
+                }
+                else {
+                    continue;
+                }
                 entries.push(DirectoryEntry {
                     name: entry.file_name(),
                     node: if entry_path.is_dir() {
                         FileNodeData::Directory {
-                            entries: get_directory_entries(&entry_path) ?,
+                            entries: get_directory_entries(&entry_path, with_data) ?,
                         }
-                    } else {
-                        FileNodeData::File
+                    } else if entry_path.is_file() {
+                        if with_data {
+                            let bytes: Vec<u8> = fs::read(&entry_path).map_err(
+                                | error | CollabError::Unknown(error.to_string())
+                            ) ?;
+                            FileNodeData::File {data: Some(bytes)}
+                        }
+                        else {
+                            FileNodeData::File {data: None}
+                        }
+                    }
+                    else {
+                        continue
                     },
                 });
             }
-            entries.sort_by( | entry_0, entry_1 | entry_0.name.cmp(&entry_1.name));
+            
+            entries.sort_by( | entry_0, entry_1 | {
+                match &entry_0.node{
+                    FileNodeData::Directory{..}=>match &entry_1.node{
+                        FileNodeData::Directory{..}=>entry_0.name.cmp(&entry_1.name),
+                        FileNodeData::File{..}=>Ordering::Less
+                    }
+                    FileNodeData::File{..}=>match &entry_1.node{
+                        FileNodeData::Directory{..}=>Ordering::Greater,
+                        FileNodeData::File{..}=>entry_0.name.cmp(&entry_1.name)
+                    }
+                }
+            });
             Ok(entries)
         }
         
         let path = self.shared.read().unwrap().path.clone();
         let root = FileNodeData::Directory {
-            entries: get_directory_entries(&path) ?,
+            entries: get_directory_entries(&path, with_data) ?,
         };
         Ok(FileTreeData {path, root})
     }

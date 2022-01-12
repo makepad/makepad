@@ -531,18 +531,7 @@ impl LiveValue {
             _ => false
         }
     }
-    /*
-    pub fn is_float_type(&self) -> bool {
-        match self {
-            Self::Float(_) |
-            Self::Color(_) |
-            Self::Vec2(_) |
-            Self::Vec3(_) |
-            Self::Vec4(_) => true,
-            _ => false
-        }
-    }*/
-    
+
     pub fn as_float(&self) -> Option<f64> {
         match self {
             Self::Float(v) => Some(*v),
