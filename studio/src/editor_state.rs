@@ -6,7 +6,7 @@ use {
             token_cache::TokenCache,
         },
         collab::{
-            collab_proto::{
+            collab_protocol::{
                 CollabRequest,
                 TextFileId
             },

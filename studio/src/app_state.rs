@@ -2,7 +2,7 @@ use {
     crate::{
         editor_state::{EditorState, SessionId},
         collab::{
-            collab_proto::{FileNodeData, FileTreeData},
+            collab_protocol::{FileNodeData, FileTreeData},
         },
     },
     makepad_component::{
@@ -169,7 +169,7 @@ impl AppState {
                         })
                             .collect::<Vec<_ >> (),
                     ),
-                    FileNodeData::File => None,
+                    FileNodeData::File{..} => None,
                 },
             };
             file_nodes.insert(file_node_id, node);

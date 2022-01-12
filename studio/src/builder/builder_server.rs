@@ -2,7 +2,7 @@
 use {
     crate::{
         builder::{
-            builder_proto::{
+            builder_protocol::{
                 BuilderCmd,
                 BuilderCmdKind,
                 BuilderMsg,

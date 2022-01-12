@@ -11,7 +11,7 @@ use {
             },
         },
         collab::{
-            collab_proto::{
+            collab_protocol::{
                 CollabNotification,
                 CollabRequest,
                 CollabResponse
