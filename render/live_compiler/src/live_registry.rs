@@ -157,6 +157,27 @@ impl LiveRegistry {
     pub fn module_id_to_file_id(&self, module_id: LiveModuleId) -> Option<LiveFileId> {
         self.module_id_to_file_id.get(&module_id).cloned()
     }
+
+    pub fn live_node_as_string(&self, node:&LiveNode) -> Option<String> {
+        match &node.value{
+            LiveValue::Str(v) => {
+                Some(v.to_string())
+            }
+            LiveValue::FittedString(v) => {
+                Some(v.as_str().to_string())
+            }
+            LiveValue::InlineString(v) => {
+                Some(v.as_str().to_string())
+            }
+            LiveValue::DocumentString {string_start, string_count} => {
+                let origin_doc = self.token_id_to_origin_doc(node.origin.token_id().unwrap());
+                let mut out = String::new();
+                origin_doc.get_string(*string_start, *string_count, &mut out);
+                Some(out)
+            }
+            _=>None
+        }
+    }
     
     // this looks at the 'id' before the live token id
     pub fn get_node_prefix(&self, origin: LiveNodeOrigin) -> Option<LiveId> {

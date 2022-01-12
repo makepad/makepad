@@ -449,6 +449,16 @@ live_primitive!(
                 origin_doc.get_string(*string_start, *string_count, self);
                 index + 1
             }
+            LiveValue::Expr{..} => {
+                let ret = live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes, &mut Some(cx));
+                match ret {
+                    LiveEval::String(v) => {*self = v;}
+                    _ => {
+                        cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "Vec4", ret);
+                    }
+                }
+                nodes.skip_node(index)
+            }
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
                     self.apply(cx, apply_from, index, nodes);

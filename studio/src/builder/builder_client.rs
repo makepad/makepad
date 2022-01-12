@@ -1,7 +1,7 @@
 use {
     crate::{
         builder::{
-            builder_proto::{BuilderCmd, BuilderMsg},
+            builder_protocol::{BuilderCmd, BuilderMsg},
             builder_server::{BuilderConnection, BuilderServer},
         }
     },
@@ -17,13 +17,32 @@ use {
     },
 };
 
+live_register!{
+    BuilderClient: {{BuilderClient}} {}
+}
+
+#[derive(Live)]
 pub struct BuilderClient {
+    bind: Option<String>,
+    fs_root: String,
+    #[rust] inner: Option<BuilderClientInner>
+}
+
+impl LiveHook for BuilderClient{
+    fn after_apply(&mut self, cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
+        if self.inner.is_none(){
+            self.inner = Some(BuilderClientInner::new_with_local_server(cx))
+        }
+    }
+}
+
+pub struct BuilderClientInner {
     pub cmd_sender: Sender<BuilderCmd>,
     pub msg_signal: Signal,
     pub msg_receiver: Receiver<BuilderMsg>,
 }
 
-impl BuilderClient {
+impl BuilderClientInner {
     pub fn new_with_local_server(cx: &mut Cx) -> Self {
         let (cmd_sender, cmd_receiver) = mpsc::channel();
         let msg_signal = cx.new_signal();
