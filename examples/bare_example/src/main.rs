@@ -43,22 +43,28 @@ impl App {
         self.desktop_window.handle_event(cx, event);
         self.scroll_view.handle_event(cx, event);
         
-        if let Event::NextFrame(..) = event {
-            // spawn 1000 buttons into the live structure
-            let mut out = Vec::new();
-            out.open();
-            for i in 0..1000 {
-                out.push_live(live_object!{
-                    [id_num!(btn, i)]: Button {
-                        label: (format!("B{}", i + self.offset))
-                    },
-                });
+        match event {
+            Event::NextFrame(..) => {
+                // spawn 1000 buttons into the live structure
+                let mut out = Vec::new();
+                out.open();
+                for i in 0..1000 {
+                    out.push_live(live_object!{
+                        [id_num!(btn, i)]: Button {
+                            label: (format!("B{}", i + self.offset))
+                        },
+                    });
+                }
+                out.close();
+                self.frame.apply_clear(cx, &out);
+                
+                cx.new_next_frame();
+                cx.redraw_all();
             }
-            out.close();
-            self.frame.apply_clear(cx, &out);
-
-            cx.new_next_frame();
-            cx.redraw_all();
+            Event::Draw(draw_event) => {
+                self.draw(&mut Cx2d::new(cx, draw_event));
+            }
+            _=>()
         }
         
         for item in self.frame.handle_event(cx, event) {
@@ -68,7 +74,7 @@ impl App {
         }
     }
     
-    pub fn draw(&mut self, cx: &mut Cx) {
+    pub fn draw(&mut self, cx: &mut Cx2d) {
         if self.desktop_window.begin(cx, None).is_err() {
             return;
         }

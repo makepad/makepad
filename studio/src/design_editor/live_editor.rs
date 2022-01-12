@@ -9,7 +9,7 @@ use {
             code_editor_impl::{CodeEditorImpl, CodeEditorAction, LinesLayout, LineLayoutOutput}
         },
         collab::{
-            collab_proto::CollabRequest,
+            collab_protocol::CollabRequest,
         },
         design_editor::{
             inline_widget::*,
@@ -20,7 +20,7 @@ use {
         },
     },
     makepad_component::{
-        makepad_render, 
+        makepad_render,
         fold_button::{FoldButton, FoldButtonAction},
         ComponentMap,
     },
@@ -445,7 +445,7 @@ impl LiveEditor {
         }
         
         let mut live_edit = false;
-        if self.editor_impl.session_id.is_none(){
+        if self.editor_impl.session_id.is_none() {
             return
         }
         let session_id = self.editor_impl.session_id.unwrap();
@@ -488,46 +488,53 @@ impl LiveEditor {
         
         // what if the code editor changes something?
         let delayed_reparse_document = &mut self.delayed_reparse_document;
-        self.editor_impl.handle_event(cx, state, event, &self.lines_layout, send_request, &mut | cx, action | {
-            match action {
-                CodeEditorAction::RedrawViewsForDocument(_) => {
-                    live_edit = true;
-                }
-                CodeEditorAction::CursorBlink => {
-                    if delayed_reparse_document.is_some() {
-                        let live_registry_rc = cx.live_registry.clone();
-                        let mut live_registry = live_registry_rc.borrow_mut();
-                        let live_edit_event = delayed_reparse_document.take();
-                        match live_registry.process_next_originals_and_expand() {
-                            Err(errs) => {
-                                for e in errs {
-                                    let e = live_registry.live_error_to_live_file_error(e);
-                                    eprintln!("PARSE ERROR {}", e);
+        self.editor_impl.handle_event_with_fn(
+            cx,
+            state,
+            event,
+            &self.lines_layout,
+            send_request,
+            &mut | cx, action | {
+                match action {
+                    CodeEditorAction::RedrawViewsForDocument(_) => {
+                        live_edit = true;
+                    }
+                    CodeEditorAction::CursorBlink => {
+                        if delayed_reparse_document.is_some() {
+                            let live_registry_rc = cx.live_registry.clone();
+                            let mut live_registry = live_registry_rc.borrow_mut();
+                            let live_edit_event = delayed_reparse_document.take();
+                            match live_registry.process_next_originals_and_expand() {
+                                Err(errs) => {
+                                    for e in errs {
+                                        let e = live_registry.live_error_to_live_file_error(e);
+                                        eprintln!("PARSE ERROR {}", e);
+                                    }
                                 }
-                            }
-                            Ok(()) => {
-                                cx.live_edit_event = live_edit_event
+                                Ok(()) => {
+                                    cx.live_edit_event = live_edit_event
+                                }
                             }
                         }
                     }
                 }
+                dispatch_action(cx, action);
             }
-            dispatch_action(cx, action);
-        });
+        );
         
         if live_edit {
             self.process_live_edit(cx, state, session_id);
         }
     }
     
-    fn text_color(&self, text:&[char], token: FullToken, next_token: Option<FullToken>) -> Vec4 {
+    fn text_color(&self, text: &[char], token: FullToken, next_token: Option<FullToken>) -> Vec4 {
         match (token, next_token) {
             (FullToken::Comment, _) => self.text_color_comment,
             (FullToken::Ident(id), _) if id.is_capitalised() => {
-                if text.len() > 1 && text[1].is_uppercase(){
+                if text.len() > 1 && text[1].is_uppercase() {
                     self.text_color_string
                 }
-                else{
+                else {
                     self.text_color_type_name
                 }
             },
