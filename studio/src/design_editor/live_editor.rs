@@ -333,6 +333,13 @@ impl LiveEditor {
                 &self.lines_layout,
                 *session.cursors.last_inserted()
             );
+
+            self.editor_impl.draw_message_lines(
+                cx,
+                &document_inner.msg_cache,
+                state,
+                &self.lines_layout,
+            );
             
             self.draw_widgets(cx);
             

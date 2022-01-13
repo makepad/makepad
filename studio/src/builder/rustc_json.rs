@@ -1,6 +1,9 @@
 #![allow(dead_code)]
 use{
-    makepad_component::makepad_render::makepad_micro_serde::*,
+    makepad_component::makepad_render::{
+        makepad_micro_serde::*,
+        makepad_live_tokenizer::{Range,Position},
+    }
 };
 
 // rust compiler output json structs
@@ -19,19 +22,19 @@ pub struct RustcTarget {
 #[derive(Clone, DeJson, Debug, Default)]
 pub struct RustcText {
     pub text: String,
-    pub highlight_start: u32,
-    pub highlight_end: u32
+    pub highlight_start: usize, 
+    pub highlight_end: usize
 }
 
 #[derive(Clone, DeJson, Debug, Default)]
 pub struct RustcSpan {
     pub file_name: String,
-    pub byte_start: u32,
-    pub byte_end: u32,
-    pub line_start: u32,
-    pub line_end: u32,
-    pub column_start: u32,
-    pub column_end: u32,
+    pub byte_start: usize,
+    pub byte_end: usize,
+    pub line_start: usize,
+    pub line_end: usize,
+    pub column_start: usize,
+    pub column_end: usize,
     pub is_primary: bool,
     pub text: Vec<RustcText>,
     pub label: Option<String>,
@@ -39,6 +42,21 @@ pub struct RustcSpan {
     pub suggestion_applicability: Option<String>,
     pub expansion: Option<Box<RustcExpansion >>,
     pub level: Option<String>
+}
+
+impl RustcSpan{
+    pub fn to_range(&self)->Range{
+        Range{
+            start:Position{
+                line:self.line_start - 1,
+                column: self.column_start - 1
+            },
+            end:Position{
+                line:self.line_end - 1,
+                column:self.column_end - 1
+            }
+        }
+    }
 }
 
 #[derive(Clone, DeJson, Debug, Default)]
@@ -67,7 +85,7 @@ pub struct RustcMessage {
 #[derive(Clone, DeJson, Debug, Default)]
 pub struct RustcProfile {
     pub opt_level: String,
-    pub debuginfo: Option<u32>,
+    pub debuginfo: Option<usize>,
     pub debug_assertions: bool,
     pub overflow_checks: bool,
     pub test: bool
@@ -75,20 +93,20 @@ pub struct RustcProfile {
 
 #[derive(Clone, DeJson, Debug, Default)]
 pub struct RustcCompilerMessage {
-    reason: String,
-    success: Option<bool>,
-    //package_id: Option<String>,
-    manifest_path: Option<String>,
-    linked_libs: Option<Vec<String >>,
-    linked_paths: Option<Vec<String >>,
-    cfgs: Option<Vec<String >>,
-    env: Option<Vec<String >>,
-    target: Option<RustcTarget>,
-    message: Option<RustcMessage>,
-    profile: Option<RustcProfile>,
-    out_dir: Option<String>,
-    features: Option<Vec<String >>,
-    filenames: Option<Vec<String >>,
-    executable: Option<String>,
-    fresh: Option<bool>
+    pub reason: String,
+    pub success: Option<bool>,
+    pub package_id: Option<String>,
+    pub manifest_path: Option<String>,
+    pub linked_libs: Option<Vec<String >>,
+    pub linked_paths: Option<Vec<String >>,
+    pub cfgs: Option<Vec<String >>,
+    pub env: Option<Vec<String >>,
+    pub target: Option<RustcTarget>,
+    pub message: Option<RustcMessage>,
+    pub profile: Option<RustcProfile>,
+    pub out_dir: Option<String>,
+    pub features: Option<Vec<String >>,
+    pub filenames: Option<Vec<String >>,
+    pub executable: Option<String>,
+    pub fresh: Option<bool>
 }

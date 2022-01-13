@@ -1,36 +1,63 @@
 use {
     makepad_component::makepad_render::{
+        makepad_live_tokenizer::{Range},
         makepad_micro_serde::{SerBin, DeBin, DeBinErr},
     }
 };
 
+
+#[derive(Clone, Copy, Debug, SerBin, DeBin)]
+pub struct BuilderCmdId(pub u64);
+
 #[derive(Clone, Debug, SerBin, DeBin)]
-pub struct BuilderCmd {
-    pub uid: u64,
-    pub kind: BuilderCmdKind
+pub struct BuilderCmdWrap {
+    pub cmd_id: BuilderCmdId,
+    pub cmd: BuilderCmd
 }
 
-impl BuilderCmd{
-    pub fn to_message(&self, kind:BuilderMsgKind)->BuilderMsg{
-        BuilderMsg{
-            uid: self.uid,
-            kind,
+impl BuilderCmdId{
+    pub fn wrap_msg(&self, msg:BuilderMsg)->BuilderMsgWrap{
+        BuilderMsgWrap{
+            cmd_id: *self,
+            msg,
         }
     }
 }
 
 #[derive(Clone, Debug, SerBin, DeBin)]
-pub enum BuilderCmdKind {
-    Build
+pub enum BuilderCmd {
+    CargoCheck
 }
 
 #[derive(Clone, Debug, SerBin, DeBin)]
-pub struct BuilderMsg {
-    pub uid: u64,
-    pub kind: BuilderMsgKind
+pub struct BuilderMsgWrap {
+    pub cmd_id: BuilderCmdId,
+    pub msg: BuilderMsg
+}
+
+#[derive(Clone, Copy, Debug, SerBin, DeBin)]
+pub enum BuilderMsgLevel{
+    Warning,
+    Error,
+    Log
 }
 
 #[derive(Clone, Debug, SerBin, DeBin)]
-pub enum BuilderMsgKind {
-    Error
+pub struct BuilderMsgLocation{
+    pub level: BuilderMsgLevel,
+    pub file_name: String,
+    pub range: Range,
+    pub msg: String
+}
+
+#[derive(Clone, Debug, SerBin, DeBin)]
+pub struct BuilderMsgBare{
+    pub level: BuilderMsgLevel,
+    pub line: String,
+}
+
+#[derive(Clone, Debug, SerBin, DeBin)]
+pub enum BuilderMsg {
+    Bare(BuilderMsgBare),
+    Location(BuilderMsgLocation)
 }
