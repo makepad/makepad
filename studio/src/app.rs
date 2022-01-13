@@ -11,15 +11,15 @@ use {
 
 live_register!{
     App: {{App}} {
-        const FS_ROOT: "edit_repo"
+        const FS_ROOT: "sub_repo"
         inner: {
             collab_client: {
                 //bind: "127.0.0.1"
-                fs_root: (FS_ROOT)
+                path: (FS_ROOT)
             }
             builder_client: {
                 //bind: "127.0.0.1"
-                fs_root: (FS_ROOT)
+                path: (FS_ROOT)
             }
         }
     }

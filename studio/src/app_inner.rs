@@ -10,7 +10,10 @@ use {
             },
         },
         builder::{
-            builder_client::BuilderClient
+            builder_client::BuilderClient,
+            builder_protocol::{
+                BuilderCmd,
+            }
         },
         app_state::{TabKind, AppState, SplitPanel, TabPanel, Panel, Tab},
         log_view::{LogView},
@@ -127,14 +130,15 @@ impl AppInner {
         
         match event {
             Event::Construct => {
-                self.collab_client.send_request(CollabRequest::LoadFileTree{with_data:true});
+                self.collab_client.send_request(CollabRequest::LoadFileTree {with_data: true});
                 self.create_code_editor_tab(
                     cx,
                     state,
                     id!(content).into(),
                     None,
-                    state.file_path_join(&["component/src/file_tree.rs"])
+                    state.file_path_join(&["studio/src/app.rs"])
                 );
+                self.builder_client.send_cmd(BuilderCmd::CargoCheck);
             }
             Event::Draw(draw_event) => {
                 self.draw(&mut Cx2d::new(cx, draw_event), state);
@@ -174,7 +178,7 @@ impl AppInner {
                                 None,
                             );
                             
-                            state.editor_state.destroy_session(session_id,&mut self.collab_client.request_sender());
+                            state.editor_state.destroy_session(session_id, &mut self.collab_client.request_sender());
                             
                             panel.tab_ids.remove(panel.tab_position(tab_id));
                             state.tabs.remove(&tab_id);
@@ -250,8 +254,8 @@ impl AppInner {
                 }
             }
         }
-
-        for action in  self.collab_client.handle_event(cx, event){
+        
+        for action in self.collab_client.handle_event(cx, event) {
             match action {
                 CollabClientAction::Response(response) => match response {
                     CollabResponse::LoadFileTree(response) => {
@@ -262,13 +266,18 @@ impl AppInner {
                         self.editors.handle_collab_response(cx, &mut state.editor_state, response, &mut self.collab_client.request_sender())
                     }
                 },
-                CollabClientAction::Notification(notification)=>{
-                     self.editors.handle_collab_notification(cx, &mut state.editor_state, notification)
+                CollabClientAction::Notification(notification) => {
+                    self.editors.handle_collab_notification(cx, &mut state.editor_state, notification)
                 }
             }
         }
+        
+        let msgs = self.builder_client.handle_event(cx, event);
+        if msgs.len()>0 {
+            self.editors.handle_builder_messages(cx, &mut state.editor_state, msgs);
+        }
     }
-
+    
     
     fn load_file_tree(&mut self, cx: &mut Cx, state: &mut AppState, file_tree_data: FileTreeData) {
         self.file_tree.forget();

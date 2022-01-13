@@ -177,7 +177,9 @@ impl AppState {
         }
         
         self.path = tree_data.path;
+
         self.file_nodes.clear();
+
         create_file_node(
             Some(id!(root).into()),
             &mut self.file_nodes,
