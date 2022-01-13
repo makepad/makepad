@@ -1,4 +1,7 @@
 use {
+    std::{
+        path::PathBuf,
+    },
     crate::{
         editor_state::{
             EditorState,
@@ -16,6 +19,12 @@ use {
                 CollabRequest,
                 CollabResponse
             },
+        },
+        builder::{
+            builder_protocol::{
+                BuilderMsgWrap,
+                BuilderMsg
+            }
         },
         design_editor::{
             live_editor::{
@@ -210,6 +219,31 @@ impl Editors {
                 let document_id = state.handle_delta_applied_notification(file_id, delta);
                 self.redraw_views_for_document(cx, state, document_id);
             }
+        }
+    }
+
+    pub fn handle_builder_messages(
+        &mut self,
+        cx: &mut Cx,
+        state: &mut EditorState,
+        msgs: Vec<BuilderMsgWrap>,
+    ) {
+        for wrap in msgs{
+            let msg_id = state.messages.len();
+            match &wrap.msg{
+                BuilderMsg::Location(loc)=>{
+                    if let Some(doc_id) = state.documents_by_path.get(&PathBuf::from(loc.file_name.clone())){
+                        let doc = &mut state.documents[*doc_id];
+                        if let Some(inner) = &mut doc.inner{
+                            inner.msg_cache.add_range(&inner.text, msg_id, loc.range);
+                        }
+                        // lets redraw this doc. with new squigglies
+                        self.redraw_views_for_document(cx, state, *doc_id);
+                    }
+                }
+                _=>()
+            }
+            state.messages.push(wrap.msg);
         }
     }
     

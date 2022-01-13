@@ -4,6 +4,7 @@ use {
             cursor_set::CursorSet,
             indent_cache::IndentCache,
             token_cache::TokenCache,
+            msg_cache::MsgCache,
         },
         collab::{
             collab_protocol::{
@@ -11,11 +12,17 @@ use {
                 TextFileId
             },
         },
+        builder::{
+            builder_protocol::{
+                BuilderMsg
+            }
+        },
         editors::EditorViewId,
         design_editor::inline_cache::InlineCache,
     },
     makepad_component::makepad_render::{
         makepad_live_tokenizer::{
+            range::Range,
             delta::{self, Delta},
             position::Position,
             position_set::PositionSet,
@@ -41,6 +48,7 @@ pub struct EditorState {
     pub documents_by_path: HashMap<PathBuf, DocumentId>,
     pub documents_by_file: LiveIdMap<TextFileId, DocumentId>,
     pub outstanding_document_queue: VecDeque<DocumentId>,
+    pub messages: Vec<BuilderMsg>
 }
 
 impl EditorState {
@@ -119,6 +127,8 @@ impl EditorState {
         let document = &mut self.documents[document_id];
         let token_cache = TokenCache::new(&text);
         let indent_cache = IndentCache::new(&text);
+        let msg_cache = MsgCache::new(&text);
+        
         let inline_cache = RefCell::new(InlineCache::new(&text));
         
         document.inner = Some(DocumentInner {
@@ -128,6 +138,7 @@ impl EditorState {
             token_cache,
             indent_cache,
             inline_cache,
+            msg_cache,
             edit_group: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -148,7 +159,8 @@ impl EditorState {
         let document = &mut self.documents[document_id];
         if document.inner.is_some() {
             self.destroy_document_deferred(document_id, send_request);
-        } else {
+        } 
+        else {
             document.should_be_destroyed = true;
         }
     }
@@ -743,6 +755,11 @@ impl Session {
     }
 }
 
+pub struct BuilderMsgRange{
+    pub range: Range,
+    pub index: usize
+}
+
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct DocumentId(pub LiveId);
 
@@ -750,16 +767,21 @@ pub struct Document {
     pub session_ids: HashSet<SessionId>,
     pub should_be_destroyed: bool,
     pub path: PathBuf,
+    //pub msg_ranges: Vec<BuilderMsgRange>,
     pub inner: Option<DocumentInner>,
 }
 
 impl Document {
     fn apply_delta(&mut self, delta: Delta) {
         let inner = self.inner.as_mut().unwrap();
+
         inner.token_cache.invalidate(&delta);
         inner.indent_cache.invalidate(&delta);
+        inner.msg_cache.invalidate(&delta);
         inner.inline_cache.borrow_mut().invalidate(&delta);
+        
         inner.text.apply_delta(delta);
+
         inner.token_cache.refresh(&inner.text);
         inner.indent_cache.refresh(&inner.text);
     }
@@ -794,6 +816,7 @@ pub struct DocumentInner {
     pub text: Text,
     pub token_cache: TokenCache,
     pub indent_cache: IndentCache,
+    pub msg_cache: MsgCache,
     pub inline_cache: RefCell<InlineCache>,
     pub edit_group: Option<EditGroup>,
     pub undo_stack: Vec<Edit>,

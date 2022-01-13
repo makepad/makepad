@@ -1,7 +1,7 @@
 use {
     crate::{
         builder::{
-            builder_protocol::{BuilderCmd, BuilderMsg},
+            builder_protocol::{BuilderCmd, BuilderCmdWrap, BuilderMsgWrap, BuilderCmdId},
             builder_server::{BuilderConnection, BuilderServer},
         }
     },
@@ -12,8 +12,9 @@ use {
         env,
         io::{Read, Write},
         net::{TcpListener, TcpStream},
-        sync::mpsc::{self, Receiver, Sender},
+        sync::mpsc::{self, Receiver, Sender, TryRecvError},
         thread,
+        path::PathBuf
     },
 };
 
@@ -24,31 +25,71 @@ live_register!{
 #[derive(Live)]
 pub struct BuilderClient {
     bind: Option<String>,
-    fs_root: String,
+    path: String,
+    #[rust] cmd_id_counter: u64,
     #[rust] inner: Option<BuilderClientInner>
 }
 
 impl LiveHook for BuilderClient{
     fn after_apply(&mut self, cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
         if self.inner.is_none(){
-            self.inner = Some(BuilderClientInner::new_with_local_server(cx))
+            self.inner = Some(BuilderClientInner::new_with_local_server(cx, &self.path))
         }
     }
 }
 
+impl BuilderClient{
+    
+    pub fn send_cmd(&mut self, cmd: BuilderCmd) {
+        self.inner.as_ref().unwrap().cmd_sender.send(BuilderCmdWrap{
+            cmd_id: BuilderCmdId(self.cmd_id_counter),
+            cmd
+        }).unwrap();
+        self.cmd_id_counter += 1;
+    }
+    
+    
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> Vec<BuilderMsgWrap> {
+        let mut a = Vec::new();
+        self.handle_event_with_fn(cx, event, &mut | _, v | a.push(v));
+        a
+    }
+    
+    pub fn handle_event_with_fn(&mut self, cx: &mut Cx, event: &mut Event, dispatch_msg: &mut dyn FnMut(&mut Cx, BuilderMsgWrap)) {
+        let inner = self.inner.as_ref().unwrap();
+        match event {
+            Event::Signal(event)
+            if event.signals.contains_key(&inner.msg_signal) => {
+                loop {
+                    match inner.msg_receiver.try_recv() {
+                        Ok(msg) => dispatch_msg(cx, msg),
+                        Err(TryRecvError::Empty) => break,
+                        _ => panic!(),
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    
+}
+
 pub struct BuilderClientInner {
-    pub cmd_sender: Sender<BuilderCmd>,
+    pub cmd_sender: Sender<BuilderCmdWrap>,
     pub msg_signal: Signal,
-    pub msg_receiver: Receiver<BuilderMsg>,
+    pub msg_receiver: Receiver<BuilderMsgWrap>,
 }
 
 impl BuilderClientInner {
-    pub fn new_with_local_server(cx: &mut Cx) -> Self {
+    pub fn new_with_local_server(cx: &mut Cx, subdir:&str) -> Self {
         let (cmd_sender, cmd_receiver) = mpsc::channel();
         let msg_signal = cx.new_signal();
         let (msg_sender, msg_receiver) = mpsc::channel();
         
-        let mut server = BuilderServer::new(env::current_dir().unwrap());
+        let base_path = env::current_dir().unwrap();
+        let final_path = base_path.join(subdir.split('/').collect::<PathBuf>());
+        
+        let mut server = BuilderServer::new(final_path);
         spawn_local_cmd_handler(
             cmd_receiver,
             server.connect(Box::new({
@@ -68,9 +109,6 @@ impl BuilderClientInner {
         }
     }
     
-    pub fn send_cmd(&mut self, cmd: BuilderCmd) {
-        self.cmd_sender.send(cmd).unwrap();
-    }
 }
 
 fn spawn_connection_listener(listener: TcpListener, mut server: BuilderServer) {
@@ -113,7 +151,7 @@ fn spawn_remote_cmd_handler(
 }
 
 fn spawn_msg_sender(
-    msg_receiver: Receiver<BuilderMsg>,
+    msg_receiver: Receiver<BuilderMsgWrap>,
     mut stream: TcpStream,
 ) {
     thread::spawn(move || loop {
@@ -128,7 +166,7 @@ fn spawn_msg_sender(
     });
 }
 
-fn _spawn_cmd_sender(cmd_receiver: Receiver<BuilderCmd>, mut stream: TcpStream) {
+fn _spawn_cmd_sender(cmd_receiver: Receiver<BuilderCmdWrap>, mut stream: TcpStream) {
     thread::spawn(move || loop {
         let cmd = cmd_receiver.recv().unwrap();
         let mut cmd_bytes = Vec::new();
@@ -142,7 +180,7 @@ fn _spawn_cmd_sender(cmd_receiver: Receiver<BuilderCmd>, mut stream: TcpStream) 
 fn _spawn_msg_receiver(
     mut stream: TcpStream,
     msg_signal: Signal,
-    msg_sender: Sender<BuilderMsg>,
+    msg_sender: Sender<BuilderMsgWrap>,
 ) {
     thread::spawn(move || loop {
         let mut len_bytes = [0; 8];
@@ -160,7 +198,7 @@ fn _spawn_msg_receiver(
 }
 
 fn spawn_local_cmd_handler(
-    cmd_receiver: Receiver<BuilderCmd>,
+    cmd_receiver: Receiver<BuilderCmdWrap>,
     connection: BuilderConnection,
 ) {
     thread::spawn(move || loop {

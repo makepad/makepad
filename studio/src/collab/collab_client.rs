@@ -14,6 +14,7 @@ use {
         net::{TcpListener, TcpStream},
         sync::mpsc::{self, Receiver, Sender, TryRecvError},
         thread,
+        path::PathBuf
     },
 };
 
@@ -24,14 +25,14 @@ live_register!{
 #[derive(Live)]
 pub struct CollabClient {
     bind: Option<String>,
-    fs_root: String,
+    path: String,
     #[rust] inner: Option<CollabClientInner>
 }
 
 impl LiveHook for CollabClient {
     fn after_apply(&mut self, cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
         if self.inner.is_none() {
-            self.inner = Some(CollabClientInner::new_with_local_server(cx))
+            self.inner = Some(CollabClientInner::new_with_local_server(cx, &self.path))
         }
     }
 }
@@ -78,12 +79,14 @@ impl CollabClient {
 }
 
 impl CollabClientInner {
-    pub fn new_with_local_server(cx: &mut Cx) -> Self {
+    pub fn new_with_local_server(cx: &mut Cx, subdir:&str) -> Self {
         let (request_sender, request_receiver) = mpsc::channel();
         let action_signal = cx.new_signal();
         let (action_sender, action_receiver) = mpsc::channel();
         
-        let mut server = CollabServer::new(env::current_dir().unwrap());
+        let base_path = env::current_dir().unwrap();
+        let final_path = base_path.join(subdir.split('/').collect::<PathBuf>());
+        let mut server = CollabServer::new(final_path);
         spawn_local_request_handler(
             request_receiver,
             server.connect(Box::new({
