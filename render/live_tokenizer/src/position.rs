@@ -1,4 +1,5 @@
 use {
+    makepad_micro_serde::*,
     crate::{
         delta::{Delta, OperationSpan},
         size::Size,
@@ -9,7 +10,7 @@ use {
     },
 };
 
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd, SerBin, DeBin)]
 pub struct Position {
     pub line: usize,
     pub column: usize,

@@ -69,9 +69,13 @@ impl CollabConnection {
     pub fn handle_request(&self, request: CollabRequest) -> CollabResponse {
         match request {
             CollabRequest::LoadFileTree {with_data} => CollabResponse::LoadFileTree(self.load_file_tree(with_data)),
-            CollabRequest::OpenFile(path) => CollabResponse::OpenFile(self.open_file(path)),
-            CollabRequest::ApplyDelta(path, revision, delta) => {
-                CollabResponse::ApplyDelta(self.apply_delta(path, revision, delta))
+            CollabRequest::OpenFile(path) => {
+                let mut base_path = self.shared.read().unwrap().path.clone();
+                base_path.push(path);
+                CollabResponse::OpenFile(self.open_file(base_path))
+            }
+            CollabRequest::ApplyDelta(text_file_id, revision, delta) => {
+                CollabResponse::ApplyDelta(self.apply_delta(text_file_id, revision, delta))
             }
             CollabRequest::CloseFile(path) => CollabResponse::CloseFile(self.close_file(path)),
         }
@@ -132,6 +136,7 @@ impl CollabConnection {
         }
         
         let path = self.shared.read().unwrap().path.clone();
+
         let root = FileNodeData::Directory {
             entries: get_directory_entries(&path, with_data) ?,
         };
