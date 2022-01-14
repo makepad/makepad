@@ -120,7 +120,7 @@ impl InlineCache {
     }
     
     pub fn invalidate(&mut self, delta: &Delta) {
-
+        
         // detect no-op line wise, to keep the folding state
         let ranges = delta.operation_ranges();
         if ranges.count() == 2 {
@@ -159,6 +159,18 @@ impl InlineCache {
     }
     
     pub fn refresh(&mut self, cx: &mut Cx, path: &str, token_cache: &TokenCache) {
+        let live_registry_rc = cx.live_registry.clone();
+        let live_registry = live_registry_rc.borrow();
+        
+        // lets check all our matched pointers generations.
+        for line_cache in self.lines.iter_mut() {
+            if line_cache.items.iter().any(|bind| !live_registry.generation_valid(bind.live_ptr)){
+                line_cache.items.clear();
+                line_cache.is_clean = false;
+                self.is_clean = false;
+            }
+        }
+
         if self.is_clean {
             return
         }
@@ -169,18 +181,16 @@ impl InlineCache {
         }
         
         if self.live_register_range.is_none() {
+            self.invalidate_all();
             return
         }
         let range = self.live_register_range.unwrap();
         
-        let live_registry_rc = cx.live_registry.clone();
-        let live_registry = live_registry_rc.borrow();
-        
-        let path = if let Some(prefix) = path.strip_prefix("/Users/admin/makepad/edit_repo/"){
+        let path = if let Some(prefix) = path.strip_prefix("/Users/admin/makepad/edit_repo/") {
             prefix
         }
-        else{
-           path 
+        else {
+            path
         };
         //println!("{}", &path.strip_prefix("/Users/admin/makepad/edit_repo/").unwrap());
         let file_id = live_registry.path_str_to_file_id(path).unwrap();
@@ -210,7 +220,7 @@ impl InlineCache {
             if line_cache.items.len() != 0 {
                 panic!();
             }
-            if line_cache.fold_button_id.is_none(){
+            if line_cache.fold_button_id.is_none() {
                 line_cache.fold_button_id = Some(self.fold_button_alloc);
                 self.fold_button_alloc += 1;
             }
@@ -240,7 +250,7 @@ impl InlineCache {
                             }
                             else {live_token_id};
                             
-                            let live_ptr = LivePtr {file_id, index: node_index as u32, generation:live_file.generation};
+                            let live_ptr = LivePtr {file_id, index: node_index as u32, generation: live_file.generation};
                             // if its a DSL, we should filter here
                             //let live_node = live_registry.ptr_to_node(live_ptr);
                             let bind = InlineEditBind {

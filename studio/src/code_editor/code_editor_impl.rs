@@ -473,7 +473,7 @@ impl CodeEditorImpl {
                 let start = view_rect.pos + view_rect.size * 0.5;
                 let pos = self.vec2_to_position(&document_inner.text, start, lines_layout);
                 pos
-            }
+            } 
             else {
                 last_cursor.head
             };

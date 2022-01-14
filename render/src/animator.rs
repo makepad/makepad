@@ -759,6 +759,9 @@ impl Animator {
     pub fn get_track_and_state_id_of(&self, cx: &mut Cx, live_ptr: Option<LivePtr>) -> Option<(LiveId, LiveId)> {
         if let Some(live_ptr) = live_ptr {
             let live_registry = cx.live_registry.borrow();
+            if !live_registry.generation_valid(live_ptr){
+                return None
+            }
             let (nodes, index) = live_registry.ptr_to_nodes_index(live_ptr);
             Some(if let Some(LiveValue::Id(id)) = nodes.child_value_by_path(index, &[id!(track)]) {
                 (*id, nodes[index].id)
