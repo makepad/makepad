@@ -216,8 +216,6 @@ impl LiveEditor {
         let mut inline_cache = document_inner.inline_cache.borrow_mut();
         inline_cache.refresh(cx, path, &document_inner.token_cache);
         
-        
-        
         let token_cache = &document_inner.token_cache;
         
         // first we generate the layout structure
@@ -240,6 +238,7 @@ impl LiveEditor {
             let mut max_height = 0.0f32;
             
             let ws = document_inner.indent_cache[input.line].virtual_leading_whitespace();
+
             // ok so. we have to determine wether we are going to fold.
             // if a line starts with # or a comment: fold it
             let mut zoom_out = 0.0;

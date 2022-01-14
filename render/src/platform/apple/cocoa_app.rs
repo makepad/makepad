@@ -483,7 +483,7 @@ impl CocoaApp {
                             window_id: cocoa_window.window_id,
                             scroll: Vec2 {x: -dx as f32, y: -dy as f32},
                             abs: cocoa_window.last_mouse_pos,
-                            input_type: FingerInputType::Mouse,
+                            input_type: FingerInputType::Touch,
                             modifiers: get_event_key_modifier(ns_event),
                             handled_x: false,
                             handled_y: false,

@@ -103,6 +103,7 @@ impl Cx {
                 
                 // lets verify our instance_offset is not disaligned
                 let instances = (draw_call.instances.as_ref().unwrap().len() / sh.mapping.instances.total_slots) as u64;
+
                 if instances == 0 {
                     continue;
                 }

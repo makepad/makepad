@@ -34,7 +34,8 @@ use {
     },
     makepad_component::{
         ComponentMap,
-        dock::PanelId,
+        tab_bar::TabId,
+//        dock::PanelId,
     },
     makepad_component::makepad_render::*,
 };
@@ -98,9 +99,9 @@ live_register!{
 
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq)]
-pub struct EditorViewId(pub PanelId);
-impl From<PanelId> for EditorViewId {
-    fn from(panel_id: PanelId) -> Self {Self (panel_id)}
+pub struct EditorViewId(pub TabId);
+impl From<TabId> for EditorViewId {
+    fn from(id: TabId) -> Self {Self (id)}
 }
 
 #[derive(Live)]

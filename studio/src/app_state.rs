@@ -229,6 +229,15 @@ impl TabPanel{
     pub fn tab_position(&self, find_id:TabId)->usize{
         self.tab_ids.iter().position(|id| *id == find_id).unwrap()
     }
+    
+    pub fn selected_tab_id(&self)->Option<TabId>{
+        if let Some(index) = self.selected_tab{
+            Some(self.tab_ids[index])
+        }
+        else{
+            None
+        }
+    }
 }
 
 #[derive(Clone, Debug)]

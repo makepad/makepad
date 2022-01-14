@@ -97,7 +97,7 @@ impl AppInner {
                             self.editors.draw(
                                 cx,
                                 &state.editor_state,
-                                panel_id.into(),
+                                tab_id.into(),
                             );
                         }
                     }
@@ -174,7 +174,7 @@ impl AppInner {
                             self.editors.set_view_session_id(
                                 cx,
                                 &mut state.editor_state,
-                                panel_id.into(),
+                                tab_id.into(),
                                 None,
                             );
                             
@@ -241,15 +241,17 @@ impl AppInner {
                         panel_id_stack.push(*child_id);
                     }
                 }
-                Panel::Tab(_) => {
-                    if self.editors.has_editor(panel_id.into()) {
-                        self.editors.handle_event(
-                            cx,
-                            &mut state.editor_state,
-                            panel_id.into(),
-                            event,
-                            &mut self.collab_client.request_sender(),
-                        );
+                Panel::Tab(tab_panel) => {
+                    if let Some(tab_id) = tab_panel.selected_tab_id(){
+                        if self.editors.has_editor(tab_id.into()) {
+                            self.editors.handle_event(
+                                cx,
+                                &mut state.editor_state,
+                                tab_id.into(),
+                                event,
+                                &mut self.collab_client.request_sender(),
+                            );
+                        }
                     }
                 }
             }
@@ -369,7 +371,7 @@ impl AppInner {
                 self.editors.set_view_session_id(
                     cx,
                     &mut state.editor_state,
-                    panel_id.into(),
+                    tab_id.into(),
                     Some(session_id),
                 );
             }
@@ -397,7 +399,7 @@ impl AppInner {
                             self.file_tree.redraw(cx);
                         }
                         TabKind::CodeEditor {..} => {
-                            self.editors.redraw_view(cx, panel_id.into());
+                            self.editors.redraw_view(cx, tab_id.into());
                         }
                     }
                 }
