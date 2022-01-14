@@ -49,15 +49,15 @@ impl Walk{
         Self{
             margin:Margin::default(),
             width:w,
-            height:h
+            height:h,
         }
-    }
+    } 
     
     pub fn fixed(w:f32, h:f32)->Self{
         Self{
             margin:Margin::default(),
             width:Width::Fixed(w),
-            height:Height::Fixed(h)
+            height:Height::Fixed(h),
         }
     }
 }
@@ -277,6 +277,7 @@ impl<'a> Cx2d<'a> {
         };
         
         let margin = old.layout.walk.margin.clone();
+        //let align_after = old.layout.walk.align_after;
         // if we have alignment set, we should now align our childnodes
         let dx = Self::compute_align_turtle_x(&old);
         if dx > 0.0 {
