@@ -8,7 +8,7 @@ use {
         cx::Cx,
         draw_2d::cx_2d::Cx2d,
         live_traits::*,
-        draw_2d::turtle::{Walk, Width, Height, Margin},
+        draw_2d::turtle::Walk,
         font::{CxFontsAtlasTodo, Font,},
         draw_2d::view::ManyInstances,
         draw_vars::DrawVars,
@@ -420,11 +420,7 @@ impl DrawText {
             }
             if emit {
                 let height = self.text_style.font_size * self.text_style.height_factor * self.font_scale;
-                let rect = cx.walk_turtle(Walk {
-                    width: Width::Fixed(width),
-                    height: Height::Fixed(height),
-                    margin: Margin::default()
-                });
+                let rect = cx.walk_turtle(Walk::fixed(width, height));
                 
                 self.draw_chunk(cx, rect.pos, 0, None);
                 

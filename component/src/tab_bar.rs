@@ -96,7 +96,7 @@ impl TabBar {
             );
         }
         self.tabs.retain_visible();
-        self.bar_fill.draw_walk(cx, Walk{width:Width::Filled, height: Height::Filled, margin:Margin::default()});
+        self.bar_fill.draw_walk(cx, Walk::wh(Width::Filled, Height::Filled));
         self.scroll_view.end(cx);
     }
     

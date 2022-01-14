@@ -65,7 +65,7 @@ live_register!{
                 width: Width::Filled,
                 height: Height::Fixed(0.0),
             },
-            align: {fx: 0.0, fy: 0.5},
+            align: {fy: 0.5},
             padding: {left: 5.0, bottom: 1.0,},
         }
         
@@ -393,13 +393,9 @@ impl FileTree {
         let height_left = cx.get_height_left();
         let mut walk = 0.0;
         while walk < height_left {
-            self.count += 1;
+            self.count += 1; 
             self.filler_quad.is_even = Self::is_even(self.count);
-            self.filler_quad.draw_walk(cx, Walk {
-                width: Width::Filled,
-                height: Height::Fixed(self.node_height.min(height_left - walk)),
-                margin: Margin::default()
-            });
+            self.filler_quad.draw_walk(cx, Walk::wh(Width::Filled, Height::Fixed(self.node_height.min(height_left - walk))));
             walk += self.node_height.max(1.0);
         }
         
@@ -421,11 +417,7 @@ impl FileTree {
             return true
         }
         else {
-            cx.walk_turtle(Walk {
-                width: Width::Filled,
-                height: Height::Fixed(height),
-                margin: Margin::default()
-            });
+            cx.walk_turtle(Walk::wh( Width::Filled, Height::Fixed(height)));
             return false
         }
     }
