@@ -67,7 +67,7 @@ live_register!{
 pub struct FrameTemplate {
     bg_quad: DrawQuad,
     
-    #[default_state(default_state, unselected_state)]
+    #[state(default_state, unselected_state)]
     animator: Animator,
     
     default_state: Option<LivePtr>,

@@ -118,7 +118,7 @@ live_register!{
 #[derive(Live, LiveHook)]
 pub struct DesktopButton {
     #[rust] pub button_logic: ButtonLogic,
-    #[default_state(default_state)] pub animator: Animator,
+    #[state(default_state)] pub animator: Animator,
     pub default_state: Option<LivePtr>,
     pub hover_state: Option<LivePtr>,
     pub pressed_state: Option<LivePtr>,

@@ -94,7 +94,7 @@ pub struct ScrollBar {
     use_vertical_finger_scroll: bool,
     smoothing: Option<f32>,
     
-    #[default_state(default_state)] pub animator: Animator,
+    #[state(default_state)] pub animator: Animator,
     
     #[rust] next_frame: NextFrame,
     #[rust(false)] visible: bool,

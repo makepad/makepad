@@ -86,7 +86,7 @@ live_register!{
 #[derive(Live, LiveHook)]
 pub struct FoldButton {
     #[rust] pub button_logic: ButtonLogic,
-    #[default_state(default_state, closed_state)] pub animator: Animator,
+    #[state(default_state, closed_state)] pub animator: Animator,
     
     default_state: Option<LivePtr>,
     hover_state: Option<LivePtr>,

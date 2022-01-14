@@ -71,7 +71,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         
         // alright now. we have a field
         for field in &mut fields {
-            if field.attrs.len() == 1 && &field.attrs[0].name != "live" && field.attrs[0].name != "calc" && field.attrs[0].name != "rust" && field.attrs[0].name != "default_state" {
+            if field.attrs.len() == 1 && &field.attrs[0].name != "live" && field.attrs[0].name != "calc" && field.attrs[0].name != "rust" && field.attrs[0].name != "state" {
                 return error_result(&format!("Field {} does not have a live, calc or rust attribute", field.name));
             }
             if field.attrs.len() == 0 { // insert a default
@@ -95,7 +95,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         }
         
         let animator_kv = if let Some(animator) = animator {
-            let kv = if let Some(attr) = animator.attrs.iter().find( | attr | attr.name == "default_state") {
+            let kv = if let Some(attr) = animator.attrs.iter().find( | attr | attr.name == "state") {
                 if let Some(args) = &attr.args {
                     let mut parser = TokenParser::new(args.clone());
                     // ok its key:value comma
@@ -108,11 +108,11 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
                     kv
                 }
                 else {
-                    return error_result("default_state attribute needs arguments");
+                    return error_result("state attribute needs arguments");
                 }
             }
             else {
-                return error_result("Animator needs a default_state(base:state_default) attribute");
+                return error_result("Animator needs a state(state_default) attribute");
             };
             
             tb.add("impl").stream(generic.clone());
