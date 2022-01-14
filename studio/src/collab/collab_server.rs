@@ -140,12 +140,11 @@ impl CollabConnection {
         let root = FileNodeData::Directory {
             entries: get_directory_entries(&path, with_data) ?,
         };
-        Ok(FileTreeData {path, root})
+        Ok(FileTreeData {path:"".into(), root})
     }
     
     pub fn open_file(&self, path: PathBuf) -> Result<(TextFileId, usize, Text), CollabError> {
         let mut shared_guard = self.shared.write().unwrap();
-        
         match shared_guard.file_ids_by_path.get(&path) {
             Some(&file_id) => {
                 let mut file_guard = shared_guard.files[file_id].lock().unwrap();

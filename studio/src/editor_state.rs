@@ -161,6 +161,7 @@ impl EditorState {
         let inner = document.inner.as_ref().unwrap();
         let file_id = inner.file_id;
         self.documents_by_file.remove(&file_id);
+        self.documents_by_path.remove(&document.path);
         self.documents.remove(&document_id);
         send_request(CollabRequest::CloseFile(file_id))
     }
