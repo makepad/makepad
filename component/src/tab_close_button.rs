@@ -45,12 +45,7 @@ live_register!{
         walk: {
             height: Height::Fixed(10.0),
             width: Width::Fixed(10.0),
-            margin: Margin {
-                l: 0.0,
-                t: 0.0,
-                r: 5.0,
-                b: 0.0,
-            },
+            margin: {right: 5},
         },
     }
 }

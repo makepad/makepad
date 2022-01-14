@@ -284,10 +284,10 @@ pub struct HitOptions {
 pub fn rect_contains_with_margin(rect: &Rect, pos: Vec2, margin: &Option<Margin>) -> bool {
     if let Some(margin) = margin {
         return
-        pos.x >= rect.pos.x - margin.l
-            && pos.x <= rect.pos.x + rect.size.x + margin.r
-            && pos.y >= rect.pos.y - margin.t
-            && pos.y <= rect.pos.y + rect.size.y + margin.b;
+        pos.x >= rect.pos.x - margin.left
+            && pos.x <= rect.pos.x + rect.size.x + margin.right
+            && pos.y >= rect.pos.y - margin.top
+            && pos.y <= rect.pos.y + rect.size.y + margin.bottom;
     }
     else {
         return rect.contains(pos);

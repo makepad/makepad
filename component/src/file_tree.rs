@@ -66,17 +66,17 @@ live_register!{
                 height: Height::Fixed(0.0),
             },
             align: {fx: 0.0, fy: 0.5},
-            padding: {l: 5.0, t: 0.0, r: 0.0, b: 1.0,},
+            padding: {left: 5.0, bottom: 1.0,},
         }
         
         icon_walk: Walk {
             width: Width::Fixed(14.0),
             height: Height::Filled,
             margin: Margin {
-                l: 1.0,
-                t: 0.0,
-                r: 4.0,
-                b: 0.0,
+                left: 1
+                top: 0
+                right: 4
+                bottom: 0
             },
         }
         
@@ -316,10 +316,10 @@ impl FileTreeNode {
             width: Width::Fixed(depth as f32 * self.indent_width),
             height: Height::Filled,
             margin: Margin {
-                l: depth as f32 * 1.0,
-                t: 0.0,
-                r: depth as f32 * 4.0,
-                b: 0.0,
+                left: depth as f32 * 1.0,
+                top: 0.0,
+                right: depth as f32 * 4.0,
+                bottom: 0.0,
             },
         }
     }

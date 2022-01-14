@@ -42,7 +42,7 @@ live_register!{
         const BORDER_SIZE: 6.0
         border_size: (BORDER_SIZE)
         view: {
-            layout: {padding: {l: (BORDER_SIZE), t: 0.0, r: (BORDER_SIZE), b: (BORDER_SIZE)}}
+            layout: {padding: {left: (BORDER_SIZE), top: 0.0, right: (BORDER_SIZE), bottom: (BORDER_SIZE)}}
         }
         padding_fill: {color: (COLOR_APP_BG)}
         drag_quad: {

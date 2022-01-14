@@ -46,9 +46,9 @@ live_register!{
             bg_quad: {no_h_scroll: true}
         }
         
-        widget_layout: Layout {
-            align: Align {fx: 0.2, fy: 0.},
-            padding: Padding {l: 0, t: .0, r: 0, b: 0}
+        widget_layout: {
+            align: {fx: 0.2, fy: 0},
+            padding: {left: 0, top: 0, right: 0, bottom: 0}
         }
         
         zoom_indent_depth: 8

@@ -40,17 +40,17 @@ live_register!{
             }
         }
         
-        layout: Layout {
-            align: Align {fx: 0.0, fy: 0.5},
-            walk: Walk {
+        layout: {
+            align: {fx: 0.0, fy: 0.5},
+            walk: {
                 width: Width::Computed,
                 height: Height::Filled, //Fixed((DIM_TAB_HEIGHT)),
             },
-            padding: Padding {
-                l: 10.0,
-                t: 2.0,
-                r: 15.0,
-                b: 0.0,
+            padding: {
+                left: 10.0,
+                top: 2.0,
+                right: 15.0,
+                bottom: 0.0,
             },
         }
         
@@ -69,7 +69,7 @@ live_register!{
                 hover: [{time: 0.0, value: 1.0}],
             }
         }
-        
+         
         unselected_state: {
             track: select,
             from: {all: Play::Forward {duration: 0.3}}
