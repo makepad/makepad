@@ -97,7 +97,7 @@ pub struct Splitter {
     #[rust] rect: Rect,
     #[rust] position: f32,
     #[rust] drag_start_align: Option<SplitterAlign>,
-    #[default_state(default_state)] pub animator: Animator,
+    #[state(default_state)] pub animator: Animator,
     
     default_state: Option<LivePtr>,
     hover_state: Option<LivePtr>,

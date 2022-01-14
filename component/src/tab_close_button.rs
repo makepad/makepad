@@ -53,7 +53,7 @@ live_register!{
 #[derive(Live, LiveHook)]
 pub struct TabCloseButton {
     button_quad: DrawQuad,
-    #[default_state(default_state)]
+    #[state(default_state)]
     animator: Animator,
     default_state: Option<LivePtr>,
     hover_state: Option<LivePtr>,

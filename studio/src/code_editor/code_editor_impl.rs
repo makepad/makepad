@@ -231,7 +231,7 @@ pub struct CodeEditorImpl {
     zoom_out_state: Option<LivePtr>,
     zoom_in_state: Option<LivePtr>,
     
-    #[default_state(show_caret_state, zoom_in_state)]
+    #[state(show_caret_state, zoom_in_state)]
     animator: Animator,
     
     selection_quad: DrawSelection,
