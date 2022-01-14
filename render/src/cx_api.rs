@@ -122,6 +122,11 @@ impl Cx {
         }
     }
     
+    pub fn repaint_pass(&mut self, pass_id: usize) {
+        let cxpass = &mut self.passes[pass_id];
+        cxpass.paint_dirty = true;
+    }
+    
     pub fn redraw_pass_and_child_passes(&mut self, pass_id: usize) {
         let cxpass = &self.passes[pass_id];
         if let Some(main_list) = cxpass.main_draw_list_id {

@@ -53,11 +53,20 @@ impl Cx {
         
         cocoa_app.event_loop( | cocoa_app, events | {
             
-            //let mut paint_dirty = false;
+            let mut paint_dirty = false;
             for mut event in events {
                 
                 self.process_desktop_pre_event(&mut event);
                 match &event {
+                    Event::AppFocus=>{ // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
+                        for mw in metal_windows.iter_mut(){
+                            if let Some(main_pass_id) = self.windows[mw.window_id].main_pass_id {
+                                self.repaint_pass(main_pass_id);
+                            }
+                        }
+                        paint_dirty = true;
+                        self.call_event_handler(&mut event);
+                    }
                     Event::WindowResizeLoop(wr) => {
                         if let Some(metal_window) = metal_windows.iter_mut().find(|w| w.window_id == wr.window_id){
                             if wr.was_started {
@@ -281,8 +290,7 @@ impl Cx {
             
             self.process_live_style_errors();
             */
-            if self.need_redrawing()
-                || self.new_next_frames.len() != 0 {
+            if self.need_redrawing() || self.new_next_frames.len() != 0 || paint_dirty {
                 false
             } else {
                 true
