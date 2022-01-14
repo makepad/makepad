@@ -309,6 +309,8 @@ impl CodeEditorImpl {
     }
     
     pub fn begin<'a>(&mut self, cx: &mut Cx2d, state: &'a EditorState) -> Result<(&'a Document, &'a DocumentInner, &'a Session), ()> {
+        self.scroll_view.begin(cx) ?;
+        
         if let Some(session_id) = self.session_id {
             
             let session = &state.sessions[session_id];
@@ -316,13 +318,13 @@ impl CodeEditorImpl {
             
             if let Some(document_inner) = document.inner.as_ref() {
                 self.text_glyph_size = self.code_text.text_style.font_size * self.code_text.get_monospace_base(cx);
-                self.scroll_view.begin(cx) ?;
                 
                 self.handle_select_scroll_in_draw(cx);
                 self.begin_instances(cx);
                 return Ok((document, document_inner, session))
             }
         }
+        self.scroll_view.end(cx);
         Err(())
     }
     
