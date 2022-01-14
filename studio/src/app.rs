@@ -15,7 +15,7 @@ live_register!{
         inner: {
             collab_client: {
                 //bind: "127.0.0.1"
-                path: (FS_ROOT)
+                path: (FS_ROOT) 
             }
             builder_client: {
                 //bind: "127.0.0.1"

@@ -200,7 +200,7 @@ impl LiveEditor {
                 let fold_button = self.fold_button;
                 let fb = self.fold_buttons.get_or_insert(cx, fold_button_id, | cx | {
                     let mut btn = FoldButton::new_from_option_ptr(cx, fold_button);
-                    btn.set_is_opened(cx, line_opened > 0.5, Animate::No);
+                    btn.set_is_open(cx, line_opened > 0.5, Animate::No);
                     btn
                 });
                 
@@ -478,7 +478,7 @@ impl LiveEditor {
         
         let mut fold_actions = Vec::new();
         for (fold_button_id, fold_button) in self.fold_buttons.iter_mut() {
-            fold_button.handle_event(cx, event, &mut | _, action | fold_actions.push((action, *fold_button_id)));
+            fold_button.handle_event_with_fn(cx, event, &mut | _, action | fold_actions.push((action, *fold_button_id)));
         }
         for (action, fold_button_id) in fold_actions {
             match action {

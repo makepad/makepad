@@ -351,8 +351,7 @@ impl DrawVars {
     
     pub fn apply_value(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         
-        
-        if nodes[index].origin.node_has_prefix() {
+        if nodes[index].origin.node_has_prefix() && nodes[index].value.is_id(){
             return nodes.skip_node(index)
         }
         
@@ -380,6 +379,11 @@ impl DrawVars {
         else { // our shader simply didnt compile
             return nodes.skip_node(index);
         }
+
+        if nodes[index].origin.node_has_prefix(){
+            return nodes.skip_node(index)
+        }
+
         let unknown_shader_props = match nodes[index].id {
             id!(debug) => false,
             id!(debug_id) => false,
@@ -388,6 +392,7 @@ impl DrawVars {
             id!(draw_call_group) => false,
             _ => true
         };
+
         if unknown_shader_props && nodes[index].value.is_value_type() {
             cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
         }

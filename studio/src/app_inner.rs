@@ -242,7 +242,7 @@ impl AppInner {
                     }
                 }
                 Panel::Tab(tab_panel) => {
-                    if let Some(tab_id) = tab_panel.selected_tab_id(){
+                    if let Some(tab_id) = tab_panel.selected_tab_id() {
                         if self.editors.has_editor(tab_id.into()) {
                             self.editors.handle_event(
                                 cx,
@@ -277,7 +277,11 @@ impl AppInner {
         let msgs = self.builder_client.handle_event(cx, event);
         if msgs.len()>0 {
             self.editors.handle_builder_messages(cx, &mut state.editor_state, msgs);
+            // lets redraw the logview
+            self.log_view.redraw(cx);
         }
+        
+        self.log_view.handle_event_with_fn(cx, event,&mut |_,_|{});
     }
     
     

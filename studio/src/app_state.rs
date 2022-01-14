@@ -56,7 +56,7 @@ impl AppState {
         tabs.insert(
             id!(log_view),
             Tab {
-                name: String::from("Log View"),
+                name: String::from("Log"),
                 kind: TabKind::LogView,
             },
         );
@@ -72,7 +72,7 @@ impl AppState {
         tabs.insert(
             id!(file_tree),
             Tab {
-                name: String::from("File Tree"),
+                name: String::from("Files"),
                 kind: TabKind::FileTree,
             },
         );
