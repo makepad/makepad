@@ -203,7 +203,7 @@ pub struct FileTreeNode {
     name_text: DrawNameText,
     layout: Layout,
     
-    #[default_state(default_state, unselected_state, closed_state)]
+    #[state(default_state, unselected_state, closed_state)]
     animator: Animator,
     
     indent_width: f32,

@@ -32,7 +32,7 @@ mod colorhex;
     live,
     rust,
     pick,
-    default_state,
+    state,
     live_register,
 ))]
 pub fn derive_live(input: TokenStream) -> TokenStream {

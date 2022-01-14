@@ -89,7 +89,7 @@ live_register!{
 })]
 pub struct Button {
     #[rust] pub button_logic: ButtonLogic,
-    #[default_state(default_state)] pub animator: Animator,
+    #[state(default_state)] pub animator: Animator,
     default_state: Option<LivePtr>,
     hover_state: Option<LivePtr>,
     pressed_state: Option<LivePtr>,
