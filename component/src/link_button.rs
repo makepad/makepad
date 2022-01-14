@@ -31,6 +31,7 @@ live_register!{
                 width: Width::Computed,
                 height: Height::Computed,
                 margin: {top: 5.0},
+
             }
             padding: {left: 1.0, top: 1.0, right: 1.0, bottom: 1.0}
         }
