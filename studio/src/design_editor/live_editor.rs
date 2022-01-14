@@ -212,8 +212,11 @@ impl LiveEditor {
     }
     
     pub fn calc_layout_with_widgets(&mut self, cx: &mut Cx2d, path: &str, document_inner: &DocumentInner) {
+        
         let mut inline_cache = document_inner.inline_cache.borrow_mut();
         inline_cache.refresh(cx, path, &document_inner.token_cache);
+        
+        
         
         let token_cache = &document_inner.token_cache;
         
@@ -260,6 +263,7 @@ impl LiveEditor {
             }
             
             for bind in &edit_info.items {
+
                 if let Some(matched) = widget_registry.match_inline_widget(&live_registry, *bind) {
                     let cache_line = &inline_cache.lines[input.line];
                     
