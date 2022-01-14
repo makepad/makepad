@@ -217,6 +217,10 @@ impl Splitter {
                 }
             },
             HitEvent::FingerDown(_) => {
+                 match self.axis {
+                    Axis::Horizontal => cx.set_down_mouse_cursor(MouseCursor::ColResize),
+                    Axis::Vertical => cx.set_down_mouse_cursor(MouseCursor::RowResize),
+                } 
                 self.animate_to(cx, self.pressed_state);
                 self.drag_start_align = Some(self.align);
             }
