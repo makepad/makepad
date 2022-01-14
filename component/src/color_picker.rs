@@ -271,11 +271,7 @@ impl ColorPicker {
         self.draw_wheel.sat = self.sat;
         self.draw_wheel.val = self.val;
         
-        self.draw_wheel.draw_walk(cx, Walk {
-            margin: Margin {bottom: 0.0, left: 0.0, top: 0.0, right: 0.0},
-            width: Width::Fixed(self.size * height_scale),
-            height: Height::Fixed(self.size * height_scale)
-        });
+        self.draw_wheel.draw_walk(cx, Walk::fixed(self.size * height_scale, self.size * height_scale));
     }
 }
 
