@@ -32,10 +32,9 @@ live_register!{
         abs_size: vec2(32, 12)
         abs_offset: vec2(4., 0.)
         
-        walk: Walk {
+        walk: {
             width: Width::Fixed(12),
             height: Height::Fixed(12),
-            margin: Margin {l: 0.0, r: 0.0, t: 0.0, b: 0.0},
         }
         
         default_state: {

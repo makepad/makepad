@@ -38,14 +38,14 @@ live_register!{
             }
         }
         
-        layout: Layout {
-            align: Align {fx: 0.5, fy: 0.5},
-            walk: Walk {
+        layout: {
+            align: {fx: 0.5, fy: 0.5},
+            walk: {
                 width: Width::Computed,
                 height: Height::Computed,
-                margin: Margin {l: 1.0, r: 1.0, t: 1.0, b: 1.0},
+                margin: {l: 1.0, r: 1.0, t: 1.0, b: 1.0},
             }
-            padding: Padding {l: 16.0, t: 12.0, r: 16.0, b: 12.0}
+            padding: {l: 16.0, t: 12.0, r: 16.0, b: 12.0}
         }
         
         default_state: {
