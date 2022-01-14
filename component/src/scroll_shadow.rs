@@ -3,6 +3,7 @@ use makepad_render::*;
 
 live_register!{
     use makepad_render::shader::std::*;
+    use crate::theme::*;
     
     ScrollShadow:{{ScrollShadow}}{
         
@@ -14,19 +15,24 @@ live_register!{
         
         fn scroll(self) -> vec2 {
             if self.shadow_is_top > 0.5 {
-                self.is_viz = clamp(self.draw_scroll.w * 0.1, 0., 1.)*0.75;
+                self.is_viz = clamp(self.draw_scroll.w * 0.1, 0., 1.);
             }
             else {
-                self.is_viz = clamp(self.draw_scroll.z * 0.1, 0., 1.)*0.75;
+                self.is_viz = clamp(self.draw_scroll.z * 0.1, 0., 1.);
             }
             return self.draw_scroll.xy;
         }
         
         fn pixel(self) -> vec4 { // TODO make the corner overlap properly with a distance field eq.
+            let base = COLOR_EDITOR_BG.xyz;
+            let alpha = 0.0;
             if self.shadow_is_top > 0.5 {
-                return mix(vec4(0., 0., 0., self.is_viz), vec4(0., 0., 0., 0.), pow(self.geom_pos.y, 0.5));
+                alpha = pow(self.geom_pos.y, 0.5);
             }
-            return mix(vec4(0., 0., 0., self.is_viz), vec4(0., 0., 0., 0.), pow(self.geom_pos.x, 0.5));
+            else{
+                alpha = pow(self.geom_pos.x, 0.5);
+            }
+            return Pal::premul(mix(vec4(base, self.is_viz), vec4(base, 0.), alpha));
         }
     }
 }

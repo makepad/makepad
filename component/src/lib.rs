@@ -8,6 +8,7 @@ mod scroll_shadow;
 mod scroll_bar;
 mod scroll_view;
 mod component_map;
+mod link_button;
 
 #[macro_use]
 mod frame_registry;
@@ -34,6 +35,7 @@ pub use crate::{
     component_map::ComponentMap,
     button_logic::{ButtonLogic, ButtonAction},
     button::{Button},
+    link_button::{LinkButton},
     desktop_window::{DesktopWindow}, 
     scroll_view::{ScrollView},
     scroll_shadow::{ScrollShadow},
@@ -46,6 +48,7 @@ pub fn live_register(cx:&mut Cx){
     crate::theme::live_register(cx);
     crate::frame::live_register(cx);
     crate::fold_button::live_register(cx);
+    crate::link_button::live_register(cx);
     crate::color_picker::live_register(cx);
     crate::scroll_shadow::live_register(cx);
     crate::button::live_register(cx);
