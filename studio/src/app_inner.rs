@@ -130,7 +130,7 @@ impl AppInner {
         
         match event {
             Event::Construct => {
-                self.collab_client.send_request(CollabRequest::LoadFileTree {with_data: true});
+                self.collab_client.send_request(CollabRequest::LoadFileTree {with_data: false});
                 self.create_code_editor_tab(
                     cx,
                     state,

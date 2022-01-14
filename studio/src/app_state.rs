@@ -232,11 +232,11 @@ impl TabPanel{
     
     pub fn selected_tab_id(&self)->Option<TabId>{
         if let Some(index) = self.selected_tab{
-            Some(self.tab_ids[index])
+            if index < self.tab_ids.len(){
+                return Some(self.tab_ids[index])
+            }
         }
-        else{
-            None
-        }
+        None
     }
 }
 

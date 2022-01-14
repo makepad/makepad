@@ -35,7 +35,7 @@ use {
     makepad_component::{
         ComponentMap,
         tab_bar::TabId,
-//        dock::PanelId,
+        //        dock::PanelId,
     },
     makepad_component::makepad_render::*,
 };
@@ -197,8 +197,7 @@ impl Editors {
         match response {
             CollabResponse::OpenFile(response) => {
                 let (file_id, revision, text) = response.unwrap();
-                let document_id =
-                state.handle_open_file_response(file_id, revision, text, send_request);
+                let document_id = state.handle_open_file_response(file_id, revision, text, send_request);
                 self.redraw_views_for_document(cx, state, document_id);
             }
             CollabResponse::ApplyDelta(response) => {
@@ -222,27 +221,27 @@ impl Editors {
             }
         }
     }
-
+    
     pub fn handle_builder_messages(
         &mut self,
         cx: &mut Cx,
         state: &mut EditorState,
         msgs: Vec<BuilderMsgWrap>,
     ) {
-        for wrap in msgs{
+        for wrap in msgs {
             let msg_id = state.messages.len();
-            match &wrap.msg{
-                BuilderMsg::Location(loc)=>{
-                    if let Some(doc_id) = state.documents_by_path.get(&PathBuf::from(loc.file_name.clone())){
+            match &wrap.msg {
+                BuilderMsg::Location(loc) => {
+                    if let Some(doc_id) = state.documents_by_path.get(&PathBuf::from(loc.file_name.clone())) {
                         let doc = &mut state.documents[*doc_id];
-                        if let Some(inner) = &mut doc.inner{
+                        if let Some(inner) = &mut doc.inner {
                             inner.msg_cache.add_range(&inner.text, msg_id, loc.range);
                         }
                         // lets redraw this doc. with new squigglies
                         self.redraw_views_for_document(cx, state, *doc_id);
                     }
                 }
-                _=>()
+                _ => ()
             }
             state.messages.push(wrap.msg);
         }
@@ -258,7 +257,7 @@ impl Editors {
         for session_id in &document.session_ids {
             let session = &state.sessions[*session_id];
             if let Some(view_id) = session.session_view {
-                let view = &mut self.editor_views[view_id];
+                let view = &mut self.editor_views[view_id]; 
                 view.redraw(cx);
             }
         }
