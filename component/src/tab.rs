@@ -100,7 +100,7 @@ pub struct Tab {
     name_text: DrawText,
     drag_quad: DrawColor,
     
-    #[default_state(default_state, unselected_state)]
+    #[state(default_state, unselected_state)]
     animator: Animator,
     
     default_state: Option<LivePtr>,

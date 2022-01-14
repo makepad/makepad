@@ -117,7 +117,7 @@ pub struct DrawColorWheel {
 pub struct ColorPicker {
     draw_wheel: DrawColorWheel,
     
-    #[default_state(default_state)]
+    #[state(default_state)]
     animator: Animator,
     
     default_state: Option<LivePtr>,
