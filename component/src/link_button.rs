@@ -6,7 +6,7 @@ use crate::register_as_frame_component;
 
 live_register!{
     use makepad_render::shader::std::*;
-    
+
     LinkButton: {{LinkButton}} {
         bg_quad: {
             instance hover: 0.0
@@ -25,14 +25,14 @@ live_register!{
             }
         }
         
-        layout: Layout {
-            align: Align {fx: 0.5, fy: 0.5},
-            walk: Walk {
+        layout: {
+            align: {fx: 0.5, fy: 0.5},
+            walk: {
                 width: Width::Computed,
                 height: Height::Computed,
-                margin: Margin {l: 0.0, r: 0.0, t: 5.0, b: 0.0},
+                margin: {top: 5.0},
             }
-            padding: Padding {l: 1.0, t: 1.0, r: 1.0, b: 1.0}
+            padding: {left: 1.0, top: 1.0, right: 1.0, bottom: 1.0}
         }
         
         default_state: {

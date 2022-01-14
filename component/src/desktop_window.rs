@@ -16,7 +16,7 @@ live_register!{
         inner_view:{
         },
         caption_layout:{
-            padding:{t:2.0}
+            padding:{top:2}
             align: {fx: 0.5, fy: 0.5},
             walk: {
                 width: Width::Filled, 

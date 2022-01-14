@@ -70,18 +70,18 @@ pub struct Align {
 
 #[derive(Clone, Copy, Default, Debug, Live, LiveHook)]
 pub struct Margin {
-    pub l: f32,
-    pub t: f32,
-    pub r: f32,
-    pub b: f32
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32
 }
 
 #[derive(Clone, Copy, Default, Debug, Live, LiveHook)]
 pub struct Padding {
-    pub l: f32,
-    pub t: f32,
-    pub r: f32,
-    pub b: f32
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32
 }
 
 #[derive(Copy, Clone, Debug, Live, LiveHook)]
@@ -194,10 +194,10 @@ impl<'a> Cx2d<'a> {
         
         // fetch origin and size from parent
         let (mut origin, mut abs_size) = if let Some(parent) = self.turtles.last() {
-            (Vec2 {x: layout.walk.margin.l + parent.pos.x, y: layout.walk.margin.t + parent.pos.y}, parent.abs_size)
+            (Vec2 {x: layout.walk.margin.left + parent.pos.x, y: layout.walk.margin.top + parent.pos.y}, parent.abs_size)
         }
         else {
-            (Vec2 {x: layout.walk.margin.l, y: layout.walk.margin.t}, Vec2::default())
+            (Vec2 {x: layout.walk.margin.left, y: layout.walk.margin.top}, Vec2::default())
         };
         
         // see if layout overrode size
@@ -223,7 +223,7 @@ impl<'a> Cx2d<'a> {
             align_list_x: self.align_list.len(),
             align_list_y: self.align_list.len(),
             origin: origin,
-            pos: Vec2 {x: origin.x + layout.padding.l, y: origin.y + layout.padding.t},
+            pos: Vec2 {x: origin.x + layout.padding.left, y: origin.y + layout.padding.top},
             layout: layout,
             biggest: 0.0,
             bound_left_top: Vec2 {x: std::f32::INFINITY, y: std::f32::INFINITY},
@@ -254,10 +254,10 @@ impl<'a> Cx2d<'a> {
         
         let w = if old.width.is_nan() {
             if old.bound_right_bottom.x == std::f32::NEG_INFINITY { // nothing happened, use padding
-                Width::Fixed(old.layout.padding.l + old.layout.padding.r)
+                Width::Fixed(old.layout.padding.left + old.layout.padding.right)
             }
             else { // use the bounding box
-                Width::Fixed(max_zero_keep_nan(old.bound_right_bottom.x - old.origin.x + old.layout.padding.r).max(old.min_width))
+                Width::Fixed(max_zero_keep_nan(old.bound_right_bottom.x - old.origin.x + old.layout.padding.right).max(old.min_width))
             }
         }
         else {
@@ -266,10 +266,10 @@ impl<'a> Cx2d<'a> {
         
         let h = if old.height.is_nan() {
             if old.bound_right_bottom.y == std::f32::NEG_INFINITY { // nothing happened use the padding
-                Height::Fixed(old.layout.padding.t + old.layout.padding.b)
+                Height::Fixed(old.layout.padding.top + old.layout.padding.bottom)
             }
             else { // use the bounding box
-                Height::Fixed(max_zero_keep_nan(old.bound_right_bottom.y - old.origin.y + old.layout.padding.b).max(old.min_height))
+                Height::Fixed(max_zero_keep_nan(old.bound_right_bottom.y - old.origin.y + old.layout.padding.bottom).max(old.min_height))
             }
         }
         else {
@@ -314,12 +314,12 @@ impl<'a> Cx2d<'a> {
                 Direction::Right => {
                     match turtle.layout.line_wrap {
                         LineWrap::NewLine => {
-                            if (turtle.pos.x + walk.margin.l + w) >
-                            (turtle.origin.x + turtle.width - turtle.layout.padding.r) + 0.01 {
+                            if (turtle.pos.x + walk.margin.left + w) >
+                            (turtle.origin.x + turtle.width - turtle.layout.padding.right) + 0.01 {
                                 // what is the move delta.
                                 let old_x = turtle.pos.x;
                                 let old_y = turtle.pos.y;
-                                turtle.pos.x = turtle.origin.x + turtle.layout.padding.l;
+                                turtle.pos.x = turtle.origin.x + turtle.layout.padding.left;
                                 turtle.pos.y += turtle.biggest;
                                 turtle.biggest = 0.0;
                                 align_dx = turtle.pos.x - old_x;
@@ -327,13 +327,13 @@ impl<'a> Cx2d<'a> {
                             }
                         },
                         LineWrap::MaxSize(max_size) => {
-                            let new_size = turtle.pos.x + walk.margin.l + w;
-                            if new_size > (turtle.origin.x + turtle.width - turtle.layout.padding.r)
-                                || new_size > (turtle.origin.x + max_size - turtle.layout.padding.r) {
+                            let new_size = turtle.pos.x + walk.margin.left + w;
+                            if new_size > (turtle.origin.x + turtle.width - turtle.layout.padding.right)
+                                || new_size > (turtle.origin.x + max_size - turtle.layout.padding.right) {
                                 // what is the move delta.
                                 let old_x = turtle.pos.x;
                                 let old_y = turtle.pos.y;
-                                turtle.pos.x = turtle.origin.x + turtle.layout.padding.l;
+                                turtle.pos.x = turtle.origin.x + turtle.layout.padding.left;
                                 turtle.pos.y += turtle.biggest;
                                 turtle.biggest = 0.0;
                                 align_dx = turtle.pos.x - old_x;
@@ -344,13 +344,13 @@ impl<'a> Cx2d<'a> {
                         }
                     }
                     
-                    let x = turtle.pos.x + walk.margin.l;
-                    let y = turtle.pos.y + walk.margin.t;
+                    let x = turtle.pos.x + walk.margin.left;
+                    let y = turtle.pos.y + walk.margin.top;
                     // walk it normally
-                    turtle.pos.x += w + walk.margin.l + walk.margin.r;
+                    turtle.pos.x += w + walk.margin.left + walk.margin.right;
                     
                     // keep track of biggest item in the line (include item margin bottom)
-                    let biggest = h + walk.margin.t + walk.margin.b;
+                    let biggest = h + walk.margin.top + walk.margin.bottom;
                     if biggest > turtle.biggest {
                         turtle.biggest = biggest;
                     }
@@ -359,12 +359,12 @@ impl<'a> Cx2d<'a> {
                 Direction::Down => {
                     match turtle.layout.line_wrap {
                         LineWrap::NewLine => {
-                            if (turtle.pos.y + walk.margin.t + h) >
-                            (turtle.origin.y + turtle.height - turtle.layout.padding.b) + 0.01 {
+                            if (turtle.pos.y + walk.margin.top + h) >
+                            (turtle.origin.y + turtle.height - turtle.layout.padding.bottom) + 0.01 {
                                 // what is the move delta.
                                 let old_x = turtle.pos.x;
                                 let old_y = turtle.pos.y;
-                                turtle.pos.y = turtle.origin.y + turtle.layout.padding.t;
+                                turtle.pos.y = turtle.origin.y + turtle.layout.padding.top;
                                 turtle.pos.x += turtle.biggest;
                                 turtle.biggest = 0.0;
                                 align_dx = turtle.pos.x - old_x;
@@ -372,13 +372,13 @@ impl<'a> Cx2d<'a> {
                             }
                         },
                         LineWrap::MaxSize(max_size) => {
-                            let new_size = turtle.pos.y + walk.margin.t + h;
-                            if new_size > (turtle.origin.y + turtle.height - turtle.layout.padding.b)
-                                || new_size > (turtle.origin.y + max_size - turtle.layout.padding.b) {
+                            let new_size = turtle.pos.y + walk.margin.top + h;
+                            if new_size > (turtle.origin.y + turtle.height - turtle.layout.padding.bottom)
+                                || new_size > (turtle.origin.y + max_size - turtle.layout.padding.bottom) {
                                 // what is the move delta.
                                 let old_x = turtle.pos.x;
                                 let old_y = turtle.pos.y;
-                                turtle.pos.y = turtle.origin.y + turtle.layout.padding.t;
+                                turtle.pos.y = turtle.origin.y + turtle.layout.padding.top;
                                 turtle.pos.x += turtle.biggest;
                                 turtle.biggest = 0.0;
                                 align_dx = turtle.pos.x - old_x;
@@ -389,29 +389,29 @@ impl<'a> Cx2d<'a> {
                         }
                     }
                     
-                    let x = turtle.pos.x + walk.margin.l;
-                    let y = turtle.pos.y + walk.margin.t;
+                    let x = turtle.pos.x + walk.margin.left;
+                    let y = turtle.pos.y + walk.margin.top;
                     // walk it normally
-                    turtle.pos.y += h + walk.margin.t + walk.margin.b;
+                    turtle.pos.y += h + walk.margin.top + walk.margin.bottom;
                     
                     // keep track of biggest item in the line (include item margin bottom)
-                    let biggest = w + walk.margin.r + walk.margin.l;
+                    let biggest = w + walk.margin.right + walk.margin.left;
                     if biggest > turtle.biggest {
                         turtle.biggest = biggest;
                     }
                     (x, y)
                 },
                 _ => {
-                    (turtle.pos.x + walk.margin.l, turtle.pos.y + walk.margin.t)
+                    (turtle.pos.x + walk.margin.left, turtle.pos.y + walk.margin.top)
                 }
             };
             
-            let bound_x2 = x + w + if walk.margin.r < 0. {walk.margin.r} else {0.};
+            let bound_x2 = x + w + if walk.margin.right < 0. {walk.margin.right} else {0.};
             if bound_x2 > turtle.bound_right_bottom.x {
                 turtle.bound_right_bottom.x = bound_x2;
             }
             // update y2 bounds (margin bottom is only added if its negative)
-            let bound_y2 = y + h + walk.margin.t + if walk.margin.b < 0. {walk.margin.b} else {0.};
+            let bound_y2 = y + h + walk.margin.top + if walk.margin.bottom < 0. {walk.margin.bottom} else {0.};
             if bound_y2 > turtle.bound_right_bottom.y {
                 turtle.bound_right_bottom.y = bound_y2;
             }
@@ -489,12 +489,12 @@ impl<'a> Cx2d<'a> {
         if let Some(turtle) = self.turtles.last_mut() {
             match turtle.layout.direction {
                 Direction::Right => {
-                    turtle.pos.x = turtle.origin.x + turtle.layout.padding.l;
+                    turtle.pos.x = turtle.origin.x + turtle.layout.padding.left;
                     turtle.pos.y += turtle.biggest + turtle.layout.new_line_padding;
                     turtle.biggest = 0.0;
                 },
                 Direction::Down => {
-                    turtle.pos.y = turtle.origin.y + turtle.layout.padding.t;
+                    turtle.pos.y = turtle.origin.y + turtle.layout.padding.top;
                     turtle.pos.x += turtle.biggest + turtle.layout.new_line_padding;
                     turtle.biggest = 0.0;
                 },
@@ -523,7 +523,7 @@ impl<'a> Cx2d<'a> {
     
     pub fn turtle_new_line_min_height(&mut self, min_height: f32) {
         if let Some(turtle) = self.turtles.last_mut() {
-            turtle.pos.x = turtle.origin.x + turtle.layout.padding.l;
+            turtle.pos.x = turtle.origin.x + turtle.layout.padding.left;
             turtle.pos.y += turtle.biggest.max(min_height);
             turtle.biggest = 0.0;
         }
@@ -581,8 +581,8 @@ impl<'a> Cx2d<'a> {
     
     pub fn get_turtle_padded_rect(&self) -> Rect {
         if let Some(turtle) = self.turtles.last() {
-            let pad_lt = vec2(turtle.layout.padding.l,turtle.layout.padding.t);
-            let pad_br = vec2(turtle.layout.padding.r,turtle.layout.padding.b);
+            let pad_lt = vec2(turtle.layout.padding.left,turtle.layout.padding.top);
+            let pad_br = vec2(turtle.layout.padding.right,turtle.layout.padding.bottom);
             return Rect {
                 pos: turtle.origin + pad_lt,
                 size: vec2(turtle.width, turtle.height) - (pad_lt+pad_br)
@@ -613,8 +613,8 @@ impl<'a> Cx2d<'a> {
         if let Some(turtle) = self.turtles.last() {
             
             return Vec2 {
-                x: if turtle.bound_right_bottom.x<0. {0.}else {turtle.bound_right_bottom.x} + turtle.layout.padding.r - turtle.origin.x,
-                y: if turtle.bound_right_bottom.y<0. {0.}else {turtle.bound_right_bottom.y} + turtle.layout.padding.b - turtle.origin.y
+                x: if turtle.bound_right_bottom.x<0. {0.}else {turtle.bound_right_bottom.x} + turtle.layout.padding.right - turtle.origin.x,
+                y: if turtle.bound_right_bottom.y<0. {0.}else {turtle.bound_right_bottom.y} + turtle.layout.padding.bottom - turtle.origin.y
             };
         }
         return Vec2::default()
@@ -623,8 +623,8 @@ impl<'a> Cx2d<'a> {
     pub fn set_turtle_bounds(&mut self, bound: Vec2) {
         if let Some(turtle) = self.turtles.last_mut() {
             turtle.bound_right_bottom = Vec2 {
-                x: bound.x - turtle.layout.padding.r + turtle.origin.x,
-                y: bound.y - turtle.layout.padding.b + turtle.origin.y
+                x: bound.x - turtle.layout.padding.right + turtle.origin.x,
+                y: bound.y - turtle.layout.padding.bottom + turtle.origin.y
             }
         }
     }
@@ -686,7 +686,7 @@ impl<'a> Cx2d<'a> {
     fn compute_align_turtle_x(turtle: &Turtle) -> f32 {
         if turtle.layout.align.fx > 0.0 {
             let dx = turtle.layout.align.fx *
-            ((turtle.width - turtle.width_used - (turtle.layout.padding.l + turtle.layout.padding.r)) - (turtle.bound_right_bottom.x - (turtle.origin.x + turtle.layout.padding.l)));
+            ((turtle.width - turtle.width_used - (turtle.layout.padding.left + turtle.layout.padding.right)) - (turtle.bound_right_bottom.x - (turtle.origin.x + turtle.layout.padding.left)));
             if dx.is_nan() {return 0.0}
             dx
         }
@@ -698,7 +698,7 @@ impl<'a> Cx2d<'a> {
     fn compute_align_turtle_y(turtle: &Turtle) -> f32 {
         if turtle.layout.align.fy > 0.0 {
             let dy = turtle.layout.align.fy *
-            ((turtle.height - turtle.height_used - (turtle.layout.padding.t + turtle.layout.padding.b)) - (turtle.bound_right_bottom.y - (turtle.origin.y + turtle.layout.padding.t)));
+            ((turtle.height - turtle.height_used - (turtle.layout.padding.top + turtle.layout.padding.bottom)) - (turtle.bound_right_bottom.y - (turtle.origin.y + turtle.layout.padding.top)));
             if dy.is_nan() {return 0.0}
             dy
         }
@@ -711,7 +711,7 @@ impl<'a> Cx2d<'a> {
         if let Some(turtle) = self.turtles.last_mut() {
             if turtle.width.is_nan() {
                 if turtle.bound_right_bottom.x != std::f32::NEG_INFINITY { // nothing happened, use padding
-                    turtle.width = max_zero_keep_nan(turtle.bound_right_bottom.x - turtle.origin.x + turtle.layout.padding.r);
+                    turtle.width = max_zero_keep_nan(turtle.bound_right_bottom.x - turtle.origin.x + turtle.layout.padding.right);
                     turtle.width_used = 0.;
                     turtle.bound_right_bottom.x = 0.;
                 }
@@ -723,7 +723,7 @@ impl<'a> Cx2d<'a> {
         if let Some(turtle) = self.turtles.last_mut() {
             if turtle.height.is_nan() {
                 if turtle.bound_right_bottom.y != std::f32::NEG_INFINITY { // nothing happened use the padding
-                    turtle.height = max_zero_keep_nan(turtle.bound_right_bottom.y - turtle.origin.y + turtle.layout.padding.b);
+                    turtle.height = max_zero_keep_nan(turtle.bound_right_bottom.y - turtle.origin.y + turtle.layout.padding.bottom);
                     turtle.height_used = 0.;
                     turtle.bound_right_bottom.y = 0.;
                 }
@@ -823,8 +823,8 @@ impl<'a> Cx2d<'a> {
         if let Some(turtle) = self.turtles.last_mut() {
             // subtract used size so 'fill' works
             turtle.pos = Vec2 {
-                x: turtle.origin.x + turtle.layout.padding.l,
-                y: turtle.origin.y + turtle.layout.padding.t
+                x: turtle.origin.x + turtle.layout.padding.left,
+                y: turtle.origin.y + turtle.layout.padding.top
             };
         }
     }
@@ -840,7 +840,7 @@ impl<'a> Cx2d<'a> {
     
     pub fn get_width_left(&self) -> f32 {
         if let Some(turtle) = self.turtles.last() {
-            let nan_val = max_zero_keep_nan(turtle.width - (turtle.layout.padding.r) - turtle.width_used - (turtle.pos.x - turtle.origin.x));
+            let nan_val = max_zero_keep_nan(turtle.width - (turtle.layout.padding.right) - turtle.width_used - (turtle.pos.x - turtle.origin.x));
             if nan_val.is_nan() { // if we are a computed height, if some value is known, use that
                 if turtle.bound_right_bottom.x != std::f32::NEG_INFINITY {
                     return turtle.bound_right_bottom.x - turtle.origin.x
@@ -862,10 +862,10 @@ impl<'a> Cx2d<'a> {
     
     pub fn get_width_total(&self) -> f32 {
         if let Some(turtle) = self.turtles.last() {
-            let nan_val = max_zero_keep_nan(turtle.width - (turtle.layout.padding.l + turtle.layout.padding.r));
+            let nan_val = max_zero_keep_nan(turtle.width - (turtle.layout.padding.left + turtle.layout.padding.right));
             if nan_val.is_nan() { // if we are a computed width, if some value is known, use that
                 if turtle.bound_right_bottom.x != std::f32::NEG_INFINITY {
-                    return turtle.bound_right_bottom.x - turtle.origin.x + turtle.layout.padding.r
+                    return turtle.bound_right_bottom.x - turtle.origin.x + turtle.layout.padding.right
                 }
             }
             return nan_val
@@ -884,7 +884,7 @@ impl<'a> Cx2d<'a> {
     
     pub fn get_height_left(&self) -> f32 {
         if let Some(turtle) = self.turtles.last() {
-            let nan_val = max_zero_keep_nan(turtle.height - ( turtle.layout.padding.b) - turtle.height_used - (turtle.pos.y - turtle.origin.y));
+            let nan_val = max_zero_keep_nan(turtle.height - ( turtle.layout.padding.bottom) - turtle.height_used - (turtle.pos.y - turtle.origin.y));
             if nan_val.is_nan() { // if we are a computed height, if some value is known, use that
                 if turtle.bound_right_bottom.y != std::f32::NEG_INFINITY {
                     return turtle.bound_right_bottom.y - turtle.origin.y
@@ -906,10 +906,10 @@ impl<'a> Cx2d<'a> {
     
     pub fn get_height_total(&self) -> f32 {
         if let Some(turtle) = self.turtles.last() {
-            let nan_val = max_zero_keep_nan(turtle.height - (turtle.layout.padding.t + turtle.layout.padding.b));
+            let nan_val = max_zero_keep_nan(turtle.height - (turtle.layout.padding.top + turtle.layout.padding.bottom));
             if nan_val.is_nan() { // if we are a computed height, if some value is known, use that
                 if turtle.bound_right_bottom.y != std::f32::NEG_INFINITY {
-                    return turtle.bound_right_bottom.y - turtle.origin.y + turtle.layout.padding.b
+                    return turtle.bound_right_bottom.y - turtle.origin.y + turtle.layout.padding.bottom
                 }
             }
             return nan_val
@@ -941,7 +941,7 @@ impl<'a> Cx2d<'a> {
             Width::Computed => (std::f32::NAN, 0.),
             //Width::ComputeFill => (std::f32::NAN, self._get_width_left(abs, abs_pos) - (margin.l + margin.r)),
             Width::Fixed(v) => (max_zero_keep_nan(*v), 0.),
-            Width::Filled => (max_zero_keep_nan(self._get_width_left(abs, abs_pos) - (margin.l + margin.r)), 0.),
+            Width::Filled => (max_zero_keep_nan(self._get_width_left(abs, abs_pos) - (margin.left + margin.right)), 0.),
             //Width::FillPad(p) => (max_zero_keep_nan(self._get_width_left(abs, abs_pos) - p - (margin.l + margin.r)), 0.),
             //Width::FillScale(s) => (max_zero_keep_nan(self._get_width_left(abs, abs_pos) * s - (margin.l + margin.r)), 0.),
             //Width::FillScalePad(s, p) => (max_zero_keep_nan(self._get_width_left(abs, abs_pos) * s - p - (margin.l + margin.r)), 0.),
@@ -955,7 +955,7 @@ impl<'a> Cx2d<'a> {
             Height::Computed => (std::f32::NAN, 0.),
             //Height::ComputeFill => (std::f32::NAN, self._get_height_left(abs, abs_pos) - (margin.t + margin.b)),
             Height::Fixed(v) => (max_zero_keep_nan(*v), 0.),
-            Height::Filled=> (max_zero_keep_nan(self._get_height_left(abs, abs_pos) - (margin.t + margin.b)), 0.),
+            Height::Filled=> (max_zero_keep_nan(self._get_height_left(abs, abs_pos) - (margin.top + margin.bottom)), 0.),
             //Height::FillPad(p) => (max_zero_keep_nan(self._get_height_left(abs, abs_pos) - p - (margin.t + margin.b)), 0.),
             //Height::FillScale(s) => (max_zero_keep_nan(self._get_height_left(abs, abs_pos) * s - (margin.t + margin.b)), 0.),
             //Height::FillScalePad(s, p) => (max_zero_keep_nan(self._get_height_left(abs, abs_pos) * s - p - (margin.t + margin.b)), 0.),
