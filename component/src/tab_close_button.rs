@@ -13,7 +13,7 @@ live_register!{
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let mid = self.rect_size / 2.0;
-                let size = (self.hover * 0.5 + 0.5) * 0.5 * length(self.rect_size) / 2.0;
+                let size = (self.hover * 0.25 + 0.5) * 0.25 * length(self.rect_size);
                 let min = mid - vec2(size);
                 let max = mid + vec2(size);
                 sdf.move_to(min.x, min.y);

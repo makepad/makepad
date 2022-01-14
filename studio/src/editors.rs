@@ -262,5 +262,4 @@ impl Editors {
             }
         }
     }
-    
 }

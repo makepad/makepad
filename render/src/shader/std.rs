@@ -11,16 +11,16 @@ live_register!{
     
     const PI: 3.141592653589793
     const E: 2.718281828459045
-    const LN2:  0.6931471805599453
-    const LN10:  2.302585092994046
-    const LOG2E:  1.4426950408889634
+    const LN2: 0.6931471805599453
+    const LN10: 2.302585092994046
+    const LOG2E: 1.4426950408889634
     const LOG10E: 0.4342944819032518
-    const SQRT1_2:  0.70710678118654757
+    const SQRT1_2: 0.70710678118654757
     const TORAD: 0.017453292519943295
-    const GOLDEN:  1.618033988749895
+    const GOLDEN: 1.618033988749895
     
-    Math: Namespace{
-        fn rotate_2d(v: vec2, a: float)->vec2 {
+    Math: Namespace {
+        fn rotate_2d(v: vec2, a: float) -> vec2 {
             let ca = cos(a);
             let sa = sin(a);
             return vec2(v.x * ca - v.y * sa, v.x * sa + v.y * ca);
@@ -28,6 +28,11 @@ live_register!{
     }
     
     Pal: Namespace {
+        
+        fn premul(v: vec4) -> vec4 {
+            return vec4(v.x * v.w, v.y * v.w, v.z * v.w, v.w);
+        }
+        
         fn iq(t: float, a: vec3, b: vec3, c: vec3, d: vec3) -> vec3 {
             return a + b * cos(6.28318 * (c * t + d));
         }
@@ -81,7 +86,7 @@ live_register!{
         }
     }
     
-    Sdf2d: Struct{
+    Sdf2d: Struct {
         field pos: vec2
         field result: vec4
         field last_pos: vec2
@@ -98,21 +103,21 @@ live_register!{
         fn antialias(p: vec2) -> float {
             return 1.0 / length(vec2(length(dFdx(p)), length(dFdy(p))));
         }
-                
+        
         fn viewport(pos: vec2) -> Self {
-            return Self{
-                pos:pos
-                result:vec4(0.)
-                last_pos:vec2(0.)
-                start_pos:vec2(0.)
-                shape:1e+20
-                clip:-1e+20
-                has_clip:0.0
-                old_shape:1e+20
-                blur:0.00001
+            return Self {
+                pos: pos
+                result: vec4(0.)
+                last_pos: vec2(0.)
+                start_pos: vec2(0.)
+                shape: 1e+20
+                clip: -1e+20
+                has_clip: 0.0
+                old_shape: 1e+20
+                blur: 0.00001
                 aa: antialias(pos)
-                scale_factor:1.0
-                dist:0.0
+                scale_factor: 1.0
+                dist: 0.0
             };
         }
         
@@ -220,7 +225,7 @@ live_register!{
         
         fn circle(inout self, x: float, y: float, r: float) {
             let c = self.pos - vec2(x, y);
-            let len = sqrt(c.x*c.x+c.y*c.y);
+            let len = sqrt(c.x * c.x + c.y * c.y);
             self.dist = (len - r) / self.scale_factor;
             self.old_shape = self.shape;
             self.shape = min(self.shape, self.dist);
