@@ -279,16 +279,16 @@ impl Splitter {
     fn margin(&self) -> Margin {
         match self.axis {
             Axis::Horizontal => Margin {
-                l: 3.0,
-                t: 0.0,
-                r: 3.0,
-                b: 0.0,
+                left: 3.0,
+                top: 0.0,
+                right: 3.0,
+                bottom: 0.0,
             },
             Axis::Vertical => Margin {
-                l: 0.0,
-                t: 3.0,
-                r: 0.0,
-                b: 3.0,
+                left: 0.0,
+                top: 3.0,
+                right: 0.0,
+                bottom: 3.0,
             },
         }
     }
