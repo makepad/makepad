@@ -164,13 +164,13 @@ impl InlineCache {
         
         // lets check all our matched pointers generations.
         for line_cache in self.lines.iter_mut() {
-            if line_cache.items.iter().any(|bind| !live_registry.generation_valid(bind.live_ptr)){
+            if line_cache.items.iter().any( | bind | !live_registry.generation_valid(bind.live_ptr)) {
                 line_cache.items.clear();
                 line_cache.is_clean = false;
                 self.is_clean = false;
             }
         }
-
+        
         if self.is_clean {
             return
         }
@@ -186,14 +186,16 @@ impl InlineCache {
         }
         let range = self.live_register_range.unwrap();
         
-        let path = if let Some(prefix) = path.strip_prefix("/Users/admin/makepad/edit_repo/") {
-            prefix
-        }
+        let path = if let Some(prefix) = path.strip_prefix("/Users/admin/makepad/edit_repo/sub_repo") {prefix}
         else {
             path
         };
         //println!("{}", &path.strip_prefix("/Users/admin/makepad/edit_repo/").unwrap());
-        let file_id = live_registry.path_str_to_file_id(path).unwrap();
+        let file_id = if let Some(file_id) = live_registry.path_str_to_file_id(path) {file_id}
+        else {
+            println!("inline_cache::refresh: File not found {} ", path);
+            return
+        };
         let live_file = &live_registry.live_files[file_id.to_index()];
         let expanded = &live_file.expanded;
         

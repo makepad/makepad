@@ -11,7 +11,7 @@ use {
 
 live_register!{
     App: {{App}} {
-        const FS_ROOT: ""
+        const FS_ROOT: "sub_repo"
         inner: {
             collab_client: {
                 //bind: "127.0.0.1"

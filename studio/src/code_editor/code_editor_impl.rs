@@ -89,6 +89,7 @@ live_register!{
     }
     
     DrawMsgLine: {{DrawMsgLine}} {
+        debug_id: my_id
         const THICKNESS: 0.8
         const WAVE_HEIGHT: 0.03
         const WAVE_FREQ: 1.5
@@ -115,7 +116,7 @@ live_register!{
     
     CodeEditorImpl: {{CodeEditorImpl}} {
         scroll_view: {
-            //v_scroll: {smoothing: 0.15},
+            v_scroll: {smoothing: 0.15},
             view: {
                 debug_id: code_editor_view
             }
@@ -758,7 +759,6 @@ impl CodeEditorImpl {
                             pos: origin + start,
                             size: vec2(end.x - start.x, layout.total_height),
                         });
-                        
                     }
                     _ => ()
                 }
@@ -1033,6 +1033,30 @@ impl CodeEditorImpl {
                     dispatch_action(cx, CodeEditorAction::RedrawViewsForDocument(session.document_id))
                 }
             }
+            HitEvent::KeyDown(KeyEvent {  
+                key_code: KeyCode::KeyX,
+                modifiers,
+                ..
+            }) if modifiers.control || modifiers.logo => {
+                self.reset_caret_blink(cx);
+                if let Some(session_id) = self.session_id {
+                    state.delete(session_id, send_request);
+                    let session = &state.sessions[session_id];
+                    dispatch_action(cx, CodeEditorAction::RedrawViewsForDocument(session.document_id))
+                }
+            }
+            HitEvent::KeyDown(KeyEvent {  
+                key_code: KeyCode::KeyA,
+                modifiers,
+                ..
+            }) if modifiers.control || modifiers.logo => {
+                self.reset_caret_blink(cx);
+                if let Some(session_id) = self.session_id {
+                    state.select_all(session_id);
+                    self.scroll_view.redraw(cx);
+                }
+            }
+            
             HitEvent::TextCopy(ke) => {
                 if let Some(session_id) = self.session_id {
                     // TODO: The code below belongs in a function on EditorState

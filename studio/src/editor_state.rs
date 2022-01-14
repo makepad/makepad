@@ -172,6 +172,15 @@ impl EditorState {
         session.injected_char_stack.clear();
     }
 
+    pub fn select_all(&mut self, session_id: SessionId){
+        let session = &mut self.sessions[session_id];
+        let document = &self.documents[session.document_id];
+        let document_inner = document.inner.as_ref().unwrap();
+        session.cursors.select_all(&document_inner.text);
+        session.update_selections_and_carets();
+        session.injected_char_stack.clear();
+    }
+
     pub fn move_cursors_left(&mut self, session_id: SessionId, select: bool) {
         let session = &mut self.sessions[session_id];
         let document = &self.documents[session.document_id];
