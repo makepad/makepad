@@ -1,31 +1,20 @@
 use {
     crate::{
+        builder::builder_protocol::BuilderMsg,
         code_editor::{
-            cursor_set::CursorSet,
-            indent_cache::IndentCache,
+            cursor_set::CursorSet, indent_cache::IndentCache, msg_cache::MsgCache,
             token_cache::TokenCache,
-            msg_cache::MsgCache,
         },
-        collab::{
-            collab_protocol::{
-                CollabRequest,
-                TextFileId
-            },
-        },
-        builder::{
-            builder_protocol::{
-                BuilderMsg
-            }
-        },
-        editors::EditorViewId,
+        collab::collab_protocol::{CollabRequest, TextFileId},
         design_editor::inline_cache::InlineCache,
+        editors::EditorViewId,
     },
     makepad_component::makepad_render::{
         makepad_live_tokenizer::{
-            range::Range,
             delta::{self, Delta},
             position::Position,
             position_set::PositionSet,
+            range::Range,
             range_set::RangeSet,
             size::Size,
             text::Text,
@@ -35,8 +24,7 @@ use {
     std::{
         cell::RefCell,
         collections::{HashMap, HashSet, VecDeque},
-        iter,
-        mem,
+        iter, mem,
         path::PathBuf,
     },
 };
@@ -48,14 +36,14 @@ pub struct EditorState {
     pub documents_by_path: HashMap<PathBuf, DocumentId>,
     pub documents_by_file: LiveIdMap<TextFileId, DocumentId>,
     pub outstanding_document_queue: VecDeque<DocumentId>,
-    pub messages: Vec<BuilderMsg>
+    pub messages: Vec<BuilderMsg>,
 }
 
 impl EditorState {
     pub fn new() -> EditorState {
         EditorState::default()
     }
-    
+
     pub fn create_session(
         &mut self,
         path: PathBuf,
@@ -74,7 +62,7 @@ impl EditorState {
         document.session_ids.insert(session_id);
         session_id
     }
-    
+
     pub fn destroy_session(
         &mut self,
         session_id: SessionId,
@@ -89,7 +77,7 @@ impl EditorState {
         }
         self.sessions.remove(&session_id);
     }
-    
+
     pub fn get_or_create_document(
         &mut self,
         path: PathBuf,
@@ -115,7 +103,7 @@ impl EditorState {
             }
         }
     }
-    
+
     pub fn handle_open_file_response(
         &mut self,
         file_id: TextFileId,
@@ -128,9 +116,9 @@ impl EditorState {
         let token_cache = TokenCache::new(&text);
         let indent_cache = IndentCache::new(&text);
         let msg_cache = MsgCache::new(&text);
-        
+
         let inline_cache = RefCell::new(InlineCache::new(&text));
-        
+
         document.inner = Some(DocumentInner {
             file_id,
             revision,
@@ -150,7 +138,7 @@ impl EditorState {
         }
         document_id
     }
-    
+
     pub fn destroy_document(
         &mut self,
         document_id: DocumentId,
@@ -159,12 +147,11 @@ impl EditorState {
         let document = &mut self.documents[document_id];
         if document.inner.is_some() {
             self.destroy_document_deferred(document_id, send_request);
-        } 
-        else {
+        } else {
             document.should_be_destroyed = true;
         }
     }
-    
+
     fn destroy_document_deferred(
         &mut self,
         document_id: DocumentId,
@@ -177,14 +164,14 @@ impl EditorState {
         self.documents.remove(&document_id);
         send_request(CollabRequest::CloseFile(file_id))
     }
-    
+
     pub fn add_cursor(&mut self, session_id: SessionId, position: Position) {
         let session = &mut self.sessions[session_id];
         session.cursors.add(position);
         session.update_selections_and_carets();
         session.injected_char_stack.clear();
     }
-    
+
     pub fn move_cursors_left(&mut self, session_id: SessionId, select: bool) {
         let session = &mut self.sessions[session_id];
         let document = &self.documents[session.document_id];
@@ -192,7 +179,7 @@ impl EditorState {
         session.cursors.move_left(&document_inner.text, select);
         session.update_selections_and_carets();
     }
-    
+
     pub fn move_cursors_right(&mut self, session_id: SessionId, select: bool) {
         let session = &mut self.sessions[session_id];
         let document = &self.documents[session.document_id];
@@ -201,7 +188,7 @@ impl EditorState {
         session.update_selections_and_carets();
         session.injected_char_stack.clear();
     }
-    
+
     pub fn move_cursors_up(&mut self, session_id: SessionId, select: bool) {
         let session = &mut self.sessions[session_id];
         let document = &self.documents[session.document_id];
@@ -210,7 +197,7 @@ impl EditorState {
         session.update_selections_and_carets();
         session.injected_char_stack.clear();
     }
-    
+
     pub fn move_cursors_down(&mut self, session_id: SessionId, select: bool) {
         let session = &mut self.sessions[session_id];
         let document = &self.documents[session.document_id];
@@ -219,14 +206,14 @@ impl EditorState {
         session.update_selections_and_carets();
         session.injected_char_stack.clear();
     }
-    
+
     pub fn move_cursors_to(&mut self, session_id: SessionId, position: Position, select: bool) {
         let session = &mut self.sessions[session_id];
         session.cursors.move_to(position, select);
         session.update_selections_and_carets();
         session.injected_char_stack.clear();
     }
-    
+
     pub fn replace_text_direct(
         &mut self,
         session_id: SessionId,
@@ -236,21 +223,21 @@ impl EditorState {
         send_request: &mut dyn FnMut(CollabRequest),
     ) {
         let session = &self.sessions[session_id];
-        
+
         let mut builder = delta::Builder::new();
         builder.retain(position - Position::origin());
         builder.delete(size);
         builder.insert(text);
         let delta = builder.build();
-        
+
         let mut offsets = Vec::new();
         for _ in &session.cursors {
             offsets.push(Size::zero());
         }
-        
+
         self.edit(session_id, None, delta, &offsets, send_request);
     }
-    
+
     pub fn insert_text(
         &mut self,
         session_id: SessionId,
@@ -258,8 +245,8 @@ impl EditorState {
         send_request: &mut dyn FnMut(CollabRequest),
     ) {
         let session = &self.sessions[session_id];
-        
-        if let Some(ch) = text.as_lines().first().and_then( | line | line.first()) {
+
+        if let Some(ch) = text.as_lines().first().and_then(|line| line.first()) {
             if let Some(injected_char) = session.injected_char_stack.last() {
                 if ch == injected_char {
                     let session = &mut self.sessions[session_id];
@@ -272,20 +259,20 @@ impl EditorState {
                 }
             }
         }
-        
+
         let injected_char = text
             .as_lines()
             .first()
-            .and_then( | line | line.first())
-            .and_then( | ch | match ch {
-            '(' => Some(')'),
-            '[' => Some(']'),
-            '{' => Some('}'),
-            _ => None,
-        });
-        
+            .and_then(|line| line.first())
+            .and_then(|ch| match ch {
+                '(' => Some(')'),
+                '[' => Some(']'),
+                '{' => Some('}'),
+                _ => None,
+            });
+
         let mut offsets = Vec::new();
-        
+
         let mut builder_0 = delta::Builder::new();
         let mut position = Position::origin();
         for cursor in &session.cursors {
@@ -294,7 +281,7 @@ impl EditorState {
             position = cursor.end();
         }
         let delta_0 = builder_0.build();
-        
+
         let mut builder_1 = delta::Builder::new();
         let mut position = Position::origin();
         for cursor in &session.cursors {
@@ -307,10 +294,10 @@ impl EditorState {
             position = cursor.end();
         }
         let delta_1 = builder_1.build();
-        
+
         let (_, new_delta_1) = delta_0.clone().transform(delta_1);
         let delta = delta_0.compose(new_delta_1);
-        
+
         self.edit(
             session_id,
             Some(EditGroup::Char),
@@ -318,20 +305,24 @@ impl EditorState {
             &offsets,
             send_request,
         );
-        
+
         let session = &mut self.sessions[session_id];
         if let Some(injected_char) = injected_char {
             session.injected_char_stack.push(injected_char);
         }
     }
-    
-    pub fn insert_newline(&mut self, session_id: SessionId, send_request: &mut dyn FnMut(CollabRequest)) {
+
+    pub fn insert_newline(
+        &mut self,
+        session_id: SessionId,
+        send_request: &mut dyn FnMut(CollabRequest),
+    ) {
         let session = &self.sessions[session_id];
         let document = &self.documents[session.document_id];
         let document_inner = document.inner.as_ref().unwrap();
-        
+
         let mut offsets = Vec::new();
-        
+
         let mut builder_0 = delta::Builder::new();
         let mut position = Position::origin();
         for cursor in &session.cursors {
@@ -340,46 +331,50 @@ impl EditorState {
             position = cursor.end();
         }
         let delta_0 = builder_0.build();
-        
+
         let mut builder_1 = delta::Builder::new();
         let mut position = Position::origin();
         for cursor in &session.cursors {
             builder_1.retain(cursor.start() - position);
+
+            let mut indent_count = 0;
+
             // This is sort of a hack. I designed the multiple cursor system so that all
             // cursors are applied at once, but operations such autoindenting are much
             // easier to implement if you apply one cursor at a time. In the future I'd
             // like to refactor the editor to always apply one cursor at a time, but in the
             // meantime I'll work around this problem by only performing autoindenting if
             // there is just a single cursor.
-            let indent_count = if session.cursors.len() == 1 {
-                let indent_info = &document_inner.indent_cache[cursor.start().line];
-                let mut indent_count = (indent_info.virtual_leading_whitespace() + 3) / 4;
-                if indent_info.leading_whitespace().is_some() {
-                    if let Some(last_non_whitespace_char) = document_inner.text.as_lines()
-                    [..cursor.start().line]
+            if session.cursors.len() == 1 {
+                let lines = document_inner.text.as_lines();
+                if let Some((first_non_whitespace_line_before, first_non_whitespace_char_before)) =
+                    lines[cursor.start().line][..cursor.start().column]
                         .iter()
-                        .flat_map( | line | line.iter().cloned())
-                        .chain(
-                        document_inner.text.as_lines()[cursor.start().line][..cursor.start().column]
-                            .iter()
-                            .cloned(),
-                    )
                         .rev()
-                        .find( | ch | !ch.is_whitespace())
-                    {
-                        match last_non_whitespace_char {
-                            '(' | '[' | '{' => indent_count += 1,
-                            _ => {}
-                        }
+                        .find(|ch| !ch.is_whitespace())
+                        .map(|&ch| (cursor.start().line, ch))
+                        .or_else(|| {
+                            (0..cursor.start().line).rev().find_map(|line| {
+                                lines[line]
+                                    .iter()
+                                    .rev()
+                                    .find(|ch| !ch.is_whitespace())
+                                    .map(|&ch| (line, ch))
+                            })
+                        })
+                {
+                    indent_count = (document_inner.indent_cache[first_non_whitespace_line_before]
+                        .leading_whitespace()
+                        .unwrap() + 3) / 4;
+                    match first_non_whitespace_char_before {
+                        '(' | '[' | '{' => indent_count += 1,
+                        _ => {}
                     }
-                };
-                indent_count
-            } else {
-                0
+                }
             };
             let text = Text::from(vec![
                 vec![],
-                iter::repeat(' ').take(indent_count * 4).collect::<Vec<_ >> (),
+                iter::repeat(' ').take(indent_count * 4).collect::<Vec<_>>(),
             ]);
             let len = text.len();
             builder_1.insert(text);
@@ -387,13 +382,13 @@ impl EditorState {
             position = cursor.end();
         }
         let delta_1 = builder_1.build();
-        
+
         let (_, new_delta_1) = delta_0.clone().transform(delta_1);
         let delta = delta_0.compose(new_delta_1);
-        
+
         self.edit(session_id, None, delta, &offsets, send_request);
     }
-    
+
     pub fn insert_backspace(
         &mut self,
         session_id: SessionId,
@@ -402,20 +397,20 @@ impl EditorState {
         let session = &self.sessions[session_id];
         let document = &self.documents[session.document_id];
         let document_inner = document.inner.as_ref().unwrap();
-        
+
         let last_injected_char_inverse =
-        session
-            .injected_char_stack
-            .last()
-            .map( | last_injected_char | match last_injected_char {
-            ')' => '(',
-            ']' => '[',
-            '}' => '{',
-            _ => panic!(),
-        });
-        
+            session
+                .injected_char_stack
+                .last()
+                .map(|last_injected_char| match last_injected_char {
+                    ')' => '(',
+                    ']' => '[',
+                    '}' => '{',
+                    _ => panic!(),
+                });
+
         let mut offsets = Vec::new();
-        
+
         let mut builder_0 = delta::Builder::new();
         let mut position = Position::origin();
         for cursor in &session.cursors {
@@ -424,7 +419,7 @@ impl EditorState {
             position = cursor.end();
         }
         let delta_0 = builder_0.build();
-        
+
         let mut builder_1 = delta::Builder::new();
         let mut position = Position::origin();
         for cursor in &session.cursors {
@@ -437,9 +432,9 @@ impl EditorState {
                                 line: cursor.start().line - 1,
                                 column: document_inner.text.as_lines()[cursor.start().line - 1]
                                     .len(),
-                            } -position,
+                            } - position,
                         );
-                        builder_1.delete(Size {line: 1, column: 0});
+                        builder_1.delete(Size { line: 1, column: 0 });
                     }
                 } else {
                     // This is sort of a hack. I designed the multiple cursor system so that all
@@ -450,16 +445,16 @@ impl EditorState {
                     // there is just a single cursor.
                     if session.cursors.len() == 1
                         && document_inner.text.as_lines()[cursor.start().line]
-                    [..cursor.start().column]
-                        .iter()
-                        .all( | &ch | ch.is_whitespace())
+                            [..cursor.start().column]
+                            .iter()
+                            .all(|&ch| ch.is_whitespace())
                     {
                         if cursor.start().line == 0 {
                             builder_1.retain(
                                 Position {
                                     line: cursor.start().line,
                                     column: 0,
-                                } -position,
+                                } - position,
                             );
                             builder_1.delete(Size {
                                 line: 0,
@@ -471,7 +466,7 @@ impl EditorState {
                                     line: cursor.start().line - 1,
                                     column: document_inner.text.as_lines()[cursor.start().line - 1]
                                         .len(),
-                                } -position,
+                                } - position,
                             );
                             builder_1.delete(Size {
                                 line: 1,
@@ -483,15 +478,15 @@ impl EditorState {
                             Position {
                                 line: cursor.start().line,
                                 column: cursor.start().column - 1,
-                            } -position,
+                            } - position,
                         );
-                        builder_1.delete(Size {line: 0, column: 1});
+                        builder_1.delete(Size { line: 0, column: 1 });
                         if let Some(last_injected_char_inverse) = last_injected_char_inverse {
                             if document_inner.text.as_lines()[cursor.start().line]
-                            [cursor.start().column - 1]
+                                [cursor.start().column - 1]
                                 == last_injected_char_inverse
                             {
-                                builder_1.delete(Size {line: 0, column: 1});
+                                builder_1.delete(Size { line: 0, column: 1 });
                             }
                         }
                     }
@@ -501,10 +496,10 @@ impl EditorState {
             position = cursor.start();
         }
         let delta_1 = builder_1.build();
-        
+
         let (_, new_delta_1) = delta_0.clone().transform(delta_1);
         let delta = delta_0.compose(new_delta_1);
-        
+
         self.edit(
             session_id,
             Some(EditGroup::Backspace),
@@ -513,14 +508,14 @@ impl EditorState {
             send_request,
         );
     }
-    
+
     pub fn delete(&mut self, session_id: SessionId, send_request: &mut dyn FnMut(CollabRequest)) {
         let session = &self.sessions[session_id];
         let document = &self.documents[session.document_id];
         let document_inner = document.inner.as_ref().unwrap();
-        
+
         let mut offsets = Vec::new();
-        
+
         let mut builder_0 = delta::Builder::new();
         let mut position = Position::origin();
         for cursor in &session.cursors {
@@ -529,7 +524,7 @@ impl EditorState {
             position = cursor.end();
         }
         let delta_0 = builder_0.build();
-        
+
         let mut builder_1 = delta::Builder::new();
         let mut position = Position::origin();
         for cursor in &session.cursors {
@@ -541,18 +536,18 @@ impl EditorState {
                 if cursor.start().line == document_inner.text.as_lines().len() - 1 {
                     continue;
                 }
-                builder_1.delete(Size {line: 1, column: 0});
+                builder_1.delete(Size { line: 1, column: 0 });
             } else {
-                builder_1.delete(Size {line: 0, column: 1});
+                builder_1.delete(Size { line: 0, column: 1 });
             }
             offsets.push(Size::zero());
             position = cursor.start();
         }
         let delta_1 = builder_1.build();
-        
+
         let (_, new_delta_1) = delta_0.clone().transform(delta_1);
         let delta = delta_0.compose(new_delta_1);
-        
+
         self.edit(
             session_id,
             Some(EditGroup::Backspace),
@@ -561,7 +556,7 @@ impl EditorState {
             send_request,
         );
     }
-    
+
     fn edit(
         &mut self,
         session_id: SessionId,
@@ -573,12 +568,12 @@ impl EditorState {
         let session = &self.sessions[session_id];
         let document = &mut self.documents[session.document_id];
         let document_inner = document.inner.as_mut().unwrap();
-        
+
         let inverse_delta = delta.clone().invert(&document_inner.text);
-        let group_undo = edit_group.map_or(false, | edit_group | {
+        let group_undo = edit_group.map_or(false, |edit_group| {
             document_inner
                 .edit_group
-                .map_or(false, | current_edit_group | current_edit_group == edit_group)
+                .map_or(false, |current_edit_group| current_edit_group == edit_group)
         });
         if group_undo {
             let edit = document_inner.undo_stack.pop().unwrap();
@@ -596,58 +591,58 @@ impl EditorState {
             });
         }
         document_inner.redo_stack.clear();
-        
+
         let session = &mut self.sessions[session_id];
         session.apply_delta(&delta);
         session.apply_offsets(offsets);
-        
+
         self.apply_delta(session_id, delta, send_request);
     }
-    
+
     pub fn undo(&mut self, session_id: SessionId, send_request: &mut dyn FnMut(CollabRequest)) {
         let session = &self.sessions[session_id];
         let document = &mut self.documents[session.document_id];
         let document_inner = document.inner.as_mut().unwrap();
         if let Some(undo) = document_inner.undo_stack.pop() {
             document_inner.edit_group = None;
-            
+
             let inverse_delta = undo.delta.clone().invert(&document_inner.text);
             document_inner.redo_stack.push(Edit {
                 injected_char_stack: session.injected_char_stack.clone(),
                 cursors: session.cursors.clone(),
                 delta: inverse_delta,
             });
-            
+
             let session = &mut self.sessions[session_id];
             session.cursors = undo.cursors;
             session.update_selections_and_carets();
-            
+
             self.apply_delta(session_id, undo.delta, send_request);
         }
     }
-    
+
     pub fn redo(&mut self, session_id: SessionId, send_request: &mut dyn FnMut(CollabRequest)) {
         let session = &self.sessions[session_id];
         let document = &mut self.documents[session.document_id];
         let document_inner = document.inner.as_mut().unwrap();
         if let Some(redo) = document_inner.redo_stack.pop() {
             document_inner.edit_group = None;
-            
+
             let inverse_delta = redo.delta.clone().invert(&document_inner.text);
             document_inner.undo_stack.push(Edit {
                 injected_char_stack: session.injected_char_stack.clone(),
                 cursors: session.cursors.clone(),
                 delta: inverse_delta,
             });
-            
+
             let session = &mut self.sessions[session_id];
             session.cursors = redo.cursors;
             session.update_selections_and_carets();
-            
+
             self.apply_delta(session_id, redo.delta, send_request);
         }
     }
-    
+
     fn apply_delta(
         &mut self,
         session_id: SessionId,
@@ -656,22 +651,22 @@ impl EditorState {
     ) {
         let session = &mut self.sessions[session_id];
         let document_id = session.document_id;
-        
+
         let document = &self.documents[document_id];
         for other_session_id in document.session_ids.iter().cloned() {
             if other_session_id == session_id {
                 continue;
             }
-            
+
             let other_session = &mut self.sessions[other_session_id];
             other_session.apply_delta(&delta);
         }
-        
+
         let document = &mut self.documents[document_id];
         document.apply_delta(delta.clone());
         document.schedule_apply_delta_request(delta, send_request);
     }
-    
+
     pub fn handle_apply_delta_response(
         &mut self,
         file_id: TextFileId,
@@ -680,7 +675,7 @@ impl EditorState {
         let document_id = self.documents_by_file[file_id];
         let document = &mut self.documents[document_id];
         let document_inner = document.inner.as_mut().unwrap();
-        
+
         document_inner.outstanding_deltas.pop_front();
         document_inner.revision += 1;
         if let Some(outstanding_delta) = document_inner.outstanding_deltas.front() {
@@ -691,7 +686,7 @@ impl EditorState {
             ));
         }
     }
-    
+
     pub fn handle_delta_applied_notification(
         &mut self,
         file_id: TextFileId,
@@ -700,7 +695,7 @@ impl EditorState {
         let document_id = self.documents_by_file[file_id];
         let document = &mut self.documents[document_id];
         let document_inner = document.inner.as_mut().unwrap();
-        
+
         let mut delta = delta;
         for outstanding_delta_ref in &mut document_inner.outstanding_deltas {
             let outstanding_delta = mem::replace(outstanding_delta_ref, Delta::identity());
@@ -708,20 +703,20 @@ impl EditorState {
             delta = new_delta;
             *outstanding_delta_ref = new_outstanding_delta;
         }
-        
+
         transform_edit_stack(&mut document_inner.undo_stack, delta.clone());
         transform_edit_stack(&mut document_inner.redo_stack, delta.clone());
-        
+
         for session_id in document.session_ids.iter().cloned() {
             let session = &mut self.sessions[session_id];
             session.apply_delta(&delta);
         }
-        
+
         let document = &mut self.documents[document_id];
         let document_inner = document.inner.as_mut().unwrap();
         document_inner.revision += 1;
         document.apply_delta(delta);
-        
+
         document_id
     }
 }
@@ -743,21 +738,21 @@ impl Session {
         self.cursors.apply_delta(delta);
         self.update_selections_and_carets();
     }
-    
+
     fn apply_offsets(&mut self, offsets: &[Size]) {
         self.cursors.apply_offsets(offsets);
         self.update_selections_and_carets();
     }
-    
+
     fn update_selections_and_carets(&mut self) {
         self.selections = self.cursors.selections();
         self.carets = self.cursors.carets();
     }
 }
 
-pub struct BuilderMsgRange{
+pub struct BuilderMsgRange {
     pub range: Range,
-    pub index: usize
+    pub index: usize,
 }
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
@@ -779,13 +774,13 @@ impl Document {
         inner.indent_cache.invalidate(&delta);
         inner.msg_cache.invalidate(&delta);
         inner.inline_cache.borrow_mut().invalidate(&delta);
-        
+
         inner.text.apply_delta(delta);
 
         inner.token_cache.refresh(&inner.text);
         inner.indent_cache.refresh(&inner.text);
     }
-    
+
     fn schedule_apply_delta_request(
         &mut self,
         delta: Delta,
