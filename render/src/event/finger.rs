@@ -302,6 +302,9 @@ impl Event {
     }
     
     pub fn hits_with_options(&mut self, cx: &mut Cx, area: Area, options: HitOptions) -> HitEvent {
+        if !area.is_valid(cx){
+            return HitEvent::None
+        }
         match self {
             Event::Trigger(te)=>{
                 if let Some(data) = te.triggers.get(&area){
@@ -350,7 +353,7 @@ impl Event {
             Event::FingerHover(fe) => {
                 let rect = area.get_rect(&cx);
                 
-                if cx.fingers[fe.digit]._over_last == area {
+                if  cx.fingers[fe.digit]._over_last == area {
                     let mut any_down = false;
                     for finger in &cx.fingers {
                         if finger.captured == area {
