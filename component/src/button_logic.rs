@@ -9,7 +9,7 @@ impl Default for ButtonAction {
     fn default() -> Self {Self::None}
 }
 
-#[derive(Copy, Clone, PartialEq)]
+#[derive(Copy, Debug, Clone, PartialEq)]
 pub enum ButtonState {
     Hover,
     Default,
