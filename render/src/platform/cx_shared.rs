@@ -126,14 +126,13 @@ impl Cx {
     pub (crate) fn call_event_handler(&mut self, event: &mut Event)
     {
         self.event_id += 1;
-        
         let event_handler = self.event_handler.unwrap();
-        
         unsafe {(*event_handler)(self, event);}
         
         if self.next_key_focus != self.key_focus {
             self.prev_key_focus = self.key_focus;
             self.key_focus = self.next_key_focus;
+            self.event_id += 1;
             unsafe {(*event_handler)(self, &mut Event::KeyFocus(KeyFocusEvent {
                 prev: self.prev_key_focus,
                 focus: self.key_focus

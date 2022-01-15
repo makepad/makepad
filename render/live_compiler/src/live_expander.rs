@@ -132,12 +132,14 @@ impl<'a> LiveExpander<'a> {
                             LiveValue::TupleEnum {..} |
                             LiveValue::NamedEnum {..} |
                             LiveValue::Clone {..} => {
-                                let next_index = out_doc.nodes.next_child(overwrite).unwrap();
                                 out_doc.nodes[overwrite] = in_node.clone();
-                                // POTENTIAL SHIFT
-                                let old_len = out_doc.nodes.len();
-                                out_doc.nodes.drain(overwrite + 1..next_index - 1);
-                                self.shift_parent_stack(&mut current_parent, &out_doc.nodes, overwrite, old_len, out_doc.nodes.len());
+                                if let Some(next_index)= out_doc.nodes.next_child(overwrite){
+                                 //   let next_index = out_doc.nodes.next_child(overwrite).unwrap();
+                                    // POTENTIAL SHIFT
+                                    let old_len = out_doc.nodes.len();
+                                    out_doc.nodes.drain(overwrite + 1..next_index - 1);
+                                    self.shift_parent_stack(&mut current_parent, &out_doc.nodes, overwrite, old_len, out_doc.nodes.len());
+                                }
                                 
                                 level_overwrite.push(true);
                             },
@@ -353,6 +355,13 @@ impl<'a> LiveExpander<'a> {
                                         self.shift_parent_stack(&mut current_parent, &out_doc.nodes, node_insert_point - 1, old_len, out_doc.nodes.len());
                                         
                                         out_doc.nodes[node_insert_point].id = field.id;
+                                    }
+                                    else if !self.live_registry.ignore_no_dsl.contains(&lti.type_name){
+                                        self.errors.push(LiveError {
+                                            origin: live_error_origin!(),
+                                            span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).into(),
+                                            message: format!("Can't find live definition of {} did you forget to call live_register for it?", lti.type_name)
+                                        });
                                     }
                                 }
                                 else {
