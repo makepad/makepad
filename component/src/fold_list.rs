@@ -5,7 +5,7 @@ use {
     crate::{
         component_map::ComponentMap,
         fold_button::FoldButton,
-        link_button::LinkButton,
+        button::Button,
         scroll_view::ScrollView
     },
     makepad_render::*,
@@ -57,6 +57,29 @@ live_register!{
     }
     
     FoldListNode: {{FoldListNode}} {
+        
+        link_button: {
+            bg_quad: {
+                const THICKNESS: 0.8
+                fn pixel(self) -> vec4 {
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                    let offset_y = 1.0
+                    sdf.move_to(0., self.rect_size.y - offset_y);
+                    sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
+                    return sdf.stroke(#f, mix(0.0, THICKNESS, self.hover));
+                }
+            }
+            
+            layout: {
+                align: {fx: 0.5, fy: 0.5},
+                walk: {
+                    width: Width::Computed,
+                    height: Height::Computed,
+                    margin: Margin{left: 5.0}
+                }
+                padding: {left: 1.0, top: 1.0, right: 1.0, bottom: 1.0}
+            }
+        }
         
         layout: {
             walk: {
@@ -174,7 +197,7 @@ pub struct FoldListNode {
     unselected_state: Option<LivePtr>,
     
     fold_button: FoldButton,
-    link_button: LinkButton,
+    link_button: Button,
     
     icon_walk: Walk,
     
@@ -288,7 +311,7 @@ impl FoldListNode {
             self.bg_quad.draw_vars.redraw(cx);
         }
         
-        self.fold_button.handle_event_with_fn(cx, event, &mut |_cx, _action|{
+        self.fold_button.handle_event_with_fn(cx, event, &mut | _cx, _action | {
             
         });
         
@@ -337,7 +360,7 @@ impl FoldList {
         self.scroll_view.begin(cx) ?;
         self.count = 0;
         Ok(())
-    } 
+    }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
         // lets fill the space left with blanks
@@ -348,9 +371,9 @@ impl FoldList {
             self.filler_quad.is_even = Self::is_even(self.count);
             self.filler_quad.draw_walk(cx, Walk::wh(Width::Filled, Height::Fixed(self.node_height.min(height_left - walk))));
             walk += self.node_height.max(1.0);
-        } 
+        }
         self.scroll_view.end(cx);
-         
+        
         let selected_node_ids = &self.selected_node_ids;
         self.fold_nodes.retain_visible_and( | node_id, _ | selected_node_ids.contains(node_id));
     }
@@ -359,7 +382,7 @@ impl FoldList {
         if count % 2 == 1 {0.0}else {1.0}
     }
     
-     pub fn redraw(&mut self, cx: &mut Cx) {
+    pub fn redraw(&mut self, cx: &mut Cx) {
         self.scroll_view.redraw(cx);
     }
     
@@ -376,7 +399,7 @@ impl FoldList {
         
         if self.should_node_draw(cx) {
             let fold_node = self.fold_node;
-            let node = self.fold_nodes.get_or_insert(cx, node_id ,| cx | {
+            let node = self.fold_nodes.get_or_insert(cx, node_id, | cx | {
                 let mut node = FoldListNode::new_from_option_ptr(cx, fold_node);
                 if is_open {
                     node.set_is_open(cx, true, Animate::No)
@@ -385,7 +408,7 @@ impl FoldList {
             });
             
             node.draw_node(cx, name, Self::is_even(self.count), self.node_height, self.stack.len());
-
+            
             if node.opened == 0.0 {
                 return 0.0;
             }
@@ -516,7 +539,7 @@ impl FoldList {
         if self.scroll_view.handle_event(cx, event) {
             self.scroll_view.redraw(cx);
         }
-       
+        
         let mut actions = Vec::new();
         for (node_id, node) in self.fold_nodes.iter_mut() {
             node.handle_event_with_fn(cx, event, &mut | _, e | actions.push((*node_id, e)));
@@ -536,7 +559,7 @@ impl FoldList {
                 FoldNodeAction::ShouldStartDragging => {
                     //if self.dragging_node_id.is_none() {
                     //    dispatch_action(cx, FileTreeAction::ShouldStartDragging(node_id));
-                   // }
+                    // }
                 }
                 _ => ()
             }

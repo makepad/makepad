@@ -44,11 +44,11 @@ impl App {
         self.scroll_view.handle_event(cx, event);
         
         match event {
-            Event::NextFrame(..) => {
+            Event::Construct => {
                 // spawn 1000 buttons into the live structure
                 let mut out = Vec::new();
                 out.open();
-                for i in 0..1000 {
+                for i in 0..1 {
                     out.push_live(live_object!{
                         [id_num!(btn, i)]: Button {
                             label: (format!("B{}", i + self.offset))
@@ -58,7 +58,8 @@ impl App {
                 out.close();
                 self.frame.apply_clear(cx, &out);
                 
-                cx.new_next_frame();
+                //cx.new_next_frame();
+                println!("here!");
                 cx.redraw_all();
             }
             Event::Draw(draw_event) => {

@@ -208,6 +208,8 @@ impl Default for Cx {
             id!(Pass),
             id!(Texture),
             id!(Window),
+            id!(TextStyle),
+            id!(Wrapping),
         ]);
         
         Self {
