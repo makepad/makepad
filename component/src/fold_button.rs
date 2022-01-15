@@ -125,7 +125,7 @@ impl FoldButton {
         
         match res.state {
             ButtonState::Pressed => {
-                if self.opened > 0.2 {
+                if self.animator_is_in_state(cx, self.opened_state) {
                     self.animate_to(cx, self.closed_state);
                     dispatch_action(cx, FoldButtonAction::Closing)
                 }
