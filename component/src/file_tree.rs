@@ -116,11 +116,12 @@ live_register!{
         
         closed_state: {
             track: open,
-            duration: 0.2
+            from: {all: Play::Exp {speed1: 0.80, speed2: 0.97}}
+            //duration: 0.2
             redraw: true
-            ease: Ease::OutExp
+            //ease: Ease::OutExp
             apply: {
-                opened: 0.0,
+                opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
                 bg_quad: {opened: (opened)}
                 name_text: {opened: (opened)}
                 icon_quad: {opened: (opened)}
@@ -129,11 +130,12 @@ live_register!{
         
         opened_state: {
             track: open,
-            duration: 0.2
+            from: {all: Play::Exp {speed1: 0.82, speed2: 0.95}}
+            //duration: 0.2
             redraw: true
-            ease: Ease::OutExp
+            //ease: Ease::OutExp
             apply: {
-                opened: 1.0,
+                opened:  [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]
             }
         }
         is_folder: false,
@@ -362,7 +364,7 @@ impl FileTreeNode {
             HitEvent::FingerDown(_) => {
                 self.animate_to(cx, self.selected_state);
                 if self.is_folder {
-                    if self.opened > 0.2 {
+                    if self.animator_is_in_state(cx, self.opened_state) {
                         self.animate_to(cx, self.closed_state);
                         dispatch_action(cx, FileTreeNodeAction::Closing);
                     }
