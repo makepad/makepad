@@ -12,7 +12,7 @@ use {
 };
 
 #[derive(Debug, Clone, Copy)]
-pub enum Animate {
+pub enum Animate{
     Yes,
     No
 }
@@ -35,7 +35,7 @@ pub enum Play {
     #[pick {duration: 1.0}]
     Forward {duration: f64},
     
-    #[live {speed1: 0.9, speed2: 1.0}]
+    #[live {speed1: 0.9,speed2:1.0}]
     Exp {speed1: f64, speed2: f64},
     
     #[live {duration: 1.0, end: 1.0}]
@@ -63,10 +63,10 @@ impl Play {
         }
     }*/
     
-    pub fn as_exp(&self) -> Option<(f64, f64)> {
+    pub fn as_exp(&self) -> Option<(f64,f64)> {
         match self {
             Self::Exp {speed1, speed2} => {
-                Some((*speed1, *speed2))
+                Some((*speed1,*speed2))
             },
             _ => None
         }
@@ -491,6 +491,7 @@ impl Animator {
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> AnimatorAction {
         
         if let Some(nf) = event.is_next_frame(self.next_frame) {
+            
             let state_nodes = self.state.as_mut().unwrap();
             
             let mut state_index = state_nodes.child_by_name(0, id!(state)).unwrap();
@@ -501,7 +502,6 @@ impl Animator {
                 let state_node = &state_nodes[state_index];
                 if state_node.is_array() {
                     // ok so. lets compute our value and store it in the last slot
-                    
                     let (play_ended, play_redraw) = Self::update_timeline_value(cx, state_index, state_nodes, nf.time);
                     if !play_ended {
                         ended = false;
@@ -532,6 +532,7 @@ impl Animator {
             if !ended {
                 self.next_frame = cx.new_next_frame();
             }
+            
             return AnimatorAction::Animating {redraw}
         }
         AnimatorAction::None
@@ -548,7 +549,7 @@ impl Animator {
                 if let LiveValue::Id(track_id) = nodes[id_index].value {
                     // ok so now we have to find our id in tracks
                     let track_index = nodes.child_by_path(0, &[id!(tracks), track_id]).unwrap();
-                
+                    
                     let time_index = if let Some(time_index) = nodes.child_by_name(track_index, id!(time)){time_index}
                     else{
                         return (true, false);
@@ -580,7 +581,7 @@ impl Animator {
                         let exp_next = exp_now * speed1;
                         nodes[exp_index].value = LiveValue::Float(exp_next);
                         let speed_index = nodes.child_by_path(track_index, &[id!(play), id!(speed1)]).unwrap();
-                        nodes[speed_index].value = LiveValue::Float(speed1 * speed2);
+                        nodes[speed_index].value = LiveValue::Float(speed1*speed2);
                         if exp_next < 0.001 {(true, 1.0)}
                         else {(false, 1.0 - exp_next)}
                     }
@@ -618,7 +619,6 @@ impl Animator {
             while let Some(node_index) = node_iter {
                 if nodes[node_index + 1].is_close() { // at last slot
                     last_child_index = node_index;
-                    
                     break;
                 }
                 let next_kf = if nodes[node_index].is_value_type() { // we hit a bare value node
@@ -649,7 +649,6 @@ impl Animator {
                     if time >= prev_kf.time && time <= next_kf.time {
                         let normalised_time = (time - prev_kf.time) / (next_kf.time - prev_kf.time);
                         let mix = next_kf.ease.map(normalised_time);
-
                         // find last one
                         while let Some(node_index) = node_iter {
                             last_child_index = node_index;
@@ -712,7 +711,7 @@ impl Animator {
                 node_iter = nodes.next_child(node_index);
             }
             if let Some(prev_kf) = prev_kf {
-                nodes[last_child_index].value = prev_kf.value; 
+                nodes[last_child_index].value = prev_kf.value
             }
             return (ended, redraw)
         }
@@ -750,7 +749,7 @@ impl Animator {
     pub fn get_track_and_state_id_of(&self, cx: &mut Cx, live_ptr: Option<LivePtr>) -> Option<(LiveId, LiveId)> {
         if let Some(live_ptr) = live_ptr {
             let live_registry = cx.live_registry.borrow();
-            if !live_registry.generation_valid(live_ptr) {
+            if !live_registry.generation_valid(live_ptr){
                 return None
             }
             let (nodes, index) = live_registry.ptr_to_nodes_index(live_ptr);
@@ -780,7 +779,7 @@ impl Animator {
         if let Some((track_id, _)) = self.get_track_and_state_id_of(cx, live_ptr) {
             if let Some(state) = self.state.as_ref() {
                 if let Some(LiveValue::Int(ended)) = state.child_value_by_path(0, &[id!(tracks), track_id, id!(ended)]) {
-                    if *ended != 0 && *ended != cx.event_id as i64 {
+                    if *ended == 0 || *ended == cx.event_id as i64 {
                         return true
                     }
                 }
@@ -803,11 +802,11 @@ impl Animator {
         if let Some(live_ptr) = live_ptr {
             let live_registry_rc = cx.live_registry.clone();
             let live_registry = live_registry_rc.borrow();
-            if live_registry.generation_valid(live_ptr) {
+            if live_registry.generation_valid(live_ptr){
                 let (nodes, index) = live_registry.ptr_to_nodes_index(live_ptr);
                 self.cut_to(cx, nodes[index].id, index, nodes);
             }
-            else {
+            else{
                 println!("cut_to_live generaiton invalid")
             }
         }
@@ -894,11 +893,11 @@ impl Animator {
         if let Some(live_ptr) = live_ptr {
             let live_registry_rc = cx.live_registry.clone();
             let live_registry = live_registry_rc.borrow();
-            if live_registry.generation_valid(live_ptr) {
+            if live_registry.generation_valid(live_ptr){
                 let (nodes, index) = live_registry.ptr_to_nodes_index(live_ptr);
                 self.animate_to(cx, nodes[index].id, index, nodes)
             }
-            else {
+            else{
                 println!("animate_to_live generation invalid");
             }
         }
@@ -942,11 +941,11 @@ impl Animator {
         else {
             0.0
         };
-        
+
         state.replace_or_insert_last_node_by_path(0, &[id!(tracks), track], live_object!{
-            [track]: {state_id: (state_id), ended: 0, time: void, exp: (1.0 - old_exp)},
+            [track]: {state_id: (state_id), ended: 0, time: void, exp: (1.0-old_exp)},
         });
-        
+
         // copy in from track
         if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(from)) {
             if let Some(reader) = reader.child_by_name(from_id) {
@@ -1072,7 +1071,6 @@ impl Animator {
                 reader.walk();
             }
         }
-        
         
         self.swap_in_state(state);
         
