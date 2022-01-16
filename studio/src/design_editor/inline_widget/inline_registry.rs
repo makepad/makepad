@@ -1,12 +1,11 @@
 use {
-    makepad_component::makepad_render,
-    makepad_render::*,
-    makepad_render::makepad_live_tokenizer::{
-        position::Position,
-        text::Text,
-        size::Size
-    },
     crate::{
+        makepad_render::*,
+        makepad_live_tokenizer::{
+            position::Position,
+            text::Text,
+            size::Size
+        },
         design_editor::{
             inline_cache::InlineEditBind
         },
@@ -24,17 +23,17 @@ pub struct InlineWidgetRegistry();
 
 pub enum InlineWidgetAction {
     None,
-    ReplaceText{
-        position:Position,
+    ReplaceText {
+        position: Position,
         size: Size,
         text: Text
     }
-} 
+}
 
 pub trait InlineWidget: LiveApply {
-    fn type_id(&self)->LiveType;
+    fn type_id(&self) -> LiveType;
     fn handle_widget_event(&mut self, cx: &mut Cx, event: &mut Event, bind: InlineEditBind) -> InlineWidgetAction;
-    fn draw_widget(&mut self, cx: &mut Cx2d, live_registry:&LiveRegistry, bind: InlineEditBind);
+    fn draw_widget(&mut self, cx: &mut Cx2d, live_registry: &LiveRegistry, bind: InlineEditBind);
 }
 
 generate_ref_cast_api!(InlineWidget);

@@ -1,6 +1,6 @@
 use {
-    makepad_shader_compiler::*,
     crate::{
+        makepad_shader_compiler::*,
         cx::Cx,
         area::Area,
         geometry::{GeometryFields},

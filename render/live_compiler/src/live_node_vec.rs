@@ -5,14 +5,14 @@ use {
         ops::DerefMut,
         iter
     },
-    makepad_derive_live::{
-        live_object
-    },
-    makepad_math::{
-        Vec2, Vec3, Vec4
-    },
-    makepad_live_tokenizer::LiveId,
     crate::{
+        makepad_derive_live::{
+            live_object
+        },
+        makepad_math::{
+            Vec2, Vec3, Vec4
+        },
+        makepad_live_tokenizer::LiveId,
         live_token::LiveTokenId,
         live_node::{LiveNode, LiveValue, LiveNodeOrigin, InlineString, FittedString},
     }

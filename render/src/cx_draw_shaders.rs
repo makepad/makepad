@@ -7,9 +7,8 @@ use {
             BTreeSet,
         },
     },
-    makepad_shader_compiler::makepad_live_compiler::*,
-    makepad_shader_compiler::*,
     crate::{
+        makepad_shader_compiler::*,
         live_traits::*,
         draw_vars::DrawVars,
         platform::{

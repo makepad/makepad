@@ -5,13 +5,13 @@ use{
         fmt::Write,
         collections::BTreeSet,
     },
-    makepad_live_compiler::{
-        id,
-        makepad_math::PrettyPrintedF32,
-        LiveId,
-        TokenSpan
-    },
     crate::{
+        makepad_live_compiler::{
+            id,
+            makepad_math::PrettyPrintedF32,
+            LiveId,
+            TokenSpan
+        },
         shader_ast::*,
         shader_registry::ShaderRegistry
     }

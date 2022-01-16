@@ -1,17 +1,19 @@
 use {
     crate::{
+        makepad_render::*,
+        makepad_component::{
+            component_map::ComponentMap
+        },
         splitter::{SplitterAction, Splitter, SplitterAlign},
         tab_bar::{TabBarAction, TabBar, TabId},
-        component_map::ComponentMap
     },
-    makepad_render::*,
 };
 
 live_register!{
     use makepad_render::shader::std::*;
     use crate::tab_bar::TabBar
     use crate::splitter::Splitter
-    use crate::theme::*;
+    use makepad_component::theme::*;
     
     DrawRoundCorner: {{DrawRoundCorner}} {
         draw_depth: 6.0

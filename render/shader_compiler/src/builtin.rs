@@ -1,7 +1,9 @@
 use{
     std::collections::HashMap,
-    makepad_live_compiler::LiveId,
-    crate::shader_ast::{Ident, ShaderTy}
+    crate::{
+        makepad_live_compiler::LiveId,
+        shader_ast::{Ident, ShaderTy}
+    },
 };
 type Ty = ShaderTy;
 

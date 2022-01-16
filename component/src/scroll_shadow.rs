@@ -1,5 +1,5 @@
 #![allow(unused)]
-use makepad_render::*;
+use crate::makepad_render::*;
 
 live_register!{
     use makepad_render::shader::std::*;

@@ -50,7 +50,7 @@ pub fn id_num(item: TokenStream) -> TokenStream {
         if let Some(v) = parser.eat_literal(){
             if let Ok(v) = v.to_string().parse::<u64>(){
                 let id = LiveId::from_str_unchecked(&name);
-                tb.add("LiveId (").suf_u64(id.0&0xffff_ffff_ffff_0000 | (v&0xfff)).add(")");
+                tb.add("LiveId (").suf_u64(id.0&0xffff_ffff_0000_0000 | (v&0xffff_ffff)).add(")");
                 return tb.end()
             }
             else{
@@ -60,7 +60,7 @@ pub fn id_num(item: TokenStream) -> TokenStream {
         else{
             let arg = parser.eat_level();
             let id = LiveId::from_str_unchecked(&name);
-            tb.add("LiveId (").suf_u64(id.0&0xffff_ffff_ffff_0000).add("|((").stream(Some(arg)).add(")&0xffff)").add(")");
+            tb.add("LiveId (").suf_u64(id.0&0xffff_ffff_0000_0000).add("|((").stream(Some(arg)).add(")&0xffff_ffff)").add(")");
             tb.end()
         }
     }

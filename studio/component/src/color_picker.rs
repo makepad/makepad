@@ -1,4 +1,4 @@
-use makepad_render::*;
+use crate::makepad_render::*;
 
 
 live_register!{

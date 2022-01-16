@@ -2,11 +2,10 @@ pub use {
     std::{
         any::TypeId,
     },
-    makepad_shader_compiler::makepad_live_compiler,
-    makepad_live_compiler::{
-        LiveEvalError
-    },
     crate::{
+        makepad_live_compiler::{
+            LiveEvalError
+        },
         cx::Cx,
         event::Event,
         live_traits::*,

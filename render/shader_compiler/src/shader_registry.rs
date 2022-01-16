@@ -3,8 +3,8 @@ use {
         collections::{BTreeMap, HashSet, HashMap},
         cell::{Cell, RefCell},
     },
-    makepad_live_compiler::*,
     crate::{
+        makepad_live_compiler::*,
         shader_ast::*,
         analyse::*,
         shader_parser::{ShaderParser, ShaderParserDep},

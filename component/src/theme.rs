@@ -1,4 +1,5 @@
-use makepad_render::*;
+use crate::makepad_render::*;
+
 live_register!{
     
     const COLOR_APP_BG: #26

@@ -1,5 +1,15 @@
 use {
     crate::{
+        makepad_render::*,
+        makepad_component::{
+            DesktopWindow,
+        },
+        makepad_studio_component::{
+            dock::{Dock, DockAction, DragPosition, PanelId},
+            file_tree::{FileTreeAction, FileNodeId, FileTree},
+            splitter::{SplitterAlign},
+            tab_bar::TabId,
+        },
         collab::{
             collab_client::CollabClient,
             collab_protocol::{
@@ -18,14 +28,6 @@ use {
         app_state::{TabKind, AppState, SplitPanel, TabPanel, Panel, Tab},
         log_view::{LogView},
         editors::{Editors},
-    },
-    makepad_component::makepad_render::*,
-    makepad_component::{
-        DesktopWindow,
-        dock::{Dock, DockAction, DragPosition, PanelId},
-        file_tree::{FileTreeAction, FileNodeId, FileTree},
-        splitter::{SplitterAlign},
-        tab_bar::TabId,
     },
     std::{
         path::{Path, PathBuf},

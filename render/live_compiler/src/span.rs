@@ -1,7 +1,7 @@
 use{
     std::fmt,
-    makepad_live_tokenizer::Position,
     crate::{
+        makepad_live_tokenizer::Position,
         live_token::LiveTokenId,
         live_ptr::LiveFileId
     }

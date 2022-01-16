@@ -4,7 +4,9 @@ use {
         collections::{HashSet, HashMap,},
         collections::hash_map::Entry
     },
-    makepad_render::{Cx}
+    crate::{
+        makepad_render::Cx
+    }
 };
 
 #[derive(Clone)]

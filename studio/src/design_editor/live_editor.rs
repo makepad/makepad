@@ -1,5 +1,16 @@
 use {
     crate::{
+        makepad_render::*,
+        makepad_component::{
+            fold_button::{FoldButton, FoldButtonAction},
+            ComponentMap,
+        },
+        makepad_live_compiler::{LiveTokenId, LiveEditEvent},
+        makepad_live_tokenizer::{
+            full_token::{FullToken, Delim},
+            TokenWithLen,
+            text::{Text},
+        },
         editor_state::{
             EditorState,
             DocumentInner
@@ -19,20 +30,7 @@ use {
             SessionId
         },
     },
-    makepad_component::{
-        makepad_render,
-        fold_button::{FoldButton, FoldButtonAction},
-        ComponentMap,
-    },
-    makepad_render::makepad_live_compiler,
-    makepad_live_compiler::makepad_live_tokenizer,
-    makepad_live_compiler::{LiveTokenId, LiveEditEvent},
-    makepad_live_tokenizer::{
-        full_token::{FullToken, Delim},
-        TokenWithLen,
-        text::{Text},
-    },
-    makepad_render::*,
+    
 };
 
 live_register!{
@@ -238,7 +236,7 @@ impl LiveEditor {
             let mut max_height = 0.0f32;
             
             let ws = document_inner.indent_cache[input.line].virtual_leading_whitespace();
-
+            
             // ok so. we have to determine wether we are going to fold.
             // if a line starts with # or a comment: fold it
             let mut zoom_out = 0.0;
@@ -262,7 +260,7 @@ impl LiveEditor {
             }
             
             for bind in &edit_info.items {
-
+                
                 if let Some(matched) = widget_registry.match_inline_widget(&live_registry, *bind) {
                     let cache_line = &inline_cache.lines[input.line];
                     
@@ -336,7 +334,7 @@ impl LiveEditor {
                 &self.lines_layout,
                 *session.cursors.last_inserted()
             );
-
+            
             self.editor_impl.draw_message_lines(
                 cx,
                 &document_inner.msg_cache,
@@ -504,7 +502,8 @@ impl LiveEditor {
             event,
             &self.lines_layout,
             send_request,
-            &mut | cx, action | {
+            &mut | cx,
+            action | {
                 match action {
                     CodeEditorAction::RedrawViewsForDocument(_) => {
                         live_edit = true;

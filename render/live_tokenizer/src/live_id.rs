@@ -107,16 +107,16 @@ impl LiveId {
     }
     
     // doing this cuts the hashsize but yolo.
-    pub fn with_num(&self, num: u16) -> Self {
-        Self (self.0 & 0xffff_ffff_ffff_0000 | (num as u64))
+    pub fn with_num(&self, num: u32) -> Self {
+        Self (self.0 & 0xffff_ffff_0000_0000 | (num as u64))
     }
     
     pub fn mask_num(&self) -> Self {
-        Self (self.0 & 0xffff_ffff_ffff_0000)
+        Self (self.0 & 0xffff_ffff_0000_0000)
     }
     
-    pub fn get_num(&self) -> u16 {
-        (self.0 & 0xffff) as u16
+    pub fn get_num(&self) -> u32 {
+        (self.0 & 0xffff_ffff) as u32
     }
     
     pub fn is_empty(&self) -> bool {

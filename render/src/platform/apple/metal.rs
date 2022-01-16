@@ -6,12 +6,12 @@ use {
         class,
         sel_impl,
     },
-    makepad_shader_compiler::{
-        generate_metal,
-        generate_metal::MetalGeneratedShader,
-    },
-    makepad_shader_compiler::makepad_live_compiler::*,
     crate::{
+        makepad_shader_compiler::{
+            generate_metal,
+            generate_metal::MetalGeneratedShader,
+        },
+        makepad_live_compiler::*,
         platform::{
             apple::frameworks::*,
             cocoa_app::CocoaApp,
@@ -403,7 +403,7 @@ impl Cx {
             let () = unsafe {msg_send![encoder, endEncoding]};
             if is_resizing {
                 self.commit_command_buffer(command_buffer, gpu_read_guards);
-                let () = unsafe {msg_send![command_buffer, waitUntilCompleted]};
+                let () = unsafe {msg_send![command_buffer, waitUntilScheduled]};
                 let () = unsafe {msg_send![drawable, present]};
             }
             else {

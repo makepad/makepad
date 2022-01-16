@@ -1,4 +1,4 @@
-use makepad_component::makepad_render::*;
+use crate::makepad_render::*;
 
 pub mod design_editor;
 pub mod inline_widget;

@@ -3,11 +3,13 @@ use {
         collections::{HashSet},
     },
     crate::{
-        scroll_shadow::ScrollShadow,
-        component_map::ComponentMap,
-        scroll_view::ScrollView
-    },
-    makepad_render::*,
+        makepad_render::*,
+        makepad_component::{
+            scroll_shadow::ScrollShadow,
+            component_map::ComponentMap,
+            scroll_view::ScrollView
+        },
+    }
 };
 
 live_register!{

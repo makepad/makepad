@@ -1,10 +1,9 @@
 use {
-    makepad_shader_compiler::makepad_live_compiler::*,
-    makepad_derive_live::*,
-    makepad_shader_compiler::{
-        ShaderTy,
-    },
     crate::{
+        makepad_derive_live::*,
+        makepad_shader_compiler::{
+            ShaderTy,
+        },
         cx::Cx,
         live_traits::*,
         geometry::{

@@ -1,15 +1,15 @@
 [package]
-name = "makepad-component"
+name = "makepad-studio-component"
 version = "0.1.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
-description = "Makepad components"
+description = "Makepad studio components"
 license = "MIT"
 
 [dependencies]
 
-[dependencies.makepad-render]
-path = "../render"
+[dependencies.makepad-component]
+path = "../../component"
 version = "0.1"
 
 

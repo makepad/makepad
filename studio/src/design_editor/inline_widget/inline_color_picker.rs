@@ -1,13 +1,12 @@
 use {
-    makepad_component::makepad_render,
-    makepad_render::*,
-    makepad_component::color_picker::*,
-    makepad_render::makepad_live_compiler::LiveToken,
-    makepad_render::makepad_live_tokenizer::{
-        position::Position,
-        text::Text,
-    },
     crate::{
+        makepad_render::*,
+        makepad_studio_component::color_picker::*,
+        makepad_live_compiler::LiveToken,
+        makepad_live_tokenizer::{
+            position::Position,
+            text::Text,
+        },
         design_editor::{
             inline_widget::*,
             inline_cache::InlineEditBind
@@ -35,9 +34,9 @@ fn register_factory(cx: &mut Cx) {
                 }
                 LiveValue::DSL {..} => {
                     let token = live_registry.token_id_to_token(bind.live_token_id);
-                    if token.is_color(){
+                    if token.is_color() {
                         return CanEdit::Yes(100.0)
-                    } 
+                    }
                 }
                 _ => ()
             }
@@ -53,7 +52,7 @@ fn register_factory(cx: &mut Cx) {
 
 impl InlineWidget for InlineColorPicker {
     
-    fn type_id(&self)->LiveType{LiveType::of::<Self>()}
+    fn type_id(&self) -> LiveType {LiveType::of::<Self>()}
     
     fn handle_widget_event(
         &mut self,
@@ -70,7 +69,7 @@ impl InlineWidget for InlineColorPicker {
                 let mut s = String::new();
                 s.push_str("#x");
                 rgba.append_hex_to_string(&mut s);
-
+                
                 // alright we are going to fetch some tokens.
                 let token = live_registry.token_id_to_token(bind.live_token_id);
                 let start_pos = Position::from(token.span.start);
@@ -83,27 +82,27 @@ impl InlineWidget for InlineColorPicker {
                 }
             }
             _ => ()
-        } 
+        }
         InlineWidgetAction::None
     }
     
     fn draw_widget(&mut self, cx: &mut Cx2d, live_registry: &LiveRegistry, bind: InlineEditBind) {
         let node = live_registry.ptr_to_node(bind.live_ptr);
         // alright so
-        let color = match &node.value{
-            LiveValue::Color(c) =>{
+        let color = match &node.value {
+            LiveValue::Color(c) => {
                 Vec4::from_u32(*c)
             }
-            LiveValue::DSL{..}=>{
+            LiveValue::DSL {..} => {
                 let token = live_registry.token_id_to_token(bind.live_token_id).token;
-                match token{
-                    LiveToken::Color(c)=>{
+                match token {
+                    LiveToken::Color(c) => {
                         Vec4::from_u32(c)
                     }
-                    _=>Vec4::default()
+                    _ => Vec4::default()
                 }
             }
-            _=>Vec4::default()
+            _ => Vec4::default()
         };
         self.color_picker.size = 100.0;
         self.color_picker.draw(cx, color, 1.0);
