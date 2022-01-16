@@ -20,8 +20,6 @@ use {
     }
 };
 
-const REPAINT_FINISH: usize = 0;
-
 impl Cx {
     
     pub (crate) fn process_tap_count(&mut self, digit: usize, pos: Vec2, time: f64) -> u32 {
@@ -40,8 +38,19 @@ impl Cx {
         }
     }
     
+    pub (crate) fn repaint_windows(&mut self) {
+        
+        for cxpass in self.passes.iter_mut() {
+            match cxpass.parent {
+                CxPassParent::Window(_) => {
+                    cxpass.paint_dirty = true;
+                },
+                _=>()
+            }
+        }
+    }
     
-    pub (crate) fn compute_passes_to_repaint(&mut self, passes_todo: &mut Vec<usize>, windows_need_repaint: &mut usize, repaint_finish: &mut usize) {
+    pub (crate) fn compute_passes_to_repaint(&mut self, passes_todo: &mut Vec<usize>, windows_need_repaint: &mut usize) {
         passes_todo.clear();
         
         // we need this because we don't mark the entire deptree of passes dirty every small paint
@@ -74,7 +83,6 @@ impl Cx {
                 match cxpass.parent {
                     CxPassParent::Window(_) => {
                         *windows_need_repaint += 1;
-                        *repaint_finish = REPAINT_FINISH;
                     }, 
                     CxPassParent::Pass(dep_of_pass_id) => {
                         if pass_id == dep_of_pass_id {
@@ -99,22 +107,6 @@ impl Cx {
             }
         }
         
-        for (pass_id, cxpass) in self.passes.iter().enumerate() {
-            if *repaint_finish > 0 {
-                match cxpass.parent {
-                    CxPassParent::Window(_) => {
-                        if !passes_todo.iter().any(|check_pass| *check_pass == pass_id){
-                            passes_todo.push(pass_id);
-                            *windows_need_repaint += 1;
-                        }
-                    },
-                    _=>()
-                }
-            }
-        }
-        if *repaint_finish > 0{
-            *repaint_finish -= 1;
-        }
     }
     
     pub (crate) fn need_redrawing(&self) -> bool {

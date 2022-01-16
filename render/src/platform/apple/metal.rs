@@ -48,6 +48,7 @@ impl Cx {
         zbias: &mut f32,
         zbias_step: f32,
         encoder: ObjcId,
+        command_buffer: ObjcId,
         gpu_read_guards: &mut Vec<MetalRwLockGpuReadGuard>,
         metal_cx: &MetalCx,
     ) {
@@ -69,6 +70,7 @@ impl Cx {
                     zbias,
                     zbias_step,
                     encoder,
+                    command_buffer,
                     gpu_read_guards,
                     metal_cx,
                 );
@@ -89,7 +91,6 @@ impl Cx {
                     self.platform.bytes_written += draw_call.instances.as_ref().unwrap().len() * 4;
                     draw_call.platform.instance_buffer.next();
                     draw_call.platform.instance_buffer.get_mut().cpu_write().update(metal_cx, &draw_call.instances.as_ref().unwrap());
-                    println!("{:?}", draw_call.instances);
                 }
                 
                 // update the zbias uniform if we have it.
@@ -375,6 +376,8 @@ impl Cx {
             let command_buffer: ObjcId = unsafe {msg_send![metal_cx.command_queue, commandBuffer]};
             let encoder: ObjcId = unsafe {msg_send![command_buffer, renderCommandEncoderWithDescriptor: render_pass_descriptor]};
             
+            //println!("BUFFER START! {}", command_buffer as *const _ as u64);
+            
             unsafe {msg_send![encoder, textureBarrier]}
             
             if let Some(depth_state) = self.passes[pass_id].platform.mtl_depth_state {
@@ -392,6 +395,7 @@ impl Cx {
                 &mut zbias,
                 zbias_step,
                 encoder,
+                command_buffer,
                 &mut gpu_read_guards,
                 &metal_cx,
             );
@@ -399,10 +403,11 @@ impl Cx {
             let () = unsafe {msg_send![encoder, endEncoding]};
             if is_resizing {
                 self.commit_command_buffer(command_buffer, gpu_read_guards);
-                let () = unsafe {msg_send![command_buffer, waitUntilScheduled]};
+                let () = unsafe {msg_send![command_buffer, waitUntilCompleted]};
                 let () = unsafe {msg_send![drawable, present]};
             }
             else {
+                
                 let () = unsafe {msg_send![command_buffer, presentDrawable: drawable]};
                 self.commit_command_buffer(command_buffer, gpu_read_guards);
             }
@@ -442,6 +447,7 @@ impl Cx {
             &mut zbias,
             zbias_step,
             encoder,
+            command_buffer,
             &mut gpu_read_guards,
             &metal_cx,
         );
@@ -835,7 +841,7 @@ struct MetalBuffer {
 }
 
 impl MetalBuffer {
-    fn update<T>(&mut self, metal_cx: &MetalCx, data: &[T]) {
+    fn update<T>(&mut self, metal_cx: &MetalCx, data: &[T]) where T: std::fmt::Debug {
         let len = data.len() * std::mem::size_of::<T>();
         if len == 0 {
             self.inner = None;
@@ -856,6 +862,9 @@ impl MetalBuffer {
         let inner = self.inner.as_ref().unwrap();
         unsafe {
             let contents: *mut u8 = msg_send![inner.buffer.as_id(), contents];
+            
+            //println!("Buffer write {} buf {} data {:?}", command_buffer as *const _ as u64, inner.buffer.as_id() as *const _ as u64, data);
+
             std::ptr::copy(data.as_ptr() as *const u8, contents, len);
             let _: () = msg_send![
                 inner.buffer.as_id(),

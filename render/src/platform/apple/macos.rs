@@ -50,13 +50,38 @@ impl Cx {
         self.redraw_all();
         
         let mut passes_todo = Vec::new();
-        let mut repaint_finish = 0;
         
+        const KEEP_ALIVE_COUNT:usize = 5;
+        let mut keep_alive_counter = 0;
+        cocoa_app.start_timer(0, 0.2, true);
+
         cocoa_app.event_loop( | cocoa_app, events | {
             
             let mut paint_dirty = false;
             for mut event in events {
-                
+                match &event {
+                    Event::FingerDown(_) |
+                    Event::FingerMove(_) | 
+                    Event::FingerHover(_) |
+                    Event::FingerUp(_) |
+                    Event::FingerScroll(_) |
+                    Event::KeyDown(_) |
+                    Event::KeyUp(_) |
+                    Event::TextInput(_)=>{
+                        keep_alive_counter = KEEP_ALIVE_COUNT;
+                    }
+                    Event::Timer(te)=>{
+                        if te.timer_id == 0{
+                            if keep_alive_counter>0{
+                                keep_alive_counter -= 1;
+                                self.repaint_windows();
+                                paint_dirty = true;
+                                continue;
+                            }
+                        }
+                    }
+                    _=>()
+                }
                 self.process_desktop_pre_event(&mut event);
                 match &event {
                     Event::AppFocus=>{ // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
@@ -109,7 +134,6 @@ impl Cx {
                         self.call_event_handler(&mut event);
                     },
                     Event::Paint => {
-                        
                         // construct or destruct windows
                         for (index, window) in self.windows.iter_mut().enumerate() {
                             
@@ -205,7 +229,7 @@ impl Cx {
                         
                         // build a list of renderpasses to repaint
                         let mut windows_need_repaint = 0;
-                        self.compute_passes_to_repaint(&mut passes_todo, &mut windows_need_repaint, &mut repaint_finish);
+                        self.compute_passes_to_repaint(&mut passes_todo, &mut windows_need_repaint);
                         
                         if passes_todo.len() > 0 {
                             self.repaint_id += 1;
@@ -281,7 +305,7 @@ impl Cx {
             
             self.process_live_style_errors();
             */
-            if self.need_redrawing() || self.new_next_frames.len() != 0 || paint_dirty || repaint_finish != 0{
+            if self.need_redrawing() || self.new_next_frames.len() != 0 || paint_dirty{
                 false
             } else {
                 true
