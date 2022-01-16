@@ -1,7 +1,6 @@
 pub use {
-    makepad_shader_compiler::makepad_live_compiler::*,
-    makepad_derive_live::*,
     crate::{
+        makepad_derive_live::*,
         cx::Cx,
         live_traits::*,
     }

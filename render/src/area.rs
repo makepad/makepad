@@ -3,17 +3,17 @@ pub use {
         rc::Rc,
         cell::RefCell
     },
-    makepad_shader_compiler::{
-        ShaderTy
-    },
-    makepad_shader_compiler::makepad_live_compiler::{
-        LiveId,
-    },
-    makepad_shader_compiler::makepad_math::{
-        Vec2,
-        Rect
-    },
     crate::{
+        makepad_shader_compiler::{
+            ShaderTy
+        },
+        makepad_live_compiler::{
+            LiveId,
+        },
+        makepad_math::{
+            Vec2,
+            Rect
+        },
         cx::Cx
     }
 };

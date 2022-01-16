@@ -1,5 +1,18 @@
 use {
     crate::{
+        makepad_live_tokenizer::{
+            position::Position,
+            position_set::PositionSet,
+            range::Range,
+            range_set::{RangeSet, Span},
+            size::Size,
+            text::{Text},
+        },
+        makepad_render::*,
+        makepad_component::{ 
+            ScrollView,
+            ScrollShadow
+        },
         editor_state::{
             EditorState,
             Document,
@@ -20,21 +33,6 @@ use {
         collab::{
             collab_protocol::CollabRequest,
         }
-    },
-    makepad_live_tokenizer::{
-        position::Position,
-        position_set::PositionSet,
-        range::Range,
-        range_set::{RangeSet, Span},
-        size::Size,
-        text::{Text},
-    },
-    makepad_component::makepad_render,
-    makepad_render::makepad_live_tokenizer,
-    makepad_render::*,
-    makepad_component::{
-        ScrollView,
-        ScrollShadow
     },
     std::mem,
 };
@@ -476,7 +474,7 @@ impl CodeEditorImpl {
                 let start = view_rect.pos + view_rect.size * 0.5;
                 let pos = self.vec2_to_position(&document_inner.text, start, lines_layout);
                 pos
-            } 
+            }
             else {
                 last_cursor.head
             };
@@ -798,7 +796,7 @@ impl CodeEditorImpl {
                         let pos = self.position_to_vec2(*caret, lines_layout);
                         self.caret_quad.draw_abs(cx, Rect {
                             pos: pos + origin,
-                            size: Vec2 { 
+                            size: Vec2 {
                                 x: 1.5 * layout.font_scale,
                                 y: self.text_glyph_size.y * layout.font_scale,
                             },
@@ -1035,7 +1033,7 @@ impl CodeEditorImpl {
                     dispatch_action(cx, CodeEditorAction::RedrawViewsForDocument(session.document_id))
                 }
             }
-            HitEvent::KeyDown(KeyEvent {  
+            HitEvent::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyX,
                 modifiers,
                 ..
@@ -1047,7 +1045,7 @@ impl CodeEditorImpl {
                     dispatch_action(cx, CodeEditorAction::RedrawViewsForDocument(session.document_id))
                 }
             }
-            HitEvent::KeyDown(KeyEvent {  
+            HitEvent::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyA,
                 modifiers,
                 ..

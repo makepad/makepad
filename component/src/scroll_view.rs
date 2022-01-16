@@ -1,5 +1,7 @@
-use makepad_render::*;
-use crate::scroll_bar::*;
+use crate::{
+    makepad_render::*,
+    scroll_bar::*
+};
 
 live_register!{
     ScrollView:{{ScrollView}}{

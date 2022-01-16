@@ -3,6 +3,14 @@ use {
         path::PathBuf,
     },
     crate::{
+        makepad_component::{
+            ComponentMap,
+        },
+        makepad_studio_component::{
+            tab_bar::TabId,
+            //        dock::PanelId,
+        },
+        makepad_render::*,
         editor_state::{
             EditorState,
             DocumentId,
@@ -32,12 +40,7 @@ use {
             },
         }
     },
-    makepad_component::{
-        ComponentMap,
-        tab_bar::TabId,
-        //        dock::PanelId,
-    },
-    makepad_component::makepad_render::*,
+
 };
 
 enum EditorView {

@@ -2,8 +2,8 @@ use {
     std::{
         collections::{HashMap, HashSet}
     },
-    makepad_shader_compiler::makepad_live_compiler::LiveEditEvent,
     crate::{
+        makepad_live_compiler::LiveEditEvent,
         cx::Cx,
         area::Area,
         event::{

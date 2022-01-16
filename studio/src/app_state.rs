@@ -1,17 +1,17 @@
 use {
     crate::{
+        makepad_studio_component::{
+            dock::{PanelId},
+            file_tree::{FileNodeId},
+            splitter::{SplitterAlign},
+            tab_bar::{TabId},
+        },
+        makepad_render::*,
         editor_state::{EditorState, SessionId},
         collab::{
             collab_protocol::{FileNodeData, FileTreeData},
         },
     },
-    makepad_component::{
-        dock::{PanelId},
-        file_tree::{FileNodeId},
-        splitter::{SplitterAlign},
-        tab_bar::{TabId},
-    },
-    makepad_component::makepad_render::*,
     std::{
         ffi::OsString,
         path::{ PathBuf},

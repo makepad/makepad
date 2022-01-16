@@ -1,5 +1,7 @@
-use makepad_render::*;
-use std::any::TypeId;
+use {
+    std::any::TypeId,
+    crate::makepad_render::*
+};
 
 live_register!{
     FrameComponentRegistry: {{FrameComponentRegistry}} {}

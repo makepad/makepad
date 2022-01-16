@@ -1,9 +1,7 @@
 #![allow(dead_code)]
-use{
-    makepad_component::makepad_render::{
-        makepad_micro_serde::*,
-        makepad_live_tokenizer::{Range,Position},
-    }
+use crate::{
+    makepad_micro_serde::*,
+    makepad_live_tokenizer::{Range,Position},
 };
 
 // rust compiler output json structs

@@ -9,9 +9,9 @@ pub use {
     makepad_geometry::{AffineTransformation, Transform, Vector},
     makepad_internal_iter::*,
     makepad_path::PathIterator,
-    makepad_derive_live::*,
-    makepad_shader_compiler::makepad_live_compiler::*,
     crate::{
+        makepad_derive_live::*,
+        makepad_live_compiler::*,
         cx::Cx,
         live_traits::*,
         shader::geometry_gen::GeometryQuad2D,

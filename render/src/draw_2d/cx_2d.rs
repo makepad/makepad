@@ -3,10 +3,10 @@ use {
         ops::Deref,
         ops::DerefMut
     },
-    makepad_shader_compiler::makepad_math::{
-        Vec2
-    },
     crate::{
+        makepad_math::{
+            Vec2
+        },
         event::{
             DrawEvent
         },

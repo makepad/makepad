@@ -1,8 +1,12 @@
 #![allow(unused)]
-use makepad_render::*;
-use crate::button_logic::*;
-use crate::frame_registry::*;
-use crate::register_as_frame_component;
+use {
+    crate::{
+        makepad_render::*,
+        button_logic::*,
+        frame_registry::*,
+        register_as_frame_component
+    }
+};
 
 live_register!{
     use makepad_render::shader::std::*;

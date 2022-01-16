@@ -1,13 +1,12 @@
 use {
     crate::{
+        makepad_micro_serde::*,
+        makepad_render::*,
         builder::{
             builder_protocol::{BuilderCmd, BuilderCmdWrap, BuilderMsgWrap, BuilderCmdId},
             builder_server::{BuilderConnection, BuilderServer},
         }
     },
-    makepad_component::makepad_render,
-    makepad_render::makepad_micro_serde::*,
-    makepad_render::*,
     std::{
         env,
         io::{Read, Write},

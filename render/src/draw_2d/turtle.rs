@@ -2,9 +2,8 @@ pub use {
     std::{
         any::TypeId,
     },
-    makepad_shader_compiler::makepad_live_compiler::*,
-    makepad_derive_live::*,
     crate::{
+        makepad_derive_live::*,
         area::Area,
         live_traits::*,
         draw_2d::cx_2d::Cx2d,

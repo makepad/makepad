@@ -3,16 +3,16 @@ use{
         cell::{RefCell, Cell},
         collections::{BTreeMap, BTreeSet, HashMap}
     },
-    makepad_live_compiler::{
-        live_error_origin,
-        id,
-        LiveRegistry,
-        LiveError,
-        LiveErrorOrigin,
-        LiveId,
-        TokenSpan
-    },
     crate::{
+        makepad_live_compiler::{
+            live_error_origin,
+            id,
+            LiveRegistry,
+            LiveError,
+            LiveErrorOrigin,
+            LiveId,
+            TokenSpan
+        },
         shader_ast::*,
         const_eval::ConstEvaluator,
         const_gather::ConstGatherer,

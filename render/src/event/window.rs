@@ -1,5 +1,7 @@
 use {
-    makepad_shader_compiler::makepad_math::*,
+    crate::{
+        makepad_math::*,
+    }
     //makepad_microserde::*,
 };
 

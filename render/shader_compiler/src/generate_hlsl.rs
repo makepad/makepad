@@ -4,11 +4,11 @@ use{
         fmt::Write,
         collections::{BTreeSet,BTreeMap},
     },
-    makepad_live_compiler::{
-        id,
-        LiveId,
-    },
     crate::{
+        makepad_live_compiler::{
+            id,
+            LiveId,
+        },
         generate::*,
         shader_ast::*,
         shader_registry::ShaderRegistry

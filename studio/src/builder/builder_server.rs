@@ -1,6 +1,8 @@
 #![allow(dead_code)]
 use {
     crate::{
+        makepad_micro_serde::*,
+        makepad_live_tokenizer::{Range},
         builder::{
             builder_protocol::*,
             child_process::{
@@ -9,10 +11,6 @@ use {
             },
             rustc_json::*,
         },
-    },
-    makepad_component::makepad_render::{
-        makepad_micro_serde::*,
-        makepad_live_tokenizer::{Range},
     },
     std::{
         fmt,

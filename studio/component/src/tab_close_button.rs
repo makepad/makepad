@@ -1,8 +1,8 @@
-use makepad_render::*;
+use crate::makepad_render::*;
 
 live_register!{
     use makepad_render::shader::std::*;
-    use crate::theme::*;
+    use makepad_component::theme::*;
     
     TabCloseButton: {{TabCloseButton}} {
         button_quad: {

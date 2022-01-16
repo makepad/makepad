@@ -3,10 +3,8 @@ use {
         fmt::Write,
         time::Instant,
     },
-    makepad_shader_compiler::makepad_math::{
-        Vec2
-    },
     crate::{
+        makepad_math::Vec2,
         cx::Cx,
         event::{
             DraggedItem,

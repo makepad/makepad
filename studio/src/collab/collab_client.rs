@@ -1,13 +1,12 @@
 use {
     crate::{
+        makepad_micro_serde::*,
+        makepad_render::*,
         collab::{
             collab_protocol::{CollabRequest, CollabClientAction},
             collab_server::{CollabConnection, CollabServer},
         }
     },
-    makepad_component::makepad_render,
-    makepad_render::makepad_micro_serde::*,
-    makepad_render::*,
     std::{
         env,
         io::{Read, Write},

@@ -4,13 +4,13 @@ use {
         ops::Deref,
         ops::DerefMut,
     },
-    makepad_math::Vec4,
-    makepad_live_tokenizer::{
-        LiveId,
-        Delim,
-        FullToken
-    },
     crate::{
+        makepad_math::Vec4,
+        makepad_live_tokenizer::{
+            LiveId,
+            Delim,
+            FullToken
+        },
         live_ptr::{LiveFileId},
         span::TextSpan
     }

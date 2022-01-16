@@ -1,9 +1,9 @@
 //use crate::id::Id;
 use {
     std::collections::{HashMap, HashSet, BTreeSet},
-    makepad_id_macros::*,
-    makepad_live_tokenizer::{Delim, TokenPos, TokenRange, TokenWithLen, FullToken, LiveId, State, Cursor},
     crate::{
+        makepad_id_macros::*,
+        makepad_live_tokenizer::{Delim, TokenPos, TokenRange, TokenWithLen, FullToken, LiveId, State, Cursor},
         live_error::{LiveError, LiveErrorSpan, LiveErrorOrigin, LiveFileError},
         live_parser::LiveParser,
         live_document::{LiveOriginal, LiveExpanded},

@@ -1,10 +1,12 @@
 use {
-    makepad_component::makepad_render,
-    makepad_render::makepad_live_tokenizer::{
-        delta::Delta,
-        text::Text
+    crate::{
+        makepad_live_tokenizer::{
+            delta::Delta,
+            text::Text
+        },
+        makepad_micro_serde::{SerBin, DeBin, DeBinErr},
+        makepad_render::*,
     },
-    makepad_render::{makepad_micro_serde::{SerBin, DeBin, DeBinErr}, *},
     std::{
         ffi::OsString,
         path::PathBuf

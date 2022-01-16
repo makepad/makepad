@@ -1,6 +1,10 @@
-use makepad_render::*;
-use crate::frame_registry::*;
-use std::collections::HashMap;
+use {
+    std::collections::HashMap,
+    crate::{
+        makepad_render::*,
+        frame_registry::*
+    }
+};
 
 live_register!{
     Frame: {{Frame}} {
