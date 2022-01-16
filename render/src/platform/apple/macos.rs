@@ -50,6 +50,7 @@ impl Cx {
         self.redraw_all();
         
         let mut passes_todo = Vec::new();
+        let mut repaint_finish = 0;
         
         cocoa_app.event_loop( | cocoa_app, events | {
             
@@ -204,7 +205,7 @@ impl Cx {
                         
                         // build a list of renderpasses to repaint
                         let mut windows_need_repaint = 0;
-                        self.compute_passes_to_repaint(&mut passes_todo, &mut windows_need_repaint);
+                        self.compute_passes_to_repaint(&mut passes_todo, &mut windows_need_repaint, &mut repaint_finish);
                         
                         if passes_todo.len() > 0 {
                             self.repaint_id += 1;
@@ -216,7 +217,6 @@ impl Cx {
                                         windows_need_repaint -= 1;
                                         for metal_window in &mut metal_windows {if metal_window.window_id == window_id {
                                             let dpi_factor = metal_window.window_geom.dpi_factor;
-                                            
                                             metal_window.resize_core_animation_layer(&metal_cx);
                                             
                                             self.draw_pass_to_layer(
@@ -226,15 +226,6 @@ impl Cx {
                                                 &mut metal_cx,
                                                 metal_window.is_resizing
                                             );
-                                            
-                                            // call redraw if we guessed the dpi wrong on startup
-                                            /*
-                                            if metal_window.first_draw {
-                                                metal_window.first_draw = false;
-                                                if dpi_factor != self.default_dpi_factor {
-                                                    self.redraw_pass_and_child_passes(*pass_id);
-                                                }
-                                            }*/
                                         }}
                                         
                                     }
@@ -290,7 +281,7 @@ impl Cx {
             
             self.process_live_style_errors();
             */
-            if self.need_redrawing() || self.new_next_frames.len() != 0 || paint_dirty {
+            if self.need_redrawing() || self.new_next_frames.len() != 0 || paint_dirty || repaint_finish != 0{
                 false
             } else {
                 true

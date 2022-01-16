@@ -20,6 +20,7 @@ use {
     }
 };
 
+const REPAINT_FINISH: usize = 0;
 
 impl Cx {
     
@@ -40,7 +41,7 @@ impl Cx {
     }
     
     
-    pub (crate) fn compute_passes_to_repaint(&mut self, passes_todo: &mut Vec<usize>, windows_need_repaint: &mut usize) {
+    pub (crate) fn compute_passes_to_repaint(&mut self, passes_todo: &mut Vec<usize>, windows_need_repaint: &mut usize, repaint_finish: &mut usize) {
         passes_todo.clear();
         
         // we need this because we don't mark the entire deptree of passes dirty every small paint
@@ -72,8 +73,9 @@ impl Cx {
                 let mut inserted = false;
                 match cxpass.parent {
                     CxPassParent::Window(_) => {
-                        *windows_need_repaint += 1
-                    },
+                        *windows_need_repaint += 1;
+                        *repaint_finish = REPAINT_FINISH;
+                    }, 
                     CxPassParent::Pass(dep_of_pass_id) => {
                         if pass_id == dep_of_pass_id {
                             panic!()
@@ -95,6 +97,23 @@ impl Cx {
                     passes_todo.push(pass_id);
                 }
             }
+        }
+        
+        for (pass_id, cxpass) in self.passes.iter().enumerate() {
+            if *repaint_finish > 0 {
+                match cxpass.parent {
+                    CxPassParent::Window(_) => {
+                        if !passes_todo.iter().any(|check_pass| *check_pass == pass_id){
+                            passes_todo.push(pass_id);
+                            *windows_need_repaint += 1;
+                        }
+                    },
+                    _=>()
+                }
+            }
+        }
+        if *repaint_finish > 0{
+            *repaint_finish -= 1;
         }
     }
     
