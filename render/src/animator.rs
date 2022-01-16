@@ -528,7 +528,7 @@ impl Animator {
                     }
                 }
             }
-            
+            //println!("{}", state_nodes.to_string(0,100));
             if !ended {
                 self.next_frame = cx.new_next_frame();
             }
