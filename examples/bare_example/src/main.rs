@@ -52,7 +52,7 @@ impl App {
                     out.push_live(live_object!{
                         [id_num!(btn, i)]: Button {
                             label: (format!("B{}", i + self.offset))
-                        },
+                        }
                     });
                 }
                 out.close();
