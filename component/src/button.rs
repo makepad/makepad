@@ -92,7 +92,7 @@ live_register!{
     }
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live)]
 #[live_register( | cx: &mut Cx | {
     register_as_frame_component!(cx, Button);
 })]
@@ -113,6 +113,12 @@ struct DrawLabelText {
     deref_target: DrawText,
     hover: f32,
     pressed: f32,
+}
+
+impl LiveHook for Button{
+    fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+        //cx.debug_draw_tree(true, 0);
+    }
 }
 
 impl FrameComponent for Button {

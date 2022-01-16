@@ -89,6 +89,7 @@ impl Cx {
                     self.platform.bytes_written += draw_call.instances.as_ref().unwrap().len() * 4;
                     draw_call.platform.instance_buffer.next();
                     draw_call.platform.instance_buffer.get_mut().cpu_write().update(metal_cx, &draw_call.instances.as_ref().unwrap());
+                    println!("{:?}", draw_call.instances);
                 }
                 
                 // update the zbias uniform if we have it.
