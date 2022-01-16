@@ -1,5 +1,5 @@
 use {
-    makepad_component::makepad_render::{
+    crate::{
         makepad_live_tokenizer::{Range},
         makepad_micro_serde::{SerBin, DeBin, DeBinErr},
     }

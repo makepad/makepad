@@ -4,9 +4,8 @@ use {
    //     fs::File,
         io,
     },
-    makepad_shader_compiler::makepad_math::Vec2,
-
     crate::{
+        makepad_math::Vec2,
         event::{
             Event,
             //KeyCode,

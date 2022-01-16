@@ -1,7 +1,9 @@
-use makepad_render::*;
-use crate::desktop_button::*;
-use crate::window_menu::*;
-use crate::button_logic::*;
+use crate::{
+    makepad_render::*,
+    desktop_button::*,
+    window_menu::*,
+    button_logic::*,
+};
 
 live_register!{
     use crate::theme::*;

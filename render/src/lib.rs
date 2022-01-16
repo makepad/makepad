@@ -32,11 +32,15 @@ mod draw_list;
 mod shader;
 
 pub use {
-    makepad_shader_compiler::makepad_derive_live::*,
+    makepad_shader_compiler,
+    makepad_shader_compiler::makepad_derive_live,
+    makepad_shader_compiler::makepad_math,
     makepad_shader_compiler::makepad_live_tokenizer,
     makepad_shader_compiler::makepad_micro_serde,
+    makepad_shader_compiler::makepad_live_compiler,
+    makepad_derive_live::*,
     //makepad_microserde::*,
-    makepad_shader_compiler::makepad_live_compiler::{
+    makepad_live_compiler::{
         vec4_ext::*,
         live_error_origin,
         LiveErrorOrigin,
@@ -73,8 +77,6 @@ pub use {
         LiveNodeSlice,
         LiveNodeVec,
     },
-    makepad_shader_compiler,
-    makepad_shader_compiler::makepad_live_compiler,
     makepad_shader_compiler::{
         ShaderRegistry,
         ShaderEnum,

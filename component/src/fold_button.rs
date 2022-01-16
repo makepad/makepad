@@ -1,6 +1,8 @@
 #![allow(unused)]
-use makepad_render::*;
-use crate::button_logic::*;
+use crate::{
+    makepad_render::*,
+    button_logic::*
+};
 
 live_register!{
     use makepad_render::shader::std::*;

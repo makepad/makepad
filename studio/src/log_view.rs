@@ -1,11 +1,14 @@
 use {
     crate::{
-        editor_state::EditorState
+        makepad_studio_component::{
+            log_list::{LogList, LogListAction}
+        },
+        makepad_render::*,
+        editor_state::EditorState,
+        //builder::{
+        //    builder_protocol::BuilderMsg,
+        //}
     },
-    makepad_component::{
-        fold_list::{FoldList, FoldListAction}
-    },
-    makepad_component::makepad_render::*,
 };
 
 live_register!{
@@ -17,7 +20,7 @@ live_register!{
 
 #[derive(Live, LiveHook)]
 pub struct LogView {
-    fold_list: FoldList
+    log_list: LogList
 }
 
 pub enum LogViewAction {
@@ -26,15 +29,36 @@ pub enum LogViewAction {
 
 impl LogView {
     pub fn redraw(&mut self, cx:&mut Cx){
-        self.fold_list.redraw(cx)
+        self.log_list.redraw(cx)
     }
     
-    pub fn draw(&mut self, cx: &mut Cx2d, _editor_state: &EditorState) {
-        if self.fold_list.begin(cx).is_ok(){
-            for i in 0..100{
-                self.fold_list.draw_node(cx, id_num!(test,i).into(), "this is a clickable link", true);
+    pub fn draw(&mut self, cx: &mut Cx2d, state: &EditorState) {
+        let mut file = String::new();
+        let mut body = String::new();
+        if self.log_list.begin(cx).is_ok(){
+            for (index,msg) in state.messages.iter().enumerate(){
+                if self.log_list.should_node_draw(cx){
+                    file.clear();
+                    body.clear();
+                    
+                    /*let id = id_num!(msg, index).into();
+                    match msg{
+                        BuilderMsg::Bare(msg)=>{
+                            write!(file, "")
+                        }
+                        BuilderMsg::Location(msg)=>{
+                            
+                        }
+                    }*/
+                    //let title = format!("{}", )
+                    //self.fold_list.draw_node(cx, , )
+                }
+                
+                //self.log_list.draw_node(cx, id_num!(test,i).into(), "this is a clickable link", true);
             }
-            self.fold_list.end(cx);
+            //for i in 0..100{
+            // }
+            self.log_list.end(cx);
         }
     }
     
@@ -42,9 +66,9 @@ impl LogView {
         &mut self,
         cx: &mut Cx,
         event: &mut Event,
-        _dispatch_action: &mut dyn FnMut(&mut Cx, FoldListAction),
+        _dispatch_action: &mut dyn FnMut(&mut Cx, LogListAction),
     ) {
-        self.fold_list.handle_event_with_fn(cx, event, &mut |_cx, _action|{
+        self.log_list.handle_event_with_fn(cx, event, &mut |_cx, _action|{
             
         })
     }

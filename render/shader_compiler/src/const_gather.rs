@@ -1,9 +1,9 @@
 use{
     std::cell::Cell,
-    makepad_live_compiler::{
-        TokenSpan
-    },
     crate::{
+         makepad_live_compiler::{
+            TokenSpan
+        },
         shader_ast::*,
     }
 };

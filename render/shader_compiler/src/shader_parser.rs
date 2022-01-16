@@ -1,12 +1,12 @@
 use {
-    makepad_live_compiler::*,
-    makepad_live_compiler::makepad_live_tokenizer::Delim,
     std::{
         iter::Cloned,
         slice::Iter,
         cell::{Cell, RefCell}
     },
     crate::{
+        makepad_live_compiler::*,
+        makepad_live_compiler::makepad_live_tokenizer::Delim,
         shader_ast::*,
         shader_registry::{ShaderRegistry, LiveNodeFindResult}
     }

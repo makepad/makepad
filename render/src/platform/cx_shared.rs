@@ -1,9 +1,7 @@
 use {
     std::collections::{HashMap, HashSet},
-    makepad_shader_compiler::makepad_math::{
-        Vec2,
-    },
     crate::{
+        makepad_math::Vec2,
         cx::Cx,
         pass::{
             CxPassParent
