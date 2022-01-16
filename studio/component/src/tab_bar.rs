@@ -1,15 +1,18 @@
 use {
+    
     crate::{
-        component_map::ComponentMap,
+        makepad_render::*,
+        makepad_component::{
+            component_map::ComponentMap,
+            scroll_view::ScrollView
+        },
         tab::{TabAction, Tab},
-        scroll_view::ScrollView
     },
-    makepad_render::*,
 };
 
 live_register!{
     use crate::tab::Tab;
-    use crate::theme::*;
+    use makepad_component::theme::*;
     
     TabBar: {{TabBar}} {
         tab: Tab {}
@@ -17,7 +20,7 @@ live_register!{
             draw_depth: 10
             color: #c
         }
-        bar_fill:{
+        bar_fill: {
             color: (COLOR_TAB_BG_UNSELECTED)
         }
         scroll_view: {
@@ -45,9 +48,9 @@ pub struct TabBar {
     
     scroll_view: ScrollView,
     draw_drag: DrawColor,
-
+    
     bar_fill: DrawColor,
-
+    
     tab: Option<LivePtr>,
     
     #[rust] tab_order: Vec<TabId>,
@@ -56,15 +59,15 @@ pub struct TabBar {
     #[rust] tabs: ComponentMap<TabId, Tab>,
     
     #[rust] selected_tab: Option<usize>,
-
+    
     #[rust] selected_tab_id: Option<TabId>,
     #[rust] next_selected_tab_id: Option<TabId>,
 }
 
 
-impl LiveHook for TabBar{
+impl LiveHook for TabBar {
     fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        if let Some(index) = nodes.child_by_name(index, id!(tab)){
+        if let Some(index) = nodes.child_by_name(index, id!(tab)) {
             for tab in self.tabs.values_mut() {
                 tab.apply(cx, apply_from, index, nodes);
             }
@@ -74,11 +77,11 @@ impl LiveHook for TabBar{
 }
 
 impl TabBar {
-    pub fn begin(&mut self, cx: &mut Cx2d, selected_tab:Option<usize>) -> Result<(), ()> {
+    pub fn begin(&mut self, cx: &mut Cx2d, selected_tab: Option<usize>) -> Result<(), ()> {
         self.selected_tab = selected_tab;
         //if selected_tab.is_some(){
         //    self.selected_tab_id = None
-       // }
+        // }
         self.scroll_view.begin(cx) ?;
         self.tab_order.clear();
         Ok(())
@@ -101,32 +104,32 @@ impl TabBar {
     }
     
     pub fn draw_tab(&mut self, cx: &mut Cx2d, tab_id: TabId, name: &str) {
-        if let Some(selected_tab) = self.selected_tab{
+        if let Some(selected_tab) = self.selected_tab {
             let tab_order_len = self.tab_order.len();
             let tab = self.get_or_create_tab(cx, tab_id);
-            if tab_order_len  == selected_tab{
+            if tab_order_len == selected_tab {
                 tab.set_is_selected(cx, true, Animate::No);
             }
-            else{
+            else {
                 tab.set_is_selected(cx, false, Animate::No);
             }
             tab.draw(cx, name);
-            if tab_order_len == selected_tab{
+            if tab_order_len == selected_tab {
                 self.selected_tab_id = Some(tab_id);
             }
             self.tab_order.push(tab_id);
         }
-        else{
-            self.tab_order.push(tab_id); 
+        else {
+            self.tab_order.push(tab_id);
             let tab = self.get_or_create_tab(cx, tab_id);
             tab.draw(cx, name);
         }
     }
     
-    fn get_or_create_tab(&mut self, cx:&mut Cx, tab_id: TabId)->&mut Tab{
+    fn get_or_create_tab(&mut self, cx: &mut Cx, tab_id: TabId) -> &mut Tab {
         let tab = self.tab;
-        self.tabs.get_or_insert(cx, tab_id, |cx|{
-             Tab::new_from_option_ptr(cx, tab)
+        self.tabs.get_or_insert(cx, tab_id, | cx | {
+            Tab::new_from_option_ptr(cx, tab)
         })
     }
     
@@ -163,8 +166,8 @@ impl TabBar {
             else if index + 1 < self.tab_order.len() {
                 self.next_selected_tab_id = Some(self.tab_order[index + 1]);
                 self.set_selected_tab_id(cx, self.next_selected_tab_id, animate);
-            } 
-            else{
+            }
+            else {
                 self.set_selected_tab_id(cx, None, animate);
             }
             cx.new_next_frame();
@@ -219,19 +222,19 @@ impl TabBar {
                 },
             },
             DragEvent::FingerDrop(f) => {
-                self.is_dragged = false; 
+                self.is_dragged = false;
                 self.redraw(cx);
                 dispatch_action(cx, TabBarAction::ReceivedDraggedItem(f.dragged_item.clone()))
             }
             _ => {}
-        } 
+        }
     }
 }
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq)]
 pub struct TabId(pub LiveId);
-impl From<LiveId> for TabId{
-    fn from(live_id:LiveId)->TabId{TabId(live_id)}
+impl From<LiveId> for TabId {
+    fn from(live_id: LiveId) -> TabId {TabId(live_id)}
 }
 
 pub enum TabBarAction {

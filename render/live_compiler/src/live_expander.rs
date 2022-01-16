@@ -1,7 +1,7 @@
 use {
-    makepad_id_macros::*,
-    makepad_live_tokenizer::LiveId,
     crate::{
+        makepad_id_macros::*,
+        makepad_live_tokenizer::LiveId,
         live_ptr::{LiveFileId, LivePtr, LiveFileGeneration},
         live_error::{LiveError, LiveErrorOrigin},
         live_document::{LiveOriginal, LiveExpanded},

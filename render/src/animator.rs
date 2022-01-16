@@ -1,9 +1,8 @@
 
 use {
     std::f64::consts::PI,
-    makepad_shader_compiler::makepad_live_compiler::*,
-    makepad_derive_live::*,
     crate::{
+        makepad_derive_live::*,
         event::NextFrame,
         cx::Cx,
         live_traits::*,

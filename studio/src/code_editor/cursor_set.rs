@@ -1,20 +1,21 @@
 use {
     crate::{
+        makepad_live_tokenizer::{
+            delta::Delta,
+            position::Position,
+            position_set,
+            position_set::PositionSet,
+            range::Range,
+            range_set,
+            range_set::RangeSet,
+            size::Size,
+            text::Text,
+        },
         code_editor::{
             cursor::Cursor,
         },
     },
-    makepad_component::makepad_render::makepad_live_tokenizer::{
-        delta::Delta,
-        position::Position,
-        position_set,
-        position_set::PositionSet,
-        range::Range,
-        range_set,
-        range_set::RangeSet,
-        size::Size,
-        text::Text,
-    },
+    
     std::slice,
 };
 

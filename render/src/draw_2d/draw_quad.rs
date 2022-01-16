@@ -1,7 +1,6 @@
 use {
-    makepad_shader_compiler::makepad_live_compiler::*,
-    makepad_derive_live::*,
     crate::{
+        makepad_derive_live::*,
         cx::Cx,
         draw_2d::cx_2d::Cx2d,
         live_traits::*,

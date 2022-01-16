@@ -1,5 +1,9 @@
-use makepad_render::*;
-use crate::button_logic::*;
+use {
+    crate::{
+        makepad_render::*,
+        button_logic::*
+    }
+};
 
 live_register!{
     use makepad_render::shader::std::*;
@@ -150,7 +154,7 @@ impl DesktopButton {
     pub fn handle_desktop_button(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonAction {
         self.animator_handle_event(cx, event);
         let res = self.button_logic.handle_event(cx, event, self.bg.draw_vars.area);
-       // println!("{:?}", res.state);
+        // println!("{:?}", res.state);
         match res.state {
             ButtonState::Pressed => self.animate_to(cx, self.pressed_state),
             ButtonState::Default => self.animate_to(cx, self.default_state),

@@ -3,8 +3,8 @@ pub use {
         rc::Rc,
         cell::RefCell
     },
-    makepad_shader_compiler::makepad_live_compiler::*,
     crate::{
+        makepad_live_compiler::*,
         cx::Cx,
         platform::{CxPlatformTexture},
         live_traits::*

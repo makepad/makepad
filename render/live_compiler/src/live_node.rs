@@ -4,13 +4,13 @@ use {
         ops::Deref,
         ops::DerefMut,
     },
-    makepad_math::{
-        Vec2,
-        Vec3,
-        Vec4
-    },
-    makepad_live_tokenizer::{LiveId},
     crate::{
+        makepad_math::{
+            Vec2,
+            Vec3,
+            Vec4
+        },
+        makepad_live_tokenizer::{LiveId},
         live_ptr::{LiveModuleId, LivePtr},
         live_token::{LiveToken, LiveTokenId},
     }

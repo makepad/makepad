@@ -1,5 +1,9 @@
-use makepad_render::*;
-use crate::frame_registry::*;
+use{
+    crate::{
+        makepad_render::*,
+        frame_registry::*
+    }
+};
 
 #[derive(Default, Clone)]
 pub struct ButtonLogic {

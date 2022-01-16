@@ -8,17 +8,17 @@ use {
         rc::Rc,
         rc::Weak,
         cell::RefCell,
-   },
-    makepad_shader_compiler::makepad_live_compiler::{
-        id,
-        LiveId,
-        LiveEditEvent,
-        LiveRegistry
-    },
-    makepad_shader_compiler::{
-        ShaderRegistry
     },
     crate::{
+        makepad_live_compiler::{
+            id,
+            LiveId,
+            LiveEditEvent,
+            LiveRegistry
+        },
+        makepad_shader_compiler::{
+            ShaderRegistry
+        },  
         cx_registries::{
             CxRegistries
         },

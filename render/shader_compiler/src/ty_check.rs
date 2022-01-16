@@ -6,8 +6,8 @@ use{
         fmt::Write,
         rc::Rc,
     },
-    makepad_live_compiler::*,
     crate::{
+        makepad_live_compiler::*,
         shader_ast::*,
         lhs_check::LhsChecker,
         swizzle::Swizzle,

@@ -4,10 +4,10 @@ use {
         time::Instant,
         os::raw::{c_void}
     },
-    makepad_shader_compiler::makepad_math::{
-        Vec2,
-    },
     crate::{
+        makepad_math::{
+            Vec2,
+        },
         platform::{
             apple::frameworks::*,
             cocoa_app::CocoaApp,

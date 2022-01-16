@@ -1,10 +1,9 @@
 use {
-    makepad_shader_compiler::makepad_live_compiler::*,
-    makepad_derive_live::*,
-    makepad_shader_compiler::{
-        ShaderTy,
-    },
     crate::{
+        makepad_derive_live::*,
+        makepad_shader_compiler::{
+            ShaderTy,
+        },
         cx::Cx,
         draw_2d::cx_2d::Cx2d,
         live_traits::*,
@@ -17,7 +16,7 @@ use {
 };
 
 live_register!{
-
+    
     DrawText: {{DrawText}} {
         //debug: true;
         wrapping: Wrapping::None
@@ -31,8 +30,8 @@ live_register!{
         
         uniform brightness: float
         uniform curve: float
-
-        texture tex:texture2d
+        
+        texture tex: texture2d
         
         varying tex_coord1: vec2
         varying tex_coord2: vec2
@@ -203,8 +202,8 @@ impl DrawText {
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
         }
     }
-
-    pub fn new_draw_call(&self, cx:&mut Cx2d){
+    
+    pub fn new_draw_call(&self, cx: &mut Cx2d) {
         cx.new_draw_call(&self.draw_vars);
     }
     

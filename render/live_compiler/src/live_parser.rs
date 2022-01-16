@@ -3,15 +3,14 @@ use {
         iter::Cloned,
         slice::Iter
     },
-    makepad_live_tokenizer::{LiveId,Delim},
-    makepad_id_macros::*,
-    makepad_math::{
-        Vec2,
-        Vec3,
-        Vec4
-    },
     crate::{
-        live_token::{LiveToken, TokenWithSpan, LiveTokenId},
+        makepad_live_tokenizer::{LiveId,Delim},
+        makepad_id_macros::*,
+        makepad_math::{
+            Vec2,
+            Vec3,
+            Vec4
+        },        live_token::{LiveToken, TokenWithSpan, LiveTokenId},
         live_ptr::{LiveFileId, LiveModuleId},
         span::{TextSpan, TextPos},
         live_error::{LiveError, LiveErrorOrigin},

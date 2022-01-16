@@ -10,6 +10,6 @@ license = "MIT"
 
 [dependencies.makepad-render]
 path = "../render"
-version = "0.2"
+version = "0.1"
 
 

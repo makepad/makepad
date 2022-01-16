@@ -1,12 +1,12 @@
 use {
     crate::{
+        makepad_render::*,
         app_inner::AppInner,
         app_state::AppState,
         design_editor::{
             inline_widget::InlineWidgetRegistry
         }
     },
-    makepad_component::makepad_render::*,
 };
 
 live_register!{
@@ -35,7 +35,7 @@ pub struct App {
 impl App {
     
     pub fn live_register(cx: &mut Cx) {
-        makepad_component::live_register(cx);
+        makepad_studio_component::live_register(cx);
         crate::builder::builder_client::live_register(cx);
         crate::collab::collab_client::live_register(cx);
         crate::design_editor::live_register(cx);

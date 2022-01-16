@@ -1,7 +1,9 @@
 #![allow(dead_code)]
 
 use{
-    makepad_live_tokenizer::LiveId,
+    crate::{
+        makepad_live_tokenizer::LiveId,
+    },
     std::fmt,
 };
  

@@ -1,7 +1,6 @@
 use {
-    makepad_shader_compiler::makepad_math::Vec2,
-    
     crate::{
+        makepad_math::Vec2,
         platform::{
             cocoa_app::CocoaApp,
             cx_desktop::CxDesktop,

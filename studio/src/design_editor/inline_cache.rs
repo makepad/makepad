@@ -1,20 +1,21 @@
 use {
-    makepad_component::makepad_render,
-    makepad_render::makepad_live_tokenizer::{
-        delta::{Delta, OperationRange},
-        text::Text,
-        full_token::{Delim, FullToken},
-        tokenizer::{TokenRange, TokenPos}
-    },
-    crate::code_editor::{
-        token_cache::TokenCache,
+    crate::{
+        makepad_render::*,
+        makepad_live_tokenizer::{
+            delta::{Delta, OperationRange},
+            text::Text,
+            full_token::{Delim, FullToken},
+            tokenizer::{TokenRange, TokenPos}
+        },
+        makepad_live_compiler::{LiveTokenId, LiveToken, TextPos, LivePtr},
+        code_editor::{
+            token_cache::TokenCache,
+        },
     },
     std::{
         ops::{Deref, DerefMut, Index},
         slice::Iter,
     },
-    makepad_render::makepad_live_compiler::{LiveTokenId, LiveToken, TextPos, LivePtr},
-    makepad_render::*,
 };
 
 #[derive(Debug, Clone, Copy)]

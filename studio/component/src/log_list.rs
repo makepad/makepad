@@ -3,20 +3,22 @@ use {
         collections::{HashSet},
     },
     crate::{
-        component_map::ComponentMap,
-        fold_button::FoldButton,
-        button::Button,
-        scroll_view::ScrollView
+        makepad_component::{
+            component_map::ComponentMap,
+            fold_button::FoldButton,
+            button::Button,
+            scroll_view::ScrollView,
+        },
+        makepad_render::*,
+        log_icon::DrawLogIconQuad
     },
-    makepad_render::*,
 };
 
 live_register!{
     use makepad_render::shader::std::*;
-    use crate::theme::*;
+    use makepad_component::theme::*;
     
     DrawBgQuad: {{DrawBgQuad}} {
-        
         fn pixel(self) -> vec4 {
             return mix(
                 mix(
@@ -44,42 +46,7 @@ live_register!{
         }
     }
     
-    DrawIconQuad: {{DrawIconQuad}} {
-        fn pixel(self) -> vec4 {
-            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-            let w = self.rect_size.x;
-            let h = self.rect_size.y;
-            sdf.box(0. * w, 0.35 * h, 0.87 * w, 0.39 * h, 0.75);
-            sdf.box(0. * w, 0.28 * h, 0.5 * w, 0.3 * h, 1.);
-            sdf.union();
-            return sdf.fill(COLOR_ICON);
-        }
-    }
-    
-    FoldListNode: {{FoldListNode}} {
-        
-        link_button: {
-            bg_quad: {
-                const THICKNESS: 0.8
-                fn pixel(self) -> vec4 {
-                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                    let offset_y = 1.0
-                    sdf.move_to(0., self.rect_size.y - offset_y);
-                    sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
-                    return sdf.stroke(#f, mix(0.0, THICKNESS, self.hover));
-                }
-            }
-            
-            layout: {
-                align: {fx: 0.5, fy: 0.5},
-                walk: {
-                    width: Width::Computed,
-                    height: Height::Computed,
-                    margin: Margin{left: 5.0, top:5.0}
-                }
-                padding: {left: 1.0, top: 1.0, right: 1.0, bottom: 1.0}
-            }
-        }
+    LogListNode: {{LogListNode}} {
         
         layout: {
             walk: {
@@ -139,9 +106,9 @@ live_register!{
         min_drag_distance: 10.0
     }
     
-    FoldList: {{FoldList}} {
+    LogList: {{LogList}} {
         node_height: 20.0,
-        fold_node: FoldListNode {}
+        fold_node: LogListNode {}
         scroll_view: {
             view: {
                 layout: {direction: Direction::Down}
@@ -170,19 +137,10 @@ struct DrawNameText {
     opened: f32,
 }
 
-#[derive(Live, LiveHook)]#[repr(C)]
-struct DrawIconQuad {
-    deref_target: DrawQuad,
-    is_even: f32,
-    selected: f32,
-    hover: f32,
-    opened: f32,
-}
-
 #[derive(Live, LiveHook)]
-pub struct FoldListNode {
+pub struct LogListNode {
     bg_quad: DrawBgQuad,
-    icon_quad: DrawIconQuad,
+    icon_quad: DrawLogIconQuad,
     name_text: DrawNameText,
     layout: Layout,
     
@@ -209,7 +167,7 @@ pub struct FoldListNode {
 }
 
 #[derive(Live)]
-pub struct FoldList {
+pub struct LogList {
     scroll_view: ScrollView,
     fold_node: Option<LivePtr>,
     
@@ -217,16 +175,16 @@ pub struct FoldList {
     
     node_height: f32,
     
-    #[rust] selected_node_ids: HashSet<FoldListNodeId>,
-    #[rust] open_nodes: HashSet<FoldListNodeId>,
+    #[rust] selected_node_ids: HashSet<LogListNodeId>,
+    #[rust] open_nodes: HashSet<LogListNodeId>,
     
-    #[rust] fold_nodes: ComponentMap<FoldListNodeId, FoldListNode>,
+    #[rust] fold_nodes: ComponentMap<LogListNodeId, LogListNode>,
     
     #[rust] count: usize,
     #[rust] stack: Vec<f32>,
 }
 
-impl LiveHook for FoldList {
+impl LiveHook for LogList {
     fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         if let Some(index) = nodes.child_by_name(index, id!(log_node)) {
             for (_, node) in self.fold_nodes.iter_mut() {
@@ -237,7 +195,7 @@ impl LiveHook for FoldList {
     }
 }
 
-pub enum FoldNodeAction {
+pub enum LogNodeAction {
     Opening,
     Closing,
     WasClicked,
@@ -245,38 +203,41 @@ pub enum FoldNodeAction {
     None
 }
 
-pub enum FoldListAction {
-    WasClicked(FoldListNodeId),
+pub enum LogListAction {
+    WasClicked(LogListNodeId),
     None,
 }
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
-pub struct FoldListNodeId(pub LiveId);
+pub struct LogListNodeId(pub LiveId);
 
-impl FoldListNode {
+impl LogListNode {
     pub fn set_draw_state(&mut self, is_even: f32) {
         self.bg_quad.is_even = is_even;
         self.name_text.is_even = is_even;
-        self.icon_quad.is_even = is_even;
     }
     
-    pub fn draw_node(&mut self, cx: &mut Cx2d, name: &str, is_even: f32, node_height: f32, _depth: usize) {
+    pub fn draw_node(
+        &mut self,
+        cx: &mut Cx2d,
+        link: &str,
+        body: &str,
+        is_even: f32,
+        node_height: f32,
+        _depth: usize
+    ) {
         self.set_draw_state(is_even);
-        
         self.layout.walk.height = Height::Fixed(node_height);
-        
         self.bg_quad.begin(cx, self.layout);
-        
-        //cx.walk_turtle(self.indent_walk(depth));
         
         // lets draw a fold button
         self.fold_button.draw(cx);
         cx.turtle_align_y();
         
-        self.link_button.draw(cx, Some(name));
+        self.link_button.draw(cx, Some(link));
         cx.turtle_align_y();
         
-        self.name_text.draw_walk(cx, "rest");
+        self.name_text.draw_walk(cx, body);
         self.bg_quad.end(cx);
     }
     
@@ -305,7 +266,7 @@ impl FoldListNode {
         &mut self,
         cx: &mut Cx,
         event: &mut Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, FoldNodeAction),
+        dispatch_action: &mut dyn FnMut(&mut Cx, LogNodeAction),
     ) {
         if self.animator_handle_event(cx, event).must_redraw() {
             self.bg_quad.draw_vars.redraw(cx);
@@ -332,7 +293,7 @@ impl FoldListNode {
             }
             HitEvent::FingerMove(f) => {
                 if f.abs.distance(&f.abs_start) >= self.min_drag_distance {
-                    dispatch_action(cx, FoldNodeAction::ShouldStartDragging);
+                    dispatch_action(cx, LogNodeAction::ShouldStartDragging);
                 }
             }
             HitEvent::FingerDown(_) => {
@@ -346,7 +307,7 @@ impl FoldListNode {
                     self.animate_to(cx, self.opened_state);
                     dispatch_action(cx, FoldNodeAction::Opening);
                 }*/
-                dispatch_action(cx, FoldNodeAction::WasClicked);
+                dispatch_action(cx, LogNodeAction::WasClicked);
             }
             _ => {}
         }
@@ -354,7 +315,7 @@ impl FoldListNode {
 }
 
 
-impl FoldList {
+impl LogList {
     
     pub fn begin(&mut self, cx: &mut Cx2d) -> Result<(), ()> {
         self.scroll_view.begin(cx) ?;
@@ -389,32 +350,33 @@ impl FoldList {
     pub fn draw_node(
         &mut self,
         cx: &mut Cx2d,
-        node_id: FoldListNodeId,
-        name: &str,
+        node_id: LogListNodeId,
+        file: &str,
+        body: &str,
         _has_open: bool
     ) -> f32 {
         self.count += 1;
         
         let is_open = self.open_nodes.contains(&node_id);
         
-        if self.should_node_draw(cx) {
-            let fold_node = self.fold_node;
-            let node = self.fold_nodes.get_or_insert(cx, node_id, | cx | {
-                let mut node = FoldListNode::new_from_option_ptr(cx, fold_node);
-                if is_open {
-                    node.set_is_open(cx, true, Animate::No)
-                }
-                node
-            });
-            
-            node.draw_node(cx, name, Self::is_even(self.count), self.node_height, self.stack.len());
-            
-            if node.opened == 0.0 {
-                return 0.0;
+        // if self.should_node_draw(cx) {
+        let fold_node = self.fold_node;
+        let node = self.fold_nodes.get_or_insert(cx, node_id, | cx | {
+            let mut node = LogListNode::new_from_option_ptr(cx, fold_node);
+            if is_open {
+                node.set_is_open(cx, true, Animate::No)
             }
-            return node.opened;
+            node
+        });
+        
+        node.draw_node(cx, file, body, Self::is_even(self.count), self.node_height, self.stack.len());
+        
+        if node.opened == 0.0 {
+            return 0.0;
         }
-        return 0.0;
+        return node.opened;
+        //}
+        //return 0.0;
     }
     
     
@@ -534,7 +496,7 @@ impl FoldList {
         &mut self,
         cx: &mut Cx,
         event: &mut Event,
-        _dispatch_action: &mut dyn FnMut(&mut Cx, FoldListAction),
+        _dispatch_action: &mut dyn FnMut(&mut Cx, LogListAction),
     ) {
         if self.scroll_view.handle_event(cx, event) {
             self.scroll_view.redraw(cx);
@@ -547,16 +509,16 @@ impl FoldList {
         
         for (node_id, action) in actions {
             match action {
-                FoldNodeAction::Opening => {
+                LogNodeAction::Opening => {
                     self.open_nodes.insert(node_id);
                 }
-                FoldNodeAction::Closing => {
+                LogNodeAction::Closing => {
                     self.open_nodes.remove(&node_id);
                 }
-                FoldNodeAction::WasClicked => {
+                LogNodeAction::WasClicked => {
                     //dispatch_action(cx, FileTreeAction::WasClicked(node_id));
                 }
-                FoldNodeAction::ShouldStartDragging => {
+                LogNodeAction::ShouldStartDragging => {
                     //if self.dragging_node_id.is_none() {
                     //    dispatch_action(cx, FileTreeAction::ShouldStartDragging(node_id));
                     // }

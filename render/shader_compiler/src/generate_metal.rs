@@ -4,8 +4,8 @@ use {
         fmt,
         collections::{BTreeMap, BTreeSet}
     },
-    makepad_live_compiler::*,
     crate::{
+        makepad_live_compiler::*,
         shader_ast::*,
         generate::*,
         shader_registry::ShaderRegistry,

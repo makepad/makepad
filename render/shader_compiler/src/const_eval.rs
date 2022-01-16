@@ -1,12 +1,12 @@
 use{
     std::cell::Cell,
-    makepad_live_compiler::{
-        LiveError,
-        LiveErrorOrigin,
-        live_error_origin,
-        TokenSpan
-    },
     crate::{
+        makepad_live_compiler::{
+            LiveError,
+            LiveErrorOrigin,
+            live_error_origin,
+            TokenSpan
+        },
         shader_ast::*,
         analyse::ShaderAnalyseOptions
     }

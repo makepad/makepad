@@ -1,5 +1,10 @@
 use {
     crate::{
+        makepad_render::*,
+        makepad_live_tokenizer::{
+            delta::Delta,
+            text::Text
+        },
         collab::{
             collab_protocol::{
                 DirectoryEntry,
@@ -13,14 +18,7 @@ use {
             },
         },
     },
-    makepad_component::makepad_render::{
-        makepad_live_tokenizer::{
-            delta::Delta,
-            text::Text
-        },
-        *
-    },
-    std::{
+    std::{ 
         cmp::Ordering,
         collections::{HashMap, VecDeque},
         fmt,
