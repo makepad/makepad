@@ -48,7 +48,7 @@ impl App {
                 // spawn 1000 buttons into the live structure
                 let mut out = Vec::new();
                 out.open();
-                for i in 0..1 {
+                for i in 0..1 { 
                     out.push_live(live_object!{
                         [id_num!(btn, i)]: Button {
                             label: (format!("B{}", i + self.offset))
