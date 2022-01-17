@@ -8,12 +8,12 @@ live_register!{
     const COLOR_80_UP: #FFFFFFCC
     const COLOR_40_UP: #FFFFFF66
     const COLOR_25_UP: #FFFFFF40
-    const COLOR_15_UP: #FFFFFF2a
+    const COLOR_16_UP: #FFFFFF2a
     const COLOR_10_UP: #FFFFFF1A
-    const COLOR_2_UP: #FFFFFF0a
+    const COLOR_4_UP: #FFFFFF0a
     const COLOR_7_DOWN: #00000013
     const COLOR_20_DOWN: #00000035
-    const COLOR_30_DOWN: #00000050
+    const COLOR_31_DOWN: #00000050
     const COLOR_50_DOWN: #00000080
     const COLOR_BLACK: #000
     
@@ -38,12 +38,12 @@ live_register!{
     
     const COLOR_BG_SELECTED:(blend(
         COLOR_BG_EDITOR,
-        COLOR_15_UP
+        COLOR_16_UP
     ))
     
     const COLOR_BG_CURSOR: (blend(
         COLOR_BG_EDITOR,
-        COLOR_2_UP
+        COLOR_4_UP
     ))
 
     const COLOR_FG_CURSOR: (blend(
@@ -63,7 +63,7 @@ live_register!{
     
     const COLOR_TEXT_DEFAULT: (blend(
         COLOR_TEXT_SELECTED,
-        COLOR_30_DOWN
+        COLOR_31_DOWN
     ))
     
      const COLOR_TEXT_META: (blend(
