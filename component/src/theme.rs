@@ -8,6 +8,7 @@ live_register!{
     const COLOR_80_UP: #FFFFFFCC
     const COLOR_40_UP: #FFFFFF66
     const COLOR_25_UP: #FFFFFF40
+    const COLOR_17_UP: #FFFFFF30
     const COLOR_10_UP: #FFFFFF1A
     const COLOR_2_UP: #FFFFFF05
     const COLOR_7_DOWN: #00000013
@@ -27,7 +28,7 @@ live_register!{
     
     const COLOR_EDITOR_BG: (blend(
         COLOR_DOCK_BG,
-        COLOR_15_DOWN
+        COLOR_25_DOWN
     ))
      
     // TABS
@@ -65,11 +66,11 @@ live_register!{
 
     // even/odd BG items
     
-    const COLOR_BG_EVEN: (blend(
+    const COLOR_BG_ODD: (blend(
         COLOR_EDITOR_BG,
         COLOR_7_DOWN
     ))
-    const COLOR_BG_ODD: (COLOR_EDITOR_BG)
+    const COLOR_BG_EVEN: (COLOR_EDITOR_BG)
     
     const COLOR_BG_SELECTED: (blend(
         COLOR_EDITOR_BG,
@@ -86,7 +87,7 @@ live_register!{
     
     const COLOR_TEXT_SELECTION:(blend(
         COLOR_EDITOR_BG,
-        COLOR_10_UP
+        COLOR_17_UP
     ))
     
     const COLOR_TEXT_SELECTION_BORDER:#fff
