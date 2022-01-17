@@ -19,16 +19,16 @@ live_register!{
     DrawBgQuad: {{DrawBgQuad}} {
         fn pixel(self) -> vec4 {
             return mix(
-                    mix(
-                        COLOR_BG_EDITOR,
-                        COLOR_BG_ODD,
-                        self.is_even
-                    ),
-                    COLOR_BG_SELECTED,
-                    self.selected
-                );
-               // COLOR_BG_HOVER,
-               // self.hover
+                mix(
+                    COLOR_BG_EDITOR,
+                    COLOR_BG_ODD,
+                    self.is_even
+                ),
+                COLOR_BG_SELECTED,
+                self.selected
+            );
+            // COLOR_BG_HOVER,
+            // self.hover
             //);
         }
     }
@@ -59,7 +59,15 @@ live_register!{
             sdf.box(0. * w, 0.35 * h, 0.87 * w, 0.39 * h, 0.75);
             sdf.box(0. * w, 0.28 * h, 0.5 * w, 0.3 * h, 1.);
             sdf.union();
-            return sdf.fill(COLOR_TEXT_DEFAULT);
+            return sdf.fill(mix(
+                mix(
+                    COLOR_TEXT_DEFAULT * self.scale,
+                    COLOR_TEXT_SELECTED,
+                    self.selected
+                ),
+                COLOR_TEXT_HOVER,
+                self.hover
+            ));
         }
     }
     
@@ -140,7 +148,7 @@ live_register!{
             redraw: true
             //ease: Ease::OutExp
             apply: {
-                opened:  [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]
+                opened: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]
             }
         }
         is_folder: false,
@@ -241,7 +249,7 @@ pub struct FileTree {
     filler_quad: DrawBgQuad,
     
     node_height: f32,
-
+    
     scroll_shadow: ScrollShadow,
     
     #[rust] dragging_node_id: Option<FileNodeId>,
@@ -400,7 +408,7 @@ impl FileTree {
         let height_left = cx.get_height_left();
         let mut walk = 0.0;
         while walk < height_left {
-            self.count += 1; 
+            self.count += 1;
             self.filler_quad.is_even = Self::is_even(self.count);
             self.filler_quad.draw_walk(cx, Walk::wh(Width::Filled, Height::Fixed(self.node_height.min(height_left - walk))));
             walk += self.node_height.max(1.0);
@@ -424,7 +432,7 @@ impl FileTree {
             return true
         }
         else {
-            cx.walk_turtle(Walk::wh( Width::Filled, Height::Fixed(height)));
+            cx.walk_turtle(Walk::wh(Width::Filled, Height::Fixed(height)));
             return false
         }
     }
@@ -529,9 +537,11 @@ impl FileTree {
     pub fn redraw(&mut self, cx: &mut Cx) {
         self.scroll_view.redraw(cx);
     }
-
-    pub fn handle_event(&mut self, cx:&mut Cx, event:&mut Event)->Vec<FileTreeAction>{
-        let mut a = Vec::new(); self.handle_event_with_fn(cx, event, &mut|_, v| a.push(v)); a
+    
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> Vec<FileTreeAction> {
+        let mut a = Vec::new();
+        self.handle_event_with_fn(cx, event, &mut | _, v | a.push(v));
+        a
     }
     
     pub fn handle_event_with_fn(
