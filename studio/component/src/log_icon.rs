@@ -30,9 +30,9 @@ live_register!{
                     sdf.stroke(#a, 0.8);
                 }
                 LogIconType::Error => {
-                    sdf.circle(5., 5., 5.);
+                    sdf.circle(5., 5., 4.5);
                     sdf.fill(#a00);
-                    let sz = 1.6;
+                    let sz = 1.5;
                     sdf.move_to(5. - sz, 5. - sz);
                     sdf.line_to(5. + sz, 5. + sz);
                     sdf.move_to(5. - sz, 5. + sz);
@@ -41,8 +41,8 @@ live_register!{
                 }
                 LogIconType::Warning => {
                     sdf.move_to(5., 1.);
-                    sdf.line_to(9.5, 9.);
-                    sdf.line_to(0.5, 9.);
+                    sdf.line_to(9.25, 9.);
+                    sdf.line_to(0.75, 9.);
                     sdf.close_path();
                     sdf.fill(#c68a25);
                     //  sdf.stroke(#be, 0.5);
