@@ -19,7 +19,7 @@ live_register!{
                     #f,
                     self.hover
                 ),
-                #f00,
+                #9,
                 self.pressed
             )
         }
