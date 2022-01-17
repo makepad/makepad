@@ -71,7 +71,7 @@ live_register!{
             }
             sdf.fill_keep(self.color)
             sdf.shape += 1.0;
-            sdf.stroke(#fff, 0.75)
+            sdf.stroke(COLOR_TEXT_SELECTION_BORDER, 0.6)
             return sdf.result
         }
     }
