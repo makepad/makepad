@@ -19,7 +19,6 @@ live_register!{
     DrawBgQuad: {{DrawBgQuad}} {
         fn pixel(self) -> vec4 {
             return mix(
-                mix(
                     mix(
                         COLOR_BG_EVEN,
                         COLOR_BG_ODD,
@@ -27,10 +26,10 @@ live_register!{
                     ),
                     COLOR_BG_SELECTED,
                     self.selected
-                ),
-                COLOR_BG_HOVER,
-                self.hover
-            );
+                );
+               // COLOR_BG_HOVER,
+               // self.hover
+            //);
         }
     }
     
