@@ -10,8 +10,7 @@ live_register!{
             match self.icon_type {
                 LogIconType::Wait => {
                     sdf.circle(5., 5., 4.);
-                    sdf.fill_keep(#ffa500);
-                    sdf.stroke(#be, 0.5);
+                    sdf.fill(COLOR_ICON_WAIT);
                     sdf.move_to(3., 5.);
                     sdf.line_to(3., 5.);
                     sdf.move_to(5., 5.);
@@ -22,8 +21,7 @@ live_register!{
                 }
                 LogIconType::Ok => {
                     sdf.circle(5., 5., 4.);
-                    sdf.fill_keep(#5);
-                    sdf.stroke(#5, 0.5);
+                    sdf.fill(COLOR_TEXT_META);
                     let sz = 1.;
                     sdf.move_to(5., 5.);
                     sdf.line_to(5., 5.);
@@ -31,7 +29,7 @@ live_register!{
                 }
                 LogIconType::Error => {
                     sdf.circle(5., 5., 4.5);
-                    sdf.fill(#c00);
+                    sdf.fill(COLOR_ERROR);
                     let sz = 1.5;
                     sdf.move_to(5. - sz, 5. - sz);
                     sdf.line_to(5. + sz, 5. + sz);
@@ -44,7 +42,7 @@ live_register!{
                     sdf.line_to(9.25, 9.);
                     sdf.line_to(0.75, 9.);
                     sdf.close_path();
-                    sdf.fill(#FFAA00);
+                    sdf.fill(COLOR_WARNING);
                     //  sdf.stroke(#be, 0.5);
                     sdf.move_to(5., 3.5);
                     sdf.line_to(5., 5.25);
@@ -58,7 +56,7 @@ live_register!{
                     sdf.line_to(9., 9.);
                     sdf.line_to(1., 9.);
                     sdf.close_path();
-                    sdf.fill(#b00);
+                    sdf.fill(COLOR_ERROR);
                     let sz = 1.;
                     sdf.move_to(5. - sz, 6.25 - sz);
                     sdf.line_to(5. + sz, 6.25 + sz);
