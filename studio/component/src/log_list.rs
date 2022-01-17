@@ -22,7 +22,7 @@ live_register!{
         fn pixel(self) -> vec4 {
             return mix(
                 mix(
-                    COLOR_BG_EVEN,
+                    COLOR_BG_EDITOR,
                     COLOR_BG_ODD,
                     self.is_even
                 ),
@@ -35,8 +35,8 @@ live_register!{
     DrawNameText: {{DrawNameText}} {
         fn get_color(self) -> vec4 {
             return mix(
-                #7,
-                COLOR_TREE_TEXT_SELECTED,
+                COLOR_TEXT_DEFAULT,
+                COLOR_TEXT_SELECTED,
                 self.selected
             );
         }

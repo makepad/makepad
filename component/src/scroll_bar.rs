@@ -34,8 +34,8 @@ live_register!{
             return sdf.fill(mix(
                 COLOR_SCROLL_BAR_DEFAULT,
                 mix(
-                    COLOR_SCROLL_BAR_HOVER,
-                    COLOR_SCROLL_BAR_PRESSED,
+                    COLOR_CONTROL_HOVER,
+                    COLOR_CONTROL_PRESSED,
                     self.pressed
                 ),
                 self.hover

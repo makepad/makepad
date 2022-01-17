@@ -20,7 +20,7 @@ live_register!{
         fn pixel(self) -> vec4 {
             return mix(
                     mix(
-                        COLOR_BG_EVEN,
+                        COLOR_BG_EDITOR,
                         COLOR_BG_ODD,
                         self.is_even
                     ),
@@ -37,12 +37,12 @@ live_register!{
         fn get_color(self) -> vec4 {
             return mix(
                 mix(
-                    COLOR_TREE_TEXT_DEFAULT * self.scale,
-                    COLOR_TREE_TEXT_HOVER,
-                    self.hover
+                    COLOR_TEXT_DEFAULT * self.scale,
+                    COLOR_TEXT_SELECTED,
+                    self.selected
                 ),
-                COLOR_TREE_TEXT_SELECTED,
-                self.selected
+                COLOR_TEXT_HOVER,
+                self.hover
             )
         }
         
@@ -59,7 +59,7 @@ live_register!{
             sdf.box(0. * w, 0.35 * h, 0.87 * w, 0.39 * h, 0.75);
             sdf.box(0. * w, 0.28 * h, 0.5 * w, 0.3 * h, 1.);
             sdf.union();
-            return sdf.fill(COLOR_ICON);
+            return sdf.fill(COLOR_TEXT_DEFAULT);
         }
     }
     

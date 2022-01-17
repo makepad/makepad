@@ -21,8 +21,8 @@ live_register!{
                 sdf.move_to(min.x, max.y);
                 sdf.line_to(max.x, min.y);
                 return sdf.stroke(mix(
-                    COLOR_TAB_CLOSE_DEFAULT,
-                    COLOR_TAB_CLOSE_HOVER,
+                    COLOR_TEXT_DEFAULT,
+                    COLOR_TEXT_HOVER,
                     self.hover
                 ), 1.0);
             }
