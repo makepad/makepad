@@ -41,10 +41,16 @@ live_register!{
         COLOR_15_UP
     ))
     
-    const COLOR_BG_MARKED: (blend(
+    const COLOR_BG_CURSOR: (blend(
         COLOR_BG_EDITOR,
         COLOR_2_UP
     ))
+
+    const COLOR_FG_CURSOR: (blend(
+        COLOR_BG_EDITOR,
+        COLOR_40_UP
+    ))
+
     
     // Text / Icon colors
     
@@ -76,6 +82,13 @@ live_register!{
         COLOR_BG_HEADER,
         COLOR_10_UP
     ))
+
+    // Icon colors
+    
+    const COLOR_ICON_WAIT: #0f0,
+    const COLOR_ERROR: #c00,
+    const COLOR_WARNING: #fa0,
+    const COLOR_ICON_PANIC: #c00
     
     const COLOR_DRAG_QUAD: #ffffff80
     

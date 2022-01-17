@@ -97,13 +97,13 @@ live_register!{
             sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
             match self.level {
                 MsgLineLevel::Warning => {
-                    sdf.stroke(#FA0, THICKNESS);
+                    sdf.stroke(COLOR_WARNING, THICKNESS);
                 }
                 MsgLineLevel::Error => {
-                    sdf.stroke(#c00, THICKNESS);
+                    sdf.stroke(COLOR_ERROR, THICKNESS);
                 }
                 MsgLineLevel::Log => {
-                    sdf.stroke(#7, THICKNESS);
+                    sdf.stroke(COLOR_TEXT_META, THICKNESS);
                 }
             }
             return sdf.result
@@ -155,12 +155,12 @@ live_register!{
         text_color_indent_line:(COLOR_TEXT_DEFAULT)
         
         caret_quad: { 
-            color: #b0b0b0
+            color: (COLOR_FG_CURSOR)
         }
         
         current_line_quad: {
             no_h_scroll: true
-            color: (COLOR_BG_MARKED)
+            color: (COLOR_BG_CURSOR)
         }
         
         show_caret_state: {
