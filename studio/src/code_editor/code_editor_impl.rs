@@ -89,7 +89,7 @@ live_register!{
     DrawMsgLine: {{DrawMsgLine}} {
         debug_id: my_id
         const THICKNESS: 1.0
-        const WAVE_HEIGHT: 0.03
+        const WAVE_HEIGHT: 0.06
         const WAVE_FREQ: 1.5
         fn pixel(self) -> vec4 {
             let offset_y = 1.0;
@@ -757,7 +757,7 @@ impl CodeEditorImpl {
                         self.msg_line_quad.level = MsgLineLevel::from(loc.level);
                         self.msg_line_quad.draw_abs(cx, Rect {
                             pos: origin + start,
-                            size: vec2(end.x - start.x, layout.total_height),
+                            size: vec2(end.x - start.x, layout.total_height+1.0),
                         });
                     }
                     _ => ()
