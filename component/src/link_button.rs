@@ -21,7 +21,11 @@ live_register!{
                     let offset_y = 1.0
                     sdf.move_to(0., self.rect_size.y - offset_y);
                     sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
-                    return sdf.stroke(mix(#c,#a,self.pressed), mix(0.0, THICKNESS, self.hover));
+                    return sdf.stroke(mix(
+                        #c,
+                        #a,
+                        self.pressed
+                    ), mix(0.0, THICKNESS, self.hover));
                 }
             }
             label_text: {

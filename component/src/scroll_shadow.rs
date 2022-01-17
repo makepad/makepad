@@ -24,7 +24,7 @@ live_register!{
         }
         
         fn pixel(self) -> vec4 { // TODO make the corner overlap properly with a distance field eq.
-            let base = COLOR_EDITOR_BG.xyz;
+            let base = COLOR_BG_EDITOR.xyz;
             let alpha = 0.0;
             if self.shadow_is_top > 0.5 {
                 alpha = pow(self.geom_pos.y, 0.5);
