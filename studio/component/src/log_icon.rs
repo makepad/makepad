@@ -44,7 +44,7 @@ live_register!{
                     sdf.line_to(9.5, 9.);
                     sdf.line_to(0.5, 9.);
                     sdf.close_path();
-                    sdf.fill(vec4(253.0 / 255.0, 205.0 / 255.0, 59.0 / 255.0, 1.0));
+                    sdf.fill(#c68a25);
                     //  sdf.stroke(#be, 0.5);
                     sdf.move_to(5., 3.5);
                     sdf.line_to(5., 5.25);
