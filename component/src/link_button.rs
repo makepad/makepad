@@ -11,6 +11,7 @@ use {
 
 live_register!{
     use makepad_render::shader::std::*;
+    use crate::theme::*;
     
     LinkButton: {{LinkButton}} {
         button: {
@@ -22,8 +23,8 @@ live_register!{
                     sdf.move_to(0., self.rect_size.y - offset_y);
                     sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
                     return sdf.stroke(mix(
-                        #c,
-                        #a,
+                        COLOR_TEXT_DEFAULT,
+                        COLOR_TEXT_META,
                         self.pressed
                     ), mix(0.0, THICKNESS, self.hover));
                 }
@@ -32,11 +33,11 @@ live_register!{
                 fn get_color(self) -> vec4 {
                     return mix(
                         mix(
-                            #9,
-                            #c,
+                            COLOR_TEXT_META,
+                            COLOR_TEXT_DEFAULT,
                             self.hover
                         ),
-                        #a,
+                        COLOR_TEXT_META,
                         self.pressed
                     )
                 }
