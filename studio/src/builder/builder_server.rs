@@ -84,7 +84,7 @@ impl BuilderConnection {
         if let Some(msg) = msg.message {
             let level = match msg.level.as_ref() {
                 "error" => BuilderMsgLevel::Error,
-                "warnign" => BuilderMsgLevel::Warning,
+                "warning" => BuilderMsgLevel::Warning,
                 other => {
                     self.send_bare_msg(cmd_id, BuilderMsgLevel::Error, format!("process_compiler_message: unexpected level {}", other));
                     return
@@ -92,6 +92,8 @@ impl BuilderConnection {
             };
             if let Some(span) = msg.spans.iter().find( | span | span.is_primary) {
                 let range = span.to_range();
+                self.send_location_msg(cmd_id, level, span.file_name.clone(), range, msg.message.clone());
+                /*
                 if let Some(label) = &span.label {
                     self.send_location_msg(cmd_id, level, span.file_name.clone(), range, label.clone());
                 }
@@ -100,7 +102,7 @@ impl BuilderConnection {
                 }
                 else {
                     self.send_location_msg(cmd_id, level, span.file_name.clone(), range, msg.message.clone());
-                }
+                }*/
             }
             else {
                 self.send_bare_msg(cmd_id, BuilderMsgLevel::Error, format!("process_compiler_message: no span:  {}", msg.message));
@@ -115,7 +117,7 @@ impl BuilderConnection {
         let args = [
             "check",
             "-p",
-            "makepad_studio",
+            "cmdline_example",
             "--message-format=json"
         ];
         
