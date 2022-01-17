@@ -6,11 +6,11 @@ use {
         makepad_component::{
             component_map::ComponentMap,
             fold_button::FoldButton,
-            button::Button,
             scroll_view::ScrollView,
+            link_button::LinkButton,
         },
         makepad_render::*,
-        log_icon::DrawLogIconQuad
+        log_icon::{DrawLogIconQuad, LogIconType}
     },
 };
 
@@ -21,7 +21,6 @@ live_register!{
     DrawBgQuad: {{DrawBgQuad}} {
         fn pixel(self) -> vec4 {
             return mix(
-                mix(
                     mix(
                         COLOR_BG_EVEN,
                         COLOR_BG_ODD,
@@ -29,21 +28,15 @@ live_register!{
                     ),
                     COLOR_BG_SELECTED,
                     self.selected
-                ),
-                COLOR_BG_HOVER,
-                self.hover
-            );
+                );
         }
     }
     
     DrawNameText: {{DrawNameText}} {
         fn get_color(self) -> vec4 {
-            return #7
+            return #7;
         }
-        
-        text_style: {
-            top_drop: 1.3,
-        }
+        text_style:{top_drop: 1.15},
     }
     
     LogListNode: {{LogListNode}} {
@@ -59,12 +52,10 @@ live_register!{
         
         icon_walk: {
             width: Width::Fixed(14.0),
-            height: Height::Filled,
+            height: Height::Fixed(14.0),
             margin: {
                 left: 1,
-                top: 0,
-                right: 4,
-                bottom: 0,
+                right: 0,
             },
         }
         
@@ -155,7 +146,7 @@ pub struct LogListNode {
     unselected_state: Option<LivePtr>,
     
     fold_button: FoldButton,
-    link_button: Button,
+    link_button: LinkButton,
     
     icon_walk: Walk,
     
@@ -220,6 +211,7 @@ impl LogListNode {
     pub fn draw_node(
         &mut self,
         cx: &mut Cx2d,
+        icon_type: LogIconType,
         link: &str,
         body: &str,
         is_even: f32,
@@ -233,6 +225,12 @@ impl LogListNode {
         // lets draw a fold button
         self.fold_button.draw(cx);
         cx.turtle_align_y();
+
+        // lets draw a fold button
+        self.icon_quad.icon_type = icon_type;
+        self.icon_quad.draw_walk(cx, self.icon_walk);
+        cx.turtle_align_y();
+
         
         self.link_button.draw(cx, Some(link));
         cx.turtle_align_y();
@@ -350,6 +348,7 @@ impl LogList {
     pub fn draw_node(
         &mut self,
         cx: &mut Cx2d,
+        log_icon: LogIconType, 
         node_id: LogListNodeId,
         file: &str,
         body: &str,
@@ -369,7 +368,7 @@ impl LogList {
             node
         });
         
-        node.draw_node(cx, file, body, Self::is_even(self.count), self.node_height, self.stack.len());
+        node.draw_node(cx, log_icon, file, body, Self::is_even(self.count), self.node_height, self.stack.len());
         
         if node.opened == 0.0 {
             return 0.0;
