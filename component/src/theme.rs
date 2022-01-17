@@ -13,6 +13,7 @@ live_register!{
     const COLOR_7_DOWN: #00000013
     const COLOR_15_DOWN: #00000026
     const COLOR_25_DOWN: #00000040
+    const COLOR_37_DOWN: #00000060
     const COLOR_50_DOWN: #00000080
     const COLOR_BLACK: #000
     
@@ -33,7 +34,7 @@ live_register!{
     
     const COLOR_TAB_BG_SELECTED: (blend(
         COLOR_DOCK_BG,
-        COLOR_15_DOWN
+        COLOR_25_DOWN
     ))
     
     const COLOR_TAB_BG_UNSELECTED: (COLOR_DOCK_BG)
@@ -72,7 +73,7 @@ live_register!{
     
     const COLOR_BG_SELECTED: (blend(
         COLOR_EDITOR_BG,
-        COLOR_25_DOWN
+        COLOR_37_DOWN
     ))
     
     const COLOR_BG_HOVER: (blend(
@@ -90,6 +91,11 @@ live_register!{
     ))
     
     const COLOR_TREE_TEXT_HOVER: (blend(
+        COLOR_DOCK_BG,
+        COLOR_80_UP
+    ))
+
+    const COLOR_TREE_TEXT_SELECTED: (blend(
         COLOR_DOCK_BG,
         COLOR_80_UP
     ))
