@@ -89,6 +89,9 @@ live_register!{
         COLOR_10_UP
     ))
     
+    const COLOR_TEXT_SELECTION_BORDER:#fff
+    
+    
     // FILETREE
     
     
