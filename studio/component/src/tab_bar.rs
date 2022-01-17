@@ -21,7 +21,7 @@ live_register!{
             color: #c
         }
         bar_fill: {
-            color: (COLOR_TAB_BG_UNSELECTED)
+            color: (COLOR_BG_HEADER)
         }
         scroll_view: {
             v_show: false

@@ -69,20 +69,18 @@ live_register!{
                 sdf.box(self.next_x, self.rect_size.y, self.next_w, self.rect_size.y, BORDER_RADIUS);
                 sdf.gloop(GLOOPINESS);
             }
-            return sdf.fill(self.color);
+            return sdf.fill(COLOR_BG_SELECTED);
         }
     }
     
     DrawIndentLine: {{DrawIndentLine}} {
         fn pixel(self) -> vec4 {
             //return #f00;
-            let col = self.color;
             let thickness = 0.8 + self.dpi_dilate * 0.5;
-            col *= vec4(0.75, 0.75, 0.75, 0.75);
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
             sdf.move_to(1., -1.);
             sdf.line_to(1., self.rect_size.y + 1.);
-            return sdf.stroke(col, thickness);
+            return sdf.stroke(COLOR_TEXT_META, thickness);
         }
     }
     
@@ -139,7 +137,7 @@ live_register!{
         }
         
         line_num_quad: {
-            color: (COLOR_WINDOW_BG)
+            color: (COLOR_BG_EDITOR)
             //draw_depth: 4.0
             no_h_scroll: true
             no_v_scroll: true
@@ -152,25 +150,17 @@ live_register!{
         line_num_width: 45.0,
         padding_top: 30.0,
         
-        text_color_linenum: #88
-        text_color_linenum_current: #d4
-        text_color_indent_line: #808080
+        text_color_linenum: (COLOR_TEXT_META)
+        text_color_linenum_current: (COLOR_TEXT_DEFAULT)
+        text_color_indent_line:(COLOR_TEXT_DEFAULT)
         
-        selection_quad: {
-            color: (COLOR_TEXT_SELECTION)
-        }
-        
-        indent_line_quad: {
-            color: #fff
-        }
-        
-        caret_quad: {
+        caret_quad: { 
             color: #b0b0b0
         }
         
         current_line_quad: {
             no_h_scroll: true
-            color: #6663
+            color: (COLOR_BG_MARKED)
         }
         
         show_caret_state: {
@@ -256,7 +246,7 @@ pub struct CodeEditorImpl {
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawSelection {
-    deref_target: DrawColor,
+    deref_target: DrawQuad,
     prev_x: f32,
     prev_w: f32,
     next_x: f32,
@@ -266,7 +256,7 @@ pub struct DrawSelection {
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawIndentLine {
-    deref_target: DrawColor,
+    deref_target: DrawQuad, 
     indent_id: f32
 }
 
@@ -718,7 +708,7 @@ impl CodeEditorImpl {
             let indent_count = (indent_info.virtual_leading_whitespace() + 3) / 4;
             for indent in 0..indent_count {
                 let indent_lines_column = indent * 4;
-                self.indent_line_quad.color = self.text_color_indent_line; // TODO: Colored indent guides
+                //self.indent_line_quad.color = self.text_color_indent_line; // TODO: Colored indent guides
                 
                 let pos = self.position_to_vec2(Position {line: line_index, column: indent_lines_column}, lines_layout);
                 self.indent_line_quad.draw_abs(cx, Rect {

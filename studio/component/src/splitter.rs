@@ -13,7 +13,7 @@ live_register!{
         
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-            sdf.clear(COLOR_SPLITTER_BG);
+            sdf.clear(COLOR_BG_APP);
             if self.is_vertical > 0.5 {
                 sdf.box(
                     SPLITER_PAD,
@@ -33,10 +33,10 @@ live_register!{
                 );
             }
             return sdf.fill_keep(mix(
-                COLOR_SPLITTER_BG,
+                COLOR_BG_APP,
                 mix(
-                    COLOR_SPLITTER_HOVER,
-                    COLOR_SPLITTER_PRESSED,
+                    COLOR_CONTROL_HOVER,
+                    COLOR_CONTROL_PRESSED,
                     self.pressed
                 ),
                 self.hover

@@ -36,7 +36,7 @@ live_register!{
             );
             
             sdf.subtract()
-            return sdf.fill(COLOR_APP_BG);
+            return sdf.fill(COLOR_BG_APP);
         }
     }
     
@@ -46,7 +46,7 @@ live_register!{
         view: {
             layout: {padding: {left: (BORDER_SIZE), top: 0.0, right: (BORDER_SIZE), bottom: (BORDER_SIZE)}}
         }
-        padding_fill: {color: (COLOR_APP_BG)}
+        padding_fill: {color: (COLOR_BG_APP)}
         drag_quad: {
             draw_depth: 10.0
             color: (COLOR_DRAG_QUAD)
