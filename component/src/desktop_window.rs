@@ -17,6 +17,7 @@ live_register!{
         border_fill: {color: (COLOR_BG_APP)},
         inner_view:{
         },
+        caption_text:{color: (COLOR_TEXT_DEFAULT)}
         caption_layout:{
             padding:{top:2}
             align: {fx: 0.5, fy: 0.5},
