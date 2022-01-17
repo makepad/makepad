@@ -1,8 +1,8 @@
 fn main() {
-    let x = 1.0;
-    let mut y = x;
+    let xlongword = 1.0;
+    let mut ylongword = xlongword;
     for i in 0..100{
-        y+=1.0;
+        ylongword +=1.0;
     }
-    x = 5.0;
+    xlongword = 5.0;
 }
