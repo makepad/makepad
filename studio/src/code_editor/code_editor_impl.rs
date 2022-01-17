@@ -43,36 +43,33 @@ live_register!{
     
     DrawSelection: {{DrawSelection}} {
         const GLOOPINESS: 8.
-        const BORDER_RADIUS: 1.
+        const BORDER_RADIUS: 2.
         
         fn vertex(self) -> vec4 { // custom vertex shader because we widen the draweable area a bit for the gloopiness
-            let shift: vec2 = -self.draw_scroll.xy
+            let shift: vec2 = -self.draw_scroll.xy;
             let clipped: vec2 = clamp(
                 self.geom_pos * vec2(self.rect_size.x + 16., self.rect_size.y) + self.rect_pos + shift - vec2(8., 0.),
                 self.draw_clip.xy,
                 self.draw_clip.zw
-            )
-            self.pos = (clipped - shift - self.rect_pos) / self.rect_size
+            );
+            self.pos = (clipped - shift - self.rect_pos) / self.rect_size;
             return self.camera_projection * (self.camera_view * (
                 self.view_transform * vec4(clipped.x, clipped.y, self.draw_depth + self.draw_zbias, 1.)
             ));
         }
         
         fn pixel(self) -> vec4 {
-            let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-            sdf.box(-0.5, 0., self.rect_size.x+1.0, self.rect_size.y, BORDER_RADIUS)
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+            sdf.box(0., 0., self.rect_size.x, self.rect_size.y, BORDER_RADIUS);
             if self.prev_w > 0. {
-                sdf.box(self.prev_x, -self.rect_size.y, self.prev_w, self.rect_size.y, BORDER_RADIUS)
-                sdf.gloop(GLOOPINESS)
+                sdf.box(self.prev_x, -self.rect_size.y, self.prev_w, self.rect_size.y, BORDER_RADIUS);
+                sdf.gloop(GLOOPINESS);
             }
             if self.next_w > 0. {
-                sdf.box(self.next_x, self.rect_size.y, self.next_w, self.rect_size.y, BORDER_RADIUS)
-                sdf.gloop(GLOOPINESS)
+                sdf.box(self.next_x, self.rect_size.y, self.next_w, self.rect_size.y, BORDER_RADIUS);
+                sdf.gloop(GLOOPINESS);
             }
-            sdf.fill_keep(self.color)
-            sdf.shape += 1.0;
-            sdf.stroke(COLOR_TEXT_SELECTION_BORDER, 0.6)
-            return sdf.result
+            return sdf.fill(self.color);
         }
     }
     
@@ -446,10 +443,10 @@ impl CodeEditorImpl {
         // this makes a single area pointer cover all the items drawn
         // also enables a faster draw api because it doesnt have to look up the instance buffer every time
         // since this also locks in draw-call-order, some draw apis call new_draw_call here
-        self.indent_line_quad.begin_many_instances(cx);
         self.selection_quad.begin_many_instances(cx);
         self.current_line_quad.new_draw_call(cx);
         self.code_text.begin_many_instances(cx);
+        self.indent_line_quad.begin_many_instances(cx);
         self.msg_line_quad.begin_many_instances(cx);
         self.caret_quad.begin_many_instances(cx);
     }
@@ -674,7 +671,7 @@ impl CodeEditorImpl {
         
         self.line_num_quad.draw_abs(cx, Rect {
             pos: origin,
-            size: Vec2 {x: self.line_num_width-2.0, y: viewport_size.y}
+            size: Vec2 {x: self.line_num_width, y: viewport_size.y}
         });
         
         
@@ -1048,7 +1045,7 @@ impl CodeEditorImpl {
                     dispatch_action(cx, CodeEditorAction::RedrawViewsForDocument(session.document_id))
                 }
             }
-            HitEvent::KeyDown(KeyEvent {
+            HitEvent::KeyDown(KeyEvent { 
                 key_code: KeyCode::KeyA,
                 modifiers,
                 ..
