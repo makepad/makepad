@@ -36,9 +36,13 @@ live_register!{
     DrawNameText: {{DrawNameText}} {
         fn get_color(self) -> vec4 {
             return mix(
-                COLOR_TREE_TEXT_DEFAULT * self.scale,
-                COLOR_TREE_TEXT_HOVER,
-                self.hover
+                mix(
+                    COLOR_TREE_TEXT_DEFAULT * self.scale,
+                    COLOR_TREE_TEXT_HOVER,
+                    self.hover
+                ),
+                COLOR_TREE_TEXT_SELECTED,
+                self.selected
             )
         }
         

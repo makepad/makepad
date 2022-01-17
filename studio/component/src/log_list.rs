@@ -515,6 +515,14 @@ impl LogList {
                     self.open_nodes.remove(&node_id);
                 }
                 LogNodeAction::WasClicked => {
+                    // deselect everything but us
+                    for id in &self.selected_node_ids{
+                        if *id != node_id{
+                            self.fold_nodes.get_mut(id).unwrap().set_is_selected(cx, false, Animate::Yes);
+                        }
+                    }
+                    self.selected_node_ids.clear();
+                    self.selected_node_ids.insert(node_id);
                     //dispatch_action(cx, FileTreeAction::WasClicked(node_id));
                 }
                 LogNodeAction::ShouldStartDragging => {
