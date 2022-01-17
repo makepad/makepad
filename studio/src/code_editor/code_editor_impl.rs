@@ -99,7 +99,7 @@ live_register!{
             sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
             match self.level {
                 MsgLineLevel::Warning => {
-                    sdf.stroke(vec4(253.0 / 255.0, 205.0 / 255.0, 59.0 / 255.0, 1.0)#, THICKNESS);
+                    sdf.stroke(#c68a25, THICKNESS*1.2);
                 }
                 MsgLineLevel::Error => {
                     sdf.stroke(#f00, THICKNESS);
