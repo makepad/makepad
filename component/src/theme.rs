@@ -2,7 +2,7 @@ use crate::makepad_render::*;
 
 live_register!{
     
-    const COLOR_APP_BG: #26
+    const COLOR_APP_BG: #24
     
     const COLOR_WHITE: #FFF
     const COLOR_80_UP: #FFFFFFCC
@@ -13,6 +13,7 @@ live_register!{
     const COLOR_2_UP: #FFFFFF05
     const COLOR_7_DOWN: #00000013
     const COLOR_15_DOWN: #00000026
+    const COLOR_20_DOWN: #00000035
     const COLOR_25_DOWN: #00000040
     const COLOR_37_DOWN: #00000060
     const COLOR_50_DOWN: #00000080
@@ -26,16 +27,13 @@ live_register!{
         COLOR_10_UP
     ))
     
-    const COLOR_EDITOR_BG: (blend(
-        COLOR_DOCK_BG,
-        COLOR_25_DOWN
-    ))
+    const COLOR_EDITOR_BG: (COLOR_TAB_BG_SELECTED)
      
     // TABS
     
     const COLOR_TAB_BG_SELECTED: (blend(
         COLOR_DOCK_BG,
-        COLOR_25_DOWN
+        COLOR_20_DOWN
     ))
     
     const COLOR_TAB_BG_UNSELECTED: (COLOR_DOCK_BG)
