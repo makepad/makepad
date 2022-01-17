@@ -31,7 +31,7 @@ live_register!{
                 }
                 LogIconType::Error => {
                     sdf.circle(5., 5., 4.5);
-                    sdf.fill(#a00);
+                    sdf.fill(#c00);
                     let sz = 1.5;
                     sdf.move_to(5. - sz, 5. - sz);
                     sdf.line_to(5. + sz, 5. + sz);
@@ -44,7 +44,7 @@ live_register!{
                     sdf.line_to(9.25, 9.);
                     sdf.line_to(0.75, 9.);
                     sdf.close_path();
-                    sdf.fill(#c68a25);
+                    sdf.fill(#FFAA00);
                     //  sdf.stroke(#be, 0.5);
                     sdf.move_to(5., 3.5);
                     sdf.line_to(5., 5.25);
