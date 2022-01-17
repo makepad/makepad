@@ -157,7 +157,7 @@ live_register!{
         text_color_indent_line: #808080
         
         selection_quad: {
-            color: #294e75
+            color: (COLOR_TEXT_SELECTION)
         }
         
         indent_line_quad: {

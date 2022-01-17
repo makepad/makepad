@@ -82,6 +82,13 @@ live_register!{
     ))
     
     
+    // CODE EDITOR
+    
+    const COLOR_TEXT_SELECTION:(blend(
+        COLOR_EDITOR_BG,
+        COLOR_25_UP
+    ))
+    
     // FILETREE
     
     
