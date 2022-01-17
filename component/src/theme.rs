@@ -8,9 +8,9 @@ live_register!{
     const COLOR_80_UP: #FFFFFFCC
     const COLOR_40_UP: #FFFFFF66
     const COLOR_25_UP: #FFFFFF40
-    const COLOR_16_UP: #FFFFFF2a
+    const COLOR_16_UP: #FFFFFF2A
     const COLOR_10_UP: #FFFFFF1A
-    const COLOR_4_UP: #FFFFFF0a
+    const COLOR_4_UP: #FFFFFF0A
     const COLOR_7_DOWN: #00000013
     const COLOR_20_DOWN: #00000035
     const COLOR_31_DOWN: #00000050
