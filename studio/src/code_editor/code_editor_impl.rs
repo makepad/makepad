@@ -89,10 +89,10 @@ live_register!{
     DrawMsgLine: {{DrawMsgLine}} {
         debug_id: my_id
         const THICKNESS: 1.0
-        const WAVE_HEIGHT: 0.06
+        const WAVE_HEIGHT: 0.05
         const WAVE_FREQ: 1.5
         fn pixel(self) -> vec4 {
-            let offset_y = 1.0;
+            let offset_y = 1.5;
             let pos2 = vec2(self.pos.x, self.pos.y + WAVE_HEIGHT * sin(WAVE_FREQ * self.pos.x * self.rect_size.x));
             let sdf = Sdf2d::viewport(pos2 * self.rect_size);
             sdf.move_to(0., self.rect_size.y - offset_y);
