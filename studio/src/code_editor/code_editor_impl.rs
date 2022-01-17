@@ -102,7 +102,7 @@ live_register!{
                     sdf.stroke(#c68a25, THICKNESS*1.2);
                 }
                 MsgLineLevel::Error => {
-                    sdf.stroke(#f00, THICKNESS);
+                    sdf.stroke(#b00, THICKNESS);
                 }
                 MsgLineLevel::Log => {
                     sdf.stroke(#7, THICKNESS);
