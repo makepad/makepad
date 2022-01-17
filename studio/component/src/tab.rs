@@ -14,7 +14,15 @@ live_register!{
             instance hover: 0.0
             instance selected: 0.0
             fn get_color(self) -> vec4 {
-                return mix(#82, #ff, self.selected)
+                return mix(
+                    mix(
+                        COLOR_TEXT_DEFAULT,
+                        COLOR_TEXT_SELECTED,
+                        self.selected
+                    ),
+                    COLOR_TEXT_HOVER,
+                    self.hover
+                )
             }
         }
         
@@ -26,12 +34,12 @@ live_register!{
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 return mix(
                     mix(
-                        COLOR_TAB_BG_UNSELECTED,
-                        COLOR_TAB_BG_SELECTED,
+                        COLOR_BG_HEADER,
+                        COLOR_BG_EDITOR,
                         self.selected
                     ),
                     #f,
-                    0.0//mix(self.hover * 0.05, self.hover * -0.025, self.selected)
+                    0.0 //mix(self.hover * 0.05, self.hover * -0.025, self.selected)
                 );
                 /*sdf.clear(color)
                 sdf.move_to(0.0, 0.0)
@@ -71,7 +79,7 @@ live_register!{
                 hover: [{time: 0.0, value: 1.0}],
             }
         }
-         
+        
         unselected_state: {
             track: select,
             from: {all: Play::Forward {duration: 0.3}}

@@ -139,6 +139,7 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
                     value_to_live_value(live_registry, index, nodes, err)
                 }
                 else{
+                    if let Some(err) = err.as_mut(){err.apply_error_cant_find_target(live_error_origin!(), *index, nodes, *id)};
                     LiveEval::Void
                 }
             }

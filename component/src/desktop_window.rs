@@ -9,12 +9,12 @@ live_register!{
     use crate::theme::*;
     DesktopWindow: {{DesktopWindow}} {
         pass:{
-            clear_color: (COLOR_WINDOW_BG)
+            clear_color: (COLOR_BG_EDITOR)
         }
-        caption_bg: {color: (COLOR_WINDOW_CAPTION)}
+        caption_bg: {color: (COLOR_BG_APP)}
         caption: "Desktop Window",
         main_view:{},
-        border_fill: {color: (COLOR_WINDOW_CAPTION)},
+        border_fill: {color: (COLOR_BG_APP)},
         inner_view:{
         },
         caption_layout:{
