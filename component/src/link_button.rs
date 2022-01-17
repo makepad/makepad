@@ -29,7 +29,7 @@ live_register!{
                 walk: {
                     width: Width::Computed,
                     height: Height::Computed,
-                    margin: Margin {left: 5.0, top: 5.0, right: 5.0}
+                    margin: Margin {left: 5.0, top: 4.0, right: 5.0}
                 }
                 padding: {left: 1.0, top: 1.0, right: 1.0, bottom: 1.0}
             }

@@ -5,80 +5,69 @@ live_register!{
     use makepad_component::theme::*;
     
     DrawLogIconQuad: {{DrawLogIconQuad}} {
-        fn pixel() -> vec4 {
+        fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * vec2(10., 10.))
-            match 
-            if abs(icon_type - 5.) < 0.1 { //Wait
-                let df = Df::viewport(pos * vec2(10., 10.)); // * vec2(w, h));
-                df.circle(5., 5., 4.);
-                df.fill_keep(#ffa500);
-                df.stroke(#be, 0.5);
-                df.move_to(3., 5.);
-                df.line_to(3., 5.);
-                df.move_to(5., 5.);
-                df.line_to(5., 5.);
-                df.move_to(7., 5.);
-                df.line_to(7., 5.);
-                df.stroke(#0, 0.8);
-                return df.result;
+            match self.icon_type {
+                LogIconType::Wait => {
+                    sdf.circle(5., 5., 4.);
+                    sdf.fill_keep(#ffa500);
+                    sdf.stroke(#be, 0.5);
+                    sdf.move_to(3., 5.);
+                    sdf.line_to(3., 5.);
+                    sdf.move_to(5., 5.);
+                    sdf.line_to(5., 5.);
+                    sdf.move_to(7., 5.);
+                    sdf.line_to(7., 5.);
+                    sdf.stroke(#0, 0.8);
+                }
+                LogIconType::Ok => {
+                    sdf.circle(5., 5., 4.);
+                    sdf.fill_keep(#5);
+                    sdf.stroke(#5, 0.5);
+                    let sz = 1.;
+                    sdf.move_to(5., 5.);
+                    sdf.line_to(5., 5.);
+                    sdf.stroke(#a, 0.8);
+                }
+                LogIconType::Error => {
+                    sdf.circle(5., 5., 5.);
+                    sdf.fill(#a00);
+                    let sz = 1.6;
+                    sdf.move_to(5. - sz, 5. - sz);
+                    sdf.line_to(5. + sz, 5. + sz);
+                    sdf.move_to(5. - sz, 5. + sz);
+                    sdf.line_to(5. + sz, 5. - sz);
+                    sdf.stroke(#0, 0.8)
+                }
+                LogIconType::Warning => {
+                    sdf.move_to(5., 1.);
+                    sdf.line_to(9.5, 9.);
+                    sdf.line_to(0.5, 9.);
+                    sdf.close_path();
+                    sdf.fill(vec4(253.0 / 255.0, 205.0 / 255.0, 59.0 / 255.0, 1.0));
+                    //  sdf.stroke(#be, 0.5);
+                    sdf.move_to(5., 3.5);
+                    sdf.line_to(5., 5.25);
+                    sdf.stroke(#0, 1.0);
+                    sdf.move_to(5., 7.25);
+                    sdf.line_to(5., 7.5);
+                    sdf.stroke(#0, 1.0);
+                }
+                LogIconType::Panic => {
+                    sdf.move_to(5., 1.);
+                    sdf.line_to(9., 9.);
+                    sdf.line_to(1., 9.);
+                    sdf.close_path();
+                    sdf.fill(#b00);
+                    let sz = 1.;
+                    sdf.move_to(5. - sz, 6.25 - sz);
+                    sdf.line_to(5. + sz, 6.25 + sz);
+                    sdf.move_to(5. - sz, 6.25 + sz);
+                    sdf.line_to(5. + sz, 6.25 - sz);
+                    sdf.stroke(#0, 0.8);
+                }
             }
-            if abs(icon_type - 4.) < 0.1 { //OK
-                let df = Df::viewport(pos * vec2(10., 10.)); // * vec2(w, h));
-                df.circle(5., 5., 4.);
-                df.fill_keep(#5);
-                df.stroke(#5, 0.5);
-                let sz = 1.;
-                df.move_to(5., 5.);
-                df.line_to(5., 5.);
-                df.stroke(#a, 0.8);
-                return df.result;
-            }
-            else if abs(icon_type - 3.) < 0.1 { // Error
-                let df = Df::viewport(pos * vec2(10., 10.)); // * vec2(w, h));
-                df.circle(5., 5., 4.);
-                df.fill_keep(#c00);
-                df.stroke(#be, 0.5);
-                let sz = 1.;
-                df.move_to(5. - sz, 5. - sz);
-                df.line_to(5. + sz, 5. + sz);
-                df.move_to(5. - sz, 5. + sz);
-                df.line_to(5. + sz, 5. - sz);
-                df.stroke(#0, 0.8);
-                return df.result;
-            }
-            else if abs(icon_type - 2.) < 0.1 { // Warning
-                let df = Df::viewport(pos * vec2(10., 10.)); // * vec2(w, h));
-                df.move_to(5., 1.);
-                df.line_to(9., 9.);
-                df.line_to(1., 9.);
-                df.close_path();
-                df.fill_keep(vec4(253.0 / 255.0, 205.0 / 255.0, 59.0 / 255.0, 1.0));
-                df.stroke(#be, 0.5);
-                df.move_to(5., 3.5);
-                df.line_to(5., 5.25);
-                df.stroke(#0, 0.8);
-                df.move_to(5., 7.25);
-                df.line_to(5., 7.5);
-                df.stroke(#0, 0.8);
-                return df.result;
-            }
-            else { // Panic
-                let df = Df::viewport(pos * vec2(10., 10.)); // * vec2(w, h));
-                df.move_to(5., 1.);
-                df.line_to(9., 9.);
-                df.line_to(1., 9.);
-                df.close_path();
-                df.fill_keep(#c00);
-                df.stroke(#be, 0.5);
-                let sz = 1.;
-                df.move_to(5. - sz, 6.25 - sz);
-                df.line_to(5. + sz, 6.25 + sz);
-                df.move_to(5. - sz, 6.25 + sz);
-                df.line_to(5. + sz, 6.25 - sz);
-                df.stroke(#f, 0.8);
-                
-                return df.result;
-            }
+            return sdf.result
         }
     }
 }
@@ -88,12 +77,12 @@ pub struct DrawLogIconQuad {
     deref_target: DrawQuad,
     selected: f32,
     hover: f32,
-    icon:LogIcon
+    pub icon_type: LogIconType
 }
 
 #[derive(Live, LiveHook)]
 #[repr(u32)]
-pub enum LogIcon {
+pub enum LogIconType {
     Wait,
     #[pick] Ok,
     Error,
