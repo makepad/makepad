@@ -21,22 +21,26 @@ live_register!{
     DrawBgQuad: {{DrawBgQuad}} {
         fn pixel(self) -> vec4 {
             return mix(
-                    mix(
-                        COLOR_BG_EVEN,
-                        COLOR_BG_ODD,
-                        self.is_even
-                    ),
-                    COLOR_BG_SELECTED,
-                    self.selected
-                );
+                mix(
+                    COLOR_BG_EVEN,
+                    COLOR_BG_ODD,
+                    self.is_even
+                ),
+                COLOR_BG_SELECTED,
+                self.selected
+            );
         }
     }
     
     DrawNameText: {{DrawNameText}} {
         fn get_color(self) -> vec4 {
-            return #7;
+            return mix(
+                #7,
+                COLOR_TREE_TEXT_SELECTED,
+                self.selected
+            );
         }
-        text_style:{top_drop: 1.15},
+        text_style: {top_drop: 1.15},
     }
     
     LogListNode: {{LogListNode}} {
@@ -225,12 +229,12 @@ impl LogListNode {
         // lets draw a fold button
         self.fold_button.draw(cx);
         cx.turtle_align_y();
-
+        
         // lets draw a fold button
         self.icon_quad.icon_type = icon_type;
         self.icon_quad.draw_walk(cx, self.icon_walk);
         cx.turtle_align_y();
-
+        
         
         self.link_button.draw(cx, Some(link));
         cx.turtle_align_y();
@@ -348,7 +352,7 @@ impl LogList {
     pub fn draw_node(
         &mut self,
         cx: &mut Cx2d,
-        log_icon: LogIconType, 
+        log_icon: LogIconType,
         node_id: LogListNodeId,
         file: &str,
         body: &str,
@@ -516,8 +520,8 @@ impl LogList {
                 }
                 LogNodeAction::WasClicked => {
                     // deselect everything but us
-                    for id in &self.selected_node_ids{
-                        if *id != node_id{
+                    for id in &self.selected_node_ids {
+                        if *id != node_id {
                             self.fold_nodes.get_mut(id).unwrap().set_is_selected(cx, false, Animate::Yes);
                         }
                     }
