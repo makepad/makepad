@@ -70,10 +70,7 @@ live_register!{
     ))
     const COLOR_BG_EVEN: (COLOR_EDITOR_BG)
     
-    const COLOR_BG_SELECTED: (blend(
-        COLOR_EDITOR_BG,
-        COLOR_37_DOWN
-    ))
+    const COLOR_BG_SELECTED: (COLOR_TEXT_SELECTION)
     
     const COLOR_BG_HOVER: (blend(
         COLOR_EDITOR_BG,
