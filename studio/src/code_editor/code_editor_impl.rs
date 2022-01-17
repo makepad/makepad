@@ -88,7 +88,7 @@ live_register!{
     
     DrawMsgLine: {{DrawMsgLine}} {
         debug_id: my_id
-        const THICKNESS: 0.8
+        const THICKNESS: 1.0
         const WAVE_HEIGHT: 0.03
         const WAVE_FREQ: 1.5
         fn pixel(self) -> vec4 {
@@ -99,7 +99,7 @@ live_register!{
             sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
             match self.level {
                 MsgLineLevel::Warning => {
-                    sdf.stroke(#c68a25, THICKNESS*1.2);
+                    sdf.stroke(#c68a25, THICKNESS);
                 }
                 MsgLineLevel::Error => {
                     sdf.stroke(#b00, THICKNESS);
