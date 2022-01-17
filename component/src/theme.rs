@@ -86,7 +86,7 @@ live_register!{
     
     const COLOR_TEXT_SELECTION:(blend(
         COLOR_EDITOR_BG,
-        COLOR_25_UP
+        COLOR_10_UP
     ))
     
     // FILETREE
