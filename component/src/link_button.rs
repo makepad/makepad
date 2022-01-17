@@ -21,7 +21,20 @@ live_register!{
                     let offset_y = 1.0
                     sdf.move_to(0., self.rect_size.y - offset_y);
                     sdf.line_to(self.rect_size.x, self.rect_size.y - offset_y);
-                    return sdf.stroke(#f, mix(0.0, THICKNESS, self.hover));
+                    return sdf.stroke(mix(#c,#9,self.pressed), mix(0.0, THICKNESS, self.hover));
+                }
+            }
+            label_text: {
+                fn get_color(self) -> vec4 {
+                    return mix(
+                        mix(
+                            #9,
+                            #c,
+                            self.hover
+                        ),
+                        #9,
+                        self.pressed
+                    )
                 }
             }
             
