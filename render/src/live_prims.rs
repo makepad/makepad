@@ -14,7 +14,14 @@ pub use {
 #[macro_export]
 macro_rules!get_component {
     ( $ comp_id: expr, $ ty: ty, $ frame: expr) => {
-        $ frame.get_component( $ comp_id).map_or(None, | v | v.cast_mut::< $ ty>())
+        $ frame.components.get( $ comp_id).map_or(None, | v | v.cast::< $ ty>())
+    }
+}
+
+#[macro_export]
+macro_rules!get_component_mut {
+    ( $ comp_id: expr, $ ty: ty, $ frame: expr) => {
+        $ frame.components.get_mut( $ comp_id).map_or(None, | v | v.cast_mut::< $ ty>())
     }
 }
 

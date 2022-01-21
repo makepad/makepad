@@ -187,9 +187,13 @@ impl InlineCache {
         }
         let range = self.live_register_range.unwrap();
         
-        let path = if let Some(prefix) = path.strip_prefix("/Users/admin/makepad/edit_repo/sub_repo") {prefix}
-        else {
-            path
+        let working_dir = std::env::current_dir().unwrap();
+        let working_dir = working_dir.as_os_str().to_str().unwrap();
+        let path = if let Some(prefix) = path.strip_prefix(working_dir){
+            prefix
+        }
+        else{
+           path 
         };
         //println!("{}", &path.strip_prefix("/Users/admin/makepad/edit_repo/").unwrap());
         let file_id = if let Some(file_id) = live_registry.path_str_to_file_id(path) {file_id}

@@ -412,32 +412,43 @@ impl LiveEditor {
         
         let token_cache = &document_inner.token_cache;
         let lines = &document_inner.text.as_lines();
-        let path = document.path.clone().into_os_string().into_string().unwrap();
+        let raw_path = document.path.clone().into_os_string().into_string().unwrap().to_owned();
         
+        let working_dir = std::env::current_dir().unwrap();
+        let working_dir = working_dir.as_os_str().to_str().unwrap();
+        let path = if let Some(prefix) = raw_path.strip_prefix(working_dir){
+            prefix
+        }
+        else{
+            raw_path.as_str()
+        };
+
         let live_registry_rc = cx.live_registry.clone();
         let mut live_registry = live_registry_rc.borrow_mut();
         // ok now what.
-        match live_registry.live_edit_file(&path, inline_cache.live_register_range.unwrap(), | line | {
-            (&lines[line], &token_cache[line].tokens())
-        }) {
-            Ok(event) => {
-                match event {
-                    Some(LiveEditEvent::ReparseDocument) => {
-                        inline_cache.invalidate_all();
-                        self.delayed_reparse_document = event;
+        if let Some(range) = inline_cache.live_register_range {
+            match live_registry.live_edit_file(&path, range, | line | {
+                (&lines[line], &token_cache[line].tokens())
+            }) {
+                Ok(event) => {
+                    match event {
+                        Some(LiveEditEvent::ReparseDocument) => {
+                            inline_cache.invalidate_all();
+                            self.delayed_reparse_document = event;
+                        }
+                        Some(_) => {
+                            self.delayed_reparse_document = None;
+                            cx.live_edit_event = event;
+                        }
+                        _ => ()
                     }
-                    Some(_) => {
-                        self.delayed_reparse_document = None;
-                        cx.live_edit_event = event;
-                    }
-                    _ => ()
                 }
-            }
-            Err(e) => {
-                let e = live_registry.live_error_to_live_file_error(e);
-                eprintln!("PARSE ERROR {}", e);
-            }
-        };
+                Err(e) => {
+                    let e = live_registry.live_error_to_live_file_error(e);
+                    eprintln!("PARSE ERROR {}", e);
+                }
+            };
+        }
     }
     
     pub fn handle_event(

@@ -25,6 +25,8 @@ pub trait FrameComponent: LiveApply {
     fn type_id(&self) -> TypeId;
 }
 
+generate_ref_cast_api!(FrameComponent);
+
 #[derive(Clone)]
 pub struct FrameActionItem {
     pub id: LiveId,
