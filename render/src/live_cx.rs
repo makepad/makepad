@@ -3,9 +3,6 @@ pub use {
         any::TypeId,
     },
     crate::{
-        makepad_live_compiler::{
-            LiveEvalError
-        },
         cx::Cx,
         event::Event,
         live_traits::*,
@@ -22,30 +19,6 @@ pub fn live_register(cx:&mut Cx) {
     crate::shader::std::live_register(cx);
     crate::font::live_register(cx);
 }
-
-impl LiveEvalError for Cx {
-    fn apply_error_wrong_value_in_expression(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], ty: &str) {
-        self.apply_error(origin, index, nodes, format!("wrong value in expression of type {} value: {:?}", ty, nodes[index].value))
-    }
-    
-    fn apply_error_binop_undefined_in_expression(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], op: LiveBinOp, a: LiveEval, b: LiveEval) {
-        self.apply_error(origin, index, nodes, format!("Operation {:?} undefined between {:?} and {:?}", op, a, b))
-    }
-    
-    fn apply_error_unop_undefined_in_expression(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], op: LiveUnOp, a: LiveEval) {
-        self.apply_error(origin, index, nodes, format!("Operation {:?} undefined for {:?}", op, a))
-    }
-    
-    fn apply_error_expression_call_not_implemented(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], ident: LiveId, args: usize) {
-        self.apply_error(origin, index, nodes, format!("Expression call not implemented ident:{} with number of args: {}", ident, args))
-    }
-    
-    fn apply_error_cant_find_target(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], id: LiveId) {
-        self.apply_error(origin, index, nodes, format!("cant find target: {}", id))
-    }
-    
-}
-
 
 impl Cx {
     
@@ -97,7 +70,6 @@ impl Cx {
         self.apply_error(origin, index, nodes, format!("wrong expression return. Prop: {} primitive: {} value: {:?}", nodes[index].id, prim, b))
     }
     
-    
     pub fn apply_error_animation_missing_state(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], track: LiveId, state_id: LiveId, ids: &[LiveId]) {
         self.apply_error(origin, index, nodes, format!("animation missing state: {} {} {:?}", track, state_id, ids))
     }
@@ -120,6 +92,15 @@ impl Cx {
     
     pub fn apply_animate_missing_apply_block(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode]) {
         self.apply_error(origin, index, nodes, format!("animate missing apply:{{}} block"))
+    }
+    
+    pub fn apply_error_cant_find_target(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], id: LiveId) {
+        self.apply_error(origin, index, nodes, format!("cant find target: {}", id))
+    }
+    
+    pub fn apply_error_eval(&mut self, err:LiveError) {
+        let live_registry = self.live_registry.borrow();
+        println!("{}", live_registry.live_error_to_live_file_error(err));
     }
     
     pub fn apply_error(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], message: String) {

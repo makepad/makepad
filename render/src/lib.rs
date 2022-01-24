@@ -45,7 +45,6 @@ pub use {
         live_error_origin,
         LiveErrorOrigin,
         LiveNodeOrigin,
-        LiveEvalError,
         id,
         id_num,
         Mat4,
