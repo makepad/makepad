@@ -118,16 +118,17 @@ live_primitive!(
                 }
                 nodes.skip_node(index)
             }
-            LiveValue::Expr{..} => {
-                
-                let ret = live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes, &mut Some(cx));
-                match ret {
-                    LiveEval::Bool(v) => {
-                        *self = v;
+            LiveValue::Expr {..} => {
+                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
+                    Ok(ret) => match ret {
+                        LiveEval::Bool(v) => {
+                            *self = v;
+                        }
+                        _ => {
+                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "bool", ret);
+                        }
                     }
-                    _ => {
-                        cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "bool", ret);
-                    }
+                    Err(err) => cx.apply_error_eval(err)
                 }
                 nodes.skip_node(index)
             },
@@ -157,14 +158,16 @@ live_primitive!(
                 *self = *val as f32;
                 index + 1
             }
-            LiveValue::Expr{..} => {
-                let ret = live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes, &mut Some(cx));
-                match ret {
-                    LiveEval::Float(v) => {*self = v as f32;}
-                    LiveEval::Int(v) => {*self = v as f32;}
-                    _ => {
-                        cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "f32", ret);
+            LiveValue::Expr {..} => {
+                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
+                    Ok(ret) => match ret {
+                        LiveEval::Float(v) => {*self = v as f32;}
+                        LiveEval::Int(v) => {*self = v as f32;}
+                        _ => {
+                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "f32", ret);
+                        }
                     }
+                    Err(err) => cx.apply_error_eval(err)
                 }
                 nodes.skip_node(index)
             },
@@ -199,14 +202,16 @@ live_primitive!(
                 *self = *val as f64;
                 index + 1
             }
-            LiveValue::Expr{..} => {
-                let ret = live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes, &mut Some(cx));
-                match ret {
-                    LiveEval::Float(v) => {*self = v as f64;}
-                    LiveEval::Int(v) => {*self = v as f64;}
-                    _ => {
-                        cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "f64", ret);
+            LiveValue::Expr {..} => {
+                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
+                    Ok(ret) => match ret {
+                        LiveEval::Float(v) => {*self = v as f64;}
+                        LiveEval::Int(v) => {*self = v as f64;}
+                        _ => {
+                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "f64", ret);
+                        }
                     }
+                    Err(err) => cx.apply_error_eval(err)
                 }
                 nodes.skip_node(index)
             },
@@ -241,14 +246,16 @@ live_primitive!(
                 *self = *val as i64;
                 index + 1
             }
-            LiveValue::Expr{..} => {
-                let ret = live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes, &mut Some(cx));
-                match ret {
-                    LiveEval::Float(v) => {*self = v as i64;}
-                    LiveEval::Int(v) => {*self = v as i64;}
-                    _ => {
-                        cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "i64", ret);
+            LiveValue::Expr {..} => {
+                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
+                    Ok(ret) => match ret {
+                        LiveEval::Float(v) => {*self = v as i64;}
+                        LiveEval::Int(v) => {*self = v as i64;}
+                        _ => {
+                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "i64", ret);
+                        }
                     }
+                    Err(err) => cx.apply_error_eval(err)
                 }
                 nodes.skip_node(index)
             },
@@ -283,14 +290,16 @@ live_primitive!(
                 *self = *val as usize;
                 index + 1
             }
-            LiveValue::Expr{..} => {
-                let ret = live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes, &mut Some(cx));
-                match ret {
-                    LiveEval::Float(v) => {*self = v as usize;}
-                    LiveEval::Int(v) => {*self = v as usize;}
-                    _ => {
-                        cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "f32", ret);
+            LiveValue::Expr {..} => {
+                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
+                    Ok(ret) => match ret {
+                        LiveEval::Float(v) => {*self = v as usize;}
+                        LiveEval::Int(v) => {*self = v as usize;}
+                        _ => {
+                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "usize", ret);
+                        }
                     }
+                    Err(err) => cx.apply_error_eval(err)
                 }
                 nodes.skip_node(index)
             }
@@ -327,13 +336,15 @@ live_primitive!(
                 }
                 nodes.skip_node(index)
             }
-            LiveValue::Expr{..} => {
-                let ret = live_eval(&cx.live_registry.clone().borrow(), index,  &mut (index + 1), nodes, &mut Some(cx));
-                match ret {
-                    LiveEval::Vec2(v) => {*self = v;}
-                    _ => {
-                        cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "Vec2", ret);
+            LiveValue::Expr {..} => {
+                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
+                    Ok(ret) => match ret {
+                        LiveEval::Vec2(v) => {*self = v;}
+                        _ => {
+                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "Vec2", ret);
+                        }
                     }
+                    Err(err) => cx.apply_error_eval(err)
                 }
                 nodes.skip_node(index)
             }
@@ -364,13 +375,15 @@ live_primitive!(
                 }
                 nodes.skip_node(index)
             }
-            LiveValue::Expr{..} => {
-                let ret = live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes, &mut Some(cx));
-                match ret {
-                    LiveEval::Vec3(v) => {*self = v;}
-                    _ => {
-                        cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "Vec3", ret);
+            LiveValue::Expr {..} => {
+                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
+                    Ok(ret) => match ret {
+                        LiveEval::Vec3(v) => {*self = v;}
+                        _ => {
+                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "Vec3", ret);
+                        }
                     }
+                    Err(err) => cx.apply_error_eval(err)
                 }
                 nodes.skip_node(index)
             }
@@ -401,13 +414,15 @@ live_primitive!(
                 }
                 nodes.skip_node(index)
             }
-            LiveValue::Expr{..} => {
-                let ret = live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes, &mut Some(cx));
-                match ret {
-                    LiveEval::Vec4(v) => {*self = v;}
-                    _ => {
-                        cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "Vec4", ret);
+            LiveValue::Expr {..} => {
+                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
+                    Ok(ret) => match ret {
+                        LiveEval::Vec4(v) => {*self = v;}
+                        _ => {
+                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "Vec4", ret);
+                        }
                     }
+                    Err(err) => cx.apply_error_eval(err)
                 }
                 nodes.skip_node(index)
             }
@@ -449,13 +464,15 @@ live_primitive!(
                 origin_doc.get_string(*string_start, *string_count, self);
                 index + 1
             }
-            LiveValue::Expr{..} => {
-                let ret = live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes, &mut Some(cx));
-                match ret {
-                    LiveEval::String(v) => {*self = v;}
-                    _ => {
-                        cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "Vec4", ret);
+            LiveValue::Expr {..} => {
+                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
+                    Ok(ret) => match ret {
+                        LiveEval::String(v) => {*self = v;}
+                        _ => {
+                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "Vec2", ret);
+                        }
                     }
+                    Err(err) => cx.apply_error_eval(err)
                 }
                 nodes.skip_node(index)
             }
@@ -478,7 +495,7 @@ live_primitive!(
             LiveValue::InlineString(inline_str)
         }
         else {
-            LiveValue::FittedString(FittedString::from_string(self.clone())) 
+            LiveValue::FittedString(FittedString::from_string(self.clone()))
         }
     }
 );
@@ -486,9 +503,9 @@ live_primitive!(
 
 live_primitive!(
     LivePtr,
-    LivePtr {file_id: LiveFileId(0), index: 0, generation:Default::default()},
+    LivePtr {file_id: LiveFileId(0), index: 0, generation: Default::default()},
     fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
-        if let Some(file_id) = apply_from.file_id() { 
+        if let Some(file_id) = apply_from.file_id() {
             self.file_id = file_id;
             self.index = index as u32;
             self.generation = cx.live_registry.borrow().file_id_to_file(file_id).generation;

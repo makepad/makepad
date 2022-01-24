@@ -24,7 +24,11 @@ live_register!{
                     COLOR_BG_ODD,
                     self.is_even
                 ),
-                COLOR_BG_SELECTED,
+                mix(
+                    COLOR_BG_UNFOCUSSED,
+                    COLOR_BG_SELECTED,
+                    self.focussed
+                ), 
                 self.selected
             );
             // COLOR_BG_HOVER,
@@ -108,6 +112,25 @@ live_register!{
             apply: {hover: [{time: 0.0, value: 1.0}]},
         }
         
+        focussed_state: {
+            track: focus,
+            duration: 0.1,
+            apply: {
+                focussed: 0.0,
+                bg_quad: {selected: (selected)}
+                name_text: {selected: (selected)}
+                icon_quad: {selected: (selected)}
+            }
+        }
+        
+        unfocussed_state: {
+            track: focus,
+            duration: 0.1,
+            apply: {
+                focussed: [{time: 0.0, value: 1.0}],
+            }
+        }
+        
         unselected_state: {
             track: select,
             duration: 0.1,
@@ -184,6 +207,7 @@ struct DrawBgQuad {
     is_even: f32,
     scale: f32,
     is_folder: f32,
+    focussed: f32,
     selected: f32,
     hover: f32,
     opened: f32,
@@ -195,6 +219,7 @@ struct DrawNameText {
     is_even: f32,
     scale: f32,
     is_folder: f32,
+    focussed: f32,
     selected: f32,
     hover: f32,
     opened: f32,
@@ -206,6 +231,7 @@ struct DrawIconQuad {
     is_even: f32,
     scale: f32,
     is_folder: f32,
+    focussed: f32,
     selected: f32,
     hover: f32,
     opened: f32,
@@ -223,6 +249,9 @@ pub struct FileTreeNode {
     
     indent_width: f32,
     
+    focussed_state: Option<LivePtr>,
+    unfocussed_state: Option<LivePtr>,
+
     default_state: Option<LivePtr>,
     hover_state: Option<LivePtr>,
     selected_state: Option<LivePtr>,
@@ -339,12 +368,16 @@ impl FileTreeNode {
         }
     }
     
-    fn set_is_selected(&mut self, cx: &mut Cx, is_selected: bool, animate: Animate) {
-        self.toggle_animator(cx, is_selected, animate, self.selected_state, self.unselected_state)
+    fn set_is_selected(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
+        self.toggle_animator(cx, is, animate, self.selected_state, self.unselected_state)
     }
     
-    pub fn set_folder_is_open(&mut self, cx: &mut Cx, is_open: bool, animate: Animate) {
-        self.toggle_animator(cx, is_open, animate, self.opened_state, self.closed_state);
+    fn set_is_focussed(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
+        self.toggle_animator(cx, is, animate, self.focussed_state, self.unfocussed_state)
+    }
+    
+    pub fn set_folder_is_open(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
+        self.toggle_animator(cx, is, animate, self.opened_state, self.closed_state);
     }
     
     pub fn handle_event(
@@ -553,7 +586,7 @@ impl FileTree {
         if self.scroll_view.handle_event(cx, event) {
             self.scroll_view.redraw(cx);
         }
-        
+
         match event {
             Event::DragEnd => self.dragging_node_id = None,
             _ => ()
@@ -573,6 +606,7 @@ impl FileTree {
                     self.open_nodes.remove(&node_id);
                 }
                 FileTreeNodeAction::WasClicked => {
+                    cx.set_key_focus(self.scroll_view.area());
                     if let Some(last_selected) = self.selected_node_id {
                         if last_selected != node_id {
                             self.tree_nodes.get_mut(&last_selected).unwrap().0.set_is_selected(cx, false, Animate::Yes);
@@ -588,6 +622,20 @@ impl FileTree {
                 }
                 _ => ()
             }
+        }
+        
+        match event.hits(cx, self.scroll_view.area()){
+            HitEvent::KeyFocus(_)=>{
+                if let Some(node_id) = self.selected_node_id {
+                    self.tree_nodes.get_mut(&node_id).unwrap().0.set_is_focussed(cx, true, Animate::Yes);
+                }
+            }
+            HitEvent::KeyFocusLost(_)=>{
+                if let Some(node_id) = self.selected_node_id {
+                    self.tree_nodes.get_mut(&node_id).unwrap().0.set_is_focussed(cx, false, Animate::Yes);
+                }
+            }
+            _=>()
         }
     }
 }

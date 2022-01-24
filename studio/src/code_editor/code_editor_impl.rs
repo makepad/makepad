@@ -69,7 +69,7 @@ live_register!{
                 sdf.box(self.next_x, self.rect_size.y, self.next_w, self.rect_size.y, BORDER_RADIUS);
                 sdf.gloop(GLOOPINESS);
             }
-            return sdf.fill(COLOR_BG_SELECTED);
+            return sdf.fill(COLOR_EDITOR_SELECTED);
         }
     }
     

@@ -138,7 +138,7 @@ impl AppInner {
                     state,
                     id!(content).into(),
                     None,
-                    state.file_path_join(&["examples/cmdline_example/src/main.rs"])
+                    state.file_path_join(&["studio/component/src/file_tree.rs"])
                 );
                 self.builder_client.send_cmd(BuilderCmd::CargoCheck);
             }

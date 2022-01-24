@@ -274,7 +274,7 @@ impl DrawTrapezoidText {
                 let font = &cxfont.ttf_font;
                 let atlas_page = &cxfont.atlas_pages[todo.atlas_page_id];
                 let glyph = &font.glyphs[todo.glyph_id];
-                
+
                 if todo.glyph_id == font.char_code_to_glyph_index_map[10] ||
                 todo.glyph_id == font.char_code_to_glyph_index_map[9] ||
                 todo.glyph_id == font.char_code_to_glyph_index_map[13] {
@@ -289,6 +289,7 @@ impl DrawTrapezoidText {
                 let font_scale_pixels = font_scale_logical * atlas_page.dpi_factor;
                 let mut trapezoids = Vec::new();
                 //log_str(&format!("Serializing char {} {} {} {}", glyphtc.tx1 , cx.fonts_atlas.texture_size.x ,todo.subpixel_x_fract ,atlas_page.dpi_factor));
+                
                 let trapezoidate = self.trapezoidator.trapezoidate(
                     glyph
                         .outline

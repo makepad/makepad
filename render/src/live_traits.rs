@@ -139,7 +139,6 @@ pub trait LiveApply: LiveHook {
                     LiveEditEvent::Mutation {tokens, apply, live_ptrs} => {
                         cx.update_shader_tables_with_live_edit(&tokens, &live_ptrs);
                         if let Some(index) = apply.child_by_name(0, id) {
-                            //println!("{}", mutated_apply.to_string(0, 100));
                             self.apply(cx, ApplyFrom::LiveEdit, index, &apply);
                         }
                     }
