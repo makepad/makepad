@@ -30,7 +30,6 @@ pub use {
     crate::{
         live_eval::{
             live_eval,
-            LiveEvalError,
             LiveEval
         },
         live_registry::{

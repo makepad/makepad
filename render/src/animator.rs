@@ -491,6 +491,9 @@ impl Animator {
         
         if let Some(nf) = event.is_next_frame(self.next_frame) {
             
+            if self.state.is_none(){
+                return AnimatorAction::None
+            }
             let state_nodes = self.state.as_mut().unwrap();
             
             let mut state_index = state_nodes.child_by_name(0, id!(state)).unwrap();

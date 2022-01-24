@@ -22,7 +22,7 @@ live_register!{
         wrapping: Wrapping::None
         text_style: {
             font: {
-                path: "resources/Ubuntu-R.ttf"
+                path: "resources/IBMPlexSans-Text.ttf"
             }
         }
         
@@ -124,7 +124,7 @@ live_register!{
 #[derive(Clone, Live, LiveHook)]
 pub struct TextStyle {
     #[live()] pub font: Font,
-    #[live(8.0)] pub font_size: f32,
+    #[live(9.0)] pub font_size: f32,
     #[live(1.0)] pub brightness: f32,
     #[live(0.6)] pub curve: f32,
     #[live(1.4)] pub line_spacing: f32,
@@ -257,11 +257,9 @@ impl DrawText {
             
             let unicode = *wc as usize;
             let glyph_id = font.char_code_to_glyph_index_map[unicode];
-            if glyph_id >= font.glyphs.len() {
-                println!("GLYPHID OUT OF BOUNDS {} {} len is {}", unicode, glyph_id, font.glyphs.len());
-                continue;
-            }
-            
+
+            let glyph_id = if *wc == 'g' && self.text_style.font.path == "resources/IBMPlexSans-Text.ttf"{11}else{glyph_id};
+
             let glyph = &font.glyphs[glyph_id];
             
             let advance = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
@@ -277,7 +275,6 @@ impl DrawText {
             // compute subpixel shift
             let subpixel_x_fract = min_pos_x - (min_pos_x * dpi_factor).floor() / dpi_factor;
             let subpixel_y_fract = min_pos_y - (min_pos_y * dpi_factor).floor() / dpi_factor;
-            
             
             // scale and snap it
             let scaled_min_pos_x = walk_x + font_size_logical * self.font_scale * glyph.bounds.p_min.x - subpixel_x_fract;
@@ -380,6 +377,9 @@ impl DrawText {
                 emit = true;
                 newline = true;
             }
+            let slot = if c == 'g' && self.text_style.font.path == "resources/IBMPlexSans-Text.ttf"{11}else{slot};
+
+
             if slot != 0 {
                 let glyph = &cx.fonts[font_id].as_ref().unwrap().ttf_font.glyphs[slot];
                 width += glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;

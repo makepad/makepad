@@ -45,8 +45,8 @@ pub enum LiveNodeFindResult {
     Struct(StructPtr),
     Function(FnPtr),
     PossibleStatic(StructPtr, FnPtr),
-    //    Const(ConstPtr),
-    LiveValue(ValuePtr, TyLit)
+    LiveValue(ValuePtr, TyLit),
+    Error(LiveError)
 }
 
 pub enum DrawShaderQuery {
@@ -191,12 +191,26 @@ impl ShaderRegistry {
                 }
                 LiveValue::Expr{..} if live_registry.get_node_prefix(node.origin) == Some(id!(const)) => {
                     // ok lets eval the expr to get a type
-                    if let Some(ty) = Ty::from_live_eval(live_eval(live_registry, index, &mut (index + 1), nodes, &mut None)){
-                        if let Some(ty_lit) = ty.maybe_ty_lit(){
-                            return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), ty_lit)
+                    match live_eval(live_registry, index, &mut (index + 1), nodes){
+                        Ok(value) => {
+                            if let Some(ty) = Ty::from_live_eval(value){
+                                if let Some(ty_lit) = ty.maybe_ty_lit(){
+                                    return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), ty_lit)
+                                }
+                            }
+                            return LiveNodeFindResult::Error(
+                                LiveError {
+                                    origin: live_error_origin!(),
+                                    message: format!("Type of eval result not valid for shader"),
+                                    span: nodes[index].origin.token_id().unwrap().into()
+                                }
+                            );
+                        }
+                        Err(err)=>{
+                            println!("HERE ERROR");
+                            return LiveNodeFindResult::Error(err)
                         }
                     }
-                    return LiveNodeFindResult::NotFound;
                 }
                 LiveValue::DSL {token_start, ..} => {
                     // lets get the first token
@@ -510,6 +524,10 @@ impl ShaderRegistry {
                 while let Some(node_index) = node_iter {
                     let prop = &doc.nodes[node_index];
                     let prop_ptr = draw_shader_ptr.with_index(node_index);
+                    if prop.id == id!(debug_id){
+                        node_iter = doc.nodes.next_child(node_index);
+                        continue;
+                    }
                     match prop.value {
                         LiveValue::Bool(_) |
                         LiveValue::Id(_) |
@@ -520,21 +538,18 @@ impl ShaderRegistry {
                         LiveValue::Vec3(_) |
                         LiveValue::Vec4(_) | 
                         LiveValue::Expr{..} => {
+                            
+                            
                             let first_def = prop.origin.first_def().unwrap();
                             let before = live_registry.get_node_prefix(prop.origin);
-                            let ty = ShaderTy::from_live_node(live_registry, node_index, &doc.nodes);
-                            if ty.is_none() {
-                                if !prop.origin.node_has_prefix(){
-                                    node_iter = doc.nodes.next_child(node_index);
-                                    continue;
+                           
+                            let ty = match ShaderTy::from_live_node(live_registry, node_index, &doc.nodes){
+                                Ok(ty)=>ty,
+                                Err(err)=>{
+                                    return Err(err)
                                 }
-                                return Err(LiveError {
-                                    origin: live_error_origin!(),
-                                    span: first_def.into(),
-                                    message: format!("Invalid type for shader {:?}", prop.value)
-                                })
-                            }
-                            let ty_expr = ty.unwrap().to_ty_expr();
+                            };
+                            let ty_expr = ty.to_ty_expr();
                             match before {
                                 Some(id!(geometry)) => {
                                     draw_shader_def.fields.push(DrawShaderFieldDef {

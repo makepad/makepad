@@ -1087,42 +1087,63 @@ impl Ty {
         }
     }
     
-    pub fn from_live_eval(live_eval:LiveEval) -> Option<Self> {
+    pub fn from_live_eval(live_eval: LiveEval) -> Option<Self> {
         match live_eval {
-            LiveEval::Bool(_)=>Some(Self::Float),
-            LiveEval::Int(_)=>Some(Self::Int),
-            LiveEval::Float(_)=>Some(Self::Float),
-            LiveEval::Vec2(_)=>Some(Self::Vec2),
-            LiveEval::Vec3(_)=>Some(Self::Vec3),
-            LiveEval::Vec4(_)=>Some(Self::Vec4),
+            LiveEval::Bool(_) => Some(Self::Float),
+            LiveEval::Int(_) => Some(Self::Int),
+            LiveEval::Float(_) => Some(Self::Float),
+            LiveEval::Vec2(_) => Some(Self::Vec2),
+            LiveEval::Vec3(_) => Some(Self::Vec3),
+            LiveEval::Vec4(_) => Some(Self::Vec4),
             _ => None
         }
     }
     
-    pub fn from_live_node(live_registry:&LiveRegistry, index: usize, nodes: &[LiveNode]) -> Option<Self> {
-        match &nodes[index].value {
-            LiveValue::Expr{..}=>{
-                Self::from_live_eval(live_eval(live_registry, index, &mut (index + 1), nodes, &mut None))
+    pub fn from_live_node(live_registry: &LiveRegistry, index: usize, nodes: &[LiveNode]) -> Result<Self,
+    LiveError> {
+        Ok(match &nodes[index].value {
+            LiveValue::Expr {..} => {
+                match live_eval(live_registry, index, &mut (index + 1), nodes) ? {
+                    LiveEval::Bool(_) => Self::Float,
+                    LiveEval::Int(_) => Self::Int,
+                    LiveEval::Float(_) => Self::Float,
+                    LiveEval::Vec2(_) => Self::Vec2,
+                    LiveEval::Vec3(_) => Self::Vec3,
+                    LiveEval::Vec4(_) => Self::Vec4,
+                    v => return Err(LiveError {
+                        origin: live_error_origin!(),
+                        message: format!("Expression return type does not resolve to a shader {:?}", v),
+                        span: nodes[index].origin.token_id().unwrap().into()
+                    })
+                }
             }
             LiveValue::Id(id) => match id {
-                id!(bool) => Some(Self::Bool),
-                id!(int) => Some(Self::Int),
-                id!(float) => Some(Self::Float),
-                id!(vec2) => Some(Self::Vec2),
-                id!(vec3) => Some(Self::Vec3),
-                id!(vec4) => Some(Self::Vec4),
-                id!(texture2d) => Some(Self::Texture2D),
-                _ => None
+                id!(bool) => Self::Bool,
+                id!(int) => Self::Int,
+                id!(float) => Self::Float,
+                id!(vec2) => Self::Vec2,
+                id!(vec3) => Self::Vec3,
+                id!(vec4) => Self::Vec4,
+                id!(texture2d) => Self::Texture2D,
+                _ => return Err(LiveError {
+                    origin: live_error_origin!(),
+                    message: format!("Id does not resolve to a shader type {}", id),
+                    span: nodes[index].origin.token_id().unwrap().into()
+                })
             }
-            LiveValue::Bool(_) => Some(Self::Int),
-            LiveValue::Int(_) => Some(Self::Int),
-            LiveValue::Float(_) => Some(Self::Float),
-            LiveValue::Color(_) => Some(Self::Vec4),
-            LiveValue::Vec2(_) => Some(Self::Vec2),
-            LiveValue::Vec3(_) => Some(Self::Vec3),
-            LiveValue::Vec4(_) => Some(Self::Vec4),
-            _ => None
-        }
+            LiveValue::Bool(_) => Self::Int,
+            LiveValue::Int(_) => Self::Int,
+            LiveValue::Float(_) => Self::Float,
+            LiveValue::Color(_) => Self::Vec4,
+            LiveValue::Vec2(_) => Self::Vec2,
+            LiveValue::Vec3(_) => Self::Vec3,
+            LiveValue::Vec4(_) => Self::Vec4,
+            _ => return Err(LiveError {
+                origin: live_error_origin!(),
+                message: format!("Live value {:?} does not resolve to a shader type", nodes[index].value),
+                span: nodes[index].origin.token_id().unwrap().into()
+            })
+        })
     }
 }
 
