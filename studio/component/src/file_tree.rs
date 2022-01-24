@@ -50,7 +50,7 @@ live_register!{
             )
         }
         
-        text_style: {
+        text_style: FONT_DATA{
             top_drop: 1.3,
         }
     }
@@ -87,8 +87,8 @@ live_register!{
         }
         
         icon_walk: Walk {
-            width: Width::Fixed(14.0),
-            height: Height::Filled,
+            width: Width::Fixed((DIM_DATA_ICON_WIDTH)),
+            height: Height::Fixed((DIM_DATA_ICON_HEIGHT)),
             margin: Margin {
                 left: 1
                 top: 0
@@ -180,7 +180,7 @@ live_register!{
     }
     
     FileTree: {{FileTree}} {
-        node_height: 20.0,
+        node_height: (DIM_DATA_ITEM_HEIGHT),
         file_node: FileTreeNode {
             is_folder: false,
             bg_quad: {is_folder: 0.0}
@@ -358,7 +358,7 @@ impl FileTreeNode {
     fn indent_walk(&self, depth: usize) -> Walk {
         Walk {
             width: Width::Fixed(depth as f32 * self.indent_width),
-            height: Height::Filled,
+            height: Height::Fixed(0.0),
             margin: Margin {
                 left: depth as f32 * 1.0,
                 top: 0.0,
