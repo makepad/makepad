@@ -40,11 +40,13 @@ live_register!{
                 self.selected
             );
         }
-        text_style: {top_drop: 1.15},
+        text_style: FONT_DATA{top_drop: 1.15},
     }
     
     LogListNode: {{LogListNode}} {
-        
+        link_button:{
+            
+        }
         layout: {
             walk: {
                 width: Width::Filled,
@@ -55,8 +57,8 @@ live_register!{
         }
         
         icon_walk: {
-            width: Width::Fixed(14.0),
-            height: Height::Fixed(14.0),
+            width: Width::Fixed((DIM_DATA_ICON_WIDTH)),
+            height: Height::Fixed((DIM_DATA_ICON_WIDTH)),
             margin: {
                 left: 1,
                 right: 0,
@@ -102,7 +104,7 @@ live_register!{
     }
     
     LogList: {{LogList}} {
-        node_height: 20.0,
+        node_height: (DIM_DATA_ITEM_HEIGHT),
         fold_node: LogListNode {}
         scroll_view: {
             view: {

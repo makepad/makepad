@@ -30,6 +30,7 @@ live_register!{
                 }
             }
             label_text: {
+                text_style:FONT_META{}
                 fn get_color(self) -> vec4 {
                     return mix(
                         mix(
