@@ -2,13 +2,13 @@ use crate::platform::apple::frameworks::*;
 use std::ptr;
 use std::mem;
 
-pub struct AudioOutput{
+pub struct AudioOutput {
     instance: AudioUnit
 }
 
-impl AudioOutput{
-
-    pub fn new()->Result<AudioOutput, AudioError>{
+impl AudioOutput {
+    
+    pub fn new() /*-> Result<AudioOutput, AudioError>*/ {
         let desc = AudioComponentDescription {
             componentType: AudioUnitType::IO,
             componentSubType: AudioUnitSubType::DefaultOutput,
@@ -18,27 +18,75 @@ impl AudioOutput{
         };
         
         unsafe {
-
-            let component = AudioComponentFindNext(ptr::null_mut(), &desc as *const _);
-
-            if component.is_null() {
-                return Err(AudioError::NoMatchingDefaultAudioUnitFound);
-            }
-
-            // Create an instance of the default audio unit using the component.
-            let mut instance_uninit = mem::MaybeUninit::<AudioUnit>::uninit();
-            AudioError::result(AudioComponentInstanceNew(
-                component,
-                instance_uninit.as_mut_ptr() as *mut AudioUnit
-            ))?;
-            let instance: AudioUnit = instance_uninit.assume_init();
-
-            // Initialise the audio unit!
-            AudioError::result(AudioUnitInitialize(instance))?;
+            let manager: ObjcId = msg_send![class!(AVAudioUnitComponentManager), sharedAudioUnitComponentManager];
+            let components: ObjcId = msg_send![manager, componentsMatchingDescription: desc];
+            // oookaay so how do we access the pointerlist.
+            let count: usize = msg_send![components, count];
+            // lets access item 1
+            let component: ObjcId = msg_send![components, objectAtIndex: 0];
+            // ok now.
+            let desc: AudioComponentDescription = msg_send![component, audioComponentDescription];
             
-            Ok(AudioOutput {
-                instance,
-            })
+            #[repr(C)]
+            struct BlockDescriptor {
+                reserved: c_ulong,
+                size: c_ulong,
+                copy_helper: extern "C" fn(*mut c_void, *const c_void),
+                dispose_helper: extern "C" fn(*mut c_void),
+            }
+            
+            static DESCRIPTOR: BlockDescriptor = BlockDescriptor {
+                reserved: 0,
+                size: mem::size_of::<BlockLiteral>() as c_ulong,
+                copy_helper,
+                dispose_helper,
+            };
+            
+            extern "C" fn copy_helper(dst: *mut c_void, src: *const c_void) {
+                unsafe {
+                    /*ptr::write(
+                        &mut (*(dst as *mut BlockLiteral)).inner as *mut _,
+                        (&*(src as *const BlockLiteral)).inner.clone()
+                    );*/
+                }
+            }
+            
+            extern "C" fn dispose_helper(src: *mut c_void) {
+                unsafe {
+                    ptr::drop_in_place(src as *mut BlockLiteral);
+                }
+            }
+            
+            #[repr(C)]
+            struct BlockLiteral {
+                isa: *const c_void,
+                flags: i32,
+                reserved: i32,
+                invoke: extern "C" fn(*mut BlockLiteral, ObjcId, ObjcId),
+                descriptor: *const BlockDescriptor,
+            }
+            
+            let literal = BlockLiteral {
+                isa: unsafe {_NSConcreteStackBlock.as_ptr() as *const c_void},
+                flags: 1 << 25,
+                reserved: 0,
+                invoke,
+                descriptor: &DESCRIPTOR,
+            };
+            
+            extern "C" fn invoke(literal: *mut BlockLiteral, audio_unit: ObjcId, error: ObjcId) {
+                let literal = unsafe {&mut *literal};
+                println!("GOT INVOKED!");
+                //drop(literal.inner.gpu_read_guards.lock().unwrap().take().unwrap());
+            }
+            
+            // ok now instantiate the fucker
+            let () = msg_send![
+                class!(AVAudioUnit),
+                instantiateWithComponentDescription: desc
+                options: kAudioComponentInstantiation_LoadInProcess
+                completionHandler: &literal
+            ];
         }
     }
 }

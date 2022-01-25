@@ -351,3 +351,35 @@ pub fn load_mouse_cursor(cursor: MouseCursor) -> ObjcId {
         // MouseCursor::Cell => load_webkit_cursor("cell"),
     }
 }
+
+#[macro_export]
+macro_rules!objc_callback {
+    ( $ ty: ident, $ default: expr, $ apply: item, $ to_live_value: item) => {
+        impl LiveHook for $ ty {}
+        impl ToLiveValue for $ ty {
+            $ to_live_value
+        }
+        impl LiveApply for $ ty {
+            //fn type_id(&self) -> TypeId {
+            //    TypeId::of::< $ ty>()
+            // }
+            
+            $ apply
+        }
+        impl LiveNew for $ ty {
+            fn new(_cx: &mut Cx) -> Self {
+                $ default
+            }
+            
+            fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
+                LiveTypeInfo {
+                    module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
+                    live_type: LiveType::of::<Self>(),
+                    fields: Vec::new(),
+                    type_name: LiveId::from_str(stringify!( $ ty)).unwrap(),
+                    //kind: LiveTypeKind::Primitive
+                }
+            }
+        }
+    }
+}

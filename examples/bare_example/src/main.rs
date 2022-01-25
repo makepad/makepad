@@ -47,14 +47,15 @@ impl App {
         match event {
             Event::Construct => {
                 // lets do an audio output
-                match AudioOutput::new(){
-                    Ok(o)=>{
+                //match 
+                AudioOutput::new();
+                  /*  Ok(o)=>{
                         println!("OK!");
                     }
                     Err(e)=>{
                         println!("ERROR {:?}", e);
                     }
-                }
+                }*/
                 // spawn 1000 buttons into the live structure
                 let mut out = Vec::new();
                 out.open();
