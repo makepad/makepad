@@ -8,8 +8,8 @@ license = "MIT"
 
 [dependencies]
 
-[dependencies.makepad-render]
-path = "../render"
+[dependencies.makepad-platform]
+path = "../platform"
 version = "0.1"
 
 

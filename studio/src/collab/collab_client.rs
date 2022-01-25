@@ -1,7 +1,7 @@
 use {
     crate::{
         makepad_micro_serde::*,
-        makepad_render::*,
+        makepad_platform::*,
         collab::{
             collab_protocol::{CollabRequest, CollabClientAction},
             collab_server::{CollabConnection, CollabServer},

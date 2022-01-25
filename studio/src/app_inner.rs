@@ -1,6 +1,6 @@
 use {
     crate::{
-        makepad_render::*,
+        makepad_platform::*,
         makepad_component::{
             DesktopWindow,
         },

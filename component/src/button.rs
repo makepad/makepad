@@ -1,7 +1,7 @@
 #![allow(unused)]
 use {
     crate::{
-        makepad_render::*,
+        makepad_platform::*,
         button_logic::*,
         frame_registry::*,
         register_as_frame_component
@@ -9,7 +9,7 @@ use {
 };
 
 live_register!{
-    use makepad_render::shader::std::*;
+    use makepad_platform::shader::std::*;
     
     DrawLabelText: {{DrawLabelText}} {
         fn get_color(self) -> vec4 {

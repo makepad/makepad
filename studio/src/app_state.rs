@@ -6,7 +6,7 @@ use {
             splitter::{SplitterAlign},
             tab_bar::{TabId},
         },
-        makepad_render::*,
+        makepad_platform::*,
         editor_state::{EditorState, SessionId},
         collab::{
             collab_protocol::{FileNodeData, FileTreeData},
