@@ -101,6 +101,13 @@ extern "C" {
     fn MTLCopyAllDevices() -> ObjcId; //TODO: Array
 }
 
+#[link(name = "AVFAudio", kind = "framework")]
+extern {
+    pub static AVAudioUnitComponentManager: ObjcId;
+    pub static AVAudioUnit: ObjcId;
+}
+
+
 
 // HELPERS
 
@@ -940,6 +947,9 @@ pub enum AudioError {
     
     Unknown,
 }
+
+pub const kAudioComponentInstantiation_LoadInProcess:u32 = 2;
+pub const kAudioComponentInstantiation_LoadOutOfProcess:u32 = 1;
 
 impl AudioError {
     pub fn result(val: i32) -> Result<(),Self> {
