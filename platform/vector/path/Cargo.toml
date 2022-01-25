@@ -1,0 +1,11 @@
+[package]
+name = "makepad-path"
+version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2018"
+description = "Path tools"
+license = "MIT"
+
+[dependencies]
+makepad-geometry = { path = "../geometry", version = "0.1" }
+makepad-internal-iter = { path = "../internal_iter", version = "0.1" }
