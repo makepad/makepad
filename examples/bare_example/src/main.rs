@@ -1,5 +1,6 @@
 use makepad_component::*;
-use makepad_component::makepad_render::*;
+use makepad_platform::*;
+use makepad_platform::platform::apple::core_audio::AudioOutput;
 
 live_register!{
     use makepad_component::frame::Frame;
@@ -45,6 +46,15 @@ impl App {
         
         match event {
             Event::Construct => {
+                // lets do an audio output
+                match AudioOutput::new(){
+                    Ok(o)=>{
+                        println!("OK!");
+                    }
+                    Err(e)=>{
+                        println!("ERROR {:?}", e);
+                    }
+                }
                 // spawn 1000 buttons into the live structure
                 let mut out = Vec::new();
                 out.open();
@@ -53,7 +63,7 @@ impl App {
                         [id_num!(btn, i)]: Button {
                             label: (format!("B{}", i + self.offset))
                         }
-                    });
+                    }); 
                 }
                 out.close();
                 self.frame.apply_clear(cx, &out);
