@@ -1,6 +1,6 @@
 use{
     crate::{
-        makepad_render::*,
+        makepad_platform::*,
         frame_registry::*
     }
 };

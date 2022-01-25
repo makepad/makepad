@@ -1,12 +1,12 @@
 use {
     crate::{
         tab_close_button::{TabCloseButtonAction, TabCloseButton},
-        makepad_render::*,
+        makepad_platform::*,
     }
 };
 
 live_register!{
-    use makepad_render::shader::std::*;
+    use makepad_platform::shader::std::*;
     use makepad_component::theme::*;
     
     Tab: {{Tab}} {

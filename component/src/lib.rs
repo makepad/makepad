@@ -1,4 +1,4 @@
-use makepad_render::*;
+use makepad_platform::*;
 
 pub mod button_logic;
 pub mod button;
@@ -15,7 +15,7 @@ pub mod frame_registry;
 pub mod frame;
 pub mod window_menu;
 
-pub use makepad_render;
+pub use makepad_platform;
 
 pub mod frame_template;
 pub mod empty_template;
@@ -36,7 +36,7 @@ pub use crate::{
 };
 
 pub fn live_register(cx:&mut Cx){
-    makepad_render::live_cx::live_register(cx);
+    makepad_platform::live_cx::live_register(cx);
     crate::theme::live_register(cx);
     crate::frame::live_register(cx);
     crate::fold_button::live_register(cx);

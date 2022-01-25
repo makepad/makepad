@@ -10,7 +10,7 @@ use {
             tab_bar::TabId,
             //        dock::PanelId,
         },
-        makepad_render::*,
+        makepad_platform::*,
         editor_state::{
             EditorState,
             DocumentId,

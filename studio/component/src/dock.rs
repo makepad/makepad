@@ -1,6 +1,6 @@
 use {
     crate::{
-        makepad_render::*,
+        makepad_platform::*,
         makepad_component::{
             component_map::ComponentMap
         },
@@ -10,7 +10,7 @@ use {
 };
 
 live_register!{
-    use makepad_render::shader::std::*;
+    use makepad_platform::shader::std::*;
     use crate::tab_bar::TabBar
     use crate::splitter::Splitter
     use makepad_component::theme::*;
