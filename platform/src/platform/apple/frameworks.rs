@@ -2,6 +2,7 @@
 
 #![allow(non_camel_case_types)]
 #![allow(non_upper_case_globals)]
+#![allow(non_snake_case)]
 
 pub use {
     makepad_objc_sys::{
@@ -30,20 +31,20 @@ pub struct RcObjcId(NonNull<Object>);
 
 impl RcObjcId {
     pub fn from_owned(id: NonNull<Object>) -> Self {
-        Self(id)
+        Self (id)
     }
-
+    
     pub fn from_unowned(id: NonNull<Object>) -> Self {
         unsafe {
             let _: () = msg_send![id.as_ptr(), retain];
         }
         Self::from_owned(id)
     }
-
+    
     pub fn as_id(&self) -> ObjcId {
         self.0.as_ptr()
     }
-
+    
     pub fn forget(self) -> NonNull<Object> {
         unsafe {
             let _: () = msg_send![self.0.as_ptr(), retain];
@@ -61,7 +62,7 @@ impl Clone for RcObjcId {
 impl Drop for RcObjcId {
     fn drop(&mut self) {
         unsafe {
-            let _: () = msg_send![self.0.as_ptr(), release ];
+            let _: () = msg_send![self.0.as_ptr(), release];
         }
     }
 }
@@ -100,6 +101,11 @@ extern "C" {
     fn MTLCopyAllDevices() -> ObjcId; //TODO: Array
 }
 
+
+// HELPERS
+
+
+
 pub fn get_default_metal_device() -> Option<ObjcId> {
     unsafe {
         let dev = MTLCreateSystemDefaultDevice();
@@ -107,9 +113,6 @@ pub fn get_default_metal_device() -> Option<ObjcId> {
     }
 }
 
-#[link(name = "CoreGraphics", kind = "framework")]
-extern {
-}
 
 pub fn get_all_metal_devices() -> Vec<ObjcId> {
     #[cfg(target_os = "ios")]
@@ -205,6 +208,11 @@ pub fn load_webkit_cursor(cursor_name_str: &str) -> ObjcId {
         msg_send![cursor, initWithImage: ns_image hotSpot: point]
     }
 }
+
+
+
+
+// COCOA
 
 
 
@@ -680,4 +688,319 @@ unsafe impl Encode for NSDragOperation {
         let encoding = format!("Q");
         unsafe {Encoding::from_str(&encoding)}
     }
+}
+
+
+
+// CORE AUDIO
+
+
+pub const kAudioUnitManufacturer_Apple: u32 = 1634758764;
+
+#[repr(C)] pub struct OpaqueAudioComponent([u8; 0]);
+pub type AudioComponent = *mut OpaqueAudioComponent;
+
+#[repr(C)] pub struct ComponentInstanceRecord([u8; 0]);
+pub type AudioComponentInstance = *mut ComponentInstanceRecord;
+pub type AudioUnit = AudioComponentInstance;
+
+pub type OSStatus = i32;
+
+#[repr(C)] 
+pub struct AudioStreamBasicDescription {
+    pub mSampleRate: f64,
+    pub mFormatID: AudioFormatId,
+    pub mFormatFlags: u32,
+    pub mBytesPerPacket: u32,
+    pub mFramesPerPacket: u32,
+    pub mBytesPerFrame: u32,
+    pub mChannelsPerFrame: u32,
+    pub mBitsPerChannel: u32,
+    pub mReserved: u32,
+}
+
+
+#[repr(u32)]
+pub enum AudioFormatId{
+    LinearPCM = 1819304813,
+    AC3 = 1633889587,
+    F60958AC3 = 1667326771,
+    AppleIMA4 = 1768775988,
+    MPEG4AAC = 1633772320,
+    MPEG4CELP = 1667591280,
+    MPEG4HVXC = 1752594531,
+    MPEG4TwinVQ = 1953986161,
+    MACE3 = 1296122675,
+    MACE6 = 1296122678,
+    ULaw = 1970037111,
+    ALaw = 1634492791,
+    QDesign = 1363430723,
+    QDesign2 = 1363430706,
+    QUALCOMM = 1365470320,
+    MPEGLayer1 = 778924081,
+    MPEGLayer2 = 778924082,
+    MPEGLayer3 = 778924083,
+    TimeCode = 1953066341,
+    MIDIStream = 1835623529,
+    ParameterValueStream = 1634760307,
+    AppleLossless = 1634492771,
+    MPEG4AAC_HE = 1633772392,
+    MPEG4AAC_LD = 1633772396,
+    MPEG4AAC_ELD = 1633772389,
+    MPEG4AAC_ELD_SBR = 1633772390,
+    MPEG4AAC_ELD_V2 = 1633772391,
+    MPEG4AAC_HE_V2 = 1633772400,
+    MPEG4AAC_Spatial = 1633772403,
+    AMR = 1935764850,
+    AMR_WB = 1935767394,
+    Audible = 1096107074,
+    iLBC = 1768710755,
+    DVIIntelIMA = 1836253201,
+    MicrosoftGSM = 1836253233,
+    AES3 = 1634038579,
+}
+
+struct F60958AC3Flags;
+impl F60958AC3Flags{
+    const IS_FLOAT:u32 = 1;
+    const IS_BIG_ENDIAN:u32 = 2;
+    const IS_SIGNED_INTEGER:u32 = 4;
+    const IS_PACKED:u32 = 8;
+    const IS_ALIGNED_HIGH:u32 = 16;
+    const IS_NON_INTERLEAVED:u32 = 32;
+    const IS_NON_MIXABLE:u32 = 64;
+}
+
+
+pub struct LinearPcmFlags;
+impl LinearPcmFlags{
+    const IS_FLOAT:u32 = 1;
+    const IS_BIG_ENDIAN:u32 = 2;
+    const IS_SIGNED_INTEGER:u32 = 4;
+    const IS_PACKED:u32 = 8;
+    const IS_ALIGNED_HIGH:u32 = 16;
+    const IS_NON_INTERLEAVED:u32 = 32;
+    const IS_NON_MIXABLE:u32 = 64;
+    const FLAGS_SAMPLE_FRACTION_SHIFT:u32 = 7;
+    const FLAGS_SAMPLE_FRACTION_MASK:u32 = 8064;
+}
+
+pub struct AppleLosslessFlags;
+impl AppleLosslessFlags{
+    const BIT_16_SOURCE_DATA:u32 = 1;
+    const BIT_20_SOURCE_DATA:u32 = 2;
+    const BIT_24_SOURCE_DATA:u32 = 3;
+    const BIT_32_SOURCE_DATA:u32 = 4;    
+}
+
+#[repr(u32)]
+pub enum Mpeg4ObjectId{
+    AAC_Main = 1,
+    AAC_LC = 2,
+    AAC_SSR = 3,
+    AAC_LTP = 4,
+    AAC_SBR = 5,
+    AAC_Scalable = 6,
+    TwinVQ = 7,
+    CELP = 8,
+    HVXC = 9,
+}
+
+pub struct AudioTimeStampFlags;
+impl AudioTimeStampFlags {
+    const SAMPLE_TIME_VALID:u32 = 1;
+    const HOST_TIME_VALID:u32 = 2;
+    const RATE_SCALAR_VALID:u32 = 4;
+    const WORLD_CLOCK_TIME_VALID:u32 = 8;
+    const SMPTE_TIME_VALID:u32 = 16;
+}
+
+#[repr(C)]
+pub struct AudioComponentDescription {
+    pub componentType: AudioUnitType,
+    pub componentSubType: AudioUnitSubType,
+    pub componentManufacturer: u32,
+    pub componentFlags: u32,
+    pub componentFlagsMask: u32,
+}
+
+#[repr(u32)]
+pub enum AudioUnitType {
+    IO = 1635086197,
+    MusicDevice = 1635085685,
+    MusicEffect = 1635085670,
+    FormatConverter = 1635083875,
+    Effect = 1635083896,
+    Mixer = 1635085688,
+    Panner = 1635086446,
+    Generator = 1635084142,
+    OfflineEffect = 1635086188,
+}
+
+#[repr(u32)]
+pub enum AudioUnitSubType {
+    PeakLimiter = 1819112562,
+    DynamicsProcessor = 1684237680,
+    LowPassFilter = 1819304307,
+    HighPassFilter = 1752195443,
+    BandPassFilter = 1651532147,
+    HighShelfFilter = 1752393830,
+    LowShelfFilter = 1819502694,
+    ParametricEQ = 1886217585,
+    Distortion = 1684632436,
+    Delay = 1684368505,
+    SampleDelay = 1935961209,
+    GraphicEQ = 1735550321,
+    MultiBandCompressor = 1835232624,
+    MatrixReverb = 1836213622,
+    Pitch = 1953329268,
+    AUFilter = 1718185076,
+    NetSend = 1853058660,
+    RogerBeep = 1919903602,
+    NBandEQ = 1851942257,
+    
+    //pub enum FormatConverterType 
+    AUConverter = 1668247158,
+    NewTimePitch = 1853191280,
+    //TimePitch = 1953329268,
+    DeferredRenderer = 1684366962,
+    Splitter = 1936747636,
+    Merger = 1835364967,
+    Varispeed = 1986097769,
+    AUiPodTimeOther = 1768977519,
+
+    //pub enum MixerType 
+    MultiChannelMixer = 1835232632,
+    StereoMixer = 1936554098,
+    Mixer3D = 862219640,
+    MatrixMixer = 1836608888,
+
+    //pub enum GeneratorType {
+    ScheduledSoundPlayer = 1936945260,
+    AudioFilePlayer = 1634103404,
+
+    //pub enum MusicDeviceType {
+    DLSSynth = 1684828960,
+    Sampler = 1935764848,
+
+    //pub enum IOType {
+    GenericOutput = 1734700658,
+    HalOutput = 1634230636,
+    DefaultOutput = 1684366880,
+    SystemOutput = 1937339168,
+    VoiceProcessingIO = 1987078511,
+    RemoteIO = 1919512419,
+}
+
+#[derive(Debug)]
+#[repr(i32)]
+pub enum AudioError {
+    
+    Unimplemented = -4,
+    FileNotFound = -43,
+    FilePermission = -54,
+    TooManyFilesOpen = -42,
+    
+    Unspecified = -1500,
+    SystemSoundClientMessageTimeout = -1501,
+    
+    BadFilePath = 561017960,
+    Param = -50,
+    MemFull = -108,
+    
+    FormatUnspecified = 2003329396,
+    UnknownProperty = 2003332927,
+    BadPropertySize = 561211770,
+    IllegalOperation = 1852797029,
+    UnsupportedFormat = 560226676,
+    State = 561214580,
+    NotEnoughBufferSpace = 560100710,
+    
+    UnsupportedDataFormat = 1718449215,
+    
+    InvalidProperty = -10879,
+    InvalidParameter = -10878,
+    InvalidElement = -10877,
+    NoConnection = -10876,
+    FailedInitialization = -10875,
+    TooManyFramesToProcess = -10874,
+    InvalidFile = -10871,
+    FormatNotSupported = -10868,
+    Uninitialized = -10867,
+    InvalidScope = -10866,
+    PropertyNotWritable = -10865,
+    CannotDoInCurrentContext = -10863,
+    InvalidPropertyValue = -10851,
+    PropertyNotInUse = -10850,
+    Initialized = -10849,
+    InvalidOfflineRender = -10848,
+    Unauthorized = -10847,
+    
+    NoMatchingDefaultAudioUnitFound,
+    
+    Unknown,
+}
+
+impl AudioError {
+    pub fn result(val: i32) -> Result<(),Self> {
+        Err(match val {
+            0 => return Ok(()),
+            x if x == Self::Unimplemented as i32 => Self::Unimplemented,
+            x if x == Self::FileNotFound as i32 => Self::FileNotFound,
+            x if x == Self::FilePermission as i32 => Self::FilePermission,
+            x if x == Self::TooManyFilesOpen as i32 => Self::TooManyFilesOpen,
+
+            x if x == Self::Unspecified as i32 => Self::Unspecified,
+            x if x == Self::SystemSoundClientMessageTimeout as i32 => Self::SystemSoundClientMessageTimeout,
+
+            x if x == Self::BadFilePath as i32 => Self::BadFilePath,
+            x if x == Self::Param as i32 => Self::Param,
+            x if x == Self::MemFull as i32 => Self::MemFull,
+            
+            x if x == Self::FormatUnspecified as i32 => Self::FormatUnspecified,
+            x if x == Self::UnknownProperty as i32 => Self::UnknownProperty,
+            x if x == Self::BadPropertySize as i32 => Self::BadPropertySize,
+            x if x == Self::IllegalOperation as i32 => Self::IllegalOperation,
+            x if x == Self::UnsupportedFormat as i32 => Self::UnsupportedFormat,
+            x if x == Self::State as i32 => Self::State,
+            x if x == Self::NotEnoughBufferSpace as i32 => Self::NotEnoughBufferSpace,
+            
+            x if x == Self::UnsupportedDataFormat as i32 => Self::UnsupportedDataFormat,
+            
+            x if x == Self::InvalidProperty as i32 => Self::InvalidProperty,
+            x if x == Self::InvalidParameter as i32 => Self::InvalidParameter,
+            x if x == Self::InvalidElement as i32 => Self::InvalidElement,
+            x if x == Self::NoConnection as i32 => Self::NoConnection,
+            x if x == Self::FailedInitialization as i32 => Self::FailedInitialization,
+            x if x == Self::TooManyFramesToProcess as i32 => Self::TooManyFramesToProcess,
+            x if x == Self::InvalidFile as i32 => Self::InvalidFile,
+            x if x == Self::FormatNotSupported as i32 => Self::FormatNotSupported,
+            x if x == Self::Uninitialized as i32 => Self::Uninitialized,
+            x if x == Self::InvalidScope as i32 => Self::InvalidScope,
+            x if x == Self::PropertyNotWritable as i32 => Self::PropertyNotWritable,
+            x if x == Self::CannotDoInCurrentContext as i32 => Self::CannotDoInCurrentContext,
+            x if x == Self::InvalidPropertyValue as i32 => Self::InvalidPropertyValue,
+            x if x == Self::PropertyNotInUse as i32 => Self::PropertyNotInUse,
+            x if x == Self::Initialized as i32 => Self::Initialized,
+            x if x == Self::InvalidOfflineRender as i32 => Self::InvalidOfflineRender,
+            x if x == Self::Unauthorized as i32 => Self::Unauthorized,
+            _ => Self::Unknown
+        })
+    }
+}
+
+#[link(name = "AudioToolbox", kind = "framework")]
+extern "C" {
+    
+    pub fn AudioComponentFindNext(
+        inComponent: AudioComponent,
+        inDesc: *const AudioComponentDescription,
+    ) -> AudioComponent;
+    
+    pub fn AudioComponentInstanceNew(
+        inComponent: AudioComponent,
+        outInstance: *mut AudioComponentInstance,
+    ) -> OSStatus;
+    
+    pub fn AudioUnitInitialize(inUnit: AudioUnit) -> OSStatus;
 }
