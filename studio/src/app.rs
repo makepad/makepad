@@ -1,6 +1,6 @@
 use {
     crate::{
-        makepad_render::*,
+        makepad_platform::*,
         app_inner::AppInner,
         app_state::AppState,
         design_editor::{

@@ -13,7 +13,7 @@ use {
             log_icon::LogIconType,
             log_list::{LogList, LogListAction}
         },
-        makepad_render::*,
+        makepad_platform::*,
         editor_state::EditorState,
         //builder::{
         //    builder_protocol::BuilderMsg,
@@ -22,7 +22,7 @@ use {
 };
 
 live_register!{
-    use makepad_render::shader::std::*;
+    use makepad_platform::shader::std::*;
     
     LogView: {{LogView}} {
     }

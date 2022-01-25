@@ -1,7 +1,7 @@
 use {
     
     crate::{
-        makepad_render::*,
+        makepad_platform::*,
         makepad_component::{
             component_map::ComponentMap,
             scroll_view::ScrollView

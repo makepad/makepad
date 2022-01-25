@@ -1,12 +1,12 @@
 use {
     crate::{
-        makepad_render::*,
+        makepad_platform::*,
         button_logic::*
     }
 };
 
 live_register!{
-    use makepad_render::shader::std::*;
+    use makepad_platform::shader::std::*;
     
     DrawDesktopButton: {{DrawDesktopButton}} {
         fn pixel(self) -> vec4 {

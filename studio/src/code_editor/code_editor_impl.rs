@@ -8,7 +8,7 @@ use {
             size::Size,
             text::{Text},
         },
-        makepad_render::*,
+        makepad_platform::*,
         makepad_component::{ 
             ScrollView,
             ScrollShadow
@@ -38,7 +38,7 @@ use {
 };
 
 live_register!{
-    use makepad_render::shader::std::*;
+    use makepad_platform::shader::std::*;
     use makepad_component::theme::*;
     
     DrawSelection: {{DrawSelection}} {

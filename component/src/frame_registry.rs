@@ -1,6 +1,6 @@
 use {
     std::any::TypeId,
-    crate::makepad_render::*
+    crate::makepad_platform::*
 };
 
 live_register!{
