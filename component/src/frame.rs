@@ -1,7 +1,7 @@
 use {
     std::collections::HashMap,
     crate::{
-        makepad_render::*,
+        makepad_platform::*,
         frame_registry::*
     }
 };

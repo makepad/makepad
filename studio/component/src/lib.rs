@@ -9,9 +9,9 @@ pub mod color_picker;
 pub mod splitter;
 
 pub use makepad_component;
-pub use makepad_component::makepad_render;
+pub use makepad_component::makepad_platform;
 
-use makepad_render::*;
+use makepad_platform::*;
 
 pub fn live_register(cx:&mut Cx){
     makepad_component::live_register(cx);

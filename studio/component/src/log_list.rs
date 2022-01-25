@@ -9,13 +9,13 @@ use {
             scroll_view::ScrollView,
             link_button::LinkButton,
         },
-        makepad_render::*,
+        makepad_platform::*,
         log_icon::{DrawLogIconQuad, LogIconType}
     },
 };
 
 live_register!{
-    use makepad_render::shader::std::*;
+    use makepad_platform::shader::std::*;
     use makepad_component::theme::*;
     
     DrawBgQuad: {{DrawBgQuad}} {

@@ -1,4 +1,4 @@
-use crate::makepad_render::*;
+use crate::makepad_platform::*;
 
 live_register!{
     BareWindow: {{BareWindow}} {

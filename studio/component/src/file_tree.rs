@@ -3,7 +3,7 @@ use {
         collections::{HashSet},
     },
     crate::{
-        makepad_render::*,
+        makepad_platform::*,
         makepad_component::{
             scroll_shadow::ScrollShadow,
             component_map::ComponentMap,
@@ -13,7 +13,7 @@ use {
 };
 
 live_register!{
-    use makepad_render::shader::std::*;
+    use makepad_platform::shader::std::*;
     use makepad_component::theme::*;
     
     DrawBgQuad: {{DrawBgQuad}} {

@@ -1,6 +1,6 @@
 use {
     crate::{
-        makepad_render::*,
+        makepad_platform::*,
         makepad_component::{
             fold_button::{FoldButton, FoldButtonAction},
             ComponentMap,
@@ -34,7 +34,7 @@ use {
 };
 
 live_register!{
-    use makepad_render::shader::std::*;
+    use makepad_platform::shader::std::*;
     use makepad_component::fold_button::FoldButton;
     
     LiveEditor: {{LiveEditor}} {

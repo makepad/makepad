@@ -1,8 +1,8 @@
-use crate::makepad_render::*;
+use crate::makepad_platform::*;
 
 
 live_register!{
-    use makepad_render::shader::std::*;
+    use makepad_platform::shader::std::*;
     
     DrawColorWheel: {{DrawColorWheel}} {
         instance hover: float
