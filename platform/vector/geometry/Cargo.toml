@@ -1,0 +1,12 @@
+[package]
+name = "makepad-geometry"
+version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2018"
+description = "Geometry tools"
+license = "MIT"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+makepad-internal-iter = { path = "../internal_iter", version = "0.1" }
