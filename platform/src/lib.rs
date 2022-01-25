@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 
-mod platform;
+pub mod platform;
 
 #[macro_use]
 mod live_prims;
