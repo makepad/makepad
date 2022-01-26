@@ -1,3 +1,4 @@
+#[macro_use]
 pub mod cocoa_util;
 pub mod cocoa_delegate;
 pub mod cocoa_app;
