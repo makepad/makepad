@@ -1,4 +1,5 @@
 use crate::platform::apple::frameworks::*;
+use crate::objc_closure;
 use std::ptr;
 use std::mem;
 
@@ -21,12 +22,12 @@ impl AudioOutput {
             let manager: ObjcId = msg_send![class!(AVAudioUnitComponentManager), sharedAudioUnitComponentManager];
             let components: ObjcId = msg_send![manager, componentsMatchingDescription: desc];
             // oookaay so how do we access the pointerlist.
-            let count: usize = msg_send![components, count];
+            let _count: usize = msg_send![components, count];
             // lets access item 1
             let component: ObjcId = msg_send![components, objectAtIndex: 0];
             // ok now.
             let desc: AudioComponentDescription = msg_send![component, audioComponentDescription];
-            
+            /*
             #[repr(C)]
             struct BlockDescriptor {
                 reserved: c_ulong,
@@ -44,10 +45,10 @@ impl AudioOutput {
             
             extern "C" fn copy_helper(dst: *mut c_void, src: *const c_void) {
                 unsafe {
-                    /*ptr::write(
+                    ptr::write(
                         &mut (*(dst as *mut BlockLiteral)).inner as *mut _,
                         (&*(src as *const BlockLiteral)).inner.clone()
-                    );*/
+                    );
                 }
             }
             
@@ -57,6 +58,11 @@ impl AudioOutput {
                 }
             }
             
+            extern "C" fn invoke(literal: *mut BlockLiteral, audio_unit: ObjcId, error: ObjcId) {
+                let literal = unsafe {&mut *literal};
+                literal.inner.lock().unwrap()(audio_unit, error);
+            }
+            
             #[repr(C)]
             struct BlockLiteral {
                 isa: *const c_void,
@@ -64,6 +70,7 @@ impl AudioOutput {
                 reserved: i32,
                 invoke: extern "C" fn(*mut BlockLiteral, ObjcId, ObjcId),
                 descriptor: *const BlockDescriptor,
+                inner: Arc<Mutex<dyn Fn(ObjcId, ObjcId)>>,
             }
             
             let literal = BlockLiteral {
@@ -72,20 +79,19 @@ impl AudioOutput {
                 reserved: 0,
                 invoke,
                 descriptor: &DESCRIPTOR,
+                inner: Arc::new(Mutex::new(|audio_unit, error|{
+                    println!("HERE!")
+                }))
             };
-            
-            extern "C" fn invoke(literal: *mut BlockLiteral, audio_unit: ObjcId, error: ObjcId) {
-                let literal = unsafe {&mut *literal};
-                println!("GOT INVOKED!");
-                //drop(literal.inner.gpu_read_guards.lock().unwrap().take().unwrap());
-            }
-            
+*/
             // ok now instantiate the fucker
             let () = msg_send![
                 class!(AVAudioUnit),
                 instantiateWithComponentDescription: desc
                 options: kAudioComponentInstantiation_LoadInProcess
-                completionHandler: &literal
+                completionHandler: &objc_closure!(move |_audio_unit:ObjcId, _error:ObjcId|{
+                    println!("HERE!");
+                })
             ];
         }
     }
