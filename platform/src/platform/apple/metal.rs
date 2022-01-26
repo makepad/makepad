@@ -26,9 +26,7 @@ use {
         },
     },
     std::{
-        ffi::c_void,
         mem,
-        os::raw::{c_int, c_ulong},
         ptr,
         sync::{
             Arc,
@@ -105,7 +103,7 @@ impl Cx {
                 
                 // lets verify our instance_offset is not disaligned
                 let instances = (draw_call.instances.as_ref().unwrap().len() / sh.mapping.instances.total_slots) as u64;
-
+                
                 if instances == 0 {
                     continue;
                 }
@@ -458,76 +456,21 @@ impl Cx {
     }
     
     fn commit_command_buffer(&mut self, command_buffer: ObjcId, gpu_read_guards: Vec<MetalRwLockGpuReadGuard>) {
-        #[repr(C)]
-        struct BlockDescriptor {
-            reserved: c_ulong,
-            size: c_ulong,
-            copy_helper: extern "C" fn(*mut c_void, *const c_void),
-            dispose_helper: extern "C" fn(*mut c_void),
-        }
-        
-        static DESCRIPTOR: BlockDescriptor = BlockDescriptor {
-            reserved: 0,
-            size: mem::size_of::<BlockLiteral>() as c_ulong,
-            copy_helper,
-            dispose_helper,
-        };
-        
-        extern "C" fn copy_helper(dst: *mut c_void, src: *const c_void) {
-            unsafe {
-                ptr::write(
-                    &mut (*(dst as *mut BlockLiteral)).inner as *mut _,
-                    (&*(src as *const BlockLiteral)).inner.clone()
-                );
-            }
-        }
-        
-        extern "C" fn dispose_helper(src: *mut c_void) {
-            unsafe {
-                ptr::drop_in_place(src as *mut BlockLiteral);
-            }
-        }
-        
-        #[repr(C)]
-        struct BlockLiteral {
-            isa: *const c_void,
-            flags: c_int,
-            reserved: c_int,
-            invoke: extern "C" fn(*mut BlockLiteral, ObjcId),
-            descriptor: *const BlockDescriptor,
-            inner: Arc<BlockLiteralInner>,
-        }
-        
-        #[repr(C)]
-        struct BlockLiteralInner {
-            gpu_read_guards: Mutex<Option<Vec<MetalRwLockGpuReadGuard >> >,
-        }
-        
-        let literal = BlockLiteral {
-            isa: unsafe {_NSConcreteStackBlock.as_ptr() as *const c_void},
-            flags: 1 << 25,
-            reserved: 0,
-            invoke,
-            descriptor: &DESCRIPTOR,
-            inner: Arc::new(BlockLiteralInner {
-                gpu_read_guards: Mutex::new(Some(gpu_read_guards))
+        let gpu_read_guards = Mutex::new(Some(gpu_read_guards));
+        let () = unsafe {msg_send![
+            command_buffer,
+            addCompletedHandler: &objc_closure!(move | _command_buffer: ObjcId | {
+                drop(gpu_read_guards.lock().unwrap().take().unwrap());
             })
-        };
-        
-        extern "C" fn invoke(literal: *mut BlockLiteral, _command_buffer: ObjcId) {
-            let literal = unsafe {&mut *literal};
-            drop(literal.inner.gpu_read_guards.lock().unwrap().take().unwrap());
-        }
-        
-        let () = unsafe {msg_send![command_buffer, addCompletedHandler: &literal]};
+        ]};
         let () = unsafe {msg_send![command_buffer, commit]};
-    }
+    }  
 }
 
 pub struct MetalCx {
     pub device: ObjcId,
     pub command_queue: ObjcId
-}
+} 
 
 
 #[derive(Clone)]
@@ -864,7 +807,7 @@ impl MetalBuffer {
             let contents: *mut u8 = msg_send![inner.buffer.as_id(), contents];
             
             //println!("Buffer write {} buf {} data {:?}", command_buffer as *const _ as u64, inner.buffer.as_id() as *const _ as u64, data);
-
+            
             std::ptr::copy(data.as_ptr() as *const u8, contents, len);
             let _: () = msg_send![
                 inner.buffer.as_id(),

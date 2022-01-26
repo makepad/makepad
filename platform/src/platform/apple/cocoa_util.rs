@@ -1,4 +1,4 @@
-use{
+use {
     crate::{
         platform::{
             apple::frameworks::*,
@@ -353,33 +353,69 @@ pub fn load_mouse_cursor(cursor: MouseCursor) -> ObjcId {
 }
 
 #[macro_export]
-macro_rules!objc_callback {
-    ( $ ty: ident, $ default: expr, $ apply: item, $ to_live_value: item) => {
-        impl LiveHook for $ ty {}
-        impl ToLiveValue for $ ty {
-            $ to_live_value
-        }
-        impl LiveApply for $ ty {
-            //fn type_id(&self) -> TypeId {
-            //    TypeId::of::< $ ty>()
-            // }
-            
-            $ apply
-        }
-        impl LiveNew for $ ty {
-            fn new(_cx: &mut Cx) -> Self {
-                $ default
+macro_rules!objc_closure {
+    (move | $ ( $ arg_ident: ident: $ arg_ty: ty), * | $ (: $ return_ty: ty) ? $ body: block) => {
+        {
+            #[repr(C)]
+            struct BlockDescriptor {
+                reserved: std::os::raw::c_ulong,
+                size: std::os::raw::c_ulong,
+                copy_helper: extern "C" fn(*mut std::os::raw::c_void, *const std::os::raw::c_void),
+                dispose_helper: extern "C" fn(*mut std::os::raw::c_void),
             }
             
-            fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
-                LiveTypeInfo {
-                    module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
-                    live_type: LiveType::of::<Self>(),
-                    fields: Vec::new(),
-                    type_name: LiveId::from_str(stringify!( $ ty)).unwrap(),
-                    //kind: LiveTypeKind::Primitive
+            static DESCRIPTOR: BlockDescriptor = BlockDescriptor {
+                reserved: 0,
+                size: mem::size_of::<BlockLiteral>() as std::os::raw::c_ulong,
+                copy_helper,
+                dispose_helper,
+            };
+            
+            #[allow(unused_unsafe)]
+            extern "C" fn copy_helper(dst: *mut std::os::raw::c_void, src: *const std::os::raw::c_void) {
+                unsafe {
+                    ptr::write(
+                        &mut (*(dst as *mut BlockLiteral)).inner as *mut _,
+                        (&*(src as *const BlockLiteral)).inner.clone()
+                    );
                 }
+            }
+            
+            #[allow(unused_unsafe)]
+            extern "C" fn dispose_helper(src: *mut std::os::raw::c_void) {
+                unsafe {
+                    ptr::drop_in_place(src as *mut BlockLiteral);
+                }
+            }
+            
+            #[allow(unused_unsafe)]
+            extern "C" fn invoke(literal: *mut BlockLiteral, $ ( $ arg_ident: $ arg_ty), *) $ ( -> $ return_ty) ? {
+                let literal = unsafe {&mut *literal};
+                literal.inner.lock().unwrap()( $ ( $ arg_ident), *)
+            }
+            
+            #[repr(C)]
+            struct BlockLiteral {
+                isa: *const std::os::raw::c_void,
+                flags: std::os::raw::c_int,
+                reserved: std::os::raw::c_int,
+                invoke: extern "C" fn(*mut BlockLiteral, $ ( $ arg_ty), *) $ ( -> $ return_ty) ?,
+                descriptor: *const BlockDescriptor,
+                inner: ::std::sync::Arc<::std::sync::Mutex<dyn Fn( $ ( $ arg_ty), *) $ ( -> $ return_ty) ? >>,
+            }
+            
+            #[allow(unused_unsafe)]
+            BlockLiteral {
+                isa: unsafe {_NSConcreteStackBlock.as_ptr() as *const std::os::raw::c_void},
+                flags: 1 << 25,
+                reserved: 0,
+                invoke,
+                descriptor: &DESCRIPTOR,
+                inner: ::std::sync::Arc::new(::std::sync::Mutex::new(move | $ ( $ arg_ident: $ arg_ty), * | {
+                    $ body
+                }))
             }
         }
     }
 }
+
