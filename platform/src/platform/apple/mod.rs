@@ -1,5 +1,5 @@
 #[macro_use]
-pub mod cocoa_util;
+pub mod apple_util;
 pub mod cocoa_delegate;
 pub mod cocoa_app;
 pub mod cocoa_window;

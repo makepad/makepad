@@ -1,6 +1,8 @@
 use makepad_component::*;
 use makepad_platform::*;
-use makepad_platform::platform::apple::core_audio::AudioOutput;
+use makepad_platform::platform::apple::core_audio::CoreAudio;
+use std::sync::Arc;
+use std::cell::Cell;
 
 live_register!{
     use makepad_component::frame::Frame;
@@ -27,6 +29,7 @@ pub struct App {
     frame_component_registry: FrameComponentRegistry,
     desktop_window: DesktopWindow,
     scroll_view: ScrollView,
+    #[rust(cx.new_signal())] signal: Signal,
     #[rust] offset: u64
 }
 
@@ -45,13 +48,37 @@ impl App {
         self.scroll_view.handle_event(cx, event);
         
         match event {
+            Event::Signal(se) => {
+                if let Some(data) = se.signals.get(&self.signal) {
+                    unsafe {CoreAudio::open_view_controller(data[0])};
+                }
+            }
             Event::Construct => {
                 // lets do an audio output
-                //match 
-                std::thread::spawn(||{
-                    AudioOutput::new();
+                //match
+                let signal = self.signal;
+                std::thread::spawn(move || {
+                    unsafe {
+                        let block_ptr = Arc::new(Cell::new(None));
+                        let list = CoreAudio::get_music_devices();
+                        if let Some(info) = list.iter().find( | item | item.name == "FM8") {
+                            let block_ptr = block_ptr.clone();
+                            CoreAudio::new_midi_instrument_from_desc(
+                                info.desc,
+                                Box::new(move | vc | {
+                                    Cx::post_signal(signal, vc);
+                                }),
+                                Box::new(move | in_block_ptr | {
+                                    block_ptr.set(Some(in_block_ptr));
+                                })
+                            );
+                        }
+                        CoreAudio::new_audio_output(Box::new(move | _left, _right | {
+                            block_ptr.get()
+                        }))
+                    };
                 });
-                  /*  Ok(o)=>{
+                /*  Ok(o)=>{
                         println!("OK!");
                     }
                     Err(e)=>{
@@ -61,12 +88,12 @@ impl App {
                 // spawn 1000 buttons into the live structure
                 let mut out = Vec::new();
                 out.open();
-                for i in 0..1 { 
+                for i in 0..1 {
                     out.push_live(live_object!{
                         [id_num!(btn, i)]: Button {
-                            label: (format!("B{}", i + self.offset))
+                            label: (format!("This is makepad metal UI{}", i + self.offset))
                         }
-                    }); 
+                    });
                 }
                 out.close();
                 self.frame.apply_clear(cx, &out);
@@ -78,7 +105,7 @@ impl App {
             Event::Draw(draw_event) => {
                 self.draw(&mut Cx2d::new(cx, draw_event));
             }
-            _=>()
+            _ => ()
         }
         
         for item in self.frame.handle_event(cx, event) {

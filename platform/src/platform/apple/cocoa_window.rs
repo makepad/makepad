@@ -10,6 +10,9 @@ use {
         },
         platform::{
             apple::frameworks::*,
+            apple::apple_util::{
+                str_to_nsstring,
+            },
             cocoa_app::CocoaApp,
         },
         event::{
@@ -120,7 +123,7 @@ impl CocoaWindow {
             
             let () = msg_send![self.window, setDelegate: self.window_delegate];
             
-            let title = str_to_ns_string(title);
+            let title = str_to_nsstring(title);
             let () = msg_send![self.window, setReleasedWhenClosed: NO];
             let () = msg_send![self.window, setTitle: title];
             let () = msg_send![self.window, setTitleVisibility: NSWindowTitleVisibility::NSWindowTitleHidden];
@@ -445,7 +448,7 @@ impl CocoaWindow {
             let _: () = unsafe {
                 msg_send![
                     pasteboard_item,
-                    setString: str_to_ns_string(file_url)
+                    setString: str_to_nsstring(file_url)
                     forType: NSPasteboardTypeFileURL
                 ]
             };

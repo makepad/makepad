@@ -16,7 +16,8 @@ use {
             cocoa_window::{
                 get_cocoa_window
             },
-            cocoa_util::{
+            apple_util::{
+                nsstring_to_string,
                 get_event_key_modifier,
                 superclass,
                 load_mouse_cursor
