@@ -96,9 +96,9 @@ extern "C" {
 
 #[link(name = "Metal", kind = "framework")]
 extern "C" {
-    fn MTLCreateSystemDefaultDevice() -> ObjcId;
+    pub fn MTLCreateSystemDefaultDevice() -> ObjcId;
     #[cfg(not(target_os = "ios"))]
-    fn MTLCopyAllDevices() -> ObjcId; //TODO: Array
+    pub fn MTLCopyAllDevices() -> ObjcId; //TODO: Array
 }
 
 #[link(name = "AVFAudio", kind = "framework")]
@@ -106,117 +106,6 @@ extern {
     pub static AVAudioUnitComponentManager: ObjcId;
     pub static AVAudioUnit: ObjcId;
 }
-
-
-
-// HELPERS
-
-
-
-pub fn get_default_metal_device() -> Option<ObjcId> {
-    unsafe {
-        let dev = MTLCreateSystemDefaultDevice();
-        if dev == nil {None} else {Some(dev)}
-    }
-}
-
-
-pub fn get_all_metal_devices() -> Vec<ObjcId> {
-    #[cfg(target_os = "ios")]
-    {
-        MTLCreateSystemDefaultDevice().into_iter().collect()
-    }
-    #[cfg(not(target_os = "ios"))]
-    unsafe {
-        let array = MTLCopyAllDevices();
-        let count: u64 = msg_send![array, count];
-        let ret = (0..count)
-            .map( | i | msg_send![array, objectAtIndex: i])
-        // The elements of this array are references---we convert them to owned references
-        // (which just means that we increment the reference count here, and it is
-        // decremented in the `Drop` impl for `Device`)
-            .map( | device: *mut Object | msg_send![device, retain])
-            .collect();
-        let () = msg_send![array, release];
-        ret
-    }
-}
-
-
-pub fn nsstring_to_string(string: ObjcId) -> String {
-    unsafe {
-        let utf8_string: *const std::os::raw::c_uchar = msg_send![string, UTF8String];
-        let utf8_len: usize = msg_send![string, lengthOfBytesUsingEncoding: UTF8_ENCODING];
-        let slice = std::slice::from_raw_parts(
-            utf8_string,
-            utf8_len,
-        );
-        std::str::from_utf8_unchecked(slice).to_owned()
-    }
-}
-
-pub fn str_to_ns_string(str: &str) -> ObjcId {
-    unsafe {
-        let ns_string: ObjcId = msg_send![class!(NSString), alloc];
-        let ns_string: ObjcId = msg_send![
-            ns_string,
-            initWithBytes: str.as_ptr()
-            length: str.len()
-            encoding: UTF8_ENCODING as ObjcId
-        ];
-        let _: () = msg_send![ns_string, autorelease];
-        ns_string
-    }
-}
-
-pub fn load_native_cursor(cursor_name: &str) -> ObjcId {
-    let sel = Sel::register(cursor_name);
-    let id: ObjcId = unsafe {msg_send![class!(NSCursor), performSelector: sel]};
-    id
-}
-
-pub fn load_undocumented_cursor(cursor_name: &str) -> ObjcId {
-    unsafe {
-        let class = class!(NSCursor);
-        let sel = Sel::register(cursor_name);
-        let sel: ObjcId = msg_send![class, respondsToSelector: sel];
-        let id: ObjcId = msg_send![class, performSelector: sel];
-        id
-    }
-}
-
-pub fn load_webkit_cursor(cursor_name_str: &str) -> ObjcId {
-    unsafe {
-        static CURSOR_ROOT: &'static str = "/System/Library/Frameworks/ApplicationServices.framework/Versions/A/Frameworks/HIServices.framework/Versions/A/Resources/cursors";
-        let cursor_root = str_to_ns_string(CURSOR_ROOT);
-        let cursor_name = str_to_ns_string(cursor_name_str);
-        let cursor_pdf = str_to_ns_string("cursor.pdf");
-        let cursor_plist = str_to_ns_string("info.plist");
-        let key_x = str_to_ns_string("hotx");
-        let key_y = str_to_ns_string("hoty");
-        
-        let cursor_path: ObjcId = msg_send![cursor_root, stringByAppendingPathComponent: cursor_name];
-        let pdf_path: ObjcId = msg_send![cursor_path, stringByAppendingPathComponent: cursor_pdf];
-        let info_path: ObjcId = msg_send![cursor_path, stringByAppendingPathComponent: cursor_plist];
-        
-        let ns_image: ObjcId = msg_send![class!(NSImage), alloc];
-        let () = msg_send![ns_image, initByReferencingFile: pdf_path];
-        let info: ObjcId = msg_send![class!(NSDictionary), dictionaryWithContentsOfFile: info_path];
-        //let image = NSImage::alloc(nil).initByReferencingFile_(pdf_path);
-        // let info = NSDictionary::dictionaryWithContentsOfFile_(nil, info_path);
-        
-        let x: ObjcId = msg_send![info, valueForKey: key_x]; //info.valueForKey_(key_x);
-        let y: ObjcId = msg_send![info, valueForKey: key_y]; //info.valueForKey_(key_y);
-        let point = NSPoint {
-            x: msg_send![x, doubleValue],
-            y: msg_send![y, doubleValue],
-        };
-        let cursor: ObjcId = msg_send![class!(NSCursor), alloc];
-        msg_send![cursor, initWithImage: ns_image hotSpot: point]
-    }
-}
-
-
 
 
 // COCOA
@@ -279,7 +168,7 @@ pub enum NSEventModifierFlags {
     NSDeviceIndependentModifierFlagsMask = 0xffff0000
 }
 
-const UTF8_ENCODING: usize = 4;
+pub const UTF8_ENCODING: usize = 4;
 
 #[repr(u64)]
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -726,7 +615,6 @@ pub struct AudioStreamBasicDescription {
     pub mReserved: u32,
 }
 
-
 #[repr(u32)]
 pub enum AudioFormatId{
     LinearPCM = 1819304813,
@@ -822,6 +710,7 @@ impl AudioTimeStampFlags {
     const SMPTE_TIME_VALID:u32 = 16;
 }
 
+#[derive(Debug, PartialEq, Copy, Clone)]
 #[repr(C)]
 pub struct AudioComponentDescription {
     pub componentType: AudioUnitType,
@@ -829,6 +718,27 @@ pub struct AudioComponentDescription {
     pub componentManufacturer: u32,
     pub componentFlags: u32,
     pub componentFlagsMask: u32,
+}
+
+impl AudioComponentDescription{
+    pub fn new_apple(ty:AudioUnitType, sub:AudioUnitSubType)->Self{
+        Self {
+            componentType: ty,
+            componentSubType: sub,
+            componentManufacturer: kAudioUnitManufacturer_Apple,
+            componentFlags: 0,
+            componentFlagsMask: 0,
+        }
+    }
+    pub fn new_all_manufacturers(ty:AudioUnitType, sub:AudioUnitSubType)->Self{
+        Self {
+            componentType: ty,
+            componentSubType: sub,
+            componentManufacturer: 0,
+            componentFlags: 0,
+            componentFlagsMask: 0,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -870,6 +780,7 @@ pub struct AudioTimeStamp {
     pub mReserved: u32,
 }
 
+#[derive(Debug, PartialEq, Copy, Clone)]
 #[repr(u32)]
 pub enum AudioUnitType {
     IO = 1635086197,
@@ -883,8 +794,11 @@ pub enum AudioUnitType {
     OfflineEffect = 1635086188,
 }
 
+#[derive(Debug, PartialEq, Copy, Clone)]
 #[repr(u32)]
 pub enum AudioUnitSubType {
+    Undefined = 0, 
+    
     PeakLimiter = 1819112562,
     DynamicsProcessor = 1684237680,
     LowPassFilter = 1819304307,
@@ -991,9 +905,9 @@ pub const kAudioComponentInstantiation_LoadInProcess:u32 = 2;
 pub const kAudioComponentInstantiation_LoadOutOfProcess:u32 = 1;
 
 impl AudioError {
-    pub fn result(val: i32) -> Result<(),Self> {
-        Err(match val {
-            0 => return Ok(()),
+    pub fn from_i32(result:i32)->Option<Self>{
+        Some(match result {
+            0 => return None,
             x if x == Self::Unimplemented as i32 => Self::Unimplemented,
             x if x == Self::FileNotFound as i32 => Self::FileNotFound,
             x if x == Self::FilePermission as i32 => Self::FilePermission,
@@ -1035,6 +949,25 @@ impl AudioError {
             x if x == Self::Unauthorized as i32 => Self::Unauthorized,
             _ => Self::Unknown
         })
+    }
+    
+    pub fn as_result(os_result: i32) -> Result<(),Self> {
+        if let Some(val) = Self::from_i32(os_result){
+            Err(val)
+        }
+        else{
+            Ok(())
+        }
+    }
+    
+    pub fn ns_error_as_result(ns_error:ObjcId) -> Result<(),Self> {
+        if ns_error != nil{
+            let code: i32 = unsafe{msg_send![ns_error, code]};
+            Self::as_result(code)
+        }
+        else{
+            Ok(())
+        }
     }
 }
 
