@@ -59,12 +59,12 @@ impl CoreAudio {
             AudioError::ns_error_as_result(error).expect("instantiateWithComponentDescription");
             let audio_unit: ObjcId = msg_send![av_audio_unit, AUAudioUnit];
             // ok lets get the writer block
-
+            
             let mut err: ObjcId = nil;
             let () = msg_send![audio_unit, allocateRenderResourcesAndReturnError: &mut err];
             AudioError::ns_error_as_result(err).expect("allocateRenderResourcesAndReturnError");
-
-
+            
+            
             let block_ptr: ObjcId = msg_send![audio_unit, renderBlock];
             let () = msg_send![block_ptr, retain];
             render_block(block_ptr as u64);
@@ -81,7 +81,7 @@ impl CoreAudio {
         ];
     }
     
-    pub unsafe fn new_audio_output(audio: Box<dyn Fn(&mut [f32], &mut [f32])->Option<u64>>) {
+    pub unsafe fn new_audio_output(audio: Box<dyn Fn(&mut [f32], &mut [f32]) -> Option<u64 >>) {
         let desc = AudioComponentDescription::new_apple(
             AudioUnitType::IO,
             AudioUnitSubType::DefaultOutput,
@@ -114,19 +114,16 @@ impl CoreAudio {
                     (buffers_ref.mBuffers[1].mDataByteSize >> 2) as usize
                 );
                 let block_ptr = audio(left_chan, right_chan);
-                if let Some(block_ptr) = block_ptr{
-                    objc_block_invoke!(   
-                        block_ptr,
-                        fn(
-                            flags: *mut u32,
-                            timestamp: *const AudioTimeStamp,
-                            frame_count: u32,
-                            input_bus_number: u64,
-                            buffers: *mut AudioBufferList,
-                            nil: ObjcId
-                        ) -> i32
-                    );
-                }  
+                if let Some(block_ptr) = block_ptr {
+                    objc_block_invoke!(block_ptr, invoke(
+                        flags: *mut u32,
+                        timestamp: *const AudioTimeStamp,
+                        frame_count: u32,
+                        input_bus_number: u64,
+                        buffers: *mut AudioBufferList,
+                        nil: ObjcId
+                    ) -> i32);
+                }
                 0
             }
         );
