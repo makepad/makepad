@@ -72,7 +72,7 @@ extern {
     pub static _NSConcreteStackBlock: [*const c_void; 32];
     pub static _NSConcreteBogusBlock: [*const c_void; 32];
 }
-
+ 
 #[link(name = "Foundation", kind = "framework")]
 extern {
     pub static NSRunLoopCommonModes: ObjcId;
@@ -829,6 +829,45 @@ pub struct AudioComponentDescription {
     pub componentManufacturer: u32,
     pub componentFlags: u32,
     pub componentFlagsMask: u32,
+}
+
+#[derive(Debug)]
+#[repr(C)]
+pub struct SMPTETime {
+    pub mSubframes: i16,
+    pub mSubframeDivisor: i16,
+    pub mCounter: u32,
+    pub mType: u32,
+    pub mFlags: u32,
+    pub mHours: i16,
+    pub mMinutes: i16,
+    pub mSeconds: i16,
+    pub mFrames: i16,
+}
+
+#[repr(C)]
+pub struct AudioBuffer {
+    pub mNumberChannels: u32,
+    pub mDataByteSize: u32,
+    pub mData: *mut ::std::os::raw::c_void,
+}
+
+#[repr(C)]
+pub struct AudioBufferList {
+    pub mNumberBuffers: u32,
+    pub mBuffers: [AudioBuffer; 2usize],
+}
+
+#[derive(Debug)]
+#[repr(C)]
+pub struct AudioTimeStamp {
+    pub mSampleTime: f64,
+    pub mHostTime: u64,
+    pub mRateScalar: f64,
+    pub mWordClockTime: u64,
+    pub mSMPTETime: SMPTETime,
+    pub mFlags: u32,
+    pub mReserved: u32,
 }
 
 #[repr(u32)]
