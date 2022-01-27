@@ -14,6 +14,10 @@ use {
         makepad_live_compiler::*,
         platform::{
             apple::frameworks::*,
+            apple::apple_util::{
+                nsstring_to_string,
+                str_to_nsstring,
+            },
             cocoa_app::CocoaApp,
             cocoa_window::CocoaWindow,
         },
@@ -663,7 +667,7 @@ impl CxPlatformDrawShader {
         let library = RcObjcId::from_owned(match NonNull::new(unsafe {
             msg_send![
                 metal_cx.device,
-                newLibraryWithSource: str_to_ns_string(&shader.mtlsl)
+                newLibraryWithSource: str_to_nsstring(&shader.mtlsl)
                 options: options
                 error: &mut error
             ]
@@ -685,11 +689,11 @@ impl CxPlatformDrawShader {
         }).unwrap());
         
         let vertex_function = RcObjcId::from_owned(NonNull::new(unsafe {
-            msg_send![library.as_id(), newFunctionWithName: str_to_ns_string("vertex_main")]
+            msg_send![library.as_id(), newFunctionWithName: str_to_nsstring("vertex_main")]
         }).unwrap());
         
         let fragment_function = RcObjcId::from_owned(NonNull::new(unsafe {
-            msg_send![library.as_id(), newFunctionWithName: str_to_ns_string("fragment_main")]
+            msg_send![library.as_id(), newFunctionWithName: str_to_nsstring("fragment_main")]
         }).unwrap());
         
         let render_pipeline_state = RcObjcId::from_owned(NonNull::new(unsafe {
@@ -969,3 +973,35 @@ impl Drop for MetalRwLockGpuReadGuard {
         }
     }
 }
+
+
+pub fn get_default_metal_device() -> Option<ObjcId> {
+    unsafe {
+        let dev = MTLCreateSystemDefaultDevice();
+        if dev == nil {None} else {Some(dev)}
+    }
+}
+
+
+pub fn get_all_metal_devices() -> Vec<ObjcId> {
+    #[cfg(target_os = "ios")]
+    {
+        MTLCreateSystemDefaultDevice().into_iter().collect()
+    }
+    #[cfg(not(target_os = "ios"))]
+    unsafe {
+        let array = MTLCopyAllDevices();
+        let count: u64 = msg_send![array, count];
+        let ret = (0..count)
+            .map( | i | msg_send![array, objectAtIndex: i])
+        // The elements of this array are references---we convert them to owned references
+        // (which just means that we increment the reference count here, and it is
+        // decremented in the `Drop` impl for `Device`)
+            .map( | device: *mut Object | msg_send![device, retain])
+            .collect();
+        let () = msg_send![array, release];
+        ret
+    }
+}
+
+
