@@ -65,9 +65,9 @@ impl CoreAudio {
             AudioError::ns_error_as_result(err).expect("allocateRenderResourcesAndReturnError");
 
 
-            let block_ptr: u64 = msg_send![audio_unit, renderBlock];
-            println!("{}", block_ptr);
-            render_block(block_ptr);
+            let block_ptr: ObjcId = msg_send![audio_unit, renderBlock];
+            let () = msg_send![block_ptr, retain];
+            render_block(block_ptr as u64);
             
             let () = msg_send![audio_unit, requestViewControllerWithCompletionHandler: &view_controller_complete];
         });
@@ -115,18 +115,18 @@ impl CoreAudio {
                 );
                 let block_ptr = audio(left_chan, right_chan);
                 if let Some(block_ptr) = block_ptr{
-                    //println!("{}", block_ptr);
-                    /*objc_block_invoke!(
+                    objc_block_invoke!(   
                         block_ptr,
                         fn(
                             flags: *mut u32,
                             timestamp: *const AudioTimeStamp,
                             frame_count: u32,
                             input_bus_number: u64,
-                            buffers: *mut AudioBufferList
+                            buffers: *mut AudioBufferList,
+                            nil: ObjcId
                         ) -> i32
-                    );*/
-                } 
+                    );
+                }  
                 0
             }
         );
