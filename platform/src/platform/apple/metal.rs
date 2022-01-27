@@ -459,9 +459,9 @@ impl Cx {
         let gpu_read_guards = Mutex::new(Some(gpu_read_guards));
         let () = unsafe {msg_send![
             command_buffer,
-            addCompletedHandler: &objc_closure!(move | _command_buffer: ObjcId | {
+            addCompletedHandler: &objc_block!(move | _command_buffer: ObjcId | {
                 drop(gpu_read_guards.lock().unwrap().take().unwrap());
-            })
+            }) 
         ]};
         let () = unsafe {msg_send![command_buffer, commit]};
     }  
