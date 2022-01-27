@@ -48,7 +48,9 @@ impl App {
             Event::Construct => {
                 // lets do an audio output
                 //match 
-                AudioOutput::new();
+                std::thread::spawn(||{
+                    AudioOutput::new();
+                });
                   /*  Ok(o)=>{
                         println!("OK!");
                     }

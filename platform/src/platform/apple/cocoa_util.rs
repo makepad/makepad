@@ -353,7 +353,7 @@ pub fn load_mouse_cursor(cursor: MouseCursor) -> ObjcId {
 }
 
 #[macro_export]
-macro_rules!objc_closure {
+macro_rules!objc_block {
     (move | $ ( $ arg_ident: ident: $ arg_ty: ty), * | $ (: $ return_ty: ty) ? $ body: block) => {
         {
             #[repr(C)]

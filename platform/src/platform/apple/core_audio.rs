@@ -1,5 +1,5 @@
 use crate::platform::apple::frameworks::*;
-use crate::objc_closure;
+use crate::objc_block;
 use std::ptr;
 use std::mem;
 
@@ -21,101 +21,76 @@ impl AudioOutput {
         unsafe {
             let manager: ObjcId = msg_send![class!(AVAudioUnitComponentManager), sharedAudioUnitComponentManager];
             let components: ObjcId = msg_send![manager, componentsMatchingDescription: desc];
-            // oookaay so how do we access the pointerlist.
-            let _count: usize = msg_send![components, count];
-            // lets access item 1
+            let count: usize = msg_send![components, count];
+            if count != 1{
+                panic!();
+            }
+
             let component: ObjcId = msg_send![components, objectAtIndex: 0];
-            // ok now.
             let desc: AudioComponentDescription = msg_send![component, audioComponentDescription];
-            /*
-            #[repr(C)]
-            struct BlockDescriptor {
-                reserved: c_ulong,
-                size: c_ulong,
-                copy_helper: extern "C" fn(*mut c_void, *const c_void),
-                dispose_helper: extern "C" fn(*mut c_void),
-            }
             
-            static DESCRIPTOR: BlockDescriptor = BlockDescriptor {
-                reserved: 0,
-                size: mem::size_of::<BlockLiteral>() as c_ulong,
-                copy_helper,
-                dispose_helper,
-            };
-            
-            extern "C" fn copy_helper(dst: *mut c_void, src: *const c_void) {
-                unsafe {
-                    ptr::write(
-                        &mut (*(dst as *mut BlockLiteral)).inner as *mut _,
-                        (&*(src as *const BlockLiteral)).inner.clone()
-                    );
+            let instantiation_handler = objc_block!(move | av_audio_unit: ObjcId, error: ObjcId | {
+                // lets spawn a thread
+                if error != nil {
+                    let code: i32 = msg_send![error, code];
+                    panic!("Error constructing {:?}", AudioError::result(code))
                 }
-            }
-            
-            extern "C" fn dispose_helper(src: *mut c_void) {
-                unsafe {
-                    ptr::drop_in_place(src as *mut BlockLiteral);
+                
+                let audio_unit: ObjcId = msg_send![av_audio_unit, AUAudioUnit];
+                
+                let () = msg_send![audio_unit, setOutputProvider: &objc_block!(
+                    move | _flags: *mut u32,
+                    _timestamp: *const AudioTimeStamp,
+                    _frame_count: u32,
+                    _input_bus_number: u64,
+                    buffers: *mut AudioBufferList |: i32 {
+
+                        let buffers = &*buffers;
+                        let _left_chan = std::slice::from_raw_parts_mut(
+                            buffers.mBuffers[0].mData as *mut f32,
+                            (buffers.mBuffers[0].mDataByteSize >> 2) as usize
+                        );
+                        let _right_chan = std::slice::from_raw_parts_mut(
+                            buffers.mBuffers[1].mData as *mut f32,
+                            (buffers.mBuffers[1].mDataByteSize >> 2) as usize
+                        );
+                        // output beep here!
+                        //for i in 0..left_chan.len(){
+                            //left_chan[i] = (i as f32*0.01).sin();
+                            //right_chan[i] = (i as f32*0.01).sin();
+                        //}
+                        0
+                    }
+                )];
+                
+                let () = msg_send![audio_unit, setOutputEnabled: true];
+                
+                let mut err: ObjcId = nil;
+                let ret: bool = msg_send![audio_unit, allocateRenderResourcesAndReturnError: &mut err];
+                if !ret {
+                    let code: i32 = msg_send![error, code];
+                    panic!("allocateRenderResourcesAndReturnError failed {:?}", AudioError::result(code))
                 }
-            }
-            
-            extern "C" fn invoke(literal: *mut BlockLiteral, audio_unit: ObjcId, error: ObjcId) {
-                let literal = unsafe {&mut *literal};
-                literal.inner.lock().unwrap()(audio_unit, error);
-            }
-            
-            #[repr(C)]
-            struct BlockLiteral {
-                isa: *const c_void,
-                flags: i32,
-                reserved: i32,
-                invoke: extern "C" fn(*mut BlockLiteral, ObjcId, ObjcId),
-                descriptor: *const BlockDescriptor,
-                inner: Arc<Mutex<dyn Fn(ObjcId, ObjcId)>>,
-            }
-            
-            let literal = BlockLiteral {
-                isa: unsafe {_NSConcreteStackBlock.as_ptr() as *const c_void},
-                flags: 1 << 25,
-                reserved: 0,
-                invoke,
-                descriptor: &DESCRIPTOR,
-                inner: Arc::new(Mutex::new(|audio_unit, error|{
-                    println!("HERE!")
-                }))
-            };
-*/
-            // ok now instantiate the fucker
+                
+                let mut err: ObjcId = nil;
+                let ret: bool = msg_send![audio_unit, startHardwareAndReturnError: &mut err];
+                if !ret {
+                    let code: i32 = msg_send![error, code];
+                    panic!("startHardwareAndReturnError failed {:?}", AudioError::result(code))
+                }
+                // stay in a waitloop so the audio output gets callbacks.
+                loop {
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+            });
+
+            // Instantiate output audio unit
             let () = msg_send![
                 class!(AVAudioUnit),
                 instantiateWithComponentDescription: desc
                 options: kAudioComponentInstantiation_LoadInProcess
-                completionHandler: &objc_closure!(move |_audio_unit:ObjcId, _error:ObjcId|{
-                    println!("HERE!");
-                })
+                completionHandler:&instantiation_handler
             ];
         }
     }
 }
-/*
-
-pub fn get_property<T>(
-    au: AudioUnit,
-    id: u32,
-    scope: Scope,
-    elem: Element,
-) -> Result<T, Error> {
-    let scope = scope as c_uint;
-    let elem = elem as c_uint;
-    let mut size = ::std::mem::size_of::<T>() as u32;
-    unsafe {
-        let mut data_uninit = ::std::mem::MaybeUninit::<T>::uninit();
-        let data_ptr = data_uninit.as_mut_ptr() as *mut _ as *mut c_void;
-        let size_ptr = &mut size as *mut _;
-        try_os_status!(sys::AudioUnitGetProperty(
-            au, id, scope, elem, data_ptr, size_ptr
-        ));
-        let data: T = data_uninit.assume_init();
-        Ok(data)
-    }
-}*/
-
