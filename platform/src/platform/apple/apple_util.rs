@@ -499,7 +499,7 @@ macro_rules!objc_block {
 
 #[macro_export]
 macro_rules!objc_block_invoke {
-    ($inp:expr, fn ( $ ( $ arg_ident: ident: $ arg_ty: ty), * ) $ (-> $ return_ty: ty) ? ) => {
+    ($inp:expr, invoke ( $ ( $ arg_ident: ident: $ arg_ty: ty), * ) $ (-> $ return_ty: ty) ? ) => {
         {
             #[repr(C)]
             struct BlockLiteral {
