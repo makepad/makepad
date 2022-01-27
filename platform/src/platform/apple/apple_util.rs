@@ -502,25 +502,15 @@ macro_rules!objc_block_invoke {
     ($inp:expr, fn ( $ ( $ arg_ident: ident: $ arg_ty: ty), * ) $ (-> $ return_ty: ty) ? ) => {
         {
             #[repr(C)]
-            struct BlockDescriptor {
-                reserved: std::os::raw::c_ulong,
-                size: std::os::raw::c_ulong,
-                copy_helper: extern "C" fn(*mut std::os::raw::c_void, *const std::os::raw::c_void),
-                dispose_helper: extern "C" fn(*mut std::os::raw::c_void),
-            }
-            
-            #[repr(C)]
             struct BlockLiteral {
                 isa: *const std::os::raw::c_void,
                 flags: std::os::raw::c_int,
                 reserved: std::os::raw::c_int,
                 invoke: extern "C" fn(*mut BlockLiteral, $ ( $ arg_ty), *) $ ( -> $ return_ty) ?,
-                descriptor: *const BlockDescriptor,
             }
             
             let block: &mut BlockLiteral = &mut * ($inp as *mut _);
-            println!("FLAGS {:?}", block.descriptor);
-            (block.invoke)(block, $ ( $ arg_ident), *)
+            (block.invoke)(block as *mut _, $ ( $ arg_ident), *)
         }
     }
 }
