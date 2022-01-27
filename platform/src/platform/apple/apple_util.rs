@@ -11,6 +11,82 @@ use {
     }
 };
 
+
+
+pub fn nsstring_to_string(string: ObjcId) -> String {
+    unsafe {
+        let utf8_string: *const std::os::raw::c_uchar = msg_send![string, UTF8String];
+        let utf8_len: usize = msg_send![string, lengthOfBytesUsingEncoding: UTF8_ENCODING];
+        let slice = std::slice::from_raw_parts(
+            utf8_string,
+            utf8_len,
+        );
+        std::str::from_utf8_unchecked(slice).to_owned()
+    }
+}
+
+pub fn str_to_nsstring(str: &str) -> ObjcId {
+    unsafe {
+        let ns_string: ObjcId = msg_send![class!(NSString), alloc];
+        let ns_string: ObjcId = msg_send![
+            ns_string,
+            initWithBytes: str.as_ptr()
+            length: str.len()
+            encoding: UTF8_ENCODING as ObjcId
+        ];
+        let _: () = msg_send![ns_string, autorelease];
+        ns_string
+    }
+}
+
+pub fn load_native_cursor(cursor_name: &str) -> ObjcId {
+    let sel = Sel::register(cursor_name);
+    let id: ObjcId = unsafe {msg_send![class!(NSCursor), performSelector: sel]};
+    id
+}
+
+pub fn load_undocumented_cursor(cursor_name: &str) -> ObjcId {
+    unsafe {
+        let class = class!(NSCursor);
+        let sel = Sel::register(cursor_name);
+        let sel: ObjcId = msg_send![class, respondsToSelector: sel];
+        let id: ObjcId = msg_send![class, performSelector: sel];
+        id
+    }
+}
+
+pub fn load_webkit_cursor(cursor_name_str: &str) -> ObjcId {
+    unsafe {
+        static CURSOR_ROOT: &'static str = "/System/Library/Frameworks/ApplicationServices.framework/Versions/A/Frameworks/HIServices.framework/Versions/A/Resources/cursors";
+        let cursor_root = str_to_nsstring(CURSOR_ROOT);
+        let cursor_name = str_to_nsstring(cursor_name_str);
+        let cursor_pdf = str_to_nsstring("cursor.pdf");
+        let cursor_plist = str_to_nsstring("info.plist");
+        let key_x = str_to_nsstring("hotx");
+        let key_y = str_to_nsstring("hoty");
+        
+        let cursor_path: ObjcId = msg_send![cursor_root, stringByAppendingPathComponent: cursor_name];
+        let pdf_path: ObjcId = msg_send![cursor_path, stringByAppendingPathComponent: cursor_pdf];
+        let info_path: ObjcId = msg_send![cursor_path, stringByAppendingPathComponent: cursor_plist];
+        
+        let ns_image: ObjcId = msg_send![class!(NSImage), alloc];
+        let () = msg_send![ns_image, initByReferencingFile: pdf_path];
+        let info: ObjcId = msg_send![class!(NSDictionary), dictionaryWithContentsOfFile: info_path];
+        //let image = NSImage::alloc(nil).initByReferencingFile_(pdf_path);
+        // let info = NSDictionary::dictionaryWithContentsOfFile_(nil, info_path);
+        
+        let x: ObjcId = msg_send![info, valueForKey: key_x]; //info.valueForKey_(key_x);
+        let y: ObjcId = msg_send![info, valueForKey: key_y]; //info.valueForKey_(key_y);
+        let point = NSPoint {
+            x: msg_send![x, doubleValue],
+            y: msg_send![y, doubleValue],
+        };
+        let cursor: ObjcId = msg_send![class!(NSCursor), alloc];
+        msg_send![cursor, initWithImage: ns_image hotSpot: point]
+    }
+}
+
+
 pub fn get_event_char(event: ObjcId) -> char {
     unsafe {
         let characters: ObjcId = msg_send![event, characters];
@@ -419,3 +495,32 @@ macro_rules!objc_block {
     }
 }
 
+
+
+#[macro_export]
+macro_rules!objc_block_invoke {
+    ($inp:expr, fn ( $ ( $ arg_ident: ident: $ arg_ty: ty), * ) $ (-> $ return_ty: ty) ? ) => {
+        {
+            #[repr(C)]
+            struct BlockDescriptor {
+                reserved: std::os::raw::c_ulong,
+                size: std::os::raw::c_ulong,
+                copy_helper: extern "C" fn(*mut std::os::raw::c_void, *const std::os::raw::c_void),
+                dispose_helper: extern "C" fn(*mut std::os::raw::c_void),
+            }
+            
+            #[repr(C)]
+            struct BlockLiteral {
+                isa: *const std::os::raw::c_void,
+                flags: std::os::raw::c_int,
+                reserved: std::os::raw::c_int,
+                invoke: extern "C" fn(*mut BlockLiteral, $ ( $ arg_ty), *) $ ( -> $ return_ty) ?,
+                descriptor: *const BlockDescriptor,
+            }
+            
+            let block: &mut BlockLiteral = &mut * ($inp as *mut _);
+            println!("FLAGS {:?}", block.descriptor);
+            (block.invoke)(block, $ ( $ arg_ident), *)
+        }
+    }
+}
