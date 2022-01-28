@@ -29,6 +29,7 @@ pub struct App {
     frame_component_registry: FrameComponentRegistry,
     desktop_window: DesktopWindow,
     scroll_view: ScrollView,
+    #[rust(cx.new_signal())] signal: Signal,
     #[rust] offset: u64
 }
 
@@ -47,7 +48,37 @@ impl App {
         self.scroll_view.handle_event(cx, event);
         
         match event {
-            Event::Construct => {  
+            Event::Signal(se) => {
+                if let Some(data) = se.signals.get(&self.signal) {
+                    unsafe {CoreAudio::open_view_controller(data[0])};
+                }
+            }
+            Event::Construct => {
+                let signal = self.signal;
+                std::thread::spawn(move || {
+                    unsafe {
+                        let block_ptr = Arc::new(Cell::new(None));
+                        let list = CoreAudio::get_music_devices();
+                        for item in &list{
+                            //println!("{}", item.name);
+                        }
+                        if let Some(info) = list.iter().find( | item | item.name == "FM8") {
+                            let block_ptr = block_ptr.clone();
+                            CoreAudio::new_midi_instrument_from_desc(
+                                info.desc,
+                                Box::new(move | vc | {
+                                    Cx::post_signal(signal, vc);
+                                }),
+                                Box::new(move | in_block_ptr | {
+                                    block_ptr.set(Some(in_block_ptr));
+                                })
+                            );
+                        }
+                        CoreAudio::new_audio_output(Box::new(move | _left, _right | {
+                            block_ptr.get()
+                        }))
+                    };
+                });
 
                 // spawn 1000 buttons into the live structure
                 let mut out = Vec::new();

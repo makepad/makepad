@@ -82,7 +82,7 @@ extern {
 #[link(name = "AppKit", kind = "framework")]
 extern {
     pub static NSPasteboardURLReadingFileURLsOnlyKey: ObjcId;
-    
+    pub static NSTrackingArea: ObjcId;
     pub static NSStringPboardType: ObjcId;
     pub static NSPasteboardTypeFileURL: ObjcId;
 }
@@ -167,6 +167,12 @@ pub enum NSEventModifierFlags {
     NSFunctionKeyMask = 1 << 23,
     NSDeviceIndependentModifierFlagsMask = 0xffff0000
 }
+
+pub const NSTrackignActiveAlways:u64 = 0x80;
+pub const NSTrackingInVisibleRect:u64 = 0x200;
+pub const NSTrackingMouseEnteredAndExited:u64 = 0x01;
+pub const NSTrackingMouseMoved:u64 = 0x02;
+pub const NSTrackingCursorUpdate:u64 = 0x04;
 
 pub const UTF8_ENCODING: usize = 4;
 
@@ -971,18 +977,16 @@ impl AudioError {
     }
 }
 
-#[link(name = "AudioToolbox", kind = "framework")]
+#[repr(C)]
+#[derive(Debug, Copy, Clone)]
+pub struct __CFString {_unused: [u8; 0]}
+pub type CFStringRef = *const __CFString;
+
+#[link(name = "CoreMidi", kind = "framework")]
 extern "C" {
-    
-    pub fn AudioComponentFindNext(
-        inComponent: AudioComponent,
-        inDesc: *const AudioComponentDescription,
-    ) -> AudioComponent;
-    
-    pub fn AudioComponentInstanceNew(
-        inComponent: AudioComponent,
-        outInstance: *mut AudioComponentInstance,
+    pub fn MIDIClientCreateWithBlock(
+        name: CFStringRef,
+        outClient: *mut u32,
+        notifyBlock: ObjcId,
     ) -> OSStatus;
-    
-    pub fn AudioUnitInitialize(inUnit: AudioUnit) -> OSStatus;
 }

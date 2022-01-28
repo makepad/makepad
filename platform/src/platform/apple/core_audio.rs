@@ -50,7 +50,7 @@ impl CoreAudio {
         desc: AudioComponentDescription,
         vc: Box<dyn Fn(u64)>,
         render_block: Box<dyn Fn(u64)>
-    ) /*-> Result<AudioOutput, AudioError>*/ {
+    ) {
         let view_controller_complete = objc_block!(move | view_controller: ObjcId | {
             vc(view_controller as u64);
         });
@@ -58,12 +58,10 @@ impl CoreAudio {
         let instantiation_complete = objc_block!(move | av_audio_unit: ObjcId, error: ObjcId | {
             AudioError::ns_error_as_result(error).expect("instantiateWithComponentDescription");
             let audio_unit: ObjcId = msg_send![av_audio_unit, AUAudioUnit];
-            // ok lets get the writer block
             
             let mut err: ObjcId = nil;
             let () = msg_send![audio_unit, allocateRenderResourcesAndReturnError: &mut err];
             AudioError::ns_error_as_result(err).expect("allocateRenderResourcesAndReturnError");
-            
             
             let block_ptr: ObjcId = msg_send![audio_unit, renderBlock];
             let () = msg_send![block_ptr, retain];
@@ -97,7 +95,6 @@ impl CoreAudio {
         let component: ObjcId = msg_send![components, objectAtIndex: 0];
         let desc: AudioComponentDescription = msg_send![component, audioComponentDescription];
         
-        #[allow(unused_variables)]
         let output_provider = objc_block!(
             move | flags: *mut u32,
             timestamp: *const AudioTimeStamp,
@@ -107,11 +104,11 @@ impl CoreAudio {
                 let buffers_ref = &*buffers;
                 let left_chan = std::slice::from_raw_parts_mut(
                     buffers_ref.mBuffers[0].mData as *mut f32,
-                    (buffers_ref.mBuffers[0].mDataByteSize >> 2) as usize
+                    frame_count as usize
                 );
                 let right_chan = std::slice::from_raw_parts_mut(
                     buffers_ref.mBuffers[1].mData as *mut f32,
-                    (buffers_ref.mBuffers[1].mDataByteSize >> 2) as usize
+                    frame_count as usize
                 );
                 let block_ptr = audio(left_chan, right_chan);
                 if let Some(block_ptr) = block_ptr {
