@@ -4,14 +4,95 @@ use {
     crate::{
         platform::apple::frameworks::*,
         platform::apple::cocoa_app::*,
-        platform::apple::apple_util::nsstring_to_string,
+        platform::apple::apple_util::*,
         objc_block,
     },
 };
 
-pub struct CoreAudio {
-    instance: AudioUnit
+pub struct CoreMidiEndpoint {
+    pub id: i32,
+    pub name: String,
+    pub manufacturer: String,
+    endpoint: MIDIEndpointRef
 }
+
+pub struct CoreMidi {
+    pub inputs: Vec<CoreMidiEndpoint>,
+    pub outputs: Vec<CoreMidiEndpoint>
+}
+
+impl CoreMidiEndpoint {
+    unsafe fn new(endpoint: MIDIEndpointRef) -> Result<Self,  OSError> {
+        let mut manufacturer = 0 as CFStringRef;
+        let mut name = 0 as CFStringRef;
+        let mut id = 0i32;
+        OSError::from(MIDIObjectGetStringProperty(endpoint, kMIDIPropertyManufacturer, &mut manufacturer)) ?;
+        OSError::from(MIDIObjectGetStringProperty(endpoint, kMIDIPropertyDisplayName, &mut name)) ?;
+        OSError::from(MIDIObjectGetIntegerProperty(endpoint, kMIDIPropertyUniqueID, &mut id)) ?;
+        Ok(Self {
+            id,
+            name: cfstring_ref_to_string(name),
+            manufacturer: cfstring_ref_to_string(manufacturer),
+            endpoint
+        })
+    }
+}
+
+impl CoreMidi {
+    pub unsafe fn new_midi_input(_message_callback: Box<dyn Fn(u64)>,) -> Result<Self, OSError> {
+        let mut midi_notify = objc_block!(move | _notification: &MIDINotification | {
+            println!("Midi device added/removed");
+        });
+        
+        let mut midi_receive = objc_block!(move | _event_list: &MIDIEventList, _user_data: ObjcId | {
+            println!("Midi data received!");
+        });
+        
+        let mut midi_client = 0 as MIDIClientRef;
+        OSError::from(MIDIClientCreateWithBlock(
+            ccfstr_from_str("Makepad"),
+            &mut midi_client,
+            &mut midi_notify as *mut _ as ObjcId
+        )) ?;
+        
+        let mut midi_in_port = 0 as MIDIPortRef;
+        OSError::from(MIDIInputPortCreateWithProtocol(
+            midi_client,
+            ccfstr_from_str("MIDI Input"),
+            kMIDIProtocol_1_0,
+            &mut midi_in_port,
+            &mut midi_receive as *mut _ as ObjcId
+        )) ?;
+        
+        let mut midi_out_port = 0 as MIDIPortRef; 
+        OSError::from(MIDIOutputPortCreate(
+            midi_client,
+            ccfstr_from_str("MIDI Output"),
+            &mut midi_out_port
+        )) ?;
+        
+        let mut outputs = Vec::new();
+        for i in 0..MIDIGetNumberOfDestinations() {
+            if let Ok(ep) = CoreMidiEndpoint::new(MIDIGetDestination(i)) {
+                outputs.push(ep);
+            }
+        }
+        let mut inputs = Vec::new();
+        for i in 0..MIDIGetNumberOfSources() {
+            if let Ok(ep) = CoreMidiEndpoint::new(MIDIGetSource(i)) {
+                MIDIPortConnectSource(midi_in_port, ep.endpoint, 0 as *mut _);
+                inputs.push(ep);
+            }
+        }
+        
+        Ok(Self {
+            inputs,
+            outputs
+        })
+    }
+}
+
+pub struct CoreAudio {}
 
 pub struct AudioComponentInfo {
     pub name: String,
@@ -56,12 +137,12 @@ impl CoreAudio {
         });
         
         let instantiation_complete = objc_block!(move | av_audio_unit: ObjcId, error: ObjcId | {
-            AudioError::ns_error_as_result(error).expect("instantiateWithComponentDescription");
+            OSError::from_nserror(error).expect("instantiateWithComponentDescription");
             let audio_unit: ObjcId = msg_send![av_audio_unit, AUAudioUnit];
             
             let mut err: ObjcId = nil;
             let () = msg_send![audio_unit, allocateRenderResourcesAndReturnError: &mut err];
-            AudioError::ns_error_as_result(err).expect("allocateRenderResourcesAndReturnError");
+            OSError::from_nserror(err).expect("allocateRenderResourcesAndReturnError");
             
             let block_ptr: ObjcId = msg_send![audio_unit, renderBlock];
             let () = msg_send![block_ptr, retain];
@@ -79,7 +160,7 @@ impl CoreAudio {
         ];
     }
     
-    pub unsafe fn new_audio_output(audio: Box<dyn Fn(&mut [f32], &mut [f32]) -> Option<u64 >>) {
+    pub unsafe fn new_audio_output(audio_callback: Box<dyn Fn(&mut [f32], &mut [f32]) -> Option<u64 >>) {
         let desc = AudioComponentDescription::new_apple(
             AudioUnitType::IO,
             AudioUnitSubType::DefaultOutput,
@@ -110,7 +191,7 @@ impl CoreAudio {
                     buffers_ref.mBuffers[1].mData as *mut f32,
                     frame_count as usize
                 );
-                let block_ptr = audio(left_chan, right_chan);
+                let block_ptr = audio_callback(left_chan, right_chan);
                 if let Some(block_ptr) = block_ptr {
                     objc_block_invoke!(block_ptr, invoke(
                         flags: *mut u32,
@@ -127,7 +208,7 @@ impl CoreAudio {
         
         let instantiation_handler = objc_block!(move | av_audio_unit: ObjcId, error: ObjcId | {
             // lets spawn a thread
-            AudioError::ns_error_as_result(error).expect("instantiateWithComponentDescription");
+            OSError::from_nserror(error).expect("instantiateWithComponentDescription");
             
             let audio_unit: ObjcId = msg_send![av_audio_unit, AUAudioUnit];
             
@@ -136,11 +217,11 @@ impl CoreAudio {
             
             let mut err: ObjcId = nil;
             let () = msg_send![audio_unit, allocateRenderResourcesAndReturnError: &mut err];
-            AudioError::ns_error_as_result(err).expect("allocateRenderResourcesAndReturnError");
+            OSError::from_nserror(err).expect("allocateRenderResourcesAndReturnError");
             
             let mut err: ObjcId = nil;
             let () = msg_send![audio_unit, startHardwareAndReturnError: &mut err];
-            AudioError::ns_error_as_result(err).expect("startHardwareAndReturnError");
+            OSError::from_nserror(err).expect("startHardwareAndReturnError");
             // stay in a waitloop so the audio output gets callbacks.
             loop {
                 std::thread::sleep(std::time::Duration::from_millis(100));

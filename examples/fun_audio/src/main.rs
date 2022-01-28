@@ -1,6 +1,6 @@
 use makepad_component::*;
 use makepad_platform::*;
-use makepad_platform::platform::apple::core_audio::CoreAudio;
+use makepad_platform::platform::apple::core_audio::{CoreAudio, CoreMidi};
 use std::sync::Arc;
 use std::cell::Cell;
 
@@ -54,12 +54,23 @@ impl App {
                 }
             }
             Event::Construct => {
+                // ok lets list midi inputs
+                unsafe {
+                    let midi = CoreMidi::new_midi_input(Box::new(move | message | {
+                        println!("MIDI MESSAGE!");
+                    })).unwrap();
+                    for input in &midi.inputs{
+                        println!("{} {}", input.name, input.manufacturer);
+                    }
+                };
+                
+                
                 let signal = self.signal;
                 std::thread::spawn(move || {
                     unsafe {
                         let block_ptr = Arc::new(Cell::new(None));
                         let list = CoreAudio::get_music_devices();
-                        for item in &list{
+                        for item in &list {
                             //println!("{}", item.name);
                         }
                         if let Some(info) = list.iter().find( | item | item.name == "FM8") {
@@ -79,7 +90,7 @@ impl App {
                         }))
                     };
                 });
-
+                
                 // spawn 1000 buttons into the live structure
                 let mut out = Vec::new();
                 out.open();

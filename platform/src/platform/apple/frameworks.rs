@@ -72,11 +72,26 @@ extern {
     pub static _NSConcreteStackBlock: [*const c_void; 32];
     pub static _NSConcreteBogusBlock: [*const c_void; 32];
 }
- 
+
 #[link(name = "Foundation", kind = "framework")]
 extern {
     pub static NSRunLoopCommonModes: ObjcId;
     pub static NSDefaultRunLoopMode: ObjcId;
+
+    pub fn __CFStringMakeConstantString(cStr: *const ::std::os::raw::c_char) -> CFStringRef;
+    
+    pub fn CFStringGetLength(theString: CFStringRef) -> u64;
+    pub fn CFStringGetBytes(
+        theString: CFStringRef,
+        range: CFRange,
+        encoding: u32,
+        lossByte: u8,
+        isExternalRepresentation: bool,
+        buffer: *mut u8,
+        maxBufLen: u64,
+        usedBufLen: *mut u64,
+    ) -> u64;
+
 }
 
 #[link(name = "AppKit", kind = "framework")]
@@ -108,8 +123,18 @@ extern {
 }
 
 
-// COCOA
+// Foundation
 
+
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct CFRange {
+    pub location: u64,
+    pub length: u64,
+}
+
+pub const kCFStringEncodingUTF8: u32 = 134217984;
 
 
 #[repr(C)]
@@ -168,11 +193,11 @@ pub enum NSEventModifierFlags {
     NSDeviceIndependentModifierFlagsMask = 0xffff0000
 }
 
-pub const NSTrackignActiveAlways:u64 = 0x80;
-pub const NSTrackingInVisibleRect:u64 = 0x200;
-pub const NSTrackingMouseEnteredAndExited:u64 = 0x01;
-pub const NSTrackingMouseMoved:u64 = 0x02;
-pub const NSTrackingCursorUpdate:u64 = 0x04;
+pub const NSTrackignActiveAlways: u64 = 0x80;
+pub const NSTrackingInVisibleRect: u64 = 0x200;
+pub const NSTrackingMouseEnteredAndExited: u64 = 0x01;
+pub const NSTrackingMouseMoved: u64 = 0x02;
+pub const NSTrackingCursorUpdate: u64 = 0x04;
 
 pub const UTF8_ENCODING: usize = 4;
 
@@ -608,7 +633,7 @@ pub type AudioUnit = AudioComponentInstance;
 
 pub type OSStatus = i32;
 
-#[repr(C)] 
+#[repr(C)]
 pub struct AudioStreamBasicDescription {
     pub mSampleRate: f64,
     pub mFormatID: AudioFormatId,
@@ -622,7 +647,7 @@ pub struct AudioStreamBasicDescription {
 }
 
 #[repr(u32)]
-pub enum AudioFormatId{
+pub enum AudioFormatId {
     LinearPCM = 1819304813,
     AC3 = 1633889587,
     F60958AC3 = 1667326771,
@@ -662,40 +687,40 @@ pub enum AudioFormatId{
 }
 
 struct F60958AC3Flags;
-impl F60958AC3Flags{
-    const IS_FLOAT:u32 = 1;
-    const IS_BIG_ENDIAN:u32 = 2;
-    const IS_SIGNED_INTEGER:u32 = 4;
-    const IS_PACKED:u32 = 8;
-    const IS_ALIGNED_HIGH:u32 = 16;
-    const IS_NON_INTERLEAVED:u32 = 32;
-    const IS_NON_MIXABLE:u32 = 64;
+impl F60958AC3Flags {
+    const IS_FLOAT: u32 = 1;
+    const IS_BIG_ENDIAN: u32 = 2;
+    const IS_SIGNED_INTEGER: u32 = 4;
+    const IS_PACKED: u32 = 8;
+    const IS_ALIGNED_HIGH: u32 = 16;
+    const IS_NON_INTERLEAVED: u32 = 32;
+    const IS_NON_MIXABLE: u32 = 64;
 }
 
 
 pub struct LinearPcmFlags;
-impl LinearPcmFlags{
-    const IS_FLOAT:u32 = 1;
-    const IS_BIG_ENDIAN:u32 = 2;
-    const IS_SIGNED_INTEGER:u32 = 4;
-    const IS_PACKED:u32 = 8;
-    const IS_ALIGNED_HIGH:u32 = 16;
-    const IS_NON_INTERLEAVED:u32 = 32;
-    const IS_NON_MIXABLE:u32 = 64;
-    const FLAGS_SAMPLE_FRACTION_SHIFT:u32 = 7;
-    const FLAGS_SAMPLE_FRACTION_MASK:u32 = 8064;
+impl LinearPcmFlags {
+    const IS_FLOAT: u32 = 1;
+    const IS_BIG_ENDIAN: u32 = 2;
+    const IS_SIGNED_INTEGER: u32 = 4;
+    const IS_PACKED: u32 = 8;
+    const IS_ALIGNED_HIGH: u32 = 16;
+    const IS_NON_INTERLEAVED: u32 = 32;
+    const IS_NON_MIXABLE: u32 = 64;
+    const FLAGS_SAMPLE_FRACTION_SHIFT: u32 = 7;
+    const FLAGS_SAMPLE_FRACTION_MASK: u32 = 8064;
 }
 
 pub struct AppleLosslessFlags;
-impl AppleLosslessFlags{
-    const BIT_16_SOURCE_DATA:u32 = 1;
-    const BIT_20_SOURCE_DATA:u32 = 2;
-    const BIT_24_SOURCE_DATA:u32 = 3;
-    const BIT_32_SOURCE_DATA:u32 = 4;    
+impl AppleLosslessFlags {
+    const BIT_16_SOURCE_DATA: u32 = 1;
+    const BIT_20_SOURCE_DATA: u32 = 2;
+    const BIT_24_SOURCE_DATA: u32 = 3;
+    const BIT_32_SOURCE_DATA: u32 = 4;
 }
 
 #[repr(u32)]
-pub enum Mpeg4ObjectId{
+pub enum Mpeg4ObjectId {
     AAC_Main = 1,
     AAC_LC = 2,
     AAC_SSR = 3,
@@ -709,11 +734,11 @@ pub enum Mpeg4ObjectId{
 
 pub struct AudioTimeStampFlags;
 impl AudioTimeStampFlags {
-    const SAMPLE_TIME_VALID:u32 = 1;
-    const HOST_TIME_VALID:u32 = 2;
-    const RATE_SCALAR_VALID:u32 = 4;
-    const WORLD_CLOCK_TIME_VALID:u32 = 8;
-    const SMPTE_TIME_VALID:u32 = 16;
+    const SAMPLE_TIME_VALID: u32 = 1;
+    const HOST_TIME_VALID: u32 = 2;
+    const RATE_SCALAR_VALID: u32 = 4;
+    const WORLD_CLOCK_TIME_VALID: u32 = 8;
+    const SMPTE_TIME_VALID: u32 = 16;
 }
 
 #[derive(Debug, PartialEq, Copy, Clone)]
@@ -726,8 +751,8 @@ pub struct AudioComponentDescription {
     pub componentFlagsMask: u32,
 }
 
-impl AudioComponentDescription{
-    pub fn new_apple(ty:AudioUnitType, sub:AudioUnitSubType)->Self{
+impl AudioComponentDescription {
+    pub fn new_apple(ty: AudioUnitType, sub: AudioUnitSubType) -> Self {
         Self {
             componentType: ty,
             componentSubType: sub,
@@ -736,7 +761,7 @@ impl AudioComponentDescription{
             componentFlagsMask: 0,
         }
     }
-    pub fn new_all_manufacturers(ty:AudioUnitType, sub:AudioUnitSubType)->Self{
+    pub fn new_all_manufacturers(ty: AudioUnitType, sub: AudioUnitSubType) -> Self {
         Self {
             componentType: ty,
             componentSubType: sub,
@@ -803,7 +828,7 @@ pub enum AudioUnitType {
 #[derive(Debug, PartialEq, Copy, Clone)]
 #[repr(u32)]
 pub enum AudioUnitSubType {
-    Undefined = 0, 
+    Undefined = 0,
     
     PeakLimiter = 1819112562,
     DynamicsProcessor = 1684237680,
@@ -825,7 +850,7 @@ pub enum AudioUnitSubType {
     RogerBeep = 1919903602,
     NBandEQ = 1851942257,
     
-    //pub enum FormatConverterType 
+    //pub enum FormatConverterType
     AUConverter = 1668247158,
     NewTimePitch = 1853191280,
     //TimePitch = 1953329268,
@@ -834,21 +859,21 @@ pub enum AudioUnitSubType {
     Merger = 1835364967,
     Varispeed = 1986097769,
     AUiPodTimeOther = 1768977519,
-
-    //pub enum MixerType 
+    
+    //pub enum MixerType
     MultiChannelMixer = 1835232632,
     StereoMixer = 1936554098,
     Mixer3D = 862219640,
     MatrixMixer = 1836608888,
-
+    
     //pub enum GeneratorType {
     ScheduledSoundPlayer = 1936945260,
     AudioFilePlayer = 1634103404,
-
+    
     //pub enum MusicDeviceType {
     DLSSynth = 1684828960,
     Sampler = 1935764848,
-
+    
     //pub enum IOType {
     GenericOutput = 1734700658,
     HalOutput = 1634230636,
@@ -860,7 +885,7 @@ pub enum AudioUnitSubType {
 
 #[derive(Debug)]
 #[repr(i32)]
-pub enum AudioError {
+pub enum OSError {
     
     Unimplemented = -4,
     FileNotFound = -43,
@@ -907,21 +932,21 @@ pub enum AudioError {
     Unknown,
 }
 
-pub const kAudioComponentInstantiation_LoadInProcess:u32 = 2;
-pub const kAudioComponentInstantiation_LoadOutOfProcess:u32 = 1;
+pub const kAudioComponentInstantiation_LoadInProcess: u32 = 2;
+pub const kAudioComponentInstantiation_LoadOutOfProcess: u32 = 1;
 
-impl AudioError {
-    pub fn from_i32(result:i32)->Option<Self>{
-        Some(match result {
-            0 => return None,
+impl OSError {
+    pub fn from(result: i32) -> Result<(), Self> {
+        Err(match result {
+            0 => return Ok(()),
             x if x == Self::Unimplemented as i32 => Self::Unimplemented,
             x if x == Self::FileNotFound as i32 => Self::FileNotFound,
             x if x == Self::FilePermission as i32 => Self::FilePermission,
             x if x == Self::TooManyFilesOpen as i32 => Self::TooManyFilesOpen,
-
+            
             x if x == Self::Unspecified as i32 => Self::Unspecified,
             x if x == Self::SystemSoundClientMessageTimeout as i32 => Self::SystemSoundClientMessageTimeout,
-
+            
             x if x == Self::BadFilePath as i32 => Self::BadFilePath,
             x if x == Self::Param as i32 => Self::Param,
             x if x == Self::MemFull as i32 => Self::MemFull,
@@ -957,21 +982,12 @@ impl AudioError {
         })
     }
     
-    pub fn as_result(os_result: i32) -> Result<(),Self> {
-        if let Some(val) = Self::from_i32(os_result){
-            Err(val)
+    pub fn from_nserror(ns_error: ObjcId) -> Result<(), Self> {
+        if ns_error != nil {
+            let code: i32 = unsafe {msg_send![ns_error, code]};
+            Self::from(code)
         }
-        else{
-            Ok(())
-        }
-    }
-    
-    pub fn ns_error_as_result(ns_error:ObjcId) -> Result<(),Self> {
-        if ns_error != nil{
-            let code: i32 = unsafe{msg_send![ns_error, code]};
-            Self::as_result(code)
-        }
-        else{
+        else {
             Ok(())
         }
     }
@@ -981,12 +997,86 @@ impl AudioError {
 #[derive(Debug, Copy, Clone)]
 pub struct __CFString {_unused: [u8; 0]}
 pub type CFStringRef = *const __CFString;
+pub type ItemCount = u64;
+pub type MIDIObjectRef = u32;
+pub type MIDIClientRef = MIDIObjectRef;
+pub type MIDIPortRef = MIDIObjectRef;
+pub type MIDIEndpointRef = MIDIObjectRef;
+pub type MIDIProtocolID = i32;
+pub type MIDITimeStamp = u64;
+pub const kMIDIProtocol_1_0: i32 = 1;
+pub const kMIDIProtocol_2_0: i32 = 2;
+
+#[repr(C)]
+#[derive(Debug, Default, Copy, Clone)]
+pub struct MIDINotification {
+    pub messageID: i32,
+    pub messageSize: u32,
+}
+
+#[repr(C)]
+#[derive(Copy, Clone)]
+pub struct MIDIEventList {
+    pub protocol: MIDIProtocolID,
+    pub numPackets: u32,
+    pub packet: [MIDIEventPacket; 1usize],
+}
+
+#[repr(C, packed(4))]
+#[derive(Copy, Clone)]
+pub struct MIDIEventPacket {
+    pub timeStamp: MIDITimeStamp,
+    pub wordCount: u32,
+    pub words: [u32; 64usize],
+}
 
 #[link(name = "CoreMidi", kind = "framework")]
 extern "C" {
+    pub static kMIDIPropertyManufacturer: CFStringRef;
+    pub static kMIDIPropertyDisplayName: CFStringRef;
+    pub static kMIDIPropertyUniqueID: CFStringRef;
+
+    pub fn MIDIGetNumberOfSources() -> ItemCount;
+    pub fn MIDIGetSource(sourceIndex0: ItemCount) -> MIDIEndpointRef;
+    
+    pub fn MIDIGetNumberOfDestinations() -> ItemCount;
+    pub fn MIDIGetDestination(sourceIndex0: ItemCount) -> MIDIEndpointRef;
+    
     pub fn MIDIClientCreateWithBlock(
         name: CFStringRef,
-        outClient: *mut u32,
+        outClient: *mut MIDIClientRef,
         notifyBlock: ObjcId,
+    ) -> OSStatus;
+    
+    pub fn MIDIInputPortCreateWithProtocol(
+        client: MIDIClientRef,
+        portName: CFStringRef,
+        protocol: MIDIProtocolID,
+        outPort: *mut MIDIPortRef,
+        receiveBlock: ObjcId,
+    ) -> OSStatus;
+    
+    pub fn MIDIOutputPortCreate(
+        client: MIDIClientRef,
+        portName: CFStringRef,
+        outPort: *mut MIDIPortRef,
+    ) -> OSStatus;
+    
+    pub fn MIDIObjectGetStringProperty(
+        obj: MIDIObjectRef,
+        propertyID: CFStringRef,
+        str_: *mut CFStringRef,
+    ) -> OSStatus;
+    
+    pub fn MIDIObjectGetIntegerProperty(
+        obj: MIDIObjectRef,
+        propertyID: CFStringRef,
+        outValue: *mut i32,
+    ) -> OSStatus;
+    
+    pub fn MIDIPortConnectSource(
+        port: MIDIPortRef,
+        source: MIDIEndpointRef,
+        connRefCon: *mut ::std::os::raw::c_void,
     ) -> OSStatus;
 }
