@@ -332,6 +332,7 @@ pub fn define_cocoa_view_class() -> *const Class {
     
     extern fn init_with_ptr(this: &Object, _sel: Sel, cx: *mut c_void) -> ObjcId {
         unsafe {
+            println!("HERE!");
             let this: ObjcId = msg_send![this, init];
             if this != nil {
                 (*this).set_ivar("cocoa_window_ptr", cx);
@@ -347,6 +348,7 @@ pub fn define_cocoa_view_class() -> *const Class {
                 count: types.len()
             ];
             let _: () = msg_send![this, registerForDraggedTypes: types_nsarray];
+            
             this
         }
     }
@@ -619,10 +621,12 @@ pub fn define_cocoa_view_class() -> *const Class {
         YES
     }
     
+    
     extern fn display_layer(this: &Object, _: Sel, _calayer: ObjcId) {
         let cw = get_cocoa_window(this);
         cw.send_change_event();
     }
+    
     
     extern fn dragging_session_ended_at_point_operation(this: &Object, _: Sel, _session: ObjcId, _point: NSPoint, _operation: NSDragOperation) {
         let window = get_cocoa_window(this);

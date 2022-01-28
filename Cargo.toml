@@ -3,6 +3,7 @@
 members = [
     "examples/bare_example", 
     "examples/cmdline_example",
+    "examples/fun_audio",
     "studio",
     "tools/webserver",
 ]
