@@ -1,0 +1,11 @@
+[package]
+name = "fun_audio"
+version = "0.1.0"
+authors = ["makepaddev"]
+edition = "2018"
+
+[dependencies]
+
+[dependencies.makepad-component]
+path="../../component"
+version="0.1"

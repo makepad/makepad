@@ -139,6 +139,25 @@ impl CocoaWindow {
             let () = msg_send![self.window, makeFirstResponder: self.view];
             let () = msg_send![self.window, makeKeyAndOrderFront: nil];
             
+            
+            let rect = NSRect {
+                origin: NSPoint {x: 0., y: 0.},
+                size: ns_size
+            };
+            let track: ObjcId = msg_send![class!(NSTrackingArea), alloc];
+            let track: ObjcId = msg_send![
+                track,
+                initWithRect: rect
+                options: NSTrackignActiveAlways
+                    | NSTrackingInVisibleRect
+                    | NSTrackingMouseEnteredAndExited
+                    | NSTrackingMouseMoved
+                    | NSTrackingCursorUpdate
+                owner: self.view
+                userInfo: nil
+            ];
+            let () = msg_send![self.view, addTrackingArea: track];
+            
             if position.is_none() {
                 let () = msg_send![self.window, center];
             }
@@ -180,9 +199,9 @@ impl CocoaWindow {
         }
         
         let mut events = vec![
-            Event::WindowResizeLoop(WindowResizeLoopEvent{
+            Event::WindowResizeLoop(WindowResizeLoopEvent {
                 window_id: self.window_id,
-                was_started:true
+                was_started: true
             })
         ];
         self.do_callback(&mut events);
@@ -194,9 +213,9 @@ impl CocoaWindow {
             self.live_resize_timer = nil;
         }
         let mut events = vec![
-            Event::WindowResizeLoop(WindowResizeLoopEvent{
+            Event::WindowResizeLoop(WindowResizeLoopEvent {
                 window_id: self.window_id,
-                was_started:false
+                was_started: false
             })
         ];
         self.do_callback(&mut events);
