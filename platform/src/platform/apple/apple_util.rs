@@ -55,6 +55,29 @@ pub fn load_undocumented_cursor(cursor_name: &str) -> ObjcId {
     }
 }
 
+pub unsafe fn ccfstr_from_str(inp: &str) -> CFStringRef {
+    let null = format!("{}\0", inp);
+    __CFStringMakeConstantString(null.as_ptr() as *const ::std::os::raw::c_char)
+}
+
+pub unsafe fn cfstring_ref_to_string(cfstring: CFStringRef) -> String {
+    let length = CFStringGetLength(cfstring);
+    let range = CFRange {location: 0, length};
+    let mut num_bytes = 0u64;
+    let converted = CFStringGetBytes(cfstring, range, kCFStringEncodingUTF8, 0, false, 0 as *mut u8, 0, &mut num_bytes);
+    if converted == 0 || num_bytes == 0 {return String::new()}
+    let mut buffer = Vec::new();
+    buffer.resize(num_bytes as usize, 0u8);
+    CFStringGetBytes(cfstring, range, kCFStringEncodingUTF8, 0, false, buffer.as_mut_ptr() as *mut u8, num_bytes, 0 as *mut u64);
+    if let Ok(val) = String::from_utf8(buffer) {
+        val
+    }
+    else {
+        String::new()
+    }
+}
+
+
 pub fn load_webkit_cursor(cursor_name_str: &str) -> ObjcId {
     unsafe {
         static CURSOR_ROOT: &'static str = "/System/Library/Frameworks/ApplicationServices.framework/Versions/A/Frameworks/HIServices.framework/Versions/A/Resources/cursors";
@@ -499,7 +522,7 @@ macro_rules!objc_block {
 
 #[macro_export]
 macro_rules!objc_block_invoke {
-    ($inp:expr, invoke ( $ ( $ arg_ident: ident: $ arg_ty: ty), * ) $ (-> $ return_ty: ty) ? ) => {
+    ( $ inp: expr, invoke ( $ ( $ arg_ident: ident: $ arg_ty: ty), *) $ ( -> $ return_ty: ty) ?) => {
         {
             #[repr(C)]
             struct BlockLiteral {
@@ -509,7 +532,7 @@ macro_rules!objc_block_invoke {
                 invoke: extern "C" fn(*mut BlockLiteral, $ ( $ arg_ty), *) $ ( -> $ return_ty) ?,
             }
             
-            let block: &mut BlockLiteral = &mut * ($inp as *mut _);
+            let block: &mut BlockLiteral = &mut *( $ inp as *mut _);
             (block.invoke)(block, $ ( $ arg_ident), *)
         }
     }
