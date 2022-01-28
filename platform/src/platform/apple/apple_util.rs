@@ -510,7 +510,7 @@ macro_rules!objc_block_invoke {
             }
             
             let block: &mut BlockLiteral = &mut * ($inp as *mut _);
-            (block.invoke)(block as *mut _, $ ( $ arg_ident), *)
+            (block.invoke)(block, $ ( $ arg_ident), *)
         }
     }
 }
