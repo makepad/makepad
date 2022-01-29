@@ -76,38 +76,38 @@ impl App {
                 if let Some(info) = list.iter().find( | item | item.name == "FM8") {
                     let instrument = self.instrument.clone();
                     let ui_ready_signal = self.ui_ready_signal;
-                    Audio::new_device(info, Box::new(move | result | {
+                    Audio::new_device(info, move | result | {
                         match result {
                             Ok(device) => {
-                                device.request_ui(Box::new(move || {
+                                device.request_ui(move || {
                                     Cx::post_signal(ui_ready_signal, 0);
-                                }));
+                                });
                                 *instrument.lock().unwrap() = Some(device);
                             }
                             Err(err) => println!("Error {:?}", err)
                         }
-                    }))
+                    })
                 }
                 
                 let instrument = self.instrument.clone();
                 std::thread::spawn(move || {
                     let out = &Audio::query_devices(AudioDeviceType::DefaultOutput)[0];
-                    Audio::new_device(out, Box::new(move | result | {
+                    Audio::new_device(out, move | result | {
                         match result {
                             Ok(device) => {
                                 let instrument = instrument.clone();
-                                device.start_output(Box::new(move | buffer | {
+                                device.start_output(move | buffer | {
                                     if let Some(instrument) = instrument.lock().unwrap().as_ref() {
                                         instrument.render_to_audio_buffer(buffer);
                                     }
-                                })); 
+                                }); 
                                 loop {
                                     std::thread::sleep(std::time::Duration::from_millis(100));
                                 }
                             }
                             Err(err) => println!("Error {:?}", err)
                         }
-                    }));
+                    });
                 });
                 
                 // spawn 1000 buttons into the live structure
