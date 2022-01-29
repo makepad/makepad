@@ -1,6 +1,6 @@
 use makepad_component::*;
 use makepad_platform::*;
-use makepad_platform::platform::apple::core_audio::{Audio, AudioDevice, AudioDeviceType, Midi, Midi1Event};
+use makepad_platform::platform::apple::core_audio::{Audio, AudioDevice, AudioDeviceType, Midi};
 use std::sync::{Arc, Mutex};
 
 live_register!{
@@ -52,7 +52,7 @@ impl App {
         
         match event {
             Event::KeyDown(_) => {
-                if let Some(instrument) = self.instrument.lock().unwrap().as_ref() {
+                if let Some(_instrument) = self.instrument.lock().unwrap().as_ref() {
                     //instrument.send_midi_1_event();
                 }
             }
@@ -63,13 +63,13 @@ impl App {
                     }
                 }
             }
-            Event::Construct => {
+            Event::Construct => { 
                 let instrument = self.instrument.clone();
-                self.midi = Some(Midi::new_midi_1_input(Box::new(move | event | {
+                self.midi = Some(Midi::new_midi_1_input(move | event | {
                     if let Some(instrument) = instrument.lock().unwrap().as_ref() {
                         instrument.send_midi_1_event(event);
                     }
-                })).unwrap());
+                }).unwrap());
                 
                 let list = Audio::query_devices(AudioDeviceType::Music);
                 
