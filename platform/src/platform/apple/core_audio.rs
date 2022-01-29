@@ -52,7 +52,7 @@ impl MidiEndpoint {
 }
 
 impl Midi {
-    pub fn new_midi_1_input(message_callback: Box<dyn Fn(Midi1Event)>,) -> Result<Self,
+    pub fn new_midi_1_input<F: Fn(Midi1Event) + Send + 'static>(message_callback: F) -> Result<Self,
     OSError> {
         let mut midi_notify = objc_block!(move | _notification: &MIDINotification | {
             println!("Midi device added/removed");
@@ -146,7 +146,7 @@ pub struct AudioDevice {
     av_audio_unit: ObjcId,
     au_audio_unit: ObjcId,
     render_block: Option<ObjcId>,
-    view_controller: Arc<Mutex<Option<ObjcId>>>,
+    view_controller: Arc<Mutex<Option<ObjcId >> >,
     device_type: AudioDeviceType
 }
 
@@ -162,7 +162,7 @@ pub struct AudioBuffer<'a> {
 }
 
 impl AudioDevice {
-    pub fn start_output<F:Fn(&mut AudioBuffer) + Send + 'static>(&self, audio_callback: F) {
+    pub fn start_output<F: Fn(&mut AudioBuffer) + Send + 'static>(&self, audio_callback: F) {
         match self.device_type {
             AudioDeviceType::DefaultOutput => (),
             _ => panic!("start_audio_output_with_fn on this device")
@@ -196,14 +196,14 @@ impl AudioDevice {
             let () = msg_send![self.au_audio_unit, setOutputProvider: &output_provider];
         }
     }
-
-    pub fn render_to_audio_buffer(&self, buffer:&mut AudioBuffer) {
+    
+    pub fn render_to_audio_buffer(&self, buffer: &mut AudioBuffer) {
         match self.device_type {
             AudioDeviceType::Music => (),
             _ => panic!("render_to_audio_buffer not supported on this device")
         }
         if let Some(render_block) = self.render_block {
-            unsafe{objc_block_invoke!(render_block, invoke(
+            unsafe {objc_block_invoke!(render_block, invoke(
                 (buffer.flags): *mut u32,
                 (buffer.timestamp): *const AudioTimeStamp,
                 (buffer.frame_count): u32,
@@ -215,14 +215,14 @@ impl AudioDevice {
     }
     
     
-    pub fn request_ui<F:Fn() + Send + 'static>(&self, view_loaded: F) {
+    pub fn request_ui<F: Fn() + Send + 'static>(&self, view_loaded: F) {
         match self.device_type {
             AudioDeviceType::Music => (),
             _ => panic!("request_ui not supported on this device")
         }
         
         let view_controller_arc = self.view_controller.clone();
-        unsafe{
+        unsafe {
             let view_controller_complete = objc_block!(move | view_controller: ObjcId | {
                 *view_controller_arc.lock().unwrap() = Some(view_controller);
                 view_loaded();
@@ -232,9 +232,9 @@ impl AudioDevice {
         }
     }
     
-    pub fn open_ui(&self){
-        if let Some(view_controller) = self.view_controller.lock().unwrap().as_ref(){
-            unsafe{
+    pub fn open_ui(&self) {
+        if let Some(view_controller) = self.view_controller.lock().unwrap().as_ref() {
+            unsafe {
                 let audio_view: ObjcId = msg_send![*view_controller, view];
                 let cocoa_app = get_cocoa_app_global();
                 let win_view = cocoa_app.cocoa_windows[0].1;
@@ -243,14 +243,14 @@ impl AudioDevice {
         }
     }
     
-    pub fn send_midi_1_event(&self, event:Midi1Event){
+    pub fn send_midi_1_event(&self, event: Midi1Event) {
         match self.device_type {
             AudioDeviceType::Music => (),
             _ => panic!("send_midi_1_event not supported on this device")
         }
-        unsafe{
-            let () = msg_send![self.av_audio_unit, sendMIDIEvent: event.status data1:event.data1 data2:event.data2];
-        } 
+        unsafe {
+            let () = msg_send![self.av_audio_unit, sendMIDIEvent: event.status data1: event.data1 data2: event.data2];
+        }
     }
 }
 
@@ -293,7 +293,7 @@ impl Audio {
         }
     }
     
-    pub fn new_device<F:Fn(Result<AudioDevice, AudioError>) + Send +'static>(
+    pub fn new_device<F: Fn(Result<AudioDevice, AudioError>) + Send + 'static>(
         device_info: &AudioDeviceInfo,
         device_callback: F,
     ) {
@@ -321,11 +321,10 @@ impl Audio {
                             let () = msg_send![block_ptr, retain];
                             render_block = Some(block_ptr);
                         }
-                        _ => ()
                     }
                     
                     Ok(AudioDevice {
-                        view_controller:Arc::new(Mutex::new(None)),
+                        view_controller: Arc::new(Mutex::new(None)),
                         render_block,
                         device_type,
                         av_audio_unit,
