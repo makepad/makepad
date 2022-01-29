@@ -1,8 +1,7 @@
 use makepad_component::*;
 use makepad_platform::*;
-use makepad_platform::platform::apple::core_audio::{CoreAudio, CoreMidi};
-use std::sync::Arc;
-use std::cell::Cell;
+use makepad_platform::platform::apple::core_audio::{Audio, AudioDevice, AudioDeviceType, Midi};
+use std::sync::{Arc, Mutex};
 
 live_register!{
     use makepad_component::frame::Frame;
@@ -29,6 +28,10 @@ pub struct App {
     frame_component_registry: FrameComponentRegistry,
     desktop_window: DesktopWindow,
     scroll_view: ScrollView,
+    
+    #[rust] midi: Option<Midi>,
+    #[rust] instrument: Arc<Mutex<Option<AudioDevice>>>,
+    
     #[rust(cx.new_signal())] signal: Signal,
     #[rust] offset: u64
 }
@@ -50,45 +53,63 @@ impl App {
         match event {
             Event::Signal(se) => {
                 if let Some(data) = se.signals.get(&self.signal) {
-                    unsafe {CoreAudio::open_view_controller(data[0])};
+                    self.instrument.lock().unwrap().as_ref().unwrap().open_ui();
                 }
             }
             Event::Construct => {
                 // ok lets list midi inputs
-                unsafe {
-                    let midi = CoreMidi::new_midi_input(Box::new(move | message | {
-                        println!("MIDI MESSAGE!");
-                    })).unwrap();
-                    for input in &midi.inputs{
-                        println!("{} {}", input.name, input.manufacturer);
-                    }
-                };
+                self.midi = Some(Midi::new_midi_1_input(Box::new(move | _message | {
+                    //println!("MIDI MESSAGE!");
+                })).unwrap());
                 
+                //for source in &self.midi.as_ref().unwrap().sources{
+                //println!("{} {}", source.name, source.manufacturer);
+                //}
                 
-                let signal = self.signal;
+                //let signal = self.signal;
+                // let block_ptr = Arc::new(Cell::new(None));
+                let list = Audio::query_devices(AudioDeviceType::Music);
+                //for item in &list {
+                //println!("{}", item.name);
+                //}
+                if let Some(info) = list.iter().find( | item | item.name == "FM8") {
+                    //let block_ptr = block_ptr.clone();≈
+                    let instrument = self.instrument.clone();
+                    let signal = self.signal;
+                    Audio::new_device(info, Box::new(move | result | {
+                        match result {
+                            Ok(device) => {
+                                device.request_ui(Box::new(move ||{
+                                    Cx::post_signal(signal, 0);
+                                }));
+                                *instrument.lock().unwrap() = Some(device);
+                            }
+                            Err(err) => println!("Error {:?}", err)
+                        }
+                    }))
+                }
+                
+                let instrument = self.instrument.clone();
                 std::thread::spawn(move || {
-                    unsafe {
-                        let block_ptr = Arc::new(Cell::new(None));
-                        let list = CoreAudio::get_music_devices();
-                        for item in &list {
-                            //println!("{}", item.name);
+                    let out = &Audio::query_devices(AudioDeviceType::DefaultOutput)[0];
+                    Audio::new_device(out, Box::new(move | result | {
+                        match result {
+                            Ok(device) => {
+                                let instrument = instrument.clone();
+                                device.start_audio_output_with_fn(Box::new(move | buffer | {
+                                    // now access here to the 'write buffer'
+                                    if let Some(instrument) = instrument.lock().unwrap().as_ref(){
+                                        instrument.render_to_audio_buffer(buffer);
+                                    }
+                                }));
+                                
+                                loop {
+                                    std::thread::sleep(std::time::Duration::from_millis(100));
+                                }
+                            }
+                            Err(err) => println!("Error {:?}", err)
                         }
-                        if let Some(info) = list.iter().find( | item | item.name == "FM8") {
-                            let block_ptr = block_ptr.clone();
-                            CoreAudio::new_midi_instrument_from_desc(
-                                info.desc,
-                                Box::new(move | vc | {
-                                    Cx::post_signal(signal, vc);
-                                }),
-                                Box::new(move | in_block_ptr | {
-                                    block_ptr.set(Some(in_block_ptr));
-                                })
-                            );
-                        }
-                        CoreAudio::new_audio_output(Box::new(move | _left, _right | {
-                            block_ptr.get()
-                        }))
-                    };
+                    }));
                 });
                 
                 // spawn 1000 buttons into the live structure
@@ -105,7 +126,6 @@ impl App {
                 self.frame.apply_clear(cx, &out);
                 
                 //cx.new_next_frame();
-                println!("here!");
                 cx.redraw_all();
             }
             Event::Draw(draw_event) => {
