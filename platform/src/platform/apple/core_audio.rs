@@ -18,10 +18,10 @@ pub struct MidiEndpoint {
 }
 
 pub struct Midi1Event {
-    input: usize,
-    status: u8,
-    data1: u8,
-    data2: u8
+    pub input: usize,
+    pub status: u8,
+    pub data1: u8,
+    pub data2: u8
 }
 
 pub struct Instrument {
@@ -162,7 +162,7 @@ pub struct AudioBuffer<'a> {
 }
 
 impl AudioDevice {
-    pub fn start_audio_output_with_fn(&self, audio_callback: Box<dyn Fn(&mut AudioBuffer) + Send>) {
+    pub fn start_output(&self, audio_callback: Box<dyn Fn(&mut AudioBuffer) + Send>) {
         match self.device_type {
             AudioDeviceType::DefaultOutput => (),
             _ => panic!("start_audio_output_with_fn on this device")
@@ -243,6 +243,15 @@ impl AudioDevice {
         }
     }
     
+    pub fn send_midi_1_event(&self, event:Midi1Event){
+        match self.device_type {
+            AudioDeviceType::Music => (),
+            _ => panic!("send_midi_1_event not supported on this device")
+        }
+        unsafe{
+            let () = msg_send![self.av_audio_unit, sendMIDIEvent: event.status data1:event.data1 data2:event.data2];
+        } 
+    }
 }
 
 #[derive(Debug)]
@@ -289,13 +298,9 @@ impl Audio {
         device_callback: Box<dyn Fn(Result<AudioDevice, AudioError>) + Send>,
     ) {
         unsafe {
-            /*
-            let view_controller_complete = objc_block!(move | view_controller: ObjcId | {
-                vc(view_controller as u64);
-            });
-            */
             let device_type = device_info.device_type;
             let instantiation_handler = objc_block!(move | av_audio_unit: ObjcId, error: ObjcId | {
+                let () = msg_send![av_audio_unit, retain];
                 unsafe fn inner(av_audio_unit: ObjcId, error: ObjcId, device_type: AudioDeviceType) -> Result<AudioDevice, OSError> {
                     OSError::from_nserror(error) ?;
                     let au_audio_unit: ObjcId = msg_send![av_audio_unit, AUAudioUnit];
@@ -343,78 +348,4 @@ impl Audio {
             ];
         }
     }
-    /*
-    pub fn new_audio_output_from_desc(desc: AudioComponentDescription, audio_callback: Box<dyn Fn(&mut [f32], &mut [f32]) -> Option<u64 >>) {
-        unsafe{
-            let manager: ObjcId = msg_send![class!(AVAudioUnitComponentManager), sharedAudioUnitComponentManager];
-            let components: ObjcId = msg_send![manager, componentsMatchingDescription: desc];
-            let count: usize = msg_send![components, count];
-            if count != 1 {
-                panic!();
-            }
-            
-            let component: ObjcId = msg_send![components, objectAtIndex: 0];
-            let desc: AudioComponentDescription = msg_send![component, audioComponentDescription];
-            
-            let output_provider = objc_block!(
-                move | flags: *mut u32,
-                timestamp: *const AudioTimeStamp,
-                frame_count: u32,
-                input_bus_number: u64,
-                buffers: *mut AudioBufferList |: i32 {
-                    let buffers_ref = &*buffers;
-                    let left_chan = std::slice::from_raw_parts_mut(
-                        buffers_ref.mBuffers[0].mData as *mut f32,
-                        frame_count as usize
-                    );
-                    let right_chan = std::slice::from_raw_parts_mut(
-                        buffers_ref.mBuffers[1].mData as *mut f32,
-                        frame_count as usize
-                    );
-                    let block_ptr = audio_callback(left_chan, right_chan);
-                    if let Some(block_ptr) = block_ptr {
-                        objc_block_invoke!(block_ptr, invoke(
-                            flags: *mut u32,
-                            timestamp: *const AudioTimeStamp,
-                            frame_count: u32,
-                            input_bus_number: u64,
-                            buffers: *mut AudioBufferList,
-                            nil: ObjcId
-                        ) -> i32);
-                    }
-                    0
-                }
-            );
-            
-            let instantiation_handler = objc_block!(move | av_audio_unit: ObjcId, error: ObjcId | {
-                // lets spawn a thread
-                OSError::from_nserror(error).expect("instantiateWithComponentDescription");
-                
-                let audio_unit: ObjcId = msg_send![av_audio_unit, AUAudioUnit];
-                
-                let () = msg_send![audio_unit, setOutputProvider: &output_provider];
-                let () = msg_send![audio_unit, setOutputEnabled: true];
-                
-                let mut err: ObjcId = nil;
-                let () = msg_send![audio_unit, allocateRenderResourcesAndReturnError: &mut err];
-                OSError::from_nserror(err).expect("allocateRenderResourcesAndReturnError");
-                
-                let mut err: ObjcId = nil;
-                let () = msg_send![audio_unit, startHardwareAndReturnError: &mut err];
-                OSError::from_nserror(err).expect("startHardwareAndReturnError");
-                // stay in a waitloop so the audio output gets callbacks.
-                loop {
-                    std::thread::sleep(std::time::Duration::from_millis(100));
-                }
-            });
-            
-            // Instantiate output audio unit
-            let () = msg_send![
-                class!(AVAudioUnit),
-                instantiateWithComponentDescription: desc
-                options: kAudioComponentInstantiation_LoadInProcess
-                completionHandler: &instantiation_handler
-            ];
-        }
-    }*/
 }

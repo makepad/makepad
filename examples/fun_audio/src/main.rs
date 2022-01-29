@@ -1,6 +1,6 @@
 use makepad_component::*;
 use makepad_platform::*;
-use makepad_platform::platform::apple::core_audio::{Audio, AudioDevice, AudioDeviceType, Midi};
+use makepad_platform::platform::apple::core_audio::{Audio, AudioDevice, AudioDeviceType, Midi, Midi1Event};
 use std::sync::{Arc, Mutex};
 
 live_register!{
@@ -30,9 +30,9 @@ pub struct App {
     scroll_view: ScrollView,
     
     #[rust] midi: Option<Midi>,
-    #[rust] instrument: Arc<Mutex<Option<AudioDevice>>>,
+    #[rust] instrument: Arc<Mutex<Option<AudioDevice >> >,
     
-    #[rust(cx.new_signal())] signal: Signal,
+    #[rust(cx.new_signal())] ui_ready_signal: Signal,
     #[rust] offset: u64
 }
 
@@ -51,36 +51,36 @@ impl App {
         self.scroll_view.handle_event(cx, event);
         
         match event {
+            Event::KeyDown(_) => {
+                if let Some(instrument) = self.instrument.lock().unwrap().as_ref() {
+                    //instrument.send_midi_1_event();
+                }
+            }
             Event::Signal(se) => {
-                if let Some(data) = se.signals.get(&self.signal) {
-                    self.instrument.lock().unwrap().as_ref().unwrap().open_ui();
+                if se.signals.get(&self.ui_ready_signal).is_some() {
+                    if let Some(instrument) = self.instrument.lock().unwrap().as_ref() {
+                        instrument.open_ui();
+                    }
                 }
             }
             Event::Construct => {
-                // ok lets list midi inputs
-                self.midi = Some(Midi::new_midi_1_input(Box::new(move | _message | {
-                    //println!("MIDI MESSAGE!");
+                let instrument = self.instrument.clone();
+                self.midi = Some(Midi::new_midi_1_input(Box::new(move | event | {
+                    if let Some(instrument) = instrument.lock().unwrap().as_ref() {
+                        instrument.send_midi_1_event(event);
+                    }
                 })).unwrap());
                 
-                //for source in &self.midi.as_ref().unwrap().sources{
-                //println!("{} {}", source.name, source.manufacturer);
-                //}
-                
-                //let signal = self.signal;
-                // let block_ptr = Arc::new(Cell::new(None));
                 let list = Audio::query_devices(AudioDeviceType::Music);
-                //for item in &list {
-                //println!("{}", item.name);
-                //}
+                
                 if let Some(info) = list.iter().find( | item | item.name == "FM8") {
-                    //let block_ptr = block_ptr.clone();≈
                     let instrument = self.instrument.clone();
-                    let signal = self.signal;
+                    let ui_ready_signal = self.ui_ready_signal;
                     Audio::new_device(info, Box::new(move | result | {
                         match result {
                             Ok(device) => {
-                                device.request_ui(Box::new(move ||{
-                                    Cx::post_signal(signal, 0);
+                                device.request_ui(Box::new(move || {
+                                    Cx::post_signal(ui_ready_signal, 0);
                                 }));
                                 *instrument.lock().unwrap() = Some(device);
                             }
@@ -96,13 +96,11 @@ impl App {
                         match result {
                             Ok(device) => {
                                 let instrument = instrument.clone();
-                                device.start_audio_output_with_fn(Box::new(move | buffer | {
-                                    // now access here to the 'write buffer'
-                                    if let Some(instrument) = instrument.lock().unwrap().as_ref(){
+                                device.start_output(Box::new(move | buffer | {
+                                    if let Some(instrument) = instrument.lock().unwrap().as_ref() {
                                         instrument.render_to_audio_buffer(buffer);
                                     }
-                                }));
-                                
+                                })); 
                                 loop {
                                     std::thread::sleep(std::time::Duration::from_millis(100));
                                 }
