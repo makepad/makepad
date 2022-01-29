@@ -332,7 +332,6 @@ pub fn define_cocoa_view_class() -> *const Class {
     
     extern fn init_with_ptr(this: &Object, _sel: Sel, cx: *mut c_void) -> ObjcId {
         unsafe {
-            println!("HERE!");
             let this: ObjcId = msg_send![this, init];
             if this != nil {
                 (*this).set_ivar("cocoa_window_ptr", cx);
