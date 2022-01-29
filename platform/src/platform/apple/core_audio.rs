@@ -162,7 +162,7 @@ pub struct AudioBuffer<'a> {
 }
 
 impl AudioDevice {
-    pub fn start_output(&self, audio_callback: Box<dyn Fn(&mut AudioBuffer) + Send>) {
+    pub fn start_output<F:Fn(&mut AudioBuffer) + Send + 'static>(&self, audio_callback: F) {
         match self.device_type {
             AudioDeviceType::DefaultOutput => (),
             _ => panic!("start_audio_output_with_fn on this device")
@@ -215,7 +215,7 @@ impl AudioDevice {
     }
     
     
-    pub fn request_ui(&self, view_loaded: Box<dyn Fn() + Send>) {
+    pub fn request_ui<F:Fn() + Send + 'static>(&self, view_loaded: F) {
         match self.device_type {
             AudioDeviceType::Music => (),
             _ => panic!("request_ui not supported on this device")
@@ -293,9 +293,9 @@ impl Audio {
         }
     }
     
-    pub fn new_device(
+    pub fn new_device<F:Fn(Result<AudioDevice, AudioError>) + Send +'static>(
         device_info: &AudioDeviceInfo,
-        device_callback: Box<dyn Fn(Result<AudioDevice, AudioError>) + Send>,
+        device_callback: F,
     ) {
         unsafe {
             let device_type = device_info.device_type;
