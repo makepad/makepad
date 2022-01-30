@@ -64,7 +64,7 @@ live_register!{
     PianoKey: {{PianoKey}} {
         
         default_state: {
-            duration: 0.2
+            duration: 0.1
             apply: {key_quad: {hover: 0.0}}
         }
         
@@ -75,7 +75,7 @@ live_register!{
         
         focussed_state: {
             track: focus,
-            duration: 0.1,
+            duration: 0.05,
             apply: {key_quad: {focussed: 0.0}}
         }
         
@@ -87,7 +87,7 @@ live_register!{
         
         up_state: {
             track: pressed,
-            duration: 0.1,
+            duration: 0.05,
             apply: {key_quad: {pressed: 0.0}}
         }
         
