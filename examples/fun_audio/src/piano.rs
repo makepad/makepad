@@ -15,7 +15,7 @@ live_register!{
     DrawKeyQuad: {{DrawKeyQuad}} {
         
         fn dist(self, pos:vec2)->float{
-            let fx = 1.0-pow(1.2-self.pressed*0.1*pos.y - sin(pos.x * PI), 10.8);
+            let fx = 1.0-pow(1.2-/*self.pressed*0.1*pos.y*/ sin(pos.x * PI), 10.8);
             let fy = 1.0-pow(1.2-self.pressed*0.2 - cos(pos.y * 0.5*PI), 25.8)
             return fx+fy
         }
@@ -27,9 +27,11 @@ live_register!{
             let dx = self.dist(self.pos+vec2(delta,0))
             let normal = normalize(cross(vec3(delta,0,dx-d), vec3(0,delta,dy-d)))
             //let light = normalize(vec3(0.75,0.5,0.5))
-            let light = normalize(vec3(1.5,0.5,1.5))
-            let diff = pow(max(dot(light, normal),0.),3.0)
-            return mix(#00, #ff, diff) + #11 * self.hover
+            //let light_hover = normalize(vec3(1.5,0.5,1.5))
+            let light = normalize(vec3(0.75,0.5,0.5))
+            let light_hover = normalize(vec3(0.75,0.5,1.5))
+            let diff = pow(max(dot(mix(light,light_hover,self.hover*(1.0-self.pressed)), normal),0.),3.0)
+            return mix(#00, #ff, diff) 
         }
         
         fn pixel(self) -> vec4 {
@@ -87,7 +89,7 @@ live_register!{
     PianoKey: {{PianoKey}} {
         
         default_state: {
-            duration: 0.1
+            duration: 0.2
             apply: {key_quad: {hover: 0.0}}
         }
         
