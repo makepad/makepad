@@ -1,7 +1,9 @@
-use makepad_component::*;
+pub use makepad_component::{self,*};
 use makepad_platform::*;
 use makepad_platform::platform::apple::core_audio::{Audio, AudioDevice, AudioDeviceType, Midi};
 use std::sync::{Arc, Mutex};
+mod piano;
+use crate::piano::*;
 
 live_register!{
     use makepad_component::frame::Frame;
@@ -24,6 +26,8 @@ main_app!(App);
 
 #[derive(Live, LiveHook)]
 pub struct App {
+    
+    piano: Piano,
     frame: Frame,
     frame_component_registry: FrameComponentRegistry,
     desktop_window: DesktopWindow,
@@ -39,17 +43,69 @@ pub struct App {
 impl App {
     pub fn live_register(cx: &mut Cx) {
         makepad_component::live_register(cx);
+        crate::piano::live_register(cx);
     }
     
     pub fn new_app(cx: &mut Cx) -> Self {
         Self::new_as_main_module(cx, &module_path!(), id!(App)).unwrap()
     }
     
+    pub fn run_audio_system(&mut self){
+        
+        // listen to midi inputs
+        let instrument = self.instrument.clone();
+        self.midi = Some(Midi::new_midi_1_input(move | event | {
+            if let Some(instrument) = instrument.lock().unwrap().as_ref() {
+                instrument.send_midi_1_event(event);
+            }
+        }).unwrap());
+        
+        // find an audio unit instrument and start it
+        let list = Audio::query_devices(AudioDeviceType::Music);
+        if let Some(info) = list.iter().find( | item | item.name == "FM8") {
+            let instrument = self.instrument.clone();
+            let ui_ready_signal = self.ui_ready_signal;
+            Audio::new_device(info, move | result | {
+                match result {
+                    Ok(device) => {
+                        device.request_ui(move || {
+                            Cx::post_signal(ui_ready_signal, 0);
+                        });
+                        *instrument.lock().unwrap() = Some(device);
+                    }
+                    Err(err) => println!("Error {:?}", err)
+                }
+            })
+        }
+        
+        // start the audio output thread
+        let instrument = self.instrument.clone();
+        std::thread::spawn(move || {
+            let out = &Audio::query_devices(AudioDeviceType::DefaultOutput)[0];
+            Audio::new_device(out, move | result | {
+                match result {
+                    Ok(device) => {
+                        let instrument = instrument.clone();
+                        device.start_output(move | buffer | {
+                            if let Some(instrument) = instrument.lock().unwrap().as_ref() {
+                                instrument.render_to_audio_buffer(buffer);
+                            }
+                        }); 
+                        loop {
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                    }
+                    Err(err) => println!("Error {:?}", err)
+                }
+            });
+        });
+    }
+    
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
         
         self.desktop_window.handle_event(cx, event);
         self.scroll_view.handle_event(cx, event);
-        
+        self.piano.handle_event(cx, event);
         match event {
             Event::KeyDown(_) => {
                 if let Some(_instrument) = self.instrument.lock().unwrap().as_ref() {
@@ -64,52 +120,7 @@ impl App {
                 }
             }
             Event::Construct => { 
-                let instrument = self.instrument.clone();
-                self.midi = Some(Midi::new_midi_1_input(move | event | {
-                    if let Some(instrument) = instrument.lock().unwrap().as_ref() {
-                        instrument.send_midi_1_event(event);
-                    }
-                }).unwrap());
-                
-                let list = Audio::query_devices(AudioDeviceType::Music);
-                
-                if let Some(info) = list.iter().find( | item | item.name == "FM8") {
-                    let instrument = self.instrument.clone();
-                    let ui_ready_signal = self.ui_ready_signal;
-                    Audio::new_device(info, move | result | {
-                        match result {
-                            Ok(device) => {
-                                device.request_ui(move || {
-                                    Cx::post_signal(ui_ready_signal, 0);
-                                });
-                                *instrument.lock().unwrap() = Some(device);
-                            }
-                            Err(err) => println!("Error {:?}", err)
-                        }
-                    })
-                }
-                
-                let instrument = self.instrument.clone();
-                std::thread::spawn(move || {
-                    let out = &Audio::query_devices(AudioDeviceType::DefaultOutput)[0];
-                    Audio::new_device(out, move | result | {
-                        match result {
-                            Ok(device) => {
-                                let instrument = instrument.clone();
-                                device.start_output(move | buffer | {
-                                    if let Some(instrument) = instrument.lock().unwrap().as_ref() {
-                                        instrument.render_to_audio_buffer(buffer);
-                                    }
-                                }); 
-                                loop {
-                                    std::thread::sleep(std::time::Duration::from_millis(100));
-                                }
-                            }
-                            Err(err) => println!("Error {:?}", err)
-                        }
-                    });
-                });
-                
+                self.run_audio_system();
                 // spawn 1000 buttons into the live structure
                 let mut out = Vec::new();
                 out.open();
@@ -144,11 +155,13 @@ impl App {
             return;
         }
         if self.scroll_view.begin(cx).is_ok() {
+            self.piano.draw(cx);
+            
             //if let Some(button) = get_component!(id!(b1), Button, self.frame) {
             //    button.label = "Btn1 label override".to_string();
             // }
             //cx.profile_start(1);
-            self.frame.draw(cx);
+            //self.frame.draw(cx);
             //cx.profile_end(1);
             //cx.set_turtle_bounds(Vec2{x:10000.0,y:10000.0});
             self.scroll_view.end(cx);
