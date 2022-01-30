@@ -63,11 +63,11 @@ impl Midi {
             for packet in packets {
                 for i in 0 .. packet.wordCount {
                     let ump = packet.words[i as usize];
-                    let ty = ((ump & 0xf000_0000) >> 28) as u8;
-                    let _group = ((ump & 0x0f00_0000) >> 24) as u8;
-                    let status = ((ump & 0x00ff_0000) >> 16) as u8;
-                    let data1 = ((ump & 0x0000_ff00) >> 8) as u8;
-                    let data2 = ((ump & 0x0000_00ff) >> 0) as u8;
+                    let ty = ((ump >> 28) & 0xf) as u8;
+                    let _group = ((ump >> 24) & 0xf) as u8;
+                    let status = ((ump >> 16) & 0xff) as u8;
+                    let data1 = ((ump >> 8) & 0xff) as u8;
+                    let data2 = (ump & 0xff) as u8;
                     if ty == 0x02 { // midi 1.0 channel voice
                         message_callback(Midi1Event {
                             input: user_data as usize,

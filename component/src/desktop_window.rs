@@ -15,6 +15,9 @@ live_register!{
         caption: "Desktop Window",
         main_view:{},
         border_fill: {color: (COLOR_BG_APP)},
+        window:{
+            inner_size:vec2(1024,768)
+        },
         inner_view:{
         },
         caption_text:{color: (COLOR_TEXT_DEFAULT)}
