@@ -116,7 +116,7 @@ extern "C" {
     pub fn MTLCopyAllDevices() -> ObjcId; //TODO: Array
 }
 
-#[link(name = "AVFAudio", kind = "framework")]
+#[link(name = "AVFoundation", kind = "framework")]
 extern {
     pub static AVAudioUnitComponentManager: ObjcId;
     pub static AVAudioUnit: ObjcId;
