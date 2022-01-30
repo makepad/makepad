@@ -174,7 +174,9 @@ impl LiveEditor {
                 });
             }
             let widget = self.widgets.get_mut(ident).unwrap();
-            
+            if !live_registry.generation_valid(widget.bind.live_ptr){
+                panic!("HERE!")
+            }
             widget.inline_widget.draw_widget(cx, &live_registry, widget.bind);
             
             last_line = Some(line)
@@ -261,6 +263,10 @@ impl LiveEditor {
             
             for bind in &edit_info.items {
                 
+                if !live_registry.generation_valid(bind.live_ptr){
+                    panic!("HERE!")
+                }
+                
                 if let Some(matched) = widget_registry.match_inline_widget(&live_registry, *bind) {
                     let cache_line = &inline_cache.lines[input.line];
                     
@@ -271,12 +277,13 @@ impl LiveEditor {
                     if input.start_y + matched.height > input.viewport_start && input.start_y < input.viewport_end {
                         // lets spawn it
                         let ident = WidgetIdent(bind.live_token_id, matched.live_type);
-                        widgets.get_or_insert(cx, ident, | cx | {
+                        let widget = widgets.get_or_insert(cx, ident, | cx | {
                             Widget {
                                 bind: *bind,
                                 inline_widget: widget_registry.new(cx, matched.live_type).unwrap(),
                             }
                         });
+                        widget.bind = *bind;
                         
                         widget_draw_order.push((input.line, ident));
                     }
@@ -554,6 +561,7 @@ impl LiveEditor {
             
             (FullToken::Ident(id!(if)), _) |
             (FullToken::Ident(id!(else)), _) |
+            (FullToken::Ident(id!(return)), _) |
             (FullToken::Ident(id!(match)), _) => self.text_color_branch_keyword,
             
             (FullToken::Ident(id!(for)), _) |

@@ -14,6 +14,23 @@ live_register!{
     
     DrawKeyQuad: {{DrawKeyQuad}} {
         
+        fn dist(self, pos:vec2)->float{
+            let fx = 1.0-pow(1.2-self.pressed*0.1*pos.y - sin(pos.x * PI), 10.8);
+            let fy = 1.0-pow(1.2-self.pressed*0.2 - cos(pos.y * 0.5*PI), 25.8)
+            return fx+fy
+        }
+        
+        fn black_key(self) -> vec4 {
+            let delta = 0.01;
+            let d = self.dist(self.pos+vec2(0,0))
+            let dy = self.dist(self.pos+vec2(0,delta))
+            let dx = self.dist(self.pos+vec2(delta,0))
+            let normal = normalize(cross(vec3(delta,0,dx-d), vec3(0,delta,dy-d)))
+            let light = normalize(vec3(0.5,0.5,0.5))
+            let diff = pow(max(dot(light, normal),0.),5.0)
+            return mix(#00, #ff, diff) + #11 * self.hover
+        }
+        
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
             sdf.box(
@@ -24,6 +41,8 @@ live_register!{
                 2.0
             );
             if self.is_black > 0.5 {
+                sdf.fill_keep(self.black_key())
+                /*
                 let hor_shape = pow(1.0 - sin(self.pos.x * PI), 2.8);
                 let x = self.pos.y;
                 let front_shape_up = mix(0, pow(1.0 - x, 3.0) / 0.0056, smoothstep(0.76, 0.83, x));
@@ -43,7 +62,7 @@ live_register!{
                         mix(#44, #11, hor_shape),
                         mix(front_shape_up, front_shape_pressed, self.pressed)
                     ) + #33 * self.hover * (1.0 - self.pressed)).xyz, 1.0)
-                );
+                );*/
             }
             else {
                 sdf.fill_keep(mix(

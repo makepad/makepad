@@ -369,7 +369,8 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         let mut stack_depth = 0;
         let mut index = parent_index;
         if !self_ref[index].is_open() {
-            panic!()
+            return Err(index)
+            //panic!()
         }
         while index < self_ref.len() {
             if self_ref[index].is_open() {

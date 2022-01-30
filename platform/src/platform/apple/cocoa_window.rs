@@ -136,7 +136,7 @@ impl CocoaWindow {
             let () = msg_send![self.view, setLayerContentsRedrawPolicy: 2]; //duringViewResize
             
             let () = msg_send![self.window, setContentView: self.view];
-            //let () = msg_send![self.window, makeFirstResponder: self.view];
+            let () = msg_send![self.window, makeFirstResponder: self.view];
             let () = msg_send![self.window, makeKeyAndOrderFront: nil];
             
             
@@ -374,6 +374,7 @@ impl CocoaWindow {
     }
     
     pub fn send_finger_down(&mut self, digit: usize, modifiers: KeyModifiers) {
+        let () = unsafe{msg_send![self.window, makeFirstResponder: self.view]};
         self.fingers_down[digit] = true;
         self.do_callback(&mut vec![Event::FingerDown(FingerDownEvent {
             window_id: self.window_id,
