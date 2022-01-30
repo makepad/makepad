@@ -493,7 +493,7 @@ impl CodeEditorImpl {
                         ..span.len
                     },
                     ..span
-                });
+                }); 
                 break;
             }
             line_count -= span.len.line;
