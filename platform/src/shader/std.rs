@@ -239,6 +239,81 @@ live_register!{
             self.shape = min(self.shape, self.dist);
         }
         
+        fn box_y(inout self, x: float, y: float, w: float, h: float, r_top: float, r_bottom: float) {
+            let size = vec2(0.5 * w, 0.5 * h);
+            let p_r = self.pos - vec2(x, y);
+            let p = abs(p_r - size.xy) - size.xy;
+            
+            let bp_top = max(p + vec2(2. * r_top, 2. * r_top).xy, vec2(0., 0.));
+            let bp_bottom = max(p + vec2(2. * r_bottom, 2. * r_bottom).xy, vec2(0., 0.));
+            
+            self.dist = mix(
+                (length(bp_top) - 2. * r_top),
+                (length(bp_bottom) - 2. * r_bottom),
+                step(0.5 * h, p_r.y)
+            ) / self.scale_factor;
+            
+            self.old_shape = self.shape;
+            self.shape = min(self.shape, self.dist);
+        }
+        
+        fn box_x(inout self, x: float, y: float, w: float, h: float, r_left: float, r_right: float) {
+            let size = vec2(0.5 * w, 0.5 * h);
+            let p_r = self.pos - vec2(x, y);
+            let p = abs(p_r - size.xy) - size.xy;
+            
+            let bp_left = max(p + vec2(2. * r_left, 2. * r_left).xy, vec2(0., 0.));
+            let bp_right = max(p + vec2(2. * r_right, 2. * r_right).xy, vec2(0., 0.));
+            
+            self.dist = mix(
+                (length(bp_left) - 2. * r_left),
+                (length(bp_right) - 2. * r_right),
+                step(0.5 * h, p_r.x)
+            ) / self.scale_factor;
+            
+            self.old_shape = self.shape;
+            self.shape = min(self.shape, self.dist);
+        }
+        
+        fn box_all(
+            inout self,
+            x: float,
+            y: float,
+            w: float,
+            h: float,
+            r_left_top: float,
+            r_right_top: float,
+            r_right_bottom: float,
+            r_left_bottom: float
+        ) {
+            let size = vec2(0.5 * w, 0.5 * h);
+            let p_r = self.pos - vec2(x, y);
+            let p = abs(p_r - size.xy) - size.xy;
+            
+            let bp_lt = max(p + vec2(2. * r_left_top, 2. * r_left_top).xy, vec2(0., 0.));
+            let bp_rt = max(p + vec2(2. * r_right_top, 2. * r_right_top).xy, vec2(0., 0.));
+            let bp_rb = max(p + vec2(2. * r_right_bottom, 2. * r_right_bottom).xy, vec2(0., 0.));
+            let bp_lb = max(p + vec2(2. * r_left_bottom, 2. * r_left_bottom).xy, vec2(0., 0.));
+            
+            self.dist = mix(
+                mix(
+                    (length(bp_lt) - 2. * r_left_top),
+                    (length(bp_lb) - 2. * r_left_bottom),
+                    step(0.5 * h, p_r.y)
+                ),
+                mix(
+                    (length(bp_rt) - 2. * r_right_top),
+                    (length(bp_rb) - 2. * r_right_bottom),
+                    step(0.5 * h, p_r.y)
+                ),
+                step(0.5 * w, p_r.x)
+            ) / self.scale_factor;
+            
+            self.old_shape = self.shape;
+            self.shape = min(self.shape, self.dist);
+        }
+        
+        
         fn rect(inout self, x: float, y: float, w: float, h: float) {
             let s = vec2(w, h) * 0.5;
             let d = abs(vec2(x, y) - self.pos + s) - s;

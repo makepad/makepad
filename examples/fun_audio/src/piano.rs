@@ -14,23 +14,22 @@ live_register!{
     
     DrawKeyQuad: {{DrawKeyQuad}} {
         
-        const BORDER_RADIUS: 1.5
-        
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-            sdf.box(
+            sdf.box_y(
                 0.,
                 0.,
                 self.rect_size.x,
                 self.rect_size.y,
-                BORDER_RADIUS
+                0.5,
+                2.0
             );
             if self.is_black > 0.5 {
                 let x = self.pos.y;
                 sdf.fill_keep(
                     // this is the funky gradient on the black key
                     vec4((mix(
-                        mix(#5c,#2c,self.pressed),
+                        mix(#5c,#4c,self.pressed),
                         #00,
                         pow(x, 1.5)
                     ) 
