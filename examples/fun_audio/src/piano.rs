@@ -36,8 +36,12 @@ live_register!{
                     ) 
                     + mix(
                         #00,
-                        mix(#44,#00,self.pressed),
-                        mix(0,(1.0-x)/0.18,smoothstep(0.76,0.83,x))
+                        #44,// mix(#44,#00,self.pressed),
+                        mix(
+                            mix(0,(1.0-x)/0.18,smoothstep(0.76,0.83,x)),
+                            mix(0,(1.0-x)/0.1,smoothstep(0.87,0.92,x)),
+                            self.pressed
+                        )
                     )
                     + #33 * self.hover*(1.0-self.pressed)).xyz, 1.0)
                 );
