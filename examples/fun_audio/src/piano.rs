@@ -20,31 +20,29 @@ live_register!{
                 0.,
                 -4.0,
                 self.rect_size.x,
-                self.rect_size.y+4.0,
+                self.rect_size.y + 4.0,
                 2.0
             );
             if self.is_black > 0.5 {
+                let hor_shape = pow(1.0 - sin(self.pos.x * PI), 2.8);
                 let x = self.pos.y;
+                let front_shape_up = mix(0, pow(1.0 - x, 3.0) / 0.0056, smoothstep(0.76, 0.83, x));
+                let front_shape_pressed = mix(0, (1.0 - x) / 0.1, smoothstep(0.87, 0.92, x));
                 sdf.fill_keep(
                     // this is the funky gradient on the black key
                     vec4((mix(
-                        mix(#5c,#4c,self.pressed),
+                        mix(
+                            mix(#5c, #11, hor_shape),
+                            #4c,
+                            self.pressed
+                        ),
                         #00,
                         pow(x, 1.5)
-                    ) 
-                    + mix(
+                    ) + mix(
                         #00,
-                        mix(#44, #11, pow(1.0 - sin(self.pos.x * PI), 2.8)),
-                        //#44,// mix(#44,#00,self.pressed),
-                        mix(
-                            //mix(0,pow(1.0-x,2.0)/0.031,smoothstep(0.76,0.83,x)),
-                            mix(0,pow(1.0-x,3.0)/0.0056,smoothstep(0.76,0.83,x)),
-                            //mix(0,(1.0-x)/0.18,smoothstep(0.76,0.83,x)),
-                            mix(0,(1.0-x)/0.1,smoothstep(0.87,0.92,x)),
-                            self.pressed
-                        )
-                    )
-                    + #33 * self.hover*(1.0-self.pressed)).xyz, 1.0)
+                        mix(#44, #11, hor_shape),
+                        mix(front_shape_up, front_shape_pressed, self.pressed)
+                    ) + #33 * self.hover * (1.0 - self.pressed)).xyz, 1.0)
                 );
             }
             else {
