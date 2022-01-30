@@ -5,6 +5,7 @@ use {
             DesktopWindow,
         },
         makepad_studio_component::{
+            shader_view::ShaderView,
             dock::{Dock, DockAction, DragPosition, PanelId},
             file_tree::{FileTreeAction, FileNodeId, FileTree},
             splitter::{SplitterAlign},
@@ -47,6 +48,7 @@ pub struct AppInner {
     dock: Dock,
     file_tree: FileTree,
     log_view: LogView,
+    shader_view: ShaderView,
     editors: Editors,
     collab_client: CollabClient,
     builder_client: BuilderClient
@@ -86,6 +88,9 @@ impl AppInner {
                 if let Some(tab_id) = self.dock.selected_tab_id(cx, panel_id) {
                     let tab = &state.tabs[tab_id];
                     match tab.kind {
+                        TabKind::ShaderView => {
+                            self.shader_view.draw(cx)
+                        }
                         TabKind::LogView => {
                             self.log_view.draw(cx, &state.editor_state)
                         }
@@ -138,7 +143,7 @@ impl AppInner {
                     state,
                     id!(content).into(),
                     None,
-                    state.file_path_join(&["studio/component/src/file_tree.rs"])
+                    state.file_path_join(&["studio/component/src/shader_view.rs"])
                 );
                 self.builder_client.send_cmd(BuilderCmd::CargoCheck);
             }
@@ -284,6 +289,7 @@ impl AppInner {
         }
         
         self.log_view.handle_event_with_fn(cx, event,&mut |_,_|{});
+        self.shader_view.handle_event(cx, event);
     }
     
     
@@ -398,6 +404,9 @@ impl AppInner {
                 if let Some(tab_id) = self.dock.selected_tab_id(cx, panel_id) {
                     let tab = &state.tabs[tab_id];
                     match tab.kind {
+                        TabKind::ShaderView => {
+                            self.shader_view.redraw(cx);
+                        }
                         TabKind::LogView => {
                             self.log_view.redraw(cx);
                         }

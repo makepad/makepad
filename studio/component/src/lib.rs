@@ -7,7 +7,7 @@ pub mod tab_bar;
 pub mod tab_close_button;
 pub mod color_picker;
 pub mod splitter;
-
+pub mod shader_view;
 pub use makepad_component;
 pub use makepad_component::makepad_platform;
 
@@ -18,6 +18,7 @@ pub fn live_register(cx:&mut Cx){
     crate::splitter::live_register(cx);
     crate::log_list::live_register(cx);
     crate::log_icon::live_register(cx);
+    crate::shader_view::live_register(cx);
     crate::file_tree::live_register(cx);
     crate::tab_close_button::live_register(cx);
     crate::tab::live_register(cx);

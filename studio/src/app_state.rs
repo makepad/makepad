@@ -48,8 +48,8 @@ impl AppState {
         panels.insert(
             id!(log_view),
             Panel::Tab(TabPanel {
-                tab_ids: vec![id!(log_view).into()],
-                selected_tab: Some(0)
+                tab_ids: vec![id!(log_view).into(), id!(shader_view).into()],
+                selected_tab: Some(1)
             }),
         );
         
@@ -58,6 +58,13 @@ impl AppState {
             Tab {
                 name: String::from("Log"),
                 kind: TabKind::LogView,
+            },
+        );
+        tabs.insert(
+            id!(shader_view),
+            Tab {
+                name: String::from("Shader"),
+                kind: TabKind::ShaderView,
             },
         );
         
@@ -89,7 +96,7 @@ impl AppState {
             id!(root),
             Panel::Split(SplitPanel {
                 axis: Axis::Vertical,
-                align: SplitterAlign::FromEnd(200.0),
+                align: SplitterAlign::FromEnd(250.0),
                 child_panel_ids: [id!(above_log).into(), id!(log_view).into()],
             }),
         );
@@ -266,6 +273,7 @@ pub struct Tab {
 
 pub enum TabKind {
     LogView,
+    ShaderView,
     FileTree,
     CodeEditor {session_id: SessionId},
 }
