@@ -51,7 +51,7 @@ live_register!{
                             #ff,
                             self.hover
                         ),
-                        mix(#99, #39, pow(1.0 - sin(self.pos.x * PI), 1.5)),
+                        mix(#99, #39, pow(1.0 - sin(self.pos.x * PI), 1.8)),
                         self.pressed
                     ),
                     self.pos.y
