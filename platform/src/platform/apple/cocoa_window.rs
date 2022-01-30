@@ -136,7 +136,7 @@ impl CocoaWindow {
             let () = msg_send![self.view, setLayerContentsRedrawPolicy: 2]; //duringViewResize
             
             let () = msg_send![self.window, setContentView: self.view];
-            let () = msg_send![self.window, makeFirstResponder: self.view];
+            //let () = msg_send![self.window, makeFirstResponder: self.view];
             let () = msg_send![self.window, makeKeyAndOrderFront: nil];
             
             
