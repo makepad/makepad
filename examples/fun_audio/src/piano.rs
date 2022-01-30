@@ -16,12 +16,11 @@ live_register!{
         
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-            sdf.box_y(
+            sdf.box(
                 0.,
-                0.,
+                -4.0,
                 self.rect_size.x,
-                self.rect_size.y,
-                0.5,
+                self.rect_size.y+4.0,
                 2.0
             );
             if self.is_black > 0.5 {
@@ -35,9 +34,12 @@ live_register!{
                     ) 
                     + mix(
                         #00,
-                        #44,// mix(#44,#00,self.pressed),
+                        mix(#44, #11, pow(1.0 - sin(self.pos.x * PI), 2.8)),
+                        //#44,// mix(#44,#00,self.pressed),
                         mix(
-                            mix(0,(1.0-x)/0.18,smoothstep(0.76,0.83,x)),
+                            //mix(0,pow(1.0-x,2.0)/0.031,smoothstep(0.76,0.83,x)),
+                            mix(0,pow(1.0-x,3.0)/0.0056,smoothstep(0.76,0.83,x)),
+                            //mix(0,(1.0-x)/0.18,smoothstep(0.76,0.83,x)),
                             mix(0,(1.0-x)/0.1,smoothstep(0.87,0.92,x)),
                             self.pressed
                         )
