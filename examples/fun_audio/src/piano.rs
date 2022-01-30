@@ -26,7 +26,7 @@ live_register!{
             let dy = self.dist(self.pos+vec2(0,delta))
             let dx = self.dist(self.pos+vec2(delta,0))
             let normal = normalize(cross(vec3(delta,0,dx-d), vec3(0,delta,dy-d)))
-            let light = normalize(vec3(0.5,0.5,0.5))
+            let light = normalize(vec3(1.5,0.5,1.5))
             let diff = pow(max(dot(light, normal),0.),5.0)
             return mix(#00, #ff, diff) + #11 * self.hover
         }
