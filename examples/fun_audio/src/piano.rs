@@ -15,8 +15,8 @@ live_register!{
     DrawKeyQuad: {{DrawKeyQuad}} {
         
         fn height_map(self, pos: vec2) -> float {
-            let fx = 1 - pow(1.2 - sin(pos.x * PI), 10.8);
-            let fy = 1 - pow(1.2 - self.pressed * 0.2 - cos(pos.y * 0.5 * PI), 25.8)
+            let fx = 1 - pow(1.2 - sin(pos.x * PI), 4.8);
+            let fy = 1 - pow(1.2 - self.pressed * 0.2 - cos(pos.y * 0.5 * PI), 7.8)
             return fx + fy
         }
         
@@ -281,10 +281,6 @@ impl Piano {
         self.black_keys.retain_visible();
     }
     
-    /*pub fn redraw(&mut self, cx: &mut Cx) {
-        self.scroll_view.redraw(cx);
-    }*/
-    
     pub fn set_key_focus(&self, cx:&mut Cx){
         cx.set_key_focus(self.scroll_view.area());
     }
@@ -324,7 +320,6 @@ impl Piano {
         for (node_id, action) in actions {
             match action {
                 PianoKeyAction::Pressed(velocity) => {
-                    // lets set keyboard focus
                     self.set_key_focus(cx);
                     dispatch_action(cx, PianoAction::Note {is_on: true, note_number: node_id.0.0 as u8, velocity});
                 }
