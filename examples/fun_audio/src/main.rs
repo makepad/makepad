@@ -1,6 +1,14 @@
-pub use makepad_component::{self,*};
+pub use makepad_component::{self, *};
 use makepad_platform::*;
-use makepad_platform::platform::apple::core_audio::{Audio, AudioDevice, AudioDeviceType, Midi};
+use makepad_platform::platform::apple::core_audio::{
+    Audio,
+    AudioDevice,
+    AudioDeviceType,
+    Midi,
+    Midi1Event,
+    Midi1Data,
+    Midi1Note
+};
 use std::sync::{Arc, Mutex};
 mod piano;
 use crate::piano::*;
@@ -24,6 +32,12 @@ live_register!{
 }
 main_app!(App);
 
+#[derive(Clone, Copy)]
+enum UISend {
+    InstrumentUIReady,
+    Midi(Midi1Data)
+}
+
 #[derive(Live, LiveHook)]
 pub struct App {
     
@@ -36,7 +50,7 @@ pub struct App {
     #[rust] midi: Option<Midi>,
     #[rust] instrument: Arc<Mutex<Option<AudioDevice >> >,
     
-    #[rust(cx.new_signal())] ui_ready_signal: Signal,
+    #[rust(UIReceiver::new(cx))] ui_receiver: UIReceiver<UISend>,
     #[rust] offset: u64
 }
 
@@ -50,13 +64,15 @@ impl App {
         Self::new_as_main_module(cx, &module_path!(), id!(App)).unwrap()
     }
     
-    pub fn run_audio_system(&mut self){
+    pub fn run_audio_system(&mut self) {
         
         // listen to midi inputs
         let instrument = self.instrument.clone();
+        let ui_sender = self.ui_receiver.sender();
         self.midi = Some(Midi::new_midi_1_input(move | event | {
             if let Some(instrument) = instrument.lock().unwrap().as_ref() {
                 instrument.send_midi_1_event(event);
+                ui_sender.send(UISend::Midi(event)).unwrap();
             }
         }).unwrap());
         
@@ -64,12 +80,13 @@ impl App {
         let list = Audio::query_devices(AudioDeviceType::Music);
         if let Some(info) = list.iter().find( | item | item.name == "FM8") {
             let instrument = self.instrument.clone();
-            let ui_ready_signal = self.ui_ready_signal;
+            let ui_sender = self.ui_receiver.sender();
             Audio::new_device(info, move | result | {
                 match result {
                     Ok(device) => {
+                        let ui_sender = ui_sender.clone();
                         device.request_ui(move || {
-                            Cx::post_signal(ui_ready_signal, 0);
+                            ui_sender.send(UISend::InstrumentUIReady).unwrap();
                         });
                         *instrument.lock().unwrap() = Some(device);
                     }
@@ -90,7 +107,7 @@ impl App {
                             if let Some(instrument) = instrument.lock().unwrap().as_ref() {
                                 instrument.render_to_audio_buffer(buffer);
                             }
-                        }); 
+                        });
                         loop {
                             std::thread::sleep(std::time::Duration::from_millis(100));
                         }
@@ -105,21 +122,47 @@ impl App {
         
         self.desktop_window.handle_event(cx, event);
         self.scroll_view.handle_event(cx, event);
-        self.piano.handle_event(cx, event);
+        
+        let instrument = self.instrument.clone();
+        for action in self.piano.handle_event(cx, event) {
+            match action {
+                PianoAction::Note {is_on, note_number} => {
+                    if let Some(instrument) = instrument.lock().unwrap().as_ref() {
+                        instrument.send_midi_1_event(Midi1Note {
+                            is_on,
+                            note_number,
+                            channel: 0,
+                            velocity: 127
+                        }.into());
+                    }
+                }
+            }
+        };
+        
         match event {
             Event::KeyDown(_) => {
                 if let Some(_instrument) = self.instrument.lock().unwrap().as_ref() {
                     //instrument.send_midi_1_event();
                 }
             }
-            Event::Signal(se) => {
-                if se.signals.get(&self.ui_ready_signal).is_some() {
-                    if let Some(instrument) = self.instrument.lock().unwrap().as_ref() {
-                        instrument.open_ui();
+            Event::Signal(se) => while let Ok(send) = self.ui_receiver.try_recv(se) {
+                match send {
+                    UISend::InstrumentUIReady => {
+                        if let Some(instrument) = self.instrument.lock().unwrap().as_ref() {
+                            instrument.open_ui();
+                        }
+                    }
+                    UISend::Midi(me) => {
+                        match me.decode() {
+                            Midi1Event::Note(note) => {
+                                self.piano.set_note(cx, note.is_on, note.note_number)
+                            }
+                            _ => ()
+                        }
                     }
                 }
             }
-            Event::Construct => { 
+            Event::Construct => {
                 self.run_audio_system();
                 // spawn 1000 buttons into the live structure
                 let mut out = Vec::new();
