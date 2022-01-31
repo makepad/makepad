@@ -285,6 +285,10 @@ impl Piano {
         self.scroll_view.redraw(cx);
     }*/
     
+    pub fn set_key_focus(&self, cx:&mut Cx){
+        cx.set_key_focus(self.scroll_view.area());
+    }
+    
     pub fn set_note(&mut self, cx: &mut Cx, is_on: bool, note_number: u8) {
         let id = LiveId(note_number as u64).into();
         if let Some(key) = self.black_keys.get_mut(&id) {
@@ -321,7 +325,7 @@ impl Piano {
             match action {
                 PianoKeyAction::Pressed(velocity) => {
                     // lets set keyboard focus
-                    cx.set_key_focus(self.scroll_view.area());
+                    self.set_key_focus(cx);
                     dispatch_action(cx, PianoAction::Note {is_on: true, note_number: node_id.0.0 as u8, velocity});
                 }
                 PianoKeyAction::Up => {
