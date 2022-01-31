@@ -126,13 +126,13 @@ impl App {
         let instrument = self.instrument.clone();
         for action in self.piano.handle_event(cx, event) {
             match action {
-                PianoAction::Note {is_on, note_number} => {
+                PianoAction::Note {is_on, note_number, velocity} => {
                     if let Some(instrument) = instrument.lock().unwrap().as_ref() {
                         instrument.send_midi_1_event(Midi1Note {
                             is_on,
                             note_number,
                             channel: 0,
-                            velocity: 127
+                            velocity
                         }.into());
                     }
                 }
@@ -152,13 +152,11 @@ impl App {
                             instrument.open_ui();
                         }
                     }
-                    UISend::Midi(me) => {
-                        match me.decode() {
-                            Midi1Event::Note(note) => {
-                                self.piano.set_note(cx, note.is_on, note.note_number)
-                            }
-                            _ => ()
+                    UISend::Midi(me) => match me.decode() {
+                        Midi1Event::Note(note) => {
+                            self.piano.set_note(cx, note.is_on, note.note_number)
                         }
+                        _ => ()
                     }
                 }
             }
