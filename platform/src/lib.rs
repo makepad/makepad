@@ -8,6 +8,7 @@ mod live_prims;
 #[macro_use]
 mod cx;
 mod cx_api;
+mod cx_thread;
 mod cx_registries;
 mod cx_draw_shaders;
 
@@ -181,6 +182,7 @@ pub use {
             PassClearColor,
             PassClearDepth
         },
+        cx_thread::{UISender, UIReceiver},
         texture::{Texture, TextureFormat},
         live_traits::{
             LiveNew,

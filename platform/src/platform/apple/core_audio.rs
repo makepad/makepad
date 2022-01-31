@@ -17,11 +17,49 @@ pub struct MidiEndpoint {
     endpoint: MIDIEndpointRef
 }
 
-pub struct Midi1Event {
+#[derive(Clone, Copy, Debug)]
+pub struct Midi1Data {
     pub input: usize,
-    pub status: u8,
+    pub data0: u8,
     pub data1: u8,
     pub data2: u8
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct Midi1Note {
+    pub is_on: bool,
+    pub channel: u8,
+    pub note_number: u8,
+    pub velocity: u8,
+}
+
+
+#[derive(Clone, Copy, Debug)]
+pub enum Midi1Event {
+    Note(Midi1Note),
+    Unknown
+}
+
+impl Into<Midi1Data> for Midi1Note{
+    fn into(self)->Midi1Data{
+        Midi1Data{
+            input: 0,
+            data0: (if self.is_on{0x9}else{0x8}<<4) | self.channel,
+            data1: self.note_number,
+            data2: self.velocity
+        }
+    }
+}
+
+impl Midi1Data {
+    pub fn decode(&self) -> Midi1Event {
+        let status = self.data0>>4;
+        let channel = self.data0&0xf;
+        match status {
+            0x8 | 0x9 => Midi1Event::Note(Midi1Note {is_on: status == 0x9, channel, note_number: self.data1, velocity: self.data2}),
+            _ => Midi1Event::Unknown
+        }
+    }
 }
 
 pub struct Instrument {
@@ -52,7 +90,7 @@ impl MidiEndpoint {
 }
 
 impl Midi {
-    pub fn new_midi_1_input<F: Fn(Midi1Event) + Send + 'static>(message_callback: F) -> Result<Self,
+    pub fn new_midi_1_input<F: Fn(Midi1Data) + Send + 'static>(message_callback: F) -> Result<Self,
     OSError> {
         let mut midi_notify = objc_block!(move | _notification: &MIDINotification | {
             println!("Midi device added/removed");
@@ -65,13 +103,13 @@ impl Midi {
                     let ump = packet.words[i as usize];
                     let ty = ((ump >> 28) & 0xf) as u8;
                     let _group = ((ump >> 24) & 0xf) as u8;
-                    let status = ((ump >> 16) & 0xff) as u8;
+                    let data0 = ((ump >> 16) & 0xff) as u8;
                     let data1 = ((ump >> 8) & 0xff) as u8;
                     let data2 = (ump & 0xff) as u8;
                     if ty == 0x02 { // midi 1.0 channel voice
-                        message_callback(Midi1Event {
+                        message_callback(Midi1Data {
                             input: user_data as usize,
-                            status,
+                            data0,
                             data1,
                             data2
                         })
@@ -243,13 +281,13 @@ impl AudioDevice {
         }
     }
     
-    pub fn send_midi_1_event(&self, event: Midi1Event) {
+    pub fn send_midi_1_event(&self, event: Midi1Data) {
         match self.device_type {
             AudioDeviceType::Music => (),
             _ => panic!("send_midi_1_event not supported on this device")
         }
         unsafe {
-            let () = msg_send![self.av_audio_unit, sendMIDIEvent: event.status data1: event.data1 data2: event.data2];
+            let () = msg_send![self.av_audio_unit, sendMIDIEvent: event.data0 data1: event.data1 data2: event.data2];
         }
     }
 }

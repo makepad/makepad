@@ -14,37 +14,31 @@ live_register!{
     
     DrawKeyQuad: {{DrawKeyQuad}} {
         
-        fn dist(self, pos:vec2)->float{
-            let fx = 1.0-pow(1.2-/*self.pressed*0.1*pos.y*/ sin(pos.x * PI), 10.8);
-            let fy = 1.0-pow(1.2-self.pressed*0.2 - cos(pos.y * 0.5*PI), 25.8)
-            return fx+fy
+        fn height_map(self, pos: vec2) -> float {
+            let fx = 1.0 - pow(1.2 - sin(pos.x * PI), 10.8);
+            let fy = 1.0 - pow(1.2 - self.pressed * 0.2 - cos(pos.y * 0.5 * PI), 25.8)
+            return fx + fy
         }
         
         fn black_key(self) -> vec4 {
-            let delta = 0.01;
-            let d = self.dist(self.pos+vec2(0,0))
-            let dy = self.dist(self.pos+vec2(0,delta))
-            let dx = self.dist(self.pos+vec2(delta,0))
-            let normal = normalize(cross(vec3(delta,0,dx-d), vec3(0,delta,dy-d)))
-            //let light = normalize(vec3(0.75,0.5,0.5))
-            //let light_hover = normalize(vec3(1.5,0.5,1.5))
-            let light = normalize(vec3(0.75,0.5,0.5))
-            //let light = normalize(vec3(1.5,0.5,1.5))
-            let light_hover = normalize(vec3(0.75,0.5,1.5))
-            let diff = pow(max(dot(mix(light,light_hover,self.hover*(1.0-self.pressed)), normal),0.),3.0)
-            return mix(#00, #ff, diff) 
+            let delta = 0.001;
+            // differentiate heightmap to get the surface normal
+            let d = self.height_map(self.pos + vec2(0, 0))
+            let dy = self.height_map(self.pos + vec2(0, delta))
+            let dx = self.height_map(self.pos + vec2(delta, 0))
+            let normal = normalize(cross(vec3(delta, 0, dx - d), vec3(0, delta, dy - d)))
+            //let light = normalize(vec3(0.75, 0.5, 0.5))
+            let light = normalize(vec3(1.5,0.5,1.1))
+            let light_hover = normalize(vec3(0.75, 0.5, 1.5))
+            let diff = pow(max(dot(mix(light, light_hover, self.hover * (1.0 - self.pressed)), normal), 0.), 3.0)
+            return mix(#00, #ff, diff)
         }
         
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-            sdf.box(
-                0.,
-                -4.0,
-                self.rect_size.x,
-                self.rect_size.y + 4.0,
-                1.0
-            );
+            
             if self.is_black > 0.5 {
+                sdf.box(0., -4.0, self.rect_size.x, self.rect_size.y + 4.0, 1.0);
                 sdf.fill_keep(self.black_key())
                 /*
                 let hor_shape = pow(1.0 - sin(self.pos.x * PI), 2.8);
@@ -69,6 +63,8 @@ live_register!{
                 );*/
             }
             else {
+                sdf.box(0., -4.0, self.rect_size.x, self.rect_size.y + 4.0, 2.0);
+                
                 sdf.fill_keep(mix(
                     #ff,
                     mix(
@@ -175,14 +171,12 @@ impl LiveHook for Piano {
 }
 
 pub enum PianoAction {
-    Pressed(PianoKeyId),
-    Up(PianoKeyId),
+    Note{is_on:bool, note_number:u8},
 }
 
 pub enum PianoKeyAction {
     Pressed,
     Up,
-    None,
 }
 
 impl PianoKey {
@@ -222,7 +216,7 @@ impl PianoKey {
                     _ => {}
                 }
             }
-            HitEvent::FingerMove(f) => {
+            HitEvent::FingerMove(_) => {
             }
             HitEvent::FingerDown(_) => {
                 self.animate_to(cx, self.pressed_state);
@@ -305,8 +299,18 @@ impl Piano {
         self.black_keys.retain_visible();
     }
     
-    pub fn redraw(&mut self, cx: &mut Cx) {
+    /*pub fn redraw(&mut self, cx: &mut Cx) {
         self.scroll_view.redraw(cx);
+    }*/
+    
+    pub fn set_note(&mut self, cx: &mut Cx, is_on:bool, note_number:u8){
+        let id = LiveId(note_number as u64).into();
+        if let Some(key) = self.black_keys.get_mut(&id){
+            key.set_is_pressed(cx, is_on, Animate::Yes)
+        }
+        if let Some(key) = self.white_keys.get_mut(&id){
+            key.set_is_pressed(cx, is_on, Animate::Yes)
+        }
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> Vec<PianoAction> {
@@ -333,12 +337,11 @@ impl Piano {
         for (node_id, action) in actions {
             match action {
                 PianoKeyAction::Pressed => {
-                    dispatch_action(cx, PianoAction::Pressed(node_id));
+                    dispatch_action(cx, PianoAction::Note{is_on:true, note_number:node_id.0.0 as u8});
                 }
                 PianoKeyAction::Up => {
-                    dispatch_action(cx, PianoAction::Up(node_id));
+                    dispatch_action(cx, PianoAction::Note{is_on:false, note_number:node_id.0.0 as u8});
                 }
-                _ => ()
             }
         }
         
