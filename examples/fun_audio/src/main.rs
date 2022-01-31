@@ -180,6 +180,7 @@ impl App {
             }
             Event::Draw(draw_event) => {
                 self.draw(&mut Cx2d::new(cx, draw_event));
+                self.piano.set_key_focus(cx);
             }
             _ => ()
         }
