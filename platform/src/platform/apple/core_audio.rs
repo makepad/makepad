@@ -3,6 +3,7 @@ use {
     std::mem,
     std::sync::{Arc, Mutex},
     crate::{
+        platform::apple::cocoa_delegate::*,
         platform::apple::frameworks::*,
         platform::apple::cocoa_app::*,
         platform::apple::apple_util::*,
@@ -40,11 +41,11 @@ pub enum Midi1Event {
     Unknown
 }
 
-impl Into<Midi1Data> for Midi1Note{
-    fn into(self)->Midi1Data{
-        Midi1Data{
+impl Into<Midi1Data> for Midi1Note {
+    fn into(self) -> Midi1Data {
+        Midi1Data {
             input: 0,
-            data0: (if self.is_on{0x9}else{0x8}<<4) | self.channel,
+            data0: (if self.is_on {0x9}else {0x8} << 4) | self.channel,
             data1: self.note_number,
             data2: self.velocity
         }
@@ -53,8 +54,8 @@ impl Into<Midi1Data> for Midi1Note{
 
 impl Midi1Data {
     pub fn decode(&self) -> Midi1Event {
-        let status = self.data0>>4;
-        let channel = self.data0&0xf;
+        let status = self.data0 >> 4;
+        let channel = self.data0 & 0xf;
         match status {
             0x8 | 0x9 => Midi1Event::Note(Midi1Note {is_on: status == 0x9, channel, note_number: self.data1, velocity: self.data2}),
             _ => Midi1Event::Unknown
@@ -181,6 +182,7 @@ pub enum AudioDeviceType {
 
 unsafe impl Send for AudioDevice {}
 pub struct AudioDevice {
+    param_tree_observer: Option<KeyValueObserver>,
     av_audio_unit: ObjcId,
     au_audio_unit: ObjcId,
     render_block: Option<ObjcId>,
@@ -199,7 +201,104 @@ pub struct AudioBuffer<'a> {
     input_bus_number: u64,
 }
 
+fn print_hex(data: &[u8]) {
+    // lets print hex data
+    // we print 16 bytes per line
+    let mut o = 0;
+    while o < data.len() {
+        let line = (data.len() - o).min(16);
+        print!("{:08x} ", o);
+        for i in o..o + line {
+            print!("{:02x} ", data[i]);
+        }
+        for i in o..o + line {
+            let c = data[i];
+            if c>30 && c < 127 {
+                print!("{}", c as char);
+            }
+            else {
+                print!(".");
+            }
+        }
+        println!("");
+        o += line;
+    }
+    
+    
+}
+
 impl AudioDevice {
+    
+    pub fn parameter_tree_changed(&mut self, callback: Box<dyn Fn() + Send>) {
+        if self.param_tree_observer.is_some() {
+            panic!();
+        }
+        let observer = KeyValueObserver::new(self.au_audio_unit, "parameterTree", callback);
+        self.param_tree_observer = Some(observer);
+    }
+    
+    pub fn dump_parameter_tree(&self) {
+        match self.device_type {
+            AudioDeviceType::Music => (),
+            _ => panic!("start_audio_output_with_fn on this device")
+        }
+        unsafe {
+            let root: ObjcId = msg_send![self.au_audio_unit, parameterTree];
+            unsafe fn recur_walk_tree(node: ObjcId, depth: usize) {
+                let children: ObjcId = msg_send![node, children];
+                let count: usize = msg_send![children, count];
+                let param_group: ObjcId = msg_send![class!(AUParameterGroup), class];
+                for i in 0..count {
+                    let node: ObjcId = msg_send![children, objectAtIndex: i];
+                    let class: ObjcId = msg_send![node, class];
+                    let display: ObjcId = msg_send![node, displayName];
+                    for _ in 0..depth {
+                        print!("|  ");
+                    }
+                    if class == param_group {
+                        recur_walk_tree(node, depth + 1);
+                    }
+                    else {
+                        let min: f32 = msg_send![node, minValue];
+                        let max: f32 = msg_send![node, maxValue];
+                        let value: f32 = msg_send![node, value];
+                        println!("{} : min:{} max:{} value:{}", nsstring_to_string(display), min, max, value);
+                    }
+                }
+            }
+            recur_walk_tree(root, 0);
+        }
+    }
+    
+    pub fn dump_full_state(&self) {
+        match self.device_type {
+            AudioDeviceType::Music => (),
+            _ => panic!("start_audio_output_with_fn on this device")
+        }
+        unsafe {
+            let state: ObjcId = msg_send![self.au_audio_unit, fullStateForDocument];
+            let all_keys: ObjcId = msg_send![state, allKeys];
+            let count: usize = msg_send![all_keys, count];
+            
+            for i in 0..count {
+                let key: ObjcId = msg_send![all_keys, objectAtIndex: i];
+                let obj: ObjcId = msg_send![state, objectForKey: key];
+                let class: ObjcId = msg_send![obj, class];
+                let name = nsstring_to_string(key);
+                if name == "name" {
+                    /*
+                    println!(
+                        "HERE! {} - {} - {}",
+                        nsstring_to_string(key),
+                        nsstring_to_string(NSStringFromClass(class)),
+                        nsstring_to_string(obj),
+                    )*/
+                }
+            }
+        }
+    }
+    
+    
     pub fn start_output<F: Fn(&mut AudioBuffer) + Send + 'static>(&self, audio_callback: F) {
         match self.device_type {
             AudioDeviceType::DefaultOutput => (),
@@ -279,6 +378,55 @@ impl AudioDevice {
                 let () = msg_send![win_view, addSubview: audio_view];
             }
         }
+    }
+    
+    pub fn ocr_ui(&self) {
+        unsafe {
+            let cocoa_app = get_cocoa_app_global();
+            let window = cocoa_app.cocoa_windows[0].0;
+            let win_num: u32 = msg_send![window, windowNumber];
+            let win_opt = kCGWindowListOptionIncludingWindow;
+            let null_rect: NSRect = NSRect{origin:NSPoint{x:f64::INFINITY, y:f64::INFINITY}, size:NSSize{width:0.0, height:0.0}};
+            let cg_image: ObjcId = CGWindowListCreateImage(null_rect, win_opt, win_num, 1);
+            if cg_image == nil{
+                println!("Please add 'screen capture' privileges to the compiled binary in the macos settings");
+                return
+            }
+            let handler: ObjcId = msg_send![class!(VNImageRequestHandler), alloc];
+            let handler: ObjcId = msg_send![handler, initWithCGImage: cg_image options: nil];
+            /*
+            let url: ObjcId = msg_send![class!(NSURL), fileURLWithPath: str_to_nsstring("/Users/admin/makepad/test.png")];
+            let dst: ObjcId = CGImageDestinationCreateWithURL(url, kUTTypePNG, 1, nil);
+            println!("{} {}", dst as u64, nsstring_to_string(kUTTypePNG));
+            CGImageDestinationAddImage(dst, cg_image, nil);
+            if !CGImageDestinationFinalize(dst) {
+                println!("FAILED TO WRITE IMAGE");
+            }
+            */
+            let completion = objc_block!(move | request: ObjcId, error: ObjcId | {
+                if error != nil {
+                    println!("ERROR")
+                }
+                let results: ObjcId = msg_send![request, results];
+                let count: usize = msg_send![results, count];
+                for i in 0..count {
+                    let obj: ObjcId = msg_send![results, objectAtIndex: i];
+                    let top_objs: ObjcId = msg_send![obj, topCandidates: 1];
+                    let top_obj: ObjcId = msg_send![top_objs, objectAtIndex: 0];
+                    let value: ObjcId = msg_send![top_obj, string];
+                   // println!("{}", nsstring_to_string(value));
+                }
+            });
+            
+            let request: ObjcId = msg_send![class!(VNRecognizeTextRequest), alloc];
+            let request: ObjcId = msg_send![request, initWithCompletionHandler: &completion];
+            let array: ObjcId = msg_send![class!(NSArray), arrayWithObject: request];
+            let error: ObjcId = nil;
+            let () = msg_send![handler, performRequests: array error: &error];
+            if error != nil {
+                println!("ERROR")
+            }
+        };
     }
     
     pub fn send_midi_1_event(&self, event: Midi1Data) {
@@ -363,6 +511,7 @@ impl Audio {
                     
                     Ok(AudioDevice {
                         view_controller: Arc::new(Mutex::new(None)),
+                        param_tree_observer: None,
                         render_block,
                         device_type,
                         av_audio_unit,
