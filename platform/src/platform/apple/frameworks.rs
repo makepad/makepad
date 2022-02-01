@@ -77,7 +77,7 @@ extern {
 extern {
     pub static NSRunLoopCommonModes: ObjcId;
     pub static NSDefaultRunLoopMode: ObjcId;
-    
+    pub static NSProcessInfo: ObjcId;
     pub fn NSStringFromClass(class:ObjcId)->ObjcId;
     
     pub fn __CFStringMakeConstantString(cStr: *const ::std::os::raw::c_char) -> CFStringRef;
@@ -119,8 +119,20 @@ extern {
 }
 
 
+pub const kCGEventLeftMouseDown:u32 = 1;
+pub const kCGEventLeftMouseUp:u32 = 2;
+pub const kCGMouseEventClickState: u32 = 1;
+//pub const kCGEventSourceStateHIDSystemState: u32 = 1;
+
 #[link(name = "CoreGraphics", kind = "framework")]
 extern "C" {
+    pub fn CGEventSourceCreate(state_id:u32)->ObjcId;
+    pub fn CGEventSetIntegerValueField(event:ObjcId, field: u32, value:u64);
+    pub fn CGEventCreateMouseEvent(source:ObjcId, mouse_type: u32, pos:NSPoint, button:u32)->ObjcId;
+    pub fn CGEventCreateScrollWheelEvent(source:ObjcId, is_line:u32, wheel_count: u32, wheel1: i32, wheel2: i32, wheel3: i32)->ObjcId;
+    pub fn CGEventPostToPid(pid:u32, event:ObjcId);
+    pub fn CGEventPost(tap:u32, event:ObjcId);
+    
     pub fn CGWindowListCreateImage(rect:NSRect, options:u32, window_id:u32, imageoptions:u32 )->ObjcId;
     pub fn CGMainDisplayID() -> u32;
     pub fn CGDisplayPixelsHigh(display: u32) -> u64;
