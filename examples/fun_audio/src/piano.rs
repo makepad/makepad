@@ -15,8 +15,8 @@ live_register!{
     DrawKeyQuad: {{DrawKeyQuad}} {
         
         fn height_map(self, pos: vec2) -> float {
-            let fx = 1 - pow(1.2 - sin(pos.x * PI), 4.8);
-            let fy = 1 - pow(1.2 - self.pressed * 0.2 - cos(pos.y * 0.5 * PI), 7.8)
+            let fx = 1 - pow(1.2 - sin(pos.x * PI), 10.8);
+            let fy = 1 - pow(1.2 - self.pressed * 0.2 - cos(pos.y * 0.5 * PI), 25.8)
             return fx + fy
         }
         
@@ -27,8 +27,8 @@ live_register!{
             let dy = self.height_map(self.pos + vec2(0, delta))
             let dx = self.height_map(self.pos + vec2(delta, 0))
             let normal = normalize(cross(vec3(delta, 0, dx - d), vec3(0, delta, dy - d)))
-            //let light = normalize(vec3(0.75, 0.5, 0.5))
             let light = normalize(vec3(1.5, 0.5, 1.1))
+            let light = normalize(vec3(0.75, 0.5, 0.5))
             let light_hover = normalize(vec3(0.75, 0.5, 1.5))
             let diff = pow(max(dot(mix(light, light_hover, self.hover * (1 - self.pressed)), normal), 0), 3)
             return mix(#00, #ff, diff)
