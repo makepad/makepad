@@ -514,7 +514,10 @@ impl CocoaApp {
                     ]);
                 }
             },
-            NSEventType::NSEventTypePressure => {},
+            NSEventType::NSEventTypePressure => {
+                
+                
+            },
             _ => (),
         }
     }

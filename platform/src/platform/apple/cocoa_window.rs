@@ -96,6 +96,7 @@ impl CocoaWindow {
             
             // set the backpointeers
             (*self.window_delegate).set_ivar("cocoa_window_ptr", self as *mut _ as *mut c_void);
+            //(*self.view).set_ivar("cocoa_window_ptr", self as *mut _ as *mut c_void);
             //(*self.layer_delegate).set_ivar("cocoa_window_ptr", self as *mut _ as *mut c_void);
             let () = msg_send![self.view, initWithPtr: self as *mut _ as *mut c_void];
             
@@ -139,7 +140,6 @@ impl CocoaWindow {
             let () = msg_send![self.window, makeFirstResponder: self.view];
             let () = msg_send![self.window, makeKeyAndOrderFront: nil];
             
-            
             let rect = NSRect {
                 origin: NSPoint {x: 0., y: 0.},
                 size: ns_size
@@ -165,14 +165,6 @@ impl CocoaWindow {
             let () = msg_send![input_context, invalidateCharacterCoordinates];
             
             let () = msg_send![pool, drain];
-        }
-    }
-    
-    pub fn update_ptrs(&mut self) {
-        unsafe {
-            //(*self.layer_delegate).set_ivar("cocoa_window_ptr", self as *mut _ as *mut c_void);
-            (*self.window_delegate).set_ivar("cocoa_window_ptr", self as *mut _ as *mut c_void);
-            (*self.view).set_ivar("cocoa_window_ptr", self as *mut _ as *mut c_void);
         }
     }
     
