@@ -126,9 +126,6 @@ impl Cx {
                             if metal_windows.len() == 0 {
                                 cocoa_app.terminate_event_loop();
                             }
-                            for metal_window in &mut metal_windows {
-                                metal_window.cocoa_window.update_ptrs();
-                            }
                         }
                         self.call_event_handler(&mut event);
                     },
@@ -142,9 +139,6 @@ impl Cx {
                                     let metal_window = MetalWindow::new(index, &metal_cx, cocoa_app, *inner_size, *position, &title);
                                     window.window_geom = metal_window.window_geom.clone();
                                     metal_windows.push(metal_window);
-                                    for metal_window in &mut metal_windows {
-                                        metal_window.cocoa_window.update_ptrs();
-                                    }
                                     CxWindowState::Created
                                 },
                                 CxWindowState::Close => {

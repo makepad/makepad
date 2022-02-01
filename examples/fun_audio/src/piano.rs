@@ -355,7 +355,7 @@ impl Piano {
         }
         
         match event.hits(cx, self.scroll_view.area()) {
-            HitEvent::KeyDown(ke) => {
+            HitEvent::KeyDown(ke) => if !ke.is_repeat {
                 if let Some(nn) = key_map(ke.key_code) {
                     let note_number = nn + self.keyboard_octave * 12;
                     self.keyboard_keys_down[nn as usize] = note_number;

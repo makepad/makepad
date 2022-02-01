@@ -484,7 +484,7 @@ pub struct MetalWindow {
     pub window_geom: WindowGeom,
     pub cal_size: Vec2,
     pub ca_layer: ObjcId,
-    pub cocoa_window: CocoaWindow,
+    pub cocoa_window: Box<CocoaWindow>,
     pub is_resizing: bool
 }
 
@@ -493,7 +493,7 @@ impl MetalWindow {
         
         let ca_layer: ObjcId = unsafe {msg_send![class!(CAMetalLayer), new]};
         
-        let mut cocoa_window = CocoaWindow::new(cocoa_app, window_id);
+        let mut cocoa_window = Box::new(CocoaWindow::new(cocoa_app, window_id));
         
         cocoa_window.init(title, inner_size, position);
         unsafe {

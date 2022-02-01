@@ -100,7 +100,7 @@ impl Midi {
         let mut midi_receive = objc_block!(move | event_list: &MIDIEventList, user_data: u64 | {
             let packets = unsafe {std::slice::from_raw_parts(event_list.packet.as_ptr(), event_list.numPackets as usize)};
             for packet in packets {
-                for i in 0 .. packet.wordCount {
+                for i in 0 .. packet.wordCount.min(64) {
                     let ump = packet.words[i as usize];
                     let ty = ((ump >> 28) & 0xf) as u8;
                     let _group = ((ump >> 24) & 0xf) as u8;
@@ -201,6 +201,15 @@ pub struct AudioBuffer<'a> {
     input_bus_number: u64,
 }
 
+impl<'a> AudioBuffer<'a>{
+    pub fn zero(&mut self){
+        for i in 0..self.left.len(){
+            self.left[i] = 0.0;
+            self.right[i] = 0.0;
+        }
+    }
+}
+
 fn print_hex(data: &[u8]) {
     // lets print hex data
     // we print 16 bytes per line
@@ -223,8 +232,17 @@ fn print_hex(data: &[u8]) {
         println!("");
         o += line;
     }
-    
-    
+}
+
+#[derive(Default)]
+pub struct AudioInstrumentState {
+    manufacturer: u64,
+    data: Vec<u8>,
+    vstdata: Vec<u8>,
+    subtype: u64,
+    version: u64,
+    ty: u64,
+    name: String
 }
 
 impl AudioDevice {
@@ -270,34 +288,86 @@ impl AudioDevice {
         }
     }
     
-    pub fn dump_full_state(&self) {
+    pub fn get_instrument_state(&self) -> AudioInstrumentState {
         match self.device_type {
             AudioDeviceType::Music => (),
             _ => panic!("start_audio_output_with_fn on this device")
         }
         unsafe {
-            let state: ObjcId = msg_send![self.au_audio_unit, fullStateForDocument];
-            let all_keys: ObjcId = msg_send![state, allKeys];
+            let dict: ObjcId = msg_send![self.au_audio_unit, fullState];
+            let all_keys: ObjcId = msg_send![dict, allKeys];
             let count: usize = msg_send![all_keys, count];
-            
+            let mut out_state = AudioInstrumentState::default();
             for i in 0..count {
                 let key: ObjcId = msg_send![all_keys, objectAtIndex: i];
-                let obj: ObjcId = msg_send![state, objectForKey: key];
-                let class: ObjcId = msg_send![obj, class];
+                let obj: ObjcId = msg_send![dict, objectForKey: key];
+                //let class: ObjcId = msg_send![obj, class]; nsstring_to_string(NSStringFromClass(class)),
                 let name = nsstring_to_string(key);
-                if name == "name" {
-                    /*
-                    println!(
-                        "HERE! {} - {} - {}",
-                        nsstring_to_string(key),
-                        nsstring_to_string(NSStringFromClass(class)),
-                        nsstring_to_string(obj),
-                    )*/
+                match name.as_ref() {
+                    "manufacturer" => out_state.manufacturer = msg_send![obj, unsignedLongLongValue],
+                    "subtype" => out_state.subtype = msg_send![obj, unsignedLongLongValue],
+                    "version" => out_state.version = msg_send![obj, unsignedLongLongValue],
+                    "type" => out_state.ty = msg_send![obj, unsignedLongLongValue],
+                    "name" => out_state.name = nsstring_to_string(obj),
+                    "data" => {
+                        let len: usize = msg_send![obj, length];
+                        if len > 0 {
+                            let bytes: *const u8 = msg_send![obj, bytes];
+                            out_state.data.extend_from_slice(std::slice::from_raw_parts(bytes, len));
+                        }
+                    }
+                    "vstdata" => {
+                        let len: usize = msg_send![obj, length];
+                        if len > 0 {
+                            let bytes: *const u8 = msg_send![obj, bytes];
+                            out_state.vstdata.extend_from_slice(std::slice::from_raw_parts(bytes, len));
+                            println!("{}", out_state.vstdata.len());
+                        }
+                    }
+                    _ => {
+                        eprintln!("Unexpected key in state dictionary {}", name);
+                    }
                 }
             }
+            out_state
         }
     }
     
+    pub fn set_instrument_state(&self, in_state:&AudioInstrumentState){
+        match self.device_type {
+            AudioDeviceType::Music => (),
+            _ => panic!("start_audio_output_with_fn on this device")
+        }
+        unsafe {
+            let dict:ObjcId = msg_send![class!(NSMutableDictionary), dictionary];
+            let () = msg_send![dict, init];
+            
+            unsafe fn set_number(dict:ObjcId, name:&str, value:u64){
+                let id:ObjcId = str_to_nsstring(name);
+                let num:ObjcId = msg_send![class!(NSNumber), numberWithLongLong:value];
+                let () = msg_send![dict, setObject:num forKey:id];
+            }
+            unsafe fn set_string(dict:ObjcId, name:&str, value:&str){
+                let id:ObjcId = str_to_nsstring(name);
+                let value:ObjcId = str_to_nsstring(value);
+                let () = msg_send![dict, setObject:value forKey:id];
+            }
+            unsafe fn set_data(dict:ObjcId, name:&str, data:&[u8]){
+                let id:ObjcId = str_to_nsstring(name);
+                let nsdata:ObjcId = msg_send![class!(NSData), dataWithBytes:data.as_ptr() length:data.len()];
+                let () = msg_send![dict, setObject:nsdata forKey:id];
+            }
+            set_number(dict,"manufacturer", in_state.manufacturer);
+            set_number(dict,"subtype", in_state.subtype);
+            set_number(dict,"version", in_state.version);
+            set_number(dict,"type", in_state.ty);
+            set_string(dict,"name", &in_state.name);
+            set_data(dict,"data", &in_state.data);
+            set_data(dict,"vstdata", &in_state.vstdata); 
+
+            let () = msg_send![self.au_audio_unit, setFullState:dict];
+        }
+    }
     
     pub fn start_output<F: Fn(&mut AudioBuffer) + Send + 'static>(&self, audio_callback: F) {
         match self.device_type {
@@ -380,21 +450,52 @@ impl AudioDevice {
         }
     }
     
+    pub fn send_mouse_down(&self) {
+        if let Some(view_controller) = self.view_controller.lock().unwrap().as_ref() {
+            unsafe {
+                println!("Posting a doubleclick");
+                let source = CGEventSourceCreate(1);
+                /*
+                let pos = NSPoint {x: 600.0, y: 720.0};
+                let event = CGEventCreateMouseEvent(source, kCGEventLeftMouseDown, pos, 0);
+                CGEventSetIntegerValueField(event, kCGMouseEventClickState, 1);
+                CGEventPost(0, event);
+                let event = CGEventCreateMouseEvent(source, kCGEventLeftMouseUp, pos, 0);
+                CGEventSetIntegerValueField(event, kCGMouseEventClickState, 1);
+                CGEventPost(0, event);
+                let event = CGEventCreateMouseEvent(source, kCGEventLeftMouseDown, pos, 0);
+                CGEventSetIntegerValueField(event, kCGMouseEventClickState, 2);
+                CGEventPost(0, event);
+                let event = CGEventCreateMouseEvent(source, kCGEventLeftMouseUp, pos, 0);
+                CGEventSetIntegerValueField(event, kCGMouseEventClickState, 2);
+                CGEventPost(0, event);
+                */
+                let event = CGEventCreateScrollWheelEvent(source, 0, 1, -24, 0, 0);
+                CGEventPost(0, event);
+                //CGEventPostToPid(pid, event);
+            }
+        }
+    }
+    
     pub fn ocr_ui(&self) {
         unsafe {
             let cocoa_app = get_cocoa_app_global();
-            let window = cocoa_app.cocoa_windows[0].0; 
+            let window = cocoa_app.cocoa_windows[0].0;
             let win_num: u32 = msg_send![window, windowNumber];
             let win_opt = kCGWindowListOptionIncludingWindow;
-            let null_rect: NSRect = NSRect{origin:NSPoint{x:f64::INFINITY, y:f64::INFINITY}, size:NSSize{width:0.0, height:0.0}};
+            let null_rect: NSRect = NSRect {origin: NSPoint {x: f64::INFINITY, y: f64::INFINITY}, size: NSSize {width: 0.0, height: 0.0}};
             let cg_image: ObjcId = CGWindowListCreateImage(null_rect, win_opt, win_num, 1);
-            if cg_image == nil{
+            if cg_image == nil {
                 println!("Please add 'screen capture' privileges to the compiled binary in the macos settings");
                 return
             }
             let handler: ObjcId = msg_send![class!(VNImageRequestHandler), alloc];
             let handler: ObjcId = msg_send![handler, initWithCGImage: cg_image options: nil];
+            let start_time = std::time::Instant::now();
             let completion = objc_block!(move | request: ObjcId, error: ObjcId | {
+                
+                println!("Profile time {}", (start_time.elapsed().as_nanos() as f64) / 1000000f64);
+                
                 if error != nil {
                     println!("text recognition failed")
                 }
@@ -405,7 +506,7 @@ impl AudioDevice {
                     let top_objs: ObjcId = msg_send![obj, topCandidates: 1];
                     let top_obj: ObjcId = msg_send![top_objs, objectAtIndex: 0];
                     let value: ObjcId = msg_send![top_obj, string];
-                    println!("Found text in UI: {}", nsstring_to_string(value));
+                    //println!("Found text in UI: {}", nsstring_to_string(value));
                 }
             });
             
