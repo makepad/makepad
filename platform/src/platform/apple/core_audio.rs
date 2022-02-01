@@ -383,7 +383,7 @@ impl AudioDevice {
     pub fn ocr_ui(&self) {
         unsafe {
             let cocoa_app = get_cocoa_app_global();
-            let window = cocoa_app.cocoa_windows[0].0;
+            let window = cocoa_app.cocoa_windows[0].0; 
             let win_num: u32 = msg_send![window, windowNumber];
             let win_opt = kCGWindowListOptionIncludingWindow;
             let null_rect: NSRect = NSRect{origin:NSPoint{x:f64::INFINITY, y:f64::INFINITY}, size:NSSize{width:0.0, height:0.0}};
@@ -394,18 +394,9 @@ impl AudioDevice {
             }
             let handler: ObjcId = msg_send![class!(VNImageRequestHandler), alloc];
             let handler: ObjcId = msg_send![handler, initWithCGImage: cg_image options: nil];
-            /*
-            let url: ObjcId = msg_send![class!(NSURL), fileURLWithPath: str_to_nsstring("/Users/admin/makepad/test.png")];
-            let dst: ObjcId = CGImageDestinationCreateWithURL(url, kUTTypePNG, 1, nil);
-            println!("{} {}", dst as u64, nsstring_to_string(kUTTypePNG));
-            CGImageDestinationAddImage(dst, cg_image, nil);
-            if !CGImageDestinationFinalize(dst) {
-                println!("FAILED TO WRITE IMAGE");
-            }
-            */
             let completion = objc_block!(move | request: ObjcId, error: ObjcId | {
                 if error != nil {
-                    println!("ERROR")
+                    println!("text recognition failed")
                 }
                 let results: ObjcId = msg_send![request, results];
                 let count: usize = msg_send![results, count];
@@ -414,7 +405,7 @@ impl AudioDevice {
                     let top_objs: ObjcId = msg_send![obj, topCandidates: 1];
                     let top_obj: ObjcId = msg_send![top_objs, objectAtIndex: 0];
                     let value: ObjcId = msg_send![top_obj, string];
-                   // println!("{}", nsstring_to_string(value));
+                    println!("Found text in UI: {}", nsstring_to_string(value));
                 }
             });
             
@@ -424,7 +415,7 @@ impl AudioDevice {
             let error: ObjcId = nil;
             let () = msg_send![handler, performRequests: array error: &error];
             if error != nil {
-                println!("ERROR")
+                println!("performRequests failed")
             }
         };
     }
