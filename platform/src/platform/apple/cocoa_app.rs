@@ -60,6 +60,7 @@ pub struct CocoaTimer {
 }
 
 pub struct CocoaApp {
+    
     pub window_class: *const Class,
     pub window_delegate_class: *const Class,
     pub post_delegate_class: *const Class,
@@ -68,6 +69,8 @@ pub struct CocoaApp {
     pub app_delegate_class: *const Class,
     pub menu_target_class: *const Class,
     pub view_class: *const Class,
+    pub key_value_observing_delegate_class: *const Class,
+    
     pub menu_delegate_instance: ObjcId,
     pub app_delegate_instance: ObjcId,
     pub const_attributes_for_marked_text: ObjcId,
@@ -126,11 +129,14 @@ impl CocoaApp {
                 time_start: Instant::now(),
                 timer_delegate_instance: timer_delegate_instance,
                 timer_delegate_class: timer_delegate_class,
+                
                 post_delegate_class: define_cocoa_post_delegate(),
                 window_class: define_cocoa_window_class(),
                 window_delegate_class: define_cocoa_window_delegate(),
                 view_class: define_cocoa_view_class(),
                 menu_target_class: define_menu_target_class(),
+                key_value_observing_delegate_class: define_key_value_observing_delegate(),
+                
                 menu_delegate_class,
                 menu_delegate_instance,
                 app_delegate_class,

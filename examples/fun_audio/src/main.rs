@@ -72,23 +72,35 @@ impl App {
         self.midi = Some(Midi::new_midi_1_input(move | event | {
             if let Some(instrument) = instrument.lock().unwrap().as_ref() {
                 instrument.send_midi_1_event(event);
+                 instrument.dump_full_state();
                 ui_sender.send(UISend::Midi(event)).unwrap();
             }
         }).unwrap());
         
         // find an audio unit instrument and start it
         let list = Audio::query_devices(AudioDeviceType::Music);
-        if let Some(info) = list.iter().find( | item | item.name == "FM8") {
+        //for item in &list{println!("{}", item.name)}
+        if let Some(info) = list.iter().find( | item | item.name == "Kontakt") {
             let instrument = self.instrument.clone();
             let ui_sender = self.ui_receiver.sender();
             Audio::new_device(info, move | result | {
                 match result {
-                    Ok(device) => {
+                    Ok(mut new_instrument) => {
                         let ui_sender = ui_sender.clone();
-                        device.request_ui(move || {
+                        let outer_instrument = instrument.clone();
+                        new_instrument.parameter_tree_changed(Box::new(move ||{
+                            if let Some(instrument) = outer_instrument.lock().unwrap().as_ref() {
+                                instrument.dump_parameter_tree();
+                                //instrument.dump_full_state();
+                            }
+                        }));
+                        new_instrument.request_ui(move || {
                             ui_sender.send(UISend::InstrumentUIReady).unwrap();
                         });
-                        *instrument.lock().unwrap() = Some(device);
+                        new_instrument.dump_full_state();
+                        
+                        *instrument.lock().unwrap() = Some(new_instrument);
+                        
                     }
                     Err(err) => println!("Error {:?}", err)
                 }
@@ -140,9 +152,13 @@ impl App {
         };
         
         match event {
-            Event::KeyDown(_) => {
-                if let Some(_instrument) = self.instrument.lock().unwrap().as_ref() {
-                    //instrument.send_midi_1_event();
+            Event::KeyDown(ke) => {
+                if let KeyCode::Escape = ke.key_code{
+                    if let Some(instrument) = self.instrument.lock().unwrap().as_ref() {
+                        instrument.ocr_ui();
+                        instrument.dump_parameter_tree();
+                    }
+                    
                 }
             }
             Event::Signal(se) => while let Ok(send) = self.ui_receiver.try_recv(se) {
