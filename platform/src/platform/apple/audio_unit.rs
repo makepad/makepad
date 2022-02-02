@@ -3,6 +3,7 @@ use {
     std::mem,
     std::sync::{Arc, Mutex},
     crate::{
+        platform::apple::core_midi::*,
         platform::apple::cocoa_delegate::*,
         platform::apple::frameworks::*,
         platform::apple::cocoa_app::*,
@@ -11,159 +12,6 @@ use {
     },
 };
 
-pub struct MidiEndpoint {
-    pub id: i32,
-    pub name: String,
-    pub manufacturer: String,
-    endpoint: MIDIEndpointRef
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct Midi1Data {
-    pub input: usize,
-    pub data0: u8,
-    pub data1: u8,
-    pub data2: u8
-}
-
-#[derive(Clone, Copy, Debug)]
-pub struct Midi1Note {
-    pub is_on: bool,
-    pub channel: u8,
-    pub note_number: u8,
-    pub velocity: u8,
-}
-
-
-#[derive(Clone, Copy, Debug)]
-pub enum Midi1Event {
-    Note(Midi1Note),
-    Unknown
-}
-
-impl Into<Midi1Data> for Midi1Note {
-    fn into(self) -> Midi1Data {
-        Midi1Data {
-            input: 0,
-            data0: (if self.is_on {0x9}else {0x8} << 4) | self.channel,
-            data1: self.note_number,
-            data2: self.velocity
-        }
-    }
-}
-
-impl Midi1Data {
-    pub fn decode(&self) -> Midi1Event {
-        let status = self.data0 >> 4;
-        let channel = self.data0 & 0xf;
-        match status {
-            0x8 | 0x9 => Midi1Event::Note(Midi1Note {is_on: status == 0x9, channel, note_number: self.data1, velocity: self.data2}),
-            _ => Midi1Event::Unknown
-        }
-    }
-}
-
-pub struct Instrument {
-    object: ObjcId
-}
-
-pub struct Midi {
-    pub sources: Vec<MidiEndpoint>,
-    pub destinations: Vec<MidiEndpoint>
-}
-
-impl MidiEndpoint {
-    unsafe fn new(endpoint: MIDIEndpointRef) -> Result<Self,
-    OSError> {
-        let mut manufacturer = 0 as CFStringRef;
-        let mut name = 0 as CFStringRef;
-        let mut id = 0i32;
-        OSError::from(MIDIObjectGetStringProperty(endpoint, kMIDIPropertyManufacturer, &mut manufacturer)) ?;
-        OSError::from(MIDIObjectGetStringProperty(endpoint, kMIDIPropertyDisplayName, &mut name)) ?;
-        OSError::from(MIDIObjectGetIntegerProperty(endpoint, kMIDIPropertyUniqueID, &mut id)) ?;
-        Ok(Self {
-            id,
-            name: cfstring_ref_to_string(name),
-            manufacturer: cfstring_ref_to_string(manufacturer),
-            endpoint
-        })
-    }
-}
-
-impl Midi {
-    pub fn new_midi_1_input<F: Fn(Midi1Data) + Send + 'static>(message_callback: F) -> Result<Self,
-    OSError> {
-        let mut midi_notify = objc_block!(move | _notification: &MIDINotification | {
-            println!("Midi device added/removed");
-        });
-        
-        let mut midi_receive = objc_block!(move | event_list: &MIDIEventList, user_data: u64 | {
-            let packets = unsafe {std::slice::from_raw_parts(event_list.packet.as_ptr(), event_list.numPackets as usize)};
-            for packet in packets {
-                for i in 0 .. packet.wordCount.min(64) {
-                    let ump = packet.words[i as usize];
-                    let ty = ((ump >> 28) & 0xf) as u8;
-                    let _group = ((ump >> 24) & 0xf) as u8;
-                    let data0 = ((ump >> 16) & 0xff) as u8;
-                    let data1 = ((ump >> 8) & 0xff) as u8;
-                    let data2 = (ump & 0xff) as u8;
-                    if ty == 0x02 { // midi 1.0 channel voice
-                        message_callback(Midi1Data {
-                            input: user_data as usize,
-                            data0,
-                            data1,
-                            data2
-                        })
-                    }
-                }
-            }
-        });
-        
-        let mut midi_client = 0 as MIDIClientRef;
-        let mut midi_in_port = 0 as MIDIPortRef;
-        let mut midi_out_port = 0 as MIDIPortRef;
-        let mut destinations = Vec::new();
-        let mut sources = Vec::new();
-        unsafe {
-            OSError::from(MIDIClientCreateWithBlock(
-                ccfstr_from_str("Makepad"),
-                &mut midi_client,
-                &mut midi_notify as *mut _ as ObjcId
-            )) ?;
-            
-            OSError::from(MIDIInputPortCreateWithProtocol(
-                midi_client,
-                ccfstr_from_str("MIDI Input"),
-                kMIDIProtocol_1_0,
-                &mut midi_in_port,
-                &mut midi_receive as *mut _ as ObjcId
-            )) ?;
-            
-            OSError::from(MIDIOutputPortCreate(
-                midi_client,
-                ccfstr_from_str("MIDI Output"),
-                &mut midi_out_port
-            )) ?;
-            
-            for i in 0..MIDIGetNumberOfDestinations() {
-                if let Ok(ep) = MidiEndpoint::new(MIDIGetDestination(i)) {
-                    destinations.push(ep);
-                }
-            }
-            for i in 0..MIDIGetNumberOfSources() {
-                if let Ok(ep) = MidiEndpoint::new(MIDIGetSource(i)) {
-                    MIDIPortConnectSource(midi_in_port, ep.endpoint, i as *mut _);
-                    sources.push(ep);
-                }
-            }
-        }
-        
-        Ok(Self {
-            sources,
-            destinations
-        })
-    }
-}
 
 pub struct Audio {}
 
@@ -177,7 +25,8 @@ pub struct AudioDeviceInfo {
 #[derive(Copy, Clone)]
 pub enum AudioDeviceType {
     DefaultOutput,
-    Music
+    MusicDevice,
+    Effect
 }
 
 unsafe impl Send for AudioDevice {}
@@ -202,9 +51,9 @@ pub struct AudioBuffer<'a> {
     input_bus_number: u64,
 }
 
-impl<'a> AudioBuffer<'a>{
-    pub fn zero(&mut self){
-        for i in 0..self.left.len(){
+impl<'a> AudioBuffer<'a> {
+    pub fn zero(&mut self) {
+        for i in 0..self.left.len() {
             self.left[i] = 0.0;
             self.right[i] = 0.0;
         }
@@ -258,8 +107,9 @@ impl AudioDevice {
     
     pub fn dump_parameter_tree(&self) {
         match self.device_type {
-            AudioDeviceType::Music => (),
-            _ => panic!("start_audio_output_with_fn on this device")
+            AudioDeviceType::MusicDevice => (),
+            AudioDeviceType::Effect => (),
+            _ => panic!("dump_parameter_tree on this device")
         }
         unsafe {
             let root: ObjcId = msg_send![self.au_audio_unit, parameterTree];
@@ -291,7 +141,7 @@ impl AudioDevice {
     
     pub fn get_instrument_state(&self) -> AudioInstrumentState {
         match self.device_type {
-            AudioDeviceType::Music => (),
+            AudioDeviceType::MusicDevice => (),
             _ => panic!("start_audio_output_with_fn on this device")
         }
         unsafe {
@@ -334,46 +184,47 @@ impl AudioDevice {
         }
     }
     
-    pub fn set_instrument_state(&self, in_state:&AudioInstrumentState){
+    pub fn set_instrument_state(&self, in_state: &AudioInstrumentState) {
         match self.device_type {
-            AudioDeviceType::Music => (),
+            AudioDeviceType::MusicDevice => (),
             _ => panic!("start_audio_output_with_fn on this device")
         }
         unsafe {
-            let dict:ObjcId = msg_send![class!(NSMutableDictionary), dictionary];
+            let dict: ObjcId = msg_send![class!(NSMutableDictionary), dictionary];
             let () = msg_send![dict, init];
             
-            unsafe fn set_number(dict:ObjcId, name:&str, value:u64){
-                let id:ObjcId = str_to_nsstring(name);
-                let num:ObjcId = msg_send![class!(NSNumber), numberWithLongLong:value];
-                let () = msg_send![dict, setObject:num forKey:id];
+            unsafe fn set_number(dict: ObjcId, name: &str, value: u64) {
+                let id: ObjcId = str_to_nsstring(name);
+                let num: ObjcId = msg_send![class!(NSNumber), numberWithLongLong: value];
+                let () = msg_send![dict, setObject: num forKey: id];
             }
-            unsafe fn set_string(dict:ObjcId, name:&str, value:&str){
-                let id:ObjcId = str_to_nsstring(name);
-                let value:ObjcId = str_to_nsstring(value);
-                let () = msg_send![dict, setObject:value forKey:id];
+            unsafe fn set_string(dict: ObjcId, name: &str, value: &str) {
+                let id: ObjcId = str_to_nsstring(name);
+                let value: ObjcId = str_to_nsstring(value);
+                let () = msg_send![dict, setObject: value forKey: id];
             }
-            unsafe fn set_data(dict:ObjcId, name:&str, data:&[u8]){
-                let id:ObjcId = str_to_nsstring(name);
-                let nsdata:ObjcId = msg_send![class!(NSData), dataWithBytes:data.as_ptr() length:data.len()];
-                let () = msg_send![dict, setObject:nsdata forKey:id];
+            unsafe fn set_data(dict: ObjcId, name: &str, data: &[u8]) {
+                let id: ObjcId = str_to_nsstring(name);
+                let nsdata: ObjcId = msg_send![class!(NSData), dataWithBytes: data.as_ptr() length: data.len()];
+                let () = msg_send![dict, setObject: nsdata forKey: id];
             }
-            set_number(dict,"manufacturer", in_state.manufacturer);
-            set_number(dict,"subtype", in_state.subtype);
-            set_number(dict,"version", in_state.version);
-            set_number(dict,"type", in_state.ty);
-            set_string(dict,"name", &in_state.name);
-            set_data(dict,"data", &in_state.data);
-            set_data(dict,"vstdata", &in_state.vstdata); 
-
-            let () = msg_send![self.au_audio_unit, setFullState:dict];
+            set_number(dict, "manufacturer", in_state.manufacturer);
+            set_number(dict, "subtype", in_state.subtype);
+            set_number(dict, "version", in_state.version);
+            set_number(dict, "type", in_state.ty);
+            set_string(dict, "name", &in_state.name);
+            set_data(dict, "data", &in_state.data);
+            set_data(dict, "vstdata", &in_state.vstdata);
+            
+            let () = msg_send![self.au_audio_unit, setFullState: dict];
         }
     }
     
-    pub fn start_output<F: Fn(&mut AudioBuffer) + Send + 'static>(&self, audio_callback: F) {
+    pub fn set_input_callback<F: Fn(&mut AudioBuffer) + Send + 'static>(&self, audio_callback: F) {
         match self.device_type {
             AudioDeviceType::DefaultOutput => (),
-            _ => panic!("start_audio_output_with_fn on this device")
+            AudioDeviceType::Effect => (),
+            _ => panic!("set_input_callback on this device")
         }
         unsafe {
             let output_provider = objc_block!(
@@ -383,6 +234,7 @@ impl AudioDevice {
                 input_bus_number: u64,
                 buffers: *mut AudioBufferList |: i32 {
                     let buffers_ref = &*buffers;
+                    //println!("IN OUTPUT {} {:?}", buffers_ref.mBuffers[0].mData as u64, *timestamp);
                     audio_callback(&mut AudioBuffer {
                         left: std::slice::from_raw_parts_mut(
                             buffers_ref.mBuffers[0].mData as *mut f32,
@@ -407,25 +259,62 @@ impl AudioDevice {
     
     pub fn render_to_audio_buffer(&self, buffer: &mut AudioBuffer) {
         match self.device_type {
-            AudioDeviceType::Music => (),
+            AudioDeviceType::MusicDevice => (),
+            AudioDeviceType::Effect => (),
             _ => panic!("render_to_audio_buffer not supported on this device")
         }
         if let Some(render_block) = self.render_block {
-            unsafe {objc_block_invoke!(render_block, invoke(
-                (buffer.flags): *mut u32,
-                (buffer.timestamp): *const AudioTimeStamp,
-                (buffer.frame_count): u32,
-                (buffer.input_bus_number): u64,
-                (buffer.buffers): *mut AudioBufferList,
-                (nil): ObjcId
-            ) -> i32)};
+            unsafe {
+                /*
+                let output_provider = objc_block!(
+                    move | flags: *mut u32,
+                    timestamp: *const AudioTimeStamp,
+                    frame_count: u32,
+                    input_bus_number: u64,
+                    buffers: *mut AudioBufferList |: i32 {
+                        let buffers_ref = &*buffers;
+                        let sub = AudioBuffer {
+                            left: std::slice::from_raw_parts_mut(
+                                buffers_ref.mBuffers[0].mData as *mut f32,
+                                frame_count as usize
+                            ),
+                            right: std::slice::from_raw_parts_mut(
+                                buffers_ref.mBuffers[1].mData as *mut f32,
+                                frame_count as usize
+                            ),
+                            buffers,
+                            flags,
+                            timestamp,
+                            frame_count,
+                            input_bus_number
+                        };
+                        /*for i in 0..sub.left.len(){
+                            sub.left[i] = (0.1 * (i as f32)).sin()*0.3;
+                           sub.right[i] = (0.1 * (i as f32)).sin()*0.3;
+                        }*/
+                        //println!("AFTER EFFECT {}", buffers_ref.mBuffers[0].mDataByteSize);
+                        0
+                    }
+                );*/
+                
+                objc_block_invoke!(render_block, invoke(
+                    (buffer.flags): *mut u32,
+                    (buffer.timestamp): *const AudioTimeStamp,
+                    (buffer.frame_count): u32,
+                    (buffer.input_bus_number): u64,
+                    (buffer.buffers): *mut AudioBufferList,
+                    //(&output_provider as *const _ as ObjcId): ObjcId
+                    (nil): ObjcId
+                ) -> i32)
+            };
         }
     }
     
     
     pub fn request_ui<F: Fn() + Send + 'static>(&self, view_loaded: F) {
         match self.device_type {
-            AudioDeviceType::Music => (),
+            AudioDeviceType::MusicDevice => (),
+            AudioDeviceType::Effect => (),
             _ => panic!("request_ui not supported on this device")
         }
         
@@ -452,7 +341,7 @@ impl AudioDevice {
     }
     
     pub fn send_mouse_down(&self) {
-        if let Some(view_controller) = self.view_controller.lock().unwrap().as_ref() {
+        if let Some(_view_controller) = self.view_controller.lock().unwrap().as_ref() {
             unsafe {
                 println!("Posting a doubleclick");
                 let source = CGEventSourceCreate(1);
@@ -506,7 +395,7 @@ impl AudioDevice {
                     let obj: ObjcId = msg_send![results, objectAtIndex: i];
                     let top_objs: ObjcId = msg_send![obj, topCandidates: 1];
                     let top_obj: ObjcId = msg_send![top_objs, objectAtIndex: 0];
-                    let value: ObjcId = msg_send![top_obj, string];
+                    let _value: ObjcId = msg_send![top_obj, string];
                     //println!("Found text in UI: {}", nsstring_to_string(value));
                 }
             });
@@ -524,7 +413,7 @@ impl AudioDevice {
     
     pub fn send_midi_1_event(&self, event: Midi1Data) {
         match self.device_type {
-            AudioDeviceType::Music => (),
+            AudioDeviceType::MusicDevice => (),
             _ => panic!("send_midi_1_event not supported on this device")
         }
         unsafe {
@@ -544,7 +433,7 @@ impl Audio {
     pub fn query_devices(device_type: AudioDeviceType) -> Vec<AudioDeviceInfo> {
         unsafe {
             let desc = match device_type {
-                AudioDeviceType::Music => {
+                AudioDeviceType::MusicDevice => {
                     AudioComponentDescription::new_all_manufacturers(
                         AudioUnitType::MusicDevice,
                         AudioUnitSubType::Undefined,
@@ -554,6 +443,12 @@ impl Audio {
                     AudioComponentDescription::new_apple(
                         AudioUnitType::IO,
                         AudioUnitSubType::DefaultOutput,
+                    )
+                }
+                AudioDeviceType::Effect => {
+                    AudioComponentDescription::new_all_manufacturers(
+                        AudioUnitType::Effect,
+                        AudioUnitSubType::Undefined,
                     )
                 }
             };
@@ -595,8 +490,19 @@ impl Audio {
                             let () = msg_send![au_audio_unit, startHardwareAndReturnError: &mut err];
                             OSError::from_nserror(err) ?;
                         }
-                        AudioDeviceType::Music => {
+                        AudioDeviceType::MusicDevice => {
                             let block_ptr: ObjcId = msg_send![au_audio_unit, renderBlock];
+                            let () = msg_send![block_ptr, retain];
+                            render_block = Some(block_ptr);
+                        }
+                        AudioDeviceType::Effect => {
+                            let block_ptr: ObjcId = msg_send![au_audio_unit, renderBlock];
+                            let input_busses: ObjcId = msg_send![au_audio_unit, inputBusses];
+                            let count: usize = msg_send![input_busses, count];
+                            for i in 0..count{
+                                let bus: ObjcId = msg_send![input_busses, objectAtIndexedSubscript: i];
+                                let () = msg_send![bus, setEnabled:true];
+                            }
                             let () = msg_send![block_ptr, retain];
                             render_block = Some(block_ptr);
                         }

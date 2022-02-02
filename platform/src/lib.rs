@@ -85,7 +85,9 @@ pub use {
     },
     crate::{
         cx_api::{
-            CxPlatformApi
+            CxPlatformApi,
+            profile_start,
+            profile_end
         },
         cx_registries::{
             CxRegistries,
