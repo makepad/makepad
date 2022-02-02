@@ -181,6 +181,7 @@ pub enum AudioDeviceType {
 }
 
 unsafe impl Send for AudioDevice {}
+unsafe impl Sync for AudioDevice {}
 pub struct AudioDevice {
     param_tree_observer: Option<KeyValueObserver>,
     av_audio_unit: ObjcId,
