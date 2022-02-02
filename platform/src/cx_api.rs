@@ -33,6 +33,14 @@ use {
 
 pub use crate::log;
 
+pub fn profile_start()->Instant {
+   Instant::now()
+}
+
+pub fn profile_end(instant: Instant) {
+    log!("Profile time {} ms", (instant.elapsed().as_nanos() as f64) / 1000000f64);
+}
+
 pub trait CxPlatformApi{
     fn show_text_ime(&mut self, x: f32, y: f32);
     fn hide_text_ime(&mut self);
@@ -286,15 +294,6 @@ impl Cx {
         self.hover_mouse_cursor = Some(mouse_cursor);
     }
 
-    pub fn profile_start(&mut self, id: u64) {
-        self.profiles.insert(id, Instant::now());
-    }
-    
-    pub fn profile_end(&self, id: u64) {
-        if let Some(inst) = self.profiles.get(&id) {
-            log!("Profile {} time {}", id, (inst.elapsed().as_nanos() as f64) / 1000000f64);
-        }
-    }
    
     pub fn debug_draw_tree(&self, dump_instances: bool, draw_list_id: usize) {
         fn debug_draw_tree_recur(cx:&Cx, dump_instances: bool, s: &mut String, draw_list_id: usize, depth: usize) {
