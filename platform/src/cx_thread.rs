@@ -13,10 +13,15 @@ pub struct UIReceiver<T>{
     signal:Signal
 }
 
-#[derive(Clone)]
 pub struct UISender<T>{
     sender:Sender<T>,
     signal:Signal
+}
+
+impl<T> Clone for UISender<T>{
+    fn clone(&self)->Self{
+        Self{ sender:self.sender.clone(), signal:self.signal.clone()}
+    }
 }
 
 unsafe impl<T> Send for UISender<T>{}
