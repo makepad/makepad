@@ -6,7 +6,8 @@ pub mod cocoa_window;
 pub mod frameworks;
 pub mod metal;
 pub mod macos;
-pub mod core_audio;
+pub mod audio_unit;
+pub mod core_midi;
 
 pub use crate::platform::apple::metal::*;
 pub use crate::platform::apple::macos::*;
