@@ -55,11 +55,9 @@ pub enum FromUI {
 }
 
 #[derive(Clone)]
-pub enum ToUI {
-}
+pub enum ToUI {}
 
-pub enum AudioEngineAction {
-}
+pub enum AudioEngineAction {}
 
 #[derive(Live)]
 pub struct AudioGraph {
