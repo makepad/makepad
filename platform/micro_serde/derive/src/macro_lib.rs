@@ -798,8 +798,12 @@ impl TokenParser {
         }
         else if let Some((ty, span)) = self.eat_any_ident_with_span() {
             tb.ident_with_span(&ty, span);
+            if ty == "dyn"{
+                if let Some((ty, span)) = self.eat_any_ident_with_span(){
+                    tb.ident_with_span(&ty, span);
+                }
+            }
             tb.stream(self.eat_generic());
-            
             return Some(tb.end())
         }
         return None

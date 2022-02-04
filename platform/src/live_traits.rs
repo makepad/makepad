@@ -247,7 +247,7 @@ impl<T> LiveApply for Option<T> where T: LiveApply + LiveNew + 'static {
     }
 }
 
-impl<T> LiveNew for Option<T> where T: LiveApply + LiveNew + 'static {
+impl<T> LiveNew for Option<T> where T: LiveApply + LiveNew + 'static{
     fn new(_cx: &mut Cx) -> Self {
         Self::None
     }
