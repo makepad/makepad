@@ -4,9 +4,9 @@ pub use makepad_platform::{self, *};
 mod piano;
 use crate::piano::*;
 
-mod audio_plugin;
-mod audio_engine;
-use crate::audio_engine::*;
+mod plugin_music_device;
+mod audio_graph;
+use crate::audio_graph::*;
 
 #[macro_use]
 mod audio_registry;
@@ -31,7 +31,7 @@ main_app!(App);
 #[derive(Live, LiveHook)]
 pub struct App {
     piano: Piano,
-    audio_engine: AudioEngine,
+    audio_graph: AudioGraph,
     
     desktop_window: DesktopWindow,
     scroll_view: ScrollView,
@@ -40,8 +40,8 @@ pub struct App {
 impl App {
     pub fn live_register(cx: &mut Cx) {
         makepad_component::live_register(cx);
-        crate::audio_plugin::live_register(cx);
-        crate::audio_engine::live_register(cx);
+        crate::plugin_music_device::live_register(cx);
+        crate::audio_graph::live_register(cx);
         crate::audio_registry::live_register(cx);
         crate::piano::live_register(cx);
     }
@@ -54,7 +54,7 @@ impl App {
         
         self.desktop_window.handle_event(cx, event);
         self.scroll_view.handle_event(cx, event);
-        self.audio_engine.handle_event_with_fn(cx, event, &mut |_cx, _action|{});
+        self.audio_graph.handle_event_with_fn(cx, event, &mut |_cx, _action|{});
         //let instrument = self.instrument.clone();
         for _action in self.piano.handle_event(cx, event) {
             /*match action {

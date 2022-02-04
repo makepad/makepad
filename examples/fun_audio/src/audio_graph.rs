@@ -13,9 +13,9 @@ use {
 
 // lets give this a stable pointer for the UI
 live_register!{
-    use crate::audio_plugin::PluginMusicDevice;
+    use crate::plugin_music_device::PluginMusicDevice;
     
-    AudioEngine: {{AudioEngine}} {
+    AudioGraph: {{AudioGraph}} {
         root: PluginMusicDevice {
             plugin: "FM8"
             preset_data: "21adslkfjalkwqwe"
@@ -62,7 +62,7 @@ pub enum AudioEngineAction {
 }
 
 #[derive(Live)]
-pub struct AudioEngine {
+pub struct AudioGraph {
     registry: AudioComponentRegistry,
     root: AudioComponentOption,
     
@@ -70,7 +70,7 @@ pub struct AudioEngine {
     #[rust(ToUIReceiver::new(cx))] to_ui: ToUIReceiver<ToUI>,
 }
 
-impl LiveHook for AudioEngine {
+impl LiveHook for AudioGraph {
     fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         // we should have a component
         if let Some(root) = self.root.component() {
@@ -86,7 +86,7 @@ impl LiveHook for AudioEngine {
 }
 
 // ok so. how do we deal with this
-impl AudioEngine {
+impl AudioGraph {
     fn run_midi_input(from_ui: FromUISender<FromUI>, to_ui: ToUISender<ToUI>) {
         Midi::new_midi_1_input(move | data | {
             let _ = from_ui.send(FromUI::Midi1Data(data));

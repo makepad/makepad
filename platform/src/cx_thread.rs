@@ -80,6 +80,12 @@ impl<T> FromUISender<T>{
             receiver:Some(receiver),
         }
     }
+    
+    pub fn new_channel(&mut self){
+        let (sender, receiver) = channel();
+        self.sender = sender;
+        self.receiver = Some(receiver)
+    }
 
     pub fn send(&self, t:T)->Result<(), SendError<T>>{
         self.sender.send(t)
