@@ -10,7 +10,6 @@ use {
             core_midi::*,
         },
     },
-    //std::sync::{Arc, Mutex}
 };
 
 live_register!{
@@ -27,23 +26,23 @@ enum FromUI {
     NewDevice(AudioDeviceClone)
 }
 
-
 #[derive(Live)]
 #[live_register( | cx: &mut Cx | {register_as_audio_component!(cx, PluginMusicDevice)})]
 struct PluginMusicDevice {
     plugin:String,
     preset_data:String,
+
     #[rust] audio_device: Option<AudioDevice>,
     #[rust(FromUISender::new())] from_ui: FromUISender<FromUI>,
     #[rust(ToUIReceiver::new(cx))] to_ui: ToUIReceiver<ToUI>,
 }
 
-struct GraphNode {
+struct Node {
     from_ui: FromUIReceiver<FromUI>,
     audio_device: Option<AudioDeviceClone>
 }
 
-impl AudioGraphNode for GraphNode{
+impl AudioGraphNode for Node{
     fn handle_midi_1_data(&mut self, data:Midi1Data){
         if let Some(audio_device) = &self.audio_device{
             audio_device.handle_midi_1_data(data);
@@ -92,7 +91,7 @@ impl AudioComponent for PluginMusicDevice {
     fn type_id(&self) -> LiveType {LiveType::of::<Self>()}
 
     fn get_graph_node(&mut self) -> Box<dyn AudioGraphNode + Send>{
-        Box::new(GraphNode{
+        Box::new(Node{
             from_ui: self.from_ui.receiver(),
             audio_device: if let Some(device) = &self.audio_device{Some(device.clone())}else{None}
         })
