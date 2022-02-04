@@ -36,8 +36,7 @@ live_register!{
     }
 }
 
-pub enum AudioComponentAction {
-}
+pub enum AudioComponentAction {}
 
 pub trait AudioComponent: LiveApply {
     fn handle_event_with_fn(&mut self, _cx: &mut Cx, event: &mut Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction));
@@ -96,7 +95,12 @@ impl AudioEngine {
     
     fn run_audio_graph(from_ui: FromUIReceiver<FromUI>, to_ui: ToUISender<ToUI>) {
         
-        let state = Arc::new(Mutex::new((from_ui, None)));
+        struct AudioGraphState{
+            from_ui: FromUIReceiver<FromUI>,
+            root: Option<Box<dyn AudioGraphNode + Send>>
+        }
+        
+        let state = Arc::new(Mutex::new(AudioGraphState{from_ui, root:None}));
         
         std::thread::spawn(move || {
             let out = &Audio::query_devices(AudioDeviceType::DefaultOutput)[0];
@@ -108,20 +112,20 @@ impl AudioEngine {
                             // the core of the audio flow..
                             
                             let mut state = state.lock().unwrap();
-                            while let Ok(msg) = state.0.try_recv() {
+                            while let Ok(msg) = state.from_ui.try_recv() {
                                 match msg {
                                     FromUI::NewRoot(new_root) => {
-                                        state.1 = Some(new_root);
+                                        state.root = Some(new_root);
                                     }
                                     FromUI::Midi1Data(data) => {
-                                        if let Some(root) = state.1.as_mut() {
+                                        if let Some(root) = state.root.as_mut() {
                                             root.handle_midi_1_data(data);
                                         }
                                     }
                                 }
                             }
                             
-                            if let Some(root) = state.1.as_mut() {
+                            if let Some(root) = state.root.as_mut() {
                                 root.render_to_audio_buffer(buffer);
                             }
                             
@@ -150,7 +154,6 @@ impl AudioEngine {
             }
             Event::Signal(se) => while let Ok(send) = self.to_ui.try_recv(se) {
                 // ok something sent us a signal.
-                
             }
             _ => ()
         }
