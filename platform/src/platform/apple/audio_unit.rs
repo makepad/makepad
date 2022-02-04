@@ -40,6 +40,15 @@ pub struct AudioDevice {
     device_type: AudioDeviceType
 }
 
+unsafe impl Send for AudioDeviceClone {}
+unsafe impl Sync for AudioDeviceClone {}
+pub struct AudioDeviceClone {
+    av_audio_unit: ObjcId,
+    au_audio_unit: ObjcId,
+    render_block: Option<ObjcId>,
+    device_type: AudioDeviceType
+}
+
 pub struct AudioBuffer<'a> {
     pub left: &'a mut [f32],
     pub right: &'a mut [f32],
@@ -95,7 +104,82 @@ pub struct AudioInstrumentState {
     name: String
 }
 
+impl AudioDeviceClone {
+    
+    pub fn render_to_audio_buffer(&self, buffer: &mut AudioBuffer) {
+        match self.device_type {
+            AudioDeviceType::MusicDevice => (),
+            AudioDeviceType::Effect => (),
+            _ => panic!("render_to_audio_buffer not supported on this device")
+        }
+        if let Some(render_block) = self.render_block {
+            unsafe {
+                /*
+                let output_provider = objc_block!(
+                    move | flags: *mut u32,
+                    timestamp: *const AudioTimeStamp,
+                    frame_count: u32,
+                    input_bus_number: u64,
+                    buffers: *mut AudioBufferList |: i32 {
+                        let buffers_ref = &*buffers;
+                        let sub = AudioBuffer {
+                            left: std::slice::from_raw_parts_mut(
+                                buffers_ref.mBuffers[0].mData as *mut f32,
+                                frame_count as usize
+                            ),
+                            right: std::slice::from_raw_parts_mut(
+                                buffers_ref.mBuffers[1].mData as *mut f32,
+                                frame_count as usize
+                            ),
+                            buffers,
+                            flags,
+                            timestamp,
+                            frame_count,
+                            input_bus_number
+                        };
+                        /*for i in 0..sub.left.len(){
+                            sub.left[i] = (0.1 * (i as f32)).sin()*0.3;
+                           sub.right[i] = (0.1 * (i as f32)).sin()*0.3;
+                        }*/
+                        //println!("AFTER EFFECT {}", buffers_ref.mBuffers[0].mDataByteSize);
+                        0
+                    }
+                );*/
+                
+                objc_block_invoke!(render_block, invoke(
+                    (buffer.flags): *mut u32,
+                    (buffer.timestamp): *const AudioTimeStamp,
+                    (buffer.frame_count): u32,
+                    (buffer.input_bus_number): u64,
+                    (buffer.buffers): *mut AudioBufferList,
+                    //(&output_provider as *const _ as ObjcId): ObjcId
+                    (nil): ObjcId
+                ) -> i32)
+            };
+        }
+    }
+    
+    pub fn handle_midi_1_data(&self, event: Midi1Data) {
+        match self.device_type {
+            AudioDeviceType::MusicDevice => (),
+            _ => panic!("send_midi_1_event not supported on this device")
+        }
+        unsafe {
+            let () = msg_send![self.av_audio_unit, sendMIDIEvent: event.data0 data1: event.data1 data2: event.data2];
+        }
+    }    
+}
+
 impl AudioDevice {
+    
+    pub fn clone(&self) -> AudioDeviceClone {
+        AudioDeviceClone {
+            av_audio_unit: self.av_audio_unit,
+            au_audio_unit: self.au_audio_unit,
+            render_block: self.render_block,
+            device_type: self.device_type,
+        }
+    }
     
     pub fn parameter_tree_changed(&mut self, callback: Box<dyn Fn() + Send>) {
         if self.param_tree_observer.is_some() {
@@ -257,60 +341,6 @@ impl AudioDevice {
         }
     }
     
-    pub fn render_to_audio_buffer(&self, buffer: &mut AudioBuffer) {
-        match self.device_type {
-            AudioDeviceType::MusicDevice => (),
-            AudioDeviceType::Effect => (),
-            _ => panic!("render_to_audio_buffer not supported on this device")
-        }
-        if let Some(render_block) = self.render_block {
-            unsafe {
-                /*
-                let output_provider = objc_block!(
-                    move | flags: *mut u32,
-                    timestamp: *const AudioTimeStamp,
-                    frame_count: u32,
-                    input_bus_number: u64,
-                    buffers: *mut AudioBufferList |: i32 {
-                        let buffers_ref = &*buffers;
-                        let sub = AudioBuffer {
-                            left: std::slice::from_raw_parts_mut(
-                                buffers_ref.mBuffers[0].mData as *mut f32,
-                                frame_count as usize
-                            ),
-                            right: std::slice::from_raw_parts_mut(
-                                buffers_ref.mBuffers[1].mData as *mut f32,
-                                frame_count as usize
-                            ),
-                            buffers,
-                            flags,
-                            timestamp,
-                            frame_count,
-                            input_bus_number
-                        };
-                        /*for i in 0..sub.left.len(){
-                            sub.left[i] = (0.1 * (i as f32)).sin()*0.3;
-                           sub.right[i] = (0.1 * (i as f32)).sin()*0.3;
-                        }*/
-                        //println!("AFTER EFFECT {}", buffers_ref.mBuffers[0].mDataByteSize);
-                        0
-                    }
-                );*/
-                
-                objc_block_invoke!(render_block, invoke(
-                    (buffer.flags): *mut u32,
-                    (buffer.timestamp): *const AudioTimeStamp,
-                    (buffer.frame_count): u32,
-                    (buffer.input_bus_number): u64,
-                    (buffer.buffers): *mut AudioBufferList,
-                    //(&output_provider as *const _ as ObjcId): ObjcId
-                    (nil): ObjcId
-                ) -> i32)
-            };
-        }
-    }
-    
-    
     pub fn request_ui<F: Fn() + Send + 'static>(&self, view_loaded: F) {
         match self.device_type {
             AudioDeviceType::MusicDevice => (),
@@ -410,16 +440,7 @@ impl AudioDevice {
             }
         };
     }
-    
-    pub fn send_midi_1_event(&self, event: Midi1Data) {
-        match self.device_type {
-            AudioDeviceType::MusicDevice => (),
-            _ => panic!("send_midi_1_event not supported on this device")
-        }
-        unsafe {
-            let () = msg_send![self.av_audio_unit, sendMIDIEvent: event.data0 data1: event.data1 data2: event.data2];
-        }
-    }
+
 }
 
 #[derive(Debug)]
@@ -499,9 +520,10 @@ impl Audio {
                             let block_ptr: ObjcId = msg_send![au_audio_unit, renderBlock];
                             let input_busses: ObjcId = msg_send![au_audio_unit, inputBusses];
                             let count: usize = msg_send![input_busses, count];
-                            for i in 0..count{
-                                let bus: ObjcId = msg_send![input_busses, objectAtIndexedSubscript: i];
-                                let () = msg_send![bus, setEnabled:true];
+                            if count > 0 {
+                                // enable bus 0   
+                                let bus: ObjcId = msg_send![input_busses, objectAtIndexedSubscript: 0];
+                                let () = msg_send![bus, setEnabled: true];
                             }
                             let () = msg_send![block_ptr, retain];
                             render_block = Some(block_ptr);

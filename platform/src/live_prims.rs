@@ -20,7 +20,7 @@ macro_rules!get_component {
 
 #[macro_export]
 macro_rules!live_primitive {
-    ( $ ty: ident, $ default: expr, $ apply: item, $ to_live_value: item) => {
+    ( $ ty: ty, $ default: expr, $ apply: item, $ to_live_value: item) => {
         impl LiveHook for $ ty {}
         impl ToLiveValue for $ ty {
             $ to_live_value
