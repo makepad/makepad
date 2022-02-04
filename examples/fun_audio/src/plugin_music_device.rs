@@ -3,7 +3,7 @@ use {
     crate::{
         register_as_audio_component,
         audio_registry::*,
-        audio_engine::*,
+        audio_graph::*,
         makepad_platform::*,
         makepad_platform::platform::apple::{
             audio_unit::*,
@@ -91,6 +91,7 @@ impl AudioComponent for PluginMusicDevice {
     fn type_id(&self) -> LiveType {LiveType::of::<Self>()}
 
     fn get_graph_node(&mut self) -> Box<dyn AudioGraphNode + Send>{
+        self.from_ui.new_channel();
         Box::new(Node{
             from_ui: self.from_ui.receiver(),
             audio_device: if let Some(device) = &self.audio_device{Some(device.clone())}else{None}
