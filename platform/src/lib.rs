@@ -184,7 +184,7 @@ pub use {
             PassClearColor,
             PassClearDepth
         },
-        cx_thread::{UISender, UIReceiver},
+        cx_thread::{FromUIReceiver, FromUISender, ToUISender, ToUIReceiver},
         texture::{Texture, TextureFormat},
         live_traits::{
             LiveNew,
