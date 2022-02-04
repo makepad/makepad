@@ -275,7 +275,7 @@ impl<'a> LiveExpander<'a> {
                                     }
                                 }
                                 
-                                //out_doc.nodes[out_index].value = out_doc.nodes[local_ptr].value.clone();
+                                out_doc.nodes[out_index].value = out_doc.nodes[local_ptr].value.clone();
                                 if let LiveValue::Class {class_parent, ..} = &mut out_doc.nodes[out_index].value {
                                     *class_parent = Some(LivePtr {file_id: self.in_file_id, index: out_index as u32, generation});
                                 }
@@ -383,7 +383,7 @@ impl<'a> LiveExpander<'a> {
                                         
                                         out_doc.nodes[node_insert_point].id = field.id;
                                     }
-                                    else {
+                                    else if lti.type_name != LiveId(0){
                                         self.errors.push(LiveError {
                                             origin: live_error_origin!(),
                                             span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).into(),
