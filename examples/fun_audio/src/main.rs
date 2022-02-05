@@ -1,8 +1,6 @@
 pub use makepad_component::{self, *};
 pub use makepad_platform::{self, *};
 
-
-
 mod piano;
 mod plugin_music_device;
 mod audio_graph;

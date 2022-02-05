@@ -14,10 +14,12 @@ pub use crate::makepad_platform::platform::apple::core_midi::*;
 
 // lets give this a stable pointer for the UI
 live_register!{
-    use crate::plugin_music_device::PluginMusicDevice;
+    //use crate::plugin_music_device::PluginMusicDevice;
     
     AudioGraph: {{AudioGraph}} {
-        root: BasicSynth{}
+        root: BasicSynth {
+            prop: 3.0
+        }
         /*
         root: PluginMusicDevice {
             plugin: "AUMIDISynth"
@@ -38,7 +40,7 @@ live_register!{
     }
 }
 
-pub enum AudioComponentAction {}  
+pub enum AudioComponentAction {}
 
 pub trait AudioComponent: LiveApply {
     fn handle_event_with_fn(&mut self, _cx: &mut Cx, event: &mut Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction));
@@ -79,17 +81,22 @@ impl LiveHook for AudioGraph {
             let graph_node = root.get_graph_node();
             self.from_ui.send(FromUI::NewRoot(graph_node)).unwrap();
         }
+        //println!("{}", nodes.to_string(index,100))
     }
     
     fn after_new(&mut self, _cx: &mut Cx) {
-        Self::run_midi_input(self.from_ui.sender(), self.to_ui.sender());
-        Self::run_audio_graph(self.from_ui.receiver(), self.to_ui.sender());
+        Self::start_midi_input(self.from_ui.sender(), self.to_ui.sender());
+        Self::start_audio_output(self.from_ui.receiver(), self.to_ui.sender());
     }
 }
 
+struct AudioGraphState {
+    from_ui: FromUIReceiver<FromUI>,
+    root: Option<Box<dyn AudioGraphNode + Send >>
+}
 // ok so. how do we deal with this
 impl AudioGraph {
-    fn run_midi_input(from_ui: FromUISender<FromUI>, to_ui: ToUISender<ToUI>) {
+    fn start_midi_input(from_ui: FromUISender<FromUI>, to_ui: ToUISender<ToUI>) {
         Midi::new_midi_1_input(move | data | {
             let _ = from_ui.send(FromUI::Midi1Data(data));
             let _ = to_ui.send(ToUI::Midi1Data(data));
@@ -97,19 +104,30 @@ impl AudioGraph {
         }).unwrap();
     }
     
-    pub fn send_midi_1_data(&self, data:Midi1Data){
+    pub fn send_midi_1_data(&self, data: Midi1Data) {
         self.from_ui.send(FromUI::Midi1Data(data)).unwrap();
     }
     
-    fn run_audio_graph(from_ui: FromUIReceiver<FromUI>, to_ui: ToUISender<ToUI>) {
-        
-        struct AudioGraphState{
-            from_ui: FromUIReceiver<FromUI>,
-            root: Option<Box<dyn AudioGraphNode + Send>>
+    fn render_to_audio_buffer(state: &mut AudioGraphState, buffer: &mut AudioBuffer) {
+        while let Ok(msg) = state.from_ui.try_recv() {
+            match msg {
+                FromUI::NewRoot(new_root) => {
+                    state.root = Some(new_root);
+                }
+                FromUI::Midi1Data(data) => {
+                    if let Some(root) = state.root.as_mut() {
+                        root.handle_midi_1_data(data);
+                    }
+                }
+            }
         }
-        
-        let state = Arc::new(Mutex::new(AudioGraphState{from_ui, root:None}));
-        
+        if let Some(root) = state.root.as_mut() {
+            root.render_to_audio_buffer(buffer);
+        }
+    }
+    
+    fn start_audio_output(from_ui: FromUIReceiver<FromUI>, to_ui: ToUISender<ToUI>) {
+        let state = Arc::new(Mutex::new(AudioGraphState {from_ui, root: None}));
         std::thread::spawn(move || {
             let out = &Audio::query_devices(AudioDeviceType::DefaultOutput)[0];
             Audio::new_device(out, move | result | {
@@ -118,25 +136,8 @@ impl AudioGraph {
                         let state = state.clone();
                         device.set_input_callback(move | buffer | {
                             // the core of the audio flow..
-                            
                             let mut state = state.lock().unwrap();
-                            while let Ok(msg) = state.from_ui.try_recv() {
-                                match msg {
-                                    FromUI::NewRoot(new_root) => {
-                                        state.root = Some(new_root);
-                                    }
-                                    FromUI::Midi1Data(data) => {
-                                        if let Some(root) = state.root.as_mut() {
-                                            root.handle_midi_1_data(data);
-                                        }
-                                    }
-                                }
-                            }
-                            
-                            if let Some(root) = state.root.as_mut() {
-                                root.render_to_audio_buffer(buffer);
-                            }
-                            
+                            Self::render_to_audio_buffer(&mut state, buffer);
                         });
                         loop {
                             std::thread::sleep(std::time::Duration::from_millis(100));
@@ -161,8 +162,8 @@ impl AudioGraph {
                 }
             }
             Event::Signal(se) => while let Ok(to_ui) = self.to_ui.try_recv(se) {
-                match to_ui{
-                    ToUI::Midi1Data(data)=>{
+                match to_ui {
+                    ToUI::Midi1Data(data) => {
                     },
                 }
                 // ok something sent us a signal.
