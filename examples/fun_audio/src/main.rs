@@ -56,19 +56,17 @@ impl App {
         self.scroll_view.handle_event(cx, event);
         self.audio_graph.handle_event_with_fn(cx, event, &mut |_cx, _action|{});
         //let instrument = self.instrument.clone();
-        for _action in self.piano.handle_event(cx, event) {
-            /*match action {
+        for action in self.piano.handle_event(cx, event) {
+            match action {
                 PianoAction::Note {is_on, note_number, velocity} => {
-                    if let Some(instrument) = instrument.lock().unwrap().as_ref() {
-                        instrument.send_midi_1_event(Midi1Note {
-                            is_on,
-                            note_number,
-                            channel: 0,
-                            velocity
-                        }.into());
-                    }
+                    self.audio_graph.send_midi_1_data(Midi1Note {
+                        is_on,
+                        note_number,
+                        channel: 0,
+                        velocity
+                    }.into());
                 }
-            }*/
+            }
         };
         
         match event {
