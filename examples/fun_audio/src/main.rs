@@ -1,11 +1,13 @@
 pub use makepad_component::{self, *};
 pub use makepad_platform::{self, *};
 
-mod piano;
-use crate::piano::*;
 
+
+mod piano;
 mod plugin_music_device;
 mod audio_graph;
+mod basic_synth;
+use crate::piano::*;
 use crate::audio_graph::*;
 
 #[macro_use]
@@ -41,6 +43,7 @@ impl App {
     pub fn live_register(cx: &mut Cx) {
         makepad_component::live_register(cx);
         crate::plugin_music_device::live_register(cx);
+        crate::basic_synth::live_register(cx);
         crate::audio_graph::live_register(cx);
         crate::audio_registry::live_register(cx);
         crate::piano::live_register(cx);
