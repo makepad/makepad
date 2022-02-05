@@ -11,13 +11,15 @@ use {
     std::sync::{Arc, Mutex}
 };
 
+pub use crate::makepad_platform::platform::apple::core_midi::*;
+
 // lets give this a stable pointer for the UI
 live_register!{
     use crate::plugin_music_device::PluginMusicDevice;
     
     AudioGraph: {{AudioGraph}} {
         root: PluginMusicDevice {
-            plugin: "FM8"
+            plugin: "AUMIDISynth"
             preset_data: "21adslkfjalkwqwe"
         }
         /*
@@ -36,7 +38,7 @@ live_register!{
     }
 }
 
-pub enum AudioComponentAction {}
+pub enum AudioComponentAction {}  
 
 pub trait AudioComponent: LiveApply {
     fn handle_event_with_fn(&mut self, _cx: &mut Cx, event: &mut Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction));
@@ -89,6 +91,10 @@ impl AudioGraph {
         Midi::new_midi_1_input(move | data | {
             let _ = from_ui.send(FromUI::Midi1Data(data));
         }).unwrap();
+    }
+    
+    pub fn send_midi_1_data(&self, data:Midi1Data){
+        self.from_ui.send(FromUI::Midi1Data(data));
     }
     
     fn run_audio_graph(from_ui: FromUIReceiver<FromUI>, to_ui: ToUISender<ToUI>) {
