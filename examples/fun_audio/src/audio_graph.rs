@@ -5,7 +5,6 @@ use {
         makepad_platform::*,
         makepad_platform::platform::apple::{
             audio_unit::*,
-            core_midi::*,
         },
     },
     std::sync::{Arc, Mutex}
@@ -94,7 +93,7 @@ impl AudioGraph {
     }
     
     pub fn send_midi_1_data(&self, data:Midi1Data){
-        self.from_ui.send(FromUI::Midi1Data(data));
+        self.from_ui.send(FromUI::Midi1Data(data)).unwrap();
     }
     
     fn run_audio_graph(from_ui: FromUIReceiver<FromUI>, to_ui: ToUISender<ToUI>) {
