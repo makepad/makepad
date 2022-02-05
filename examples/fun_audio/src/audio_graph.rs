@@ -17,11 +17,12 @@ live_register!{
     use crate::plugin_music_device::PluginMusicDevice;
     
     AudioGraph: {{AudioGraph}} {
+        root: BasicSynth{}
+        /*
         root: PluginMusicDevice {
             plugin: "AUMIDISynth"
             preset_data: "21adslkfjalkwqwe"
         }
-        /*
         root: Mixer {
             Instrument {
                 key_range: {start: 34, end: 47 shift: 30}
@@ -56,7 +57,9 @@ pub enum FromUI {
 }
 
 #[derive(Clone)]
-pub enum ToUI {}
+pub enum ToUI {
+    Midi1Data(Midi1Data),
+}
 
 pub enum AudioEngineAction {}
 
@@ -89,6 +92,8 @@ impl AudioGraph {
     fn run_midi_input(from_ui: FromUISender<FromUI>, to_ui: ToUISender<ToUI>) {
         Midi::new_midi_1_input(move | data | {
             let _ = from_ui.send(FromUI::Midi1Data(data));
+            let _ = to_ui.send(ToUI::Midi1Data(data));
+            
         }).unwrap();
     }
     
@@ -155,7 +160,11 @@ impl AudioGraph {
                 if let KeyCode::Escape = ke.key_code {
                 }
             }
-            Event::Signal(se) => while let Ok(send) = self.to_ui.try_recv(se) {
+            Event::Signal(se) => while let Ok(to_ui) = self.to_ui.try_recv(se) {
+                match to_ui{
+                    ToUI::Midi1Data(data)=>{
+                    },
+                }
                 // ok something sent us a signal.
             }
             _ => ()
