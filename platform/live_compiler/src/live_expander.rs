@@ -257,6 +257,7 @@ impl<'a> LiveExpander<'a> {
                     if let Some(target) = self.live_registry.find_scope_target_via_start(*clone, out_index, &out_doc.nodes) {
                         match target {
                             LiveScopeTarget::LocalPtr(local_ptr) => {
+                                //println!("CLONING LOCAL {}", clone);
                                 let old_len = out_doc.nodes.len();
                                 
                                 out_doc.nodes.insert_children_from_self(local_ptr, out_index + 1);
