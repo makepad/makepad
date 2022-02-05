@@ -74,6 +74,9 @@ impl PluginMusicDevice{
         // alright lets create an audio device 
         let list = Audio::query_devices(AudioDeviceType::MusicDevice);
         let sender = self.to_ui.sender();
+        for item in &list{
+            println!("{}", item.name);
+        }
         if let Some(info) = list.iter().find( | item | item.name == self.plugin) {
             Audio::new_device(info, move | result | {
                 match result {
