@@ -16,7 +16,6 @@ pub mod live_eval;
 pub use makepad_id_macros::*;
 pub use makepad_math;
 pub use makepad_derive_live;
-pub use makepad_math::*;
 pub use makepad_live_tokenizer;
 pub use makepad_id_macros;
 pub use makepad_live_tokenizer::makepad_micro_serde;

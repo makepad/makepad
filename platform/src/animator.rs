@@ -3,6 +3,7 @@ use {
     std::f64::consts::PI,
     crate::{
         makepad_derive_live::*,
+        makepad_math::*,
         event::NextFrame,
         cx::Cx,
         live_traits::*,

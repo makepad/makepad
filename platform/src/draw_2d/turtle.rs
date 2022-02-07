@@ -4,6 +4,7 @@ pub use {
     },
     crate::{
         makepad_derive_live::*,
+        makepad_math::*,
         area::Area,
         live_traits::*,
         draw_2d::cx_2d::Cx2d,
