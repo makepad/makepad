@@ -1,6 +1,7 @@
 use {
     crate::{
         makepad_derive_live::*,
+        makepad_math::*,
         cx::Cx,
         draw_2d::cx_2d::Cx2d,
         live_traits::*,

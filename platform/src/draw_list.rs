@@ -5,6 +5,7 @@ pub use {
     },
     crate::{
         makepad_live_compiler::*,
+        makepad_math::*,
         platform::{
             CxPlatformDrawCall,
             CxPlatformView,

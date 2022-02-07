@@ -9,6 +9,7 @@ pub use {
     makepad_geometry::{AffineTransformation, Transform, Vector},
     makepad_internal_iter::*,
     makepad_path::PathIterator,
+    makepad_math::*,
     crate::{
         makepad_derive_live::*,
         makepad_live_compiler::*,
