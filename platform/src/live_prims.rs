@@ -4,6 +4,7 @@ pub use {
     },
     crate::{
         makepad_live_compiler::*,
+        makepad_math::*,
         cx::Cx,
         event::Event,
         live_traits::*,

@@ -11,6 +11,7 @@ use {
             generate_metal,
             generate_metal::MetalGeneratedShader,
         },
+        makepad_math::*,
         makepad_live_compiler::*,
         platform::{
             apple::frameworks::*,

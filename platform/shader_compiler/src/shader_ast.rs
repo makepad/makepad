@@ -10,6 +10,7 @@ use {
         ops::DerefMut
     },
     makepad_live_compiler::*,
+    makepad_live_compiler::makepad_math::*,
 };
 //use crate::shaderregistry::ShaderResourceId;
 
