@@ -66,6 +66,7 @@ pub enum LiveValue {
         expand_index: Option<u32>
     },
     Use (LiveModuleId),
+    UseComponent(LiveId)
 }
 
 impl LiveValue {
@@ -623,7 +624,8 @@ impl LiveValue {
             Self::Close => 25,
             
             Self::DSL {..} => 26,
-            Self::Use {..} => 27
+            Self::Use {..} => 27,
+            Self::UseComponent {..} => 28
         }
     }
 }

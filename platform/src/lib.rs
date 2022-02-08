@@ -31,6 +31,8 @@ mod draw_2d;
 mod draw_3d;
 mod draw_list;
 mod shader;
+pub mod audio;
+pub mod midi;
 
 pub use {
     makepad_shader_compiler,
@@ -55,11 +57,14 @@ pub use {
         LiveIdMap,
         LiveFileId,
         LivePtr,
+        LiveRef,
         LiveNode,
         LiveType,
         LiveTypeInfo,
         LiveTypeField,
         LiveFieldKind,
+        LiveComponentInfo,
+        LiveComponentRegistry,
         //LiveTypeKind,
         LiveValue,
         FittedString,

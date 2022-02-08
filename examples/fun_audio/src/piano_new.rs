@@ -9,18 +9,31 @@ use {
 };
 
 live_register!{
-    use makepad_platform::shader::std::*;
-    use makepad_component::theme::*;
+    import makepad_platform::shader::std::*;
+    import makepad_component::theme::*;
     
-    DrawKeyQuad: {{DrawKeyQuad}} {
+    struct Sdf2d{
+        shader fn height_map(self, pos: vec2) -> float {
+            let fx = 1 - pow(1.2 - sin(pos.x * PI), 10.8);
+            let fy = 1 - pow(1.2 - self.pressed * 0.2 - cos(pos.y * 0.5 * PI), 25.8)
+            return fx + fy
+        }
+    }
+    
+    struct DrawKeyQuad {
+        deref_target: DrawQuad,
+        is_black: f32,
+        pressed: f32,
+        focussed: f32,
+        hover: f32,
         
-        fn height_map(self, pos: vec2) -> float {
+        shader fn height_map(self, pos: vec2) -> float {
             let fx = 1 - pow(1.2 - sin(pos.x * PI), 10.8);
             let fy = 1 - pow(1.2 - self.pressed * 0.2 - cos(pos.y * 0.5 * PI), 25.8)
             return fx + fy
         }
         
-        fn black_key(self) -> vec4 {
+        shader fn black_key(self) -> vec4 {
             let delta = 0.001;
             // differentiate heightmap to get the surface normal
             let d = self.height_map(self.pos)
@@ -34,7 +47,7 @@ live_register!{
             return mix(#00, #ff, diff)
         }
         
-        fn pixel(self) -> vec4 {
+        shader fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
             
             if self.is_black > 0.5 {
@@ -61,104 +74,70 @@ live_register!{
         }
     }
     
-    PianoKey: {{PianoKey}} {
+    struct PianoKey {
+        key_quad: DrawKeyQuad,
         
-        default_state: {
+        animator: Animator = [default_state, up_state, unfocussed_state],
+        
+        default_state: LiveRef = {
             duration: 0.2
             apply: {key_quad: {hover: 0.0}}
         }
         
-        hover_state: {
+        hover_state: LiveRef = {
             duration: 0.
             apply: {key_quad: {hover: 1.0}}
         }
         
-        focussed_state: {
+        focussed_state: LiveRef = {
             track: focus,
             duration: 0.05,
             apply: {key_quad: {focussed: 0.0}}
         }
         
-        unfocussed_state: {
+        unfocussed_state: LiveRef = {
             track: focus,
             duration: 0.,
             apply: {key_quad: {focussed: 1.0}}
         }
         
-        up_state: {
+        up_state: LiveRef = {
             track: pressed,
             duration: 0.05,
             apply: {key_quad: {pressed: 0.0}}
         }
         
-        pressed_state: {
+        pressed_state: LiveRef = {
             track: pressed,
             duration: 0.,
             apply: {key_quad: {pressed: 1.0}}
         }
     }
     
-    Piano: {{Piano}} {
-        piano_key: PianoKey {}
-    }
-}
-
-// TODO support a shared 'inputs' struct on drawshaders
-#[derive(Live, LiveHook)]#[repr(C)]
-struct DrawKeyQuad {
-    deref_target: DrawQuad,
-    is_black: f32,
-    pressed: f32,
-    focussed: f32,
-    hover: f32,
-}
-
-#[derive(Live, LiveHook)]
-pub struct PianoKey {
-    key_quad: DrawKeyQuad,
-    
-    #[state(default_state, up_state, unfocussed_state)]
-    animator: Animator,
-    
-    focussed_state: LiveRef,
-    unfocussed_state: LiveRef,
-    default_state: LiveRef,
-    hover_state: LiveRef,
-    pressed_state: LiveRef,
-    up_state: LiveRef,
-}
-
-#[derive(Live)]
-pub struct Piano {
-    scroll_view: ScrollView,
-    piano_key: Option<LivePtr>,
-    
-    #[rust([0;20])] 
-    keyboard_keys_down:[u8;20],
-    
-    #[rust(5)] 
-    keyboard_octave: u8,
-    
-    #[rust(100)] 
-    keyboard_velocity: u8,
-
-    #[rust] white_keys: ComponentMap<PianoKeyId, PianoKey>,
-    #[rust] black_keys: ComponentMap<PianoKeyId, PianoKey>,
-}
-
-impl LiveHook for Piano {
-    fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        for piano_key in self.white_keys.values_mut().chain(self.black_keys.values_mut()) {
-            if let Some(index) = nodes.child_by_name(index, id!(piano_key)) {
-                piano_key.apply(cx, apply_from, index, nodes);
+    struct Piano {
+        piano_key: LiveRef = PianoKey {}
+        scroll_view: ScrollView,
+        
+        rust keyboard_keys_down: [u8; 20] = [0; 20],
+        rust keyboard_octave: u8 = 5,
+        rust keyboard_velocity: u8 = 100,
+        
+        rust white_keys: ComponentMap<PianoKeyId, PianoKey>,
+        rust black_keys: ComponentMap<PianoKeyId, PianoKey>,
+        
+        hook fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+            for piano_key in self.white_keys.values_mut().chain(self.black_keys.values_mut()) {
+                if let Some(index) = nodes.child_by_name(index, id!(piano_key)) {
+                    piano_key.apply(cx, apply_from, index, nodes);
+                }
             }
+            self.scroll_view.redraw(cx);
         }
-        self.scroll_view.redraw(cx);
     }
 }
 
 pub enum PianoAction {
-    Note {is_on: bool, note_number: u8, velocity:u8},
+    Note {is_on: bool, note_number: u8, velocity: u8},
 }
 
 pub enum PianoKeyAction {
@@ -217,7 +196,6 @@ impl PianoKey {
         }
     }
 }
-
 
 impl Piano {
     pub fn draw(&mut self, cx: &mut Cx2d) {
@@ -286,7 +264,7 @@ impl Piano {
         self.black_keys.retain_visible();
     }
     
-    pub fn set_key_focus(&self, cx:&mut Cx){
+    pub fn set_key_focus(&self, cx: &mut Cx) {
         cx.set_key_focus(self.scroll_view.area());
     }
     
@@ -321,7 +299,6 @@ impl Piano {
             piano_key.handle_event(cx, event, &mut | _, e | actions.push((*key_id, e)));
         }
         
-        
         for (node_id, action) in actions {
             match action {
                 PianoKeyAction::Pressed(velocity) => {
@@ -329,11 +306,10 @@ impl Piano {
                     dispatch_action(cx, PianoAction::Note {is_on: true, note_number: node_id.0.0 as u8, velocity});
                 }
                 PianoKeyAction::Up => {
-                    dispatch_action(cx, PianoAction::Note {is_on: false, note_number: node_id.0.0 as u8, velocity:127});
+                    dispatch_action(cx, PianoAction::Note {is_on: false, note_number: node_id.0.0 as u8, velocity: 127});
                 }
             }
         }
-        
         
         fn key_map(kk: KeyCode) -> Option<u8> {
             match kk {
@@ -365,33 +341,33 @@ impl Piano {
                     let note_number = nn + self.keyboard_octave * 12;
                     self.keyboard_keys_down[nn as usize] = note_number;
                     self.set_note(cx, true, note_number);
-                    dispatch_action(cx, PianoAction::Note {is_on: true, note_number, velocity:self.keyboard_velocity});
+                    dispatch_action(cx, PianoAction::Note {is_on: true, note_number, velocity: self.keyboard_velocity});
                 }
                 else {match ke.key_code {
-                    KeyCode::KeyZ=>{
+                    KeyCode::KeyZ => {
                         self.keyboard_octave -= 1;
                         self.keyboard_octave = self.keyboard_octave.max(1);
                     }
-                    KeyCode::KeyX=>{
+                    KeyCode::KeyX => {
                         self.keyboard_octave += 1;
                         self.keyboard_octave = self.keyboard_octave.min(7);
                     }
-                    KeyCode::KeyC=>{
+                    KeyCode::KeyC => {
                         self.keyboard_velocity -= 16;
                         self.keyboard_velocity = self.keyboard_velocity.max(16);
                     }
-                    KeyCode::KeyV=>{
+                    KeyCode::KeyV => {
                         self.keyboard_velocity += 16;
                         self.keyboard_velocity = self.keyboard_velocity.min(127);
                     }
-                    _=>()
+                    _ => ()
                 }}
             }
             HitEvent::KeyUp(ke) => if let Some(nn) = key_map(ke.key_code) {
                 let note_number = self.keyboard_keys_down[nn as usize];
                 self.keyboard_keys_down[nn as usize] = 0;
                 self.set_note(cx, false, note_number);
-                dispatch_action(cx, PianoAction::Note {is_on: false, note_number, velocity:self.keyboard_velocity});
+                dispatch_action(cx, PianoAction::Note {is_on: false, note_number, velocity: self.keyboard_velocity});
             },
             HitEvent::KeyFocus(_) => {
                 for piano_key in self.white_keys.values_mut().chain(self.black_keys.values_mut()) {

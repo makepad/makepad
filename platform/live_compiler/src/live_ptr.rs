@@ -76,6 +76,8 @@ pub struct LivePtr {
     pub index: u32,
 }
 
+pub type LiveRef = Option<LivePtr>;
+ 
 impl LivePtr{
     pub fn node_index(&self)->usize{
         self.index as usize

@@ -224,7 +224,7 @@ pub fn generate_ref_cast_api_impl(input:TokenStream)->TokenStream{
         let mut tb = TokenBuilder::new();
         tb.add("impl dyn ").ident(&ident).add(" {");
         tb.add("    pub fn is<T: ").ident(&ident).add(" + 'static >(&self) -> bool {");
-        tb.add("        let t = TypeId::of::<T>();");
+        tb.add("        let t = std::any::TypeId::of::<T>();");
         tb.add("        let concrete = self.type_id();");
         tb.add("        t == concrete");
         tb.add("    }");
@@ -257,7 +257,7 @@ pub fn generate_clone_cast_api_impl(input:TokenStream)->TokenStream{
         let mut tb = TokenBuilder::new();
         tb.add("impl dyn ").ident(&ident).add(" {");
         tb.add("    pub fn is<T: ").ident(&ident).add(" + 'static >(&self) -> bool {");
-        tb.add("        let t = TypeId::of::<T>();");
+        tb.add("        let t = std::any::TypeId::of::<T>();");
         tb.add("        let concrete = self.type_id();");
         tb.add("        t == concrete");
         tb.add("    }");
