@@ -148,7 +148,25 @@ impl<'a> LiveParser<'a> {
     fn expect_use(&mut self, ld: &mut LiveOriginal) -> Result<(), LiveError> {
         let token_id = self.get_token_id();
         let crate_id = self.expect_ident() ?;
+        // if crate_id is capitalized, its a component.
+        // so we should make a LiveValue::UseComponent
         self.expect_token(LiveToken::Punct(id!(::))) ?;
+
+        if crate_id.is_capitalised(){
+            let component_id = if self.accept_token(LiveToken::Punct(id!(*))){
+                LiveId(0)
+            }
+            else {
+                self.expect_ident()?
+            };
+            
+            ld.nodes.push(LiveNode {
+                origin: LiveNodeOrigin::from_token_id(token_id),
+                id: component_id,
+                value: LiveValue::UseComponent(crate_id)
+            });
+            return Ok(())
+        }
         
         // ok so. we need to collect everything 'upto' the last id
         let first_module_id = self.expect_ident() ?;

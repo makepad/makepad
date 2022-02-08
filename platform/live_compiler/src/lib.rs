@@ -12,6 +12,7 @@ pub mod live_registry;
 pub mod live_expander;
 pub mod live_ptr;
 pub mod live_eval;
+pub mod live_component;
 
 pub use makepad_id_macros::*;
 pub use makepad_math;
@@ -27,6 +28,10 @@ pub use {
     },
     makepad_live_tokenizer::vec4_ext,
     crate::{
+        live_component::{
+            LiveComponentInfo,
+            LiveComponentRegistry
+        },
         live_eval::{
             live_eval,
             LiveEval
@@ -39,6 +44,7 @@ pub use {
         live_ptr::{
             LiveModuleId,
             LivePtr,
+            LiveRef,            
             LiveFileGeneration,
             LiveFileId,
         },

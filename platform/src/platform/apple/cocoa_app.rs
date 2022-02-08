@@ -249,36 +249,44 @@ impl CocoaApp {
     }
     
     pub fn startup_focus_hack(&mut self) {
-                /*
-        unsafe { 
+        
+        unsafe {
+            self.startup_focus_hack_ran = true;
             if !self.startup_focus_hack_ran {
                 self.startup_focus_hack_ran = true;
-                let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
-                let active: bool = msg_send![ns_app, isActive];
-                if !active {
-                    let dock_bundle_id = str_to_ns_string("com.apple.dock");
-                    let dock_array: ObjcId = msg_send![
-                        class!(NSRunningApplication),
-                        runningApplicationsWithBundleIdentifier: dock_bundle_id
-                    ];
-                    let dock_array_len: u64 = msg_send![dock_array, count];
-                    if dock_array_len == 0 {
-                        panic!("Dock not running");
-                    } else {
-                        let dock: ObjcId = msg_send![dock_array, objectAtIndex: 0];
+                
+                //let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+                //let active: bool = msg_send![ns_app, isActive];
+                //if !active {
+                let dock_bundle_id = str_to_nsstring("com.apple.dock");
+                let dock_array: ObjcId = msg_send![
+                    class!(NSRunningApplication),
+                    runningApplicationsWithBundleIdentifier: dock_bundle_id
+                ];
+                let my_app: ObjcId = msg_send![
+                    class!(NSRunningApplication),
+                    runningApplicationWithProcessIdentifier: std::process::id()
+                ];
+                let dock_array_len: u64 = msg_send![dock_array, count];
+                if dock_array_len == 0 {
+                    panic!("Dock not running"); 
+                } else {
+                    /*let dock: ObjcId = msg_send![dock_array, objectAtIndex: 0];
                         let _status: BOOL = msg_send![
-                            dock,
+                            dock, 
                             activateWithOptions: NSApplicationActivationOptions::NSApplicationActivateIgnoringOtherApps
                         ];
-                        let ns_running_app: ObjcId = msg_send![class!(NSRunningApplication), currentApplication];
-                        let () = msg_send![
-                            ns_running_app,
-                            activateWithOptions: NSApplicationActivationOptions::NSApplicationActivateIgnoringOtherApps
-                        ];
-                    }
+                        let ns_running_app: ObjcId = msg_send![class!(NSRunningApplication), currentApplication];*/
+                    
+                    let () = msg_send![
+                        my_app,
+                        activateWithOptions: NSApplicationActivationOptions::NSApplicationActivateIgnoringOtherApps
+                    ];
+                    let () = msg_send![self.cocoa_windows[0].0, makeKeyAndOrderFront: nil];
                 }
+                //}
             }
-        }*/
+        }
     }
     
     /*    pub fn init_app_after_first_window(&mut self) {

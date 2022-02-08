@@ -120,12 +120,12 @@ pub struct PianoKey {
     #[state(default_state, up_state, unfocussed_state)]
     animator: Animator,
     
-    focussed_state: Option<LivePtr>,
-    unfocussed_state: Option<LivePtr>,
-    default_state: Option<LivePtr>,
-    hover_state: Option<LivePtr>,
-    pressed_state: Option<LivePtr>,
-    up_state: Option<LivePtr>,
+    focussed_state: LiveRef,
+    unfocussed_state: LiveRef,
+    default_state: LiveRef,
+    hover_state: LiveRef,
+    pressed_state: LiveRef,
+    up_state: LiveRef,
 }
 
 #[derive(Live)]
@@ -133,9 +133,14 @@ pub struct Piano {
     scroll_view: ScrollView,
     piano_key: Option<LivePtr>,
     
-    #[rust([0;20])] keyboard_keys_down:[u8;20],
-    #[rust(5)] keyboard_octave: u8,
-    #[rust(100)] keyboard_velocity: u8,
+    #[rust([0;20])] 
+    keyboard_keys_down:[u8;20],
+    
+    #[rust(5)] 
+    keyboard_octave: u8,
+    
+    #[rust(100)] 
+    keyboard_velocity: u8,
 
     #[rust] white_keys: ComponentMap<PianoKeyId, PianoKey>,
     #[rust] black_keys: ComponentMap<PianoKeyId, PianoKey>,
