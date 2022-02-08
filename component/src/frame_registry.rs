@@ -1,19 +1,8 @@
 use {
     std::any::TypeId,
-    crate::makepad_platform::*
+    crate::makepad_platform::*,
+    std::collections::BTreeMap,
 };
-
-live_register!{
-    FrameComponentRegistry: {{FrameComponentRegistry}} {}
-}
-
-#[derive(LiveHook, LiveRegistry)]
-#[generate_registry(CxFrameComponentRegistry, FrameComponent, FrameComponentFactory)]
-pub struct FrameComponentRegistry();
-
-pub trait FrameComponentFactory {
-    fn new(&self, cx: &mut Cx) -> Box<dyn FrameComponent>;
-}
 
 pub trait FrameComponent: LiveApply {
     fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event) -> Option<Box<dyn FrameComponentAction >>;
@@ -24,6 +13,17 @@ pub trait FrameComponent: LiveApply {
     }
     fn type_id(&self) -> TypeId;
 }
+
+
+pub trait FrameComponentFactory {
+    fn new(&self, cx: &mut Cx) -> Box<dyn FrameComponent>;
+}
+
+#[derive(Default, LiveComponentRegistry)]
+pub struct FrameComponentRegistry {
+    pub map: BTreeMap<LiveType, (LiveComponentInfo, Box<dyn FrameComponentFactory>)>
+}
+
 
 #[derive(Clone)]
 pub struct FrameActionItem {
@@ -36,7 +36,6 @@ pub enum FrameActions {
     None,
     Actions(Vec<FrameActionItem>)
 }
-
 
 impl Default for FrameActions {
     fn default() -> Self {Self::None}
@@ -106,8 +105,17 @@ macro_rules!register_as_frame_component {
                     Box::new( $ ty::new(cx))
                 }
             }
-            $cx.registries.clone().get_or_create::<CxFrameComponentRegistry>()
-                .register($ ty::live_type_info($cx), Box::new(Factory()), LiveId::from_str(stringify!($ty)).unwrap());
+            $ cx.live_registry.borrow().components.clone().get_or_create::<FrameComponentRegistry>()
+                .map.insert(
+                LiveType::of::< $ ty>(),
+                (
+                    LiveComponentInfo {
+                        name: LiveId::from_str(stringify!( $ ty)).unwrap(),
+                        module_id: LiveModuleId::from_str(&module_path!()).unwrap()
+                    },
+                    Box::new(Factory())
+                )
+            );
         }
     }
 }

@@ -168,7 +168,7 @@ impl FrameComponent for Frame {
 impl Frame {
     
     fn new_component(&mut self, cx: &mut Cx, apply_from: ApplyFrom, id: LiveId, live_type: LiveType, index: usize, nodes: &[LiveNode]) {
-        if let Some(mut component) = cx.registries.clone().get::<CxFrameComponentRegistry>().new(cx, live_type) {
+        if let Some(mut component) = cx.live_registry.clone().borrow().components.get::<FrameComponentRegistry>().new(cx, live_type) {
             component.apply(cx, apply_from, index, nodes);
             self.components.insert(id, component);
         }

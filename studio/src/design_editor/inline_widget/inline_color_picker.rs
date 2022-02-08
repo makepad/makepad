@@ -43,11 +43,13 @@ fn register_factory(cx: &mut Cx) {
             CanEdit::No
         }
     }
-    cx.registries.clone().get_or_create::<CxInlineWidgetRegistry>().register(
-        InlineColorPicker::live_type_info(cx),
-        Box::new(Factory()),
-        LiveId::from_str("color_picker").unwrap(),
-    )
+    cx.live_registry.borrow().components.get_or_create::<InlineWidgetRegistry>().map.insert(
+        LiveType::of::<InlineColorPicker>(),
+        (LiveComponentInfo {
+            name: LiveId::from_str("color_picker").unwrap(),
+            module_id: LiveModuleId::from_str(&module_path!()).unwrap()
+        }, Box::new(Factory()))
+    );
 }
 
 impl InlineWidget for InlineColorPicker {

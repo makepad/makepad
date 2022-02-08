@@ -116,10 +116,13 @@ pub struct LiveEditor {
 
 impl LiveHook for LiveEditor {
     fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        let registries = cx.registries.clone();
+        /*
+        let live_registry_cp = cx.live_registry.clone();
+        let live_registry = live_registry_cp.borrow();
+        let reg = live_registry.components.get::<InlineWidgetRegistry>();
         for widget in self.widgets.values_mut() {
-            registries.get::<CxInlineWidgetRegistry>().apply(cx, apply_from, index, nodes, widget.inline_widget.as_mut());
-        }
+            reg.apply(cx, apply_from, index, nodes, widget.inline_widget.as_mut());
+        }*/
         if let Some(index) = nodes.child_by_name(index, id!(fold_button)) {
             for fold_button in self.fold_buttons.values_mut() {
                 fold_button.apply(cx, apply_from, index, nodes);
@@ -226,8 +229,7 @@ impl LiveEditor {
         
         let widget_draw_order = &mut self.widget_draw_order;
         
-        let registries = cx.registries.clone();
-        let widget_registry = registries.get::<CxInlineWidgetRegistry>();
+        let widget_registry = live_registry.components.get::<InlineWidgetRegistry>();
         let zoom_indent_depth = self.zoom_indent_depth;
         
         self.editor_impl.calc_lines_layout(cx, document_inner, &mut self.lines_layout, | cx, input | {

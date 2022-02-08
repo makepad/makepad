@@ -62,7 +62,7 @@ impl LogView {
                     body.clear();
                     let id = LiveId(index as  u64).into();
                     match msg{
-                        BuilderMsg::Bare(msg)=>{
+                        BuilderMsg::Bare(_msg)=>{
                         }
                         BuilderMsg::Location(msg)=>{
                             write!(file, "{}:{}", msg.file_name, msg.range.start.line).unwrap();

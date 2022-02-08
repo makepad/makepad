@@ -32,7 +32,7 @@ pub use crate::{
     scroll_view::{ScrollView},
     scroll_shadow::{ScrollShadow},
     frame::{Frame},
-    frame_registry::{FrameActions, CxFrameComponentRegistry, FrameComponent, FrameComponentRegistry}
+    frame_registry::{FrameActions, FrameComponent, FrameComponentRegistry}
 };
 
 pub fn live_register(cx:&mut Cx){
@@ -49,5 +49,4 @@ pub fn live_register(cx:&mut Cx){
     crate::window_menu::live_register(cx);
     crate::scroll_view::live_register(cx);
     crate::scroll_bar::live_register(cx);
-    crate::frame_registry::live_register(cx);
 }
