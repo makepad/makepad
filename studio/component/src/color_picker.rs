@@ -20,6 +20,7 @@ live_register!{
         }
         
         fn pixel(self) -> vec4 {
+            
             let rgbv = Pal::hsv2rgb(vec4(self.hue, self.sat, self.val, 1.));
             let w = self.rect_size.x;
             let h = self.rect_size.y;
@@ -270,7 +271,6 @@ impl ColorPicker {
         self.draw_wheel.hue = self.hue;
         self.draw_wheel.sat = self.sat;
         self.draw_wheel.val = self.val;
-        
         self.draw_wheel.draw_walk(cx, Walk::fixed(self.size * height_scale, self.size * height_scale));
     }
 }

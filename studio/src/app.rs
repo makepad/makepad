@@ -3,9 +3,6 @@ use {
         makepad_platform::*,
         app_inner::AppInner,
         app_state::AppState,
-        design_editor::{
-            inline_widget::InlineWidgetRegistry
-        }
     },
 };
 
@@ -28,7 +25,6 @@ live_register!{
 #[derive(Live, LiveHook)]
 pub struct App {
     inner: AppInner,
-    inline_widget_registry: InlineWidgetRegistry,
     #[rust(AppState::new())] state: AppState,
 }
 

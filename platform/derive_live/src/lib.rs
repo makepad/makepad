@@ -81,9 +81,9 @@ pub fn live_register(input: TokenStream) -> TokenStream {
     live_register_impl(input)
 }
 
-#[proc_macro_derive(LiveRegistry,attributes(generate_registry))]
-pub fn derive_live_registry(input: TokenStream) -> TokenStream {
-    derive_live_registry_impl(input)
+#[proc_macro_derive(LiveComponentRegistry)]
+pub fn derive_live_component_registry(input: TokenStream) -> TokenStream {
+    derive_live_component_registry_impl(input)
 }
 
 // move elsewhere

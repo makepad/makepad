@@ -9,7 +9,7 @@ mod live_prims;
 mod cx;
 mod cx_api;
 mod cx_thread;
-mod cx_registries;
+//mod cx_registries;
 mod cx_draw_shaders;
 
 pub mod live_traits;
@@ -85,10 +85,10 @@ pub use {
             profile_start,
             profile_end
         },
-        cx_registries::{
+        /*cx_registries::{
             CxRegistries,
             CxRegistryNew,
-        },
+        },*/
         cx_draw_shaders::{
         },
         cx::{

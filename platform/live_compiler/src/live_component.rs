@@ -3,8 +3,11 @@ use {
         any::TypeId,
         cell::RefCell,
         rc::Rc,
-        collections::HashMap,
-        collections::hash_map::Entry
+        collections::{
+            BTreeSet,
+            HashMap,
+            hash_map::Entry
+        }
     },
     crate::{
         makepad_derive_live::*,
@@ -15,16 +18,16 @@ use {
 };
 
 #[derive(Clone)]
-pub struct LiveComponentInfo{
+pub struct LiveComponentInfo {
     pub name: LiveId,
     pub module_id: LiveModuleId,
 }
 
-pub trait LiveComponentRegistry{
+pub trait LiveComponentRegistry {
     fn type_id(&self) -> LiveType;
-    fn get_component_info(&self, name:LiveId)->Option<LiveComponentInfo>;
-    fn component_type(&self)->LiveId;
-    fn get_component_infos(&self)->Vec<LiveComponentInfo>;
+    fn get_component_info(&self, name: LiveId) -> Option<LiveComponentInfo>;
+    fn component_type(&self) -> LiveId;
+    fn get_module_set(&self, set: &mut BTreeSet<LiveModuleId>);
 }
 
 #[derive(Default, Clone)]
@@ -33,6 +36,16 @@ pub struct LiveComponentRegistries(pub Rc<RefCell<HashMap<LiveType, Box<dyn Live
 generate_ref_cast_api!(LiveComponentRegistry);
 
 impl LiveComponentRegistries {
+    pub fn find_component(&self, ty: LiveId, name: LiveId) -> Option<LiveComponentInfo> {
+        let reg = self.0.borrow();
+        for entry in reg.values() {
+            if entry.component_type() == ty {
+                return entry.get_component_info(name)
+            }
+        }
+        None
+    }
+    
     pub fn new() -> Self {
         Self (Rc::new(RefCell::new(HashMap::new())))
     }
@@ -45,8 +58,8 @@ impl LiveComponentRegistries {
                 .cast::<T>().unwrap()
         )
     }
-
-    pub fn get_or_create<T: 'static + Default + LiveComponentRegistry>(&self) -> std::cell::RefMut<'_, T> 
+    
+    pub fn get_or_create<T: 'static + Default + LiveComponentRegistry>(&self) -> std::cell::RefMut<'_, T>
     {
         let reg = self.0.borrow_mut();
         std::cell::RefMut::map(
