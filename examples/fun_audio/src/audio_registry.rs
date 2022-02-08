@@ -26,54 +26,36 @@ pub trait AudioGraphNode {
     fn render_to_audio_buffer(&mut self, buffer: &mut AudioBuffer);
 }
 
-generate_ref_cast_api!(AudioComponent);
+//generate_ref_cast_api!(AudioComponent);
 
 
 
 // Audio component registry
 
 
-#[derive(Default)]
+#[derive(Default, LiveComponentRegistry)]
 pub struct AudioComponentRegistry {
     pub map: BTreeMap<LiveType, (LiveComponentInfo, Box<dyn AudioComponentFactory>)>
-}
-
-impl AudioComponentRegistry {
-    fn new(&self, cx: &mut Cx, ty: LiveType) -> Option<Box<dyn AudioComponent >> {
-        self.map.get(&ty).map( | (_, fac) | fac.new(cx))
-    }
 }
 
 pub trait AudioComponentFactory {
     fn new(&self, cx: &mut Cx) -> Box<dyn AudioComponent>;
 }
 
-impl LiveComponentRegistry for AudioComponentRegistry {
-    fn type_id(&self) -> LiveType {LiveType::of::<AudioComponentRegistry>()}
-    fn component_type(&self) -> LiveId {id!(AudioComponent)}
-    fn get_component_infos(&self) -> Vec<LiveComponentInfo> {
-        self.map.values().map( | (info, _) | info.clone()).collect()
-    }
-    fn get_component_info(&self, name:LiveId)->Option<LiveComponentInfo>{
-        self.map.values().find( | (info, _) | info.name == name).map( | (info, _) | info.clone())
-    }
-}
-
-
 
 // Live bindings for AudioComponentOption
 
 
-pub struct AudioComponentOption(Option<Box<dyn AudioComponent >>);
+pub struct AudioComponentRef(Option<Box<dyn AudioComponent >>);
 
-impl AudioComponentOption {
+impl AudioComponentRef {
     pub fn component(&mut self) -> &mut Option<Box<dyn AudioComponent >> {
         &mut self.0
     }
 }
 
-impl LiveHook for AudioComponentOption {}
-impl LiveApply for AudioComponentOption {
+impl LiveHook for AudioComponentRef {}
+impl LiveApply for AudioComponentRef {
     fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         if let LiveValue::Class {live_type, ..} = nodes[index].value {
             if let Some(component) = &mut self.0 {
@@ -99,7 +81,7 @@ impl LiveApply for AudioComponentOption {
     }
 }
 
-impl LiveNew for AudioComponentOption {
+impl LiveNew for AudioComponentRef {
     fn new(_cx: &mut Cx) -> Self {
         Self (None)
     }
@@ -129,16 +111,12 @@ macro_rules!register_as_audio_component {
                     Box::new( $ ty::new(cx))
                 }
             }
-            $ cx.live_registry.borrow().components.clone().get_or_create::<AudioComponentRegistry>()
-                .map.insert(
+            $ cx.live_registry.borrow().components.get_or_create::<AudioComponentRegistry>().map.insert(
                 LiveType::of::< $ ty>(),
-                (
-                    LiveComponentInfo {
-                        name: LiveId::from_str(stringify!( $ ty)).unwrap(),
-                        module_id: LiveModuleId::from_str(&module_path!()).unwrap()
-                    },
-                    Box::new(Factory())
-                )
+                (LiveComponentInfo {
+                    name: LiveId::from_str(stringify!( $ ty)).unwrap(),
+                    module_id: LiveModuleId::from_str(&module_path!()).unwrap()
+                }, Box::new(Factory()))
             );
         }
     }

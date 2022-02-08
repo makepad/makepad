@@ -15,7 +15,7 @@ pub use crate::makepad_platform::platform::apple::core_midi::*;
 // lets give this a stable pointer for the UI
 live_register!{
     //use crate::plugin_music_device::PluginMusicDevice;
-    use AudioComponent::BasicSynth; 
+    use AudioComponent::*;
     AudioGraph: {{AudioGraph}} {
         root: BasicSynth {
             prop: 3.0
@@ -55,7 +55,7 @@ pub enum AudioEngineAction {}
 
 #[derive(Live)]
 pub struct AudioGraph {
-    root: AudioComponentOption,
+    root: AudioComponentRef,
     #[rust(FromUISender::new())] from_ui: FromUISender<FromUI>,
     #[rust(ToUIReceiver::new(cx))] to_ui: ToUIReceiver<ToUI>,
 }

@@ -19,9 +19,9 @@ use {
         makepad_shader_compiler::{
             ShaderRegistry
         },  
-        cx_registries::{
+        /*cx_registries::{
             CxRegistries
-        },
+        },*/
         cx_draw_shaders::{
             CxDrawShaders
         },
@@ -104,7 +104,7 @@ pub struct Cx {
     pub path_to_font_id: HashMap<String, usize>,
     pub draw_font_atlas: Option<Box<CxDrawFontAtlas >>,
     
-    pub registries: CxRegistries,
+    //pub registries: CxRegistries,
     
     pub new_draw_event: DrawEvent,
     
@@ -239,7 +239,7 @@ impl Default for Cx {
             path_to_font_id: HashMap::new(),
             draw_font_atlas: None,
             
-            registries: CxRegistries::new(),
+            //registries: CxRegistries::new(),
             
             new_draw_event: DrawEvent::default(),
             

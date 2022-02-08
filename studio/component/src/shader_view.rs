@@ -83,7 +83,7 @@ impl ShaderView {
                     _ => ()
                 }
             },
-            HitEvent::FingerDown(fe) => {
+            HitEvent::FingerDown(_fe) => {
                 self.animate_to(cx, self.pressed_state);
             },
             HitEvent::FingerUp(fe) => {
