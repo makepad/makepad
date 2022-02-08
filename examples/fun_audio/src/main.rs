@@ -9,7 +9,7 @@ use crate::piano::*;
 use crate::audio_graph::*;
 
 #[macro_use]
-mod audio_registry;
+mod audio_component;
 
 live_register!{
     use makepad_component::frame::Frame;

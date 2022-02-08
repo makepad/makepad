@@ -14,7 +14,6 @@ use {
 
 
 pub enum AudioComponentAction {}
-
 pub trait AudioComponent: LiveApply {
     fn handle_event_with_fn(&mut self, _cx: &mut Cx, event: &mut Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction));
     fn type_id(&self) -> LiveType;
@@ -43,7 +42,7 @@ pub trait AudioComponentFactory {
 }
 
 
-// Live bindings for AudioComponentOption
+// Live bindings for AudioComponentRef
 
 
 pub struct AudioComponentRef(Option<Box<dyn AudioComponent >>);
@@ -102,22 +101,16 @@ impl LiveNew for AudioComponentRef {
 
 
 #[macro_export]
-macro_rules!register_as_audio_component {
-    ( $ cx: expr, $ ty: ident) => {
-        {
+macro_rules!audio_component_factory {
+    ($ ty: ident) => {
+        | cx: &mut Cx | {
             struct Factory();
             impl AudioComponentFactory for Factory {
                 fn new(&self, cx: &mut Cx) -> Box<dyn AudioComponent> {
                     Box::new( $ ty::new(cx))
                 }
             }
-            $ cx.live_registry.borrow().components.get_or_create::<AudioComponentRegistry>().map.insert(
-                LiveType::of::< $ ty>(),
-                (LiveComponentInfo {
-                    name: LiveId::from_str(stringify!( $ ty)).unwrap(),
-                    module_id: LiveModuleId::from_str(&module_path!()).unwrap()
-                }, Box::new(Factory()))
-            );
+            register_component_factory!(cx, AudioComponentRegistry, $ty, Factory);
         }
     }
 }
