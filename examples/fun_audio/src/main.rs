@@ -43,7 +43,6 @@ impl App {
         crate::plugin_music_device::live_register(cx);
         crate::basic_synth::live_register(cx);
         crate::audio_graph::live_register(cx);
-        crate::audio_registry::live_register(cx);
         crate::piano::live_register(cx);
     }
     

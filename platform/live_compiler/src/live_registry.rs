@@ -12,7 +12,8 @@ use {
         live_ptr::{LiveFileId, LivePtr, LiveModuleId, LiveFileGeneration},
         live_token::{LiveToken, LiveTokenId, TokenWithSpan},
         span::{TextSpan, TextPos},
-        live_expander::{LiveExpander}
+        live_expander::{LiveExpander},
+        live_component::{LiveComponentRegistries}
     }
 };
 
@@ -32,9 +33,9 @@ pub struct LiveFile {
     pub next_original: Option<LiveOriginal>,
     pub expanded: LiveExpanded,
     
+    
     pub live_type_infos: Vec<LiveTypeInfo>,
 }
-
 
 pub struct LiveRegistry {
     pub file_ids: HashMap<String, LiveFileId>,
@@ -43,6 +44,7 @@ pub struct LiveRegistry {
     pub live_type_infos: HashMap<LiveType, LiveTypeInfo>,
     pub ignore_no_dsl: HashSet<LiveId>,
     pub main_module: Option<LiveFileId>,
+    pub components: LiveComponentRegistries
 }
 
 impl Default for LiveRegistry {
@@ -57,6 +59,7 @@ impl Default for LiveRegistry {
             module_id_to_file_id: HashMap::new(),
             live_files: Vec::new(),
             live_type_infos: HashMap::new(),
+            components: LiveComponentRegistries::default()
             //mutated_apply: None,
             //mutated_tokens: None
         }
@@ -253,19 +256,23 @@ impl LiveRegistry {
     
     pub fn find_scope_target_via_start(&self, item: LiveId, index: usize, nodes: &[LiveNode]) -> Option<LiveScopeTarget> {
         if let Some(index) = nodes.scope_up_down_by_name(index, item) {
-            if let LiveValue::Use(module_id) = &nodes[index].value {
-                // ok lets find it in that other doc
-                if let Some(file_id) = self.module_id_to_file_id(*module_id) {
-                    let file = self.file_id_to_file(file_id);
-                    if let Some(index) = file.expanded.nodes.child_by_name(0, item) {
-                        return Some(LiveScopeTarget::LivePtr(
-                            LivePtr {file_id: file_id, index: index as u32, generation:file.generation}
-                        ))
+            match &nodes[index].value{
+                LiveValue::Use(module_id) =>{
+                    // ok lets find it in that other doc
+                    if let Some(file_id) = self.module_id_to_file_id(*module_id) {
+                        let file = self.file_id_to_file(file_id);
+                        if let Some(index) = file.expanded.nodes.child_by_name(0, item) {
+                            return Some(LiveScopeTarget::LivePtr(
+                                LivePtr {file_id: file_id, index: index as u32, generation:file.generation}
+                            ))
+                        }
                     }
                 }
-            }
-            else {
-                return Some(LiveScopeTarget::LocalPtr(index))
+                LiveValue::UseComponent(component_type) =>{
+                }
+                _=>{
+                    return Some(LiveScopeTarget::LocalPtr(index))
+                }
             }
         }
         // ok now look at the glob use * things
@@ -287,7 +294,6 @@ impl LiveRegistry {
         }
         None
     }
-    
     
     pub fn find_scope_ptr_via_expand_index(&self, file_id: LiveFileId, index: usize, item: LiveId) -> Option<LivePtr> {
         // ok lets start
@@ -734,6 +740,7 @@ impl LiveRegistry {
     }
     
     pub fn expand_all_documents(&mut self, errors: &mut Vec<LiveError>) {
+        // lets build up all dependencies here
         
         // alright so. we iterate
         let mut dep_order = Vec::new();

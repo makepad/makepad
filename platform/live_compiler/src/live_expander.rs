@@ -47,7 +47,7 @@ impl<'a> LiveExpander<'a> {
         }
     }
     
-    pub fn expand(&mut self, in_doc: &LiveOriginal, out_doc: &mut LiveExpanded, generation:LiveFileGeneration) {
+    pub fn expand(&mut self, in_doc: &LiveOriginal, out_doc: &mut LiveExpanded, generation: LiveFileGeneration) {
         
         // ok first copy the edit_info over.
         //out_doc.edit_info = in_doc.edit_info.clone();
@@ -76,6 +76,31 @@ impl<'a> LiveExpander<'a> {
                     current_parent.pop();
                     level_overwrite.pop();
                     //self.scope_stack.stack.pop();
+                    in_index += 1;
+                    continue;
+                }
+                LiveValue::UseComponent(component_type) => {
+                    let registries = self.live_registry.components.0.borrow();
+                    if let Some(registry) = registries.values().find( | v | v.component_type() == *component_type) {
+                        if in_node.id != LiveId(0) && registry.get_component_info(in_node.id).is_none() {
+                            self.errors.push(LiveError {
+                                origin: live_error_origin!(),
+                                span: in_node.origin.token_id().unwrap().into(),
+                                message: format!("Use statement component not found {}::{}", component_type, in_node.id)
+                            });
+                        }
+                    }
+                    else {
+                        self.errors.push(LiveError {
+                            origin: live_error_origin!(),
+                            span: in_node.origin.token_id().unwrap().into(),
+                            message: format!("Use statement invalid component type {}::{}", component_type, in_node.id)
+                        });
+                    }
+                    let index = out_doc.nodes.append_child_index(current_parent.last().unwrap().1);
+                    let old_len = out_doc.nodes.len();
+                    out_doc.nodes.insert(index, in_node.clone());
+                    self.shift_parent_stack(&mut current_parent, &out_doc.nodes, index, old_len, out_doc.nodes.len());
                     in_index += 1;
                     continue;
                 }
@@ -133,8 +158,8 @@ impl<'a> LiveExpander<'a> {
                             LiveValue::NamedEnum {..} |
                             LiveValue::Clone {..} => {
                                 out_doc.nodes[overwrite] = in_node.clone();
-                                if let Some(next_index)= out_doc.nodes.next_child(overwrite){
-                                 //   let next_index = out_doc.nodes.next_child(overwrite).unwrap();
+                                if let Some(next_index) = out_doc.nodes.next_child(overwrite) {
+                                    //   let next_index = out_doc.nodes.next_child(overwrite).unwrap();
                                     // POTENTIAL SHIFT
                                     let old_len = out_doc.nodes.len();
                                     out_doc.nodes.drain(overwrite + 1..next_index - 1);
@@ -196,7 +221,7 @@ impl<'a> LiveExpander<'a> {
                         self.shift_parent_stack(&mut current_parent, &out_doc.nodes, overwrite, old_len, out_doc.nodes.len());
                         level_overwrite.push(true);
                         overwrite
-                    } 
+                    }
                     else if in_value.is_clone() && out_value.is_object() {
                         // throw away whats in there
                         let next_index = out_doc.nodes.skip_node(overwrite);
@@ -210,11 +235,11 @@ impl<'a> LiveExpander<'a> {
                         level_overwrite.push(true);
                         overwrite
                     }
-                    else if in_value.is_number_type() && out_value.is_number_type(){
+                    else if in_value.is_number_type() && out_value.is_number_type() {
                         out_doc.nodes[overwrite] = in_node.clone();
                         overwrite
                     }
-                    else{
+                    else {
                         self.errors.push(LiveError {
                             origin: live_error_origin!(),
                             span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).into(),
@@ -257,7 +282,7 @@ impl<'a> LiveExpander<'a> {
                     if let Some(target) = self.live_registry.find_scope_target_via_start(*clone, out_index, &out_doc.nodes) {
                         match target {
                             LiveScopeTarget::LocalPtr(local_ptr) => {
-                                //println!("CLONING LOCAL {}", clone);
+                                
                                 let old_len = out_doc.nodes.len();
                                 
                                 out_doc.nodes.insert_children_from_self(local_ptr, out_index + 1);
@@ -308,7 +333,7 @@ impl<'a> LiveExpander<'a> {
                         };
                         //overwrite value, this copies the Class
                     }
-                    else if !self.live_registry.ignore_no_dsl.contains(clone){
+                    else if !self.live_registry.ignore_no_dsl.contains(clone) {
                         self.errors.push(LiveError {
                             origin: live_error_origin!(),
                             span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).into(),
@@ -357,7 +382,7 @@ impl<'a> LiveExpander<'a> {
                                         
                                         out_doc.nodes[node_insert_point].id = field.id;
                                     }
-                                    else if !self.live_registry.ignore_no_dsl.contains(&lti.type_name){
+                                    else if !self.live_registry.ignore_no_dsl.contains(&lti.type_name) {
                                         self.errors.push(LiveError {
                                             origin: live_error_origin!(),
                                             span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).into(),
@@ -384,7 +409,7 @@ impl<'a> LiveExpander<'a> {
                                         
                                         out_doc.nodes[node_insert_point].id = field.id;
                                     }
-                                    else if lti.type_name != LiveId(0){
+                                    else if lti.type_name != LiveId(0) {
                                         self.errors.push(LiveError {
                                             origin: live_error_origin!(),
                                             span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).into(),
@@ -393,7 +418,7 @@ impl<'a> LiveExpander<'a> {
                                     }
                                 }
                             }
-                            else if !self.live_registry.ignore_no_dsl.contains(&lti.type_name){
+                            else if !self.live_registry.ignore_no_dsl.contains(&lti.type_name) && lti.type_name != LiveId(0) {
                                 self.errors.push(LiveError {
                                     origin: live_error_origin!(),
                                     span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).into(),
@@ -404,7 +429,7 @@ impl<'a> LiveExpander<'a> {
                     }
                     current_parent.push((out_doc.nodes[out_index].id, out_index));
                 }
-                LiveValue::Expr{..} => {
+                LiveValue::Expr {..} => {
                     panic!()
                 },
                 LiveValue::Array |
