@@ -1,8 +1,8 @@
 #![allow(unused_variables)]
 use {
     crate::{
-        register_as_audio_component,
-        audio_registry::*,
+        audio_component_factory,
+        audio_component::*,
         audio_graph::*,
         makepad_platform::*,
         makepad_platform::platform::apple::{
@@ -21,7 +21,7 @@ live_register!{
 enum FromUI {}
 
 #[derive(Live, LiveHook)]
-#[live_register( | cx: &mut Cx | {register_as_audio_component!(cx, BasicSynth)})]
+#[live_register(audio_component_factory!(BasicSynth))]
 struct BasicSynth {
     prop:f64,
     #[rust(FromUISender::new())] from_ui: FromUISender<FromUI>,

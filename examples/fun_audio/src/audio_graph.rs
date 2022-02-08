@@ -1,7 +1,7 @@
 #![allow(unused_variables)]
 use {
     crate::{
-        audio_registry::*,
+        audio_component::*,
         makepad_platform::*,
         makepad_platform::platform::apple::{
             audio_unit::*,

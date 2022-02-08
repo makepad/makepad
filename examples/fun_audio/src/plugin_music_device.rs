@@ -1,8 +1,8 @@
 #![allow(unused_variables)]
 use {
     crate::{
-        register_as_audio_component,
-        audio_registry::*,
+        audio_component_factory,
+        audio_component::*,
         makepad_platform::*,
         makepad_platform::platform::apple::{
             audio_unit::*,
@@ -26,7 +26,7 @@ enum FromUI {
 }
 
 #[derive(Live)]
-#[live_register( | cx: &mut Cx | {register_as_audio_component!(cx, PluginMusicDevice)})]
+#[live_register(audio_component_factory!(PluginMusicDevice))]
 struct PluginMusicDevice {
     plugin:String,
     preset_data:String,

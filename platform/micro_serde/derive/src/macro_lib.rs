@@ -685,7 +685,16 @@ impl TokenParser {
             if !self.open_bracket() {
                 break;
             }
+            let mut assign_form = false;
             while let Some(ident) = self.eat_any_ident() {
+                // we might have an =
+                if self.eat_punct_alone('='){
+                    let level = self.eat_level();
+                   results.push(Attribute {name: ident, args: Some(level)});
+                   //eprintln!("{} {}", results.last().unwrap().name, results.last().as_ref().unwrap().args.as_ref().unwrap().to_string());
+                   assign_form = true;
+                   break; 
+                }
                 if !self.open_paren() && !self.open_brace() {
                     results.push(Attribute {name: ident, args: None});
                     break;
@@ -694,7 +703,7 @@ impl TokenParser {
                 results.push(Attribute {name: ident, args: Some(self.eat_level())});
                 self.eat_punct_alone(',');
             }
-            if !self.eat_eot() {
+            if !assign_form && !self.eat_eot() {
                 break
             }
         }
