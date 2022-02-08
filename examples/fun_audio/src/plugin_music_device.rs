@@ -3,7 +3,6 @@ use {
     crate::{
         register_as_audio_component,
         audio_registry::*,
-        audio_graph::*,
         makepad_platform::*,
         makepad_platform::platform::apple::{
             audio_unit::*,

@@ -173,15 +173,15 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         // scan backwards to find a node with this name
         loop {
             if self_ref[index].is_open() {
-                if stack_depth>0 {
-                    stack_depth -= 1;
-                }
                 if stack_depth == 0{
                     if let Some(child_index) = self.child_by_name(index, name) {
                         if child_index != start_index {
                             return Some(child_index)
                         }
                     }
+                }
+                if stack_depth>0 {
+                    stack_depth -= 1;
                 }
             }
             else if self_ref[index].is_close() {
@@ -713,6 +713,9 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
                 },
                 LiveValue::Use(module_path) => {
                     writeln!(f, "<Use> {}::{}", module_path, node.id).unwrap();
+                }
+                LiveValue::UseComponent(component_id) => {
+                    writeln!(f, "<UseComponent> {}::{}", component_id, node.id).unwrap();
                 }
             }
             index += 1;
