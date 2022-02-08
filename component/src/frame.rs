@@ -2,7 +2,7 @@ use {
     std::collections::HashMap,
     crate::{
         makepad_platform::*,
-        frame_registry::*
+        frame_component::*
     }
 };
 

@@ -11,7 +11,7 @@ pub mod component_map;
 pub mod link_button;
 
 #[macro_use]
-pub mod frame_registry;
+pub mod frame_component;
 pub mod frame;
 pub mod window_menu;
 
@@ -32,7 +32,7 @@ pub use crate::{
     scroll_view::{ScrollView},
     scroll_shadow::{ScrollShadow},
     frame::{Frame},
-    frame_registry::{FrameActions, FrameComponent, FrameComponentRegistry}
+    frame_component::{FrameActions, FrameComponent, FrameComponentRegistry}
 };
 
 pub fn live_register(cx:&mut Cx){

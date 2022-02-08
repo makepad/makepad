@@ -391,6 +391,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         tb.add("        ret");
         tb.add("    }");
         tb.add("}");
+        
         Ok(())
     }
     else if parser.eat_ident("enum") {

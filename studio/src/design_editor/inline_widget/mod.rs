@@ -1,3 +1,4 @@
 pub mod inline_color_picker;
-pub mod inline_registry;
-pub use inline_registry::*;
+#[macro_use]
+pub mod inline_widget;
+pub use inline_widget::*;
