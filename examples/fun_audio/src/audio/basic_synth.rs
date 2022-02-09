@@ -2,8 +2,7 @@
 use {
     crate::{
         audio_component_factory,
-        audio_component::*,
-        audio_graph::*,
+        audio::*,
         makepad_platform::*,
         makepad_platform::platform::apple::{
             audio_unit::*,
@@ -24,7 +23,7 @@ enum FromUI {}
 #[live_register(audio_component_factory!(BasicSynth))]
 struct BasicSynth {
     prop:f64,
-    #[rust(FromUISender::new())] from_ui: FromUISender<FromUI>,
+    #[rust] from_ui: FromUISender<FromUI>,
 //    #[rust(ToUIReceiver::new(cx))] to_ui: ToUIReceiver<ToUI>,
 }
 
