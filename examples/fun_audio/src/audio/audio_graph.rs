@@ -1,7 +1,7 @@
 #![allow(unused_variables)]
 use {
     crate::{
-        audio_component::*,
+        audio::*,
         makepad_platform::*,
         makepad_platform::platform::apple::{
             audio_unit::*,
@@ -14,29 +14,10 @@ pub use crate::makepad_platform::platform::apple::core_midi::*;
 
 // lets give this a stable pointer for the UI
 live_register!{
-    //use crate::plugin_music_device::PluginMusicDevice;
     use AudioComponent::*;
     AudioGraph: {{AudioGraph}} {
         root: BasicSynth {
-            prop: 3.0
         }
-        /*
-        root: PluginMusicDevice {
-            plugin: "AUMIDISynth"
-            preset_data: "21adslkfjalkwqwe"
-        }
-        root: Mixer {
-            Instrument {
-                key_range: {start: 34, end: 47 shift: 30}
-                PluginEffect {
-                    plugin: "AUReverb"
-                }
-                PluginMusicDevice {
-                    plugin: "FM8"
-                    preset_data: "21adslkfjalkwqwe"
-                }
-            }
-        }*/
     }
 }
 
@@ -51,12 +32,14 @@ pub enum ToUI {
     Midi1Data(Midi1Data),
 }
 
-pub enum AudioEngineAction {}
+pub enum AudioGraphAction {
+    Midi1Data(Midi1Data),
+}
 
 #[derive(Live)]
 pub struct AudioGraph {
     root: AudioComponentRef,
-    #[rust(FromUISender::new())] from_ui: FromUISender<FromUI>,
+    #[rust] from_ui: FromUISender<FromUI>,
     #[rust(ToUIReceiver::new(cx))] to_ui: ToUIReceiver<ToUI>,
 }
 
@@ -80,13 +63,12 @@ struct AudioGraphState {
     from_ui: FromUIReceiver<FromUI>,
     root: Option<Box<dyn AudioGraphNode + Send >>
 }
-// ok so. how do we deal with this
+
 impl AudioGraph {
     fn start_midi_input(from_ui: FromUISender<FromUI>, to_ui: ToUISender<ToUI>) {
         Midi::new_midi_1_input(move | data | {
             let _ = from_ui.send(FromUI::Midi1Data(data));
             let _ = to_ui.send(ToUI::Midi1Data(data));
-            
         }).unwrap();
     }
     
@@ -135,7 +117,11 @@ impl AudioGraph {
         });
     }
     
-    pub fn handle_event_with_fn(&mut self, cx: &mut Cx, event: &mut Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioEngineAction)) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event)->Vec<AudioGraphAction> {
+        let mut a = Vec::new(); self.handle_event_with_fn(cx, event, &mut |_,ac| a.push(ac)); a
+    }
+    
+    pub fn handle_event_with_fn(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, AudioGraphAction)) {
         if let Some(root) = self.root.component() {
             root.handle_event_with_fn(cx, event, &mut | _cx, _action | {
             });
@@ -150,6 +136,7 @@ impl AudioGraph {
             Event::Signal(se) => while let Ok(to_ui) = self.to_ui.try_recv(se) {
                 match to_ui {
                     ToUI::Midi1Data(data) => {
+                        dispatch_action(cx, AudioGraphAction::Midi1Data(data))
                     },
                 }
                 // ok something sent us a signal.

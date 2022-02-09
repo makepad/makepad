@@ -2,7 +2,7 @@
 use {
     crate::{
         audio_component_factory,
-        audio_component::*,
+        audio::audio_component::*,
         makepad_platform::*,
         makepad_platform::platform::apple::{
             audio_unit::*,
@@ -32,7 +32,7 @@ struct PluginMusicDevice {
     preset_data:String,
 
     #[rust] audio_device: Option<AudioDevice>,
-    #[rust(FromUISender::new())] from_ui: FromUISender<FromUI>,
+    #[rust] from_ui: FromUISender<FromUI>,
     #[rust(ToUIReceiver::new(cx))] to_ui: ToUIReceiver<ToUI>,
 }
 

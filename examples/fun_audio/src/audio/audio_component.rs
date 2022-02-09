@@ -3,7 +3,7 @@ use {
     crate::{
         makepad_platform::*,
         makepad_platform::audio::*,
-        audio_graph::*
+        audio::*
         //audio_engine::AudioEngine
     }
 };
@@ -66,7 +66,8 @@ impl LiveApply for AudioComponentRef {
                     return nodes.skip_node(index);
                 }
             }
-            if let Some(mut component) = cx.live_registry.clone().borrow().components.clone().get::<AudioComponentRegistry>().new(cx, live_type) {
+            if let Some(mut component) = cx.live_registry.clone().borrow()
+                .components.get::<AudioComponentRegistry>().new(cx, live_type) {
                 component.apply(cx, apply_from, index, nodes);
                 self.0 = Some(component);
             }
@@ -102,7 +103,7 @@ impl LiveNew for AudioComponentRef {
 
 #[macro_export]
 macro_rules!audio_component_factory {
-    ($ ty: ident) => {
+    ( $ ty: ident) => {
         | cx: &mut Cx | {
             struct Factory();
             impl AudioComponentFactory for Factory {
@@ -110,7 +111,7 @@ macro_rules!audio_component_factory {
                     Box::new( $ ty::new(cx))
                 }
             }
-            register_component_factory!(cx, AudioComponentRegistry, $ty, Factory);
+            register_component_factory!(cx, AudioComponentRegistry, $ ty, Factory);
         }
     }
 }
