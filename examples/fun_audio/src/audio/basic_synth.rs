@@ -1,12 +1,7 @@
-#![allow(unused_variables)]
 use {
     crate::{
-        audio_component_factory,
         audio::*,
-        makepad_platform::*,
-        makepad_platform::platform::apple::{
-            audio_unit::*,
-        },
+        makepad_platform::{*,audio::*, midi::*}
     },
 };
 
@@ -70,6 +65,6 @@ impl AudioComponent for BasicSynth {
         Box::new(Node::default())
     }
     
-    fn handle_event_with_fn(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)){
+    fn handle_event_with_fn(&mut self, _cx: &mut Cx, _event: &mut Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)){
     }
 }

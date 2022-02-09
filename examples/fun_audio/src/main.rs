@@ -10,26 +10,18 @@ live_register!{
     use AudioComponent::*;
     App: {{App}} {
         audio_graph: {
-            root: PluginMusicDevice {
-                plugin:"FM8"
-            }
-            /*
-        root: PluginMusicDevice {
-            plugin: "AUMIDISynth"
-            preset_data: "21adslkfjalkwqwe"
-        }
-        root: Mixer {
-            Instrument {
-                key_range: {start: 34, end: 47 shift: 30}
-                PluginEffect {
-                    plugin: "AUReverb"
-                }
-                PluginMusicDevice {
-                    plugin: "FM8"
-                    preset_data: "21adslkfjalkwqwe"
+            root: Mixer {
+                Instrument {
+                    key_range: {start: 34, end: 47 shift: 30}
+                    PluginEffect {
+                        plugin: "AUReverb"
+                    }
+                    PluginMusicDevice {
+                        plugin: "FM8"
+                        preset_data: "21adslkfjalkwqwe"
+                    }
                 }
             }
-        }*/
         }
         
         scroll_view: {
@@ -57,9 +49,7 @@ pub struct App {
 impl App {
     pub fn live_register(cx: &mut Cx) {
         makepad_component::live_register(cx);
-        crate::audio::plugin_music_device::live_register(cx);
-        crate::audio::basic_synth::live_register(cx);
-        crate::audio::audio_graph::live_register(cx);
+        crate::audio::live_register(cx);
         crate::piano::live_register(cx);
     }
     
