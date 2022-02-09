@@ -58,8 +58,6 @@ impl AudioGraphNode for Node{
 
 
 impl AudioComponent for BasicSynth {
-    fn type_id(&self) -> LiveType {LiveType::of::<Self>()}
-
     fn get_graph_node(&mut self) -> Box<dyn AudioGraphNode + Send>{
         self.from_ui.new_channel();
         Box::new(Node::default())

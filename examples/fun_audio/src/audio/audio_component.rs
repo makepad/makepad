@@ -15,13 +15,13 @@ use {
 
 pub enum AudioComponentAction {}
 pub trait AudioComponent: LiveApply {
+    fn type_id(&self) -> LiveType where Self:'static {LiveType::of::<Self>()}
     fn handle_event_with_fn(&mut self, _cx: &mut Cx, event: &mut Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction));
-    fn type_id(&self) -> LiveType;
     fn get_graph_node(&mut self) -> Box<dyn AudioGraphNode + Send>;
 }
 
 pub trait AudioGraphNode {
-    fn handle_midi_1_data(&mut self, data: Midi1Data);
+    fn handle_midi_1_data(&mut self, _data: Midi1Data){}
     fn render_to_audio_buffer(&mut self, buffer: &mut AudioBuffer);
 }
 

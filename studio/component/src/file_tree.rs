@@ -114,12 +114,9 @@ live_register!{
         
         focussed_state: {
             track: focus,
-            duration: 0.1,
+            duration: 0.,
             apply: {
-                focussed: 0.0,
-                bg_quad: {selected: (selected)}
-                name_text: {selected: (selected)}
-                icon_quad: {selected: (selected)}
+                focussed: 1.0,
             }
         }
         
@@ -127,7 +124,7 @@ live_register!{
             track: focus,
             duration: 0.1,
             apply: {
-                focussed: [{time: 0.0, value: 1.0}],
+                focussed: 0.0,
             }
         }
         
@@ -244,7 +241,7 @@ pub struct FileTreeNode {
     name_text: DrawNameText,
     layout: Layout,
     
-    #[state(default_state, unselected_state, closed_state)]
+    #[state(default_state, unselected_state, closed_state, focussed_state)]
     animator: Animator,
     
     indent_width: f32,
@@ -265,6 +262,7 @@ pub struct FileTreeNode {
     min_drag_distance: f32,
     
     opened: f32,
+    focussed:f32,
     hover: f32,
     selected: f32,
 }

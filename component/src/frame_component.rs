@@ -11,7 +11,7 @@ pub trait FrameComponent: LiveApply {
         self.apply_over(cx, nodes);
         self.draw_component(cx);
     }
-    fn type_id(&self) -> TypeId;
+    fn type_id(&self) -> LiveType where Self:'static {LiveType::of::<Self>()}
 }
 
 
