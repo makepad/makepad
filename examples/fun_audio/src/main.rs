@@ -1,20 +1,37 @@
 pub use makepad_component::{self, *};
-pub use makepad_platform::{self, *};
+pub use makepad_platform::{self, *, audio::*, midi::*};
 
 mod piano;
-mod plugin_music_device;
-mod audio_graph;
-mod basic_synth;
+mod audio;
 use crate::piano::*;
-use crate::audio_graph::*;
-
-#[macro_use]
-mod audio_component;
+use crate::audio::*;
 
 live_register!{
-    use makepad_component::frame::Frame;
-    use makepad_component::button::Button;
+    use AudioComponent::*;
     App: {{App}} {
+        audio_graph: {
+            root: PluginMusicDevice {
+                plugin:"FM8"
+            }
+            /*
+        root: PluginMusicDevice {
+            plugin: "AUMIDISynth"
+            preset_data: "21adslkfjalkwqwe"
+        }
+        root: Mixer {
+            Instrument {
+                key_range: {start: 34, end: 47 shift: 30}
+                PluginEffect {
+                    plugin: "AUReverb"
+                }
+                PluginMusicDevice {
+                    plugin: "FM8"
+                    preset_data: "21adslkfjalkwqwe"
+                }
+            }
+        }*/
+        }
+        
         scroll_view: {
             h_show: true,
             v_show: true,
@@ -40,9 +57,9 @@ pub struct App {
 impl App {
     pub fn live_register(cx: &mut Cx) {
         makepad_component::live_register(cx);
-        crate::plugin_music_device::live_register(cx);
-        crate::basic_synth::live_register(cx);
-        crate::audio_graph::live_register(cx);
+        crate::audio::plugin_music_device::live_register(cx);
+        crate::audio::basic_synth::live_register(cx);
+        crate::audio::audio_graph::live_register(cx);
         crate::piano::live_register(cx);
     }
     
@@ -54,7 +71,15 @@ impl App {
         
         self.desktop_window.handle_event(cx, event);
         self.scroll_view.handle_event(cx, event);
-        self.audio_graph.handle_event_with_fn(cx, event, &mut |_cx, _action|{});
+        
+        for action in self.audio_graph.handle_event(cx, event){
+            match action{
+                AudioGraphAction::Midi1Data(data) => if let Midi1Event::Note(note) = data.decode(){
+                    self.piano.set_note(cx, note.is_on, note.note_number)
+                }
+            }
+        };
+        
         //let instrument = self.instrument.clone();
         for action in self.piano.handle_event(cx, event) {
             match action {

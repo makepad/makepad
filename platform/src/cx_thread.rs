@@ -72,6 +72,10 @@ pub struct FromUISender<T>{
 
 unsafe impl<T> Send for FromUIReceiver<T>{}
 
+impl<T> Default for FromUISender<T>{
+    fn default()->Self{Self::new()}
+}
+
 impl<T> FromUISender<T>{
     pub fn new()->Self{
         let (sender, receiver) = channel();
