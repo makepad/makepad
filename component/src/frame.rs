@@ -155,7 +155,7 @@ impl LiveApply for Frame {
 }
 
 impl FrameComponent for Frame {
-    fn type_id(&self)->LiveType{LiveType::of::<Self>()}
+    fn type_id(&self) -> LiveType where Self:'static {LiveType::of::<Self>()}
     fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event) -> OptionFrameComponentAction {
         self.handle_event(cx, event).into()
     }

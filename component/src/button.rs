@@ -124,8 +124,6 @@ impl LiveHook for Button {
 }
 
 impl FrameComponent for Button {
-    fn type_id(&self) -> LiveType {LiveType::of::<Self>()}
-    
     fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event) -> OptionFrameComponentAction {
         self.handle_event(cx, event).into()
     }
