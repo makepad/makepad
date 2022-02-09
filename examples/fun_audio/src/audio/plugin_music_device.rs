@@ -1,13 +1,8 @@
 #![allow(unused_variables)]
 use {
     crate::{
-        audio_component_factory,
-        audio::audio_component::*,
-        makepad_platform::*,
-        makepad_platform::platform::apple::{
-            audio_unit::*,
-            core_midi::*,
-        },
+        audio::*,
+        makepad_platform::{*,audio::*, midi::*}
     },
 };
 
@@ -71,10 +66,10 @@ impl LiveHook for PluginMusicDevice {
 impl PluginMusicDevice{
     fn load_audio_device(&mut self){
         // alright lets create an audio device 
-        let list = Audio::query_devices(AudioDeviceType::MusicDevice);
+        let list = AudioFactory::query_devices(AudioDeviceType::MusicDevice);
         let sender = self.to_ui.sender();
         if let Some(info) = list.iter().find( | item | item.name == self.plugin) {
-            Audio::new_device(info, move | result | {
+            AudioFactory::new_device(info, move | result | {
                 match result {
                     Ok(device) => {
                         sender.send(ToUI::NewDevice(device)).unwrap()
