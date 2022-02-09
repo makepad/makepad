@@ -7,7 +7,6 @@ use {
 
 live_register!{
     Instrument: {{Instrument}} {
-        prop:1.0
     }
 }
 
@@ -17,7 +16,6 @@ enum FromUI {}
 #[derive(Live, LiveHook)]
 #[live_register(audio_component_factory!(Instrument))]
 struct Instrument {
-    prop:f64,
     #[rust] from_ui: FromUISender<FromUI>,
 }
 
@@ -35,8 +33,6 @@ impl AudioGraphNode for Node{
 
 
 impl AudioComponent for Instrument {
-    fn type_id(&self) -> LiveType {LiveType::of::<Self>()}
-
     fn get_graph_node(&mut self) -> Box<dyn AudioGraphNode + Send>{
         self.from_ui.new_channel();
         Box::new(Node::default())

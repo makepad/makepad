@@ -23,7 +23,7 @@ pub enum InlineWidgetAction {
 }
 
 pub trait InlineWidget: LiveApply {
-    fn type_id(&self) -> LiveType;
+    fn type_id(&self) -> LiveType where Self:'static {LiveType::of::<Self>()}
     fn handle_widget_event(&mut self, cx: &mut Cx, event: &mut Event, bind: InlineEditBind) -> InlineWidgetAction;
     fn draw_widget(&mut self, cx: &mut Cx2d, live_registry: &LiveRegistry, bind: InlineEditBind);
 }
