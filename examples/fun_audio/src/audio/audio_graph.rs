@@ -97,8 +97,8 @@ impl AudioGraph {
     fn start_audio_output(from_ui: FromUIReceiver<FromUI>, to_ui: ToUISender<ToUI>) {
         let state = Arc::new(Mutex::new(AudioGraphState {from_ui, root: None}));
         std::thread::spawn(move || {
-            let out = &Audio::query_devices(AudioDeviceType::DefaultOutput)[0];
-            Audio::new_device(out, move | result | {
+            let out = &AudioFactory::query_devices(AudioDeviceType::DefaultOutput)[0];
+            AudioFactory::new_device(out, move | result | {
                 match result {
                     Ok(device) => {
                         let state = state.clone();

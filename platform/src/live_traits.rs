@@ -222,7 +222,7 @@ impl ApplyFrom {
 
 pub trait LiveHook {
     fn apply_value_unknown(&mut self, cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
-        if !nodes[index].id.is_capitalised() {
+        if !nodes[index].id.is_capitalised() && !nodes[index].origin.id_non_unique() {
             cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
         }
         nodes.skip_node(index)

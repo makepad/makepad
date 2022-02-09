@@ -13,7 +13,7 @@ use {
 };
 
 
-pub struct Audio {}
+pub struct AudioFactory {}
 
 #[derive(Clone)]
 pub struct AudioDeviceInfo {
@@ -449,7 +449,7 @@ pub enum AudioError {
     NoDevice
 }
 
-impl Audio {
+impl AudioFactory {
     
     pub fn query_devices(device_type: AudioDeviceType) -> Vec<AudioDeviceInfo> {
         unsafe {

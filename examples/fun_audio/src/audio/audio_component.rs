@@ -100,7 +100,6 @@ impl LiveNew for AudioComponentRef {
     }
 }
 
-
 #[macro_export]
 macro_rules!audio_component_factory {
     ( $ ty: ident) => {
