@@ -314,6 +314,7 @@ impl<'a> LiveExpander<'a> {
                                 self.shift_parent_stack(&mut current_parent, &out_doc.nodes, out_index, old_len, out_doc.nodes.len());
                                 
                                 // store the parent pointer
+                                /*
                                 if let LiveValue::Class {live_type: old_live_type, ..} = &out_doc.nodes[out_index].value {
                                     if let LiveValue::Class {live_type, ..} = &doc.nodes[live_ptr.node_index()].value {
                                         if live_type != old_live_type {
@@ -324,7 +325,7 @@ impl<'a> LiveExpander<'a> {
                                             });
                                         }
                                     }
-                                }
+                                }*/
                                 out_doc.nodes[out_index].value = doc.nodes[live_ptr.node_index()].value.clone();
                                 if let LiveValue::Class {class_parent, ..} = &mut out_doc.nodes[out_index].value {
                                     *class_parent = Some(LivePtr {file_id: self.in_file_id, index: out_index as u32, generation});
