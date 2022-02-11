@@ -25,7 +25,6 @@ enum FromUI {
 struct PluginMusicDevice {
     plugin:String,
     preset_data:String,
-
     #[rust] audio_device: Option<AudioDevice>,
     #[rust] from_ui: FromUISender<FromUI>,
     #[rust(ToUIReceiver::new(cx))] to_ui: ToUIReceiver<ToUI>,
@@ -43,7 +42,7 @@ impl AudioGraphNode for Node{
         }
     }
     
-    fn render_to_audio_buffer(&mut self, buffer: &mut AudioBuffer){
+    fn render_to_audio_buffer(&mut self, time: AudioTime, outputs: &mut [AudioBufferMut], inputs: &[AudioBufferRef]){
         while let Ok(msg) = self.from_ui.try_recv(){
             match msg{
                 FromUI::NewDevice(device)=>{
@@ -52,7 +51,7 @@ impl AudioGraphNode for Node{
             }
         }
         if let Some(audio_device) = &self.audio_device{
-            audio_device.render_to_audio_buffer(buffer);
+            audio_device.render_to_audio_buffer(time, outputs, inputs);
         }
     }
 }
@@ -77,7 +76,10 @@ impl PluginMusicDevice{
                     Err(err) => println!("Error {:?}", err)
                 }
             })
-        }        
+        }
+        else{
+            println!("Cannot find audio device {}", self.plugin)
+        }
     }
 }
 

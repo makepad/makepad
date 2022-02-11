@@ -40,16 +40,19 @@ impl AudioGraphNode for Node{
         }
     }
     
-    fn render_to_audio_buffer(&mut self, buffer: &mut AudioBuffer){
+    fn render_to_audio_buffer(&mut self, _time: AudioTime, outputs: &mut [AudioBufferMut], _inputs: &[AudioBufferRef]){
         let freq = 440.0 * 2.0f64.powf( (self.note as f64 - 69.0)/12.0);
-        for i in 0..buffer.left.len(){
+        // only do one output
+        let output = &mut outputs[0];
+        for i in 0..output.frame_count{
             let note_time = ((self.sample_time - self.key_down_time) as f64 / 44100.0).max(0.0).min(1.0);
             let ramp = (0.37*3.1415-note_time).powf(8.0).sin().max(0.0).min(1.0);
             let ft = self.sample_time as f64 / 44100.0;
             let sample = (ft * freq * 3.14).sin() * ramp;
-
-            buffer.left[i] = sample as f32;
-            buffer.right[i] = sample as f32;
+            
+            for j in 0..output.channel_count{
+                output.write_value(j, i, sample as f32);
+            }
 
             self.sample_time += 1;
         }
