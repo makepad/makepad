@@ -65,7 +65,7 @@ impl LiveApply for AudioComponentRef {
         if let LiveValue::Class {live_type, ..} = nodes[index].value {
             if let Some(component) = &mut self.0 {
                 if component.type_id() != live_type {
-                    self.0 = None;
+                    self.0 = None; // type changed, drop old component
                 }
                 else {
                     component.apply(cx, apply_from, index, nodes);
@@ -78,10 +78,8 @@ impl LiveApply for AudioComponentRef {
                 self.0 = Some(component);
             }
         }
-        else {
-            if let Some(component) = &mut self.0 {
-                component.apply(cx, apply_from, index, nodes);
-            }
+        else if let Some(component) = &mut self.0 {
+            component.apply(cx, apply_from, index, nodes);
         }
         nodes.skip_node(index)
     }

@@ -57,7 +57,7 @@ impl AudioGraphNode for Node {
             else {
                 let (step0, step1) = steps.split_at_mut(i);
                 let output_buffer = &mut step0[i - 1].input_buffer;
-                output_buffer.resize_from(outputs[0]);
+                output_buffer.resize_like(outputs[0]);
                 if i == num_steps - 1 { // last one uses external inputs
                     step1[0].graph_node.render_to_audio_buffer(time, &mut[output_buffer], inputs);
                 }
