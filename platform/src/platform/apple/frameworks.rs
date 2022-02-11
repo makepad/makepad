@@ -656,16 +656,16 @@ unsafe impl Encode for NSDragOperation {
 pub const kAudioUnitManufacturer_Apple: u32 = 1634758764;
 
 #[repr(C)] pub struct OpaqueAudioComponent([u8; 0]);
-pub type AudioComponent = *mut OpaqueAudioComponent;
+pub type CAudioComponent = *mut OpaqueAudioComponent;
 
 #[repr(C)] pub struct ComponentInstanceRecord([u8; 0]);
-pub type AudioComponentInstance = *mut ComponentInstanceRecord;
-pub type AudioUnit = AudioComponentInstance;
+pub type CAudioComponentInstance = *mut ComponentInstanceRecord;
+pub type CAudioUnit = CAudioComponentInstance;
 
 pub type OSStatus = i32;
 
 #[repr(C)]
-pub struct AudioStreamBasicDescription {
+pub struct CAudioStreamBasicDescription {
     pub mSampleRate: f64,
     pub mFormatID: AudioFormatId,
     pub mFormatFlags: u32,
@@ -774,16 +774,16 @@ impl AudioTimeStampFlags {
 
 #[derive(Debug, PartialEq, Copy, Clone)]
 #[repr(C)]
-pub struct AudioComponentDescription {
-    pub componentType: AudioUnitType,
-    pub componentSubType: AudioUnitSubType,
+pub struct CAudioComponentDescription {
+    pub componentType: CAudioUnitType,
+    pub componentSubType: CAudioUnitSubType,
     pub componentManufacturer: u32,
     pub componentFlags: u32,
     pub componentFlagsMask: u32,
 }
 
-impl AudioComponentDescription {
-    pub fn new_apple(ty: AudioUnitType, sub: AudioUnitSubType) -> Self {
+impl CAudioComponentDescription {
+    pub fn new_apple(ty: CAudioUnitType, sub: CAudioUnitSubType) -> Self {
         Self {
             componentType: ty,
             componentSubType: sub,
@@ -792,7 +792,7 @@ impl AudioComponentDescription {
             componentFlagsMask: 0,
         }
     }
-    pub fn new_all_manufacturers(ty: AudioUnitType, sub: AudioUnitSubType) -> Self {
+    pub fn new_all_manufacturers(ty: CAudioUnitType, sub: CAudioUnitSubType) -> Self {
         Self {
             componentType: ty,
             componentSubType: sub,
@@ -827,14 +827,14 @@ pub struct _AudioBuffer {
 
 pub const MAX_AUDIO_BUFFERS:usize = 8;
 #[repr(C)]
-pub struct AudioBufferList {
+pub struct CAudioBufferList {
     pub mNumberBuffers: u32,
     pub mBuffers: [_AudioBuffer; MAX_AUDIO_BUFFERS],
 }
 
 #[derive(Debug)]
 #[repr(C)]
-pub struct AudioTimeStamp {
+pub struct CAudioTimeStamp {
     pub mSampleTime: f64,
     pub mHostTime: u64,
     pub mRateScalar: f64,
@@ -846,7 +846,7 @@ pub struct AudioTimeStamp {
 
 #[derive(Debug, PartialEq, Copy, Clone)]
 #[repr(u32)]
-pub enum AudioUnitType {
+pub enum CAudioUnitType {
     IO = 1635086197,
     MusicDevice = 1635085685,
     MusicEffect = 1635085670,
@@ -860,7 +860,7 @@ pub enum AudioUnitType {
 
 #[derive(Debug, PartialEq, Copy, Clone)]
 #[repr(u32)]
-pub enum AudioUnitSubType {
+pub enum CAudioUnitSubType {
     Undefined = 0,
     
     PeakLimiter = 1819112562,
