@@ -76,7 +76,7 @@ impl AudioGraph {
         self.from_ui.send(FromUI::Midi1Data(data)).unwrap();
     }
     
-    fn render_to_audio_buffer(node: &mut Node, time:AudioTime, mut output:AudioOutputBuffer) {
+    fn render_to_output_buffer(node: &mut Node, time:AudioTime, mut output:AudioOutputBuffer) {
         while let Ok(msg) = node.from_ui.try_recv() {
             match msg {
                 FromUI::NewRoot(new_root) => {
@@ -108,7 +108,7 @@ impl AudioGraph {
                         device.set_input_callback(move | time, output_buffer | {
                             // the core of the audio flow..
                             let mut state = state.lock().unwrap();
-                            Self::render_to_audio_buffer(&mut state, time, output_buffer);
+                            Self::render_to_output_buffer(&mut state, time, output_buffer);
                         });
                         loop {
                             std::thread::sleep(std::time::Duration::from_millis(100));
