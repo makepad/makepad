@@ -54,7 +54,7 @@ impl AudioGraphNode for Node {
         }
     }
     
-    fn render_to_audio_buffer(&mut self, time: AudioTime, outputs: &mut [AudioBufferMut], _inputs: &[AudioBufferRef]) {
+    fn render_to_audio_buffer(&mut self, time: AudioTime, outputs: &mut [&mut AudioBuffer], _inputs: &[&AudioBuffer]) {
         self.inputs[0].render_to_audio_buffer(time, outputs, &[])
     }
 }
