@@ -18,7 +18,7 @@ live_register!{
                 0.5 * sqrt(2. - 2. * sqrt(2.) * v - u2 + v2)
             );
         }
-        
+         
         fn pixel(self) -> vec4 {
             
             let rgbv = Pal::hsv2rgb(vec4(self.hue, self.sat, self.val, 1.));

@@ -4,4 +4,8 @@ pub use crate::platform::apple::audio_unit::{
     AudioDevice,
     AudioDeviceClone,
     AudioDeviceType,
+    AudioTime,
+    AudioBufferMut,
+    AudioBufferRef,
+    AudioOutputBuffer,
 };
