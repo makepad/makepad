@@ -52,16 +52,17 @@ impl AudioGraphNode for Node {
     }
     
     fn render_to_audio_buffer(&mut self, time: AudioTime, outputs: &mut [&mut AudioBuffer], _inputs: &[&AudioBuffer]) {
-        self.buffer.resize_from(outputs[0]);
-        outputs[0].zero();
+        let output = &mut outputs[0];
+        self.buffer.resize_like(*output);
+        output.zero();
         for i in 0..self.inputs.len() {
             let input = &mut self.inputs[i];
             input.render_to_audio_buffer(time, &mut [&mut self.buffer], &[]);
-            for c in 0..outputs[0].channel_count {
-                let out_channel = outputs[0].channel_mut(c);
+            for c in 0..output.channel_count() {
+                let out_channel = output.channel_mut(c);
                 let in_channel = self.buffer.channel(c);
                 for j in 0..out_channel.len() {
-                    out_channel[j] += in_channel[j]*0.1;
+                    out_channel[j] += in_channel[j];//*0.1;
                 }
             }
         }
