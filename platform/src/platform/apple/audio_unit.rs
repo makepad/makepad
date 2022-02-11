@@ -49,23 +49,176 @@ pub struct AudioDeviceClone {
     device_type: AudioDeviceType
 }
 
-pub struct AudioBuffer<'a> {
-    pub left: &'a mut [f32],
-    pub right: &'a mut [f32],
-    
-    buffers: *mut AudioBufferList,
-    flags: *mut u32,
-    timestamp: *const AudioTimeStamp,
-    frame_count: u32,
-    input_bus_number: u64,
+#[derive(Copy, Clone)]
+pub struct AudioTime {
+    pub sample_time: f64,
+    pub host_time: u64,
+    pub rate_scalar: f64,
 }
 
-impl<'a> AudioBuffer<'a> {
-    pub fn zero(&mut self) {
-        for i in 0..self.left.len() {
-            self.left[i] = 0.0;
-            self.right[i] = 0.0;
+pub struct AudioBufferMut<'a> {
+    pub data: &'a mut [f32],
+    pub frame_count: usize,
+    pub channel_count: usize
+}
+
+pub struct AudioBufferRef<'a> {
+    pub data: &'a[f32],
+    pub frame_count: usize,
+    pub channel_count: usize
+}
+
+pub struct AudioOutputBuffer {
+    data: [*mut f32; MAX_AUDIO_BUFFERS],
+    pub frame_count: usize,
+    pub channel_count: usize
+}
+
+impl AudioOutputBuffer {
+    pub fn get_channel(&mut self, channel: usize) -> &mut [f32] {
+        unsafe {
+            std::slice::from_raw_parts_mut(
+                self.data[channel] as *mut f32,
+                self.frame_count as usize
+            )
         }
+    }
+    
+    pub fn zero(&mut self) {
+        for i in 0..self.channel_count {
+            let data = self.get_channel(i);
+            for j in 0..data.len() {
+                data[j] = 0.0;
+            }
+        }
+    }
+    
+    pub fn copy_from_buffer(&mut self, buffer:&AudioBufferRef){
+        if self.channel_count != buffer.channel_count{
+            panic!("Output buffer channel_count != buffer channel_count {} {}",self.channel_count, buffer.channel_count );
+        }
+        if self.frame_count != buffer.frame_count{
+            panic!("Output buffer frame_count != buffer frame_count ");
+        }
+        for i in 0..self.channel_count{
+            let output = self.get_channel(i);
+            let input = buffer.get_channel(i);
+            output.copy_from_slice(input);
+        }
+    }
+}
+
+
+#[derive(Clone, Default)]
+pub struct AudioBuffer {
+    pub data: Vec<f32>,
+    pub frame_count: usize,
+    pub channel_count: usize
+}
+
+impl AudioTime {
+    fn to_audio_time_stamp(&self) -> AudioTimeStamp {
+        AudioTimeStamp {
+            mSampleTime: self.sample_time,
+            mHostTime: self.host_time,
+            mRateScalar: self.rate_scalar,
+            mWordClockTime: 0,
+            mSMPTETime: SMPTETime::default(),
+            mFlags: 7,
+            mReserved: 0
+        }
+    }
+}
+
+impl<'a> AudioBufferMut<'a> {
+    unsafe fn to_audio_buffer_list(&mut self) -> AudioBufferList {
+        let mut ab = AudioBufferList {
+            mNumberBuffers: self.channel_count.min(MAX_AUDIO_BUFFERS) as u32,
+            mBuffers: [
+                _AudioBuffer {
+                    mNumberChannels: 0,
+                    mDataByteSize: 0,
+                    mData: 0 as *mut ::std::os::raw::c_void
+                };
+                MAX_AUDIO_BUFFERS
+            ]
+        };
+        for i in 0..self.channel_count.min(MAX_AUDIO_BUFFERS) {
+            ab.mBuffers[i] = _AudioBuffer {
+                mNumberChannels: 0,
+                mDataByteSize: (self.frame_count * 4) as u32,
+                mData: self.get_channel(i).as_ptr() as *mut ::std::os::raw::c_void,
+            }
+        }
+        ab
+    }
+}
+
+pub trait AudioBufferSize{
+    fn frame_count(&self)->usize;
+    fn channel_count(&self)->usize;
+}
+
+impl AudioBufferSize for &AudioOutputBuffer{
+    fn frame_count(&self)->usize{self.frame_count}
+    fn channel_count(&self)->usize{self.channel_count}
+}
+
+impl<'a> AudioBufferSize for &AudioBufferRef<'a>{
+    fn frame_count(&self)->usize{self.frame_count}
+    fn channel_count(&self)->usize{self.channel_count}
+}
+
+impl<'a> AudioBufferSize for &AudioBufferMut<'a>{
+    fn frame_count(&self)->usize{self.frame_count}
+    fn channel_count(&self)->usize{self.channel_count}
+}
+
+
+impl AudioBuffer {
+    pub fn resize_from(&mut self, output:impl AudioBufferSize)->&mut Self{
+        self.resize(output.frame_count(), output.channel_count());
+        self
+    }
+    
+    pub fn resize(&mut self, frame_count: usize, channel_count: usize) {
+        self.frame_count = frame_count;
+        self.channel_count = channel_count;
+        self.data.resize(frame_count * channel_count as usize, 0.0);
+    }
+
+    pub fn as_ref(&self) -> AudioBufferRef {AudioBufferRef {
+        data: &self.data,
+        channel_count: self.channel_count,
+        frame_count: self.frame_count
+    }}
+    
+    pub fn as_mut(&mut self) -> AudioBufferMut {AudioBufferMut {
+        data: &mut self.data,
+        channel_count: self.channel_count,
+        frame_count: self.frame_count
+    }}
+}
+
+impl<'a> AudioBufferMut<'a> {
+    pub fn get_channel(&mut self, channel: usize) -> &mut [f32] {
+        &mut self.data[channel * self.frame_count..(channel+1) * self.frame_count]
+    }
+
+    pub fn write_value(&mut self, channel: usize, index:usize, value:f32){
+        self.data[channel * self.frame_count + index] = value
+    }
+    
+    pub fn zero(&mut self) {
+        for i in 0..self.data.len() {
+            self.data[i] = 0.0;
+        }
+    }
+}
+
+impl<'a> AudioBufferRef<'a> {
+    pub fn get_channel(&self, channel: usize) -> &[f32] {
+        &self.data[channel * self.frame_count..(channel+1) * self.frame_count]
     }
 }
 
@@ -104,9 +257,10 @@ pub struct AudioInstrumentState {
     name: String
 }
 
+
 impl AudioDeviceClone {
     
-    pub fn render_to_audio_buffer(&self, buffer: &mut AudioBuffer) {
+    pub fn render_to_audio_buffer(&self, time: AudioTime, outputs: &mut [AudioBufferMut], inputs: &[AudioBufferRef]) {
         match self.device_type {
             AudioDeviceType::MusicDevice => (),
             AudioDeviceType::Effect => (),
@@ -114,47 +268,64 @@ impl AudioDeviceClone {
         }
         if let Some(render_block) = self.render_block {
             unsafe {
-                /*
+                let inputs_ptr = inputs.as_ptr() as *const AudioBufferRef as u64;
+                let inputs_len = inputs.len();
                 let output_provider = objc_block!(
-                    move | flags: *mut u32,
-                    timestamp: *const AudioTimeStamp,
+                    move | _flags: *mut u32,
+                    _timestamp: *const AudioTimeStamp,
                     frame_count: u32,
-                    input_bus_number: u64,
+                    input_bus: u64,
                     buffers: *mut AudioBufferList |: i32 {
-                        let buffers_ref = &*buffers;
-                        let sub = AudioBuffer {
-                            left: std::slice::from_raw_parts_mut(
-                                buffers_ref.mBuffers[0].mData as *mut f32,
+                        let inputs = std::slice::from_raw_parts(
+                            inputs_ptr as *const AudioBufferRef,
+                            inputs_len as usize
+                        );
+                        let buffers = &*buffers;
+                        let input_bus = input_bus as usize;
+                        if input_bus >= inputs.len() {
+                            println!("render_to_audio_buffer - input bus number > input len {} {}", input_bus, inputs.len());
+                            return 0
+                        }
+                        // ok now..
+                        if buffers.mNumberBuffers as usize != inputs[input_bus].channel_count {
+                            println!("render_to_audio_buffer - input channel count doesnt match {} {}", buffers.mNumberBuffers, inputs[input_bus].channel_count);
+                            return 0
+                        }
+                        if buffers.mNumberBuffers as usize > MAX_AUDIO_BUFFERS {
+                            println!("render_to_audio_buffer - number of channels requested > MAX_AUDIO_BUFFER_LIST_SIZE");
+                            return 0
+                        }
+                        if frame_count as usize != inputs[input_bus].frame_count {
+                            println!("render_to_audio_buffer - frame count doesnt match {} {}", inputs[input_bus].frame_count, frame_count);
+                            return 0
+                        }
+                        for i in 0..inputs[input_bus].channel_count {
+                            // ok so. we have an inputs
+                            let output_buffer = std::slice::from_raw_parts_mut(
+                                buffers.mBuffers[i].mData as *mut f32,
                                 frame_count as usize
-                            ),
-                            right: std::slice::from_raw_parts_mut(
-                                buffers_ref.mBuffers[1].mData as *mut f32,
-                                frame_count as usize
-                            ),
-                            buffers,
-                            flags,
-                            timestamp,
-                            frame_count,
-                            input_bus_number
-                        };
-                        /*for i in 0..sub.left.len(){
-                            sub.left[i] = (0.1 * (i as f32)).sin()*0.3;
-                           sub.right[i] = (0.1 * (i as f32)).sin()*0.3;
-                        }*/
-                        //println!("AFTER EFFECT {}", buffers_ref.mBuffers[0].mDataByteSize);
+                            );
+                            let input_buffer = inputs[input_bus].get_channel(i);
+                            output_buffer.copy_from_slice(input_buffer);
+                        }
                         0
                     }
-                );*/
-                
-                objc_block_invoke!(render_block, invoke(
-                    (buffer.flags): *mut u32,
-                    (buffer.timestamp): *const AudioTimeStamp,
-                    (buffer.frame_count): u32,
-                    (buffer.input_bus_number): u64,
-                    (buffer.buffers): *mut AudioBufferList,
-                    //(&output_provider as *const _ as ObjcId): ObjcId
-                    (nil): ObjcId
-                ) -> i32)
+                );
+                // ok we need to construct all these things
+                let mut flags: u32 = 0;
+                let timestamp = time.to_audio_time_stamp();
+                for i in 0..outputs.len() {
+                    let mut buffer_list = outputs[i].to_audio_buffer_list();
+                    objc_block_invoke!(render_block, invoke(
+                        (&mut flags as *mut u32): *mut u32,
+                        (&timestamp as *const AudioTimeStamp): *const AudioTimeStamp,
+                        (outputs[i].frame_count as u32): u32,
+                        (i as u64): u64,
+                        (&mut buffer_list as *mut AudioBufferList): *mut AudioBufferList,
+                        (&output_provider as *const _ as ObjcId): ObjcId
+                        //(nil): ObjcId
+                    ) -> i32);
+                }
             };
         }
     }
@@ -167,7 +338,7 @@ impl AudioDeviceClone {
         unsafe {
             let () = msg_send![self.av_audio_unit, sendMIDIEvent: event.data0 data1: event.data1 data2: event.data2];
         }
-    }    
+    }
 }
 
 impl AudioDevice {
@@ -304,7 +475,7 @@ impl AudioDevice {
         }
     }
     
-    pub fn set_input_callback<F: Fn(&mut AudioBuffer) + Send + 'static>(&self, audio_callback: F) {
+    pub fn set_input_callback<F: Fn(AudioTime, AudioOutputBuffer) + Send + 'static>(&self, audio_callback: F) {
         match self.device_type {
             AudioDeviceType::DefaultOutput => (),
             AudioDeviceType::Effect => (),
@@ -312,28 +483,29 @@ impl AudioDevice {
         }
         unsafe {
             let output_provider = objc_block!(
-                move | flags: *mut u32,
+                move | _flags: *mut u32,
                 timestamp: *const AudioTimeStamp,
                 frame_count: u32,
-                input_bus_number: u64,
+                _input_bus_number: u64,
                 buffers: *mut AudioBufferList |: i32 {
                     let buffers_ref = &*buffers;
                     //println!("IN OUTPUT {} {:?}", buffers_ref.mBuffers[0].mData as u64, *timestamp);
-                    audio_callback(&mut AudioBuffer {
-                        left: std::slice::from_raw_parts_mut(
-                            buffers_ref.mBuffers[0].mData as *mut f32,
-                            frame_count as usize
-                        ),
-                        right: std::slice::from_raw_parts_mut(
-                            buffers_ref.mBuffers[1].mData as *mut f32,
-                            frame_count as usize
-                        ),
-                        buffers,
-                        flags,
-                        timestamp,
-                        frame_count,
-                        input_bus_number
-                    });
+                    let mut output = AudioOutputBuffer {
+                        data: [0 as *mut f32; MAX_AUDIO_BUFFERS],
+                        frame_count: frame_count as usize,
+                        channel_count: buffers_ref.mNumberBuffers as usize
+                    };
+                    for i in 0..output.channel_count {
+                        output.data[i] = buffers_ref.mBuffers[i].mData as *mut f32;
+                    }
+                    audio_callback(
+                        AudioTime {
+                            sample_time: (*timestamp).mSampleTime,
+                            host_time: (*timestamp).mHostTime,
+                            rate_scalar: (*timestamp).mRateScalar
+                        },
+                        output
+                    );
                     0
                 }
             );
@@ -440,7 +612,7 @@ impl AudioDevice {
             }
         };
     }
-
+    
 }
 
 #[derive(Debug)]
@@ -521,7 +693,7 @@ impl AudioFactory {
                             let input_busses: ObjcId = msg_send![au_audio_unit, inputBusses];
                             let count: usize = msg_send![input_busses, count];
                             if count > 0 {
-                                // enable bus 0   
+                                // enable bus 0
                                 let bus: ObjcId = msg_send![input_busses, objectAtIndexedSubscript: 0];
                                 let () = msg_send![bus, setEnabled: true];
                             }

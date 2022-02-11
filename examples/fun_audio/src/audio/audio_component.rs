@@ -15,15 +15,18 @@ use {
 
 pub enum AudioComponentAction {}
 pub trait AudioComponent: LiveApply {
-    fn type_id(&self) -> LiveType where Self:'static {LiveType::of::<Self>()}
+    fn type_id(&self) -> LiveType where Self: 'static {LiveType::of::<Self>()}
     fn handle_event_with_fn(&mut self, _cx: &mut Cx, event: &mut Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction));
     fn get_graph_node(&mut self) -> Box<dyn AudioGraphNode + Send>;
 }
 
 pub trait AudioGraphNode {
-    fn handle_midi_1_data(&mut self, _data: Midi1Data){}
-    fn render_to_audio_buffer(&mut self, buffer: &mut AudioBuffer);
+    fn handle_midi_1_data(&mut self, data: Midi1Data);
+    fn render_to_audio_buffer(&mut self, time: AudioTime, outputs: &mut [AudioBufferMut], inputs: &[AudioBufferRef]);
 }
+
+//pub type AudioGraphNodeRef = Option<Box<dyn AudioGraphNode + Send >>;
+
 
 //generate_ref_cast_api!(AudioComponent);
 
@@ -48,8 +51,11 @@ pub trait AudioComponentFactory {
 pub struct AudioComponentRef(Option<Box<dyn AudioComponent >>);
 
 impl AudioComponentRef {
-    pub fn component(&mut self) -> &mut Option<Box<dyn AudioComponent >> {
-        &mut self.0
+    pub fn _as_ref(&mut self) -> Option<&Box<dyn AudioComponent >> {
+        self.0.as_ref()
+    }
+    pub fn as_mut(&mut self) -> Option<&mut Box<dyn AudioComponent >> {
+        self.0.as_mut()
     }
 }
 

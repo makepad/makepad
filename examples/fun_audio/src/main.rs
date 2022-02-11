@@ -11,13 +11,17 @@ live_register!{
     App: {{App}} {
         audio_graph: {
             root: Mixer {
-                Instrument {
+                /*c0: PluginMusicDevice {
+                    plugin: "AUMIDISynth"
+                    preset_data: "21adslkfjalkwqwe"
+                }*/
+                c0:Instrument {
                     key_range: {start: 34, end: 47 shift: 30}
-                    PluginEffect {
-                        plugin: "AUReverb"
+                    s0 : PluginEffect {
+                        plugin: "AUReverb2"
                     }
-                    PluginMusicDevice {
-                        plugin: "FM8"
+                    s1 : PluginMusicDevice {
+                        plugin: "AUMIDISynth"
                         preset_data: "21adslkfjalkwqwe"
                     }
                 }
@@ -62,9 +66,9 @@ impl App {
         self.desktop_window.handle_event(cx, event);
         self.scroll_view.handle_event(cx, event);
         
-        for action in self.audio_graph.handle_event(cx, event){
-            match action{
-                AudioGraphAction::Midi1Data(data) => if let Midi1Event::Note(note) = data.decode(){
+        for action in self.audio_graph.handle_event(cx, event) {
+            match action {
+                AudioGraphAction::Midi1Data(data) => if let Midi1Event::Note(note) = data.decode() {
                     self.piano.set_note(cx, note.is_on, note.note_number)
                 }
             }
