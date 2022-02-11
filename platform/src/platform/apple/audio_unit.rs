@@ -19,7 +19,7 @@ pub struct AudioFactory {}
 pub struct AudioDeviceInfo {
     pub name: String,
     pub device_type: AudioDeviceType,
-    desc: AudioComponentDescription
+    desc: CAudioComponentDescription
 }
 
 #[derive(Copy, Clone)]
@@ -58,11 +58,14 @@ pub struct AudioTime {
 
 pub struct AudioOutputBuffer {
     data: [*mut f32; MAX_AUDIO_BUFFERS],
-    pub frame_count: usize,
-    pub channel_count: usize
+    frame_count: usize,
+    channel_count: usize
 }
 
 impl AudioOutputBuffer {
+    pub fn frame_count(&self)->usize{self.frame_count}
+    pub fn channel_count(&self)->usize{self.channel_count}
+
     pub fn channel_mut(&mut self, channel: usize) -> &mut [f32] {
         unsafe {
             std::slice::from_raw_parts_mut(
@@ -99,14 +102,14 @@ impl AudioOutputBuffer {
 
 #[derive(Clone, Default)]
 pub struct AudioBuffer {
-    pub data: Vec<f32>,
-    pub frame_count: usize,
-    pub channel_count: usize
+    data: Vec<f32>,
+    frame_count: usize,
+    channel_count: usize
 }
 
 impl AudioTime {
-    fn to_audio_time_stamp(&self) -> AudioTimeStamp {
-        AudioTimeStamp {
+    fn to_audio_time_stamp(&self) -> CAudioTimeStamp {
+        CAudioTimeStamp {
             mSampleTime: self.sample_time,
             mHostTime: self.host_time,
             mRateScalar: self.rate_scalar,
@@ -118,27 +121,19 @@ impl AudioTime {
     }
 }
 
-pub trait AudioBufferSize{
-    fn frame_count(&self)->usize;
-    fn channel_count(&self)->usize;
-}
-
-impl AudioBufferSize for AudioOutputBuffer{
-    fn frame_count(&self)->usize{self.frame_count}
-    fn channel_count(&self)->usize{self.channel_count}
-}
-
-impl AudioBufferSize for AudioBuffer{
-    fn frame_count(&self)->usize{self.frame_count}
-    fn channel_count(&self)->usize{self.channel_count}
-}
-
 impl AudioBuffer {
-    pub fn resize_from(&mut self, output:&impl AudioBufferSize)->&mut Self{
-        self.resize(output.frame_count(), output.channel_count());
+    pub fn frame_count(&self)->usize{self.frame_count}
+    pub fn channel_count(&self)->usize{self.channel_count}
+    
+    pub fn resize_like(&mut self, like:&AudioBuffer)->&mut Self{
+        self.resize(like.frame_count(), like.channel_count());
         self
     }
-    
+
+    pub fn resize_like_output(&mut self, like:&AudioOutputBuffer)->&mut Self{
+        self.resize(like.frame_count(), like.channel_count());
+        self
+    }    
     pub fn resize(&mut self, frame_count: usize, channel_count: usize) {
         self.frame_count = frame_count;
         self.channel_count = channel_count;
@@ -153,18 +148,14 @@ impl AudioBuffer {
         &self.data[channel * self.frame_count..(channel+1) * self.frame_count]
     }
 
-    pub fn write_value(&mut self, channel: usize, index:usize, value:f32){
-        self.data[channel * self.frame_count + index] = value
-    }
-    
     pub fn zero(&mut self) {
         for i in 0..self.data.len() {
             self.data[i] = 0.0;
         }
     }
 
-    unsafe fn to_audio_buffer_list(&mut self) -> AudioBufferList {
-        let mut ab = AudioBufferList {
+    unsafe fn to_audio_buffer_list(&mut self) -> CAudioBufferList {
+        let mut ab = CAudioBufferList {
             mNumberBuffers: self.channel_count.min(MAX_AUDIO_BUFFERS) as u32,
             mBuffers: [
                 _AudioBuffer {
@@ -236,10 +227,10 @@ impl AudioDeviceClone {
                 let inputs_len = inputs.len();
                 let output_provider = objc_block!(
                     move | _flags: *mut u32,
-                    _timestamp: *const AudioTimeStamp,
+                    _timestamp: *const CAudioTimeStamp,
                     frame_count: u32,
                     input_bus: u64,
-                    buffers: *mut AudioBufferList |: i32 {
+                    buffers: *mut CAudioBufferList |: i32 {
                         let inputs = std::slice::from_raw_parts(
                             inputs_ptr as *const &AudioBuffer,
                             inputs_len as usize
@@ -282,10 +273,10 @@ impl AudioDeviceClone {
                     let mut buffer_list = outputs[i].to_audio_buffer_list();
                     objc_block_invoke!(render_block, invoke(
                         (&mut flags as *mut u32): *mut u32,
-                        (&timestamp as *const AudioTimeStamp): *const AudioTimeStamp,
+                        (&timestamp as *const CAudioTimeStamp): *const CAudioTimeStamp,
                         (outputs[i].frame_count as u32): u32,
                         (i as u64): u64,
-                        (&mut buffer_list as *mut AudioBufferList): *mut AudioBufferList,
+                        (&mut buffer_list as *mut CAudioBufferList): *mut CAudioBufferList,
                         (&output_provider as *const _ as ObjcId): ObjcId
                         //(nil): ObjcId
                     ) -> i32);
@@ -439,7 +430,7 @@ impl AudioDevice {
         }
     }
     
-    pub fn set_input_callback<F: Fn(AudioTime, AudioOutputBuffer) + Send + 'static>(&self, audio_callback: F) {
+    pub fn set_input_callback<F: Fn(AudioTime, &mut AudioOutputBuffer) + Send + 'static>(&self, audio_callback: F) {
         match self.device_type {
             AudioDeviceType::DefaultOutput => (),
             AudioDeviceType::Effect => (),
@@ -448,10 +439,10 @@ impl AudioDevice {
         unsafe {
             let output_provider = objc_block!(
                 move | _flags: *mut u32,
-                timestamp: *const AudioTimeStamp,
+                timestamp: *const CAudioTimeStamp,
                 frame_count: u32,
                 _input_bus_number: u64,
-                buffers: *mut AudioBufferList |: i32 {
+                buffers: *mut CAudioBufferList |: i32 {
                     let buffers_ref = &*buffers;
                     //println!("IN OUTPUT {} {:?}", buffers_ref.mBuffers[0].mData as u64, *timestamp);
                     let mut output = AudioOutputBuffer {
@@ -468,7 +459,7 @@ impl AudioDevice {
                             host_time: (*timestamp).mHostTime,
                             rate_scalar: (*timestamp).mRateScalar
                         },
-                        output
+                        &mut output
                     );
                     0
                 }
@@ -591,21 +582,21 @@ impl AudioFactory {
         unsafe {
             let desc = match device_type {
                 AudioDeviceType::MusicDevice => {
-                    AudioComponentDescription::new_all_manufacturers(
-                        AudioUnitType::MusicDevice,
-                        AudioUnitSubType::Undefined,
+                    CAudioComponentDescription::new_all_manufacturers(
+                        CAudioUnitType::MusicDevice,
+                        CAudioUnitSubType::Undefined,
                     )
                 }
                 AudioDeviceType::DefaultOutput => {
-                    AudioComponentDescription::new_apple(
-                        AudioUnitType::IO,
-                        AudioUnitSubType::DefaultOutput,
+                    CAudioComponentDescription::new_apple(
+                        CAudioUnitType::IO,
+                        CAudioUnitSubType::DefaultOutput,
                     )
                 }
                 AudioDeviceType::Effect => {
-                    AudioComponentDescription::new_all_manufacturers(
-                        AudioUnitType::Effect,
-                        AudioUnitSubType::Undefined,
+                    CAudioComponentDescription::new_all_manufacturers(
+                        CAudioUnitType::Effect,
+                        CAudioUnitSubType::Undefined,
                     )
                 }
             };
@@ -617,7 +608,7 @@ impl AudioFactory {
             for i in 0..count {
                 let component: ObjcId = msg_send![components, objectAtIndex: i];
                 let name = nsstring_to_string(msg_send![component, name]);
-                let desc: AudioComponentDescription = msg_send!(component, audioComponentDescription);
+                let desc: CAudioComponentDescription = msg_send!(component, audioComponentDescription);
                 out.push(AudioDeviceInfo {device_type, name, desc});
             }
             out

@@ -76,7 +76,7 @@ impl AudioGraph {
         self.from_ui.send(FromUI::Midi1Data(data)).unwrap();
     }
     
-    fn render_to_output_buffer(node: &mut Node, time:AudioTime, mut output:AudioOutputBuffer) {
+    fn render_to_output_buffer(node: &mut Node, time:AudioTime, output:&mut AudioOutputBuffer) {
         while let Ok(msg) = node.from_ui.try_recv() {
             match msg {
                 FromUI::NewRoot(new_root) => {
@@ -91,7 +91,7 @@ impl AudioGraph {
         }
         if let Some(root) = node.root.as_mut() {
             // we should create a real output buffer
-            node.buffer.resize_from(&output);
+            node.buffer.resize_like_output(output);
             root.render_to_audio_buffer(time, &mut [&mut node.buffer], &[]);
             output.copy_from_buffer(&node.buffer);
         }
