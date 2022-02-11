@@ -40,24 +40,25 @@ impl AudioGraphNode for Node {
         }
     }
     
-    fn render_to_audio_buffer(&mut self, time: AudioTime, outputs: &mut [AudioBufferMut], _inputs: &[AudioBufferRef]) {
+    fn render_to_audio_buffer(&mut self, time: AudioTime, outputs: &mut [&mut AudioBuffer], _inputs: &[&AudioBuffer]) {
         // alright lets start at the bottom step
         let steps = &mut self.steps;
         let num_steps = steps.len();
         for i in (0..num_steps).rev() {
             if i == 0 { // first
                 let step = &mut steps[0];
-                step.graph_node.render_to_audio_buffer(time, outputs, &[step.input_buffer.as_ref()]);
+                step.graph_node.render_to_audio_buffer(time, outputs, &[&step.input_buffer]);
             }
             else {
                 let (step0, step1) = steps.split_at_mut(i);
-                let output_buffer = step0[i - 1].input_buffer.resize_from(&outputs[0]).as_mut();
+                let output_buffer = &mut step0[i - 1].input_buffer;
+                output_buffer.resize_from(outputs[0]);
                 if i == num_steps - 1 { // last
                     step1[0].graph_node.render_to_audio_buffer(time, &mut[output_buffer], &[]);
                 }
                 else {
                     let step = &mut step1[0];
-                    step.graph_node.render_to_audio_buffer(time, &mut[output_buffer], &[step.input_buffer.as_ref()]);
+                    step.graph_node.render_to_audio_buffer(time, &mut[output_buffer], &[&step.input_buffer]);
                 }
             };
         }

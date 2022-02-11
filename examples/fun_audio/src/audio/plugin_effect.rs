@@ -40,7 +40,7 @@ impl AudioGraphNode for Node {
     fn handle_midi_1_data(&mut self, data: Midi1Data) {
     }
     
-    fn render_to_audio_buffer(&mut self, time: AudioTime, outputs: &mut [AudioBufferMut], inputs: &[AudioBufferRef]) {
+    fn render_to_audio_buffer(&mut self, time: AudioTime, outputs: &mut [&mut AudioBuffer], inputs: &[&AudioBuffer]) {
         while let Ok(msg) = self.from_ui.try_recv() {
             match msg {
                 FromUI::NewDevice(device) => {
@@ -76,10 +76,10 @@ impl PluginEffect {
             })
         }
         else{
+            println!("Cannot find effect {}", self.plugin);
             for item in &list{
-                println!("Item {}", item.name);
+                println!("Effects: {}", item.name);
             }
-            println!("Cannot find effect {}", self.plugin)
         }
     }
 }

@@ -92,8 +92,8 @@ impl AudioGraph {
         if let Some(root) = node.root.as_mut() {
             // we should create a real output buffer
             node.buffer.resize_from(&output);
-            root.render_to_audio_buffer(time, &mut [node.buffer.as_mut()], &[]);
-            output.copy_from_buffer(&node.buffer.as_ref());
+            root.render_to_audio_buffer(time, &mut [&mut node.buffer], &[]);
+            output.copy_from_buffer(&node.buffer);
         }
     }
     

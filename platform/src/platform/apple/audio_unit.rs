@@ -56,18 +56,6 @@ pub struct AudioTime {
     pub rate_scalar: f64,
 }
 
-pub struct AudioBufferMut<'a> {
-    pub data: &'a mut [f32],
-    pub frame_count: usize,
-    pub channel_count: usize
-}
-
-pub struct AudioBufferRef<'a> {
-    pub data: &'a[f32],
-    pub frame_count: usize,
-    pub channel_count: usize
-}
-
 pub struct AudioOutputBuffer {
     data: [*mut f32; MAX_AUDIO_BUFFERS],
     pub frame_count: usize,
@@ -75,7 +63,7 @@ pub struct AudioOutputBuffer {
 }
 
 impl AudioOutputBuffer {
-    pub fn get_channel(&mut self, channel: usize) -> &mut [f32] {
+    pub fn channel_mut(&mut self, channel: usize) -> &mut [f32] {
         unsafe {
             std::slice::from_raw_parts_mut(
                 self.data[channel] as *mut f32,
@@ -86,14 +74,14 @@ impl AudioOutputBuffer {
     
     pub fn zero(&mut self) {
         for i in 0..self.channel_count {
-            let data = self.get_channel(i);
+            let data = self.channel_mut(i);
             for j in 0..data.len() {
                 data[j] = 0.0;
             }
         }
     }
     
-    pub fn copy_from_buffer(&mut self, buffer:&AudioBufferRef){
+    pub fn copy_from_buffer(&mut self, buffer:&AudioBuffer){
         if self.channel_count != buffer.channel_count{
             panic!("Output buffer channel_count != buffer channel_count {} {}",self.channel_count, buffer.channel_count );
         }
@@ -101,8 +89,8 @@ impl AudioOutputBuffer {
             panic!("Output buffer frame_count != buffer frame_count ");
         }
         for i in 0..self.channel_count{
-            let output = self.get_channel(i);
-            let input = buffer.get_channel(i);
+            let output = self.channel_mut(i);
+            let input = buffer.channel(i);
             output.copy_from_slice(input);
         }
     }
@@ -130,7 +118,51 @@ impl AudioTime {
     }
 }
 
-impl<'a> AudioBufferMut<'a> {
+pub trait AudioBufferSize{
+    fn frame_count(&self)->usize;
+    fn channel_count(&self)->usize;
+}
+
+impl AudioBufferSize for AudioOutputBuffer{
+    fn frame_count(&self)->usize{self.frame_count}
+    fn channel_count(&self)->usize{self.channel_count}
+}
+
+impl AudioBufferSize for AudioBuffer{
+    fn frame_count(&self)->usize{self.frame_count}
+    fn channel_count(&self)->usize{self.channel_count}
+}
+
+impl AudioBuffer {
+    pub fn resize_from(&mut self, output:&impl AudioBufferSize)->&mut Self{
+        self.resize(output.frame_count(), output.channel_count());
+        self
+    }
+    
+    pub fn resize(&mut self, frame_count: usize, channel_count: usize) {
+        self.frame_count = frame_count;
+        self.channel_count = channel_count;
+        self.data.resize(frame_count * channel_count as usize, 0.0);
+    }
+
+    pub fn channel_mut(&mut self, channel: usize) -> &mut [f32] {
+        &mut self.data[channel * self.frame_count..(channel+1) * self.frame_count]
+    }
+
+    pub fn channel(&self, channel: usize) -> &[f32] {
+        &self.data[channel * self.frame_count..(channel+1) * self.frame_count]
+    }
+
+    pub fn write_value(&mut self, channel: usize, index:usize, value:f32){
+        self.data[channel * self.frame_count + index] = value
+    }
+    
+    pub fn zero(&mut self) {
+        for i in 0..self.data.len() {
+            self.data[i] = 0.0;
+        }
+    }
+
     unsafe fn to_audio_buffer_list(&mut self) -> AudioBufferList {
         let mut ab = AudioBufferList {
             mNumberBuffers: self.channel_count.min(MAX_AUDIO_BUFFERS) as u32,
@@ -147,78 +179,10 @@ impl<'a> AudioBufferMut<'a> {
             ab.mBuffers[i] = _AudioBuffer {
                 mNumberChannels: 0,
                 mDataByteSize: (self.frame_count * 4) as u32,
-                mData: self.get_channel(i).as_ptr() as *mut ::std::os::raw::c_void,
+                mData: self.channel_mut(i).as_ptr() as *mut ::std::os::raw::c_void,
             }
         }
         ab
-    }
-}
-
-pub trait AudioBufferSize{
-    fn frame_count(&self)->usize;
-    fn channel_count(&self)->usize;
-}
-
-impl AudioBufferSize for &AudioOutputBuffer{
-    fn frame_count(&self)->usize{self.frame_count}
-    fn channel_count(&self)->usize{self.channel_count}
-}
-
-impl<'a> AudioBufferSize for &AudioBufferRef<'a>{
-    fn frame_count(&self)->usize{self.frame_count}
-    fn channel_count(&self)->usize{self.channel_count}
-}
-
-impl<'a> AudioBufferSize for &AudioBufferMut<'a>{
-    fn frame_count(&self)->usize{self.frame_count}
-    fn channel_count(&self)->usize{self.channel_count}
-}
-
-
-impl AudioBuffer {
-    pub fn resize_from(&mut self, output:impl AudioBufferSize)->&mut Self{
-        self.resize(output.frame_count(), output.channel_count());
-        self
-    }
-    
-    pub fn resize(&mut self, frame_count: usize, channel_count: usize) {
-        self.frame_count = frame_count;
-        self.channel_count = channel_count;
-        self.data.resize(frame_count * channel_count as usize, 0.0);
-    }
-
-    pub fn as_ref(&self) -> AudioBufferRef {AudioBufferRef {
-        data: &self.data,
-        channel_count: self.channel_count,
-        frame_count: self.frame_count
-    }}
-    
-    pub fn as_mut(&mut self) -> AudioBufferMut {AudioBufferMut {
-        data: &mut self.data,
-        channel_count: self.channel_count,
-        frame_count: self.frame_count
-    }}
-}
-
-impl<'a> AudioBufferMut<'a> {
-    pub fn get_channel(&mut self, channel: usize) -> &mut [f32] {
-        &mut self.data[channel * self.frame_count..(channel+1) * self.frame_count]
-    }
-
-    pub fn write_value(&mut self, channel: usize, index:usize, value:f32){
-        self.data[channel * self.frame_count + index] = value
-    }
-    
-    pub fn zero(&mut self) {
-        for i in 0..self.data.len() {
-            self.data[i] = 0.0;
-        }
-    }
-}
-
-impl<'a> AudioBufferRef<'a> {
-    pub fn get_channel(&self, channel: usize) -> &[f32] {
-        &self.data[channel * self.frame_count..(channel+1) * self.frame_count]
     }
 }
 
@@ -260,7 +224,7 @@ pub struct AudioInstrumentState {
 
 impl AudioDeviceClone {
     
-    pub fn render_to_audio_buffer(&self, time: AudioTime, outputs: &mut [AudioBufferMut], inputs: &[AudioBufferRef]) {
+    pub fn render_to_audio_buffer(&self, time: AudioTime, outputs: &mut [&mut AudioBuffer], inputs: &[&AudioBuffer]) {
         match self.device_type {
             AudioDeviceType::MusicDevice => (),
             AudioDeviceType::Effect => (),
@@ -268,7 +232,7 @@ impl AudioDeviceClone {
         }
         if let Some(render_block) = self.render_block {
             unsafe {
-                let inputs_ptr = inputs.as_ptr() as *const AudioBufferRef as u64;
+                let inputs_ptr = inputs.as_ptr() as *const *const AudioBuffer as u64;
                 let inputs_len = inputs.len();
                 let output_provider = objc_block!(
                     move | _flags: *mut u32,
@@ -277,7 +241,7 @@ impl AudioDeviceClone {
                     input_bus: u64,
                     buffers: *mut AudioBufferList |: i32 {
                         let inputs = std::slice::from_raw_parts(
-                            inputs_ptr as *const AudioBufferRef,
+                            inputs_ptr as *const &AudioBuffer,
                             inputs_len as usize
                         );
                         let buffers = &*buffers;
@@ -305,7 +269,7 @@ impl AudioDeviceClone {
                                 buffers.mBuffers[i].mData as *mut f32,
                                 frame_count as usize
                             );
-                            let input_buffer = inputs[input_bus].get_channel(i);
+                            let input_buffer = inputs[input_bus].channel(i);
                             output_buffer.copy_from_slice(input_buffer);
                         }
                         0
