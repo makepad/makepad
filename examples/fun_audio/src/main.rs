@@ -11,11 +11,11 @@ live_register!{
     App: {{App}} {
         audio_graph: {
             root: Mixer {
-                /*c0: PluginMusicDevice {
+                /*c0: BasicSynth {
                     plugin: "AUMIDISynth"
                     preset_data: "21adslkfjalkwqwe"
                 }*/
-                c0:Instrument {
+                c1:Instrument {
                     key_range: {start: 34, end: 47 shift: 30}
                     s0 : PluginEffect {
                         plugin: "AUReverb2"

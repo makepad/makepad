@@ -18,16 +18,12 @@ enum FromUI {}
 #[derive(Live)]
 #[live_register(audio_component_factory!(Mixer))]
 struct Mixer {
-    #[rust] input_order: Vec<LiveId>,
     #[rust] inputs: ComponentMap<LiveId, AudioComponentRef>,
     #[rust] from_ui: FromUISender<FromUI>,
 }
 
 impl LiveHook for Mixer {
     fn apply_value_unknown(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
-        if apply_from.is_from_doc() {
-            self.input_order.push(nodes[index].id);
-        }
         self.inputs.get_or_insert(cx, nodes[index].id, | cx | {AudioComponentRef::new(cx)})
             .apply(cx, apply_from, index, nodes)
     }
@@ -42,6 +38,7 @@ impl LiveHook for Mixer {
 
 struct Node {
     from_ui: FromUIReceiver<FromUI>,
+    buffer: AudioBuffer,
     inputs: Vec<Box<dyn AudioGraphNode + Send >>
 }
 
@@ -55,7 +52,19 @@ impl AudioGraphNode for Node {
     }
     
     fn render_to_audio_buffer(&mut self, time: AudioTime, outputs: &mut [&mut AudioBuffer], _inputs: &[&AudioBuffer]) {
-        self.inputs[0].render_to_audio_buffer(time, outputs, &[])
+        self.buffer.resize_from(outputs[0]);
+        outputs[0].zero();
+        for i in 0..self.inputs.len() {
+            let input = &mut self.inputs[i];
+            input.render_to_audio_buffer(time, &mut [&mut self.buffer], &[]);
+            for c in 0..outputs[0].channel_count {
+                let out_channel = outputs[0].channel_mut(c);
+                let in_channel = self.buffer.channel(c);
+                for j in 0..out_channel.len() {
+                    out_channel[j] += in_channel[j]*0.1;
+                }
+            }
+        }
     }
 }
 
@@ -65,15 +74,14 @@ impl AudioComponent for Mixer {
         
         self.from_ui.new_channel();
         let mut inputs = Vec::new();
-        for input_id in &self.input_order {
-            if let Some(input) = self.inputs.get_mut(input_id) {
-                if let Some(input) = input.as_mut() {
-                    inputs.push(input.get_graph_node());
-                }
+        for input in self.inputs.values_mut() {
+            if let Some(input) = input.as_mut() {
+                inputs.push(input.get_graph_node());
             }
         }
-        Box::new(Node{
+        Box::new(Node {
             inputs,
+            buffer: AudioBuffer::default(),
             from_ui: self.from_ui.receiver()
         })
         /* same but written as combinators harder to read imho
@@ -89,8 +97,8 @@ impl AudioComponent for Mixer {
     }
     
     fn handle_event_with_fn(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
-        for input in self.inputs.values_mut(){
-            if let Some(input) = input.as_mut(){
+        for input in self.inputs.values_mut() {
+            if let Some(input) = input.as_mut() {
                 input.handle_event_with_fn(cx, event, dispatch_action)
             }
         }
