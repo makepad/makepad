@@ -22,7 +22,7 @@ pub trait AudioComponent: LiveApply {
 
 pub trait AudioGraphNode {
     fn handle_midi_1_data(&mut self, data: Midi1Data);
-    fn render_to_audio_buffer(&mut self, time: AudioTime, outputs: &mut [AudioBufferMut], inputs: &[AudioBufferRef]);
+    fn render_to_audio_buffer(&mut self, time: AudioTime, outputs: &mut [&mut AudioBuffer], inputs: &[&AudioBuffer]);
 }
 
 //pub type AudioGraphNodeRef = Option<Box<dyn AudioGraphNode + Send >>;
