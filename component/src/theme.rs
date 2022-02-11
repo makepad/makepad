@@ -57,9 +57,9 @@ live_register!{
     const COLOR_UP_10: #FFFFFF1A
     const COLOR_UP_4: #FFFFFF0A
     const COLOR_DOWN_7: #00000013
+    const COLOR_DOWN_10: #00000030
     const COLOR_DOWN_20: #00000040
     const COLOR_DOWN_31: #00000050
-    const COLOR_DOWN_41: #0000006a
     const COLOR_DOWN_50: #00000080
     const COLOR_BLACK: #000
     
@@ -69,12 +69,12 @@ live_register!{
     
     const COLOR_BG_HEADER: (blend(
         COLOR_BG_APP,
-        COLOR_UP_10
+        COLOR_DOWN_10
     ))
     
     const COLOR_BG_EDITOR: (blend(
         COLOR_BG_HEADER,
-        COLOR_DOWN_41
+        COLOR_DOWN_10
     ))
     
     const COLOR_BG_ODD: (blend(
