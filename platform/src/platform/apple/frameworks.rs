@@ -803,7 +803,7 @@ impl AudioComponentDescription {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default)]
 #[repr(C)]
 pub struct SMPTETime {
     pub mSubframes: i16,
@@ -818,16 +818,18 @@ pub struct SMPTETime {
 }
 
 #[repr(C)]
-pub struct AudioBuffer {
+#[derive(Copy, Clone)]
+pub struct _AudioBuffer {
     pub mNumberChannels: u32,
     pub mDataByteSize: u32,
     pub mData: *mut ::std::os::raw::c_void,
 }
 
+pub const MAX_AUDIO_BUFFERS:usize = 8;
 #[repr(C)]
 pub struct AudioBufferList {
     pub mNumberBuffers: u32,
-    pub mBuffers: [AudioBuffer; 2usize],
+    pub mBuffers: [_AudioBuffer; MAX_AUDIO_BUFFERS],
 }
 
 #[derive(Debug)]

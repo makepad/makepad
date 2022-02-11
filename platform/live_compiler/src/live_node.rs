@@ -1,8 +1,7 @@
 use {
     std::{
         fmt,
-        ops::Deref,
-        ops::DerefMut,
+        ops::{Deref,DerefMut},
     },
     crate::{
         makepad_math::{
