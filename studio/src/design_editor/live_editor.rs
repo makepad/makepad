@@ -282,7 +282,7 @@ impl LiveEditor {
                         let widget = widgets.get_or_insert(cx, ident, | cx | {
                             Widget {
                                 bind: *bind,
-                                inline_widget: widget_registry.new(cx, matched.live_type).unwrap(),
+                                inline_widget: widget_registry.new_and_apply_origin(cx, matched.live_type).unwrap(),
                             }
                         });
                         widget.bind = *bind;
