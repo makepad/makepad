@@ -32,6 +32,17 @@ pub fn derive_live_component_registry_impl(input: TokenStream) -> TokenStream {
             tb.add("    pub fn new(&self, cx: &mut Cx, ty: LiveType) -> Option<Box<dyn ").ident(&trait_name).add(" >> {");
             tb.add("        self.map.get(&ty).map( | (_, fac) | fac.new(cx))");
             tb.add("    }");
+            tb.add("    pub fn new_and_apply_origin(&self, cx: &mut Cx, ty: LiveType) -> Option<Box<dyn ").ident(&trait_name).add(" >> {");
+            tb.add("        self.map.get(&ty).map( | (info, fac) | {");
+            tb.add("            let mut ret = fac.new(cx);");
+            tb.add("            let live_ptr = cx.live_registry.borrow().module_id_and_name_to_ptr(info.module_id, info.name).unwrap();");
+            tb.add("            live_traits::from_ptr_impl(cx, live_ptr, |cx, file_id, index, nodes|{");
+            tb.add("                ret.apply(cx, ApplyFrom::NewFromDoc {file_id}, index, nodes)");
+            tb.add("            });");
+           tb.add("             ret");
+            tb.add("        })");
+            tb.add("    }");
+
             tb.add("}");
             return tb.end();
         }

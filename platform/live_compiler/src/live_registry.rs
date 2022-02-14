@@ -222,6 +222,29 @@ impl LiveRegistry {
         None
     }
     
+     pub fn module_id_and_name_to_ptr(&self, module_id: LiveModuleId, name: LiveId) -> Option<LivePtr> {
+        if let Some(file_id) = self.module_id_to_file_id.get(&module_id) {
+            let live= &self.live_files[file_id.to_index()];
+            let doc = &live.expanded;
+            if name != LiveId::empty() {
+                if doc.nodes.len() == 0 {
+                    println!("module_path_id_to_doc zero nodelen {}", self.file_id_to_file_name(*file_id));
+                    return None
+                }
+                if let Some(index) = doc.nodes.child_by_name(0, name) {
+                    return Some(LivePtr {file_id:*file_id, index:index as u32, generation:live.generation});
+                }
+                else {
+                    return None
+                }
+            }
+            else {
+                return Some(LivePtr {file_id:*file_id, index:0, generation:live.generation});
+            }
+        }
+        None
+    }
+    
     pub fn find_scope_item_via_class_parent(&self, start_ptr: LivePtr, item: LiveId) -> Option<(&[LiveNode], usize)> {
         let (nodes, index) = self.ptr_to_nodes_index(start_ptr);
         if let LiveValue::Class {class_parent, ..} = &nodes[index].value {
