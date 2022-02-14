@@ -8,7 +8,12 @@ use crate::audio::*;
 
 live_register!{
     use AudioComponent::*;
+    use FrameComponent::*;
+    use makepad_component::theme::*;
     App: {{App}} {
+        const FS_ROOT: ""
+        desktop_window: {pass: {clear_color: (COLOR_BG_APP)}}
+
         audio_graph: {
             root: Mixer {
                 /*c0: BasicSynth {
@@ -22,9 +27,15 @@ live_register!{
                     }
                     s1 : PluginMusicDevice {
                         plugin: "AUMIDISynth"
-                        preset_data: "21adslkfjalkwqwe"
                     }
                 }
+            }
+        }
+        
+        frame:{
+            HBox{
+                Button{}
+                Button{}
             }
         }
         
@@ -45,7 +56,7 @@ main_app!(App);
 pub struct App {
     piano: Piano,
     audio_graph: AudioGraph,
-    
+    frame: Frame,
     desktop_window: DesktopWindow,
     scroll_view: ScrollView,
 }

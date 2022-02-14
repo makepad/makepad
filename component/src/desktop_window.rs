@@ -9,7 +9,7 @@ live_register!{
     use crate::theme::*;
     DesktopWindow: {{DesktopWindow}} {
         pass:{
-            clear_color: (COLOR_BG_EDITOR)
+            clear_color: (COLOR_CLEAR)
         }
         caption_bg: {color: (COLOR_BG_APP)}
         caption: "Desktop Window",
