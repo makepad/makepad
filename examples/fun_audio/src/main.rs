@@ -22,10 +22,10 @@ live_register!{
                 }*/
                 c1:Instrument {
                     key_range: {start: 34, end: 47 shift: 30}
-                    s0 : PluginEffect {
+                    PluginEffect {
                         plugin: "AUReverb2"
                     }
-                    s1 : PluginMusicDevice {
+                    PluginMusicDevice {
                         plugin: "AUMIDISynth"
                     }
                 }
@@ -34,8 +34,8 @@ live_register!{
         
         frame:{
             HBox{
-                Button{}
-                Button{}
+                Button{label:"hi"}
+                Button{label:"hi"}
             }
         }
         

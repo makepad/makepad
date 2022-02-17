@@ -129,7 +129,7 @@ impl TabBar {
     fn get_or_create_tab(&mut self, cx: &mut Cx, tab_id: TabId) -> &mut Tab {
         let tab = self.tab;
         self.tabs.get_or_insert(cx, tab_id, | cx | {
-            Tab::new_from_option_ptr(cx, tab)
+            Tab::new_from_ptr(cx, tab)
         })
     }
     

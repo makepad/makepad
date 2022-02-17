@@ -194,6 +194,19 @@ impl LiveId {
         })
     }
     
+    pub fn add_numeric(&self, num: u32) {
+        let self_id = self;
+        LiveIdInterner::with( | idmap | {
+            let str_name = idmap.id_to_string.get(self_id).unwrap();
+            let new_name = format!("{}[{}]", str_name, num);
+            idmap.id_to_string.insert(
+                self_id.with_num(num), 
+                new_name
+            );
+        })
+    }
+    
+    
     pub fn gen() -> Self {
         LiveIdInterner::with( | idmap | {
             // cycle the hash
@@ -331,8 +344,8 @@ impl std::hash::BuildHasher for LiveIdHasherBuilder {
 }
 
 #[derive(Clone, Debug)]
-pub struct LiveIdMap<K, V>{
-    map:HashMap<K, V, LiveIdHasherBuilder>,
+pub struct LiveIdMap<K, V> {
+    map: HashMap<K, V, LiveIdHasherBuilder>,
     alloc_set: HashSet<K, LiveIdHasherBuilder>
 }
 
@@ -354,7 +367,7 @@ where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId>
     pub fn alloc_key(&mut self) -> K {
         loop {
             let new_id = LiveId::gen().into();
-            if self.map.get(&new_id).is_none() && !self.alloc_set.contains(&new_id){
+            if self.map.get(&new_id).is_none() && !self.alloc_set.contains(&new_id) {
                 self.alloc_set.insert(new_id);
                 return new_id.into()
             }
@@ -364,7 +377,7 @@ where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId>
     pub fn insert_unique(&mut self, value: V) -> K {
         loop {
             let new_id = LiveId::gen().into();
-            if self.alloc_set.contains(&new_id){
+            if self.alloc_set.contains(&new_id) {
                 continue
             }
             match self.map.entry(new_id) {

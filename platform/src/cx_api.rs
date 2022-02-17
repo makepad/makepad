@@ -427,7 +427,7 @@ macro_rules!main_app {
 
 #[macro_export]
 macro_rules!register_component_factory{
-    ($cx: ident, $registry: ident, $ ty: ident, $factory: ident) => {
+    ($cx: ident, $registry: ident, $ ty: ty, $factory: ident) => {
         $cx.live_registry.borrow().components.get_or_create::<$registry>().map.insert(
             LiveType::of::< $ ty>(),
             (LiveComponentInfo {
@@ -437,3 +437,18 @@ macro_rules!register_component_factory{
         );
     }
 }
+
+/*
+#[macro_export]
+macro_rules!define_component_ref{
+    ($componetref: ident, $component: ident) => {
+        $cx.live_registry.borrow().components.get_or_create::<$registry>().map.insert(
+            LiveType::of::< $ ty>(),
+            (LiveComponentInfo {
+                name: LiveId::from_str(stringify!( $ ty)).unwrap(),
+                module_id: LiveModuleId::from_str(&module_path!()).unwrap()
+            }, Box::new($factory()))
+        );
+    }
+}
+*/

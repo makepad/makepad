@@ -4,6 +4,7 @@ use {
         app_inner::AppInner,
         app_state::AppState,
     },
+    //makepad_regex::regex::Regex
 };
 
 live_register!{
@@ -33,6 +34,11 @@ pub struct App {
 impl App {
     
     pub fn live_register(cx: &mut Cx) {
+        //let regex = Regex::new("\\d(\\d{2})\\d");
+        //let mut slots = vec![None; 4];
+        //println!("{:?}", regex.run("xxx1234yyy", &mut slots));
+        //println!("{:?}", slots);
+        
         makepad_studio_component::live_register(cx);
         crate::builder::builder_client::live_register(cx);
         crate::collab::collab_client::live_register(cx);
