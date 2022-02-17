@@ -61,24 +61,24 @@ impl AudioComponentRef {
 
 impl LiveHook for AudioComponentRef {}
 impl LiveApply for AudioComponentRef {
-    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         if let LiveValue::Class {live_type, ..} = nodes[index].value {
             if let Some(component) = &mut self.0 {
                 if component.type_id() != live_type {
                     self.0 = None; // type changed, drop old component
                 }
                 else {
-                    return component.apply(cx, apply_from, index, nodes)
+                    return component.apply(cx, from, index, nodes)
                 }
             }
             if let Some(component) = cx.live_registry.clone().borrow()
                 .components.get::<AudioComponentRegistry>().new(cx, live_type) {
                  self.0 = Some(component);
-                 return self.0.as_mut().unwrap().apply(cx, apply_from, index, nodes);
+                 return self.0.as_mut().unwrap().apply(cx, from, index, nodes);
             }
         }
         else if let Some(component) = &mut self.0 {
-            return component.apply(cx, apply_from, index, nodes);
+            return component.apply(cx, from, index, nodes);
         }
         nodes.skip_node(index)
     }

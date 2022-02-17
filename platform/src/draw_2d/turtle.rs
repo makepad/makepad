@@ -34,7 +34,9 @@ pub struct Layout {
     pub new_line_padding: f32,
     pub abs_origin: Option<Vec2>,
     pub abs_size: Option<Vec2>,
-    pub walk: Walk,
+    pub margin: Margin,
+    pub width: Width,
+    pub height: Height,
 }
 
 #[derive(Copy, Clone, Default, Debug, Live, LiveHook)]
@@ -68,7 +70,7 @@ pub struct Align {
     pub fy: f32
 }
 
-#[derive(Clone, Copy, Default, Debug, Live, LiveHook)]
+#[derive(Clone, Copy, Default, Debug, Live)]
 pub struct Margin {
     pub left: f32,
     pub top: f32,
@@ -76,12 +78,44 @@ pub struct Margin {
     pub bottom: f32
 }
 
-#[derive(Clone, Copy, Default, Debug, Live, LiveHook)]
+impl LiveHook for Margin{
+    fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode])->Option<usize>{
+        match &nodes[index].value{
+            LiveValue::Float(v)=>{
+                *self = Self{left:*v as f32, top:*v as f32, right:*v as f32, bottom:*v as f32};
+                Some(index + 1)
+            }
+            LiveValue::Int(v)=>{
+                *self = Self{left:*v as f32, top:*v as f32, right:*v as f32, bottom:*v as f32};
+                Some(index + 1)
+            }
+            _=>None
+        }
+    }
+}
+
+#[derive(Clone, Copy, Default, Debug, Live)]
 pub struct Padding {
     pub left: f32,
     pub top: f32,
     pub right: f32,
     pub bottom: f32
+}
+
+impl LiveHook for Padding{
+    fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode])->Option<usize>{
+        match &nodes[index].value{
+            LiveValue::Float(v)=>{
+                *self = Self{left:*v as f32, top:*v as f32, right:*v as f32, bottom:*v as f32};
+                Some(index + 1)
+            }
+            LiveValue::Int(v)=>{
+                *self = Self{left:*v as f32, top:*v as f32, right:*v as f32, bottom:*v as f32};
+                Some(index + 1)
+            }
+            _=>None
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, Live, LiveHook)]
@@ -108,34 +142,50 @@ impl Default for Axis {
     }
 }
 
-#[derive(Copy, Clone, Debug, Live, LiveHook)]
+#[derive(Copy, Clone, Debug, Live)]
 pub enum Width {
     #[pick] Filled,
     #[live(200.0)] Fixed(f32),
     Computed,
-    /*
-    #[live] ComputeFill,
-    #[live(0.0)] FillPad(f32),
-    #[live(0.0)] FillScale(f32),
-    #[live(0.0, 0.0)] FillScalePad(f32, f32),
-    #[live(0.0)] Scale(f32),
-    #[live(0.0, 0.0)] ScalePad(f32, f32),
-    */
 }
 
-#[derive(Copy, Clone, Debug, Live, LiveHook)]
+impl LiveHook for Width{
+    fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode])->Option<usize>{
+        match &nodes[index].value{
+            LiveValue::Float(v)=>{
+                *self = Self::Fixed(*v as f32);
+                Some(index + 1)
+            }
+            LiveValue::Int(v)=>{
+                *self = Self::Fixed(*v as f32);
+                Some(index + 1)
+            }
+            _=>None
+        }
+    }
+}
+
+#[derive(Copy, Clone, Debug, Live)]
 pub enum Height {
     #[pick] Filled,
     #[live(200.0)] Fixed(f32),
     Computed,
-    /*
-    #[live] ComputeFill,
-    #[live(0.0)] FillPad(f32),
-    #[live(0.0)] FillScale(f32),
-    #[live(0.0, 0.0)] FillScalePad(f32, f32),
-    #[live(0.0)] Scale(f32),
-    #[live(0.0, 0.0)] ScalePad(f32, f32),
-    */
+}
+
+impl LiveHook for Height{
+    fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode])->Option<usize>{
+        match &nodes[index].value{
+            LiveValue::Float(v)=>{
+                *self = Self::Fixed(*v as f32);
+                Some(index + 1)
+            }
+            LiveValue::Int(v)=>{
+                *self = Self::Fixed(*v as f32);
+                Some(index + 1)
+            }
+            _=>None
+        }
+    }
 }
 
 impl Default for Width {
@@ -143,7 +193,6 @@ impl Default for Width {
         Width::Filled
     }
 }
-
 
 impl Default for Height {
     fn default() -> Self {
@@ -176,14 +225,14 @@ impl<'a> Cx2d<'a> {
     //pub fn debug_pt(&self, x:f32, y:f32, color:i32){
     //self.debug_pts.borrow_mut().push((x,y,color));
     //}
-    
+    /*
     pub fn set_count_of_aligned_instance(&mut self, instance_count: usize) -> Area {
         let mut area = self.align_list.last_mut().unwrap();
         if let Area::Instance(inst) = &mut area {
             inst.instance_count = instance_count;
         }
         area.clone()
-    }
+    }*/
     
     // begin a new turtle with a layout
     pub fn begin_turtle(&mut self, layout: Layout) {
@@ -194,10 +243,10 @@ impl<'a> Cx2d<'a> {
         
         // fetch origin and size from parent
         let (mut origin, mut abs_size) = if let Some(parent) = self.turtles.last() {
-            (Vec2 {x: layout.walk.margin.left + parent.pos.x, y: layout.walk.margin.top + parent.pos.y}, parent.abs_size)
+            (Vec2 {x: layout.margin.left + parent.pos.x, y: layout.margin.top + parent.pos.y}, parent.abs_size)
         }
         else {
-            (Vec2 {x: layout.walk.margin.left, y: layout.walk.margin.top}, Vec2::default())
+            (Vec2 {x: layout.margin.left, y: layout.margin.top}, Vec2::default())
         };
         
         // see if layout overrode size
@@ -216,8 +265,8 @@ impl<'a> Cx2d<'a> {
         }
         
         // abs origin overrides the computation of width/height to use the parent abs_origin
-        let (width, min_width) = self.eval_width(&layout.walk.width, layout.walk.margin, is_abs_origin, abs_size.x);
-        let (height, min_height) = self.eval_height(&layout.walk.height, layout.walk.margin, is_abs_origin, abs_size.y);
+        let (width, min_width) = self.eval_width(&layout.width, layout.margin, is_abs_origin, abs_size.x);
+        let (height, min_height) = self.eval_height(&layout.height, layout.margin, is_abs_origin, abs_size.y);
         
         let turtle = Turtle {
             align_list_x: self.align_list.len(),
@@ -276,7 +325,7 @@ impl<'a> Cx2d<'a> {
             Height::Fixed(old.height)
         };
         
-        let margin = old.layout.walk.margin.clone();
+        let margin = old.layout.margin.clone();
         //let align_after = old.layout.walk.align_after;
         // if we have alignment set, we should now align our childnodes
         let dx = Self::compute_align_turtle_x(&old);
@@ -444,7 +493,7 @@ impl<'a> Cx2d<'a> {
         
         ret
     }
-    
+    /*
     // high perf turtle with no indirections and compute visibility
     pub fn walk_turtle_right_no_wrap(&mut self, w: f32, h: f32, scroll: Vec2) -> Option<Rect> {
         if let Some(turtle) = self.turtles.last_mut() {
@@ -484,7 +533,7 @@ impl<'a> Cx2d<'a> {
         else {
             None
         }
-    }
+    }*/
     
     pub fn turtle_new_line(&mut self) {
         if let Some(turtle) = self.turtles.last_mut() {
@@ -600,7 +649,7 @@ impl<'a> Cx2d<'a> {
             Vec2::default()
         }
     }
-    
+    /*
     pub fn get_turtle_biggest(&self) -> f32 {
         if let Some(turtle) = self.turtles.last() {
             turtle.biggest
@@ -608,7 +657,7 @@ impl<'a> Cx2d<'a> {
         else {
             0.
         }
-    }
+    }*/
     
     pub fn get_turtle_bounds(&self) -> Vec2 {
         if let Some(turtle) = self.turtles.last() {
@@ -812,13 +861,13 @@ impl<'a> Cx2d<'a> {
         };
         self.change_turtle_align_x(fx, false);
     }
-    
+    /*
     pub fn reset_turtle_bounds(&mut self) {
         if let Some(turtle) = self.turtles.last_mut() {
             turtle.bound_left_top = Vec2 {x: std::f32::INFINITY, y: std::f32::INFINITY};
             turtle.bound_right_bottom = Vec2 {x: std::f32::NEG_INFINITY, y: std::f32::NEG_INFINITY};
         }
-    }
+    }*/
     
     pub fn reset_turtle_pos(&mut self) {
         if let Some(turtle) = self.turtles.last_mut() {
@@ -920,7 +969,7 @@ impl<'a> Cx2d<'a> {
     
     pub fn is_height_computed(&self) -> bool {
         if let Some(turtle) = self.turtles.last() {
-            if let Height::Computed = turtle.layout.walk.height {
+            if let Height::Computed = turtle.layout.height {
                 return true
             }
         }
@@ -929,7 +978,7 @@ impl<'a> Cx2d<'a> {
     
     pub fn is_width_computed(&self) -> bool {
         if let Some(turtle) = self.turtles.last() {
-            if let Width::Computed = turtle.layout.walk.width {
+            if let Width::Computed = turtle.layout.width {
                 return true
             }
         }
@@ -940,28 +989,16 @@ impl<'a> Cx2d<'a> {
     pub fn eval_width(&self, width: &Width, margin: Margin, abs: bool, abs_pos: f32) -> (f32, f32) {
         match width {
             Width::Computed => (std::f32::NAN, 0.),
-            //Width::ComputeFill => (std::f32::NAN, self._get_width_left(abs, abs_pos) - (margin.l + margin.r)),
             Width::Fixed(v) => (max_zero_keep_nan(*v), 0.),
             Width::Filled => (max_zero_keep_nan(self._get_width_left(abs, abs_pos) - (margin.left + margin.right)), 0.),
-            //Width::FillPad(p) => (max_zero_keep_nan(self._get_width_left(abs, abs_pos) - p - (margin.l + margin.r)), 0.),
-            //Width::FillScale(s) => (max_zero_keep_nan(self._get_width_left(abs, abs_pos) * s - (margin.l + margin.r)), 0.),
-            //Width::FillScalePad(s, p) => (max_zero_keep_nan(self._get_width_left(abs, abs_pos) * s - p - (margin.l + margin.r)), 0.),
-            //Width::Scale(s) => (max_zero_keep_nan(self._get_width_total(abs, abs_pos) * s - (margin.l + margin.r)), 0.),
-            //Width::ScalePad(s, p) => (max_zero_keep_nan(self._get_width_total(abs, abs_pos) * s - p - (margin.l + margin.r)), 0.),
         }
     }
     
     pub fn eval_height(&self, height: &Height, margin: Margin, abs: bool, abs_pos: f32) -> (f32, f32) {
         match height {
             Height::Computed => (std::f32::NAN, 0.),
-            //Height::ComputeFill => (std::f32::NAN, self._get_height_left(abs, abs_pos) - (margin.t + margin.b)),
             Height::Fixed(v) => (max_zero_keep_nan(*v), 0.),
             Height::Filled=> (max_zero_keep_nan(self._get_height_left(abs, abs_pos) - (margin.top + margin.bottom)), 0.),
-            //Height::FillPad(p) => (max_zero_keep_nan(self._get_height_left(abs, abs_pos) - p - (margin.t + margin.b)), 0.),
-            //Height::FillScale(s) => (max_zero_keep_nan(self._get_height_left(abs, abs_pos) * s - (margin.t + margin.b)), 0.),
-            //Height::FillScalePad(s, p) => (max_zero_keep_nan(self._get_height_left(abs, abs_pos) * s - p - (margin.t + margin.b)), 0.),
-            //Height::Scale(s) => (max_zero_keep_nan(self._get_height_total(abs, abs_pos) * s - (margin.t + margin.b)), 0.),
-            //Height::ScalePad(s, p) => (max_zero_keep_nan(self._get_height_total(abs, abs_pos) * s - p - (margin.t + margin.b)), 0.),
         }
     }
 }
@@ -974,35 +1011,6 @@ fn max_zero_keep_nan(v: f32) -> f32 {
         f32::max(v, 0.0)
     }
 }
-
-/*
-thread_local!(pub static debug_pts_store: RefCell<Vec<(f32,f32,i32,String)>> = RefCell::new(Vec::new()));
-pub fn debug_pt(x:f32, y:f32, color:i32, s:&str){
-    debug_pts_store.with(|c|{
-        let mut store = c.borrow_mut();
-        store.push((x,y,color,s.to_string()));
-    })
-}
-
-
-        debug_pts_store.with(|c|{
-            let mut store = c.borrow_mut();
-            for (x,y,col,s) in store.iter(){
-                self.debug_qd.color = match col{
-                    0=>color("red"),
-                    1=>color("green"),
-                    2=>color("blue"),
-                    _=>color("yellow")
-                };
-                self.debug_qd.draw_abs(cx, false, *x, *y,2.0,2.0);
-                if s.len() != 0{
-                    self.debug_tx.draw_text(cx, Fixed(*x), Fixed(*y), s);
-                }
-            }
-            store.truncate(0);
-        })*/
-
-
 
 #[derive(Clone, Default, Debug)]
 pub struct Turtle {

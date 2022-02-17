@@ -72,9 +72,9 @@ impl EditorView {
         }
     }
     
-    pub fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    pub fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match self {
-            Self::LiveEditor(e) => e.apply(cx, apply_from, index, nodes)
+            Self::LiveEditor(e) => e.apply(cx, from, index, nodes)
         }
     }
     
@@ -115,10 +115,10 @@ pub struct Editors {
 }
 
 impl LiveHook for Editors {
-    fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         if let Some(index) = nodes.child_by_name(index, id!(live_editor)) {
             for editor_view in self.editor_views.values_mut() {
-                editor_view.apply(cx, apply_from, index, nodes);
+                editor_view.apply(cx, from, index, nodes);
             }
         }
     }

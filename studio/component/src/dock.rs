@@ -86,14 +86,14 @@ pub struct Dock {
 }
 
 impl LiveHook for Dock {
-    fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         for panel in self.panels.values_mut() {
             match panel {
                 Panel::Split(panel) => if let Some(index) = nodes.child_by_name(index, id!(splitter)) {
-                    panel.splitter.apply(cx, apply_from, index, nodes);
+                    panel.splitter.apply(cx, from, index, nodes);
                 }
                 Panel::Tab(panel) => if let Some(index) = nodes.child_by_name(index, id!(tab_bar)) {
-                    panel.tab_bar.apply(cx, apply_from, index, nodes);
+                    panel.tab_bar.apply(cx, from, index, nodes);
                 }
             }
         }

@@ -118,7 +118,7 @@ struct DrawLabelText {
 }
 
 impl LiveHook for Button {
-    fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         //cx.debug_draw_tree(true, 0);
     }
 }

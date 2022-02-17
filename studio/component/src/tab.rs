@@ -11,7 +11,7 @@ live_register!{
     
     Tab: {{Tab}} {
         name_text: {
-            text_style: FONT_LABEL{}
+            text_style: FONT_LABEL {}
             instance hover: 0.0
             instance selected: 0.0
             fn get_color(self) -> vec4 {
@@ -53,10 +53,8 @@ live_register!{
         
         layout: {
             align: {fx: 0.0, fy: 0.5},
-            walk: {
-                width: Width::Computed,
-                height: Height::Filled, //Fixed((DIM_TAB_HEIGHT)),
-            },
+            width: Width::Computed,
+            height: Height::Filled, //Fixed((DIM_TAB_HEIGHT)),
             padding: {
                 left: 10.0,
                 top: 2.0,
