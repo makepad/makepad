@@ -68,18 +68,17 @@ impl LiveApply for AudioComponentRef {
                     self.0 = None; // type changed, drop old component
                 }
                 else {
-                    component.apply(cx, apply_from, index, nodes);
-                    return nodes.skip_node(index);
+                    return component.apply(cx, apply_from, index, nodes)
                 }
             }
-            if let Some(mut component) = cx.live_registry.clone().borrow()
+            if let Some(component) = cx.live_registry.clone().borrow()
                 .components.get::<AudioComponentRegistry>().new(cx, live_type) {
-                component.apply(cx, apply_from, index, nodes);
-                self.0 = Some(component);
+                 self.0 = Some(component);
+                 return self.0.as_mut().unwrap().apply(cx, apply_from, index, nodes);
             }
         }
         else if let Some(component) = &mut self.0 {
-            component.apply(cx, apply_from, index, nodes);
+            return component.apply(cx, apply_from, index, nodes);
         }
         nodes.skip_node(index)
     }
@@ -89,11 +88,7 @@ impl LiveNew for AudioComponentRef {
     fn new(_cx: &mut Cx) -> Self {
         Self (None)
     }
-    fn new_apply(cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Self {
-        let mut ret = Self (None);
-        ret.apply(cx, apply_from, index, nodes);
-        ret
-    }
+
     fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
         LiveTypeInfo {
             module_id: LiveModuleId::from_str(&module_path!()).unwrap(),

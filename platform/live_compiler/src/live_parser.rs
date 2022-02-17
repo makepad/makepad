@@ -12,6 +12,7 @@ use {
             Vec4
         },        live_token::{LiveToken, TokenWithSpan, LiveTokenId},
         live_ptr::{LiveFileId, LiveModuleId},
+        live_node_vec::LiveNodeSlice,
         span::{TextSpan, TextPos},
         live_error::{LiveError, LiveErrorOrigin},
         live_document::LiveOriginal,
@@ -710,10 +711,18 @@ impl<'a> LiveParser<'a> {
                             let origin = LiveNodeOrigin::from_token_id(token_id)
                                 .with_edit_info(edit_info)
                                 .with_id_non_unique(true);
+                            // should we count the previous non unique id?
+                            let new_num = if ld.nodes.len()>0{
+                                ld.nodes.next_num_from_id(ld.nodes.len() - 1, prop_id)
+                            }
+                            else{ 
+                                0
+                            };
+                            prop_id.add_numeric(new_num);
                             ld.nodes.push(LiveNode {
                                 origin,
-                                id: LiveId(0),
-                                value: LiveValue::Object
+                                id: prop_id.with_num(new_num),
+                                value: LiveValue::Clone(prop_id)
                             });
                             self.expect_live_class(false, prop_id, ld) ?;
                         }

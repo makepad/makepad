@@ -97,7 +97,7 @@ live_register!{
 }
 
 #[derive(Live)]
-#[live_register( | cx: &mut Cx | {register_as_frame_component!(cx, Button);})]
+#[live_register(register_as_frame_component!(Button))]
 pub struct Button {
     #[rust] pub button_logic: ButtonLogic,
     #[state(default_state)] pub animator: Animator,

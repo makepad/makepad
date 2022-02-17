@@ -109,11 +109,11 @@ impl LiveApply for View {
                 break;
             }
             match nodes[index].id {
-                id!(debug_id) => cx.draw_lists[self.draw_list_id].debug_id = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
-                id!(is_clipped) => cx.draw_lists[self.draw_list_id].is_clipped = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
-                id!(is_overlay) => self.is_overlay = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
-                id!(always_redraw) => self.always_redraw = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
-                id!(layout) => self.layout = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
+                id!(debug_id) => cx.draw_lists[self.draw_list_id].debug_id = LiveNew::new_apply_mut_index(cx, apply_from, &mut index, nodes),
+                id!(is_clipped) => cx.draw_lists[self.draw_list_id].is_clipped = LiveNew::new_apply_mut_index(cx, apply_from, &mut index, nodes),
+                id!(is_overlay) => self.is_overlay = LiveNew::new_apply_mut_index(cx, apply_from, &mut index, nodes),
+                id!(always_redraw) => self.always_redraw = LiveNew::new_apply_mut_index(cx, apply_from, &mut index, nodes),
+                id!(layout) => self.layout = LiveNew::new_apply_mut_index(cx, apply_from, &mut index, nodes),
                 _ => {
                     cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
                     index = nodes.skip_node(index);

@@ -235,7 +235,7 @@ impl Dock {
         let splitter = self.splitter;
         self.panels.get_or_insert(cx, panel_id, | cx | {
             Panel::Split(SplitPanel {
-                splitter: Splitter::new_from_option_ptr(cx, splitter),
+                splitter: Splitter::new_from_ptr(cx, splitter),
             })
         }).as_split_panel_mut()
     }
@@ -244,7 +244,7 @@ impl Dock {
         let tab_bar = self.tab_bar;
         self.panels.get_or_insert(cx, panel_id, | cx | {
             Panel::Tab(TabPanel {
-                tab_bar: TabBar::new_from_option_ptr(cx, tab_bar),
+                tab_bar: TabBar::new_from_ptr(cx, tab_bar),
                 contents_rect: Rect::default(),
                 full_rect: Rect::default(),
             })
