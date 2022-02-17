@@ -103,24 +103,24 @@ impl FrameComponentRef {
 
 impl LiveHook for FrameComponentRef {}
 impl LiveApply for FrameComponentRef {
-    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         if let LiveValue::Class {live_type, ..} = nodes[index].value {
             if let Some(component) = &mut self.0 {
                 if component.type_id() != live_type {
                     self.0 = None; // type changed, drop old component
                 }
                 else {
-                    return component.apply(cx, apply_from, index, nodes);
+                    return component.apply(cx, from, index, nodes);
                 }
             }
             if let Some(component) = cx.live_registry.clone().borrow()
                 .components.get::<FrameComponentRegistry>().new(cx, live_type) {
                 self.0 = Some(component);
-                return self.0.as_mut().unwrap().apply(cx, apply_from, index, nodes);
+                return self.0.as_mut().unwrap().apply(cx, from, index, nodes);
             }
         }
         else if let Some(component) = &mut self.0 {
-            return component.apply(cx, apply_from, index, nodes)
+            return component.apply(cx, from, index, nodes)
         }
         nodes.skip_node(index)
     }
@@ -160,23 +160,24 @@ macro_rules!register_as_frame_component {
 macro_rules!frame_component_impl {
     ( $ ty: ty) => {
         impl LiveHook for $ ty {
-            fn before_apply(&mut self, _cx: &mut Cx, apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
-                if let ApplyFrom::ApplyClear = apply_from {
+            fn before_apply(&mut self, _cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode])->Option<usize> {
+                if let ApplyFrom::ApplyClear = from {
                     self.create_order.clear();
                 }
+                None
             }
             
-            fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, _nodes: &[LiveNode]) {
-                if let Some(file_id) = apply_from.file_id() {
+            fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, _nodes: &[LiveNode]) {
+                if let Some(file_id) = from.file_id() {
                     self.live_ptr = Some(LivePtr::from_index(file_id, index, cx.live_registry.borrow().file_id_to_file(file_id).generation));
                 }
             }
             
-            fn apply_value_unknown(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
-                if apply_from.is_from_doc() { //from doc
+            fn apply_value_unknown(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+                if from.is_from_doc() { //from doc
                     self.create_order.push(nodes[index].id);
                     return self.components.get_or_insert(cx, nodes[index].id, | cx | {FrameComponentRef::new(cx)})
-                        .apply(cx, apply_from, index, nodes);
+                        .apply(cx, from, index, nodes);
                 }
                 else {
                 }

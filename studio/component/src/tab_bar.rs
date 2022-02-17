@@ -33,10 +33,8 @@ live_register!{
             view: {
                 debug_id: tab_bar_view
                 layout: {
-                    walk: {
-                        width: Width::Filled
-                        height: Height::Fixed((DIM_TAB_HEIGHT))
-                    }
+                    width: Width::Filled
+                    height: Height::Fixed((DIM_TAB_HEIGHT))
                 }
             }
         }
@@ -66,10 +64,10 @@ pub struct TabBar {
 
 
 impl LiveHook for TabBar {
-    fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         if let Some(index) = nodes.child_by_name(index, id!(tab)) {
             for tab in self.tabs.values_mut() {
-                tab.apply(cx, apply_from, index, nodes);
+                tab.apply(cx, from, index, nodes);
             }
         }
         self.scroll_view.redraw(cx);

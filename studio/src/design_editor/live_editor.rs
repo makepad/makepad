@@ -115,7 +115,7 @@ pub struct LiveEditor {
 }
 
 impl LiveHook for LiveEditor {
-    fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         /*
         let live_registry_cp = cx.live_registry.clone();
         let live_registry = live_registry_cp.borrow();
@@ -125,7 +125,7 @@ impl LiveHook for LiveEditor {
         }*/
         if let Some(index) = nodes.child_by_name(index, id!(fold_button)) {
             for fold_button in self.fold_buttons.values_mut() {
-                fold_button.apply(cx, apply_from, index, nodes);
+                fold_button.apply(cx, from, index, nodes);
             }
         }
         self.editor_impl.redraw(cx);

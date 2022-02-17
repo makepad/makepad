@@ -28,7 +28,7 @@ live_register!{
                     COLOR_BG_UNFOCUSSED,
                     COLOR_BG_SELECTED,
                     self.focussed
-                ), 
+                ),
                 self.selected
             );
             // COLOR_BG_HOVER,
@@ -50,7 +50,7 @@ live_register!{
             )
         }
         
-        text_style: FONT_DATA{
+        text_style: FONT_DATA {
             top_drop: 1.3,
         }
     }
@@ -78,10 +78,8 @@ live_register!{
     FileTreeNode: {{FileTreeNode}} {
         
         layout: {
-            walk: {
-                width: Width::Filled,
-                height: Height::Fixed(0.0),
-            },
+            width: Width::Filled,
+            height: Height::Fixed(0.0),
             align: {fy: 0.5},
             padding: {left: 5.0, bottom: 1.0,},
         }
@@ -248,7 +246,7 @@ pub struct FileTreeNode {
     
     focussed_state: Option<LivePtr>,
     unfocussed_state: Option<LivePtr>,
-
+    
     default_state: Option<LivePtr>,
     hover_state: Option<LivePtr>,
     selected_state: Option<LivePtr>,
@@ -262,7 +260,7 @@ pub struct FileTreeNode {
     min_drag_distance: f32,
     
     opened: f32,
-    focussed:f32,
+    focussed: f32,
     hover: f32,
     selected: f32,
 }
@@ -290,10 +288,10 @@ pub struct FileTree {
 }
 
 impl LiveHook for FileTree {
-    fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         for (_, (tree_node, id)) in self.tree_nodes.iter_mut() {
             if let Some(index) = nodes.child_by_name(index, *id) {
-                tree_node.apply(cx, apply_from, index, nodes);
+                tree_node.apply(cx, from, index, nodes);
             }
         }
         self.scroll_view.redraw(cx);
@@ -327,7 +325,7 @@ impl FileTreeNode {
     pub fn draw_folder(&mut self, cx: &mut Cx2d, name: &str, is_even: f32, node_height: f32, depth: usize, scale: f32) {
         self.set_draw_state(is_even, scale);
         
-        self.layout.walk.height = Height::Fixed(scale * node_height);
+        self.layout.height = Height::Fixed(scale * node_height);
         
         self.bg_quad.begin(cx, self.layout);
         
@@ -343,7 +341,7 @@ impl FileTreeNode {
     pub fn draw_file(&mut self, cx: &mut Cx2d, name: &str, is_even: f32, node_height: f32, depth: usize, scale: f32) {
         self.set_draw_state(is_even, scale);
         
-        self.layout.walk.height = Height::Fixed(scale * node_height);
+        self.layout.height = Height::Fixed(scale * node_height);
         self.bg_quad.begin(cx, self.layout);
         
         cx.walk_turtle(self.indent_walk(depth));
@@ -584,7 +582,7 @@ impl FileTree {
         if self.scroll_view.handle_event(cx, event) {
             self.scroll_view.redraw(cx);
         }
-
+        
         match event {
             Event::DragEnd => self.dragging_node_id = None,
             _ => ()
@@ -622,18 +620,18 @@ impl FileTree {
             }
         }
         
-        match event.hits(cx, self.scroll_view.area()){
-            HitEvent::KeyFocus(_)=>{
+        match event.hits(cx, self.scroll_view.area()) {
+            HitEvent::KeyFocus(_) => {
                 if let Some(node_id) = self.selected_node_id {
                     self.tree_nodes.get_mut(&node_id).unwrap().0.set_is_focussed(cx, true, Animate::Yes);
                 }
             }
-            HitEvent::KeyFocusLost(_)=>{
+            HitEvent::KeyFocusLost(_) => {
                 if let Some(node_id) = self.selected_node_id {
                     self.tree_nodes.get_mut(&node_id).unwrap().0.set_is_focussed(cx, false, Animate::Yes);
                 }
             }
-            _=>()
+            _ => ()
         }
     }
 }
