@@ -225,7 +225,7 @@ impl LogListNode {
         _depth: usize
     ) {
         self.set_draw_state(is_even);
-        self.layout.height = Height::Fixed(node_height);
+        self.layout.height = Size::Fixed(node_height);
         self.bg_quad.begin(cx, self.layout);
         
         // lets draw a fold button
@@ -247,8 +247,8 @@ impl LogListNode {
     
     fn _indent_walk(&self, depth: usize) -> Walk {
         Walk {
-            width: Width::Fixed(depth as f32 * self.indent_width),
-            height: Height::Filled,
+            width: Size::Fixed(depth as f32 * self.indent_width),
+            height: Size::Fill,
             margin: Margin {
                 left: depth as f32 * 1.0,
                 top: 0.0,
@@ -334,7 +334,7 @@ impl LogList {
         while walk < height_left {
             self.count += 1;
             self.filler_quad.is_even = Self::is_even(self.count);
-            self.filler_quad.draw_walk(cx, Walk::wh(Width::Filled, Height::Fixed(self.node_height.min(height_left - walk))));
+            self.filler_quad.draw_walk(cx, Walk::wh(Size::Fill, Size::Fixed(self.node_height.min(height_left - walk))));
             walk += self.node_height.max(1.0);
         }
         self.scroll_view.end(cx);
@@ -391,7 +391,7 @@ impl LogList {
             return true
         }
         else {
-            cx.walk_turtle(Walk::wh(Width::Filled, Height::Fixed(height)));
+            cx.walk_turtle(Walk::wh(Size::Fill, Size::Fixed(height)));
             return false
         }
     }
