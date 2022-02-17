@@ -163,13 +163,13 @@ impl Splitter {
     fn layout(&self) -> Layout {
         match self.axis {
             Axis::Horizontal => Layout {
-                width: Width::Fixed(self.position),
-                height: Height::Filled,
+                width: Size::Fixed(self.position),
+                height: Size::Fill,
                 ..self.layout
             },
             Axis::Vertical => Layout {
-                width: Width::Filled,
-                height: Height::Fixed(self.position),
+                width: Size::Fill,
+                height: Size::Fixed(self.position),
                 ..self.layout
             },
         }

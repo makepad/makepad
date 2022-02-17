@@ -53,8 +53,8 @@ live_register!{
         
         layout: {
             align: {fx: 0.0, fy: 0.5},
-            width: Width::Computed,
-            height: Height::Filled, //Fixed((DIM_TAB_HEIGHT)),
+            width: Size::Fit,
+            height: Size::Fill, //Fixed((DIM_TAB_HEIGHT)),
             padding: {
                 left: 10.0,
                 top: 2.0,

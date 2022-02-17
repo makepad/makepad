@@ -43,8 +43,8 @@ live_register!{
         }
         
         walk: {
-            height: Height::Fixed(10.0),
-            width: Width::Fixed(10.0),
+            height: 10.0,
+            width: 10.0,
             margin: {right: 5},
         },
     }

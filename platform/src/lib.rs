@@ -160,8 +160,7 @@ pub use {
                 Padding,
                 Direction,
                 Axis,
-                Width,
-                Height,
+                Size,
                 Rect
             },
             view::{
