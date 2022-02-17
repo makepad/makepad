@@ -65,7 +65,7 @@ impl LiveNew for Window {
 }
 impl LiveApply for Window {
     //fn type_id(&self)->std::any::TypeId{ std::any::TypeId::of::<Self>()}
-    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
         
         if !nodes[start_index].value.is_structy_type() {
             cx.apply_error_wrong_type_for_struct(live_error_origin!(), start_index, nodes, id!(View));
@@ -79,21 +79,21 @@ impl LiveApply for Window {
                 break;
             }
             match nodes[index].id {
-                id!(position) => cx.windows[self.window_id].window_set_position = Some(LiveNew::new_apply_mut_index(cx, apply_from, &mut index, nodes)),
+                id!(position) => cx.windows[self.window_id].window_set_position = Some(LiveNew::new_apply_mut_index(cx, from, &mut index, nodes)),
                 id!(inner_size) => {
-                    let v = LiveNew::new_apply_mut_index(cx, apply_from, &mut index, nodes);
+                    let v = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes);
                     if let CxWindowState::Create{inner_size,..} = &mut cx.windows[self.window_id].window_state{
                         *inner_size = v;
                     }
                 },
                 id!(title) => {
-                    let v = LiveNew::new_apply_mut_index(cx, apply_from, &mut index, nodes);
+                    let v = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes);
                     if let CxWindowState::Create{title,..} = &mut cx.windows[self.window_id].window_state{
                         *title = v;
                     }
                 }
                 id!(position) => {
-                    let v = LiveNew::new_apply_mut_index(cx, apply_from, &mut index, nodes);
+                    let v = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes);
                     if let CxWindowState::Create{position,..} = &mut cx.windows[self.window_id].window_state{
                         *position = v;
                     }

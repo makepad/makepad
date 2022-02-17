@@ -498,6 +498,13 @@ impl LiveValue {
         }
     }
     
+    pub fn is_color(&self) -> bool {
+        match self{
+            Self::Color(_)=>true,
+            _=>false
+        }
+    }
+
     pub fn is_value_type(&self) -> bool {
         match self {
             Self::Str(_) |

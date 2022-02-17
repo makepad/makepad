@@ -62,7 +62,7 @@ impl DrawVars {
         }
     }
     
-    pub fn init_shader(&mut self, cx: &mut Cx, apply_from: ApplyFrom, draw_shader_ptr: DrawShaderPtr, geometry_fields: &dyn GeometryFields) {
+    pub fn init_shader(&mut self, cx: &mut Cx, from: ApplyFrom, draw_shader_ptr: DrawShaderPtr, geometry_fields: &dyn GeometryFields) {
         self.draw_shader = None;
         
         if cx.draw_shaders.error_set.contains(&draw_shader_ptr){
@@ -203,7 +203,7 @@ impl DrawVars {
                         DRAW_SHADER_INPUT_PACKING
                     );
                     
-                    mapping.update_live_uniforms(cx, apply_from);
+                    mapping.update_live_uniforms(cx, from);
                     
                     let live_registry_rc = cx.live_registry.clone();
                     let live_registry = live_registry_rc.borrow();
@@ -300,36 +300,36 @@ impl DrawVars {
         }
     }
     
-    pub fn before_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, _nodes: &[LiveNode], geometry_fields: &dyn GeometryFields) {
+    pub fn before_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, _nodes: &[LiveNode], geometry_fields: &dyn GeometryFields) {
         
-        let draw_shader_ptr = if let Some(file_id) = apply_from.file_id() {
+        let draw_shader_ptr = if let Some(file_id) = from.file_id() {
             let generation = cx.live_registry.borrow().file_id_to_file(file_id).generation;
             DrawShaderPtr(LivePtr::from_index(file_id, index, generation))
         }
         else {
             return
         };
-        self.init_shader(cx, apply_from, draw_shader_ptr, geometry_fields)
+        self.init_shader(cx, from, draw_shader_ptr, geometry_fields)
     }
     
-    pub fn apply_slots(cx: &mut Cx, slots: usize, output: &mut [f32], offset: usize, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    pub fn apply_slots(cx: &mut Cx, slots: usize, output: &mut [f32], offset: usize, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match slots {
             1 => {
                 let mut v: f32 = 0.0;
-                let index = v.apply(cx, apply_from, index, nodes);
+                let index = v.apply(cx, from, index, nodes);
                 output[offset + 0] = v;
                 return index;
             }
             2 => {
                 let mut v: Vec2 = Vec2::default();
-                let index = v.apply(cx, apply_from, index, nodes);
+                let index = v.apply(cx, from, index, nodes);
                 output[offset + 0] = v.x;
                 output[offset + 1] = v.y;
                 return index;
             }
             3 => {
                 let mut v: Vec3 = Vec3::default();
-                let index = v.apply(cx, apply_from, index, nodes);
+                let index = v.apply(cx, from, index, nodes);
                 output[offset + 0] = v.x;
                 output[offset + 1] = v.y;
                 output[offset + 2] = v.z;
@@ -337,7 +337,7 @@ impl DrawVars {
             }
             4 => {
                 let mut v: Vec4 = Vec4::default();
-                let index = v.apply(cx, apply_from, index, nodes);
+                let index = v.apply(cx, from, index, nodes);
                 output[offset + 0] = v.x;
                 output[offset + 1] = v.y;
                 output[offset + 2] = v.z;
@@ -350,7 +350,7 @@ impl DrawVars {
         }
     }
     
-    pub fn apply_value(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    pub fn apply_value(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         
         if nodes[index].origin.node_has_prefix() && nodes[index].value.is_id(){
             return nodes.skip_node(index)
@@ -366,14 +366,14 @@ impl DrawVars {
                 let offset = input.offset;
                 let slots = input.slots;
                 if input.id == id {
-                    return Self::apply_slots(cx, slots, &mut self.user_uniforms, offset, apply_from, index, nodes);
+                    return Self::apply_slots(cx, slots, &mut self.user_uniforms, offset, from, index, nodes);
                 }
             }
             for input in &sh.mapping.var_instances.inputs {
                 let offset = (self.var_instances.len() - sh.mapping.var_instances.total_slots) + input.offset;
                 let slots = input.slots;
                 if input.id == id {
-                    return Self::apply_slots(cx, slots, &mut self.var_instances, offset, apply_from, index, nodes);
+                    return Self::apply_slots(cx, slots, &mut self.var_instances, offset, from, index, nodes);
                 }
             }
         }
@@ -400,14 +400,14 @@ impl DrawVars {
         nodes.skip_node(index)
     }
     
-    pub fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode], geometry_fields: &dyn GeometryFields) {
+    pub fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode], geometry_fields: &dyn GeometryFields) {
         // alright. so.if we are ApplyFrom::
-        if let ApplyFrom::LiveEdit = apply_from {
+        if let ApplyFrom::LiveEdit = from {
             // alright, we might have to update something here.
             return
         }
         
-        if apply_from.is_from_doc() {
+        if from.is_from_doc() {
             self.init_slicer(cx);
         }
         self.geometry_id = geometry_fields.get_geometry_id();

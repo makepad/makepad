@@ -23,14 +23,14 @@ struct Mixer {
 }
 
 impl LiveHook for Mixer {
-    fn apply_value_unknown(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_value_unknown(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         self.inputs.get_or_insert(cx, nodes[index].id, | cx | {AudioComponentRef::new(cx)})
-            .apply(cx, apply_from, index, nodes)
+            .apply(cx, from, index, nodes)
     }
     
-    fn after_apply(&mut self, _cx: &mut Cx, apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
+    fn after_apply(&mut self, _cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
         // so.. alright.. if we have a file_id we can gc the inputs
-        if apply_from.is_from_doc() {
+        if from.is_from_doc() {
             self.inputs.retain_visible();
         }
     }

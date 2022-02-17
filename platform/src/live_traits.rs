@@ -10,10 +10,6 @@ pub use {
     }
 };
 
-pub trait LiveNewHelper {
-    
-}
-
 pub fn from_ptr_impl<CB>(cx: &mut Cx, live_ptr: LivePtr, cb: CB)
 where CB: FnOnce(&mut Cx, LiveFileId, usize, &[LiveNode]) -> usize {
     let live_registry_rc = cx.live_registry.clone();
@@ -37,26 +33,18 @@ pub trait LiveNew: LiveApply {
     
     fn live_type_info(cx: &mut Cx) -> LiveTypeInfo;
     
-    fn new_apply(cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Self where Self: Sized {
+    fn new_apply(cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Self where Self: Sized {
         let mut ret = Self::new(cx);
-        ret.apply(cx, apply_from, index, nodes);
+        ret.apply(cx, from, index, nodes);
         ret
     }
     
-    fn new_apply_mut_index(cx: &mut Cx, apply_from: ApplyFrom, index: &mut usize, nodes: &[LiveNode]) -> Self where Self: Sized {
+    fn new_apply_mut_index(cx: &mut Cx, from: ApplyFrom, index: &mut usize, nodes: &[LiveNode]) -> Self where Self: Sized {
         let mut ret = Self::new(cx);
-        *index = ret.apply(cx, apply_from, *index, nodes);
+        *index = ret.apply(cx, from, *index, nodes);
         ret
     }
-    /*
-    fn new_from_ptr(cx: &mut Cx, live_ptr: LivePtr) -> Self where Self: Sized {
-        let mut ret = Self::new(cx);
-        from_ptr_impl(cx, live_ptr, |cx, file_id, index, nodes|{
-            ret.apply(cx, ApplyFrom::NewFromDoc {file_id}, index, nodes)
-        });
-        return ret
-    }*/
-    
+
     fn new_from_ptr(cx: &mut Cx, live_ptr: Option<LivePtr>) -> Self where Self: Sized {
         let mut ret = Self::new(cx);
         if let Some(live_ptr) = live_ptr{
@@ -66,12 +54,6 @@ pub trait LiveNew: LiveApply {
         }
         return ret
     }
-    /*
-    fn new_from_ptr_debug(cx: &mut Cx, live_ptr: LivePtr) -> Self where Self: Sized {
-        cx.live_registry.borrow().ptr_to_doc(live_ptr).nodes.debug_print(live_ptr.index as usize, 100);
-        let ret = Self::new_from_ptr(cx, live_ptr);
-        return ret
-    }*/
     
     fn new_as_main_module(cx: &mut Cx, module_path: &str, id: LiveId) -> Option<Self> where Self: Sized {
         let module_id = LiveModuleId::from_str(module_path).unwrap();
@@ -105,11 +87,11 @@ pub trait ToLiveValue {
 }
 
 pub trait LiveApplyValue {
-    fn apply_value(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize;
+    fn apply_value(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize;
 }
 
 pub trait LiveApply: LiveHook {
-    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize;
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize;
     
     fn apply_over(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
         self.apply(cx, ApplyFrom::ApplyOver, 0, nodes);
@@ -227,20 +209,20 @@ pub trait LiveHook {
         }
         nodes.skip_node(index)
     }
-    fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {}
+    fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode])->Option<usize>{None}
     fn after_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {}
     fn after_new(&mut self, _cx: &mut Cx) {}
 }
 
 impl<T> LiveHook for Option<T> where T: LiveApply + LiveNew + 'static {}
 impl<T> LiveApply for Option<T> where T: LiveApply + LiveNew + 'static {
-    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         if let Some(v) = self {
-            v.apply(cx, apply_from, index, nodes)
+            v.apply(cx, from, index, nodes)
         }
         else {
             let mut inner = T::new(cx);
-            let index = inner.apply(cx, apply_from, index, nodes);
+            let index = inner.apply(cx, from, index, nodes);
             *self = Some(inner);
             index
         }
@@ -251,9 +233,9 @@ impl<T> LiveNew for Option<T> where T: LiveApply + LiveNew + 'static{
     fn new(_cx: &mut Cx) -> Self {
         Self::None
     }
-    fn new_apply(cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Self {
+    fn new_apply(cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Self {
         let mut ret = Self::None;
-        ret.apply(cx, apply_from, index, nodes);
+        ret.apply(cx, from, index, nodes);
         ret
     }
     

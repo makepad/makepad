@@ -182,10 +182,10 @@ pub struct LogList {
 }
 
 impl LiveHook for LogList {
-    fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         if let Some(index) = nodes.child_by_name(index, id!(log_node)) {
             for (_, node) in self.fold_nodes.iter_mut() {
-                node.apply(cx, apply_from, index, nodes);
+                node.apply(cx, from, index, nodes);
             }
         }
         self.scroll_view.redraw(cx);
@@ -225,7 +225,7 @@ impl LogListNode {
         _depth: usize
     ) {
         self.set_draw_state(is_even);
-        self.layout.walk.height = Height::Fixed(node_height);
+        self.layout.height = Height::Fixed(node_height);
         self.bg_quad.begin(cx, self.layout);
         
         // lets draw a fold button

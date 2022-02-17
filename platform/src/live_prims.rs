@@ -54,10 +54,10 @@ macro_rules!live_primitive {
 live_primitive!(
     LiveValue,
     LiveValue::None,
-    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         if nodes[index].is_array() {
             if let Some(_) = Animator::last_keyframe_value_from_array(index, nodes) {
-                self.apply(cx, apply_from, index, nodes);
+                self.apply(cx, from, index, nodes);
             }
             nodes.skip_node(index)
         }
@@ -77,7 +77,7 @@ live_primitive!(
 live_primitive!(
     LiveId,
     LiveId::empty(),
-    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Id(id) => {
                 *self = *id;
@@ -85,7 +85,7 @@ live_primitive!(
             }
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
-                    self.apply(cx, apply_from, index, nodes);
+                    self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
             }
@@ -103,7 +103,7 @@ live_primitive!(
 live_primitive!(
     bool,
     false,
-    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Bool(val) => {
                 *self = *val;
@@ -115,7 +115,7 @@ live_primitive!(
             }
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
-                    self.apply(cx, apply_from, index, nodes);
+                    self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
             }
@@ -149,7 +149,7 @@ live_primitive!(
 live_primitive!(
     f32,
     0.0f32,
-    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Float(val) => {
                 *self = *val as f32;
@@ -174,7 +174,7 @@ live_primitive!(
             },
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
-                    self.apply(cx, apply_from, index, nodes);
+                    self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
             }
@@ -193,7 +193,7 @@ live_primitive!(
 live_primitive!(
     f64,
     0.0f64,
-    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Float(val) => {
                 *self = *val as f64;
@@ -218,7 +218,7 @@ live_primitive!(
             },
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
-                    self.apply(cx, apply_from, index, nodes);
+                    self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
             }
@@ -237,7 +237,7 @@ live_primitive!(
 live_primitive!(
     i64,
     0i64,
-    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Float(val) => {
                 *self = *val as i64;
@@ -262,7 +262,7 @@ live_primitive!(
             },
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
-                    self.apply(cx, apply_from, index, nodes);
+                    self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
             }
@@ -281,7 +281,7 @@ live_primitive!(
 live_primitive!(
     usize,
     0usize,
-    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Float(val) => {
                 *self = *val as usize;
@@ -306,7 +306,7 @@ live_primitive!(
             }
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
-                    self.apply(cx, apply_from, index, nodes);
+                    self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
             }
@@ -325,7 +325,7 @@ live_primitive!(
 live_primitive!(
     Vec2,
     Vec2::default(),
-    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Vec2(val) => {
                 *self = *val;
@@ -333,7 +333,7 @@ live_primitive!(
             }
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
-                    self.apply(cx, apply_from, index, nodes);
+                    self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
             }
@@ -364,7 +364,7 @@ live_primitive!(
 live_primitive!(
     Vec3,
     Vec3::default(),
-    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Vec3(val) => {
                 *self = *val;
@@ -372,7 +372,7 @@ live_primitive!(
             }
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
-                    self.apply(cx, apply_from, index, nodes);
+                    self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
             }
@@ -403,7 +403,7 @@ live_primitive!(
 live_primitive!(
     Vec4,
     Vec4::default(),
-    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Color(v) => {
                 *self = Vec4::from_u32(*v);
@@ -411,7 +411,7 @@ live_primitive!(
             }
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
-                    self.apply(cx, apply_from, index, nodes);
+                    self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
             }
@@ -442,7 +442,7 @@ live_primitive!(
 live_primitive!(
     String,
     String::default(),
-    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
             LiveValue::Str(v) => {
                 self.clear();
@@ -479,7 +479,7 @@ live_primitive!(
             }
             LiveValue::Array => {
                 if let Some(index) = Animator::last_keyframe_value_from_array(index, nodes) {
-                    self.apply(cx, apply_from, index, nodes);
+                    self.apply(cx, from, index, nodes);
                 }
                 nodes.skip_node(index)
             }
@@ -505,8 +505,8 @@ live_primitive!(
 live_primitive!(
     LivePtr,
     LivePtr {file_id: LiveFileId(0), index: 0, generation: Default::default()},
-    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
-        if let Some(file_id) = apply_from.file_id() {
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        if let Some(file_id) = from.file_id() {
             self.file_id = file_id;
             self.index = index as u32;
             self.generation = cx.live_registry.borrow().file_id_to_file(file_id).generation;
