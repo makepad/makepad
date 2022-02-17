@@ -262,7 +262,7 @@ impl Piano {
             }
             let key_id = LiveId(i as u64).into();
             let key = self.white_keys.get_or_insert(cx, key_id, | cx | {
-                PianoKey::new_from_option_ptr(cx, piano_key)
+                PianoKey::new_from_ptr(cx, piano_key)
             });
             key.draw_abs(cx, 0.0, Rect {pos: pos, size: white_size});
             pos.x += white_size.x;
@@ -273,7 +273,7 @@ impl Piano {
             if let Some(shift) = black_key_shift(i) {
                 let key_id = LiveId(i as u64).into();
                 let key = self.black_keys.get_or_insert(cx, key_id, | cx | {
-                    PianoKey::new_from_option_ptr(cx, piano_key)
+                    PianoKey::new_from_ptr(cx, piano_key)
                 });
                 key.draw_abs(cx, 1.0, Rect {
                     pos: pos - vec2(black_size.x * shift, 0.),

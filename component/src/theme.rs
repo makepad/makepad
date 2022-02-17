@@ -71,7 +71,7 @@ live_register!{
         COLOR_DOWN_10
     ))
     
-    //const COLOR_CLEAR: (COLOR_BG_APP)
+    const COLOR_CLEAR: (COLOR_BG_APP)
     
     const COLOR_BG_EDITOR: (blend(
         COLOR_BG_HEADER,

@@ -244,7 +244,7 @@ impl LiveRegistry {
         }
         None
     }
-    
+    /*
     pub fn find_scope_item_via_class_parent(&self, start_ptr: LivePtr, item: LiveId) -> Option<(&[LiveNode], usize)> {
         let (nodes, index) = self.ptr_to_nodes_index(start_ptr);
         if let LiveValue::Class {class_parent, ..} = &nodes[index].value {
@@ -275,7 +275,7 @@ impl LiveRegistry {
             println!("WRONG TYPE  {:?}", nodes[index].value);
         }
         None
-    }
+    }*/
     
     pub fn find_module_id_name(&self, item: LiveId, module_id: LiveModuleId) -> Option<LiveScopeTarget> {
         // ok lets find it in that other doc

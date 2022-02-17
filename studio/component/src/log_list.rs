@@ -367,7 +367,7 @@ impl LogList {
         // if self.should_node_draw(cx) {
         let fold_node = self.fold_node;
         let node = self.fold_nodes.get_or_insert(cx, node_id, | cx | {
-            let mut node = LogListNode::new_from_option_ptr(cx, fold_node);
+            let mut node = LogListNode::new_from_ptr(cx, fold_node);
             if is_open {
                 node.set_is_open(cx, true, Animate::No)
             }
