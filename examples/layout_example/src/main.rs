@@ -6,8 +6,12 @@ live_register!{
     App: {{App}} {
         scroll_view: {}
         frame: {
-            Quad{color:#0f0, width:80}
-            Quad{color:#0ff}
+            color: #f00,
+            padding: 100,
+            width: Size::Fit
+            height: Size::Fit
+            Frame {color: #0f0, width: 40, height: 40}
+            Frame {color: #0ff, width: 40, height: 40}
         }
     }
 }
@@ -22,6 +26,7 @@ pub struct App {
 
 impl App {
     pub fn live_register(cx: &mut Cx) {
+        println!("{}", std::mem::size_of::<Frame>());
         makepad_component::live_register(cx);
     }
     
@@ -35,7 +40,7 @@ impl App {
         self.scroll_view.handle_event(cx, event);
         
         match event {
-            Event::Construct => {  
+            Event::Construct => {
             }
             Event::Draw(draw_event) => {
                 self.draw(&mut Cx2d::new(cx, draw_event));

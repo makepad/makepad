@@ -17,7 +17,7 @@ pub use {
         live_traits::*,
         draw_2d::{
             cx_2d::Cx2d,
-            turtle::{Layout, Width, Height, Walk, Rect},
+            turtle::{Layout, Size, Walk, Rect},
         },
         cx_draw_shaders::{
             CxDrawShaderOptions,
@@ -236,8 +236,8 @@ impl View {
             && !view_will_redraw {
             
             // walk the turtle because we aren't drawing
-            let w = Width::Fixed(cx.draw_lists[self.draw_list_id].rect.size.x);
-            let h = Height::Fixed(cx.draw_lists[self.draw_list_id].rect.size.y);
+            let w = Size::Fixed(cx.draw_lists[self.draw_list_id].rect.size.x);
+            let h = Size::Fixed(cx.draw_lists[self.draw_list_id].rect.size.y);
             cx.walk_turtle(Walk {width: w, height: h, margin: self.layout.margin});
             return Err(());
         }

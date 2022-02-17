@@ -33,8 +33,8 @@ live_register!{
             view: {
                 debug_id: tab_bar_view
                 layout: {
-                    width: Width::Filled
-                    height: Height::Fixed((DIM_TAB_HEIGHT))
+                    width: Size::Fill
+                    height: Size::Fixed((DIM_TAB_HEIGHT))
                 }
             }
         }
@@ -90,14 +90,14 @@ impl TabBar {
             self.draw_drag.draw_walk(
                 cx,
                 Walk {
-                    width: Width::Filled,
-                    height: Height::Filled,
+                    width: Size::Fill,
+                    height: Size::Fill,
                     ..Walk::default()
                 },
             );
         }
         self.tabs.retain_visible();
-        self.bar_fill.draw_walk(cx, Walk::wh(Width::Filled, Height::Filled));
+        self.bar_fill.draw_walk(cx, Walk::wh(Size::Fill, Size::Fill));
         self.scroll_view.end(cx);
     }
     
