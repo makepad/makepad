@@ -78,7 +78,7 @@ impl LiveNew for View {
 }
 impl LiveApply for View {
     //fn type_id(&self) -> std::any::TypeId {std::any::TypeId::of::<Self>()}
-    fn apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
         
         if !nodes[start_index].value.is_structy_type() {
             cx.apply_error_wrong_type_for_struct(live_error_origin!(), start_index, nodes, id!(View));
@@ -92,11 +92,11 @@ impl LiveApply for View {
                 break;
             }
             match nodes[index].id {
-                id!(debug_id) => cx.views[self.view_id].debug_id = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
-                id!(is_clipped) => cx.views[self.view_id].is_clipped = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
-                id!(is_overlay) => cx.views[self.view_id].is_overlay = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
-                id!(always_redraw) => cx.views[self.view_id].always_redraw = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
-                id!(layout) => cx.views[self.view_id].layout = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes),
+                id!(debug_id) => cx.views[self.view_id].debug_id = LiveNew::new_apply_mut(cx, from, &mut index, nodes),
+                id!(is_clipped) => cx.views[self.view_id].is_clipped = LiveNew::new_apply_mut(cx, from, &mut index, nodes),
+                id!(is_overlay) => cx.views[self.view_id].is_overlay = LiveNew::new_apply_mut(cx, from, &mut index, nodes),
+                id!(always_redraw) => cx.views[self.view_id].always_redraw = LiveNew::new_apply_mut(cx, from, &mut index, nodes),
+                id!(layout) => cx.views[self.view_id].layout = LiveNew::new_apply_mut(cx, from, &mut index, nodes),
                 _ => {
                     cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
                     index = nodes.skip_node(index);

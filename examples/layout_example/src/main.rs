@@ -6,8 +6,8 @@ live_register!{
     App: {{App}} {
         scroll_view: {}
         frame: {
-            Quad{bg:{color:#0f0}}
-            Quad{bg:{color:#0ff}}
+            Quad{color:#0f0, width:80}
+            Quad{color:#0ff}
         }
     }
 }

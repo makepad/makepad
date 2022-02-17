@@ -24,17 +24,13 @@ live_register!{
         caption_layout:{
             padding:{top:2}
             align: {fx: 0.5, fy: 0.5},
-            walk: {
-                width: Width::Filled, 
-                height: Height::Fixed(26.),
-            }
+            width: Width::Filled, 
+            height: Height::Fixed(26.),
         }
         caption_view: {
             layout: {
-                walk: {
-                    width: Width::Filled,
-                    height: Height::Computed
-                },
+                width: Width::Filled,
+                height: Height::Computed
             }
         }
     }
@@ -197,7 +193,8 @@ impl DesktopWindow {
                         
                         self.caption_bg.begin(cx, Layout {
                             align: Align {fx: 1.0, fy: 0.0},
-                            walk: Walk::wh(Width::Filled, Height::Computed),
+                            width:Width::Filled, 
+                            height:Height::Computed,
                             ..Default::default()
                         });
                         
@@ -246,7 +243,8 @@ impl DesktopWindow {
                         if self.window.is_fullscreen(cx) { // put a bar at the top
                             self.caption_bg.begin(cx, Layout {
                                 align: Align {fx: 0.5, fy: 0.5},
-                                walk: Walk::wh(Width::Filled, Height::Fixed(22.)),
+                                width: Width::Filled,
+                                height: Height::Fixed(22.),
                                 ..Default::default()
                             });
                             self.caption_bg.end(cx);

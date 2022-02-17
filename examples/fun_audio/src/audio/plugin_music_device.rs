@@ -57,7 +57,7 @@ impl AudioGraphNode for Node{
 }
 
 impl LiveHook for PluginMusicDevice {
-    fn after_apply(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         self.load_audio_device();
     }
 }

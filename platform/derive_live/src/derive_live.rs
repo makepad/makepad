@@ -247,29 +247,31 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         
         tb.add("    fn apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, start_index: usize, nodes: &[LiveNode])->usize {");
         
-        tb.add("        self.before_apply(cx, apply_from, start_index, nodes);");
+        tb.add("        let skip_index = self.before_apply(cx, apply_from, start_index, nodes);");
         if draw_vars.is_some() {
-            tb.add("        self.draw_vars.before_apply(cx, apply_from, start_index, nodes, &self.geometry);");
+            tb.add("    self.draw_vars.before_apply(cx, apply_from, start_index, nodes, &self.geometry);");
         }
         else if deref_target.is_some() {
-            tb.add("        self.deref_target.deref_target_before_apply(cx, apply_from, start_index, nodes);");
+            tb.add("    self.deref_target.deref_target_before_apply(cx, apply_from, start_index, nodes);");
         }
-        
-        tb.add("        let struct_id = LiveId(").suf_u64(LiveId::from_str(&struct_name).unwrap().0).add(");");
-        tb.add("        if !nodes[start_index].value.is_structy_type(){");
-        tb.add("            cx.apply_error_wrong_type_for_struct(live_error_origin!(), start_index, nodes, struct_id);");
-        tb.add("            self.after_apply(cx, apply_from, start_index, nodes);");
-        tb.add("            return nodes.skip_node(start_index);");
-        tb.add("        }");
-        
-        tb.add("        let mut index = start_index + 1;"); // skip the class
-        tb.add("        loop{");
-        tb.add("            if nodes[index].value.is_close(){");
-        tb.add("                index += 1;");
-        tb.add("                break;");
+        tb.add("        let index = if let Some(index) = skip_index{index} else {");
+        tb.add("            let struct_id = LiveId(").suf_u64(LiveId::from_str(&struct_name).unwrap().0).add(");");
+        tb.add("            if !nodes[start_index].value.is_structy_type(){");
+        tb.add("                cx.apply_error_wrong_type_for_struct(live_error_origin!(), start_index, nodes, struct_id);");
+        tb.add("                self.after_apply(cx, apply_from, start_index, nodes);");
+        tb.add("                return nodes.skip_node(start_index);");
         tb.add("            }");
-        tb.add("            index = self.apply_value(cx, apply_from, index, nodes);");
-        tb.add("        }");
+        
+        tb.add("            let mut index = start_index + 1;"); // skip the class
+        tb.add("            loop{");
+        tb.add("                if nodes[index].value.is_close(){");
+        tb.add("                    index += 1;");
+        tb.add("                    break;");
+        tb.add("                }");
+        tb.add("                index = self.apply_value(cx, apply_from, index, nodes);");
+        tb.add("            }");
+        tb.add("            index");
+        tb.add("        };");
         
         if let Some(_) = draw_vars {
             tb.add("    self.draw_vars.after_apply(cx, apply_from, start_index, nodes, &self.geometry);");
@@ -508,7 +510,10 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         //tb.add("    fn type_id(&self)->std::any::TypeId{ std::any::TypeId::of::<Self>() }");
         
         tb.add("    fn apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, start_index:usize, nodes: &[LiveNode]) -> usize {");
-        tb.add("        self.before_apply(cx, apply_from, start_index, nodes);");
+        tb.add("        if let Some(index) = self.before_apply(cx, apply_from, start_index, nodes){");
+        tb.add("            self.after_apply(cx, apply_from, start_index, nodes);");
+        tb.add("            return index");
+        tb.add("        }");
         tb.add("        let mut index = start_index;");
         tb.add("        let enum_id = LiveId(").suf_u64(LiveId::from_str(&enum_name).unwrap().0).add(");");
         tb.add("        match &nodes[start_index].value{");

@@ -7,7 +7,7 @@ live_register!{
     DrawSplitter: {{DrawSplitter}} {
         const BORDER_RADIUS: 1.0
         const SPLITER_PAD: 1.0
-        const SPLITER_GRABBER:110.0
+        const SPLITER_GRABBER: 110.0
         instance pressed: 0.0
         instance hover: 0.0
         
@@ -17,18 +17,18 @@ live_register!{
             if self.is_vertical > 0.5 {
                 sdf.box(
                     SPLITER_PAD,
-                    self.rect_size.y * 0.5 - SPLITER_GRABBER *0.5,
-                    self.rect_size.x-2.0*SPLITER_PAD,
+                    self.rect_size.y * 0.5 - SPLITER_GRABBER * 0.5,
+                    self.rect_size.x - 2.0 * SPLITER_PAD,
                     SPLITER_GRABBER,
                     BORDER_RADIUS
                 );
             }
             else {
                 sdf.box(
-                    self.rect_size.x*0.5 - SPLITER_GRABBER *0.5,
+                    self.rect_size.x * 0.5 - SPLITER_GRABBER * 0.5,
                     SPLITER_PAD,
                     SPLITER_GRABBER,
-                    self.rect_size.y-2.0*SPLITER_PAD,
+                    self.rect_size.y - 2.0 * SPLITER_PAD,
                     BORDER_RADIUS
                 );
             }
@@ -40,7 +40,7 @@ live_register!{
                     self.pressed
                 ),
                 self.hover
-            )); 
+            ));
         }
     }
     
@@ -125,14 +125,14 @@ impl Splitter {
         cx.end_turtle();
         match self.axis {
             Axis::Horizontal => {
-               self.bar_quad.is_vertical = 1.0;
-               self.bar_quad.draw_abs(
+                self.bar_quad.is_vertical = 1.0;
+                self.bar_quad.draw_abs(
                     cx,
                     Rect {
                         pos: vec2(self.rect.pos.x + self.position, self.rect.pos.y),
                         size: vec2(self.split_bar_size, self.rect.size.y),
                     },
-                ); 
+                );
                 cx.set_turtle_pos(Vec2 {
                     x: self.rect.pos.x + self.position + self.split_bar_size,
                     y: self.rect.pos.y,
@@ -161,12 +161,17 @@ impl Splitter {
     }
     
     fn layout(&self) -> Layout {
-        Layout {
-            walk: match self.axis {
-                Axis::Horizontal => Walk::wh(Width::Fixed(self.position), Height::Filled),
-                Axis::Vertical => Walk::wh(Width::Filled, Height::Fixed(self.position)),
+        match self.axis {
+            Axis::Horizontal => Layout {
+                width: Width::Fixed(self.position),
+                height: Height::Filled,
+                ..self.layout
             },
-            ..self.layout
+            Axis::Vertical => Layout {
+                width: Width::Filled,
+                height: Height::Fixed(self.position),
+                ..self.layout
+            },
         }
     }
     
@@ -210,17 +215,17 @@ impl Splitter {
                     HoverState::In => if !f.any_down {
                         self.animate_to(cx, self.hover_state);
                     },
-                    HoverState::Out => if !f.any_down{
+                    HoverState::Out => if !f.any_down {
                         self.animate_to(cx, self.default_state);
                     },
                     _ => ()
                 }
             },
             HitEvent::FingerDown(_) => {
-                 match self.axis {
+                match self.axis {
                     Axis::Horizontal => cx.set_down_mouse_cursor(MouseCursor::ColResize),
                     Axis::Vertical => cx.set_down_mouse_cursor(MouseCursor::RowResize),
-                } 
+                }
                 self.animate_to(cx, self.pressed_state);
                 self.drag_start_align = Some(self.align);
             }
