@@ -10,6 +10,3 @@ edition = "2018"
 path="./component"  
 version="0.1"
 
-[dependencies.makepad-regex]
-path="./regex"  
-version="0.1"

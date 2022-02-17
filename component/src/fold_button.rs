@@ -64,7 +64,7 @@ live_register!{
             from: {all: Play::Exp {speed1: 0.98, speed2: 0.95}}
             redraw: true
             apply: {opened: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]}
-        }
+        } 
         /*
         closed_state: {
             track: open
