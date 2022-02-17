@@ -145,7 +145,7 @@ impl Editors {
     ) {
         let live_editor = self.live_editor;
         let view = self.editor_views.get_or_insert(cx, view_id.into(), | cx | {
-            EditorView::LiveEditor(LiveEditor::new_from_option_ptr(cx, live_editor))
+            EditorView::LiveEditor(LiveEditor::new_from_ptr(cx, live_editor))
         });
         
         if let Some(session_id) = view.session_id() {

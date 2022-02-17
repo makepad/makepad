@@ -43,21 +43,21 @@ pub trait LiveNew: LiveApply {
         ret
     }
     
-    fn new_apply_mut(cx: &mut Cx, apply_from: ApplyFrom, index: &mut usize, nodes: &[LiveNode]) -> Self where Self: Sized {
+    fn new_apply_mut_index(cx: &mut Cx, apply_from: ApplyFrom, index: &mut usize, nodes: &[LiveNode]) -> Self where Self: Sized {
         let mut ret = Self::new(cx);
         *index = ret.apply(cx, apply_from, *index, nodes);
         ret
     }
-    
+    /*
     fn new_from_ptr(cx: &mut Cx, live_ptr: LivePtr) -> Self where Self: Sized {
         let mut ret = Self::new(cx);
         from_ptr_impl(cx, live_ptr, |cx, file_id, index, nodes|{
             ret.apply(cx, ApplyFrom::NewFromDoc {file_id}, index, nodes)
         });
         return ret
-    }
+    }*/
     
-    fn new_from_option_ptr(cx: &mut Cx, live_ptr: Option<LivePtr>) -> Self where Self: Sized {
+    fn new_from_ptr(cx: &mut Cx, live_ptr: Option<LivePtr>) -> Self where Self: Sized {
         let mut ret = Self::new(cx);
         if let Some(live_ptr) = live_ptr{
             from_ptr_impl(cx, live_ptr, |cx, file_id, index, nodes|{
@@ -66,12 +66,12 @@ pub trait LiveNew: LiveApply {
         }
         return ret
     }
-    
+    /*
     fn new_from_ptr_debug(cx: &mut Cx, live_ptr: LivePtr) -> Self where Self: Sized {
         cx.live_registry.borrow().ptr_to_doc(live_ptr).nodes.debug_print(live_ptr.index as usize, 100);
         let ret = Self::new_from_ptr(cx, live_ptr);
         return ret
-    }
+    }*/
     
     fn new_as_main_module(cx: &mut Cx, module_path: &str, id: LiveId) -> Option<Self> where Self: Sized {
         let module_id = LiveModuleId::from_str(module_path).unwrap();
@@ -222,7 +222,7 @@ impl ApplyFrom {
 
 pub trait LiveHook {
     fn apply_value_unknown(&mut self, cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
-        if !nodes[index].id.is_capitalised() && !nodes[index].origin.id_non_unique() {
+        if !nodes[index].id.is_capitalised() /*&& !nodes[index].origin.id_non_unique()*/ {
             cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
         }
         nodes.skip_node(index)

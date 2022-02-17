@@ -92,13 +92,11 @@ impl AudioComponent for Instrument {
         self.from_ui.new_channel();
         let mut steps = Vec::new();
         for step_id in &self.step_order {
-            if let Some(input) = self.steps.get_mut(step_id) {
-                if let Some(input) = input.as_mut() {
-                    steps.push(Step {
-                        graph_node: input.get_graph_node(),
-                        input_buffer: AudioBuffer::default()
-                    });
-                }
+            if let Some(input) = self.steps.get_mut(step_id).unwrap().as_mut() {
+                steps.push(Step {
+                    graph_node: input.get_graph_node(),
+                    input_buffer: AudioBuffer::default()
+                });
             }
         }
         Box::new(Node {

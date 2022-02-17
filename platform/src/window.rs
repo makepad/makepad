@@ -79,21 +79,21 @@ impl LiveApply for Window {
                 break;
             }
             match nodes[index].id {
-                id!(position) => cx.windows[self.window_id].window_set_position = Some(LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes)),
+                id!(position) => cx.windows[self.window_id].window_set_position = Some(LiveNew::new_apply_mut_index(cx, apply_from, &mut index, nodes)),
                 id!(inner_size) => {
-                    let v = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes);
+                    let v = LiveNew::new_apply_mut_index(cx, apply_from, &mut index, nodes);
                     if let CxWindowState::Create{inner_size,..} = &mut cx.windows[self.window_id].window_state{
                         *inner_size = v;
                     }
                 },
                 id!(title) => {
-                    let v = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes);
+                    let v = LiveNew::new_apply_mut_index(cx, apply_from, &mut index, nodes);
                     if let CxWindowState::Create{title,..} = &mut cx.windows[self.window_id].window_state{
                         *title = v;
                     }
                 }
                 id!(position) => {
-                    let v = LiveNew::new_apply_mut(cx, apply_from, &mut index, nodes);
+                    let v = LiveNew::new_apply_mut_index(cx, apply_from, &mut index, nodes);
                     if let CxWindowState::Create{position,..} = &mut cx.windows[self.window_id].window_state{
                         *position = v;
                     }

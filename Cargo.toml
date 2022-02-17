@@ -2,6 +2,7 @@
 
 members = [
     "examples/bare_example", 
+    "examples/layout_example", 
     "examples/cmdline_example",
     "examples/fun_audio",
     "studio",

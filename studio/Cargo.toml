@@ -5,8 +5,11 @@ authors = ["Eddy Bruel <ejpbruel@gmail.com>"]
 edition = "2018"
 
 [dependencies]
-#regex = "1.5"
 
 [dependencies.makepad-studio-component]
 path="./component"  
+version="0.1"
+
+[dependencies.makepad-regex]
+path="./regex"  
 version="0.1"
