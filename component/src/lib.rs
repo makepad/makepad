@@ -9,11 +9,9 @@ pub mod scroll_bar;
 pub mod scroll_view;
 pub mod component_map;
 pub mod link_button;
-pub mod quad;
 
 #[macro_use]
 pub mod frame_component;
-pub mod frame_layout;
 pub mod frame;
 pub mod window_menu;
 
@@ -40,8 +38,6 @@ pub use crate::{
 pub fn live_register(cx:&mut Cx){
     makepad_platform::live_cx::live_register(cx);
     crate::theme::live_register(cx);
-    crate::quad::live_register(cx);
-    crate::frame_layout::live_register(cx);
     crate::frame::live_register(cx);
     crate::fold_button::live_register(cx);
     crate::link_button::live_register(cx);

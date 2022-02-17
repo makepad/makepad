@@ -35,8 +35,8 @@ live_register!{
         abs_offset: vec2(4., 0.)
         
         walk: {
-            width: Width::Fixed(12),
-            height: Height::Fixed(12),
+            width: 12,
+            height: 12,
         }
         
         default_state: {

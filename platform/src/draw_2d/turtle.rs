@@ -35,19 +35,19 @@ pub struct Layout {
     pub abs_origin: Option<Vec2>,
     pub abs_size: Option<Vec2>,
     pub margin: Margin,
-    pub width: Width,
-    pub height: Height,
+    pub width: Size,
+    pub height: Size,
 }
 
 #[derive(Copy, Clone, Default, Debug, Live, LiveHook)]
 pub struct Walk {
     pub margin: Margin,
-    pub width: Width,
-    pub height: Height,
+    pub width: Size,
+    pub height: Size,
 }
 
 impl Walk{
-    pub fn wh(w:Width, h:Height)->Self{
+    pub fn wh(w:Size, h:Size)->Self{
         Self{
             margin:Margin::default(),
             width:w,
@@ -58,8 +58,8 @@ impl Walk{
     pub fn fixed(w:f32, h:f32)->Self{
         Self{
             margin:Margin::default(),
-            width:Width::Fixed(w),
-            height:Height::Fixed(h),
+            width:Size::Fixed(w),
+            height:Size::Fixed(h),
         }
     }
 }
@@ -143,13 +143,13 @@ impl Default for Axis {
 }
 
 #[derive(Copy, Clone, Debug, Live)]
-pub enum Width {
-    #[pick] Filled,
+pub enum Size {
+    #[pick] Fill,
     #[live(200.0)] Fixed(f32),
-    Computed,
+    Fit,
 }
 
-impl LiveHook for Width{
+impl LiveHook for Size{
     fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode])->Option<usize>{
         match &nodes[index].value{
             LiveValue::Float(v)=>{
@@ -165,61 +165,21 @@ impl LiveHook for Width{
     }
 }
 
-#[derive(Copy, Clone, Debug, Live)]
-pub enum Height {
-    #[pick] Filled,
-    #[live(200.0)] Fixed(f32),
-    Computed,
-}
-
-impl LiveHook for Height{
-    fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode])->Option<usize>{
-        match &nodes[index].value{
-            LiveValue::Float(v)=>{
-                *self = Self::Fixed(*v as f32);
-                Some(index + 1)
-            }
-            LiveValue::Int(v)=>{
-                *self = Self::Fixed(*v as f32);
-                Some(index + 1)
-            }
-            _=>None
-        }
-    }
-}
-
-impl Default for Width {
+impl Default for Size {
     fn default() -> Self {
-        Width::Filled
+        Size::Fill
     }
 }
 
-impl Default for Height {
-    fn default() -> Self {
-        Height::Filled
-    }
-}
-
-
-impl Width {
+impl Size {
     pub fn fixed(&self) -> f32 {
         match self {
-            Width::Fixed(v) => *v,
+            Size::Fixed(v) => *v,
             _ => 0.
         }
     }
     
 }
-
-impl Height {
-    pub fn fixed(&self) -> f32 {
-        match self {
-            Height::Fixed(v) => *v,
-            _ => 0.
-        }
-    }
-}
-
 
 impl<'a> Cx2d<'a> {
     //pub fn debug_pt(&self, x:f32, y:f32, color:i32){
@@ -303,26 +263,26 @@ impl<'a> Cx2d<'a> {
         
         let w = if old.width.is_nan() {
             if old.bound_right_bottom.x == std::f32::NEG_INFINITY { // nothing happened, use padding
-                Width::Fixed(old.layout.padding.left + old.layout.padding.right)
+                Size::Fixed(old.layout.padding.left + old.layout.padding.right)
             }
             else { // use the bounding box
-                Width::Fixed(max_zero_keep_nan(old.bound_right_bottom.x - old.origin.x + old.layout.padding.right).max(old.min_width))
+                Size::Fixed(max_zero_keep_nan(old.bound_right_bottom.x - old.origin.x + old.layout.padding.right).max(old.min_width))
             }
         }
         else {
-            Width::Fixed(old.width)
+            Size::Fixed(old.width)
         };
         
         let h = if old.height.is_nan() {
             if old.bound_right_bottom.y == std::f32::NEG_INFINITY { // nothing happened use the padding
-                Height::Fixed(old.layout.padding.top + old.layout.padding.bottom)
+                Size::Fixed(old.layout.padding.top + old.layout.padding.bottom)
             }
             else { // use the bounding box
-                Height::Fixed(max_zero_keep_nan(old.bound_right_bottom.y - old.origin.y + old.layout.padding.bottom).max(old.min_height))
+                Size::Fixed(max_zero_keep_nan(old.bound_right_bottom.y - old.origin.y + old.layout.padding.bottom).max(old.min_height))
             }
         }
         else {
-            Height::Fixed(old.height)
+            Size::Fixed(old.height)
         };
         
         let margin = old.layout.margin.clone();
@@ -340,8 +300,8 @@ impl<'a> Cx2d<'a> {
         // when a turtle is x-abs / y-abs you dont walk the parent
         if !old.layout.abs_origin.is_none() {
             let abs_origin = if let Some(abs_origin) = old.layout.abs_origin {abs_origin} else {Vec2::default()};
-            let w = if let Width::Fixed(vw) = w {vw} else {0.};
-            let h = if let Height::Fixed(vh) = h {vh} else {0.};
+            let w = if let Size::Fixed(vw) = w {vw} else {0.};
+            let h = if let Size::Fixed(vh) = h {vh} else {0.};
             return Rect {pos: abs_origin, size: vec2(w, h)};
         }
         
@@ -969,7 +929,7 @@ impl<'a> Cx2d<'a> {
     
     pub fn is_height_computed(&self) -> bool {
         if let Some(turtle) = self.turtles.last() {
-            if let Height::Computed = turtle.layout.height {
+            if let Size::Fit = turtle.layout.height {
                 return true
             }
         }
@@ -978,7 +938,7 @@ impl<'a> Cx2d<'a> {
     
     pub fn is_width_computed(&self) -> bool {
         if let Some(turtle) = self.turtles.last() {
-            if let Width::Computed = turtle.layout.width {
+            if let Size::Fit = turtle.layout.width {
                 return true
             }
         }
@@ -986,19 +946,19 @@ impl<'a> Cx2d<'a> {
     }
     
     
-    pub fn eval_width(&self, width: &Width, margin: Margin, abs: bool, abs_pos: f32) -> (f32, f32) {
+    pub fn eval_width(&self, width: &Size, margin: Margin, abs: bool, abs_pos: f32) -> (f32, f32) {
         match width {
-            Width::Computed => (std::f32::NAN, 0.),
-            Width::Fixed(v) => (max_zero_keep_nan(*v), 0.),
-            Width::Filled => (max_zero_keep_nan(self._get_width_left(abs, abs_pos) - (margin.left + margin.right)), 0.),
+            Size::Fit => (std::f32::NAN, 0.),
+            Size::Fixed(v) => (max_zero_keep_nan(*v), 0.),
+            Size::Fill => (max_zero_keep_nan(self._get_width_left(abs, abs_pos) - (margin.left + margin.right)), 0.),
         }
     }
     
-    pub fn eval_height(&self, height: &Height, margin: Margin, abs: bool, abs_pos: f32) -> (f32, f32) {
+    pub fn eval_height(&self, height: &Size, margin: Margin, abs: bool, abs_pos: f32) -> (f32, f32) {
         match height {
-            Height::Computed => (std::f32::NAN, 0.),
-            Height::Fixed(v) => (max_zero_keep_nan(*v), 0.),
-            Height::Filled=> (max_zero_keep_nan(self._get_height_left(abs, abs_pos) - (margin.top + margin.bottom)), 0.),
+            Size::Fit => (std::f32::NAN, 0.),
+            Size::Fixed(v) => (max_zero_keep_nan(*v), 0.),
+            Size::Fill=> (max_zero_keep_nan(self._get_height_left(abs, abs_pos) - (margin.top + margin.bottom)), 0.),
         }
     }
 }
