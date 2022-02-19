@@ -4,3 +4,7 @@ pub mod draw_color;
 pub mod draw_quad;
 pub mod draw_text;
 pub mod turtle;
+
+pub mod turtle2;
+pub mod cx_2da;
+pub mod view2;

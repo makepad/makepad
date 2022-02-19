@@ -6,7 +6,7 @@ use {
 
 pub trait FrameComponent: LiveApply {
     fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event) -> Option<Box<dyn FrameComponentAction >>;
-    fn draw_component(&mut self, cx: &mut Cx2d);
+    fn draw_component(&mut self, cx: &mut Cx2da);
     fn type_id(&self) -> LiveType where Self:'static {LiveType::of::<Self>()}
 }
 

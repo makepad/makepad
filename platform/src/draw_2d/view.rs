@@ -17,7 +17,7 @@ pub use {
         live_traits::*,
         draw_2d::{
             cx_2d::Cx2d,
-            turtle::{Layout, Size, Walk, Rect},
+            turtle::{Layout, Size, Walk},
         },
         cx_draw_shaders::{
             CxDrawShaderOptions,

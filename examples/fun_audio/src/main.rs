@@ -32,13 +32,6 @@ live_register!{
             }
         }
         
-        frame:{
-            HBox{
-                Button{label:"hi"}
-                Button{label:"hi"}
-            }
-        }
-        
         scroll_view: {
             h_show: true,
             v_show: true,
@@ -56,7 +49,6 @@ main_app!(App);
 pub struct App {
     piano: Piano,
     audio_graph: AudioGraph,
-    frame: Frame,
     desktop_window: DesktopWindow,
     scroll_view: ScrollView,
 }
