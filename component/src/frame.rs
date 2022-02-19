@@ -2,7 +2,6 @@ use {
     crate::{
         makepad_platform::*,
         component_map::*,
-        scroll_view::*,
         frame_component::*
     }
 };
@@ -21,7 +20,7 @@ live_register!{
 #[live_register(register_as_frame_component!(Frame))]
 pub struct Frame { // draw info per UI element
     bg_quad: DrawColor,
-    layout: Layout,
+    layout: Layout2,
     #[rust] live_ptr: Option<LivePtr>,
     #[rust] children: ComponentMap<LiveId, FrameComponentRef>,
     #[rust] create_order: Vec<LiveId>
@@ -48,12 +47,16 @@ impl LiveHook for Frame {
             id!(height) => self.layout.height.apply(cx, from, index, nodes),
             id!(margin) => self.layout.margin.apply(cx, from, index, nodes),
             id!(padding) => self.layout.padding.apply(cx, from, index, nodes),
-            _ => {
-                self.create_order.push(nodes[index].id);
-                return self.children.get_or_insert(cx, nodes[index].id, | cx | {FrameComponentRef::new(cx)})
-                    .apply(cx, from, index, nodes);
-                //cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
-                //nodes.skip_node(index)
+            id => {
+                if id.is_capitalised(){
+                    self.create_order.push(nodes[index].id);
+                    return self.children.get_or_insert(cx, nodes[index].id, | cx | {FrameComponentRef::new(cx)})
+                        .apply(cx, from, index, nodes);
+                }
+                else{
+                    cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
+                    nodes.skip_node(index)
+                }
             }
         }
     }
@@ -64,7 +67,7 @@ impl FrameComponent for Frame {
         self.handle_event(cx, event).into()
     }
     
-    fn draw_component(&mut self, cx: &mut Cx2d) {
+    fn draw_component(&mut self, cx: &mut Cx2da) {
         self.draw(cx);
     }
 }
@@ -95,11 +98,10 @@ impl Frame {
         }
     }
     
-    
-    pub fn draw(&mut self, cx: &mut Cx2d) {
+    pub fn draw(&mut self, cx: &mut Cx2da) {
         let has_bg = self.bg_quad.color.w > 0.0;
         if has_bg{
-            self.bg_quad.begin(cx, self.layout);
+            self.bg_quad.begin2(cx, self.layout);
         }
         else{
             cx.begin_turtle(self.layout);
@@ -112,7 +114,7 @@ impl Frame {
         }
         
         if has_bg{
-            self.bg_quad.end(cx);
+            self.bg_quad.end2(cx);
         }
         else{
             cx.end_turtle();
