@@ -97,7 +97,6 @@ live_register!{
 }
 
 #[derive(Live)]
-#[live_register(register_as_frame_component!(Button))]
 pub struct Button {
     #[rust] pub button_logic: ButtonLogic,
     #[state(default_state)] pub animator: Animator,
@@ -120,16 +119,6 @@ struct DrawLabelText {
 impl LiveHook for Button {
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         //cx.debug_draw_tree(true, 0);
-    }
-}
-
-impl FrameComponent for Button {
-    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event) -> OptionFrameComponentAction {
-        self.handle_event(cx, event).into()
-    }
-    
-    fn draw_component(&mut self, cx: &mut Cx2d) {
-        self.draw(cx, None);
     }
 }
 

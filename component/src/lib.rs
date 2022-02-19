@@ -24,6 +24,7 @@ pub mod fold_button;
 mod theme;
 
 pub use crate::{
+    bare_window::BareWindow,
     component_map::ComponentMap,
     button_logic::{ButtonLogic, ButtonAction},
     button::{Button},

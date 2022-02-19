@@ -161,7 +161,6 @@ pub use {
                 Direction,
                 Axis,
                 Size,
-                Rect
             },
             view::{
                 View,
@@ -170,9 +169,26 @@ pub use {
             },
             cx_2d::{
                 Cx2d
-            }
+            },
+            view2::{
+                View2,
+            },
+            cx_2da::{
+                Cx2da
+            },
+            turtle2::{
+                LineWrap2,
+                Layout2,
+                Walk2,
+                Align2,
+                Margin2,
+                Padding2,
+                Direction2,
+                Axis2,
+                Size2,
+            },
         },
-
+        
         window::Window,
         pass::{
             Pass,

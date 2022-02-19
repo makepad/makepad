@@ -1,7 +1,4 @@
-pub use {
-    std::{
-        any::TypeId,
-    },
+use {
     crate::{
         makepad_derive_live::*,
         makepad_math::*,
