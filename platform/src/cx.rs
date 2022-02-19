@@ -210,6 +210,14 @@ impl Default for Cx {
             id!(Window),
             id!(TextStyle),
             id!(Wrapping),
+
+            id!(Margin2),
+            id!(Walk2),
+            id!(Align2),
+            id!(Axis2),
+            id!(Layout2),
+            id!(Padding2),
+
         ]);
         
         Self {

@@ -15,7 +15,7 @@ pub use {
         },
         area::{Area, DrawListArea, InstanceArea},
         live_traits::*,
-        draw_2d::turtle::{Layout, Size, Walk, Rect},
+        draw_2d::turtle::{Layout, Size, Walk},
         cx_draw_shaders::{
             CxDrawShaderOptions,
             CxDrawShaderMapping,

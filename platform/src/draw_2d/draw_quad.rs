@@ -4,11 +4,14 @@ use {
         makepad_math::*,
         cx::Cx,
         draw_2d::cx_2d::Cx2d,
+        draw_2d::turtle2::Layout2,
         live_traits::*,
         shader::geometry_gen::GeometryQuad2D,
         draw_vars::DrawVars,
         draw_2d::view::ManyInstances,
-        draw_2d::turtle::{Layout, Walk, Rect}
+        draw_2d::turtle::{Layout, Walk},
+        draw_2d::cx_2da::Cx2da,
+        draw_2d::turtle2::{Walk2}
     },
 };
 
@@ -71,11 +74,41 @@ impl DrawQuad {
         self.draw_vars.area.set_rect(cx, &rect);
     }
     
+    pub fn begin2(&mut self, cx: &mut Cx2da, layout: Layout2) {
+        if self.draw_vars.draw_shader.is_some() {
+            let new_area = cx.add_aligned_instance(&self.draw_vars);
+            self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
+        }
+        cx.begin_turtle_with_guard(layout, self.draw_vars.area);
+    }
+    
+    pub fn end2(&mut self, cx: &mut Cx2da) {
+        let rect = cx.end_turtle_with_guard(self.draw_vars.area);
+        self.draw_vars.area.set_rect(cx, &rect);
+    }
+    
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         let rect = cx.walk_turtle(walk);
         self.rect_pos = rect.pos;
         self.rect_size = rect.size;
         self.draw(cx);
+    }
+    
+    pub fn draw_walk2(&mut self, cx: &mut Cx2da, walk: Walk2) {
+        let rect = cx.walk_turtle(walk);
+        self.rect_pos = rect.pos;
+        self.rect_size = rect.size;
+        self.draw2(cx);
+    }
+
+    pub fn draw2(&mut self, cx: &mut Cx2da){
+        if let Some(mi) = &mut self.many_instances{
+            mi.instances.extend_from_slice(self.draw_vars.as_slice());            
+        }
+        else if self.draw_vars.can_instance() {
+            let new_area = cx.add_aligned_instance(&self.draw_vars);
+            self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
+        }
     }
     
     pub fn draw_abs(&mut self, cx: &mut Cx2d, rect: Rect) {
