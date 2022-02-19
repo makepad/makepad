@@ -6,10 +6,9 @@ live_register!{
     App: {{App}} {
         frame: {
             color: #3
-            padding: 0
-            width: 500
+            padding: 40
+            width: Size::Fill
             height: 500
-            align:{fx:0.5,fy:0.5}
             Frame {color: #0f0, width: 40, height: 40}
             Frame {color: #0ff, width: 40, height: 80}
             Frame {color: #f0f, width: 40, height: 60}
