@@ -59,21 +59,14 @@ impl Walk2 {
 }
 
 #[derive(Clone, Copy, Debug, Live, LiveHook)]
-pub enum Align2 {
-    #[pick] TopLeft,
-    TopCenter,
-    TopRight,
-    CenterLeft,
-    Center,
-    CenterRight,
-    BottomLeft,
-    BottomCenter,
-    BottomRight
+pub struct Align2 {
+    fx: f32,
+    fy: f32
 }
 
 impl Default for Align2 {
     fn default() -> Self {
-        Self::TopLeft
+        Self {fx: 0.0, fy: 0.0}
     }
 }
 
@@ -201,17 +194,6 @@ impl Size2 {
 }
 
 impl<'a> Cx2da<'a> {
-    //pub fn debug_pt(&self, x:f32, y:f32, color:i32){
-    //self.debug_pts.borrow_mut().push((x,y,color));
-    //}
-    /*
-    pub fn set_count_of_aligned_instance(&mut self, instance_count: usize) -> Area {
-        let mut area = self.align_list.last_mut().unwrap();
-        if let Area::Instance(inst) = &mut area {
-            inst.instance_count = instance_count;
-        }
-        area.clone()
-    }*/
     
     // begin a new turtle with a layout
     pub fn begin_turtle(&mut self, walk: Walk2, layout: Layout2) {
@@ -236,18 +218,18 @@ impl<'a> Cx2da<'a> {
                     pos: pos + spacing
                 })
             },
-            Flow::Down if walk.height.is_fill() => todo!(),/*{
-                let pos = turtle.pos;
-                turtle.pos.y += margin_size.y;
+            Flow::Down if walk.height.is_fill() => {
+                let spacing = turtle.child_spacing(self.turtle_walks.len());
+                turtle.pos.y += margin_size.y + spacing.y;
                 turtle.update_used(margin_size.x, 0.0);
                 turtle.fill_count += 1;
                 Some(FillWalk {
                     fill_index,
                     margin: walk.margin,
-                    other_axis: walk.height,
-                    pos
+                    other_axis: walk.width,
+                    pos: pos + spacing
                 })
-            },*/
+            },
             _ => {
                 None
             }
@@ -269,16 +251,17 @@ impl<'a> Cx2da<'a> {
                     height: fill.other_axis
                 }
             },
-            Flow::Down => todo!(),/* { // vertical fill
+            Flow::Down => { // this is a horizontal fill
+                // space left to fill
                 let left = turtle.height_left();
                 let part = left / turtle.fill_count as f32;
-                Walk2{
+                Walk2 {
                     abs_pos: Some(fill.pos + vec2(0., part * fill.fill_index as f32)),
                     margin: fill.margin,
-                    width: Size2::Fixed(part),
-                    height: fill.other_axis
+                    height: Size2::Fixed(part),
+                    width: fill.other_axis
                 }
-            },*/
+            },
             _ => {
                 panic!()
             }
@@ -288,10 +271,9 @@ impl<'a> Cx2da<'a> {
     pub fn begin_turtle_with_guard(&mut self, walk: Walk2, layout: Layout2, guard_area: Area) {
         
         let (origin, width, height) = if let Some(parent) = self.turtles.last() {
-            let spacing = parent.child_spacing(self.turtle_walks.len());
-            
-            let o = walk.margin.left_top() + if let Some(pos) = walk.abs_pos{pos} else{parent.pos};
-            
+            let o = walk.margin.left_top() + if let Some(pos) = walk.abs_pos {pos} else {
+                parent.pos + parent.child_spacing(self.turtle_walks.len())
+            };
             let w = parent.eval_width(walk.width, walk.margin, parent.layout.flow);
             let h = parent.eval_height(walk.height, walk.margin, parent.layout.flow);
             (o, w, h)
@@ -328,6 +310,15 @@ impl<'a> Cx2da<'a> {
         self.end_turtle_with_guard(Area::Empty)
     }
     
+    fn get_align_end(&self, i: usize) -> usize {
+        if i < self.turtle_walks.len() - 1 {
+            self.turtle_walks[i + 1].align_start
+        }
+        else {
+            self.align_list.len()
+        }
+    }
+    
     pub fn end_turtle_with_guard(&mut self, guard_area: Area) -> Rect {
         let turtle = self.turtles.pop().unwrap();
         if guard_area != turtle.guard_area {
@@ -354,23 +345,51 @@ impl<'a> Cx2da<'a> {
                 if turtle.fill_count > 0 {
                     let left = turtle.width_left();
                     let part = left / turtle.fill_count as f32;
-                    // ok so. lets loop over our subwalks
+                    // shift all the subwalks
                     for i in turtle.turtle_walks_start..self.turtle_walks.len() {
                         let walk = &self.turtle_walks[i];
-                        if walk.fill_index > 0 {
-                            let align_start = walk.align_start;
-                            let align_end = if i < self.turtle_walks.len() - 1 {
-                                self.turtle_walks[i + 1].align_start
-                            } else {self.align_list.len()};
-                            // lets compute the shift
-                            let shift_x = walk.fill_index as f32 * part;
-                            self.move_align_x(shift_x, align_start, align_end);
-                        }
+                        let shift_x = walk.fill_index as f32 * part;
+                        let shift_y = turtle.layout.align.fy * (turtle.no_pad_height() - walk.rect.size.y);
+                        let align_start = walk.align_start;
+                        let align_end = self.get_align_end(i);
+                        self.move_align(shift_x, shift_y, align_start, align_end);
                     }
                 }
-                
+                else {
+                    for i in turtle.turtle_walks_start..self.turtle_walks.len() {
+                        let walk = &self.turtle_walks[i];
+                        let shift_x = turtle.layout.align.fx * turtle.width_left();
+                        let shift_y = turtle.layout.align.fy * (turtle.no_pad_height() - walk.rect.size.y);
+                        let align_start = walk.align_start;
+                        let align_end = self.get_align_end(i);
+                        self.move_align(shift_x, shift_y, align_start, align_end);
+                    }
+                }
             },
             Flow::Down => { // vertical fill
+                if turtle.fill_count > 0 {
+                    let left = turtle.height_left();
+                    let part = left / turtle.fill_count as f32;
+                    // shift all the subwalks
+                    for i in turtle.turtle_walks_start..self.turtle_walks.len() {
+                        let walk = &self.turtle_walks[i];
+                        let shift_y = walk.fill_index as f32 * part;
+                        let shift_x = turtle.layout.align.fx * (turtle.no_pad_width() - walk.rect.size.x);
+                        let align_start = walk.align_start;
+                        let align_end = self.get_align_end(i);
+                        self.move_align(shift_x, shift_y, align_start, align_end);
+                    }
+                }
+                else {
+                    for i in turtle.turtle_walks_start..self.turtle_walks.len() {
+                        let walk = &self.turtle_walks[i];
+                        let shift_y = turtle.layout.align.fy * turtle.height_left();
+                        let shift_x = turtle.layout.align.fx * (turtle.no_pad_width() - walk.rect.size.x);
+                        let align_start = walk.align_start;
+                        let align_end = self.get_align_end(i);
+                        self.move_align(shift_x, shift_y, align_start, align_end);
+                    }
+                }
             },
             _ => {
                 panic!()
@@ -420,10 +439,10 @@ impl<'a> Cx2da<'a> {
                     turtle.pos.x = pos.x + size.x + margin_size.x + spacing.x;
                     turtle.update_used(0.0, size.y + margin_size.y);
                 },
-                Flow::Down => todo!(),/*{
-                    turtle.pos.y = pos.y + size.y + margin_size.y;
+                Flow::Down => {
+                    turtle.pos.y = pos.y + size.y + margin_size.y + spacing.y;
                     turtle.update_used(size.x + margin_size.x, 0.0);
-                },*/
+                },
                 _ => todo!()
             };
             turtle.width_used = turtle.width_used.max(turtle.pos.x - turtle.origin.x);
@@ -439,8 +458,14 @@ impl<'a> Cx2da<'a> {
         }
     }
     
-    fn move_align_x(&mut self, dx: f32, align_start: usize, align_end: usize) {
+    fn move_align(&mut self, dx: f32, dy: f32, align_start: usize, align_end: usize) {
+        let dx = if dx.is_nan(){0.0}else{dx};
+        let dy = if dy.is_nan(){0.0}else{dy};
         let dx = (dx * self.current_dpi_factor).floor() / self.current_dpi_factor;
+        let dy = (dy * self.current_dpi_factor).floor() / self.current_dpi_factor;
+        if dx == 0.0 && dy == 0.0{
+            return
+        }
         for i in align_start..align_end {
             let align_item = &self.align_list[i];
             match align_item {
@@ -448,29 +473,11 @@ impl<'a> Cx2da<'a> {
                     let draw_list = &mut self.cx.draw_lists[inst.draw_list_id];
                     let draw_call = draw_list.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
                     let sh = &self.cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
+                    let inst_buf = draw_call.instances.as_mut().unwrap();
                     for i in 0..inst.instance_count {
                         if let Some(rect_pos) = sh.mapping.rect_pos {
-                            draw_call.instances.as_mut().unwrap()[inst.instance_offset + rect_pos + i * sh.mapping.instances.total_slots] += dx;
-                        }
-                    }
-                },
-                _ => (),
-            }
-        }
-    }
-    
-    fn move_align_y(&mut self, dy: f32, align_start: usize, align_end: usize) {
-        let dy = (dy * self.current_dpi_factor).floor() / self.current_dpi_factor;
-        for i in align_start..align_end {
-            let align_item = &self.align_list[i];
-            match align_item {
-                Area::Instance(inst) => {
-                    let draw_list = &mut self.cx.draw_lists[inst.draw_list_id];
-                    let draw_call = &mut draw_list.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
-                    let sh = &self.cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
-                    for i in 0..inst.instance_count {
-                        if let Some(rect_pos) = sh.mapping.rect_pos {
-                            draw_call.instances.as_mut().unwrap()[inst.instance_offset + rect_pos + 1 + i * sh.mapping.instances.total_slots] += dy;
+                            inst_buf[inst.instance_offset + rect_pos + i * sh.mapping.instances.total_slots] += dx;
+                            inst_buf[inst.instance_offset + rect_pos + 1 + i * sh.mapping.instances.total_slots] += dy;
                         }
                     }
                 },
@@ -535,12 +542,14 @@ impl Turtle2 {
                 Flow::Right => {
                     vec2(self.layout.spacing, 0.0)
                 }
-                Flow::Down => todo!(),
-                _=>todo!()
+                Flow::Down => {
+                    vec2(0.0, self.layout.spacing)
+                }
+                _ => todo!()
             }
         }
         else {
-            vec2(0.0,0.0)
+            vec2(0.0, 0.0)
         }
     }
     
