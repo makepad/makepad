@@ -47,6 +47,7 @@ pub type ViewRedraw = Result<(), ()>;
 pub struct View2 { // draw info per UI element
     pub draw_list_id: usize, //Option<usize>,
     pub layout: Layout2,
+    pub walk: Walk2,
     pub is_overlay: bool,
     pub always_redraw: bool,
     pub redraw_id: u64,
@@ -79,6 +80,7 @@ impl LiveNew for View2 {
             draw_lists_free: draw_lists_free,
             redraw_id: 0,
             layout: Layout2::default(),
+            walk: Walk2::default(),
             draw_list_id,
         }
     }
@@ -177,8 +179,8 @@ impl View2 {
         
         if cxpass.main_draw_list_id.is_none() {
             cxpass.main_draw_list_id = Some(self.draw_list_id);
-            self.layout.width = Size2::Fixed(cxpass.pass_size.x);
-            self.layout.height = Size2::Fixed(cxpass.pass_size.x);
+            self.walk.width = Size2::Fixed(cxpass.pass_size.x);
+            self.walk.height = Size2::Fixed(cxpass.pass_size.y);
         }
         
         // find the parent draw list id
@@ -238,7 +240,7 @@ impl View2 {
             // walk the turtle because we aren't drawing
             let w = Size2::Fixed(cx.draw_lists[self.draw_list_id].rect.size.x);
             let h = Size2::Fixed(cx.draw_lists[self.draw_list_id].rect.size.y);
-            cx.walk_turtle(Walk2 {width: w, height: h, margin: self.layout.margin});
+            cx.walk_turtle(Walk2 {abs_pos:None, width: w, height: h, margin: self.walk.margin});
             return Err(());
         }
         
@@ -261,7 +263,7 @@ impl View2 {
         let new_area = Area::DrawList(DrawListArea {draw_list_id: self.draw_list_id, redraw_id: cx.redraw_id});
         
         cx.update_area_refs(old_area, new_area);
-        cx.begin_turtle_with_guard(self.layout, new_area);
+        cx.begin_turtle_with_guard(self.walk, self.layout, new_area);
         
         Ok(())
     }
