@@ -10,7 +10,13 @@ live_register!{
             width: Size2::Fill
             height: Size2::Fill
             Frame {color: #0f0, width: 40, height: 40}
-            Frame {color: #0ff, width: Size2::Fill, height: Size2::Fill}
+            Frame {
+                color: #0ff,
+                padding: 10,
+                width: Size2::Fill,
+                height: Size2::Fill
+                Frame{color:#f00, width:40, height:40}
+            }
             Frame {color: #f0f, width: 40, height: 60}
         }
     }
@@ -50,6 +56,6 @@ impl App {
             return;
         }
         self.frame.draw(cx, self.frame.walk);
-        self.window.end(cx); 
+        self.window.end(cx);
     }
 }
