@@ -375,27 +375,8 @@ impl<'a> Cx2da<'a> {
             }
         }
         
+        self.turtle_walks.truncate(turtle.turtle_walks_start);
         
-        // lets truncate the subwalks
-        
-        
-        // ok so now, we need to walk our turtle in the parent
-        
-        // we need to now compute our turtle walk stuff that hasnt been computed yet,
-        // and also move all our turtle walk things in place.
-        //
-        
-        //let align_after = old.layout.walk.align_after;
-        // if we have alignment set, we should now align our childnodes
-        /*
-        let dx = Self::compute_align_turtle_x(&old);
-        if dx > 0.0 {
-            self.do_align_x(dx, old.align_list_x);
-        }
-        let dy = Self::compute_align_turtle_y(& old);
-        if dy > 0.0 {
-            self.do_align_y(dy, old.align_list_y);
-        }*/
         if self.turtles.len() == 0 {
             return Rect {
                 pos: vec2(0.0, 0.0),
