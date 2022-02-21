@@ -48,7 +48,9 @@ impl LiveHook for Frame {
             id!(height) => self.walk.height.apply(cx, from, index, nodes),
             id!(margin) => self.walk.margin.apply(cx, from, index, nodes),
             id!(padding) => self.layout.padding.apply(cx, from, index, nodes),
+            id!(align) => self.layout.align.apply(cx, from, index, nodes),
             id!(spacing) => self.layout.spacing.apply(cx, from, index, nodes),
+            id!(flow) => self.layout.flow.apply(cx, from, index, nodes),
             id => {
                 if id.is_capitalised(){
                     self.create_order.push(nodes[index].id);
