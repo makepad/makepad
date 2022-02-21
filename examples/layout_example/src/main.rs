@@ -10,19 +10,22 @@ live_register!{
             width: Size2::Fill
             height: Size2::Fill
             align: {fx:0.0,fy:0.0}
-            spacing: 10.,
-            Frame {color: #0f0, width: 40, height: 40}
+            spacing: 30.,
+            Frame {color: #0f0, width: Size2::Fill, height: 40}
             Frame {
                 color: #0ff,
                 padding: 10,
                 flow: Flow::Down,
                 width: Size2::Fit,
-                height: Size2::Fit
+                height: 300
                 spacing: 10
+                Frame{color:#00f, width:40, height:Size2::Fill}
                 Frame{color:#f00, width:40, height:40}
-                Frame{color:#00f, width:40, padding:100., height:40}
+                Frame{color:#00f, width:40, height:40}
             }  
-            Frame {color: #f0f, width: 40, height: 60}
+            Frame{color:#f00, width:40, height:40}
+            Frame {color: #f0f, width:  Size2::Fill, height: 60}
+            Frame{color:#f00, width:40, height:40}
         }
     }
 }
