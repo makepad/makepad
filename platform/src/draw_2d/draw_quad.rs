@@ -74,16 +74,16 @@ impl DrawQuad {
         self.draw_vars.area.set_rect(cx, &rect);
     }
     
-    pub fn begin2(&mut self, cx: &mut Cx2da, layout: Layout2) {
+    pub fn begin2(&mut self, cx: &mut Cx2da, walk:Walk2, layout: Layout2) {
+        cx.begin_turtle(walk, layout);
         if self.draw_vars.draw_shader.is_some() {
             let new_area = cx.add_aligned_instance(&self.draw_vars);
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
         }
-        cx.begin_turtle_with_guard(layout, self.draw_vars.area);
     }
     
     pub fn end2(&mut self, cx: &mut Cx2da) {
-        let rect = cx.end_turtle_with_guard(self.draw_vars.area);
+        let rect = cx.end_turtle();
         self.draw_vars.area.set_rect(cx, &rect);
     }
     

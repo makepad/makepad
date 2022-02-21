@@ -6,11 +6,11 @@ live_register!{
     App: {{App}} {
         frame: {
             color: #3
-            padding: 40
-            width: Size::Fill
-            height: 500
+            padding: 30
+            width: Size2::Fill
+            height: Size2::Fill
             Frame {color: #0f0, width: 40, height: 40}
-            Frame {color: #0ff, width: 40, height: 80}
+            Frame {color: #0ff, width: Size2::Fill, height: Size2::Fill}
             Frame {color: #f0f, width: 40, height: 60}
         }
     }
@@ -49,7 +49,7 @@ impl App {
         if self.window.begin(cx).is_err() {
             return;
         }
-        self.frame.draw(cx);
+        self.frame.draw(cx, self.frame.walk);
         self.window.end(cx); 
     }
 }
