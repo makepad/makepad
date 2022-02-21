@@ -27,6 +27,7 @@ pub struct Layout2 {
     pub padding: Padding2,
     pub align: Align2,
     pub flow: Flow,
+    pub spacing: f32
 }
 
 #[derive(Copy, Clone, Default, Debug, Live, LiveHook)]
@@ -224,14 +225,15 @@ impl<'a> Cx2da<'a> {
         let margin_size = walk.margin.size();
         match turtle.layout.flow {
             Flow::Right if walk.width.is_fill() => {
-                turtle.pos.x += margin_size.x;
+                let spacing = turtle.child_spacing(self.turtle_walks.len());
+                turtle.pos.x += margin_size.x + spacing.x;
                 turtle.update_used(0.0, margin_size.y);
                 turtle.fill_count += 1;
                 Some(FillWalk {
                     fill_index,
                     margin: walk.margin,
                     other_axis: walk.height,
-                    pos
+                    pos: pos + spacing
                 })
             },
             Flow::Down if walk.height.is_fill() => todo!(),/*{
@@ -286,10 +288,10 @@ impl<'a> Cx2da<'a> {
     pub fn begin_turtle_with_guard(&mut self, walk: Walk2, layout: Layout2, guard_area: Area) {
         
         let (origin, width, height) = if let Some(parent) = self.turtles.last() {
-            let o = Vec2 {
-                x: walk.margin.left + parent.pos.x,
-                y: walk.margin.top + parent.pos.y
-            };
+            let spacing = parent.child_spacing(self.turtle_walks.len());
+            
+            let o = walk.margin.left_top() + if let Some(pos) = walk.abs_pos{pos} else{parent.pos};
+            
             let w = parent.eval_width(walk.width, walk.margin, parent.layout.flow);
             let h = parent.eval_height(walk.height, walk.margin, parent.layout.flow);
             (o, w, h)
@@ -410,11 +412,12 @@ impl<'a> Cx2da<'a> {
             Rect {pos: pos + walk.margin.left_top(), size}
         }
         else {
+            let spacing = turtle.child_spacing(self.turtle_walks.len());
             let pos = turtle.pos;
             let margin_size = walk.margin.size();
             match turtle.layout.flow {
                 Flow::Right => {
-                    turtle.pos.x = pos.x + size.x + margin_size.x;
+                    turtle.pos.x = pos.x + size.x + margin_size.x + spacing.x;
                     turtle.update_used(0.0, size.y + margin_size.y);
                 },
                 Flow::Down => todo!(),/*{
@@ -422,7 +425,7 @@ impl<'a> Cx2da<'a> {
                     turtle.update_used(size.x + margin_size.x, 0.0);
                 },*/
                 _ => todo!()
-            }
+            };
             turtle.width_used = turtle.width_used.max(turtle.pos.x - turtle.origin.x);
             turtle.height_used = turtle.height_used.max(turtle.pos.y - turtle.origin.y);
             
@@ -432,7 +435,7 @@ impl<'a> Cx2da<'a> {
                 rect: Rect {pos, size: size + margin_size}
             });
             
-            Rect {pos: pos + walk.margin.left_top(), size}
+            Rect {pos: pos + walk.margin.left_top() + spacing, size}
         }
     }
     
@@ -526,6 +529,21 @@ pub struct Turtle2 {
 }
 
 impl Turtle2 {
+    pub fn child_spacing(&self, walks_len: usize) -> Vec2 {
+        if self.turtle_walks_start < walks_len {
+            match self.layout.flow {
+                Flow::Right => {
+                    vec2(self.layout.spacing, 0.0)
+                }
+                Flow::Down => todo!(),
+                _=>todo!()
+            }
+        }
+        else {
+            vec2(0.0,0.0)
+        }
+    }
+    
     pub fn update_used(&mut self, dx: f32, dy: f32) {
         self.width_used = self.width_used.max((self.pos.x + dx) - self.origin.x);
         self.height_used = self.height_used.max((self.pos.y + dy) - self.origin.y);
@@ -565,14 +583,14 @@ impl Turtle2 {
             Size2::Fit => std::f32::NAN,
             Size2::Fixed(v) => max_zero_keep_nan(v),
             Size2::Fill => {
-                match flow{
-                    Flow::Right=>{
+                match flow {
+                    Flow::Right => {
                         max_zero_keep_nan(self.width_left() - (margin.left + margin.right))
                     },
-                    Flow::Down=>{
+                    Flow::Down => {
                         max_zero_keep_nan(self.no_pad_width() - (margin.left + margin.right))
                     }
-                    _=>todo!()
+                    _ => todo!()
                 }
             },
         }
@@ -583,14 +601,14 @@ impl Turtle2 {
             Size2::Fit => std::f32::NAN,
             Size2::Fixed(v) => max_zero_keep_nan(v),
             Size2::Fill => {
-                match flow{
-                    Flow::Right=>{
+                match flow {
+                    Flow::Right => {
                         max_zero_keep_nan(self.no_pad_height() - (margin.top + margin.bottom))
                     },
-                    Flow::Down=>{
+                    Flow::Down => {
                         max_zero_keep_nan(self.height_left() - (margin.top + margin.bottom))
                     }
-                    _=>todo!()
+                    _ => todo!()
                 }
             }
         }
