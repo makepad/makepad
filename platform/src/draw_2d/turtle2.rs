@@ -195,7 +195,6 @@ impl Size2 {
 
 impl<'a> Cx2da<'a> {
     
-    // begin a new turtle with a layout
     pub fn begin_turtle(&mut self, walk: Walk2, layout: Layout2) {
         self.begin_turtle_with_guard(walk, layout, Area::Empty)
     }
@@ -239,8 +238,7 @@ impl<'a> Cx2da<'a> {
     pub fn resolve_fill(&mut self, fill: FillWalk) -> Walk2 {
         let turtle = self.turtles.last().unwrap();
         match turtle.layout.flow {
-            Flow::Right => { // this is a horizontal fill
-                // space left to fill
+            Flow::Right => { 
                 let left = turtle.width_left();
                 let part = left / turtle.fill_count as f32;
                 Walk2 {
@@ -250,8 +248,7 @@ impl<'a> Cx2da<'a> {
                     height: fill.other_axis
                 }
             },
-            Flow::Down => { // this is a horizontal fill
-                // space left to fill
+            Flow::Down => { 
                 let left = turtle.height_left();
                 let part = left / turtle.fill_count as f32;
                 Walk2 {
@@ -340,11 +337,10 @@ impl<'a> Cx2da<'a> {
         };
         
         match turtle.layout.flow {
-            Flow::Right => { // this is a horizontal fill
+            Flow::Right => { 
                 if turtle.fill_count > 0 {
                     let left = turtle.width_left();
                     let part = left / turtle.fill_count as f32;
-                    // shift all the subwalks
                     for i in turtle.turtle_walks_start..self.turtle_walks.len() {
                         let walk = &self.turtle_walks[i];
                         let shift_x = walk.fill_index as f32 * part;
@@ -365,11 +361,10 @@ impl<'a> Cx2da<'a> {
                     }
                 }
             },
-            Flow::Down => { // vertical fill
+            Flow::Down => { 
                 if turtle.fill_count > 0 {
                     let left = turtle.height_left();
                     let part = left / turtle.fill_count as f32;
-                    // shift all the subwalks
                     for i in turtle.turtle_walks_start..self.turtle_walks.len() {
                         let walk = &self.turtle_walks[i];
                         let shift_y = walk.fill_index as f32 * part;
@@ -410,18 +405,15 @@ impl<'a> Cx2da<'a> {
         self.walk_turtle_with_align(walk, self.align_list.len())
     }
     
-    // walk the turtle with a 'w/h' and a margin
     fn walk_turtle_with_align(&mut self, walk: Walk2, align_start: usize) -> Rect {
         
         let turtle = self.turtles.last_mut().unwrap();
-        // we can only do a fill in the direction we are stacking
         let size = vec2(
             turtle.eval_width(walk.width, walk.margin, turtle.layout.flow),
             turtle.eval_height(walk.height, walk.margin, turtle.layout.flow)
         );
         
         if let Some(pos) = walk.abs_pos {
-            // we still need to push the turtle walk in. because we mioght need to be vertically aligned
             self.turtle_walks.push(TurtleWalk {
                 align_start,
                 fill_index: 0,
@@ -460,11 +452,11 @@ impl<'a> Cx2da<'a> {
     fn move_align(&mut self, dx: f32, dy: f32, align_start: usize, align_end: usize) {
         let dx = if dx.is_nan(){0.0}else{dx};
         let dy = if dy.is_nan(){0.0}else{dy};
-        let dx = (dx * self.current_dpi_factor).floor() / self.current_dpi_factor;
-        let dy = (dy * self.current_dpi_factor).floor() / self.current_dpi_factor;
         if dx == 0.0 && dy == 0.0{
             return
         }
+        let dx = (dx * self.current_dpi_factor).floor() / self.current_dpi_factor;
+        let dy = (dy * self.current_dpi_factor).floor() / self.current_dpi_factor;
         for i in align_start..align_end {
             let align_item = &self.align_list[i];
             match align_item {
@@ -503,6 +495,7 @@ fn max_zero_keep_nan(v: f32) -> f32 {
     }
 }
 
+#[derive(Clone, Default, Debug)]
 pub struct FillWalk {
     pub fill_index: usize,
     pub margin: Margin2,
@@ -510,12 +503,11 @@ pub struct FillWalk {
     pub pos: Vec2
 }
 
-// these slots we need to move
 #[derive(Clone, Default, Debug)]
 pub struct TurtleWalk {
     pub align_start: usize,
     pub fill_index: usize,
-    pub rect: Rect, // the abs rect of this turtle walk to compute move delta
+    pub rect: Rect, 
 }
 
 #[derive(Clone, Default, Debug)]
