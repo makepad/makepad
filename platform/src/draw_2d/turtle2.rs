@@ -306,7 +306,7 @@ impl<'a> Cx2da<'a> {
         self.end_turtle_with_guard(Area::Empty)
     }
     
-    fn get_align_end(&self, i: usize) -> usize {
+    fn get_turtle_walk_align_end(&self, i: usize) -> usize {
         if i < self.turtle_walks.len() - 1 {
             self.turtle_walks[i + 1].align_start
         }
@@ -346,7 +346,7 @@ impl<'a> Cx2da<'a> {
                         let shift_x = walk.fill_index as f32 * part;
                         let shift_y = turtle.layout.align.fy * (turtle.no_pad_height() - walk.rect.size.y);
                         let align_start = walk.align_start;
-                        let align_end = self.get_align_end(i);
+                        let align_end = self.get_turtle_walk_align_end(i);
                         self.move_align(shift_x, shift_y, align_start, align_end);
                     }
                 }
@@ -356,7 +356,7 @@ impl<'a> Cx2da<'a> {
                         let shift_x = turtle.layout.align.fx * turtle.width_left();
                         let shift_y = turtle.layout.align.fy * (turtle.no_pad_height() - walk.rect.size.y);
                         let align_start = walk.align_start;
-                        let align_end = self.get_align_end(i);
+                        let align_end = self.get_turtle_walk_align_end(i);
                         self.move_align(shift_x, shift_y, align_start, align_end);
                     }
                 }
@@ -370,7 +370,7 @@ impl<'a> Cx2da<'a> {
                         let shift_y = walk.fill_index as f32 * part;
                         let shift_x = turtle.layout.align.fx * (turtle.no_pad_width() - walk.rect.size.x);
                         let align_start = walk.align_start;
-                        let align_end = self.get_align_end(i);
+                        let align_end = self.get_turtle_walk_align_end(i);
                         self.move_align(shift_x, shift_y, align_start, align_end);
                     }
                 }
@@ -380,7 +380,7 @@ impl<'a> Cx2da<'a> {
                         let shift_y = turtle.layout.align.fy * turtle.height_left();
                         let shift_x = turtle.layout.align.fx * (turtle.no_pad_width() - walk.rect.size.x);
                         let align_start = walk.align_start;
-                        let align_end = self.get_align_end(i);
+                        let align_end = self.get_turtle_walk_align_end(i);
                         self.move_align(shift_x, shift_y, align_start, align_end);
                     }
                 }
