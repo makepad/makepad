@@ -21,6 +21,7 @@ live_register!{
 pub struct Frame { // draw info per UI element
     bg_quad: DrawColor,
     layout: Layout2,
+    pub walk: Walk2,
     #[rust] live_ptr: Option<LivePtr>,
     #[rust] children: ComponentMap<LiveId, FrameComponentRef>,
     #[rust] create_order: Vec<LiveId>
@@ -43,9 +44,9 @@ impl LiveHook for Frame {
     fn apply_value_unknown(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match nodes[index].id {
             id!(color) => self.bg_quad.color.apply(cx, from, index, nodes),
-            id!(width) => self.layout.width.apply(cx, from, index, nodes),
-            id!(height) => self.layout.height.apply(cx, from, index, nodes),
-            id!(margin) => self.layout.margin.apply(cx, from, index, nodes),
+            id!(width) => self.walk.width.apply(cx, from, index, nodes),
+            id!(height) => self.walk.height.apply(cx, from, index, nodes),
+            id!(margin) => self.walk.margin.apply(cx, from, index, nodes),
             id!(padding) => self.layout.padding.apply(cx, from, index, nodes),
             id => {
                 if id.is_capitalised(){
@@ -66,9 +67,13 @@ impl FrameComponent for Frame {
     fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event) -> OptionFrameComponentAction {
         self.handle_event(cx, event).into()
     }
+
+    fn get_walk(&self)->Walk2{
+        self.walk
+    }
     
-    fn draw_component(&mut self, cx: &mut Cx2da) {
-        self.draw(cx);
+    fn draw_component(&mut self, cx: &mut Cx2da, walk:Walk2) {
+        self.draw(cx, walk);
     }
 }
 
@@ -98,18 +103,34 @@ impl Frame {
         }
     }
     
-    pub fn draw(&mut self, cx: &mut Cx2da) {
+    pub fn draw(&mut self, cx: &mut Cx2da, walk:Walk2) {
         let has_bg = self.bg_quad.color.w > 0.0;
         if has_bg{
-            self.bg_quad.begin2(cx, self.layout);
+            self.bg_quad.begin2(cx, walk, self.layout);
         }
         else{
-            cx.begin_turtle(self.layout);
+            cx.begin_turtle(walk, self.layout);
         }
         
+        // lets make a defer list for fill items
+        let mut fills = Vec::new();
         for id in &self.create_order {
             if let Some(child) = self.children.get_mut(id).unwrap().as_mut() {
-                child.draw_component(cx);
+                let walk = child.get_walk();
+                if let Some(fw) = cx.fill_walk(walk){
+                    fills.push((id, fw));
+                }
+                else{
+                    child.draw_component(cx, walk);
+                }
+            }
+        }
+        
+        // the fill-items
+        for (id, fw) in fills{
+            if let Some(child) = self.children.get_mut(id).unwrap().as_mut() {
+                let walk = cx.resolve_fill(fw);
+                child.draw_component(cx, walk);
             }
         }
         
