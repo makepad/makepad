@@ -15,7 +15,7 @@ use {
         },
         draw_2d::{
             view2::View2,
-            turtle2::Turtle2,
+            turtle2::{Turtle2, TurtleWalk},
         },
         pass::{
             Pass,
@@ -31,6 +31,7 @@ pub struct Cx2da<'a> {
     pub pass_id: Option<usize>,
     pub draw_list_stack: Vec<usize>,
     pub turtles: Vec<Turtle2>,
+    pub turtle_walks: Vec<TurtleWalk>,
     pub align_list: Vec<Area>,
     pub current_dpi_factor: f32,
 }
@@ -47,6 +48,7 @@ impl<'a> Cx2da<'a> {
             draw_event,
             pass_id: None,
             draw_list_stack: Vec::new(),
+            turtle_walks: Vec::new(),
             turtles: Vec::new(),
             align_list: Vec::new(),
         }
