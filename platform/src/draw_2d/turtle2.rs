@@ -237,7 +237,6 @@ impl<'a> Cx2da<'a> {
     }
     
     pub fn resolve_fill(&mut self, fill: FillWalk) -> Walk2 {
-        // ok so....
         let turtle = self.turtles.last().unwrap();
         match turtle.layout.flow {
             Flow::Right => { // this is a horizontal fill
@@ -537,7 +536,7 @@ pub struct Turtle2 {
 
 impl Turtle2 {
     pub fn child_spacing(&self, walks_len: usize) -> Vec2 {
-        if self.turtle_walks_start < walks_len {
+        if self.turtle_walks_start < walks_len || self.fill_count > 0 {
             match self.layout.flow {
                 Flow::Right => {
                     vec2(self.layout.spacing, 0.0)
