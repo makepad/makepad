@@ -70,7 +70,19 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         };
         
         // alright now. we have a field
+        // lets pull out all the alias fields
+        let mut aliases = Vec::new();
         for field in &mut fields {
+            while let Some(index) = field.attrs.iter().position(|attr| attr.name == "alias"){
+                let attr = field.attrs.remove(index);
+                if let Some(args) = &attr.args {
+                    let mut parser = TokenParser::new(args.clone());
+                    // ok its key:value comma
+                    let var = parser.expect_any_ident() ?;
+                    parser.expect_punct_alone(',')?;
+                    aliases.push((var, parser.eat_level()));
+                }
+            }
             if field.attrs.len() == 1 && &field.attrs[0].name != "live" && field.attrs[0].name != "calc" && field.attrs[0].name != "rust" && field.attrs[0].name != "state" {
                 return error_result(&format!("Field {} does not have a live, calc or rust attribute", field.name));
             }
@@ -196,10 +208,14 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         
         tb.add("    fn apply_value(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]) -> usize{");
         tb.add("        match nodes[index].id {");
+
         for field in &fields {
             if field.attrs[0].name == "live" {
                 tb.add("    LiveId(").suf_u64(LiveId::from_str(&field.name).unwrap().0).add(")=>self.").ident(&field.name).add(".apply(cx, apply_from, index, nodes),");
             }
+        }
+        for (alias_var, alias_redir) in aliases{
+            tb.add("    LiveId(").suf_u64(LiveId::from_str(&alias_var).unwrap().0).add(")=>self.").stream(Some(alias_redir)).add(".apply(cx, apply_from, index, nodes),");
         }
         // Unknown value handling
         if deref_target.is_some() {

@@ -47,6 +47,7 @@ pub type ViewRedraw = Result<(), ()>;
 pub struct View { // draw info per UI element
     pub draw_list_id: usize, //Option<usize>,
     pub layout: Layout,
+    pub walk: Walk,
     pub is_overlay: bool,
     pub always_redraw: bool,
     pub redraw_id: u64,
@@ -59,7 +60,7 @@ impl Drop for View {
     }
 }
 
-impl LiveHook for View {}
+impl LiveHook for View{}
 impl LiveNew for View {
     fn new(cx: &mut Cx) -> Self {
         let draw_lists_free = cx.draw_lists_free.clone();
@@ -79,6 +80,7 @@ impl LiveNew for View {
             draw_lists_free: draw_lists_free,
             redraw_id: 0,
             layout: Layout::default(),
+            walk: Walk::default(),
             draw_list_id,
         }
     }
@@ -177,8 +179,8 @@ impl View {
         
         if cxpass.main_draw_list_id.is_none() {
             cxpass.main_draw_list_id = Some(self.draw_list_id);
-            self.layout.abs_origin = Some(Vec2 {x: 0., y: 0.});
-            self.layout.abs_size = Some(cxpass.pass_size);
+            self.walk.width = Size::Fixed(cxpass.pass_size.x);
+            self.walk.height = Size::Fixed(cxpass.pass_size.y);
         }
         
         // find the parent draw list id
@@ -238,7 +240,7 @@ impl View {
             // walk the turtle because we aren't drawing
             let w = Size::Fixed(cx.draw_lists[self.draw_list_id].rect.size.x);
             let h = Size::Fixed(cx.draw_lists[self.draw_list_id].rect.size.y);
-            cx.walk_turtle(Walk {width: w, height: h, margin: self.layout.margin});
+            cx.walk_turtle(Walk {abs_pos:None, width: w, height: h, margin: self.walk.margin});
             return Err(());
         }
         
@@ -261,7 +263,7 @@ impl View {
         let new_area = Area::DrawList(DrawListArea {draw_list_id: self.draw_list_id, redraw_id: cx.redraw_id});
         
         cx.update_area_refs(old_area, new_area);
-        cx.begin_turtle_with_guard(self.layout, new_area);
+        cx.begin_turtle_with_guard(self.walk, self.layout, new_area);
         
         Ok(())
     }
