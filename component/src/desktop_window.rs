@@ -3,28 +3,49 @@ use crate::{
     desktop_button::*,
     window_menu::*,
     button_logic::*,
+    frame::*
 };
 
 live_register!{
     use crate::theme::*;
+    use FrameComponent::*;
+    
     DesktopWindow: {{DesktopWindow}} {
-        pass:{
-            clear_color: (COLOR_CLEAR)
+        pass: {clear_color: (COLOR_CLEAR)}
+        
+        caption: "Desktop Window"
+        
+        frame: {
+            flow: Flow::Down
+            windows_buttons:Frame {
+                color: (COLOR_BG_APP)
+                height: 29
+                align: {fx: 1.0}
+                caption:Frame{ // this is a fill
+                    align: {fx: 0.5}
+                    label: Label{label:"Desktop Window"}
+                }
+                min_btn: DesktopButton {button_type: DesktopButtonType::WindowsMin}
+                max_btn: DesktopButton {button_type: DesktopButtonType::WindowsMin}
+                close_btn: DesktopButton {button_type: DesktopButtonType::WindowsMin}
+            }
+            inner_view:Frame{ // i want a callback here...
+                
+            }
         }
-        caption_bg: {color: (COLOR_BG_APP)}
-        caption: "Desktop Window",
-        main_view:{},
-        border_fill: {color: (COLOR_BG_APP)},
-        window:{
-            inner_size:vec2(1024,768)
+        
+        //border_fill: {color: (COLOR_BG_APP)},
+        window: {
+            inner_size: vec2(1024, 768)
         },
-        inner_view:{
+        /*
+        inner_view: {
         },
-        caption_text:{color: (COLOR_TEXT_DEFAULT)}
-        caption_layout:{
-            padding:{top:2}
+        caption_text: {color: (COLOR_TEXT_DEFAULT)}
+        caption_layout: {
+            padding: {top: 2}
             align: {fx: 0.5, fy: 0.5},
-            width: Size::Fill, 
+            width: Size::Fill,
             height: Size::Fixed(26.),
         }
         caption_view: {
@@ -32,35 +53,35 @@ live_register!{
                 width: Size::Fill,
                 height: Size::Fit
             }
-        }
+        }*/
     }
 }
 
 #[derive(Live)]
 pub struct DesktopWindow {
     #[rust] pub caption_size: Vec2,
-
+    
     window: Window,
     pass: Pass,
     depth_texture: Texture,
     
+    frame: Frame,
+    /*
     main_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
     caption_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
     inner_view: View,
-    caption_layout: Layout, 
+    caption_layout: Layout,
     clear_color: Vec4,
     
     min_btn: DesktopButton,
     max_btn: DesktopButton,
     close_btn: DesktopButton,
-    xr_btn: DesktopButton,
-    fullscreen_btn: DesktopButton,
     
     caption_text: DrawText,
     caption_bg: DrawColor,
     caption: String,
     
-    border_fill: DrawColor,
+    border_fill: DrawColor,*/
     
     #[rust(WindowMenu::new(cx))] pub window_menu: WindowMenu,
     #[rust(Menu::main(vec![
@@ -77,8 +98,8 @@ pub struct DesktopWindow {
     #[rust] pub inner_over_chrome: bool,
 }
 
-impl LiveHook for DesktopWindow{
-    fn after_new(&mut self, cx:&mut Cx){
+impl LiveHook for DesktopWindow {
+    fn after_new(&mut self, cx: &mut Cx) {
         self.window.set_pass(cx, &self.pass);
         self.pass.set_depth_texture(cx, &self.depth_texture, PassClearDepth::ClearWith(1.0));
     }
@@ -95,10 +116,8 @@ pub enum DesktopWindowEvent {
 impl DesktopWindow {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> DesktopWindowEvent {
-        //self.main_view.handle_scroll_bars(cx, event);
-        //self.inner_view.handle_scroll_bars(cx, event);
-        
-        if let ButtonAction::WasClicked = self.xr_btn.handle_desktop_button(cx, event) {
+        /*
+        if let ButtonAction::WasClicked = self.xr_btn.handle_event(cx, event) {
             if self.window.xr_is_presenting(cx) {
                 self.window.xr_stop_presenting(cx);
             }
@@ -107,7 +126,7 @@ impl DesktopWindow {
             }
         }
         
-        if let ButtonAction::WasClicked = self.fullscreen_btn.handle_desktop_button(cx, event) {
+        if let ButtonAction::WasClicked = self.fullscreen_btn.handle_event(cx, event) {
             if self.window.is_fullscreen(cx) {
                 self.window.normal(cx);
             }
@@ -115,10 +134,12 @@ impl DesktopWindow {
                 self.window.fullscreen(cx);
             }
         }
-        if let ButtonAction::WasClicked = self.min_btn.handle_desktop_button(cx, event) {
+        
+        if let ButtonAction::WasClicked = self.min_btn.handle_event(cx, event) {
             self.window.minimize(cx);
         }
-        if let ButtonAction::WasClicked = self.max_btn.handle_desktop_button(cx, event) {
+        
+        if let ButtonAction::WasClicked = self.max_btn.handle_event(cx, event) {
             if self.window.is_fullscreen(cx) {
                 self.window.restore(cx);
             }
@@ -126,9 +147,11 @@ impl DesktopWindow {
                 self.window.maximize(cx);
             }
         }
-        if let ButtonAction::WasClicked = self.close_btn.handle_desktop_button(cx, event) {
+        
+        if let ButtonAction::WasClicked = self.close_btn.handle_event(cx, event) {
             self.window.close(cx);
-        }
+        }*/
+        
         let is_for_other_window = match event {
             Event::WindowCloseRequested(ev) => ev.window_id != self.window.window_id,
             Event::WindowClosed(ev) => {
@@ -172,13 +195,13 @@ impl DesktopWindow {
     }
     
     pub fn begin(&mut self, cx: &mut Cx2d, menu: Option<&Menu>) -> ViewRedraw {
-        
+        /*
         if !cx.view_will_redraw(&self.main_view) {
             return Err(())
         }
-
+        */
         cx.begin_pass(&self.pass);
-        
+        /*
         self.main_view.begin(cx).unwrap();
         
         if self.caption_view.begin(cx).is_ok() {
@@ -186,24 +209,24 @@ impl DesktopWindow {
             let process_chrome = match cx.platform_type {
                 PlatformType::Linux {custom_window_chrome} => custom_window_chrome,
                 _ => true
-            }; 
+            };
             if process_chrome {
                 match cx.platform_type {
                     PlatformType::MsWindows | PlatformType::Unknown | PlatformType::Linux {..} => {
                         
-                        self.caption_bg.begin(cx, Layout {
-                            align: Align {fx: 1.0, fy: 0.0},
-                            width:Size::Fill, 
-                            height:Size::Fit,
-                            ..Default::default()
-                        });
+                        self.caption_bg.begin(cx, Walk::size(Size::Fill, Size::Fit), Layout::flow_right().with_align_x(1.0),);
+                        // we kinda need 2 turtles here that overlap so they can have different alignments
+                        // OR i need to be able to reset the alignment mid stroke
+                        // however this has no design-analog.
+                        // ok so. how about doing a nested turtle
+                        
                         
                         // we need to draw the window menu here.
                         if let Some(_menu) = menu {
                             // lets draw the thing, check with the clone if it changed
                             // then draw it
                         }
-                        
+                        // these buttons need right alignment
                         self.min_btn.draw_desktop_button(cx, DesktopButtonType::WindowsMin);
                         if self.window.is_fullscreen(cx) {
                             self.max_btn.draw_desktop_button(cx, DesktopButtonType::WindowsMaxToggled);
@@ -213,17 +236,10 @@ impl DesktopWindow {
                         }
                         self.close_btn.draw_desktop_button(cx, DesktopButtonType::WindowsClose);
                         
-                        // change alignment
-                        cx.change_turtle_align_x_cab(0.5); //Align::center());
-                        cx.compute_turtle_height();
-                        cx.change_turtle_align_y_cab(0.5); //Align::center());
-                        cx.reset_turtle_pos();
-                        cx.move_turtle(50., 0.);
-                        // we need to store our caption rect somewhere.
-                        self.caption_size = Vec2 {x: cx.get_width_left(), y: cx.get_height_left()};
+                        // this caption needs to be horizontally centered
                         self.caption_text.draw_walk(cx, &self.caption);
+                        
                         self.caption_bg.end(cx);
-                        cx.turtle_new_line();
                     },
                     
                     PlatformType::OSX => { // mac still uses the built in buttons, TODO, replace that.
@@ -257,26 +273,28 @@ impl DesktopWindow {
         }
         cx.turtle_new_line();
         
-        if self.inner_view.begin(cx).is_ok(){
+        if self.inner_view.begin(cx).is_ok() {
             return Ok(())
         }
-
-        self.end_inner(cx, true);
+        
+        self.end_inner(cx, true);*/
+        
         Err(())
     }
-
+    
     pub fn end(&mut self, cx: &mut Cx2d) {
         self.end_inner(cx, false);
     }
     
-    fn end_inner(&mut self, cx: &mut Cx2d, no_inner:bool) {
-        if !no_inner{
+    fn end_inner(&mut self, cx: &mut Cx2d, no_inner: bool) {
+        /*if !no_inner {
             self.inner_view.end(cx);
-        }
+        }*/
         // lets draw a VR button top right over the UI.
-        // window fullscreen? 
+        // window fullscreen?
         
         // only support fullscreen on web atm
+        /*
         if !cx.platform_type.is_desktop() && !self.window.is_fullscreen(cx) {
             cx.reset_turtle_pos();
             cx.move_turtle(cx.get_width_total() - 50.0, 0.);
@@ -287,10 +305,10 @@ impl DesktopWindow {
             cx.reset_turtle_pos();
             cx.move_turtle(cx.get_width_total() - 100.0, 0.);
             self.xr_btn.draw_desktop_button(cx, DesktopButtonType::XRMode);
-        }
+        }*/
         
-        self.main_view.end(cx);
-        
+        /*self.main_view.end(cx);
+        */
         cx.end_pass(&self.pass);
     }
 }

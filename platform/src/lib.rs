@@ -152,14 +152,12 @@ pub use {
         font::Font,
         draw_2d::{
             turtle::{
-                LineWrap,
                 Layout,
                 Walk,
                 Align,
                 Margin,
                 Padding,
-                Direction,
-                Axis,
+                Flow,
                 Size,
             },
             view::{
@@ -169,21 +167,6 @@ pub use {
             },
             cx_2d::{
                 Cx2d
-            },
-            view2::{
-                View2,
-            },
-            cx_2da::{
-                Cx2da
-            },
-            turtle2::{
-                Layout2,
-                Walk2,
-                Align2,
-                Margin2,
-                Padding2,
-                Flow,
-                Size2,
             },
         },
         

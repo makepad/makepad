@@ -4,14 +4,11 @@ use {
         makepad_math::*,
         cx::Cx,
         draw_2d::cx_2d::Cx2d,
-        draw_2d::turtle2::Layout2,
         live_traits::*,
         shader::geometry_gen::GeometryQuad2D,
         draw_vars::DrawVars,
         draw_2d::view::ManyInstances,
         draw_2d::turtle::{Layout, Walk},
-        draw_2d::cx_2da::Cx2da,
-        draw_2d::turtle2::{Walk2}
     },
 };
 
@@ -60,21 +57,7 @@ pub struct DrawQuad {
 }
 
 impl DrawQuad {
-    
-    pub fn begin(&mut self, cx: &mut Cx2d, layout: Layout) {
-        if self.draw_vars.draw_shader.is_some() {
-            let new_area = cx.add_aligned_instance(&self.draw_vars);
-            self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
-        }
-        cx.begin_turtle_with_guard(layout, self.draw_vars.area);
-    }
-    
-    pub fn end(&mut self, cx: &mut Cx2d) {
-        let rect = cx.end_turtle_with_guard(self.draw_vars.area);
-        self.draw_vars.area.set_rect(cx, &rect);
-    }
-    
-    pub fn begin2(&mut self, cx: &mut Cx2da, walk:Walk2, layout: Layout2) {
+    pub fn begin(&mut self, cx: &mut Cx2d, walk:Walk, layout: Layout) {
         cx.begin_turtle(walk, layout);
         if self.draw_vars.draw_shader.is_some() {
             let new_area = cx.add_aligned_instance(&self.draw_vars);
@@ -82,7 +65,7 @@ impl DrawQuad {
         }
     }
     
-    pub fn end2(&mut self, cx: &mut Cx2da) {
+    pub fn end(&mut self, cx: &mut Cx2d) {
         let rect = cx.end_turtle();
         self.draw_vars.area.set_rect(cx, &rect);
     }
@@ -93,15 +76,8 @@ impl DrawQuad {
         self.rect_size = rect.size;
         self.draw(cx);
     }
-    
-    pub fn draw_walk2(&mut self, cx: &mut Cx2da, walk: Walk2) {
-        let rect = cx.walk_turtle(walk);
-        self.rect_pos = rect.pos;
-        self.rect_size = rect.size;
-        self.draw2(cx);
-    }
 
-    pub fn draw2(&mut self, cx: &mut Cx2da){
+    pub fn draw(&mut self, cx: &mut Cx2d){
         if let Some(mi) = &mut self.many_instances{
             mi.instances.extend_from_slice(self.draw_vars.as_slice());            
         }
@@ -118,7 +94,7 @@ impl DrawQuad {
     }
     
     pub fn draw_rel(&mut self, cx: &mut Cx2d, rect: Rect) {
-        let rect = rect.translate(cx.get_turtle_origin());
+        let rect = rect.translate(cx.turtle().origin());
         self.rect_pos = rect.pos;
         self.rect_size = rect.size;
         self.draw(cx);
@@ -136,16 +112,6 @@ impl DrawQuad {
     pub fn end_many_instances(&mut self, cx: &mut Cx2d) {
         if let Some(mi) = self.many_instances.take() {
             let new_area = cx.end_many_instances(mi);
-            self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
-        }
-    }
-    
-    pub fn draw(&mut self, cx: &mut Cx2d) {
-        if let Some(mi) = &mut self.many_instances{
-            mi.instances.extend_from_slice(self.draw_vars.as_slice());            
-        }
-        else if self.draw_vars.can_instance() {
-            let new_area = cx.add_aligned_instance(&self.draw_vars);
             self.draw_vars.area = cx.update_area_refs(self.draw_vars.area, new_area);
         }
     }

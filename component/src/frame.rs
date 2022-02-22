@@ -19,9 +19,22 @@ live_register!{
 #[derive(Live)]
 #[live_register(register_as_frame_component!(Frame))]
 pub struct Frame { // draw info per UI element
+    #[alias(color, bg_quad.color)]
     bg_quad: DrawColor,
-    layout: Layout2,
-    pub walk: Walk2,
+
+    #[alias(padding, layout.padding)]
+    #[alias(align, layout.align)]
+    #[alias(spacing, layout.spacing)]
+    #[alias(flow, layout.flow)]
+    layout: Layout,
+
+    #[alias(width, walk.width)]
+    #[alias(height, walk.height)]
+    #[alias(margin, walk.margin)]
+    pub walk: Walk,
+    
+    hidden: bool,
+    
     #[rust] live_ptr: Option<LivePtr>,
     #[rust] children: ComponentMap<LiveId, FrameComponentRef>,
     #[rust] create_order: Vec<LiveId>
@@ -43,14 +56,6 @@ impl LiveHook for Frame {
     
     fn apply_value_unknown(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match nodes[index].id {
-            id!(color) => self.bg_quad.color.apply(cx, from, index, nodes),
-            id!(width) => self.walk.width.apply(cx, from, index, nodes),
-            id!(height) => self.walk.height.apply(cx, from, index, nodes),
-            id!(margin) => self.walk.margin.apply(cx, from, index, nodes),
-            id!(padding) => self.layout.padding.apply(cx, from, index, nodes),
-            id!(align) => self.layout.align.apply(cx, from, index, nodes),
-            id!(spacing) => self.layout.spacing.apply(cx, from, index, nodes),
-            id!(flow) => self.layout.flow.apply(cx, from, index, nodes),
             id => {
                 if id.is_capitalised(){
                     self.create_order.push(nodes[index].id);
@@ -71,11 +76,11 @@ impl FrameComponent for Frame {
         self.handle_event(cx, event).into()
     }
 
-    fn get_walk(&self)->Walk2{
+    fn get_walk(&self)->Walk{
         self.walk
     }
     
-    fn draw_component(&mut self, cx: &mut Cx2da, walk:Walk2) {
+    fn draw_component(&mut self, cx: &mut Cx2d, walk:Walk) {
         self.draw(cx, walk);
     }
 }
@@ -106,10 +111,11 @@ impl Frame {
         }
     }
     
-    pub fn draw(&mut self, cx: &mut Cx2da, walk:Walk2) {
+    pub fn draw(&mut self, cx: &mut Cx2d, walk:Walk) {
         let has_bg = self.bg_quad.color.w > 0.0;
+
         if has_bg{
-            self.bg_quad.begin2(cx, walk, self.layout);
+            self.bg_quad.begin(cx, walk, self.layout);
         }
         else{
             cx.begin_turtle(walk, self.layout);
@@ -132,13 +138,13 @@ impl Frame {
         // the fill-items
         for (id, fw) in defer_walks{
             if let Some(child) = self.children.get_mut(id).unwrap().as_mut() {
-                let walk = cx.resolve_walk(fw);
+                let walk = fw.resolve(cx);
                 child.draw_component(cx, walk);
             }
         }
         
         if has_bg{
-            self.bg_quad.end2(cx);
+            self.bg_quad.end(cx);
         }
         else{
             cx.end_turtle();

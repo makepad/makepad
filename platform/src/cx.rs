@@ -191,7 +191,7 @@ impl Default for Cx {
             id!(Margin),
             id!(Walk),
             id!(Align),
-            id!(Axis),
+            id!(ScrollBarAxis),
             id!(Layout),
             id!(Padding),
             id!(f32),
@@ -210,14 +210,6 @@ impl Default for Cx {
             id!(Window),
             id!(TextStyle),
             id!(Wrapping),
-
-            id!(Margin2),
-            id!(Walk2),
-            id!(Align2),
-            id!(Axis2),
-            id!(Layout2),
-            id!(Padding2),
-
         ]);
         
         Self {

@@ -182,7 +182,7 @@ impl DrawText {
     pub fn draw_rel(&mut self, cx: &mut Cx2d, pos: Vec2, val: &str) {
         self.buf.clear();
         self.buf_push_str(val);
-        self.draw(cx, pos + cx.get_turtle_origin());
+        self.draw(cx, pos + cx.turtle().origin());
     }
     
     pub fn draw_abs(&mut self, cx: &mut Cx2d, pos: Vec2, val: &str) {
@@ -374,7 +374,7 @@ impl DrawText {
             };
             if c == '\n' {
                 emit = true;
-                newline = true;
+                //newline = true;
             }
 
             if slot != 0 {
@@ -416,15 +416,16 @@ impl DrawText {
             }
             if emit {
                 let height = self.text_style.font_size * self.text_style.height_factor * self.font_scale;
-                let rect = cx.walk_turtle(Walk::fixed(width, height));
+                let rect = cx.walk_turtle(Walk::fixed_size(width, height));
                 
                 self.draw_chunk(cx, rect.pos, 0, None);
                 
                 width = 0.0;
                 self.buf.clear();
+                /*
                 if newline {
                     cx.turtle_new_line_min_height(self.font_size * self.text_style.line_spacing * self.font_scale);
-                }
+                }*/
             }
         }
         if !in_many {
