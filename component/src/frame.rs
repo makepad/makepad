@@ -116,12 +116,12 @@ impl Frame {
         }
         
         // lets make a defer list for fill items
-        let mut fills = Vec::new();
+        let mut defer_walks = Vec::new();
         for id in &self.create_order {
             if let Some(child) = self.children.get_mut(id).unwrap().as_mut() {
                 let walk = child.get_walk();
-                if let Some(fw) = cx.fill_walk(walk){
-                    fills.push((id, fw));
+                if let Some(fw) = cx.defer_walk(walk){
+                    defer_walks.push((id, fw));
                 }
                 else{
                     child.draw_component(cx, walk);
@@ -130,9 +130,9 @@ impl Frame {
         }
         
         // the fill-items
-        for (id, fw) in fills{
+        for (id, fw) in defer_walks{
             if let Some(child) = self.children.get_mut(id).unwrap().as_mut() {
-                let walk = cx.resolve_fill(fw);
+                let walk = cx.resolve_walk(fw);
                 child.draw_component(cx, walk);
             }
         }
