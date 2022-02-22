@@ -62,7 +62,7 @@ pub enum Size2 {
 
 #[derive(Clone, Default, Debug)]
 pub struct DeferWalk {
-    fill_index: usize,
+    defer_index: usize,
     margin: Margin2,
     other_axis: Size2,
     pos: Vec2
@@ -71,7 +71,7 @@ pub struct DeferWalk {
 #[derive(Clone, Default, Debug)]
 pub struct TurtleWalk {
     align_start: usize,
-    fill_index: usize,
+    defer_index: usize,
     rect: Rect,
 }
 
@@ -81,7 +81,7 @@ pub struct Turtle2 {
     layout: Layout2,
     align_start: usize,
     turtle_walks_start: usize,
-    fill_count: usize,
+    defer_count: usize,
     pos: Vec2,
     origin: Vec2,
     width: f32,
@@ -106,7 +106,7 @@ impl<'a> Cx2da<'a> {
     
     pub fn defer_walk(&mut self, walk: Walk2) -> Option<DeferWalk> {
         let turtle = self.turtles.last_mut().unwrap();
-        let fill_index = turtle.fill_count;
+        let defer_index = turtle.defer_count;
         let pos = turtle.pos;
         let margin_size = walk.margin.size();
         match turtle.layout.flow {
@@ -114,9 +114,9 @@ impl<'a> Cx2da<'a> {
                 let spacing = turtle.child_spacing(self.turtle_walks.len());
                 turtle.pos.x += margin_size.x + spacing.x;
                 turtle.update_used(0.0, margin_size.y);
-                turtle.fill_count += 1;
+                turtle.defer_count += 1;
                 Some(DeferWalk {
-                    fill_index,
+                    defer_index,
                     margin: walk.margin,
                     other_axis: walk.height,
                     pos: pos + spacing
@@ -126,9 +126,9 @@ impl<'a> Cx2da<'a> {
                 let spacing = turtle.child_spacing(self.turtle_walks.len());
                 turtle.pos.y += margin_size.y + spacing.y;
                 turtle.update_used(margin_size.x, 0.0);
-                turtle.fill_count += 1;
+                turtle.defer_count += 1;
                 Some(DeferWalk {
-                    fill_index,
+                    defer_index,
                     margin: walk.margin,
                     other_axis: walk.width,
                     pos: pos + spacing
@@ -145,9 +145,9 @@ impl<'a> Cx2da<'a> {
         match turtle.layout.flow {
             Flow::Right => {
                 let left = turtle.width_left();
-                let part = left / turtle.fill_count as f32;
+                let part = left / turtle.defer_count as f32;
                 Walk2 {
-                    abs_pos: Some(defer.pos + vec2(part * defer.fill_index as f32, 0.)),
+                    abs_pos: Some(defer.pos + vec2(part * defer.defer_index as f32, 0.)),
                     margin: defer.margin,
                     width: Size2::Fixed(part),
                     height: defer.other_axis
@@ -155,9 +155,9 @@ impl<'a> Cx2da<'a> {
             },
             Flow::Down => {
                 let left = turtle.height_left();
-                let part = left / turtle.fill_count as f32;
+                let part = left / turtle.defer_count as f32;
                 Walk2 {
-                    abs_pos: Some(defer.pos + vec2(0., part * defer.fill_index as f32)),
+                    abs_pos: Some(defer.pos + vec2(0., part * defer.defer_index as f32)),
                     margin: defer.margin,
                     height: Size2::Fixed(part),
                     width: defer.other_axis
@@ -188,7 +188,7 @@ impl<'a> Cx2da<'a> {
             layout,
             align_start: self.align_list.len(),
             turtle_walks_start: self.turtle_walks.len(),
-            fill_count: 0,
+            defer_count: 0,
             pos: Vec2 {
                 x: origin.x + layout.padding.left,
                 y: origin.y + layout.padding.top
@@ -231,12 +231,12 @@ impl<'a> Cx2da<'a> {
         
         match turtle.layout.flow {
             Flow::Right => {
-                if turtle.fill_count > 0 {
+                if turtle.defer_count > 0 {
                     let left = turtle.width_left();
-                    let part = left / turtle.fill_count as f32;
+                    let part = left / turtle.defer_count as f32;
                     for i in turtle.turtle_walks_start..self.turtle_walks.len() {
                         let walk = &self.turtle_walks[i];
-                        let shift_x = walk.fill_index as f32 * part;
+                        let shift_x = walk.defer_index as f32 * part;
                         let shift_y = turtle.layout.align.fy * (turtle.no_pad_height() - walk.rect.size.y);
                         let align_start = walk.align_start;
                         let align_end = self.get_turtle_walk_align_end(i);
@@ -255,12 +255,12 @@ impl<'a> Cx2da<'a> {
                 }
             },
             Flow::Down => {
-                if turtle.fill_count > 0 {
+                if turtle.defer_count > 0 {
                     let left = turtle.height_left();
-                    let part = left / turtle.fill_count as f32;
+                    let part = left / turtle.defer_count as f32;
                     for i in turtle.turtle_walks_start..self.turtle_walks.len() {
                         let walk = &self.turtle_walks[i];
-                        let shift_y = walk.fill_index as f32 * part;
+                        let shift_y = walk.defer_index as f32 * part;
                         let shift_x = turtle.layout.align.fx * (turtle.no_pad_width() - walk.rect.size.x);
                         let align_start = walk.align_start;
                         let align_end = self.get_turtle_walk_align_end(i);
@@ -306,7 +306,7 @@ impl<'a> Cx2da<'a> {
         if let Some(pos) = walk.abs_pos {
             self.turtle_walks.push(TurtleWalk {
                 align_start,
-                fill_index: 0,
+                defer_index: 0,
                 rect: Rect {pos, size: size + walk.margin.size()}
             });
             Rect {pos: pos + walk.margin.left_top(), size}
@@ -330,7 +330,7 @@ impl<'a> Cx2da<'a> {
             
             self.turtle_walks.push(TurtleWalk {
                 align_start,
-                fill_index: turtle.fill_count,
+                defer_index: turtle.defer_count,
                 rect: Rect {pos, size: size + margin_size}
             });
             
@@ -392,8 +392,8 @@ impl Turtle2 {
         self.pos = pos
     }
 
-    pub fn child_spacing(&self, walks_len: usize) -> Vec2 {
-        if self.turtle_walks_start < walks_len || self.fill_count > 0 {
+    fn child_spacing(&self, walks_len: usize) -> Vec2 {
+        if self.turtle_walks_start < walks_len || self.defer_count > 0 {
             match self.layout.flow {
                 Flow::Right => {
                     vec2(self.layout.spacing, 0.0)
