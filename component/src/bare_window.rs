@@ -3,19 +3,18 @@ use crate::makepad_platform::*;
 live_register!{
     BareWindow: {{BareWindow}} {
         clear_color: #1e1e1e
-        main_view:{},
+        main_view:{}
     }
 }
 
 #[derive(Live)]
 pub struct BareWindow {
+    #[alias(clear_color, pass)]
     pass: Pass,
-    color_texture: Texture,
     depth_texture: Texture,
     
     window: Window,
-    main_view: View2, // we have a root view otherwise is_overlay subviews can't attach topmost
-    clear_color: Vec4,
+    main_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
 }
 
 impl LiveHook for BareWindow{
@@ -27,7 +26,7 @@ impl LiveHook for BareWindow{
 
 impl BareWindow {
     
-    pub fn begin(&mut self, cx: &mut Cx2da) -> ViewRedraw {
+    pub fn begin(&mut self, cx: &mut Cx2d) -> ViewRedraw {
         if !cx.view_will_redraw(&self.main_view) {
             return Err(())
         }
@@ -38,7 +37,7 @@ impl BareWindow {
         Ok(())
     }
     
-    pub fn end(&mut self, cx: &mut Cx2da) {
+    pub fn end(&mut self, cx: &mut Cx2d) {
         self.main_view.end(cx);
         cx.end_pass(&self.pass);
     }
