@@ -105,6 +105,7 @@ pub struct Button {
     pressed_state: Option<LivePtr>,
     bg_quad: DrawQuad,
     label_text: DrawLabelText,
+    walk: Walk,
     layout: Layout,
     label: String
 }
@@ -139,7 +140,7 @@ impl Button {
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d, label: Option<&str>) {
-        self.bg_quad.begin(cx, self.layout);
+        self.bg_quad.begin(cx, self.walk, self.layout);
         self.label_text.draw_walk(cx, label.unwrap_or(&self.label));
         self.bg_quad.end(cx);
     }

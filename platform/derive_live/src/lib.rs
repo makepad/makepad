@@ -28,6 +28,7 @@ mod colorhex;
 
 
 #[proc_macro_derive(Live, attributes(
+    alias,
     calc,
     live,
     rust,

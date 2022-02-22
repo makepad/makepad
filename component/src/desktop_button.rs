@@ -126,6 +126,7 @@ pub struct DesktopButton {
     pub default_state: Option<LivePtr>,
     pub hover_state: Option<LivePtr>,
     pub pressed_state: Option<LivePtr>,
+    #[alias(button_type, bg.button_type)]
     pub bg: DrawDesktopButton,
 }
 
@@ -149,9 +150,23 @@ pub struct DrawDesktopButton {
     button_type: DesktopButtonType
 }
 
+impl DrawDesktopButton{
+    pub fn get_walk(&self)->Walk{
+        let (w, h) = match self.button_type {
+            DesktopButtonType::WindowsMin
+                | DesktopButtonType::WindowsMax
+                | DesktopButtonType::WindowsMaxToggled
+                | DesktopButtonType::WindowsClose => (46., 29.),
+            DesktopButtonType::XRMode => (50., 36.),
+            DesktopButtonType::Fullscreen => (50., 36.),
+        };
+        Walk::fixed_size(w, h)
+    }
+}
+
 impl DesktopButton {
     
-    pub fn handle_desktop_button(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonAction {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonAction {
         self.animator_handle_event(cx, event);
         let res = self.button_logic.handle_event(cx, event, self.bg.draw_vars.area);
         // println!("{:?}", res.state);
@@ -164,18 +179,9 @@ impl DesktopButton {
         res.action
     }
     
-    pub fn draw_desktop_button(&mut self, cx: &mut Cx2d, ty: DesktopButtonType) {
-        let (w, h) = match ty {
-            DesktopButtonType::WindowsMin
-                | DesktopButtonType::WindowsMax
-                | DesktopButtonType::WindowsMaxToggled
-                | DesktopButtonType::WindowsClose => (46., 29.),
-            DesktopButtonType::XRMode => (50., 36.),
-            DesktopButtonType::Fullscreen => (50., 36.),
-        };
-        
-        self.bg.button_type = ty;
-        self.bg.draw_walk(cx, Walk::fixed(w, h));
+    pub fn draw(&mut self, cx: &mut Cx2d) {
+        let walk = self.bg.get_walk();
+        self.bg.draw_walk(cx, walk);
     }
 }
 

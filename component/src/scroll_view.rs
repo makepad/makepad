@@ -173,8 +173,8 @@ impl ScrollView{
         let view_area = Area::DrawList(DrawListArea {draw_list_id, redraw_id: cx.redraw_id});
         
         // lets ask the turtle our actual bounds
-        let view_total = cx.get_turtle_bounds();
-        let mut rect_now = cx.get_turtle_rect();
+        let view_total = cx.turtle().used();
+        let mut rect_now = cx.turtle().rect();
         if rect_now.size.y.is_nan() {
             rect_now.size.y = view_total.y;
         }
@@ -183,12 +183,12 @@ impl ScrollView{
         }
         
         if self.h_show {
-            let scroll_pos = self.h_scroll.draw_scroll_bar(cx, Axis::Horizontal, view_area, rect_now, view_total);
+            let scroll_pos = self.h_scroll.draw_scroll_bar(cx, ScrollBarAxis::Horizontal, view_area, rect_now, view_total);
             cx.set_view_scroll_x(draw_list_id, scroll_pos);
         }
         if self.v_show {
             //println!("SET SCROLLBAR {} {}", rect_now.h, view_total.y);
-            let scroll_pos = self.v_scroll.draw_scroll_bar(cx, Axis::Vertical, view_area, rect_now, view_total);
+            let scroll_pos = self.v_scroll.draw_scroll_bar(cx, ScrollBarAxis::Vertical, view_area, rect_now, view_total);
             cx.set_view_scroll_y(draw_list_id, scroll_pos);
         }
         

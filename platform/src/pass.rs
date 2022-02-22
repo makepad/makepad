@@ -59,28 +59,15 @@ impl LiveNew for Pass {
 
 impl LiveApply for Pass {
     
-    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
-        
-        if !nodes[start_index].value.is_structy_type() {
-            cx.apply_error_wrong_type_for_struct(live_error_origin!(), start_index, nodes, id!(View));
-            return nodes.skip_node(start_index);
-        }
-        
-        let mut index = start_index + 1;
-        loop {
-            if nodes[index].value.is_close() {
-                index += 1;
-                break;
-            }
-            match nodes[index].id {
-                id!(clear_color) => cx.passes[self.pass_id].clear_color = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
-                _=> {
-                    cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
-                    index = nodes.skip_node(index);
-                }
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, mut index: usize, nodes: &[LiveNode]) -> usize {
+        match nodes[index].id {
+            id!(clear_color) => cx.passes[self.pass_id].clear_color = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
+            _=> {
+                cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
+                index = nodes.skip_node(index);
             }
         }
-        return index;
+        index
     }
 }
 
