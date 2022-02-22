@@ -177,7 +177,6 @@ pub use {
                 Cx2da
             },
             turtle2::{
-                LineWrap2,
                 Layout2,
                 Walk2,
                 Align2,
