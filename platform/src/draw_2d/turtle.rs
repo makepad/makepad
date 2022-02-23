@@ -27,8 +27,8 @@ pub struct Walk {
 
 #[derive(Clone, Copy, Debug, Live, LiveHook)]
 pub struct Align {
-    fx: f32,
-    fy: f32
+    x: f32,
+    y: f32
 }
 
 #[derive(Clone, Copy, Default, Debug, Live)]
@@ -212,7 +212,7 @@ impl<'a> Cx2d<'a> {
                     for i in turtle.turtle_walks_start..self.turtle_walks.len() {
                         let walk = &self.turtle_walks[i];
                         let shift_x = walk.defer_index as f32 * part;
-                        let shift_y = turtle.layout.align.fy * (turtle.no_pad_height() - walk.rect.size.y);
+                        let shift_y = turtle.layout.align.y * (turtle.no_pad_height() - walk.rect.size.y);
                         let align_start = walk.align_start;
                         let align_end = self.get_turtle_walk_align_end(i);
                         self.move_align_list(shift_x, shift_y, align_start, align_end);
@@ -221,8 +221,8 @@ impl<'a> Cx2d<'a> {
                 else {
                     for i in turtle.turtle_walks_start..self.turtle_walks.len() {
                         let walk = &self.turtle_walks[i];
-                        let shift_x = turtle.layout.align.fx * turtle.width_left();
-                        let shift_y = turtle.layout.align.fy * (turtle.no_pad_height() - walk.rect.size.y);
+                        let shift_x = turtle.layout.align.x * turtle.width_left();
+                        let shift_y = turtle.layout.align.y * (turtle.no_pad_height() - walk.rect.size.y);
                         let align_start = walk.align_start;
                         let align_end = self.get_turtle_walk_align_end(i);
                         self.move_align_list(shift_x, shift_y, align_start, align_end);
@@ -235,7 +235,7 @@ impl<'a> Cx2d<'a> {
                     let part = left / turtle.defer_count as f32;
                     for i in turtle.turtle_walks_start..self.turtle_walks.len() {
                         let walk = &self.turtle_walks[i];
-                        let shift_x = turtle.layout.align.fx * (turtle.no_pad_width() - walk.rect.size.x);
+                        let shift_x = turtle.layout.align.x * (turtle.no_pad_width() - walk.rect.size.x);
                         let shift_y = walk.defer_index as f32 * part;
                         let align_start = walk.align_start;
                         let align_end = self.get_turtle_walk_align_end(i);
@@ -245,8 +245,8 @@ impl<'a> Cx2d<'a> {
                 else {
                     for i in turtle.turtle_walks_start..self.turtle_walks.len() {
                         let walk = &self.turtle_walks[i];
-                        let shift_x = turtle.layout.align.fx * (turtle.no_pad_width() - walk.rect.size.x);
-                        let shift_y = turtle.layout.align.fy * turtle.height_left();
+                        let shift_x = turtle.layout.align.x * (turtle.no_pad_width() - walk.rect.size.x);
+                        let shift_y = turtle.layout.align.y * turtle.height_left();
                         let align_start = walk.align_start;
                         let align_end = self.get_turtle_walk_align_end(i);
                         self.move_align_list(shift_x, shift_y, align_start, align_end);
@@ -256,8 +256,8 @@ impl<'a> Cx2d<'a> {
             Flow::Overlay=>{
                 for i in turtle.turtle_walks_start..self.turtle_walks.len() {
                     let walk = &self.turtle_walks[i];
-                    let shift_x = turtle.layout.align.fx * (turtle.no_pad_width() - walk.rect.size.x);
-                    let shift_y = turtle.layout.align.fy * (turtle.no_pad_height() - walk.rect.size.y);
+                    let shift_x = turtle.layout.align.x * (turtle.no_pad_width() - walk.rect.size.x);
+                    let shift_y = turtle.layout.align.y * (turtle.no_pad_height() - walk.rect.size.y);
                     let align_start = walk.align_start;
                     let align_end = self.get_turtle_walk_align_end(i);
                     self.move_align_list(shift_x, shift_y, align_start, align_end);
@@ -280,7 +280,7 @@ impl<'a> Cx2d<'a> {
         self.walk_turtle_with_align(walk, self.align_list.len())
     }
     
-    fn walk_turtle_with_align(&mut self, walk: Walk, align_start: usize) -> Rect {
+    pub fn walk_turtle_with_align(&mut self, walk: Walk, align_start: usize) -> Rect {
         
         let turtle = self.turtles.last_mut().unwrap();
         let size = vec2(
@@ -538,12 +538,12 @@ impl Layout {
     }
     
     pub fn with_align_x(mut self, v: f32) -> Self {
-        self.align.fx = v;
+        self.align.x = v;
         self
     }
 
     pub fn with_align_y(mut self, v: f32) -> Self {
-        self.align.fy = v;
+        self.align.y = v;
         self
     }
     
@@ -579,6 +579,15 @@ impl Layout {
 }
 
 impl Walk {
+    pub fn empty() -> Self {
+        Self {
+            abs_pos: None,
+            margin: Margin::default(),
+            width: Size::Fixed(0.0),
+            height: Size::Fixed(0.0),
+        }
+    }
+
     pub fn size(w: Size, h: Size) -> Self {
         Self {
             abs_pos: None,
@@ -630,10 +639,9 @@ impl Walk {
 
 impl Default for Align {
     fn default() -> Self {
-        Self {fx: 0.0, fy: 0.0}
+        Self {x: 0.0, y: 0.0}
     }
 }
-
 
 impl LiveHook for Margin {
     fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Option<usize> {

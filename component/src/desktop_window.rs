@@ -2,8 +2,6 @@ use crate::{
     makepad_platform::*,
     button_logic::*,
     window_menu::*,
-    //button_logic::*,
-    frame_component::*,
     frame::*
 };
 
@@ -16,24 +14,23 @@ live_register!{
         
         frame: {
             flow: Flow::Down
-            windows_buttons := Frame {
+            windows_buttons:= Frame {
                 color: (COLOR_BG_APP)
                 height: 29
-                align: {fx: 1.0}
-                caption := Frame {
-                    align: {fx: 0.5}
-                    Label {text: "Desktop Window"}
+                caption:= Frame {
+                    align: {x: 0.5, y:0.5}
+                    Label {text: "Desktop Window", margin:{left:100}}
                 }
-                min_btn := DesktopButton {button_type: DesktopButtonType::WindowsMin}
-                max_btn := DesktopButton {button_type: DesktopButtonType::WindowsMax}
-                close_btn := DesktopButton {button_type: DesktopButtonType::WindowsClose}
+                min_btn:= DesktopButton {button_type: DesktopButtonType::WindowsMin}
+                max_btn:= DesktopButton {button_type: DesktopButtonType::WindowsMax}
+                close_btn:= DesktopButton {button_type: DesktopButtonType::WindowsClose}
             }
-            inner_view: = Frame {user: true}
+            inner_view:= Frame {user: true}
         }
-
+        
         window: {
             inner_size: vec2(1024, 768)
-        },
+        }
     }
 }
 
@@ -83,7 +80,7 @@ impl DesktopWindow {
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> DesktopWindowEvent {
         
         for item in self.frame.handle_event(cx, event) {
-            if let ButtonAction::IsPressed = item.action.cast() {match item.id {
+            if let ButtonAction::WasClicked = item.action.cast() {match item.id {
                 id!(min_btn) => {
                     self.window.minimize(cx);
                 }
@@ -118,6 +115,8 @@ impl DesktopWindow {
             },
             Event::WindowDragQuery(dq) => {
                 if dq.window_id == self.window.window_id {
+                    // alright we should query the caption area.
+                    // we should build an api for that
                     if dq.abs.x < self.caption_size.x && dq.abs.y < self.caption_size.y {
                         if dq.abs.x < 50. {
                             dq.response = WindowDragQueryResponse::SysMenu;
@@ -151,11 +150,10 @@ impl DesktopWindow {
         }
         
         cx.begin_pass(&self.pass);
-        // lets begin our frame
-        self.main_view.begin(cx) ?;
         
-        let walk = self.frame.get_walk();
-        if self.frame.draw(cx, walk).is_err(){
+        self.main_view.begin(cx).unwrap();
+        
+        if self.frame.draw(cx).is_err() {
             self.main_view.end(cx);
             cx.end_pass(&self.pass);
             return Err(())
@@ -165,8 +163,7 @@ impl DesktopWindow {
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
-        let walk = self.frame.get_walk();
-        while self.frame.draw(cx, walk).is_ok() {}
+        while self.frame.draw(cx).is_ok() {}
         self.main_view.end(cx);
         cx.end_pass(&self.pass);
     }
