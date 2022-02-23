@@ -9,4 +9,3 @@ edition = "2018"
 [dependencies.makepad-studio-component]
 path="./component"  
 version="0.1"
-

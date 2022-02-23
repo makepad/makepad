@@ -167,7 +167,7 @@ impl DrawDesktopButton{
 }
 
 impl FrameComponent for DesktopButton {
-    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event) -> OptionFrameComponentAction {
+    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event) -> FrameComponentActionRef {
         self.handle_event(cx, event).into()
     }
 
@@ -176,7 +176,7 @@ impl FrameComponent for DesktopButton {
     }
     
     fn draw_component(&mut self, cx: &mut Cx2d, walk:Walk)->Result<LiveId,()>{
-        self.draw(cx, walk);
+        self.draw_walk(cx, walk);
         Err(())
     }
 }
@@ -195,7 +195,7 @@ impl DesktopButton {
         res.action
     }
     
-    pub fn draw(&mut self, cx: &mut Cx2d, walk:Walk) {
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk:Walk) {
         self.bg.draw_walk(cx, walk);
     }
 }

@@ -13,7 +13,7 @@ pub fn derive_into_frame_component_action_impl(input: TokenStream) -> TokenStrea
             let _types = parser.eat_all_types();
             let where_clause = parser.eat_where_clause(None); //Some("LiveUpdateHooks"));
             tb.add("impl").stream(generic.clone());
-            tb.add("Into<OptionFrameComponentAction> for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+            tb.add("Into<FrameComponentActionRef> for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
             tb.add("    fn into(self)->Option<Box<dyn FrameComponentAction>>{");
             tb.add("        match &self{");
             tb.add("            Self::None=>None,");
@@ -29,7 +29,7 @@ pub fn derive_into_frame_component_action_impl(input: TokenStream) -> TokenStrea
             let generic = parser.eat_generic();
             let where_clause = parser.eat_where_clause(None);
             tb.add("impl").stream(generic.clone());
-            tb.add("Into<OptionFrameComponentAction> for").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+            tb.add("Into<FrameComponentActionRef> for").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
             tb.add("    fn into(self)->Option<Box<dyn FrameComponentAction>>{");
             tb.add("        match &self{");
             tb.add("            Self::None=>None,");
