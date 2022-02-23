@@ -80,7 +80,7 @@ impl LiveHook for Frame {
 }
 
 impl FrameComponent for Frame {
-    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event) -> OptionFrameComponentAction {
+    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event) -> FrameComponentActionRef {
         self.handle_event(cx, event).into()
     }
 
@@ -89,7 +89,7 @@ impl FrameComponent for Frame {
     }
     
     fn draw_component(&mut self, cx: &mut Cx2d, walk:Walk)->Result<LiveId,()>{
-        self.draw(cx, walk)
+        self.draw_walk(cx, walk)
     }
 }
 
@@ -106,13 +106,12 @@ impl Frame {
             if let Some(child) = self.children.get_mut(id).unwrap().as_mut() {
                 if let Some(action) = child.handle_component_event(cx, event) {
                     if let FrameActions::Actions(other_actions) = action.cast() {
-                        actions.extend(other_actions);
+                        for action in other_actions{
+                            actions.push(action.with_parent_id(*id));
+                        }
                     }
                     else {
-                        actions.push(FrameActionItem {
-                            id: *id,
-                            action: action
-                        });
+                        actions.push(FrameActionItem::new(*id, action));
                     }
                 }
             }
@@ -125,7 +124,11 @@ impl Frame {
         }
     }
     
-    pub fn draw(&mut self, cx: &mut Cx2d, walk:Walk)->Result<LiveId,()>{
+    pub fn draw(&mut self, cx: &mut Cx2d)->Result<LiveId,()>{
+        self.draw_walk(cx, self.get_walk())
+    }
+    
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk:Walk)->Result<LiveId,()>{
         if self.hidden{
             return Err(())
         }
@@ -133,7 +136,7 @@ impl Frame {
         if self.redraw_id != cx.redraw_id{
             self.redraw_id = cx.redraw_id;
             self.draw_state = DrawState::Drawing(0);
-            self.defer_walks.truncate(0);
+            self.defer_walks.clear();
             
             // ok so.. we have to keep calling draw till we return LiveId(0)
             if self.bg_quad.color.w > 0.0{

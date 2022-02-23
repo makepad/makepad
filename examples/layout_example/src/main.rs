@@ -9,7 +9,7 @@ live_register!{
             padding: 30
             width: Size::Fill
             height: Size::Fill
-            align: {fx: 0.0, fy: 0.5}
+            align: {x: 0.0, y: 0.5}
             spacing: 30.,
             Frame {color: #0f0, width: Size::Fill, height: 40}
             Frame {
@@ -39,7 +39,6 @@ pub struct App {
 
 impl App {
     pub fn live_register(cx: &mut Cx) {
-        println!("{}", std::mem::size_of::<Frame>());
         makepad_component::live_register(cx);
     }
     
@@ -63,7 +62,7 @@ impl App {
         if self.window.begin(cx, None).is_err() {
             return;
         }
-        while self.frame.draw(cx, self.frame.walk).is_ok(){};
+        while self.frame.draw(cx).is_ok(){};
         self.window.end(cx);
     }
 }

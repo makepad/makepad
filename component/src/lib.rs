@@ -2,6 +2,7 @@ use makepad_platform::*;
 
 pub mod button_logic;
 pub mod button;
+pub mod label;
 pub mod desktop_button;
 pub mod desktop_window;
 pub mod scroll_shadow;
@@ -39,6 +40,7 @@ pub use crate::{
 pub fn live_register(cx:&mut Cx){
     makepad_platform::live_cx::live_register(cx);
     crate::theme::live_register(cx);
+    crate::label::live_register(cx);
     crate::frame::live_register(cx);
     crate::fold_button::live_register(cx);
     crate::link_button::live_register(cx);

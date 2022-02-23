@@ -8,7 +8,7 @@ use {
         cx::Cx,
         draw_2d::cx_2d::Cx2d,
         live_traits::*,
-        draw_2d::turtle::Walk,
+        draw_2d::turtle::{Walk, Margin, Size},
         font::{CxFontsAtlasTodo, Font,},
         draw_2d::view::ManyInstances,
         draw_vars::DrawVars,
@@ -258,7 +258,7 @@ impl DrawText {
             
             let unicode = *wc as usize;
             let glyph_id = font.char_code_to_glyph_index_map[unicode];
-
+            
             let glyph = &font.glyphs[glyph_id];
             
             let advance = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
@@ -334,7 +334,7 @@ impl DrawText {
         }
     }
     
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, text: &str) {
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, margin: Margin, text: &str) {
         
         if !self.draw_vars.can_instance()
             || self.text_style.font.font_id.is_none() {
@@ -348,6 +348,8 @@ impl DrawText {
         }
         
         let in_many = self.many_instances.is_some();
+        
+        let align_start = cx.align_list.len();
         
         self.update_draw_call_vars(cx);
         if !in_many {
@@ -376,7 +378,7 @@ impl DrawText {
                 emit = true;
                 //newline = true;
             }
-
+            
             if slot != 0 {
                 let glyph = &cx.fonts[font_id].as_ref().unwrap().ttf_font.glyphs[slot];
                 width += glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
@@ -416,10 +418,14 @@ impl DrawText {
             }
             if emit {
                 let height = self.text_style.font_size * self.text_style.height_factor * self.font_scale;
-                let rect = cx.walk_turtle(Walk::fixed_size(width, height));
                 
+                let rect = cx.walk_turtle_with_align(Walk {
+                    abs_pos: None,
+                    margin,
+                    width: Size::Fixed(width),
+                    height: Size::Fixed(height),
+                }, align_start);
                 self.draw_chunk(cx, rect.pos, 0, None);
-                
                 width = 0.0;
                 self.buf.clear();
                 /*

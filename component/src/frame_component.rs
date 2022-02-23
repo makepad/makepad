@@ -25,7 +25,28 @@ pub struct FrameComponentRegistry {
 #[derive(Clone)]
 pub struct FrameActionItem {
     pub id: LiveId,
+    pub parent: [LiveId;4],
     pub action: Box<dyn FrameComponentAction>
+}
+
+impl FrameActionItem{
+    pub fn new(id:LiveId, action: Box<dyn FrameComponentAction>)->Self{
+        Self {
+            id,
+            parent: [LiveId(0);4],
+            action: action
+        }
+    }
+    
+    pub fn with_parent_id(mut self, id:LiveId)->Self{
+        for i in 0..self.parent.len(){
+            if self.parent[i] == LiveId(0){
+                self.parent[i] = id;
+                break;
+            }
+        }
+        self
+    }
 }
 
 #[derive(Clone, IntoFrameComponentAction)]
@@ -84,7 +105,7 @@ impl<T: 'static + ? Sized + Clone> FrameComponentAction for T {
 
 generate_clone_cast_api!(FrameComponentAction);
 
-pub type OptionFrameComponentAction = Option<Box<dyn FrameComponentAction >>;
+pub type FrameComponentActionRef = Option<Box<dyn FrameComponentAction >>;
 
 impl Clone for Box<dyn FrameComponentAction> {
     fn clone(&self) -> Box<dyn FrameComponentAction> {
