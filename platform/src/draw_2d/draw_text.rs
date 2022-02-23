@@ -366,7 +366,7 @@ impl DrawText {
             let last = iter.peek().is_none();
             
             let mut emit = last;
-            let mut newline = false;
+            //let mut newline = false;
             let slot = if c < '\u{10000}' {
                 cx.fonts[font_id].as_ref().unwrap().ttf_font.char_code_to_glyph_index_map[c as usize]
             } else {
@@ -396,7 +396,7 @@ impl DrawText {
                         if c == 10 as char || c == 13 as char {
                             emit = true;
                         }
-                        newline = true;
+                        //newline = true;
                     },
                     Wrapping::None => {
                         self.buf.push(c);
