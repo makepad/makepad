@@ -9,14 +9,14 @@ live_register!{
             padding: 30
             width: Size::Fill
             height: Size::Fill
-            align: {fx: 0.0, fy: 0.0}
+            align: {fx: 0.0, fy: 0.5}
             spacing: 30.,
             Frame {color: #0f0, width: Size::Fill, height: 40}
             Frame {
                 color: #0ff,
                 padding: 10,
                 flow: Flow::Down,
-                width: Size2::Fit,
+                width: Size::Fit,
                 height: 300
                 spacing: 10
                 Frame {color: #00f, width: 40, height: Size::Fill}
@@ -34,7 +34,7 @@ main_app!(App);
 #[derive(Live, LiveHook)]
 pub struct App {
     frame: Frame,
-    window: BareWindow,
+    window: DesktopWindow,
 }
 
 impl App {
@@ -48,7 +48,7 @@ impl App {
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
-        
+        self.window.handle_event(cx, event);
         match event {
             Event::Construct => {
             }
@@ -60,10 +60,10 @@ impl App {
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
-        if self.window.begin(cx).is_err() {
+        if self.window.begin(cx, None).is_err() {
             return;
         }
-        self.frame.draw(cx, self.frame.walk);
+        while self.frame.draw(cx, self.frame.walk).is_ok(){};
         self.window.end(cx);
     }
 }

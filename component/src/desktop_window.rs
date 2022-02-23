@@ -1,8 +1,9 @@
 use crate::{
     makepad_platform::*,
-    desktop_button::*,
-    window_menu::*,
     button_logic::*,
+    window_menu::*,
+    //button_logic::*,
+    frame_component::*,
     frame::*
 };
 
@@ -13,25 +14,21 @@ live_register!{
     DesktopWindow: {{DesktopWindow}} {
         pass: {clear_color: (COLOR_CLEAR)}
         
-        caption: "Desktop Window"
-        
         frame: {
             flow: Flow::Down
-            windows_buttons:Frame {
+            windows_buttons := Frame {
                 color: (COLOR_BG_APP)
                 height: 29
                 align: {fx: 1.0}
-                caption:Frame{ // this is a fill
+                caption := Frame { // this is a fill
                     align: {fx: 0.5}
-                    label: Label{label:"Desktop Window"}
+                    //label: Label {label: "Desktop Window"}
                 }
-                min_btn: DesktopButton {button_type: DesktopButtonType::WindowsMin}
-                max_btn: DesktopButton {button_type: DesktopButtonType::WindowsMin}
-                close_btn: DesktopButton {button_type: DesktopButtonType::WindowsMin}
+                min_btn := DesktopButton {button_type: DesktopButtonType::WindowsMin}
+                max_btn := DesktopButton {button_type: DesktopButtonType::WindowsMax}
+                close_btn := DesktopButton {button_type: DesktopButtonType::WindowsClose}
             }
-            inner_view:Frame{ // i want a callback here...
-                
-            }
+            inner_view: = Frame {user: true}
         }
         
         //border_fill: {color: (COLOR_BG_APP)},
@@ -62,26 +59,11 @@ pub struct DesktopWindow {
     #[rust] pub caption_size: Vec2,
     
     window: Window,
+    main_view: View,
     pass: Pass,
     depth_texture: Texture,
     
     frame: Frame,
-    /*
-    main_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
-    caption_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
-    inner_view: View,
-    caption_layout: Layout,
-    clear_color: Vec4,
-    
-    min_btn: DesktopButton,
-    max_btn: DesktopButton,
-    close_btn: DesktopButton,
-    
-    caption_text: DrawText,
-    caption_bg: DrawColor,
-    caption: String,
-    
-    border_fill: DrawColor,*/
     
     #[rust(WindowMenu::new(cx))] pub window_menu: WindowMenu,
     #[rust(Menu::main(vec![
@@ -90,7 +72,7 @@ pub struct DesktopWindow {
         ]),
     ]))]
     
-    default_menu: Menu,
+    _default_menu: Menu,
     
     #[rust] pub last_menu: Option<Menu>,
     
@@ -152,6 +134,26 @@ impl DesktopWindow {
             self.window.close(cx);
         }*/
         
+        for item in self.frame.handle_event(cx, event) {
+            if let ButtonAction::IsPressed = item.action.cast() {match item.id {
+                id!(min_btn) => {
+                    self.window.minimize(cx);
+                }
+                id!(max_btn) => {
+                    if self.window.is_fullscreen(cx) {
+                        self.window.restore(cx);
+                    }
+                    else {
+                        self.window.maximize(cx);
+                    }
+                }
+                id!(close_btn) => {
+                    self.window.close(cx);
+                }
+                _ => ()
+            }}
+        }
+        
         let is_for_other_window = match event {
             Event::WindowCloseRequested(ev) => ev.window_id != self.window.window_id,
             Event::WindowClosed(ev) => {
@@ -194,13 +196,22 @@ impl DesktopWindow {
         }
     }
     
-    pub fn begin(&mut self, cx: &mut Cx2d, menu: Option<&Menu>) -> ViewRedraw {
-        /*
+    pub fn begin(&mut self, cx: &mut Cx2d, _menu: Option<&Menu>) -> ViewRedraw {
+        
         if !cx.view_will_redraw(&self.main_view) {
             return Err(())
         }
-        */
+        
         cx.begin_pass(&self.pass);
+        // lets begin our frame
+        self.main_view.begin(cx) ?;
+        
+        // this thing needs to return the inner_view id on first call
+        let walk = self.frame.get_walk();
+        let _id = self.frame.draw(cx, walk) ?;
+        
+        return Ok(());
+        // otherwise return Err(())
         /*
         self.main_view.begin(cx).unwrap();
         
@@ -278,37 +289,13 @@ impl DesktopWindow {
         }
         
         self.end_inner(cx, true);*/
-        
-        Err(())
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
-        self.end_inner(cx, false);
-    }
-    
-    fn end_inner(&mut self, cx: &mut Cx2d, no_inner: bool) {
-        /*if !no_inner {
-            self.inner_view.end(cx);
-        }*/
-        // lets draw a VR button top right over the UI.
-        // window fullscreen?
         
-        // only support fullscreen on web atm
-        /*
-        if !cx.platform_type.is_desktop() && !self.window.is_fullscreen(cx) {
-            cx.reset_turtle_pos();
-            cx.move_turtle(cx.get_width_total() - 50.0, 0.);
-            self.fullscreen_btn.draw_desktop_button(cx, DesktopButtonType::Fullscreen);
-        }
-        
-        if self.window.xr_can_present(cx) { // show a switch-to-VRMode button
-            cx.reset_turtle_pos();
-            cx.move_turtle(cx.get_width_total() - 100.0, 0.);
-            self.xr_btn.draw_desktop_button(cx, DesktopButtonType::XRMode);
-        }*/
-        
-        /*self.main_view.end(cx);
-        */
+        let walk = self.frame.get_walk();
+        while self.frame.draw(cx, walk).is_ok() {}
+        self.main_view.end(cx);
         cx.end_pass(&self.pass);
     }
 }
