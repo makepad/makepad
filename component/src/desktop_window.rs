@@ -20,9 +20,9 @@ live_register!{
                 color: (COLOR_BG_APP)
                 height: 29
                 align: {fx: 1.0}
-                caption := Frame { // this is a fill
+                caption := Frame {
                     align: {fx: 0.5}
-                    //label: Label {label: "Desktop Window"}
+                    Label {text: "Desktop Window"}
                 }
                 min_btn := DesktopButton {button_type: DesktopButtonType::WindowsMin}
                 max_btn := DesktopButton {button_type: DesktopButtonType::WindowsMax}
@@ -30,27 +30,10 @@ live_register!{
             }
             inner_view: = Frame {user: true}
         }
-        
-        //border_fill: {color: (COLOR_BG_APP)},
+
         window: {
             inner_size: vec2(1024, 768)
         },
-        /*
-        inner_view: {
-        },
-        caption_text: {color: (COLOR_TEXT_DEFAULT)}
-        caption_layout: {
-            padding: {top: 2}
-            align: {fx: 0.5, fy: 0.5},
-            width: Size::Fill,
-            height: Size::Fixed(26.),
-        }
-        caption_view: {
-            layout: {
-                width: Size::Fill,
-                height: Size::Fit
-            }
-        }*/
     }
 }
 
@@ -98,41 +81,6 @@ pub enum DesktopWindowEvent {
 impl DesktopWindow {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> DesktopWindowEvent {
-        /*
-        if let ButtonAction::WasClicked = self.xr_btn.handle_event(cx, event) {
-            if self.window.xr_is_presenting(cx) {
-                self.window.xr_stop_presenting(cx);
-            }
-            else {
-                self.window.xr_start_presenting(cx);
-            }
-        }
-        
-        if let ButtonAction::WasClicked = self.fullscreen_btn.handle_event(cx, event) {
-            if self.window.is_fullscreen(cx) {
-                self.window.normal(cx);
-            }
-            else {
-                self.window.fullscreen(cx);
-            }
-        }
-        
-        if let ButtonAction::WasClicked = self.min_btn.handle_event(cx, event) {
-            self.window.minimize(cx);
-        }
-        
-        if let ButtonAction::WasClicked = self.max_btn.handle_event(cx, event) {
-            if self.window.is_fullscreen(cx) {
-                self.window.restore(cx);
-            }
-            else {
-                self.window.maximize(cx);
-            }
-        }
-        
-        if let ButtonAction::WasClicked = self.close_btn.handle_event(cx, event) {
-            self.window.close(cx);
-        }*/
         
         for item in self.frame.handle_event(cx, event) {
             if let ButtonAction::IsPressed = item.action.cast() {match item.id {
@@ -206,93 +154,17 @@ impl DesktopWindow {
         // lets begin our frame
         self.main_view.begin(cx) ?;
         
-        // this thing needs to return the inner_view id on first call
         let walk = self.frame.get_walk();
-        let _id = self.frame.draw(cx, walk) ?;
-        
-        return Ok(());
-        // otherwise return Err(())
-        /*
-        self.main_view.begin(cx).unwrap();
-        
-        if self.caption_view.begin(cx).is_ok() {
-            // alright here we draw our platform buttons.
-            let process_chrome = match cx.platform_type {
-                PlatformType::Linux {custom_window_chrome} => custom_window_chrome,
-                _ => true
-            };
-            if process_chrome {
-                match cx.platform_type {
-                    PlatformType::MsWindows | PlatformType::Unknown | PlatformType::Linux {..} => {
-                        
-                        self.caption_bg.begin(cx, Walk::size(Size::Fill, Size::Fit), Layout::flow_right().with_align_x(1.0),);
-                        // we kinda need 2 turtles here that overlap so they can have different alignments
-                        // OR i need to be able to reset the alignment mid stroke
-                        // however this has no design-analog.
-                        // ok so. how about doing a nested turtle
-                        
-                        
-                        // we need to draw the window menu here.
-                        if let Some(_menu) = menu {
-                            // lets draw the thing, check with the clone if it changed
-                            // then draw it
-                        }
-                        // these buttons need right alignment
-                        self.min_btn.draw_desktop_button(cx, DesktopButtonType::WindowsMin);
-                        if self.window.is_fullscreen(cx) {
-                            self.max_btn.draw_desktop_button(cx, DesktopButtonType::WindowsMaxToggled);
-                        }
-                        else {
-                            self.max_btn.draw_desktop_button(cx, DesktopButtonType::WindowsMax);
-                        }
-                        self.close_btn.draw_desktop_button(cx, DesktopButtonType::WindowsClose);
-                        
-                        // this caption needs to be horizontally centered
-                        self.caption_text.draw_walk(cx, &self.caption);
-                        
-                        self.caption_bg.end(cx);
-                    },
-                    
-                    PlatformType::OSX => { // mac still uses the built in buttons, TODO, replace that.
-                        if let Some(menu) = menu {
-                            cx.update_menu(menu);
-                        }
-                        else {
-                            cx.update_menu(&self.default_menu);
-                        }
-                        self.caption_bg.begin(cx, self.caption_layout);
-                        self.caption_size = Vec2 {x: cx.get_width_left(), y: cx.get_height_left()};
-                        self.caption_text.draw_walk(cx, &self.caption);
-                        self.caption_bg.end(cx);
-                        cx.turtle_new_line();
-                    },
-                    PlatformType::WebBrowser {..} => {
-                        if self.window.is_fullscreen(cx) { // put a bar at the top
-                            self.caption_bg.begin(cx, Layout {
-                                align: Align {fx: 0.5, fy: 0.5},
-                                width: Size::Fill,
-                                height: Size::Fixed(22.),
-                                ..Default::default()
-                            });
-                            self.caption_bg.end(cx);
-                            cx.turtle_new_line();
-                        }
-                    }
-                }
-            }
-            self.caption_view.end(cx);
-        }
-        cx.turtle_new_line();
-        
-        if self.inner_view.begin(cx).is_ok() {
-            return Ok(())
+        if self.frame.draw(cx, walk).is_err(){
+            self.main_view.end(cx);
+            cx.end_pass(&self.pass);
+            return Err(())
         }
         
-        self.end_inner(cx, true);*/
+        Ok(())
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
-        
         let walk = self.frame.get_walk();
         while self.frame.draw(cx, walk).is_ok() {}
         self.main_view.end(cx);
