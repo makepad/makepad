@@ -1,7 +1,8 @@
 use {
     crate::{
         makepad_platform::*,
-        button_logic::*
+        button_logic::*,
+        frame_component::*
     }
 };
 
@@ -120,6 +121,7 @@ live_register!{
 }
 
 #[derive(Live, LiveHook)]
+#[live_register(register_as_frame_component!(DesktopButton))]
 pub struct DesktopButton {
     #[rust] pub button_logic: ButtonLogic,
     #[state(default_state)] pub animator: Animator,
@@ -164,8 +166,22 @@ impl DrawDesktopButton{
     }
 }
 
-impl DesktopButton {
+impl FrameComponent for DesktopButton {
+    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event) -> OptionFrameComponentAction {
+        self.handle_event(cx, event).into()
+    }
+
+    fn get_walk(&self)->Walk{
+        self.bg.get_walk()
+    }
     
+    fn draw_component(&mut self, cx: &mut Cx2d, walk:Walk)->Result<LiveId,()>{
+        self.draw(cx, walk);
+        Err(())
+    }
+}
+
+impl DesktopButton {
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonAction {
         self.animator_handle_event(cx, event);
         let res = self.button_logic.handle_event(cx, event, self.bg.draw_vars.area);
@@ -179,8 +195,7 @@ impl DesktopButton {
         res.action
     }
     
-    pub fn draw(&mut self, cx: &mut Cx2d) {
-        let walk = self.bg.get_walk();
+    pub fn draw(&mut self, cx: &mut Cx2d, walk:Walk) {
         self.bg.draw_walk(cx, walk);
     }
 }

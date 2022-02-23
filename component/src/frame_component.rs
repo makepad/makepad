@@ -3,10 +3,11 @@ use {
     crate::makepad_platform::*,
     std::collections::BTreeMap,
 };
+pub use crate::register_as_frame_component;
 
 pub trait FrameComponent: LiveApply {
     fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event) -> Option<Box<dyn FrameComponentAction >>;
-    fn draw_component(&mut self, cx: &mut Cx2d, walk:Walk);
+    fn draw_component(&mut self, cx: &mut Cx2d, walk:Walk)->Result<LiveId,()>;
     fn get_walk(&self)->Walk;
     fn type_id(&self) -> LiveType where Self:'static {LiveType::of::<Self>()}
 }
