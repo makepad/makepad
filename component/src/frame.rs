@@ -34,6 +34,13 @@ pub struct Frame { // draw info per UI element
     pub walk: Walk,
     
     hidden: bool,
+    user: bool,
+    
+    #[rust] self_id: LiveId,
+    
+    #[rust] redraw_id: u64,
+    #[rust] defer_walks: Vec<(LiveId,DeferWalk)>,
+    #[rust(DrawState::Done)] draw_state: DrawState,
     
     #[rust] live_ptr: Option<LivePtr>,
     #[rust] children: ComponentMap<LiveId, FrameComponentRef>,
@@ -48,7 +55,8 @@ impl LiveHook for Frame {
         None
     }
     
-    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, _nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+        self.self_id = nodes[index].id;
         if let Some(file_id) = from.file_id() {
             self.live_ptr = Some(LivePtr::from_index(file_id, index, cx.live_registry.borrow().file_id_to_file(file_id).generation));
         }
@@ -57,7 +65,7 @@ impl LiveHook for Frame {
     fn apply_value_unknown(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match nodes[index].id {
             id => {
-                if id.is_capitalised(){
+                if id.is_capitalised() || nodes[index].origin.id_non_unique(){
                     self.create_order.push(nodes[index].id);
                     return self.children.get_or_insert(cx, nodes[index].id, | cx | {FrameComponentRef::new(cx)})
                         .apply(cx, from, index, nodes);
@@ -80,9 +88,15 @@ impl FrameComponent for Frame {
         self.walk
     }
     
-    fn draw_component(&mut self, cx: &mut Cx2d, walk:Walk) {
-        self.draw(cx, walk);
+    fn draw_component(&mut self, cx: &mut Cx2d, walk:Walk)->Result<LiveId,()>{
+        self.draw(cx, walk)
     }
+}
+
+enum DrawState{
+    Done,
+    Drawing(usize),
+    DeferWalk(usize)
 }
 
 impl Frame {
@@ -111,43 +125,67 @@ impl Frame {
         }
     }
     
-    pub fn draw(&mut self, cx: &mut Cx2d, walk:Walk) {
-        let has_bg = self.bg_quad.color.w > 0.0;
-
-        if has_bg{
-            self.bg_quad.begin(cx, walk, self.layout);
-        }
-        else{
-            cx.begin_turtle(walk, self.layout);
+    pub fn draw(&mut self, cx: &mut Cx2d, walk:Walk)->Result<LiveId,()>{
+        // the beginning state
+        if self.redraw_id != cx.redraw_id{
+            self.redraw_id = cx.redraw_id;
+            self.draw_state = DrawState::Drawing(0);
+            self.defer_walks.truncate(0);
+            
+            // ok so.. we have to keep calling draw till we return LiveId(0)
+            if self.bg_quad.color.w > 0.0{
+                self.bg_quad.begin(cx, walk, self.layout);
+            }
+            else{
+                cx.begin_turtle(walk, self.layout);
+            }
+            if self.user{
+                return Ok(self.self_id)
+            }
         }
         
-        // lets make a defer list for fill items
-        let mut defer_walks = Vec::new();
-        for id in &self.create_order {
-            if let Some(child) = self.children.get_mut(id).unwrap().as_mut() {
-                let walk = child.get_walk();
-                if let Some(fw) = cx.defer_walk(walk){
-                    defer_walks.push((id, fw));
+        while let DrawState::Drawing(step) = self.draw_state{
+            if step < self.create_order.len(){
+                let id = self.create_order[step];
+                if let Some(child) = self.children.get_mut(&id).unwrap().as_mut() {
+                    let walk = child.get_walk();
+                    if let Some(fw) = cx.defer_walk(walk){
+                        self.defer_walks.push((id, fw));
+                    }
+                    else if let Ok(id) = child.draw_component(cx, walk){
+                        return Ok(id);
+                    }
+                }
+                self.draw_state = DrawState::Drawing(step + 1);
+            }
+            else{
+                self.draw_state = DrawState::DeferWalk(0);
+            }
+        }
+        
+        while let DrawState::DeferWalk(step) = self.draw_state{
+            if step < self.defer_walks.len(){
+                let (id, dw) = &self.defer_walks[step];
+                if let Some(child) = self.children.get_mut(&id).unwrap().as_mut() {
+                    let walk = dw.resolve(cx);
+                    if let Ok(id) = child.draw_component(cx, walk){
+                        return Ok(id);
+                    }
+                }
+                self.draw_state = DrawState::DeferWalk(step + 1);
+            }
+            else{
+                if self.bg_quad.color.w > 0.0{
+                    self.bg_quad.end(cx);
                 }
                 else{
-                    child.draw_component(cx, walk);
+                    cx.end_turtle();
                 }
+                self.draw_state = DrawState::Done
             }
         }
         
-        // the fill-items
-        for (id, fw) in defer_walks{
-            if let Some(child) = self.children.get_mut(id).unwrap().as_mut() {
-                let walk = fw.resolve(cx);
-                child.draw_component(cx, walk);
-            }
-        }
-        
-        if has_bg{
-            self.bg_quad.end(cx);
-        }
-        else{
-            cx.end_turtle();
-        }
+        return Err(());
     }
 }
+

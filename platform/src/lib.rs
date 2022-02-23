@@ -159,6 +159,7 @@ pub use {
                 Padding,
                 Flow,
                 Size,
+                DeferWalk
             },
             view::{
                 View,
