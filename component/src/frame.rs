@@ -65,9 +65,9 @@ impl LiveHook for Frame {
     fn apply_value_unknown(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match nodes[index].id {
             id => {
-                if id.is_capitalised() || nodes[index].origin.id_non_unique(){
-                    self.create_order.push(nodes[index].id);
-                    return self.children.get_or_insert(cx, nodes[index].id, | cx | {FrameComponentRef::new(cx)})
+                if nodes[index].origin.id_non_unique(){
+                    self.create_order.push(id);
+                    return self.children.get_or_insert(cx, id, | cx | {FrameComponentRef::new(cx)})
                         .apply(cx, from, index, nodes);
                 }
                 else{
@@ -126,6 +126,9 @@ impl Frame {
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d, walk:Walk)->Result<LiveId,()>{
+        if self.hidden{
+            return Err(())
+        }
         // the beginning state
         if self.redraw_id != cx.redraw_id{
             self.redraw_id = cx.redraw_id;
