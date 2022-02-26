@@ -143,7 +143,7 @@ impl Splitter {
                 self.bar_quad.draw_walk(cx, Walk::size(Size::Fill, Size::Fixed(self.split_bar_size)));
             }
         }
-        cx.begin_turtle(Walk::default(), Layout::default());
+        cx.begin_turtle(Walk::default(), Layout::flow_down());
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
