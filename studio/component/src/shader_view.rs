@@ -110,7 +110,7 @@ impl ShaderView {
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
-        let pos = cx.get_turtle_pos() + self.pad;
+        let pos = cx.turtle().pos() + self.pad;
         self.bg_quad.draw_abs(cx, Rect {pos, size: self.size})
     }
 }

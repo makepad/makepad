@@ -50,11 +50,13 @@ live_register!{
                 return sdf.stroke(BORDER_COLOR, BORDER_WIDTH)*/
             }
         }
-        
-        layout: {
-            align: {fx: 0.0, fy: 0.5},
+        walk:{
             width: Size::Fit,
             height: Size::Fill, //Fixed((DIM_TAB_HEIGHT)),
+        }
+        
+        layout: {
+            align: {x: 0.0, y: 0.5},
             padding: {
                 left: 10.0,
                 top: 2.0,
@@ -123,7 +125,8 @@ pub struct Tab {
     
     hover: f32,
     selected: f32,
-    
+
+    walk: Walk, 
     layout: Layout,
 }
 
@@ -146,7 +149,7 @@ impl Tab {
     
     pub fn draw(&mut self, cx: &mut Cx2d, name: &str) {
         //self.bg_quad.color = self.color(self.is_selected);
-        self.bg_quad.begin(cx, self.layout);
+        self.bg_quad.begin(cx, self.walk, self.layout);
         //self.name_text.color = self.name_color(self.is_selected);
         self.close_button.draw(cx);
         //cx.turtle_align_y();

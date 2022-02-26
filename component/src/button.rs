@@ -140,7 +140,7 @@ impl Button {
     
     pub fn draw(&mut self, cx: &mut Cx2d, label: Option<&str>) {
         self.bg_quad.begin(cx, self.walk, self.layout);
-        self.label_text.draw_walk(cx, Margin::default(), label.unwrap_or(&self.label));
+        self.label_text.draw_walk(cx, label.unwrap_or(&self.label));
         self.bg_quad.end(cx);
     }
 }

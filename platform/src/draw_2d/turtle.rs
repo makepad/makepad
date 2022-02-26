@@ -48,6 +48,18 @@ pub struct Padding {
 }
 
 #[derive(Copy, Clone, Debug, Live, LiveHook)]
+pub enum Axis {
+    #[pick] Horizontal,
+    Vertical
+}
+
+impl Default for Axis {
+    fn default() -> Self {
+        Axis::Horizontal
+    }
+}
+
+#[derive(Copy, Clone, Debug, Live, LiveHook)]
 pub enum Flow {
     #[pick] Right,
     Down,
@@ -253,7 +265,7 @@ impl<'a> Cx2d<'a> {
                     }
                 }
             },
-            Flow::Overlay=>{
+            Flow::Overlay => {
                 for i in turtle.turtle_walks_start..self.turtle_walks.len() {
                     let walk = &self.turtle_walks[i];
                     let shift_x = turtle.layout.align.x * (turtle.no_pad_width() - walk.rect.size.x);
@@ -273,14 +285,27 @@ impl<'a> Cx2d<'a> {
                 size: vec2(w.fixed_or_zero(), h.fixed_or_zero())
             }
         }
-        return self.walk_turtle_with_align(Walk {width: w, height: h, ..turtle.walk}, turtle.align_start)
+        return self.walk_turtle_internal(Walk {width: w, height: h, ..turtle.walk}, turtle.align_start, true)
     }
     
     pub fn walk_turtle(&mut self, walk: Walk) -> Rect {
-        self.walk_turtle_with_align(walk, self.align_list.len())
+        self.walk_turtle_internal(walk, self.align_list.len(), true)
+    }
+
+    pub fn walk_turtle_with_align(&mut self, walk: Walk, align_start: usize) -> Rect {
+        self.walk_turtle_internal(walk, align_start, true)
     }
     
-    pub fn walk_turtle_with_align(&mut self, walk: Walk, align_start: usize) -> Rect {
+    pub fn walk_turtle_without_move(&mut self, walk: Walk)->Rect{
+        self.walk_turtle_internal(walk, self.align_list.len(), false)
+    }
+    
+    pub fn walk_turtle_would_be_visible(&mut self, walk: Walk, scroll:Vec2)->bool{
+        let rect = self.walk_turtle_internal(walk, self.align_list.len(), false);
+        self.turtle().rect_is_visible(rect, scroll)
+    }
+    
+    fn walk_turtle_internal(&mut self, walk: Walk, align_start: usize, actually_move:bool) -> Rect {
         
         let turtle = self.turtles.last_mut().unwrap();
         let size = vec2(
@@ -289,38 +314,40 @@ impl<'a> Cx2d<'a> {
         );
         
         if let Some(pos) = walk.abs_pos {
-            self.turtle_walks.push(TurtleWalk {
-                align_start,
-                defer_index: 0,
-                rect: Rect {pos, size: size + walk.margin.size()}
-            });
+            if actually_move{
+                self.turtle_walks.push(TurtleWalk {
+                    align_start,
+                    defer_index: 0,
+                    rect: Rect {pos, size: size + walk.margin.size()}
+                });
+            }
             Rect {pos: pos + walk.margin.left_top(), size}
         }
         else {
             let spacing = turtle.child_spacing(self.turtle_walks.len());
             let pos = turtle.pos;
-            let margin_size = walk.margin.size();
-            match turtle.layout.flow {
-                Flow::Right => {
-                    turtle.pos.x = pos.x + size.x + margin_size.x + spacing.x;
-                    turtle.update_used(0.0, size.y + margin_size.y);
-                },
-                Flow::Down => {
-                    turtle.pos.y = pos.y + size.y + margin_size.y + spacing.y;
-                    turtle.update_used(size.x + margin_size.x, 0.0);
-                },
-                Flow::Overlay=>{ // do not walk
-                }
-            };
-            turtle.width_used = turtle.width_used.max(turtle.pos.x - turtle.origin.x);
-            turtle.height_used = turtle.height_used.max(turtle.pos.y - turtle.origin.y);
-            
-            self.turtle_walks.push(TurtleWalk {
-                align_start,
-                defer_index: turtle.defer_count,
-                rect: Rect {pos, size: size + margin_size}
-            });
-            
+            if actually_move{
+                let margin_size = walk.margin.size();
+                match turtle.layout.flow {
+                    Flow::Right => {
+                        turtle.pos.x = pos.x + size.x + margin_size.x + spacing.x;
+                        turtle.update_used(0.0, size.y + margin_size.y);
+                    },
+                    Flow::Down => {
+                        turtle.pos.y = pos.y + size.y + margin_size.y + spacing.y;
+                        turtle.update_used(size.x + margin_size.x, 0.0);
+                    },
+                    Flow::Overlay => { // do not walk
+                    }
+                };
+                
+                self.turtle_walks.push(TurtleWalk {
+                    align_start,
+                    defer_index: turtle.defer_count,
+                    rect: Rect {pos, size: size + margin_size}
+                });
+            }
+        
             Rect {pos: pos + walk.margin.left_top() + spacing, size}
         }
     }
@@ -369,11 +396,15 @@ impl Turtle {
         self.width_used = self.width_used.max((self.pos.x + dx) - self.origin.x);
         self.height_used = self.height_used.max((self.pos.y + dy) - self.origin.y);
     }
-
-    pub fn used(&self)->Vec2{
+    
+    pub fn used(&self) -> Vec2 {
         vec2(self.width_used, self.height_used)
     }
-
+    
+    pub fn set_used(&mut self, width_used:f32, height_used:f32){
+        self.width_used = width_used;
+        self.height_used = height_used;
+    }
     
     pub fn move_pos(&mut self, dx: f32, dy: f32) {
         self.pos.x += dx;
@@ -394,7 +425,7 @@ impl Turtle {
                 Flow::Down => {
                     vec2(0.0, self.layout.spacing)
                 }
-                Flow::Overlay=>{ 
+                Flow::Overlay => {
                     vec2(0.0, 0.0)
                 }
             }
@@ -433,7 +464,7 @@ impl Turtle {
                     Flow::Right => {
                         max_zero_keep_nan(self.width_left() - margin.width())
                     },
-                    Flow::Down | Flow::Overlay=> {
+                    Flow::Down | Flow::Overlay => {
                         max_zero_keep_nan(self.no_pad_width() - margin.width())
                     }
                 }
@@ -462,6 +493,13 @@ impl Turtle {
         Rect {
             pos: self.origin,
             size: vec2(self.width, self.height)
+        }
+    }
+    
+    pub fn rect_left(&self) -> Rect {
+        Rect {
+            pos: self.pos,
+            size: vec2(self.width_left(), self.height_left())
         }
     }
     
@@ -530,7 +568,7 @@ impl Layout {
         }
     }
     
-    pub fn flow_downn() -> Self {
+    pub fn flow_down() -> Self {
         Self {
             flow: Flow::Down,
             ..Self::default()
@@ -541,7 +579,7 @@ impl Layout {
         self.align.x = v;
         self
     }
-
+    
     pub fn with_align_y(mut self, v: f32) -> Self {
         self.align.y = v;
         self
@@ -587,7 +625,7 @@ impl Walk {
             height: Size::Fixed(0.0),
         }
     }
-
+    
     pub fn size(w: Size, h: Size) -> Self {
         Self {
             abs_pos: None,
