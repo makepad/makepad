@@ -47,14 +47,15 @@ live_register!{
         link_button:{
             
         }
+        
         layout: {
-            align: {fy: 0.5},
+            align: {y: 0.5},
             padding: {left: 5},
         }
         
         icon_walk: {
-            width: Width::Fixed((DIM_DATA_ICON_WIDTH)),
-            height: Height::Fixed((DIM_DATA_ICON_WIDTH)),
+            width: Size::Fixed((DIM_DATA_ICON_WIDTH)),
+            height: Size::Fixed((DIM_DATA_ICON_WIDTH)),
             margin: {
                 left: 1,
                 right: 0,
@@ -231,25 +232,13 @@ impl LogListNode {
         // lets draw a fold button
         self.icon_quad.icon_type = icon_type;
         self.icon_quad.draw_walk(cx, self.icon_walk);
+        println!("LINK HERE {}", link);
         self.link_button.draw(cx, Some(link));
         
         self.name_text.draw_walk(cx, body);
         self.bg_quad.end(cx);
     }
-    /*
-    fn _indent_walk(&self, depth: usize) -> Walk {
-        Walk {
-            width: Size::Fixed(depth as f32 * self.indent_width),
-            height: Size::Fill,
-            margin: Margin {
-                left: depth as f32 * 1.0,
-                top: 0.0,
-                right: depth as f32 * 4.0,
-                bottom: 0.0,
-            },
-        }
-    }*/
-    
+
     pub fn set_is_selected(&mut self, cx: &mut Cx, is_selected: bool, animate: Animate) {
         self.toggle_animator(cx, is_selected, animate, self.selected_state, self.unselected_state)
     }
