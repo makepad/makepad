@@ -312,10 +312,10 @@ impl CodeEditorImpl {
         self.end_instances(cx);
         
         let visible = self.scroll_view.get_scroll_view_visible();
-        cx.set_turtle_bounds(Vec2 {
-            x: lines_layout.max_line_width + self.line_num_width + self.text_glyph_size.x * 4.0,
-            y: lines_layout.total_height + visible.y - self.text_glyph_size.y,
-        });
+        cx.turtle_mut().set_used(
+            lines_layout.max_line_width + self.line_num_width + self.text_glyph_size.x * 4.0,
+            lines_layout.total_height + visible.y - self.text_glyph_size.y,
+        );
         
         self.scroll_shadow.draw(cx, &self.scroll_view, vec2(self.line_num_width, 0.));
         self.scroll_view.end(cx);
@@ -355,7 +355,7 @@ impl CodeEditorImpl {
     )
     where T: FnMut(&mut Cx, LineLayoutInput) -> LineLayoutOutput
     {
-        let viewport_size = cx.get_turtle_size();
+        let viewport_size = cx.turtle().size();
         let viewport_start = cx.get_scroll_pos();
         
         let viewport_end = viewport_start + viewport_size;
@@ -479,7 +479,7 @@ impl CodeEditorImpl {
         text: &Text,
         lines_layout: &LinesLayout,
     ) {
-        let origin = cx.get_turtle_pos();
+        let origin = cx.turtle().pos();
         let start_x = origin.x + self.line_num_width;
         let mut line_count = lines_layout.view_start;
         let mut span_iter = selections.spans();
@@ -646,7 +646,7 @@ impl CodeEditorImpl {
             }
         }
         
-        let Rect {pos: origin, size: viewport_size,} = cx.get_turtle_rect();
+        let Rect {pos: origin, size: viewport_size,} = cx.turtle().rect();
         
         //let mut start_y = lines_layout.start_y + origin.y;
         let start_x = origin.x;
@@ -687,7 +687,7 @@ impl CodeEditorImpl {
         indent_cache: &IndentCache,
         lines_layout: &LinesLayout,
     ) {
-        let origin = cx.get_turtle_pos();
+        let origin = cx.turtle().pos();
         //let mut start_y = lines_layout.start_y + origin.y;
         for (line_index, indent_info) in indent_cache
             .iter()
@@ -719,7 +719,7 @@ impl CodeEditorImpl {
         state: &EditorState,
         lines_layout: &LinesLayout,
     ) {
-        let origin = cx.get_turtle_pos();
+        let origin = cx.turtle().pos();
         //let mut start_y = lines_layout.start_y + origin.y;
         for (line_index, spans) in msg_cache
             .iter()
@@ -764,7 +764,7 @@ impl CodeEditorImpl {
                 _ => break,
             }
         }
-        let origin = cx.get_turtle_pos();
+        let origin = cx.turtle().pos();
         //let mut start_y = lines_layout.start_y + origin.y;
         for line_index in lines_layout.view_start..lines_layout.view_end {
             let layout = &lines_layout.lines[line_index];
@@ -815,7 +815,7 @@ impl CodeEditorImpl {
         lines_layout: &LinesLayout,
         cursor: Cursor,
     ) {
-        let rect = cx.get_turtle_rect();
+        let rect = cx.turtle().rect();
         if cursor.head == cursor.tail {
             let line = &lines_layout.lines[cursor.head.line];
             self.current_line_quad.draw_abs(

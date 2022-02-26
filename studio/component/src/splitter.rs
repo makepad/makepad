@@ -1,4 +1,5 @@
 use crate::makepad_platform::*;
+use crate::makepad_component::*;
 
 live_register!{
     use makepad_platform::shader::std::*;
@@ -108,7 +109,6 @@ pub struct Splitter {
     min_horizontal: f32,
     max_horizontal: f32,
     
-    layout: Layout,
     bar_quad: DrawSplitter,
     split_bar_size: f32,
 }
@@ -116,9 +116,19 @@ pub struct Splitter {
 impl Splitter {
     
     pub fn begin(&mut self, cx: &mut Cx2d) {
-        self.rect = cx.get_turtle_padded_rect();
+        // we should start a fill turtle in the layout direction of choice
+        match self.axis {
+            Axis::Horizontal => {
+                cx.begin_turtle(Walk::default(), Layout::flow_right());
+            }
+            Axis::Vertical => {
+                cx.begin_turtle(Walk::default(), Layout::flow_down());
+            }
+        }
+        
+        self.rect = cx.turtle().padded_rect();
         self.position = self.align.to_position(self.axis, self.rect);
-        cx.begin_turtle(self.layout());
+        cx.begin_turtle(self.walk(), Layout::flow_down());
     }
     
     pub fn middle(&mut self, cx: &mut Cx2d) {
@@ -126,52 +136,25 @@ impl Splitter {
         match self.axis {
             Axis::Horizontal => {
                 self.bar_quad.is_vertical = 1.0;
-                self.bar_quad.draw_abs(
-                    cx,
-                    Rect {
-                        pos: vec2(self.rect.pos.x + self.position, self.rect.pos.y),
-                        size: vec2(self.split_bar_size, self.rect.size.y),
-                    },
-                );
-                cx.set_turtle_pos(Vec2 {
-                    x: self.rect.pos.x + self.position + self.split_bar_size,
-                    y: self.rect.pos.y,
-                });
+                self.bar_quad.draw_walk(cx, Walk::size(Size::Fixed(self.split_bar_size), Size::Fill));
             }
             Axis::Vertical => {
                 self.bar_quad.is_vertical = 0.0;
-                self.bar_quad.draw_abs(
-                    cx,
-                    Rect {
-                        pos: vec2(self.rect.pos.x, self.rect.pos.y + self.position),
-                        size: vec2(self.rect.size.x, self.split_bar_size),
-                    },
-                );
-                cx.set_turtle_pos(Vec2 {
-                    x: self.rect.pos.x,
-                    y: self.rect.pos.y + self.position + self.split_bar_size,
-                });
+                self.bar_quad.draw_walk(cx, Walk::size(Size::Fill, Size::Fixed(self.split_bar_size)));
             }
         }
-        cx.begin_turtle(Layout::default());
+        cx.begin_turtle(Walk::default(), Layout::default());
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
         cx.end_turtle();
+        cx.end_turtle();
     }
     
-    fn layout(&self) -> Layout {
+    fn walk(&self) -> Walk {
         match self.axis {
-            Axis::Horizontal => Layout {
-                width: Size::Fixed(self.position),
-                height: Size::Fill,
-                ..self.layout
-            },
-            Axis::Vertical => Layout {
-                width: Size::Fill,
-                height: Size::Fixed(self.position),
-                ..self.layout
-            },
+            Axis::Horizontal => Walk::size(Size::Fixed(self.position), Size::Fill),
+            Axis::Vertical => Walk::size(Size::Fill, Size::Fixed(self.position)),
         }
     }
     

@@ -45,7 +45,7 @@ live_register!{
         }
         
         widget_layout: {
-            align: {fx: 0.2, fy: 0},
+            align: {x: 0.2, y: 0},
             padding: {left: 0, top: 0, right: 0, bottom: 0}
         }
         
@@ -153,8 +153,8 @@ impl LiveEditor {
         let mut last_line = None;
         
         let line_num_geom = vec2(self.editor_impl.line_num_width, 0.0);
-        let origin = cx.get_turtle_pos() + line_num_geom;
-        let size = cx.get_turtle_size() - line_num_geom;
+        let origin = cx.turtle().pos() + line_num_geom;
+        let size = cx.turtle().size() - line_num_geom;
         for (line, ident) in &self.widget_draw_order {
             if Some(line) != last_line { // start a new draw segment with the turtle
                 
@@ -164,17 +164,15 @@ impl LiveEditor {
                 // lets look at the line height
                 let layout = &self.lines_layout.lines[*line];
                 
-                cx.begin_turtle(Layout {
-                    abs_origin: Some(vec2(
+                cx.begin_turtle(Walk {
+                    abs_pos: Some(vec2(
                         origin.x,
                         origin.y + layout.start_y + layout.text_height
                     )),
-                    abs_size: Some(vec2(
-                        size.x,
-                        layout.widget_height
-                    )),
-                    ..self.widget_layout
-                });
+                    width: Size::Fixed(size.x),
+                    height: Size::Fixed(layout.widget_height),
+                    margin: Margin::default(),
+                }, Layout::default());
             }
             let widget = self.widgets.get_mut(ident).unwrap();
             if !live_registry.generation_valid(widget.bind.live_ptr){
@@ -191,7 +189,7 @@ impl LiveEditor {
     
     pub fn draw_fold_buttons(&mut self, cx: &mut Cx2d, document_inner: &DocumentInner) {
         let mut last_line = None;
-        let origin = cx.get_turtle_pos();
+        let origin = cx.turtle().pos();
         
         let inline_cache = document_inner.inline_cache.borrow_mut();
         
@@ -372,7 +370,7 @@ impl LiveEditor {
         token_cache: &TokenCache,
     ) {
         let lines_layout = &self.lines_layout;
-        let origin = cx.get_turtle_pos();
+        let origin = cx.turtle().pos();
         //let mut start_y = visible_lines.start_y;
         for (line_index, (chars, token_info)) in text
             .as_lines()

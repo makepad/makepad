@@ -37,7 +37,7 @@ use {
 
 live_register!{
     AppInner: {{AppInner}} {
-        window: {caption: "Makepad Studio"}
+       // window: {caption: "Makepad Studio"}
     }
 }
 
