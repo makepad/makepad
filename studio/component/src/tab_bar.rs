@@ -32,7 +32,7 @@ live_register!{
             }
             view: {
                 debug_id: tab_bar_view
-                layout: {
+                walk: {
                     width: Size::Fill
                     height: Size::Fixed((DIM_TAB_HEIGHT))
                 }
@@ -97,7 +97,7 @@ impl TabBar {
             );
         }
         self.tabs.retain_visible();
-        self.bar_fill.draw_walk(cx, Walk::wh(Size::Fill, Size::Fill));
+        self.bar_fill.draw_walk(cx, Walk::size(Size::Fill, Size::Fill));
         self.scroll_view.end(cx);
     }
     

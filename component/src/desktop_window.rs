@@ -11,19 +11,21 @@ live_register!{
     
     DesktopWindow: {{DesktopWindow}} {
         pass: {clear_color: (COLOR_CLEAR)}
-        
+        var caption:"DesktopWindow"
         frame: {
             flow: Flow::Down
             windows_buttons:= Frame {
                 color: (COLOR_BG_APP)
                 height: 29
-                caption:= Frame {
+                caption_label:= Frame {
                     align: {x: 0.5, y:0.5}
-                    Label {text: "Desktop Window", margin:{left:100}}
+                    Label {text: (caption), margin:{left:100}}
                 }
+                /*
                 min_btn:= DesktopButton {button_type: DesktopButtonType::WindowsMin}
                 max_btn:= DesktopButton {button_type: DesktopButtonType::WindowsMax}
                 close_btn:= DesktopButton {button_type: DesktopButtonType::WindowsClose}
+                */
             }
             inner_view:= Frame {user: true}
         }
@@ -144,7 +146,6 @@ impl DesktopWindow {
     }
     
     pub fn begin(&mut self, cx: &mut Cx2d, _menu: Option<&Menu>) -> ViewRedraw {
-        
         if !cx.view_will_redraw(&self.main_view) {
             return Err(())
         }

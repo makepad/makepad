@@ -333,8 +333,12 @@ impl DrawText {
             self.end_many_instances(cx)
         }
     }
+
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, text: &str) {
+        self.draw_walk_with_margin(cx, Margin::default(), text);
+    }
     
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, margin: Margin, text: &str) {
+    pub fn draw_walk_with_margin(&mut self, cx: &mut Cx2d, margin: Margin, text: &str) {
         
         if !self.draw_vars.can_instance()
             || self.text_style.font.font_id.is_none() {

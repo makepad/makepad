@@ -38,6 +38,6 @@ impl FrameComponent for Label {
 
 impl Label {
     pub fn draw_walk(&mut self, cx: &mut Cx2d) { 
-        self.label_text.draw_walk(cx, self.margin, &self.text);
+        self.label_text.draw_walk_with_margin(cx, self.margin, &self.text);
     }
 }

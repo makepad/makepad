@@ -116,6 +116,7 @@ impl LiveApply for View {
                 id!(is_overlay) => self.is_overlay = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
                 id!(always_redraw) => self.always_redraw = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
                 id!(layout) => self.layout = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
+                id!(walk) => self.walk = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
                 _ => {
                     cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
                     index = nodes.skip_node(index);

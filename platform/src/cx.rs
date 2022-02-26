@@ -194,6 +194,7 @@ impl Default for Cx {
             id!(ScrollBarAxis),
             id!(Layout),
             id!(Padding),
+            id!(Axis),
             id!(f32),
             id!(usize),
             id!(f64),
