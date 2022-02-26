@@ -224,7 +224,6 @@ impl Dock {
     fn contents(&mut self, cx: &mut Cx2d) {
         let panel_id = *self.panel_id_stack.last().unwrap();
         let panel = self.panels[panel_id].as_tab_panel_mut();
-        
         panel.contents_rect = cx.turtle().rect_left();
     }
     
