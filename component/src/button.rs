@@ -55,14 +55,14 @@ live_register!{
             }
         }
         
+        walk: {
+            width: Size::Fit,
+            height: Size::Fit,
+            margin: {left: 1.0, right: 1.0, top: 1.0, bottom: 1.0},
+        }
         
         layout: {
-            align: {fx: 0.5, fy: 0.5},
-            walk: {
-                width: Width::Computed,
-                height: Height::Computed,
-                margin: {left: 1.0, right: 1.0, top: 1.0, bottom: 1.0},
-            }
+            align: {x: 0.5, y: 0.5},
             padding: {left: 16.0, top: 12.0, right: 16.0, bottom: 12.0}
         }
         

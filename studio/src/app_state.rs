@@ -49,7 +49,7 @@ impl AppState {
             id!(log_view),
             Panel::Tab(TabPanel {
                 tab_ids: vec![id!(log_view).into(), id!(shader_view).into()],
-                selected_tab: Some(1)
+                selected_tab: Some(0)
             }),
         );
         
