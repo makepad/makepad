@@ -48,10 +48,6 @@ live_register!{
             
         }
         layout: {
-            walk: {
-                width: Width::Filled,
-                height: Height::Fixed(0.0),
-            },
             align: {fy: 0.5},
             padding: {left: 5},
         }
@@ -108,7 +104,7 @@ live_register!{
         fold_node: LogListNode {}
         scroll_view: {
             view: {
-                layout: {direction: Direction::Down}
+                layout: {flow: Flow::Down}
                 debug_id: file_tree_view
             }
         }
@@ -214,6 +210,7 @@ impl LogListNode {
         self.name_text.is_even = is_even;
     }
     
+    
     pub fn draw_node(
         &mut self,
         cx: &mut Cx2d,
@@ -225,26 +222,21 @@ impl LogListNode {
         _depth: usize
     ) {
         self.set_draw_state(is_even);
-        self.layout.height = Size::Fixed(node_height);
-        self.bg_quad.begin(cx, self.layout);
+        
+        self.bg_quad.begin(cx, Walk::size(Size::Fill, Size::Fixed(node_height)), self.layout);
         
         // lets draw a fold button
         self.fold_button.draw(cx);
-        cx.turtle_align_y();
         
         // lets draw a fold button
         self.icon_quad.icon_type = icon_type;
         self.icon_quad.draw_walk(cx, self.icon_walk);
-        cx.turtle_align_y();
-        
-        
         self.link_button.draw(cx, Some(link));
-        cx.turtle_align_y();
         
         self.name_text.draw_walk(cx, body);
         self.bg_quad.end(cx);
     }
-    
+    /*
     fn _indent_walk(&self, depth: usize) -> Walk {
         Walk {
             width: Size::Fixed(depth as f32 * self.indent_width),
@@ -256,7 +248,7 @@ impl LogListNode {
                 bottom: 0.0,
             },
         }
-    }
+    }*/
     
     pub fn set_is_selected(&mut self, cx: &mut Cx, is_selected: bool, animate: Animate) {
         self.toggle_animator(cx, is_selected, animate, self.selected_state, self.unselected_state)
@@ -329,12 +321,12 @@ impl LogList {
     
     pub fn end(&mut self, cx: &mut Cx2d) {
         // lets fill the space left with blanks
-        let height_left = cx.get_height_left();
+        let height_left = cx.turtle().height_left();
         let mut walk = 0.0;
         while walk < height_left {
             self.count += 1;
             self.filler_quad.is_even = Self::is_even(self.count);
-            self.filler_quad.draw_walk(cx, Walk::wh(Size::Fill, Size::Fixed(self.node_height.min(height_left - walk))));
+            self.filler_quad.draw_walk(cx, Walk::size(Size::Fill, Size::Fixed(self.node_height.min(height_left - walk))));
             walk += self.node_height.max(1.0);
         }
         self.scroll_view.end(cx);
@@ -387,11 +379,12 @@ impl LogList {
     
     pub fn should_node_draw(&mut self, cx: &mut Cx2d) -> bool {
         let height = self.node_height;
-        if cx.turtle_line_is_visible(height, self.scroll_view.get_scroll_pos(cx)) {
+        let walk = Walk::size(Size::Fill, Size::Fixed(height));
+        if cx.walk_turtle_would_be_visible(walk, self.scroll_view.get_scroll_pos(cx)) {
             return true
         }
         else {
-            cx.walk_turtle(Walk::wh(Size::Fill, Size::Fixed(height)));
+            cx.walk_turtle(walk);
             return false
         }
     }

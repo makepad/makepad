@@ -33,6 +33,7 @@ pub use crate::{
     desktop_window::{DesktopWindow}, 
     scroll_view::{ScrollView},
     scroll_shadow::{ScrollShadow},
+    scroll_bar::{ScrollBar},
     frame::{Frame},
     frame_component::{FrameActions, FrameComponent, FrameComponentRegistry}
 };

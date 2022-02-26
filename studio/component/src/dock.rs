@@ -44,7 +44,10 @@ live_register!{
         const BORDER_SIZE: 6.0
         border_size: (BORDER_SIZE)
         view: {
-            layout: {padding: {left: (BORDER_SIZE), top: 0.0, right: (BORDER_SIZE), bottom: (BORDER_SIZE)}}
+            layout: {
+                flow: Flow::Down
+                padding: {left: (BORDER_SIZE), top: 0.0, right: (BORDER_SIZE), bottom: (BORDER_SIZE)}
+            }
         }
         padding_fill: {color: (COLOR_BG_APP)}
         drag_quad: {
@@ -52,7 +55,7 @@ live_register!{
             color: (COLOR_DRAG_QUAD)
         }
         overlay_view: {
-            layout: {abs_origin: vec2(0, 0)}
+            walk: {abs_pos: vec2(0.0, 0.0)}
             is_overlay: true
         }
         tab_bar: TabBar {}
@@ -109,7 +112,7 @@ impl Dock {
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
-        if self .overlay_view.begin(cx).is_ok() {
+        if self.overlay_view.begin(cx).is_ok() {
             if let Some(drag) = self.drag.as_ref() {
                 let panel = self.panels[drag.panel_id].as_tab_panel();
                 let rect = compute_drag_rect(panel.contents_rect, drag.position);
@@ -141,7 +144,7 @@ impl Dock {
         }
         let pf = &mut self.padding_fill;
         // lets get the turtle rect
-        let rect = cx.get_turtle_rect();
+        let rect = cx.turtle().rect();
         pf.draw_abs(cx, Rect {
             pos: rect.pos,
             size: vec2(self.border_size, rect.size.y)
@@ -190,7 +193,7 @@ impl Dock {
     pub fn begin_tab_bar(&mut self, cx: &mut Cx2d, selected_tab: Option<usize>) -> Result<(), ()> {
         let panel_id = *self.panel_id_stack.last().unwrap();
         let panel = self.panels[panel_id].as_tab_panel_mut();
-        panel.full_rect = cx.get_turtle_rect();
+        panel.full_rect = cx.turtle().rect();
         
         if let Err(error) = panel.tab_bar.begin(cx, selected_tab) {
             self.contents(cx);
@@ -221,14 +224,8 @@ impl Dock {
     fn contents(&mut self, cx: &mut Cx2d) {
         let panel_id = *self.panel_id_stack.last().unwrap();
         let panel = self.panels[panel_id].as_tab_panel_mut();
-        cx.turtle_new_line();
-        panel.contents_rect = Rect {
-            pos: cx.get_turtle_pos(),
-            size: Vec2 {
-                x: cx.get_width_left(),
-                y: cx.get_height_left(),
-            },
-        };
+        
+        panel.contents_rect = cx.turtle().rect_left();
     }
     
     fn get_or_create_split_panel(&mut self, cx: &mut Cx, panel_id: PanelId) -> &mut SplitPanel {
@@ -275,9 +272,11 @@ impl Dock {
         let panel = self.get_or_create_tab_panel(cx, panel_id);
         panel.tab_bar.redraw(cx);
     }
-
-    pub fn handle_event(&mut self, cx:&mut Cx, event:&mut Event)->Vec<DockAction>{
-        let mut a = Vec::new(); self.handle_event_with_fn(cx, event, &mut|_, v| a.push(v)); a
+    
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> Vec<DockAction> {
+        let mut a = Vec::new();
+        self.handle_event_with_fn(cx, event, &mut | _, v | a.push(v));
+        a
     }
     
     pub fn handle_event_with_fn(

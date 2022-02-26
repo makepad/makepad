@@ -152,6 +152,7 @@ pub use {
         font::Font,
         draw_2d::{
             turtle::{
+                Axis,
                 Layout,
                 Walk,
                 Align,
