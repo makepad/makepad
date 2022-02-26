@@ -145,6 +145,7 @@ impl Dock {
         let pf = &mut self.padding_fill;
         // lets get the turtle rect
         let rect = cx.turtle().rect();
+
         pf.draw_abs(cx, Rect {
             pos: rect.pos,
             size: vec2(self.border_size, rect.size.y)
@@ -225,7 +226,7 @@ impl Dock {
         let panel_id = *self.panel_id_stack.last().unwrap();
         let panel = self.panels[panel_id].as_tab_panel_mut();
         panel.contents_rect = cx.turtle().rect_left();
-    }
+    } 
     
     fn get_or_create_split_panel(&mut self, cx: &mut Cx, panel_id: PanelId) -> &mut SplitPanel {
         let splitter = self.splitter;
