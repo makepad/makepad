@@ -44,7 +44,7 @@ unsafe impl Send for AudioDeviceClone {}
 unsafe impl Sync for AudioDeviceClone {}
 pub struct AudioDeviceClone {
     av_audio_unit: ObjcId,
-    au_audio_unit: ObjcId,
+    _au_audio_unit: ObjcId,
     render_block: Option<ObjcId>,
     device_type: AudioDeviceType
 }
@@ -176,7 +176,7 @@ impl AudioBuffer {
         ab
     }
 }
-
+/*
 fn print_hex(data: &[u8]) {
     // lets print hex data
     // we print 16 bytes per line
@@ -199,7 +199,7 @@ fn print_hex(data: &[u8]) {
         println!("");
         o += line;
     }
-}
+}*/
 
 #[derive(Default)]
 pub struct AudioInstrumentState {
@@ -301,7 +301,7 @@ impl AudioDevice {
     pub fn clone(&self) -> AudioDeviceClone {
         AudioDeviceClone {
             av_audio_unit: self.av_audio_unit,
-            au_audio_unit: self.au_audio_unit,
+            _au_audio_unit: self.au_audio_unit,
             render_block: self.render_block,
             device_type: self.device_type,
         }

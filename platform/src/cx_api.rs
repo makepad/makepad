@@ -428,11 +428,17 @@ macro_rules!main_app {
 #[macro_export]
 macro_rules!register_component_factory{
     ($cx: ident, $registry: ident, $ ty: ty, $factory: ident) => {
+        let module_id = LiveModuleId::from_str(&module_path!()).unwrap();
+        if let Some((reg,_)) = $cx.live_registry.borrow().components.get_or_create::<$registry>().map.get(&LiveType::of::< $ ty>()){
+            if reg.module_id != module_id{
+                panic!("Component already registered {} {}",stringify!($ty),reg.module_id);
+            }
+        }
         $cx.live_registry.borrow().components.get_or_create::<$registry>().map.insert(
             LiveType::of::< $ ty>(),
             (LiveComponentInfo {
                 name: LiveId::from_str(stringify!( $ ty)).unwrap(),
-                module_id: LiveModuleId::from_str(&module_path!()).unwrap()
+                module_id
             }, Box::new($factory()))
         );
     }

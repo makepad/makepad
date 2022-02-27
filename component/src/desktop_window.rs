@@ -11,7 +11,7 @@ live_register!{
     
     DesktopWindow: {{DesktopWindow}} {
         pass: {clear_color: (COLOR_CLEAR)}
-        var caption:"DesktopWindow"
+        var caption:"DesktopWindow2"
         frame: {
             flow: Flow::Down
             windows_buttons:= Frame {
