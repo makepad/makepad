@@ -302,7 +302,6 @@ impl<'a> Cx2d<'a> {
     
     pub fn walk_turtle_would_be_visible(&mut self, walk: Walk, scroll:Vec2)->bool{
         let rect = self.walk_turtle_internal(walk, self.align_list.len(), false);
-        println!("{:?}", rect);
         self.turtle().rect_is_visible(rect, scroll)
     }
     
