@@ -95,7 +95,7 @@ impl App {
         //self.desktop_window.handle_event(cx, event);
         self.scroll_view.handle_event(cx, event);
         
-        for item in self.frame.handle_event(cx, event){
+        for _item in self.frame.handle_event(cx, event){
             
         }
         
