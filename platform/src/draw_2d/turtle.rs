@@ -375,6 +375,12 @@ impl<'a> Cx2d<'a> {
                         }
                     }
                 },
+                Area::DrawList(inst)=>{
+                    let draw_list = &mut self.cx.draw_lists[inst.draw_list_id];
+                    draw_list.rect.pos.x += dx;
+                    draw_list.rect.pos.y += dy;
+                }
+                
                 _ => (),
             }
         }

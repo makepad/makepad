@@ -266,6 +266,8 @@ impl View {
         cx.update_area_refs(old_area, new_area);
         cx.begin_turtle_with_guard(self.walk, self.layout, new_area);
         
+        cx.align_list.push(new_area);
+        
         Ok(())
     }
     
