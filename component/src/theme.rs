@@ -121,7 +121,7 @@ live_register!{
     
     const COLOR_CONTROL_PRESSED: (blend(
         COLOR_BG_HEADER,
-        COLOR_DOWN_10
+        COLOR_UP_25
     ))
     
     // ICON COLORS
