@@ -389,6 +389,7 @@ impl AppInner {
             }
             _ => {}
         }
+        self.redraw_panel(cx, state, panel_id);
     }
     
     fn redraw_panel(&mut self, cx: &mut Cx, state: &AppState, panel_id: PanelId) {
