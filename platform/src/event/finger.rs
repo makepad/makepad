@@ -265,11 +265,11 @@ pub enum DragAction {
 pub struct DraggedItem {
     pub file_urls: Vec<String>
 }
-
+/*
 pub enum HitTouch {
     Single,
     Multi
-}
+}*/
 
 
 // Status

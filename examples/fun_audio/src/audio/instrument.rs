@@ -29,7 +29,7 @@ struct Step {
 }
 
 struct Node {
-    from_ui: FromUIReceiver<FromUI>,
+    _from_ui: FromUIReceiver<FromUI>,
     steps: Vec<Step>
 }
 
@@ -101,7 +101,7 @@ impl AudioComponent for Instrument {
         }
         Box::new(Node {
             steps,
-            from_ui: self.from_ui.receiver()
+            _from_ui: self.from_ui.receiver()
         })
     }
     

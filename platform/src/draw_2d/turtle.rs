@@ -698,37 +698,37 @@ impl LiveHook for Margin {
 }
 
 impl Margin {
-    fn left_top(&self) -> Vec2 {
+    pub fn left_top(&self) -> Vec2 {
         vec2(self.left, self.top)
     }
-    fn right_bottom(&self) -> Vec2 {
+    pub fn right_bottom(&self) -> Vec2 {
         vec2(self.right, self.bottom)
     }
-    fn size(&self) -> Vec2 {
+    pub fn size(&self) -> Vec2 {
         vec2(self.left + self.right, self.top + self.bottom)
     }
-    fn width(&self) -> f32 {
+    pub fn width(&self) -> f32 {
         self.left + self.right
     }
-    fn height(&self) -> f32 {
+    pub fn height(&self) -> f32 {
         self.top + self.bottom
     }
 }
 
 impl Padding {
-    fn left_top(&self) -> Vec2 {
+    pub fn left_top(&self) -> Vec2 {
         vec2(self.left, self.top)
     }
-    fn right_bottom(&self) -> Vec2 {
+    pub fn right_bottom(&self) -> Vec2 {
         vec2(self.right, self.bottom)
     }
-    fn size(&self) -> Vec2 {
+    pub fn size(&self) -> Vec2 {
         vec2(self.left + self.right, self.top + self.bottom)
     }
-    fn width(&self) -> f32 {
+    pub fn width(&self) -> f32 {
         self.left + self.right
     }
-    fn height(&self) -> f32 {
+    pub fn height(&self) -> f32 {
         self.top + self.bottom
     }
 }

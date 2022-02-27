@@ -30,15 +30,22 @@ pub use crate::{
     button_logic::{ButtonLogic, ButtonAction},
     button::{Button},
     link_button::{LinkButton},
-    desktop_window::{DesktopWindow}, 
+    desktop_window::{DesktopWindow},
     scroll_view::{ScrollView},
     scroll_shadow::{ScrollShadow},
     scroll_bar::{ScrollBar},
     frame::{Frame},
-    frame_component::{FrameActions, FrameComponent, FrameComponentRegistry}
+    frame_component::{
+        FrameActions,
+        FrameComponent,
+        FrameComponentRegistry,
+        FrameComponentFactory,
+        FrameComponentAction,
+        FrameComponentActionRef
+    }
 };
 
-pub fn live_register(cx:&mut Cx){
+pub fn live_register(cx: &mut Cx) {
     makepad_platform::live_cx::live_register(cx);
     crate::theme::live_register(cx);
     crate::label::live_register(cx);

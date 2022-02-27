@@ -11,8 +11,7 @@ live_register!{
     use FrameComponent::*;
     use makepad_component::theme::*;
     App: {{App}} {
-        const FS_ROOT: ""
-        desktop_window: {pass: {clear_color: (COLOR_BG_APP)}}
+        window: {pass: {clear_color: (COLOR_BG_APP)}}
 
         audio_graph: {
             root: Mixer {
@@ -32,14 +31,40 @@ live_register!{
             }
         }
         
+        frame: {
+            color: #3
+            padding: 30
+            width: Size::Fill
+            height: Size::Fill
+            align: {x: 0.0, y: 0.5}
+            spacing: 30.,
+            flow: Flow::Down,
+            piano:= Piano{}
+            Frame{
+                flow: Flow::Right,
+                spacing: 30.,
+                Frame {color: #0f0, width: Size::Fill, height: 40}
+                Frame {
+                    color: #0ff,
+                    padding: 10,
+                    flow: Flow::Down,
+                    width: Size::Fit,
+                    height: 300
+                    spacing: 10
+                    Frame {color: #00f, width: 40, height: Size::Fill}
+                    Frame {color: #f00, width: 40, height: 40}
+                    Frame {color: #00f, width: 40, height: 40}
+                }
+                Frame {color: #f00, width: 40, height: 40}
+                Frame {color: #f0f, width: Size::Fill, height: 60}
+                Frame {color: #f00, width: 40, height: 40}
+            }
+        }
+        
         scroll_view: {
             h_show: true,
             v_show: true,
-            view: {
-                layout: {
-                    line_wrap: LineWrap::NewLine
-                }
-            }
+            view: {}
         }
     }
 }
@@ -48,8 +73,9 @@ main_app!(App);
 #[derive(Live, LiveHook)]
 pub struct App {
     piano: Piano,
+    frame: Frame,
     audio_graph: AudioGraph,
-    desktop_window: DesktopWindow,
+    window: BareWindow,
     scroll_view: ScrollView,
 }
 
@@ -66,8 +92,13 @@ impl App {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
         
-        self.desktop_window.handle_event(cx, event);
+        //self.desktop_window.handle_event(cx, event);
         self.scroll_view.handle_event(cx, event);
+        
+        for item in self.frame.handle_event(cx, event){
+            
+        }
+        
         
         for action in self.audio_graph.handle_event(cx, event) {
             match action {
@@ -78,6 +109,7 @@ impl App {
         };
         
         //let instrument = self.instrument.clone();
+        /*
         for action in self.piano.handle_event(cx, event) {
             match action {
                 PianoAction::Note {is_on, note_number, velocity} => {
@@ -89,7 +121,7 @@ impl App {
                     }.into());
                 }
             }
-        };
+        };*/
         
         match event {
             Event::KeyDown(ke) => {
@@ -108,14 +140,18 @@ impl App {
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
-        if self.desktop_window.begin(cx, None).is_err() {
+        if self.window.begin(cx).is_err() {
             return;
         }
-        if self.scroll_view.begin(cx).is_ok() {
-            self.piano.draw(cx);
-            self.scroll_view.end(cx);
-        }
         
-        self.desktop_window.end(cx);
+        //self.piano.draw(cx);
+        while self.frame.draw(cx).is_ok(){};
+        /*
+        if self.scroll_view.begin(cx).is_ok() {
+            self.scroll_view.end(cx);
+        }*/
+        
+        
+        self.window.end(cx);
     }
 }
