@@ -300,10 +300,6 @@ impl<'a> Cx2d<'a> {
         self.walk_turtle_internal(walk, self.align_list.len(), false)
     }
     
-    pub fn walk_turtle_would_be_visible2(&mut self, walk: Walk, scroll:Vec2)->bool{
-        let rect = self.walk_turtle_internal(walk, self.align_list.len(), false);
-        self.turtle().rect_is_visible2(rect, scroll)
-    }
     pub fn walk_turtle_would_be_visible(&mut self, walk: Walk, scroll:Vec2)->bool{
         let rect = self.walk_turtle_internal(walk, self.align_list.len(), false);
         println!("{:?}", rect);
@@ -441,11 +437,6 @@ impl Turtle {
     }
     
     pub fn rect_is_visible(&self, geom: Rect, scroll: Vec2) -> bool {
-        let view = Rect {pos: self.pos + scroll, size: vec2(self.width, self.height)};
-        return view.intersects(geom)
-    }
-    
-        pub fn rect_is_visible2(&self, geom: Rect, scroll: Vec2) -> bool {
         let view = Rect {pos: self.origin + scroll, size: vec2(self.width, self.height)};
         return view.intersects(geom)
     }
