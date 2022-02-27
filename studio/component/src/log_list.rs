@@ -232,7 +232,6 @@ impl LogListNode {
         // lets draw a fold button
         self.icon_quad.icon_type = icon_type;
         self.icon_quad.draw_walk(cx, self.icon_walk);
-        println!("LINK HERE {}", link);
         self.link_button.draw(cx, Some(link));
         
         self.name_text.draw_walk(cx, body);
