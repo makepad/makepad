@@ -10,7 +10,7 @@ use {
         platform::{
             apple::frameworks::*,
             cocoa_app::{
-                CocoaApp,
+//                CocoaApp,
                 get_cocoa_app,
                 get_cocoa_app_global
             },
@@ -41,7 +41,7 @@ use {
 };
 
 pub struct KeyValueObserver {
-    callback: Box<Box<dyn Fn() >>,
+    _callback: Box<Box<dyn Fn() >>,
     observer: RcObjcId
 }
 
@@ -70,7 +70,7 @@ impl KeyValueObserver {
                 context: nil
             ];
             Self {
-                callback: double_box,
+                _callback: double_box,
                 observer
             }
         }
@@ -192,11 +192,11 @@ pub fn define_menu_delegate() -> *const Class {
     decl.add_protocol(&Protocol::get("NSMenuDelegate").unwrap());
     return decl.register();
 }
-
+/*
 struct CocoaPostInit {
     cocoa_app_ptr: *mut CocoaApp,
     signal_id: u64,
-}
+}*/
 
 pub fn define_cocoa_post_delegate() -> *const Class {
     
@@ -378,10 +378,10 @@ pub fn define_cocoa_window_class() -> *const Class {
     extern fn yes(_: &Object, _: Sel) -> BOOL {
         YES
     }
-    
+    /*
     extern fn is_movable_by_window_background(_: &Object, _: Sel) -> BOOL {
         YES
-    }
+    }*/
     
     let window_superclass = class!(NSWindow);
     let mut decl = ClassDecl::new("RenderWindow", window_superclass).unwrap();
@@ -664,7 +664,7 @@ pub fn define_cocoa_view_class() -> *const Class {
     
     extern fn key_up(_this: &Object, _sel: Sel, _event: ObjcId) {
     }
-    
+    /*
     extern fn insert_tab(this: &Object, _sel: Sel, _sender: ObjcId) {
         unsafe {
             let window: ObjcId = msg_send![this, window];
@@ -685,7 +685,7 @@ pub fn define_cocoa_view_class() -> *const Class {
                 let (): _ = msg_send![window, selectPreviousKeyView: this];
             }
         }
-    }
+    }*/
     
     extern fn yes_function(_this: &Object, _se: Sel, _event: ObjcId) -> BOOL {
         YES

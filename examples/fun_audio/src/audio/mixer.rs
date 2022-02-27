@@ -37,7 +37,7 @@ impl LiveHook for Mixer {
 }
 
 struct Node {
-    from_ui: FromUIReceiver<FromUI>,
+    _from_ui: FromUIReceiver<FromUI>,
     buffer: AudioBuffer,
     inputs: Vec<Box<dyn AudioGraphNode + Send >>
 }
@@ -83,7 +83,7 @@ impl AudioComponent for Mixer {
         Box::new(Node {
             inputs,
             buffer: AudioBuffer::default(),
-            from_ui: self.from_ui.receiver()
+            _from_ui: self.from_ui.receiver()
         })
         /* same but written as combinators harder to read imho
            let self_inputs = &mut self.inputs;

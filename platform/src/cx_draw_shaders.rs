@@ -260,8 +260,8 @@ impl DrawShaderInputs {
 
 #[derive(Clone)]
 pub struct DrawShaderTextureInput {
-    id: LiveId,
-    ty: ShaderTy
+    _id: LiveId,
+    _ty: ShaderTy
 }
 
 #[derive(Clone)]
@@ -341,8 +341,8 @@ impl CxDrawShaderMapping {
                 }
                 DrawShaderFieldKind::Texture {..} => {
                     textures.push(DrawShaderTextureInput {
-                        ty,
-                        id: field.ident.0,
+                        _ty:ty,
+                        _id: field.ident.0,
                     });
                 }
                 _ => ()

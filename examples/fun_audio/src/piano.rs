@@ -1,10 +1,7 @@
 use {
     crate::{
         makepad_platform::*,
-        makepad_component::{
-            component_map::ComponentMap,
-            scroll_view::ScrollView
-        },
+        makepad_component::*,
     }
 };
 
@@ -103,6 +100,13 @@ live_register!{
     
     Piano: {{Piano}} {
         piano_key: PianoKey {}
+        
+        view:{
+            walk:{
+                width:Size::Fit,
+                height:Size::Fit
+            }
+        }
     }
 }
 
@@ -132,8 +136,9 @@ pub struct PianoKey {
 }
 
 #[derive(Live)]
+#[live_register(register_as_frame_component!(Piano))]
 pub struct Piano {
-    scroll_view: ScrollView,
+    view: View,
     piano_key: Option<LivePtr>,
     
     #[rust([0; 20])]
@@ -149,6 +154,21 @@ pub struct Piano {
     #[rust] black_keys: ComponentMap<PianoKeyId, PianoKey>,
 }
 
+impl FrameComponent for Piano {
+    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event) -> FrameComponentActionRef {
+        self.handle_event(cx, event).into()
+    }
+
+    fn get_walk(&self)->Walk{
+        Walk::empty()
+    }
+    
+    fn draw_component(&mut self, cx: &mut Cx2d, _walk:Walk)->Result<LiveId,()>{
+        self.draw_walk(cx);
+        Err(())
+    }
+}
+
 impl LiveHook for Piano {
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         for piano_key in self.white_keys.values_mut().chain(self.black_keys.values_mut()) {
@@ -156,10 +176,17 @@ impl LiveHook for Piano {
                 piano_key.apply(cx, from, index, nodes);
             }
         }
-        self.scroll_view.redraw(cx);
+        self.view.redraw(cx);
     }
 }
 
+#[derive(Clone, IntoFrameComponentAction)]
+pub enum PianoActions{
+    Actions(Vec<PianoAction>),
+    None
+}
+
+#[derive(Clone)]
 pub enum PianoAction {
     Note {is_on: bool, note_number: u8, velocity: u8},
 }
@@ -223,12 +250,12 @@ impl PianoKey {
 
 
 impl Piano {
-    pub fn draw(&mut self, cx: &mut Cx2d) {
+    pub fn draw_walk(&mut self, cx: &mut Cx2d) {
         // alright lets draw em fuckers
-        if self.scroll_view.begin(cx).is_err() {
+        if self.view.begin(cx).is_err() {
             return
         };
-        let start_pos = cx.get_turtle_pos() + vec2(10., 10.);
+        let start_pos = cx.turtle().pos();//+ vec2(10., 10.);
         let mut pos = start_pos;
         
         let midi_a0 = 21;
@@ -284,13 +311,14 @@ impl Piano {
                 pos.x += white_size.x;
             }
         }
-        self.scroll_view.end(cx);
+        cx.turtle_mut().set_used(white_size.x * (midi_c8 - midi_a0) as f32, white_size.y);
+        self.view.end(cx);
         self.white_keys.retain_visible();
         self.black_keys.retain_visible();
     }
     
     pub fn set_key_focus(&self, cx: &mut Cx) {
-        cx.set_key_focus(self.scroll_view.area());
+        cx.set_key_focus(self.view.area());
     }
     
     pub fn set_note(&mut self, cx: &mut Cx, is_on: bool, note_number: u8) {
@@ -303,10 +331,15 @@ impl Piano {
         }
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> Vec<PianoAction> {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> PianoActions {
         let mut a = Vec::new();
         self.handle_event_with_fn(cx, event, &mut | _, v | a.push(v));
-        a
+        if a.len()>0{
+            PianoActions::Actions(a)
+        }
+        else{
+            PianoActions::None
+        }
     }
     
     pub fn handle_event_with_fn(
@@ -315,9 +348,9 @@ impl Piano {
         event: &mut Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, PianoAction),
     ) {
-        if self.scroll_view.handle_event(cx, event) {
-            self.scroll_view.redraw(cx);
-        }
+        //if self.view.handle_event(cx, event) {
+        //    self.view.redraw(cx);
+        //}
         
         let mut actions = Vec::new();
         for (key_id, piano_key) in self.black_keys.iter_mut().chain(self.white_keys.iter_mut()) {
@@ -362,7 +395,7 @@ impl Piano {
             }
         }
         
-        match event.hits(cx, self.scroll_view.area()) {
+        match event.hits(cx, self.view.area()) {
             HitEvent::KeyDown(ke) => if !ke.is_repeat {
                 if let Some(nn) = key_map(ke.key_code) {
                     let note_number = nn + self.keyboard_octave * 12;
