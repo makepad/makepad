@@ -271,12 +271,12 @@ impl CocoaApp {
                 if dock_array_len == 0 {
                     panic!("Dock not running"); 
                 } else {
-                    /*let dock: ObjcId = msg_send![dock_array, objectAtIndex: 0];
+                    let dock: ObjcId = msg_send![dock_array, objectAtIndex: 0];
                         let _status: BOOL = msg_send![
                             dock, 
                             activateWithOptions: NSApplicationActivationOptions::NSApplicationActivateIgnoringOtherApps
                         ];
-                        let ns_running_app: ObjcId = msg_send![class!(NSRunningApplication), currentApplication];*/
+                        //let ns_running_app: ObjcId = msg_send![class!(NSRunningApplication), currentApplication];
                     
                     let () = msg_send![
                         my_app,
