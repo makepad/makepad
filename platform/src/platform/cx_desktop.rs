@@ -135,12 +135,12 @@ impl Cx {
         
         vsync
     }
-    
+    /*
     pub(crate) fn process_to_wasm<F>(&mut self, _msg: u32, mut _event_handler: F) -> u32
     where F: FnMut(&mut Cx, &mut Event)
     {
         0
-    }
+    }*/
     
     pub fn write_log(data: &str) {
         let _ = io::stdout().write(data.as_bytes());

@@ -580,7 +580,7 @@ pub enum PackType {
 }
 
 pub struct SlErr {
-    msg: String
+    _msg: String
 }
 
 impl Cx {
@@ -644,7 +644,7 @@ impl MetalCx {
 /**************************************************************************************************/
 
 pub struct CxPlatformDrawShader {
-    library: RcObjcId,
+    _library: RcObjcId,
     render_pipeline_state: RcObjcId,
     draw_uniform_buffer_id: Option<u64>,
     pass_uniform_buffer_id: Option<u64>,
@@ -740,7 +740,7 @@ impl CxPlatformDrawShader {
         }
         
         return Some(Self {
-            library,
+            _library:library,
             render_pipeline_state,
             draw_uniform_buffer_id,
             pass_uniform_buffer_id,

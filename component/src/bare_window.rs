@@ -2,14 +2,12 @@ use crate::makepad_platform::*;
 
 live_register!{
     BareWindow: {{BareWindow}} {
-        clear_color: #1e1e1e
         main_view:{}
     }
 }
 
 #[derive(Live)]
 pub struct BareWindow {
-    #[alias(clear_color, pass)]
     pass: Pass,
     depth_texture: Texture,
     

@@ -11,11 +11,11 @@ use {
     
 };
 
-
+/*
 pub enum ShaderCompileResult {
     Nop,
     Ok
-}
+}*/
 
 pub const DRAW_CALL_USER_UNIFORMS: usize = 16;
 pub const DRAW_CALL_TEXTURE_SLOTS: usize = 4;

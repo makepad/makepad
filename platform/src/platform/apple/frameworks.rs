@@ -716,7 +716,7 @@ pub enum AudioFormatId {
     MicrosoftGSM = 1836253233,
     AES3 = 1634038579,
 }
-
+/*
 struct F60958AC3Flags;
 impl F60958AC3Flags {
     const IS_FLOAT: u32 = 1;
@@ -727,8 +727,8 @@ impl F60958AC3Flags {
     const IS_NON_INTERLEAVED: u32 = 32;
     const IS_NON_MIXABLE: u32 = 64;
 }
-
-
+*/
+/*
 pub struct LinearPcmFlags;
 impl LinearPcmFlags {
     const IS_FLOAT: u32 = 1;
@@ -749,7 +749,7 @@ impl AppleLosslessFlags {
     const BIT_24_SOURCE_DATA: u32 = 3;
     const BIT_32_SOURCE_DATA: u32 = 4;
 }
-
+*/
 #[repr(u32)]
 pub enum Mpeg4ObjectId {
     AAC_Main = 1,
@@ -762,7 +762,7 @@ pub enum Mpeg4ObjectId {
     CELP = 8,
     HVXC = 9,
 }
-
+/*
 pub struct AudioTimeStampFlags;
 impl AudioTimeStampFlags {
     const SAMPLE_TIME_VALID: u32 = 1;
@@ -771,7 +771,7 @@ impl AudioTimeStampFlags {
     const WORLD_CLOCK_TIME_VALID: u32 = 8;
     const SMPTE_TIME_VALID: u32 = 16;
 }
-
+*/
 #[derive(Debug, PartialEq, Copy, Clone)]
 #[repr(C)]
 pub struct CAudioComponentDescription {
