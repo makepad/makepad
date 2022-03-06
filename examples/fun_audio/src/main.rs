@@ -72,7 +72,6 @@ main_app!(App);
 
 #[derive(Live, LiveHook)]
 pub struct App {
-    piano: Piano,
     frame: Frame,
     audio_graph: AudioGraph,
     window: BareWindow,
@@ -95,15 +94,25 @@ impl App {
         //self.desktop_window.handle_event(cx, event);
         self.scroll_view.handle_event(cx, event);
         
-        for _item in self.frame.handle_event(cx, event){
-            
+        for item in self.frame.handle_event(cx, event){
+            match item.id{
+                id!(piano)=>if let PianoAction::Note{is_on, note_number, velocity} = item.action.cast(){
+                    self.audio_graph.send_midi_1_data(Midi1Note {
+                        is_on,
+                        note_number,
+                        channel: 0,
+                        velocity
+                    }.into());
+                }
+                _=>()
+            }
         }
-        
         
         for action in self.audio_graph.handle_event(cx, event) {
             match action {
                 AudioGraphAction::Midi1Data(data) => if let Midi1Event::Note(note) = data.decode() {
-                    self.piano.set_note(cx, note.is_on, note.note_number)
+                    self.frame.get_child()
+                    //self.piano.set_note(cx, note.is_on, note.note_number)
                 }
             }
         };

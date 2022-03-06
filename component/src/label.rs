@@ -22,7 +22,7 @@ pub struct Label {
 }
 
 impl FrameComponent for Label {
-    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event) -> FrameComponentActionRef {
+    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, self_id:LiveId) -> FrameComponentActionRef {
         None
     }
 

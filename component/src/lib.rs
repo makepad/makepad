@@ -37,6 +37,7 @@ pub use crate::{
     frame::{Frame},
     frame_component::{
         FrameActions,
+        FrameActionItem,
         FrameComponent,
         FrameComponentRegistry,
         FrameComponentFactory,
