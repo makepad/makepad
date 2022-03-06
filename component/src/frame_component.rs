@@ -6,7 +6,7 @@ use {
 pub use crate::register_as_frame_component;
 
 pub trait FrameComponent: LiveApply {
-    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event) -> Option<Box<dyn FrameComponentAction >>;
+    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, self_id:LiveId) -> Option<Box<dyn FrameComponentAction >>;
     fn draw_component(&mut self, cx: &mut Cx2d, walk:Walk)->Result<LiveId,()>;
     fn get_walk(&self)->Walk;
     fn type_id(&self) -> LiveType where Self:'static {LiveType::of::<Self>()}
@@ -30,11 +30,11 @@ pub struct FrameActionItem {
 }
 
 impl FrameActionItem{
-    pub fn new(id:LiveId, action: Box<dyn FrameComponentAction>)->Self{
+    pub fn new(id:LiveId, action: FrameComponentActionRef)->Self{
         Self {
             id,
             parent: [LiveId(0);4],
-            action: action
+            action: action.unwrap()
         }
     }
     
