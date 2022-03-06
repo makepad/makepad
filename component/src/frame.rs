@@ -80,7 +80,7 @@ impl LiveHook for Frame {
 }
 
 impl FrameComponent for Frame {
-    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event) -> FrameComponentActionRef {
+    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, _self_id:LiveId) -> FrameComponentActionRef {
         self.handle_event(cx, event).into()
     }
 
@@ -100,18 +100,24 @@ enum DrawState{
 }
 
 impl Frame {
+    pub fn child<T: 'static>(&self, id:LiveId) -> std::cell::Ref<'_, T>{
+        std::cell::Ref::map(
+            self.children.get(&id).unwrap().unwrap().cast::<T>().unwrap()
+        )
+    }
+    
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> FrameActions {
         let mut actions = Vec::new();
         for id in &self.create_order {
             if let Some(child) = self.children.get_mut(id).unwrap().as_mut() {
-                if let Some(action) = child.handle_component_event(cx, event) {
+                if let Some(action) = child.handle_component_event(cx, event, *id) {
                     if let FrameActions::Actions(other_actions) = action.cast() {
                         for action in other_actions{
                             actions.push(action.with_parent_id(*id));
                         }
                     }
                     else {
-                        actions.push(FrameActionItem::new(*id, action));
+                        actions.push(FrameActionItem::new(*id, Some(action)));
                     }
                 }
             }
