@@ -167,7 +167,7 @@ impl DrawDesktopButton{
 }
 
 impl FrameComponent for DesktopButton {
-    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event) -> FrameComponentActionRef {
+    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, _self_id:LiveId) -> FrameComponentActionRef {
         self.handle_event(cx, event).into()
     }
 

@@ -155,8 +155,10 @@ pub struct Piano {
 }
 
 impl FrameComponent for Piano {
-    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event) -> FrameComponentActionRef {
-        self.handle_event(cx, event).into()
+    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, self_id:LiveId) -> FrameComponentActionRef {
+        let mut a = Vec::new();
+        self.handle_event_with_fn(cx, event, &mut | _, v | a.push(FrameActionItem::new(self_id, v.into())));
+        FrameActions::Actions(a).into()
     }
 
     fn get_walk(&self)->Walk{
@@ -180,15 +182,15 @@ impl LiveHook for Piano {
     }
 }
 
+
 #[derive(Clone, IntoFrameComponentAction)]
-pub enum PianoActions{
-    Actions(Vec<PianoAction>),
+pub enum PianoAction {
+    Note {is_on: bool, note_number: u8, velocity: u8},
     None
 }
 
-#[derive(Clone)]
-pub enum PianoAction {
-    Note {is_on: bool, note_number: u8, velocity: u8},
+impl Default for PianoAction{
+    fn default()->Self{PianoAction::None}
 }
 
 pub enum PianoKeyAction {
@@ -328,17 +330,6 @@ impl Piano {
         }
         if let Some(key) = self.white_keys.get_mut(&id) {
             key.set_is_pressed(cx, is_on, Animate::No)
-        }
-    }
-    
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> PianoActions {
-        let mut a = Vec::new();
-        self.handle_event_with_fn(cx, event, &mut | _, v | a.push(v));
-        if a.len()>0{
-            PianoActions::Actions(a)
-        }
-        else{
-            PianoActions::None
         }
     }
     
