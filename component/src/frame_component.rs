@@ -12,6 +12,8 @@ pub trait FrameComponent: LiveApply {
     fn type_id(&self) -> LiveType where Self:'static {LiveType::of::<Self>()}
 }
 
+generate_ref_cast_api!(FrameComponent);
+
 pub trait FrameComponentFactory {
     fn new(&self, cx: &mut Cx) -> Box<dyn FrameComponent>;
 }
@@ -116,7 +118,7 @@ impl Clone for Box<dyn FrameComponentAction> {
 pub struct FrameComponentRef(Option<Box<dyn FrameComponent >>);
 
 impl FrameComponentRef {
-    pub fn _as_ref(&mut self) -> Option<&Box<dyn FrameComponent >> {
+    pub fn as_ref(&self) -> Option<&Box<dyn FrameComponent >> {
         self.0.as_ref()
     }
     pub fn as_mut(&mut self) -> Option<&mut Box<dyn FrameComponent >> {
