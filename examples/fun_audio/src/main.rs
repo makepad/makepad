@@ -111,7 +111,8 @@ impl App {
         for action in self.audio_graph.handle_event(cx, event) {
             match action {
                 AudioGraphAction::Midi1Data(data) => if let Midi1Event::Note(note) = data.decode() {
-                    self.frame.get_child()
+                    //let piano = self.frame.child::<Piano>(id!(piano));
+                    
                     //self.piano.set_note(cx, note.is_on, note.note_number)
                 }
             }
@@ -142,7 +143,7 @@ impl App {
             }
             Event::Draw(draw_event) => {
                 self.draw(&mut Cx2d::new(cx, draw_event));
-                self.piano.set_key_focus(cx);
+                //self.piano.set_key_focus(cx);
             }
             _ => ()
         }
