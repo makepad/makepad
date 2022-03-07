@@ -97,14 +97,39 @@ enum DrawState{
     Done,
     Drawing(usize),
     DeferWalk(usize)
-}
+} 
 
 impl Frame {
-    pub fn child<T: 'static>(&self, id:LiveId) -> std::cell::Ref<'_, T>{
-        std::cell::Ref::map(
-            self.children.get(&id).unwrap().unwrap().cast::<T>().unwrap()
-        )
+    pub fn child<T: 'static + FrameComponent>(&self, id:LiveId) -> Option<&T>{
+        if let Some(c) = self.children.get(&id).unwrap().as_ref().unwrap().cast::<T>(){
+            return Some(c)
+        }
+        for child in self.children.values(){
+            if let Some(c) = child.as_ref().unwrap().cast::<Frame>(){
+                if let Some(c) = c.child(id){
+                    return Some(c)
+                }
+            }
+        }
+        None
     }
+
+    pub fn child_mut<T: 'static + FrameComponent>(&mut self, id:LiveId) -> Option<&mut T>{
+
+        if let Some(c) = self.children.get_mut(&id).unwrap().as_mut().unwrap().cast_mut::<T>(){
+            return Some(c)
+        }
+        
+        for child in self.children.values_mut(){
+            if let Some(c) = child.as_mut().unwrap().cast_mut::<Frame>(){
+                if let Some(c) = c.child_mut(id){
+                    return Some(c)
+                }
+            }
+        }
+        None
+    }
+
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> FrameActions {
         let mut actions = Vec::new();
