@@ -12,7 +12,6 @@ live_register!{
     use makepad_component::theme::*;
     App: {{App}} {
         window: {pass: {clear_color: (COLOR_BG_APP)}}
-
         audio_graph: {
             root: Mixer {
                 /*c0: BasicSynth {
@@ -42,13 +41,13 @@ live_register!{
             piano:= Piano{}
             Frame{
                 flow: Flow::Right,
-                spacing: 30.,
+                spacing: 30.
                 Frame {color: #0f0, width: Size::Fill, height: 40}
                 Frame {
-                    color: #0ff,
-                    padding: 10,
-                    flow: Flow::Down,
-                    width: Size::Fit,
+                    color: #0ff
+                    padding: 10
+                    flow: Flow::Down
+                    width: Size::Fit
                     height: 300
                     spacing: 10
                     Frame {color: #00f, width: 40, height: Size::Fill}
@@ -111,9 +110,8 @@ impl App {
         for action in self.audio_graph.handle_event(cx, event) {
             match action {
                 AudioGraphAction::Midi1Data(data) => if let Midi1Event::Note(note) = data.decode() {
-                    //let piano = self.frame.child::<Piano>(id!(piano));
-                    
-                    //self.piano.set_note(cx, note.is_on, note.note_number)
+                    let piano = self.frame.child_mut::<Piano>(id!(piano)).unwrap();
+                    piano.set_note(cx, note.is_on, note.note_number)
                 }
             }
         };
