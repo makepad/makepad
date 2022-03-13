@@ -18,7 +18,7 @@ live_register!{
                     plugin: "AUMIDISynth"
                     preset_data: "21adslkfjalkwqwe"
                 }*/
-                c1:Instrument {
+                c1: Instrument {
                     key_range: {start: 34, end: 47 shift: 30}
                     PluginEffect {
                         plugin: "AUReverb2"
@@ -31,15 +31,24 @@ live_register!{
         }
         
         frame: {
-            color: #3
-            padding: 30
+            color: (COLOR_BG_APP)
+            padding: 7
             width: Size::Fill
             height: Size::Fill
             align: {x: 0.0, y: 0.5}
             spacing: 30.,
             flow: Flow::Down,
-            piano:= Piano{}
-            Frame{
+            Frame {
+                margin:{left:60}
+                flow: Flow::Right,
+                height:Size::Fit,
+                spacing: 5.0
+                Button {label: "+  Band"}
+                Button {label: "<"}
+                Button {label: ">"}
+            }
+            piano: = Piano {}
+            Frame {
                 flow: Flow::Right,
                 spacing: 30.
                 Frame {color: #0f0, width: Size::Fill, height: 40}
@@ -93,9 +102,9 @@ impl App {
         //self.desktop_window.handle_event(cx, event);
         self.scroll_view.handle_event(cx, event);
         
-        for item in self.frame.handle_event(cx, event){
-            match item.id{
-                id!(piano)=>if let PianoAction::Note{is_on, note_number, velocity} = item.action.cast(){
+        for item in self.frame.handle_event(cx, event) {
+            match item.id {
+                id!(piano) => if let PianoAction::Note {is_on, note_number, velocity} = item.action.cast() {
                     self.audio_graph.send_midi_1_data(Midi1Note {
                         is_on,
                         note_number,
@@ -103,7 +112,7 @@ impl App {
                         velocity
                     }.into());
                 }
-                _=>()
+                _ => ()
             }
         }
         
@@ -153,7 +162,7 @@ impl App {
         }
         
         //self.piano.draw(cx);
-        while self.frame.draw(cx).is_ok(){};
+        while self.frame.draw(cx).is_ok() {};
         /*
         if self.scroll_view.begin(cx).is_ok() {
             self.scroll_view.end(cx);
