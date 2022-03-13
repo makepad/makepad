@@ -11,6 +11,12 @@ live_register!{
     use makepad_platform::shader::std::*;
     
     DrawLabelText: {{DrawLabelText}} {
+        text_style: {
+            font: {
+                path: "resources/IBMPlexSans-SemiBold.ttf"
+            }
+            font_size:11.0
+        }
         fn get_color(self) -> vec4 {
             return mix(
                 mix(
@@ -29,29 +35,30 @@ live_register!{
             instance hover: 0.0
             instance pressed: 0.0
             
-            const SHADOW: 3.0
-            const BORDER_RADIUS: 2.5
+            const BORDER_RADIUS: 3.0
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let grad_top = 5.0;
+                let grad_bot = 1.0;
+                let body = mix(mix(#53, #5c, self.hover), #33, self.pressed);
+                //return mix(#ff,#f00,max(0.0,self.rect_size.y - grad_bot - sdf.pos.y)/grad_bot);
                 sdf.box(
-                    SHADOW,
-                    SHADOW,
-                    self.rect_size.x - SHADOW * (1. + self.pressed),
-                    self.rect_size.y - SHADOW * (1. + self.pressed),
+                    1.,
+                    1.,
+                    self.rect_size.x-2.0,
+                    self.rect_size.y-2.0,
                     BORDER_RADIUS
-                );
-                sdf.blur = 6.0;
-                sdf.fill(mix(#0007, #0, self.hover));
-                sdf.blur = 0.001;
-                sdf.box(
-                    SHADOW,
-                    SHADOW,
-                    self.rect_size.x - SHADOW * 2.,
-                    self.rect_size.y - SHADOW * 2.,
-                    BORDER_RADIUS
-                );
-                return sdf.fill(mix(mix(#3, #4, self.hover), #2a, self.pressed));
+                )
+                sdf.fill_keep(body)
+                let top_gradient = mix(body,mix(#6d,#1f,self.pressed),max(0.0,grad_top-sdf.pos.y)/grad_top);
+                let bot_gradient = mix(mix(#2f,#53,self.pressed),top_gradient,clamp(0.0,1.0,self.rect_size.y - grad_bot - sdf.pos.y)/grad_bot);
+                
+                sdf.stroke(
+                    bot_gradient,
+                    1.2
+                )
+                return sdf.result
             }
         }
         
@@ -63,7 +70,7 @@ live_register!{
         
         layout: {
             align: {x: 0.5, y: 0.5},
-            padding: {left: 16.0, top: 12.0, right: 16.0, bottom: 12.0}
+            padding: {left: 16.0, top: 10.0, right: 16.0, bottom: 10.0}
         }
         
         default_state: {
@@ -96,6 +103,7 @@ live_register!{
 }
 
 #[derive(Live)]
+#[live_register(register_as_frame_component!(Button))]
 pub struct Button {
     #[rust] pub button_logic: ButtonLogic,
     #[state(default_state)] pub animator: Animator,
@@ -122,6 +130,21 @@ impl LiveHook for Button {
     }
 }
 
+impl FrameComponent for Button {
+    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, self_id:LiveId) -> FrameComponentActionRef {
+        self.handle_event(cx, event).into()
+    }
+
+    fn get_walk(&self)->Walk{
+        self.walk
+    }
+    
+    fn draw_component(&mut self, cx: &mut Cx2d, walk:Walk)->Result<LiveId,()>{
+        self.draw_walk(cx, walk);
+        Err(())
+    }
+}
+
 impl Button {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonAction {
@@ -137,10 +160,16 @@ impl Button {
         };
         res.action
     }
-    
-    pub fn draw(&mut self, cx: &mut Cx2d, label: Option<&str>) {
+
+    pub fn draw_label(&mut self, cx: &mut Cx2d, label: &str) {
         self.bg_quad.begin(cx, self.walk, self.layout);
-        self.label_text.draw_walk(cx, label.unwrap_or(&self.label));
+        self.label_text.draw_walk(cx, label);
+        self.bg_quad.end(cx);
+    }
+    
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk:Walk) {
+        self.bg_quad.begin(cx, walk, self.layout);
+        self.label_text.draw_walk(cx, &self.label);
         self.bg_quad.end(cx);
     }
 }

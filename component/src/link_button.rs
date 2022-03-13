@@ -68,7 +68,7 @@ impl LinkButton {
         self.button.handle_event(cx, event)
     }
     
-    pub fn draw(&mut self, cx: &mut Cx2d, label: Option<&str>) {
-        self.button.draw(cx, label)
+    pub fn draw_label(&mut self, cx: &mut Cx2d, label: &str) {
+        self.button.draw_label(cx, &label)
     }
 }
