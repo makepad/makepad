@@ -1,5 +1,9 @@
-use crate::makepad_platform::*;
-use crate::makepad_component::*;
+use crate::{
+    makepad_platform::*,
+    frame_component::*,
+    frame_component_ref_find_child
+};
+
 
 live_register!{
     use makepad_platform::shader::std::*;
@@ -92,9 +96,10 @@ pub struct DrawSplitter {
 }
 
 #[derive(Live, LiveHook)]
+#[live_register(register_as_frame_component!(Splitter))]
 pub struct Splitter {
-    #[rust(Axis::Horizontal)] pub axis: Axis,
-    #[rust(SplitterAlign::Weighted(0.5))] pub align: SplitterAlign,
+    #[live(Axis::Horizontal)] pub axis: Axis,
+    #[live(SplitterAlign::Weighted(0.5))] pub align: SplitterAlign,
     #[rust] rect: Rect,
     #[rust] position: f32,
     #[rust] drag_start_align: Option<SplitterAlign>,
@@ -111,24 +116,93 @@ pub struct Splitter {
     
     bar_quad: DrawSplitter,
     split_bar_size: f32,
+    
+    // framecomponent mode
+    #[rust] draw_state: DrawStateWrap<DrawState>,
+    a: FrameComponentRef,
+    b: FrameComponentRef,
+    walk: Walk,
+}
+
+#[derive(Clone)]
+enum DrawState{
+    DrawA,
+    DrawSplit,
+    DrawB
+}
+
+impl FrameComponent for Splitter {
+    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, _self_id: LiveId) -> FrameComponentActionRef {
+        let mut actions = Vec::new();
+        self.handle_event_with_fn(cx, event, &mut |_,action|{
+            actions.merge(id!(a),action.into()); 
+        });
+        if let Some(child) = self.a.as_mut(){
+            actions.merge(id!(a), child.handle_component_event(cx, event, id!(a)));
+        }
+        if let Some(child) = self.b.as_mut(){
+            actions.merge(id!(b), child.handle_component_event(cx, event, id!(b)));
+        }
+        FrameActions::from_vec(actions).into()
+    }
+    
+    fn get_walk(&self) -> Walk {
+        self.walk
+    }
+    
+    fn find_child(&self, id: LiveId) -> Option<&Box<dyn FrameComponent >> {
+        frame_component_ref_find_child!(id, self.a, self.b)
+    }
+    
+    fn find_child_mut(&mut self, id: LiveId) -> Option<&mut Box<dyn FrameComponent >> {
+        frame_component_ref_find_child_mut!(id, self.a, self.b)
+    }
+    
+    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId> {
+        if self.draw_state.begin(cx, DrawState::DrawA){
+            self.begin(cx, walk);
+        }
+        if let DrawState::DrawA = self.draw_state.get(){
+            if let Some(child) = self.a.as_mut(){
+                child.draw_component(cx, child.get_walk())?;
+            }
+            self.draw_state.set(DrawState::DrawSplit);
+        }
+        if let DrawState::DrawSplit = self.draw_state.get(){
+            self.middle(cx);
+            self.draw_state.set(DrawState::DrawB)
+        }
+        if let DrawState::DrawB = self.draw_state.get(){
+            if let Some(child) = self.b.as_mut(){
+                child.draw_component(cx, child.get_walk())?;
+            }
+            self.end(cx);
+            self.draw_state.end();
+        }
+        Ok(())
+    }
 }
 
 impl Splitter {
-    
-    pub fn begin(&mut self, cx: &mut Cx2d) {
+    pub fn begin(&mut self, cx: &mut Cx2d, walk:Walk) {
         // we should start a fill turtle in the layout direction of choice
         match self.axis {
             Axis::Horizontal => {
-                cx.begin_turtle(Walk::default(), Layout::flow_right());
+                cx.begin_turtle(walk, Layout::flow_right());
             }
             Axis::Vertical => {
-                cx.begin_turtle(Walk::default(), Layout::flow_down());
+                cx.begin_turtle(walk, Layout::flow_down());
             }
         }
         
         self.rect = cx.turtle().padded_rect();
         self.position = self.align.to_position(self.axis, self.rect);
-        cx.begin_turtle(self.walk(), Layout::flow_down());
+
+        let walk = match self.axis {
+            Axis::Horizontal => Walk::size(Size::Fixed(self.position), Size::Fill),
+            Axis::Vertical => Walk::size(Size::Fill, Size::Fixed(self.position)),
+        };
+        cx.begin_turtle(walk, Layout::flow_down());
     }
     
     pub fn middle(&mut self, cx: &mut Cx2d) {
@@ -151,13 +225,6 @@ impl Splitter {
         cx.end_turtle();
     }
     
-    fn walk(&self) -> Walk {
-        match self.axis {
-            Axis::Horizontal => Walk::size(Size::Fixed(self.position), Size::Fill),
-            Axis::Vertical => Walk::size(Size::Fill, Size::Fixed(self.position)),
-        }
-    }
-    
     pub fn axis(&self) -> Axis {
         self.axis
     }
@@ -174,7 +241,7 @@ impl Splitter {
         self.align = align;
     }
     
-    pub fn handle_event(
+    pub fn handle_event_with_fn(
         &mut self,
         cx: &mut Cx,
         event: &mut Event,
@@ -282,11 +349,11 @@ impl Splitter {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Live, LiveHook)]
 pub enum SplitterAlign {
-    FromStart(f32),
-    FromEnd(f32),
-    Weighted(f32),
+    #[live(50.0)] FromStart(f32),
+    #[live(50.0)] FromEnd(f32),
+    #[pick(0.5)] Weighted(f32),
 }
 
 impl SplitterAlign {
@@ -306,6 +373,8 @@ impl SplitterAlign {
     }
 }
 
+#[derive(Clone, IntoFrameComponentAction)]
 pub enum SplitterAction {
+    None,
     Changed {axis: Axis, align: SplitterAlign},
 }

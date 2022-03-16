@@ -366,6 +366,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
             tb.add("(").stream(attr.args.clone()).add(")(cx);");
         }
         
+        
         // we need this here for shader enums to register without hassle
         for field in &fields {
             let attr = &field.attrs[0];
@@ -408,7 +409,11 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         tb.add("        ret.after_new(cx);");
         tb.add("        ret");
         tb.add("    }");
+
         tb.add("}");
+        if main_attribs.iter().any(|attr| attr.name == "live_debug"){
+            tb.eprint();
+        }
         
         Ok(())
     }
