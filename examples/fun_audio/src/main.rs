@@ -10,6 +10,7 @@ live_register!{
     use AudioComponent::*;
     use FrameComponent::*;
     use makepad_component::theme::*;
+    use makepad_platform::shader::std::*;
     App: {{App}} {
         window: {pass: {clear_color: (COLOR_BG_APP)}}
         audio_graph: {
@@ -32,33 +33,59 @@ live_register!{
         
         frame: {
             color: (COLOR_BG_APP)
-            padding: 7
-            width: Size::Fill
-            height: Size::Fill
-            align: {x: 0.0, y: 0.5}
-            spacing: 30.,
-            flow: Flow::Down,
+            walk: {width: Size::Fill, height: Size::Fill}
+            layout: {
+                padding: 8
+                align: {x: 0.0, y: 0.0}
+                spacing: 30.,
+                flow: Flow::Down
+            },
             Frame {
-                margin:{left:60}
-                flow: Flow::Right,
-                height:Size::Fit,
-                spacing: 5.0
+                layout: {flow: Flow::Right, spacing: 5.0}
+                walk: {margin: {left: 60}, height: Size::Fit}
                 Button {label: "+  Band"}
                 Button {label: "<"}
                 Button {label: ">"}
+                Frame {
+                    walk: {width: Size::Fill, height: Size::Fixed(36)}
+                    color: #f00
+                    bg_quad: {
+                        const WAVE_HEIGHT: 0.15
+                        const WAVE_FREQ: 0.2
+                        fn pixel(self) -> vec4 {
+                            let offset_y = 1.5;
+                            let pos2 = vec2(self.pos.x, self.pos.y + WAVE_HEIGHT * sin(WAVE_FREQ * self.pos.x * self.rect_size.x));
+                            let sdf = Sdf2d::viewport(pos2 * self.rect_size);
+                            sdf.clear(#2f)
+                            sdf.move_to(0., self.rect_size.y * 0.5);
+                            sdf.line_to(self.rect_size.x, self.rect_size.y * 0.5);
+                            return sdf.stroke(#f, 1.0)
+                        }
+                    }
+                }
             }
             piano: = Piano {}
-            Frame {
-                flow: Flow::Right,
-                spacing: 30.
+            Splitter {
+                walk: {width: Size::Fill, height: 100}
+                a: Frame {
+                    color: #f00
+                }
+                b: Frame {
+                    color:#fff
+                }
+            }
+            /*Frame {
+                layout: {flow: Flow::Right, spacing: 30.}
                 Frame {color: #0f0, width: Size::Fill, height: 40}
                 Frame {
                     color: #0ff
-                    padding: 10
-                    flow: Flow::Down
-                    width: Size::Fit
+                    layout: {
+                        padding: 10
+                        flow: Flow::Down
+                        spacing: 10
+                    }
+                    width: Size::Fixed(100)
                     height: 300
-                    spacing: 10
                     Frame {color: #00f, width: 40, height: Size::Fill}
                     Frame {color: #f00, width: 40, height: 40}
                     Frame {color: #00f, width: 40, height: 40}
@@ -66,7 +93,7 @@ live_register!{
                 Frame {color: #f00, width: 40, height: 40}
                 Frame {color: #f0f, width: Size::Fill, height: 60}
                 Frame {color: #f00, width: 40, height: 40}
-            }
+            }*/
         }
         
         scroll_view: {
@@ -162,7 +189,7 @@ impl App {
         }
         
         //self.piano.draw(cx);
-        while self.frame.draw(cx).is_ok() {};
+        while self.frame.draw(cx).is_err() {};
         /*
         if self.scroll_view.begin(cx).is_ok() {
             self.scroll_view.end(cx);

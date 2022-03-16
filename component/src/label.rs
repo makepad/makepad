@@ -30,9 +30,9 @@ impl FrameComponent for Label {
         Walk::empty()
     }
     
-    fn draw_component(&mut self, cx: &mut Cx2d, walk:Walk)->Result<LiveId,()>{
+    fn draw_component(&mut self, cx: &mut Cx2d, walk:Walk)->Result<(),LiveId>{
         self.draw_walk(cx);
-        Err(())
+        Ok(())
     }
 }
 

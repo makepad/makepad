@@ -211,6 +211,7 @@ impl Default for Cx {
             id!(Window),
             id!(TextStyle),
             id!(Wrapping),
+            id!(SplitterAlign),
         ]);
         
         Self {
