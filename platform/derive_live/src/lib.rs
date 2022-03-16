@@ -35,6 +35,7 @@ mod colorhex;
     pick,
     state,
     live_register,
+    live_debug
 ))]
 pub fn derive_live(input: TokenStream) -> TokenStream {
     derive_live_impl(input)

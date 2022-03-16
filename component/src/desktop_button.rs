@@ -175,9 +175,9 @@ impl FrameComponent for DesktopButton {
         self.bg.get_walk()
     }
     
-    fn draw_component(&mut self, cx: &mut Cx2d, walk:Walk)->Result<LiveId,()>{
+    fn draw_component(&mut self, cx: &mut Cx2d, walk:Walk)->Result<(), LiveId>{
         self.draw_walk(cx, walk);
-        Err(())
+        Ok(())
     }
 }
 
