@@ -41,23 +41,24 @@ live_register!{
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 let grad_top = 5.0;
                 let grad_bot = 1.0;
-
                 let body = mix(mix(#53, #5c, self.hover), #33, self.pressed);
-                let top_gradient = mix(vec4(body.xyz, 0.0), mix(#6d, #1f, self.pressed), max(0.0, grad_top - sdf.pos.y) / grad_top);
+                let body_transp = vec4(body.xyz, 0.0);
+                let top_gradient = mix(body_transp, mix(#6d, #1f, self.pressed), max(0.0, grad_top - sdf.pos.y) / grad_top);
                 let bot_gradient = mix(
-                    mix(vec4(body.xyz, 0.0), #5c, self.pressed),
+                    mix(body_transp, #5c, self.pressed),
                     top_gradient,
                     clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
                 );
+                
                 // the little drop shadow at the bottom
                 let shift_inward = BORDER_RADIUS + 4.0;
                 sdf.move_to(shift_inward,self.rect_size.y-BORDER_RADIUS);
                 sdf.line_to(self.rect_size.x-shift_inward,self.rect_size.y-BORDER_RADIUS);
                 sdf.stroke(
-                    mix(#2f, #0000, self.pressed),
+                    mix(mix(#2f,#1f,self.hover), #0000, self.pressed),
                     BORDER_RADIUS
                 )
-                //return mix(#ff,#f00,max(0.0,self.rect_size.y - grad_bot - sdf.pos.y)/grad_bot);
+
                 sdf.box(
                     1.,
                     1.,
@@ -71,8 +72,6 @@ live_register!{
                     bot_gradient,
                     1.0
                 )
-                
-                // lets draw a tiny gradient below the button
                 
                 return sdf.result
             }
@@ -155,9 +154,9 @@ impl FrameComponent for Button {
         self.walk
     }
     
-    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<LiveId, ()> {
+    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId> {
         self.draw_walk(cx, walk);
-        Err(())
+        Ok(())
     }
 }
 
