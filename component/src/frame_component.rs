@@ -45,9 +45,12 @@ impl<T: Clone> DrawStateWrap<T> {
 }
 
 pub trait FrameComponent: LiveApply {
+    // to implement
     fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, self_id: LiveId) -> FrameComponentActionRef;
     fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId>;
     fn get_walk(&self) -> Walk;
+    // defaults
+    fn draw_walk_component(&mut self, cx: &mut Cx2d) -> Result<(), LiveId>{self.draw_component(cx, self.get_walk())}
     fn find_child(&self, _id: LiveId) -> Option<&Box<dyn FrameComponent >> {None}
     fn find_child_mut(&mut self, _id: LiveId) -> Option<&mut Box<dyn FrameComponent >> {None}
     fn type_id(&self) -> LiveType where Self: 'static {LiveType::of::<Self>()}

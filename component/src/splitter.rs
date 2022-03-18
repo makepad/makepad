@@ -164,7 +164,7 @@ impl FrameComponent for Splitter {
         }
         if let DrawState::DrawA = self.draw_state.get(){
             if let Some(child) = self.a.as_mut(){
-                child.draw_component(cx, child.get_walk())?;
+                child.draw_walk_component(cx)?;
             }
             self.draw_state.set(DrawState::DrawSplit);
         }
@@ -174,7 +174,7 @@ impl FrameComponent for Splitter {
         }
         if let DrawState::DrawB = self.draw_state.get(){
             if let Some(child) = self.b.as_mut(){
-                child.draw_component(cx, child.get_walk())?;
+                child.draw_walk_component(cx)?;
             }
             self.end(cx);
             self.draw_state.end();

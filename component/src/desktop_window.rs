@@ -13,12 +13,14 @@ live_register!{
         pass: {clear_color: (COLOR_CLEAR)}
         var caption:"DesktopWindow2"
         frame: {
-            flow: Flow::Down
+            layout:{
+                flow: Flow::Down
+            },
             windows_buttons:= Frame {
                 color: (COLOR_BG_APP)
                 height: 29
                 caption_label:= Frame {
-                    align: {x: 0.5, y:0.5}
+                    layout:{align: {x: 0.5, y:0.5}},
                     Label {text: (caption), margin:{left:100}}
                 }
                 /*
@@ -152,9 +154,10 @@ impl DesktopWindow {
         
         cx.begin_pass(&self.pass);
         
-        self.main_view.begin(cx).unwrap();
+        self.main_view.begin(cx, Walk::default(), Layout::default()).unwrap();
         
-        if self.frame.draw(cx).is_err() {
+        //while self.frame.draw(cx).is_ok(){}
+        if self.frame.draw(cx).is_ok() {
             self.main_view.end(cx);
             cx.end_pass(&self.pass);
             return Err(())
@@ -164,7 +167,7 @@ impl DesktopWindow {
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
-        while self.frame.draw(cx).is_ok() {}
+        while self.frame.draw(cx).is_err() {}
         self.main_view.end(cx);
         cx.end_pass(&self.pass);
     }

@@ -53,12 +53,12 @@ live_register!{
                         const WAVE_HEIGHT: 0.15
                         const WAVE_FREQ: 0.2
                         fn pixel(self) -> vec4 {
-                            let offset_y = 1.5;
-                            let pos2 = vec2(self.pos.x, self.pos.y + WAVE_HEIGHT * sin(WAVE_FREQ * self.pos.x * self.rect_size.x));
-                            let sdf = Sdf2d::viewport(pos2 * self.rect_size);
+                            let offset_y = 1.5
+                            let pos2 = vec2(self.pos.x, self.pos.y + WAVE_HEIGHT * sin(WAVE_FREQ * self.pos.x * self.rect_size.x))
+                            let sdf = Sdf2d::viewport(pos2 * self.rect_size)
                             sdf.clear(#2f)
-                            sdf.move_to(0., self.rect_size.y * 0.5);
-                            sdf.line_to(self.rect_size.x, self.rect_size.y * 0.5);
+                            sdf.move_to(0., self.rect_size.y * 0.5)
+                            sdf.line_to(self.rect_size.x, self.rect_size.y * 0.5)
                             return sdf.stroke(#f, 1.0)
                         }
                     }

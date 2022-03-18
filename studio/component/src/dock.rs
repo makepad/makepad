@@ -2,9 +2,9 @@ use {
     crate::{
         makepad_platform::*,
         makepad_component::{
-            component_map::ComponentMap
+            component_map::ComponentMap,
+            splitter::{SplitterAction, Splitter, SplitterAlign},
         },
-        splitter::{SplitterAction, Splitter, SplitterAlign},
         tab_bar::{TabBarAction, TabBar, TabId},
     },
 };
@@ -12,7 +12,7 @@ use {
 live_register!{
     use makepad_platform::shader::std::*;
     use crate::tab_bar::TabBar
-    use crate::splitter::Splitter
+    use makepad_component::splitter::Splitter
     use makepad_component::theme::*;
     
     DrawRoundCorner: {{DrawRoundCorner}} {
@@ -43,11 +43,9 @@ live_register!{
     Dock: {{Dock}} {
         const BORDER_SIZE: 6.0
         border_size: (BORDER_SIZE)
-        view: {
-            layout: {
-                flow: Flow::Down
-                padding: {left: (BORDER_SIZE), top: 0.0, right: (BORDER_SIZE), bottom: (BORDER_SIZE)}
-            }
+        layout: {
+            flow: Flow::Down
+            padding: {left: (BORDER_SIZE), top: 0.0, right: (BORDER_SIZE), bottom: (BORDER_SIZE)}
         }
         padding_fill: {color: (COLOR_BG_APP)}
         drag_quad: {
@@ -55,7 +53,7 @@ live_register!{
             color: (COLOR_DRAG_QUAD)
         }
         overlay_view: {
-            walk: {abs_pos: vec2(0.0, 0.0)}
+            //walk: {abs_pos: vec2(0.0, 0.0)}
             is_overlay: true
         }
         tab_bar: TabBar {}
@@ -73,7 +71,7 @@ pub struct DrawRoundCorner {
 
 #[derive(Live)]
 pub struct Dock {
-    
+    layout: Layout,
     view: View,
     overlay_view: View,
     round_corner: DrawRoundCorner,
@@ -107,12 +105,12 @@ impl LiveHook for Dock {
 impl Dock {
     
     pub fn begin(&mut self, cx: &mut Cx2d) -> Result<(), ()> {
-        self.view.begin(cx) ?;
+        self.view.begin(cx, Walk::default(), self.layout) ?;
         Ok(())
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
-        if self.overlay_view.begin(cx).is_ok() {
+        if self.overlay_view.begin(cx, Walk::default(), Layout::default()).is_ok() {
             if let Some(drag) = self.drag.as_ref() {
                 let panel = self.panels[drag.panel_id].as_tab_panel();
                 let rect = compute_drag_rect(panel.contents_rect, drag.position);
@@ -166,7 +164,7 @@ impl Dock {
         let panel = self.get_or_create_split_panel(cx, panel_id);
         panel.splitter.set_axis(axis);
         panel.splitter.set_align(align);
-        panel.splitter.begin(cx);
+        panel.splitter.begin(cx, Walk::default());
         self.panel_id_stack.push(panel_id);
     }
     
@@ -290,10 +288,11 @@ impl Dock {
                 Panel::Split(panel) => {
                     panel
                         .splitter
-                        .handle_event(cx, event, &mut | cx, action | match action {
+                        .handle_event_with_fn(cx, event, &mut | cx, action | match action {
                         SplitterAction::Changed {axis, align} => {
                             dispatch_action(cx, DockAction::SplitPanelChanged {panel_id: *panel_id, axis, align});
-                        }
+                        },
+                        _=>()
                     });
                 }
                 Panel::Tab(panel) => {
