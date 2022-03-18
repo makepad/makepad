@@ -36,7 +36,7 @@ pub struct Frame { // draw info per UI element
     #[rust] defer_walks: Vec<(LiveId, DeferWalk)>,
     #[rust] draw_state: DrawStateWrap<DrawState>,
     
-    #[rust] live_ptr: Option<LivePtr>,
+    //#[rust] live_ptr: Option<LivePtr>,
     #[rust] children: ComponentMap<LiveId, FrameComponentRef>,
     #[rust] create_order: Vec<LiveId>
 }
@@ -49,11 +49,11 @@ impl LiveHook for Frame {
         None
     }
     
-    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        self.self_id = nodes[index].id;
-        if let Some(file_id) = from.file_id() {
-            self.live_ptr = Some(LivePtr::from_index(file_id, index, cx.live_registry.borrow().file_id_to_file(file_id).generation));
-        }
+    fn after_apply(&mut self, _cx: &mut Cx, _from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
+        //self.self_id = nodes[index].id;
+        //if let Some(file_id) = from.file_id() {
+            //self.live_ptr = Some(LivePtr::from_index(file_id, index, cx.live_registry.borrow().file_id_to_file(file_id).generation));
+        //}
     }
     
     fn apply_value_unknown(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
@@ -135,7 +135,6 @@ impl Frame {
             None
         }
     }
-    
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> FrameActions {
         let mut actions = Vec::new();

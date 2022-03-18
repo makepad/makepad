@@ -23,6 +23,10 @@ live_register!{
         bar_fill: {
             color: (COLOR_BG_HEADER)
         }
+        walk: {
+            width: Size::Fill
+            height: Size::Fixed((DIM_TAB_HEIGHT))
+        }
         scroll_view: {
             v_show: false
             h_show: true
@@ -32,10 +36,6 @@ live_register!{
             }
             view: {
                 debug_id: tab_bar_view
-                walk: {
-                    width: Size::Fill
-                    height: Size::Fixed((DIM_TAB_HEIGHT))
-                }
             }
         }
     }
@@ -48,7 +48,7 @@ pub struct TabBar {
     draw_drag: DrawColor,
     
     bar_fill: DrawColor,
-    
+    walk: Walk,
     tab: Option<LivePtr>,
     
     #[rust] tab_order: Vec<TabId>,
@@ -80,7 +80,7 @@ impl TabBar {
         //if selected_tab.is_some(){
         //    self.selected_tab_id = None
         // }
-        self.scroll_view.begin(cx) ?;
+        self.scroll_view.begin(cx, self.walk, Layout::default()) ?;
         self.tab_order.clear();
         Ok(())
     }

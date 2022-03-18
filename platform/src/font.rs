@@ -19,6 +19,7 @@ pub use {
         draw_vars::DrawVars,
         draw_2d::view::ManyInstances,
         pass::{Pass, PassClearColor},
+        draw_2d::turtle::{Walk, Layout},
         draw_2d::view::View,
         draw_2d::cx_2d::Cx2d,
         texture::Texture,
@@ -397,7 +398,7 @@ impl CxDrawFontAtlas {
             self.atlas_pass.clear_color_textures(cx);
             self.atlas_pass.add_color_texture(cx, &self.atlas_texture, clear);
             self.atlas_view.always_redraw = true;
-            self.atlas_view.begin(cx).unwrap();
+            self.atlas_view.begin(cx, Walk::default(), Layout::default()).unwrap();
             let mut atlas_todo = Vec::new();
             std::mem::swap(&mut cx.fonts_atlas.atlas_todo, &mut atlas_todo);
             

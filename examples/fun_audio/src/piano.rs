@@ -100,12 +100,9 @@ live_register!{
     
     Piano: {{Piano}} {
         piano_key: PianoKey {}
-        
-        view:{
-            walk:{
-                width:Size::Fit,
-                height:Size::Fit
-            }
+        walk:{
+            width:Size::Fit,
+            height:Size::Fit
         }
     }
 }
@@ -126,7 +123,6 @@ pub struct PianoKey {
     
     #[state(default_state, up_state, unfocussed_state)]
     animator: Animator,
-    
     focussed_state: LiveRef,
     unfocussed_state: LiveRef,
     default_state: LiveRef,
@@ -139,6 +135,7 @@ pub struct PianoKey {
 #[live_register(register_as_frame_component!(Piano))]
 pub struct Piano {
     view: View,
+    walk: Walk,
     piano_key: Option<LivePtr>,
     
     #[rust([0; 20])]
@@ -254,7 +251,7 @@ impl PianoKey {
 impl Piano {
     pub fn draw_walk(&mut self, cx: &mut Cx2d) {
         // alright lets draw em fuckers
-        if self.view.begin(cx).is_err() {
+        if self.view.begin(cx, self.walk, Layout::default()).is_err() {
             return
         };
         let start_pos = cx.turtle().pos();//+ vec2(10., 10.);

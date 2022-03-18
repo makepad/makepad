@@ -46,8 +46,8 @@ pub type ViewRedraw = Result<(), ()>;
 #[derive(Debug)]
 pub struct View { // draw info per UI element
     pub draw_list_id: usize, //Option<usize>,
-    pub layout: Layout,
-    pub walk: Walk,
+    //pub layout: Layout,
+    //pub walk: Walk,
     pub is_overlay: bool,
     pub always_redraw: bool,
     pub redraw_id: u64,
@@ -79,8 +79,8 @@ impl LiveNew for View {
             is_overlay: false,
             draw_lists_free: draw_lists_free,
             redraw_id: 0,
-            layout: Layout::default(),
-            walk: Walk::default(),
+            //layout: Layout::default(),
+            //walk: Walk::default(),
             draw_list_id,
         }
     }
@@ -115,8 +115,8 @@ impl LiveApply for View {
                 id!(is_clipped) => cx.draw_lists[self.draw_list_id].is_clipped = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
                 id!(is_overlay) => self.is_overlay = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
                 id!(always_redraw) => self.always_redraw = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
-                id!(layout) => self.layout = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
-                id!(walk) => self.walk = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
+                //id!(layout) => self.layout = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
+                //id!(walk) => self.walk = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
                 _ => {
                     cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
                     index = nodes.skip_node(index);
@@ -166,7 +166,7 @@ impl View {
         set_view_transform_recur(self.draw_list_id, cx, mat);
     }
     
-    pub fn begin(&mut self, cx: &mut Cx2d) -> ViewRedraw {
+    pub fn begin(&mut self, cx: &mut Cx2d, mut walk: Walk, layout:Layout) -> ViewRedraw {
         
         // check if we have a pass id parent
         let pass_id = cx.pass_id.expect("No pass found when begin_view");
@@ -180,8 +180,8 @@ impl View {
         
         if cxpass.main_draw_list_id.is_none() {
             cxpass.main_draw_list_id = Some(self.draw_list_id);
-            self.walk.width = Size::Fixed(cxpass.pass_size.x);
-            self.walk.height = Size::Fixed(cxpass.pass_size.y);
+            walk.width = Size::Fixed(cxpass.pass_size.x);
+            walk.height = Size::Fixed(cxpass.pass_size.y);
         }
         
         // find the parent draw list id
@@ -241,7 +241,7 @@ impl View {
             // walk the turtle because we aren't drawing
             let w = Size::Fixed(cx.draw_lists[self.draw_list_id].rect.size.x);
             let h = Size::Fixed(cx.draw_lists[self.draw_list_id].rect.size.y);
-            cx.walk_turtle(Walk {abs_pos:None, width: w, height: h, margin: self.walk.margin});
+            cx.walk_turtle(Walk {abs_pos:None, width: w, height: h, margin: walk.margin});
             return Err(());
         }
         
@@ -264,7 +264,7 @@ impl View {
         let new_area = Area::DrawList(DrawListArea {draw_list_id: self.draw_list_id, redraw_id: cx.redraw_id});
         
         cx.update_area_refs(old_area, new_area);
-        cx.begin_turtle_with_guard(self.walk, self.layout, new_area);
+        cx.begin_turtle_with_guard(walk, layout, new_area);
         
         cx.align_list.push(new_area);
         
