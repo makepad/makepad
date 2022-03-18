@@ -184,9 +184,9 @@ live_register!{
             bg_quad: {is_folder: 1.0}
             name_text: {is_folder: 1.0}
         }
+        layout: {flow: Flow::Down},
         scroll_view: {
             view: {
-                layout: {flow: Flow::Down}
                 debug_id: file_tree_view
             }
         }
@@ -268,7 +268,7 @@ pub struct FileTree {
     scroll_view: ScrollView,
     file_node: Option<LivePtr>,
     folder_node: Option<LivePtr>,
-    
+    layout: Layout,
     filler_quad: DrawBgQuad,
     
     node_height: f32,
@@ -421,7 +421,7 @@ impl FileTreeNode {
 impl FileTree {
     
     pub fn begin(&mut self, cx: &mut Cx2d) -> Result<(), ()> {
-        self.scroll_view.begin(cx) ?;
+        self.scroll_view.begin(cx, Walk::default(), self.layout) ?;
         self.count = 0;
         Ok(())
     }

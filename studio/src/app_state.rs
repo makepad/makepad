@@ -3,8 +3,10 @@ use {
         makepad_studio_component::{
             dock::{PanelId},
             file_tree::{FileNodeId},
-            splitter::{SplitterAlign},
             tab_bar::{TabId},
+        },
+        makepad_component::{
+            splitter::{SplitterAlign},
         },
         makepad_platform::*,
         editor_state::{EditorState, SessionId},
