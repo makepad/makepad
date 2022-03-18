@@ -2,13 +2,13 @@ use {
     crate::{
         makepad_platform::*,
         makepad_component::{
+            splitter::{SplitterAlign},
             DesktopWindow,
         },
         makepad_studio_component::{
             shader_view::ShaderView,
             dock::{Dock, DockAction, DragPosition, PanelId},
             file_tree::{FileTreeAction, FileNodeId, FileTree},
-            splitter::{SplitterAlign},
             tab_bar::TabId,
         },
         collab::{

@@ -29,7 +29,7 @@ impl BareWindow {
         }
         cx.begin_pass(&self.pass);
         
-        self.main_view.begin(cx).unwrap();
+        self.main_view.begin(cx, Walk::default(), Layout::default()).unwrap();
         
         Ok(())
     }

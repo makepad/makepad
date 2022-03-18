@@ -289,7 +289,7 @@ impl CodeEditorImpl {
     }
     
     pub fn begin<'a>(&mut self, cx: &mut Cx2d, state: &'a EditorState) -> Result<(&'a Document, &'a DocumentInner, &'a Session), ()> {
-        self.scroll_view.begin(cx) ?;
+        self.scroll_view.begin(cx, Walk::default(), Layout::default()) ?;
         
         if let Some(session_id) = self.session_id {
             
