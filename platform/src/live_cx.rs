@@ -15,6 +15,7 @@ pub use {
 pub fn live_register(cx:&mut Cx) {
     crate::draw_2d::draw_quad::live_register(cx);
     crate::draw_2d::draw_color::live_register(cx);
+    crate::draw_2d::draw_shape::live_register(cx);
     crate::draw_2d::draw_text::live_register(cx);
     crate::shader::geometry_gen::live_register(cx);
     crate::shader::std::live_register(cx);
