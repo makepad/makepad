@@ -7,8 +7,53 @@ use {
 };
 
 live_register!{
+    
     Frame: {{Frame}} {
         color: #0000
+    }
+    
+    Solid: Frame{
+        bg:{shape: Shape::Solid}
+    }
+    
+    Rect: Frame{
+        bg:{shape: Shape::Rect}
+    }
+    
+    Box: Frame{
+        bg:{shape: Shape::Box}
+    }
+
+    BoxX: Frame{
+        bg:{shape: Shape::BoxX}
+    }
+
+    BoxY: Frame{
+        bg:{shape: Shape::BoxY}
+    }
+
+    BoxAll: Frame{
+        bg:{shape: Shape::BoxAll}
+    }
+
+    Circle: Frame{
+        bg:{shape: Shape::Circle}
+    }
+
+    Hexagon: Frame{
+        bg:{shape: Shape::Hexagon}
+    }
+
+    UserDraw: Frame{
+        user_draw: true
+    }
+    
+    Clip: Frame{
+        clip: true,
+    }
+
+    Scroll: Frame{
+        clip: true,
     }
 }
 
@@ -19,8 +64,12 @@ live_register!{
 #[derive(Live)]
 #[live_register(register_as_frame_component!(Frame))]
 pub struct Frame { // draw info per UI element
-    #[alias(color, bg_quad.color)]
-    bg_quad: DrawColor,
+    #[alias(color, bg.color)]
+    #[alias(border_width, bg.border_width)]
+    #[alias(border_color, bg.border_color)]
+    #[alias(inset, bg.inset)]
+    #[alias(radius, bg.radius)]
+    bg: DrawShape,
     layout: Layout,
     
     #[alias(width, walk.width)]
@@ -28,15 +77,20 @@ pub struct Frame { // draw info per UI element
     #[alias(margin, walk.margin)]
     pub walk: Walk,
     
+    clip: bool,
     hidden: bool,
-    user: bool,
+    user_draw: bool,
+    
+    #[rust] view: Option<View>,
+    
+    scroll_x: FrameComponentRef,
+    scroll_y: FrameComponentRef,
     
     #[rust] self_id: LiveId,
     
     #[rust] defer_walks: Vec<(LiveId, DeferWalk)>,
     #[rust] draw_state: DrawStateWrap<DrawState>,
     
-    //#[rust] live_ptr: Option<LivePtr>,
     #[rust] children: ComponentMap<LiveId, FrameComponentRef>,
     #[rust] create_order: Vec<LiveId>
 }
@@ -65,6 +119,7 @@ impl LiveHook for Frame {
                         .apply(cx, from, index, nodes);
                 }
                 else {
+                    nodes.debug_print(0,100);
                     cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
                     nodes.skip_node(index)
                 }
@@ -159,13 +214,13 @@ impl Frame {
             self.defer_walks.clear();
             
             // ok so.. we have to keep calling draw till we return LiveId(0)
-            if self.bg_quad.color.w > 0.0 {
-                self.bg_quad.begin(cx, walk, self.layout);
+            if self.bg.shape != Shape::None {
+                self.bg.begin(cx, walk, self.layout);
             }
             else {
                 cx.begin_turtle(walk, self.layout);
             }
-            if self.user {
+            if self.user_draw {
                 return Err(self.self_id)
             }
         }
@@ -199,8 +254,8 @@ impl Frame {
                 self.draw_state.set(DrawState::DeferWalk(step + 1));
             }
             else {
-                if self.bg_quad.color.w > 0.0 {
-                    self.bg_quad.end(cx);
+                if self.bg.shape != Shape::None {
+                    self.bg.end(cx);
                 }
                 else {
                     cx.end_turtle();

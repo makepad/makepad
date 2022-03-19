@@ -327,6 +327,14 @@ live_primitive!(
     Vec2::default(),
     fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
+            LiveValue::Int(v) => {
+                *self = Vec2::all(*v as f32);
+                index + 1
+            }
+            LiveValue::Float(v) => {
+                *self = Vec2::all(*v as f32);
+                index + 1
+            }
             LiveValue::Vec2(val) => {
                 *self = *val;
                 index + 1
@@ -366,6 +374,18 @@ live_primitive!(
     Vec3::default(),
     fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
+            LiveValue::Vec2(v) => {
+                *self = Vec3{x:v.x, y:v.y, z:0.0};
+                index + 1
+            }
+            LiveValue::Int(v) => {
+                *self = Vec3::all(*v as f32);
+                index + 1
+            }
+            LiveValue::Float(v) => {
+                *self = Vec3::all(*v as f32);
+                index + 1
+            }
             LiveValue::Vec3(val) => {
                 *self = *val;
                 index + 1
@@ -405,6 +425,22 @@ live_primitive!(
     Vec4::default(),
     fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match &nodes[index].value {
+            LiveValue::Vec2(v) => {
+                *self = Vec4{x:v.x, y:v.y, z:v.x, w:v.y};
+                index + 1
+            }
+            LiveValue::Vec3(v) => {
+                *self = Vec4{x:v.x, y:v.y, z:v.z, w:1.0};
+                index + 1
+            }
+            LiveValue::Int(v) => {
+                *self = Vec4::all(*v as f32);
+                index + 1
+            }
+            LiveValue::Float(v) => {
+                *self = Vec4::all(*v as f32);
+                index + 1
+            }
             LiveValue::Color(v) => {
                 *self = Vec4::from_u32(*v);
                 index + 1
