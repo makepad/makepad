@@ -268,7 +268,7 @@ live_register!{
             self.dist = mix(
                 (length(bp_left) - 2. * r_left),
                 (length(bp_right) - 2. * r_right),
-                step(0.5 * h, p_r.x)
+                step(0.5 * w, p_r.x)
             ) / self.scale_factor;
             
             self.old_shape = self.shape;

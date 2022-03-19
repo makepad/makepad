@@ -10,7 +10,9 @@ live_register!{
     use AudioComponent::*;
     use FrameComponent::*;
     use makepad_component::theme::*;
+    use makepad_component::frame::*;
     use makepad_platform::shader::std::*;
+    
     App: {{App}} {
         window: {pass: {clear_color: (COLOR_BG_APP)}}
         audio_graph: {
@@ -49,7 +51,7 @@ live_register!{
                 Frame {
                     walk: {width: Size::Fill, height: Size::Fixed(36)}
                     color: #f00
-                    bg_quad: {
+                    bg: {
                         const WAVE_HEIGHT: 0.15
                         const WAVE_FREQ: 0.2
                         fn pixel(self) -> vec4 {
@@ -64,14 +66,23 @@ live_register!{
                     }
                 }
             }
+            
+            
+            
             piano: = Piano {}
             Splitter {
                 walk: {width: Size::Fill, height: 100}
-                a: Frame {
+                a: Solid {
+                    border_width: 0.0,
+                    border_color: #f
+                    //radius: vec2(10.0,25.0),
                     color: #f00
                 }
-                b: Frame {
-                    color:#fff
+                b: Box {
+                    radius: 10.0
+                    border_width: 2.0,
+                    border_color: #f
+                    color:#0f0
                 }
             }
             /*Frame {
