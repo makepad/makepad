@@ -34,7 +34,7 @@ live_register!{
         }
         
         frame: {
-            color: (COLOR_BG_APP)
+            bg:{color: (COLOR_BG_APP)},
             walk: {width: Fill, height: Fill}
             layout: {
                 padding: 8
@@ -71,47 +71,59 @@ live_register!{
                 align: SplitterAlign::FromEnd(200)
                 walk: {width: Fill, height: 100}
                 a: FoldHeader {
+                    closed_state: {apply: {
+                        header: {
+                            bg: {radius: vec2(3.0, 3.0)}
+                        }
+                        body: {
+                            g1: {bg: {color: #0000}}
+                        }
+                    }}
+                    opened_state: {apply: {
+                        header: {
+                            bg: {radius: vec2(3.0, 1.0)}
+                        }
+                        body: {
+                            g1: {bg: {color: #000a}}
+                        }
+                    }}
                     header: BoxY {
-                        radius: vec2(3.0, 1.0)
-                        color: #6
+                        bg:{color: #6},
                         width: Fill
-                        layout: {flow: Right, padding: 10, spacing:5}
-                        fold_button := FoldButton{}
+                        layout: {flow: Right, padding: 10, spacing: 5}
+                        fold_button:= FoldButton {}
                         Label {text: "Piano"}
                     }
                     body: Frame {
                         layout: {flow: Overlay}
                         width: Fit
                         height: Fit
-                        Frame{
-                            layout:{flow: Down}
+                        Frame {
+                            layout: {flow: Down}
                             width: Fit
                             height: Fit
                             piano: = Piano {}
                             GradientY {
                                 width: Fill
                                 height: 10
-                                color: #000a
-                                color2: #0000
+                                bg: {color: #000a, color2: #0000}
                             }
                         }
-                        GradientY {
-                            bg:{
-                                no_v_scroll:true
-                            }
+                        g1:= GradientY {
                             width: Fill
                             height: 2
-                            color: #000a
-                            color2: #0000
+                            bg: {color: #000a, color2: #0000, no_v_scroll: true}
                         }
                     }
                 }
                 b: Box {
                     clip: true,
-                    radius: 10.0
-                    border_width: 2.0
-                    border_color: #f
-                    color: #0f0
+                    bg: {
+                        radius: 10.0
+                        border_width: 2.0
+                        border_color: #f
+                        color: #0f0
+                    }
                 }
             }
             /*Frame {

@@ -17,6 +17,24 @@ live_register!{
         layout:{
             flow:Flow::Down,
         }
+        
+        closed_state: {
+            track: zoom
+            from: {all: Play::Exp {speed1: 0.96, speed2: 0.97}}
+            redraw: true
+            apply: {
+                opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
+            }
+        }
+        
+        opened_state: {
+            track: zoom
+            from: {all: Play::Exp {speed1: 0.98, speed2: 0.95}}
+            redraw: true
+            apply: {
+                opened: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]
+            }
+        }
     }
 }
 
@@ -26,6 +44,12 @@ pub struct FoldHeader {
     #[rust] draw_state: DrawStateWrap<DrawState>,
     header: FrameComponentRef,
     body: FrameComponentRef,
+
+    #[state(opened_state)] pub animator: Animator,
+    opened: f32,
+    closed_state: Option<LivePtr>,
+    opened_state: Option<LivePtr>,
+
     view: View,
     layout: Layout,
     walk: Walk,
@@ -40,15 +64,26 @@ enum DrawState{
 
 impl FrameComponent for FoldHeader {
     fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, _self_id: LiveId) -> FrameComponentActionRef {
+
+        if self.animator_handle_event(cx, event).is_animating() {
+            if self.animator.is_track_of_animating(cx, self.closed_state) {
+                let rect = self.view.get_rect(cx);
+                self.view.set_scroll_pos(cx, vec2(0.0,rect.size.y * (1.0-self.opened)));
+            }
+        };
         let mut actions = Vec::new();
         if let Some(child) = self.header.as_mut(){
             if let Some(action) = child.handle_component_event(cx, event, id!(header)){
                 for item in action.cast::<FrameActions>(){
                     if item.id == id!(fold_button){
-                        if let FoldButtonAction::Animating(v) = item.action.cast(){
-                            // lets set our view stuff
-                            let rect = self.view.get_rect(cx);
-                            self.view.set_scroll_pos(cx, vec2(0.0,rect.size.y * (1.0-v)));
+                        match item.action.cast(){
+                            FoldButtonAction::Opening=>{
+                                self.animate_to(cx, self.opened_state)
+                            }
+                            FoldButtonAction::Closing=>{
+                                self.animate_to(cx, self.closed_state)
+                            }
+                            _=>()
                         }
                     }
                 }
