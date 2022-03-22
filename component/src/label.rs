@@ -8,8 +8,11 @@ use {
 
 live_register!{
     use makepad_platform::shader::std::*;
-    
+    use makepad_component::theme::*;
     Label: {{Label}} {
+        label_text:{
+            color:(COLOR_TEXT_DEFAULT)
+        }
     }
 }
 
