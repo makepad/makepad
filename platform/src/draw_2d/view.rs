@@ -308,6 +308,16 @@ impl View {
     pub fn area(&self) -> Area {
         Area::DrawList(DrawListArea {draw_list_id: self.draw_list_id, redraw_id: self.redraw_id})
     }
+
+    pub fn set_scroll_pos(&mut self, cx:&mut Cx, scroll_pos:Vec2) {
+        cx.set_view_scroll_x(self.draw_list_id, scroll_pos.x);
+        cx.set_view_scroll_y(self.draw_list_id, scroll_pos.y);
+    }
+    
+    pub fn get_scroll_pos(&self, cx:&Cx)->Vec2{
+        let draw_list = &cx.draw_lists[self.draw_list_id];
+        draw_list.unsnapped_scroll
+    }
 }
 
 

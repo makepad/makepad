@@ -1111,11 +1111,13 @@ impl Ty {
                     LiveEval::Vec2(_) => Self::Vec2,
                     LiveEval::Vec3(_) => Self::Vec3,
                     LiveEval::Vec4(_) => Self::Vec4,
-                    v => return Err(LiveError {
-                        origin: live_error_origin!(),
-                        message: format!("Expression return type does not resolve to a shader {:?}", v),
-                        span: nodes[index].origin.token_id().unwrap().into()
-                    })
+                    v => {
+                        return Err(LiveError {
+                            origin: live_error_origin!(),
+                            message: format!("Expression return type does not resolve to a shader {:?}", v),
+                            span: nodes[index].origin.token_id().unwrap().into()
+                        })
+                    }
                 }
             }
             LiveValue::Id(id) => match id {
@@ -1126,11 +1128,13 @@ impl Ty {
                 id!(vec3) => Self::Vec3,
                 id!(vec4) => Self::Vec4,
                 id!(texture2d) => Self::Texture2D,
-                _ => return Err(LiveError {
-                    origin: live_error_origin!(),
-                    message: format!("Id does not resolve to a shader type {}", id),
-                    span: nodes[index].origin.token_id().unwrap().into()
-                })
+                _ => {
+                    return Err(LiveError {
+                        origin: live_error_origin!(),
+                        message: format!("Id does not resolve to a shader type {}", id),
+                        span: nodes[index].origin.token_id().unwrap().into()
+                    })
+                }
             }
             LiveValue::Bool(_) => Self::Int,
             LiveValue::Int(_) => Self::Int,

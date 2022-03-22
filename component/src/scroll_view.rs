@@ -59,11 +59,11 @@ impl ScrollView{
         };
         ret_h != ScrollBarEvent::None || ret_v != ScrollBarEvent::None
     }
-    
+    /*
     pub fn get_scroll_pos(&self, cx: &Cx) -> Vec2 {
         let draw_list = &cx.draw_lists[self.view.draw_list_id];
         draw_list.unsnapped_scroll
-    }
+    }*/
     
     pub fn set_scroll_pos(&mut self, cx: &mut Cx, pos: Vec2) -> bool {
         //let view_area = Area::DrawList(DrawListArea{draw_list_id:draw_list_id, redraw_id:cx.redraw_id});

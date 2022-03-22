@@ -48,9 +48,9 @@ live_register!{
                 Button {label: "+  Band"}
                 Button {label: "<"}
                 Button {label: ">"}
-                Frame {
-                    walk: {width: Fill, height: 36}
-                    color: #f00
+                Solid {
+                    width: Fill
+                    height: 36
                     bg: {
                         const WAVE_HEIGHT: 0.15
                         const WAVE_FREQ: 0.2
@@ -72,32 +72,33 @@ live_register!{
                 walk: {width: Fill, height: 100}
                 a: FoldHeader {
                     header: BoxY {
-                        radius: vec2(3.0, 1.0),
+                        radius: vec2(3.0, 1.0)
                         color: #6
-                        width: Fill,
-                        layout: {flow: Right, padding: 10},
+                        width: Fill
+                        layout: {flow: Right, padding: 10, spacing:5}
+                        fold_button := FoldButton{}
                         Label {text: "Piano"}
                     }
                     body: Frame {
                         layout: {flow: Overlay}
-                        width: Fit,
-                        height: Fit,
+                        width: Fit
+                        height: Fit
                         Frame{
-                            layout:{flow: Down},
-                            width: Fit,
-                            height: Fit,
+                            layout:{flow: Down}
+                            width: Fit
+                            height: Fit
                             piano: = Piano {}
                             GradientY {
                                 width: Fill
                                 height: 10
-                                color: #000a,
+                                color: #000a
                                 color2: #0000
                             }
                         }
                         GradientY {
                             width: Fill
                             height: 2
-                            color: #000a,
+                            color: #000a
                             color2: #0000
                         }
                     }
@@ -105,7 +106,7 @@ live_register!{
                 b: Box {
                     clip: true,
                     radius: 10.0
-                    border_width: 2.0,
+                    border_width: 2.0
                     border_color: #f
                     color: #0f0
                 }

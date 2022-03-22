@@ -185,6 +185,7 @@ generate_clone_cast_api!(FrameComponentAction);
 
 pub type FrameComponentActionRef = Option<Box<dyn FrameComponentAction >>;
 
+
 impl Clone for Box<dyn FrameComponentAction> {
     fn clone(&self) -> Box<dyn FrameComponentAction> {
         self.as_ref().box_clone()
