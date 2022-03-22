@@ -8,6 +8,7 @@ use crate::{
 live_register!{
     use crate::theme::*;
     use FrameComponent::*;
+    use makepad_component::frame::*;
     
     DesktopWindow: {{DesktopWindow}} {
         pass: {clear_color: (COLOR_CLEAR)}
@@ -16,7 +17,7 @@ live_register!{
             layout:{
                 flow: Flow::Down
             },
-            windows_buttons:= Frame {
+            windows_buttons:= Solid {
                 color: (COLOR_BG_APP)
                 height: 29
                 caption_label:= Frame {
@@ -24,12 +25,12 @@ live_register!{
                     Label {text: (caption), margin:{left:100}}
                 }
                 
-                min_btn:= DesktopButton {button_type: DesktopButtonType::WindowsMin}
-                max_btn:= DesktopButton {button_type: DesktopButtonType::WindowsMax}
-                close_btn:= DesktopButton {button_type: DesktopButtonType::WindowsClose}
+                //min_btn:= DesktopButton {button_type: DesktopButtonType::WindowsMin}
+                //max_btn:= DesktopButton {button_type: DesktopButtonType::WindowsMax}
+                //close_btn:= DesktopButton {button_type: DesktopButtonType::WindowsClose}
                 
             }
-            inner_view:= Frame {user: true}
+            inner_view:= Frame {user_draw: true}
         }
         
         window: {

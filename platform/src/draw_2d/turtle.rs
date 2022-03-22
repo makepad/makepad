@@ -338,6 +338,7 @@ impl<'a> Cx2d<'a> {
                         turtle.update_used(size.x + margin_size.x, 0.0);
                     },
                     Flow::Overlay => { // do not walk
+                        turtle.update_used(size.x, size.y);
                     }
                 };
                 
@@ -470,8 +471,12 @@ impl Turtle {
                     Flow::Right => {
                         max_zero_keep_nan(self.width_left() - margin.width())
                     },
-                    Flow::Down | Flow::Overlay => {
-                        max_zero_keep_nan(self.no_pad_width() - margin.width())
+                    Flow::Down | Flow::Overlay =>{
+                        let r = max_zero_keep_nan(self.no_pad_width() - margin.width());
+                        if r.is_nan(){
+                            return self.width_used - margin.width()
+                        }
+                        return r
                     }
                 }
             },
@@ -484,9 +489,13 @@ impl Turtle {
             Size::Fixed(v) => max_zero_keep_nan(v),
             Size::Fill => {
                 match flow {
-                    Flow::Right | Flow::Overlay => {
-                        max_zero_keep_nan(self.no_pad_height() - margin.height())
-                    },
+                    Flow::Right | Flow::Overlay=>{
+                        let r = max_zero_keep_nan(self.no_pad_height() - margin.height());
+                        if r.is_nan(){
+                            return self.height_used - margin.height()
+                        }
+                        return r
+                    }
                     Flow::Down => {
                         max_zero_keep_nan(self.height_left() - margin.height())
                     }
