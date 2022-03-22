@@ -1,6 +1,7 @@
 use crate::{
     makepad_platform::*,
     frame_component::*,
+    fold_button::*
 };
 
 live_register!{
@@ -41,8 +42,18 @@ impl FrameComponent for FoldHeader {
     fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, _self_id: LiveId) -> FrameComponentActionRef {
         let mut actions = Vec::new();
         if let Some(child) = self.header.as_mut(){
-            let action = child.handle_component_event(cx, event, id!(header));
-            actions.merge(id!(header), action);
+            if let Some(action) = child.handle_component_event(cx, event, id!(header)){
+                for item in action.cast::<FrameActions>(){
+                    if item.id == id!(fold_button){
+                        if let FoldButtonAction::Animating(v) = item.action.cast(){
+                            // lets set our view stuff
+                            let rect = self.view.get_rect(cx);
+                            self.view.set_scroll_pos(cx, vec2(0.0,rect.size.y * (1.0-v)));
+                        }
+                    }
+                }
+                actions.merge(id!(header), Some(action));
+            }
         }
         if let Some(child) = self.body.as_mut(){
             actions.merge(id!(body), child.handle_component_event(cx, event, id!(body)));

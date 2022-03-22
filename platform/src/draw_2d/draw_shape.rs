@@ -12,17 +12,26 @@ use {
 live_register!{
     use makepad_platform::shader::std::*;
     DrawShape: {{DrawShape}} {
-        fn pixel(self) -> vec4 {
-            let color = self.color;
+        varying vertex_color: vec4
+
+        fn vertex(self) -> vec4 {
+            let ret =  self.scroll_and_clip_quad();
             match self.fill {
-                Fill::Color=>{}
+                Fill::Color=>{
+                    self.vertex_color = self.color
+                }
                 Fill::GradientX=>{
-                    color = mix(self.color, self.color2, self.pos.x)
+                    self.vertex_color = mix(self.color, self.color2, self.pos.x)
                 }
                 Fill::GradientY=>{
-                    color = mix(self.color, self.color2, self.pos.y)
+                    self.vertex_color = mix(self.color, self.color2, self.pos.y)
                 }
             }
+            return ret;
+        }
+        
+        fn pixel(self) -> vec4 {
+            let color = self.vertex_color;
             match self.shape {
                 Shape::None => {
                     return #000

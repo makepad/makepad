@@ -9,17 +9,17 @@ use {
 live_register!{
     
     Frame: {{Frame}} {}
-    Solid: Frame {bg: {shape: Solid}}
-    Rect: Frame {bg: {shape: Rect}}
-    Box: Frame {bg: {shape: Box}}
-    BoxX: Frame {bg: {shape: BoxX}}
-    BoxY: Frame {bg: {shape: BoxY}}
-    BoxAll: Frame {bg: {shape: BoxAll}}
-    GradientY: Frame {bg: {shape: GradientY}}
-    Circle: Frame {bg: {shape: Circle}}
-    Hexagon: Frame {bg: {shape: Hexagon}}
-    GradientX: Frame {bg: {shape: Solid, fill:GradientX}}
-    GradientY: Frame {bg: {shape: Solid, fill:GradientY}}
+    Solid: Frame {shape: Solid}
+    Rect: Frame {shape: Rect}
+    Box: Frame {shape: Box}
+    BoxX: Frame {shape: BoxX}
+    BoxY: Frame {shape: BoxY}
+    BoxAll: Frame {shape: BoxAll}
+    GradientY: Frame {shape: GradientY}
+    Circle: Frame {shape: Circle}
+    Hexagon: Frame {shape: Hexagon}
+    GradientX: Frame {shape: Solid, fill:GradientX}
+    GradientY: Frame {shape: Solid, fill:GradientY}
     UserDraw: Frame {user_draw: true}
     Clip: Frame {clip: true,}
     Scroll: Frame {clip: true,}
@@ -38,6 +38,8 @@ pub struct Frame { // draw info per UI element
     #[alias(border_color, bg.border_color)]
     #[alias(inset, bg.inset)]
     #[alias(radius, bg.radius)]
+    #[alias(shape, bg.shape)]
+    #[alias(fill, bg.fill)]
     bg: DrawShape,
     
     layout: Layout,
