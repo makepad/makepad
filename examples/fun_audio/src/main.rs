@@ -13,15 +13,18 @@ live_register!{
     use makepad_component::frame::*;
     use makepad_platform::shader::std::*;
     
+    const HEADER_RADIUS_CLOSED: vec2(3.0, 3.0)
+    const HEADER_RADIUS_OPEN: vec2(3.0, 1.0)
+    
     FunFoldHeader: FoldHeader {
         closed_state: {apply: {
             header: {
-                bg: {radius: vec2(3.0, 3.0)}
+                bg: {radius: (HEADER_RADIUS_CLOSED)}
             }
         }}
         opened_state: {apply: {
             header: {
-                bg: {radius: vec2(3.0, 1.0)}
+                bg: {radius: (HEADER_RADIUS_OPEN)}
             }
         }}
         header: BoxY {
