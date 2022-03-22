@@ -96,6 +96,9 @@ live_register!{
                             }
                         }
                         GradientY {
+                            bg:{
+                                no_v_scroll:true
+                            }
                             width: Fill
                             height: 2
                             color: #000a
