@@ -16,12 +16,12 @@ live_register!{
     
     DrawQuad: {{DrawQuad}} {
         varying pos: vec2
-        
+
         fn scroll(self) -> vec2 {
             return self.draw_scroll.xy
         }
         
-        fn vertex(self) -> vec4 {
+        fn scroll_and_clip_quad(self)->vec4{
             let scr = self.scroll()
             
             let clipped: vec2 = clamp(
@@ -37,6 +37,10 @@ live_register!{
                 self.draw_depth + self.draw_zbias,
                 1.
             )))
+        }
+        
+        fn vertex(self) -> vec4 {
+            return self.scroll_and_clip_quad()
         }
         
         fn pixel(self) -> vec4 {
