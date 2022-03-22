@@ -1,7 +1,6 @@
 use crate::{
     makepad_platform::*,
     frame_component::*,
-    frame_component_ref_find_child
 };
 
 
@@ -134,13 +133,21 @@ enum DrawState{
 impl FrameComponent for Splitter {
     fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, _self_id: LiveId) -> FrameComponentActionRef {
         let mut actions = Vec::new();
+        let mut redraw = false;
         self.handle_event_with_fn(cx, event, &mut |_,action|{
             actions.merge(id!(a),action.into()); 
+            redraw = true;
         });
         if let Some(child) = self.a.as_mut(){
+            if redraw{
+                child.redraw(cx);
+            }
             actions.merge(id!(a), child.handle_component_event(cx, event, id!(a)));
         }
         if let Some(child) = self.b.as_mut(){
+            if redraw{
+                child.redraw(cx);
+            }
             actions.merge(id!(b), child.handle_component_event(cx, event, id!(b)));
         }
         FrameActions::from_vec(actions).into()
