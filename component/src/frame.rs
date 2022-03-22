@@ -9,17 +9,17 @@ use {
 live_register!{
     
     Frame: {{Frame}} {}
-    Solid: Frame {shape: Solid}
-    Rect: Frame {shape: Rect}
-    Box: Frame {shape: Box}
-    BoxX: Frame {shape: BoxX}
-    BoxY: Frame {shape: BoxY}
-    BoxAll: Frame {shape: BoxAll}
-    GradientY: Frame {shape: GradientY}
-    Circle: Frame {shape: Circle}
-    Hexagon: Frame {shape: Hexagon}
-    GradientX: Frame {shape: Solid, fill:GradientX}
-    GradientY: Frame {shape: Solid, fill:GradientY}
+    Solid: Frame {bg:{shape: Solid}}
+    Rect: Frame {bg:{shape: Rect}}
+    Box: Frame {bg:{shape: Box}}
+    BoxX: Frame {bg:{shape: BoxX}}
+    BoxY: Frame {bg:{shape: BoxY}}
+    BoxAll: Frame {bg:{shape: BoxAll}}
+    GradientY: Frame {bg:{shape: GradientY}}
+    Circle: Frame {bg:{shape: Circle}}
+    Hexagon: Frame {bg:{shape: Hexagon}}
+    GradientX: Frame {bg:{shape: Solid, fill:GradientX}}
+    GradientY: Frame {bg:{shape: Solid, fill:GradientY}}
     UserDraw: Frame {user_draw: true}
     Clip: Frame {clip: true,}
     Scroll: Frame {clip: true,}
@@ -32,14 +32,14 @@ live_register!{
 #[derive(Live)]
 #[live_register(register_as_frame_component!(Frame))]
 pub struct Frame { // draw info per UI element
-    #[alias(color, bg.color)]
+    /*#[alias(color, bg.color)]
     #[alias(color2, bg.color2)]
     #[alias(border_width, bg.border_width)]
     #[alias(border_color, bg.border_color)]
     #[alias(inset, bg.inset)]
     #[alias(radius, bg.radius)]
     #[alias(shape, bg.shape)]
-    #[alias(fill, bg.fill)]
+    #[alias(fill, bg.fill)]*/
     bg: DrawShape,
     
     layout: Layout,
@@ -86,15 +86,23 @@ impl LiveHook for Frame {
     }
     
     fn apply_value_unknown(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
-        match nodes[index].id {
-            id => {
+        let id = nodes[index].id;
+        match from{
+            ApplyFrom::Animate=>{
+                if let Some(component) = self.children.get_mut(&nodes[index].id){
+                    component.apply(cx, from, index, nodes)
+                }
+                else{
+                    nodes.skip_node(index)
+                }
+            }
+            _=>{
                 if nodes[index].origin.id_non_unique() {
                     self.create_order.push(id);
                     return self.children.get_or_insert(cx, id, | cx | {FrameComponentRef::new(cx)})
                         .apply(cx, from, index, nodes);
                 }
                 else {
-                    nodes.debug_print(0, 100);
                     cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
                     nodes.skip_node(index)
                 }
