@@ -530,7 +530,7 @@ impl ShaderRegistry {
                     }
                     match prop.value {
                         LiveValue::Bool(_) |
-                        LiveValue::Id(_) |
+                        LiveValue::Id(_)  |
                         LiveValue::Int(_) |
                         LiveValue::Float(_) |
                         LiveValue::Color(_) |
@@ -539,6 +539,12 @@ impl ShaderRegistry {
                         LiveValue::Vec4(_) | 
                         LiveValue::Expr{..} => {
                             
+                            if let LiveValue::Id(id) = prop.value{
+                                if id.is_capitalised(){
+                                    node_iter = doc.nodes.next_child(node_index);
+                                    continue;
+                                }
+                            }
                             
                             let first_def = prop.origin.first_def().unwrap();
                             let before = live_registry.get_node_prefix(prop.origin);

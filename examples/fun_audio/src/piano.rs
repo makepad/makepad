@@ -163,7 +163,7 @@ impl FrameComponent for Piano {
     }
     
     fn draw_component(&mut self, cx: &mut Cx2d, _walk:Walk)->Result<(), LiveId>{
-        self.draw_walk(cx);
+        self.draw_walk(cx, self.walk);
         Ok(())
     }
 }
@@ -249,9 +249,9 @@ impl PianoKey {
 
 
 impl Piano {
-    pub fn draw_walk(&mut self, cx: &mut Cx2d) {
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk:Walk) {
         // alright lets draw em fuckers
-        if self.view.begin(cx, self.walk, Layout::default()).is_err() {
+        if self.view.begin(cx, walk, Layout::default()).is_err() {
             return
         };
         let start_pos = cx.turtle().pos();//+ vec2(10., 10.);

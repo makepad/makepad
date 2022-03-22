@@ -1,7 +1,8 @@
 #![allow(unused)]
 use crate::{
     makepad_platform::*,
-    button_logic::*
+    button_logic::*,
+    frame_component::*,
 };
 
 live_register!{
@@ -11,11 +12,11 @@ live_register!{
         bg_quad: {
             instance opened: 0.0
             instance hover: 0.0
-
+            
             uniform fade: 1.0
-
+            
             fn pixel(self) -> vec4 {
-              
+                
                 let sz = 3.;
                 let c = vec2(5.0, 0.5 * self.rect_size.y);
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -63,8 +64,11 @@ live_register!{
             track: zoom
             from: {all: Play::Exp {speed1: 0.98, speed2: 0.95}}
             redraw: true
-            apply: {opened: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]}
-        } 
+            apply: {
+                opened: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]
+                bg_quad: {opened: (opened)}
+            }
+        }
         /*
         closed_state: {
             track: open
@@ -86,9 +90,10 @@ live_register!{
 }
 
 #[derive(Live, LiveHook)]
+#[live_register(register_as_frame_component!(FoldButton))]
 pub struct FoldButton {
     #[rust] pub button_logic: ButtonLogic,
-    #[state(default_state, closed_state)] pub animator: Animator,
+    #[state(default_state, opened_state)] pub animator: Animator,
     
     default_state: Option<LivePtr>,
     hover_state: Option<LivePtr>,
@@ -103,11 +108,33 @@ pub struct FoldButton {
     walk: Walk,
 }
 
+#[derive(Clone, IntoFrameComponentAction)]
 pub enum FoldButtonAction {
     None,
     Opening,
     Closing,
     Animating(f32)
+}
+
+impl Default for FoldButtonAction {
+    fn default() -> Self {Self::None}
+}
+
+impl FrameComponent for FoldButton {
+    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, self_id: LiveId) -> FrameComponentActionRef {
+        let mut a = Vec::new();
+        self.handle_event_with_fn(cx, event, &mut | _, v | a.push(FrameActionItem::new(self_id, v.into())));
+        FrameActions::Actions(a).into()
+    }
+    
+    fn get_walk(&self) -> Walk {
+        self.walk
+    }
+    
+    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId> {
+        self.draw_walk(cx, walk);
+        Ok(())
+    }
 }
 
 impl FoldButton {
@@ -146,8 +173,8 @@ impl FoldButton {
         self.toggle_animator(cx, is_open, animate, self.opened_state, self.closed_state)
     }
     
-    pub fn draw(&mut self, cx: &mut Cx2d) {
-        self.bg_quad.draw_walk(cx, self.walk);
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
+        self.bg_quad.draw_walk(cx, walk);
     }
     
     pub fn draw_abs(&mut self, cx: &mut Cx2d, pos: Vec2, fade: f32) {
