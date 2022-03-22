@@ -13,6 +13,62 @@ live_register!{
     use makepad_component::frame::*;
     use makepad_platform::shader::std::*;
     
+    FunFoldHeader: FoldHeader {
+        closed_state: {apply: {
+            header: {
+                bg: {radius: vec2(3.0, 3.0)}
+            }
+        }}
+        opened_state: {apply: {
+            header: {
+                bg: {radius: vec2(3.0, 1.0)}
+            }
+        }}
+        header: BoxY {
+            bg: {color: #6},
+            width: Fill
+            layout: {flow: Right, padding: 8, spacing: 5}
+            fold_button:= FoldButton {}
+        }
+    }
+    
+    FoldablePiano: FunFoldHeader {
+        header:{
+            label:= Label {text: "Keys"}            
+        }
+        closed_state: {apply: {
+            body: {
+                g1: {bg: {color: #0000}}
+            }
+        }}
+        opened_state: {apply: {
+            body: {
+                g1: {bg: {color: #000a}}
+            }
+        }}
+        body: Frame {
+            layout: {flow: Overlay}
+            width: Fit
+            height: Fit
+            Frame {
+                layout: {flow: Down}
+                width: Fit
+                height: Fit
+                piano: = Piano {}
+                GradientY {
+                    width: Fill
+                    height: 10
+                    bg: {color: #000a, color2: #0000}
+                }
+            }
+            g1:= GradientY {
+                width: Fill
+                height: 2
+                bg: {color: #000a, color2: #0000, no_v_scroll: true}
+            }
+        }
+    }
+    
     App: {{App}} {
         window: {pass: {clear_color: (COLOR_BG_APP)}}
         audio_graph: {
@@ -34,7 +90,7 @@ live_register!{
         }
         
         frame: {
-            bg:{color: (COLOR_BG_APP)},
+            bg: {color: (COLOR_BG_APP)},
             walk: {width: Fill, height: Fill}
             layout: {
                 padding: 8
@@ -70,59 +126,17 @@ live_register!{
             Splitter {
                 align: SplitterAlign::FromEnd(200)
                 walk: {width: Fill, height: 100}
-                a: FoldHeader {
-                    closed_state: {apply: {
-                        header: {
-                            bg: {radius: vec2(3.0, 3.0)}
+                a: FoldablePiano {}
+                b: FunFoldHeader {
+                    header:{
+                        swatch:= Circle {
+                            width: 10,
+                            height: 10
+                            bg: {color: #f00}
                         }
-                        body: {
-                            g1: {bg: {color: #0000}}
-                        }
-                    }}
-                    opened_state: {apply: {
-                        header: {
-                            bg: {radius: vec2(3.0, 1.0)}
-                        }
-                        body: {
-                            g1: {bg: {color: #000a}}
-                        }
-                    }}
-                    header: BoxY {
-                        bg:{color: #6},
-                        width: Fill
-                        layout: {flow: Right, padding: 10, spacing: 5}
-                        fold_button:= FoldButton {}
-                        Label {text: "Piano"}
+                        label:= Label {text: "Instrument name"}
                     }
-                    body: Frame {
-                        layout: {flow: Overlay}
-                        width: Fit
-                        height: Fit
-                        Frame {
-                            layout: {flow: Down}
-                            width: Fit
-                            height: Fit
-                            piano: = Piano {}
-                            GradientY {
-                                width: Fill
-                                height: 10
-                                bg: {color: #000a, color2: #0000}
-                            }
-                        }
-                        g1:= GradientY {
-                            width: Fill
-                            height: 2
-                            bg: {color: #000a, color2: #0000, no_v_scroll: true}
-                        }
-                    }
-                }
-                b: Box {
-                    clip: true,
-                    bg: {
-                        radius: 10.0
-                        border_width: 2.0
-                        border_color: #f
-                        color: #0f0
+                    body:Frame{
                     }
                 }
             }
