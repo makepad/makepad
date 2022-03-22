@@ -538,6 +538,20 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         tb.add("        let mut index = start_index;");
         tb.add("        let enum_id = LiveId(").suf_u64(LiveId::from_str(&enum_name).unwrap().0).add(");");
         tb.add("        match &nodes[start_index].value{");
+        tb.add("            LiveValue::Id(variant)=>{");
+        tb.add("                match variant{");
+        for item in &items {
+            if let EnumKind::Bare = item.kind {
+                tb.add("            LiveId(").suf_u64(LiveId::from_str(&item.name).unwrap().0).add(")=>{index += 1;*self = Self::").ident(&item.name).add("},");
+            }
+        }
+        tb.add("                    _=>{");
+        tb.add("                        cx.apply_error_wrong_enum_variant(live_error_origin!(), index, nodes, enum_id, *variant);");
+        tb.add("                        index = nodes.skip_node(index);");
+        tb.add("                    }");
+        tb.add("                }");
+        tb.add("            },");
+
         tb.add("            LiveValue::BareEnum{base,variant}=>{");
         tb.add("                if *base != enum_id{");
         tb.add("                    cx.apply_error_wrong_enum_base(live_error_origin!(), index, nodes, enum_id, *base);");
