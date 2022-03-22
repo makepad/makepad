@@ -348,6 +348,12 @@ live_primitive!(
             LiveValue::Expr {..} => {
                 match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
                     Ok(ret) => match ret {
+                       LiveEval::Int(v) => {
+                            *self = Vec2::all(v as f32);
+                        }
+                        LiveEval::Float(v) => {
+                            *self = Vec2::all(v as f32);
+                        }
                         LiveEval::Vec2(v) => {*self = v;}
                         _ => {
                             cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "Vec2", ret);
@@ -399,6 +405,15 @@ live_primitive!(
             LiveValue::Expr {..} => {
                 match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
                     Ok(ret) => match ret {
+                        LiveEval::Vec2(v) => {
+                            *self = Vec3{x:v.x, y:v.y, z:0.0};
+                        }
+                        LiveEval::Int(v) => {
+                            *self = Vec3::all(v as f32);
+                        }
+                        LiveEval::Float(v) => {
+                            *self = Vec3::all(v as f32);
+                        }
                         LiveEval::Vec3(v) => {*self = v;}
                         _ => {
                             cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "Vec3", ret);
@@ -454,6 +469,18 @@ live_primitive!(
             LiveValue::Expr {..} => {
                 match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
                     Ok(ret) => match ret {
+                        LiveEval::Vec2(v) => {
+                            *self = Vec4{x:v.x, y:v.y, z:v.x, w:v.y};
+                        }
+                        LiveEval::Vec3(v) => {
+                            *self = Vec4{x:v.x, y:v.y, z:v.z, w:1.0};
+                        }
+                        LiveEval::Int(v) => {
+                            *self = Vec4::all(v as f32);
+                        }
+                        LiveEval::Float(v) => {
+                            *self = Vec4::all(v as f32);
+                        }
                         LiveEval::Vec4(v) => {*self = v;}
                         _ => {
                             cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "Vec4", ret);
