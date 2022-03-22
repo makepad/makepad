@@ -8,53 +8,21 @@ use {
 
 live_register!{
     
-    Frame: {{Frame}} {
-        color: #0000
-    }
-    
-    Solid: Frame{
-        bg:{shape: Shape::Solid}
-    }
-    
-    Rect: Frame{
-        bg:{shape: Shape::Rect}
-    }
-    
-    Box: Frame{
-        bg:{shape: Shape::Box}
-    }
-
-    BoxX: Frame{
-        bg:{shape: Shape::BoxX}
-    }
-
-    BoxY: Frame{
-        bg:{shape: Shape::BoxY}
-    }
-
-    BoxAll: Frame{
-        bg:{shape: Shape::BoxAll}
-    }
-
-    Circle: Frame{
-        bg:{shape: Shape::Circle}
-    }
-
-    Hexagon: Frame{
-        bg:{shape: Shape::Hexagon}
-    }
-
-    UserDraw: Frame{
-        user_draw: true
-    }
-    
-    Clip: Frame{
-        clip: true,
-    }
-
-    Scroll: Frame{
-        clip: true,
-    }
+    Frame: {{Frame}} {}
+    Solid: Frame {bg: {shape: Solid}}
+    Rect: Frame {bg: {shape: Rect}}
+    Box: Frame {bg: {shape: Box}}
+    BoxX: Frame {bg: {shape: BoxX}}
+    BoxY: Frame {bg: {shape: BoxY}}
+    BoxAll: Frame {bg: {shape: BoxAll}}
+    GradientY: Frame {bg: {shape: GradientY}}
+    Circle: Frame {bg: {shape: Circle}}
+    Hexagon: Frame {bg: {shape: Hexagon}}
+    GradientX: Frame {bg: {shape: Solid, fill:GradientX}}
+    GradientY: Frame {bg: {shape: Solid, fill:GradientY}}
+    UserDraw: Frame {user_draw: true}
+    Clip: Frame {clip: true,}
+    Scroll: Frame {clip: true,}
 }
 
 // ClipFrame
@@ -65,11 +33,13 @@ live_register!{
 #[live_register(register_as_frame_component!(Frame))]
 pub struct Frame { // draw info per UI element
     #[alias(color, bg.color)]
+    #[alias(color2, bg.color2)]
     #[alias(border_width, bg.border_width)]
     #[alias(border_color, bg.border_color)]
     #[alias(inset, bg.inset)]
     #[alias(radius, bg.radius)]
     bg: DrawShape,
+    
     layout: Layout,
     
     #[alias(width, walk.width)]
@@ -103,10 +73,13 @@ impl LiveHook for Frame {
         None
     }
     
-    fn after_apply(&mut self, _cx: &mut Cx, _from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, _from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
+        if self.clip && self.view.is_none() {
+            self.view = Some(View::new(cx));
+        }
         //self.self_id = nodes[index].id;
         //if let Some(file_id) = from.file_id() {
-            //self.live_ptr = Some(LivePtr::from_index(file_id, index, cx.live_registry.borrow().file_id_to_file(file_id).generation));
+        //self.live_ptr = Some(LivePtr::from_index(file_id, index, cx.live_registry.borrow().file_id_to_file(file_id).generation));
         //}
     }
     
@@ -119,7 +92,7 @@ impl LiveHook for Frame {
                         .apply(cx, from, index, nodes);
                 }
                 else {
-                    nodes.debug_print(0,100);
+                    nodes.debug_print(0, 100);
                     cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
                     nodes.skip_node(index)
                 }
@@ -139,6 +112,12 @@ impl FrameComponent for Frame {
     
     fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId> {
         self.draw_walk(cx, walk)
+    }
+    
+    fn redraw(&mut self, cx: &mut Cx) {
+        if self.clip {
+            self.view.as_mut().unwrap().redraw(cx);
+        }
     }
 }
 
@@ -205,13 +184,20 @@ impl Frame {
         self.draw_walk(cx, self.get_walk())
     }
     
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId> {
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, mut walk: Walk) -> Result<(), LiveId> {
         if self.hidden {
             return Ok(())
         }
         // the beginning state
         if self.draw_state.begin(cx, DrawState::Drawing(0)) {
             self.defer_walks.clear();
+            
+            if self.clip {
+                if self.view.as_mut().unwrap().begin(cx, walk, self.layout).is_err() {
+                    return Ok(())
+                };
+                walk = Walk::default();
+            }
             
             // ok so.. we have to keep calling draw till we return LiveId(0)
             if self.bg.shape != Shape::None {
@@ -220,6 +206,7 @@ impl Frame {
             else {
                 cx.begin_turtle(walk, self.layout);
             }
+            
             if self.user_draw {
                 return Err(self.self_id)
             }
@@ -259,6 +246,9 @@ impl Frame {
                 }
                 else {
                     cx.end_turtle();
+                }
+                if self.clip {
+                    self.view.as_mut().unwrap().end(cx);
                 }
                 self.draw_state.end();
                 break;

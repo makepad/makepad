@@ -35,21 +35,21 @@ live_register!{
         
         frame: {
             color: (COLOR_BG_APP)
-            walk: {width: Size::Fill, height: Size::Fill}
+            walk: {width: Fill, height: Fill}
             layout: {
                 padding: 8
                 align: {x: 0.0, y: 0.0}
-                spacing: 30.,
+                spacing: 5.,
                 flow: Flow::Down
             },
             Frame {
-                layout: {flow: Flow::Right, spacing: 5.0}
-                walk: {margin: {left: 60}, height: Size::Fit}
+                layout: {flow: Right, spacing: 5.0}
+                walk: {margin: {left: 60}, height: Fit}
                 Button {label: "+  Band"}
                 Button {label: "<"}
                 Button {label: ">"}
                 Frame {
-                    walk: {width: Size::Fill, height: Size::Fixed(36)}
+                    walk: {width: Fill, height: 36}
                     color: #f00
                     bg: {
                         const WAVE_HEIGHT: 0.15
@@ -67,22 +67,47 @@ live_register!{
                 }
             }
             
-            
-            
-            piano: = Piano {}
             Splitter {
-                walk: {width: Size::Fill, height: 100}
-                a: Solid {
-                    border_width: 0.0,
-                    border_color: #f
-                    //radius: vec2(10.0,25.0),
-                    color: #f00
+                align: SplitterAlign::FromEnd(200)
+                walk: {width: Fill, height: 100}
+                a: FoldHeader {
+                    header: BoxY {
+                        radius: vec2(3.0, 1.0),
+                        color: #6
+                        width: Fill,
+                        layout: {flow: Right, padding: 10},
+                        Label {text: "Piano"}
+                    }
+                    body: Frame {
+                        layout: {flow: Overlay}
+                        width: Fit,
+                        height: Fit,
+                        Frame{
+                            layout:{flow: Down},
+                            width: Fit,
+                            height: Fit,
+                            piano: = Piano {}
+                            GradientY {
+                                width: Fill
+                                height: 10
+                                color: #000a,
+                                color2: #0000
+                            }
+                        }
+                        GradientY {
+                            width: Fill
+                            height: 2
+                            color: #000a,
+                            color2: #0000
+                        }
+                    }
                 }
                 b: Box {
+                    clip: true,
                     radius: 10.0
                     border_width: 2.0,
                     border_color: #f
-                    color:#0f0
+                    color: #0f0
                 }
             }
             /*Frame {

@@ -26,6 +26,7 @@ pub mod bare_window;
 pub mod fold_button;
 
 pub mod splitter;
+pub mod fold_header;
 
 mod theme;
 
@@ -53,6 +54,7 @@ pub use crate::{
 
 pub fn live_register(cx: &mut Cx) {
     makepad_platform::live_cx::live_register(cx);
+    crate::fold_header::live_register(cx);
     crate::splitter::live_register(cx);
     crate::theme::live_register(cx);
     crate::label::live_register(cx);

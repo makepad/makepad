@@ -13,12 +13,22 @@ live_register!{
     use makepad_platform::shader::std::*;
     DrawShape: {{DrawShape}} {
         fn pixel(self) -> vec4 {
+            let color = self.color;
+            match self.fill {
+                Fill::Color=>{}
+                Fill::GradientX=>{
+                    color = mix(self.color, self.color2, self.pos.x)
+                }
+                Fill::GradientY=>{
+                    color = mix(self.color, self.color2, self.pos.y)
+                }
+            }
             match self.shape {
                 Shape::None => {
                     return #000
                 }
                 Shape::Solid => {
-                    return Pal::premul(self.color)
+                    return Pal::premul(color)
                 }
                 Shape::Rect => {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -43,7 +53,7 @@ live_register!{
                         self.rect_size.y - (self.inset.y + self.inset.w+self.border_width*2.0),
                         max(1.0,self.radius.x)
                     )
-                    sdf.fill_keep(self.color)
+                    sdf.fill_keep(color)
                     if self.border_width > 0.0 {
                         sdf.stroke(self.border_color, self.border_width)
                     }
@@ -59,7 +69,7 @@ live_register!{
                         self.radius.x,
                         self.radius.y
                     )
-                    sdf.fill_keep(self.color)
+                    sdf.fill_keep(color)
                     if self.border_width > 0.0 {
                         sdf.stroke(self.border_color, self.border_width)
                     }
@@ -75,7 +85,7 @@ live_register!{
                         self.radius.x,
                         self.radius.y
                     )
-                    sdf.fill_keep(self.color)
+                    sdf.fill_keep(color)
                     if self.border_width > 0.0 {
                         sdf.stroke(self.border_color, self.border_width)
                     }
@@ -93,7 +103,7 @@ live_register!{
                         self.radius.z,
                         self.radius.w
                     )
-                    sdf.fill_keep(self.color)
+                    sdf.fill_keep(color)
                     if self.border_width > 0.0 {
                         sdf.stroke(self.border_color, self.border_width)
                     }
@@ -118,7 +128,7 @@ live_register!{
                             )
                         )
                     }
-                    sdf.fill_keep(self.color)
+                    sdf.fill_keep(color)
                     if self.border_width > 0.0 {
                         sdf.stroke(self.border_color, self.border_width)
                     }
@@ -143,7 +153,7 @@ live_register!{
                             )
                         )
                     }
-                    sdf.fill_keep(self.color)
+                    sdf.fill_keep(color)
                     if self.border_width > 0.0 {
                         sdf.stroke(self.border_color, self.border_width)
                     }
@@ -170,12 +180,22 @@ pub enum Shape {
     Hexagon,
 }
 
+#[derive(Live, LiveHook, PartialEq)]
+#[repr(u32)]
+pub enum Fill {
+   #[pick] Color,
+    GradientX,
+    GradientY
+}
+
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawShape {
     #[live] pub deref_target: DrawQuad,
     #[live] pub shape: Shape,
+    #[live] pub fill: Fill,
     #[live(vec4(0.0,1.0,0.0,1.0))] pub color: Vec4,
+    #[live(vec4(0.0,1.0,0.0,1.0))] pub color2: Vec4,
     #[live] pub border_width: f32,
     #[live] pub border_color: Vec4,
     #[live] pub inset: Vec4,
