@@ -157,11 +157,11 @@ impl FrameComponent for Splitter {
         self.walk
     }
     
-    fn find_child(&self, id: LiveId) -> Option<&Box<dyn FrameComponent >> {
+    fn find_child(&self, id: &[LiveId]) -> Option<&Box<dyn FrameComponent >> {
         frame_component_ref_find_child!(id, self.a, self.b)
     }
     
-    fn find_child_mut(&mut self, id: LiveId) -> Option<&mut Box<dyn FrameComponent >> {
+    fn find_child_mut(&mut self, id: &[LiveId]) -> Option<&mut Box<dyn FrameComponent >> {
         frame_component_ref_find_child_mut!(id, self.a, self.b)
     }
     
