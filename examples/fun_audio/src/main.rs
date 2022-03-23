@@ -36,7 +36,8 @@ live_register!{
             mouse_cursor: Default,
             bg: {color: #5},
             width: Fill
-            layout: {flow: Right, padding: 8, spacing: 5, align: {x: 0.0}}
+            height: Fit
+            layout: {flow: Right, padding: 8, spacing: 5}
         }
     }
     
@@ -133,6 +134,7 @@ live_register!{
                 walk: {width: Fill, height: Fill}
                 a: FoldablePiano {}
                 b: Box {
+                    clip: true,
                     mouse_cursor: Default,
                     bg: {color: #4, radius: 3.0, border_width: 0.5, border_color: #3}
                     height: Fill
@@ -152,6 +154,7 @@ live_register!{
                                     bg: {color: #f00}
                                 }
                                 label:= Label {text: "Instrument"}
+                                Rect{bg:{color:#f00}, width:Fill, height:8}
                             }
                             body: Frame{
                                 bg: {color: #f00},
