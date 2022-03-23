@@ -153,8 +153,19 @@ live_register!{
                                 }
                                 label:= Label {text: "Instrument"}
                             }
-                            body: {
-                                
+                            body: Frame{
+                                bg: {color: #f00},
+                                width: Fill,
+                                height: Fit,
+                                layout: {flow: Down}
+                                Rect {
+                                    mouse_cursor: Default,
+                                    bg: {color: #5},
+                                    width: Fill
+                                    height: Fit
+                                    layout: {flow: Right, padding: 8, spacing: 5, align: {x: 0.0}}
+                                    label:= Label {text: "Stack item"}
+                                }
                             }
                         }
                     }
