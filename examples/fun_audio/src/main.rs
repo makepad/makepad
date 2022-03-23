@@ -16,38 +16,40 @@ live_register!{
     const HEADER_RADIUS_CLOSED: vec2(3.0, 3.0)
     const HEADER_RADIUS_OPEN: vec2(3.0, 1.0)
     
-    FunFoldHeader: FoldHeader {
+    MainHeader: FoldHeader {
         closed_state: {apply: {
-            header: {
-                bg: {radius: (HEADER_RADIUS_CLOSED)}
-            }
+            header: {bg: {radius: (HEADER_RADIUS_CLOSED)}}
         }}
         opened_state: {apply: {
-            header: {
-                bg: {radius: (HEADER_RADIUS_OPEN)}
-            }
+            header: {bg: {radius: (HEADER_RADIUS_OPEN)}}
         }}
         header: BoxY {
+            mouse_cursor: Default,
             bg: {color: #6},
             width: Fill
             layout: {flow: Right, padding: 8, spacing: 5}
-            fold_button:= FoldButton {}
         }
     }
     
-    FoldablePiano: FunFoldHeader {
-        header:{
-            label:= Label {text: "Keys"}            
+    SubHeader: FoldHeader {
+        header: Rect {
+            mouse_cursor: Default,
+            bg: {color: #5},
+            width: Fill
+            layout: {flow: Right, padding: 8, spacing: 5, align: {x: 0.0}}
+        }
+    }
+    
+    FoldablePiano: MainHeader {
+        header: {
+            fold_button:= FoldButton {}
+            label:= Label {text: "Keys"}
         }
         closed_state: {apply: {
-            body: {
-                g1: {bg: {color: #0000}}
-            }
+            body: {g1: {bg: {color: #0000}}}
         }}
         opened_state: {apply: {
-            body: {
-                g1: {bg: {color: #000a}}
-            }
+            body: {g1: {bg: {color: #000a}}}
         }}
         body: Frame {
             layout: {flow: Overlay}
@@ -127,19 +129,34 @@ live_register!{
             }
             
             Splitter {
-                align: SplitterAlign::FromEnd(200)
-                walk: {width: Fill, height: 100}
+                align: SplitterAlign::FromEnd(300)
+                walk: {width: Fill, height: Fill}
                 a: FoldablePiano {}
-                b: FunFoldHeader {
-                    header:{
-                        swatch:= Circle {
-                            width: 10,
-                            height: 10
-                            bg: {color: #f00}
+                b: Box {
+                    mouse_cursor: Default,
+                    bg: {color: #4, radius: 3.0, border_width: 0.5, border_color: #3}
+                    height: Fill
+                    layout: {flow: Down, padding: 0.5}
+                    MainHeader {
+                        header: {
+                            mouse_cursor: Hand,
+                            label:= Label {text: "Instruments"}
                         }
-                        label:= Label {text: "Instrument name"}
-                    }
-                    body:Frame{
+                        body: SubHeader {
+                            header: {
+                                mouse_cursor: Default,
+                                fold_button:= FoldButton {}
+                                swatch:= Circle {
+                                    width: 10,
+                                    height: 10
+                                    bg: {color: #f00}
+                                }
+                                label:= Label {text: "Instrument"}
+                            }
+                            body: {
+                                
+                            }
+                        }
                     }
                 }
             }

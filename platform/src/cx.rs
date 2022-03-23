@@ -212,6 +212,7 @@ impl Default for Cx {
             id!(TextStyle),
             id!(Wrapping),
             id!(SplitterAlign),
+            id!(MouseCursor)
         ]);
         
         Self {
