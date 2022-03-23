@@ -9,17 +9,17 @@ use {
 live_register!{
     
     Frame: {{Frame}} {}
-    Solid: Frame {bg:{shape: Solid}}
-    Rect: Frame {bg:{shape: Rect}}
-    Box: Frame {bg:{shape: Box}}
-    BoxX: Frame {bg:{shape: BoxX}}
-    BoxY: Frame {bg:{shape: BoxY}}
-    BoxAll: Frame {bg:{shape: BoxAll}}
-    GradientY: Frame {bg:{shape: GradientY}}
-    Circle: Frame {bg:{shape: Circle}}
-    Hexagon: Frame {bg:{shape: Hexagon}}
-    GradientX: Frame {bg:{shape: Solid, fill:GradientX}}
-    GradientY: Frame {bg:{shape: Solid, fill:GradientY}}
+    Solid: Frame {bg: {shape: Solid}}
+    Rect: Frame {bg: {shape: Rect}}
+    Box: Frame {bg: {shape: Box}}
+    BoxX: Frame {bg: {shape: BoxX}}
+    BoxY: Frame {bg: {shape: BoxY}}
+    BoxAll: Frame {bg: {shape: BoxAll}}
+    GradientY: Frame {bg: {shape: GradientY}}
+    Circle: Frame {bg: {shape: Circle}}
+    Hexagon: Frame {bg: {shape: Hexagon}}
+    GradientX: Frame {bg: {shape: Solid, fill: GradientX}}
+    GradientY: Frame {bg: {shape: Solid, fill: GradientY}}
     UserDraw: Frame {user_draw: true}
     Clip: Frame {clip: true,}
     Scroll: Frame {clip: true,}
@@ -88,16 +88,16 @@ impl LiveHook for Frame {
     
     fn apply_value_unknown(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         let id = nodes[index].id;
-        match from{
-            ApplyFrom::Animate=>{
-                if let Some(component) = self.children.get_mut(&nodes[index].id){
+        match from {
+            ApplyFrom::Animate => {
+                if let Some(component) = self.children.get_mut(&nodes[index].id) {
                     component.apply(cx, from, index, nodes)
                 }
-                else{
+                else {
                     nodes.skip_node(index)
                 }
             }
-            _=>{
+            _ => {
                 if nodes[index].origin.id_non_unique() {
                     self.create_order.push(id);
                     return self.children.get_or_insert(cx, id, | cx | {FrameComponentRef::new(cx)})
@@ -133,17 +133,12 @@ impl FrameComponent for Frame {
             child.as_mut().unwrap().redraw(cx);
         }
     }
-}
-
-#[derive(Clone)]
-enum DrawState {
-    Drawing(usize),
-    DeferWalk(usize)
-}
-
-impl Frame {
-    pub fn find_child(&self, id: LiveId) -> Option<&Box<dyn FrameComponent >> {
-        if let Some(child) = self.children.get(&id) {
+    
+    fn find_child(&self, id: &[LiveId]) -> Option<&Box<dyn FrameComponent >> {
+        if let Some(child) = self.children.get(&id[0]) {
+            if id.len()>1 {
+                return child.as_ref().unwrap().find_child(&id[1..])
+            }
             return child.as_ref();
         }
         for child in self.children.values() {
@@ -154,7 +149,50 @@ impl Frame {
         None
     }
     
+
+    fn find_child_mut(&mut self, id: &[LiveId]) -> Option<&mut Box<dyn FrameComponent >> {
+        if self.children.get(&id[0]).is_some() {
+            if id.len()>1{
+                return self.children.get_mut(&id[0]).unwrap().as_mut().unwrap().find_child_mut(&id[1..])
+            }
+            return self.children.get_mut(&id[0]).unwrap().as_mut()
+        }
+        for child in self.children.values_mut() {
+            if let Some(c) = child.as_mut().unwrap().find_child_mut(id) {
+                return Some(c)
+            }
+        }
+        None
+    }    
+}
+
+#[derive(Clone)]
+enum DrawState {
+    Drawing(usize),
+    DeferWalk(usize)
+}
+
+impl Frame {
+    
     pub fn child<T: 'static + FrameComponent>(&self, id: LiveId) -> Option<&T> {
+        if let Some(child) = self.find_child(&[id]) {
+            child.cast::<T>()
+        }
+        else {
+            None
+        }
+    }
+    
+    pub fn child_mut<T: 'static + FrameComponent>(&mut self, id: LiveId) -> Option<&mut T> {
+        if let Some(child) = self.find_child_mut(&[id]) {
+            child.cast_mut::<T>()
+        }
+        else {
+            None
+        }
+    }
+    
+    pub fn child_path<T: 'static + FrameComponent>(&self, id: &[LiveId]) -> Option<&T> {
         if let Some(child) = self.find_child(id) {
             child.cast::<T>()
         }
@@ -163,19 +201,7 @@ impl Frame {
         }
     }
     
-    pub fn find_child_mut(&mut self, id: LiveId) -> Option<&mut Box<dyn FrameComponent >> {
-        if self.children.get(&id).is_some() {
-            return self.children.get_mut(&id).unwrap().as_mut()
-        }
-        for child in self.children.values_mut() {
-            if let Some(c) = child.as_mut().unwrap().find_child_mut(id) {
-                return Some(c)
-            }
-        }
-        None
-    }
-    
-    pub fn child_mut<T: 'static + FrameComponent>(&mut self, id: LiveId) -> Option<&mut T> {
+    pub fn child_path_mut<T: 'static + FrameComponent>(&mut self, id: &[LiveId]) -> Option<&mut T> {
         if let Some(child) = self.find_child_mut(id) {
             child.cast_mut::<T>()
         }
@@ -191,7 +217,7 @@ impl Frame {
                 actions.merge(*id, child.handle_component_event(cx, event, *id));
             }
         }
-        if let Some(cursor) = &self.mouse_cursor{
+        if let Some(cursor) = &self.mouse_cursor {
             match event.hits(cx, self.bg.draw_vars.area) {
                 HitEvent::FingerHover(f) => {
                     match f.hover_state {
@@ -201,7 +227,7 @@ impl Frame {
                         _ => {}
                     }
                 }
-                _=>()            
+                _ => ()
             }
         }
         

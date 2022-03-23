@@ -128,7 +128,6 @@ live_register!{
                     }
                 }
             }
-            
             Splitter {
                 align: SplitterAlign::FromEnd(300)
                 walk: {width: Fill, height: Fill}
@@ -158,12 +157,12 @@ live_register!{
                             }
                             body: Frame{
                                 bg: {color: #f00},
-                                width: Fill,
-                                height: Fit,
+                                width: Fill
+                                height: Fit
                                 layout: {flow: Down}
                                 Rect {
-                                    mouse_cursor: Default,
-                                    bg: {color: #5},
+                                    mouse_cursor: Default
+                                    bg: {color: #5}
                                     width: Fill
                                     height: Fit
                                     layout: {flow: Right, padding: 8, spacing: 5, align: {x: 0.0}}
@@ -175,7 +174,6 @@ live_register!{
                 }
             }
         }
-        
         scroll_view: {
             h_show: true,
             v_show: true,
@@ -227,6 +225,7 @@ impl App {
             match action {
                 AudioGraphAction::Midi1Data(data) => if let Midi1Event::Note(note) = data.decode() {
                     let piano = self.frame.child_mut::<Piano>(id!(piano)).unwrap();
+                    
                     piano.set_note(cx, note.is_on, note.note_number)
                 }
             }
