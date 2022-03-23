@@ -52,8 +52,8 @@ pub trait FrameComponent: LiveApply {
     // defaults
     fn redraw(&mut self, _cx:&mut Cx){}
     fn draw_walk_component(&mut self, cx: &mut Cx2d) -> Result<(), LiveId>{self.draw_component(cx, self.get_walk())}
-    fn find_child(&self, _id: LiveId) -> Option<&Box<dyn FrameComponent >> {None}
-    fn find_child_mut(&mut self, _id: LiveId) -> Option<&mut Box<dyn FrameComponent >> {None}
+    fn find_child(&self, _id: &[LiveId]) -> Option<&Box<dyn FrameComponent >> {None}
+    fn find_child_mut(&mut self,  _id: &[LiveId]) -> Option<&mut Box<dyn FrameComponent >> {None}
     fn type_id(&self) -> LiveType where Self: 'static {LiveType::of::<Self>()}
 }
 
