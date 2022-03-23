@@ -131,11 +131,11 @@ enum DrawState{
 }
 
 impl FrameComponent for Splitter {
-    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, _self_id: LiveId) -> FrameComponentActionRef {
+    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, self_id: LiveId) -> FrameComponentActionRef {
         let mut actions = Vec::new();
         let mut redraw = false;
         self.handle_event_with_fn(cx, event, &mut |_,action|{
-            actions.merge(id!(a),action.into()); 
+            actions.merge(self_id,action.into()); 
             redraw = true;
         });
         if let Some(child) = self.a.as_mut(){

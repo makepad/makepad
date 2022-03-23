@@ -4,6 +4,8 @@ pub use {
         cell::RefCell
     },
     crate::{
+        makepad_math::*,
+        draw_list::DrawUniforms,
         makepad_shader_compiler::{
             ShaderTy
         },
@@ -211,29 +213,33 @@ impl Area {
                     return Rect::default()
                 }
                 if cx.draw_shaders.generation != draw_call.draw_shader.draw_shader_generation {
-                    println!("Generation invalid get_rect {} {:?} {} {}",draw_list.debug_id, inst, cx.draw_shaders.generation, draw_call.draw_shader.draw_shader_generation);
+                    println!("Generation invalid get_rect {} {:?} {} {}", draw_list.debug_id, inst, cx.draw_shaders.generation, draw_call.draw_shader.draw_shader_generation);
                     return Rect::default()
                 }
                 let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
                 // ok now we have to patch x/y/w/h into it
                 let buf = draw_call.instances.as_ref().unwrap();
                 if let Some(rect_pos) = sh.mapping.rect_pos {
-                    let x = buf[inst.instance_offset + rect_pos + 0];
-                    let y = buf[inst.instance_offset + rect_pos + 1];
+                    let pos = vec2(buf[inst.instance_offset + rect_pos + 0], buf[inst.instance_offset + rect_pos + 1]);
                     if let Some(rect_size) = sh.mapping.rect_size {
-                        let w = buf[inst.instance_offset + rect_size + 0];
-                        let h = buf[inst.instance_offset + rect_size + 1];
-                        return draw_call.draw_uniforms.clip_and_scroll_rect(x, y, w, h);
+                        let size = vec2(buf[inst.instance_offset + rect_size + 0], buf[inst.instance_offset + rect_size + 1]);
+                        let du = &draw_call.draw_uniforms;
+                        return Rect{pos,size}.scroll_and_clip(
+                            vec2(du.draw_scroll.x, du.draw_scroll.y),
+                            (vec2(du.draw_clip_x1,du.draw_clip_y1),vec2(du.draw_clip_x2,du.draw_clip_y2)),
+                        );
+                        //return draw_call.draw_uniforms.clip_and_scroll_rect(x, y, w, h);
                     }
                 }
                 Rect::default()
             },
             Area::DrawList(list) => {
+                // we need to clip this drawlist too
                 let draw_list = &cx.draw_lists[list.draw_list_id];
-                Rect {
-                    pos: draw_list.rect.pos - draw_list.parent_scroll,
-                    size: draw_list.rect.size
-                }
+                return draw_list.rect.scroll_and_clip(
+                    draw_list.parent_scroll,
+                    draw_list.clip_points,
+                );                
             },
             _ => Rect::default(),
         }
@@ -252,7 +258,7 @@ impl Area {
                 }
                 let draw_call = &draw_list.draw_items[inst.draw_item_id].draw_call.as_ref().unwrap();
                 if cx.draw_shaders.generation != draw_call.draw_shader.draw_shader_generation {
-                    println!("Generation invalid abs_to_rel {} {:?} {} {}",draw_list.debug_id,inst, cx.draw_shaders.generation, draw_call.draw_shader.draw_shader_generation);
+                    println!("Generation invalid abs_to_rel {} {:?} {} {}", draw_list.debug_id, inst, cx.draw_shaders.generation, draw_call.draw_shader.draw_shader_generation);
                     return abs;
                 }
                 

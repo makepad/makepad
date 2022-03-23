@@ -66,18 +66,6 @@ impl DrawUniforms {
         self.draw_clip_y2 = clip.1.y;
     }
     
-    pub fn clip_and_scroll_rect(&self, x: f32, y: f32, w: f32, h: f32) -> Rect {
-        let mut x1 = x - self.draw_scroll.x;
-        let mut y1 = y - self.draw_scroll.y;
-        let mut x2 = x1 + w;
-        let mut y2 = y1 + h;
-        x1 = self.draw_clip_x1.max(x1).min(self.draw_clip_x2);
-        y1 = self.draw_clip_y1.max(y1).min(self.draw_clip_y2);
-        x2 = self.draw_clip_x1.max(x2).min(self.draw_clip_x2);
-        y2 = self.draw_clip_y1.max(y2).min(self.draw_clip_y2);
-        return Rect {pos: vec2(x1, y1), size: vec2(x2 - x1, y2 - y1)};
-    }
-    
     pub fn set_local_scroll(&mut self, scroll: Vec2, local_scroll: Vec2, options: &CxDrawShaderOptions) {
         self.draw_scroll.x = scroll.x;
         if !options.no_h_scroll {
@@ -201,6 +189,7 @@ pub struct DrawList {
     pub platform: CxPlatformView,
     
     pub rect: Rect,
+    pub clip_points: (Vec2,Vec2),
     pub is_clipped: bool,
     
     pub debug: Option<DrawListDebug>
@@ -239,22 +228,25 @@ impl DrawList {
         }
     }
     
-    pub fn intersect_clip(&self, clip: (Vec2, Vec2)) -> (Vec2, Vec2) {
+    pub fn intersect_clip(&mut self, clip: (Vec2, Vec2)) -> (Vec2, Vec2) {
         if self.is_clipped {
             let min_x = self.rect.pos.x - self.parent_scroll.x;
             let min_y = self.rect.pos.y - self.parent_scroll.y;
             let max_x = self.rect.pos.x + self.rect.size.x - self.parent_scroll.x;
             let max_y = self.rect.pos.y + self.rect.size.y - self.parent_scroll.y;
             
-            (Vec2 {
+            let ret = (Vec2 {
                 x: min_x.max(clip.0.x),
                 y: min_y.max(clip.0.y)
             }, Vec2 {
                 x: max_x.min(clip.1.x),
                 y: max_y.min(clip.1.y)
-            })
+            });
+            self.clip_points = ret;
+            ret
         }
         else {
+            self.clip_points = clip;
             clip
         }
     }

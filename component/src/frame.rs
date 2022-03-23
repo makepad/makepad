@@ -52,6 +52,7 @@ pub struct Frame { // draw info per UI element
     clip: bool,
     hidden: bool,
     user_draw: bool,
+    mouse_cursor: Option<MouseCursor>,
     
     #[rust] view: Option<View>,
     
@@ -128,6 +129,9 @@ impl FrameComponent for Frame {
         if self.clip {
             self.view.as_mut().unwrap().redraw(cx);
         }
+        for child in self.children.values_mut() {
+            child.as_mut().unwrap().redraw(cx);
+        }
     }
 }
 
@@ -187,6 +191,20 @@ impl Frame {
                 actions.merge(*id, child.handle_component_event(cx, event, *id));
             }
         }
+        if let Some(cursor) = &self.mouse_cursor{
+            match event.hits(cx, self.bg.draw_vars.area) {
+                HitEvent::FingerHover(f) => {
+                    match f.hover_state {
+                        HoverState::In => {
+                            cx.set_hover_mouse_cursor(*cursor);
+                        }
+                        _ => {}
+                    }
+                }
+                _=>()            
+            }
+        }
+        
         FrameActions::from_vec(actions)
     }
     
