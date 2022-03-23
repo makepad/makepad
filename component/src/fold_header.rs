@@ -109,11 +109,11 @@ impl FrameComponent for FoldHeader {
         self.walk
     }
     
-    fn find_child(&self, id: LiveId) -> Option<&Box<dyn FrameComponent >> {
+    fn find_child(&self, id: &[LiveId]) -> Option<&Box<dyn FrameComponent >> {
         frame_component_ref_find_child!(id, self.header, self.body)
     }
     
-    fn find_child_mut(&mut self, id: LiveId) -> Option<&mut Box<dyn FrameComponent >> {
+    fn find_child_mut(&mut self, id: &[LiveId]) -> Option<&mut Box<dyn FrameComponent >> {
         frame_component_ref_find_child_mut!(id, self.header, self.body)
     }
     
