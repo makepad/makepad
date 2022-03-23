@@ -1,4 +1,12 @@
-#[derive(Clone, Debug, Hash, PartialEq)]
+use {
+    crate::{
+        makepad_derive_live::*,
+        live_traits::*,
+        cx::Cx,
+    }
+};
+
+#[derive(Clone, Copy, Debug, Hash, PartialEq, Live, LiveHook)]
 pub enum MouseCursor {
     // don't show the cursor
     Hidden,
@@ -10,7 +18,7 @@ pub enum MouseCursor {
     //  *   *
     //  *    *
     //        *
-    Default,
+    #[pick] Default,
     
     //     |
     //     |
