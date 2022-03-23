@@ -20,8 +20,6 @@ pub mod window_menu;
 
 pub use makepad_platform;
 
-pub mod frame_template;
-pub mod empty_template;
 pub mod bare_window;
 pub mod fold_button;
 

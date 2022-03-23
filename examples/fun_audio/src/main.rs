@@ -174,26 +174,6 @@ live_register!{
                     }
                 }
             }
-            /*Frame {
-                layout: {flow: Flow::Right, spacing: 30.}
-                Frame {color: #0f0, width: Size::Fill, height: 40}
-                Frame {
-                    color: #0ff
-                    layout: {
-                        padding: 10
-                        flow: Flow::Down
-                        spacing: 10
-                    }
-                    width: Size::Fixed(100)
-                    height: 300
-                    Frame {color: #00f, width: 40, height: Size::Fill}
-                    Frame {color: #f00, width: 40, height: 40}
-                    Frame {color: #00f, width: 40, height: 40}
-                }
-                Frame {color: #f00, width: 40, height: 40}
-                Frame {color: #f0f, width: Size::Fill, height: 60}
-                Frame {color: #f00, width: 40, height: 40}
-            }*/
         }
         
         scroll_view: {
@@ -251,22 +231,7 @@ impl App {
                 }
             }
         };
-        
-        //let instrument = self.instrument.clone();
-        /*
-        for action in self.piano.handle_event(cx, event) {
-            match action {
-                PianoAction::Note {is_on, note_number, velocity} => {
-                    self.audio_graph.send_midi_1_data(Midi1Note {
-                        is_on,
-                        note_number,
-                        channel: 0,
-                        velocity
-                    }.into());
-                }
-            }
-        };*/
-        
+
         match event {
             Event::KeyDown(ke) => {
                 if let KeyCode::F1 = ke.key_code {
@@ -288,13 +253,7 @@ impl App {
             return;
         }
         
-        //self.piano.draw(cx);
         while self.frame.draw(cx).is_err() {};
-        /*
-        if self.scroll_view.begin(cx).is_ok() {
-            self.scroll_view.end(cx);
-        }*/
-        
         
         self.window.end(cx);
     }
