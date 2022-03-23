@@ -98,6 +98,12 @@ impl FrameComponent for FoldHeader {
 
     fn redraw(&mut self, cx:&mut Cx){
         self.view.redraw(cx);
+        if let Some(child) = self.header.as_mut(){
+            child.redraw(cx);
+        }
+        if let Some(child) = self.body.as_mut(){
+            child.redraw(cx);
+        }
     }
     
     fn get_walk(&self) -> Walk {
