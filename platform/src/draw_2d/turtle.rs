@@ -121,12 +121,16 @@ impl<'a> Cx2d<'a> {
         let turtle = self.turtles.last_mut().unwrap();
         let defer_index = turtle.defer_count;
         let pos = turtle.pos;
+        let size = vec2(
+            turtle.eval_width(walk.width, walk.margin, turtle.layout.flow),
+            turtle.eval_height(walk.height, walk.margin, turtle.layout.flow)
+        );
         let margin_size = walk.margin.size();
         match turtle.layout.flow {
             Flow::Right if walk.width.is_fill() => {
                 let spacing = turtle.child_spacing(self.turtle_walks.len());
                 turtle.pos.x += margin_size.x + spacing.x;
-                turtle.update_used(0.0, margin_size.y);
+                turtle.update_used(0.0, size.y + margin_size.y);
                 turtle.defer_count += 1;
                 Some(DeferWalk {
                     defer_index,
@@ -138,7 +142,7 @@ impl<'a> Cx2d<'a> {
             Flow::Down if walk.height.is_fill() => {
                 let spacing = turtle.child_spacing(self.turtle_walks.len());
                 turtle.pos.y += margin_size.y + spacing.y;
-                turtle.update_used(margin_size.x, 0.0);
+                turtle.update_used(size.x + margin_size.x, 0.0);
                 turtle.defer_count += 1;
                 Some(DeferWalk {
                     defer_index,
@@ -224,7 +228,7 @@ impl<'a> Cx2d<'a> {
                     for i in turtle.turtle_walks_start..self.turtle_walks.len() {
                         let walk = &self.turtle_walks[i];
                         let shift_x = walk.defer_index as f32 * part;
-                        let shift_y = turtle.layout.align.y * (turtle.no_pad_height() - walk.rect.size.y);
+                        let shift_y = turtle.layout.align.y * (turtle.no_pad_height_or_used() - walk.rect.size.y);
                         let align_start = walk.align_start;
                         let align_end = self.get_turtle_walk_align_end(i);
                         self.move_align_list(shift_x, shift_y, align_start, align_end);
@@ -234,7 +238,7 @@ impl<'a> Cx2d<'a> {
                     for i in turtle.turtle_walks_start..self.turtle_walks.len() {
                         let walk = &self.turtle_walks[i];
                         let shift_x = turtle.layout.align.x * turtle.width_left();
-                        let shift_y = turtle.layout.align.y * (turtle.no_pad_height() - walk.rect.size.y);
+                        let shift_y = turtle.layout.align.y * (turtle.no_pad_height_or_used() - walk.rect.size.y);
                         let align_start = walk.align_start;
                         let align_end = self.get_turtle_walk_align_end(i);
                         self.move_align_list(shift_x, shift_y, align_start, align_end);
@@ -247,7 +251,7 @@ impl<'a> Cx2d<'a> {
                     let part = left / turtle.defer_count as f32;
                     for i in turtle.turtle_walks_start..self.turtle_walks.len() {
                         let walk = &self.turtle_walks[i];
-                        let shift_x = turtle.layout.align.x * (turtle.no_pad_width() - walk.rect.size.x);
+                        let shift_x = turtle.layout.align.x * (turtle.no_pad_width_or_used() - walk.rect.size.x);
                         let shift_y = walk.defer_index as f32 * part;
                         let align_start = walk.align_start;
                         let align_end = self.get_turtle_walk_align_end(i);
@@ -257,7 +261,7 @@ impl<'a> Cx2d<'a> {
                 else {
                     for i in turtle.turtle_walks_start..self.turtle_walks.len() {
                         let walk = &self.turtle_walks[i];
-                        let shift_x = turtle.layout.align.x * (turtle.no_pad_width() - walk.rect.size.x);
+                        let shift_x = turtle.layout.align.x * (turtle.no_pad_width_or_used() - walk.rect.size.x);
                         let shift_y = turtle.layout.align.y * turtle.height_left();
                         let align_start = walk.align_start;
                         let align_end = self.get_turtle_walk_align_end(i);
@@ -267,9 +271,8 @@ impl<'a> Cx2d<'a> {
             },
             Flow::Overlay => {
                 for i in turtle.turtle_walks_start..self.turtle_walks.len() {
-                    let walk = &self.turtle_walks[i];
-                    let shift_x = turtle.layout.align.x * (turtle.no_pad_width() - walk.rect.size.x);
-                    let shift_y = turtle.layout.align.y * (turtle.no_pad_height() - walk.rect.size.y);
+                    let walk = &self.turtle_walks[i];let shift_x = turtle.layout.align.x * (turtle.no_pad_width_or_used() - walk.rect.size.x);
+                    let shift_y = turtle.layout.align.y * (turtle.no_pad_height_or_used() - walk.rect.size.y);
                     let align_start = walk.align_start;
                     let align_end = self.get_turtle_walk_align_end(i);
                     self.move_align_list(shift_x, shift_y, align_start, align_end);
@@ -544,6 +547,26 @@ impl Turtle {
     pub fn no_pad_height(&self) -> f32 {
         return max_zero_keep_nan(self.height - self.layout.padding.height());
     }
+    
+    pub fn no_pad_height_or_used(&self) -> f32 {
+        let r = max_zero_keep_nan(self.height - self.layout.padding.height());
+        if r.is_nan(){
+            self.height_used - self.layout.padding.bottom
+        }        
+        else {
+            r
+        }
+    }
+    
+    pub fn no_pad_width_or_used(&self) -> f32 {
+        let r = max_zero_keep_nan(self.width - self.layout.padding.width());
+        if r.is_nan(){
+            self.width_used - self.layout.padding.right
+        }        
+        else {
+            r
+        }
+    }    
 }
 
 impl DeferWalk {

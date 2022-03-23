@@ -64,7 +64,6 @@ enum DrawState{
 
 impl FrameComponent for FoldHeader {
     fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, _self_id: LiveId) -> FrameComponentActionRef {
-
         if self.animator_handle_event(cx, event).is_animating() {
             if self.animator.is_track_of_animating(cx, self.closed_state) {
                 let rect = self.view.get_rect(cx);
