@@ -96,6 +96,7 @@ impl AudioComponent for PluginMusicDevice {
     }
     
     fn handle_event_with_fn(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)){
+        // ui EVENT
         match event {
             Event::Signal(se) => while let Ok(to_ui) = self.to_ui.try_recv(se) {
                 match to_ui{

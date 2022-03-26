@@ -61,8 +61,8 @@ impl Default for Axis {
 
 #[derive(Copy, Clone, Debug, Live, LiveHook)]
 pub enum Flow {
-    #[pick] Right,
-    Down,
+    Right,
+    #[pick] Down,
     Overlay
 }
 
@@ -228,7 +228,7 @@ impl<'a> Cx2d<'a> {
                     for i in turtle.turtle_walks_start..self.turtle_walks.len() {
                         let walk = &self.turtle_walks[i];
                         let shift_x = walk.defer_index as f32 * part;
-                        let shift_y = turtle.layout.align.y * (turtle.no_pad_height_or_used() - walk.rect.size.y);
+                        let shift_y = turtle.layout.align.y * (turtle.padded_height_or_used() - walk.rect.size.y);
                         let align_start = walk.align_start;
                         let align_end = self.get_turtle_walk_align_end(i);
                         self.move_align_list(shift_x, shift_y, align_start, align_end);
@@ -238,7 +238,7 @@ impl<'a> Cx2d<'a> {
                     for i in turtle.turtle_walks_start..self.turtle_walks.len() {
                         let walk = &self.turtle_walks[i];
                         let shift_x = turtle.layout.align.x * turtle.width_left();
-                        let shift_y = turtle.layout.align.y * (turtle.no_pad_height_or_used() - walk.rect.size.y);
+                        let shift_y = turtle.layout.align.y * (turtle.padded_height_or_used() - walk.rect.size.y);
                         let align_start = walk.align_start;
                         let align_end = self.get_turtle_walk_align_end(i);
                         self.move_align_list(shift_x, shift_y, align_start, align_end);
@@ -251,7 +251,7 @@ impl<'a> Cx2d<'a> {
                     let part = left / turtle.defer_count as f32;
                     for i in turtle.turtle_walks_start..self.turtle_walks.len() {
                         let walk = &self.turtle_walks[i];
-                        let shift_x = turtle.layout.align.x * (turtle.no_pad_width_or_used() - walk.rect.size.x);
+                        let shift_x = turtle.layout.align.x * (turtle.padded_width_or_used() - walk.rect.size.x);
                         let shift_y = walk.defer_index as f32 * part;
                         let align_start = walk.align_start;
                         let align_end = self.get_turtle_walk_align_end(i);
@@ -261,7 +261,7 @@ impl<'a> Cx2d<'a> {
                 else {
                     for i in turtle.turtle_walks_start..self.turtle_walks.len() {
                         let walk = &self.turtle_walks[i];
-                        let shift_x = turtle.layout.align.x * (turtle.no_pad_width_or_used() - walk.rect.size.x);
+                        let shift_x = turtle.layout.align.x * (turtle.padded_width_or_used() - walk.rect.size.x);
                         let shift_y = turtle.layout.align.y * turtle.height_left();
                         let align_start = walk.align_start;
                         let align_end = self.get_turtle_walk_align_end(i);
@@ -271,8 +271,8 @@ impl<'a> Cx2d<'a> {
             },
             Flow::Overlay => {
                 for i in turtle.turtle_walks_start..self.turtle_walks.len() {
-                    let walk = &self.turtle_walks[i];let shift_x = turtle.layout.align.x * (turtle.no_pad_width_or_used() - walk.rect.size.x);
-                    let shift_y = turtle.layout.align.y * (turtle.no_pad_height_or_used() - walk.rect.size.y);
+                    let walk = &self.turtle_walks[i];let shift_x = turtle.layout.align.x * (turtle.padded_width_or_used() - walk.rect.size.x);
+                    let shift_y = turtle.layout.align.y * (turtle.padded_height_or_used() - walk.rect.size.y);
                     let align_start = walk.align_start;
                     let align_end = self.get_turtle_walk_align_end(i);
                     self.move_align_list(shift_x, shift_y, align_start, align_end);
@@ -475,9 +475,9 @@ impl Turtle {
                         max_zero_keep_nan(self.width_left() - margin.width())
                     },
                     Flow::Down | Flow::Overlay =>{
-                        let r = max_zero_keep_nan(self.no_pad_width() - margin.width());
+                        let r = max_zero_keep_nan(self.width - self.layout.padding.width() - margin.width());
                         if r.is_nan(){
-                            return self.width_used - margin.width()
+                            return self.width_used - margin.width() - self.layout.padding.right
                         }
                         return r
                     }
@@ -493,9 +493,9 @@ impl Turtle {
             Size::Fill => {
                 match flow {
                     Flow::Right | Flow::Overlay=>{
-                        let r = max_zero_keep_nan(self.no_pad_height() - margin.height());
+                        let r = max_zero_keep_nan(self.height - self.layout.padding.height() - margin.height());
                         if r.is_nan(){
-                            return self.height_used - margin.height()
+                            return self.height_used - margin.height() - self.layout.padding.bottom
                         }
                         return r
                     }
@@ -535,30 +535,22 @@ impl Turtle {
     pub fn width_left(&self) -> f32 {
         return max_zero_keep_nan(self.width - self.width_used - self.layout.padding.right);
     }
-    
-    pub fn no_pad_width(&self) -> f32 {
-        return max_zero_keep_nan(self.width - self.layout.padding.width());
-    }
-    
+
     pub fn height_left(&self) -> f32 {
         return max_zero_keep_nan(self.height - self.height_used - self.layout.padding.bottom);
     }
-    
-    pub fn no_pad_height(&self) -> f32 {
-        return max_zero_keep_nan(self.height - self.layout.padding.height());
-    }
-    
-    pub fn no_pad_height_or_used(&self) -> f32 {
+
+    pub fn padded_height_or_used(&self) -> f32 {
         let r = max_zero_keep_nan(self.height - self.layout.padding.height());
         if r.is_nan(){
             self.height_used - self.layout.padding.bottom
-        }        
+        }
         else {
             r
         }
     }
     
-    pub fn no_pad_width_or_used(&self) -> f32 {
+    pub fn padded_width_or_used(&self) -> f32 {
         let r = max_zero_keep_nan(self.width - self.layout.padding.width());
         if r.is_nan(){
             self.width_used - self.layout.padding.right
@@ -788,7 +780,7 @@ impl LiveHook for Padding {
 }
 
 impl Default for Flow {
-    fn default() -> Self {Self::Right}
+    fn default() -> Self {Self::Down}
 }
 
 
