@@ -4,6 +4,7 @@ use {
     },
     crate::{
         makepad_component::{
+            frame_component::*,
             component_map::ComponentMap,
             fold_button::FoldButton,
             scroll_view::ScrollView,
@@ -227,7 +228,7 @@ impl LogListNode {
         self.bg_quad.begin(cx, Walk::size(Size::Fill, Size::Fixed(node_height)), self.layout);
         
         // lets draw a fold button
-        self.fold_button.draw(cx);
+        self.fold_button.draw_walk(cx, self.fold_button.get_walk());
         
         // lets draw a fold button
         self.icon_quad.icon_type = icon_type;

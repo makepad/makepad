@@ -31,13 +31,19 @@ live_register!{
         }
     }
     
-    SubHeader: FoldHeader {
+    InstrumentHeader: FoldHeader {
         header: Rect {
             mouse_cursor: Default,
             bg: {color: #5},
             width: Fill
             height: Fit
             layout: {flow: Right, padding: 8, spacing: 5}
+        }
+    }
+
+    LayerHeader: InstrumentHeader {
+        header: {
+            bg: {color: #3},
         }
     }
     
@@ -137,36 +143,53 @@ live_register!{
                     mouse_cursor: Default,
                     bg: {color: #4, radius: 3.0, border_width: 0.5, border_color: #3}
                     height: Fill
-                    layout: {flow: Down, padding: 0.5}
+                    layout: {padding: 0.5}
                     MainHeader {
                         header: {
                             mouse_cursor: Hand,
                             label:= Label {text: "Instruments"}
                         }
-                        body: SubHeader {
-                            header: {
-                                mouse_cursor: Default,
-                                fold_button:= FoldButton {}
-                                swatch:= Circle {
-                                    width: 10,
-                                    height: 10
-                                    bg: {color: #f00}
+                        body: Frame{
+                            width:Fill,
+                            height:Fill,
+                            InstrumentHeader {
+                                header: {
+                                    fold_button:= FoldButton {}
+                                    swatch:= Circle {
+                                        width: 10,
+                                        height: 10
+                                        bg: {color: #f00}
+                                    }
+                                    label:= Label {text: "Instrument"}
+                                    Rect{bg:{color:#f00}, width:Fill, height:8}
                                 }
-                                label:= Label {text: "Instrument"}
-                                Rect{bg:{color:#f00}, width:Fill, height:8}
-                            }
-                            body: Frame{
-                                bg: {color: #f00},
-                                width: Fill
-                                height: Fit
-                                layout: {flow: Down}
-                                Rect {
-                                    mouse_cursor: Default
-                                    bg: {color: #5}
-                                    width: Fill
-                                    height: Fit
-                                    layout: {flow: Right, padding: 8, spacing: 5, align: {x: 0.0}}
-                                    label:= Label {text: "Stack item"}
+                                body: LayerHeader{
+                                    header:{
+                                        fold_button:= FoldButton {}
+                                        label:= Label {text: "Stack item"}
+                                        Frame{
+                                            layout:{flow:Right, align:{x:1.0}, spacing:4}
+                                            Label {text: "Start"}
+                                            Label {text: "D#3"}
+                                            Label {text: "-"}
+                                            Label {text: "End"}
+                                            Label {text: "E-4"}
+                                        }
+                                    }
+                                    body:Frame{
+                                        bg: {color: #f00},
+                                        width: Fill
+                                        height: Fit
+                                        Rect {
+                                            mouse_cursor: Default
+                                            bg: {color: #3}
+                                            width: Fill
+                                            height: Fit
+                                            layout: {flow: Right, padding: 8, spacing: 5, align: {x: 0.0}}
+                                            label:= Label {text: "Cutoff"}
+                                            //Slider{}
+                                        }
+                                    }
                                 }
                             }
                         }

@@ -18,7 +18,7 @@ live_register!{
                 flow: Flow::Down
             },
             windows_buttons:= Solid {
-                color: (COLOR_BG_APP)
+                bg:{color: (COLOR_BG_APP)}
                 height: 29
                 caption_label:= Frame {
                     layout:{align: {x: 0.5, y:0.5}},
