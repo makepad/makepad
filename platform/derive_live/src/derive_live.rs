@@ -144,7 +144,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
             
             tb.add("    fn apply_animator(&mut self, cx: &mut Cx) {");
             tb.add("        let state = self.animator.swap_out_state();");
-            tb.add("        self.apply(cx, ApplyFrom::Animate, state.child_by_name(0,id!(state)).unwrap(), &state);");
+            tb.add("        self.apply(cx, ApplyFrom::Animate, state.child_by_name(0,id!(state), LiveAssignType::Property).unwrap(), &state);");
             tb.add("        self.animator.swap_in_state(state);");
             tb.add("    }");
             

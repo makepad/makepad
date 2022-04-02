@@ -72,7 +72,7 @@ pub trait LiveNew: LiveApply {
         let live_registry = live_registry_rc.borrow();
         if let Some(file_id) = live_registry.module_id_to_file_id.get(&module_id) {
             let file = live_registry.file_id_to_file(*file_id);
-            if let Some(index) = file.expanded.nodes.child_by_name(0, id) {
+            if let Some(index) = file.expanded.nodes.child_by_name(0, id, LiveAssignType::Property) {
                 let mut ret = Self::new(cx);
                 ret.apply(cx, ApplyFrom::NewFromDoc {file_id: *file_id}, index, &file.expanded.nodes);
                 return Some(ret)
@@ -112,7 +112,7 @@ pub trait LiveApply: LiveHook {
                         let live_registry = live_registry_rc.borrow();
                         if let Some(file_id) = live_registry.main_module {
                             let file = live_registry.file_id_to_file(file_id);
-                            if let Some(index) = file.expanded.nodes.child_by_name(0, id) {
+                            if let Some(index) = file.expanded.nodes.child_by_name(0, id, LiveAssignType::Property) {
                                 self.apply(cx, ApplyFrom::UpdateFromDoc {file_id}, index, &file.expanded.nodes);
                             }
                         }
@@ -120,7 +120,7 @@ pub trait LiveApply: LiveHook {
                     }
                     LiveEditEvent::Mutation {tokens, apply, live_ptrs} => {
                         cx.update_shader_tables_with_live_edit(&tokens, &live_ptrs);
-                        if let Some(index) = apply.child_by_name(0, id) {
+                        if let Some(index) = apply.child_by_name(0, id, LiveAssignType::Property) {
                             self.apply(cx, ApplyFrom::LiveEdit, index, &apply);
                         }
                     }

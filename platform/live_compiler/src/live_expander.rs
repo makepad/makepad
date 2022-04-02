@@ -5,7 +5,7 @@ use {
         live_ptr::{LiveFileId, LivePtr, LiveFileGeneration},
         live_error::{LiveError, LiveErrorOrigin},
         live_document::{LiveOriginal, LiveExpanded},
-        live_node::{LiveValue, LiveNode, /*LiveTypeKind*/},
+        live_node::{LiveValue, LiveNode, LiveAssignType},
         live_node_vec::{LiveNodeSlice, LiveNodeVec},
         live_registry::{LiveRegistry, LiveScopeTarget},
     }
@@ -125,7 +125,7 @@ impl<'a> LiveExpander<'a> {
             
             //// determine node overwrite rules
             
-            let out_index = match out_doc.nodes.child_or_append_index_by_name(current_parent.last().unwrap().1, in_node.id) {
+            let out_index = match out_doc.nodes.child_or_append_index_by_name(current_parent.last().unwrap().1, in_node.id, in_node.origin.assign_type()) {
                 Ok(overwrite) => {
                     let out_value = &out_doc.nodes[overwrite].value;
                     
@@ -361,7 +361,7 @@ impl<'a> LiveExpander<'a> {
                         // ok so we need the lti of the deref hop and clone all children
                         if let Some(file_id) = self.live_registry.module_id_to_file_id.get(&live_type_info.module_id) {
                             let doc = &self.live_registry.live_files[file_id.to_index()].expanded;
-                            if let Some(index) = doc.nodes.child_by_name(0, live_type_info.type_name) {
+                            if let Some(index) = doc.nodes.child_by_name(0, live_type_info.type_name, LiveAssignType::Property) {
                                 let old_len = out_doc.nodes.len();
                                 out_doc.nodes.insert_children_from_other(index, out_index + 1, &doc.nodes);
                                 self.shift_parent_stack(&mut current_parent, &out_doc.nodes, out_index, old_len, out_doc.nodes.len());
@@ -374,7 +374,7 @@ impl<'a> LiveExpander<'a> {
                             if let Some(file_id) = self.live_registry.module_id_to_file_id.get(&lti.module_id) {
                                 
                                 if *file_id == self.in_file_id { // clone on self
-                                    if let Some(index) = out_doc.nodes.child_by_name(0, lti.type_name) {
+                                    if let Some(index) = out_doc.nodes.child_by_name(0, lti.type_name, LiveAssignType::Property) {
                                         let node_insert_point = insert_point;
                                         
                                         let old_len = out_doc.nodes.len();
@@ -401,7 +401,7 @@ impl<'a> LiveExpander<'a> {
                                             self.live_registry.file_id_to_file_name(self.in_file_id),
                                         );
                                     }
-                                    if let Some(index) = other_nodes.child_by_name(0, lti.type_name) {
+                                    if let Some(index) = other_nodes.child_by_name(0, lti.type_name, LiveAssignType::Property) {
                                         let node_insert_point = insert_point;
                                         
                                         let old_len = out_doc.nodes.len();

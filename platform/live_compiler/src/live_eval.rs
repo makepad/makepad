@@ -99,7 +99,7 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
             fn last_keyframe_value_from_array(index: usize, nodes: &[LiveNode]) -> Option<usize> {
                 if let Some(index) = nodes.last_child(index) {
                     if nodes[index].value.is_object() {
-                        return nodes.child_by_name(index, id!(value));
+                        return nodes.child_by_name(index, id!(value), LiveAssignType::Property);
                     }
                     else {
                         return Some(index)

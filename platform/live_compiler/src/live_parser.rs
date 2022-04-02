@@ -4,19 +4,20 @@ use {
         slice::Iter
     },
     crate::{
-        makepad_live_tokenizer::{LiveId,Delim},
+        makepad_live_tokenizer::{LiveId, Delim},
         makepad_id_macros::*,
         makepad_math::{
             Vec2,
             Vec3,
             Vec4
-        },        live_token::{LiveToken, TokenWithSpan, LiveTokenId},
+        },
+        live_token::{LiveToken, TokenWithSpan, LiveTokenId},
         live_ptr::{LiveFileId, LiveModuleId},
         live_node_vec::LiveNodeSlice,
         span::{TextSpan, TextPos},
         live_error::{LiveError, LiveErrorOrigin},
         live_document::LiveOriginal,
-        live_node::{LiveNode, LiveValue, LiveTypeInfo, LiveBinOp, LiveUnOp, LiveNodeOrigin, LiveEditInfo},
+        live_node::{LiveAssignType, LiveNode, LiveValue, LiveTypeInfo, LiveBinOp, LiveUnOp, LiveNodeOrigin, LiveEditInfo},
     }
 };
 
@@ -68,7 +69,7 @@ impl<'a> LiveParser<'a> {
         self.token_index += 1;
     }
     
-    fn error(&mut self, message: String, origin:LiveErrorOrigin) -> LiveError {
+    fn error(&mut self, message: String, origin: LiveErrorOrigin) -> LiveError {
         LiveError {
             origin,
             span: self.token_with_span.span.into(),
@@ -152,13 +153,13 @@ impl<'a> LiveParser<'a> {
         // if crate_id is capitalized, its a component.
         // so we should make a LiveValue::UseComponent
         self.expect_token(LiveToken::Punct(id!(::))) ?;
-
-        if crate_id.is_capitalised(){
-            let component_id = if self.accept_token(LiveToken::Punct(id!(*))){
+        
+        if crate_id.is_capitalised() {
+            let component_id = if self.accept_token(LiveToken::Punct(id!(*))) {
                 LiveId(0)
             }
             else {
-                self.expect_ident()?
+                self.expect_ident() ?
             };
             
             ld.nodes.push(LiveNode {
@@ -224,7 +225,7 @@ impl<'a> LiveParser<'a> {
         
         Ok(())
     }
-
+    
     
     fn possible_edit_info(&mut self, ld: &mut LiveOriginal) -> Result<Option<LiveEditInfo>, LiveError> {
         // metadata is .{key:value}
@@ -240,7 +241,7 @@ impl<'a> LiveParser<'a> {
             }
             let edit_info_index = ld.edit_info.len();
             
-            if edit_info_index > 0x3e0{
+            if edit_info_index > 0x3e0 {
                 return Err(self.error(format!("Used more than 64 .{{..}} edit info fields in a file, we dont have the bitspace for that in our u64."), live_error_origin!()))
             }
             
@@ -325,8 +326,8 @@ impl<'a> LiveParser<'a> {
         let real_prop_id = self.expect_ident() ?;
         let edit_info = self.possible_edit_info(ld) ?;
         let origin = LiveNodeOrigin::from_token_id(token_id).with_edit_info(edit_info).with_node_has_prefix(true);
-
-        if self.accept_token(LiveToken::Punct(id!(:))){
+        
+        if self.accept_token(LiveToken::Punct(id!(:))) {
             self.expect_live_value(real_prop_id, origin, ld) ?;
         }
         
@@ -349,7 +350,11 @@ impl<'a> LiveParser<'a> {
                 });
                 return Ok(())
             }
-            self.expect_live_value(LiveId::empty(), LiveNodeOrigin::from_token_id(self.get_token_id()).with_id_non_unique(true), ld) ?;
+            self.expect_live_value(
+                LiveId::empty(),
+                LiveNodeOrigin::from_token_id(self.get_token_id()).with_assign_type(LiveAssignType::Nameless),
+                ld
+            ) ?;
             self.accept_token(LiveToken::Punct(id!(,)));
         }
         return Err(self.error(format!("Eof in array body"), live_error_origin!()))
@@ -373,7 +378,7 @@ impl<'a> LiveParser<'a> {
                 return Ok(())
             }
             //let span = self.begin_span();
-            self.expect_live_value(LiveId::empty(), LiveNodeOrigin::from_token_id(self.get_token_id()).with_id_non_unique(true), ld) ?;
+            self.expect_live_value(LiveId::empty(), LiveNodeOrigin::from_token_id(self.get_token_id()).with_assign_type(LiveAssignType::Nameless), ld) ?;
             self.accept_token(LiveToken::Punct(id!(,)));
         }
         return Err(self.error(format!("Eof in object body"), live_error_origin!()))
@@ -503,7 +508,7 @@ impl<'a> LiveParser<'a> {
             },
             LiveToken::Ident(id!(vec2)) => {
                 self.skip_token();
-                if self.accept_token(LiveToken::Open(Delim::Paren)){
+                if self.accept_token(LiveToken::Open(Delim::Paren)) {
                     let x = self.expect_float() ?;
                     self.expect_token(LiveToken::Punct(id!(,))) ?;
                     let y = self.expect_float() ?;
@@ -514,17 +519,17 @@ impl<'a> LiveParser<'a> {
                         value: LiveValue::Vec2(Vec2 {x: x as f32, y: y as f32})
                     });
                 }
-                else{
+                else {
                     ld.nodes.push(LiveNode {
                         origin,
                         id: prop_id,
                         value: LiveValue::Id(id!(vec2))
-                    });                    
+                    });
                 }
             },
             LiveToken::Ident(id!(vec3)) => {
                 self.skip_token();
-                if self.accept_token(LiveToken::Open(Delim::Paren)){
+                if self.accept_token(LiveToken::Open(Delim::Paren)) {
                     let x = self.expect_float() ?;
                     self.expect_token(LiveToken::Punct(id!(,))) ?;
                     let y = self.expect_float() ?;
@@ -537,17 +542,17 @@ impl<'a> LiveParser<'a> {
                         value: LiveValue::Vec3(Vec3 {x: x as f32, y: y as f32, z: z as f32})
                     });
                 }
-                else{
+                else {
                     ld.nodes.push(LiveNode {
                         origin,
                         id: prop_id,
                         value: LiveValue::Id(id!(vec3))
-                    });                    
+                    });
                 }
             },
             LiveToken::Ident(id!(vec4)) => {
                 self.skip_token();
-                if self.accept_token(LiveToken::Open(Delim::Paren)){
+                if self.accept_token(LiveToken::Open(Delim::Paren)) {
                     let x = self.expect_float() ?;
                     self.expect_token(LiveToken::Punct(id!(,))) ?;
                     let y = self.expect_float() ?;
@@ -562,12 +567,12 @@ impl<'a> LiveParser<'a> {
                         value: LiveValue::Vec4(Vec4 {x: x as f32, y: y as f32, z: z as f32, w: w as f32})
                     });
                 }
-                else{
+                else {
                     ld.nodes.push(LiveNode {
                         origin,
                         id: prop_id,
                         value: LiveValue::Id(id!(vec4))
-                    });                    
+                    });
                 }
             },
             LiveToken::Ident(base) => { // we're gonna parse a class or an enum
@@ -707,15 +712,15 @@ impl<'a> LiveParser<'a> {
                         // if we get a . metadata follows
                         let edit_info = self.possible_edit_info(ld) ?;
                         
-                        if prop_id.is_capitalised() && self.accept_token(LiveToken::Open(Delim::Brace)){
+                        if prop_id.is_capitalised() && self.accept_token(LiveToken::Open(Delim::Brace)) {
                             let origin = LiveNodeOrigin::from_token_id(token_id)
                                 .with_edit_info(edit_info)
-                                .with_id_non_unique(true);
+                                .with_assign_type(LiveAssignType::Instance);
                             // should we count the previous non unique id?
-                            let new_num = if ld.nodes.len()>0{
+                            let new_num = if ld.nodes.len()>0 {
                                 ld.nodes.next_num_from_id(ld.nodes.len() - 1, prop_id)
                             }
-                            else{ 
+                            else {
                                 0
                             };
                             prop_id.add_numeric(new_num);
@@ -726,11 +731,21 @@ impl<'a> LiveParser<'a> {
                             });
                             self.expect_live_class(false, prop_id, ld) ?;
                         }
-                        else{
+                        else {
                             self.expect_token(LiveToken::Punct(id!(:))) ?;
+                            let assign_type = if self.accept_token(LiveToken::Punct(id!( =))) {
+                                LiveAssignType::Instance
+                            }
+                            else if self.accept_token(LiveToken::Punct(id!( ?))) {
+                                LiveAssignType::Template
+                            }
+                            else {
+                                LiveAssignType::Property
+                            };
+                            
                             let origin = LiveNodeOrigin::from_token_id(token_id)
                                 .with_edit_info(edit_info)
-                                .with_id_non_unique(self.accept_token(LiveToken::Punct(id!( =))));
+                                .with_assign_type(assign_type);
                             self.expect_live_value(prop_id, origin, ld) ?;
                         }
                         self.accept_optional_delim();
@@ -784,14 +799,14 @@ impl<'a> LiveParser<'a> {
         ld.nodes.push(LiveNode {
             origin: origin,
             id: prop_id,
-            value: LiveValue::Expr{expand_index:None}
+            value: LiveValue::Expr {expand_index: None}
         });
         
         fn recur_walk(expr: Expr, ld: &mut LiveOriginal) {
             match expr {
                 Expr::Bin {token_id, op, left_expr, right_expr} => {
                     ld.nodes.push(LiveNode {
-                        origin: LiveNodeOrigin::from_token_id(token_id).with_id_non_unique(true),
+                        origin: LiveNodeOrigin::from_token_id(token_id).with_assign_type(LiveAssignType::Nameless),
                         id: LiveId::empty(),
                         value: LiveValue::ExprBinOp(op)
                     });
@@ -800,7 +815,7 @@ impl<'a> LiveParser<'a> {
                 }
                 Expr::Un {token_id, op, expr} => {
                     ld.nodes.push(LiveNode {
-                        origin: LiveNodeOrigin::from_token_id(token_id).with_id_non_unique(true),
+                        origin: LiveNodeOrigin::from_token_id(token_id).with_assign_type(LiveAssignType::Nameless),
                         id: LiveId::empty(),
                         value: LiveValue::ExprUnOp(op)
                     });
@@ -808,7 +823,7 @@ impl<'a> LiveParser<'a> {
                 }
                 Expr::Call {token_id, ident, arg_exprs} => {
                     ld.nodes.push(LiveNode {
-                        origin: LiveNodeOrigin::from_token_id(token_id).with_id_non_unique(true),
+                        origin: LiveNodeOrigin::from_token_id(token_id).with_assign_type(LiveAssignType::Nameless),
                         id: LiveId::empty(),
                         value: LiveValue::ExprCall {ident, args: arg_exprs.len()}
                     });
@@ -818,7 +833,7 @@ impl<'a> LiveParser<'a> {
                 }
                 Expr::Member {token_id, ident, expr} => {
                     ld.nodes.push(LiveNode {
-                        origin: LiveNodeOrigin::from_token_id(token_id).with_id_non_unique(true),
+                        origin: LiveNodeOrigin::from_token_id(token_id).with_assign_type(LiveAssignType::Nameless),
                         id: LiveId::empty(),
                         value: LiveValue::ExprMember(ident)
                     });
@@ -826,35 +841,35 @@ impl<'a> LiveParser<'a> {
                 }
                 Expr::Var {token_id, ident} => {
                     ld.nodes.push(LiveNode {
-                        origin: LiveNodeOrigin::from_token_id(token_id).with_id_non_unique(true),
+                        origin: LiveNodeOrigin::from_token_id(token_id).with_assign_type(LiveAssignType::Nameless),
                         id: LiveId::empty(),
                         value: LiveValue::Id(ident)
                     });
                 }
                 Expr::Bool {token_id, v} => {
                     ld.nodes.push(LiveNode {
-                        origin: LiveNodeOrigin::from_token_id(token_id).with_id_non_unique(true),
+                        origin: LiveNodeOrigin::from_token_id(token_id).with_assign_type(LiveAssignType::Nameless),
                         id: LiveId::empty(),
                         value: LiveValue::Bool(v)
                     });
                 }
                 Expr::Int {token_id, v} => {
                     ld.nodes.push(LiveNode {
-                        origin: LiveNodeOrigin::from_token_id(token_id).with_id_non_unique(true),
+                        origin: LiveNodeOrigin::from_token_id(token_id).with_assign_type(LiveAssignType::Nameless),
                         id: LiveId::empty(),
                         value: LiveValue::Int(v)
                     });
                 }
                 Expr::Float {token_id, v} => {
                     ld.nodes.push(LiveNode {
-                        origin: LiveNodeOrigin::from_token_id(token_id).with_id_non_unique(true),
+                        origin: LiveNodeOrigin::from_token_id(token_id).with_assign_type(LiveAssignType::Nameless),
                         id: LiveId::empty(),
                         value: LiveValue::Float(v)
                     });
                 }
                 Expr::Color {token_id, v} => {
                     ld.nodes.push(LiveNode {
-                        origin: LiveNodeOrigin::from_token_id(token_id).with_id_non_unique(true),
+                        origin: LiveNodeOrigin::from_token_id(token_id).with_assign_type(LiveAssignType::Nameless),
                         id: LiveId::empty(),
                         value: LiveValue::Color(v)
                     });
