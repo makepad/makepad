@@ -150,6 +150,7 @@ live_register!{
                             label:= Label {text: "Instruments"}
                         }
                         body: Frame {
+                            layout: {flow: Down}
                             instrument :? InstrumentHeader {
                                 header: {
                                     fold_button:= FoldButton {}
@@ -162,6 +163,7 @@ live_register!{
                                     Rect {bg: {color: #f00}, width: Fill, height: 8}
                                 }
                                 body: Frame {
+                                    layout: {flow: Down}
                                     stack :? LayerHeader {
                                         header: {
                                             fold_button:= FoldButton {}
@@ -177,6 +179,7 @@ live_register!{
                                             }
                                         }
                                         body: Frame {
+                                            layout: {flow: Down}
                                             bg: {color: #f00},
                                             width: Fill
                                             height: Fit

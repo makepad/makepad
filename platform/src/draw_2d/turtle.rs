@@ -61,8 +61,8 @@ impl Default for Axis {
 
 #[derive(Copy, Clone, Debug, Live, LiveHook)]
 pub enum Flow {
-    Right,
-    #[pick] Down,
+    #[pick] Right,
+    Down,
     Overlay
 }
 

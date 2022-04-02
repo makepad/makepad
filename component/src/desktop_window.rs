@@ -155,7 +155,7 @@ impl DesktopWindow {
         
         cx.begin_pass(&self.pass);
         
-        self.main_view.begin(cx, Walk::default(), Layout::default()).unwrap();
+        self.main_view.begin(cx, Walk::default(), Layout::flow_right()).unwrap();
         
         //while self.frame.draw(cx).is_ok(){}
         if self.frame.draw(cx).is_ok() {

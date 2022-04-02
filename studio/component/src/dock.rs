@@ -90,10 +90,10 @@ impl LiveHook for Dock {
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         for panel in self.panels.values_mut() {
             match panel {
-                Panel::Split(panel) => if let Some(index) = nodes.child_by_name(index, id!(splitter)) {
+                Panel::Split(panel) => if let Some(index) = nodes.child_by_name(index, id!(splitter), LiveAssignType::Property) {
                     panel.splitter.apply(cx, from, index, nodes);
                 }
-                Panel::Tab(panel) => if let Some(index) = nodes.child_by_name(index, id!(tab_bar)) {
+                Panel::Tab(panel) => if let Some(index) = nodes.child_by_name(index, id!(tab_bar), LiveAssignType::Property) {
                     panel.tab_bar.apply(cx, from, index, nodes);
                 }
             }
@@ -110,7 +110,7 @@ impl Dock {
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
-        if self.overlay_view.begin(cx, Walk::default(), Layout::default()).is_ok() {
+        if self.overlay_view.begin(cx, Walk::default(), Layout::flow_right()).is_ok() {
             if let Some(drag) = self.drag.as_ref() {
                 let panel = self.panels[drag.panel_id].as_tab_panel();
                 let rect = compute_drag_rect(panel.contents_rect, drag.position);
