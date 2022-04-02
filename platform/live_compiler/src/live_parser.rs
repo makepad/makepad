@@ -718,15 +718,15 @@ impl<'a> LiveParser<'a> {
                                 .with_assign_type(LiveAssignType::Instance);
                             // should we count the previous non unique id?
                             let new_num = if ld.nodes.len()>0 {
-                                ld.nodes.next_num_from_id(ld.nodes.len() - 1, prop_id)
+                                ld.nodes.get_num_sibling_nodes(ld.nodes.len() - 1)
                             }
                             else {
                                 0
                             };
-                            prop_id.add_numeric(new_num);
+                            let new_name = format!("{}[{}]", prop_id, new_num);
                             ld.nodes.push(LiveNode {
                                 origin,
-                                id: prop_id.with_num(new_num),
+                                id: LiveId::from_str(&new_name).unwrap(),
                                 value: LiveValue::Clone(prop_id)
                             });
                             self.expect_live_class(false, prop_id, ld) ?;

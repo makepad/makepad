@@ -98,7 +98,8 @@ impl LiveHook for Frame {
                 }
             }
             _ => {
-                if nodes[index].origin.assign_type_equal(LiveAssignType::Instance) || nodes[index].origin.assign_type_equal(LiveAssignType::Template){
+                if nodes[index].origin.has_assign_type_of(LiveAssignType::Instance) 
+                || nodes[index].origin.has_assign_type_of(LiveAssignType::Template){
                     self.create_order.push(id);
                     return self.children.get_or_insert(cx, id, | cx | {FrameComponentRef::new(cx)})
                         .apply(cx, from, index, nodes);

@@ -37,7 +37,7 @@ pub trait LiveNodeSlice {
     
     fn first_node_with_token_id(&self, match_token_id:LiveTokenId, also_in_dsl:bool)->Option<usize>;
 
-    fn next_num_from_id(&self, parent_index: usize, name: LiveId) -> u32;
+    fn get_num_sibling_nodes(&self, child_index: usize) -> usize;
     
     fn scope_up_by_name(&self, parent_index: usize, name: LiveId) -> Option<usize>;
     fn scope_up_down_by_name(&self, parent_index: usize, name: LiveId) -> Option<usize>;
@@ -136,14 +136,13 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         Some(0)
     }
     
-    fn next_num_from_id(&self, index: usize, name: LiveId) -> u32 {
-        let name = name.with_num(0);
+    fn get_num_sibling_nodes(&self, start_index: usize) -> usize {
         let self_ref = self.as_ref();
         if self_ref.len() == 0 {
             return 0
         }
         let mut stack_depth: isize = 0;
-        let mut index = index;
+        let mut index = start_index;
         // scan backwards to find a node with this name
         loop {
             if self_ref[index].is_open() {
@@ -151,14 +150,11 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
                     stack_depth -= 1;
                 }
                 else{
-                    return 0;
+                    return start_index - index;
                 }
             }
             else if self_ref[index].is_close() {
                 stack_depth += 1;
-            }
-            if stack_depth == 0 && self_ref[index].id.mask_num() == name && !self_ref[index].is_close() { // valuenode
-                return self_ref[index].id.get_num()+1
             }
             if index == 0 {
                 break
@@ -409,7 +405,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         while index < self_ref.len() {
             if self_ref[index].is_open() {
                 if stack_depth == 1 {
-                    if  self_ref[index].origin.assign_type_equal(assign_compare) &&  self_ref[index].id == child_name {
+                    if  self_ref[index].origin.has_assign_type_of(assign_compare) &&  self_ref[index].id == child_name {
                         return Ok(index);
                     }
                 }
@@ -423,7 +419,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
             }
             else {
                 if stack_depth == 1 {
-                    if  self_ref[index].origin.assign_type_equal(assign_compare) &&  self_ref[index].id == child_name {
+                    if  self_ref[index].origin.has_assign_type_of(assign_compare) &&  self_ref[index].id == child_name {
                         return Ok(index);
                     }
                 }
@@ -498,7 +494,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
             }
             else {
                 if stack_depth == 1 {
-                    if !self_ref[index].origin.assign_type_equal(assign_compare) && self_ref[index].id == child_name {
+                    if !self_ref[index].origin.has_assign_type_of(assign_compare) && self_ref[index].id == child_name {
                         return Some(index);
                     }
                 }
