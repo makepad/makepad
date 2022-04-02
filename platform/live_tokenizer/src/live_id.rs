@@ -29,7 +29,7 @@ impl LiveIdInterner {
         static ONCE: Once = Once::new();
         ONCE.call_once( || unsafe {
             let mut map = LiveIdInterner {
-                gen_hash: LiveId(0xd6e8_feb8_6659_fd93),
+                alloc: 0,
                 id_to_string: HashMap::new()
             };
             // pre-seed list for debugging purposes
@@ -106,17 +106,8 @@ impl LiveId {
         Self (0)
     }
     
-    // doing this cuts the hashsize but yolo.
-    pub fn with_num(&self, num: u32) -> Self {
-        Self (self.0 & 0xffff_ffff_0000_0000 | (num as u64))
-    }
-    
-    pub fn mask_num(&self) -> Self {
-        Self (self.0 & 0xffff_ffff_0000_0000)
-    }
-    
-    pub fn get_num(&self) -> u32 {
-        (self.0 & 0xffff_ffff) as u32
+    pub fn is_unique(&self) -> bool {
+        (self.0 & 0x8000_0000_0000_0000) == 0 && self.0 != 0
     }
     
     pub fn is_empty(&self) -> bool {
@@ -124,9 +115,8 @@ impl LiveId {
     }
     
     pub fn is_capitalised(&self) -> bool {
-        self.0 & 0x8000_0000_0000_0000 != 0
+        self.0 & 0x4000_0000_0000_0000 != 0
     }
-    
     
     // from https://nullprogram.com/blog/2018/07/31/
     // i have no idea what im doing with start value and finalisation.
@@ -142,17 +132,17 @@ impl LiveId {
             x ^= x >> 32;
             i += 1;
         }
-        // use high bit to mark id as capitalised
+        // use second to high bit to mark id as capitalised
         if id_bytes[0] >= 'A' as u8 && id_bytes[0] <= 'Z' as u8 {
-            return Self (x | 0x8000_0000_0000_0000)
+            return Self ((x & 0x3fff_ffff_ffff_fff) | 0xC000_0000_0000_0000)
         }
         else {
-            return Self (x & 0x7fff_ffff_ffff_ffff)
+            return Self ((x & 0x3fff_ffff_ffff_ffff) | 0x8000_0000_0000_0000)
         }
     }
     
     // merges 2 ids in a nonsymmetric fashion
-    
+    /*
     pub const fn add_id(&self, id: LiveId) -> Self {
         //let id_len = id_bytes.len();
         let mut x = id.0;
@@ -163,7 +153,7 @@ impl LiveId {
         x = x.overflowing_mul(0xd6e8_feb8_6659_fd93).0;
         x ^= x >> 32;
         return Self (x) // leave the first bit
-    }
+    }*/
     
     pub const fn from_str_unchecked(id_str: &str) -> Self {
         let bytes = id_str.as_bytes();
@@ -193,33 +183,12 @@ impl LiveId {
             return f(idmap.id_to_string.get(self))
         })
     }
-    
-    pub fn add_numeric(&self, num: u32) {
-        let self_id = self;
-        LiveIdInterner::with( | idmap | {
-            let str_name = idmap.id_to_string.get(self_id).unwrap();
-            let new_name = format!("{}[{}]", str_name, num);
-            idmap.id_to_string.insert(
-                self_id.with_num(num), 
-                new_name
-            );
-        })
-    }
-    
-    
-    pub fn gen() -> Self {
+
+    pub fn unique() -> Self {
         LiveIdInterner::with( | idmap | {
             // cycle the hash
-            idmap.gen_hash = idmap.gen_hash.add_id(idmap.gen_hash);
-            idmap.gen_hash
-        })
-    }
-    
-    pub fn gen_with_input(&self) -> Self {
-        LiveIdInterner::with( | idmap | {
-            // cycle the hash
-            idmap.gen_hash = idmap.gen_hash.add_id(*self);
-            idmap.gen_hash
+            idmap.alloc += 1;//idmap.gen_hash.add_id(idmap.gen_hash);
+            LiveId(idmap.alloc)
         })
     }
 }
@@ -254,7 +223,10 @@ impl fmt::Display for LiveId {
         if *self == LiveId::empty() {
             write!(f, "0")
         }
-        else {
+        else if self.is_unique(){
+            write!(f, "UniqueId {}", self.0)
+        }
+        else{
             self.as_string( | string | {
                 if let Some(id) = string {
                     write!(f, "{}", id)
@@ -275,7 +247,7 @@ impl fmt::LowerHex for LiveId {
 
 
 pub struct LiveIdInterner {
-    gen_hash: LiveId,
+    alloc: u64,
     id_to_string: HashMap<LiveId, String>,
 }
 
@@ -366,7 +338,7 @@ where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId>
     
     pub fn alloc_key(&mut self) -> K {
         loop {
-            let new_id = LiveId::gen().into();
+            let new_id = LiveId::unique().into();
             if self.map.get(&new_id).is_none() && !self.alloc_set.contains(&new_id) {
                 self.alloc_set.insert(new_id);
                 return new_id.into()
@@ -376,7 +348,7 @@ where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId>
     
     pub fn insert_unique(&mut self, value: V) -> K {
         loop {
-            let new_id = LiveId::gen().into();
+            let new_id = LiveId::unique().into();
             if self.alloc_set.contains(&new_id) {
                 continue
             }

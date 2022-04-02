@@ -116,7 +116,7 @@ pub struct Editors {
 
 impl LiveHook for Editors {
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        if let Some(index) = nodes.child_by_name(index, id!(live_editor)) {
+        if let Some(index) = nodes.child_by_name(index, id!(live_editor), LiveAssignType::Property) {
             for editor_view in self.editor_views.values_mut() {
                 editor_view.apply(cx, from, index, nodes);
             }

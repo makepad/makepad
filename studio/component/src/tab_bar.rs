@@ -65,7 +65,7 @@ pub struct TabBar {
 
 impl LiveHook for TabBar {
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        if let Some(index) = nodes.child_by_name(index, id!(tab)) {
+        if let Some(index) = nodes.child_by_name(index, id!(tab), LiveAssignType::Property) {
             for tab in self.tabs.values_mut() {
                 tab.apply(cx, from, index, nodes);
             }
@@ -80,7 +80,7 @@ impl TabBar {
         //if selected_tab.is_some(){
         //    self.selected_tab_id = None
         // }
-        self.scroll_view.begin(cx, self.walk, Layout::default()) ?;
+        self.scroll_view.begin(cx, self.walk, Layout::flow_right()) ?;
         self.tab_order.clear();
         Ok(())
     }

@@ -36,7 +36,7 @@ pub fn id(item: TokenStream) -> TokenStream {
         parser.unexpected()
     }
 }
-
+/*
 // absolutely a very bad idea but lets see if we can do this.
 #[proc_macro]
 pub fn id_num(item: TokenStream) -> TokenStream {
@@ -67,7 +67,7 @@ pub fn id_num(item: TokenStream) -> TokenStream {
     else{
         parser.unexpected()
     }
-}
+}*/
 
 
 #[proc_macro]
