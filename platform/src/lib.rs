@@ -65,6 +65,7 @@ pub use {
         LiveFieldKind,
         LiveComponentInfo,
         LiveComponentRegistry,
+        LiveAssignType,
         //LiveTypeKind,
         LiveValue,
         FittedString,

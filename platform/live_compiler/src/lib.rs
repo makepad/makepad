@@ -66,6 +66,7 @@ pub use {
             LiveNodeOrigin,
             InlineString,
             FittedString, 
+            LiveAssignType,
             //LiveTypeKind,
         },
         live_token::{TokenWithSpan, LiveToken, LiveTokenId},
