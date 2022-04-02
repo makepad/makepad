@@ -40,7 +40,7 @@ live_register!{
             layout: {flow: Right, padding: 8, spacing: 5}
         }
     }
-
+    
     LayerHeader: InstrumentHeader {
         header: {
             bg: {color: #3},
@@ -149,10 +149,8 @@ live_register!{
                             mouse_cursor: Hand,
                             label:= Label {text: "Instruments"}
                         }
-                        body: Frame{
-                            width:Fill,
-                            height:Fill,
-                            InstrumentHeader {
+                        body: Frame {
+                            instrument :? InstrumentHeader {
                                 header: {
                                     fold_button:= FoldButton {}
                                     swatch:= Circle {
@@ -161,33 +159,36 @@ live_register!{
                                         bg: {color: #f00}
                                     }
                                     label:= Label {text: "Instrument"}
-                                    Rect{bg:{color:#f00}, width:Fill, height:8}
+                                    Rect {bg: {color: #f00}, width: Fill, height: 8}
                                 }
-                                body: LayerHeader{
-                                    header:{
-                                        fold_button:= FoldButton {}
-                                        label:= Label {text: "Stack item"}
-                                        Frame{
-                                            layout:{flow:Right, align:{x:1.0}, spacing:4}
-                                            Label {text: "Start"}
-                                            Label {text: "D#3"}
-                                            Label {text: "-"}
-                                            Label {text: "End"}
-                                            Label {text: "E-4"}
+                                body: Frame {
+                                    stack :? LayerHeader {
+                                        header: {
+                                            fold_button:= FoldButton {}
+                                            label:= Label {text: "Stack item"}
+                                            Frame {
+                                                user_draw: false,
+                                                layout: {flow: Right, align: {x: 1.0}, spacing: 4}
+                                                Label {text: "Start"}
+                                                Label {text: "D#3"}
+                                                Label {text: "-"}
+                                                Label {text: "End"}
+                                                mylabel:= Label {text: "E-4"}
+                                            }
                                         }
-                                    }
-                                    body:Frame{
-                                        bg: {color: #f00},
-                                        width: Fill
-                                        height: Fit
-                                        Rect {
-                                            mouse_cursor: Default
-                                            bg: {color: #3}
+                                        body: Frame {
+                                            bg: {color: #f00},
                                             width: Fill
                                             height: Fit
-                                            layout: {flow: Right, padding: 8, spacing: 5, align: {x: 0.0}}
-                                            label:= Label {text: "Cutoff"}
-                                            //Slider{}
+                                            Rect {
+                                                mouse_cursor: Default
+                                                bg: {color: #3}
+                                                width: Fill
+                                                height: Fit
+                                                layout: {flow: Right, padding: 8, spacing: 5, align: {x: 0.0}}
+                                                label:= Label {text: "Cutoff"}
+                                                //Slider{}
+                                            }
                                         }
                                     }
                                 }
@@ -253,7 +254,7 @@ impl App {
                 }
             }
         };
-
+        
         match event {
             Event::KeyDown(ke) => {
                 if let KeyCode::F1 = ke.key_code {
@@ -274,8 +275,32 @@ impl App {
         if self.window.begin(cx).is_err() {
             return;
         }
-        
-        while self.frame.draw(cx).is_err() {};
+        /*
+        if let Some(instrument) = self.frame.template(id!(instrument), id!(my_id), live!{
+            header: {label := {text: "MyInstrument"}}
+        }) {
+            // lets render/append all instruments
+            instrument.template(id!(stack), id!(my_id), live!{
+                header {label := {text: "MyStack"}}
+            });
+        }*/
+        // ok so.. what do we do.
+        // we should reference a node
+        // then override properties
+        // as in, what if we don't do any expansions. justz
+        while let Err(child) = self.frame.draw(cx) {
+            /*
+            match child.id {
+                id!(myframe) => if let Some(frame) = child.as_frame() {
+                    while let Err(child) = self.frame.draw(cx) {
+                        
+                    }
+                }
+                id!(mylabel) => draw_apply!(frame, cx, {
+                    text: "hello world"
+                })
+            }*/
+        };
         
         self.window.end(cx);
     }
