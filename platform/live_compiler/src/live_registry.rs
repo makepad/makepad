@@ -7,7 +7,7 @@ use {
         live_error::{LiveError, LiveErrorSpan, LiveErrorOrigin, LiveFileError},
         live_parser::LiveParser,
         live_document::{LiveOriginal, LiveExpanded},
-        live_node::{LiveNodeOrigin, LiveNode, LiveValue, LiveType, LiveTypeInfo},
+        live_node::{LiveNodeOrigin, LiveNode, LiveValue, LiveType, LiveTypeInfo, LiveAssignType},
         live_node_vec::{LiveNodeSlice, LiveNodeVec, LiveNodeMutReader},
         live_ptr::{LiveFileId, LivePtr, LiveModuleId, LiveFileGeneration},
         live_token::{LiveToken, LiveTokenId, TokenWithSpan},
@@ -208,7 +208,7 @@ impl LiveRegistry {
                     println!("module_path_id_to_doc zero nodelen {}", self.file_id_to_file_name(*file_id));
                     return None
                 }
-                if let Some(index) = doc.nodes.child_by_name(0, name) {
+                if let Some(index) = doc.nodes.child_by_name(0, name, LiveAssignType::Property) {
                     return Some(LiveDocNodes {nodes: &doc.nodes, file_id: *file_id, index});
                 }
                 else {
@@ -231,7 +231,7 @@ impl LiveRegistry {
                     println!("module_path_id_to_doc zero nodelen {}", self.file_id_to_file_name(*file_id));
                     return None
                 }
-                if let Some(index) = doc.nodes.child_by_name(0, name) {
+                if let Some(index) = doc.nodes.child_by_name(0, name, LiveAssignType::Property) {
                     return Some(LivePtr {file_id:*file_id, index:index as u32, generation:live.generation});
                 }
                 else {
@@ -281,7 +281,7 @@ impl LiveRegistry {
         // ok lets find it in that other doc
         if let Some(file_id) = self.module_id_to_file_id(module_id) {
             let file = self.file_id_to_file(file_id);
-            if let Some(index) = file.expanded.nodes.child_by_name(0, item) {
+            if let Some(index) = file.expanded.nodes.child_by_name(0, item, LiveAssignType::Property) {
                 return Some(LiveScopeTarget::LivePtr(
                     LivePtr {file_id: file_id, index: index as u32, generation: file.generation}
                 ))

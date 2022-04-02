@@ -497,7 +497,7 @@ impl Animator {
             }
             let state_nodes = self.state.as_mut().unwrap();
             
-            let mut state_index = state_nodes.child_by_name(0, id!(state)).unwrap();
+            let mut state_index = state_nodes.child_by_name(0, id!(state), LiveAssignType::Property).unwrap();
             let mut stack_depth = 0;
             let mut ended = true;
             let mut redraw = false;
@@ -553,7 +553,7 @@ impl Animator {
                     // ok so now we have to find our id in tracks
                     let track_index = nodes.child_by_path(0, &[id!(tracks), track_id]).unwrap();
                     
-                    let time_index = if let Some(time_index) = nodes.child_by_name(track_index, id!(time)){time_index}
+                    let time_index = if let Some(time_index) = nodes.child_by_name(track_index, id!(time), LiveAssignType::Property){time_index}
                     else{
                         return (true, false);
                     };
@@ -570,7 +570,7 @@ impl Animator {
                         _ => panic!()
                     };
                     
-                    let play = if let Some(play_index) = nodes.child_by_name(track_index, id!(play)) {
+                    let play = if let Some(play_index) = nodes.child_by_name(track_index, id!(play), LiveAssignType::Property) {
                         Play::new_apply(cx, ApplyFrom::New, play_index, nodes)
                     }
                     else {
@@ -579,7 +579,7 @@ impl Animator {
                     node_iter = nodes.next_child(id_index);
                     
                     let (ended, time) = if let Some((speed1, speed2)) = play.as_exp() {
-                        let exp_index = nodes.child_by_name(track_index, id!(exp)).unwrap();
+                        let exp_index = nodes.child_by_name(track_index, id!(exp), LiveAssignType::Property).unwrap();
                         let exp_now = nodes[exp_index].value.as_float().unwrap();
                         let exp_next = exp_now * speed1;
                         nodes[exp_index].value = LiveValue::Float(exp_next);
@@ -593,12 +593,12 @@ impl Animator {
                     };
                     
                     if ended { // mark ended step 1
-                        if let Some(index) = nodes.child_by_name(track_index, id!(ended)) {
+                        if let Some(index) = nodes.child_by_name(track_index, id!(ended), LiveAssignType::Property) {
                             nodes[index].value = LiveValue::Int(cx.event_id as i64);
                         }
                     }
                     
-                    let redraw = if let Some(index) = nodes.child_by_name(track_index, id!(redraw)) {
+                    let redraw = if let Some(index) = nodes.child_by_name(track_index, id!(redraw), LiveAssignType::Property) {
                         if let LiveValue::Bool(redraw) = &nodes[index].value {
                             *redraw
                         }else {false}
@@ -642,7 +642,7 @@ impl Animator {
                 }
                 else { // try to deserialize a keyframe
                     let mut kf = KeyFrame::new_apply(cx, ApplyFrom::New, node_index, nodes);
-                    if nodes.child_by_name(node_index, id!(ease)).is_none() {
+                    if nodes.child_by_name(node_index, id!(ease), LiveAssignType::Property).is_none() {
                         kf.ease = default_ease.clone();
                     }
                     kf
@@ -725,7 +725,7 @@ impl Animator {
     pub fn last_keyframe_value_from_array(index: usize, nodes: &[LiveNode]) -> Option<usize> {
         if let Some(index) = nodes.last_child(index) {
             if nodes[index].value.is_object() {
-                return nodes.child_by_name(index, id!(value));
+                return nodes.child_by_name(index, id!(value), LiveAssignType::Property);
             }
             else {
                 return Some(index)

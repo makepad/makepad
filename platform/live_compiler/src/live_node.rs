@@ -148,7 +148,7 @@ pub struct LiveNodeOrigin(u64);
 
 impl fmt::Debug for LiveNodeOrigin {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "token_id:{:?} first_def:{:?} edit_info:{:?} non_unique:{}", self.token_id(), self.first_def(), self.edit_info(), self.id_non_unique())
+        write!(f, "token_id:{:?} first_def:{:?} edit_info:{:?} assign_type:{:?}", self.token_id(), self.first_def(), self.edit_info(), self.assign_type())
     }
 }
 
@@ -161,10 +161,20 @@ impl fmt::Debug for LiveNodeOrigin {
 // 10 bit first def file_id
 // 18 bit first def token_id
 
-// 7 bits (128) edit_info index
+// 6 bits (64) edit_info index
+// 1 bit 'is_template'
 // 1 bit 'id_is_nonunique'
 
 // ok if we are a DSL node then what else do we need. we need a node index pointer.
+
+#[derive(Debug, Clone, Copy)]
+#[repr(usize)]
+pub enum LiveAssignType{
+    Property = 0,
+    Instance = 1,
+    Template = 2,
+    Nameless = 3
+}
 
 impl LiveNodeOrigin {
     pub fn empty() -> Self {
@@ -192,7 +202,7 @@ impl LiveNodeOrigin {
     
     pub fn set_edit_info(&mut self, edit_info: Option<LiveEditInfo>)->&mut Self{
         if let Some(edit_info) = edit_info {
-            self.0 = (self.0 & 0x80FF_FFFF_FFFF_FFFF) | ((edit_info.to_bits() as u64) << 56);
+            self.0 = (self.0 & 0xE0FF_FFFF_FFFF_FFFF) | ((edit_info.to_bits() as u64) << 56);
         }
         self
     }
@@ -203,12 +213,12 @@ impl LiveNodeOrigin {
     }
     
     pub fn edit_info(&self) -> Option<LiveEditInfo> {
-        LiveEditInfo::from_bits(((self.0 & 0x7f00_0000_0000_0000) >> 56) as u32)
+        LiveEditInfo::from_bits(((self.0 & 0x1f00_0000_0000_0000) >> 56) as u32)
     }
     
     pub fn set_node_has_prefix(&mut self, node_has_prefix: bool) {
         if node_has_prefix {
-            self.0 |= 0x4000_0000_0000_0000;
+            self.0 |= 0x2000_0000_0000_0000;
         }
     }
     
@@ -218,18 +228,20 @@ impl LiveNodeOrigin {
     }
     
     pub fn node_has_prefix(&self) -> bool {
-        self.0 & 0x4000_0000_0000_0000 != 0
+        self.0 & 0x2000_0000_0000_0000 != 0
     }
     
-    pub fn with_id_non_unique(mut self, non_unique: bool) -> Self {
-        if non_unique {
-            self.0 |= 0x8000_0000_0000_0000;
-        }
+    pub fn with_assign_type(mut self, live_assign_type: LiveAssignType) -> Self {
+        self.0 |= (live_assign_type as u64) << 62;//0x8000_0000_0000_0000;
         self
     }
     
-    pub fn id_non_unique(&self) -> bool {
-        self.0 & 0x8000_0000_0000_0000 != 0
+    pub fn assign_type(&self) -> LiveAssignType {
+        LiveAssignType::from_usize(((self.0 & 0xC000_0000_0000_0000)>>62) as usize)
+    }
+    
+    pub fn assign_type_equal(&self, origin:LiveAssignType)->bool{
+        (self.0 & 0xC000_0000_0000_0000) >> 62 == origin as u64
     }
     
     pub fn inherit_origin(&mut self, origin:Self){
@@ -239,6 +251,17 @@ impl LiveNodeOrigin {
         self.set_edit_info(edit_info);
         self.set_first_def(first_def);
         self.set_node_has_prefix(node_has_prefix);
+    }
+}
+
+impl LiveAssignType{
+    fn from_usize(val:usize)->Self{
+        match val{
+            0=>Self::Property,
+            1=>Self::Instance,
+            2=>Self::Template,
+            _=>Self::Nameless
+        }
     }
 }
 
