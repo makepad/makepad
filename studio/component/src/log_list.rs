@@ -181,7 +181,7 @@ pub struct LogList {
 
 impl LiveHook for LogList {
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        if let Some(index) = nodes.child_by_name(index, id!(log_node)) {
+        if let Some(index) = nodes.child_by_name(index, id!(log_node), LiveAssignType::Property) {
             for (_, node) in self.fold_nodes.iter_mut() {
                 node.apply(cx, from, index, nodes);
             }
