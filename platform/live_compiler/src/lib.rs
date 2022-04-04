@@ -49,6 +49,7 @@ pub use {
             LiveFileId,
         },
         live_node_vec::{
+            LivePath,
             LiveNodeSlice,
             LiveNodeVec,
             LiveNodeReader,
