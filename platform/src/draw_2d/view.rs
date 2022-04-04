@@ -170,26 +170,24 @@ impl View {
         
         // check if we have a pass id parent
         let pass_id = cx.pass_id.expect("No pass found when begin_view");
-        cx.cx.draw_lists[self.draw_list_id].pass_id = pass_id;
+        cx.draw_lists[self.draw_list_id].pass_id = pass_id;
         
         let codeflow_parent_id = cx.draw_list_stack.last().cloned();
         
         let view_will_redraw = cx.view_will_redraw(self);
         
-        let cxpass = &mut cx.cx.passes[pass_id];
-        
-        if cxpass.main_draw_list_id.is_none() {
-            cxpass.main_draw_list_id = Some(self.draw_list_id);
-            walk.width = Size::Fixed(cxpass.pass_size.x);
-            walk.height = Size::Fixed(cxpass.pass_size.y);
+        if cx.passes[pass_id].main_draw_list_id.is_none() {
+            cx.passes[pass_id].main_draw_list_id = Some(self.draw_list_id);
+            walk.width = Size::Fixed(cx.passes[pass_id].pass_size.x);
+            walk.height = Size::Fixed(cx.passes[pass_id].pass_size.y);
         }
         
         // find the parent draw list id
         let parent_id = if self.is_overlay {
-            if cxpass.main_draw_list_id.is_none() {
+            if cx.passes[pass_id].main_draw_list_id.is_none() {
                 panic!("Cannot make overlay inside window without root view")
             };
-            let main_view_id = cxpass.main_draw_list_id.unwrap();
+            let main_view_id = cx.cx.passes[pass_id].main_draw_list_id.unwrap();
             Some(main_view_id)
         }
         else {
@@ -200,10 +198,10 @@ impl View {
         if let Some(parent_id) = parent_id {
             // copy the view transform
             
-            if !cx.cx.draw_lists[self.draw_list_id].locked_view_transform {
+            if !cx.draw_lists[self.draw_list_id].locked_view_transform {
                 for i in 0..16 {
-                    cx.cx.draw_lists[self.draw_list_id].draw_list_uniforms.view_transform[i] =
-                    cx.cx.draw_lists[parent_id].draw_list_uniforms.view_transform[i];
+                    cx.draw_lists[self.draw_list_id].draw_list_uniforms.view_transform[i] =
+                    cx.draw_lists[parent_id].draw_list_uniforms.view_transform[i];
                 }
             }
             
@@ -237,15 +235,19 @@ impl View {
         if !self.always_redraw
             && cx.cx.draw_lists[self.draw_list_id].draw_items_len != 0
             && !view_will_redraw {
-            
+                
             // walk the turtle because we aren't drawing
-            let w = Size::Fixed(cx.draw_lists[self.draw_list_id].rect.size.x);
-            let h = Size::Fixed(cx.draw_lists[self.draw_list_id].rect.size.y);
-            cx.walk_turtle(Walk {abs_pos:None, width: w, height: h, margin: walk.margin});
-            return Err(());
+            let w = Size::Fixed(cx.cx.draw_lists[self.draw_list_id].rect.size.x);
+            let h = Size::Fixed(cx.cx.draw_lists[self.draw_list_id].rect.size.y);
+            let walk= Walk {abs_pos:None, width: w, height: h, margin: walk.margin};
+            let pos = cx.peek_walk_pos(walk);
+            if pos == cx.cx.draw_lists[self.draw_list_id].rect.pos{
+                cx.walk_turtle(walk);
+                return Err(());
+            }
         }
         
-        if cxpass.main_draw_list_id.unwrap() == self.draw_list_id {
+        if cx.passes[pass_id].main_draw_list_id.unwrap() == self.draw_list_id {
             cx.passes[pass_id].paint_dirty = true;
         }
         

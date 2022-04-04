@@ -70,6 +70,7 @@ pub enum Flow {
 pub enum Size {
     #[pick] Fill,
     #[live(200.0)] Fixed(f32),
+    #[live(0.0)] Negative(f32),
     Fit,
 }
 
@@ -130,7 +131,8 @@ impl<'a> Cx2d<'a> {
             Flow::Right if walk.width.is_fill() => {
                 let spacing = turtle.child_spacing(self.turtle_walks.len());
                 turtle.pos.x += margin_size.x + spacing.x;
-                turtle.update_used(0.0, size.y + margin_size.y);
+                turtle.update_width_max(0.0);
+                turtle.update_height_max(size.y + margin_size.y);
                 turtle.defer_count += 1;
                 Some(DeferWalk {
                     defer_index,
@@ -142,7 +144,8 @@ impl<'a> Cx2d<'a> {
             Flow::Down if walk.height.is_fill() => {
                 let spacing = turtle.child_spacing(self.turtle_walks.len());
                 turtle.pos.y += margin_size.y + spacing.y;
-                turtle.update_used(size.x + margin_size.x, 0.0);
+                turtle.update_width_max(size.x + margin_size.x);
+                turtle.update_height_max(0.0);
                 turtle.defer_count += 1;
                 Some(DeferWalk {
                     defer_index,
@@ -299,13 +302,23 @@ impl<'a> Cx2d<'a> {
         self.walk_turtle_internal(walk, align_start, true)
     }
     
-    pub fn walk_turtle_without_move(&mut self, walk: Walk)->Rect{
+    pub fn peek_walk_turtle(&mut self, walk: Walk)->Rect{
         self.walk_turtle_internal(walk, self.align_list.len(), false)
     }
     
     pub fn walk_turtle_would_be_visible(&mut self, walk: Walk, scroll:Vec2)->bool{
         let rect = self.walk_turtle_internal(walk, self.align_list.len(), false);
         self.turtle().rect_is_visible(rect, scroll)
+    }
+    
+    pub fn peek_walk_pos(&mut self, walk: Walk) -> Vec2 {
+        if let Some(pos) = walk.abs_pos {
+            pos + walk.margin.left_top()
+        }
+        else {
+            let turtle = self.turtles.last_mut().unwrap();
+            turtle.pos + walk.margin.left_top()
+        }
     }
     
     fn walk_turtle_internal(&mut self, walk: Walk, align_start: usize, actually_move:bool) -> Rect {
@@ -334,14 +347,29 @@ impl<'a> Cx2d<'a> {
                 match turtle.layout.flow {
                     Flow::Right => {
                         turtle.pos.x = pos.x + size.x + margin_size.x + spacing.x;
-                        turtle.update_used(0.0, size.y + margin_size.y);
+                        if size.x < 0.0{
+                            turtle.update_width_min(0.0);
+                            turtle.update_height_max(size.y + margin_size.y);
+                        }
+                        else{
+                            turtle.update_width_max(0.0);
+                            turtle.update_height_max(size.y + margin_size.y);
+                        }
                     },
                     Flow::Down => {
                         turtle.pos.y = pos.y + size.y + margin_size.y + spacing.y;
-                        turtle.update_used(size.x + margin_size.x, 0.0);
+                        if size.y < 0.0{
+                            turtle.update_width_max(size.x + margin_size.x);
+                            turtle.update_height_min(0.0);
+                        }
+                        else{
+                            turtle.update_width_max(size.x + margin_size.x);
+                            turtle.update_height_max(0.0);
+                        }
                     },
                     Flow::Overlay => { // do not walk
-                        turtle.update_used(size.x, size.y);
+                        turtle.update_width_max(size.x);
+                        turtle.update_height_max(size.y);
                     }
                 };
                 
@@ -401,11 +429,22 @@ impl<'a> Cx2d<'a> {
 }
 
 impl Turtle {
-    pub fn update_used(&mut self, dx: f32, dy: f32) {
+    pub fn update_width_max(&mut self, dx: f32) {
         self.width_used = self.width_used.max((self.pos.x + dx) - self.origin.x);
-        self.height_used = self.height_used.max((self.pos.y + dy) - self.origin.y);
     }
     
+    pub fn update_height_max(&mut self, dy: f32) {
+        self.height_used = self.height_used.max((self.pos.y + dy) - self.origin.y);
+    }
+
+    pub fn update_width_min(&mut self, dx: f32) {
+        self.width_used = self.width_used.min((self.pos.x + dx) - self.origin.x);
+    }
+    
+    pub fn update_height_min(&mut self, dy: f32) {
+        self.height_used = self.height_used.min((self.pos.y + dy) - self.origin.y);
+    }
+
     pub fn used(&self) -> Vec2 {
         vec2(self.width_used, self.height_used)
     }
@@ -418,7 +457,8 @@ impl Turtle {
     pub fn move_pos(&mut self, dx: f32, dy: f32) {
         self.pos.x += dx;
         self.pos.y += dy;
-        self.update_used(0.0, 0.0);
+        self.update_width_max(0.0);
+        self.update_height_max(0.0);
     }
     
     pub fn set_pos(&mut self, pos: Vec2) {
@@ -467,6 +507,7 @@ impl Turtle {
     pub fn eval_width(&self, width: Size, margin: Margin, flow: Flow) -> f32 {
         return match width {
             Size::Fit => std::f32::NAN,
+            Size::Negative(v) => -v,
             Size::Fixed(v) => max_zero_keep_nan(v),
             Size::Fill => {
                 match flow {
@@ -488,6 +529,7 @@ impl Turtle {
     pub fn eval_height(&self, height: Size, margin: Margin, flow: Flow) -> f32 {
         return match height {
             Size::Fit => std::f32::NAN,
+            Size::Negative(v) => -v,
             Size::Fixed(v) => max_zero_keep_nan(v),
             Size::Fill => {
                 match flow {
