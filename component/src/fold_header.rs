@@ -64,10 +64,11 @@ enum DrawState{
 
 impl FrameComponent for FoldHeader {
     fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, _self_id: LiveId) -> FrameComponentActionRef {
-        if self.animator_handle_event(cx, event).is_animating() {
+        if self.animator_handle_event(cx, event).must_redraw() {
             if self.animator.is_track_of_animating(cx, self.closed_state) {
                 let rect = self.view.get_rect(cx);
                 self.view.set_scroll_pos(cx, vec2(0.0,rect.size.y * (1.0-self.opened)));
+                self.view.redraw(cx);
             }
         };
         let mut actions = Vec::new();
@@ -117,8 +118,8 @@ impl FrameComponent for FoldHeader {
         frame_component_find_child_mut_impl!(id, self.header, self.body)
     }
 
-    fn create_child(&mut self, cx:&mut Cx, id: &[LiveId], create:LiveId, nodes:&[LiveNode]) -> Option<&mut Box<dyn FrameComponent >> {
-        frame_component_create_child_impl!(cx, id, create, nodes, self.header, self.body)
+    fn create_child(&mut self, cx:&mut Cx, at:CreateAt, id: &[LiveId], create:LiveId, nodes:&[LiveNode]) -> Option<&mut Box<dyn FrameComponent >> {
+        frame_component_create_child_impl!(cx, at, id, create, nodes, self.header, self.body)
     }
     
     fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId> {
@@ -141,8 +142,10 @@ impl FrameComponent for FoldHeader {
             if let Some(child) = self.body.as_mut(){
                 child.draw_walk_component(cx)?;
             }
-            //self.end(cx);
+            // ok so. how do we do this feature
+            // we need to 
             self.view.end(cx);
+            
             cx.end_turtle();
             self.draw_state.end();
         }

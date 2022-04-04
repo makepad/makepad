@@ -40,6 +40,7 @@ pub use crate::{
     scroll_bar::{ScrollBar},
     frame::{Frame},
     frame_component::{
+        CreateAt,
         FrameActions,
         FrameActionItem,
         FrameComponent,
