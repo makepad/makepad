@@ -32,8 +32,8 @@ pub trait LiveNodeSlice {
     //fn next_child_by_name(&self, child_index: usize, name: LiveId) -> Option<usize>;
     fn child_by_name(&self, parent_index: usize, name: LiveId, assign_compare:LiveAssignType) -> Option<usize>;
     fn sibling_by_name(&self, start_index: usize, name: LiveId, assign_compare:LiveAssignType) -> Option<usize>;
-    fn child_by_path(&self, parent_index: usize, path: &[LiveId]) -> Option<usize>;
-    fn child_value_by_path(&self, parent_index: usize, path: &[LiveId]) -> Option<&LiveValue>;
+    fn child_by_path(&self, parent_index: usize, path: &[LivePath]) -> Option<usize>;
+    fn child_value_by_path(&self, parent_index: usize, path: &[LivePath]) -> Option<&LiveValue>;
     
     fn first_node_with_token_id(&self, match_token_id:LiveTokenId, also_in_dsl:bool)->Option<usize>;
 
@@ -56,8 +56,8 @@ pub trait LiveNodeVec {
     fn insert_children_from_other(&mut self, from_index: usize, insert_start: usize, other: &[LiveNode]);
     fn insert_children_from_self(&mut self, from_index: usize, insert_start: usize);
 
-    fn replace_or_insert_last_node_by_path(&mut self, start_index: usize, path: &[LiveId], other: &[LiveNode]);
-    fn replace_or_insert_first_node_by_path(&mut self, start_index: usize, path: &[LiveId], other: &[LiveNode]);
+    fn replace_or_insert_last_node_by_path(&mut self, start_index: usize, path: &[LivePath], other: &[LiveNode]);
+    fn replace_or_insert_first_node_by_path(&mut self, start_index: usize, path: &[LivePath], other: &[LiveNode]);
     
     fn push_live(&mut self, v: &[LiveNode]);
     fn push_str(&mut self, id: LiveId, v: &'static str);
@@ -508,10 +508,10 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
     }
     
     
-    fn child_by_path(&self, parent_index: usize, path: &[LiveId]) -> Option<usize> {
+    fn child_by_path(&self, parent_index: usize, path: &[LivePath]) -> Option<usize> {
         let mut index = parent_index;
         for level in path {
-            if let Some(child) = self.child_by_name(index, *level, LiveAssignType::Property) {
+            if let Some(child) = self.child_by_name(index, level.0, level.1) {
                 index = child
             }
             else {
@@ -521,7 +521,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         Some(index)
     }
     
-    fn child_value_by_path(&self, parent_index: usize, path: &[LiveId]) -> Option<&LiveValue> {
+    fn child_value_by_path(&self, parent_index: usize, path: &[LivePath]) -> Option<&LiveValue> {
         if let Some(index) = self.child_by_path(parent_index, path) {
             Some(&self.as_ref()[index].value)
         }
@@ -762,6 +762,13 @@ impl_live_node_slice!(&[LiveNode]);
 impl_live_node_slice!(&mut [LiveNode]);
 impl_live_node_slice!(Vec<LiveNode>);
 */
+#[derive(Debug)]
+pub struct LivePath(pub LiveId,pub LiveAssignType);
+impl LivePath{
+    pub fn prop(id:LiveId)->Self{Self(id, LiveAssignType::Property)}
+    pub fn instance(id:LiveId)->Self{Self(id, LiveAssignType::Instance)}
+}
+
 impl LiveNodeVec for Vec<LiveNode> {
     
     fn insert_children_from_other(&mut self, source_index: usize, insert_point: usize, other: &[LiveNode]) {
@@ -817,18 +824,18 @@ impl LiveNodeVec for Vec<LiveNode> {
         insert_point + num_nodes
     }
     
-    fn replace_or_insert_last_node_by_path(&mut self, start_index: usize, path: &[LiveId], other: &[LiveNode]) {
+    fn replace_or_insert_last_node_by_path(&mut self, start_index: usize, path: &[LivePath], other: &[LiveNode]) {
         let mut index = start_index;
         let mut depth = 0;
         while depth < path.len() {
-            match self.child_or_append_index_by_name(index, path[depth], LiveAssignType::Property) {
+            match self.child_or_append_index_by_name(index, path[depth].0, path[depth].1) {
                 Ok(found_index) => {
                     index = found_index;
                     if depth == path.len() - 1 { // last
                         let next_index = self.skip_node(found_index);
                         self.splice(found_index..next_index, other.iter().cloned());
                         // overwrite id
-                        self[found_index].id = path[depth];
+                        self[found_index].id = path[depth].0;
                         return
                     }
                 }
@@ -837,13 +844,14 @@ impl LiveNodeVec for Vec<LiveNode> {
                     if depth == path.len() - 1 { // last
                         self.splice(append_index..append_index, other.iter().cloned());
                         // lets overwrite the id
-                        self[append_index].id = path[depth];
+                        self[append_index].id = path[depth].0;
                         return
                     }
                     else { // insert an empty object
                         self.splice(append_index..append_index, live_object!{
-                            [path[depth]]: {}
+                            [path[depth].0]: {}
                         }.iter().cloned());
+                        self[append_index].origin = LiveNodeOrigin::empty().with_assign_type(path[depth].1);
                     }
                 }
             }
@@ -851,18 +859,18 @@ impl LiveNodeVec for Vec<LiveNode> {
         }
     }
     
-    fn replace_or_insert_first_node_by_path(&mut self, start_index: usize, path: &[LiveId], other: &[LiveNode]) {
+    fn replace_or_insert_first_node_by_path(&mut self, start_index: usize, path: &[LivePath], other: &[LiveNode]) {
         let mut index = start_index;
         let mut depth = 0;
         while depth < path.len() {
-            match self.child_by_name(index, path[depth], LiveAssignType::Property) {
+            match self.child_by_name(index, path[depth].0, path[depth].1) {
                 Some(found_index) => {
                     index = found_index;
                     if depth == path.len() - 1 { // last
                         let next_index = self.skip_node(found_index);
                         self.splice(found_index..next_index, other.iter().cloned());
                         // overwrite id
-                        self[found_index].id = path[depth];
+                        self[found_index].id = path[depth].0;
                         return
                     }
                 }
@@ -871,13 +879,15 @@ impl LiveNodeVec for Vec<LiveNode> {
                     if depth == path.len() - 1 { // last
                         self.splice(index..index, other.iter().cloned());
                         // lets overwrite the id
-                        self[index].id = path[depth];
+                        self[index].id = path[depth].0;
+                        self[index].origin = LiveNodeOrigin::empty().with_assign_type(path[depth].1);
                         return
                     }
                     else { // insert an empty object
                         self.splice(index..index, live_object!{
-                            [path[depth]]: {}
+                            [path[depth].0]: {}
                         }.iter().cloned());
+                        self[index].origin = LiveNodeOrigin::empty().with_assign_type(path[depth].1);
                     }
                 }
             }
@@ -981,7 +991,7 @@ impl<'a> LiveNodeReader<'a> {
         self.index_option(self.nodes.child_by_name(self.index, name, LiveAssignType::Property), 1)
     }
     
-    fn child_by_path(&self, path: &[LiveId]) -> Option<Self> {
+    fn child_by_path(&self, path: &[LivePath]) -> Option<Self> {
         self.index_option(self.nodes.child_by_path(self.index, path), 1)
     }
     

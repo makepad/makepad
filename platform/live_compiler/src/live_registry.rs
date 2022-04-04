@@ -8,7 +8,7 @@ use {
         live_parser::LiveParser,
         live_document::{LiveOriginal, LiveExpanded},
         live_node::{LiveNodeOrigin, LiveNode, LiveValue, LiveType, LiveTypeInfo, LiveAssignType},
-        live_node_vec::{LiveNodeSlice, LiveNodeVec, LiveNodeMutReader},
+        live_node_vec::{LiveNodeSlice, LiveNodeVec, LiveNodeMutReader, LivePath},
         live_ptr::{LiveFileId, LivePtr, LiveModuleId, LiveFileGeneration},
         live_token::{LiveToken, LiveTokenId, TokenWithSpan},
         span::{TextSpan, TextPos},
@@ -662,7 +662,7 @@ impl LiveRegistry {
                     reader.walk();
                     while !reader.is_eot() {
                         if reader.is_open() {
-                            path.push(reader.id)
+                            path.push(LivePath(reader.id, reader.origin.assign_type()))
                         }
                         else if reader.is_close() {
                             path.pop();
@@ -676,7 +676,7 @@ impl LiveRegistry {
                             live_ptrs.push(live_ptr);
                             if is_main {
                                 // ok so. lets write by path here
-                                path.push(reader.id);
+                                path.push(LivePath(reader.id, reader.origin.assign_type()));
                                 diff.replace_or_insert_last_node_by_path(0, &path, reader.node_slice());
                                 path.pop();
                             }
@@ -684,7 +684,7 @@ impl LiveRegistry {
                         else if reader.is_token_id_inside_dsl(token_id) {
                             if is_main {
                                 // ok so. lets write by path here
-                                path.push(reader.id);
+                                path.push(LivePath(reader.id, reader.origin.assign_type()));
                                 diff.replace_or_insert_last_node_by_path(0, &path, reader.node_slice());
                                 path.pop();
                             }
