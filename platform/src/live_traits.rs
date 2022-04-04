@@ -96,10 +96,10 @@ pub trait LiveApply: LiveHook {
     fn apply_over(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
         self.apply(cx, ApplyFrom::ApplyOver, 0, nodes);
     }
-    
+    /*
     fn apply_clear(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
         self.apply(cx, ApplyFrom::ApplyClear, 0, nodes);
-    }
+    }*/
     
     fn handle_live_edit_event(&mut self, cx: &mut Cx, event: &Event, id: LiveId) {
         match event {
@@ -180,7 +180,6 @@ pub enum ApplyFrom {
     New, // Bare new without file info
     Animate, // from animate
     ApplyOver, // called from bare apply_live() call
-    ApplyClear // called from bare apply_live() call
 }
 
 impl ApplyFrom {
@@ -209,6 +208,11 @@ pub trait LiveHook {
         }
         nodes.skip_node(index)
     }
+
+    fn apply_value_instance(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        nodes.skip_node(index)
+    }
+
     fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode])->Option<usize>{None}
     fn after_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {}
     fn after_new(&mut self, _cx: &mut Cx) {}

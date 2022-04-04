@@ -17,10 +17,10 @@ live_register!{
             layout:{
                 flow: Flow::Down
             },
-            windows_buttons:= Solid {
+            windows_buttons = Solid {
                 bg:{color: (COLOR_BG_APP)}
                 height: 29
-                caption_label:= Frame {
+                caption_label = Frame {
                     layout:{align: {x: 0.5, y:0.5}},
                     Label {text: (caption), margin:{left:100}}
                 }
@@ -30,7 +30,7 @@ live_register!{
                 //close_btn:= DesktopButton {button_type: DesktopButtonType::WindowsClose}
                 
             }
-            inner_view:= Frame {user_draw: true}
+            inner_view = Frame {user_draw: true}
         }
         
         window: {

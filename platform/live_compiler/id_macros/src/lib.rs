@@ -36,6 +36,29 @@ pub fn id(item: TokenStream) -> TokenStream {
         parser.unexpected()
     }
 }
+
+#[proc_macro] 
+pub fn ids(item: TokenStream) -> TokenStream {
+    let mut tb = TokenBuilder::new(); 
+    let mut parser = TokenParser::new(item);
+    fn parse(parser:&mut TokenParser, tb:&mut TokenBuilder)->Result<(),TokenStream>{
+        tb.add("&[");
+        loop{
+            let ident = parser.expect_any_ident()?;
+            let id = LiveId::from_str_unchecked(&ident);
+            tb.add("LiveId (").suf_u64(id.0).add("),");
+            if parser.eat_eot(){
+                tb.add("]");
+                return Ok(())
+            }
+            parser.expect_punct_alone('.')?
+        }
+    }
+    if let Err(e) = parse(&mut parser, &mut tb){
+        return e
+    };
+    tb.end()
+}
 /*
 // absolutely a very bad idea but lets see if we can do this.
 #[proc_macro]
