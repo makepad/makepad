@@ -68,6 +68,7 @@ impl FrameComponent for FoldHeader {
             if self.animator.is_track_of_animating(cx, self.closed_state) {
                 let rect = self.view.get_rect(cx);
                 self.view.set_scroll_pos(cx, vec2(0.0,rect.size.y * (1.0-self.opened)));
+                //cx.redraw_all();
                 self.view.redraw(cx);
             }
         };
@@ -132,6 +133,7 @@ impl FrameComponent for FoldHeader {
                 child.draw_walk_component(cx)?;
             }
             if self.view.begin(cx, self.body_walk, Layout::flow_down()).is_err(){
+                self.reverse_walk(cx);
                 cx.end_turtle();
                 self.draw_state.end();
                 return Ok(())
@@ -142,14 +144,20 @@ impl FrameComponent for FoldHeader {
             if let Some(child) = self.body.as_mut(){
                 child.draw_walk_component(cx)?;
             }
-            // ok so. how do we do this feature
-            // we need to 
             self.view.end(cx);
-            
+            // reverse walk
+            self.reverse_walk(cx);
             cx.end_turtle();
             self.draw_state.end();
         }
         Ok(())
+    }
+}
+
+impl FoldHeader{
+    fn reverse_walk(&mut self, cx:&mut Cx2d){
+        let rect = self.view.get_rect(cx);
+        cx.walk_turtle(Walk::size(Size::Fill, Size::Negative(rect.size.y * (1.0-self.opened))));
     }
 }
 
