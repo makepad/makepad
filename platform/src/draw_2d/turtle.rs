@@ -351,7 +351,6 @@ impl<'a> Cx2d<'a> {
                     rect: Rect {pos, size: size + margin_size}
                 });
             }
-        
             Rect {pos: pos + walk.margin.left_top() + spacing, size}
         }
     }

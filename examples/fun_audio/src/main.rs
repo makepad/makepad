@@ -90,7 +90,7 @@ live_register!{
                     preset_data: "21adslkfjalkwqwe"
                 }*/
                 c1 = Instrument {
-                    key_range: {start: 34, end: 47 shift: 30}
+                    //key_range: {start: 34, end: 47 shift: 30}
                     PluginEffect {
                         plugin: "AUReverb2"
                     }
@@ -167,7 +167,7 @@ live_register!{
                                         header: {
                                             fold_button = FoldButton {}
                                             label = Label {text: "Stack item"}
-                                            Frame {
+                                            range = Frame {
                                                 user_draw: false,
                                                 layout: {flow: Right, align: {x: 1.0}, spacing: 4}
                                                 Label {text: "Start"}
@@ -251,7 +251,6 @@ impl App {
             match action {
                 AudioGraphAction::Midi1Data(data) => if let Midi1Event::Note(note) = data.decode() {
                     let piano = self.frame.child_mut::<Piano>(id!(piano)).unwrap();
-                    
                     piano.set_note(cx, note.is_on, note.note_number)
                 }
             }
@@ -259,14 +258,24 @@ impl App {
         
         match event {
             Event::Construct => {
-                if let Some(instrument) = self.frame.create_child(cx, ids!(instrument), id!(my_id), live!{
+                if let Some(instrument) = self.frame.add_child(cx, ids!(instrument), id!(my_id), live!{
                     header: {label = {text: "MyInstrument"}}
                 }) {
-                    instrument.create_child(cx, ids!(stack), id!(my_stack1), live!{
+                    instrument.add_child(cx, ids!(stack), id!(my_stack1), live!{
                         header: {label = {text: "MyStackItem"}}
                     });
-                    instrument.create_child(cx, ids!(stack), id!(my_stack2), live!{
-                        header: {label = {text: "MyStackItem2"}}
+                    instrument.add_child(cx, ids!(stack), id!(my_stack2), live!{
+                        header: {label = {text: "MyStackItem2"}, range={mylabel={text:"WHEE"}}}
+                    });
+                }
+                if let Some(instrument) = self.frame.add_child(cx, ids!(instrument), id!(my_id2), live!{
+                    header: {label = {text: "MyInstrument"}}
+                }) {
+                    instrument.add_child(cx, ids!(stack), id!(my_stack1), live!{
+                        header: {label = {text: "MyStackItem"}}
+                    });
+                    instrument.add_child(cx, ids!(stack), id!(my_stack2), live!{
+                        header: {label = {text: "MyStackItem2"}, range={mylabel={text:"WHEE"}}}
                     });
                 }
             }
