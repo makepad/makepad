@@ -49,14 +49,14 @@ live_register!{
     
     FoldablePiano: MainHeader {
         header: {
-            fold_button:= FoldButton {}
-            label:= Label {text: "Keys"}
+            fold_button = FoldButton {}
+            label = Label {text: "Keys"}
         }
         closed_state: {apply: {
-            body: {g1: {bg: {color: #0000}}}
+            body: {g1 = {bg: {color: #0000}}}
         }}
         opened_state: {apply: {
-            body: {g1: {bg: {color: #000a}}}
+            body: {g1 = {bg: {color: #000a}}}
         }}
         body: Frame {
             layout: {flow: Overlay}
@@ -66,14 +66,14 @@ live_register!{
                 layout: {flow: Down}
                 width: Fit
                 height: Fit
-                piano: = Piano {}
+                piano = Piano {}
                 GradientY {
                     width: Fill
                     height: 10
                     bg: {color: #000a, color2: #0000}
                 }
             }
-            g1:= GradientY {
+            g1 = GradientY {
                 width: Fill
                 height: 2
                 bg: {color: #000a, color2: #0000, no_v_scroll: true}
@@ -89,7 +89,7 @@ live_register!{
                     plugin: "AUMIDISynth"
                     preset_data: "21adslkfjalkwqwe"
                 }*/
-                c1: Instrument {
+                c1 = Instrument {
                     key_range: {start: 34, end: 47 shift: 30}
                     PluginEffect {
                         plugin: "AUReverb2"
@@ -100,7 +100,6 @@ live_register!{
                 }
             }
         }
-        
         frame: {
             bg: {color: (COLOR_BG_APP)},
             walk: {width: Fill, height: Fill}
@@ -147,27 +146,27 @@ live_register!{
                     MainHeader {
                         header: {
                             mouse_cursor: Hand,
-                            label:= Label {text: "Instruments"}
+                            label = Label {text: "Instruments"}
                         }
                         body: Frame {
                             layout: {flow: Down}
-                            instrument :? InstrumentHeader {
+                            instrument = ? InstrumentHeader {
                                 header: {
-                                    fold_button:= FoldButton {}
-                                    swatch:= Circle {
+                                    fold_button = FoldButton {}
+                                    swatch = Circle {
                                         width: 10,
                                         height: 10
                                         bg: {color: #f00}
                                     }
-                                    label:= Label {text: "Instrument"}
+                                    label = Label {text: "Instrument"}
                                     Rect {bg: {color: #f00}, width: Fill, height: 8}
                                 }
                                 body: Frame {
                                     layout: {flow: Down}
-                                    stack :? LayerHeader {
+                                    stack = ? LayerHeader {
                                         header: {
-                                            fold_button:= FoldButton {}
-                                            label:= Label {text: "Stack item"}
+                                            fold_button = FoldButton {}
+                                            label = Label {text: "Stack item"}
                                             Frame {
                                                 user_draw: false,
                                                 layout: {flow: Right, align: {x: 1.0}, spacing: 4}
@@ -175,7 +174,7 @@ live_register!{
                                                 Label {text: "D#3"}
                                                 Label {text: "-"}
                                                 Label {text: "End"}
-                                                mylabel:= Label {text: "E-4"}
+                                                mylabel = Label {text: "E-4"}
                                             }
                                         }
                                         body: Frame {
@@ -189,7 +188,7 @@ live_register!{
                                                 width: Fill
                                                 height: Fit
                                                 layout: {flow: Right, padding: 8, spacing: 5, align: {x: 0.0}}
-                                                label:= Label {text: "Cutoff"}
+                                                label = Label {text: "Cutoff"}
                                                 //Slider{}
                                             }
                                         }
@@ -259,6 +258,18 @@ impl App {
         };
         
         match event {
+            Event::Construct => {
+                if let Some(instrument) = self.frame.create_child(cx, ids!(instrument), id!(my_id), live!{
+                    header: {label = {text: "MyInstrument"}}
+                }) {
+                    instrument.create_child(cx, ids!(stack), id!(my_stack1), live!{
+                        header: {label = {text: "MyStackItem"}}
+                    });
+                    instrument.create_child(cx, ids!(stack), id!(my_stack2), live!{
+                        header: {label = {text: "MyStackItem2"}}
+                    });
+                }
+            }
             Event::KeyDown(ke) => {
                 if let KeyCode::F1 = ke.key_code {
                 }
@@ -279,19 +290,19 @@ impl App {
             return;
         }
         /*
-        if let Some(instrument) = self.frame.template(id!(instrument), id!(my_id), live!{
-            header: {label := {text: "MyInstrument"}}
+        if let Some(instrument) = self.frame.create_child(id!(instrument), id!(my_id), live!{
+            header: {label = {text: "MyInstrument"}}
         }) {
             // lets render/append all instruments
             instrument.template(id!(stack), id!(my_id), live!{
-                header {label := {text: "MyStack"}}
+                header {label = {text: "MyStack"}}
             });
         }*/
         // ok so.. what do we do.
         // we should reference a node
         // then override properties
         // as in, what if we don't do any expansions. justz
-        while let Err(child) = self.frame.draw(cx) {
+        while let Err(_child) = self.frame.draw(cx) {
             /*
             match child.id {
                 id!(myframe) => if let Some(frame) = child.as_frame() {

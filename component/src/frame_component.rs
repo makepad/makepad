@@ -52,6 +52,11 @@ pub trait FrameComponent: LiveApply {
     // defaults
     fn redraw(&mut self, _cx:&mut Cx){}
     fn draw_walk_component(&mut self, cx: &mut Cx2d) -> Result<(), LiveId>{self.draw_component(cx, self.get_walk())}
+
+    fn create_child(&mut self, cx:&mut Cx, _id: &[LiveId], _create:LiveId, _nodes:&[LiveNode]) -> Option<&mut Box<dyn FrameComponent >> {
+        None
+    }
+    
     fn find_child(&self, _id: &[LiveId]) -> Option<&Box<dyn FrameComponent >> {None}
     fn find_child_mut(&mut self,  _id: &[LiveId]) -> Option<&mut Box<dyn FrameComponent >> {None}
     fn type_id(&self) -> LiveType where Self: 'static {LiveType::of::<Self>()}
@@ -195,6 +200,8 @@ impl Clone for Box<dyn FrameComponentAction> {
 pub struct FrameComponentRef(Option<Box<dyn FrameComponent >>);
 
 impl FrameComponentRef {
+    pub fn empty()->Self{Self(None)}
+    
     pub fn as_ref(&self) -> Option<&Box<dyn FrameComponent >> {
         self.0.as_ref()
     }
@@ -281,7 +288,7 @@ macro_rules!register_as_frame_component {
 }
 
 #[macro_export]
-macro_rules!frame_component_ref_find_child {
+macro_rules!frame_component_find_child_impl {
     ( $ id: ident, $ ( $ arg: expr), *) => {
         {
             ( $ (
@@ -295,8 +302,25 @@ macro_rules!frame_component_ref_find_child {
         }
     }
 }
+
 #[macro_export]
-macro_rules!frame_component_ref_find_child_mut {
+macro_rules!frame_component_create_child_impl {
+    ( $cx: ident, $ id: ident, $create:ident, $nodes: ident, $ ( $ arg: expr), *) => {
+        {
+            ( $ (
+                if let Some(a) = $ arg.as_mut() {
+                    if let Some(c) = a.create_child( $cx, $ id, $create, $nodes) {
+                        return Some(c)
+                    }
+                }
+            ), *);
+            return None;
+        }
+    }
+}
+
+#[macro_export]
+macro_rules!frame_component_find_child_mut_impl {
     ( $ id: ident, $ ( $ arg: expr), *) => {
         {
             ( $ (

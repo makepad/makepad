@@ -158,11 +158,15 @@ impl FrameComponent for Splitter {
     }
     
     fn find_child(&self, id: &[LiveId]) -> Option<&Box<dyn FrameComponent >> {
-        frame_component_ref_find_child!(id, self.a, self.b)
+        frame_component_find_child_impl!(id, self.a, self.b)
     }
     
     fn find_child_mut(&mut self, id: &[LiveId]) -> Option<&mut Box<dyn FrameComponent >> {
-        frame_component_ref_find_child_mut!(id, self.a, self.b)
+        frame_component_find_child_mut_impl!(id, self.a, self.b)
+    }
+
+    fn create_child(&mut self, cx:&mut Cx, id: &[LiveId], create:LiveId, nodes:&[LiveNode]) -> Option<&mut Box<dyn FrameComponent >> {
+        frame_component_create_child_impl!(cx, id, create, nodes, self.a, self.b)
     }
     
     fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId> {
