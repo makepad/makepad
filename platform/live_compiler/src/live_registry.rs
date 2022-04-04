@@ -128,6 +128,14 @@ impl LiveRegistry {
         &self.live_files[file_id.to_index()]
     }
     
+    pub fn file_id_index_to_live_ptr(&self, file_id: LiveFileId, index:usize) -> LivePtr {
+        LivePtr{
+            file_id,
+            index: index as u32,
+            generation: self.live_files[file_id.to_index()].generation
+        }
+    }
+    
     pub fn ptr_to_nodes_index(&self, live_ptr: LivePtr) -> (&[LiveNode], usize) {
         let doc = &self.live_files[live_ptr.file_id.to_index()];
         if doc.generation != live_ptr.generation {
