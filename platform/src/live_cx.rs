@@ -72,7 +72,7 @@ impl Cx {
         self.apply_error(origin, index, nodes, format!("wrong expression return. Prop: {} primitive: {} value: {:?}", nodes[index].id, prim, b))
     }
     
-    pub fn apply_error_animation_missing_state(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], track: LiveId, state_id: LiveId, ids: &[LiveId]) {
+    pub fn apply_error_animation_missing_state(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], track: LiveId, state_id: LiveId, ids: &[LivePath]) {
         self.apply_error(origin, index, nodes, format!("animation missing state: {} {} {:?}", track, state_id, ids))
     }
     

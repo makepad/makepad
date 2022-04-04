@@ -66,6 +66,7 @@ pub use {
         LiveComponentInfo,
         LiveComponentRegistry,
         LiveAssignType,
+        LivePath,
         //LiveTypeKind,
         LiveValue,
         FittedString,
