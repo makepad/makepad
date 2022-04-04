@@ -98,7 +98,11 @@ impl Cx {
                 
                 // update the zbias uniform if we have it.
                 draw_call.draw_uniforms.set_zbias(*zbias);
-                draw_call.draw_uniforms.set_local_scroll(scroll, local_scroll, &draw_call.options);
+                draw_call.draw_uniforms.set_local_scroll(
+                    scroll,
+                    local_scroll,
+                    &draw_call.options
+                );
                 draw_call.draw_uniforms.set_clip(clip);
                 *zbias += zbias_step;
                 
@@ -466,16 +470,16 @@ impl Cx {
             command_buffer,
             addCompletedHandler: &objc_block!(move | _command_buffer: ObjcId | {
                 drop(gpu_read_guards.lock().unwrap().take().unwrap());
-            }) 
+            })
         ]};
         let () = unsafe {msg_send![command_buffer, commit]};
-    }  
+    }
 }
 
 pub struct MetalCx {
     pub device: ObjcId,
     pub command_queue: ObjcId
-} 
+}
 
 
 #[derive(Clone)]
@@ -740,7 +744,7 @@ impl CxPlatformDrawShader {
         }
         
         return Some(Self {
-            _library:library,
+            _library: library,
             render_pipeline_state,
             draw_uniform_buffer_id,
             pass_uniform_buffer_id,

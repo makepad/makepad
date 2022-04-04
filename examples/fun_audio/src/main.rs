@@ -267,6 +267,9 @@ impl App {
                     instrument.add_child(cx, ids!(stack), id!(my_stack2), live!{
                         header: {label = {text: "MyStackItem2"}, range={mylabel={text:"WHEE"}}}
                     });
+                    instrument.add_child(cx, ids!(stack), id!(my_stack3), live!{
+                        header: {label = {text: "MyStackItem3"}, range={mylabel={text:"WHEE"}}}
+                    });
                 }
                 if let Some(instrument) = self.frame.add_child(cx, ids!(instrument), id!(my_id2), live!{
                     header: {label = {text: "MyInstrument"}}
