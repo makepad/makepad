@@ -44,6 +44,14 @@ impl<T: Clone> DrawStateWrap<T> {
     }
 }
 
+#[derive(Clone,Copy)]
+pub enum CreateAt{
+    Begin,
+    After(LiveId),
+    Before(LiveId),
+    End
+}
+
 pub trait FrameComponent: LiveApply {
     // to implement
     fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, self_id: LiveId) -> FrameComponentActionRef;
@@ -53,12 +61,24 @@ pub trait FrameComponent: LiveApply {
     fn redraw(&mut self, _cx:&mut Cx){}
     fn draw_walk_component(&mut self, cx: &mut Cx2d) -> Result<(), LiveId>{self.draw_component(cx, self.get_walk())}
 
-    fn create_child(&mut self, cx:&mut Cx, _id: &[LiveId], _create:LiveId, _nodes:&[LiveNode]) -> Option<&mut Box<dyn FrameComponent >> {
+    fn create_child(&mut self, _cx:&mut Cx, _at:CreateAt, _id: &[LiveId], _create:LiveId, _nodes:&[LiveNode]) -> Option<&mut Box<dyn FrameComponent >> {
         None
+    }
+
+    fn add_child(&mut self, cx:&mut Cx, id: &[LiveId], create:LiveId, nodes:&[LiveNode]) -> Option<&mut Box<dyn FrameComponent >> {
+        self.create_child(cx, CreateAt::End, id, create, nodes)
     }
     
     fn find_child(&self, _id: &[LiveId]) -> Option<&Box<dyn FrameComponent >> {None}
-    fn find_child_mut(&mut self,  _id: &[LiveId]) -> Option<&mut Box<dyn FrameComponent >> {None}
+    
+    fn find_child_mut(&mut self, _id: &[LiveId]) -> Option<&mut Box<dyn FrameComponent >> {None}
+
+    fn apply_child(&mut self, cx:&mut Cx, id: &[LiveId], nodes:&[LiveNode]) {
+        if let Some(child) = self.find_child_mut(id){
+            child.apply(cx, ApplyFrom::ApplyOver, 0, nodes);
+        }
+    }
+    
     fn type_id(&self) -> LiveType where Self: 'static {LiveType::of::<Self>()}
 }
 
@@ -305,11 +325,11 @@ macro_rules!frame_component_find_child_impl {
 
 #[macro_export]
 macro_rules!frame_component_create_child_impl {
-    ( $cx: ident, $ id: ident, $create:ident, $nodes: ident, $ ( $ arg: expr), *) => {
+    ( $cx: ident, $at: ident, $ id: ident, $create:ident, $nodes: ident, $ ( $ arg: expr), *) => {
         {
             ( $ (
                 if let Some(a) = $ arg.as_mut() {
-                    if let Some(c) = a.create_child( $cx, $ id, $create, $nodes) {
+                    if let Some(c) = a.create_child( $cx, $at, $ id, $create, $nodes) {
                         return Some(c)
                     }
                 }

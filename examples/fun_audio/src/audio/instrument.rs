@@ -71,7 +71,7 @@ impl AudioGraphNode for Node {
 }
 
 impl LiveHook for Instrument {
-    fn apply_value_unknown(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         if from.is_from_doc() {
             self.step_order.push(nodes[index].id);
         }
