@@ -207,29 +207,31 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         tb.add("LiveApplyValue for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
         
         tb.add("    fn apply_value(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]) -> usize{");
-        tb.add("        match nodes[index].id {");
+        tb.add("        if nodes[index].origin.has_assign_type_of(LiveAssignType::Property){");
+        tb.add("            match nodes[index].id {");
 
         for field in &fields {
             if field.attrs[0].name == "live" {
-                tb.add("    LiveId(").suf_u64(LiveId::from_str(&field.name).unwrap().0).add(")=>self.").ident(&field.name).add(".apply(cx, apply_from, index, nodes),");
+                tb.add("        LiveId(").suf_u64(LiveId::from_str(&field.name).unwrap().0).add(")=>self.").ident(&field.name).add(".apply(cx, apply_from, index, nodes),");
             }
         }
         for (alias_var, alias_redir) in aliases{
-            tb.add("    LiveId(").suf_u64(LiveId::from_str(&alias_var).unwrap().0).add(")=>self.").stream(Some(alias_redir)).add(".apply(cx, apply_from, index, nodes),");
+            tb.add("            LiveId(").suf_u64(LiveId::from_str(&alias_var).unwrap().0).add(")=>self.").stream(Some(alias_redir)).add(".apply(cx, apply_from, index, nodes),");
         }
         // Unknown value handling
         if deref_target.is_some() {
-            tb.add("        _=> self.deref_target.apply_value(cx, apply_from, index, nodes)");
+            tb.add("            _=> self.deref_target.apply_value(cx, apply_from, index, nodes)");
         }
         else {
             if draw_vars.is_some() {
-                tb.add("    _=> self.draw_vars.apply_value(cx, apply_from, index, nodes)");
+                tb.add("        _=> self.draw_vars.apply_value(cx, apply_from, index, nodes)");
             }
             else {
-                tb.add("    _=> self.apply_value_unknown(cx, apply_from, index, nodes)");
+                tb.add("        _=> self.apply_value_unknown(cx, apply_from, index, nodes)");
             }
         }
-        tb.add("        }");
+        tb.add("            }");
+        tb.add("        } else {self.apply_value_instance(cx, apply_from, index, nodes)}");
         tb.add("    }");
         
         tb.add("}");

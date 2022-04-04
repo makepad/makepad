@@ -570,9 +570,7 @@ live_primitive!(
     LivePtr {file_id: LiveFileId(0), index: 0, generation: Default::default()},
     fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         if let Some(file_id) = from.file_id() {
-            self.file_id = file_id;
-            self.index = index as u32;
-            self.generation = cx.live_registry.borrow().file_id_to_file(file_id).generation;
+            *self = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
         }
         nodes.skip_node(index)
     },

@@ -50,6 +50,7 @@ pub use {
         LiveErrorOrigin,
         LiveNodeOrigin,
         id,
+        ids,
         LiveRegistry,
         LiveDocNodes,
         LiveId,

@@ -32,14 +32,6 @@ live_register!{
 #[derive(Live)]
 #[live_register(register_as_frame_component!(Frame))]
 pub struct Frame { // draw info per UI element
-    /*#[alias(color, bg.color)]
-    #[alias(color2, bg.color2)]
-    #[alias(border_width, bg.border_width)]
-    #[alias(border_color, bg.border_color)]
-    #[alias(inset, bg.inset)]
-    #[alias(radius, bg.radius)]
-    #[alias(shape, bg.shape)]
-    #[alias(fill, bg.fill)]*/
     bg: DrawShape,
     
     layout: Layout,
@@ -63,16 +55,16 @@ pub struct Frame { // draw info per UI element
     
     #[rust] defer_walks: Vec<(LiveId, DeferWalk)>,
     #[rust] draw_state: DrawStateWrap<DrawState>,
-    
+    #[rust] templates: ComponentMap<LiveId, LivePtr>,
     #[rust] children: ComponentMap<LiveId, FrameComponentRef>,
-    #[rust] create_order: Vec<LiveId>
+    #[rust] draw_order: Vec<LiveId>
 }
 
 impl LiveHook for Frame {
-    fn before_apply(&mut self, _cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) -> Option<usize> {
-        if let ApplyFrom::ApplyClear = from {
+    fn before_apply(&mut self, _cx: &mut Cx, _from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) -> Option<usize> {
+        /*if let ApplyFrom::ApplyClear = from {
             self.create_order.clear();
-        }
+        }*/
         None
     }
     
@@ -86,10 +78,11 @@ impl LiveHook for Frame {
         //}
     }
     
-    fn apply_value_unknown(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+    fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         let id = nodes[index].id;
+        let is_design_mode = false;
         match from {
-            ApplyFrom::Animate => {
+            ApplyFrom::Animate | ApplyFrom::ApplyOver=> {
                 if let Some(component) = self.children.get_mut(&nodes[index].id) {
                     component.apply(cx, from, index, nodes)
                 }
@@ -97,10 +90,16 @@ impl LiveHook for Frame {
                     nodes.skip_node(index)
                 }
             }
-            _ => {
-                if nodes[index].origin.has_assign_type_of(LiveAssignType::Instance) 
-                || nodes[index].origin.has_assign_type_of(LiveAssignType::Template){
-                    self.create_order.push(id);
+            ApplyFrom::NewFromDoc{file_id} | ApplyFrom::UpdateFromDoc{file_id} => {
+                if !is_design_mode && nodes[index].origin.has_assign_type_of(LiveAssignType::Template) {
+                    // lets store a pointer into our templates.
+                    let live_ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
+                    self.templates.insert(id, live_ptr);
+                    nodes.skip_node(index)
+                }
+                else if nodes[index].origin.has_assign_type_of(LiveAssignType::Instance)
+                    || is_design_mode && nodes[index].origin.has_assign_type_of(LiveAssignType::Template) {
+                    self.draw_order.push(id);
                     return self.children.get_or_insert(cx, id, | cx | {FrameComponentRef::new(cx)})
                         .apply(cx, from, index, nodes);
                 }
@@ -109,8 +108,12 @@ impl LiveHook for Frame {
                     nodes.skip_node(index)
                 }
             }
+            _=>{
+                nodes.skip_node(index)
+            }
         }
     }
+    
 }
 
 impl FrameComponent for Frame {
@@ -135,6 +138,35 @@ impl FrameComponent for Frame {
         }
     }
     
+    fn create_child(&mut self, cx:&mut Cx, id: &[LiveId], create: LiveId, nodes: &[LiveNode]) -> Option<&mut Box<dyn FrameComponent >> {
+        if id.len()>1 {
+            if self.children.get(&id[0]).is_some() {
+                return self.children.get_mut(&id[0]).unwrap().as_mut().unwrap().create_child(cx, &id[1..], create, nodes)
+            }
+            return None
+        }
+        if let Some(live_ptr) = self.templates.get(&id[0]){
+            
+            let exists_already = self.children.get(&create).is_some();
+            // lets resolve the live ptr to something
+            let mut x = FrameComponentRef::new_from_ptr(cx, Some(live_ptr.clone()));
+            x.as_mut().unwrap().apply(cx, ApplyFrom::ApplyOver, 0, nodes);
+            self.children.insert(create, x);
+            if !exists_already{ // add one to create order
+                self.draw_order.push(create);
+            }
+            return self.children.get_mut(&create).unwrap().as_mut()
+        }
+        else{
+            for child in self.children.values_mut() {
+                if let Some(c) = child.as_mut().unwrap().create_child(cx, id, create, nodes) {
+                    return Some(c)
+                }
+            }
+        }
+        None
+    }
+    
     fn find_child(&self, id: &[LiveId]) -> Option<&Box<dyn FrameComponent >> {
         if let Some(child) = self.children.get(&id[0]) {
             if id.len()>1 {
@@ -150,10 +182,10 @@ impl FrameComponent for Frame {
         None
     }
     
-
+    
     fn find_child_mut(&mut self, id: &[LiveId]) -> Option<&mut Box<dyn FrameComponent >> {
         if self.children.get(&id[0]).is_some() {
-            if id.len()>1{
+            if id.len()>1 {
                 return self.children.get_mut(&id[0]).unwrap().as_mut().unwrap().find_child_mut(&id[1..])
             }
             return self.children.get_mut(&id[0]).unwrap().as_mut()
@@ -164,7 +196,7 @@ impl FrameComponent for Frame {
             }
         }
         None
-    }    
+    }
 }
 
 #[derive(Clone)]
@@ -213,7 +245,7 @@ impl Frame {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> FrameActions {
         let mut actions = Vec::new();
-        for id in &self.create_order {
+        for id in &self.draw_order {
             if let Some(child) = self.children.get_mut(id).unwrap().as_mut() {
                 actions.merge(*id, child.handle_component_event(cx, event, *id));
             }
@@ -268,8 +300,8 @@ impl Frame {
         }
         
         while let DrawState::Drawing(step) = self.draw_state.get() {
-            if step < self.create_order.len() {
-                let id = self.create_order[step];
+            if step < self.draw_order.len() {
+                let id = self.draw_order[step];
                 if let Some(child) = self.children.get_mut(&id).unwrap().as_mut() {
                     let walk = child.get_walk();
                     if let Some(fw) = cx.defer_walk(walk) {

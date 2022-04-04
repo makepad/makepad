@@ -110,11 +110,15 @@ impl FrameComponent for FoldHeader {
     }
     
     fn find_child(&self, id: &[LiveId]) -> Option<&Box<dyn FrameComponent >> {
-        frame_component_ref_find_child!(id, self.header, self.body)
+        frame_component_find_child_impl!(id, self.header, self.body)
     }
     
     fn find_child_mut(&mut self, id: &[LiveId]) -> Option<&mut Box<dyn FrameComponent >> {
-        frame_component_ref_find_child_mut!(id, self.header, self.body)
+        frame_component_find_child_mut_impl!(id, self.header, self.body)
+    }
+
+    fn create_child(&mut self, cx:&mut Cx, id: &[LiveId], create:LiveId, nodes:&[LiveNode]) -> Option<&mut Box<dyn FrameComponent >> {
+        frame_component_create_child_impl!(cx, id, create, nodes, self.header, self.body)
     }
     
     fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId> {

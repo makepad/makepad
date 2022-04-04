@@ -703,7 +703,17 @@ impl<'a> LiveParser<'a> {
                                 self.accept_optional_delim();
                             }
                             _ => {
-                                self.expect_node_with_prefix(ld) ?;
+                                let token_id = self.get_token_id();
+                                let real_prop_id = self.expect_ident() ?;
+                                let edit_info = self.possible_edit_info(ld) ?;
+                                let assign_type = self.expect_assign_type()?;
+                                let origin = LiveNodeOrigin::from_token_id(token_id)
+                                    .with_edit_info(edit_info)
+                                    .with_node_has_prefix(true)
+                                    .with_assign_type(assign_type);
+                                
+                                self.expect_live_value(real_prop_id, origin, ld) ?;
+                                //self.expect_node_with_prefix(ld) ?;
                                 self.accept_optional_delim();
                             }
                         }
@@ -732,17 +742,7 @@ impl<'a> LiveParser<'a> {
                             self.expect_live_class(false, prop_id, ld) ?;
                         }
                         else {
-                            self.expect_token(LiveToken::Punct(id!(:))) ?;
-                            let assign_type = if self.accept_token(LiveToken::Punct(id!( =))) {
-                                LiveAssignType::Instance
-                            }
-                            else if self.accept_token(LiveToken::Punct(id!( ?))) {
-                                LiveAssignType::Template
-                            }
-                            else {
-                                LiveAssignType::Property
-                            };
-                            
+                            let assign_type = self.expect_assign_type()?;
                             let origin = LiveNodeOrigin::from_token_id(token_id)
                                 .with_edit_info(edit_info)
                                 .with_assign_type(assign_type);
@@ -758,6 +758,23 @@ impl<'a> LiveParser<'a> {
             return Ok(())
         }
         return Err(self.error(format!("Eof in class body"), live_error_origin!()))
+    }
+    
+    pub fn expect_assign_type(&mut self)->Result<LiveAssignType, LiveError>{
+        Ok(if self.accept_token(LiveToken::Punct(id!(:))){
+            LiveAssignType::Property
+        }
+        else if self.accept_token(LiveToken::Punct(id!(=))){
+            if self.accept_token(LiveToken::Punct(id!( ?))) {
+                LiveAssignType::Template
+            }
+            else{
+                LiveAssignType::Instance
+            }
+        }
+        else{
+            return Err(self.error(format!("Unexpected assign_type, expected = or :"), live_error_origin!()))
+        })
     }
     
     pub fn accept_optional_delim(&mut self) {

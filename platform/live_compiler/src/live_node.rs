@@ -162,8 +162,8 @@ impl fmt::Debug for LiveNodeOrigin {
 // 18 bit first def token_id
 
 // 6 bits (64) edit_info index
-// 1 bit 'is_template'
-// 1 bit 'id_is_nonunique'
+// 1 bit node_has_prefix
+// 2 bits LiveAssignType
 
 // ok if we are a DSL node then what else do we need. we need a node index pointer.
 
@@ -180,6 +180,15 @@ impl LiveNodeOrigin {
     pub fn empty() -> Self {
         Self (0)
     }
+    
+    pub fn property() -> Self {
+        Self (0).with_assign_type(LiveAssignType::Property)
+    }
+
+    pub fn instance() -> Self {
+        Self (0).with_assign_type(LiveAssignType::Instance)
+    }
+
     
     pub fn from_token_id(token_id: LiveTokenId) -> Self {
         Self( (token_id.to_bits() as u64) |  ((token_id.to_bits() as u64)<<28) )
