@@ -60,7 +60,7 @@ impl Drop for View {
     }
 }
 
-impl LiveHook for View{}
+impl LiveHook for View {}
 impl LiveNew for View {
     fn new(cx: &mut Cx) -> Self {
         let draw_lists_free = cx.draw_lists_free.clone();
@@ -85,7 +85,7 @@ impl LiveNew for View {
         }
     }
     
-    fn live_type_info(_cx:&mut Cx) -> LiveTypeInfo {
+    fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
         LiveTypeInfo {
             module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
             live_type: LiveType::of::<Self>(),
@@ -166,7 +166,7 @@ impl View {
         set_view_transform_recur(self.draw_list_id, cx, mat);
     }
     
-    pub fn begin(&mut self, cx: &mut Cx2d, mut walk: Walk, layout:Layout) -> ViewRedraw {
+    pub fn begin(&mut self, cx: &mut Cx2d, mut walk: Walk, layout: Layout) -> ViewRedraw {
         
         // check if we have a pass id parent
         let pass_id = cx.pass_id.expect("No pass found when begin_view");
@@ -235,13 +235,12 @@ impl View {
         if !self.always_redraw
             && cx.cx.draw_lists[self.draw_list_id].draw_items_len != 0
             && !view_will_redraw {
-                
-            // walk the turtle because we aren't drawing
+            
             let w = Size::Fixed(cx.cx.draw_lists[self.draw_list_id].rect.size.x);
             let h = Size::Fixed(cx.cx.draw_lists[self.draw_list_id].rect.size.y);
-            let walk= Walk {abs_pos:None, width: w, height: h, margin: walk.margin};
+            let walk = Walk {abs_pos: None, width: w, height: h, margin: walk.margin};
             let pos = cx.peek_walk_pos(walk);
-            if pos == cx.cx.draw_lists[self.draw_list_id].rect.pos{
+            if pos == cx.cx.draw_lists[self.draw_list_id].rect.pos {
                 cx.walk_turtle(walk);
                 return Err(());
             }
@@ -310,13 +309,13 @@ impl View {
     pub fn area(&self) -> Area {
         Area::DrawList(DrawListArea {draw_list_id: self.draw_list_id, redraw_id: self.redraw_id})
     }
-
-    pub fn set_scroll_pos(&mut self, cx:&mut Cx, scroll_pos:Vec2) {
+    
+    pub fn set_scroll_pos(&mut self, cx: &mut Cx, scroll_pos: Vec2) {
         cx.set_view_scroll_x(self.draw_list_id, scroll_pos.x);
         cx.set_view_scroll_y(self.draw_list_id, scroll_pos.y);
     }
     
-    pub fn get_scroll_pos(&self, cx:&Cx)->Vec2{
+    pub fn get_scroll_pos(&self, cx: &Cx) -> Vec2 {
         let draw_list = &cx.draw_lists[self.draw_list_id];
         draw_list.unsnapped_scroll
     }
@@ -335,12 +334,12 @@ impl<'a> Cx2d<'a> {
     
     pub fn get_draw_call(&mut self, append: bool, draw_vars: &DrawVars) -> Option<&mut DrawItem> {
         
-        if draw_vars.draw_shader.is_none(){
+        if draw_vars.draw_shader.is_none() {
             return None
         }
         let draw_shader = draw_vars.draw_shader.unwrap();
         
-        if draw_shader.draw_shader_generation != self.draw_shaders.generation{
+        if draw_shader.draw_shader_generation != self.draw_shaders.generation {
             return None
         }
         
@@ -386,7 +385,7 @@ impl<'a> Cx2d<'a> {
     pub fn begin_many_instances(&mut self, draw_vars: &DrawVars) -> Option<ManyInstances> {
         
         let draw_item = self.append_to_draw_call(draw_vars);
-        if draw_item.is_none(){
+        if draw_item.is_none() {
             return None
         }
         let draw_item = draw_item.unwrap();
@@ -409,7 +408,7 @@ impl<'a> Cx2d<'a> {
     
     pub fn begin_many_aligned_instances(&mut self, draw_vars: &DrawVars) -> Option<ManyInstances> {
         let mut li = self.begin_many_instances(draw_vars);
-        if li.is_none(){
+        if li.is_none() {
             return None;
         }
         li.as_mut().unwrap().aligned = Some(self.align_list.len());
@@ -435,7 +434,7 @@ impl<'a> Cx2d<'a> {
     pub fn add_instance(&mut self, draw_vars: &DrawVars) -> Area {
         let data = draw_vars.as_slice();
         let draw_item = self.append_to_draw_call(draw_vars);
-        if draw_item.is_none(){
+        if draw_item.is_none() {
             return Area::Empty
         }
         let draw_item = draw_item.unwrap();
@@ -459,7 +458,7 @@ impl<'a> Cx2d<'a> {
     pub fn add_aligned_instance(&mut self, draw_vars: &DrawVars) -> Area {
         let data = draw_vars.as_slice();
         let draw_item = self.append_to_draw_call(draw_vars);
-        if draw_item.is_none(){
+        if draw_item.is_none() {
             return Area::Empty
         }
         let draw_item = draw_item.unwrap();
