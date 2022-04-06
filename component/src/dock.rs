@@ -1,10 +1,8 @@
 use {
     crate::{
         makepad_platform::*,
-        makepad_component::{
-            component_map::ComponentMap,
-            splitter::{SplitterAction, Splitter, SplitterAlign},
-        },
+        component_map::ComponentMap,
+        splitter::{SplitterAction, Splitter, SplitterAlign},
         tab_bar::{TabBarAction, TabBar, TabId},
     },
 };
@@ -90,10 +88,10 @@ impl LiveHook for Dock {
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         for panel in self.panels.values_mut() {
             match panel {
-                Panel::Split(panel) => if let Some(index) = nodes.child_by_name(index, id!(splitter), LiveAssignType::Property) {
+                Panel::Split(panel) => if let Some(index) = nodes.child_by_name(index, LivePath::prop(id!(splitter))) {
                     panel.splitter.apply(cx, from, index, nodes);
                 }
-                Panel::Tab(panel) => if let Some(index) = nodes.child_by_name(index, id!(tab_bar), LiveAssignType::Property) {
+                Panel::Tab(panel) => if let Some(index) = nodes.child_by_name(index, LivePath::prop(id!(tab_bar))) {
                     panel.tab_bar.apply(cx, from, index, nodes);
                 }
             }

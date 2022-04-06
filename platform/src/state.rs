@@ -4,13 +4,14 @@ use {
     crate::{
         makepad_derive_live::*,
         makepad_math::*,
+        animator::*,
         event::NextFrame,
         cx::Cx,
         live_traits::*,
     },
     
 };
-
+/*
 #[derive(Debug, Clone, Copy)]
 pub enum Animate {
     Yes,
@@ -445,21 +446,60 @@ impl Ease {
             }
         }
     }
-}
+}*/
 
 #[derive(Default)]
-pub struct Animator {
+pub struct State {
+    pub live_ptr: LiveRef,
     pub state: Option<Vec<LiveNode >>,
     pub next_frame: NextFrame,
 }
 
 #[derive(Copy, Clone)]
-pub enum AnimatorAction {
+pub enum StateAction {
     Animating {redraw: bool},
     None
 }
 
-impl AnimatorAction {
+impl LiveHook for State{}
+impl LiveNew for State {
+    fn new(cx: &mut Cx)->Self{Self::default()}
+    
+    fn live_type_info(_cx:&mut Cx) -> LiveTypeInfo{
+        LiveTypeInfo {
+            module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
+            live_type: LiveType::of::<Self>(),
+            fields: Vec::new(),
+            type_name: LiveId::from_str("States").unwrap()
+        }
+    }
+}
+impl LiveApply for State {
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
+        if let Some(file_id) = from.file_id(){
+            self.live_ptr = Some(cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, start_index));
+        }
+        if !nodes[start_index].value.is_structy_type() {
+            cx.apply_error_wrong_type_for_struct(live_error_origin!(), start_index, nodes, id!(States));
+            return nodes.skip_node(start_index);
+        }
+        let mut index = start_index + 1;
+        loop {
+            if nodes[index].value.is_close() {
+                index += 1;
+                break;
+            }
+            if !nodes[index].origin.has_assign_type(LiveAssignType::Instance){
+                cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
+                index = nodes.skip_node(index);
+            }
+        }
+        return index;
+    }
+}
+
+
+impl StateAction {
     pub fn must_redraw(&self) -> bool {
         match self {
             Self::Animating {redraw} => *redraw,
@@ -473,7 +513,7 @@ impl AnimatorAction {
         }
     }
 }
-impl Animator {
+impl State {
     
     pub fn swap_out_state(&mut self) -> Vec<LiveNode> {
         if let Some(state) = self.state.take() {
@@ -749,26 +789,26 @@ impl Animator {
         return 1.0
     }
     
-    pub fn get_track_and_state_id_of(&self, cx: &mut Cx, live_ptr: Option<LivePtr>) -> Option<(LiveId, LiveId)> {
-        if let Some(live_ptr) = live_ptr {
+    pub fn get_track_of(&self, cx: &mut Cx, state_id: LiveId) -> Option<LiveId> {
+        if let Some(live_ptr) = self.live_ptr {
             let live_registry = cx.live_registry.borrow();
             if !live_registry.generation_valid(live_ptr) {
                 return None
             }
             let (nodes, index) = live_registry.ptr_to_nodes_index(live_ptr);
-            Some(if let Some(LiveValue::Id(id)) = nodes.child_value_by_path(index, &[LivePath::prop(id!(track))]) {
-                (*id, nodes[index].id)
-            } else {
-                (LiveId(1), nodes[index].id)
-            })
+            if let Some(index) = nodes.child_by_name(index, LivePath::instance(state_id)){
+                return Some(if let Some(LiveValue::Id(id)) = nodes.child_value_by_path(index, &[LivePath::prop(id!(track))]) {
+                    *id
+                } else {
+                    LiveId(1)
+                })
+            }
         }
-        else {
-            None
-        }
+        None
     }
-    
+    /*
     pub fn get_state_id_of(&self, cx: &mut Cx, live_ptr: Option<LivePtr>, default: LiveId) -> LiveId {
-        if let Some((track_id, _)) = self.get_track_and_state_id_of(cx, live_ptr) {
+        if let Some((track_id, _)) = self.get_track_of(cx, live_ptr) {
             if let Some(state) = self.state.as_ref() {
                 if let Some(LiveValue::Id(id)) = &state.child_value_by_path(0, &[LivePath::prop(id!(tracks)), LivePath::prop(track_id), LivePath::prop(id!(state_id))]) {
                     return *id
@@ -776,10 +816,10 @@ impl Animator {
             }
         }
         default
-    }
+    }*/
     
-    pub fn is_track_of_animating(&self, cx: &mut Cx, live_ptr: Option<LivePtr>) -> bool {
-        if let Some((track_id, _)) = self.get_track_and_state_id_of(cx, live_ptr) {
+    pub fn is_track_of_animating(&self, cx: &mut Cx, state_id: LiveId) -> bool {
+        if let Some(track_id) = self.get_track_of(cx, state_id) {
             if let Some(state) = self.state.as_ref() {
                 if let Some(LiveValue::Int(ended)) = state.child_value_by_path(0, &[LivePath::prop(id!(tracks)), LivePath::prop(track_id), LivePath::prop(id!(ended))]) {
                     if *ended == 0 || *ended == cx.event_id as i64 {
@@ -791,8 +831,8 @@ impl Animator {
         false
     }
     
-    pub fn is_in_state(&self, cx: &mut Cx, live_ptr: Option<LivePtr>) -> bool {
-        if let Some((track_id, state_id)) = self.get_track_and_state_id_of(cx, live_ptr) {
+    pub fn is_in_state(&self, cx: &mut Cx, state_id: LiveId) -> bool {
+        if let Some(track_id) = self.get_track_of(cx, state_id) {
             let state = self.state.as_ref().unwrap();
             if let Some(LiveValue::Id(id)) = &state.child_value_by_path(0, &[LivePath::prop(id!(tracks)), LivePath::prop(track_id), LivePath::prop(id!(state_id))]) {
                 return *id == state_id;
@@ -801,13 +841,19 @@ impl Animator {
         false
     }
     
-    pub fn cut_to_live(&mut self, cx: &mut Cx, live_ptr: Option<LivePtr>/*, state_id: Id*/) {
-        if let Some(live_ptr) = live_ptr {
+    pub fn cut_to_live(&mut self, cx: &mut Cx, state_id: LiveId) {
+        if let Some(live_ptr) = self.live_ptr {
             let live_registry_rc = cx.live_registry.clone();
             let live_registry = live_registry_rc.borrow();
             if live_registry.generation_valid(live_ptr) {
+                // ok now we have to find 
                 let (nodes, index) = live_registry.ptr_to_nodes_index(live_ptr);
-                self.cut_to(cx, nodes[index].id, index, nodes);
+                if let Some(index) = nodes.child_by_name(index, LivePath::instance(state_id)){
+                    self.cut_to(cx, state_id, index, nodes);
+                }
+                else{
+                    println!("cut_to_live {} not found", state_id)
+                }
             }
             else {
                 println!("cut_to_live generaiton invalid")
@@ -892,13 +938,18 @@ impl Animator {
         self.swap_in_state(state);
     }
     
-    pub fn animate_to_live(&mut self, cx: &mut Cx, live_ptr: Option<LivePtr>/*,state_id: Id*/) {
-        if let Some(live_ptr) = live_ptr {
+    pub fn anim_to_live(&mut self, cx: &mut Cx, state_id:LiveId) {
+        if let Some(live_ptr) = self.live_ptr {
             let live_registry_rc = cx.live_registry.clone();
             let live_registry = live_registry_rc.borrow();
             if live_registry.generation_valid(live_ptr) {
                 let (nodes, index) = live_registry.ptr_to_nodes_index(live_ptr);
-                self.animate_to(cx, nodes[index].id, index, nodes)
+                if let Some(index) = nodes.child_by_name(index, LivePath::instance(state_id)){
+                    self.anim_to(cx, nodes[index].id, index, nodes)
+                }
+                else{
+                    println!("animate_to_live {} not found", state_id)
+                }
             }
             else {
                 println!("animate_to_live generation invalid");
@@ -906,7 +957,7 @@ impl Animator {
         }
     }
     
-    pub fn animate_to(&mut self, cx: &mut Cx, state_id: LiveId, index: usize, nodes: &[LiveNode]) {
+    pub fn anim_to(&mut self, cx: &mut Cx, state_id: LiveId, index: usize, nodes: &[LiveNode]) {
         
         let mut reader = if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(LivePath::prop(id!(apply))) {
             reader
