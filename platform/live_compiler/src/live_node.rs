@@ -249,7 +249,7 @@ impl LiveNodeOrigin {
         LiveAssignType::from_usize(((self.0 & 0xC000_0000_0000_0000)>>62) as usize)
     }
     
-    pub fn has_assign_type_of(&self, origin:LiveAssignType)->bool{
+    pub fn has_assign_type(&self, origin:LiveAssignType)->bool{
         (self.0 & 0xC000_0000_0000_0000) >> 62 == origin as u64
     }
     

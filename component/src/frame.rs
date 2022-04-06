@@ -45,7 +45,7 @@ pub struct Frame { // draw info per UI element
     hidden: bool,
     user_draw: bool,
     mouse_cursor: Option<MouseCursor>,
-    
+    #[live(false)] design_mode: bool, 
     #[rust] view: Option<View>,
     
     scroll_x: FrameComponentRef,
@@ -80,7 +80,6 @@ impl LiveHook for Frame {
     
     fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         let id = nodes[index].id;
-        let is_design_mode = false;
         match from {
             ApplyFrom::Animate | ApplyFrom::ApplyOver=> {
                 if let Some(component) = self.children.get_mut(&nodes[index].id) {
@@ -91,14 +90,14 @@ impl LiveHook for Frame {
                 }
             }
             ApplyFrom::NewFromDoc{file_id} | ApplyFrom::UpdateFromDoc{file_id} => {
-                if !is_design_mode && nodes[index].origin.has_assign_type_of(LiveAssignType::Template) {
+                if !self.design_mode && nodes[index].origin.has_assign_type(LiveAssignType::Template) {
                     // lets store a pointer into our templates.
                     let live_ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
                     self.templates.insert(id, live_ptr);
                     nodes.skip_node(index)
                 }
-                else if nodes[index].origin.has_assign_type_of(LiveAssignType::Instance)
-                    || is_design_mode && nodes[index].origin.has_assign_type_of(LiveAssignType::Template) {
+                else if nodes[index].origin.has_assign_type(LiveAssignType::Instance)
+                    || self.design_mode && nodes[index].origin.has_assign_type(LiveAssignType::Template) {
                     self.draw_order.push(id);
                     return self.children.get_or_insert(cx, id, | cx | {FrameComponentRef::new(cx)})
                         .apply(cx, from, index, nodes);
@@ -113,7 +112,6 @@ impl LiveHook for Frame {
             }
         }
     }
-    
 }
 
 
@@ -140,6 +138,9 @@ impl FrameComponent for Frame {
     }
     
     fn create_child(&mut self, cx:&mut Cx, at:CreateAt, id: &[LiveId], create: LiveId, nodes: &[LiveNode]) -> Option<&mut Box<dyn FrameComponent >> {
+        if self.design_mode{
+            return None
+        }
         if id.len()>1 {
             if self.children.get(&id[0]).is_some() {
                 return self.children.get_mut(&id[0]).unwrap().as_mut().unwrap().create_child(cx, at, &id[1..], create, nodes)

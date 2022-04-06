@@ -206,6 +206,7 @@ impl Default for Cx {
             id!(LivePtr),
             id!(String),
             id!(View),
+            id!(States),
             id!(Pass),
             id!(Texture),
             id!(Window),

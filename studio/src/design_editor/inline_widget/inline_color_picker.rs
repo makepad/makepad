@@ -1,7 +1,7 @@
 use {
     crate::{
         makepad_platform::*,
-        makepad_studio_component::color_picker::*,
+        makepad_component::color_picker::*,
         makepad_live_compiler::LiveToken,
         makepad_live_tokenizer::{
             position::Position,

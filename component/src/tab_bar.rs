@@ -2,10 +2,8 @@ use {
     
     crate::{
         makepad_platform::*,
-        makepad_component::{
-            component_map::ComponentMap,
-            scroll_view::ScrollView
-        },
+        component_map::ComponentMap,
+        scroll_view::ScrollView,
         tab::{TabAction, Tab},
     },
 };
@@ -65,7 +63,7 @@ pub struct TabBar {
 
 impl LiveHook for TabBar {
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        if let Some(index) = nodes.child_by_name(index, id!(tab), LiveAssignType::Property) {
+        if let Some(index) = nodes.child_by_name(index, LivePath::prop(id!(tab))) {
             for tab in self.tabs.values_mut() {
                 tab.apply(cx, from, index, nodes);
             }

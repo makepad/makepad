@@ -13,6 +13,12 @@ pub mod scroll_view;
 pub mod component_map;
 pub mod link_button;
 
+pub mod dock;
+pub mod tab;
+pub mod tab_bar;
+pub mod tab_close_button;
+pub mod color_picker;
+
 #[macro_use]
 pub mod frame_component;
 pub mod frame;
@@ -68,4 +74,9 @@ pub fn live_register(cx: &mut Cx) {
     crate::window_menu::live_register(cx);
     crate::scroll_view::live_register(cx);
     crate::scroll_bar::live_register(cx);
+    crate::tab_close_button::live_register(cx);
+    crate::tab::live_register(cx);
+    crate::tab_bar::live_register(cx);
+    crate::dock::live_register(cx);
+    crate::color_picker::live_register(cx);
 }

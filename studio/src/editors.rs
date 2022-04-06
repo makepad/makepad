@@ -5,10 +5,7 @@ use {
     crate::{
         makepad_component::{
             ComponentMap,
-        },
-        makepad_studio_component::{
             tab_bar::TabId,
-            //        dock::PanelId,
         },
         makepad_platform::*,
         editor_state::{

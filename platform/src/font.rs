@@ -366,7 +366,7 @@ impl CxDrawFontAtlas {
                         let live_registry = live_registry_rc.borrow();
                         if let Some(file_id) = live_registry.module_id_to_file_id.get(&LiveModuleId::from_str(&module_path!()).unwrap()) {
                             let file = live_registry.file_id_to_file(*file_id);
-                            if let Some(index) = file.expanded.nodes.child_by_name(0, id!(DrawTrapezoidText), LiveAssignType::Property) {
+                            if let Some(index) = file.expanded.nodes.child_by_name(0, LivePath::prop(id!(DrawTrapezoidText))) {
                                 self.draw_trapezoid_text.apply(cx, ApplyFrom::UpdateFromDoc {file_id:*file_id}, index, &file.expanded.nodes);
                             }
                         }
