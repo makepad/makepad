@@ -1,12 +1,12 @@
 use {
     crate::{
         makepad_studio_component::{
-            dock::{PanelId},
             file_tree::{FileNodeId},
-            tab_bar::{TabId},
         },
         makepad_component::{
             splitter::{SplitterAlign},
+            dock::{PanelId},
+            tab_bar::{TabId},
         },
         makepad_platform::*,
         editor_state::{EditorState, SessionId},

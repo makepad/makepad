@@ -7,7 +7,7 @@ use {
         live_error::{LiveError, LiveErrorSpan, LiveErrorOrigin, LiveFileError},
         live_parser::LiveParser,
         live_document::{LiveOriginal, LiveExpanded},
-        live_node::{LiveNodeOrigin, LiveNode, LiveValue, LiveType, LiveTypeInfo, LiveAssignType},
+        live_node::{LiveNodeOrigin, LiveNode, LiveValue, LiveType, LiveTypeInfo},
         live_node_vec::{LiveNodeSlice, LiveNodeVec, LiveNodeMutReader, LivePath},
         live_ptr::{LiveFileId, LivePtr, LiveModuleId, LiveFileGeneration},
         live_token::{LiveToken, LiveTokenId, TokenWithSpan},
@@ -216,7 +216,7 @@ impl LiveRegistry {
                     println!("module_path_id_to_doc zero nodelen {}", self.file_id_to_file_name(*file_id));
                     return None
                 }
-                if let Some(index) = doc.nodes.child_by_name(0, name, LiveAssignType::Property) {
+                if let Some(index) = doc.nodes.child_by_name(0, LivePath::prop(name)) {
                     return Some(LiveDocNodes {nodes: &doc.nodes, file_id: *file_id, index});
                 }
                 else {
@@ -239,7 +239,7 @@ impl LiveRegistry {
                     println!("module_path_id_to_doc zero nodelen {}", self.file_id_to_file_name(*file_id));
                     return None
                 }
-                if let Some(index) = doc.nodes.child_by_name(0, name, LiveAssignType::Property) {
+                if let Some(index) = doc.nodes.child_by_name(0, LivePath::prop(name)) {
                     return Some(LivePtr {file_id:*file_id, index:index as u32, generation:live.generation});
                 }
                 else {
@@ -289,7 +289,7 @@ impl LiveRegistry {
         // ok lets find it in that other doc
         if let Some(file_id) = self.module_id_to_file_id(module_id) {
             let file = self.file_id_to_file(file_id);
-            if let Some(index) = file.expanded.nodes.child_by_name(0, item, LiveAssignType::Property) {
+            if let Some(index) = file.expanded.nodes.child_by_name(0, LivePath::prop(item)) {
                 return Some(LiveScopeTarget::LivePtr(
                     LivePtr {file_id: file_id, index: index as u32, generation: file.generation}
                 ))
@@ -299,7 +299,7 @@ impl LiveRegistry {
     }
     
     pub fn find_scope_target_via_start(&self, item: LiveId, index: usize, nodes: &[LiveNode]) -> Option<LiveScopeTarget> {
-        if let Some(index) = nodes.scope_up_down_by_name(index, item) {
+        if let Some(index) = nodes.scope_up_down_by_name(index, LivePath::prop(item)) {
             match &nodes[index].value {
                 LiveValue::Use(module_id) => {
                     if let Some(ret) = self.find_module_id_name(item, *module_id) {

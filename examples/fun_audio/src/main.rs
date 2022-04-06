@@ -101,6 +101,7 @@ live_register!{
             }
         }
         frame: {
+            design_mode: false,
             bg: {color: (COLOR_BG_APP)},
             walk: {width: Fill, height: Fill}
             layout: {
@@ -136,7 +137,10 @@ live_register!{
             Splitter {
                 align: SplitterAlign::FromEnd(300)
                 walk: {width: Fill, height: Fill}
-                a: FoldablePiano {}
+                a: Frame{
+                    layout:{flow:Down}
+                    FoldablePiano {}
+                }
                 b: Box {
                     clip: true,
                     mouse_cursor: Default,
