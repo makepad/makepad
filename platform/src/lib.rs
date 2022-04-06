@@ -24,6 +24,7 @@ mod texture;
 mod cursor;
 mod menu;
 mod animator;
+mod state;
 mod gpu_info;
 mod draw_vars;
 mod geometry;
@@ -191,6 +192,10 @@ pub use {
             LiveAnimate,
             ApplyFrom,
             LiveBody,
+        },
+        state::{
+            State,
+            StateAction
         },
         animator::{
             Ease,

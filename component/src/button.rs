@@ -87,6 +87,36 @@ live_register!{
             align: {x: 0.5, y: 0.5},
             padding: {left: 14.0, top: 10.0, right: 14.0, bottom: 10.0}
         }
+        /*
+        state:{
+            default = {
+                default:true,
+                duration: 0.1,
+                apply: {
+                    bg_quad: {pressed: 0.0, hover: 0.0}
+                    label_text: {pressed: 0.0, hover: 0.0}
+                }
+            }
+            
+            hover = {
+                from: {
+                    all: Play::Forward {duration: 0.1}
+                    pressed_state: Play::Forward {duration: 0.01}
+                }
+                apply: {
+                    bg_quad: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                    label_text: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                }
+            }
+            
+            pressed = {
+                duration: 0.2,
+                apply: {
+                    bg_quad: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                    label_text: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                }
+            }
+        }*/
         
         default_state: {
             duration: 0.1,
@@ -121,10 +151,14 @@ live_register!{
 #[live_register(register_as_frame_component!(Button))]
 pub struct Button {
     #[rust] pub button_logic: ButtonLogic,
+
     #[state(default_state)] pub animator: Animator,
     default_state: Option<LivePtr>,
     hover_state: Option<LivePtr>,
     pressed_state: Option<LivePtr>,
+
+    //state: State,
+
     bg_quad: DrawQuad,
     label_text: DrawLabelText,
     walk: Walk,

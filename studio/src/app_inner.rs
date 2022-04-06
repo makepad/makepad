@@ -4,12 +4,12 @@ use {
         makepad_component::{
             splitter::{SplitterAlign},
             DesktopWindow,
+            dock::{Dock, DockAction, DragPosition, PanelId},
+            tab_bar::TabId,
         },
         makepad_studio_component::{
             shader_view::ShaderView,
-            dock::{Dock, DockAction, DragPosition, PanelId},
             file_tree::{FileTreeAction, FileNodeId, FileTree},
-            tab_bar::TabId,
         },
         collab::{
             collab_client::CollabClient,
