@@ -31,19 +31,22 @@ live_register!{
         
         size: vec2(200., 200)
         
-        default_state: {
-            duration: 0.1,
-            apply: {bg_quad: {pressed: 0.0, hover: 0.0}}
-        }
-        
-        hover_state: {
-            duration: 0.0
-            apply: {bg_quad: {pressed: 0.0, hover: 1.0}}
-        }
-        
-        pressed_state: {
-            duration: 0.2,
-            apply: {bg_quad: {pressed: 1.0, hover: 1.0}}
+        state:{
+            default = {
+                default: true
+                duration: 0.1,
+                apply: {bg_quad: {pressed: 0.0, hover: 0.0}}
+            }
+            
+            hover = {
+                duration: 0.0
+                apply: {bg_quad: {pressed: 0.0, hover: 1.0}}
+            }
+            
+            pressed = {
+                duration: 0.2,
+                apply: {bg_quad: {pressed: 1.0, hover: 1.0}}
+            }
         }
     }
 }
@@ -55,8 +58,8 @@ pub struct ShaderView {
     
     size: Vec2,
     pad: Vec2,
-    #[state(default_state)]
-    animator: Animator,
+
+    state: State,
     
     default_state: Option<LivePtr>,
     hover_state: Option<LivePtr>,
@@ -67,7 +70,7 @@ pub struct ShaderView {
 impl ShaderView {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
-        self.animator_handle_event(cx, event);
+        self.state_handle_event(cx, event);
         
         match event.hits(cx, self.bg_quad.draw_vars.area) {
             HitEvent::FingerHover(fe) => {
@@ -75,28 +78,28 @@ impl ShaderView {
                 
                 match fe.hover_state {
                     HoverState::In => {
-                        self.animate_to(cx, self.hover_state);
+                        self.animate_state(cx, id!(hover));
                     },
                     HoverState::Out => {
-                        self.animate_to(cx, self.default_state);
+                        self.animate_state(cx, id!(default));
                     },
                     _ => ()
                 }
             },
             HitEvent::FingerDown(_fe) => {
-                self.animate_to(cx, self.pressed_state);
+                self.animate_state(cx, id!(pressed));
             },
             HitEvent::FingerUp(fe) => {
                 if fe.is_over {
                     if fe.input_type.has_hovers() {
-                        self.animate_to(cx, self.hover_state);
+                        self.animate_state(cx, id!(hover));
                     }
                     else {
-                        self.animate_to(cx, self.default_state);
+                        self.animate_state(cx, id!(default));
                     }
                 }
                 else {
-                    self.animate_to(cx, self.default_state);
+                    self.animate_state(cx, id!(default));
                 }
             }
             HitEvent::FingerMove(_) => {

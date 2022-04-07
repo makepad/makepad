@@ -893,6 +893,9 @@ impl State {
             if live_registry.generation_valid(live_ptr) {
                 // ok now we have to find 
                 let (nodes, index) = live_registry.ptr_to_nodes_index(live_ptr);
+                
+                self.init_as_needed(cx, index, nodes);
+                
                 if let Some(index) = nodes.child_by_name(index, state_id.as_instance()){
                     self.cut_to(cx, state_id, index, nodes);
                 }
@@ -983,6 +986,19 @@ impl State {
         self.swap_in_state(state);
     }
     
+    pub fn init_as_needed(&mut self, cx:&mut Cx, index:usize, nodes:&[LiveNode]){
+        if self.need_init(){
+            let mut index = index + 1;
+            while !nodes[index].is_close() {
+                let state_id = nodes[index].id;
+                if let Some(LiveValue::Bool(true)) = nodes.child_value_by_path(index, &[id!(default).as_field()]){
+                    self.cut_to(cx, state_id, index, nodes);
+                }
+                index = nodes.skip_node(index);
+            }
+        }
+    }
+    
     pub fn animate_to_live(&mut self, cx: &mut Cx, state_id:LiveId) {
         if let Some(live_ptr) = self.live_ptr {
             let live_registry_rc = cx.live_registry.clone();
@@ -990,16 +1006,7 @@ impl State {
             if live_registry.generation_valid(live_ptr) {
                 let (nodes, index) = live_registry.ptr_to_nodes_index(live_ptr);
                 
-                if self.need_init(){
-                    let mut index = index + 1;
-                    while !nodes[index].is_close() {
-                        let state_id = nodes[index].id;
-                        if let Some(LiveValue::Bool(true)) = nodes.child_value_by_path(index, &[id!(default).as_field()]){
-                            self.cut_to(cx, state_id, index, nodes);
-                        }
-                        index = nodes.skip_node(index);
-                    }
-                }
+                self.init_as_needed(cx, index, nodes);
                 
                 if let Some(index) = nodes.child_by_name(index, state_id.as_instance()){
                     self.animate_to(cx, nodes[index].id, index, nodes)

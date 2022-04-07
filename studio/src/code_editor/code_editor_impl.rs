@@ -155,30 +155,34 @@ live_register!{
             color: (COLOR_BG_CURSOR)
         }
         
-        show_caret_state: {
-            track: caret,
-            duration: 0.0
-            apply: {caret_quad: {color: #b0}}
-        }
-        
-        hide_caret_state: {
-            track: caret,
-            duration: 0.0
-            apply: {caret_quad: {color: #0000}}
-        }
-        
-        zoom_in_state: {
-            track: zoom
-            from: {all: Play::Exp {speed1: 0.96, speed2: 0.97}}
-            redraw: true
-            apply: {zoom_out: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
-        }
-        
-        zoom_out_state: {
-            track: zoom
-            from: {all: Play::Exp {speed1: 0.98, speed2: 0.95}}
-            redraw: true
-            apply: {zoom_out: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]}
+        state:{
+            show_caret = {
+                default: true,
+                track: caret,
+                duration: 0.0
+                apply: {caret_quad: {color: #b0}}
+            }
+            
+            hide_caret =  {
+                track: caret,
+                duration: 0.0
+                apply: {caret_quad: {color: #0000}}
+            }
+            
+            zoom_in = {
+                default: true,
+                track: zoom
+                from: {all: Play::Exp {speed1: 0.96, speed2: 0.97}}
+                redraw: true
+                apply: {zoom_out: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
+            }
+            
+            zoom_out = {
+                track: zoom
+                from: {all: Play::Exp {speed1: 0.98, speed2: 0.95}}
+                redraw: true
+                apply: {zoom_out: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]}
+            }
         }
         
         max_zoom_out: 0.92
@@ -200,19 +204,12 @@ pub struct CodeEditorImpl {
     
     pub scroll_view: ScrollView,
     
-    show_caret_state: Option<LivePtr>,
-    hide_caret_state: Option<LivePtr>,
-    
     pub zoom_out: f32,
     pub max_zoom_out: f32,
     
     padding_top: f32,
     
-    zoom_out_state: Option<LivePtr>,
-    zoom_in_state: Option<LivePtr>,
-    
-    #[state(show_caret_state, zoom_in_state)]
-    animator: Animator,
+    state: State,
     
     selection_quad: DrawSelection,
     code_text: DrawText,
@@ -334,7 +331,7 @@ impl CodeEditorImpl {
         self.calc_lines_layout_inner(cx, document_inner, lines_layout, &mut compute_height);
         // this keeps the animation zooming properly focussed around a cursor/line
         if let Some(center_line) = self.zoom_anim_center {
-            if self.animator.is_track_of_animating(cx, self.zoom_out_state) {
+            if self.state.is_track_of_animating(cx, id!(zoom_out)) {
                 let next_pos = self.position_to_vec2(center_line, lines_layout);
                 let last_pos = self.zoom_last_pos.unwrap();
                 let pos = self.scroll_view.get_scroll_pos(cx);
@@ -441,7 +438,7 @@ impl CodeEditorImpl {
         self.caret_quad.end_many_instances(cx);
     }
     
-    pub fn start_zoom_anim(&mut self, cx: &mut Cx, state: &mut EditorState, lines_layout: &LinesLayout, anim: Option<LivePtr>) {
+    pub fn start_zoom_anim(&mut self, cx: &mut Cx, state: &mut EditorState, lines_layout: &LinesLayout, anim: LiveId) {
         if let Some(session_id) = self.session_id {
             let session = &state.sessions[session_id];
             let document = &state.documents[session.document_id];
@@ -462,14 +459,14 @@ impl CodeEditorImpl {
             };
             self.zoom_anim_center = Some(center_line);
             self.zoom_last_pos = Some(self.position_to_vec2(center_line, lines_layout));
-            self.animate_to(cx, anim)
+            self.animate_state(cx, anim)
         }
     }
     
     pub fn reset_caret_blink(&mut self, cx: &mut Cx) {
         cx.stop_timer(self.caret_blink_timer);
         self.caret_blink_timer = cx.start_timer(self.caret_blink_timeout, true);
-        self.animate_cut(cx, self.show_caret_state);
+        self.cut_state(cx, id!(show_caret));
     }
     
     pub fn draw_selections(
@@ -843,17 +840,17 @@ impl CodeEditorImpl {
         send_request: &mut dyn FnMut(CollabRequest),
         dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
     ) {
-        if self.animator_handle_event(cx, event).must_redraw() {
+        if self.state_handle_event(cx, event).must_redraw() {
             self.scroll_view.redraw(cx);
         }
         
         if event.is_timer(self.caret_blink_timer) {
-            if self.animator_is_in_state(cx, self.show_caret_state) {
-                self.animate_to(cx, self.hide_caret_state);
+            if self.state.is_in_state(cx, id!(show_caret)) {
+                self.animate_state(cx, id!(hide_caret));
                 dispatch_action(cx, CodeEditorAction::CursorBlink);
             }
             else {
-                self.animate_to(cx, self.show_caret_state);
+                self.animate_state(cx, id!(show_caret));
             }
         }
         
@@ -995,13 +992,13 @@ impl CodeEditorImpl {
                 key_code: KeyCode::Alt,
                 ..
             }) => {
-                self.start_zoom_anim(cx, state, lines_layout, self.zoom_out_state);
+                self.start_zoom_anim(cx, state, lines_layout, id!(zoom_out));
             }
             HitEvent::KeyUp(KeyEvent {
                 key_code: KeyCode::Alt,
                 ..
             }) => {
-                self.start_zoom_anim(cx, state, lines_layout, self.zoom_in_state);
+                self.start_zoom_anim(cx, state, lines_layout, id!(zoom_in));
             }
             HitEvent::KeyDown(KeyEvent {
                 key_code: KeyCode::Return,
