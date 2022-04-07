@@ -123,7 +123,7 @@ impl LiveHook for LiveEditor {
         for widget in self.widgets.values_mut() {
             reg.apply(cx, apply_from, index, nodes, widget.inline_widget.as_mut());
         }*/
-        if let Some(index) = nodes.child_by_name(index, id!(fold_button), LiveAssignType::Property) {
+        if let Some(index) = nodes.child_by_name(index, id!(fold_button).as_field()) {
             for fold_button in self.fold_buttons.values_mut() {
                 fold_button.apply(cx, from, index, nodes);
             }

@@ -66,7 +66,7 @@ live_register!{
         }
         
         state:{
-            default = {
+            default2 = {
                 default: true,
                 from: {all: Play::Forward {duration: 0.2}}
                 apply: {
@@ -189,7 +189,7 @@ impl Tab {
         match self.close_button.handle_event(cx, event) {
             TabCloseButtonAction::WasPressed => dispatch_action(cx, TabAction::CloseWasPressed),
             TabCloseButtonAction::HoverIn => block_hover_out = true,
-            TabCloseButtonAction::HoverOut => self.animate_state(cx, id!(default)),
+            TabCloseButtonAction::HoverOut => self.animate_state(cx, id!(default2)),
             _ => ()
         };
         
@@ -201,7 +201,7 @@ impl Tab {
                         self.animate_state(cx, id!(hover));
                     }
                     HoverState::Out => if !block_hover_out {
-                        self.animate_state(cx, id!(default));
+                        self.animate_state(cx, id!(default2));
                     }
                     _ => {}
                 }

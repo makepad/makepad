@@ -93,78 +93,84 @@ live_register!{
             },
         }
         
-        default_state: {
-            duration: 0.2
-            apply: {
-                hover: 0.0,
-                bg_quad: {hover: (hover)}
-                name_text: {hover: (hover)}
-                icon_quad: {hover: (hover)}
+        state : {
+            default = {
+                default: true,
+                duration: 0.2
+                apply: {
+                    hover: 0.0,
+                    bg_quad: {hover: (hover)}
+                    name_text: {hover: (hover)}
+                    icon_quad: {hover: (hover)}
+                }
             }
-        }
-        
-        hover_state: {
-            duration: 0.1
-            apply: {hover: [{time: 0.0, value: 1.0}]},
-        }
-        
-        focussed_state: {
-            track: focus,
-            duration: 0.,
-            apply: {
-                focussed: 1.0,
+            
+            hover = {
+                duration: 0.1
+                apply: {hover: [{time: 0.0, value: 1.0}]},
             }
-        }
-        
-        unfocussed_state: {
-            track: focus,
-            duration: 0.1,
-            apply: {
-                focussed: 0.0,
+            
+            focussed = {
+                default:true
+                track: focus,
+                duration: 0.,
+                apply: {
+                    focussed: 1.0,
+                }
             }
-        }
-        
-        unselected_state: {
-            track: select,
-            duration: 0.1,
-            apply: {
-                selected: 0.0,
-                bg_quad: {selected: (selected)}
-                name_text: {selected: (selected)}
-                icon_quad: {selected: (selected)}
+            
+            unfocussed = {
+                track: focus,
+                duration: 0.1,
+                apply: {
+                    focussed: 0.0,
+                }
             }
-        }
-        
-        selected_state: {
-            track: select,
-            duration: 0.1,
-            apply: {
-                selected: [{time: 0.0, value: 1.0}],
+            
+            unselected = {
+                default:true
+                track: select,
+                duration: 0.1,
+                apply: {
+                    selected: 0.0,
+                    bg_quad: {selected: (selected)}
+                    name_text: {selected: (selected)}
+                    icon_quad: {selected: (selected)}
+                }
             }
-        }
-        
-        closed_state: {
-            track: open,
-            from: {all: Play::Exp {speed1: 0.80, speed2: 0.97}}
-            //duration: 0.2
-            redraw: true
-            //ease: Ease::OutExp
-            apply: {
-                opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
-                bg_quad: {opened: (opened)}
-                name_text: {opened: (opened)}
-                icon_quad: {opened: (opened)}
+            
+            selected = {
+                track: select,
+                duration: 0.1,
+                apply: {
+                    selected: [{time: 0.0, value: 1.0}],
+                }
             }
-        }
-        
-        opened_state: {
-            track: open,
-            from: {all: Play::Exp {speed1: 0.82, speed2: 0.95}}
-            //duration: 0.2
-            redraw: true
-            //ease: Ease::OutExp
-            apply: {
-                opened: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]
+            
+            closed =  {
+                default: true
+                track: open,
+                from: {all: Play::Exp {speed1: 0.80, speed2: 0.97}}
+                //duration: 0.2
+                redraw: true
+                //ease: Ease::OutExp
+                apply: {
+                    opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
+                    bg_quad: {opened: (opened)}
+                    name_text: {opened: (opened)}
+                    icon_quad: {opened: (opened)}
+                }
+            }
+            
+            opened = {
+                track: open,
+                from: {all: Play::Exp {speed1: 0.82, speed2: 0.95}}
+                //duration: 0.2
+                redraw: true
+                //ease: Ease::OutExp
+                apply: {
+                    opened: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]
+                }
             }
         }
         is_folder: false,
@@ -237,20 +243,9 @@ pub struct FileTreeNode {
     name_text: DrawNameText,
     layout: Layout,
     
-    #[state(default_state, unselected_state, closed_state, focussed_state)]
-    animator: Animator,
+    state: State,
     
     indent_width: f32,
-    
-    focussed_state: Option<LivePtr>,
-    unfocussed_state: Option<LivePtr>,
-    
-    default_state: Option<LivePtr>,
-    hover_state: Option<LivePtr>,
-    selected_state: Option<LivePtr>,
-    unselected_state: Option<LivePtr>,
-    opened_state: Option<LivePtr>,
-    closed_state: Option<LivePtr>,
     
     icon_walk: Walk,
     
@@ -288,7 +283,7 @@ pub struct FileTree {
 impl LiveHook for FileTree {
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         for (_, (tree_node, id)) in self.tree_nodes.iter_mut() {
-            if let Some(index) = nodes.child_by_name(index, *id, LiveAssignType::Property) {
+            if let Some(index) = nodes.child_by_name(index, id.as_field()) {
                 tree_node.apply(cx, from, index, nodes);
             }
         }
@@ -359,15 +354,15 @@ impl FileTreeNode {
     }
     
     fn set_is_selected(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.toggle_animator(cx, is, animate, self.selected_state, self.unselected_state)
+        self.toggle_state(cx, is, animate, id!(selected), id!(unselected))
     }
     
     fn set_is_focussed(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.toggle_animator(cx, is, animate, self.focussed_state, self.unfocussed_state)
+        self.toggle_state(cx, is, animate, id!(focussed), id!(unfocussed))
     }
     
     pub fn set_folder_is_open(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.toggle_animator(cx, is, animate, self.opened_state, self.closed_state);
+        self.toggle_state(cx, is, animate, id!(opened), id!(closed));
     }
     
     pub fn handle_event(
@@ -376,7 +371,7 @@ impl FileTreeNode {
         event: &mut Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, FileTreeNodeAction),
     ) {
-        if self.animator_handle_event(cx, event).must_redraw() {
+        if self.state_handle_event(cx, event).must_redraw() {
             self.bg_quad.draw_vars.redraw(cx);
         }
         match event.hits(cx, self.bg_quad.draw_vars.area) {
@@ -384,10 +379,10 @@ impl FileTreeNode {
                 cx.set_hover_mouse_cursor(MouseCursor::Hand);
                 match f.hover_state {
                     HoverState::In => {
-                        self.animate_to(cx, self.hover_state);
+                        self.animate_state(cx, id!(hover));
                     }
                     HoverState::Out => {
-                        self.animate_to(cx, self.default_state);
+                        self.animate_state(cx, id!(default));
                     }
                     _ => {}
                 }
@@ -398,14 +393,14 @@ impl FileTreeNode {
                 }
             }
             HitEvent::FingerDown(_) => {
-                self.animate_to(cx, self.selected_state);
+                self.animate_state(cx, id!(selected));
                 if self.is_folder {
-                    if self.animator_is_in_state(cx, self.opened_state) {
-                        self.animate_to(cx, self.closed_state);
+                    if self.state.is_in_state(cx, id!(opened)) {
+                        self.animate_state(cx, id!(closed));
                         dispatch_action(cx, FileTreeNodeAction::Closing);
                     }
                     else {
-                        self.animate_to(cx, self.opened_state);
+                        self.animate_state(cx, id!(opened));
                         dispatch_action(cx, FileTreeNodeAction::Opening);
                     }
                     
