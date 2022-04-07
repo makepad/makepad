@@ -6,7 +6,7 @@ pub use {
         makepad_live_compiler::*,
         event::Event,
         cx::Cx,
-        animator::{Animator,AnimatorAction, Animate}
+        state::{State,StateAction, Animate}
     }
 };
 
@@ -72,7 +72,7 @@ pub trait LiveNew: LiveApply {
         let live_registry = live_registry_rc.borrow();
         if let Some(file_id) = live_registry.module_id_to_file_id.get(&module_id) {
             let file = live_registry.file_id_to_file(*file_id);
-            if let Some(index) = file.expanded.nodes.child_by_name(0, LivePath::prop(id)) {
+            if let Some(index) = file.expanded.nodes.child_by_name(0, id.as_field()) {
                 let mut ret = Self::new(cx);
                 ret.apply(cx, ApplyFrom::NewFromDoc {file_id: *file_id}, index, &file.expanded.nodes);
                 return Some(ret)
@@ -112,7 +112,7 @@ pub trait LiveApply: LiveHook {
                         let live_registry = live_registry_rc.borrow();
                         if let Some(file_id) = live_registry.main_module {
                             let file = live_registry.file_id_to_file(file_id);
-                            if let Some(index) = file.expanded.nodes.child_by_name(0, LivePath::prop(id)) {
+                            if let Some(index) = file.expanded.nodes.child_by_name(0, id.as_field()) {
                                 self.apply(cx, ApplyFrom::UpdateFromDoc {file_id}, index, &file.expanded.nodes);
                             }
                         }
@@ -120,7 +120,7 @@ pub trait LiveApply: LiveHook {
                     }
                     LiveEditEvent::Mutation {tokens, apply, live_ptrs} => {
                         cx.update_shader_tables_with_live_edit(&tokens, &live_ptrs);
-                        if let Some(index) = apply.child_by_name(0, LivePath::prop(id)) {
+                        if let Some(index) = apply.child_by_name(0, id.as_field()) {
                             self.apply(cx, ApplyFrom::LiveEdit, index, &apply);
                         }
                     }
@@ -140,61 +140,6 @@ pub struct LiveBody {
     pub column: usize,
     pub code: String,
     pub live_type_infos: Vec<LiveTypeInfo>
-}
-
-
-pub trait LiveAnimate {
-    fn init_animator(&mut self, cx: &mut Cx);
-    fn apply_animator(&mut self, cx: &mut Cx);
-    fn toggle_animator(&mut self, cx: &mut Cx, is_state_1: bool, animate: Animate, state1: Option<LivePtr>, state2: Option<LivePtr>,) {
-        if is_state_1 {
-            if let Animate::Yes = animate {
-                self.animate_to(cx, state1)
-            }
-            else {
-                self.animate_cut(cx, state1)
-            }
-        }
-        else {
-            if let Animate::Yes = animate {
-                self.animate_to(cx, state2)
-            }
-            else {
-                self.animate_cut(cx, state2)
-            }
-        }
-    }
-    fn animator_is_in_state(&mut self, cx: &mut Cx, state: Option<LivePtr>) -> bool;
-    fn animate_cut(&mut self, cx: &mut Cx, state: Option<LivePtr>);
-    fn animate_to(&mut self, cx: &mut Cx, state: Option<LivePtr>);
-    fn animator_handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> AnimatorAction;
-}
-
-pub trait LiveState {
-    fn init_state(&mut self, cx: &mut Cx);
-    fn apply_state(&mut self, cx: &mut Cx);
-    fn toggle_state(&mut self, cx: &mut Cx, is_state_1: bool, animate: Animate, state1: LiveId, state2: LiveId) {
-        if is_state_1 {
-            if let Animate::Yes = animate {
-                self.state_animate(cx, state1)
-            }
-            else {
-                self.state_cut(cx, state1)
-            }
-        }
-        else {
-            if let Animate::Yes = animate {
-                self.state_animate(cx, state2)
-            }
-            else {
-                self.state_cut(cx, state2)
-            }
-        }
-    }
-    fn is_in_state(&mut self, cx: &mut Cx, state: LiveId) -> bool;
-    fn state_cut(&mut self, cx: &mut Cx, state: LiveId);
-    fn state_animate(&mut self, cx: &mut Cx, state: LiveId);
-    fn state_handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> AnimatorAction;
 }
 
 

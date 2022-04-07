@@ -54,32 +54,36 @@ live_register!{
         max_horizontal: (DIM_SPLITTER_MAX_HORIZONTAL)
         min_vertical: (DIM_SPLITTER_MIN_VERTICAL)
         max_vertical: (DIM_SPLITTER_MAX_VERTICAL)
-        default_state: {
-            from: {all: Play::Forward {duration: 0.1}}
-            apply: {
-                bar_quad: {pressed: 0.0, hover: 0.0}
-            }
-        }
         
-        hover_state: {
-            from: {
-                all: Play::Forward {duration: 0.1}
-                state_down: Play::Forward {duration: 0.01}
-            }
-            apply: {
-                bar_quad: {
-                    pressed: 0.0,
-                    hover: [{time: 0.0, value: 1.0}],
+        state:{
+            default = {
+                default: true
+                from: {all: Play::Forward {duration: 0.1}}
+                apply: {
+                    bar_quad: {pressed: 0.0, hover: 0.0}
                 }
             }
-        }
-        
-        pressed_state: {
-            from: {all: Play::Forward {duration: 0.1}}
-            apply: {
-                bar_quad: {
-                    pressed: [{time: 0.0, value: 1.0}],
-                    hover: 1.0,
+            
+            hover = {
+                from: {
+                    all: Play::Forward {duration: 0.1}
+                    state_down: Play::Forward {duration: 0.01}
+                }
+                apply: {
+                    bar_quad: {
+                        pressed: 0.0,
+                        hover: [{time: 0.0, value: 1.0}],
+                    }
+                }
+            }
+            
+            pressed = {
+                from: {all: Play::Forward {duration: 0.1}}
+                apply: {
+                    bar_quad: {
+                        pressed: [{time: 0.0, value: 1.0}],
+                        hover: 1.0,
+                    }
                 }
             }
         }
@@ -102,11 +106,8 @@ pub struct Splitter {
     #[rust] rect: Rect,
     #[rust] position: f32,
     #[rust] drag_start_align: Option<SplitterAlign>,
-    #[state(default_state)] pub animator: Animator,
-    
-    default_state: Option<LivePtr>,
-    hover_state: Option<LivePtr>,
-    pressed_state: Option<LivePtr>,
+
+    state: State,
     
     min_vertical: f32,
     max_vertical: f32,
@@ -258,7 +259,7 @@ impl Splitter {
         event: &mut Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, SplitterAction),
     ) {
-        self.animator_handle_event(cx, event);
+        self.state_handle_event(cx, event);
         match event.hits_with_options(
             cx,
             self.bar_quad.draw_vars.area,
@@ -274,10 +275,10 @@ impl Splitter {
                 }
                 match f.hover_state {
                     HoverState::In => if !f.any_down {
-                        self.animate_to(cx, self.hover_state);
+                        self.animate_state(cx, id!(hover));
                     },
                     HoverState::Out => if !f.any_down {
-                        self.animate_to(cx, self.default_state);
+                        self.animate_state(cx, id!(default));
                     },
                     _ => ()
                 }
@@ -287,21 +288,21 @@ impl Splitter {
                     Axis::Horizontal => cx.set_down_mouse_cursor(MouseCursor::ColResize),
                     Axis::Vertical => cx.set_down_mouse_cursor(MouseCursor::RowResize),
                 }
-                self.animate_to(cx, self.pressed_state);
+                self.animate_state(cx, id!(pressed));
                 self.drag_start_align = Some(self.align);
             }
             HitEvent::FingerUp(f) => {
                 self.drag_start_align = None;
                 if f.is_over {
                     if f.input_type.has_hovers() {
-                        self.animate_to(cx, self.hover_state);
+                        self.animate_state(cx, id!(hover));
                     }
                     else {
-                        self.animate_to(cx, self.default_state);
+                        self.animate_state(cx, id!(default));
                     }
                 }
                 else {
-                    self.animate_to(cx, self.default_state);
+                    self.animate_state(cx, id!(default));
                 }
             }
             HitEvent::FingerMove(f) => {

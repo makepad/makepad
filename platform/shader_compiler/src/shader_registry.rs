@@ -229,7 +229,7 @@ impl ShaderRegistry {
                     if ids.len() == 0 {
                         return LiveNodeFindResult::Component(now_ptr);
                     }
-                    match nodes.child_by_name(index, LivePath::prop(ids[0])) {
+                    match nodes.child_by_name(index, ids[0].as_field()) {
                         Some(child_index) => {
                             return walk_recur(live_registry, None, file_id, generation, child_index, nodes, &ids[1..])
                         }
@@ -245,7 +245,7 @@ impl ShaderRegistry {
                         }
                         return LiveNodeFindResult::Component(now_ptr);
                     }
-                    match nodes.child_by_name(index, LivePath::prop(ids[0])) {
+                    match nodes.child_by_name(index, ids[0].as_field()) {
                         Some(child_index) => {
                             let struct_ptr = if clone == id!(Struct) {
                                 Some(now_ptr)
@@ -264,7 +264,7 @@ impl ShaderRegistry {
                     if ids.len() == 0 {
                         return LiveNodeFindResult::NotFound;
                     }
-                    match nodes.child_by_name(index, LivePath::prop(ids[0])) {
+                    match nodes.child_by_name(index, ids[0].as_field()) {
                         Some(child_index) => {
                             return walk_recur(live_registry, None, file_id,  generation,  child_index, nodes, &ids[1..])
                         }

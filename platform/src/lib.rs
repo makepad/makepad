@@ -23,7 +23,7 @@ mod pass;
 mod texture;
 mod cursor;
 mod menu;
-mod animator;
+//mod animator;
 mod state;
 mod gpu_info;
 mod draw_vars;
@@ -66,8 +66,9 @@ pub use {
         LiveFieldKind,
         LiveComponentInfo,
         LiveComponentRegistry,
-        LiveAssignType,
-        LivePath,
+        LivePropType,
+        LiveProp,
+        LiveIdAsProp,
         //LiveTypeKind,
         LiveValue,
         FittedString,
@@ -189,20 +190,16 @@ pub use {
             LiveHook,
             LiveApplyValue,
             ToLiveValue,
-            LiveAnimate,
             ApplyFrom,
             LiveBody,
         },
         state::{
-            State,
-            StateAction
-        },
-        animator::{
             Ease,
             Play,
-            Animator,
             Animate,
-            AnimatorAction
+            LiveState,
+            State,
+            StateAction
         },
         draw_vars::{
             DrawVars

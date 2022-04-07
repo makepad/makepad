@@ -49,12 +49,13 @@ pub use {
             LiveFileId,
         },
         live_node_vec::{
-            LivePath,
             LiveNodeSlice,
             LiveNodeVec,
             LiveNodeReader,
         },
         live_node::{
+            LiveProp,
+            LiveIdAsProp,
             LiveEditInfo,
             LiveValue,
             LiveNode,
@@ -67,7 +68,7 @@ pub use {
             LiveNodeOrigin,
             InlineString,
             FittedString, 
-            LiveAssignType,
+            LivePropType,
             //LiveTypeKind,
         },
         live_token::{TokenWithSpan, LiveToken, LiveTokenId},
