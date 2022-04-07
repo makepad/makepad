@@ -150,7 +150,7 @@ live_register!{
                         }
                         body: Frame {
                             layout: {flow: Down}
-                            instrument = InstrumentHeader {
+                            instrument =? InstrumentHeader {
                                 header: {
                                     fold_button = FoldButton {}
                                     swatch = Circle {
@@ -261,6 +261,7 @@ impl App {
                 if let Some(instrument) = self.frame.add_child(cx, ids!(instrument), id!(my_id), live!{
                     header: {label = {text: "MyInstrument"}}
                 }) {
+                    println!("HERE!");
                     instrument.add_child(cx, ids!(stack), id!(my_stack1), live!{
                         header: {label = {text: "MyStackItem"}}
                     });
