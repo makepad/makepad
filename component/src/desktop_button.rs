@@ -88,46 +88,49 @@ live_register!{
     
     DesktopButton: {{DesktopButton}} {
         
-        default_state: {
-            from: {all: Play::Forward {duration: 0.1}}
-            apply: {
-                bg: {pressed: 0.0, hover: 0.0}
+        state:{
+            default = {
+                default: true,
+                from: {all: Play::Forward {duration: 0.1}}
+                apply: {
+                    bg: {pressed: 0.0, hover: 0.0}
+                }
             }
-        }
-        
-        hover_state: {
-            from: {
-                all: Play::Forward {duration: 0.1}
-                state_down: Play::Forward {duration: 0.01}
+            
+            hover = {
+                from: {
+                    all: Play::Forward {duration: 0.1}
+                    state_down: Play::Forward {duration: 0.01}
+                }
+                apply: {
+                    bg: {
+                        pressed: 0.0,
+                        hover: [{time: 0.0, value: 1.0}],
+                    }
+                }
             }
-            apply: {
-                bg: {
-                    pressed: 0.0,
-                    hover: [{time: 0.0, value: 1.0}],
+            
+            pressed = {
+                from: {all: Play::Forward {duration: 0.2}}
+                apply: {
+                    bg: {
+                        pressed: [{time: 0.0, value: 1.0}],
+                        hover: 1.0,
+                    }
                 }
             }
         }
-        
-        pressed_state: {
-            from: {all: Play::Forward {duration: 0.2}}
-            apply: {
-                bg: {
-                    pressed: [{time: 0.0, value: 1.0}],
-                    hover: 1.0,
-                }
-            }
-        }
+            
     }
 }
 
 #[derive(Live, LiveHook)]
 #[live_register(register_as_frame_component!(DesktopButton))]
 pub struct DesktopButton {
-    #[rust] pub button_logic: ButtonLogic,
-    #[state(default_state)] pub animator: Animator,
-    pub default_state: Option<LivePtr>,
-    pub hover_state: Option<LivePtr>,
-    pub pressed_state: Option<LivePtr>,
+    #[rust] button_logic: ButtonLogic,
+    
+    state: State,
+    
     #[alias(button_type, bg.button_type)]
     pub bg: DrawDesktopButton,
 }
@@ -183,13 +186,13 @@ impl FrameComponent for DesktopButton {
 
 impl DesktopButton {
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonAction {
-        self.animator_handle_event(cx, event);
+        self.state_handle_event(cx, event);
         let res = self.button_logic.handle_event(cx, event, self.bg.draw_vars.area);
         // println!("{:?}", res.state);
         match res.state {
-            ButtonState::Pressed => self.animate_to(cx, self.pressed_state),
-            ButtonState::Default => self.animate_to(cx, self.default_state),
-            ButtonState::Hover => self.animate_to(cx, self.hover_state),
+            ButtonState::Pressed => self.animate_state(cx, id!(pressed)),
+            ButtonState::Default => self.animate_state(cx, id!(default)),
+            ButtonState::Hover => self.animate_state(cx, id!(hover)),
             _ => ()
         };
         res.action

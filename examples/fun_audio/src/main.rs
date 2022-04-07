@@ -17,12 +17,10 @@ live_register!{
     const HEADER_RADIUS_OPEN: vec2(3.0, 1.0)
     
     MainHeader: FoldHeader {
-        closed_state: {apply: {
-            header: {bg: {radius: (HEADER_RADIUS_CLOSED)}}
-        }}
-        opened_state: {apply: {
-            header: {bg: {radius: (HEADER_RADIUS_OPEN)}}
-        }}
+        state: {
+            closed = {apply: {header: {bg: {radius: (HEADER_RADIUS_CLOSED)}}}}
+            open = {apply: {header: {bg: {radius: (HEADER_RADIUS_OPEN)}}}}
+        }        
         header: BoxY {
             mouse_cursor: Default,
             bg: {color: #6},
@@ -52,12 +50,10 @@ live_register!{
             fold_button = FoldButton {}
             label = Label {text: "Keys"}
         }
-        closed_state: {apply: {
-            body: {g1 = {bg: {color: #0000}}}
-        }}
-        opened_state: {apply: {
-            body: {g1 = {bg: {color: #000a}}}
-        }}
+        state: {
+            closed = {apply: {body: {g1 = {bg: {color: #0000}}}}}
+            open = {apply: {body: {g1 = {bg: {color: #000a}}}}}
+        }
         body: Frame {
             layout: {flow: Overlay}
             width: Fit
@@ -137,8 +133,8 @@ live_register!{
             Splitter {
                 align: SplitterAlign::FromEnd(300)
                 walk: {width: Fill, height: Fill}
-                a: Frame{
-                    layout:{flow:Down}
+                a: Frame {
+                    layout: {flow: Down}
                     FoldablePiano {}
                 }
                 b: Box {
@@ -154,7 +150,7 @@ live_register!{
                         }
                         body: Frame {
                             layout: {flow: Down}
-                            instrument = ? InstrumentHeader {
+                            instrument = InstrumentHeader {
                                 header: {
                                     fold_button = FoldButton {}
                                     swatch = Circle {
@@ -269,10 +265,10 @@ impl App {
                         header: {label = {text: "MyStackItem"}}
                     });
                     instrument.add_child(cx, ids!(stack), id!(my_stack2), live!{
-                        header: {label = {text: "MyStackItem2"}, range={mylabel={text:"WHEE"}}}
+                        header: {label = {text: "MyStackItem2"}, range = {mylabel = {text: "WHEE"}}}
                     });
                     instrument.add_child(cx, ids!(stack), id!(my_stack3), live!{
-                        header: {label = {text: "MyStackItem3"}, range={mylabel={text:"WHEE"}}}
+                        header: {label = {text: "MyStackItem3"}, range = {mylabel = {text: "WHEE"}}}
                     });
                 }
                 if let Some(instrument) = self.frame.add_child(cx, ids!(instrument), id!(my_id2), live!{
@@ -282,7 +278,7 @@ impl App {
                         header: {label = {text: "MyStackItem"}}
                     });
                     instrument.add_child(cx, ids!(stack), id!(my_stack2), live!{
-                        header: {label = {text: "MyStackItem2"}, range={mylabel={text:"WHEE"}}}
+                        header: {label = {text: "MyStackItem2"}, range = {mylabel = {text: "WHEE"}}}
                     });
                 }
             }

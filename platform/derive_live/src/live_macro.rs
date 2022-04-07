@@ -29,7 +29,7 @@ fn parse_object(parser:&mut TokenParser, tb:&mut TokenBuilder)->Result<(),TokenS
         
         if parser.eat_punct_alone(':'){ // value is following
             let mut prop = TokenBuilder::new();
-            prop.add("origin:LiveNodeOrigin::property(), id:");
+            prop.add("origin:LiveNodeOrigin::field(), id:");
             prop.stream(Some(live_id));
             // if we have a = its an instance assign
             parse_value(prop.end(), parser, tb)?;

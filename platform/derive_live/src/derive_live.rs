@@ -106,7 +106,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         if draw_vars.is_some() && !geometry.is_some() {
             return error_result("drawvars requires a geometry object to be present");
         }
-        
+        /*
         let animator_kv = if let Some(animator) = animator {
             let kv = if let Some(attr) = animator.attrs.iter().find( | attr | attr.name == "state") {
                 if let Some(args) = &attr.args {
@@ -145,66 +145,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
             
             tb.add("    fn apply_animator(&mut self, cx: &mut Cx) {");
             tb.add("        let state = self.animator.swap_out_state();");
-            tb.add("        self.apply(cx, ApplyFrom::Animate, state.child_by_name(0,LivePath::prop(id!(state))).unwrap(), &state);");
-            tb.add("        self.animator.swap_in_state(state);");
-            tb.add("    }");
-            
-            
-            tb.add("    fn animate_cut(&mut self, cx: &mut Cx, state: Option<LivePtr>) {");
-            tb.add("        if self.animator.state.is_none() {");
-            tb.add("            self.init_animator(cx);");
-            tb.add("         }");
-            tb.add("         self.animator.cut_to_live(cx, state);");
-            tb.add("         self.apply_animator(cx);");
-            tb.add("    }");
-            
-            
-            tb.add("    fn animator_is_in_state(&mut self, cx: &mut Cx, state: Option<LivePtr>)->bool{");
-            tb.add("        if state.is_none() { return false }");
-            tb.add("        if self.animator.state.is_none() {");
-            for def in &kv {
-                tb.add("         if state == self.").ident(def).add("{ return true }");
-            }
-            tb.add("             return false");
-            tb.add("         }");
-            tb.add("         else{");
-            tb.add("             return self.animator.is_in_state(cx, state)");
-            tb.add("         }");
-            tb.add("    }");
-            
-            
-            tb.add("    fn animator_handle_event(&mut self, cx: &mut Cx, event: &mut Event)->AnimatorAction{");
-            tb.add("        let ret = self.animator.handle_event(cx, event);");
-            tb.add("        if ret.is_animating(){self.apply_animator(cx);}");
-            tb.add("        ret");
-            tb.add("    }");
-            tb.add("}");
-            Some(kv)
-        }
-        else {
-            None
-        };
-        /*
-        if state.is_some() {
-            
-            tb.add("impl").stream(generic.clone());
-            tb.add("LiveState for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-            tb.add("    fn init_animator(&mut self, cx: &mut Cx) {");
-            for def in &kv {
-                tb.add("    self.animator.cut_to_live(cx,self.").ident(def).add(");");
-            }
-            tb.add("    }");
-            
-            tb.add("    fn animate_to(&mut self, cx: &mut Cx, state: Option<LivePtr>) {");
-            tb.add("        if self.animator.state.is_none() {");
-            tb.add("            self.init_animator(cx);");
-            tb.add("         }");
-            tb.add("         self.animator.animate_to_live(cx, state);");
-            tb.add("    }");
-            
-            tb.add("    fn apply_animator(&mut self, cx: &mut Cx) {");
-            tb.add("        let state = self.animator.swap_out_state();");
-            tb.add("        self.apply(cx, ApplyFrom::Animate, state.child_by_name(0,id!(state), LiveAssignType::Property).unwrap(), &state);");
+            tb.add("        self.apply(cx, ApplyFrom::Animate, state.child_by_name(0,id!(state).as_field()).unwrap(), &state);");
             tb.add("        self.animator.swap_in_state(state);");
             tb.add("    }");
             
@@ -244,6 +185,50 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
             None
         };*/
         
+        if state.is_some() {
+            
+            tb.add("impl").stream(generic.clone());
+            tb.add("LiveState for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+            
+            tb.add("    fn animate_state(&mut self, cx: &mut Cx, state: LiveId) {");
+            tb.add("         self.state.animate_to_live(cx, state);");
+            tb.add("         self.apply_state(cx);");
+            tb.add("    }");
+            
+            tb.add("    fn cut_state(&mut self, cx: &mut Cx, state: LiveId) {");
+            tb.add("         self.state.cut_to_live(cx, state);");
+            tb.add("         self.apply_state(cx);");
+            tb.add("    }");
+
+            tb.add("    fn after_apply_update_state(&mut self, cx:&mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]){");
+            tb.add("        if apply_from.file_id().is_none(){return}");
+            tb.add("        if let Some(index) = nodes.child_by_name(index, id!(state).as_field()){");
+            tb.add("            let mut index = index + 1;");
+            tb.add("            while !nodes[index].is_close() {");
+            tb.add("                if let Some(LiveValue::Bool(true)) = nodes.child_value_by_path(index, &[id!(default).as_field()]){");
+            tb.add("                    if let Some(index) = nodes.child_by_name(index, id!(apply).as_field()){");
+            tb.add("                        self.apply(cx, ApplyFrom::Animate, index, nodes);");
+            tb.add("                    }");
+            tb.add("                }");
+            tb.add("                index = nodes.skip_node(index);");
+            tb.add("            }");
+            tb.add("        }");
+            tb.add("    }");
+
+            tb.add("    fn apply_state(&mut self, cx: &mut Cx) {");
+            tb.add("        let state = self.state.swap_out_state();");
+            tb.add("        self.apply(cx, ApplyFrom::Animate, state.child_by_name(0,id!(state).as_field()).unwrap(), &state);");
+            tb.add("        self.state.swap_in_state(state);");
+            tb.add("    }");
+            
+            tb.add("    fn state_handle_event(&mut self, cx: &mut Cx, event: &mut Event)->StateAction{");
+            tb.add("        let ret = self.state.handle_event(cx, event);");
+            tb.add("        if ret.is_animating(){self.apply_state(cx);}");
+            tb.add("        ret");
+            tb.add("    }");
+            tb.add("}");
+        }
+        
         if draw_vars.is_some() { // we have draw vars, make sure we are repr(C)6
             if main_attribs.iter().find( | attr | attr.name == "repr" && attr.args.as_ref().unwrap().to_string().to_lowercase() == "c").is_none() {
                 return error_result("Any struct with draw_vars needs to be repr(c)")
@@ -267,7 +252,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         tb.add("LiveApplyValue for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
         
         tb.add("    fn apply_value(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]) -> usize{");
-        tb.add("        if nodes[index].origin.has_assign_type(LiveAssignType::Property){");
+        tb.add("        if nodes[index].origin.has_prop_type(LivePropType::Field){");
         tb.add("            match nodes[index].id {");
 
         for field in &fields {
@@ -357,32 +342,23 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         else if let Some(_) = deref_target {
             tb.add("    self.deref_target.deref_target_after_apply(cx, apply_from, start_index, nodes);");
         }
-        
+        /*
         if let Some(_) = animator { // apply the default states
             tb.add("    if let Some(file_id) = apply_from.file_id() {");
             for def in &animator_kv.unwrap() {
-                tb.add("    if let Some(index) = nodes.child_by_path(start_index, &[LivePath::prop(");
-                tb.add("        self.animator.get_state_id_of(cx, self.").ident(def).add(",LiveId(").suf_u64(LiveId::from_str(def).unwrap().0).add("))),");
-                tb.add("        LivePath::prop(id!(apply))");
-                tb.add("        ]) {");
-                tb.add("            self.apply(cx, ApplyFrom::Animate, index, nodes);");
-                tb.add("    }");
-            }
-            tb.add("    }");
-        }
-        /*
-        if state.is_some() { // apply the default states
-            tb.add("    if let Some(file_id) = apply_from.file_id() {");
-            for def in &animator_kv.unwrap() {
-                tb.add("    if let Some(index) = nodes.child_by_path(start_index, &[LivePath::prop(LiveId(").suf_u64(LiveId::from_str(def).unwrap().0).add(")]){");
-                tb.add("        self.animator.get_state_id_of(cx, self.").ident(def).add(",LiveId(").suf_u64(LiveId::from_str(def).unwrap().0).add("))),");
-                tb.add("        LivePath::prop(id!(apply))");
+                tb.add("    if let Some(index) = nodes.child_by_path(start_index, &[");
+                tb.add("        self.animator.get_state_id_of(cx, self.").ident(def).add(",LiveId(").suf_u64(LiveId::from_str(def).unwrap().0).add(")).as_field(),");
+                tb.add("        id!(apply).as_field()");
                 tb.add("        ]) {");
                 tb.add("            self.apply(cx, ApplyFrom::Animate, index, nodes);");
                 tb.add("    }");
             }
             tb.add("    }");
         }*/
+        
+        if state.is_some() { // apply the default states
+            tb.add("    self.after_apply_update_state(cx, apply_from, start_index, nodes);");
+        }
         
         tb.add("        self.after_apply(cx, apply_from, start_index, nodes);");
         

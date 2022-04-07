@@ -90,14 +90,14 @@ impl LiveHook for Frame {
                 }
             }
             ApplyFrom::NewFromDoc{file_id} | ApplyFrom::UpdateFromDoc{file_id} => {
-                if !self.design_mode && nodes[index].origin.has_assign_type(LiveAssignType::Template) {
+                if !self.design_mode && nodes[index].origin.has_prop_type(LivePropType::Template) {
                     // lets store a pointer into our templates.
                     let live_ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
                     self.templates.insert(id, live_ptr);
                     nodes.skip_node(index)
                 }
-                else if nodes[index].origin.has_assign_type(LiveAssignType::Instance)
-                    || self.design_mode && nodes[index].origin.has_assign_type(LiveAssignType::Template) {
+                else if nodes[index].origin.has_prop_type(LivePropType::Instance)
+                    || self.design_mode && nodes[index].origin.has_prop_type(LivePropType::Template) {
                     self.draw_order.push(id);
                     return self.children.get_or_insert(cx, id, | cx | {FrameComponentRef::new(cx)})
                         .apply(cx, from, index, nodes);
