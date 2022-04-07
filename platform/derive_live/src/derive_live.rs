@@ -83,7 +83,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
                     aliases.push((var, parser.eat_level()));
                 }
             }
-            if field.attrs.len() == 1 && &field.attrs[0].name != "live" && field.attrs[0].name != "calc" && field.attrs[0].name != "rust" && field.attrs[0].name != "state" {
+            if field.attrs.len() == 1 && &field.attrs[0].name != "live" && field.attrs[0].name != "calc" && field.attrs[0].name != "rust"  {
                 return error_result(&format!("Field {} does not have a live, calc or rust attribute", field.name));
             }
             if field.attrs.len() == 0 { // insert a default
@@ -95,7 +95,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         let deref_target = fields.iter().find( | field | field.name == "deref_target");
         let draw_vars = fields.iter().find( | field | field.name == "draw_vars");
         let geometry = fields.iter().find( | field | field.name == "geometry");
-        let animator = fields.iter().find( | field | field.name == "animator");
+        //let animator = fields.iter().find( | field | field.name == "animator");
         let state = fields.iter().find( | field | field.name == "state");
         // ok we have to parse the animator args fields
         
