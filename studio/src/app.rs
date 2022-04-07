@@ -28,7 +28,7 @@ live_register!{
 #[derive(Live, LiveHook)]
 pub struct App {
     inner: AppInner,
-    #[rust(AppState::new())] state: AppState,
+    #[rust(AppState::new())] app_state: AppState,
 }
 
 impl App {
@@ -56,6 +56,6 @@ impl App {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
         self.handle_live_edit_event(cx, event, id!(App));
-        self.inner.handle_event(cx, event, &mut self.state);
+        self.inner.handle_event(cx, event, &mut self.app_state);
     }
 }

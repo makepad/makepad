@@ -63,40 +63,44 @@ live_register!{
             },
         }
         
-        default_state: {
-            duration: 0.2
-            apply: {
-                hover: 0.0,
-                bg_quad: {hover: (hover)}
-                name_text: {hover: (hover)}
-                icon_quad: {hover: (hover)}
+        state:{
+            default = {
+                default:true
+                duration: 0.2
+                apply: {
+                    hover: 0.0,
+                    bg_quad: {hover: (hover)}
+                    name_text: {hover: (hover)}
+                    icon_quad: {hover: (hover)}
+                }
+            }
+            
+            hover = {
+                duration: 0.1
+                apply: {hover: [{time: 0.0, value: 1.0}]},
+            }
+            
+            unselected = {
+                default:true
+                track: select,
+                duration: 0.1,
+                apply: {
+                    selected: 0.0,
+                    bg_quad: {selected: (selected)}
+                    name_text: {selected: (selected)}
+                    icon_quad: {selected: (selected)}
+                }
+            }
+            
+            selected = {
+                track: select,
+                duration: 0.1,
+                apply: {
+                    selected: [{time: 0.0, value: 1.0}],
+                }
             }
         }
-        
-        hover_state: {
-            duration: 0.1
-            apply: {hover: [{time: 0.0, value: 1.0}]},
-        }
-        
-        unselected_state: {
-            track: select,
-            duration: 0.1,
-            apply: {
-                selected: 0.0,
-                bg_quad: {selected: (selected)}
-                name_text: {selected: (selected)}
-                icon_quad: {selected: (selected)}
-            }
-        }
-        
-        selected_state: {
-            track: select,
-            duration: 0.1,
-            apply: {
-                selected: [{time: 0.0, value: 1.0}],
-            }
-        }
-        
+            
         indent_width: 10.0
         min_drag_distance: 10.0
     }
@@ -139,15 +143,9 @@ pub struct LogListNode {
     name_text: DrawNameText,
     layout: Layout,
     
-    #[state(default_state, unselected_state)]
-    animator: Animator,
+    state: State,
     
     indent_width: f32,
-    
-    default_state: Option<LivePtr>,
-    hover_state: Option<LivePtr>,
-    selected_state: Option<LivePtr>,
-    unselected_state: Option<LivePtr>,
     
     fold_button: FoldButton,
     link_button: LinkButton,
@@ -181,7 +179,7 @@ pub struct LogList {
 
 impl LiveHook for LogList {
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        if let Some(index) = nodes.child_by_name(index, id!(log_node), LiveAssignType::Property) {
+        if let Some(index) = nodes.child_by_name(index, id!(log_node).as_field()) {
             for (_, node) in self.fold_nodes.iter_mut() {
                 node.apply(cx, from, index, nodes);
             }
@@ -240,7 +238,7 @@ impl LogListNode {
     }
 
     pub fn set_is_selected(&mut self, cx: &mut Cx, is_selected: bool, animate: Animate) {
-        self.toggle_animator(cx, is_selected, animate, self.selected_state, self.unselected_state)
+        self.toggle_state(cx, is_selected, animate, id!(selected), id!(unselected))
     }
     
     pub fn set_is_open(&mut self, cx: &mut Cx, is_open: bool, animate: Animate) {
@@ -253,7 +251,7 @@ impl LogListNode {
         event: &mut Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, LogNodeAction),
     ) {
-        if self.animator_handle_event(cx, event).must_redraw() {
+        if self.state_handle_event(cx, event).must_redraw() {
             self.bg_quad.draw_vars.redraw(cx);
         }
         
@@ -268,10 +266,10 @@ impl LogListNode {
                 cx.set_hover_mouse_cursor(MouseCursor::Hand);
                 match f.hover_state {
                     HoverState::In => {
-                        self.animate_to(cx, self.hover_state);
+                        self.animate_state(cx, id!(hover));
                     }
                     HoverState::Out => {
-                        self.animate_to(cx, self.default_state);
+                        self.animate_state(cx, id!(default));
                     }
                     _ => {}
                 }
@@ -282,7 +280,7 @@ impl LogListNode {
                 }
             }
             HitEvent::FingerDown(_) => {
-                self.animate_to(cx, self.selected_state);
+                self.animate_state(cx, id!(selected));
                 /*
                 if self.opened > 0.2 {
                     self.animate_to(cx, self.closed_state);
