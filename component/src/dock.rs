@@ -88,10 +88,10 @@ impl LiveHook for Dock {
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         for panel in self.panels.values_mut() {
             match panel {
-                Panel::Split(panel) => if let Some(index) = nodes.child_by_name(index, LivePath::prop(id!(splitter))) {
+                Panel::Split(panel) => if let Some(index) = nodes.child_by_name(index, id!(splitter).as_field()) {
                     panel.splitter.apply(cx, from, index, nodes);
                 }
-                Panel::Tab(panel) => if let Some(index) = nodes.child_by_name(index, LivePath::prop(id!(tab_bar))) {
+                Panel::Tab(panel) => if let Some(index) = nodes.child_by_name(index, id!(tab_bar).as_field()) {
                     panel.tab_bar.apply(cx, from, index, nodes);
                 }
             }

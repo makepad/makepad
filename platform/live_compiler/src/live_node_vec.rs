@@ -14,7 +14,7 @@ use {
         },
         makepad_live_tokenizer::LiveId,
         live_token::LiveTokenId,
-        live_node::{LiveAssignType, LiveNode, LiveValue, LiveNodeOrigin, InlineString, FittedString},
+        live_node::{LiveNode, LiveValue, LiveNodeOrigin, InlineString, FittedString, LiveProp},
     }
 };
 
@@ -28,19 +28,19 @@ pub trait LiveNodeSlice {
     fn children_slice(&self, parent_index: usize) -> &[LiveNode];
     
     fn child_by_number(&self, parent_index: usize, child_number: usize) -> Option<usize>;
-    fn child_or_append_index_by_name(&self, parent_index: usize, name: LivePath) -> Result<usize, usize>;
+    fn child_or_append_index_by_name(&self, parent_index: usize, name: LiveProp) -> Result<usize, usize>;
     //fn next_child_by_name(&self, child_index: usize, name: LiveId) -> Option<usize>;
-    fn child_by_name(&self, parent_index: usize, name: LivePath) -> Option<usize>;
-    fn sibling_by_name(&self, start_index: usize, name: LivePath) -> Option<usize>;
-    fn child_by_path(&self, parent_index: usize, path: &[LivePath]) -> Option<usize>;
-    fn child_value_by_path(&self, parent_index: usize, path: &[LivePath]) -> Option<&LiveValue>;
+    fn child_by_name(&self, parent_index: usize, name: LiveProp) -> Option<usize>;
+    fn sibling_by_name(&self, start_index: usize, name: LiveProp) -> Option<usize>;
+    fn child_by_path(&self, parent_index: usize, path: &[LiveProp]) -> Option<usize>;
+    fn child_value_by_path(&self, parent_index: usize, path: &[LiveProp]) -> Option<&LiveValue>;
     
     fn first_node_with_token_id(&self, match_token_id:LiveTokenId, also_in_dsl:bool)->Option<usize>;
 
     fn get_num_sibling_nodes(&self, child_index: usize) -> usize;
     
-    fn scope_up_by_name(&self, parent_index: usize, name: LivePath) -> Option<usize>;
-    fn scope_up_down_by_name(&self, parent_index: usize, name: LivePath) -> Option<usize>;
+    fn scope_up_by_name(&self, parent_index: usize, name: LiveProp) -> Option<usize>;
+    fn scope_up_down_by_name(&self, parent_index: usize, name: LiveProp) -> Option<usize>;
     
     fn count_children(&self, parent_index: usize) -> usize;
     fn skip_node(&self, node_index: usize) -> usize;
@@ -56,8 +56,8 @@ pub trait LiveNodeVec {
     fn insert_children_from_other(&mut self, from_index: usize, insert_start: usize, other: &[LiveNode]);
     fn insert_children_from_self(&mut self, from_index: usize, insert_start: usize);
 
-    fn replace_or_insert_last_node_by_path(&mut self, start_index: usize, path: &[LivePath], other: &[LiveNode]);
-    fn replace_or_insert_first_node_by_path(&mut self, start_index: usize, path: &[LivePath], other: &[LiveNode]);
+    fn replace_or_insert_last_node_by_path(&mut self, start_index: usize, path: &[LiveProp], other: &[LiveNode]);
+    fn replace_or_insert_first_node_by_path(&mut self, start_index: usize, path: &[LiveProp], other: &[LiveNode]);
     
     fn push_live(&mut self, v: &[LiveNode]);
     fn push_str(&mut self, id: LiveId, v: &'static str);
@@ -164,7 +164,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         0
     }
     
-    fn scope_up_by_name(&self, index: usize, name: LivePath) -> Option<usize> {
+    fn scope_up_by_name(&self, index: usize, name: LiveProp) -> Option<usize> {
         let self_ref = self.as_ref();
         if self_ref.len() == 0 {
             return None
@@ -181,7 +181,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
             else if self_ref[index].is_close() {
                 stack_depth += 1;
             }
-            if stack_depth == 0 && self_ref[index].id == name.0 && self_ref[index].origin.has_assign_type(name.1) && !self_ref[index].is_close() { // valuenode
+            if stack_depth == 0 && self_ref[index].id == name.0 && self_ref[index].origin.has_prop_type(name.1) && !self_ref[index].is_close() { // valuenode
                 return Some(index)
             }
             
@@ -193,7 +193,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         None
     }
     
-    fn scope_up_down_by_name(&self, start_index: usize, name: LivePath) -> Option<usize> {
+    fn scope_up_down_by_name(&self, start_index: usize, name: LiveProp) -> Option<usize> {
         let self_ref = self.as_ref();
         if self_ref.len() == 0 {
             return None
@@ -394,7 +394,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         index
     }
     
-    fn child_or_append_index_by_name(&self, parent_index: usize, child_name: LivePath) -> Result<usize, usize> {
+    fn child_or_append_index_by_name(&self, parent_index: usize, child_name: LiveProp) -> Result<usize, usize> {
         let self_ref = self.as_ref();
         let mut stack_depth = 0;
         let mut index = parent_index;
@@ -405,7 +405,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         while index < self_ref.len() {
             if self_ref[index].is_open() {
                 if stack_depth == 1 {
-                    if  self_ref[index].origin.has_assign_type(child_name.1) &&  self_ref[index].id == child_name.0 {
+                    if  self_ref[index].origin.has_prop_type(child_name.1) &&  self_ref[index].id == child_name.0 {
                         return Ok(index);
                     }
                 }
@@ -419,7 +419,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
             }
             else {
                 if stack_depth == 1 {
-                    if  self_ref[index].origin.has_assign_type(child_name.1) &&  self_ref[index].id == child_name.0 {
+                    if  self_ref[index].origin.has_prop_type(child_name.1) &&  self_ref[index].id == child_name.0 {
                         return Ok(index);
                     }
                 }
@@ -432,7 +432,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         Err(index)
     }
     
-    fn child_by_name(&self, parent_index: usize, name: LivePath) -> Option<usize> {
+    fn child_by_name(&self, parent_index: usize, name: LiveProp) -> Option<usize> {
         if let Ok(value) = self.child_or_append_index_by_name(parent_index, name) {
             Some(value)
         }
@@ -473,7 +473,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
     }*/
 
     
-    fn sibling_by_name(&self, child_index: usize, child_name: LivePath) -> Option<usize> {
+    fn sibling_by_name(&self, child_index: usize, child_name: LiveProp) -> Option<usize> {
         let self_ref = self.as_ref();
         let mut stack_depth = 1;
         let mut index = child_index;
@@ -494,7 +494,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
             }
             else {
                 if stack_depth == 1 {
-                    if !self_ref[index].origin.has_assign_type(child_name.1) && self_ref[index].id == child_name.0 {
+                    if !self_ref[index].origin.has_prop_type(child_name.1) && self_ref[index].id == child_name.0 {
                         return Some(index);
                     }
                 }
@@ -508,7 +508,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
     }
     
     
-    fn child_by_path(&self, parent_index: usize, path: &[LivePath]) -> Option<usize> {
+    fn child_by_path(&self, parent_index: usize, path: &[LiveProp]) -> Option<usize> {
         let mut index = parent_index;
         for level in path {
             if let Some(child) = self.child_by_name(index, *level) {
@@ -521,7 +521,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         Some(index)
     }
     
-    fn child_value_by_path(&self, parent_index: usize, path: &[LivePath]) -> Option<&LiveValue> {
+    fn child_value_by_path(&self, parent_index: usize, path: &[LiveProp]) -> Option<&LiveValue> {
         if let Some(index) = self.child_by_path(parent_index, path) {
             Some(&self.as_ref()[index].value)
         }
@@ -762,12 +762,7 @@ impl_live_node_slice!(&[LiveNode]);
 impl_live_node_slice!(&mut [LiveNode]);
 impl_live_node_slice!(Vec<LiveNode>);
 */
-#[derive(Copy, Clone, Debug)]
-pub struct LivePath(pub LiveId,pub LiveAssignType);
-impl LivePath{
-    pub fn prop(id:LiveId)->Self{Self(id, LiveAssignType::Property)}
-    pub fn instance(id:LiveId)->Self{Self(id, LiveAssignType::Instance)}
-}
+
 
 impl LiveNodeVec for Vec<LiveNode> {
     
@@ -824,7 +819,7 @@ impl LiveNodeVec for Vec<LiveNode> {
         insert_point + num_nodes
     }
     
-    fn replace_or_insert_last_node_by_path(&mut self, start_index: usize, path: &[LivePath], other: &[LiveNode]) {
+    fn replace_or_insert_last_node_by_path(&mut self, start_index: usize, path: &[LiveProp], other: &[LiveNode]) {
         let mut index = start_index;
         let mut depth = 0;
         while depth < path.len() {
@@ -851,7 +846,7 @@ impl LiveNodeVec for Vec<LiveNode> {
                         self.splice(append_index..append_index, live_object!{
                             [path[depth].0]: {}
                         }.iter().cloned());
-                        self[append_index].origin = LiveNodeOrigin::empty().with_assign_type(path[depth].1);
+                        self[append_index].origin = LiveNodeOrigin::empty().with_prop_type(path[depth].1);
                     }
                 }
             }
@@ -859,7 +854,7 @@ impl LiveNodeVec for Vec<LiveNode> {
         }
     }
     
-    fn replace_or_insert_first_node_by_path(&mut self, start_index: usize, path: &[LivePath], other: &[LiveNode]) {
+    fn replace_or_insert_first_node_by_path(&mut self, start_index: usize, path: &[LiveProp], other: &[LiveNode]) {
         let mut index = start_index;
         let mut depth = 0;
         while depth < path.len() {
@@ -880,14 +875,14 @@ impl LiveNodeVec for Vec<LiveNode> {
                         self.splice(index..index, other.iter().cloned());
                         // lets overwrite the id
                         self[index].id = path[depth].0;
-                        self[index].origin = LiveNodeOrigin::empty().with_assign_type(path[depth].1);
+                        self[index].origin = LiveNodeOrigin::empty().with_prop_type(path[depth].1);
                         return
                     }
                     else { // insert an empty object
                         self.splice(index..index, live_object!{
                             [path[depth].0]: {}
                         }.iter().cloned());
-                        self[index].origin = LiveNodeOrigin::empty().with_assign_type(path[depth].1);
+                        self[index].origin = LiveNodeOrigin::empty().with_prop_type(path[depth].1);
                     }
                 }
             }
@@ -987,15 +982,15 @@ impl<'a> LiveNodeReader<'a> {
         self.index_option(self.nodes.child_by_number(self.index, child_number), 1)
     }
     
-    pub fn child_by_name(&self, name: LivePath) -> Option<Self> {
+    pub fn child_by_name(&self, name: LiveProp) -> Option<Self> {
         self.index_option(self.nodes.child_by_name(self.index, name), 1)
     }
     
-    fn child_by_path(&self, path: &[LivePath]) -> Option<Self> {
+    fn child_by_path(&self, path: &[LiveProp]) -> Option<Self> {
         self.index_option(self.nodes.child_by_path(self.index, path), 1)
     }
     
-    pub fn scope_up_by_name(&self, name: LivePath) -> Option<Self> {
+    pub fn scope_up_by_name(&self, name: LiveProp) -> Option<Self> {
         self.index_option(self.nodes.scope_up_by_name(self.index, name), 0)
     }
     

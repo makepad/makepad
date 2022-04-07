@@ -28,17 +28,20 @@ live_register!{
             }
         }
         
-        default_state: {
-            from: {all: Play::Forward {duration: 0.2}}
-            apply: {
-                button_quad: {hover: 0.0}
+        state:{
+            default = {
+                default: true
+                from: {all: Play::Forward {duration: 0.2}}
+                apply: {
+                    button_quad: {hover: 0.0}
+                }
             }
-        }
-        
-        hover_state: {
-            from: {all: Play::Forward {duration: 0.1}}
-            apply: {
-                button_quad: {hover: [{time: 0.0, value: 1.0}]},
+            
+            hover =  {
+                from: {all: Play::Forward {duration: 0.1}}
+                apply: {
+                    button_quad: {hover: [{time: 0.0, value: 1.0}]},
+                }
             }
         }
         
@@ -53,10 +56,8 @@ live_register!{
 #[derive(Live, LiveHook)]
 pub struct TabCloseButton {
     button_quad: DrawQuad,
-    #[state(default_state)]
-    animator: Animator,
-    default_state: Option<LivePtr>,
-    hover_state: Option<LivePtr>,
+    state: State,
+
     walk: Walk
 }
 
@@ -74,17 +75,17 @@ impl TabCloseButton {
         cx: &mut Cx,
         event: &mut Event,
     ) -> TabCloseButtonAction {
-        self.animator_handle_event(cx, event);
+        self.state_handle_event(cx, event);
         match event.hits(cx, self.button_quad.draw_vars.area) {
             HitEvent::FingerHover(f) => {
                 cx.set_hover_mouse_cursor(MouseCursor::Hand);
                 match f.hover_state {
                     HoverState::In => {
-                        self.animate_to(cx, self.hover_state);
+                        self.animate_state(cx, id!(hover));
                         return TabCloseButtonAction::HoverIn;
                     }
                     HoverState::Out => {
-                        self.animate_to(cx, self.default_state);
+                        self.animate_state(cx, id!(default));
                         return TabCloseButtonAction::HoverOut;
                     }
                     _ => {}

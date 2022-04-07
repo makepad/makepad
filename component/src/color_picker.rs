@@ -72,32 +72,35 @@ live_register!{
     
     ColorPicker: {{ColorPicker}} {
         
-        default_state: {
-            from: {all: Play::Forward {duration: 0.1}}
-            apply: {
-                draw_wheel: {pressed: 0.0, hover: 0.0}
-            }
-        }
-        
-        hover_state: {
-            from: {
-                all: Play::Forward {duration: 0.1}
-                pressed_state: Play::Forward {duration: 0.01}
-            }
-            apply: {
-                draw_wheel: {
-                    pressed: 0.0,
-                    hover: [{time: 0.0, value: 1.0}],
+        state:{
+            default =  {
+                default:true
+                from: {all: Play::Forward {duration: 0.1}}
+                apply: {
+                    draw_wheel: {pressed: 0.0, hover: 0.0}
                 }
             }
-        }
-        
-        pressed_state: {
-            from: {all: Play::Forward {duration: 0.2}}
-            apply: {
-                draw_wheel: {
-                    pressed: [{time: 0.0, value: 1.0}],
-                    hover: 1.0,
+            
+            hover =  {
+                from: {
+                    all: Play::Forward {duration: 0.1}
+                    pressed_state: Play::Forward {duration: 0.01}
+                }
+                apply: {
+                    draw_wheel: {
+                        pressed: 0.0,
+                        hover: [{time: 0.0, value: 1.0}],
+                    }
+                }
+            }
+            
+            pressed =  {
+                from: {all: Play::Forward {duration: 0.2}}
+                apply: {
+                    draw_wheel: {
+                        pressed: [{time: 0.0, value: 1.0}],
+                        hover: 1.0,
+                    }
                 }
             }
         }
@@ -118,13 +121,8 @@ pub struct DrawColorWheel {
 pub struct ColorPicker {
     draw_wheel: DrawColorWheel,
     
-    #[state(default_state)]
-    animator: Animator,
-    
-    default_state: Option<LivePtr>,
-    hover_state: Option<LivePtr>,
-    pressed_state: Option<LivePtr>,
-    
+    state: State,
+
     #[rust] pub size: f32,
     #[rust] hue: f32,
     #[rust] sat: f32,
@@ -196,7 +194,7 @@ impl ColorPicker {
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> ColorPickerAction {
-        self.animator_handle_event(cx, event);
+        self.state_handle_event(cx, event);
         
         match event.hits(cx, self.draw_wheel.draw_vars.area) {
             HitEvent::FingerHover(fe) => {
@@ -204,16 +202,16 @@ impl ColorPicker {
                 
                 match fe.hover_state {
                     HoverState::In => {
-                        self.animate_to(cx, self.hover_state);
+                        self.animate_state(cx, id!(hover));
                     },
                     HoverState::Out => {
-                        self.animate_to(cx, self.default_state);
+                        self.animate_state(cx, id!(default));
                     },
                     _ => ()
                 }
             },
             HitEvent::FingerDown(fe) => {
-                self.animate_to(cx, self.pressed_state);
+                self.animate_state(cx, id!(pressed));
                 cx.set_down_mouse_cursor(MouseCursor::Arrow);
                 let rsize = (self.size * 0.28) / 2.0f32.sqrt();
                 let vx = fe.rel.x - 0.5 * self.size;
@@ -233,14 +231,14 @@ impl ColorPicker {
             HitEvent::FingerUp(fe) => {
                 if fe.is_over {
                     if fe.input_type.has_hovers() {
-                        self.animate_to(cx, self.hover_state);
+                        self.animate_state(cx, id!(hover));
                     }
                     else {
-                        self.animate_to(cx, self.default_state);
+                        self.animate_state(cx, id!(default));
                     }
                 }
                 else {
-                    self.animate_to(cx, self.default_state);
+                    self.animate_state(cx, id!(default));
                 }
                 self.drag_mode = ColorPickerDragMode::None;
                 return ColorPickerAction::DoneChanging;

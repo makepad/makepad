@@ -63,38 +63,43 @@ live_register!{
     
     PianoKey: {{PianoKey}} {
         
-        default_state: {
-            duration: 0.2
-            apply: {key_quad: {hover: 0.0}}
-        }
-        
-        hover_state: {
-            duration: 0.
-            apply: {key_quad: {hover: 1.0}}
-        }
-        
-        focussed_state: {
-            track: focus,
-            duration: 0.05,
-            apply: {key_quad: {focussed: 0.0}}
-        }
-        
-        unfocussed_state: {
-            track: focus,
-            duration: 0.,
-            apply: {key_quad: {focussed: 1.0}}
-        }
-        
-        up_state: {
-            track: pressed,
-            duration: 0.05,
-            apply: {key_quad: {pressed: 0.0}}
-        }
-        
-        pressed_state: {
-            track: pressed,
-            duration: 0.,
-            apply: {key_quad: {pressed: 1.0}}
+        state:{
+            default = {
+                default:true
+                duration: 0.2
+                apply: {key_quad: {hover: 0.0}}
+            }
+            
+            hover = {
+                duration: 0.
+                apply: {key_quad: {hover: 1.0}}
+            }
+            
+            focussed = {
+                track: focus,
+                duration: 0.05,
+                apply: {key_quad: {focussed: 0.0}}
+            }
+            
+            unfocussed = {
+                default:true
+                track: focus,
+                duration: 0.,
+                apply: {key_quad: {focussed: 1.0}}
+            }
+            
+            up = {
+                default:true
+                track: pressed,
+                duration: 0.05,
+                apply: {key_quad: {pressed: 0.0}}
+            }
+            
+            pressed = {
+                track: pressed,
+                duration: 0.,
+                apply: {key_quad: {pressed: 1.0}}
+            }
         }
     }
     
@@ -121,14 +126,7 @@ struct DrawKeyQuad {
 pub struct PianoKey {
     key_quad: DrawKeyQuad,
     
-    #[state(default_state, up_state, unfocussed_state)]
-    animator: Animator,
-    focussed_state: LiveRef,
-    unfocussed_state: LiveRef,
-    default_state: LiveRef,
-    hover_state: LiveRef,
-    pressed_state: LiveRef,
-    up_state: LiveRef,
+    state: State,
 }
 
 #[derive(Live)]
@@ -171,7 +169,7 @@ impl FrameComponent for Piano {
 impl LiveHook for Piano {
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         for piano_key in self.white_keys.values_mut().chain(self.black_keys.values_mut()) {
-            if let Some(index) = nodes.child_by_name(index, LivePath::prop(id!(piano_key))) {
+            if let Some(index) = nodes.child_by_name(index, id!(piano_key).as_field()) {
                 piano_key.apply(cx, from, index, nodes);
             }
         }
@@ -203,11 +201,11 @@ impl PianoKey {
     }
     
     fn set_is_pressed(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.toggle_animator(cx, is, animate, self.pressed_state, self.up_state)
+        self.toggle_state(cx, is, animate, id!(pressed), id!(up))
     }
     
     fn set_is_focussed(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.toggle_animator(cx, is, animate, self.focussed_state, self.unfocussed_state)
+        self.toggle_state(cx, is, animate, id!(focussed), id!(unfocussed))
     }
     
     pub fn handle_event(
@@ -216,7 +214,7 @@ impl PianoKey {
         event: &mut Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, PianoKeyAction),
     ) {
-        if self.animator_handle_event(cx, event).must_redraw() {
+        if self.state_handle_event(cx, event).must_redraw() {
             self.key_quad.draw_vars.redraw(cx);
         }
         match event.hits(cx, self.key_quad.draw_vars.area) {
@@ -224,10 +222,10 @@ impl PianoKey {
                 cx.set_hover_mouse_cursor(MouseCursor::Hand);
                 match f.hover_state {
                     HoverState::In => {
-                        self.animate_to(cx, self.hover_state);
+                        self.animate_state(cx, id!(hover));
                     }
                     HoverState::Out => {
-                        self.animate_to(cx, self.default_state);
+                        self.animate_state(cx, id!(default));
                     }
                     _ => {}
                 }
@@ -235,11 +233,11 @@ impl PianoKey {
             HitEvent::FingerMove(_) => {
             }
             HitEvent::FingerDown(fd) => {
-                self.animate_to(cx, self.pressed_state);
+                self.animate_state(cx, id!(pressed));
                 dispatch_action(cx, PianoKeyAction::Pressed(((fd.rel.y / fd.rect.size.y) * 127.0) as u8));
             }
             HitEvent::FingerUp(_) => {
-                self.animate_to(cx, self.up_state);
+                self.animate_state(cx, id!(up));
                 dispatch_action(cx, PianoKeyAction::Up);
             }
             _ => {}

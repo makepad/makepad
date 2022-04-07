@@ -99,7 +99,7 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
             fn last_keyframe_value_from_array(index: usize, nodes: &[LiveNode]) -> Option<usize> {
                 if let Some(index) = nodes.last_child(index) {
                     if nodes[index].value.is_object() {
-                        return nodes.child_by_name(index, LivePath::prop(id!(value)));
+                        return nodes.child_by_name(index, id!(value).as_field());
                     }
                     else {
                         return Some(index)
@@ -145,7 +145,7 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
                 })
             }
             
-            if let Some(index) = nodes.scope_up_by_name(start - 1, LivePath::prop(*id)) {
+            if let Some(index) = nodes.scope_up_by_name(start - 1, id.as_field()) {
                 // found ok now what. it depends on the type of the thing here
                 value_to_live_value(live_registry, index, nodes)?
             }
