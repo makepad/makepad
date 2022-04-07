@@ -65,38 +65,42 @@ live_register!{
             },
         }
         
-        default_state: {
-            from: {all: Play::Forward {duration: 0.2}}
-            apply: {
-                hover: 0.0,
-                bg_quad: {hover: (hover)}
-                name_text: {hover: (hover)}
+        state:{
+            default = {
+                default: true,
+                from: {all: Play::Forward {duration: 0.2}}
+                apply: {
+                    hover: 0.0,
+                    bg_quad: {hover: (hover)}
+                    name_text: {hover: (hover)}
+                }
             }
-        }
-        
-        hover_state: {
-            from: {all: Play::Forward {duration: 0.1}}
-            apply: {
-                hover: [{time: 0.0, value: 1.0}],
+            
+            hover = {
+                from: {all: Play::Forward {duration: 0.1}}
+                apply: {
+                    hover: [{time: 0.0, value: 1.0}],
+                }
             }
-        }
-        
-        unselected_state: {
-            track: select,
-            from: {all: Play::Forward {duration: 0.3}}
-            apply: {
-                selected: 0.0,
-                close_button: {button_quad: {selected: (selected)}}
-                bg_quad: {selected: (selected)}
-                name_text: {selected: (selected)}
+            
+            unselected = {
+                default: true,
+                track: select,
+                from: {all: Play::Forward {duration: 0.3}}
+                apply: {
+                    selected: 0.0,
+                    close_button: {button_quad: {selected: (selected)}}
+                    bg_quad: {selected: (selected)}
+                    name_text: {selected: (selected)}
+                }
             }
-        }
-        
-        selected_state: {
-            track: select,
-            from: {all: Play::Forward {duration: 0.1}}
-            apply: {
-                selected: [{time: 0.0, value: 1.0}],
+            
+            selected = {
+                track: select,
+                from: {all: Play::Forward {duration: 0.1}}
+                apply: {
+                    selected: [{time: 0.0, value: 1.0}],
+                }
             }
         }
     }
@@ -111,13 +115,7 @@ pub struct Tab {
     name_text: DrawText,
     drag_quad: DrawColor,
     
-    #[state(default_state, unselected_state)]
-    animator: Animator,
-    
-    default_state: Option<LivePtr>,
-    hover_state: Option<LivePtr>,
-    selected_state: Option<LivePtr>,
-    unselected_state: Option<LivePtr>,
+    state: State,
     
     close_button: TabCloseButton,
     
@@ -144,7 +142,7 @@ impl Tab {
     
     pub fn set_is_selected(&mut self, cx: &mut Cx, is_selected: bool, animate: Animate) {
         self.is_selected = is_selected;
-        self.toggle_animator(cx, is_selected, animate, self.selected_state, self.unselected_state);
+        self.toggle_state(cx, is_selected, animate, id!(selected), id!(unselected));
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d, name: &str) {
@@ -185,13 +183,13 @@ impl Tab {
         event: &mut Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, TabAction),
     ) {
-        self.animator_handle_event(cx, event);
+        self.state_handle_event(cx, event);
         
         let mut block_hover_out = false;
         match self.close_button.handle_event(cx, event) {
             TabCloseButtonAction::WasPressed => dispatch_action(cx, TabAction::CloseWasPressed),
             TabCloseButtonAction::HoverIn => block_hover_out = true,
-            TabCloseButtonAction::HoverOut => self.animate_to(cx, self.default_state),
+            TabCloseButtonAction::HoverOut => self.animate_state(cx, id!(default)),
             _ => ()
         };
         
@@ -200,10 +198,10 @@ impl Tab {
                 cx.set_hover_mouse_cursor(MouseCursor::Hand);
                 match f.hover_state {
                     HoverState::In => {
-                        self.animate_to(cx, self.hover_state);
+                        self.animate_state(cx, id!(hover));
                     }
                     HoverState::Out => if !block_hover_out {
-                        self.animate_to(cx, self.default_state);
+                        self.animate_state(cx, id!(default));
                     }
                     _ => {}
                 }

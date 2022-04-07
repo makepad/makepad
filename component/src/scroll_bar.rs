@@ -47,32 +47,36 @@ live_register!{
         bar_size: 10.0,
         bar_side_margin: 3.0
         min_handle_size: 30.0
-        default_state: {
-            from: {all: Play::Forward {duration: 0.1}}
-            apply: {
-                bar_quad: {pressed: 0.0, hover: 0.0}
-            }
-        }
         
-        hover_state: {
-            from: {
-                all: Play::Forward {duration: 0.1}
-                state_down: Play::Forward {duration: 0.01}
-            }
-            apply: {
-                bar_quad: {
-                    pressed: 0.0,
-                    hover: [{time: 0.0, value: 1.0}],
+        state :{
+            default = {
+                default: true,
+                from: {all: Play::Forward {duration: 0.1}}
+                apply: {
+                    bar_quad: {pressed: 0.0, hover: 0.0}
                 }
             }
-        }
-        
-        pressed_state: {
-            from: {all: Play::Forward {duration: 0.2}}
-            apply: {
-                bar_quad: {
-                    pressed: [{time: 0.0, value: 1.0}],
-                    hover: 1.0,
+            
+            hover = {
+                from: {
+                    all: Play::Forward {duration: 0.1}
+                    state_down: Play::Forward {duration: 0.01}
+                }
+                apply: {
+                    bar_quad: {
+                        pressed: 0.0,
+                        hover: [{time: 0.0, value: 1.0}],
+                    }
+                }
+            }
+            
+            pressed = {
+                from: {all: Play::Forward {duration: 0.2}}
+                apply: {
+                    bar_quad: {
+                        pressed: [{time: 0.0, value: 1.0}],
+                        hover: 1.0,
+                    }
                 }
             }
         }
@@ -87,14 +91,10 @@ pub struct ScrollBar {
     bar_side_margin: f32,
     #[live(Axis::Horizontal)] pub axis: Axis,
     
-    default_state: Option<LivePtr>,
-    hover_state: Option<LivePtr>,
-    pressed_state: Option<LivePtr>,
-    
     use_vertical_finger_scroll: bool,
     smoothing: Option<f32>,
     
-    #[state(default_state)] pub animator: Animator,
+    state: State,
     
     #[rust] next_frame: NextFrame,
     #[rust(false)] visible: bool,
@@ -336,7 +336,7 @@ impl ScrollBar {
             _ => ()
         };
         if self.visible {
-            self.animator_handle_event(cx, event);
+            self.state_handle_event(cx, event);
             if let Some(_) = event.is_next_frame(self.next_frame) {
                 if self.move_towards_scroll_target(cx) {
                     self.next_frame = cx.new_next_frame();
@@ -346,7 +346,7 @@ impl ScrollBar {
             
             match event.hits(cx, self.bar_quad.draw_vars.area) {
                 HitEvent::FingerDown(fe) => {
-                    self.animate_to(cx, self.pressed_state);
+                    self.animate_state(cx, id!(pressed));
                     let rel = match self.axis {
                         Axis::Horizontal => fe.rel.x,
                         Axis::Vertical => fe.rel.y
@@ -368,10 +368,10 @@ impl ScrollBar {
                         cx.set_hover_mouse_cursor(MouseCursor::Default);
                         match fe.hover_state {
                             HoverState::In => {
-                                self.animate_to(cx, self.hover_state);
+                                self.animate_state(cx, id!(hover));
                             },
                             HoverState::Out => {
-                                self.animate_to(cx, self.default_state);
+                                self.animate_state(cx, id!(default));
                             },
                             _ => ()
                         }
@@ -381,14 +381,14 @@ impl ScrollBar {
                     self.drag_point = None;
                     if fe.is_over {
                         if fe.input_type.has_hovers() {
-                            self.animate_to(cx, self.hover_state);
+                            self.animate_state(cx, id!(hover));
                         }
                         else {
-                            self.animate_to(cx, self.default_state);
+                            self.animate_state(cx, id!(default));
                         }
                     }
                     else {
-                        self.animate_to(cx, self.default_state);
+                        self.animate_state(cx, id!(default));
                     }
                     return ScrollBarEvent::ScrollDone;
                 },

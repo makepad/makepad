@@ -141,6 +141,26 @@ impl LiveNode {
         }
     }
     
+    pub fn prop(&self)->LiveProp{
+        LiveProp(self.id, self.origin.prop_type())
+    }
+    
+}
+
+#[derive(Copy, Clone, Debug)]
+pub struct LiveProp(pub LiveId,pub LivePropType);
+impl LiveProp{
+    pub fn field(id:LiveId)->Self{Self(id, LivePropType::Field)}
+    pub fn instance(id:LiveId)->Self{Self(id, LivePropType::Instance)}
+}
+
+pub trait LiveIdAsProp{
+    fn as_field(&self)->LiveProp;
+    fn as_instance(&self)->LiveProp;
+}
+impl LiveIdAsProp for LiveId{
+    fn as_field(&self)->LiveProp{LiveProp(*self, LivePropType::Field)}
+    fn as_instance(&self)->LiveProp{LiveProp(*self, LivePropType::Instance)}
 }
 
 #[derive(Copy, Clone, PartialEq)]
@@ -148,7 +168,7 @@ pub struct LiveNodeOrigin(u64);
 
 impl fmt::Debug for LiveNodeOrigin {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "token_id:{:?} first_def:{:?} edit_info:{:?} assign_type:{:?}", self.token_id(), self.first_def(), self.edit_info(), self.assign_type())
+        write!(f, "token_id:{:?} first_def:{:?} edit_info:{:?} prop_type:{:?}", self.token_id(), self.first_def(), self.edit_info(), self.prop_type())
     }
 }
 
@@ -169,8 +189,8 @@ impl fmt::Debug for LiveNodeOrigin {
 
 #[derive(Debug, Clone, Copy)]
 #[repr(usize)]
-pub enum LiveAssignType{
-    Property = 0,
+pub enum LivePropType{
+    Field = 0,
     Instance = 1,
     Template = 2,
     Nameless = 3
@@ -181,12 +201,12 @@ impl LiveNodeOrigin {
         Self (0)
     }
     
-    pub fn property() -> Self {
-        Self (0).with_assign_type(LiveAssignType::Property)
+    pub fn field() -> Self {
+        Self (0).with_prop_type(LivePropType::Field)
     }
 
     pub fn instance() -> Self {
-        Self (0).with_assign_type(LiveAssignType::Instance)
+        Self (0).with_prop_type(LivePropType::Instance)
     }
 
     
@@ -240,16 +260,16 @@ impl LiveNodeOrigin {
         self.0 & 0x2000_0000_0000_0000 != 0
     }
     
-    pub fn with_assign_type(mut self, live_assign_type: LiveAssignType) -> Self {
-        self.0 |= (live_assign_type as u64) << 62;//0x8000_0000_0000_0000;
+    pub fn with_prop_type(mut self, prop_type: LivePropType) -> Self {
+        self.0 |= (prop_type as u64) << 62;//0x8000_0000_0000_0000;
         self
     }
     
-    pub fn assign_type(&self) -> LiveAssignType {
-        LiveAssignType::from_usize(((self.0 & 0xC000_0000_0000_0000)>>62) as usize)
+    pub fn prop_type(&self) -> LivePropType {
+        LivePropType::from_usize(((self.0 & 0xC000_0000_0000_0000)>>62) as usize)
     }
     
-    pub fn has_assign_type(&self, origin:LiveAssignType)->bool{
+    pub fn has_prop_type(&self, origin:LivePropType)->bool{
         (self.0 & 0xC000_0000_0000_0000) >> 62 == origin as u64
     }
     
@@ -263,10 +283,10 @@ impl LiveNodeOrigin {
     }
 }
 
-impl LiveAssignType{
+impl LivePropType{
     fn from_usize(val:usize)->Self{
         match val{
-            0=>Self::Property,
+            0=>Self::Field,
             1=>Self::Instance,
             2=>Self::Template,
             _=>Self::Nameless

@@ -87,7 +87,7 @@ live_register!{
             align: {x: 0.5, y: 0.5},
             padding: {left: 14.0, top: 10.0, right: 14.0, bottom: 10.0}
         }
-        /*
+        
         state:{
             default = {
                 default:true,
@@ -116,33 +116,6 @@ live_register!{
                     label_text: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
                 }
             }
-        }*/
-        
-        default_state: {
-            duration: 0.1,
-            apply: {
-                bg_quad: {pressed: 0.0, hover: 0.0}
-                label_text: {pressed: 0.0, hover: 0.0}
-            }
-        }
-        
-        hover_state: {
-            from: {
-                all: Play::Forward {duration: 0.1}
-                pressed_state: Play::Forward {duration: 0.01}
-            }
-            apply: {
-                bg_quad: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                label_text: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
-            }
-        }
-        
-        pressed_state: {
-            duration: 0.2,
-            apply: {
-                bg_quad: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                label_text: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
-            }
         }
     }
 }
@@ -152,12 +125,7 @@ live_register!{
 pub struct Button {
     #[rust] pub button_logic: ButtonLogic,
 
-    #[state(default_state)] pub animator: Animator,
-    default_state: Option<LivePtr>,
-    hover_state: Option<LivePtr>,
-    pressed_state: Option<LivePtr>,
-
-    //state: State,
+    state: State,
 
     bg_quad: DrawQuad,
     label_text: DrawLabelText,
@@ -192,13 +160,13 @@ impl Button {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonAction {
         
-        self.animator_handle_event(cx, event);
+        self.state_handle_event(cx, event);
         let res = self.button_logic.handle_event(cx, event, self.bg_quad.draw_vars.area);
         
         match res.state {
-            ButtonState::Pressed => self.animate_to(cx, self.pressed_state),
-            ButtonState::Default => self.animate_to(cx, self.default_state),
-            ButtonState::Hover => self.animate_to(cx, self.hover_state),
+            ButtonState::Pressed => self.animate_state(cx, id!(pressed)),
+            ButtonState::Default => self.animate_state(cx, id!(default)),
+            ButtonState::Hover => self.animate_state(cx, id!(hover)),
             _ => ()
         };
         res.action
