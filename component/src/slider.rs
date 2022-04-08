@@ -89,16 +89,12 @@ impl FrameComponent for Slider {
     }
 }
 
-#[derive(Copy, Clone, PartialEq, IntoFrameComponentAction)]
+#[derive(Copy, Clone, PartialEq, FrameComponentAction)]
 pub enum SliderAction {
     StartSlide,
     Slide(f32),
     EndSlide,
     None
-}
-
-impl Default for SliderAction {
-    fn default() -> Self {Self::None}
 }
 
 impl Slider {

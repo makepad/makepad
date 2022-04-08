@@ -166,8 +166,8 @@ impl FrameComponent for Splitter {
         frame_component_find_child_mut_impl!(id, self.a, self.b)
     }
 
-    fn create_child(&mut self, cx:&mut Cx, at:CreateAt, id: &[LiveId], create:LiveId, nodes:&[LiveNode]) -> Option<&mut Box<dyn FrameComponent >> {
-        frame_component_create_child_impl!(cx, at, id, create, nodes, self.a, self.b)
+    fn create_child(&mut self, cx:&mut Cx, at:CreateAt, id:LiveId, path: &[LiveId], nodes:&[LiveNode]) -> Option<&mut Box<dyn FrameComponent >> {
+        frame_component_create_child_impl!(cx, at, id, path, nodes, self.a, self.b)
     }
     
     fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId> {
@@ -385,7 +385,7 @@ impl SplitterAlign {
     }
 }
 
-#[derive(Clone, IntoFrameComponentAction)]
+#[derive(Clone, FrameComponentAction)]
 pub enum SplitterAction {
     None,
     Changed {axis: Axis, align: SplitterAlign},

@@ -9,10 +9,6 @@ use{
 pub struct ButtonLogic {
 }
 
-impl Default for ButtonAction {
-    fn default() -> Self {Self::None}
-}
-
 #[derive(Copy, Debug, Clone, PartialEq)]
 pub enum ButtonState {
     Hover,
@@ -25,7 +21,7 @@ impl Default for ButtonState {
     fn default() -> Self {Self::None}
 }
 
-#[derive(Copy, Clone, PartialEq, IntoFrameComponentAction)]
+#[derive(Copy, Clone, PartialEq, FrameComponentAction)]
 pub enum ButtonAction {
     None,
     WasClicked,
