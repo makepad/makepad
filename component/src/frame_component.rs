@@ -61,12 +61,12 @@ pub trait FrameComponent: LiveApply {
     fn redraw(&mut self, _cx:&mut Cx){}
     fn draw_walk_component(&mut self, cx: &mut Cx2d) -> Result<(), LiveId>{self.draw_component(cx, self.get_walk())}
 
-    fn create_child(&mut self, _cx:&mut Cx, _at:CreateAt, _id: &[LiveId], _create:LiveId, _nodes:&[LiveNode]) -> Option<&mut Box<dyn FrameComponent >> {
+    fn create_child(&mut self, _cx:&mut Cx, _at:CreateAt,  _id:LiveId, _path: &[LiveId], _nodes:&[LiveNode]) -> Option<&mut Box<dyn FrameComponent >> {
         None
     }
 
-    fn add_child(&mut self, cx:&mut Cx, id: &[LiveId], create:LiveId, nodes:&[LiveNode]) -> Option<&mut Box<dyn FrameComponent >> {
-        self.create_child(cx, CreateAt::End, id, create, nodes)
+    fn add_child(&mut self, cx:&mut Cx, id:LiveId, path: &[LiveId], nodes:&[LiveNode]) -> Option<&mut Box<dyn FrameComponent >> {
+        self.create_child(cx, CreateAt::End, id, path, nodes)
     }
     
     fn find_child(&self, _id: &[LiveId]) -> Option<&Box<dyn FrameComponent >> {None}
@@ -140,7 +140,7 @@ impl FrameActionItem {
     }
 }
 
-#[derive(Clone, IntoFrameComponentAction)]
+#[derive(Clone, FrameComponentAction)]
 pub enum FrameActions {
     None,
     Actions(Vec<FrameActionItem>)
@@ -156,10 +156,6 @@ impl FrameActions {
         }
     }
     
-}
-
-impl Default for FrameActions {
-    fn default() -> Self {Self::None}
 }
 
 pub struct FrameActionsIterator {
@@ -325,11 +321,11 @@ macro_rules!frame_component_find_child_impl {
 
 #[macro_export]
 macro_rules!frame_component_create_child_impl {
-    ( $cx: ident, $at: ident, $ id: ident, $create:ident, $nodes: ident, $ ( $ arg: expr), *) => {
+    ( $cx: ident, $at: ident, $ id: ident, $path:ident, $nodes: ident, $ ( $ arg: expr), *) => {
         {
             ( $ (
                 if let Some(a) = $ arg.as_mut() {
-                    if let Some(c) = a.create_child( $cx, $at, $ id, $create, $nodes) {
+                    if let Some(c) = a.create_child( $cx, $at, $ id, $path, $nodes) {
                         return Some(c)
                     }
                 }

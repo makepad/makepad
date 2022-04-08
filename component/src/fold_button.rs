@@ -109,16 +109,12 @@ pub struct FoldButton {
     walk: Walk,
 }
 
-#[derive(Clone, IntoFrameComponentAction)]
+#[derive(Clone, FrameComponentAction)]
 pub enum FoldButtonAction {
     None,
     Opening,
     Closing,
     Animating(f32)
-}
-
-impl Default for FoldButtonAction {
-    fn default() -> Self {Self::None}
 }
 
 impl FrameComponent for FoldButton {
