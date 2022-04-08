@@ -9,7 +9,7 @@ live_register!{
         walk:{
             width:Size::Fill,
             height:Size::Fit
-        },
+        }
         body_walk:{
             width:Size::Fill,
             height:Size::Fit
@@ -28,7 +28,7 @@ live_register!{
                 }
             }
             
-            open =  {
+            opened =  {
                 default:true
                 track: zoom
                 from: {all: Play::Exp {speed1: 0.98, speed2: 0.95}}
@@ -80,7 +80,7 @@ impl FrameComponent for FoldHeader {
                     if item.id == id!(fold_button){
                         match item.action.cast(){
                             FoldButtonAction::Opening=>{
-                                self.animate_state(cx, id!(open))
+                                self.animate_state(cx, id!(opened))
                             }
                             FoldButtonAction::Closing=>{
                                 self.animate_state(cx, id!(closed))
@@ -168,4 +168,3 @@ pub enum FoldHeaderAction {
     Closing,
     None
 }
-
