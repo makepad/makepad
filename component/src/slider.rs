@@ -1,59 +1,66 @@
-use crate::makepad_platform::*;
-
+use {
+    crate::{
+        makepad_platform::*,
+        frame_component::*,
+    }
+};
 
 live_register!{
     use makepad_platform::shader::std::*;
     
     DrawSlider: {{DrawSlider}} {
         instance hover: float
-        instance pressed: float
-         
+        instance focus: float
         fn pixel(self) -> vec4 {
-            
-            return #f00;
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+            sdf.box(0., 0., self.rect_size.x, self.rect_size.y, 2.0)
+            return sdf.fill(#f)
         }
     }
     
     Slider: {{Slider}} {
         
-        default_state: {
-            from: {all: Play::Forward {duration: 0.1}}
-            apply: {
-                draw_wheel: {pressed: 0.0, hover: 0.0}
-            }
-        }
-        
-        hover_state: {
-            from: {
-                all: Play::Forward {duration: 0.1}
-                pressed_state: Play::Forward {duration: 0.01}
-            }
-            apply: {
-                draw_wheel: {
-                    pressed: 0.0,
-                    hover: [{time: 0.0, value: 1.0}],
+        state: {
+            
+            default = {
+                default: true
+                from: {all: Play::Forward {duration: 0.1}}
+                apply: {
+                    draw_slider: {hover: 0.0}
                 }
             }
-        }
-        
-        pressed_state: {
-            from: {all: Play::Forward {duration: 0.2}}
-            apply: {
-                draw_wheel: {
-                    pressed: [{time: 0.0, value: 1.0}],
-                    hover: 1.0,
+            
+            hover = {
+                from: {
+                    all: Play::Forward {duration: 0.1}
+                    pressed: Play::Forward {duration: 0.01}
+                }
+                apply: {
+                    draw_slider: {
+                        hover: [{time: 0.0, value: 1.0}],
+                    }
                 }
             }
+            
+            has_focus = {
+                from: {all: Play::Snap}
+                apply: {draw_slider: {focus: 1.0}}
+            }
+            
+            no_focus = {
+                from: {all: Play::Snap}
+                apply: {draw_slider: {focus: 0.0}}
+            }
+            
         }
     }
 }
-
 
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawSlider {
     deref_target: DrawQuad,
-    pos:f32
+    slide_pos: f32
 }
 
 #[derive(Live, LiveHook)]
@@ -61,18 +68,28 @@ pub struct DrawSlider {
 pub struct Slider {
     draw_slider: DrawSlider,
     walk: Walk,
-    
-    #[state(default_state)]
-    animator: Animator,
-    
-    default_state: Option<LivePtr>,
-    hover_state: Option<LivePtr>,
-    pressed_state: Option<LivePtr>,
+    state: State,
     
     #[rust] pub pos: f32,
     #[rust] pub dragging: bool,
 }
 
+impl FrameComponent for Slider {
+    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, _self_id: LiveId) -> FrameComponentActionRef {
+        self.handle_event(cx, event).into()
+    }
+    
+    fn get_walk(&self) -> Walk {
+        self.walk
+    }
+    
+    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId> {
+        self.draw_walk(cx, walk);
+        Ok(())
+    }
+}
+
+#[derive(Copy, Clone, PartialEq, IntoFrameComponentAction)]
 pub enum SliderAction {
     StartSlide,
     Slide(f32),
@@ -80,26 +97,30 @@ pub enum SliderAction {
     None
 }
 
+impl Default for SliderAction {
+    fn default() -> Self {Self::None}
+}
+
 impl Slider {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> SliderAction {
-        self.animator_handle_event(cx, event);
+        self.state_handle_event(cx, event);
         
-        match event.hits(cx, self.draw_wheel.draw_vars.area) {
+        match event.hits(cx, self.draw_slider.draw_vars.area) {
             HitEvent::FingerHover(fe) => {
                 cx.set_hover_mouse_cursor(MouseCursor::Arrow);
                 match fe.hover_state {
                     HoverState::In => {
-                        self.animate_to(cx, self.hover_state);
+                        self.animate_state(cx, id!(hover));
                     },
                     HoverState::Out => {
-                        self.animate_to(cx, self.default_state);
+                        self.animate_state(cx, id!(default));
                     },
                     _ => ()
                 }
             },
-            HitEvent::FingerDown(fe) => {
-                self.animate_to(cx, self.pressed_state);
+            HitEvent::FingerDown(_fe) => {
+                self.animate_state(cx, id!(pressed));
                 cx.set_down_mouse_cursor(MouseCursor::Arrow);
                 self.dragging = true;
                 return SliderAction::StartSlide
@@ -107,28 +128,28 @@ impl Slider {
             HitEvent::FingerUp(fe) => {
                 if fe.is_over {
                     if fe.input_type.has_hovers() {
-                        self.animate_to(cx, self.hover_state);
+                        self.animate_state(cx, id!(hover));
                     }
                     else {
-                        self.animate_to(cx, self.default_state);
+                        self.animate_state(cx, id!(default));
                     }
                 }
                 else {
-                    self.animate_to(cx, self.default_state);
+                    self.animate_state(cx, id!(default));
                 }
-                self.drag_mode = ColorPickerDragMode::None;
-                return ColorPickerAction::DoneChanging;
+                self.dragging = false;
+                return SliderAction::EndSlide;
             }
-            HitEvent::FingerMove(fe) => {
-                return self.handle_finger(cx, fe.rel)
+            HitEvent::FingerMove(_fe) => {
+                //return self.handle_finger(cx, fe.rel)
             },
             _ => ()
         }
-        ColorPickerAction::None
+        SliderAction::None
     }
     
-    pub fn draw(&mut self, cx: &mut Cx2d) {
-        self.draw_slider.draw_walk(cx, self.walk);
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
+        self.draw_slider.draw_walk(cx, walk);
     }
 }
 

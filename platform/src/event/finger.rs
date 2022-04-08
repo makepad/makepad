@@ -296,7 +296,6 @@ pub fn rect_contains_with_margin(rect: &Rect, pos: Vec2, margin: &Option<Margin>
 
 impl Event {
     
-    
     pub fn hits(&mut self, cx: &mut Cx, area: Area) -> HitEvent {
         self.hits_with_options(cx, area, HitOptions::default())
     }

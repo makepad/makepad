@@ -62,6 +62,8 @@ pub struct KeyFrame {
 pub enum Play {
     #[pick {duration: 1.0}]
     Forward {duration: f64},
+
+    Snap,
     
     #[live {speed1: 0.9, speed2: 1.0}]
     Exp {speed1: f64, speed2: f64},
@@ -102,6 +104,7 @@ impl Play {
     
     pub fn get_ended_time(&self, time: f64) -> (bool, f64) {
         match self {
+            Self::Snap=>(true, 1.0),
             Self::Exp {..} => panic!(),
             Self::Forward {duration} => {
                 if *duration == 0.0 {return (true, 1.0)}

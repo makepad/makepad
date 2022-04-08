@@ -13,14 +13,11 @@ live_register!{
     use makepad_component::frame::*;
     use makepad_platform::shader::std::*;
     
-    const HEADER_RADIUS_CLOSED: vec2(3.0, 3.0)
-    const HEADER_RADIUS_OPEN: vec2(3.0, 1.0)
-    
     MainHeader: FoldHeader {
         state: {
-            closed = {apply: {header: {bg: {radius: (HEADER_RADIUS_CLOSED)}}}}
-            open = {apply: {header: {bg: {radius: (HEADER_RADIUS_OPEN)}}}}
-        }        
+            closed = {apply: {header: {bg: {radius: vec2(3.0, 3.0)}}}}
+            opened = {apply: {header: {bg: {radius: vec2(3.0, 1.0)}}}}
+        }
         header: BoxY {
             mouse_cursor: Default,
             bg: {color: #6},
@@ -52,7 +49,7 @@ live_register!{
         }
         state: {
             closed = {apply: {body: {g1 = {bg: {color: #0000}}}}}
-            open = {apply: {body: {g1 = {bg: {color: #000a}}}}}
+            opened = {apply: {body: {g1 = {bg: {color: #000a}}}}}
         }
         body: Frame {
             layout: {flow: Overlay}
@@ -150,7 +147,7 @@ live_register!{
                         }
                         body: Frame {
                             layout: {flow: Down}
-                            instrument =? InstrumentHeader {
+                            instrument = ? InstrumentHeader {
                                 header: {
                                     fold_button = FoldButton {}
                                     swatch = Circle {
@@ -189,7 +186,7 @@ live_register!{
                                                 height: Fit
                                                 layout: {flow: Right, padding: 8, spacing: 5, align: {x: 0.0}}
                                                 label = Label {text: "Cutoff"}
-                                                //Slider{}
+                                                Slider{}
                                             }
                                         }
                                     }
@@ -261,7 +258,6 @@ impl App {
                 if let Some(instrument) = self.frame.add_child(cx, ids!(instrument), id!(my_id), live!{
                     header: {label = {text: "MyInstrument"}}
                 }) {
-                    println!("HERE!");
                     instrument.add_child(cx, ids!(stack), id!(my_stack1), live!{
                         header: {label = {text: "MyStackItem"}}
                     });
