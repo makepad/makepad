@@ -13,8 +13,8 @@ use crate::live_macro::*;
 mod derive_live_registry;
 use crate::derive_live_registry::*;
 
-mod derive_into_fcaction;
-use crate::derive_into_fcaction::*;
+mod derive_frame_component_action;
+use crate::derive_frame_component_action::*;
 
 
 #[path = "../../micro_serde/derive/src/macro_lib.rs"]
@@ -89,8 +89,8 @@ pub fn derive_live_component_registry(input: TokenStream) -> TokenStream {
 }
 
 // move elsewhere
-#[proc_macro_derive(IntoFrameComponentAction)]
-pub fn derive_into_frame_component_action(input: TokenStream) -> TokenStream {
-    derive_into_frame_component_action_impl(input)
+#[proc_macro_derive(FrameComponentAction)]
+pub fn derive_frame_component_action(input: TokenStream) -> TokenStream {
+    derive_frame_component_action_impl(input)
 }
 

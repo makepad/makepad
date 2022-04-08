@@ -120,8 +120,8 @@ impl FrameComponent for FoldHeader {
         frame_component_find_child_mut_impl!(id, self.header, self.body)
     }
 
-    fn create_child(&mut self, cx:&mut Cx, at:CreateAt, id: &[LiveId], create:LiveId, nodes:&[LiveNode]) -> Option<&mut Box<dyn FrameComponent >> {
-        frame_component_create_child_impl!(cx, at, id, create, nodes, self.header, self.body)
+    fn create_child(&mut self, cx:&mut Cx, at:CreateAt, id:LiveId, path: &[LiveId], nodes:&[LiveNode]) -> Option<&mut Box<dyn FrameComponent >> {
+        frame_component_create_child_impl!(cx, at, id, path, nodes, self.header, self.body)
     }
     
     fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId> {
@@ -162,7 +162,7 @@ impl FoldHeader{
     }
 }
 
-#[derive(Clone, IntoFrameComponentAction)]
+#[derive(Clone, FrameComponentAction)]
 pub enum FoldHeaderAction {
     Opening,
     Closing,
