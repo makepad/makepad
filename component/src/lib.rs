@@ -19,6 +19,8 @@ pub mod tab_bar;
 pub mod tab_close_button;
 pub mod color_picker;
 
+pub mod slider;
+
 #[macro_use]
 pub mod frame_component;
 pub mod frame;
@@ -62,6 +64,7 @@ pub fn live_register(cx: &mut Cx) {
     crate::fold_header::live_register(cx);
     crate::splitter::live_register(cx);
     crate::theme::live_register(cx);
+    crate::slider::live_register(cx);
     crate::label::live_register(cx);
     crate::frame::live_register(cx);
     crate::fold_button::live_register(cx);

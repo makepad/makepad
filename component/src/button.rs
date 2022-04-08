@@ -1,4 +1,3 @@
-#![allow(unused)]
 use {
     crate::{
         makepad_platform::*,
@@ -101,7 +100,7 @@ live_register!{
             hover = {
                 from: {
                     all: Play::Forward {duration: 0.1}
-                    pressed_state: Play::Forward {duration: 0.01}
+                    pressed: Play::Forward {duration: 0.01}
                 }
                 apply: {
                     bg_quad: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
@@ -142,7 +141,7 @@ struct DrawLabelText {
 }
 
 impl FrameComponent for Button {
-    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, self_id: LiveId) -> FrameComponentActionRef {
+    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, _self_id: LiveId) -> FrameComponentActionRef {
         self.handle_event(cx, event).into()
     }
     
