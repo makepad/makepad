@@ -84,7 +84,7 @@ live_register!{
             hover =  {
                 from: {
                     all: Play::Forward {duration: 0.1}
-                    pressed_state: Play::Forward {duration: 0.01}
+                    pressed: Play::Forward {duration: 0.01}
                 }
                 apply: {
                     draw_wheel: {
