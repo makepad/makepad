@@ -137,52 +137,52 @@ impl FrameComponent for Frame {
         }
     }
     
-    fn create_child(&mut self, cx:&mut Cx, at:CreateAt, id: &[LiveId], create: LiveId, nodes: &[LiveNode]) -> Option<&mut Box<dyn FrameComponent >> {
+    fn create_child(&mut self, cx:&mut Cx, at:CreateAt, id: LiveId, path: &[LiveId],  nodes: &[LiveNode]) -> Option<&mut Box<dyn FrameComponent >> {
         if self.design_mode{
             return None
         }
-        if id.len()>1 {
-            if self.children.get(&id[0]).is_some() {
-                return self.children.get_mut(&id[0]).unwrap().as_mut().unwrap().create_child(cx, at, &id[1..], create, nodes)
+        if path.len()>1 {
+            if self.children.get(&path[0]).is_some() {
+                return self.children.get_mut(&path[0]).unwrap().as_mut().unwrap().create_child(cx, at, id, &path[1..],nodes)
             }
             return None
         }
-        if let Some(live_ptr) = self.templates.get(&id[0]){
+        if let Some(live_ptr) = self.templates.get(&path[0]){
             // remove from draworder
-            self.draw_order.retain(|v| *v != create);
+            self.draw_order.retain(|v| *v != id);
             // lets resolve the live ptr to something
             let mut x = FrameComponentRef::new_from_ptr(cx, Some(live_ptr.clone()));
             x.as_mut().unwrap().apply(cx, ApplyFrom::ApplyOver, 0, nodes);
-            self.children.insert(create, x);
+            self.children.insert(id, x);
             match at{
                 CreateAt::Begin=>{
-                    self.draw_order.insert(0, create);
+                    self.draw_order.insert(0, id);
                 }
                 CreateAt::End=>{
-                    self.draw_order.push(create);
+                    self.draw_order.push(id);
                 }
                 CreateAt::After(id)=>{
                     if let Some(index) = self.draw_order.iter().position(|v| *v == id){
-                        self.draw_order.insert(index + 1, create);
+                        self.draw_order.insert(index + 1, id);
                     }
                     else{
-                        self.draw_order.push(create);
+                        self.draw_order.push(id);
                     }
                 }
                 CreateAt::Before(id)=>{
                     if let Some(index) = self.draw_order.iter().position(|v| *v == id){
-                        self.draw_order.insert(index, create);
+                        self.draw_order.insert(index, id);
                     }
                     else{
-                        self.draw_order.push(create);
+                        self.draw_order.push(id);
                     }
                 }
             }
-            return self.children.get_mut(&create).unwrap().as_mut()
+            return self.children.get_mut(&id).unwrap().as_mut()
         }
         else{
             for child in self.children.values_mut() {
-                if let Some(c) = child.as_mut().unwrap().create_child(cx, at, id, create, nodes) {
+                if let Some(c) = child.as_mut().unwrap().create_child(cx, at, id, path, nodes) {
                     return Some(c)
                 }
             }

@@ -255,26 +255,26 @@ impl App {
         
         match event {
             Event::Construct => {
-                if let Some(instrument) = self.frame.add_child(cx, ids!(instrument), id!(my_id), live!{
+                if let Some(instrument) = self.frame.add_child(cx, id!(my_id), ids!(instrument), live!{
                     header: {label = {text: "MyInstrument"}}
                 }) {
-                    instrument.add_child(cx, ids!(stack), id!(my_stack1), live!{
+                    instrument.add_child(cx, id!(my_stack1), ids!(stack),  live!{
                         header: {label = {text: "MyStackItem"}}
                     });
-                    instrument.add_child(cx, ids!(stack), id!(my_stack2), live!{
+                    instrument.add_child(cx, id!(my_stack2), ids!(stack), live!{
                         header: {label = {text: "MyStackItem2"}, range = {mylabel = {text: "WHEE"}}}
                     });
-                    instrument.add_child(cx, ids!(stack), id!(my_stack3), live!{
+                    instrument.add_child(cx, id!(my_stack3), ids!(stack), live!{
                         header: {label = {text: "MyStackItem3"}, range = {mylabel = {text: "WHEE"}}}
                     });
                 }
-                if let Some(instrument) = self.frame.add_child(cx, ids!(instrument), id!(my_id2), live!{
+                if let Some(instrument) = self.frame.add_child(cx, id!(my_id2), ids!(instrument), live!{
                     header: {label = {text: "MyInstrument"}}
                 }) {
-                    instrument.add_child(cx, ids!(stack), id!(my_stack1), live!{
+                    instrument.add_child(cx, id!(my_stack1), ids!(stack), live!{
                         header: {label = {text: "MyStackItem"}}
                     });
-                    instrument.add_child(cx, ids!(stack), id!(my_stack2), live!{
+                    instrument.add_child(cx, id!(my_stack2), ids!(stack), live!{
                         header: {label = {text: "MyStackItem2"}, range = {mylabel = {text: "WHEE"}}}
                     });
                 }

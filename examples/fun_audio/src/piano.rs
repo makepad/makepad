@@ -178,14 +178,10 @@ impl LiveHook for Piano {
 }
 
 
-#[derive(Clone, IntoFrameComponentAction)]
+#[derive(Clone, FrameComponentAction)]
 pub enum PianoAction {
     Note {is_on: bool, note_number: u8, velocity: u8},
     None
-}
-
-impl Default for PianoAction{
-    fn default()->Self{PianoAction::None}
 }
 
 pub enum PianoKeyAction {
