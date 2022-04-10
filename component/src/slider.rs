@@ -11,10 +11,52 @@ live_register!{
     DrawSlider: {{DrawSlider}} {
         instance hover: float
         instance focus: float
+        instance drag: float
+        const BORDER_RADIUS: 2.0
+        
         fn pixel(self) -> vec4 {
-            let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-            sdf.box(0., 0., self.rect_size.x, self.rect_size.y, 2.0)
-            return sdf.fill(#f)
+            let hover = max(self.hover, self.drag);
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+            let grad_top = 5.0;
+            let grad_bot = 1.0;
+            
+            // we need to move the slider range slightly inward
+            
+            // show the slider position in the body
+            let body = mix(#3, mix(#5, #6, hover), step(self.pos.x, self.slide_pos));
+            
+            let body_transp = vec4(body.xyz, 0.0);
+            let top_gradient = mix(body_transp, #1f, max(0.0, grad_top - sdf.pos.y) / grad_top);
+            let inset_gradient = mix(
+                #5c,
+                top_gradient,
+                clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
+            );
+            
+            sdf.box(
+                1.,
+                1. + (self.rect_size.y - 4.0) * (1.0 - self.focus),
+                self.rect_size.x - 2.0,
+                (self.rect_size.y - 4.0) * self.focus + 2.0,
+                BORDER_RADIUS
+            )
+            sdf.fill_keep(body)
+            
+            sdf.stroke(
+                mix(inset_gradient, body, (1.0 - self.focus)),
+                0.75
+            )
+            
+            let xs = self.slide_pos * (self.rect_size.x-5.0)+2.0;
+            sdf.rect(
+                xs-1.5,
+                1. + (self.rect_size.y - 5.0) * (1.0 - self.focus),
+                3.0,
+                (self.rect_size.y - 4.0) * (self.focus)+mix(4.0,2.0,self.focus)
+            );
+            sdf.fill(mix(#0000, #a, hover))
+            
+            return sdf.result
         }
     }
     
@@ -25,33 +67,39 @@ live_register!{
             default = {
                 default: true
                 from: {all: Play::Forward {duration: 0.1}}
-                apply: {
-                    draw_slider: {hover: 0.0}
-                }
+                apply: {draw_slider: {hover: 0.0}}
             }
             
             hover = {
-                from: {
-                    all: Play::Forward {duration: 0.1}
-                    pressed: Play::Forward {duration: 0.01}
-                }
-                apply: {
-                    draw_slider: {
-                        hover: [{time: 0.0, value: 1.0}],
-                    }
-                }
+                from: {all: Play::Snap}
+                apply: {draw_slider: {hover: 1.0}}
             }
             
-            has_focus = {
+            focus = {
+                track: focus
                 from: {all: Play::Snap}
                 apply: {draw_slider: {focus: 1.0}}
             }
             
-            no_focus = {
-                from: {all: Play::Snap}
+            defocus = {
+                default: true,
+                track: focus
+                from: {all: Play::Forward {duration: 0.1}}
                 apply: {draw_slider: {focus: 0.0}}
             }
             
+            drag = {
+                track: drag
+                from: {all: Play::Snap}
+                apply: {draw_slider: {drag: 1.0}}
+            }
+            
+            nodrag = {
+                default: true,
+                track: drag
+                from: {all: Play::Forward {duration: 0.1}}
+                apply: {draw_slider: {drag: 0.0}}
+            }
         }
     }
 }
@@ -67,11 +115,16 @@ pub struct DrawSlider {
 #[live_register(register_as_frame_component!(Slider))]
 pub struct Slider {
     draw_slider: DrawSlider,
+    
+    #[alias(width, walk.width)]
+    #[alias(height, walk.height)]
+    #[alias(margin, walk.margin)]
     walk: Walk,
+    
     state: State,
     
-    #[rust] pub pos: f32,
-    #[rust] pub dragging: bool,
+    #[rust] pub slide_pos: f32,
+    #[rust] pub dragging: Option<f32>,
 }
 
 impl FrameComponent for Slider {
@@ -103,6 +156,12 @@ impl Slider {
         self.state_handle_event(cx, event);
         
         match event.hits(cx, self.draw_slider.draw_vars.area) {
+            HitEvent::KeyFocusLost(_) => {
+                self.animate_state(cx, id!(defocus));
+            }
+            HitEvent::KeyFocus(_) => {
+                self.animate_state(cx, id!(focus));
+            }
             HitEvent::FingerHover(fe) => {
                 cx.set_hover_mouse_cursor(MouseCursor::Arrow);
                 match fe.hover_state {
@@ -110,18 +169,21 @@ impl Slider {
                         self.animate_state(cx, id!(hover));
                     },
                     HoverState::Out => {
+                        //self.animate_state(cx, id!(defocus));
                         self.animate_state(cx, id!(default));
                     },
                     _ => ()
                 }
             },
             HitEvent::FingerDown(_fe) => {
-                self.animate_state(cx, id!(pressed));
+                cx.set_key_focus(self.draw_slider.draw_vars.area);
                 cx.set_down_mouse_cursor(MouseCursor::Arrow);
-                self.dragging = true;
+                self.animate_state(cx, id!(drag));
+                self.dragging = Some(self.slide_pos);
                 return SliderAction::StartSlide
             },
             HitEvent::FingerUp(fe) => {
+                self.animate_state(cx, id!(nodrag));
                 if fe.is_over {
                     if fe.input_type.has_hovers() {
                         self.animate_state(cx, id!(hover));
@@ -133,18 +195,26 @@ impl Slider {
                 else {
                     self.animate_state(cx, id!(default));
                 }
-                self.dragging = false;
+                self.dragging = None;
                 return SliderAction::EndSlide;
             }
-            HitEvent::FingerMove(_fe) => {
-                //return self.handle_finger(cx, fe.rel)
-            },
+            HitEvent::FingerMove(fe) => {
+                // lets drag the fucker
+                if let Some(start_pos) = self.dragging{
+                    self.slide_pos = (start_pos + (fe.rel.x - fe.rel_start.x) / fe.rect.size.x).max(0.0).min(1.0);
+                    self.draw_slider.apply_over(cx, live!{
+                        slide_pos:(self.slide_pos)
+                    });
+                    //return self.handle_finger(cx, fe.rel)
+                }
+            }
             _ => ()
         }
         SliderAction::None
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
+        self.draw_slider.slide_pos = self.slide_pos;
         self.draw_slider.draw_walk(cx, walk);
     }
 }

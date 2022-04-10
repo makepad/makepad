@@ -96,8 +96,6 @@ impl Cx {
         dpi_factor
     }
 
-    
-    
     pub fn redraw_pass_of(&mut self, area: Area) {
         // we walk up the stack of area
         match area {
