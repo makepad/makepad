@@ -38,7 +38,7 @@ live_register!{
     
     LayerHeader: InstrumentHeader {
         header: {
-            bg: {color: #3},
+            bg: {color: #4},
         }
     }
     
@@ -181,12 +181,12 @@ live_register!{
                                             height: Fit
                                             Rect {
                                                 mouse_cursor: Default
-                                                bg: {color: #3}
+                                                bg: {color: #4}
                                                 width: Fill
                                                 height: Fit
-                                                layout: {flow: Right, padding: 8, spacing: 5, align: {x: 0.0}}
+                                                layout: {flow: Right, padding: 8, spacing: 5, align: {y: 0.5}}
                                                 label = Label {text: "Cutoff"}
-                                                Slider{}
+                                                Slider{height:18}
                                             }
                                         }
                                     }
@@ -284,7 +284,6 @@ impl App {
                 }
                 if let KeyCode::Escape = ke.key_code {
                 }
-                
             }
             Event::Draw(draw_event) => {
                 self.draw(&mut Cx2d::new(cx, draw_event));
