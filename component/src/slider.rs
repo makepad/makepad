@@ -2,6 +2,7 @@ use {
     crate::{
         makepad_platform::*,
         frame_component::*,
+        text_input::TextInput,
     }
 };
 
@@ -21,9 +22,9 @@ live_register!{
             let grad_bot = 1.0;
             
             // we need to move the slider range slightly inward
-            
+            let xbody = self.slide_pos * (self.rect_size.x - 2.0) + 1.0;
             // show the slider position in the body
-            let body = mix(#3, mix(#5, #6, hover), step(self.pos.x, self.slide_pos));
+            let body = mix(#3, mix(#5, #6, hover), step(sdf.pos.x, xbody));
             
             let body_transp = vec4(body.xyz, 0.0);
             let top_gradient = mix(body_transp, #1f, max(0.0, grad_top - sdf.pos.y) / grad_top);
@@ -47,12 +48,12 @@ live_register!{
                 0.75
             )
             
-            let xs = self.slide_pos * (self.rect_size.x-5.0)+2.0;
+            let xs = self.slide_pos * (self.rect_size.x - 5.0) + 2.0;
             sdf.rect(
-                xs-1.5,
+                xs - 1.5,
                 1. + (self.rect_size.y - 5.0) * (1.0 - self.focus),
                 3.0,
-                (self.rect_size.y - 4.0) * (self.focus)+mix(4.0,2.0,self.focus)
+                (self.rect_size.y - 4.0) * (self.focus) + mix(4.0, 2.0, self.focus)
             );
             sdf.fill(mix(#0000, #a, hover))
             
@@ -61,6 +62,11 @@ live_register!{
     }
     
     Slider: {{Slider}} {
+        
+        layout:{
+            flow:Right,
+            align:{x:1.0}
+        }
         
         state: {
             
@@ -121,9 +127,12 @@ pub struct Slider {
     #[alias(margin, walk.margin)]
     walk: Walk,
     
+    layout: Layout,
     state: State,
     
-    #[rust] pub slide_pos: f32,
+    text_input: TextInput,
+    
+    #[rust] pub value: f32,
     #[rust] pub dragging: Option<f32>,
 }
 
@@ -179,7 +188,7 @@ impl Slider {
                 cx.set_key_focus(self.draw_slider.draw_vars.area);
                 cx.set_down_mouse_cursor(MouseCursor::Arrow);
                 self.animate_state(cx, id!(drag));
-                self.dragging = Some(self.slide_pos);
+                self.dragging = Some(self.value);
                 return SliderAction::StartSlide
             },
             HitEvent::FingerUp(fe) => {
@@ -200,11 +209,13 @@ impl Slider {
             }
             HitEvent::FingerMove(fe) => {
                 // lets drag the fucker
-                if let Some(start_pos) = self.dragging{
-                    self.slide_pos = (start_pos + (fe.rel.x - fe.rel_start.x) / fe.rect.size.x).max(0.0).min(1.0);
-                    self.draw_slider.apply_over(cx, live!{
-                        slide_pos:(self.slide_pos)
-                    });
+                if let Some(start_pos) = self.dragging {
+                    self.value = (start_pos + (fe.rel.x - fe.rel_start.x) / fe.rect.size.x).max(0.0).min(1.0);
+                    self.draw_slider.draw_vars.redraw(cx);
+                    /*self.draw_slider.apply_over(cx, live!{
+                        slide_pos: (self.value)
+                    });*/
+                    
                     //return self.handle_finger(cx, fe.rel)
                 }
             }
@@ -214,8 +225,11 @@ impl Slider {
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        self.draw_slider.slide_pos = self.slide_pos;
-        self.draw_slider.draw_walk(cx, walk);
+        self.draw_slider.slide_pos = self.value;
+        self.draw_slider.begin(cx, walk, self.layout);
+        self.text_input.value = format!("{:.2}", self.value);//, (self.value*100.0) as usize);
+        self.text_input.draw_walk(cx, self.text_input.get_walk());
+        self.draw_slider.end(cx);
     }
 }
 
