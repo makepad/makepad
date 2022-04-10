@@ -18,7 +18,7 @@ pub mod tab;
 pub mod tab_bar;
 pub mod tab_close_button;
 pub mod color_picker;
-
+pub mod text_input;
 pub mod slider;
 
 #[macro_use]
@@ -41,6 +41,7 @@ pub use crate::{
     component_map::ComponentMap,
     button_logic::{ButtonLogic, ButtonAction},
     button::{Button},
+    text_input::{TextInput},
     link_button::{LinkButton},
     desktop_window::{DesktopWindow},
     scroll_view::{ScrollView},
@@ -68,6 +69,7 @@ pub fn live_register(cx: &mut Cx) {
     crate::label::live_register(cx);
     crate::frame::live_register(cx);
     crate::fold_button::live_register(cx);
+    crate::text_input::live_register(cx);
     crate::link_button::live_register(cx);
     crate::scroll_shadow::live_register(cx);
     crate::button::live_register(cx);
