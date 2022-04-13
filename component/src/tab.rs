@@ -66,40 +66,42 @@ live_register!{
         }
         
         state:{
-            default2 = {
-                default: true,
-                from: {all: Play::Forward {duration: 0.2}}
-                apply: {
-                    hover: 0.0,
-                    bg_quad: {hover: (hover)}
-                    name_text: {hover: (hover)}
-                }
-            }
-            
             hover = {
-                from: {all: Play::Forward {duration: 0.1}}
-                apply: {
-                    hover: [{time: 0.0, value: 1.0}],
+                default: off
+                off = {
+                    from: {all: Play::Forward {duration: 0.2}}
+                    apply: {
+                        hover: 0.0,
+                        bg_quad: {hover: (hover)}
+                        name_text: {hover: (hover)}
+                    }
                 }
-            }
-            
-            unselected = {
-                default: true,
-                track: select,
-                from: {all: Play::Forward {duration: 0.3}}
-                apply: {
-                    selected: 0.0,
-                    close_button: {button_quad: {selected: (selected)}}
-                    bg_quad: {selected: (selected)}
-                    name_text: {selected: (selected)}
+                
+                on = {
+                    from: {all: Play::Forward {duration: 0.1}}
+                    apply: {
+                        hover: [{time: 0.0, value: 1.0}],
+                    }
                 }
             }
             
             selected = {
-                track: select,
-                from: {all: Play::Forward {duration: 0.1}}
-                apply: {
-                    selected: [{time: 0.0, value: 1.0}],
+                default: off
+                off = {
+                    from: {all: Play::Forward {duration: 0.3}}
+                    apply: {
+                        selected: 0.0,
+                        close_button: {button_quad: {selected: (selected)}}
+                        bg_quad: {selected: (selected)}
+                        name_text: {selected: (selected)}
+                    }
+                }
+                
+                on = {
+                    from: {all: Play::Snap}
+                    apply: {
+                        selected: 1.0,
+                    }
                 }
             }
         }
@@ -142,7 +144,7 @@ impl Tab {
     
     pub fn set_is_selected(&mut self, cx: &mut Cx, is_selected: bool, animate: Animate) {
         self.is_selected = is_selected;
-        self.toggle_state(cx, is_selected, animate, id!(selected), id!(unselected));
+        self.toggle_state(cx, is_selected, animate, ids!(selected.on), ids!(selected.off));
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d, name: &str) {
@@ -189,7 +191,7 @@ impl Tab {
         match self.close_button.handle_event(cx, event) {
             TabCloseButtonAction::WasPressed => dispatch_action(cx, TabAction::CloseWasPressed),
             TabCloseButtonAction::HoverIn => block_hover_out = true,
-            TabCloseButtonAction::HoverOut => self.animate_state(cx, id!(default2)),
+            TabCloseButtonAction::HoverOut => self.animate_state(cx, ids!(hover.off)),
             _ => ()
         };
         
@@ -198,10 +200,10 @@ impl Tab {
                 cx.set_hover_mouse_cursor(MouseCursor::Hand);
                 match f.hover_state {
                     HoverState::In => {
-                        self.animate_state(cx, id!(hover));
+                        self.animate_state(cx, ids!(hover.on));
                     }
                     HoverState::Out => if !block_hover_out {
-                        self.animate_state(cx, id!(default2));
+                        self.animate_state(cx, ids!(hover.off));
                     }
                     _ => {}
                 }

@@ -32,20 +32,22 @@ live_register!{
         size: vec2(200., 200)
         
         state:{
-            default = {
-                default: true
-                duration: 0.1,
-                apply: {bg_quad: {pressed: 0.0, hover: 0.0}}
-            }
-            
             hover = {
-                duration: 0.0
-                apply: {bg_quad: {pressed: 0.0, hover: 1.0}}
-            }
-            
-            pressed = {
-                duration: 0.2,
-                apply: {bg_quad: {pressed: 1.0, hover: 1.0}}
+                default:off
+                default = {
+                    from: {all: Play::Forward {duration: 0.1}}
+                    apply: {bg_quad: {pressed: 0.0, hover: 0.0}}
+                }
+                
+                hover = {
+                    from: {all: Play::Snap}
+                    apply: {bg_quad: {pressed: 0.0, hover: 1.0}}
+                }
+                
+                pressed = {
+                    from: {all: Play::Forward {duration: 0.2}}
+                    apply: {bg_quad: {pressed: 1.0, hover: 1.0}}
+                }
             }
         }
     }
@@ -78,28 +80,23 @@ impl ShaderView {
                 
                 match fe.hover_state {
                     HoverState::In => {
-                        self.animate_state(cx, id!(hover));
+                        self.animate_state(cx, ids!(hover.on));
                     },
                     HoverState::Out => {
-                        self.animate_state(cx, id!(default));
+                        self.animate_state(cx, ids!(hover.off));
                     },
                     _ => ()
                 }
             },
             HitEvent::FingerDown(_fe) => {
-                self.animate_state(cx, id!(pressed));
+                self.animate_state(cx, ids!(hover.pressed));
             },
             HitEvent::FingerUp(fe) => {
-                if fe.is_over {
-                    if fe.input_type.has_hovers() {
-                        self.animate_state(cx, id!(hover));
-                    }
-                    else {
-                        self.animate_state(cx, id!(default));
-                    }
+                if fe.is_over && fe.input_type.has_hovers() {
+                    self.animate_state(cx, ids!(hover.on));
                 }
                 else {
-                    self.animate_state(cx, id!(default));
+                    self.animate_state(cx, ids!(hover.off));
                 }
             }
             HitEvent::FingerMove(_) => {

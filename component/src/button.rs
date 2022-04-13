@@ -88,31 +88,33 @@ live_register!{
         }
         
         state:{
-            default = {
-                default:true,
-                duration: 0.1,
-                apply: {
-                    bg_quad: {pressed: 0.0, hover: 0.0}
-                    label_text: {pressed: 0.0, hover: 0.0}
-                }
-            }
-            
             hover = {
-                from: {
-                    all: Play::Forward {duration: 0.1}
-                    pressed: Play::Forward {duration: 0.01}
+                default: off,
+                off = {
+                    duration: 0.1,
+                    apply: {
+                        bg_quad: {pressed: 0.0, hover: 0.0}
+                        label_text: {pressed: 0.0, hover: 0.0}
+                    }
                 }
-                apply: {
-                    bg_quad: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                    label_text: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                
+                on = {
+                    from: {
+                        all: Play::Forward {duration: 0.1}
+                        pressed: Play::Forward {duration: 0.01}
+                    }
+                    apply: {
+                        bg_quad: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        label_text: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                    }
                 }
-            }
-            
-            pressed = {
-                duration: 0.2,
-                apply: {
-                    bg_quad: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                    label_text: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                
+                pressed = {
+                    duration: 0.2,
+                    apply: {
+                        bg_quad: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        label_text: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                    }
                 }
             }
         }
@@ -168,9 +170,9 @@ impl Button {
         let res = self.button_logic.handle_event(cx, event, self.bg_quad.draw_vars.area);
         
         match res.state {
-            ButtonState::Pressed => self.animate_state(cx, id!(pressed)),
-            ButtonState::Default => self.animate_state(cx, id!(default)),
-            ButtonState::Hover => self.animate_state(cx, id!(hover)),
+            ButtonState::Pressed => self.animate_state(cx, ids!(hover.pressed)),
+            ButtonState::Default => self.animate_state(cx, ids!(hover.off)),
+            ButtonState::Hover => self.animate_state(cx, ids!(hover.on)),
             _ => ()
         };
         res.action

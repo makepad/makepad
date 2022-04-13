@@ -42,55 +42,39 @@ live_register!{
         
         state:{
             
-            default = {
-                default:true,
-                duration: 0.1
-                apply: {bg_quad: {hover: 0.0}}
-            }
-            
-            hover =  {
-                duration: 0.0
-                apply: {bg_quad: {hover: 1.0}}
-            }
-            
-            closed = {
-                track: zoom
-                from: {all: Play::Exp {speed1: 0.96, speed2: 0.97}}
-                redraw: true
-                apply: {
-                    opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
-                    bg_quad: {opened: (opened)}
+            hover ={
+                default:off
+                off = {
+                    from: {all: Play::Forward{duration: 0.1}}
+                    apply: {bg_quad: {hover: 0.0}}
+                }
+                
+                on =  {
+                    from: {all: Play::Snap}
+                    apply: {bg_quad: {hover: 1.0}}
                 }
             }
             
-            opened = {
-                default:true,
-                track: zoom
-                from: {all: Play::Exp {speed1: 0.98, speed2: 0.95}}
-                redraw: true
-                apply: {
-                    opened: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]
-                    bg_quad: {opened: (opened)}
+            open = {
+                default: yes
+                no ={
+                    from: {all: Play::Exp {speed1: 0.96, speed2: 0.97}}
+                    redraw: true
+                    apply: {
+                        opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
+                        bg_quad: {opened: (opened)}
+                    }
+                }
+                yes = {
+                    from: {all: Play::Exp {speed1: 0.98, speed2: 0.95}}
+                    redraw: true
+                    apply: {
+                        opened: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]
+                        bg_quad: {opened: (opened)}
+                    }
                 }
             }
         }
-        /*
-        closed_state: {
-            track: open
-            duration: 0.2
-            ease: Ease::OutExp
-            apply: {
-                opened: 0.0,
-                bg_quad: {opened: (opened)}
-            }
-        }
-        
-        opened_state: {
-            track: open,
-            duration: 0.2
-            ease: Ease::OutExp
-            apply: {opened: 1.0,}
-        }*/
     }
 }
 
@@ -143,7 +127,7 @@ impl FoldButton {
         dispatch_action: &mut dyn FnMut(&mut Cx, FoldButtonAction),
     ) {
         if self.state_handle_event(cx, event).is_animating() {
-            if self.state.is_track_of_animating(cx, id!(closed)) {
+            if self.state.is_track_animating(cx, id!(open)) {
                 dispatch_action(cx, FoldButtonAction::Animating(self.opened))
             }
         };
@@ -151,23 +135,23 @@ impl FoldButton {
         
         match res.state {
             ButtonState::Pressed => {
-                if self.state.is_in_state(cx, id!(opened)) {
-                    self.animate_state(cx, id!(closed));
+                if self.state.is_in_state(cx, ids!(open.yes)) {
+                    self.animate_state(cx, ids!(open.no));
                     dispatch_action(cx, FoldButtonAction::Closing)
                 }
                 else {
-                    self.animate_state(cx, id!(opened));
+                    self.animate_state(cx, ids!(open.yes));
                     dispatch_action(cx, FoldButtonAction::Opening)
                 }
             }
-            ButtonState::Default => self.animate_state(cx, id!(default)),
-            ButtonState::Hover => self.animate_state(cx, id!(hover)),
+            ButtonState::Default => self.animate_state(cx, ids!(hover.off)),
+            ButtonState::Hover => self.animate_state(cx, ids!(hover.on)),
             _ => ()
         };
     }
     
     pub fn set_is_open(&mut self, cx: &mut Cx, is_open: bool, animate: Animate) {
-        self.toggle_state(cx, is_open, animate, id!(opened), id!(closed))
+        self.toggle_state(cx, is_open, animate, ids!(open.yes), ids!(open.no))
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {

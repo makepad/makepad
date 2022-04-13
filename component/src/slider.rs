@@ -24,7 +24,7 @@ live_register!{
             // we need to move the slider range slightly inward
             let xbody = self.slide_pos * (self.rect_size.x - 2.0) + 1.0;
             // show the slider position in the body
-            let body = mix(#3, mix(#5, #6, hover), step(sdf.pos.x, xbody));
+            let body = mix(mix(#3a, #3, hover), mix(#5, #6, hover), step(sdf.pos.x, xbody));
             
             let body_transp = vec4(body.xyz, 0.0);
             let top_gradient = mix(body_transp, #1f, max(0.0, grad_top - sdf.pos.y) / grad_top);
@@ -63,48 +63,56 @@ live_register!{
     
     Slider: {{Slider}} {
         
-        layout:{
-            flow:Right,
-            align:{x:1.0}
+        layout: {
+            flow: Right,
+            align: {x: 1.0}
         }
         
         state: {
-            
-            default = {
-                default: true
-                from: {all: Play::Forward {duration: 0.1}}
-                apply: {draw_slider: {hover: 0.0}}
-            }
-            
             hover = {
-                from: {all: Play::Snap}
-                apply: {draw_slider: {hover: 1.0}}
+                default: off
+                off = {
+                    from: {all: Play::Forward {duration: 0.1}}
+                    apply: {
+                        draw_slider: {hover: 0.0}
+                        text_input: {state: {hover = off}}
+                    }
+                }
+                on = {
+                    from: {all: Play::Snap}
+                    apply: {
+                        draw_slider: {hover: 1.0}
+                        text_input: {state: {hover = on}}
+                    }
+                }
             }
-            
             focus = {
-                track: focus
-                from: {all: Play::Snap}
-                apply: {draw_slider: {focus: 1.0}}
+                default: off
+                off = {
+                    from: {all: Play::Forward {duration: 0.1}}
+                    apply: {
+                        draw_slider: {focus: 0.0}
+                        text_input: {state: {focus = off}}
+                    }
+                }
+                on = {
+                    from: {all: Play::Snap}
+                    apply: {
+                        draw_slider: {focus: 1.0}
+                        text_input: {state: {focus = on}}
+                    }
+                }
             }
-            
-            defocus = {
-                default: true,
-                track: focus
-                from: {all: Play::Forward {duration: 0.1}}
-                apply: {draw_slider: {focus: 0.0}}
-            }
-            
             drag = {
-                track: drag
-                from: {all: Play::Snap}
-                apply: {draw_slider: {drag: 1.0}}
-            }
-            
-            nodrag = {
-                default: true,
-                track: drag
-                from: {all: Play::Forward {duration: 0.1}}
-                apply: {draw_slider: {drag: 0.0}}
+                default: off
+                off = {
+                    from: {all: Play::Forward {duration: 0.1}}
+                    apply: {draw_slider: {drag: 0.0}}
+                }
+                on = {
+                    from: {all: Play::Snap}
+                    apply: {draw_slider: {drag: 1.0}}
+                }
             }
         }
     }
@@ -163,23 +171,22 @@ impl Slider {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> SliderAction {
         self.state_handle_event(cx, event);
-        
         match event.hits(cx, self.draw_slider.draw_vars.area) {
             HitEvent::KeyFocusLost(_) => {
-                self.animate_state(cx, id!(defocus));
+                self.animate_state(cx, ids!(focus.off));
             }
             HitEvent::KeyFocus(_) => {
-                self.animate_state(cx, id!(focus));
+                self.animate_state(cx, ids!(focus.on));
             }
             HitEvent::FingerHover(fe) => {
                 cx.set_hover_mouse_cursor(MouseCursor::Arrow);
                 match fe.hover_state {
                     HoverState::In => {
-                        self.animate_state(cx, id!(hover));
+                        self.animate_state(cx, ids!(hover.on));
                     },
                     HoverState::Out => {
                         //self.animate_state(cx, id!(defocus));
-                        self.animate_state(cx, id!(default));
+                        self.animate_state(cx, ids!(hover.off));
                     },
                     _ => ()
                 }
@@ -187,22 +194,17 @@ impl Slider {
             HitEvent::FingerDown(_fe) => {
                 cx.set_key_focus(self.draw_slider.draw_vars.area);
                 cx.set_down_mouse_cursor(MouseCursor::Arrow);
-                self.animate_state(cx, id!(drag));
+                self.animate_state(cx, ids!(drag.on));
                 self.dragging = Some(self.value);
                 return SliderAction::StartSlide
             },
             HitEvent::FingerUp(fe) => {
-                self.animate_state(cx, id!(nodrag));
-                if fe.is_over {
-                    if fe.input_type.has_hovers() {
-                        self.animate_state(cx, id!(hover));
-                    }
-                    else {
-                        self.animate_state(cx, id!(default));
-                    }
+                self.animate_state(cx, ids!(drag.off));
+                if fe.is_over && fe.input_type.has_hovers() {
+                    self.animate_state(cx, ids!(hover.on));
                 }
                 else {
-                    self.animate_state(cx, id!(default));
+                    self.animate_state(cx, ids!(hover.off));
                 }
                 self.dragging = None;
                 return SliderAction::EndSlide;
@@ -215,7 +217,6 @@ impl Slider {
                     /*self.draw_slider.apply_over(cx, live!{
                         slide_pos: (self.value)
                     });*/
-                    
                     //return self.handle_finger(cx, fe.rel)
                 }
             }
@@ -227,7 +228,7 @@ impl Slider {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_slider.slide_pos = self.value;
         self.draw_slider.begin(cx, walk, self.layout);
-        self.text_input.value = format!("{:.2}", self.value);//, (self.value*100.0) as usize);
+        self.text_input.value = format!("{:.2}", self.value); //, (self.value*100.0) as usize);
         self.text_input.draw_walk(cx, self.text_input.get_walk());
         self.draw_slider.end(cx);
     }
