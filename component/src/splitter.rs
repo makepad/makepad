@@ -56,33 +56,35 @@ live_register!{
         max_vertical: (DIM_SPLITTER_MAX_VERTICAL)
         
         state:{
-            default = {
-                default: true
-                from: {all: Play::Forward {duration: 0.1}}
-                apply: {
-                    bar_quad: {pressed: 0.0, hover: 0.0}
-                }
-            }
-            
             hover = {
-                from: {
-                    all: Play::Forward {duration: 0.1}
-                    state_down: Play::Forward {duration: 0.01}
-                }
-                apply: {
-                    bar_quad: {
-                        pressed: 0.0,
-                        hover: [{time: 0.0, value: 1.0}],
+                default: off
+                off = {
+                    from: {all: Play::Forward {duration: 0.1}}
+                    apply: {
+                        bar_quad: {pressed: 0.0, hover: 0.0}
                     }
                 }
-            }
-            
-            pressed = {
-                from: {all: Play::Forward {duration: 0.1}}
-                apply: {
-                    bar_quad: {
-                        pressed: [{time: 0.0, value: 1.0}],
-                        hover: 1.0,
+                
+                on = {
+                    from: {
+                        all: Play::Forward {duration: 0.1}
+                        state_down: Play::Forward {duration: 0.01}
+                    }
+                    apply: {
+                        bar_quad: {
+                            pressed: 0.0,
+                            hover: [{time: 0.0, value: 1.0}],
+                        }
+                    }
+                }
+                
+                pressed = {
+                    from: {all: Play::Forward {duration: 0.1}}
+                    apply: {
+                        bar_quad: {
+                            pressed: [{time: 0.0, value: 1.0}],
+                            hover: 1.0,
+                        }
                     }
                 }
             }
@@ -275,10 +277,10 @@ impl Splitter {
                 }
                 match f.hover_state {
                     HoverState::In => if !f.any_down {
-                        self.animate_state(cx, id!(hover));
+                        self.animate_state(cx, ids!(hover.on));
                     },
                     HoverState::Out => if !f.any_down {
-                        self.animate_state(cx, id!(default));
+                        self.animate_state(cx, ids!(hover.off));
                     },
                     _ => ()
                 }
@@ -288,21 +290,16 @@ impl Splitter {
                     Axis::Horizontal => cx.set_down_mouse_cursor(MouseCursor::ColResize),
                     Axis::Vertical => cx.set_down_mouse_cursor(MouseCursor::RowResize),
                 }
-                self.animate_state(cx, id!(pressed));
+                self.animate_state(cx, ids!(hover.pressed));
                 self.drag_start_align = Some(self.align);
             }
             HitEvent::FingerUp(f) => {
                 self.drag_start_align = None;
-                if f.is_over {
-                    if f.input_type.has_hovers() {
-                        self.animate_state(cx, id!(hover));
-                    }
-                    else {
-                        self.animate_state(cx, id!(default));
-                    }
+                if f.is_over && f.input_type.has_hovers() {
+                    self.animate_state(cx, ids!(hover.on));
                 }
                 else {
-                    self.animate_state(cx, id!(default));
+                    self.animate_state(cx, ids!(hover.off));
                 }
             }
             HitEvent::FingerMove(f) => {

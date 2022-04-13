@@ -13,10 +13,10 @@ live_register!{
     
     TextInput: {{TextInput}} {
         
-        label_text:{
+        label_text: {
             instance hover: 0.0
             instance focus: 0.0
-            text_style: FONT_CODE{}
+            text_style: FONT_CODE {}
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
@@ -24,7 +24,7 @@ live_register!{
                         #f,
                         self.hover
                     ),
-                    #9,
+                    #0,
                     self.focus
                 )
             }
@@ -34,49 +34,66 @@ live_register!{
             instance hover: 0.0
             instance focus: 0.0
             
-            const BORDER_RADIUS: 3.0
+            const BORDER_RADIUS: 2.0
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                sdf.box(
+                    1.,
+                    1.,
+                    self.rect_size.x - 2.0,
+                    self.rect_size.y - 2.0,
+                    BORDER_RADIUS
+                )
+                sdf.fill(#0000)
                 return sdf.result
             }
         }
         
         walk: {
             width: Size::Fit,
-            height: Size::Fit,
-            margin: {left: 1.0, right: 1.0, top: 1.0, bottom: 1.0},
+            height: Size::Fill,
+            margin: {left: 1.0, right: 1.0, top: 2.0, bottom: 2.0},
         }
         
         layout: {
-            padding: {left: 0.0, top: 0.0, right: 4.0, bottom: 0.0}
+            align: {y: 0.5}
+            padding: {left: 4.0, top: 0.0, right: 4.0, bottom: 2.0}
         }
         
-        state:{
-            default =  {
-                duration: 0.1,
-                apply: {
-                    bg_quad: {pressed: 0.0, hover: 0.0}
-                    label_text: {pressed: 0.0, hover: 0.0}
+        state: {
+            hover = {
+                default:off
+                off = {
+                    from: {all: Play::Forward {duration: 0.1}}
+                    apply: {
+                        bg_quad: {hover: 0.0}
+                        label_text: {hover: 0.0}
+                    }
+                }
+                on = {
+                    from: {all: Play::Snap}
+                    apply: {
+                        bg_quad: {hover: 1.0}
+                        label_text: {hover: 1.0}
+                    }
                 }
             }
-            
-            hover =  {
-                from: {
-                    all: Play::Forward {duration: 0.1}
-                    pressed_state: Play::Forward {duration: 0.01}
+            focus = {
+                default:off
+                off = {
+                    from: {all: Play::Forward {duration: 0.1}}
+                    apply: {
+                        bg_quad: {focus: 0.0}
+                        label_text: {focus: 0.0}
+                    }
                 }
-                apply: {
-                    bg_quad: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                    label_text: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                }
-            }
-                
-            edit = {
-                duration: 0.2,
-                apply: {
-                    bg_quad: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                    label_text: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                on = {
+                    from: {all: Play::Snap}
+                    apply: {
+                        bg_quad: {focus: 1.0}
+                        label_text: {focus: 1.0}
+                    }
                 }
             }
         }

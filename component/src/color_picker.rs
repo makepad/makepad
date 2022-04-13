@@ -18,7 +18,7 @@ live_register!{
                 0.5 * sqrt(2. - 2. * sqrt(2.) * v - u2 + v2)
             );
         }
-         
+        
         fn pixel(self) -> vec4 {
             
             let rgbv = Pal::hsv2rgb(vec4(self.hue, self.sat, self.val, 1.));
@@ -55,7 +55,7 @@ live_register!{
             sdf.circle(rect_puk.x, rect_puk.y, puck_size);
             sdf.rect(cx - rsize, cy - rsize, rsize * 2.0, rsize * 2.0);
             sdf.intersect();
-            sdf.fill(color); 
+            sdf.fill(color);
             sdf.circle(rect_puk.x, rect_puk.y, puck_size - 1. - 2. * self.hover + self.pressed);
             sdf.rect(cx - rsize, cy - rsize, rsize * 2.0, rsize * 2.0);
             sdf.intersect();
@@ -72,34 +72,36 @@ live_register!{
     
     ColorPicker: {{ColorPicker}} {
         
-        state:{
-            default =  {
-                default:true
-                from: {all: Play::Forward {duration: 0.1}}
-                apply: {
-                    draw_wheel: {pressed: 0.0, hover: 0.0}
-                }
-            }
-            
-            hover =  {
-                from: {
-                    all: Play::Forward {duration: 0.1}
-                    pressed: Play::Forward {duration: 0.01}
-                }
-                apply: {
-                    draw_wheel: {
-                        pressed: 0.0,
-                        hover: [{time: 0.0, value: 1.0}],
+        state: {
+            hover = {
+                default: off
+                off = {
+                    from: {all: Play::Forward {duration: 0.1}}
+                    apply: {
+                        draw_wheel: {pressed: 0.0, hover: 0.0}
                     }
                 }
-            }
-            
-            pressed =  {
-                from: {all: Play::Forward {duration: 0.2}}
-                apply: {
-                    draw_wheel: {
-                        pressed: [{time: 0.0, value: 1.0}],
-                        hover: 1.0,
+                
+                on = {
+                    from: {
+                        all: Play::Forward {duration: 0.1}
+                        pressed: Play::Forward {duration: 0.01}
+                    }
+                    apply: {
+                        draw_wheel: {
+                            pressed: 0.0,
+                            hover: [{time: 0.0, value: 1.0}],
+                        }
+                    }
+                }
+                
+                pressed = {
+                    from: {all: Play::Forward {duration: 0.2}}
+                    apply: {
+                        draw_wheel: {
+                            pressed: [{time: 0.0, value: 1.0}],
+                            hover: 1.0,
+                        }
                     }
                 }
             }
@@ -122,7 +124,7 @@ pub struct ColorPicker {
     draw_wheel: DrawColorWheel,
     
     state: State,
-
+    
     #[rust] pub size: f32,
     #[rust] hue: f32,
     #[rust] sat: f32,
@@ -162,7 +164,7 @@ impl ColorPicker {
                 self.val = 1.0 - clamp((vy + rsize) / (2.0 * rsize), 0.0, 1.0);
             },
             ColorPickerDragMode::Wheel => {
-                self.hue = (vx.atan2(vy) / std::f32::consts::PI * 0.5) - 0.33333+1.0;
+                self.hue = (vx.atan2(vy) / std::f32::consts::PI * 0.5) - 0.33333 + 1.0;
             },
             _ => ()
         }
@@ -202,16 +204,16 @@ impl ColorPicker {
                 
                 match fe.hover_state {
                     HoverState::In => {
-                        self.animate_state(cx, id!(hover));
+                        self.animate_state(cx, ids!(hover.on));
                     },
                     HoverState::Out => {
-                        self.animate_state(cx, id!(default));
+                        self.animate_state(cx, ids!(hover.off));
                     },
                     _ => ()
                 }
             },
             HitEvent::FingerDown(fe) => {
-                self.animate_state(cx, id!(pressed));
+                self.animate_state(cx, ids!(hover.pressed));
                 cx.set_down_mouse_cursor(MouseCursor::Arrow);
                 let rsize = (self.size * 0.28) / 2.0f32.sqrt();
                 let vx = fe.rel.x - 0.5 * self.size;
@@ -229,16 +231,11 @@ impl ColorPicker {
                 // lets check where we clicked!
             },
             HitEvent::FingerUp(fe) => {
-                if fe.is_over {
-                    if fe.input_type.has_hovers() {
-                        self.animate_state(cx, id!(hover));
-                    }
-                    else {
-                        self.animate_state(cx, id!(default));
-                    }
+                if fe.is_over && fe.input_type.has_hovers() {
+                    self.animate_state(cx, ids!(hover.on));
                 }
                 else {
-                    self.animate_state(cx, id!(default));
+                    self.animate_state(cx, ids!(hover.off));
                 }
                 self.drag_mode = ColorPickerDragMode::None;
                 return ColorPickerAction::DoneChanging;

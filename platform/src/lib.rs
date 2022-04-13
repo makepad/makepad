@@ -199,7 +199,8 @@ pub use {
             Animate,
             LiveState,
             State,
-            StateAction
+            StateAction,
+            StatePair
         },
         draw_vars::{
             DrawVars

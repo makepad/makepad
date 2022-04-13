@@ -7,7 +7,6 @@ use {
 };
 
 live_register!{
-    
     Frame: {{Frame}} {}
     Solid: Frame {bg: {shape: Solid}}
     Rect: Frame {bg: {shape: Rect}}

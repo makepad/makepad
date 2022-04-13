@@ -265,6 +265,10 @@ impl LiveNodeOrigin {
         self
     }
     
+    pub fn set_prop_type(&mut self, prop_type: LivePropType){
+        self.0 = (self.0 & (!0xC000_0000_0000_0000))| ((prop_type as u64) << 62);
+    }
+    
     pub fn prop_type(&self) -> LivePropType {
         LivePropType::from_usize(((self.0 & 0xC000_0000_0000_0000)>>62) as usize)
     }
@@ -559,6 +563,7 @@ impl LiveValue {
 
     pub fn is_value_type(&self) -> bool {
         match self {
+            Self::Id(_) |
             Self::Str(_) |
             Self::FittedString(_) |
             Self::InlineString {..} |
