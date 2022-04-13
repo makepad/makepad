@@ -14,7 +14,7 @@ use {
         },
         makepad_live_tokenizer::LiveId,
         live_token::LiveTokenId,
-        live_node::{LiveNode, LiveValue, LiveNodeOrigin, InlineString, FittedString, LiveProp},
+        live_node::{LivePropType, LiveNode, LiveValue, LiveNodeOrigin, InlineString, FittedString, LiveProp},
     }
 };
 
@@ -642,91 +642,101 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
             for _ in 0..stack_depth {
                 write!(f, "|   ").unwrap();
             }
+            let pt = match node.origin.prop_type(){
+                LivePropType::Field=>":",
+                LivePropType::Instance=>"=",
+                LivePropType::Template=>"=?",
+                LivePropType::Nameless=>"??"
+            };
             match &node.value {
                 LiveValue::None => {
-                    writeln!(f, "{}: <None>", node.id).unwrap();
+                    writeln!(f, "{}{} <None>", node.id, pt).unwrap();
                 },
                 LiveValue::Str(s) => {
-                    writeln!(f, "{}: <Str> {}", node.id, s).unwrap();
+                    writeln!(f, "{}{} <Str> {}", node.id, pt, s).unwrap();
                 },
                 LiveValue::InlineString(s) => {
-                    writeln!(f, "{}: <InlineString> {}", node.id, s.as_str()).unwrap();
+                    writeln!(f, "{}{} <InlineString> {}", node.id, pt, s.as_str()).unwrap();
                 },
                 LiveValue::FittedString(s) => {
-                    writeln!(f, "{}: <FittedString> {}", node.id, s.as_str()).unwrap();
+                    writeln!(f, "{}{} <FittedString> {}", node.id, pt, s.as_str()).unwrap();
                 },
                 LiveValue::DocumentString {string_start, string_count} => {
-                    writeln!(f, "{}: <DocumentString> string_start:{}, string_end:{}", node.id, string_start, string_count).unwrap();
+                    writeln!(f, "{}{} <DocumentString> string_start:{}, string_end:{}", node.id, pt, string_start, string_count).unwrap();
                 },
                 LiveValue::Bool(v) => {
-                    writeln!(f, "{}: <Bool> {}", node.id, v).unwrap();
+                    writeln!(f, "{}{} <Bool> {}", node.id, pt, v).unwrap();
                 }
                 LiveValue::Int(v) => {
-                    writeln!(f, "{}: <Int> {}", node.id, v).unwrap();
+                    writeln!(f, "{}{} <Int> {}", node.id, pt, v).unwrap();
                 }
                 LiveValue::Float(v) => {
-                    writeln!(f, "{}: <Float> {}", node.id, v).unwrap();
+                    writeln!(f, "{}{} <Float> {}", node.id, pt, v).unwrap();
                 },
                 LiveValue::Color(v) => {
-                    writeln!(f, "{}: <Color>{:08x}", node.id, v).unwrap();
+                    writeln!(f, "{}{} <Color>{:08x}", node.id, pt, v).unwrap();
                 },
                 LiveValue::Vec2(v) => {
-                    writeln!(f, "{}: <Vec2> {:?}", node.id, v).unwrap();
+                    writeln!(f, "{}{} <Vec2> {:?}", node.id, pt, v).unwrap();
                 },
                 LiveValue::Vec3(v) => {
-                    writeln!(f, "{}: <Vec3> {:?}", node.id, v).unwrap();
+                    writeln!(f, "{}{} <Vec3> {:?}", node.id, pt, v).unwrap();
                 },
                 LiveValue::Vec4(v) => {
-                    writeln!(f, "{}: <Vec4> {:?}", node.id, v).unwrap();
+                    writeln!(f, "{}{} <Vec4> {:?}", node.id, pt, v).unwrap();
                 },
                 LiveValue::Id(id) => {
-                    writeln!(f, "{}: <Id> {}", node.id, id).unwrap();
+                    writeln!(f, "{}{} <Id> {}", node.id, pt, id).unwrap();
                 },
                 LiveValue::ExprBinOp(id) => {
-                    writeln!(f, "{}: <ExprBinOp> {:?}", node.id, id).unwrap();
+                    writeln!(f, "{}{} <ExprBinOp> {:?}", node.id, pt, id).unwrap();
                 },
                 LiveValue::ExprUnOp(id) => {
-                    writeln!(f, "{}: <ExprUnOp> {:?}", node.id, id).unwrap();
+                    writeln!(f, "{}{} <ExprUnOp> {:?}", node.id, pt, id).unwrap();
                 },
                 LiveValue::ExprMember(id) => {
-                    writeln!(f, "{}: <ExprMember> {:?}", node.id, id).unwrap();
+                    writeln!(f, "{}{} <ExprMember> {:?}", node.id, pt, id).unwrap();
                 },
                 LiveValue::BareEnum {base, variant} => {
-                    writeln!(f, "{}: <BareEnum> {}::{}", node.id, base, variant).unwrap();
+                    writeln!(f, "{}{} <BareEnum> {}::{}", node.id, pt, base, variant).unwrap();
                 },
                 // stack items
                 LiveValue::Expr{expand_index} => {
-                    writeln!(f, "{}: <Expr> {:?}", node.id, expand_index).unwrap();
+                    writeln!(f, "{}{} <Expr> {:?}", node.id, pt, expand_index).unwrap();
                     stack_depth += 1;
                 },
                 LiveValue::ExprCall {ident, args} => {
-                    writeln!(f, "{}: <ExprCall> {}({})", node.id, ident, args).unwrap();
+                    writeln!(f, "{}{} <ExprCall> {}({})", node.id, pt, ident, args).unwrap();
                 },
                 LiveValue::Array => {
-                    writeln!(f, "{}: <Array>", node.id).unwrap();
+                    writeln!(f, "{}{} <Array>", node.id, pt).unwrap();
                     stack_depth += 1;
                 },
                 LiveValue::TupleEnum {base, variant} => {
-                    writeln!(f, "{}: <TupleEnum> {}::{}", node.id, base, variant).unwrap();
+                    writeln!(f, "{}{} <TupleEnum> {}::{}", node.id, pt, base, variant).unwrap();
                     stack_depth += 1;
                 },
                 LiveValue::NamedEnum {base, variant} => {
-                    writeln!(f, "{}: <NamedEnum> {}::{}", node.id, base, variant).unwrap();
+                    writeln!(f, "{}{} <NamedEnum> {}::{}", node.id, pt, base, variant).unwrap();
                     stack_depth += 1;
                 },
                 LiveValue::Object => {
-                    writeln!(f, "{}: <Object>", node.id).unwrap();
+                    writeln!(f, "{}{} <Object>", node.id, pt).unwrap();
                     stack_depth += 1;
                 }, // subnodes including this one
                 LiveValue::Clone(clone) => {
-                    writeln!(f, "{}: <Clone> {}", node.id, clone).unwrap();
+                    writeln!(f, "{}{} <Clone> {}", node.id, pt, clone).unwrap();
                     stack_depth += 1;
                 }, // subnodes including this one
                 LiveValue::Class {live_type, ..} => {
-                    writeln!(f, "{}: <Class> {:?}", node.id, live_type).unwrap();
+                    writeln!(f, "{}{} <Class> {:?}", node.id, pt, live_type).unwrap();
                     stack_depth += 1;
                 }, // subnodes including this one
                 LiveValue::Close => {
+                    if stack_depth == 0 {
+                        writeln!(f, "<CloseMisaligned> {}", node.id).unwrap();
+                        break;
+                    }
                     writeln!(f, "<Close> {}", node.id).unwrap();
                     stack_depth -= 1;
                     if stack_depth == 0 {
@@ -830,6 +840,7 @@ impl LiveNodeVec for Vec<LiveNode> {
                         let next_index = self.skip_node(found_index);
                         self.splice(found_index..next_index, other.iter().cloned());
                         // overwrite id
+                        self[found_index].origin.set_prop_type(path[depth].1);
                         self[found_index].id = path[depth].0;
                         return
                     }
@@ -839,6 +850,7 @@ impl LiveNodeVec for Vec<LiveNode> {
                     if depth == path.len() - 1 { // last
                         self.splice(append_index..append_index, other.iter().cloned());
                         // lets overwrite the id
+                        self[append_index].origin.set_prop_type(path[depth].1);
                         self[append_index].id = path[depth].0;
                         return
                     }
@@ -846,7 +858,7 @@ impl LiveNodeVec for Vec<LiveNode> {
                         self.splice(append_index..append_index, live_object!{
                             [path[depth].0]: {}
                         }.iter().cloned());
-                        self[append_index].origin = LiveNodeOrigin::empty().with_prop_type(path[depth].1);
+                        self[append_index].origin.set_prop_type(path[depth].1);
                     }
                 }
             }

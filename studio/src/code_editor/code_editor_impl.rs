@@ -156,32 +156,30 @@ live_register!{
         }
         
         state:{
-            show_caret = {
-                default: true,
-                track: caret,
-                duration: 0.0
-                apply: {caret_quad: {color: #b0}}
+            caret = {
+                default:on
+                on = {
+                    from: {all: Play::Snap}
+                    apply: {caret_quad: {color: #b0}}
+                }
+                
+                off =  {
+                    from: {all: Play::Snap}
+                    apply: {caret_quad: {color: #0000}}
+                }
             }
-            
-            hide_caret =  {
-                track: caret,
-                duration: 0.0
-                apply: {caret_quad: {color: #0000}}
-            }
-            
-            zoom_in = {
-                default: true,
-                track: zoom
-                from: {all: Play::Exp {speed1: 0.96, speed2: 0.97}}
-                redraw: true
-                apply: {zoom_out: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
-            }
-            
-            zoom_out = {
-                track: zoom
-                from: {all: Play::Exp {speed1: 0.98, speed2: 0.95}}
-                redraw: true
-                apply: {zoom_out: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]}
+            zoom = {
+                default: on
+                on = {
+                    from: {all: Play::Exp {speed1: 0.96, speed2: 0.97}}
+                    redraw: true
+                    apply: {zoom_out: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
+                }
+                off = {
+                    from: {all: Play::Exp {speed1: 0.98, speed2: 0.95}}
+                    redraw: true
+                    apply: {zoom_out: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]}
+                }
             }
         }
         
@@ -331,7 +329,7 @@ impl CodeEditorImpl {
         self.calc_lines_layout_inner(cx, document_inner, lines_layout, &mut compute_height);
         // this keeps the animation zooming properly focussed around a cursor/line
         if let Some(center_line) = self.zoom_anim_center {
-            if self.state.is_track_of_animating(cx, id!(zoom_out)) {
+            if self.state.is_track_animating(cx, id!(zoom_out)) {
                 let next_pos = self.position_to_vec2(center_line, lines_layout);
                 let last_pos = self.zoom_last_pos.unwrap();
                 let pos = self.scroll_view.get_scroll_pos(cx);
@@ -438,7 +436,7 @@ impl CodeEditorImpl {
         self.caret_quad.end_many_instances(cx);
     }
     
-    pub fn start_zoom_anim(&mut self, cx: &mut Cx, state: &mut EditorState, lines_layout: &LinesLayout, anim: LiveId) {
+    pub fn start_zoom_anim(&mut self, cx: &mut Cx, state: &mut EditorState, lines_layout: &LinesLayout, anim: &StatePair) {
         if let Some(session_id) = self.session_id {
             let session = &state.sessions[session_id];
             let document = &state.documents[session.document_id];
@@ -466,7 +464,7 @@ impl CodeEditorImpl {
     pub fn reset_caret_blink(&mut self, cx: &mut Cx) {
         cx.stop_timer(self.caret_blink_timer);
         self.caret_blink_timer = cx.start_timer(self.caret_blink_timeout, true);
-        self.cut_state(cx, id!(show_caret));
+        self.cut_state(cx, ids!(caret.on));
     }
     
     pub fn draw_selections(
@@ -845,12 +843,12 @@ impl CodeEditorImpl {
         }
         
         if event.is_timer(self.caret_blink_timer) {
-            if self.state.is_in_state(cx, id!(show_caret)) {
-                self.animate_state(cx, id!(hide_caret));
+            if self.state.is_in_state(cx, ids!(caret.on)) {
+                self.animate_state(cx, ids!(caret.off));
                 dispatch_action(cx, CodeEditorAction::CursorBlink);
             }
             else {
-                self.animate_state(cx, id!(show_caret));
+                self.animate_state(cx, ids!(caret.on));
             }
         }
         
@@ -992,13 +990,13 @@ impl CodeEditorImpl {
                 key_code: KeyCode::Alt,
                 ..
             }) => {
-                self.start_zoom_anim(cx, state, lines_layout, id!(zoom_out));
+                self.start_zoom_anim(cx, state, lines_layout, ids!(zoom.off));
             }
             HitEvent::KeyUp(KeyEvent {
                 key_code: KeyCode::Alt,
                 ..
             }) => {
-                self.start_zoom_anim(cx, state, lines_layout, id!(zoom_in));
+                self.start_zoom_anim(cx, state, lines_layout, ids!(zoom.on));
             }
             HitEvent::KeyDown(KeyEvent {
                 key_code: KeyCode::Return,

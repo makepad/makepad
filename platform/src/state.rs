@@ -12,8 +12,10 @@ use {
 };
 
 pub trait LiveState {
-    fn apply_state(&mut self, cx: &mut Cx);
-    fn toggle_state(&mut self, cx: &mut Cx, is_state_1: bool, animate: Animate, state1: LiveId, state2: LiveId) {
+
+    fn cut_state(&mut self, cx: &mut Cx, state: &[LiveId;2]);
+    fn animate_state(&mut self, cx: &mut Cx, state: &[LiveId;2]);
+    fn toggle_state(&mut self, cx: &mut Cx, is_state_1: bool, animate: Animate, state1: &[LiveId;2], state2: &[LiveId;2]) {
         if is_state_1 {
             if let Animate::Yes = animate {
                 self.animate_state(cx, state1)
@@ -31,9 +33,9 @@ pub trait LiveState {
             }
         }
     }
-    fn after_apply_update_state(&mut self, cx:&mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]);
-    fn cut_state(&mut self, cx: &mut Cx, state: LiveId);
-    fn animate_state(&mut self, cx: &mut Cx, state: LiveId);
+
+    fn apply_animating_state(&mut self, cx: &mut Cx);
+    fn after_apply_state_changed(&mut self, cx:&mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]);
     fn state_handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> StateAction;
 }
 
@@ -80,6 +82,7 @@ pub enum Play {
     #[live {duration: 1.0, end: 1.0}]
     BounceLoop {duration: f64, end: f64},
 }
+pub type StatePair = [LiveId;2];
 
 impl Play {
     /*
@@ -513,6 +516,7 @@ impl LiveApply for State {
             cx.apply_error_wrong_type_for_struct(live_error_origin!(), start_index, nodes, id!(States));
             return nodes.skip_node(start_index);
         }
+        // this just checks it only has instance subprops
         let mut index = start_index + 1;
         loop {
             if nodes[index].value.is_close() {
@@ -771,6 +775,12 @@ impl State {
                                 }
                                 _ => LiveValue::None
                             }
+                            LiveValue::Id(va) => match b {
+                                LiveValue::Id(vb) => {
+                                    LiveValue::Id(*vb)
+                                }
+                                _ => LiveValue::None
+                            }
                             _ => LiveValue::None
                         };
                         if let LiveValue::None = &new_val {
@@ -821,7 +831,7 @@ impl State {
         }
         return 1.0
     }
-    
+    /*
     pub fn get_track_of(&self, cx: &mut Cx, state_id: LiveId) -> Option<LiveId> {
         if let Some(live_ptr) = self.live_ptr {
             let live_registry = cx.live_registry.borrow();
@@ -838,7 +848,7 @@ impl State {
             }
         }
         None
-    }
+    }*/
     /*
     pub fn get_state_id_of(&self, cx: &mut Cx, live_ptr: Option<LivePtr>, default: LiveId) -> LiveId {
         if let Some((track_id, _)) = self.get_track_of(cx, live_ptr) {
@@ -851,20 +861,18 @@ impl State {
         default
     }*/
     
-    pub fn is_track_of_animating(&self, cx: &mut Cx, state_id: LiveId) -> bool {
-        if let Some(track_id) = self.get_track_of(cx, state_id) {
-            if let Some(state) = self.state.as_ref() {
-                if let Some(LiveValue::Int(ended)) = state.child_value_by_path(0, &[id!(tracks).as_field(), track_id.as_field(), id!(ended).as_field()]) {
-                    if *ended == 0 || *ended == cx.event_id as i64 {
-                        return true
-                    }
+    pub fn is_track_animating(&self, cx: &mut Cx, track_id: LiveId) -> bool {
+        if let Some(state) = self.state.as_ref() {
+            if let Some(LiveValue::Int(ended)) = state.child_value_by_path(0, &[id!(tracks).as_field(), track_id.as_field(), id!(ended).as_field()]) {
+                if *ended == 0 || *ended == cx.event_id as i64 {
+                    return true
                 }
             }
         }
         false
     }
     
-    pub fn is_in_state(&self, cx: &mut Cx, check_state_id: LiveId) -> bool {
+    pub fn is_in_state(&self, cx: &mut Cx, check_state_pair: &StatePair) -> bool {
         // if we aren't initialized, look if our state id is a default
         if self.need_init(){
             if let Some(live_ptr) = self.live_ptr {
@@ -872,24 +880,22 @@ impl State {
                 let live_registry = live_registry_rc.borrow();
                 if live_registry.generation_valid(live_ptr) {
                     let (nodes, index) = live_registry.ptr_to_nodes_index(live_ptr);
-                    if let Some(index) = nodes.child_by_name(index, check_state_id.as_instance()){
-                        if let Some(LiveValue::Bool(true)) = nodes.child_value_by_path(index, &[id!(default).as_field()]){
-                            return true;
-                        }
+                    if let Some(LiveValue::Id(default_id)) = nodes.child_value_by_path(index, &[check_state_pair[0].as_instance(),id!(default).as_field()]){
+                        return *default_id == check_state_pair[1];
                     }
                 }
             }
         }
-        else if let Some(track_id) = self.get_track_of(cx, check_state_id) {
+        else{
             let state = self.state.as_ref().unwrap();
-            if let Some(LiveValue::Id(id)) = &state.child_value_by_path(0, &[id!(tracks).as_field(), track_id.as_field(), id!(state_id).as_field()]) {
-                return *id == check_state_id;
+            if let Some(LiveValue::Id(id)) = &state.child_value_by_path(0, &[id!(tracks).as_field(), check_state_pair[0].as_field(), id!(state_id).as_field()]) {
+                return *id == check_state_pair[1];
             }
         }
         false
     }
     
-    pub fn cut_to_live(&mut self, cx: &mut Cx, state_id: LiveId) {
+    pub fn cut_to_live(&mut self, cx: &mut Cx, state_id: &StatePair) {
         if let Some(live_ptr) = self.live_ptr {
             let live_registry_rc = cx.live_registry.clone();
             let live_registry = live_registry_rc.borrow();
@@ -899,11 +905,11 @@ impl State {
                 
                 self.init_as_needed(cx, index, nodes);
                 
-                if let Some(index) = nodes.child_by_name(index, state_id.as_instance()){
+                if let Some(index) = nodes.child_by_path(index, &[state_id[0].as_instance(), state_id[1].as_instance()]){
                     self.cut_to(cx, state_id, index, nodes);
                 }
                 else{
-                    println!("cut_to_live {} not found", state_id)
+                    println!("cut_to_live {}.{} not found", state_id[0],state_id[1]);
                 }
             }
             else {
@@ -913,16 +919,11 @@ impl State {
     }
     
     // hard cut / initialisate the state to a certain state
-    pub fn cut_to(&mut self, cx: &mut Cx, state_id: LiveId, index: usize, nodes: &[LiveNode]) {
+    pub fn cut_to(&mut self, cx: &mut Cx, state_pair: &StatePair, index: usize, nodes: &[LiveNode]) {
         // if we dont have a state object, lets create a template
         let mut state = self.swap_out_state();
         // ok lets fetch the track
-        let track = if let Some(LiveValue::Id(id)) = nodes.child_value_by_path(index, &[id!(track).as_field()]) {
-            *id
-        }
-        else {
-            LiveId(1)
-        };
+        let track = state_pair[0];
         
         if state.len() == 0 {
             state.push_live(live!{
@@ -932,7 +933,7 @@ impl State {
         }
         
         state.replace_or_insert_last_node_by_path(0, &[id!(tracks).as_field(), track.as_field()], live_object!{
-            [track]: {state_id: (state_id), ended: 1}
+            [track]: {state_id: (state_pair[1]), ended: 1}
         });
         
         let mut reader = if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(apply).as_field()) {
@@ -993,16 +994,18 @@ impl State {
         if self.need_init(){
             let mut index = index + 1;
             while !nodes[index].is_close() {
-                let state_id = nodes[index].id;
-                if let Some(LiveValue::Bool(true)) = nodes.child_value_by_path(index, &[id!(default).as_field()]){
-                    self.cut_to(cx, state_id, index, nodes);
+                let track_id = nodes[index].id;
+                if let Some(LiveValue::Id(state_id)) = nodes.child_value_by_path(index, &[id!(default).as_field()]){
+                    if let Some(index) = nodes.child_by_name(index, state_id.as_instance()){
+                        self.cut_to(cx, &[track_id, *state_id], index, nodes);
+                    }
                 }
                 index = nodes.skip_node(index);
             }
         }
     }
     
-    pub fn animate_to_live(&mut self, cx: &mut Cx, state_id:LiveId) {
+    pub fn animate_to_live(&mut self, cx: &mut Cx, state_pair:&StatePair) {
         if let Some(live_ptr) = self.live_ptr {
             let live_registry_rc = cx.live_registry.clone();
             let live_registry = live_registry_rc.borrow();
@@ -1011,11 +1014,11 @@ impl State {
                 
                 self.init_as_needed(cx, index, nodes);
                 
-                if let Some(index) = nodes.child_by_name(index, state_id.as_instance()){
-                    self.animate_to(cx, nodes[index].id, index, nodes)
+                if let Some(index) = nodes.child_by_path(index, &[state_pair[0].as_instance(), state_pair[1].as_instance()]){
+                    self.animate_to(cx, state_pair, index, nodes)
                 }
                 else{
-                    println!("animate_to_live {} not found", state_id)
+                    println!("animate_to_live {}.{} not found", state_pair[0],state_pair[1])
                 }
             }
             else {
@@ -1023,8 +1026,8 @@ impl State {
             }
         }
     }
-    
-    pub fn animate_to(&mut self, cx: &mut Cx, state_id: LiveId, index: usize, nodes: &[LiveNode]) {
+        
+    pub fn animate_to(&mut self, cx: &mut Cx, state_pair: &StatePair, index: usize, nodes: &[LiveNode]) {
         
         let mut reader = if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(apply).as_field()) {
             reader
@@ -1036,22 +1039,19 @@ impl State {
         
         let mut state = self.swap_out_state();
         if state.len() == 0 { // call cut first
+            //self.cut_to(cx, state_id, index, nodes);
+            //return
             panic!();
         }
         
-        let track = if let Some(LiveValue::Id(id)) = nodes.child_value_by_path(index, &[id!(track).as_field()]) {
-            *id
-        }
-        else {
-            LiveId(1)
-        };
+        let track = state_pair[0];
         
         // ok we have to look up into state/tracks for our state_id what state we are in right now
         let from_id = if let Some(LiveValue::Id(id)) = state.child_value_by_path(0, &[id!(tracks).as_field(), track.as_field(), id!(state_id).as_field()]) {
             *id
         }
         else {
-            cx.apply_error_animate_to_unknown_track(live_error_origin!(), index, nodes, track, state_id);
+            cx.apply_error_animate_to_unknown_track(live_error_origin!(), index, nodes, track, state_pair[1]);
             return
         };
         
@@ -1064,7 +1064,7 @@ impl State {
         };
         
         state.replace_or_insert_last_node_by_path(0, &[id!(tracks).as_field(), track.as_field()], live_object!{
-            [track]: {state_id: (state_id), ended: 0, time: void, exp: (1.0 - old_exp)},
+            [track]: {state_id: (state_pair[1]), ended: 0, time: void, exp: (1.0 - old_exp)},
         });
         
         // copy in from track
@@ -1112,7 +1112,7 @@ impl State {
                     else {panic!()}
                 }
                 else {
-                    cx.apply_error_animation_missing_state(live_error_origin!(), index, nodes, track, state_id, &path);
+                    cx.apply_error_animation_missing_state(live_error_origin!(), index, nodes, track, state_pair[1], &path);
                     path.pop();
                     reader.skip();
                     continue;
@@ -1169,7 +1169,9 @@ impl State {
                         else {panic!()}
                     }
                     else {
-                        cx.apply_error_animation_missing_state(live_error_origin!(), index, nodes, track, state_id, &path);
+                        // ok so if its missing state, shall we just do an array with 1 value?
+                        
+                        cx.apply_error_animation_missing_state(live_error_origin!(), index, nodes, track, state_pair[1], &path);
                         path.pop();
                         reader.skip();
                         continue;
@@ -1191,7 +1193,7 @@ impl State {
                     timeline.push_live(live_array!{(track)});
                     timeline.push_live(state.node_slice(last_index));
                     timeline.push_live(reader.node_slice());
-                    timeline.last_mut().unwrap().id = id!(0); // clean up property id
+                    //timeline.last_mut().unwrap().id = id!(0); // clean up property id
                     timeline.push_live(state.node_slice(last_index));
                     timeline.close();
                     state.replace_or_insert_last_node_by_path(0, &path, &timeline);
@@ -1202,7 +1204,6 @@ impl State {
         }
         
         self.swap_in_state(state);
-        
         self.next_frame = cx.new_next_frame();
     }
     

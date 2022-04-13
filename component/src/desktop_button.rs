@@ -89,38 +89,39 @@ live_register!{
     DesktopButton: {{DesktopButton}} {
         
         state:{
-            default = {
-                default: true,
-                from: {all: Play::Forward {duration: 0.1}}
-                apply: {
-                    bg: {pressed: 0.0, hover: 0.0}
-                }
-            }
-            
             hover = {
-                from: {
-                    all: Play::Forward {duration: 0.1}
-                    state_down: Play::Forward {duration: 0.01}
-                }
-                apply: {
-                    bg: {
-                        pressed: 0.0,
-                        hover: [{time: 0.0, value: 1.0}],
+                default: off,
+                off = {
+                    from: {all: Play::Forward {duration: 0.1}}
+                    apply: {
+                        bg: {pressed: 0.0, hover: 0.0}
                     }
                 }
-            }
-            
-            pressed = {
-                from: {all: Play::Forward {duration: 0.2}}
-                apply: {
-                    bg: {
-                        pressed: [{time: 0.0, value: 1.0}],
-                        hover: 1.0,
+                
+                on = {
+                    from: {
+                        all: Play::Forward {duration: 0.1}
+                        state_down: Play::Snap
+                    }
+                    apply: {
+                        bg: {
+                            pressed: 0.0,
+                            hover: 1.0,
+                        }
+                    }
+                }
+                
+                pressed = {
+                    from: {all: Play::Snap}
+                    apply: {
+                        bg: {
+                            pressed: 1.0,
+                            hover: 1.0,
+                        }
                     }
                 }
             }
         }
-            
     }
 }
 
@@ -190,9 +191,9 @@ impl DesktopButton {
         let res = self.button_logic.handle_event(cx, event, self.bg.draw_vars.area);
         // println!("{:?}", res.state);
         match res.state {
-            ButtonState::Pressed => self.animate_state(cx, id!(pressed)),
-            ButtonState::Default => self.animate_state(cx, id!(default)),
-            ButtonState::Hover => self.animate_state(cx, id!(hover)),
+            ButtonState::Pressed => self.animate_state(cx, ids!(hover.pressed)),
+            ButtonState::Default => self.animate_state(cx, ids!(hover.off)),
+            ButtonState::Hover => self.animate_state(cx, ids!(hover.on)),
             _ => ()
         };
         res.action

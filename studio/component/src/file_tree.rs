@@ -94,82 +94,76 @@ live_register!{
         }
         
         state : {
-            default = {
-                default: true,
-                duration: 0.2
-                apply: {
-                    hover: 0.0,
-                    bg_quad: {hover: (hover)}
-                    name_text: {hover: (hover)}
-                    icon_quad: {hover: (hover)}
-                }
-            }
-            
             hover = {
-                duration: 0.1
-                apply: {hover: [{time: 0.0, value: 1.0}]},
-            }
-            
-            focussed = {
-                default:true
-                track: focus,
-                duration: 0.,
-                apply: {
-                    focussed: 1.0,
+                default:off
+                off = {
+                    from: {all: Play::Forward {duration: 0.2}}
+                    apply: {
+                        hover: 0.0,
+                        bg_quad: {hover: (hover)}
+                        name_text: {hover: (hover)}
+                        icon_quad: {hover: (hover)}
+                    }
+                }
+                
+                on = {
+                    from: {all: Play::Snap}
+                    apply: {hover: 1.0},
                 }
             }
             
-            unfocussed = {
-                track: focus,
-                duration: 0.1,
-                apply: {
-                    focussed: 0.0,
+            focus = {
+                default:on
+                on = {
+                    from: {all: Play::Snap}
+                    apply: {focussed: 1.0}
+                }
+                
+                off = {
+                    from: {all: Play::Forward {duration: 0.1}}
+                    apply: {focussed: 0.0}
                 }
             }
             
-            unselected = {
-                default:true
-                track: select,
-                duration: 0.1,
-                apply: {
-                    selected: 0.0,
-                    bg_quad: {selected: (selected)}
-                    name_text: {selected: (selected)}
-                    icon_quad: {selected: (selected)}
+            select = {
+                default: off
+                off = {
+                    from: {all: Play::Forward {duration: 0.1}}
+                    apply: {
+                        selected: 0.0,
+                        bg_quad: {selected: (selected)}
+                        name_text: {selected: (selected)}
+                        icon_quad: {selected: (selected)}
+                    }
                 }
+                on = {
+                    from: {all: Play::Snap}
+                    apply: {selected:1.0}
+                }
+                
             }
             
-            selected = {
-                track: select,
-                duration: 0.1,
-                apply: {
-                    selected: [{time: 0.0, value: 1.0}],
+            open = {
+                default: off
+                off = {
+                    from: {all: Play::Exp {speed1: 0.80, speed2: 0.97}}
+                    //duration: 0.2
+                    redraw: true
+                    //ease: Ease::OutExp
+                    apply: {
+                        opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
+                        bg_quad: {opened: (opened)}
+                        name_text: {opened: (opened)}
+                        icon_quad: {opened: (opened)}
+                    }
                 }
-            }
-            
-            closed =  {
-                default: true
-                track: open,
-                from: {all: Play::Exp {speed1: 0.80, speed2: 0.97}}
-                //duration: 0.2
-                redraw: true
-                //ease: Ease::OutExp
-                apply: {
-                    opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
-                    bg_quad: {opened: (opened)}
-                    name_text: {opened: (opened)}
-                    icon_quad: {opened: (opened)}
-                }
-            }
-            
-            opened = {
-                track: open,
-                from: {all: Play::Exp {speed1: 0.82, speed2: 0.95}}
-                //duration: 0.2
-                redraw: true
-                //ease: Ease::OutExp
-                apply: {
-                    opened: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]
+                
+                on = {
+                    from: {all: Play::Exp {speed1: 0.82, speed2: 0.95}}
+                    redraw: true
+                    apply: {
+                        opened: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]
+                    }
                 }
             }
         }
@@ -354,15 +348,15 @@ impl FileTreeNode {
     }
     
     fn set_is_selected(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.toggle_state(cx, is, animate, id!(selected), id!(unselected))
+        self.toggle_state(cx, is, animate, ids!(select.on), ids!(select.off))
     }
     
     fn set_is_focussed(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.toggle_state(cx, is, animate, id!(focussed), id!(unfocussed))
+        self.toggle_state(cx, is, animate, ids!(focus.on), ids!(focus.off))
     }
     
     pub fn set_folder_is_open(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.toggle_state(cx, is, animate, id!(opened), id!(closed));
+        self.toggle_state(cx, is, animate, ids!(open.on), ids!(open.off));
     }
     
     pub fn handle_event(
@@ -379,10 +373,10 @@ impl FileTreeNode {
                 cx.set_hover_mouse_cursor(MouseCursor::Hand);
                 match f.hover_state {
                     HoverState::In => {
-                        self.animate_state(cx, id!(hover));
+                        self.animate_state(cx, ids!(hover.on));
                     }
                     HoverState::Out => {
-                        self.animate_state(cx, id!(default));
+                        self.animate_state(cx, ids!(hover.off));
                     }
                     _ => {}
                 }
@@ -393,14 +387,14 @@ impl FileTreeNode {
                 }
             }
             HitEvent::FingerDown(_) => {
-                self.animate_state(cx, id!(selected));
+                self.animate_state(cx, ids!(select.on));
                 if self.is_folder {
-                    if self.state.is_in_state(cx, id!(opened)) {
-                        self.animate_state(cx, id!(closed));
+                    if self.state.is_in_state(cx, ids!(open.on)) {
+                        self.animate_state(cx, ids!(open.off));
                         dispatch_action(cx, FileTreeNodeAction::Closing);
                     }
                     else {
-                        self.animate_state(cx, id!(opened));
+                        self.animate_state(cx, ids!(open.on));
                         dispatch_action(cx, FileTreeNodeAction::Opening);
                     }
                     

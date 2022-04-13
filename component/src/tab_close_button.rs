@@ -29,18 +29,20 @@ live_register!{
         }
         
         state:{
-            default = {
-                default: true
-                from: {all: Play::Forward {duration: 0.2}}
-                apply: {
-                    button_quad: {hover: 0.0}
+            hover = {
+                default: off
+                off = {
+                    from: {all: Play::Forward {duration: 0.2}}
+                    apply: {
+                        button_quad: {hover: 0.0}
+                    }
                 }
-            }
-            
-            hover =  {
-                from: {all: Play::Forward {duration: 0.1}}
-                apply: {
-                    button_quad: {hover: [{time: 0.0, value: 1.0}]},
+                
+                on =  {
+                    from: {all: Play::Snap}
+                    apply: {
+                        button_quad: {hover:1.0}
+                    }
                 }
             }
         }
@@ -81,11 +83,11 @@ impl TabCloseButton {
                 cx.set_hover_mouse_cursor(MouseCursor::Hand);
                 match f.hover_state {
                     HoverState::In => {
-                        self.animate_state(cx, id!(hover));
+                        self.animate_state(cx, ids!(hover.on));
                         return TabCloseButtonAction::HoverIn;
                     }
                     HoverState::Out => {
-                        self.animate_state(cx, id!(default));
+                        self.animate_state(cx, ids!(hover.off));
                         return TabCloseButtonAction::HoverOut;
                     }
                     _ => {}

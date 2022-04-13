@@ -34,6 +34,9 @@ impl LiveIdInterner {
             };
             // pre-seed list for debugging purposes
             let fill = [
+                "default",
+                "exp",
+                "void",
                 "true",
                 "false",
                 "use",
