@@ -152,6 +152,7 @@ pub enum ApplyFrom {
     
     New, // Bare new without file info
     Animate, // from animate
+    StateInit,
     ApplyOver, // called from bare apply_live() call
 }
 

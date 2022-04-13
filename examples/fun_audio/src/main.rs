@@ -15,8 +15,10 @@ live_register!{
     
     MainHeader: FoldHeader {
         state: {
-            closed = {apply: {header: {bg: {radius: vec2(3.0, 3.0)}}}}
-            opened = {apply: {header: {bg: {radius: vec2(3.0, 1.0)}}}}
+            open ={
+                off = {apply: {header: {bg: {radius: vec2(3.0, 3.0)}}}}
+                on = {apply: {header: {bg: {radius: vec2(3.0, 1.0)}}}}
+            }
         }
         header: BoxY {
             mouse_cursor: Default,
@@ -48,8 +50,10 @@ live_register!{
             label = Label {text: "Keys"}
         }
         state: {
-            closed = {apply: {body: {g1 = {bg: {color: #0000}}}}}
-            opened = {apply: {body: {g1 = {bg: {color: #000a}}}}}
+            open ={
+                off = {apply: {body: {g1 = {bg: {color: #0000}}}}}
+                on = {apply: {body: {g1 = {bg: {color: #000a}}}}}
+            }
         }
         body: Frame {
             layout: {flow: Overlay}
@@ -186,7 +190,7 @@ live_register!{
                                                 height: Fit
                                                 layout: {flow: Right, padding: 8, spacing: 5, align: {y: 0.5}}
                                                 label = Label {text: "Cutoff"}
-                                                Slider{height:18}
+                                                Slider{height:22}
                                             }
                                         }
                                     }
@@ -258,12 +262,15 @@ impl App {
                 if let Some(instrument) = self.frame.add_child(cx, id!(my_id), ids!(instrument), live!{
                     header: {label = {text: "MyInstrument"}}
                 }) {
-                    instrument.add_child(cx, id!(my_stack1), ids!(stack),  live!{
+                    
+                    instrument.add_child(cx, id!(my_stack1), ids!(stack), live!{
                         header: {label = {text: "MyStackItem"}}
                     });
+                    
                     instrument.add_child(cx, id!(my_stack2), ids!(stack), live!{
                         header: {label = {text: "MyStackItem2"}, range = {mylabel = {text: "WHEE"}}}
                     });
+
                     instrument.add_child(cx, id!(my_stack3), ids!(stack), live!{
                         header: {label = {text: "MyStackItem3"}, range = {mylabel = {text: "WHEE"}}}
                     });

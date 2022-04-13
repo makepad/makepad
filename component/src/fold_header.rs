@@ -19,24 +19,23 @@ live_register!{
         }
         
         state:{
-            closed = {
-                track: zoom
-                from: {all: Play::Exp {speed1: 0.96, speed2: 0.97}}
-                redraw: true
-                apply: {
-                    opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
+            open = {
+                default: on
+                off = {
+                    from: {all: Play::Exp {speed1: 0.96, speed2: 0.97}}
+                    redraw: true
+                    apply: {
+                        opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
+                    }
+                }
+                on = {
+                    from: {all: Play::Exp {speed1: 0.98, speed2: 0.95}}
+                    redraw: true
+                    apply: {
+                        opened: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]
+                    }
                 }
             }
-            
-            opened =  {
-                default:true
-                track: zoom
-                from: {all: Play::Exp {speed1: 0.98, speed2: 0.95}}
-                redraw: true
-                apply: {
-                    opened: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]
-                }
-            } 
         }
     }
 }
@@ -66,7 +65,7 @@ enum DrawState{
 impl FrameComponent for FoldHeader {
     fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, _self_id: LiveId) -> FrameComponentActionRef {
         if self.state_handle_event(cx, event).must_redraw() {
-            if self.state.is_track_of_animating(cx, id!(closed)) {
+            if self.state.is_track_animating(cx, id!(open)) {
                 let rect = self.view.get_rect(cx);
                 self.view.set_scroll_pos(cx, vec2(0.0,rect.size.y * (1.0-self.opened)));
                 //cx.redraw_all();
@@ -80,10 +79,10 @@ impl FrameComponent for FoldHeader {
                     if item.id == id!(fold_button){
                         match item.action.cast(){
                             FoldButtonAction::Opening=>{
-                                self.animate_state(cx, id!(opened))
+                                self.animate_state(cx, ids!(open.on))
                             }
                             FoldButtonAction::Closing=>{
-                                self.animate_state(cx, id!(closed))
+                                self.animate_state(cx, ids!(open.off))
                             }
                             _=>()
                         }

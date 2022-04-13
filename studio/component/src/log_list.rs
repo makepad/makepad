@@ -41,11 +41,11 @@ live_register!{
                 self.selected
             );
         }
-        text_style: FONT_DATA{top_drop: 1.15},
+        text_style: FONT_DATA {top_drop: 1.15},
     }
     
     LogListNode: {{LogListNode}} {
-        link_button:{
+        link_button: {
             
         }
         
@@ -63,44 +63,44 @@ live_register!{
             },
         }
         
-        state:{
-            default = {
-                default:true
-                duration: 0.2
-                apply: {
-                    hover: 0.0,
-                    bg_quad: {hover: (hover)}
-                    name_text: {hover: (hover)}
-                    icon_quad: {hover: (hover)}
-                }
-            }
-            
+        state: {
             hover = {
-                duration: 0.1
-                apply: {hover: [{time: 0.0, value: 1.0}]},
-            }
-            
-            unselected = {
-                default:true
-                track: select,
-                duration: 0.1,
-                apply: {
-                    selected: 0.0,
-                    bg_quad: {selected: (selected)}
-                    name_text: {selected: (selected)}
-                    icon_quad: {selected: (selected)}
+                default: off
+                off = {
+                    from: {all: Play::Forward {duration: 0.1}}
+                    apply: {
+                        hover: 0.0,
+                        bg_quad: {hover: (hover)}
+                        name_text: {hover: (hover)}
+                        icon_quad: {hover: (hover)}
+                    }
+                }
+                on = {
+                    from: {all: Play::Snap}
+                    apply: {hover: 1.0},
                 }
             }
             
-            selected = {
-                track: select,
-                duration: 0.1,
-                apply: {
-                    selected: [{time: 0.0, value: 1.0}],
+            select = {
+                default: off
+                off = {
+                    from: {all: Play::Forward {duration: 0.1}}
+                    apply: {
+                        selected: 0.0,
+                        bg_quad: {selected: (selected)}
+                        name_text: {selected: (selected)}
+                        icon_quad: {selected: (selected)}
+                    }
+                }
+                on = {
+                    from: {all: Play::Snap}
+                    apply: {selected: 1.0}
                 }
             }
+            
+            
         }
-            
+        
         indent_width: 10.0
         min_drag_distance: 10.0
     }
@@ -236,9 +236,9 @@ impl LogListNode {
         self.name_text.draw_walk(cx, body);
         self.bg_quad.end(cx);
     }
-
+    
     pub fn set_is_selected(&mut self, cx: &mut Cx, is_selected: bool, animate: Animate) {
-        self.toggle_state(cx, is_selected, animate, id!(selected), id!(unselected))
+        self.toggle_state(cx, is_selected, animate, ids!(select.on), ids!(select.off))
     }
     
     pub fn set_is_open(&mut self, cx: &mut Cx, is_open: bool, animate: Animate) {
@@ -266,10 +266,10 @@ impl LogListNode {
                 cx.set_hover_mouse_cursor(MouseCursor::Hand);
                 match f.hover_state {
                     HoverState::In => {
-                        self.animate_state(cx, id!(hover));
+                        self.animate_state(cx, ids!(hover.on));
                     }
                     HoverState::Out => {
-                        self.animate_state(cx, id!(default));
+                        self.animate_state(cx, ids!(hover.off));
                     }
                     _ => {}
                 }
@@ -280,7 +280,7 @@ impl LogListNode {
                 }
             }
             HitEvent::FingerDown(_) => {
-                self.animate_state(cx, id!(selected));
+                self.animate_state(cx, ids!(select.on));
                 /*
                 if self.opened > 0.2 {
                     self.animate_to(cx, self.closed_state);

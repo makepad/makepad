@@ -190,32 +190,63 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
             tb.add("impl").stream(generic.clone());
             tb.add("LiveState for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
             
-            tb.add("    fn animate_state(&mut self, cx: &mut Cx, state: LiveId) {");
+            tb.add("    fn animate_state(&mut self, cx: &mut Cx, state: &[LiveId;2]) {");
             tb.add("         self.state.animate_to_live(cx, state);");
-            tb.add("         self.apply_state(cx);");
+            tb.add("         self.apply_animating_state(cx);");
             tb.add("    }");
             
-            tb.add("    fn cut_state(&mut self, cx: &mut Cx, state: LiveId) {");
+            tb.add("    fn cut_state(&mut self, cx: &mut Cx, state: &[LiveId;2]) {");
             tb.add("         self.state.cut_to_live(cx, state);");
-            tb.add("         self.apply_state(cx);");
+            tb.add("         self.apply_animating_state(cx);");
             tb.add("    }");
-
-            tb.add("    fn after_apply_update_state(&mut self, cx:&mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]){");
-            tb.add("        if apply_from.file_id().is_none(){return}");
-            tb.add("        if let Some(index) = nodes.child_by_name(index, id!(state).as_field()){");
-            tb.add("            let mut index = index + 1;");
-            tb.add("            while !nodes[index].is_close() {");
-            tb.add("                if let Some(LiveValue::Bool(true)) = nodes.child_value_by_path(index, &[id!(default).as_field()]){");
-            tb.add("                    if let Some(index) = nodes.child_by_name(index, id!(apply).as_field()){");
-            tb.add("                        self.apply(cx, ApplyFrom::Animate, index, nodes);");
+            
+            // this applies all the default states
+            // however what if we are a non-file apply on the 'state' property
+            // this is a state-override from a parent node
+            
+            // we have 3 cases.
+            // 1. StateInit (process the 'state' structure)
+            // 2. from file id (run defaults)
+            // 3. actual animate (process the 'state' structure and call animate_to/cut depending)
+            // 
+            
+            tb.add("    fn after_apply_state_changed(&mut self, cx:&mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]){");
+            tb.add("        let mut index = index + 1;");
+            tb.add("        match apply_from{"); // if apply from is file, run defaults
+            tb.add("            ApplyFrom::NewFromDoc{..} | ApplyFrom::UpdateFromDoc{..}=>{"); // if apply from is file, run defaults
+            tb.add("                while !nodes[index].is_close() {");
+            tb.add("                    if let Some(LiveValue::Id(default_id)) = nodes.child_value_by_path(index, &[id!(default).as_field()]){");
+            tb.add("                        if let Some(index) = nodes.child_by_path(index, &[default_id.as_instance(), id!(apply).as_field()]){");
+            tb.add("                            self.apply(cx, ApplyFrom::StateInit, index, nodes);");
+            tb.add("                        }");
+            tb.add("                    }");
+            tb.add("                    index = nodes.skip_node(index);");
+            tb.add("                }");
+            tb.add("            }");
+            tb.add("            ApplyFrom::StateInit=>{"); // someone is calling state init on a state, means we need to find it
+            tb.add("                if let Some(live_ptr) = self.state.live_ptr {");
+            tb.add("                    let live_registry_rc = cx.live_registry.clone();");
+            tb.add("                    let live_registry = live_registry_rc.borrow();");
+            tb.add("                    if live_registry.generation_valid(live_ptr) {");
+            tb.add("                        let (orig_nodes, orig_index) = live_registry.ptr_to_nodes_index(live_ptr);");
+            tb.add("                        while !nodes[index].is_close() {");
+            tb.add("                            if let LiveValue::Id(state_id) = nodes[index].value{");
+            tb.add("                               if let Some(orig_index) = orig_nodes.child_by_path(orig_index, &[nodes[index].id.as_instance(), state_id.as_instance(), id!(apply).as_field()]){");
+            tb.add("                                   self.apply(cx, ApplyFrom::StateInit, orig_index, orig_nodes);");
+            tb.add("                               }");
+            tb.add("                            }");
+            tb.add("                            index = nodes.skip_node(index);");
+            tb.add("                        }");
             tb.add("                    }");
             tb.add("                }");
-            tb.add("                index = nodes.skip_node(index);");
             tb.add("            }");
+            tb.add("            ApplyFrom::Animate=>{"); // find the last id-keys and start animations/cuts
+            tb.add("            }");/*nodes.debug_print(index,100);*/
+            tb.add("            _=>()"); // if apply from is file, run defaults
             tb.add("        }");
             tb.add("    }");
 
-            tb.add("    fn apply_state(&mut self, cx: &mut Cx) {");
+            tb.add("    fn apply_animating_state(&mut self, cx: &mut Cx) {");
             tb.add("        let state = self.state.swap_out_state();");
             tb.add("        self.apply(cx, ApplyFrom::Animate, state.child_by_name(0,id!(state).as_field()).unwrap(), &state);");
             tb.add("        self.state.swap_in_state(state);");
@@ -223,7 +254,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
             
             tb.add("    fn state_handle_event(&mut self, cx: &mut Cx, event: &mut Event)->StateAction{");
             tb.add("        let ret = self.state.handle_event(cx, event);");
-            tb.add("        if ret.is_animating(){self.apply_state(cx);}");
+            tb.add("        if ret.is_animating(){self.apply_animating_state(cx);}");
             tb.add("        ret");
             tb.add("    }");
             tb.add("}");
@@ -317,6 +348,10 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         else if deref_target.is_some() {
             tb.add("    self.deref_target.deref_target_before_apply(cx, apply_from, start_index, nodes);");
         }
+        if state.is_some() { // apply the default states
+            tb.add("    let mut state_index = None;");
+        }
+
         tb.add("        let index = if let Some(index) = skip_index{index} else {");
         tb.add("            let struct_id = LiveId(").suf_u64(LiveId::from_str(&struct_name).unwrap().0).add(");");
         tb.add("            if !nodes[start_index].value.is_structy_type(){");
@@ -331,6 +366,9 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         tb.add("                    index += 1;");
         tb.add("                    break;");
         tb.add("                }");
+        if state.is_some() { // apply the default states
+            tb.add("            if nodes[index].id == id!(state){state_index = Some(index);}");
+        }
         tb.add("                index = self.apply_value(cx, apply_from, index, nodes);");
         tb.add("            }");
         tb.add("            index");
@@ -357,7 +395,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         }*/
         
         if state.is_some() { // apply the default states
-            tb.add("    self.after_apply_update_state(cx, apply_from, start_index, nodes);");
+            tb.add("    if let Some(state_index) = state_index{self.after_apply_state_changed(cx, apply_from, state_index, nodes);}");
         }
         
         tb.add("        self.after_apply(cx, apply_from, start_index, nodes);");

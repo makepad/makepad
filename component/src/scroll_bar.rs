@@ -49,33 +49,35 @@ live_register!{
         min_handle_size: 30.0
         
         state :{
-            default = {
-                default: true,
-                from: {all: Play::Forward {duration: 0.1}}
-                apply: {
-                    bar_quad: {pressed: 0.0, hover: 0.0}
-                }
-            }
-            
             hover = {
-                from: {
-                    all: Play::Forward {duration: 0.1}
-                    state_down: Play::Forward {duration: 0.01}
-                }
-                apply: {
-                    bar_quad: {
-                        pressed: 0.0,
-                        hover: [{time: 0.0, value: 1.0}],
+                default:off
+                off = {
+                    from: {all: Play::Forward {duration: 0.1}}
+                    apply: {
+                        bar_quad: {pressed: 0.0, hover: 0.0}
                     }
                 }
-            }
-            
-            pressed = {
-                from: {all: Play::Forward {duration: 0.2}}
-                apply: {
-                    bar_quad: {
-                        pressed: [{time: 0.0, value: 1.0}],
-                        hover: 1.0,
+                
+                on = {
+                    from: {
+                        all: Play::Forward {duration: 0.1}
+                        pressed: Play::Forward {duration: 0.01}
+                    }
+                    apply: {
+                        bar_quad: {
+                            pressed: 0.0,
+                            hover: [{time: 0.0, value: 1.0}],
+                        }
+                    }
+                }
+                
+                pressed = {
+                    from: {all: Play::Snap}
+                    apply: {
+                        bar_quad: {
+                            pressed: 1.0,
+                            hover: 1.0,
+                        }
                     }
                 }
             }
@@ -346,7 +348,7 @@ impl ScrollBar {
             
             match event.hits(cx, self.bar_quad.draw_vars.area) {
                 HitEvent::FingerDown(fe) => {
-                    self.animate_state(cx, id!(pressed));
+                    self.animate_state(cx, ids!(hover.pressed));
                     let rel = match self.axis {
                         Axis::Horizontal => fe.rel.x,
                         Axis::Vertical => fe.rel.y
@@ -368,10 +370,10 @@ impl ScrollBar {
                         cx.set_hover_mouse_cursor(MouseCursor::Default);
                         match fe.hover_state {
                             HoverState::In => {
-                                self.animate_state(cx, id!(hover));
+                                self.animate_state(cx, ids!(hover.on));
                             },
                             HoverState::Out => {
-                                self.animate_state(cx, id!(default));
+                                self.animate_state(cx, ids!(hover.off));
                             },
                             _ => ()
                         }
@@ -379,16 +381,11 @@ impl ScrollBar {
                 },
                 HitEvent::FingerUp(fe) => {
                     self.drag_point = None;
-                    if fe.is_over {
-                        if fe.input_type.has_hovers() {
-                            self.animate_state(cx, id!(hover));
-                        }
-                        else {
-                            self.animate_state(cx, id!(default));
-                        }
+                    if fe.is_over && fe.input_type.has_hovers() {
+                        self.animate_state(cx, ids!(hover.on));
                     }
                     else {
-                        self.animate_state(cx, id!(default));
+                        self.animate_state(cx, ids!(hover.off));
                     }
                     return ScrollBarEvent::ScrollDone;
                 },
