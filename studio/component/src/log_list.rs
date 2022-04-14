@@ -46,7 +46,6 @@ live_register!{
     
     LogListNode: {{LogListNode}} {
         link_button: {
-            
         }
         
         layout: {

@@ -91,7 +91,7 @@ live_register!{
             hover = {
                 default: off,
                 off = {
-                    duration: 0.1,
+                    from: {all: Play::Forward {duration: 0.1}}
                     apply: {
                         bg_quad: {pressed: 0.0, hover: 0.0}
                         label_text: {pressed: 0.0, hover: 0.0}
@@ -110,7 +110,7 @@ live_register!{
                 }
                 
                 pressed = {
-                    duration: 0.2,
+                    from: {all: Play::Forward {duration: 0.2}}
                     apply: {
                         bg_quad: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
                         label_text: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}

@@ -69,14 +69,8 @@ impl LogView {
                             self.log_list.draw_node(cx, msg.level.into(), id, &file, &msg.msg, true);
                         }
                     }
-                    //let title = format!("{}", )
-                    //self.fold_list.draw_node(cx, , )
                 }
-                
-                //self.log_list.draw_node(cx, id_num!(test,i).into(), "this is a clickable link", true);
             }
-            //for i in 0..100{
-            // }
             self.log_list.end(cx);
         }
     }
