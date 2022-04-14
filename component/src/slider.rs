@@ -171,6 +171,7 @@ impl Slider {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> SliderAction {
         self.state_handle_event(cx, event);
+        self.text_input.handle_event(cx, event);
         match event.hits(cx, self.draw_slider.draw_vars.area) {
             HitEvent::KeyFocusLost(_) => {
                 self.animate_state(cx, ids!(focus.off));

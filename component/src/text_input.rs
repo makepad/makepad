@@ -137,6 +137,7 @@ pub enum TextInputAction {
 impl TextInput {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> TextInputAction {
+        self.state_handle_event(cx, event);
         TextInputAction::None
         /*
         self.animator_handle_event(cx, event);
