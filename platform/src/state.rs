@@ -1084,12 +1084,7 @@ impl State {
                 );
             }
         }
-        else if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(duration).as_field()) { // we dont have a from. we should use duration property and construct a play::forward
-            state.replace_or_insert_last_node_by_path(0, &[id!(tracks).as_field(), track.as_field(), id!(play).as_field()], live_object!{
-                play: Play::Forward {duration: (reader.node().value.as_float().unwrap_or(1.0))}
-            });
-        }
-        
+
         // copy ease default if we have one
         if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(ease).as_field()) {
             state.replace_or_insert_last_node_by_path(0, &[id!(tracks).as_field(), track.as_field(), id!(ease).as_field()], reader.node_slice());

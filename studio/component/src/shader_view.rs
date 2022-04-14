@@ -34,12 +34,12 @@ live_register!{
         state:{
             hover = {
                 default:off
-                default = {
+                off = {
                     from: {all: Play::Forward {duration: 0.1}}
                     apply: {bg_quad: {pressed: 0.0, hover: 0.0}}
                 }
                 
-                hover = {
+                on = {
                     from: {all: Play::Snap}
                     apply: {bg_quad: {pressed: 0.0, hover: 1.0}}
                 }

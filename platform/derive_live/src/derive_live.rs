@@ -241,6 +241,14 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
             tb.add("                }");
             tb.add("            }");
             tb.add("            ApplyFrom::Animate=>{"); // find the last id-keys and start animations/cuts
+            tb.add("                while !nodes[index].is_close() {");
+            tb.add("                    let state_id = LiveId::new_apply(cx, ApplyFrom::New, index, nodes);");
+            tb.add("                    let state_pair = &[nodes[index].id, state_id];");
+            tb.add("                    if !self.state.is_in_state(cx, state_pair){");
+            tb.add("                       self.state.animate_to_live(cx, state_pair);");
+            tb.add("                    }");
+            tb.add("                    index = nodes.skip_node(index);");
+            tb.add("                }");
             tb.add("            }");/*nodes.debug_print(index,100);*/
             tb.add("            _=>()"); // if apply from is file, run defaults
             tb.add("        }");

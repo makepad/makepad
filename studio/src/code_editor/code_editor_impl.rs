@@ -185,7 +185,7 @@ live_register!{
         
         max_zoom_out: 0.92
         
-        caret_blink_timeout: 0.2
+        caret_blink_timeout: 0.5
     }
 }
 

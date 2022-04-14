@@ -259,8 +259,8 @@ impl App {
         
         match event {
             Event::Construct => {
-                if let Some(instrument) = self.frame.add_child(cx, id!(my_id), ids!(instrument), live!{
-                    header: {label = {text: "MyInstrument"}}
+                if let Some(instrument) = self.frame.add_child(cx, id!(my_instrument), ids!(instrument), live!{
+                    header: {label = {text: "HELLO WORLD"}}
                 }) {
                     
                     instrument.add_child(cx, id!(my_stack1), ids!(stack), live!{
