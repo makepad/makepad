@@ -226,8 +226,8 @@ impl ClassDecl {
     /// Registers self, consuming it and returning a reference to the
     /// newly registered `Class`.
     pub fn register(self) -> &'static Class {
+        let cls = self.cls;
         unsafe {
-            let cls = self.cls;
             runtime::objc_registerClassPair(cls);
             // Forget self otherwise the class will be disposed in drop
             mem::forget(self);
