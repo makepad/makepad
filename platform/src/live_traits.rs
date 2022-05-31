@@ -64,10 +64,11 @@ pub trait LiveNew: LiveApply {
                 live_registry.main_module = Some(*file_id);
             }
         }
-        Self::new_from_module(cx, module_id, id)
+        Self::new_from_module(cx, module_path, id)
     }
     
-    fn new_from_module(cx: &mut Cx, module_id: LiveModuleId, id: LiveId) -> Option<Self> where Self: Sized {
+    fn new_from_module(cx: &mut Cx, module_path: &str, id: LiveId) -> Option<Self> where Self: Sized {
+        let module_id = LiveModuleId::from_str(module_path).unwrap();
         let live_registry_rc = cx.live_registry.clone();
         let live_registry = live_registry_rc.borrow();
         if let Some(file_id) = live_registry.module_id_to_file_id.get(&module_id) {

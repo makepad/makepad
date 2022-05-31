@@ -155,6 +155,7 @@ impl FrameComponent for FoldHeader {
 }
 
 impl FoldHeader{
+    
     fn reverse_walk_opened(&mut self, cx:&mut Cx2d){
         let rect = self.view.get_rect(cx);
         cx.walk_turtle(Walk::size(Size::Fill, Size::Negative(rect.size.y * (1.0-self.opened))));
