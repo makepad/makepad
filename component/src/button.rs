@@ -180,13 +180,13 @@ impl Button {
     
     pub fn draw_label(&mut self, cx: &mut Cx2d, label: &str) {
         self.bg_quad.begin(cx, self.walk, self.layout);
-        self.label_text.draw_walk(cx, label);
+        self.label_text.draw_walk(cx, Walk::fit(), label);
         self.bg_quad.end(cx);
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.bg_quad.begin(cx, walk, self.layout);
-        self.label_text.draw_walk(cx, &self.label);
+        self.label_text.draw_walk(cx, Walk::fit(), &self.label);
         self.bg_quad.end(cx);
     }
 }

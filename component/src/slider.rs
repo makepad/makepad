@@ -13,7 +13,6 @@ live_register!{
         instance hover: float
         instance focus: float
         instance drag: float
-        const BORDER_RADIUS: 2.0
         
         fn pixel(self) -> vec4 {
             let hover = max(self.hover, self.drag);
@@ -22,9 +21,13 @@ live_register!{
             let grad_bot = 1.0;
             
             // we need to move the slider range slightly inward
-            let xbody = self.slide_pos * (self.rect_size.x - 2.0) + 1.0;
+            let xbody = self.slide_pos * (self.rect_size.x - 1.0) + 0.5;
             // show the slider position in the body
-            let body = mix(mix(#3a, #3, hover), mix(#5, #6, hover), step(sdf.pos.x, xbody));
+            let body = mix(
+                mix(#3a, #3, hover),
+                mix(#5, #6, hover),
+                step(sdf.pos.x, xbody)
+            );
             
             let body_transp = vec4(body.xyz, 0.0);
             let top_gradient = mix(body_transp, #1f, max(0.0, grad_top - sdf.pos.y) / grad_top);
@@ -39,7 +42,7 @@ live_register!{
                 1. + (self.rect_size.y - 4.0) * (1.0 - self.focus),
                 self.rect_size.x - 2.0,
                 (self.rect_size.y - 4.0) * self.focus + 2.0,
-                BORDER_RADIUS
+                mix(1.0, 2.0, self.focus)
             )
             sdf.fill_keep(body)
             
@@ -55,7 +58,7 @@ live_register!{
                 3.0,
                 (self.rect_size.y - 4.0) * (self.focus) + mix(4.0, 2.0, self.focus)
             );
-            sdf.fill(mix(#0000, #a, hover))
+            sdf.fill(mix(#0000, #7, hover))
             
             return sdf.result
         }
@@ -137,6 +140,9 @@ pub struct Slider {
     
     layout: Layout,
     state: State,
+    
+    label_text: DrawText,
+    label: String,
     
     text_input: TextInput,
     

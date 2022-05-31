@@ -5,6 +5,7 @@ pub use {
         io::prelude::*,
         fs::File
     },
+    makepad_font::Glyph,
     makepad_trapezoidator::Trapezoidator,
     makepad_geometry::{AffineTransformation, Transform, Vector},
     makepad_internal_iter::*,
@@ -147,7 +148,7 @@ impl Cx {
                         println!("Error loading font {} ", path);
                     }
                     Ok(mut cxfont) => {
-                        if path == "resources/IBMPlexSans-Text.ttf"{
+                        if path == "resources/IBMPlexSans-Text.ttf" {
                             cxfont.ttf_font.char_code_to_glyph_index_map['g' as usize] = 11;
                         }
                         self.fonts[font_id] = Some(cxfont);
@@ -158,7 +159,7 @@ impl Cx {
         font_id
     }
     
-    pub fn with_draw_font_atlas<T>(&mut self, mut cb:T) where T:FnMut(&mut Cx, &mut CxDrawFontAtlas){
+    pub fn with_draw_font_atlas<T>(&mut self, mut cb: T) where T: FnMut(&mut Cx, &mut CxDrawFontAtlas) {
         if self.draw_font_atlas.is_none() {
             self.draw_font_atlas = Some(Box::new(CxDrawFontAtlas::new(self)));
         }
@@ -169,8 +170,8 @@ impl Cx {
         
     }
     
-     pub fn after_handle_event(&mut self, event: &mut Event) {
-         self.with_draw_font_atlas(|cx, dfa|{
+    pub fn after_handle_event(&mut self, event: &mut Event) {
+        self.with_draw_font_atlas( | cx, dfa | {
             dfa.handle_event(cx, event);
         })
     }
@@ -279,7 +280,7 @@ impl DrawTrapezoidText {
                 let font = &cxfont.ttf_font;
                 let atlas_page = &cxfont.atlas_pages[todo.atlas_page_id];
                 let glyph = &font.glyphs[todo.glyph_id];
-
+                
                 if todo.glyph_id == font.char_code_to_glyph_index_map[10] ||
                 todo.glyph_id == font.char_code_to_glyph_index_map[9] ||
                 todo.glyph_id == font.char_code_to_glyph_index_map[13] {
@@ -341,11 +342,7 @@ impl CxDrawFontAtlas {
         let atlas_texture = Texture::new(cx);
         cx.fonts_atlas.texture_id = atlas_texture.texture_id;
         
-        let draw_trapezoid_text = DrawTrapezoidText::new_from_module(
-            cx,
-            LiveModuleId::from_str(&module_path!()).unwrap(),
-            id!(DrawTrapezoidText)
-        ).unwrap();
+        let draw_trapezoid_text = DrawTrapezoidText::new_from_module(cx, &module_path!(), id!(DrawTrapezoidText)).unwrap();
         
         // ok we need to initialize drawtrapezoidtext from a live pointer.
         Self {
@@ -357,7 +354,7 @@ impl CxDrawFontAtlas {
         }
     }
     
-    pub fn handle_event(&mut self, cx:&mut Cx, event:&mut Event){
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
         match event {
             Event::LiveEdit(live_edit_event) => {
                 match live_edit_event {
@@ -367,14 +364,14 @@ impl CxDrawFontAtlas {
                         if let Some(file_id) = live_registry.module_id_to_file_id.get(&LiveModuleId::from_str(&module_path!()).unwrap()) {
                             let file = live_registry.file_id_to_file(*file_id);
                             if let Some(index) = file.expanded.nodes.child_by_name(0, id!(DrawTrapezoidText).as_field()) {
-                                self.draw_trapezoid_text.apply(cx, ApplyFrom::UpdateFromDoc {file_id:*file_id}, index, &file.expanded.nodes);
+                                self.draw_trapezoid_text.apply(cx, ApplyFrom::UpdateFromDoc {file_id: *file_id}, index, &file.expanded.nodes);
                             }
                         }
                     }
-                    _=>()
+                    _ => ()
                 }
             }
-            Event::Draw(re)=>{
+            Event::Draw(re) => {
                 self.draw(&mut Cx2d::new(cx, re));
             }
             _ => ()
@@ -402,7 +399,7 @@ impl CxDrawFontAtlas {
             let mut atlas_todo = Vec::new();
             std::mem::swap(&mut cx.fonts_atlas.atlas_todo, &mut atlas_todo);
             
-            if let Some(mut many) = cx.begin_many_instances(&self.draw_trapezoid_text.draw_vars){
+            if let Some(mut many) = cx.begin_many_instances(&self.draw_trapezoid_text.draw_vars) {
                 for todo in atlas_todo {
                     self.draw_trapezoid_text.draw_todo(cx, todo, &mut many);
                 }
