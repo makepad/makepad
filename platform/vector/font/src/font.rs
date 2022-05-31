@@ -12,3 +12,15 @@ pub struct TTFFont {
     pub char_code_to_glyph_index_map: Vec<usize>,
     pub glyphs: Vec<Glyph>,
 }
+
+
+impl TTFFont{
+    pub fn get_glyph(&self, c:char)->Option<&Glyph>{
+        if c < '\u{10000}' {
+            Some(&self.glyphs[self.char_code_to_glyph_index_map[c as usize]])
+        } else {
+            None
+        }
+    }
+}
+

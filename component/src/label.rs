@@ -10,6 +10,9 @@ live_register!{
     use makepad_platform::shader::std::*;
     use makepad_component::theme::*;
     Label: {{Label}} {
+        walk:{
+            width:Fit
+        }
         label_text:{
             color:(COLOR_TEXT_DEFAULT)
         }
@@ -20,7 +23,8 @@ live_register!{
 #[live_register(register_as_frame_component!(Label))]
 pub struct Label {
     label_text: DrawText,
-    margin: Margin,
+    walk: Walk,
+    //margin: Margin,
     text: String,
 }
 
@@ -30,17 +34,11 @@ impl FrameComponent for Label {
     }
 
     fn get_walk(&self)->Walk{
-        Walk::empty()
+        self.walk
     }
     
     fn draw_component(&mut self, cx: &mut Cx2d, walk:Walk)->Result<(),LiveId>{
-        self.draw_walk(cx);
+        self.label_text.draw_walk(cx, walk, &self.text);
         Ok(())
-    }
-}
-
-impl Label {
-    pub fn draw_walk(&mut self, cx: &mut Cx2d) { 
-        self.label_text.draw_walk_with_margin(cx, self.margin, &self.text);
     }
 }

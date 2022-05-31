@@ -4,6 +4,24 @@ use crate::makepad_platform::*;
 live_register!{
     use makepad_platform::shader::std::*;
     
+    Slides:[
+        JsToRust,
+        CodeEditorDogFood,
+        StylingWithShaders,
+        PerfAndExpressiveness,
+        InlineWidgets,
+        RunsOnWebViaWasm,
+        DesktopNative2mb,
+        RustAndLiveDSL,
+        BuildTimeFast,
+        Designtooling,
+        EditItself,
+        ArVr,
+        OpensourceMIT,
+        Documented6Mo,
+        RustMacroReflection
+    ]
+    
     ShaderView: {{ShaderView}} {
         bg_quad: {
             instance hover: 0.0
@@ -61,11 +79,7 @@ pub struct ShaderView {
     size: Vec2,
     pad: Vec2,
 
-    state: State,
-    
-    default_state: Option<LivePtr>,
-    hover_state: Option<LivePtr>,
-    pressed_state: Option<LivePtr>,
+    state: State
 }
 
 

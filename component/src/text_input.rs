@@ -154,13 +154,13 @@ impl TextInput {
     
     pub fn draw_label(&mut self, cx: &mut Cx2d, label: &str) {
         self.bg_quad.begin(cx, self.walk, self.layout);
-        self.label_text.draw_walk(cx, label);
+        self.label_text.draw_walk(cx, Walk::default(), label);
         self.bg_quad.end(cx);
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.bg_quad.begin(cx, walk, self.layout);
-        self.label_text.draw_walk(cx, &self.value);
+        self.label_text.draw_walk(cx, Walk::default(), &self.value);
         self.bg_quad.end(cx);
     }
 }

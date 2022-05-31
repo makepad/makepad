@@ -212,6 +212,7 @@ impl Default for Cx {
             id!(Window),
             id!(TextStyle),
             id!(Wrapping),
+            id!(Overflow),
             id!(SplitterAlign),
             id!(MouseCursor)
         ]);

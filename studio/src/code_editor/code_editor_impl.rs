@@ -329,7 +329,7 @@ impl CodeEditorImpl {
         self.calc_lines_layout_inner(cx, document_inner, lines_layout, &mut compute_height);
         // this keeps the animation zooming properly focussed around a cursor/line
         if let Some(center_line) = self.zoom_anim_center {
-            if self.state.is_track_animating(cx, id!(zoom_out)) {
+            if self.state.is_track_animating(cx, id!(zoom)) {
                 let next_pos = self.position_to_vec2(center_line, lines_layout);
                 let last_pos = self.zoom_last_pos.unwrap();
                 let pos = self.scroll_view.get_scroll_pos(cx);
