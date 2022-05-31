@@ -15,7 +15,7 @@ pub struct Layout {
     pub align: Align,
     pub flow: Flow,
     pub spacing: f32
-}
+} 
 
 #[derive(Copy, Clone, Default, Debug, Live, LiveHook)]
 pub struct Walk {
@@ -27,8 +27,8 @@ pub struct Walk {
 
 #[derive(Clone, Copy, Debug, Live, LiveHook)]
 pub struct Align {
-    x: f32,
-    y: f32
+    pub x: f32,
+    pub y: f32
 }
 
 #[derive(Clone, Copy, Default, Debug, Live)]
@@ -491,7 +491,7 @@ impl Turtle {
     
     pub fn origin(&self) -> Vec2 {
         self.origin
-    }
+    } 
     
     pub fn rel_pos(&self) -> Vec2 {
         Vec2 {
@@ -715,6 +715,15 @@ impl Walk {
         }
     }
     
+    pub fn fit() -> Self {
+        Self {
+            abs_pos: None,
+            margin: Margin::default(),
+            width: Size::Fit,
+            height: Size::Fit,
+        }
+    }
+    
     pub fn with_margin_all(mut self, v: f32) -> Self {
         self.margin = Margin {left: v, right: v, top: v, bottom: v};
         self
@@ -859,6 +868,13 @@ impl Size {
         match self {
             Self::Fixed(v) => max_zero_keep_nan(*v),
             _ => std::f32::NAN,
+        }
+    }
+    
+    pub fn is_fit(&self) -> bool { 
+        match self {
+            Self::Fit => true,
+            _ => false
         }
     }
     

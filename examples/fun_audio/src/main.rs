@@ -14,8 +14,10 @@ live_register!{
     use makepad_platform::shader::std::*;
     
     MainHeader: FoldHeader {
+        walk:{
+        }
         state: {
-            open ={
+            open = {
                 off = {apply: {header: {bg: {radius: vec2(3.0, 3.0)}}}}
                 on = {apply: {header: {bg: {radius: vec2(3.0, 1.0)}}}}
             }
@@ -153,6 +155,7 @@ live_register!{
                             layout: {flow: Down}
                             instrument = ? InstrumentHeader {
                                 header: {
+                                    layout:{align:{y:0.5}}
                                     fold_button = FoldButton {}
                                     swatch = Circle {
                                         width: 10,
@@ -160,7 +163,7 @@ live_register!{
                                         bg: {color: #f00}
                                     }
                                     label = Label {text: "Instrument"}
-                                    Rect {bg: {color: #f00}, width: Fill, height: 8}
+                                    //Rect {bg: {color: #f00}, width: Fill, height: 2}
                                 }
                                 body: Frame {
                                     layout: {flow: Down}
@@ -259,6 +262,7 @@ impl App {
         
         match event {
             Event::Construct => {
+                
                 if let Some(instrument) = self.frame.add_child(cx, id!(my_instrument), ids!(instrument), live!{
                     header: {label = {text: "HELLO WORLD"}}
                 }) {
@@ -296,7 +300,7 @@ impl App {
                 self.draw(&mut Cx2d::new(cx, draw_event));
                 //self.piano.set_key_focus(cx);
             }
-            _ => ()
+            _=>()
         }
     }
     

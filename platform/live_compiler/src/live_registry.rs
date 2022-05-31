@@ -33,7 +33,6 @@ pub struct LiveFile {
     pub next_original: Option<LiveOriginal>,
     pub expanded: LiveExpanded,
     
-    
     pub live_type_infos: Vec<LiveTypeInfo>,
 }
 
