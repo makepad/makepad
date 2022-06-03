@@ -215,7 +215,9 @@ pub use {
         draw_2d::{
             draw_shape::{DrawShape, Shape},
             draw_quad::DrawQuad,
-            draw_text::DrawText,
+            draw_text::{
+                DrawText,
+            }, 
             draw_color::DrawColor,
         },
         shader::{

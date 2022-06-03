@@ -8,7 +8,7 @@ use {
         cx::Cx,
         draw_2d::cx_2d::Cx2d,
         live_traits::*,
-        draw_2d::turtle::{Walk, Size, Margin, Align, Flow},
+        draw_2d::turtle::{Walk, Size, Flow, Align},
         font::{CxFontsAtlasTodo, Font},
         draw_2d::view::ManyInstances,
         draw_vars::DrawVars,
@@ -132,20 +132,20 @@ pub struct TextStyle {
     #[live(1.1)] pub top_drop: f32,
     #[live(1.3)] pub height_factor: f32,
 }
-
+/*
 #[derive(Debug, Clone, Copy, Live, LiveHook)]
 pub enum Overflow {
     #[live] Cut,
     #[pick] Ellipsis,
     #[live] None
-}
+}*/
 
 pub struct TextGeom {
     pub eval_width: f32,
     pub eval_height: f32,
     pub measured_width: f32,
     pub measured_height: f32,
-    pub ellip_pt: Option<(usize, f32)>
+    pub ellip_pt: Option<(usize, f32, usize)>
 }
 
 #[derive(Live, LiveHook)]
@@ -155,9 +155,6 @@ pub struct DrawText {
     
     #[live] pub geometry: GeometryQuad2D,
     #[live] pub text_style: TextStyle,
-    
-    #[live] pub overflow: Overflow,
-    #[live] pub align: Align,
     
     #[live(1.0)] pub font_scale: f32,
     #[live(1.0)] pub draw_depth: f32,
@@ -363,7 +360,7 @@ impl DrawText {
         else {
             
             let ellip_width = if let Some(glyph) = cx.fonts[font_id].as_ref().unwrap().ttf_font.get_glyph('.') {
-                glyph.horizontal_metrics.advance_width * 3.0
+                glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale
             }
             else {
                 0.0
@@ -372,8 +369,8 @@ impl DrawText {
             let mut measured_width = 0.0;
             let mut ellip_pt = None;
             for (i, c) in text.chars().enumerate() {
-                if measured_width + ellip_width < eval_width {
-                    ellip_pt = Some((i, measured_width));
+                if measured_width + ellip_width * 3.0 < eval_width {
+                    ellip_pt = Some((i, measured_width, 3));
                 }
                 if let Some(glyph) = cx.fonts[font_id].as_ref().unwrap().ttf_font.get_glyph(c) {
                     let adv = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
@@ -381,12 +378,16 @@ impl DrawText {
                     if measured_width + adv >= eval_width { // we have to drop back to ellip_pt
                         // if we don't have an ellip_pt, set it to 0
                         if ellip_pt.is_none() {
-                            ellip_pt = Some((0, 0.0));
+                            let dots = if ellip_width * 3.0 < eval_width {3}
+                            else if ellip_width * 2.0 < eval_width {2}
+                            else if ellip_width < eval_width {1}
+                            else {0};
+                            ellip_pt = Some((0, 0.0, dots));
                         }
                         return Some(TextGeom {
                             eval_width,
                             eval_height,
-                            measured_width,
+                            measured_width: ellip_pt.unwrap().1 + ellip_width,
                             measured_height,
                             ellip_pt
                         })
@@ -405,34 +406,56 @@ impl DrawText {
         }
     }
     
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk, text: &str) {
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk, align: Align, text: &str) {
         
         // lets compute the geom
         if let Some(geom) = self.compute_geom(cx, walk, text) {
+            let height = if walk.height.is_fit() {
+                geom.measured_height
+            } else {
+                geom.eval_height
+            };
+            let y_align = (height - geom.measured_height) * align.y;
+
             if walk.width.is_fit() {
                 // lets just output it and walk it
                 let rect = cx.walk_turtle(Walk {
                     abs_pos: walk.abs_pos,
                     margin: walk.margin,
                     width: Size::Fixed(geom.measured_width),
-                    height: Size::Fixed(geom.measured_height),
+                    height: Size::Fixed(height)
                 });
-                
-                self.draw_inner(cx, rect.pos, 0, text);
+                // lets do our y alignment
+                self.draw_inner(cx, rect.pos + vec2(0.0, y_align), 0, text);
             }
             else {
                 // otherwise we should check the ellipsis
-                if let Some((ellip, at_x)) = geom.ellip_pt {
-                    
+                if let Some((ellip, at_x, dots)) = geom.ellip_pt {
+                    // ok so how do we draw this
+                    let rect = cx.walk_turtle(Walk {
+                        abs_pos: walk.abs_pos,
+                        margin: walk.margin,
+                        width: Size::Fixed(geom.eval_width),
+                        height: Size::Fixed(height)
+                    });
+                    self.draw_inner(cx, rect.pos+ vec2(0.0, y_align), 0, &text[0..ellip]);
+                    self.draw_inner(cx, rect.pos + vec2(at_x, y_align), 0, &"..."[0..dots]);
                 }
                 else { // we might have space to h-align
                     let rect = cx.walk_turtle(Walk {
                         abs_pos: walk.abs_pos,
                         margin: walk.margin,
                         width: Size::Fixed(geom.eval_width),
-                        height: Size::Fixed(geom.measured_height),
+                        height: Size::Fixed(
+                            if walk.height.is_fit() {
+                                geom.measured_height
+                            } else {
+                                geom.eval_height
+                            }
+                        )
                     });
-                    self.draw_inner(cx, rect.pos, 0, text);
+                    let x_align = (geom.eval_width - geom.measured_width) * align.x;
+                    self.draw_inner(cx, rect.pos + vec2(x_align, y_align), 0, text);
                 }
             }
         }
