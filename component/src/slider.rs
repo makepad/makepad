@@ -66,9 +66,12 @@ live_register!{
     
     Slider: {{Slider}} {
         
-        layout: {
-            flow: Right,
-            align: {x: 1.0}
+        label_walk:{
+            width:Fill,
+            height:Fill
+        }
+        label_align:{
+            y:0.5
         }
         
         state: {
@@ -141,6 +144,8 @@ pub struct Slider {
     layout: Layout,
     state: State,
     
+    label_walk: Walk,
+    label_align: Align,
     label_text: DrawText,
     label: String,
     
@@ -235,8 +240,12 @@ impl Slider {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_slider.slide_pos = self.value;
         self.draw_slider.begin(cx, walk, self.layout);
-        self.text_input.value = format!("{:.2}", self.value); //, (self.value*100.0) as usize);
-        self.text_input.draw_walk(cx, self.text_input.get_walk());
+        // ok so. we wanna do a 'fill' here with the label and request a future
+        if let Some(dw) = cx.defer_walk(self.label_walk){
+            self.text_input.value = format!("{:.2}", self.value); //, (self.value*100.0) as usize);
+            self.text_input.draw_walk(cx, self.text_input.get_walk());
+            self.label_text.draw_walk(cx, dw.resolve(cx), self.label_align, &self.label);
+        }
         self.draw_slider.end(cx);
     }
 }

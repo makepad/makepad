@@ -775,7 +775,7 @@ impl State {
                                 }
                                 _ => LiveValue::None
                             }
-                            LiveValue::Id(va) => match b {
+                            LiveValue::Id(_) => match b {
                                 LiveValue::Id(vb) => {
                                     LiveValue::Id(*vb)
                                 }

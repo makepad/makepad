@@ -170,10 +170,11 @@ live_register!{
                                     stack = ? LayerHeader {
                                         header: {
                                             fold_button = FoldButton {}
-                                            label = Label {text: "Stack item"}
+                                            label = Label {text: "Stack item", walk:{width:Fill}}
                                             range = Frame {
+                                                width: Fit
                                                 user_draw: false,
-                                                layout: {flow: Right, align: {x: 1.0}, spacing: 4}
+                                                layout: {flow: Right,spacing: 4}
                                                 Label {text: "Start"}
                                                 Label {text: "D#3"}
                                                 Label {text: "-"}
@@ -192,8 +193,10 @@ live_register!{
                                                 width: Fill
                                                 height: Fit
                                                 layout: {flow: Right, padding: 8, spacing: 5, align: {y: 0.5}}
-                                                label = Label {text: "Cutoff"}
-                                                Slider{height:22}
+                                                slider = Slider{
+                                                    label:"CutOff"
+                                                    height:22
+                                                }
                                             }
                                         }
                                     }
