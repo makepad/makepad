@@ -619,7 +619,8 @@ impl CodeEditorImpl {
         lines_layout: &LinesLayout,
         cursor: Cursor
     ) {
-        fn linenum_fill(buf: &mut Vec<char>, line: usize) {
+        let mut buf = String::new();
+        fn linenum_fill(buf: &mut String, line: usize) {
             buf.clear();
             let mut scale = 10000;
             let mut fill = false;
@@ -662,17 +663,17 @@ impl CodeEditorImpl {
                 self.line_num_text.color = self.text_color_linenum;
             }
             
-            linenum_fill(&mut self.line_num_text.buf, i + 1);
+            linenum_fill(&mut buf, i + 1);
             
             self.line_num_text.font_scale = layout.font_scale;
             
             // lets scale around the right side center
-            let right_side = self.line_num_text.buf.len() as f32 * self.text_glyph_size.x;
+            let right_side = buf.len() as f32 * self.text_glyph_size.x;
             
-            self.line_num_text.draw_chunk(cx, Vec2 {
+            self.line_num_text.draw_abs(cx, Vec2 {
                 x: start_x + right_side * (1.0 - layout.font_scale),
                 y: layout.start_y + origin.y,
-            }, 0, None);
+            }, &buf);
         }
     }
     
@@ -796,11 +797,11 @@ impl CodeEditorImpl {
     ) {
         self.code_text.font_scale = font_scale;
         self.code_text.color = color;
-        self.code_text.draw_chunk(
+        self.code_text.draw_inner_fix_later_when_editor_rep_is_not_vec_of_char(
             cx,
             pos,
             0,
-            Some(chunk)
+            chunk
         );
     }
     
