@@ -67,6 +67,7 @@ live_register!{
     Slider: {{Slider}} {
         
         label_walk:{
+            margin:{left:4.0}
             width:Fill,
             height:Fill
         }
