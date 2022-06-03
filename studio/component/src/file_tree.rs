@@ -318,7 +318,7 @@ impl FileTreeNode {
         
         self.icon_quad.draw_walk(cx, self.icon_walk);
          
-        self.name_text.draw_walk(cx, Walk::default(), name);
+        self.name_text.draw_walk(cx, Walk::fit(), Align::default(), name);
         self.bg_quad.end(cx);
     }
     
@@ -329,7 +329,7 @@ impl FileTreeNode {
         
         cx.walk_turtle(self.indent_walk(depth));
         
-        self.name_text.draw_walk(cx, Walk::default(), name);
+        self.name_text.draw_walk(cx, Walk::fit(), Align::default(), name);
         self.bg_quad.end(cx);
     }
     
