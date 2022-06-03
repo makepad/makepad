@@ -209,6 +209,123 @@ impl DrawText {
         self.draw_vars.user_uniforms[1] = self.text_style.curve;
     }
     
+    pub fn draw_inner_fix_later_when_editor_rep_is_not_vec_of_char(&mut self, cx: &mut Cx2d, pos: Vec2, char_offset: usize, chunk: &[char]) {
+        if !self.draw_vars.can_instance()
+            || pos.x.is_nan()
+            || pos.y.is_nan()
+            || self.text_style.font.font_id.is_none() {
+            return
+        }
+        
+        let in_many = self.many_instances.is_some();
+        let font_id = self.text_style.font.font_id.unwrap();
+        
+        if cx.fonts[font_id].is_none() {
+            return
+        }
+        
+        if !in_many {
+            self.begin_many_instances(cx);
+        }
+        
+        let mut walk_x = pos.x;
+        let mut char_offset = char_offset;
+        
+        let cxfont = cx.cx.fonts[font_id].as_mut().unwrap();
+        let dpi_factor = cx.current_dpi_factor;
+        
+        let atlas_page_id = cxfont.get_atlas_page_id(dpi_factor, self.text_style.font_size);
+        
+        let font = &mut cxfont.ttf_font;
+        
+        let font_size_logical = self.text_style.font_size * 96.0 / (72.0 * font.units_per_em);
+        let font_size_pixels = font_size_logical * dpi_factor;
+        
+        let atlas_page = &mut cxfont.atlas_pages[atlas_page_id];
+        
+        let mi = if let Some(mi) = &mut self.many_instances {mi} else {return};
+        let zbias_step = 0.00001;
+        let mut char_depth = self.draw_depth;
+        for wc in chunk {
+            
+            let unicode = *wc as usize;
+            let glyph_id = font.char_code_to_glyph_index_map[unicode];
+            
+            let glyph = &font.glyphs[glyph_id];
+            
+            let advance = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
+            
+            // snap width/height to pixel granularity
+            let w = ((glyph.bounds.p_max.x - glyph.bounds.p_min.x) * font_size_pixels).ceil() + 1.0;
+            let h = ((glyph.bounds.p_max.y - glyph.bounds.p_min.y) * font_size_pixels).ceil() + 1.0;
+            
+            // this one needs pixel snapping
+            let min_pos_x = walk_x + font_size_logical * glyph.bounds.p_min.x;
+            let min_pos_y = pos.y - font_size_logical * glyph.bounds.p_min.y + self.text_style.font_size * self.text_style.top_drop;
+            
+            // compute subpixel shift
+            let subpixel_x_fract = min_pos_x - (min_pos_x * dpi_factor).floor() / dpi_factor;
+            let subpixel_y_fract = min_pos_y - (min_pos_y * dpi_factor).floor() / dpi_factor;
+            
+            // scale and snap it
+            let scaled_min_pos_x = walk_x + font_size_logical * self.font_scale * glyph.bounds.p_min.x - subpixel_x_fract;
+            let scaled_min_pos_y = pos.y - font_size_logical * self.font_scale * glyph.bounds.p_min.y + self.text_style.font_size * self.font_scale * self.text_style.top_drop - subpixel_y_fract;
+            
+            // only use a subpixel id for small fonts
+            let subpixel_id = if self.text_style.font_size>32.0 {
+                0
+            }
+            else { // subtle 64 index subpixel id
+                ((subpixel_y_fract * 7.0) as usize) << 3 |
+                (subpixel_x_fract * 7.0) as usize
+            };
+            
+            let tc = if let Some(tc) = &atlas_page.atlas_glyphs[glyph_id][subpixel_id] {
+                //println!("{} {} {} {}", tc.tx1,tc.tx2,tc.ty1,tc.ty2);
+                tc
+            }
+            else {
+                // see if we can fit it
+                // allocate slot
+                cx.cx.fonts_atlas.atlas_todo.push(CxFontsAtlasTodo {
+                    subpixel_x_fract,
+                    subpixel_y_fract,
+                    font_id,
+                    atlas_page_id,
+                    glyph_id,
+                    subpixel_id
+                });
+                
+                atlas_page.atlas_glyphs[glyph_id][subpixel_id] = Some(
+                    cx.cx.fonts_atlas.alloc_atlas_glyph(w, h)
+                );
+                
+                atlas_page.atlas_glyphs[glyph_id][subpixel_id].as_ref().unwrap()
+            };
+            
+            // give the callback a chance to do things
+            self.font_t1.x = tc.tx1;
+            self.font_t1.y = tc.ty1;
+            self.font_t2.x = tc.tx2;
+            self.font_t2.y = tc.ty2;
+            self.rect_pos = vec2(scaled_min_pos_x, scaled_min_pos_y);
+            self.rect_size = vec2(w * self.font_scale / dpi_factor, h * self.font_scale / dpi_factor);
+            self.char_depth = char_depth;
+            self.base.x = walk_x;
+            self.base.y = pos.y;
+            self.font_size = self.text_style.font_size;
+            self.char_offset = char_offset as f32;
+            char_depth += zbias_step;
+            mi.instances.extend_from_slice(self.draw_vars.as_slice());
+            walk_x += advance;
+            char_offset += 1;
+        }
+        
+        if !in_many {
+            self.end_many_instances(cx)
+        }
+    }
+    
     pub fn draw_inner(&mut self, cx: &mut Cx2d, pos: Vec2, char_offset: usize, chunk: &str) {
         if !self.draw_vars.can_instance()
             || pos.x.is_nan()

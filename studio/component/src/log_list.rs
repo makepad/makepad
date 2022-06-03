@@ -232,7 +232,7 @@ impl LogListNode {
         self.icon_quad.draw_walk(cx, self.icon_walk);
         self.link_button.draw_label(cx, link);
         
-        self.name_text.draw_walk(cx, Walk::default(), body);
+        self.name_text.draw_walk(cx, Walk::fit(), Align::default(), body);
         self.bg_quad.end(cx);
     }
     
