@@ -12,6 +12,7 @@ live_register!{
     Label: {{Label}} {
         walk:{
             width:Fit
+            height:Fit
         }
         label_text:{
             color:(COLOR_TEXT_DEFAULT)
@@ -24,6 +25,10 @@ live_register!{
 pub struct Label {
     label_text: DrawText,
     walk: Walk,
+    
+//    overflow: Overflow,
+    align: Align,
+
     //margin: Margin,
     text: String,
 }
@@ -38,7 +43,7 @@ impl FrameComponent for Label {
     }
     
     fn draw_component(&mut self, cx: &mut Cx2d, walk:Walk)->Result<(),LiveId>{
-        self.label_text.draw_walk(cx, walk, &self.text);
+        self.label_text.draw_walk(cx, walk, self.align, &self.text);
         Ok(())
     }
 }
