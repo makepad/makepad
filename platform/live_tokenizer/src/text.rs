@@ -50,7 +50,7 @@ impl Text {
         Text { lines }
     }
 
-    /// Returns true if this text is empty.
+    /// Returns `true` if this text is empty.
     /// 
     /// # Examples
     /// 
