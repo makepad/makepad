@@ -6,6 +6,7 @@ pub fn derive_ser_json_impl(input: TokenStream) -> TokenStream {
     let mut parser = TokenParser::new(input);
     let mut tb = TokenBuilder::new();
     
+    parser.eat_attributes();
     parser.eat_ident("pub");
     if parser.eat_ident("struct"){
         if let Some(name) = parser.eat_any_ident(){
@@ -140,6 +141,7 @@ pub fn derive_de_json_impl(input: TokenStream) -> TokenStream {
     let mut parser = TokenParser::new(input);
     let mut tb = TokenBuilder::new();
     
+    parser.eat_attributes();
     parser.eat_ident("pub");
     if parser.eat_ident("struct"){
         if let Some(name) = parser.eat_any_ident(){

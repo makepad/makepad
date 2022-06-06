@@ -318,6 +318,8 @@ impl TokenParser {
         else {
             self.current = None;
         }
+        // skip over ///
+        
     }
     
     pub fn unexpected(&self) -> TokenStream {
