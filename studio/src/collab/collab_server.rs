@@ -173,11 +173,10 @@ impl CollabConnection {
                 let bytes = fs::read(&path).map_err(
                     | error | CollabError::Unknown(error.to_string())
                 ) ?;
-                let text: Text = String::from_utf8_lossy(&bytes)
+                let text: Text = Text::from_lines(String::from_utf8_lossy(&bytes)
                     .lines()
                     .map( | line | line.chars().collect::<Vec<_ >> ())
-                    .collect::<Vec<_ >> ()
-                    .into();
+                    .collect::<Vec<_ >>());
                 
                 let mut participants_by_connection_id = HashMap::new();
                 participants_by_connection_id.insert(
