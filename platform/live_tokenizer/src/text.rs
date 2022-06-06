@@ -171,38 +171,6 @@ impl Text {
         }
     }
 }
-/*
-pub trait CharVecToString{
-    fn to_string(&self, start:usize, len:usize)->String;
-    fn compare_string(&self, s:&str, start:usize, end:usize)->bool;
-}
-
-impl CharVecToString for Vec<char>{
-    fn to_string(&self, start:usize, end:usize)->String{
-        let mut s = String::new();
-        for i in start..end{
-            s.push(self[i]);
-        }
-        return s
-    }
-
-    fn compare_string(&self, s:&str, start:usize, end:usize)->bool{
-        let mut i = start;
-        for s in s.chars(){
-            if i >= end{
-                return false
-            }
-            if self[i] != s{
-                return false
-            }
-            i+=1;
-        }
-        if i < end{
-            return false
-        }
-        true
-    }
-}*/
 
 impl AddAssign for Text {
     fn add_assign(&mut self, other: Text) {
