@@ -5,6 +5,7 @@ use crate::macro_lib::*;
 pub fn derive_live_component_registry_impl(input: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new();
     let mut parser = TokenParser::new(input);
+    parser.eat_attributes();
     parser.eat_ident("pub");
     if parser.eat_ident("struct") {
         if let Some(struct_name) = parser.eat_any_ident() {

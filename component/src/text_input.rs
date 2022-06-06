@@ -16,21 +16,22 @@ live_register!{
         label_text: {
             instance hover: 0.0
             instance focus: 0.0
+            instance selected: 0.0
             text_style: FONT_CODE {}
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
                         #9,
-                        #f,
+                        #b,
                         self.hover
                     ),
-                    #0,
+                    #9,
                     self.focus
                 )
             }
         }
         
-        bg_quad: {
+        select_quad: {
             instance hover: 0.0
             instance focus: 0.0
             
@@ -53,12 +54,11 @@ live_register!{
         walk: {
             width: Size::Fit,
             height: Size::Fill,
-            margin: {left: 1.0, right: 1.0, top: 2.0, bottom: 2.0},
+            margin: {left: 1.0, right: 5.0, top: 0.0, bottom: 2.0},
         }
         
-        layout: {
-            align: {y: 0.5}
-            padding: {left: 4.0, top: 0.0, right: 4.0, bottom: 2.0}
+        align: {
+            y:0.5
         }
         
         state: {
@@ -105,10 +105,11 @@ live_register!{
 pub struct TextInput {
     state: State,
     
-    bg_quad: DrawQuad,
+    select_quad: DrawQuad,
     label_text: DrawText,
     
     walk: Walk,
+    align: Align,
     layout: Layout,
     
     pub value: String
@@ -153,8 +154,10 @@ impl TextInput {
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        self.bg_quad.begin(cx, walk, self.layout);
-        self.label_text.draw_walk(cx, walk, Align::default(), &self.value);
-        self.bg_quad.end(cx);
+        //self.bg_quad.begin(cx, walk, self.layout);
+        self.label_text.draw_walk(cx, walk, self.align, &self.value);
+        // ok so 
+        
+        //self.bg_quad.end(cx);
     }
 }

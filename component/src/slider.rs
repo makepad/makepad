@@ -66,11 +66,16 @@ live_register!{
     
     Slider: {{Slider}} {
         
+        label_text:{
+            color:#9
+        }
+        
         label_walk:{
             margin:{left:4.0}
             width:Fill,
             height:Fill
         }
+        
         label_align:{
             y:0.5
         }
@@ -212,6 +217,8 @@ impl Slider {
                 return SliderAction::StartSlide
             },
             HitEvent::FingerUp(fe) => {
+                // if the finger hasn't moved further than X we jump to edit-all on the text thing
+                
                 self.animate_state(cx, ids!(drag.off));
                 if fe.is_over && fe.input_type.has_hovers() {
                     self.animate_state(cx, ids!(hover.on));
