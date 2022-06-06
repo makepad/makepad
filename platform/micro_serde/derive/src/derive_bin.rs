@@ -2,13 +2,14 @@ use proc_macro::{TokenStream};
 use crate::macro_lib::*;
 
 pub fn derive_ser_bin_impl(input: TokenStream) -> TokenStream {
-
     let mut parser = TokenParser::new(input);
     let mut tb = TokenBuilder::new();
     
+    parser.eat_attributes();
     parser.eat_ident("pub");
     if parser.eat_ident("struct"){
         if let Some(name) = parser.eat_any_ident(){
+
             let generic = parser.eat_generic();
             let types = parser.eat_all_types();
             let where_clause = parser.eat_where_clause(Some("SerBin"));
@@ -98,6 +99,7 @@ pub fn derive_de_bin_impl(input: TokenStream) -> TokenStream {
     let mut parser = TokenParser::new(input);
     let mut tb = TokenBuilder::new();
     
+    parser.eat_attributes();
     parser.eat_ident("pub");
     if parser.eat_ident("struct"){
         if let Some(name) = parser.eat_any_ident(){
