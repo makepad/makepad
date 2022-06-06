@@ -9,24 +9,73 @@ use {
     std::{fmt, iter, mem, ops::AddAssign},
 };
 
+/// A type for representing text.
+///
+/// A text is structured as a vec of lines, where each line is a vec of chars. This is not a very
+/// compact representation, since most characters are expected to be ASCII, and thus take up only
+/// a single byte, whereas a char always takes up 4 bytes. This means that for a typical text, up
+/// to 75% of memory it uses is wasted. However, this representation is very convenient to work
+/// with, because it closely matches the structure expected by most operations performed on a text.
+/// Since large texts are relatively rare, we've thus decided to accept this inefficiency for now.
+/// In the future, we might want to replace this representation with a more efficient one, such as
+/// an UTF-8 rope.
+///
+/// A text maintains the invariant that it always contains at least one (possibly empty) line.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, SerBin, DeBin)]
 pub struct Text {
     lines: Vec<Vec<char>>,
 }
 
 impl Text {
+    /// Creates an empty text.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use makepad_live_tokenizer::Text;
+    /// 
+    /// let text = Text::new();
+    /// ```
     pub fn new() -> Text {
         Text::default()
     }
 
+    /// Create a text from a vec of lines.
+    /// 
+    /// # Panics
+    /// 
+    /// Panics if the vec is empty.
     pub fn from_lines(lines: Vec<Vec<char>>) -> Text {
+        assert!(!lines.is_empty());
         Text { lines }
     }
 
+    /// Returns true if this text is empty.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use makepad_live_tokenizer::Text;
+    /// 
+    /// let text = Text::new();
+    /// assert!(text.is_empty());
+    /// let text = Text::from("abc\ndef");
+    /// assert!(!text.is_empty());
+    /// ```
     pub fn is_empty(&self) -> bool {
         self.len().is_zero()
     }
 
+    /// Returns the length of this text.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use makepad_live_tokenizer::{Size, Text};
+    /// 
+    /// let text = Text::from("abc\ndef");
+    /// assert!(text.len() == Size { line: 1, column: 3 });
+    /// ```
     pub fn len(&self) -> Size {
         Size {
             line: self.lines.len() - 1,
@@ -34,10 +83,42 @@ impl Text {
         }
     }
 
+    /// Returns a slice of the lines in this text.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use makepad_live_tokenizer::{Size, Text};
+    /// 
+    /// let text = Text::from("abc\ndef");
+    /// assert_eq!(text.as_lines(), &[vec!['a', 'b', 'c'], vec!['d', 'e', 'f']]);
+    /// ```
     pub fn as_lines(&self) -> &[Vec<char>] {
         &self.lines
     }
 
+    /// Copies the given range from this text into a new text.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the range is out of bounds.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use makepad_live_tokenizer::{Position, Range, Text};
+    /// 
+    /// let text = Text::from("abc\ndef");
+    /// assert_eq!(
+    ///     text.copy(
+    ///         Range {
+    ///             start: Position { line: 0, column: 1 },
+    ///             end: Position { line: 1, column: 2 }
+    ///         }
+    ///     ),
+    ///     Text::from("bc\nde"),
+    /// );
+    /// ```
     pub fn copy(&self, range: Range) -> Text {
         Text {
             lines: if range.start.line == range.end.line {
@@ -71,6 +152,25 @@ impl Text {
         }
     }
 
+    /// Appends the given range of this text to the given string.
+    /// 
+    /// # Panics
+    /// 
+    /// Panics if the range is out of bounds.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use makepad_live_tokenizer::{Position, Range, Text};
+    /// 
+    /// let text = Text::from("abc\ndef");
+    /// let mut string = String::new();
+    /// text.append_to_string(
+    ///     Range { start: Position { line: 0, column: 1 }, end: Position { line: 1, column: 2 }},
+    ///     &mut string
+    /// );
+    /// assert_eq!(string, "bc\nde");
+    /// ```
     pub fn append_to_string(&self, range: Range, out: &mut String) {
         if range.start.line == range.end.line {
             out.extend(
@@ -98,6 +198,15 @@ impl Text {
         }
     }
 
+    /// Removes the given amount of text from the start of this text, and returns it as a new text.
+    /// 
+    /// ```
+    /// use makepad_live_tokenizer::{Size, Text};
+    /// 
+    /// let mut text = Text::from("abc\ndef");
+    /// assert_eq!(text.take(Size { line: 1, column: 1 }), Text::from("abc\nd"));
+    /// assert_eq!(text, Text::from("ef"));
+    /// ```
     pub fn take(&mut self, len: Size) -> Text {
         let mut lines = self.lines.drain(..len.line).collect::<Vec<_>>();
         lines.push(
@@ -110,11 +219,35 @@ impl Text {
         Text { lines }
     }
 
+    /// Removes the given amount of text from the start of this text.
+    /// 
+    /// ```
+    /// use makepad_live_tokenizer::{Size, Text};
+    /// 
+    /// let mut text = Text::from("abc\ndef");
+    /// text.skip(Size { line: 1, column: 1 });
+    /// assert_eq!(text, Text::from("ef"));
+    /// ```
     pub fn skip(&mut self, len: Size) {
         self.lines.drain(..len.line);
         self.lines.first_mut().unwrap().drain(..len.column);
     }
 
+    /// Inserts the given text at the given position in this text.
+    /// 
+    /// # Panics
+    /// 
+    /// Panics if the position is out of bounds.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use makepad_live_tokenizer::{Position, Text};
+    /// 
+    /// let mut text = Text::from("abc\ndef");
+    /// text.insert(Position { line: 1, column: 1 }, Text::from("xyz"));
+    /// assert_eq!(text, Text::from("abc\ndxyzef"));
+    /// ```
     pub fn insert(&mut self, position: Position, mut text: Text) {
         if text.len().line == 0 {
             self.lines[position.line].splice(
@@ -135,6 +268,21 @@ impl Text {
         }
     }
 
+    /// Deletes the given amount of text at the given position from this text.
+    /// 
+    /// # Panics
+    /// 
+    /// Panics if the position and/or the amount is out of bounds.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use makepad_live_tokenizer::{Position, Size, Text};
+    /// 
+    /// let mut text = Text::from("abc\ndef");
+    /// text.delete(Position { line: 0, column: 2 }, Size { line: 1, column: 1 });
+    /// assert_eq!(text, Text::from("abef"));
+    /// ```
     pub fn delete(&mut self, position: Position, count: Size) {
         if count.line == 0 {
             self.lines[position.line].splice(
@@ -156,6 +304,11 @@ impl Text {
         }
     }
 
+    /// Applies the given delta to this text.
+    /// 
+    /// # Panics
+    /// 
+    /// Panics if the delta is not compatible with this text.
     pub fn apply_delta(&mut self, delta: Delta) {
         let mut position = Position::origin();
         for operation in delta {
@@ -202,12 +355,6 @@ impl fmt::Display for Text {
     }
 }
 
-impl From<Vec<Vec<char>>> for Text {
-    fn from(lines: Vec<Vec<char>>) -> Text {
-        Text { lines }
-    }
-}
-
 impl From<String> for Text {
     fn from(string: String) -> Text {
         Text::from(string.as_str())
@@ -216,7 +363,7 @@ impl From<String> for Text {
 
 impl From<&str> for Text {
     fn from(string: &str) -> Text {
-        Text::from(
+        Text::from_lines(
             string
                 .lines()
                 .map(|line| line.chars().collect::<Vec<_>>())
