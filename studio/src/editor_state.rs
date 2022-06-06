@@ -300,7 +300,7 @@ impl EditorState {
             builder_1.retain(cursor.start() - position);
             builder_1.insert(text.clone());
             if let Some(injected_char) = injected_char {
-                builder_1.insert(Text::from(vec![vec![injected_char]]));
+                builder_1.insert(Text::from_lines(vec![vec![injected_char]]));
             }
             offsets.push(text.len());
             position = cursor.end();
@@ -382,7 +382,7 @@ impl EditorState {
                     }
                 }
             };
-            let text = Text::from(vec![
+            let text = Text::from_lines(vec![
                 vec![],
                 iter::repeat(' ').take(indent_count * 4).collect::<Vec<_ >> (),
             ]);
