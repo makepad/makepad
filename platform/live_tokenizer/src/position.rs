@@ -105,12 +105,3 @@ impl Sub for Position {
         }
     }
 }
-/*
-impl From<TextPos> for Position {
-    fn from(text_pos: TextPos) -> Position {
-        Position{
-            line:text_pos.line as usize,
-            column:text_pos.column as usize
-        }
-    }
-}*/
