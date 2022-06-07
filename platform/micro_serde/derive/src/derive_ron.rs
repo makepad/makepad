@@ -69,6 +69,7 @@ pub fn derive_ser_ron_impl(input: TokenStream) -> TokenStream {
 
             while !parser.eat_eot(){
                 // parse ident
+                parser.eat_attributes();
                 if let Some(variant) = parser.eat_any_ident(){
                     if let Some(types) = parser.eat_all_types(){
                         
