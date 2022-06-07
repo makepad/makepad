@@ -50,6 +50,7 @@ pub fn derive_ser_bin_impl(input: TokenStream) -> TokenStream {
             }
             let mut index = 0;
             while !parser.eat_eot(){
+                parser.eat_attributes();
                 // parse ident
                 if let Some(variant) = parser.eat_any_ident(){
                     if let Some(types) = parser.eat_all_types(){
