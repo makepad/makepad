@@ -16,7 +16,8 @@ live_register!{
         label_text: {
             instance hover: 0.0
             instance focus: 0.0
-            instance selected: 0.0
+            instance selected: 1.0
+
             text_style: FONT_CODE {}
             fn get_color(self) -> vec4 {
                 return mix(
@@ -25,7 +26,11 @@ live_register!{
                         #b,
                         self.hover
                     ),
-                    #9,
+                    mix(
+                        #9,
+                        #f00,
+                        self.selected
+                    ),
                     self.focus
                 )
             }
@@ -67,14 +72,14 @@ live_register!{
                 off = {
                     from: {all: Play::Forward {duration: 0.1}}
                     apply: {
-                        bg_quad: {hover: 0.0}
+                        select_quad: {hover: 0.0}
                         label_text: {hover: 0.0}
                     }
                 }
                 on = {
                     from: {all: Play::Snap}
                     apply: {
-                        bg_quad: {hover: 1.0}
+                        select_quad: {hover: 1.0}
                         label_text: {hover: 1.0}
                     }
                 }
@@ -84,14 +89,14 @@ live_register!{
                 off = {
                     from: {all: Play::Forward {duration: 0.1}}
                     apply: {
-                        bg_quad: {focus: 0.0}
+                        select_quad: {focus: 0.0}
                         label_text: {focus: 0.0}
                     }
                 }
                 on = {
                     from: {all: Play::Snap}
                     apply: {
-                        bg_quad: {focus: 1.0}
+                        select_quad: {focus: 1.0}
                         label_text: {focus: 1.0}
                     }
                 }
@@ -156,7 +161,11 @@ impl TextInput {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         //self.bg_quad.begin(cx, walk, self.layout);
         self.label_text.draw_walk(cx, walk, self.align, &self.value);
-        // ok so 
+        // ok so we can now set the color of the text
+        // now how do we draw the selection 
+        // how do we know where to start and stop the selection rect
+        // we would need to compute-geom
+        
         
         //self.bg_quad.end(cx);
     }
