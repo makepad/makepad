@@ -1,3 +1,11 @@
+//! This module contains code for tokenizing Rust code.
+//! 
+//! The tokenizer in this module supports lazy tokenization. That is, it has an explicit state,
+//! which can be recorded at the start of each line. Running the tokenizer with the same starting
+//! state on the same line will always result in the same sequence of tokens. This means that if
+//! neither the contents nor the starting state of the tokenizer changed for a given line, that
+//! line does not need to be retokenized. 
+
 use {
     crate::{
         char_ext::CharExt,
@@ -6,31 +14,6 @@ use {
         colorhex
     },
 };
-
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct TokenPos {
-    pub line: usize,
-    pub index: usize,
-}
-
-#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
-pub struct TokenRange {
-    pub start: TokenPos,
-    pub end: TokenPos
-}
-
-impl TokenRange{
-    pub fn is_in_range(&self, pos:TokenPos)->bool{
-        if self.start.line == self.end.line{
-            pos.line == self.start.line && pos.index >= self.start.index && pos.index < self.end.index
-        }
-        else{
-            pos.line == self.start.line && pos.index >= self.start.index ||
-            pos.line > self.start.line && pos.line < self.end.line ||
-            pos.line == self.end.line && pos.index < self.end.index
-        }
-    }
-}
 
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum State {
@@ -248,7 +231,6 @@ impl InitialState {
     }
     
     fn number(self, cursor: &mut Cursor) -> (State, FullToken) {
-        //debug_assert!(cursor.peek(0).is_digit(10));
         match (cursor.peek(0), cursor.peek(1)) {
             ('0', 'b') => {
                 cursor.skip(2);
@@ -627,3 +609,28 @@ impl<'a> Cursor<'a> {
     }
 }
 
+
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct TokenPos {
+    pub line: usize,
+    pub index: usize,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd)]
+pub struct TokenRange {
+    pub start: TokenPos,
+    pub end: TokenPos
+}
+
+impl TokenRange{
+    pub fn is_in_range(&self, pos:TokenPos)->bool{
+        if self.start.line == self.end.line{
+            pos.line == self.start.line && pos.index >= self.start.index && pos.index < self.end.index
+        }
+        else{
+            pos.line == self.start.line && pos.index >= self.start.index ||
+            pos.line > self.start.line && pos.line < self.end.line ||
+            pos.line == self.end.line && pos.index < self.end.index
+        }
+    }
+}
