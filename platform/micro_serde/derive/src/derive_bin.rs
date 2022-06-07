@@ -153,6 +153,7 @@ pub fn derive_de_bin_impl(input: TokenStream) -> TokenStream {
             let mut index = 0;
             while !parser.eat_eot(){
                 // parse ident
+                parser.eat_attributes();
                 if let Some(variant) = parser.eat_any_ident(){
                     tb.suf_u16(index as u16).add("=> {");
                     tb.add("std :: result :: Result :: Ok ( Self ::");
