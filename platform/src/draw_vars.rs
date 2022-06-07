@@ -249,7 +249,7 @@ impl DrawVars {
         }
     }
     
-    pub fn update_vars_in_place(&mut self, cx: &mut Cx) {
+    pub fn update_area_with_self(&mut self, cx: &mut Cx) {
         if let Some(draw_shader) = self.draw_shader {
             // ok now what.
             // we could iterate our uniform and instance props
@@ -285,6 +285,47 @@ impl DrawVars {
                 cx.passes[draw_list.pass_id].paint_dirty = true;
                 draw_call.instance_dirty = true;
                 draw_call.uniforms_dirty = true;
+            }
+        }
+    }
+
+    pub fn update_area_with_value(&mut self, cx: &mut Cx, id:LiveId, v:&[f32], start:usize, count:usize) {
+        if let Some(draw_shader) = self.draw_shader {
+            if let Some(inst) = self.area.valid_instance(cx) {
+                if draw_shader.draw_shader_generation != cx.draw_shaders.generation{
+                    return;
+                }
+                let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
+                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
+                let draw_call = draw_list.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
+                
+                let repeat = inst.instance_count.min(count);
+                let stride = sh.mapping.instances.total_slots;
+                let instances = &mut draw_call.instances.as_mut().unwrap()[inst.instance_offset..];
+
+                cx.passes[draw_list.pass_id].paint_dirty = true;
+                
+                // lets iterate the /*
+                for input in &sh.mapping.live_instances.inputs {
+                    if input.id == id{
+                        for j in start..(start+repeat) {
+                            for i in 0..input.slots {
+                                instances[input.offset + i + j * stride] = v[i]
+                            }
+                        }
+                        draw_call.instance_dirty = true;
+                    }
+                    return
+                }
+                for input in &sh.mapping.user_uniforms.inputs {
+                    if input.id == id{
+                        for i in 0..input.slots {
+                            draw_call.user_uniforms[input.offset + i] = v[i]
+                        }
+                        draw_call.uniforms_dirty = true;
+                        return
+                    }
+                }
             }
         }
     }
@@ -411,7 +452,7 @@ impl DrawVars {
             self.init_slicer(cx);
         }
         self.geometry_id = geometry_fields.get_geometry_id();
-        self.update_vars_in_place(cx);
+        self.update_area_with_self(cx);
     }
     
 }
