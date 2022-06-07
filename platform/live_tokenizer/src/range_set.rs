@@ -49,14 +49,8 @@ impl RangeSet {
     /// assert!(ranges.is_empty());
     /// let mut builder = range_set::Builder::new();
     /// builder.include(Range {
-    ///     start: Position {
-    ///         line: 1,
-    ///         column: 1,
-    ///     },
-    ///     end: Position {
-    ///         line: 2,
-    ///         column: 2,
-    ///     },
+    ///     start: Position { line: 1, column: 1 },
+    ///     end: Position { line: 2, column: 2 },
     /// });
     /// let ranges = builder.build();
     /// assert!(!ranges.is_empty());
@@ -73,14 +67,8 @@ impl RangeSet {
     /// use makepad_live_tokenizer::{range_set, Position, Range, RangeSet};
     /// let mut builder = range_set::Builder::new();
     /// builder.include(Range {
-    ///     start: Position {
-    ///         line: 1,
-    ///         column: 1,
-    ///     },
-    ///     end: Position {
-    ///         line: 2,
-    ///         column: 2,
-    ///     },
+    ///     start: Position { line: 1, column: 1 },
+    ///     end: Position { line: 2, column: 2 },
     /// });
     /// let ranges = builder.build();
     /// assert_eq!(ranges.len(), 1);
@@ -92,23 +80,20 @@ impl RangeSet {
     /// Returns `true` is this set contains a range that contains the given position.
     /// 
     /// # Examples
+    ///
+    /// ```
     /// use makepad_live_tokenizer::{range_set, Position, Range, RangeSet};
     /// 
     /// let mut builder = range_set::Builder::new();
     /// builder.include(Range {
-    ///     start: Position {
-    ///         line: 1,
-    ///         column: 1,
-    ///     },
-    ///     end: Position {
-    ///         line: 2,
-    ///         column: 2,
-    ///     },
+    ///     start: Position { line: 1, column: 1 },
+    ///     end: Position { line: 2, column: 2 },
     /// });
     /// let ranges = builder.build();
     /// assert!(ranges.contains_position(Position { line: 1, column: 2 }));
     /// assert!(ranges.contains_position(Position { line: 2, column: 1 }));
     /// assert!(!ranges.contains_position(Position { line: 3, column: 0 }));
+    /// ```
     pub fn contains_position(&self, position: Position) -> bool {
         match self.positions.binary_search(&position) {
             Ok(_) => false,
@@ -134,14 +119,8 @@ impl RangeSet {
     /// 
     /// let mut builder = range_set::Builder::new();
     /// builder.include(Range {
-    ///     start: Position {
-    ///         line: 1,
-    ///         column: 1,
-    ///     },
-    ///     end: Position {
-    ///         line: 2,
-    ///         column: 2,
-    ///     },
+    ///     start: Position { line: 1, column: 1 },
+    ///     end: Position { line: 2, column: 2 },
     /// });
     /// let ranges = builder.build();
     /// let mut spans = ranges.spans();
@@ -167,6 +146,8 @@ impl RangeSet {
 /// A builder for sets of non-overlapping ranges.
 #[derive(Debug, Default)]
 pub struct Builder {
+    // We store a map from positions to changes in the number of ranges after that position. A
+    // positive delta means one or more ranges start at this position.
     deltas_by_position: BTreeMap<Position, i32>,
 }
 
@@ -195,14 +176,8 @@ impl Builder {
     /// 
     /// let mut builder = Builder::new();
     /// builder.include(Range {
-    ///     start: Position {
-    ///         line: 1,
-    ///         column: 1,
-    ///     },
-    ///     end: Position {
-    ///         line: 2,
-    ///         column: 2,
-    ///     },
+    ///     start: Position { line: 1, column: 1 },
+    ///     end: Position { line: 2, column: 2 },
     /// });
     /// ```
     pub fn include(&mut self, range: Range) {
@@ -247,6 +222,9 @@ impl Builder {
         let mut value = 0;
         for (position, delta) in &self.deltas_by_position {
             let next_value = value + delta;
+            // If there were zero ranges before this position, and one or more ranges after this
+            // position, or vice versa, then this position is the boundary of a range, and we need
+            // to store it in the set.
             if (value == 0) != (next_value == 0) {
                 positions.push(*position);
             }
