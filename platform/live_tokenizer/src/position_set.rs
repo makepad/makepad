@@ -22,9 +22,9 @@ impl PositionSet {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_live_tokenizer::PositionSet;
+    /// use makepad_live_tokenizer::position_set;
     /// 
-    /// let positions = PositionSet::new();
+    /// let positions = position_set::PositionSet::new();
     /// ```
     pub fn new() -> PositionSet {
         PositionSet::default()
