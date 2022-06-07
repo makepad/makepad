@@ -48,7 +48,7 @@ impl PositionSet {
         self.positions.is_empty()
     }
 
-    /// Returns the number of elements in this set.
+    /// Returns the number of positions in this set.
     /// 
     /// # Examples
     /// 
@@ -66,9 +66,9 @@ impl PositionSet {
         self.positions.len()
     }
     
-    /// Returns an iterator over the distances between each position.
+    /// Returns an iterator over the distances between each position in this set.
     /// 
-    /// Iterating over the distances between each position, rather than the position themselves, is
+    /// Iterating over the distances between each position, rather than the positions themselves, is
     /// often useful because the editor renders things such as carets by performing a downward sweep
     /// over the lines of a document while maintaining a current position. During each step of the
     /// sweep, the current position is incremented with the distance to the position of the next
@@ -86,6 +86,7 @@ impl PositionSet {
     /// let mut distances = positions.distances();
     /// assert_eq!(distances.next(), Some(Size { line: 1, column: 2 }));
     /// assert_eq!(distances.next(), Some(Size { line: 1, column: 1 }));
+    /// assert_eq!(distances.next(), None);
     /// ```
     pub fn distances(&self) -> Distances {
         Distances {
@@ -112,6 +113,7 @@ impl<'a> IntoIterator for &'a PositionSet {
     }
 }
 
+/// A builder for sets of positions.
 #[derive(Default, Debug)]
 pub struct Builder {
     positions: Vec<Position>,
@@ -131,14 +133,14 @@ impl Builder {
         Builder::default()
     }
     
-    /// Adds a new position to the set under construction.
+    /// Adds the given position to the set under construction.
     /// 
     /// This method takes `O(1)` time.
     /// 
     /// # Examples
     /// 
     /// ```
-    /// use makepad_live_tokenizer::{Position, position_set::Builder};
+    /// use makepad_live_tokenizer::{position_set::Builder, Position};
     /// 
     /// let mut builder = Builder::new();
     /// builder.insert(Position { line: 1, column: 1 });
@@ -147,7 +149,7 @@ impl Builder {
         self.positions.push(position);
     }
 
-    /// Finishes the position set under construction.
+    /// Finishes the set under construction.
     /// 
     /// This method takes `O(n log n)` time.
     /// 
