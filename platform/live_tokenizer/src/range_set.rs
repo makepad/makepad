@@ -157,9 +157,9 @@ impl Builder {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_live_tokenizer::range_set::Builder;
+    /// use makepad_live_tokenizer::range_set;
     /// 
-    /// let builder = Builder::new();
+    /// let builder = range_set::Builder::new();
     /// ```
     pub fn new() -> Builder {
         Builder::default()
@@ -259,7 +259,9 @@ impl<'a> Iterator for Spans<'a> {
     }
 }
 
-// A span in a set of ranges. See the `spans` method on `RangeSet` for more.
+/// A span in a set of ranges.
+///
+/// See the `spans` method on `RangeSet` for more.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct Span {
     /// The length of this span.

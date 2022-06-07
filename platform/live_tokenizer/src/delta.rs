@@ -28,6 +28,8 @@ use {
 /// original delta so that it can be applied to the text after it has been modified by the other
 /// delta. This is the key idea behind operational transform (OT), which is what we use to implement
 /// collaboration in the editor.
+/// 
+/// To construct a delta, use the `Builder` type.
 #[derive(Clone, Debug, Default, Eq, Hash, PartialEq, SerBin, DeBin)]
 pub struct Delta {
     operations: Vec<Operation>,
@@ -50,7 +52,7 @@ impl Delta {
         Delta::default()
     }
     
-    /// Returns an iterator over the range of the operations in this delta, and their kind.
+    /// Returns an iterator over the ranges of the operations in this delta, and their kind.
     /// 
     /// The range of an operation is defined as follows: for an insert operation, it is the range
     /// of the inserted text after it has been inserted. For a delete operation, it is the range
@@ -105,13 +107,12 @@ impl Delta {
     /// ```
     /// use makepad_live_tokenizer::{delta, Delta, Size, Text};
     /// 
-    /// let mut text = Text::from("abc");
-    /// 
     /// let mut builder = delta::Builder::new();
     /// builder.retain(Size { line: 0, column: 3 });
     /// builder.insert(Text::from("def"));
     /// let delta = builder.build();
     /// 
+    /// let mut text = Text::from("abc");
     /// let inverse_delta = delta.clone().invert(&text);
     /// 
     /// text.apply_delta(delta);
@@ -152,7 +153,6 @@ impl Delta {
     /// 
     /// ```
     /// use makepad_live_tokenizer::{delta, Delta, Size, Text};
-    /// let mut text = Text::from("abc");
     /// 
     /// let mut builder = delta::Builder::new();
     /// builder.retain(Size { line: 0, column: 3 });
@@ -165,7 +165,8 @@ impl Delta {
     /// let delta_1 = builder.build();
     /// 
     /// let composite_delta = delta_0.compose(delta_1);
-    /// 
+    ///
+    /// let mut text = Text::from("abc");
     /// text.apply_delta(composite_delta);
     /// assert_eq!(text, Text::from("abcdefghi"));
     /// ```
@@ -296,6 +297,29 @@ impl Delta {
     /// # Examples
     /// 
     /// ```
+    /// use makepad_live_tokenizer::{delta, Delta, Size, Text};
+    /// 
+    /// let mut builder = delta::Builder::new();
+    /// builder.retain(Size { line: 0, column: 3 });
+    /// builder.insert(Text::from("def"));
+    /// let delta_0 = builder.build();
+    /// 
+    /// let mut builder = delta::Builder::new();
+    /// builder.retain(Size { line: 0, column: 3 });
+    /// builder.insert(Text::from("ghi"));
+    /// let delta_1 = builder.build();
+    /// 
+    /// let (delta_2, delta_3) = delta_0.clone().transform(delta_1.clone());
+
+    /// let mut text = Text::from("abc");
+    /// text.apply_delta(delta_0);
+    /// text.apply_delta(delta_3);
+    /// assert_eq!(text, Text::from("abcdefghi"));
+    /// 
+    /// let mut text = Text::from("abc");
+    /// text.apply_delta(delta_1);
+    /// text.apply_delta(delta_2);
+    /// assert_eq!(text, Text::from("abcdefghi"));
     /// ```
     pub fn transform(self, other: Delta) -> (Delta, Delta) {
         let mut builder_0 = Builder::new();
@@ -450,6 +474,10 @@ impl IntoIterator for Delta {
     }
 }
 
+/// An iterator over the ranges of operations, and their kinds.
+/// 
+/// This struct is created by the `operation_ranges` method on `Delta`. See its documentation for
+/// more.
 pub struct OperationRanges<'a> {
     position: Position,
     iter: Iter<'a, Operation>,
@@ -483,22 +511,57 @@ impl<'a> Iterator for OperationRanges<'a> {
     }
 }
 
+/// A type to represent both the range and the kind of an operation.
+/// 
+/// See the `operation_ranges` method on `Delta` for more.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum OperationRange {
     Insert(Range),
     Delete(Range),
 }
 
+/// A builder for deltas.
+/// 
+/// A builder automatically normalizes the delta under construction. A delta that is in normal form
+/// meets the following requirements:
+/// - Operations of the same kind never appear next to each other.
+/// - A delete operation never appears after an insert operation.
+/// 
+/// These requirements are sufficient to ensure that if two deltas compare equal to each other, the
+/// effect they have on a given text is the same.
 #[derive(Debug, Default)]
 pub struct Builder {
     operations: Vec<Operation>,
 }
 
 impl Builder {
+    /// Creates a builder for a delta.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use makepad_live_tokenizer::delta;
+    /// 
+    /// let builder = delta::Builder::new();
+    /// ```
     pub fn new() -> Builder {
         Builder::default()
     }
     
+    /// Adds a retain operation to the delta under construction.
+    /// 
+    /// In order to maintain normal form, if the delta under construction already contains a retain
+    /// operation at the end, it is merged with the retain operation to be added, so that operations
+    /// of the same kind never appear next to each other.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use makepad_live_tokenizer::{delta, Size};
+    /// 
+    /// let mut builder = delta::Builder::new();
+    /// builder.retain(Size { line: 1, column: 1 });
+    /// ```
     pub fn retain(&mut self, count: Size) {
         if count.is_zero() {
             return;
@@ -511,6 +574,18 @@ impl Builder {
         }
     }
     
+    /// Adds an insert operation to the delta under construction.
+    /// 
+    /// In order to maintain normal form, if the delta under construction already contains an insert
+    /// operation at the end, it is merged with the insert operation to be added, so that operations
+    /// of the same kind never appear next to each other.
+    /// 
+    /// ```
+    /// use makepad_live_tokenizer::{delta, Text};
+    /// 
+    /// let mut builder = delta::Builder::new();
+    /// builder.insert(Text::from("abc"));
+    /// ```
     pub fn insert(&mut self, text: Text) {
         if text.is_empty() {
             return;
@@ -523,6 +598,23 @@ impl Builder {
         }
     }
     
+    /// Adds a delete operation to the delta under construction.
+    /// 
+    /// In order to maintain normal form, if the delta under construction already contains a delete
+    /// operation at the end, it is merged with the delete operation to be added, so that operations
+    /// of the same kind never appear next to each other. Otherwise, if the delta under construction
+    /// already contains an insert operation at the end, it is swapped with the delete operation to
+    /// be added, so that a delete operation never appears after an insert operation. If the
+    /// operation preceding the swapped out insert operation was a delete operation, this delete
+    /// operation is merged with the one swapped in, so that operations of the same kind never
+    /// appear next to each other.
+    /// 
+    /// ```
+    /// use makepad_live_tokenizer::{delta, Size};
+    /// 
+    /// let mut builder = delta::Builder::new();
+    /// builder.delete(Size { line: 1, column: 1 });
+    /// ```
     pub fn delete(&mut self, count: Size) {
         if count.is_zero() {
             return;
@@ -542,6 +634,16 @@ impl Builder {
         }
     }
     
+    /// Finishes the delta under construction.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use makepad_live_tokenizer::delta;
+    /// 
+    /// let mut builder = delta::Builder::new();
+    /// let delta = builder.build();
+    /// ```
     pub fn build(mut self) -> Delta {
         if let Some(Operation::Retain(_)) = self.operations.last() {
             self.operations.pop();
@@ -552,14 +654,22 @@ impl Builder {
     }
 }
 
+/// An operation in a delta.
 #[derive(Clone, Debug, Eq, Hash, PartialEq, SerBin, DeBin)]
 pub enum Operation {
+    /// Keeps the given amount of text at the current position.
     Retain(Size),
+    /// Insert the given text at the current position.
     Insert(Text),
+    /// Delete the given amount of text at the current position.
     Delete(Size),
 }
 
 impl Operation {
+    /// Returns the span of this operation, and its kind.
+    /// 
+    /// This method is useful when you need to store an operation, but you only care about the
+    /// amount of text inserted by insert operations, not the actual text itself.
     pub fn span(&self) -> OperationSpan {
         match self {
             Operation::Retain(count) => OperationSpan::Retain(*count),
@@ -569,6 +679,9 @@ impl Operation {
     }
 }
 
+/// A type to represent both the span and the kind of an operation.
+/// 
+/// See the `span` method on `Operation` for more.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum OperationSpan {
     Retain(Size),
@@ -576,8 +689,19 @@ pub enum OperationSpan {
     Delete(Size),
 }
 
+/// An enum to indicate who applied a delta to a text.
+/// 
+/// In certain situations, the effect of applying a delta is ambiguous. An example of this is
+/// applying a delta to the position of a cursor, when that delta inserts a text at the position
+/// of the cursor. Whether the cursor should be shifted to the right as a result of applying the
+/// delta depends on whether the delta represents a change to the text made by us or by others: if
+/// we were the one that made the change, the cursor should be shifted to the right. If someone else
+/// made the change, however, the cursor should stay in place. The purpose of this type is to
+/// distinguish between these two cases.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum Whose {
+    // This delta originates from us.
     Ours,
+    // The delta originates from someone else.
     Theirs,
 }
