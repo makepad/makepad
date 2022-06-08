@@ -5,6 +5,12 @@
 //! state on the same line will always result in the same sequence of tokens. This means that if
 //! neither the contents nor the starting state of the tokenizer changed for a given line, that
 //! line does not need to be retokenized. 
+//! 
+//! The tokenizer consumes one token at a time. The only exception to this are multiline tokens,
+//! such as comments and strings, which are broken up into separate tokens for each line.
+//! Consequently, the only time the tokenizer can end up in a state other than the initial state is
+//! when it is in the middle of tokenizing a multiline token and runs into the end of the line
+//! before it finds the end of the token.
 
 use {
     crate::{
@@ -15,6 +21,7 @@ use {
     },
 };
 
+/// The state of the tokenizer.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub enum State {
     Initial(InitialState),
@@ -30,6 +37,33 @@ impl Default for State {
 }
 
 impl State {
+    /// Given the current state of the tokenizer and a cursor over a slice of chars, finds the next
+    /// token in in that string, and moves the cursor forward by the number of characters in the
+    /// token. Returns the new state of the tokenizer and the token recognised, or `None` if there
+    /// are no more tokens in the string.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use makepad_live_tokenizer::{
+    ///     full_token::{FullToken, TokenWithLen},
+    ///     tokenizer::{Cursor, InitialState, State}
+    /// };
+    /// 
+    /// let mut state = State::default();
+    /// let mut scratch = String::new();
+    /// let mut cursor = Cursor::new(&['1', '2', '3'], &mut scratch);
+    /// assert_eq!(
+    ///     state.next(&mut cursor),
+    ///     (
+    ///         State::Initial(InitialState),
+    ///         Some(TokenWithLen {
+    ///            len: 3,
+    ///            token: FullToken::Int(123),
+    ///         })
+    ///     )
+    /// );
+    /// ```
     pub fn next(self, cursor: &mut Cursor) -> (State, Option<TokenWithLen>) {
         if cursor.peek(0) == '\0' {
             return (self, None);
@@ -53,6 +87,7 @@ impl State {
     }
 }
 
+/// The state of the tokenizer when it is not in the middle of any token.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct InitialState;
 
@@ -144,7 +179,7 @@ impl InitialState {
                     FullToken::Close(Delim::Brace),
                 )
             }
-            ('#', ch1, ch2) if ch1 == 'x' && ch2.is_hex() || ch1.is_hex() => self.color(cursor),
+            ('#', ch1, ch2) if ch1 == 'x' && ch2.is_digit(16) || ch1.is_digit(16) => self.color(cursor),
             ('.', ch1, _) if ch1.is_digit(10) => self.number(cursor),
             ('!', _, _)
                 | ('#', _, _)
@@ -453,6 +488,7 @@ impl BlockCommentTailState {
     }
 }
 
+/// The state of the tokenizer when it is in the middle of a double quoted string.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct DoubleQuotedStringTailState;
 
@@ -478,6 +514,7 @@ impl DoubleQuotedStringTailState {
     }
 }
 
+/// The state of the tokenizer when it is in the middle of a raw double quoted string.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 pub struct RawDoubleQuotedStringTailState {
     start_hash_count: usize,
@@ -507,6 +544,7 @@ impl RawDoubleQuotedStringTailState {
     }
 }
 
+/// A cursor over a slice of chars.
 #[derive(Debug)]
 pub struct Cursor<'a> {
     chars: &'a [char],
@@ -515,8 +553,19 @@ pub struct Cursor<'a> {
 }
 
 impl<'a> Cursor<'a> {
+    /// Creates a cursor over a slice of chars. The `scratch` parameter provides scratch storage for
+    /// building a string when necessary.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use makepad_live_tokenizer::tokenizer::Cursor;
+    /// 
+    /// let mut scratch = String::new();
+    /// let cursor = Cursor::new(&['1', '2', '3'], &mut scratch);
+    /// ```
     pub fn new(chars: &'a [char], scratch: &'a mut String) -> Cursor<'a> {
-        Cursor {chars, scratch, index: 0}
+        Cursor {chars, scratch, index: 0 }
     }
     
     fn index(&self) -> usize {
