@@ -12,17 +12,17 @@ live_register!{
     
     DesktopWindow: {{DesktopWindow}} {
         pass: {clear_color: (COLOR_CLEAR)}
-        var caption:"Makepad"
+        var caption: "Makepad"
         frame: {
-            layout:{
+            layout: {
                 flow: Flow::Down
             },
             windows_buttons = Solid {
-                bg:{color: (COLOR_BG_APP)}
+                bg: {color: (COLOR_BG_APP)}
                 height: 29
                 caption_label = Frame {
-                    layout:{align: {x: 0.5, y:0.5}},
-                    Label {text: (caption), margin:{left:100}}
+                    layout: {align: {x: 0.5, y: 0.5}},
+                    Label {text: (caption), walk: {margin: {left: 100}}}
                 }
                 
                 //min_btn:= DesktopButton {button_type: DesktopButtonType::WindowsMin}
