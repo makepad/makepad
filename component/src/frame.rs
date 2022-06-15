@@ -45,7 +45,7 @@ pub struct Frame { // draw info per UI element
     user_draw: bool,
     mouse_cursor: Option<MouseCursor>,
     #[live(false)] design_mode: bool, 
-    #[rust] view: Option<View>,
+    #[rust] pub view: Option<View>,
     
     scroll_x: FrameComponentRef,
     scroll_y: FrameComponentRef,
@@ -287,6 +287,15 @@ impl Frame {
         }
         
         FrameActions::from_vec(actions)
+    }
+    
+    pub fn area(&self)->Area{
+        if let Some(view) = &self.view{
+            view.area()
+        }
+        else{
+            self.bg.draw_vars.area
+        }
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) -> Result<(), LiveId> {

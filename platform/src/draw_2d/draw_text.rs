@@ -526,6 +526,9 @@ impl DrawText {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk, align: Align, text: &str) {
         
         // lets compute the geom
+        if text.len() == 0{
+            return
+        }
         if let Some(geom) = self.compute_geom(cx, walk, text) {
             let height = if walk.height.is_fit() {
                 geom.measured_height
