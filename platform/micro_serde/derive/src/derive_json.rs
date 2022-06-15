@@ -279,7 +279,7 @@ pub fn derive_de_json_impl(input: TokenStream) -> TokenStream {
                 else{
                     return parser.unexpected()
                 }
-            } 
+            }
             tb.add("_ => return std :: result :: Result :: Err ( s . err_exp ( & s . strbuf ) )");
             tb.add("} ) ; s . curly_close ( i ) ? ; r } }");
             return tb.end();

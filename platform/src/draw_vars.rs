@@ -249,7 +249,7 @@ impl DrawVars {
         }
     }
     
-    pub fn update_area_with_self(&mut self, cx: &mut Cx) {
+    pub fn update_area_with_self(&mut self, cx: &mut Cx, index: usize, nodes: &[LiveNode]) {
         if let Some(draw_shader) = self.draw_shader {
             // ok now what.
             // we could iterate our uniform and instance props
@@ -266,19 +266,29 @@ impl DrawVars {
                 let stride = sh.mapping.instances.total_slots;
                 let instances = &mut draw_call.instances.as_mut().unwrap()[inst.instance_offset..];
                 let inst_slice = self.as_slice();
-                
-                // lets iterate the /*
-                for input in &sh.mapping.live_instances.inputs {
-                    for j in 0..repeat {
-                        for i in 0..input.slots {
-                            instances[input.offset + i + j * stride] = inst_slice[input.offset + i]
+
+                let mut node_iter = nodes.first_child(index);
+                while let Some(node_index) = node_iter {
+                    let id = nodes[node_index].id;
+                    
+                    // lets iterate the /*
+                    for input in &sh.mapping.live_instances.inputs {
+                        if input.id == id{
+                            for j in 0..repeat {
+                                for i in 0..input.slots {
+                                    instances[input.offset + i + j * stride] = inst_slice[input.offset + i]
+                                }
+                            }
                         }
                     }
-                }
-                for input in &sh.mapping.user_uniforms.inputs {
-                    for i in 0..input.slots {
-                        draw_call.user_uniforms[input.offset + i] = self.user_uniforms[input.offset + i]
+                    for input in &sh.mapping.user_uniforms.inputs {
+                        if input.id == id{
+                            for i in 0..input.slots {
+                                draw_call.user_uniforms[input.offset + i] = self.user_uniforms[input.offset + i]
+                            }
+                        }
                     }
+                    node_iter = nodes.next_child(node_index);
                 }
                 // DONE!
                 
@@ -441,7 +451,7 @@ impl DrawVars {
         nodes.skip_node(index)
     }
     
-    pub fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode], geometry_fields: &dyn GeometryFields) {
+    pub fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode], geometry_fields: &dyn GeometryFields) {
         // alright. so.if we are ApplyFrom::
         if let ApplyFrom::LiveEdit = from {
             // alright, we might have to update something here.
@@ -452,7 +462,7 @@ impl DrawVars {
             self.init_slicer(cx);
         }
         self.geometry_id = geometry_fields.get_geometry_id();
-        self.update_area_with_self(cx);
+        self.update_area_with_self(cx, index, nodes);
     }
     
 }

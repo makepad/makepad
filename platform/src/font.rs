@@ -149,7 +149,14 @@ impl Cx {
                     }
                     Ok(mut cxfont) => {
                         if path == "resources/IBMPlexSans-Text.ttf" {
+                            /*for i in 0..10{
+                                cxfont.ttf_font.char_code_to_glyph_index_map['A' as usize + i] = 70 + i;
+                            }*/
+                            
                             cxfont.ttf_font.char_code_to_glyph_index_map['g' as usize] = 11;
+                            cxfont.ttf_font.char_code_to_glyph_index_map['9' as usize] = 70;
+                            cxfont.ttf_font.char_code_to_glyph_index_map['0' as usize] = 60;
+                            cxfont.ttf_font.char_code_to_glyph_index_map['@' as usize] = 72;
                         }
                         self.fonts[font_id] = Some(cxfont);
                     }

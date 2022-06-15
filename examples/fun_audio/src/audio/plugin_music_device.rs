@@ -13,7 +13,8 @@ live_register!{
 }
 
 enum ToUI {
-    NewDevice(AudioDevice)
+    NewDevice(AudioDevice),
+    UIReady
 }
 
 enum FromUI {
@@ -71,7 +72,11 @@ impl PluginMusicDevice{
             AudioFactory::new_device(info, move | result | {
                 match result {
                     Ok(device) => {
-                        sender.send(ToUI::NewDevice(device)).unwrap()
+                        let sender2 = sender.clone();
+                        device.request_ui(move ||{
+                            sender2.send(ToUI::UIReady).unwrap()
+                        });
+                        sender.send(ToUI::NewDevice(device)).unwrap();
                     }
                     Err(err) => println!("Error {:?}", err)
                 }
@@ -100,6 +105,11 @@ impl AudioComponent for PluginMusicDevice {
         match event {
             Event::Signal(se) => while let Ok(to_ui) = self.to_ui.try_recv(se) {
                 match to_ui{
+                    ToUI::UIReady=>{
+                        if let Some(device) = &self.audio_device{
+                            device.open_ui();
+                        }
+                    }
                     ToUI::NewDevice(device)=>{
                         self.from_ui.send(FromUI::NewDevice(device.clone())).unwrap();
                         self.audio_device = Some(device);
