@@ -1,6 +1,6 @@
 use {
     crate::{
-        makepad_live_tokenizer::{
+        code_editor::{
             delta::Delta,
             position::Position,
             position_set,

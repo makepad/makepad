@@ -1,5 +1,5 @@
 use {
-    crate::makepad_live_tokenizer::{
+    crate::code_editor::{
         delta::{Delta, OperationRange},
         text::Text,
     },

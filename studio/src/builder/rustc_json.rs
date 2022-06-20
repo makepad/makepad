@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 use crate::{
     makepad_micro_serde::*,
-    makepad_live_tokenizer::{Range,Position},
+    code_editor::{Range,Position},
 };
 
 // rust compiler output json structs

@@ -1,6 +1,6 @@
 use {
     crate::{
-        makepad_live_tokenizer::{
+        code_editor::{
             position::Position,
             position_set::PositionSet,
             range::Range,
