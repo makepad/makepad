@@ -2,7 +2,7 @@
 use {
     crate::{
         makepad_micro_serde::*,
-        makepad_live_tokenizer::{Range},
+        code_editor::{Range},
         builder::{
             builder_protocol::*,
             child_process::{
