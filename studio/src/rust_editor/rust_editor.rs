@@ -19,10 +19,6 @@ use {
         collab::{
             collab_protocol::CollabRequest,
         },
-        /*design_editor::{
-            inline_widget::*,
-            inline_cache::InlineEditBind
-        },*/
         editor_state::{
             SessionId
         },
@@ -100,7 +96,7 @@ pub struct RustEditor {
 }
 
 impl LiveHook for RustEditor {
-    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, _from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
         self.editor_impl.redraw(cx);
     }
 }
@@ -120,19 +116,19 @@ impl RustEditor {
     }
     
     
-    pub fn calc_layout_with_widgets(&mut self, cx: &mut Cx2d, path: &str, document_inner: &DocumentInner) {
+    pub fn calc_layout_with_widgets(&mut self, cx: &mut Cx2d, _path: &str, document_inner: &DocumentInner) {
         
         let token_cache = &document_inner.token_cache;
         
         // first we generate the layout structure
-        let live_registry_rc = cx.live_registry.clone();
-        let live_registry = live_registry_rc.borrow();
+        //let live_registry_rc = cx.live_registry.clone();
+        //let live_registry = live_registry_rc.borrow();
         
         let zoom_indent_depth = self.zoom_indent_depth;
         
-        self.editor_impl.calc_lines_layout(cx, document_inner, &mut self.lines_layout, | cx, input | {
+        self.editor_impl.calc_lines_layout(cx, document_inner, &mut self.lines_layout, | _cx, input | {
 
-            let mut max_height = 0.0f32;
+            let max_height = 0.0f32;
             
             let ws = document_inner.indent_cache[input.line].virtual_leading_whitespace();
             
@@ -289,7 +285,7 @@ impl RustEditor {
         if self.editor_impl.session_id.is_none() {
             return
         }
-        let session_id = self.editor_impl.session_id.unwrap();
+        //let session_id = self.editor_impl.session_id.unwrap();
         
         // what if the code editor changes something?
         self.editor_impl.handle_event_with_fn(
