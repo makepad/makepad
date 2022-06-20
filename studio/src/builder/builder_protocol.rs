@@ -1,6 +1,6 @@
 use {
     crate::{
-        makepad_live_tokenizer::{Range},
+        code_editor::{Range},
         makepad_micro_serde::{SerBin, DeBin, DeBinErr},
     }
 };

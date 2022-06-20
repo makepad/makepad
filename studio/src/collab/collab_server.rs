@@ -1,7 +1,7 @@
 use {
     crate::{
         makepad_platform::*,
-        makepad_live_tokenizer::{
+        code_editor::{
             delta::Delta,
             text::Text
         },
