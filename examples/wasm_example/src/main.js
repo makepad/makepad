@@ -11,12 +11,11 @@ MyWasmApp.load_wasm_from_url(
     "/makepad/target/wasm32-unknown-unknown/debug/wasm_example.wasm",
     (wasm) => {
         let app = new MyWasmApp(canvas, wasm);
-        let to_wasm = new app.msg_class.ToWasmMsg(app);
+        
+        let to_wasm = app.new_to_wasm();
         to_wasm.SysMouseInput({x: 1234, y: 5432});
-        let ret_ptr = app.process_to_wasm(to_wasm.finalise());
-        let from_wasm = new app.msg_class.FromWasmMsg(app, ret_ptr);
-        from_wasm.dispatch();
-        from_wasm.destroy();
+        
+        app.to_wasm_pump(to_wasm);
     },
     (err) => {
     }

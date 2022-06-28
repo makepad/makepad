@@ -57,6 +57,17 @@ export class WasmApp{
         return ret_ptr
     }
     
+    to_wasm_pump(to_wasm){
+        let ret_ptr = this.process_to_wasm(to_wasm.finalise());
+        let from_wasm = new this.msg_class.FromWasmMsg(this, ret_ptr);
+        from_wasm.dispatch();
+        from_wasm.destroy();
+    }
+    
+    new_to_wasm(){
+        return new this.msg_class.ToWasmMsg(this)
+    }
+    
     static load_wasm_from_url(wasm_url, complete, error) {
         function fetch_wasm(wasmfile) {
             let wasm = null;
@@ -121,10 +132,6 @@ export class ToWasmMsg {
 
         let u64_len = (offset & 1 + offset) >> 1;
         app.u32[this.u32_ptr + 1] = u64_len;
-        /*
-        for(let i = 0;i < offset;i++){
-            console.log(i," - ",app.u32[i + this.u32_ptr]);
-        }*/
         
         this.app = null;
         this.ptr = 0;
@@ -140,7 +147,7 @@ export class ToWasmMsg {
         this.reserve_u32(str.length + 1);
         app.u32[this.u32_offset ++] = str.length;
         for (let i = 0; i < str.length; i ++) {
-            this.u32[this.u32_offset ++] = str.charCodeAt(i)
+            app.u32[this.u32_offset ++] = str.charCodeAt(i)
         }
     }
 }
