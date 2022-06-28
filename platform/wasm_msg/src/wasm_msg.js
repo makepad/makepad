@@ -1,3 +1,89 @@
+export class WasmApp{
+    constructor(wasm) {
+        this.wasm = wasm;
+        this.exports = wasm.instance.exports;
+        this.memory = wasm.instance.exports.memory;
+        
+        this.buffer_ref_len_check = 0;
+        
+        this.from_wasm_args = {};
+        
+        this.update_array_buffer_refs();
+        
+        let msg = new FromWasmMsg(this, this.get_wasm_js_msg_impl());
+        let code = msg.read_str();
+        msg.destroy();
+        
+        // this class can also be loaded from file.
+        this.msg_class = new Function("ToWasmMsg","FromWasmMsg", code)(ToWasmMsg, FromWasmMsg);
+        console.log(this.msg_class)
+    }
+    
+    update_array_buffer_refs() {
+        if (this.buffer_ref_len_check != this.exports.memory.buffer.byteLength){
+            this.f32 = new Float32Array(this.exports.memory.buffer);
+            this.u32 = new Uint32Array(this.exports.memory.buffer);
+            this.f64 = new Float64Array(this.exports.memory.buffer);
+            this.buffer_ref_len_check = this.exports.memory.buffer.byteLength;
+        }
+    }
+    
+    get_wasm_js_msg_impl(){
+        let new_ptr = this.exports.get_wasm_js_msg_impl();
+        this.update_array_buffer_refs();
+        return new_ptr
+    }
+    
+    new_wasm_msg_with_u64_capacity(capacity){
+        let new_ptr = this.exports.new_wasm_msg_with_u64_capacity(capacity)
+        this.update_array_buffer_refs();
+        return new_ptr
+    }
+
+    wasm_msg_reserve_u64(ptr, capacity){
+        let new_ptr = this.exports.wasm_msg_reserve_u64(ptr, capacity);
+        this.update_array_buffer_refs();
+        return new_ptr
+    }
+    
+    wasm_msg_free(ptr){
+        this.exports.wasm_msg_free(ptr);
+        this.update_array_buffer_refs();
+    }
+    
+    process_to_wasm(msg_ptr){
+        let ret_ptr = this.exports.process_to_wasm(msg_ptr)
+        this.update_array_buffer_refs();
+        return ret_ptr
+    }
+    
+    static load_wasm_from_url(wasm_url, complete, error) {
+        function fetch_wasm(wasmfile) {
+            let wasm = null;
+            function _console_log(chars_ptr, len) {
+                let out = "";
+                let array = new Uint32Array(wasm.instance.exports.memory.buffer, chars_ptr, len);
+                for (let i = 0; i < len; i ++) {
+                    out += String.fromCharCode(array[i]);
+                }
+                console.log(out);
+            }
+            fetch(wasmfile)
+                .then(response => response.arrayBuffer())
+                .then(bytes => WebAssembly.instantiate(bytes, {env: {
+                _console_log
+            }}))
+                .then(results => {
+                wasm = results;
+                complete(wasm);
+            }, errors => {
+                error(errors);
+            });
+        }
+        fetch_wasm(wasm_url);
+    }
+}
+
 export class ToWasmMsg {
     constructor(app) {
         this.app = app
@@ -84,5 +170,11 @@ export class FromWasmMsg {
             str += String.fromCharCode(app.u32[this.u32_offset++]);
         }
         return str
+    }
+    
+    dispatch(){
+       // oook so.
+       // lets look at the first u32
+       
     }
 }
