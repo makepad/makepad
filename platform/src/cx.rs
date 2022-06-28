@@ -10,9 +10,11 @@ use {
         cell::RefCell,
     },
     crate::{
-        makepad_live_compiler::{
+        makepad_live_id::{
             id,
             LiveId,
+        },
+        makepad_live_compiler::{
             LiveEditEvent,
             LiveRegistry
         },
