@@ -18,26 +18,27 @@ pub fn derive_ser_ron_impl(input: TokenStream) -> TokenStream {
 
             tb.add("impl").stream(generic.clone());
             tb.add("SerRon for").ident(&name).stream(generic).stream(where_clause);
-            tb.add("{ fn ser_ron ( & self , d : usize , s : & mut SerRonState ) {");
+            tb.add("{");
+            tb.add("fn ser_ron(&self, d: usize, s: &mut SerRonState){");
             
             if let Some(types) = types{
-                tb.add("s . out . push (").chr('(').add(") ;");
+                tb.add("s.out.push(").chr('(').add(");");
                 for i in 0..types.len(){
-                     tb.add("self .").unsuf_usize(i).add(". ser_ron ( d , s ) ;");
+                     tb.add("self.").unsuf_usize(i).add(".ser_ron(d, s);");
                      if i != types.len() - 1{
-                         tb.add("s . out . push_str (").string(", ").add(") ;");
+                         tb.add("s.out.push_str(").string(", ").add(") ;");
                      }
                 }
-                tb.add("s . out . push (").chr(')').add(") ;");
+                tb.add("s.out.push(").chr(')').add(");");
             }
             else if let Some(fields) = parser.eat_all_struct_fields(){ 
-                tb.add("s . st_pre ( ) ;");
+                tb.add("s.st_pre( ) ;");
                 // named struct
                 for field in fields{
                     if field.ty.into_iter().next().unwrap().to_string() == "Option"{
                         tb.add("if let Some ( t ) = ").add("& self .").ident(&field.name).add("{");
-                        tb.add("s . field ( d + 1 ,").string(&field.name).add(") ;");
-                        tb.add("t . ser_ron ( d + 1 , s ) ; s . conl ( ) ; } ;");
+                        tb.add("s.field ( d + 1 ,").string(&field.name).add(") ;");
+                        tb.add("t.ser_ron ( d + 1 , s ) ; s . conl ( ) ; } ;");
                     }
                     else{
                         tb.add("s . field ( d + 1 ,").string(&field.name).add(" ) ;");

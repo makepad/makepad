@@ -2,15 +2,9 @@ use {
     std::fmt,
     std::convert::Into,
     crate::live_token::LiveTokenId,
-    crate::span::{TextSpan,TokenSpan}
+    crate::span::{TextSpan,TokenSpan},
+    makepad_live_tokenizer::{LiveErrorOrigin},
 };
-
-#[derive(Clone, Default, PartialEq)]
-pub struct LiveErrorOrigin {
-    pub filename: String,
-    pub line:usize
-}
-
 
 #[derive(Clone)]
 pub enum LiveErrorSpan {
@@ -95,12 +89,6 @@ impl fmt::Display for LiveError {
     }
 }
 
-impl fmt::Display for LiveErrorOrigin {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}:{} ", self.filename, self.line)
-    }
-}
-
 
 impl fmt::Debug for LiveError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -108,8 +96,3 @@ impl fmt::Debug for LiveError {
     }
 }
 
-impl fmt::Debug for LiveErrorOrigin {
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "{}:{} ", self.filename, self.line)
-    }
-}

@@ -5,6 +5,7 @@ use {
     },
     crate::{
         makepad_live_compiler::*,
+        makepad_live_id::*,
         shader_ast::*,
         analyse::*,
         shader_parser::{ShaderParser, ShaderParserDep},

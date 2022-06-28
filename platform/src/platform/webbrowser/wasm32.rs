@@ -1278,6 +1278,7 @@ impl FromWasm {
     }
 }
 
+
 #[derive(Clone)]
 struct ToWasm {
     mu32: *mut u32,
