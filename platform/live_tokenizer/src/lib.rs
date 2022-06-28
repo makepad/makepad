@@ -2,14 +2,18 @@ pub mod char_ext;
 pub mod vec4_ext;
 pub mod full_token;
 pub mod tokenizer;
-pub mod live_id;
 pub mod colorhex;
 
+#[macro_use]
+pub mod live_error_origin;
+
 pub use makepad_micro_serde;
+pub use makepad_live_id;
+pub use makepad_live_id::*;
 
 pub use {
     crate::char_ext::*,
     full_token::*,
     tokenizer::*,
-    live_id::*,
+    crate::live_error_origin::*,
 };

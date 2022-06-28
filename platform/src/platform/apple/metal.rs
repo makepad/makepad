@@ -12,7 +12,7 @@ use {
             generate_metal::MetalGeneratedShader,
         },
         makepad_math::*,
-        makepad_live_compiler::*,
+        makepad_live_id::*,
         platform::{
             apple::frameworks::*,
             apple::apple_util::{

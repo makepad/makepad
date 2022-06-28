@@ -537,6 +537,7 @@ impl TokenParser {
         while let Some(TokenTree::Punct(current)) = &self.current {
             out.push(current.as_char());
             if current.spacing() == Spacing::Alone {
+                self.advance();
                 return Some(out);
             }
             self.advance();

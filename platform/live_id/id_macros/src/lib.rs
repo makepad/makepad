@@ -111,12 +111,4 @@ pub fn id_from_str(item: TokenStream) -> TokenStream {
     }
 }
 
-#[proc_macro]
-pub fn live_error_origin(_item: TokenStream) -> TokenStream {
-    let mut tb = TokenBuilder::new(); 
-    tb.add("LiveErrorOrigin { filename : file ! ( ) . to_string ( ) , line : line ! ( ) as usize }");
-    tb.end()
-}
-
-
 

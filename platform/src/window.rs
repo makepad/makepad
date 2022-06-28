@@ -6,6 +6,7 @@ pub use {
 
     crate::{
         makepad_live_compiler::*,
+        makepad_live_id::*,
         makepad_math::*,
         event::{
             WindowGeom

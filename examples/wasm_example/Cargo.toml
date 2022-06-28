@@ -1,0 +1,8 @@
+[package]
+name = "wasm_example"
+version = "0.1.0"
+edition = "2018"
+
+[dependencies]
+makepad-wasm-msg = { path = "../../platform/wasm_msg", version = "0.1" }
+
