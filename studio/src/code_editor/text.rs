@@ -1,6 +1,6 @@
-use makepad_micro_serde::{DeBin, DeBinErr, SerBin};
+use crate::makepad_micro_serde::{DeBin, DeBinErr, SerBin};
 use {
-    crate::{
+    crate::code_editor::{
         delta::{Delta, Operation},
         position::Position,
         range::Range,

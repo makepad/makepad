@@ -9,6 +9,7 @@ use {
         },
         makepad_studio_component::{
             shader_view::ShaderView,
+            slides_view::SlidesView,
             file_tree::{FileTreeAction, FileNodeId, FileTree},
         },
         collab::{
@@ -49,6 +50,7 @@ pub struct AppInner {
     file_tree: FileTree,
     log_view: LogView,
     shader_view: ShaderView,
+    slides_view: SlidesView,
     editors: Editors,
     collab_client: CollabClient,
     builder_client: BuilderClient
@@ -90,6 +92,9 @@ impl AppInner {
                     match tab.kind {
                         TabKind::ShaderView => {
                             self.shader_view.draw(cx)
+                        }
+                        TabKind::SlidesView => {
+                            self.slides_view.draw(cx)
                         }
                         TabKind::LogView => {
                             self.log_view.draw(cx, &state.editor_state)
@@ -143,7 +148,8 @@ impl AppInner {
                     state,
                     id!(content).into(),
                     None,
-                    state.file_path_join(&["studio/component/src/shader_view.rs"])
+                    state.file_path_join(&["studio/component/src/shader_view.rs"]),
+                    false
                 );
                 self.builder_client.send_cmd(BuilderCmd::CargoCheck);
             }
@@ -167,7 +173,7 @@ impl AppInner {
                 DockAction::TabBarReceivedDraggedItem(panel_id, item) => {
                     for file_url in &item.file_urls {
                         let path = Path::new(&file_url[7..]).to_path_buf();
-                        self.create_code_editor_tab(cx, state, panel_id, None, path);
+                        self.create_code_editor_tab(cx, state, panel_id, None, path, true);
                     }
                 }
                 DockAction::TabWasPressed(panel_id, tab_id) => {
@@ -199,7 +205,7 @@ impl AppInner {
                 DockAction::TabReceivedDraggedItem(panel_id, tab_id, item) => {
                     for file_url in &item.file_urls {
                         let path = Path::new(&file_url[7..]).to_path_buf();
-                        self.create_code_editor_tab(cx, state, panel_id, Some(tab_id), path);
+                        self.create_code_editor_tab(cx, state, panel_id, Some(tab_id), path, true);
                     }
                 }
                 DockAction::ContentsReceivedDraggedItem(panel_id, position, item) => {
@@ -209,7 +215,7 @@ impl AppInner {
                     };
                     for file_url in &item.file_urls {
                         let path = Path::new(&file_url[7..]).to_path_buf();
-                        self.create_code_editor_tab(cx, state, panel_id, None, path);
+                        self.create_code_editor_tab(cx, state, panel_id, None, path, true);
                     }
                 }
             }
@@ -221,7 +227,7 @@ impl AppInner {
                     let node = &state.file_nodes[file_node_id];
                     if node.is_file() {
                         let path = state.file_node_path(file_node_id);
-                        self.create_code_editor_tab(cx, state, state.selected_panel_id, None, path);
+                        self.create_code_editor_tab(cx, state, state.selected_panel_id, None, path, true);
                     }
                 }
                 FileTreeAction::ShouldStartDragging(file_node_id) => {
@@ -290,6 +296,7 @@ impl AppInner {
         
         self.log_view.handle_event_with_fn(cx, event,&mut |_,_|{});
         self.shader_view.handle_event(cx, event);
+        self.slides_view.handle_event(cx, event);
     }
     
     
@@ -351,6 +358,7 @@ impl AppInner {
         panel_id: PanelId,
         next_tab_id: Option<TabId>,
         path: PathBuf,
+        select: bool
     ) {
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
         
@@ -369,7 +377,9 @@ impl AppInner {
             }
             None => panel.tab_ids.push(tab_id),
         }
-        self.select_tab(cx, state, panel_id, tab_id, Animate::No);
+        if select{
+            self.select_tab(cx, state, panel_id, tab_id, Animate::No);
+        }
     }
     
     fn select_tab(&mut self, cx: &mut Cx, state: &mut AppState, panel_id: PanelId, tab_id: TabId, animate: Animate) {
@@ -407,6 +417,9 @@ impl AppInner {
                     match tab.kind {
                         TabKind::ShaderView => {
                             self.shader_view.redraw(cx);
+                        }
+                        TabKind::SlidesView => {
+                            self.slides_view.redraw(cx);
                         }
                         TabKind::LogView => {
                             self.log_view.redraw(cx);

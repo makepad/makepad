@@ -161,11 +161,9 @@ impl TextInput {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         //self.bg_quad.begin(cx, walk, self.layout);
         self.label_text.draw_walk(cx, walk, self.align, &self.value);
-        // ok so we can now set the color of the text
-        // now how do we draw the selection 
-        // how do we know where to start and stop the selection rect
-        // we would need to compute-geom
-        
+        // ok next problem.
+        // how will we get the text geom
+        // 
         
         //self.bg_quad.end(cx);
     }

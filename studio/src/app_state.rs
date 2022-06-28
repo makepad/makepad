@@ -89,8 +89,8 @@ impl AppState {
         panels.insert(
             id!(content),
             Panel::Tab(TabPanel {
-                tab_ids: vec![],
-                selected_tab: None
+                tab_ids: vec![id!(slides_view).into()],
+                selected_tab: Some(0)
             }),
         );
         
@@ -101,6 +101,14 @@ impl AppState {
                 align: SplitterAlign::FromEnd(250.0),
                 child_panel_ids: [id!(above_log).into(), id!(log_view).into()],
             }),
+        );
+        
+         tabs.insert(
+            id!(slides_view),
+            Tab {
+                name: String::from("Slides"),
+                kind: TabKind::SlidesView,
+            },
         );
         
         panels.insert(
@@ -276,6 +284,7 @@ pub struct Tab {
 pub enum TabKind {
     LogView,
     ShaderView,
+    SlidesView,
     FileTree,
     CodeEditor {session_id: SessionId},
 }

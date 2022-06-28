@@ -15,7 +15,7 @@ live_register!{
             height:Fit
         }
         label_text:{
-            color:(COLOR_TEXT_DEFAULT)
+            color:#8
         }
     }
 }
@@ -43,7 +43,10 @@ impl FrameComponent for Label {
     }
     
     fn draw_component(&mut self, cx: &mut Cx2d, walk:Walk)->Result<(),LiveId>{
-        self.label_text.draw_walk(cx, walk, self.align, &self.text);
+        let mut lines = self.text.split("\\n");
+        for line in lines{
+            self.label_text.draw_walk(cx, walk, self.align, line);
+        }
         Ok(())
     }
 }
