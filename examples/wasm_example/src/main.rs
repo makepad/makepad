@@ -26,7 +26,7 @@ pub unsafe extern "C" fn process_to_wasm(msg_ptr: u32) -> u32 {
             
             // we have to put an id envelope around this
             
-            //ReturnMsg{x:2,y:3}.from_wasm(&mut from_wasm_msg);
+            ReturnMsg{x:2,y:3}.from_wasm(&mut from_wasm_msg);
             
             console_log(&format!("{:?}", inp));
         }
@@ -47,7 +47,6 @@ pub unsafe extern "C" fn get_wasm_js_msg_impl() -> u32 {
     out.push_str("   },");
     out.push_str("   FromWasmMsg:class extends FromWasmMsg{");
     ReturnMsg::from_wasm_js_method(&mut out);
-    
     out.push_str("   }");
     out.push_str("}");
     

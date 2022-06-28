@@ -31,8 +31,12 @@ pub fn console_log(val: &str) {
 
 pub trait FromWasm {
     
-    fn from_wasm(&self, _out: &mut FromWasmMsg) {
-        panic!();
+    fn from_wasm(&self, out: &mut FromWasmMsg) {
+        out.push_u64(Self::live_id().0);
+        let block_len_offset = out.data_len();
+        out.push_u32(0);
+        self.from_wasm_inner(out);
+        out.or_even_u32(block_len_offset, (out.data_len() - block_len_offset + 1) as u32);
     }
     
     fn from_wasm_inner(&self, out: &mut FromWasmMsg);
@@ -273,6 +277,12 @@ impl FromWasmMsg {
         self.data.reserve(capacity_u64);
         self
     }
+
+    pub fn data_len(& self)->usize{ self.data.len() }
+    
+    pub fn or_even_u32(&mut self, index:usize, data:u32){
+        self.data[index] |= data as u64;
+    }
     
     pub fn push_u32(&mut self, data: u32) {
         if self.odd {
@@ -288,6 +298,11 @@ impl FromWasmMsg {
     
     pub fn push_f32(&mut self, data: f32) {
         self.push_u32(data.to_bits())
+    }
+
+    pub fn push_u64(&mut self, data: u64) {
+        self.odd = false;
+        self.data.push(data);
     }
     
     pub fn push_f64(&mut self, data: f64) {
