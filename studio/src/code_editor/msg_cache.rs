@@ -1,6 +1,6 @@
 use {
     std::{iter, ops::{Deref, Index}, slice::Iter},
-    crate::makepad_live_tokenizer::{
+    crate::code_editor::{
         range::Range,
         delta::{Delta, OperationRange},
         text::Text,
