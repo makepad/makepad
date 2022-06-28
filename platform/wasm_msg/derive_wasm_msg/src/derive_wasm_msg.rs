@@ -16,26 +16,34 @@ pub fn derive_from_wasm_impl(input: TokenStream) -> TokenStream {
             let generic = parser.eat_generic();
             let types = parser.eat_all_types();
             let where_clause = parser.eat_where_clause(Some("FromWasm"));
-
+            
+            // implement from_wasm creating the exact same structure
+            // as the to wasm does
+            
             tb.add("impl").stream(generic.clone());
             tb.add("FromWasm for").ident(&name).stream(generic).stream(where_clause);
             tb.add("{");
-            tb.add("    fn from_wasm(&self ,out:&mut FromWasmMsg){");
+
+            tb.add("    fn type_name()->&'static str{").string(&name).add("}");
+            tb.add("    fn live_id()->LiveId{id!(").ident(&name).add(")}");
+
+            tb.add("    fn from_wasm_inner(&self ,out:&mut FromWasmMsg){");
 
             if let Some(types) = types{
                 for i in 0..types.len(){
-                     tb.add("self.").unsuf_usize(i).add(".from_wasm(out);");
+                     tb.add("self.").unsuf_usize(i).add(".from_wasm_inner(out);");
                 }
             }
-            else if let Some(fields) = parser.eat_all_struct_fields(){ 
+            else if let Some(fields) = parser.eat_all_struct_fields(){
                 for field in fields{
-                    tb.add("self.").ident(&field.name).add(".from_wasm(out);");
+                    tb.add("self.").ident(&field.name).add(".from_wasm_inner(out);");
                 }
             }
             else{
                 return parser.unexpected()
             }
-            tb.add("}"); 
+            tb.add("   }"); 
+            
             tb.add("};"); 
             return tb.end();
         }
@@ -124,7 +132,10 @@ pub fn derive_to_wasm_impl(input: TokenStream) -> TokenStream {
             tb.add("impl").stream(generic.clone());
             tb.add("ToWasm for").ident(&name).stream(generic).stream(where_clause);
             tb.add("{");
-            
+
+            tb.add("    fn type_name()->&'static str{").string(&name).add("}");
+            tb.add("    fn live_id()->LiveId{id!(").ident(&name).add(")}");
+
             tb.add("    fn to_wasm(inp:&mut ToWasmMsg)->Self{");
             if let Some(types) = &types{
                 tb.add("Self(");
@@ -168,15 +179,15 @@ pub fn derive_to_wasm_impl(input: TokenStream) -> TokenStream {
             }
             tb.add("}"); 
             
-            tb.add("    fn codegen_js_body(out:&mut String, prop:&str){");
+            tb.add("    fn to_wasm_js_body(out:&mut String, prop:&str){");
             if let Some(types) = &types{
                 for (index,ty) in types.iter().enumerate(){
-                    tb.stream(Some(ty.clone())).add("::codegen_js_body(out, &format!(").string(&format!("{{}}.{}",index)).add(",prop));");
+                    tb.stream(Some(ty.clone())).add("::to_wasm_js_body(out, &format!(").string(&format!("{{}}.{}",index)).add(",prop));");
                 }
             }
             else if let Some(fields) = &fields{ 
                 for field in fields{
-                    tb.stream(Some(field.ty.clone())).add("::codegen_js_body(out, &format!(").string(&format!("{{}}.{}",field.name)).add(",prop));");
+                    tb.stream(Some(field.ty.clone())).add("::to_wasm_js_body(out, &format!(").string(&format!("{{}}.{}",field.name)).add(",prop));");
                 }
             }
             else{
