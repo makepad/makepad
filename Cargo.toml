@@ -1,6 +1,7 @@
 [workspace]
 
 members = [
+    "code_editor/ucd",
     "examples/bare_example", 
     "examples/layout_example", 
     "examples/cmdline_example",
