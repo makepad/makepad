@@ -1,5 +1,5 @@
 use {
-    crate::{
+    crate::code_editor::{
         position::Position,
         range::Range,
         size::Size,
@@ -12,7 +12,7 @@ use {
         slice::Iter,
         vec::IntoIter
     },
-    makepad_micro_serde::{SerBin, DeBin, DeBinErr}
+    crate::makepad_micro_serde::{SerBin, DeBin, DeBinErr}
 };
 
 /// A type for representing changes in a text.

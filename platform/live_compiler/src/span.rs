@@ -1,7 +1,7 @@
 use{
     std::fmt,
     crate::{
-        makepad_live_tokenizer::Position,
+   //     makepad_live_tokenizer::Position,
         live_token::LiveTokenId,
         live_ptr::LiveFileId
     }
@@ -12,15 +12,14 @@ pub struct TextPos {
     pub line: u32,
     pub column: u32
 }
-
+/*
 impl From<TextPos> for Position {
     fn from(text_pos: TextPos) -> Position {
         Position{
             line:text_pos.line as usize,
             column:text_pos.column as usize
         }
-    }
-}
+    }*/
 
 #[derive(Clone, Copy, Default, Eq, Ord, PartialOrd, PartialEq)]
 pub struct TextSpan {

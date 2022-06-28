@@ -153,7 +153,7 @@ impl Tab {
         //self.name_text.color = self.name_color(self.is_selected);
         self.close_button.draw(cx);
         //cx.turtle_align_y();
-        self.name_text.draw_walk(cx, Walk::default(), Align::default(),  name);
+        self.name_text.draw_walk(cx, Walk::fit(), Align::default(),  name);
         //cx.turtle_align_y();
         self.bg_quad.end(cx);
         

@@ -31,9 +31,9 @@ use {
                 BuilderMsg
             }
         },
-        design_editor::{
-            live_editor::{
-                LiveEditor
+        rust_editor::{
+            rust_editor::{
+               RustEditor
             },
         }
     },
@@ -41,37 +41,37 @@ use {
 };
 
 enum EditorView {
-    LiveEditor(LiveEditor)
+    RustEditor(RustEditor)
 }
 
 impl EditorView {
     pub fn redraw(&self, cx: &mut Cx) {
         match self {
-            Self::LiveEditor(e) => e.redraw(cx)
+            Self::RustEditor(e) => e.redraw(cx)
         }
     }
     
     pub fn set_session_id(&mut self, session_id: Option<SessionId>) {
         match self {
-            Self::LiveEditor(e) => e.set_session_id(session_id)
+            Self::RustEditor(e) => e.set_session_id(session_id)
         }
     }
     
     pub fn session_id(&self) -> Option<SessionId> {
         match self {
-            Self::LiveEditor(e) => e.session_id()
+            Self::RustEditor(e) => e.session_id()
         }
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d, state: &EditorState) {
         match self {
-            Self::LiveEditor(e) => e.draw(cx, state)
+            Self::RustEditor(e) => e.draw(cx, state)
         }
     }
     
     pub fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         match self {
-            Self::LiveEditor(e) => e.apply(cx, from, index, nodes)
+            Self::RustEditor(e) => e.apply(cx, from, index, nodes)
         }
     }
     
@@ -84,16 +84,16 @@ impl EditorView {
         dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
     ) {
         match self {
-            Self::LiveEditor(e) => e.handle_event(cx, state, event, send_request, dispatch_action)
+            Self::RustEditor(e) => e.handle_event(cx, state, event, send_request, dispatch_action)
         }
     }
 }
 
 live_register!{
-    use crate::design_editor::live_editor::LiveEditor;
+    use crate::rust_editor::rust_editor::RustEditor;
     
     Editors: {{Editors}} {
-        live_editor: LiveEditor {},
+        rust_editor: RustEditor {},
     }
 }
 
@@ -108,7 +108,7 @@ impl From<TabId> for EditorViewId {
 pub struct Editors {
     #[rust] editor_views: ComponentMap<EditorViewId, EditorView>,
     
-    live_editor: Option<LivePtr>,
+    rust_editor: Option<LivePtr>,
 }
 
 impl LiveHook for Editors {
@@ -140,9 +140,9 @@ impl Editors {
         view_id: EditorViewId,
         session_id: Option<SessionId>,
     ) {
-        let live_editor = self.live_editor;
+        let rust_editor = self.rust_editor;
         let view = self.editor_views.get_or_insert(cx, view_id.into(), | cx | {
-            EditorView::LiveEditor(LiveEditor::new_from_ptr(cx, live_editor))
+            EditorView::RustEditor(RustEditor::new_from_ptr(cx, rust_editor))
         });
         
         if let Some(session_id) = view.session_id() {

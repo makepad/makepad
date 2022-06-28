@@ -94,7 +94,7 @@ live_register!{
                         plugin: "AUReverb2"
                     }
                     PluginMusicDevice {
-                        plugin: "AUMIDISynth"
+                        plugin: "Kontakt"
                     }
                 }
             }

@@ -1,7 +1,7 @@
 use {
     crate::{
         makepad_platform::*,
-        makepad_live_tokenizer::{
+        code_editor::{
             delta::{self, Delta},
             position::Position,
             position_set::PositionSet,
@@ -15,15 +15,14 @@ use {
             cursor_set::CursorSet,
             indent_cache::IndentCache,
             msg_cache::MsgCache,
-            token_cache::TokenCache,
         },
+        rust_editor::rust_tokenizer::token_cache::TokenCache,
         collab::collab_protocol::{CollabRequest, TextFileId},
-        design_editor::inline_cache::InlineCache,
+        //design_editor::inline_cache::InlineCache,
         editors::EditorViewId,
     },
     
     std::{
-        cell::RefCell,
         collections::{HashMap, HashSet, VecDeque},
         iter,
         mem,  
@@ -119,7 +118,7 @@ impl EditorState {
         let indent_cache = IndentCache::new(&text);
         let msg_cache = MsgCache::new(&text);
         
-        let inline_cache = RefCell::new(InlineCache::new(&text));
+        //let inline_cache = RefCell::new(InlineCache::new(&text));
         
         document.inner = Some(DocumentInner {
             file_id,
@@ -127,7 +126,6 @@ impl EditorState {
             text,
             token_cache,
             indent_cache,
-            inline_cache,
             msg_cache,
             edit_group: None,
             undo_stack: Vec::new(),
@@ -783,7 +781,6 @@ impl Document {
         inner.token_cache.invalidate(&delta);
         inner.indent_cache.invalidate(&delta);
         inner.msg_cache.invalidate(&delta);
-        inner.inline_cache.borrow_mut().invalidate(&delta);
         
         inner.text.apply_delta(delta);
         
@@ -822,7 +819,6 @@ pub struct DocumentInner {
     pub token_cache: TokenCache,
     pub indent_cache: IndentCache,
     pub msg_cache: MsgCache,
-    pub inline_cache: RefCell<InlineCache>,
     pub edit_group: Option<EditGroup>,
     pub undo_stack: Vec<Edit>,
     pub redo_stack: Vec<Edit>,
