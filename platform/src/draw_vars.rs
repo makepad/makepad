@@ -1,6 +1,7 @@
 use {
     crate::{
         makepad_shader_compiler::*,
+        makepad_live_id::*,
         makepad_math::*,
         cx::Cx,
         area::Area,

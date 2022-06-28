@@ -9,6 +9,7 @@ use {
     },
     crate::{
         makepad_shader_compiler::*,
+        makepad_live_id::*,
         live_traits::*,
         draw_vars::DrawVars,
         platform::{

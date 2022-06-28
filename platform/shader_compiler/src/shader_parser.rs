@@ -5,6 +5,7 @@ use {
         cell::{Cell, RefCell}
     },
     crate::{
+        makepad_live_id::*,
         makepad_live_compiler::*,
         makepad_live_compiler::makepad_live_tokenizer::Delim,
         shader_ast::*,
