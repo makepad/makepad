@@ -29,41 +29,73 @@ pub fn console_log(val: &str) {
     }
 }
 
-
 pub trait FromWasm {
-    fn from_wasm(&self, out: &mut FromWasmMsg);
+    
+    fn from_wasm(&self, _out: &mut FromWasmMsg) {
+        panic!();
+    }
+    
+    fn from_wasm_inner(&self, out: &mut FromWasmMsg);
+    
+    fn type_name()->&'static str;
+    fn live_id()->LiveId;
+    
+    //fn from_wasm_js_body(out: &mut String, prop: &str);
+    fn from_wasm_js_method(out: &mut String) {
+        let id = Self::live_id();
+        out.push_str(&format!("
+            {0}(){{
+                let app = this.app;
+                let args = app.from_wasm_args;
+                if(args_{1} === undefined) args._{1} = {{}};
+                let obj = args._{1};
+                \n", id.0 & 0xffff_ffff, Self::type_name()));
+        
+        //Self::from_wasm_js_body(out, "obj");
+        
+        out.push_str("
+            }
+        ");
+    }
 }
 
 pub trait ToWasm {
     fn to_wasm(inp: &mut ToWasmMsg) -> Self;
-    fn codegen_js_body(out:&mut String, prop:&str);
-    fn u32_size()->usize;
-    
-    fn codegen_js_method(out:&mut String, name:&str){
-        let id = LiveId::from_str(name).unwrap();
+    fn to_wasm_js_body(out: &mut String, prop: &str);
+
+    fn u32_size() -> usize;
+
+    fn type_name()->&'static str;
+    fn live_id()->LiveId;
+
+    fn to_wasm_js_method(out: &mut String) {
+        let id = Self::live_id();
         out.push_str(&format!("
             {}(obj){{
-                let app = this.app;
-                this.reserve_u32({});
-                app.u32[this.u32_offset ++] = {};
-                app.u32[this.u32_offset ++] = {};
-                let block_len_offset = this.u32_offset ++;
-        \n", name, 3 + Self::u32_size(), id.0&0xffff_ffff, (id.0>>32)));
+            let app = this.app;
+            this.reserve_u32({});
+            app.u32[this.u32_offset ++] = {};
+            app.u32[this.u32_offset ++] = {};
+            let block_len_offset = this.u32_offset ++;
+            \n", Self::type_name(), 3 + Self::u32_size(), id.0 & 0xffff_ffff, (id.0 >> 32)));
         
-        Self::codegen_js_body(out, "obj");
+        Self::to_wasm_js_body(out, "obj");
         
         out.push_str("
-                if( this.u32_offset & 1 != 0){ app.u32[this.u32_offset ++] = 0;}
-                let new_len = (this.u32_offset - this.u32_ptr) >> 1;
-                app.u32[block_len_offset] = new_len - app.u32[this.u32_ptr + 1];
-                app.u32[this.u32_ptr + 1] = new_len;
+            if( this.u32_offset & 1 != 0){ app.u32[this.u32_offset ++] = 0;}
+            let new_len = (this.u32_offset - this.u32_ptr) >> 1;
+            app.u32[block_len_offset] = new_len - app.u32[this.u32_ptr + 1];
+            app.u32[this.u32_ptr + 1] = new_len;
             }
         ");
     }
 }
 
 impl FromWasm for String {
-    fn from_wasm(&self, out: &mut FromWasmMsg) {
+    fn live_id()->LiveId{id!(String)}
+    fn type_name()->&'static str{"String"}
+
+    fn from_wasm_inner(&self, out: &mut FromWasmMsg) {
         out.push_str(self);
     }
 }
@@ -72,30 +104,41 @@ impl ToWasm for String {
     fn to_wasm(inp: &mut ToWasmMsg) -> Self {
         inp.read_string()
     }
+
+    fn live_id()->LiveId{id!(String)}
+    fn type_name()->&'static str{"String"}
     
-    fn codegen_js_body(out:&mut String, prop:&str){
+    fn to_wasm_js_body(out: &mut String, prop: &str) {
         out.push_str("this.push_str(");
         out.push_str(prop);
         out.push_str(");\n");
     }
     
-    fn u32_size()->usize{1}
+    fn u32_size() -> usize {1}
 }
 
 impl FromWasm for u32 {
-    fn from_wasm(&self, out: &mut FromWasmMsg) {
+    fn live_id()->LiveId{id!(u32)}
+    fn type_name()->&'static str{"u32"}
+
+    fn from_wasm_inner(&self, out: &mut FromWasmMsg) {
         out.push_u32(*self)
     }
 }
 
 impl FromWasm for f32 {
-    fn from_wasm(&self, out: &mut FromWasmMsg) {
+    fn live_id()->LiveId{id!(f32)}
+    fn type_name()->&'static str{"f32"}
+
+    fn from_wasm_inner(&self, out: &mut FromWasmMsg) {
         out.push_f32(*self)
     }
 }
 
 impl FromWasm for f64 {
-    fn from_wasm(&self, out: &mut FromWasmMsg) {
+    fn live_id()->LiveId{id!(f64)}
+    fn type_name()->&'static str{"f64"}
+    fn from_wasm_inner(&self, out: &mut FromWasmMsg) {
         out.push_f64(*self)
     }
 }
@@ -104,26 +147,32 @@ impl ToWasm for u32 {
     fn to_wasm(inp: &mut ToWasmMsg) -> Self {
         inp.read_u32()
     }
+
+    fn live_id()->LiveId{id!(u32)}
+    fn type_name()->&'static str{"u32"}
     
-    fn codegen_js_body(out:&mut String, prop:&str){
+    fn to_wasm_js_body(out: &mut String, prop: &str) {
         out.push_str("            app.u32[this.u32_offset++] = ");
         out.push_str(prop);
         out.push_str(";\n");
     }
-    fn u32_size()->usize{1}
+    fn u32_size() -> usize {1}
 }
 
 impl ToWasm for f32 {
     fn to_wasm(inp: &mut ToWasmMsg) -> Self {
         inp.read_f32()
     }
+    
+    fn live_id()->LiveId{id!(f32)}
+    fn type_name()->&'static str{"f32"}
 
-    fn codegen_js_body(out:&mut String, prop:&str){
+    fn to_wasm_js_body(out: &mut String, prop: &str) {
         out.push_str("            app.f32[this.u32_offset++] = ");
         out.push_str(prop);
         out.push_str(";\n");
     }
-    fn u32_size()->usize{1}
+    fn u32_size() -> usize {1}
 }
 
 impl ToWasm for f64 {
@@ -131,14 +180,17 @@ impl ToWasm for f64 {
         inp.read_f64()
     }
 
-    fn codegen_js_body(out:&mut String, prop:&str){
+    fn live_id()->LiveId{id!(f64)}
+    fn type_name()->&'static str{"f64"}
+    
+    fn to_wasm_js_body(out: &mut String, prop: &str) {
         out.push_str("            this.u32_offset += this.u32_offset&1;\n");
         out.push_str("            app.f64[this.u32_offset>>1] = ");
         out.push_str(prop);
         out.push_str(";\n");
         out.push_str("            this.u32_offset += 2;\n");
     }
-    fn u32_size()->usize{3}
+    fn u32_size() -> usize {3}
 }
 
 pub struct ToWasmMsg {
@@ -157,8 +209,8 @@ impl ToWasmMsg {
         unsafe {
             let ptr = val as *mut u64;
             let head = ptr.offset(0).read();
-            let len =  (head>>32) as usize;
-            let cap =  (head&0xffff_ffff) as usize;
+            let len = (head >> 32) as usize;
+            let cap = (head & 0xffff_ffff) as usize;
             Self {
                 data: Vec::from_raw_parts(ptr, len, cap),
                 u32_offset: 2,
@@ -187,19 +239,19 @@ impl ToWasmMsg {
     pub fn read_f32(&mut self) -> f32 {
         f32::from_bits(self.read_u32())
     }
-
+    
     pub fn read_u64(&mut self) -> u64 {
-        self.u32_offset += self.u32_offset&1;
+        self.u32_offset += self.u32_offset & 1;
         let ret = self.data[self.u32_offset >> 1];
         self.u32_offset += 2;
         ret
-    }    
+    }
     
     pub fn read_f64(&mut self) -> f64 {
         f64::from_bits(self.read_u64())
     }
     
-    pub fn read_string(&mut self)->String{
+    pub fn read_string(&mut self) -> String {
         let chars = self.read_u32();
         let mut out = String::new();
         for _ in 0..chars {
@@ -243,7 +295,7 @@ impl FromWasmMsg {
         self.data.push(data.to_bits());
     }
     
-    pub fn push_str(&mut self, val:&str){
+    pub fn push_str(&mut self, val: &str) {
         let chars = val.chars().count();
         self.push_u32(chars as u32);
         for c in val.chars() {
@@ -257,7 +309,7 @@ impl FromWasmMsg {
             let ptr = v.as_mut_ptr();
             let len = v.len();
             let cap = v.capacity();
-
+            
             ptr.offset(0).write((len as u64) << 32 | cap as u64);
             ptr as u32
         }
