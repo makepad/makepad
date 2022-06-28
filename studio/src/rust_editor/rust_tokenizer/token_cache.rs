@@ -1,7 +1,9 @@
 use {
-    crate::makepad_live_tokenizer::{
+    crate::code_editor::{
         delta::{Delta, OperationRange},
         text::Text,
+    },
+    crate::rust_editor::rust_tokenizer::{
         full_token::TokenWithLen,
         tokenizer::{Cursor, State},
     },

@@ -1,5 +1,5 @@
 use std::ops::{Add, AddAssign, Sub, SubAssign};
-use makepad_micro_serde::{SerBin, DeBin, DeBinErr};
+use crate::makepad_micro_serde::{SerBin, DeBin, DeBinErr};
 
 /// A type for representing an amount of text.
 /// 
