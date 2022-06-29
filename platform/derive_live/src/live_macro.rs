@@ -1,6 +1,7 @@
 use proc_macro::TokenStream;
-use crate::macro_lib::*;
-use crate::live_id::*;
+
+use makepad_macro_lib::{TokenBuilder, TokenParser, error};
+use makepad_live_id::*;
 use crate::colorhex::*;
 
 fn parse_array(parser:&mut TokenParser, tb:&mut TokenBuilder)->Result<(),TokenStream>{

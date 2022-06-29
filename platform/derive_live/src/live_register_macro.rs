@@ -4,7 +4,7 @@ use {
         Span,
         Delimiter
     },
-    crate::macro_lib::*,
+    makepad_macro_lib::{TokenBuilder, TokenParser},
     std::fmt::Write
 };
 

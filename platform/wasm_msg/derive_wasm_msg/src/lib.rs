@@ -1,10 +1,6 @@
-#![allow(unused)]
 #![feature(proc_macro_span)]
-use proc_macro::{TokenStream, TokenTree};
+use proc_macro::{TokenStream};
 
-#[path = "../../../../platform/micro_serde/derive/src/macro_lib.rs"]
-mod macro_lib;
-use macro_lib::{TokenBuilder, TokenParser};
 
 mod derive_wasm_msg;
 use derive_wasm_msg::*;
