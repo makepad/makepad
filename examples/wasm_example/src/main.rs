@@ -23,12 +23,9 @@ pub unsafe extern "C" fn process_to_wasm(msg_ptr: u32) -> u32 {
     match cmd_id{
         id!(SysMouseInput)=>{
             let inp = SysMouseInput::to_wasm(&mut to_wasm_msg);
-            
-            // we have to put an id envelope around this
-            
-            ReturnMsg{x:2,y:3}.from_wasm(&mut from_wasm_msg);
-            
             console_log(&format!("{:?}", inp));
+            ReturnMsg{x:2,y:3}.from_wasm(&mut from_wasm_msg);
+            ReturnMsg{x:4,y:5}.from_wasm(&mut from_wasm_msg);
         }
         _=>()
     } 

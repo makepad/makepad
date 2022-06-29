@@ -4,6 +4,7 @@ let canvas = document.getElementsByClassName('main_canvas')[0];
 
 class MyWasmApp extends WebGLWasmApp {
     ReturnMsg(obj) {
+        console.log("ReturnMsg arrived", obj)
     }
 }
 
