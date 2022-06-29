@@ -5,6 +5,7 @@ pub use {
     },
     crate::{
         makepad_live_compiler::*,
+        makepad_live_id::*,
         cx::Cx,
         platform::{CxPlatformTexture},
         live_traits::*

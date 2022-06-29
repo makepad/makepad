@@ -27,6 +27,7 @@ pub use makepad_live_compiler::makepad_math;
 pub use makepad_live_compiler::makepad_live_tokenizer;
 pub use makepad_live_compiler::makepad_derive_live;
 pub use makepad_live_compiler::makepad_micro_serde;
+pub use makepad_live_tokenizer::makepad_live_id;
 
 pub use {
     crate::{

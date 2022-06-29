@@ -9,7 +9,6 @@ mod live_prims;
 mod cx;
 mod cx_api;
 mod cx_thread;
-//mod cx_registries;
 mod cx_draw_shaders;
 
 pub mod live_traits;
@@ -23,7 +22,6 @@ mod pass;
 mod texture;
 mod cursor;
 mod menu;
-//mod animator;
 mod state;
 mod gpu_info;
 mod draw_vars;
@@ -42,16 +40,16 @@ pub use {
     makepad_shader_compiler::makepad_live_tokenizer,
     makepad_shader_compiler::makepad_micro_serde,
     makepad_shader_compiler::makepad_live_compiler,
+    makepad_shader_compiler::makepad_live_id,
+    makepad_wasm_msg,
     makepad_derive_live::*,
     makepad_math::*,
-    //makepad_microserde::*,
+    makepad_live_id::*,
     makepad_live_compiler::{
         vec4_ext::*,
         live_error_origin,
         LiveErrorOrigin,
         LiveNodeOrigin,
-        id,
-        ids,
         LiveRegistry,
         LiveDocNodes,
         LiveId,
