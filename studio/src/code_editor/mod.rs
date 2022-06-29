@@ -12,6 +12,7 @@ pub mod size;
 pub mod text;
 
 pub use {
+    cursor::*,
     delta::*,
     position::*,
     position_set::*,
