@@ -1,6 +1,6 @@
 use proc_macro::{TokenStream};
 
-use makepad_macro_lib::{TokenBuilder, TokenParser};
+use makepad_macro_lib::{TokenBuilder, TokenParser, type_to_static_callable};
 
 pub fn derive_from_wasm_impl(input: TokenStream) -> TokenStream {
 
@@ -50,13 +50,15 @@ pub fn derive_from_wasm_impl(input: TokenStream) -> TokenStream {
             if let Some(types) = &types{
                 tb.add("    out.push_str(&format!(").string("if({0} == undefined){0} = [];\n").add(",prop));");
                 for (index,ty) in types.iter().enumerate(){
-                    tb.stream(Some(ty.clone())).add("::from_wasm_js_body(out, &format!(").string(&format!("{{}}.{}",index)).add(",prop));");
+                    let ty = type_to_static_callable(ty.clone());
+                    tb.stream(Some(ty)).add("::from_wasm_js_body(out, &format!(").string(&format!("{{}}.{}",index)).add(",prop));");
                 }
             }
             else if let Some(fields) = &fields{ 
                 tb.add("    out.push_str(&format!(").string("if({0} == undefined){0} = {{}};\n").add(",prop));");
                 for field in fields{
-                    tb.stream(Some(field.ty.clone())).add("::from_wasm_js_body(out, &format!(").string(&format!("{{}}.{}",field.name)).add(",prop));");
+                    let ty = type_to_static_callable(field.ty.clone());
+                    tb.stream(Some(ty)).add("::from_wasm_js_body(out, &format!(").string(&format!("{{}}.{}",field.name)).add(",prop));");
                 }
             }
             else{
@@ -126,7 +128,8 @@ pub fn derive_to_wasm_impl(input: TokenStream) -> TokenStream {
                     if index > 0{
                         tb.add("+");
                     }
-                    tb.stream(Some(ty.clone())).add("::u32_size()");
+                    let ty = type_to_static_callable(ty.clone());
+                    tb.stream(Some(ty)).add("::u32_size()");
                 }
             }
             else if let Some(fields) = &fields{ 
@@ -134,7 +137,8 @@ pub fn derive_to_wasm_impl(input: TokenStream) -> TokenStream {
                     if index > 0{
                         tb.add("+");
                     }
-                    tb.stream(Some(field.ty.clone())).add("::u32_size()");
+                    let ty = type_to_static_callable(field.ty.clone());
+                    tb.stream(Some(ty)).add("::u32_size()");
                 }
             }
             else{
@@ -143,14 +147,17 @@ pub fn derive_to_wasm_impl(input: TokenStream) -> TokenStream {
             tb.add("}"); 
             
             tb.add("    fn to_wasm_js_body(out:&mut String, prop:&str){");
+            //tb.add("        out.push_str(&format!(").string("this.reserve_u32({})").add(", Self::u32_size()));");
             if let Some(types) = &types{
                 for (index,ty) in types.iter().enumerate(){
-                    tb.stream(Some(ty.clone())).add("::to_wasm_js_body(out, &format!(").string(&format!("{{}}.{}",index)).add(",prop));");
+                    let ty = type_to_static_callable(ty.clone());
+                    tb.stream(Some(ty)).add("::to_wasm_js_body(out, &format!(").string(&format!("{{}}.{}",index)).add(",prop));");
                 }
             }
             else if let Some(fields) = &fields{ 
                 for field in fields{
-                    tb.stream(Some(field.ty.clone())).add("::to_wasm_js_body(out, &format!(").string(&format!("{{}}.{}",field.name)).add(",prop));");
+                    let ty = type_to_static_callable(field.ty.clone());
+                    tb.stream(Some(ty)).add("::to_wasm_js_body(out, &format!(").string(&format!("{{}}.{}",field.name)).add(",prop));");
                 }
             }
             else{
