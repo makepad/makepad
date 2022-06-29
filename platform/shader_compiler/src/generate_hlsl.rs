@@ -5,7 +5,7 @@ use{
         collections::{BTreeSet,BTreeMap},
     },
     crate::{
-        makepad_live_compiler::{
+        makepad_live_id::{
             id,
             LiveId,
         },

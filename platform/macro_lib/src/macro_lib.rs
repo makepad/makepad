@@ -1,5 +1,5 @@
 #![allow(dead_code)]
-
+extern crate proc_macro;
 use proc_macro::{TokenTree, Span, TokenStream, Delimiter, Group, Literal, Ident, Punct, Spacing};
 use proc_macro::token_stream::IntoIter;
 
@@ -17,10 +17,42 @@ pub fn error(err: &str) -> TokenStream {
     tb.end()
 }
 
-pub fn error_result(err: &str) -> Result<(),TokenStream> {
+pub fn error_result(err: &str) -> Result<(), TokenStream> {
     let mut tb = TokenBuilder::new();
     tb.add("compile_error ! (").string(err).add(") ;");
     Err(tb.end())
+}
+
+pub fn type_to_static_callable(input: TokenStream) -> TokenStream {
+    let mut ty_parser = TokenParser::new(input.clone());
+    let mut tb = TokenBuilder::new();
+    if let Some(ident) = ty_parser.eat_any_ident() {
+        
+        if !ty_parser.eat_punct_alone('<') {
+            return input
+        }
+        tb.ident(&ident);
+        tb.add("::<");
+        tb.stream(Some(ty_parser.eat_level_or_punct('>')));
+        tb.add(">");
+        tb.end()
+    }
+    else {
+        input
+    }
+}
+
+pub fn unwrap_option(input: TokenStream) -> Result<TokenStream, TokenStream> {
+    let mut ty_parser = TokenParser::new(input.clone());
+    if ty_parser.eat_ident("Option") {
+        if !ty_parser.eat_punct_alone('<') {
+            panic!()
+        }
+        Ok(ty_parser.eat_level_or_punct('>'))
+    }
+    else {
+        Err(input)
+    }
 }
 
 pub struct TokenBuilder {
@@ -68,7 +100,7 @@ impl TokenBuilder {
     
     pub fn add(&mut self, what: &str) -> &mut Self {
         let b = what.as_bytes();
-        let mut o = 0; 
+        let mut o = 0;
         while o < b.len() {
             let c0 = b[o] as char;
             let c1 = if o + 1 < b.len() {b[o + 1] as char}else {'\0'};
@@ -139,8 +171,8 @@ impl TokenBuilder {
                     self.string(std::str::from_utf8(&b[o + 1..e]).unwrap());
                     o = e + 1;
                 }
-                ('\'',_)=>{
-                    let mut e = o+1;
+                ('\'', _) => {
+                    let mut e = o + 1;
                     while e < b.len() {
                         let c = b[e] as char;
                         if c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_' {
@@ -152,10 +184,10 @@ impl TokenBuilder {
                     if o == e {
                         panic!("Unexpected character {}", b[e] as char);
                     }
-                    let ident = std::str::from_utf8(&b[o+1..e]).unwrap();
+                    let ident = std::str::from_utf8(&b[o + 1..e]).unwrap();
                     self.lifetime_mark();
                     self.ident(ident);
-                    o = e;                    
+                    o = e;
                 }
                 _ => {
                     let mut e = o;
@@ -193,7 +225,7 @@ impl TokenBuilder {
         }
         self
     }
-
+    
     pub fn lifetime_mark(&mut self) -> &mut Self {
         self.extend(TokenTree::from(Punct::new('\'', Spacing::Joint)));
         self
@@ -537,6 +569,7 @@ impl TokenParser {
         while let Some(TokenTree::Punct(current)) = &self.current {
             out.push(current.as_char());
             if current.spacing() == Spacing::Alone {
+                self.advance();
                 return Some(out);
             }
             self.advance();
@@ -690,12 +723,12 @@ impl TokenParser {
             let mut assign_form = false;
             while let Some(ident) = self.eat_any_ident() {
                 // we might have an =
-                if self.eat_punct_alone('='){
+                if self.eat_punct_alone('=') {
                     let level = self.eat_level();
-                   results.push(Attribute {name: ident, args: Some(level)});
-                   //eprintln!("{} {}", results.last().unwrap().name, results.last().as_ref().unwrap().args.as_ref().unwrap().to_string());
-                   assign_form = true;
-                   break; 
+                    results.push(Attribute {name: ident, args: Some(level)});
+                    //eprintln!("{} {}", results.last().unwrap().name, results.last().as_ref().unwrap().args.as_ref().unwrap().to_string());
+                    assign_form = true;
+                    break;
                 }
                 if !self.open_paren() && !self.open_brace() {
                     results.push(Attribute {name: ident, args: None});
@@ -809,8 +842,8 @@ impl TokenParser {
         }
         else if let Some((ty, span)) = self.eat_any_ident_with_span() {
             tb.ident_with_span(&ty, span);
-            if ty == "dyn"{
-                if let Some((ty, span)) = self.eat_any_ident_with_span(){
+            if ty == "dyn" {
+                if let Some((ty, span)) = self.eat_any_ident_with_span() {
                     tb.ident_with_span(&ty, span);
                 }
             }
@@ -820,19 +853,5 @@ impl TokenParser {
         return None
     }
     
-    pub fn unwrap_option(input: TokenStream) -> Result<TokenStream, TokenStream> {
-        let mut ty_parser = TokenParser::new(input.clone());
-        if ty_parser.eat_ident("Option") {
-            if !ty_parser.eat_punct_alone('<') {
-                panic!()
-            }
-            Ok(ty_parser.eat_level_or_punct('>'))
-        }
-        else {
-            Err(input)
-        }
-    }
 }
-
-
 

@@ -9,6 +9,7 @@ use {
         ops::Deref,
         ops::DerefMut
     },
+    makepad_live_id::*,
     makepad_live_compiler::*,
     makepad_live_compiler::makepad_math::*,
 };

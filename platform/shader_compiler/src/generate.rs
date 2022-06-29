@@ -6,10 +6,9 @@ use{
         collections::BTreeSet,
     },
     crate::{
+        makepad_live_id::{LiveId, id},
         makepad_live_compiler::{
-            id,
             makepad_math::PrettyPrintedF32,
-            LiveId,
             TokenSpan
         },
         shader_ast::*,

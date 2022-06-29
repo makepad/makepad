@@ -1,8 +1,14 @@
 use proc_macro::{TokenStream};
 
-use crate::macro_lib::*;
-use crate::live_id::*;
-
+use makepad_macro_lib::{
+    TokenBuilder,
+    TokenParser,
+    unwrap_option,
+    error_result,
+    Attribute,
+    StructField
+};
+use makepad_live_id::*;
 
 pub fn derive_live_hook_impl(input: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new();
@@ -73,17 +79,17 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         // lets pull out all the alias fields
         let mut aliases = Vec::new();
         for field in &mut fields {
-            while let Some(index) = field.attrs.iter().position(|attr| attr.name == "alias"){
+            while let Some(index) = field.attrs.iter().position( | attr | attr.name == "alias") {
                 let attr = field.attrs.remove(index);
                 if let Some(args) = &attr.args {
                     let mut parser = TokenParser::new(args.clone());
                     // ok its key:value comma
                     let var = parser.expect_any_ident() ?;
-                    parser.expect_punct_alone(',')?;
+                    parser.expect_punct_alone(',') ?;
                     aliases.push((var, parser.eat_level()));
                 }
             }
-            if field.attrs.len() == 1 && &field.attrs[0].name != "live" && field.attrs[0].name != "calc" && field.attrs[0].name != "rust"  {
+            if field.attrs.len() == 1 && &field.attrs[0].name != "live" && field.attrs[0].name != "calc" && field.attrs[0].name != "rust" {
                 return error_result(&format!("Field {} does not have a live, calc or rust attribute", field.name));
             }
             if field.attrs.len() == 0 { // insert a default
@@ -208,7 +214,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
             // 1. StateInit (process the 'state' structure)
             // 2. from file id (run defaults)
             // 3. actual animate (process the 'state' structure and call animate_to/cut depending)
-            // 
+            //
             
             tb.add("    fn after_apply_state_changed(&mut self, cx:&mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]){");
             tb.add("        let mut index = index + 1;");
@@ -253,7 +259,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
             tb.add("            _=>()"); // if apply from is file, run defaults
             tb.add("        }");
             tb.add("    }");
-
+            
             tb.add("    fn apply_animating_state(&mut self, cx: &mut Cx) {");
             tb.add("        let state = self.state.swap_out_state();");
             tb.add("        self.apply(cx, ApplyFrom::Animate, state.child_by_name(0,id!(state).as_field()).unwrap(), &state);");
@@ -293,13 +299,13 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         tb.add("    fn apply_value(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]) -> usize{");
         tb.add("        if nodes[index].origin.has_prop_type(LivePropType::Field){");
         tb.add("            match nodes[index].id {");
-
+        
         for field in &fields {
             if field.attrs[0].name == "live" {
                 tb.add("        LiveId(").suf_u64(LiveId::from_str(&field.name).unwrap().0).add(")=>self.").ident(&field.name).add(".apply(cx, apply_from, index, nodes),");
             }
         }
-        for (alias_var, alias_redir) in aliases{
+        for (alias_var, alias_redir) in aliases {
             tb.add("            LiveId(").suf_u64(LiveId::from_str(&alias_var).unwrap().0).add(")=>self.").stream(Some(alias_redir)).add(".apply(cx, apply_from, index, nodes),");
         }
         // Unknown value handling
@@ -359,7 +365,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         if state.is_some() { // apply the default states
             tb.add("    let mut state_index = None;");
         }
-
+        
         tb.add("        let index = if let Some(index) = skip_index{index} else {");
         tb.add("            let struct_id = LiveId(").suf_u64(LiveId::from_str(&struct_name).unwrap().0).add(");");
         tb.add("            if !nodes[start_index].value.is_structy_type(){");
@@ -424,7 +430,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
                 tb.add("fields.push(LiveTypeField{id:LiveId::from_str(").string(&field.name).add(").unwrap(),");
                 // ok so what do we do if we have an Option<..>
                 // how about LiveOrCalc becomes LiveFieldType::Option
-                match TokenParser::unwrap_option(field.ty.clone()) {
+                match unwrap_option(field.ty.clone()) {
                     Ok(inside) => {
                         if attr.name != "live" {
                             return error_result("For option type only use of live is supported")
@@ -455,9 +461,9 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         tb.add("    }");
         
         tb.add("    fn live_register(cx: &mut Cx) {");
-
-        for attr in main_attribs.iter().filter(|attr| attr.name == "live_register"){
-            if attr.args.is_none(){
+        
+        for attr in main_attribs.iter().filter( | attr | attr.name == "live_register") {
+            if attr.args.is_none() {
                 return error_result("live_register needs an argument")
             }
             tb.add("(").stream(attr.args.clone()).add(")(cx);");
@@ -468,7 +474,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         for field in &fields {
             let attr = &field.attrs[0];
             if attr.name == "live" || attr.name == "calc" {
-                match TokenParser::unwrap_option(field.ty.clone()) {
+                match unwrap_option(field.ty.clone()) {
                     Ok(inside) => {
                         tb.stream(Some(inside)).add("::live_register(cx);");
                     }
@@ -486,7 +492,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         for field in &fields {
             let attr = &field.attrs[0];
             tb.ident(&field.name).add(":");
-            if field.name == "animator"{
+            if field.name == "animator" {
                 tb.add("Default::default()");
             }
             else if attr.args.is_none () || attr.args.as_ref().unwrap().is_empty() {
@@ -506,9 +512,9 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         tb.add("        ret.after_new(cx);");
         tb.add("        ret");
         tb.add("    }");
-
+        
         tb.add("}");
-        if main_attribs.iter().any(|attr| attr.name == "live_debug"){
+        if main_attribs.iter().any( | attr | attr.name == "live_debug") {
             tb.eprint();
         }
         
@@ -601,7 +607,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         tb.add("    }");
         
         tb.add("    fn live_register(cx: &mut Cx) {");
-
+        
         
         let is_u32_enum = main_attribs.iter().find( | attr | attr.name == "repr" && attr.args.as_ref().unwrap().to_string().to_lowercase() == "u32").is_some();
         if is_u32_enum {
@@ -648,7 +654,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         tb.add("                    }");
         tb.add("                }");
         tb.add("            },");
-
+        
         tb.add("            LiveValue::BareEnum{base,variant}=>{");
         tb.add("                if *base != enum_id{");
         tb.add("                    cx.apply_error_wrong_enum_base(live_error_origin!(), index, nodes, enum_id, *base);");

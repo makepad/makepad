@@ -2,30 +2,26 @@ use makepad_component::*;
 use makepad_platform::*;
 
 live_register!{
+    use makepad_component::frame::*;
     use FrameComponent::*;
     App: {{App}} {
         frame: {
-            color: #3
-            padding: 30
-            width: Size::Fill
-            height: Size::Fill
-            align: {x: 0.0, y: 0.5}
-            spacing: 30.,
-            Frame {color: #0f0, width: Size::Fill, height: 40}
-            Frame {
-                color: #0ff,
-                padding: 10,
-                flow: Flow::Down,
-                width: Size::Fit,
+            width: Fill
+            height: Fill
+            layout:{align: {x: 0.0, y: 0.5}, padding: 30,spacing: 30.}
+            Solid {bg:{color: #0f0}, width: Fill, height: 40}
+            Solid {
+                bg:{color: #0ff},
+                layout:{padding: 10, flow: Down, spacing: 10},
+                width: Fit,
                 height: 300
-                spacing: 10
-                Frame {color: #00f, width: 40, height: Size::Fill}
-                Frame {color: #f00, width: 40, height: 40}
-                Frame {color: #00f, width: 40, height: 40}
+                Solid {bg:{color: #00f}, width: 40, height: Fill}
+                Solid {bg:{color: #f00}, width: 40, height: 40}
+                Solid {bg:{color: #00f}, width: 40, height: 40}
             }
-            Frame {color: #f00, width: 40, height: 40}
-            Frame {color: #f0f, width: Size::Fill, height: 60}
-            Frame {color: #f00, width: 40, height: 40}
+            Solid {bg:{color: #f00}, width: 40, height: 40}
+            Solid {bg:{color: #f0f}, width: Fill, height: 60}
+            Solid {bg:{color: #f00}, width: 40, height: 40}
         }
     }
 }
@@ -62,7 +58,9 @@ impl App {
         if self.window.begin(cx, None).is_err() {
             return;
         }
-        while self.frame.draw(cx).is_ok(){};
+        while let Err(_child) = self.frame.draw(cx){
+            
+        };
         self.window.end(cx);
     }
 }
