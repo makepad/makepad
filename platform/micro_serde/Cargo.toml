@@ -8,3 +8,4 @@ edition = "2018"
 
 [dependencies]
 makepad-micro-serde-derive = { path = "derive", version = "0.1" }
+

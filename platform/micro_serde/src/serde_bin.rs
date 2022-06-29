@@ -2,9 +2,13 @@ use std::{
     collections::HashMap,
     hash::Hash,
     convert::TryInto,
+    str,
+};
+
+#[cfg(not(target_arch = "wasm32"))]
+use std::{
     ffi::{OsStr, OsString},
     path::{PathBuf, Path},
-    str,
 };
 
 pub trait SerBin {
@@ -341,25 +345,28 @@ impl<T> DeBin for Box<T> where T: DeBin {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl SerBin for PathBuf {
     fn ser_bin(&self, s: &mut Vec<u8>) {
         self.as_os_str().ser_bin(s)
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl SerBin for Path {
     fn ser_bin(&self, s: &mut Vec<u8>) {
         self.as_os_str().ser_bin(s)
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 impl SerBin for OsString {
     fn ser_bin(&self, s: &mut Vec<u8>) {
         self.as_os_str().ser_bin(s)
     }
 }
 
-#[cfg(unix)]
+#[cfg(not(target_arch = "wasm32"))]
 impl SerBin for OsStr {
     fn ser_bin(&self, s: &mut Vec<u8>) {
         use std::os::unix::ffi::OsStrExt;
