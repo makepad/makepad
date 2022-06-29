@@ -16,16 +16,8 @@ use crate::derive_live_registry::*;
 mod derive_frame_component_action;
 use crate::derive_frame_component_action::*;
 
-
-#[path = "../../micro_serde/derive/src/macro_lib.rs"]
-mod macro_lib;
-
-#[path = "../../live_tokenizer/src/live_id.rs"]
-mod live_id;
-
 #[path = "../../live_tokenizer/src/colorhex.rs"]
 mod colorhex;
-
 
 #[proc_macro_derive(Live, attributes(
     alias,

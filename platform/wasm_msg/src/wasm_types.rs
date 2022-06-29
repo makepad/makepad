@@ -22,10 +22,19 @@ extern "C" {
     pub fn _console_log(chars: u32, len: u32);
 }
 
-pub fn console_log(val: &str) {
+pub fn console_log_impl(val: &str) {
     unsafe {
         let chars = val.chars().collect::<Vec<char >> ();
         _console_log(chars.as_ptr() as u32, chars.len() as u32);
+    }
+}
+
+pub struct WasmPtr(u32);
+
+#[macro_export]
+macro_rules!console_log {
+    ( $ ( $ t: tt) *) => {
+        console_log_impl(&format!("{}:{} - {}", file!(), line!(), format!( $ ( $ t) *)))
     }
 }
 
@@ -139,6 +148,20 @@ impl FromWasm for u32 {
     }
 }
 
+impl FromWasm for usize {
+    fn live_id()->LiveId{id!(usize)}
+    fn type_name()->&'static str{"usize"}
+
+    fn from_wasm_js_body(out: &mut String, prop: &str) {
+        out.push_str(prop);
+        out.push_str(" = app.u32[this.u32_offset++];\n");
+    }
+
+    fn from_wasm_inner(&self, out: &mut FromWasmMsg) {
+        out.push_u32(*self as u32)
+    }
+}
+
 impl FromWasm for f32 {
     fn live_id()->LiveId{id!(f32)}
     fn type_name()->&'static str{"f32"}
@@ -185,6 +208,23 @@ impl ToWasm for u32 {
     fn u32_size() -> usize {1}
 }
 
+impl ToWasm for usize {
+    fn to_wasm(inp: &mut ToWasmMsg) -> Self {
+        inp.read_u32() as usize
+    }
+
+    fn live_id()->LiveId{id!(usize)}
+    fn type_name()->&'static str{"usize"}
+    
+    fn to_wasm_js_body(out: &mut String, prop: &str) {
+        out.push_str("            app.u32[this.u32_offset++] = ");
+        out.push_str(prop);
+        out.push_str(";\n");
+    }
+    fn u32_size() -> usize {1}
+}
+
+
 impl ToWasm for f32 {
     fn to_wasm(inp: &mut ToWasmMsg) -> Self {
         inp.read_f32()
@@ -229,6 +269,11 @@ pub struct FromWasmMsg {
     odd: bool
 }
 
+pub struct ToWasmCmdSkip{
+    len:usize,
+    base:usize
+}
+
 impl ToWasmMsg {
     
     pub fn from_wasm_ptr(val: u32) -> Self {
@@ -262,6 +307,17 @@ impl ToWasmMsg {
         ret
     }
     
+    pub fn read_cmd_skip(&mut self)->ToWasmCmdSkip{
+        ToWasmCmdSkip{
+            base: self.u32_offset >> 1,
+            len: self.read_u32() as usize, 
+        }
+    }
+    
+    pub fn cmd_skip(&mut self, cmd_skip:ToWasmCmdSkip){
+        self.u32_offset = (cmd_skip.base + cmd_skip.len - 1)<<1
+    }
+    
     pub fn read_f32(&mut self) -> f32 {
         f32::from_bits(self.read_u32())
     }
@@ -284,6 +340,11 @@ impl ToWasmMsg {
             out.push(char::from_u32(self.read_u32()).unwrap_or('?'));
         }
         out
+    }
+    
+    pub fn was_last_cmd(&mut self)->bool{
+        self.u32_offset += self.u32_offset & 1;
+        self.u32_offset>>1 >= self.data.len()
     }
 }
 

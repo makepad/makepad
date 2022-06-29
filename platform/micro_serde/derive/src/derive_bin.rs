@@ -1,5 +1,5 @@
 use proc_macro::{TokenStream};
-use crate::macro_lib::*;
+use makepad_macro_lib::*;
 
 pub fn derive_ser_bin_impl(input: TokenStream) -> TokenStream {
     let mut parser = TokenParser::new(input);
