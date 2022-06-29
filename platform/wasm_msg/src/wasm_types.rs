@@ -39,8 +39,8 @@ macro_rules!console_log {
 }
 
 pub trait FromWasm {
-    fn type_name()->&'static str;
-    fn live_id()->LiveId;
+    fn type_name()->&'static str{panic!()}
+    fn live_id()->LiveId{panic!()}
 
     fn from_wasm(&self, out: &mut FromWasmMsg) {
         out.push_u64(Self::live_id().0);
@@ -74,8 +74,9 @@ pub trait FromWasm {
 
 pub trait ToWasm {
     fn u32_size() -> usize;
-    fn type_name()->&'static str;
-    fn live_id()->LiveId;
+    
+    fn type_name()->&'static str{panic!()}
+    fn live_id()->LiveId{panic!()}
 
     fn to_wasm(inp: &mut ToWasmMsg) -> Self;
     fn to_wasm_js_body(out: &mut String, prop: &str);
@@ -94,7 +95,7 @@ pub trait ToWasm {
         Self::to_wasm_js_body(out, "obj");
         
         out.push_str("
-            if( this.u32_offset & 1 != 0){ app.u32[this.u32_offset ++] = 0;}
+            if( (this.u32_offset & 1) != 0){ app.u32[this.u32_offset ++] = 0;}
             let new_len = (this.u32_offset - this.u32_ptr) >> 1;
             app.u32[block_len_offset] = new_len - app.u32[this.u32_ptr + 1];
             app.u32[this.u32_ptr + 1] = new_len;
@@ -104,9 +105,6 @@ pub trait ToWasm {
 }
 
 impl FromWasm for String {
-    fn live_id()->LiveId{id!(String)}
-    fn type_name()->&'static str{"String"}
-    
     fn from_wasm_js_body(out: &mut String, prop: &str) {
         out.push_str(prop);
         out.push_str(" = this.read_str();\n");
@@ -122,9 +120,6 @@ impl ToWasm for String {
         inp.read_string()
     }
 
-    fn live_id()->LiveId{id!(String)}
-    fn type_name()->&'static str{"String"}
-    
     fn to_wasm_js_body(out: &mut String, prop: &str) {
         out.push_str("this.push_str(");
         out.push_str(prop);
@@ -135,9 +130,6 @@ impl ToWasm for String {
 }
 
 impl FromWasm for u32 {
-    fn live_id()->LiveId{id!(u32)}
-    fn type_name()->&'static str{"u32"}
-
     fn from_wasm_js_body(out: &mut String, prop: &str) {
         out.push_str(prop);
         out.push_str(" = app.u32[this.u32_offset++];\n");
@@ -149,9 +141,6 @@ impl FromWasm for u32 {
 }
 
 impl FromWasm for usize {
-    fn live_id()->LiveId{id!(usize)}
-    fn type_name()->&'static str{"usize"}
-
     fn from_wasm_js_body(out: &mut String, prop: &str) {
         out.push_str(prop);
         out.push_str(" = app.u32[this.u32_offset++];\n");
@@ -163,9 +152,6 @@ impl FromWasm for usize {
 }
 
 impl FromWasm for f32 {
-    fn live_id()->LiveId{id!(f32)}
-    fn type_name()->&'static str{"f32"}
-    
     fn from_wasm_js_body(out: &mut String, prop: &str) {
         out.push_str(prop);
         out.push_str(" = app.f32[this.u32_offset++];\n");
@@ -177,9 +163,6 @@ impl FromWasm for f32 {
 }
 
 impl FromWasm for f64 {
-    fn live_id()->LiveId{id!(f64)}
-    fn type_name()->&'static str{"f64"}
-    
     fn from_wasm_js_body(out: &mut String, prop: &str) {
         out.push_str("            this.u32_offset += this.u32_offset&1;\n");
         out.push_str(prop);
@@ -192,14 +175,31 @@ impl FromWasm for f64 {
     }
 }
 
+impl<T> FromWasm for Vec<T> where T:FromWasm{
+    fn from_wasm_inner(&self, out: &mut FromWasmMsg) {
+        out.push_u32(self.len() as u32);
+        for item in self{
+            item.from_wasm_inner(out);
+        }
+    }
+    
+    fn from_wasm_js_body(out: &mut String, prop: &str){
+        out.push_str(prop);
+        out.push_str(" = [];\n");
+        out.push_str(&format!("
+            {0}.length = app.u32[this.u32_offset++];
+            for(let i = 0; i < {0}.length; i++){{
+        ", prop));
+        T::from_wasm_js_body(out, &format!("{}[i]", prop));
+        out.push_str("}");
+    }
+}
+
 impl ToWasm for u32 {
     fn to_wasm(inp: &mut ToWasmMsg) -> Self {
         inp.read_u32()
     }
 
-    fn live_id()->LiveId{id!(u32)}
-    fn type_name()->&'static str{"u32"}
-    
     fn to_wasm_js_body(out: &mut String, prop: &str) {
         out.push_str("            app.u32[this.u32_offset++] = ");
         out.push_str(prop);
@@ -213,9 +213,6 @@ impl ToWasm for usize {
         inp.read_u32() as usize
     }
 
-    fn live_id()->LiveId{id!(usize)}
-    fn type_name()->&'static str{"usize"}
-    
     fn to_wasm_js_body(out: &mut String, prop: &str) {
         out.push_str("            app.u32[this.u32_offset++] = ");
         out.push_str(prop);
@@ -230,9 +227,6 @@ impl ToWasm for f32 {
         inp.read_f32()
     }
     
-    fn live_id()->LiveId{id!(f32)}
-    fn type_name()->&'static str{"f32"}
-
     fn to_wasm_js_body(out: &mut String, prop: &str) {
         out.push_str("            app.f32[this.u32_offset++] = ");
         out.push_str(prop);
@@ -246,9 +240,6 @@ impl ToWasm for f64 {
         inp.read_f64()
     }
 
-    fn live_id()->LiveId{id!(f64)}
-    fn type_name()->&'static str{"f64"}
-    
     fn to_wasm_js_body(out: &mut String, prop: &str) {
         out.push_str("            this.u32_offset += this.u32_offset&1;\n");
         out.push_str("            app.f64[this.u32_offset>>1] = ");
@@ -257,6 +248,34 @@ impl ToWasm for f64 {
         out.push_str("            this.u32_offset += 2;\n");
     }
     fn u32_size() -> usize {3}
+}
+
+impl<T> ToWasm for Vec<T> where T:ToWasm{
+    fn u32_size() -> usize{1}
+    
+    fn to_wasm(inp: &mut ToWasmMsg) -> Self{
+        let len = inp.read_u32();
+        let mut ret = Vec::new();
+        for _ in 0..len{
+            ret.push(ToWasm::to_wasm(inp));
+        }
+        ret
+    }
+    
+    fn to_wasm_js_body(out: &mut String, prop: &str){
+        let item_size = T::u32_size();
+        out.push_str(&format!("
+            if(Array.isArray({0})){{
+            app.u32[this.u32_offset ++] = {0}.length
+            this.reserve_u32({1} * {0}.length)
+            for(let i = 0; i < {0}.length; i++){{
+        ", prop, item_size));
+        T::to_wasm_js_body(out, &format!("{}[i]", prop));
+        out.push_str("}} else {");
+        out.push_str("   app.u32[this.u32_offset ++] = 0");
+        out.push_str("}");
+
+    }
 }
 
 pub struct ToWasmMsg {

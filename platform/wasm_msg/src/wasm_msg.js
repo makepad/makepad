@@ -109,9 +109,9 @@ export class ToWasmMsg {
         let app = this.app;
         
         this.u32_capacity += u32_capacity;
-        let u64_capacity_needed = (this.u32_capacity & 1 + this.u32_capacity) >> 1;
+        let u64_capacity_needed = ((this.u32_capacity & 1) + this.u32_capacity) >> 1;
         let offset = this.u32_offset - this.u32_ptr;
-        let u64_len = (offset & 1 + offset) >> 1;
+        let u64_len = ((offset & 1) + offset) >> 1;
         
         if (app.u32[this.u32_ptr] - u64_len < u64_capacity_needed) {
             app.u32[this.u32_ptr + 1] = u64_len;
@@ -126,11 +126,11 @@ export class ToWasmMsg {
         let ptr = this.ptr;
         let offset = this.u32_offset - this.u32_ptr;
         
-        if (offset & 1 != 0) {
+        if ((offset & 1) != 0) {
             app.u32[this.u32_offset + 1] = 0
         }
         
-        let u64_len = (offset & 1 + offset) >> 1;
+        let u64_len = ((offset & 1) + offset) >> 1;
         app.u32[this.u32_ptr + 1] = u64_len;
         
         this.app = null;

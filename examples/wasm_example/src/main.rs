@@ -3,13 +3,19 @@ use makepad_wasm_msg::*;
 #[derive(Debug, ToWasm)]
 struct SysMouseInput {
     x: u32,
-    y: u32,
+    y: Vec<SubObj>,
+}
+
+#[derive(Debug, ToWasm, FromWasm)]
+struct SubObj {
+    a:u32,
+    b:u32
 }
 
 #[derive(Debug, FromWasm)]
 struct ReturnMsg{
     x:u32,
-    y:u32
+    y:Vec<SubObj>
 }
 
 #[export_name = "process_to_wasm"]
@@ -25,8 +31,8 @@ pub unsafe extern "C" fn process_to_wasm(msg_ptr: u32) -> u32 {
             id!(SysMouseInput)=>{
                 let inp = SysMouseInput::to_wasm(&mut to_wasm_msg);
                 console_log!("{:?}", inp);
-                ReturnMsg{x:2,y:3}.from_wasm(&mut from_wasm_msg);
-                ReturnMsg{x:4,y:5}.from_wasm(&mut from_wasm_msg);
+                ReturnMsg{x:2,y:vec![SubObj{a:3,b:4}]}.from_wasm(&mut from_wasm_msg);
+   console_log!("{:?}", inp);                //ReturnMsg{x:4,y:vec![5,6]}.from_wasm(&mut from_wasm_msg);
             }
             _=>()
         }
