@@ -16,7 +16,10 @@ pub fn derive_from_wasm_impl(input: TokenStream) -> TokenStream {
             let generic = parser.eat_generic();
             let types = parser.eat_all_types();
             let where_clause = parser.eat_where_clause(Some("FromWasm"));
-            
+            let fields = if types.is_none(){
+                parser.eat_all_struct_fields()
+            }
+            else {None};            
             // implement from_wasm creating the exact same structure
             // as the to wasm does
             
@@ -29,12 +32,12 @@ pub fn derive_from_wasm_impl(input: TokenStream) -> TokenStream {
 
             tb.add("    fn from_wasm_inner(&self ,out:&mut FromWasmMsg){");
 
-            if let Some(types) = types{
+            if let Some(types) = &types{
                 for i in 0..types.len(){
                      tb.add("self.").unsuf_usize(i).add(".from_wasm_inner(out);");
                 }
             }
-            else if let Some(fields) = parser.eat_all_struct_fields(){
+            else if let Some(fields) = &fields{
                 for field in fields{
                     tb.add("self.").ident(&field.name).add(".from_wasm_inner(out);");
                 }
@@ -43,6 +46,25 @@ pub fn derive_from_wasm_impl(input: TokenStream) -> TokenStream {
                 return parser.unexpected()
             }
             tb.add("   }"); 
+            
+            tb.add("    fn from_wasm_js_body(out:&mut String, prop:&str){");
+            if let Some(types) = &types{
+                tb.add("    out.push_str(&format!(").string("if({0} == undefined){0} = [];\n").add(",prop));");
+                for (index,ty) in types.iter().enumerate(){
+                    tb.stream(Some(ty.clone())).add("::from_wasm_js_body(out, &format!(").string(&format!("{{}}.{}",index)).add(",prop));");
+                }
+            }
+            else if let Some(fields) = &fields{ 
+                tb.add("    out.push_str(&format!(").string("if({0} == undefined){0} = {{}};\n").add(",prop));");
+                for field in fields{
+                    tb.stream(Some(field.ty.clone())).add("::from_wasm_js_body(out, &format!(").string(&format!("{{}}.{}",field.name)).add(",prop));");
+                }
+            }
+            else{
+                return parser.unexpected()
+            }
+            
+            tb.add("}");
             
             tb.add("};"); 
             return tb.end();
