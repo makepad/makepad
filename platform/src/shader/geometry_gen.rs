@@ -4,6 +4,7 @@ use {
         makepad_shader_compiler::{
             ShaderTy,
         },
+        makepad_live_id::*,
         cx::Cx,
         live_traits::*,
         geometry::{

@@ -5,12 +5,14 @@ use{
     },
     crate::{
         makepad_live_compiler::{
-            live_error_origin,
-            id,
+            makepad_live_id::{
+                id,
+                LiveId,
+            },
             LiveRegistry,
             LiveError,
+            live_error_origin,
             LiveErrorOrigin,
-            LiveId,
             TokenSpan
         },
         shader_ast::*,

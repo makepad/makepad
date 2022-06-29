@@ -394,7 +394,6 @@
         }
     }
     
-    
     class WasmApp {
         constructor(canvas, webasm) {
             this.canvas = canvas;
@@ -427,8 +426,6 @@
             
             // create initial to_wasm
             this.to_wasm = new ToWasm(this);
-            
-            
             
             // fetch dependencies
             this.to_wasm.fetch_deps(this.gpu_info);

@@ -2,9 +2,9 @@
 use {
     std::collections::{HashMap, HashSet, BTreeSet},
     crate::{
-        makepad_id_macros::*,
-        makepad_live_tokenizer::{Delim, TokenPos, TokenRange, TokenWithLen, FullToken, LiveId, State, Cursor},
-        live_error::{LiveError, LiveErrorSpan, LiveErrorOrigin, LiveFileError},
+        makepad_live_id::*,
+        makepad_live_tokenizer::{Delim, TokenPos, TokenRange, TokenWithLen, FullToken, LiveId, State, Cursor, live_error_origin, LiveErrorOrigin},
+        live_error::{LiveError, LiveErrorSpan, LiveFileError},
         live_parser::LiveParser,
         live_document::{LiveOriginal, LiveExpanded},
         live_node::{LiveNodeOrigin, LiveNode, LiveValue, LiveType, LiveTypeInfo, LiveIdAsProp},

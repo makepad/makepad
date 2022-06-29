@@ -2,6 +2,7 @@
 use {
     std::f64::consts::PI,
     crate::{
+        makepad_live_id::*,
         makepad_derive_live::*,
         makepad_math::*,
         event::NextFrame,

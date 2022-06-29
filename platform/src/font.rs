@@ -14,6 +14,7 @@ pub use {
     crate::{
         makepad_derive_live::*,
         makepad_live_compiler::*,
+        makepad_live_id::*,
         cx::Cx,
         live_traits::*,
         shader::geometry_gen::GeometryQuad2D,
