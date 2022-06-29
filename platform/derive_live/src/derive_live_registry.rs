@@ -1,6 +1,6 @@
 use proc_macro::{TokenStream};
 
-use crate::macro_lib::*;
+use makepad_macro_lib::{TokenBuilder, TokenParser, error};
 
 pub fn derive_live_component_registry_impl(input: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new();

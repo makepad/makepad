@@ -1,11 +1,9 @@
 use proc_macro::{TokenStream};
 
-#[path = "../../../micro_serde/derive/src/macro_lib.rs"]
-mod macro_lib;
-use crate::macro_lib::*;
+use makepad_macro_lib::{TokenBuilder, TokenParser};
 
 use crate::live_id::*;
-#[path = "../../../live_tokenizer/src/live_id.rs"]
+#[path = "../../src/live_id.rs"]
 mod live_id; 
 
 #[proc_macro] 

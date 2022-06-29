@@ -10,6 +10,7 @@ license = "MIT"
 proc-macro = true
 
 [dependencies]
+makepad-macro-lib = { path = "../../macro_lib", version = "0.1" }
 
 [features]
 default = ["nightly"]
