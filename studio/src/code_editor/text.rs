@@ -32,7 +32,7 @@ impl Text {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_live_tokenizer::Text;
+    /// use makepad_studio::code_editor::Text;
     /// 
     /// let text = Text::new();
     /// ```
@@ -55,7 +55,7 @@ impl Text {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_live_tokenizer::Text;
+    /// use makepad_studio::code_editor::Text;
     /// 
     /// let text = Text::new();
     /// assert!(text.is_empty());
@@ -71,7 +71,7 @@ impl Text {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_live_tokenizer::{Size, Text};
+    /// use makepad_studio::code_editor::{Size, Text};
     /// 
     /// let text = Text::from("abc\ndef");
     /// assert!(text.len() == Size { line: 1, column: 3 });
@@ -88,7 +88,7 @@ impl Text {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_live_tokenizer::{Size, Text};
+    /// use makepad_studio::code_editor::{Size, Text};
     /// 
     /// let text = Text::from("abc\ndef");
     /// assert_eq!(text.as_lines(), &[vec!['a', 'b', 'c'], vec!['d', 'e', 'f']]);
@@ -106,7 +106,7 @@ impl Text {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_live_tokenizer::{Position, Range, Text};
+    /// use makepad_studio::code_editor::{Position, Range, Text};
     /// 
     /// let text = Text::from("abc\ndef");
     /// assert_eq!(
@@ -161,7 +161,7 @@ impl Text {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_live_tokenizer::{Position, Range, Text};
+    /// use makepad_studio::code_editor::{Position, Range, Text};
     /// 
     /// let text = Text::from("abc\ndef");
     /// let mut string = String::new();
@@ -201,7 +201,7 @@ impl Text {
     /// Removes the given amount of text from the start of this text, and returns it as a new text.
     /// 
     /// ```
-    /// use makepad_live_tokenizer::{Size, Text};
+    /// use makepad_studio::code_editor::{Size, Text};
     /// 
     /// let mut text = Text::from("abc\ndef");
     /// assert_eq!(text.take(Size { line: 1, column: 1 }), Text::from("abc\nd"));
@@ -222,7 +222,7 @@ impl Text {
     /// Removes the given amount of text from the start of this text.
     /// 
     /// ```
-    /// use makepad_live_tokenizer::{Size, Text};
+    /// use makepad_studio::code_editor::{Size, Text};
     /// 
     /// let mut text = Text::from("abc\ndef");
     /// text.skip(Size { line: 1, column: 1 });
@@ -242,7 +242,7 @@ impl Text {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_live_tokenizer::{Position, Text};
+    /// use makepad_studio::code_editor::{Position, Text};
     /// 
     /// let mut text = Text::from("abc\ndef");
     /// text.insert(Position { line: 1, column: 1 }, Text::from("xyz"));
@@ -277,7 +277,7 @@ impl Text {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_live_tokenizer::{Position, Size, Text};
+    /// use makepad_studio::code_editor::{Position, Size, Text};
     /// 
     /// let mut text = Text::from("abc\ndef");
     /// text.delete(Position { line: 0, column: 2 }, Size { line: 1, column: 1 });
