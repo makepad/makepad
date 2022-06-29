@@ -1,4 +1,4 @@
-export class WasmApp{
+export class WasmApp {
     constructor(wasm) {
         this.wasm = wasm;
         this.exports = wasm.instance.exports;
@@ -15,12 +15,12 @@ export class WasmApp{
         msg.destroy();
         
         // this class can also be loaded from file.
-        this.msg_class = new Function("ToWasmMsg","FromWasmMsg", code)(ToWasmMsg, FromWasmMsg);
+        this.msg_class = new Function("ToWasmMsg", "FromWasmMsg", code)(ToWasmMsg, FromWasmMsg);
         console.log(this.msg_class)
     }
     
     update_array_buffer_refs() {
-        if (this.buffer_ref_len_check != this.exports.memory.buffer.byteLength){
+        if (this.buffer_ref_len_check != this.exports.memory.buffer.byteLength) {
             this.f32 = new Float32Array(this.exports.memory.buffer);
             this.u32 = new Uint32Array(this.exports.memory.buffer);
             this.f64 = new Float64Array(this.exports.memory.buffer);
@@ -28,43 +28,43 @@ export class WasmApp{
         }
     }
     
-    get_wasm_js_msg_impl(){
+    get_wasm_js_msg_impl() {
         let new_ptr = this.exports.get_wasm_js_msg_impl();
         this.update_array_buffer_refs();
         return new_ptr
     }
     
-    new_wasm_msg_with_u64_capacity(capacity){
+    new_wasm_msg_with_u64_capacity(capacity) {
         let new_ptr = this.exports.new_wasm_msg_with_u64_capacity(capacity)
         this.update_array_buffer_refs();
         return new_ptr
     }
-
-    wasm_msg_reserve_u64(ptr, capacity){
+    
+    wasm_msg_reserve_u64(ptr, capacity) {
         let new_ptr = this.exports.wasm_msg_reserve_u64(ptr, capacity);
         this.update_array_buffer_refs();
         return new_ptr
     }
     
-    wasm_msg_free(ptr){
+    wasm_msg_free(ptr) {
         this.exports.wasm_msg_free(ptr);
         this.update_array_buffer_refs();
     }
     
-    process_to_wasm(msg_ptr){
+    process_to_wasm(msg_ptr) {
         let ret_ptr = this.exports.process_to_wasm(msg_ptr)
         this.update_array_buffer_refs();
         return ret_ptr
     }
     
-    to_wasm_pump(to_wasm){
+    to_wasm_pump(to_wasm) {
         let ret_ptr = this.process_to_wasm(to_wasm.finalise());
         let from_wasm = new this.msg_class.FromWasmMsg(this, ret_ptr);
         from_wasm.dispatch();
         from_wasm.destroy();
     }
     
-    new_to_wasm(){
+    new_to_wasm() {
         return new this.msg_class.ToWasmMsg(this)
     }
     
@@ -101,13 +101,13 @@ export class ToWasmMsg {
         this.ptr = app.new_wasm_msg_with_u64_capacity(1024);
         this.u32_ptr = this.ptr >> 2;
         this.u32_offset = this.u32_ptr + 2;
-
+        
         this.u32_capacity = app.u32[this.u32_ptr] << 1;
     }
     
     reserve_u32(u32_capacity) {
         let app = this.app;
-
+        
         this.u32_capacity += u32_capacity;
         let u64_capacity_needed = (this.u32_capacity & 1 + this.u32_capacity) >> 1;
         let offset = this.u32_offset - this.u32_ptr;
@@ -121,15 +121,15 @@ export class ToWasmMsg {
         }
     }
     
-    finalise(){
+    finalise() {
         let app = this.app;
         let ptr = this.ptr;
         let offset = this.u32_offset - this.u32_ptr;
         
-        if(offset&1 != 0){ 
-            app.u32[this.u32_offset+ 1] = 0
+        if (offset & 1 != 0) {
+            app.u32[this.u32_offset + 1] = 0
         }
-
+        
         let u64_len = (offset & 1 + offset) >> 1;
         app.u32[this.u32_ptr + 1] = u64_len;
         
@@ -142,7 +142,7 @@ export class ToWasmMsg {
         return ptr;
     }
     
-    push_str(str){
+    push_str(str) {
         let app = this.app;
         this.reserve_u32(str.length + 1);
         app.u32[this.u32_offset ++] = str.length;
@@ -160,7 +160,7 @@ export class FromWasmMsg {
         this.u32_offset = this.u32_ptr + 2;
     }
     
-    destroy(){
+    destroy() {
         let app = this.app;
         app.wasm_msg_free(this.ptr);
         this.app = null;
@@ -169,19 +169,26 @@ export class FromWasmMsg {
         this.u32_offset = 0;
     }
     
-    read_str(){
+    read_str() {
         let app = this.app;
-        let len = app.u32[this.u32_offset++];
+        let len = app.u32[this.u32_offset ++];
         let str = "";
-        for(let i = 0; i < len; i++){
-            str += String.fromCharCode(app.u32[this.u32_offset++]);
+        for (let i = 0; i < len; i ++) {
+            str += String.fromCharCode(app.u32[this.u32_offset ++]);
         }
         return str
     }
     
-    dispatch(){
-       // oook so.
-       // lets look at the first u32
-       
+    dispatch() {
+        let app = this.app;
+        let u32_len = app.u32[this.u32_ptr + 1]<<1;
+        while ((this.u32_offset) - this.u32_ptr < u32_len) {
+            let msg_id = app.u32[this.u32_offset++];
+            this.u32_offset++; // skip second u32 of id
+            this.u32_offset++; // skip body len
+            // dispatch to deserializer
+            this[msg_id]();
+            this.u32_offset += this.u32_offset&1; // align
+        }
     }
 }
