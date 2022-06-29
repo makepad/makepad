@@ -5,6 +5,7 @@ use {
         makepad_shader_compiler::{
             ShaderTy,
         },
+        makepad_live_id::*,
         cx::Cx,
         draw_2d::cx_2d::Cx2d,
         live_traits::*,

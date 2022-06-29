@@ -1,8 +1,6 @@
 extern crate proc_macro;
 use proc_macro::{TokenStream};
 
-mod macro_lib; 
-
 mod derive_bin;
 use crate::derive_bin::*;
 

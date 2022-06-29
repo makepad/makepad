@@ -1,3 +1,4 @@
+#[cfg(target_os = "macos")]
 pub use crate::platform::apple::audio_unit::{
     AudioFactory,
     AudioBuffer,
