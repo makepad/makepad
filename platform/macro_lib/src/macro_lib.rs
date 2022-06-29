@@ -23,8 +23,23 @@ pub fn error_result(err: &str) -> Result<(), TokenStream> {
     Err(tb.end())
 }
 
-pub fn type_to_static_callable(_input: TokenStream) -> TokenStream {
-    TokenStream::new()
+pub fn type_to_static_callable(input: TokenStream) -> TokenStream {
+    let mut ty_parser = TokenParser::new(input.clone());
+    let mut tb = TokenBuilder::new();
+    if let Some(ident) = ty_parser.eat_any_ident() {
+        
+        if !ty_parser.eat_punct_alone('<') {
+            return input
+        }
+        tb.ident(&ident);
+        tb.add("::<");
+        tb.stream(Some(ty_parser.eat_level_or_punct('>')));
+        tb.add(">");
+        tb.end()
+    }
+    else {
+        input
+    }
 }
 
 pub fn unwrap_option(input: TokenStream) -> Result<TokenStream, TokenStream> {
@@ -39,7 +54,6 @@ pub fn unwrap_option(input: TokenStream) -> Result<TokenStream, TokenStream> {
         Err(input)
     }
 }
-
 
 pub struct TokenBuilder {
     pub groups: Vec<(Delimiter, TokenStream)>
