@@ -13,6 +13,7 @@ pub mod text;
 
 pub use {
     cursor::*,
+    cursor_set::*,
     delta::*,
     position::*,
     position_set::*,

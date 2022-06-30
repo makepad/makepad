@@ -1,6 +1,6 @@
 mod tables;
 
-pub use grapheme_cluster_break::GraphemeClusterBreak;
+pub use {grapheme_cluster_break::GraphemeClusterBreak, word_break::WordBreak};
 
 use tables::*;
 
@@ -11,6 +11,9 @@ pub trait Ucd {
 
     /// Returns the value of the `Grapheme_Cluster_Break` property for this `char`.
     fn grapheme_cluster_break(self) -> GraphemeClusterBreak;
+
+    /// Returns the value of the `Word_Break` property for this `char`.
+    fn word_break(self) -> WordBreak;
 }
 
 impl Ucd for char {
@@ -24,6 +27,10 @@ impl Ucd for char {
         grapheme_cluster_break::GRAPHEME_CLUSTER_BREAK
             .search(self)
             .unwrap_or_default()
+    }
+
+    fn word_break(self) -> WordBreak {
+        word_break::WORD_BREAK.search(self).unwrap_or_default()
     }
 }
 
