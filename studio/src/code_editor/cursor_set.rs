@@ -77,11 +77,13 @@ impl CursorSet {
     /// assert_eq!(iter.next(), Some(&Cursor::new()));
     /// assert_eq!(
     ///     iter.next(),
-    ///     Some(&Cursor {
-    ///         head: Position { line: 1, column: 1 },
-    ///         tail: Position { line: 1, column: 1 },
-    ///         max_column: 1,
-    ///     })
+    ///     Some(
+    ///         &Cursor {
+    ///             head: Position { line: 1, column: 1 },
+    ///             tail: Position { line: 1, column: 1 },
+    ///             max_column: 1,
+    ///         }
+    ///     )
     /// );
     /// assert_eq!(iter.next(), None);
     /// ```
@@ -115,6 +117,35 @@ impl CursorSet {
     
     /// Returns the minimal set of non-overlapping ranges that covers the selections of all cursors
     /// in this `CursorSet`.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use makepad_studio::code_editor::{range_set::Span, CursorSet, Position, Size, Text};
+    /// 
+    /// let mut cursors = CursorSet::new();
+    /// cursors.add(Position { line: 1, column: 1 });
+    /// let text = Text::from("abc\ndef");
+    /// cursors.move_right(&text, true);
+    /// let selections = cursors.selections();
+    /// let mut spans = selections.spans();
+    /// assert_eq!(
+    ///     spans.next(),
+    ///     Some(Span { len: Size { line: 0, column: 0 }, is_included: false })
+    /// );
+    /// assert_eq!(
+    ///     spans.next(),
+    ///     Some(Span { len: Size { line: 0, column: 1 }, is_included: true })
+    /// );
+    /// assert_eq!(
+    ///     spans.next(),
+    ///     Some(Span { len: Size { line: 1, column: 1 }, is_included: false })
+    /// );
+    /// assert_eq!(
+    ///     spans.next(),
+    ///     Some(Span { len: Size { line: 0, column: 1 }, is_included: true })
+    /// );
+    /// ```
     pub fn selections(&self) -> RangeSet {
         let mut builder = range_set::Builder::new();
         for cursor in &self.cursors {
@@ -126,8 +157,22 @@ impl CursorSet {
         builder.build()
     }
     
-    /// Returns the minimal set of positiosn that coverts the carets of all cursors in this 
+    /// Returns the minimal set of positions that covers the carets of all cursors in this 
     /// `CursorSet`.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use makepad_studio::code_editor::{CursorSet, Position, Size};
+    /// 
+    /// let mut cursors = CursorSet::new();
+    /// cursors.add(Position { line: 1, column: 1 });
+    /// let carets = cursors.carets();
+    /// let mut distances = carets.distances();
+    /// assert_eq!(distances.next(), Some(Size { line: 0, column: 0 }));
+    /// assert_eq!(distances.next(), Some(Size { line: 1, column: 1 }));
+    /// assert_eq!(distances.next(), None);
+    /// ```
     pub fn carets(&self) -> PositionSet {
         let mut builder = position_set::Builder::new();
         for cursor in &self.cursors {
