@@ -120,7 +120,7 @@ impl AppState {
             }),
         );
         
-        AppState {
+        AppState { 
             panels,
             tabs,
             selected_panel_id: id!(content).into(),
@@ -303,7 +303,7 @@ impl FileNode {
 }
 
 #[derive(Debug)]
-pub struct FileEdge {
+pub struct FileEdge { 
     pub name: OsString,
     pub file_node_id: FileNodeId,
 }
