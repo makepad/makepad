@@ -23,6 +23,12 @@ use {
 /// was before, the cursor is moved to the end of the line instead, but we remember the original
 /// column it was on. If the cursor is then moved up or down again, and the line the cursor
 /// moved to is long enough, the cursor is moved back to the original column it was on.
+/// 
+/// This implementation assumes that each code point represents a single character on the screen.
+/// While this is true for the Latin script, it is definitely not true for others. To correctly
+/// implement this for all Unicode scripts, we need to group code points into grapheme clusters.
+/// Doing so requires generating several large Unicode tables, which is why we've held off from this
+/// for now.
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
 pub struct Cursor {
     pub head: Position,
@@ -31,7 +37,9 @@ pub struct Cursor {
 }
 
 impl Cursor {
-    /// Creates a new cursor at the start of the text.
+    /// Creates a new `Cursor` at the start of the text.
+    /// 
+    /// # Examples
     /// 
     /// ```
     /// use makepad_studio::code_editor::Cursor;
@@ -46,9 +54,11 @@ impl Cursor {
         }
     }
 
-    /// Returns the start of the selection of this cursor.
+    /// Returns the start of the selection of this `Cursor`.
     /// 
     /// This is either the `head` or the `tail` of the cursor, whichever is smaller.
+    /// 
+    /// # Examples
     /// 
     /// ```
     /// use makepad_studio::code_editor::{Cursor, Position};
@@ -64,9 +74,11 @@ impl Cursor {
         self.head.min(self.tail)
     }
     
-    /// Returns the end of the selection of this cursor.
+    /// Returns the end of the selection of this `Cursor`.
     /// 
     /// This is either the `head` or the `tail` of the cursor, whichever is larger.
+    /// 
+    /// # Examples
     /// 
     /// ```
     /// use makepad_studio::code_editor::{Cursor, Position};
@@ -82,7 +94,7 @@ impl Cursor {
         self.head.max(self.tail)
     }
 
-    /// Moves this cursor one column to the left.
+    /// Moves this `Cursor` one column to the left.
     ///
     /// This method takes the `text` on which the cursor operates as argument, because the structure
     /// of the text determines the behavior of the cursor when it moves. If there is no previous
@@ -93,6 +105,9 @@ impl Cursor {
     /// The `select` argument indicates whether the cursor is selecting while it moves. If `true`,
     /// only the `head` of the cursor is changed, while the `tail` remains unchanged. Otherwise, the
     /// `tail` is set to the same position as the `head`.
+    /// 
+    /// # Examples
+    /// 
     /// ```
     /// use makepad_studio::code_editor::{Cursor, Position, Text};
     /// 
@@ -128,7 +143,7 @@ impl Cursor {
         self.max_column = self.head.column;
     }
 
-    /// Moves this cursor one column to the right.
+    /// Moves this `Cursor` one column to the right.
     ///
     /// This method takes the `text` on which the cursor operates as argument, because the structure
     /// of the text determines the behavior of the cursor when it moves. If there is no next column
@@ -139,6 +154,9 @@ impl Cursor {
     /// The `select` argument indicates whether the cursor is selecting while it moves. If `true`,
     /// only the `head` of the cursor is changed, while the `tail` remains unchanged. Otherwise, the
     /// `tail` is set to the same position as the `head`.
+    /// 
+    /// # Examples
+    /// 
     /// ```
     /// use makepad_studio::code_editor::{Cursor, Position, Text};
     /// 
@@ -174,12 +192,14 @@ impl Cursor {
         self.max_column = self.head.column;
     }
     
-    /// Moves this cursor one line up.
+    /// Moves this `Cursor` one line up.
     /// 
     /// This method takes the `text` on which the cursor operates as argument, because the structure
     /// of the text determines the behavior of the cursor when it moves. If there is no previous line
     /// (i.e. the cursor is at the start of the `text`), this method has no effect.
     ///
+    /// # Examples
+    /// 
     /// The `select` argument indicates whether the cursor is selecting while it moves. If `true`,
     /// only the `head` of the cursor is changed, while the `tail` remains unchanged. Otherwise, the
     /// `tail` is set to the same position as the `head`.
@@ -216,7 +236,7 @@ impl Cursor {
         }
     }
 
-    /// Moves this cursor one line down.
+    /// Moves this `Cursor` one line down.
     /// 
     /// This method takes the `text` on which the cursor operates as argument, because the structure
     /// of the text determines the behavior of the cursor when it moves. If there is no next line
@@ -225,6 +245,8 @@ impl Cursor {
     /// The `select` argument indicates whether the cursor is selecting while it moves. If `true`,
     /// only the `head` of the cursor is changed, while the `tail` remains unchanged. Otherwise, the
     /// `tail` is set to the same position as the `head`.
+    /// 
+    /// # Examples
     /// 
     /// ```
     /// use makepad_studio::code_editor::{Cursor, Position, Text};
@@ -258,11 +280,13 @@ impl Cursor {
         }
     }
 
-    /// Moves this cursor to the given `position`.
+    /// Moves this `Cursor` to the given `position`.
     /// 
     /// The `select` argument indicates whether the cursor is selecting while it moves. If `true`,
     /// only the `head` of the cursor is changed, while the `tail` remains unchanged. Otherwise, the
     /// `tail` is set to the same position as the `head`.
+    /// 
+    /// # Examples
     /// 
     /// ```
     /// use makepad_studio::code_editor::{Cursor, Position};
@@ -290,12 +314,44 @@ impl Cursor {
         self.max_column = position.column;
     }
 
+    /// Applies the given `delta` to this `Cursor`.
+    /// 
+    /// When a change is made to the text on which this cursor operates that did not originate at
+    /// this cursor, the position of the cursor is shifted as a result of this change. Applying a
+    /// delta to a cursor shifts its position to accomodate the corresponding change.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use makepad_studio::code_editor::{delta, Cursor, Delta, Position, Size, Text};
+    /// 
+    /// let mut cursor = Cursor {
+    ///     head: Position { line: 1, column: 1 },
+    ///     tail: Position { line: 2, column: 2 },
+    ///     max_column: 1,
+    /// };
+    /// let mut builder = delta::Builder::new();
+    /// builder.retain(Size { line: 1, column: 1 });
+    /// builder.insert(Text::from("abc\ndef"));
+    /// let delta = builder.build();
+    /// cursor.apply_delta(&delta);
+    /// assert_eq!(
+    ///     cursor,
+    ///     Cursor {
+    ///         head: Position { line: 1, column: 1 },
+    ///         tail: Position { line: 3, column: 2 },
+    ///         max_column: 1,
+    ///     }
+    /// );
+    /// ```
+    /// 
     pub fn apply_delta(&mut self, delta: &Delta) {
         self.head = self.head.apply_delta(&delta);
         self.tail = self.tail.apply_delta(&delta);
         self.max_column = self.head.column;
     }
 
+    /// Shifts this `Cursor` forward by the given `offset`.
     pub fn apply_offset(&mut self, offset: Size) {
         self.head += offset;
         self.tail = self.head;
