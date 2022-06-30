@@ -5,7 +5,7 @@ live_register!{
     use makepad_platform::shader::std::*;
     use FrameComponent::*;
     
-    const SLIDE_WIDTH: 1000
+    const SLIDE_WIDTH: 800
     
     Body: Label {
         label_text: {
@@ -39,18 +39,6 @@ live_register!{
         frame: {
             clip: true,
             walk: {width: Fill, height: Fill}
-            
-            Slide {title = {text: "Proc macros"}, Body {text: "Are not scary"}}
-            Slide {title = {text: "What are proc macros"}, Body {text: "Plugins in compiler\nItem, expression or derive"}}
-            Slide {title = {text: "Why use proc macros"}, Body {text: "Serialisation\nReflection\nScript glue - RPC\nTesting"}}
-            Slide {title = {text: "Why not use syn"}, Body {text: "lots of compile time\nNot that easy API"}}
-            Slide {title = {text: "How do i use it"}}
-            Slide {title = {text: "Makepad Live DSL"}}
-            Slide {title = {text: "Collab"}}
-            Slide {title = {text: "Settings file"}}
-            Slide {title = {text: "Base example"}}
-            Slide {title = {text: "Links"}, Body {text: "proc_macro crate\nmakepad.dev\ngithub.com/makepad/makepad\ntwitter: @rikarends @makepad"}}
-            /*
             Slide {title = {text: "Makepad"}, Body {text: "A new way to build UI\nFor web and native"}}
             Slide {title = {text: "Long long ago"}, Body {text: "Founded cloud 9 IDE\nHTML based code editor ACE"}}
             Slide {title = {text: "WebGL and JS"}, Body {text: "6 years\nover and over"}}
@@ -69,7 +57,7 @@ live_register!{
             Slide {title = {text: "Why"}, Body {text: "Having fun again as a programmer"}}
             Slide {title = {text: "Fun Audio"}}
             Slide {title = {text: "Future"}, Body {text: "OSS release in 3 months\nDesigntool will be commercial"}}
-            Slide {title = {text: "Links"}, Body {text: "makepad.dev\ngithub.com/makepad/makepad\ntwitter: @rikarends @makepad"}}*/
+            Slide {title = {text: "Links"}, Body {text: "makepad.dev\ngithub.com/makepad/makepad\ntwitter: @rikarends @makepad"}}
         }
     }
 }
@@ -84,6 +72,7 @@ pub struct SlidesView {
     frame: Frame,
     #[rust] next_frame: NextFrame
 }
+
 
 impl SlidesView {
     

@@ -19,6 +19,12 @@ use {
     std::slice,
 };
 
+/// A type for representing a set of possbily overlapping `Cursor`s.
+/// 
+/// This is used to implement multiple cursor support in the editor. The cursors are stored in a
+/// list, and the list is sorted by the start position of each cursor. The last inserted cursor is
+/// special (because it determines the scroll position in the document), so we also remember its
+/// index in the list. A `CursorSet` always contains at least one cursor.
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub struct CursorSet {
     cursors: Vec<Cursor>,
@@ -26,6 +32,15 @@ pub struct CursorSet {
 }
 
 impl CursorSet {
+    /// Creates a `CursorSet` with a single cursor at the start of the text.
+    ///
+    /// # Examples
+    /// 
+    /// ```
+    /// use makepad_studio::code_editor::CursorSet;
+    /// 
+    /// let cursors = CursorSet::new();
+    /// ```
     pub fn new() -> CursorSet {
         CursorSet {
             cursors: vec![Cursor::new()],
@@ -33,20 +48,73 @@ impl CursorSet {
         }
     }
     
+    /// Returns the number of cursors in this `CursorSet`.
+    /// 
+    /// This is always at least 1.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use makepad_studio::code_editor::CursorSet;
+    /// 
+    /// let cursors = CursorSet::new();
+    /// assert_eq!(cursors.len(), 1);
+    /// ```
     pub fn len(&self) -> usize {
         self.cursors.len()
     }
     
+    /// Returns an iterator over the cursors in this `CursorSet`.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use makepad_studio::code_editor::{Cursor, CursorSet, Position};
+    /// 
+    /// let mut cursors = CursorSet::new();
+    /// cursors.add(Position { line: 1, column: 1 });
+    /// let mut iter = cursors.iter();
+    /// assert_eq!(iter.next(), Some(&Cursor::new()));
+    /// assert_eq!(
+    ///     iter.next(),
+    ///     Some(&Cursor {
+    ///         head: Position { line: 1, column: 1 },
+    ///         tail: Position { line: 1, column: 1 },
+    ///         max_column: 1,
+    ///     })
+    /// );
+    /// assert_eq!(iter.next(), None);
+    /// ```
     pub fn iter(&self) -> Iter<'_> {
         Iter {
             iter: self.cursors.iter(),
         }
     }
     
+    /// Returns the the last inserted cursor in this `CursorSet`.
+    /// 
+    /// # Examples
+    /// 
+    /// ```
+    /// use makepad_studio::code_editor::{Cursor, CursorSet, Position};
+    /// 
+    /// let mut cursors = CursorSet::new();
+    /// cursors.add(Position { line: 1, column: 1 });
+    /// assert_eq!(
+    ///     cursors.last_inserted(),
+    ///     &Cursor {
+    ///         head: Position { line: 1, column: 1 },
+    ///         tail: Position { line: 1, column: 1 },
+    ///         max_column: 1,
+    ///     }
+    /// );
+    /// ```
     pub fn last_inserted(&self) -> &Cursor {
         &self.cursors[self.last_inserted_index]
     }
     
+    /// Returns the minimal set of non-overlapping ranges that covers the selections of all cursors
+    /// in this `CursorSet`.
     pub fn selections(&self) -> RangeSet {
         let mut builder = range_set::Builder::new();
         for cursor in &self.cursors {
@@ -58,6 +126,8 @@ impl CursorSet {
         builder.build()
     }
     
+    /// Returns the minimal set of positiosn that coverts the carets of all cursors in this 
+    /// `CursorSet`.
     pub fn carets(&self) -> PositionSet {
         let mut builder = position_set::Builder::new();
         for cursor in &self.cursors {
