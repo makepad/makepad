@@ -141,6 +141,7 @@ impl Cx {
         let font_id = self.fonts.len();
         self.fonts.push(None);
         self.path_to_font_id.insert(path.to_string(), font_id);
+        
         if let Ok(mut file_handle) = File::open(&path) {
             let mut buffer = Vec::<u8>::new();
             if file_handle.read_to_end(&mut buffer).is_ok() {
@@ -153,7 +154,6 @@ impl Cx {
                             /*for i in 0..10{
                                 cxfont.ttf_font.char_code_to_glyph_index_map['A' as usize + i] = 70 + i;
                             }*/
-                            
                             cxfont.ttf_font.char_code_to_glyph_index_map['g' as usize] = 11;
                             cxfont.ttf_font.char_code_to_glyph_index_map['9' as usize] = 70;
                             cxfont.ttf_font.char_code_to_glyph_index_map['0' as usize] = 60;
