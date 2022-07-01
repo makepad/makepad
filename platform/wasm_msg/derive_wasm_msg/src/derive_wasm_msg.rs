@@ -124,21 +124,31 @@ pub fn derive_to_wasm_impl(input: TokenStream) -> TokenStream {
             tb.add("    fn u32_size()->usize{");
             
             if let Some(types) = &types{
-                for (index,ty) in types.iter().enumerate(){
-                    if index > 0{
-                        tb.add("+");
+                if types.len() ==0{
+                    tb.add("0");
+                }
+                else{
+                    for (index,ty) in types.iter().enumerate(){
+                        if index > 0{
+                            tb.add("+");
+                        }
+                        let ty = type_to_static_callable(ty.clone());
+                        tb.stream(Some(ty)).add("::u32_size()");
                     }
-                    let ty = type_to_static_callable(ty.clone());
-                    tb.stream(Some(ty)).add("::u32_size()");
                 }
             }
             else if let Some(fields) = &fields{ 
-                for (index, field) in fields.iter().enumerate(){
-                    if index > 0{
-                        tb.add("+");
+                if fields.len() ==0{
+                    tb.add("0");
+                }
+                else{
+                    for (index, field) in fields.iter().enumerate(){
+                        if index > 0{
+                            tb.add("+");
+                        }
+                        let ty = type_to_static_callable(field.ty.clone());
+                        tb.stream(Some(ty)).add("::u32_size()");
                     }
-                    let ty = type_to_static_callable(field.ty.clone());
-                    tb.stream(Some(ty)).add("::u32_size()");
                 }
             }
             else{
