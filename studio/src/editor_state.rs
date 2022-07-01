@@ -28,21 +28,54 @@ use {
     },
 };
 
+/// This type contains all the state for the code editor that is not directly related to the UI. It
+/// contains a `Session` for each open file tab, and a `Document` for each open file.
+/// 
+/// Each session refers to exactly one document, and each document is referred to by one or more
+/// session. In addition, each document refers back to the sessions that refer to it. The resulting
+/// data structure is a cyclic graph. These are hard to represent directly in Rust, so we use the
+/// typical approach of storing the sessions and documents in some kind of arena, and then referring
+/// to them by id.  
+/// 
+/// When the user clicks on a file in the file tree, we create both a new session and a new document
+/// for this file. Subsequent attempts to open the same file should create a new session that refers
+/// to the same document. To figure out whether we already have a document for a given file, we
+/// maintain a mapping from file paths to document ids.
+/// 
+/// When a document is first created, it starts out in an uninitialized state, while we fetch its
+/// contents from the collab server. Although the initial message to open the file for a document and
+/// fetch its content uses a file path, subsequent messages to the collab server for the same
+/// document uses a file id (this is analagous to how opening a file uses a path, but subsequent
+/// operations on that file use a file handle). We maintain a map from file ids to document ids so
+/// that when we receive a response or notification from the collab server with a given file, we can
+/// find the corresponding document.
 #[derive(Default)]
 pub struct EditorState {
+    /// An arena for all sessions in this code editor.
     pub sessions: LiveIdMap<SessionId, Session>,
+    /// An arena for all documents in this code editor.
     pub documents: LiveIdMap<DocumentId, Document>,
+    /// A map from file paths to document ids (see above for why this is needed)
     pub documents_by_path: HashMap<PathBuf, DocumentId>,
+    /// A map from file ids to document ids (see above for why this is needed)
     pub documents_by_file: LiveIdMap<TextFileId, DocumentId>,
+    /// The queue of outstanding documents for this code editor. A document is outstanding if it has
+    /// been created, but we have not yet received its contents from the collab server.
     pub outstanding_document_queue: VecDeque<DocumentId>,
     pub messages: Vec<BuilderMsg>,
 }
 
 impl EditorState {
+    /// Creates a new `EditorState`.
     pub fn new() -> EditorState {
         EditorState::default()
     }
     
+    /// Either gets or creates the document for the file with the given `path`, and then creates a
+    /// session that refers to this document. Returns the id of the newly created session.
+    /// 
+    /// If the document did not yet exist, the `send_request` callback is used to send a request to
+    /// the collab server to open the document's file and fetch its contents.
     pub fn create_session(
         &mut self,
         path: PathBuf,
@@ -62,6 +95,11 @@ impl EditorState {
         session_id
     }
     
+    /// Destroys the session with the given `session_id`. If this session was the last session that
+    /// referred to its document, the document is destroyed as well.
+    /// 
+    /// If the document is destroyed, the `send_request` callback is used to send a request to the
+    /// collab server to close the document's file.
     pub fn destroy_session(
         &mut self,
         session_id: SessionId,
@@ -77,6 +115,10 @@ impl EditorState {
         self.sessions.remove(&session_id);
     }
     
+    /// Either gets or creates the document for the file with the given `path`.
+    ///
+    /// If the document did not yet exist, the `send_request` callback is used to send a request to
+    /// the collab server to open the document's file and fetch its contents.
     pub fn get_or_create_document(
         &mut self,
         path: PathBuf,
@@ -843,11 +885,16 @@ pub struct DocumentInner {
     pub revision: usize,
     /// The text for this document
     pub text: Text,
+    /// A line-based cache containing the tokens for each line.
     pub token_cache: TokenCache,
+    /// A line-based cache containing the indent level for each line.
     pub indent_cache: IndentCache,
     pub msg_cache: MsgCache,
+    //// Whether the last typed character was a backspace character or a non-backspace character.
     pub edit_group: Option<EditGroup>,
+    /// The undo stack for this document.
     pub undo_stack: Vec<Edit>,
+    /// The redo stack for this document.
     pub redo_stack: Vec<Edit>,
     /// The queue of outstanding deltas for this document. A delta is outstanding if it has been
     /// applied to the local document, but we have not yet received confirmation from the collab
@@ -855,16 +902,33 @@ pub struct DocumentInner {
     pub outstanding_deltas: VecDeque<Delta>,
 }
 
+/// An `EditGroup` keeps track of whether the last typed character was a backspace character or a
+/// non-backspace character.
+/// 
+/// This is necessary because when a sequence of backspace characters is typed, they should be 
+/// grouped together into a single edit operation. Similarly, when a sequence of non-backspace
+/// characters is typed, they should be grouped together into a single operation. However,
+/// alternating sequences of backspace and non-backspace characters should not be grouped together.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum EditGroup {
+    /// Non-backspace character
     Char,
+    /// Backspace character
     Backspace,
 }
 
+/// An `Edit` represents an atomic edit operation.
+/// 
+/// The primary purpose of this type is to be stored on the undo stack.
 #[derive(Debug)]
 pub struct Edit {
+    /// The state of the injected character stack at the time of this `Edit`. We store this
+    /// explicitly because it cannot be recovered from the `delta` alone.
     pub injected_char_stack: Vec<char>,
+    /// The state of the cursor set at the time of this `Edit`. We store this explicitly
+    /// because it cannot be recovered from the `delta` alone.
     pub cursors: CursorSet,
+    /// A delta representing the change made to the text by this `Edit`.
     pub delta: Delta,
 }
 
