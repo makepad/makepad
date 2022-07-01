@@ -51,14 +51,20 @@ export class WasmApp {
         this.update_array_buffer_refs();
     }
     
-    process_to_wasm(msg_ptr) {
-        let ret_ptr = this.exports.process_to_wasm(msg_ptr)
+    new_to_wasm_data_u8(capacity){
+        let new_ptr = this.exports.new_to_wasm_data_u8(capacity);
+        this.update_array_buffer_refs();
+        return new_ptr        
+    }
+    
+    process_to_wasm_msg(msg_ptr) {
+        let ret_ptr = this.exports.process_to_wasm_msg(msg_ptr)
         this.update_array_buffer_refs();
         return ret_ptr
     }
     
     to_wasm_pump(to_wasm) {
-        let ret_ptr = this.process_to_wasm(to_wasm.finalise());
+        let ret_ptr = this.process_to_wasm_msg(to_wasm.finalise());
         let from_wasm = new this.msg_class.FromWasmMsg(this, ret_ptr);
         from_wasm.dispatch();
         from_wasm.destroy();
@@ -119,6 +125,33 @@ export class ToWasmMsg {
             this.u32_ptr = this.ptr >> 2;
             this.u32_offset = this.u32_ptr + offset;
         }
+    }
+
+    // i forgot how to do memcpy with typed arrays. so, we'll do this.
+    push_data_u8(input_buffer) {
+        let app = this.app;
+        
+        let u8_len = input_buffer.byteLength;
+        let output_ptr = app.new_to_wasm_data_u8(u8_len);
+        
+        if ((u8_len & 3) != 0 || (output_ptr & 3) != 0) { // not u32 aligned, do a byte copy
+            var u8_out = new Uint8Array(app.memory.buffer, output_ptr, u8_len)
+            var u8_in = new Uint8Array(input_buffer)
+            for (let i = 0; i < u8_len; i ++) {
+                u8_out[i] = u8_in[i];
+            }
+        }
+        else { // do a u32 copy
+            let u32_len = u8len >> 2; //4 bytes at a time.
+            var u32_out = new Uint32Array(app.memory.buffer, output_ptr, u32_len)
+            var u32_in = new Uint32Array(input_buffer)
+            for (let i = 0; i < u32_len; i ++) {
+                u32_out[i] = u32_in[i];
+            }
+        }
+        
+        app.u32[this.u32_offset++] = output_ptr;
+        app.u32[this.u32_offset++] = u8_len;
     }
     
     finalise() {
