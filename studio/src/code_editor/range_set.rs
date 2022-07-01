@@ -30,7 +30,7 @@ impl RangeSet {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_live_tokenizer::RangeSet;
+    /// use makepad_studio::code_editor::RangeSet;
     /// 
     /// let ranges = RangeSet::new();
     /// ```
@@ -43,7 +43,7 @@ impl RangeSet {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_live_tokenizer::{range_set, Position, Range, RangeSet};
+    /// use makepad_studio::code_editor::{range_set, Position, Range, RangeSet};
     /// 
     /// let ranges = RangeSet::new();
     /// assert!(ranges.is_empty());
@@ -64,7 +64,7 @@ impl RangeSet {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_live_tokenizer::{range_set, Position, Range, RangeSet};
+    /// use makepad_studio::code_editor::{range_set, Position, Range, RangeSet};
     /// let mut builder = range_set::Builder::new();
     /// builder.include(Range {
     ///     start: Position { line: 1, column: 1 },
@@ -82,7 +82,7 @@ impl RangeSet {
     /// # Examples
     ///
     /// ```
-    /// use makepad_live_tokenizer::{range_set, Position, Range, RangeSet};
+    /// use makepad_studio::code_editor::{range_set, Position, Range, RangeSet};
     /// 
     /// let mut builder = range_set::Builder::new();
     /// builder.include(Range {
@@ -115,7 +115,7 @@ impl RangeSet {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_live_tokenizer::{range_set, range_set::Span, Position, Range, RangeSet, Size};
+    /// use makepad_studio::code_editor::{range_set, range_set::Span, Position, Range, RangeSet, Size};
     /// 
     /// let mut builder = range_set::Builder::new();
     /// builder.include(Range {
@@ -157,7 +157,7 @@ impl Builder {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_live_tokenizer::range_set;
+    /// use makepad_studio::code_editor::range_set;
     /// 
     /// let builder = range_set::Builder::new();
     /// ```
@@ -172,7 +172,7 @@ impl Builder {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_live_tokenizer::{range_set::Builder, Position, Range};
+    /// use makepad_studio::code_editor::{range_set::Builder, Position, Range};
     /// 
     /// let mut builder = Builder::new();
     /// builder.include(Range {
@@ -212,7 +212,7 @@ impl Builder {
     /// # Examples
     /// 
     /// ```
-    /// use makepad_live_tokenizer::range_set::Builder;
+    /// use makepad_studio::code_editor::range_set::Builder;
     ///
     /// let mut builder = Builder::new();
     /// let ranges = builder.build(); 

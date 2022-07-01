@@ -5,7 +5,6 @@ use {
             delta::{self, Delta},
             position::Position,
             position_set::PositionSet,
-            range::Range,
             range_set::RangeSet,
             size::Size,
             text::Text,
@@ -18,7 +17,6 @@ use {
         },
         rust_editor::rust_tokenizer::token_cache::TokenCache,
         collab::collab_protocol::{CollabRequest, TextFileId},
-        //design_editor::inline_cache::InlineCache,
         editors::EditorViewId,
     },
     
@@ -729,52 +727,74 @@ impl EditorState {
     }
 }
 
+/// An id for a `Session`. This can be used to refer to a session without borrowing it.
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct SessionId(pub LiveId);
 
+/// A `Session` represents an open file tab in the code editor. Each session refers to exactly one
+/// `Document`, and stores the state that is unique for each session. Among other things, this
+/// includes the set of cursors for the session.
 pub struct Session {
     pub session_view: Option<EditorViewId>,
+    /// The stack of characters that were automatically injected after the cursor during the last few
+    /// edit operations. If the next character to be typed is the same as an automatically injected
+    /// character, we skip over the automatically inject character rather than insert the same
+    /// character again. 
     pub injected_char_stack: Vec<char>,
+    /// The set of cursors for this session.
     pub cursors: CursorSet,
+    /// The minimal set of non-overlapping ranges that covers the selections of all cursors for this
+    /// session. This information can be derived from the set of cursors, but is cached here
+    /// because it is somewhat expensive to compute.
     pub selections: RangeSet,
+    /// The minimal set of positions that covers the carets of all cursors for this session. This
+    /// inforation can be derived from the set of cursors, but is cached here because it is somewhat
+    /// expensive to compute.
     pub carets: PositionSet,
+    /// The document referred to by this session.
     pub document_id: DocumentId,
 }
 
 impl Session {
+    // Applies a delta to this session. This applies the delta to the set of cursors for this
+    // session, and then recomputes the derived information for this set of cursors.
     fn apply_delta(&mut self, delta: &Delta) {
         self.cursors.apply_delta(delta);
         self.update_selections_and_carets();
     }
     
+    // Applies an offset to each cursor. This applies the offsets to the set of cursors for this
+    // session, and then recomputes the derived information for this set of cursor.
     fn apply_offsets(&mut self, offsets: &[Size]) {
         self.cursors.apply_offsets(offsets);
         self.update_selections_and_carets();
     }
     
+    // Recomputes the derived information for the set of cursors for this session.
     fn update_selections_and_carets(&mut self) {
         self.selections = self.cursors.selections();
         self.carets = self.cursors.carets();
     }
 }
 
-pub struct BuilderMsgRange {
-    pub range: Range,
-    pub index: usize,
-}
-
+/// An id for a `Document`. This can be used to refer to a document without borrowing from it.
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct DocumentId(pub LiveId);
 
+/// A `Document` represents an open file in the code editor. Each document is referred to by one or
+/// more `Session`s, and stores the state that is shared between each session. Among other things,
+/// this includes the text for this document, the token state, and the undo state.
 pub struct Document {
+    /// The sessions that refer to this document.
     pub session_ids: HashSet<SessionId>,
     pub should_be_destroyed: bool,
     pub path: PathBuf,
-    //pub msg_ranges: Vec<BuilderMsgRange>,
     pub inner: Option<DocumentInner>,
 }
 
 impl Document {
+    // Applies a delta to this `Document`. This applies the delta to the text for this document, and
+    // then invalidates the cached data for this text.
     fn apply_delta(&mut self, delta: Delta) {
         let inner = self.inner.as_mut().unwrap();
         
@@ -788,6 +808,11 @@ impl Document {
         inner.indent_cache.refresh(&inner.text);
     }
     
+    // Schedules a request to the collab server to apply this delta to the remote document.
+    //
+    // The actual request is sent by calling the `send_request` callback. However, you should always
+    // call this function rather than call `send_request` directly, so the document has a chance to
+    // update its queue of outstanding deltas.
     fn schedule_apply_delta_request(
         &mut self,
         delta: Delta,
@@ -814,7 +839,9 @@ impl Document {
 
 pub struct DocumentInner {
     pub file_id: TextFileId,
+    /// The revision of this document.
     pub revision: usize,
+    /// The text for this document
     pub text: Text,
     pub token_cache: TokenCache,
     pub indent_cache: IndentCache,
@@ -822,6 +849,9 @@ pub struct DocumentInner {
     pub edit_group: Option<EditGroup>,
     pub undo_stack: Vec<Edit>,
     pub redo_stack: Vec<Edit>,
+    /// The queue of outstanding deltas for this document. A delta is outstanding if it has been
+    /// applied to the local document, but we have not yet received confirmation from the collab
+    /// server that it has been applied to the remote document.
     pub outstanding_deltas: VecDeque<Delta>,
 }
 

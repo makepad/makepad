@@ -21,7 +21,7 @@ impl Position {
     /// Returns the position of the start of a text.
     /// 
     /// ```
-    /// use makepad_live_tokenizer::Position;
+    /// use makepad_studio::code_editor::Position;
     /// 
     /// let position = Position::origin();
     /// ```
@@ -32,7 +32,7 @@ impl Position {
     /// Returns `true` if this is the position of the start of a text.
     /// 
     /// ```
-    /// use makepad_live_tokenizer::Position;
+    /// use makepad_studio::code_editor::Position;
     /// 
     /// let position = Position::origin();
     /// assert!(position.is_origin());
