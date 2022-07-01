@@ -18,29 +18,29 @@ struct ReturnMsg{
     y:Vec<SubObj>
 }
 
-#[export_name = "process_to_wasm"]
+#[export_name = "process_to_wasm_msg"]
 #[cfg(target_arch = "wasm32")]
-pub unsafe extern "C" fn process_to_wasm(msg_ptr: u32) -> u32 {
-    let mut from_wasm_msg = FromWasmMsg::new();
-    let mut to_wasm_msg = ToWasmMsg::from_wasm_ptr(msg_ptr);
+pub unsafe extern "C" fn process_to_wasm_msg(msg_ptr: u32) -> u32 {
+    let mut from_wasm = FromWasmMsg::new();
+    let mut to_wasm = ToWasmMsg::from_wasm_ptr(msg_ptr);
     
-    while !to_wasm_msg.was_last_cmd(){
-        let cmd_id = LiveId(to_wasm_msg.read_u64());
-        let cmd_skip = to_wasm_msg.read_cmd_skip();
+    while !to_wasm.was_last_cmd(){
+        let cmd_id = LiveId(to_wasm.read_u64());
+        let cmd_skip = to_wasm.read_cmd_skip();
         match cmd_id{
             id!(SysMouseInput)=>{
-                let inp = SysMouseInput::to_wasm(&mut to_wasm_msg);
+                let inp = SysMouseInput::to_wasm(&mut to_wasm);
                 console_log!("{:?}", inp);
-                ReturnMsg{x:2,y:vec![SubObj{a:3,b:4}]}.from_wasm(&mut from_wasm_msg);
+                ReturnMsg{x:2,y:vec![SubObj{a:3,b:4}]}.from_wasm(&mut from_wasm);
    console_log!("{:?}", inp);                //ReturnMsg{x:4,y:vec![5,6]}.from_wasm(&mut from_wasm_msg);
             }
             _=>()
         }
-        to_wasm_msg.cmd_skip(cmd_skip);
+        to_wasm.cmd_skip(cmd_skip);
         // skip over the command by cmd_len
         //console_log(&format!("{}", cmd_len));
     }
-    from_wasm_msg.into_wasm_ptr()
+    from_wasm.into_wasm_ptr()
 }
 
 #[export_name = "get_wasm_js_msg_impl"]
