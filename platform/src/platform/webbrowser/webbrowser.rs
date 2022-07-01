@@ -1,9 +1,15 @@
 
 use {
     crate::{
+        makepad_live_id::*,
         makepad_math::Vec2,
+        makepad_wasm_msg::{FromWasmMsg, ToWasmMsg, FromWasm, ToWasm},
         platform::{
-            webbrowser::webgl_platform::*,
+            webbrowser::{
+                from_wasm::*,
+                to_wasm::*,
+                webgl_platform::*,
+            }
         },
         event::{
             Timer,
@@ -31,14 +37,14 @@ impl Cx {
     where F: FnMut(&mut Cx, &mut Event),
     {
         self.event_handler = Some(&mut event_handler as *const dyn FnMut(&mut Cx, &mut Event) as *mut dyn FnMut(&mut Cx, &mut Event));
-        let ret = self.event_loop_core(msg);
+        let ret = self.event_loop_core(ToWasmMsg::from_wasm_ptr(msg));
         self.event_handler = None;
         ret
     }
     
     // incoming to_wasm. There is absolutely no other entrypoint
     // to general rust codeflow than this function. Only the allocators and init
-    pub fn event_loop_core(&mut self, msg: u32) -> u32
+    pub fn event_loop_core(&mut self, to_wasm: ToWasmMsg) -> u32
     {
         // store our view root somewhere
         if self.platform.is_initialized == false {
@@ -48,38 +54,29 @@ impl Cx {
             }
         }
         
-        //let root_view = unsafe {&mut *(self.platform.root_view_ptr as *mut View<NoScrollBar>)};
-        let mut to_wasm = ToWasm::from(msg);
-        if self.platform.from_wasm.offset == 0 {
-            self.platform.from_wasm = FromWasm::new();
-        }
+        self.platform.from_wasm = Some(FromWasmMsg::new());
+        
         let mut is_animation_frame = false;
-        loop {
-            let msg_type = to_wasm.mu32();
-            match msg_type {
-                0 => { // end
-                    break;
-                },
-                1 => { // fetch_deps
+        while !to_wasm.was_last_cmd(){
+            let cmd_id = LiveId(to_wasm.read_u64());
+            let cmd_skip = to_wasm.read_cmd_skip();
+            match cmd_id{
+                id!(ToWasmConstructAndGetDeps) => { // fetch_deps
+                    let msg = ToWasmConstructAndGetDeps::to_wasm(&mut to_wasm);
+                    
                     self.call_event_handler(&mut Event::Construct);
                     
                     self.gpu_info.init_from_info(
-                        to_wasm.mu32(), // min_uniforms
-                        to_wasm.parse_string(), // min_uniforms
-                        to_wasm.parse_string() // min_uniforms
+                        msg.gpu_info.min_uniform_vectors,
+                        msg.gpu_info.vendor,
+                        msg.gpu_info.renderer
                     );
-                    self.platform_type = PlatformType::WebBrowser {
-                        port: to_wasm.mu32() as u16,
-                        protocol: to_wasm.parse_string(),
-                        hostname: to_wasm.parse_string(),
-                        pathname: to_wasm.parse_string(),
-                        search: to_wasm.parse_string(),
-                        hash: to_wasm.parse_string(),
-                    };
+                    
+                    self.platform_type = msg.browser_info.into();
                     // send the UI our deps, overlap with shadercompiler
                     let mut load_deps = Vec::<String>::new();
                     
-                    for (file, _) in &self.live_styles.font_index {
+                    for (file, _) in &self.live_styles.font_index { 
                         load_deps.push(file.to_string());
                     }
                     // other textures, things
@@ -469,6 +466,7 @@ impl Cx {
                     panic!("Message unknown")
                 }
             };
+            to_wasm.cmd_skip(cmd_skip);
         };
         
         self.call_signals_and_triggers();
@@ -552,8 +550,6 @@ impl Cx {
                 }
             }
         }
-        // free the received message
-        to_wasm.dealloc();
         
         // request animation frame if still need to redraw, or repaint
         // we use request animation frame for that.
@@ -583,11 +579,9 @@ impl Cx {
             self.call_shader_recompile_event(shader_results, &mut event_handler);*/
         }
         self.process_live_style_errors();
-        // mark the end of the message
-        self.platform.from_wasm.end();
-        
+
         //return wasm pointer to caller
-        self.platform.from_wasm.take_wasm_ptr()
+        self.platform.from_wasm.take().into_wasm_ptr()
     }
     
     // empty stub
@@ -651,11 +645,10 @@ impl Cx {
 }
 
 // storage buffers for graphics API related platform
-#[derive(Clone)]
 pub struct CxPlatform {
     pub is_initialized: bool,
     pub window_geom: WindowGeom,
-    pub from_wasm: FromWasm,
+    pub from_wasm: Option<FromWasmMsg>,
     pub vertex_buffers: usize,
     pub index_buffers: usize,
     pub vaos: usize,
@@ -670,7 +663,7 @@ impl Default for CxPlatform {
         CxPlatform {
             is_initialized: false,
             window_geom: WindowGeom::default(),
-            from_wasm: FromWasm::new(),
+            from_wasm: None,
             vertex_buffers: 0,
             index_buffers: 0,
             vaos: 0,
@@ -686,339 +679,3 @@ impl CxPlatform {
 }
 
 
-
-
-//  Wasm API
-
-
-
-/*
-    
-    fn add_propdefvec(&mut self, prop_defs: &Vec<PropDef>) {
-        self.fit(1);
-        self.mu32(prop_defs.len() as u32);
-        for prop_def in prop_defs {
-            self.add_string(match prop_def.ty {
-                Ty::Vec4 => "vec4",
-                Ty::Vec3 => "vec3",
-                Ty::Vec2 => "vec2",
-                Ty::Float => "float",
-                Ty::Mat4 => "mat4",
-                Ty::Texture2D => "sampler2D",
-                _ => panic!("unexpected type in add_propdefvec")
-            });
-            self.add_string(&prop_def.name);
-        }
-    }*/
-    
-    pub fn compile_webgl_shader(
-        &mut self,
-        shader_id: usize,
-        vertex: &str,
-        fragment: &str,
-        mapping: &CxShaderMapping
-    ) {
-        self.fit(2);
-        self.mu32(2);
-        self.mu32(shader_id as u32);
-        self.add_string(fragment);
-        self.add_string(vertex);
-        self.fit(2);
-        self.mu32(mapping.geometry_props.total_slots as u32);
-        self.mu32(mapping.instance_props.total_slots as u32);
-        self.add_propdefvec(&mapping.pass_uniforms);
-        self.add_propdefvec(&mapping.view_uniforms);
-        self.add_propdefvec(&mapping.draw_uniforms);
-        self.add_propdefvec(&mapping.user_uniforms);
-        self.add_propdefvec(&mapping.live_uniforms);
-        self.add_propdefvec(&mapping.textures);
-    }
-    
-    pub fn alloc_array_buffer(&mut self, buffer_id: usize, len: usize, data: *const f32) {
-        self.fit(4);
-        self.mu32(3);
-        self.mu32(buffer_id as u32);
-        self.mu32(len as u32);
-        self.mu32(data as u32);
-    }
-    
-    pub fn alloc_index_buffer(&mut self, buffer_id: usize, len: usize, data: *const u32) {
-        self.fit(4);
-        self.mu32(4);
-        self.mu32(buffer_id as u32);
-        self.mu32(len as u32);
-        self.mu32(data as u32);
-    }
-    
-    pub fn alloc_vao(&mut self, vao_id: usize, shader_id: usize, geom_ib_id: usize, geom_vb_id: usize, inst_vb_id: usize) {
-        self.fit(6);
-        self.mu32(5);
-        self.mu32(vao_id as u32);
-        self.mu32(shader_id as u32);
-        self.mu32(geom_ib_id as u32);
-        self.mu32(geom_vb_id as u32);
-        self.mu32(inst_vb_id as u32);
-    }
-    
-    pub fn draw_call(
-        &mut self,
-        shader_id: usize,
-        vao_id: usize,
-        uniforms_pass: &[f32],
-        uniforms_view: &[f32],
-        uniforms_draw: &[f32],
-        uniforms_user: &[f32],
-        uniforms_live: &[f32],
-        textures: &Vec<u32>,
-        const_table: &Option<Vec<f32 >>
-    ) {
-        self.fit(11);
-        self.mu32(6);
-        self.mu32(shader_id as u32);
-        self.mu32(vao_id as u32);
-        self.mu32(uniforms_pass.as_ptr() as u32);
-        self.mu32(uniforms_view.as_ptr() as u32);
-        self.mu32(uniforms_draw.as_ptr() as u32);
-        self.mu32(uniforms_user.as_ptr() as u32);
-        self.mu32(uniforms_live.as_ptr() as u32);
-        self.mu32(textures.as_ptr() as u32);
-        if let Some(const_table) = const_table {
-            self.mu32(const_table.as_ptr() as u32);
-            self.mu32(const_table.len() as u32);
-        }
-        else {
-            self.mu32(0);
-            self.mu32(0);
-        }
-    }
-    
-    pub fn clear(&mut self, r: f32, g: f32, b: f32, a: f32) {
-        self.fit(5);
-        self.mu32(7);
-        self.mf32(r);
-        self.mf32(g);
-        self.mf32(b);
-        self.mf32(a);
-    }
-    
-    pub fn load_deps(&mut self, deps: Vec<String>) {
-        self.fit(1);
-        self.mu32(8);
-        self.fit(1);
-        self.mu32(deps.len() as u32);
-        for dep in deps {
-            self.add_string(&dep);
-        }
-    }
-    
-    pub fn update_texture_image2d(&mut self, texture_id: usize, texture: &mut CxTexture) {
-        //usize, width: usize, height: usize, data: &Vec<u32>
-        self.fit(5);
-        self.mu32(9);
-        self.mu32(texture_id as u32);
-        self.mu32(texture.desc.width.unwrap() as u32);
-        self.mu32(texture.desc.height.unwrap() as u32);
-        self.mu32(texture.image_u32.as_ptr() as u32)
-    }
-    
-    pub fn request_animation_frame(&mut self) {
-        self.fit(1);
-        self.mu32(10);
-    }
-    
-    pub fn set_document_title(&mut self, title: &str) {
-        self.fit(1);
-        self.mu32(11);
-        self.add_string(title);
-    }
-    
-    pub fn set_mouse_cursor(&mut self, mouse_cursor: MouseCursor) {
-        self.fit(2);
-        self.mu32(12);
-        let cursor_id = match mouse_cursor {
-            MouseCursor::Hidden => 0,
-            MouseCursor::Default => 1,
-            MouseCursor::Crosshair => 2,
-            MouseCursor::Hand => 3,
-            MouseCursor::Arrow => 4,
-            MouseCursor::Move => 5,
-            MouseCursor::Text => 6,
-            MouseCursor::Wait => 7,
-            MouseCursor::Help => 8,
-            MouseCursor::NotAllowed => 9,
-            MouseCursor::NResize => 10,
-            MouseCursor::NeResize => 11,
-            MouseCursor::EResize => 12,
-            MouseCursor::SeResize => 13,
-            MouseCursor::SResize => 14,
-            MouseCursor::SwResize => 15,
-            MouseCursor::WResize => 16,
-            MouseCursor::NwResize => 17,
-            
-            MouseCursor::NsResize => 18,
-            MouseCursor::NeswResize => 19,
-            MouseCursor::EwResize => 20,
-            MouseCursor::NwseResize => 21,
-            MouseCursor::ColResize => 22,
-            MouseCursor::RowResize => 23,
-            
-        };
-        self.mu32(cursor_id);
-    }
-    
-    pub fn read_file(&mut self, id: u32, path: &str) {
-        self.fit(2);
-        self.mu32(13);
-        self.mu32(id);
-        self.add_string(path);
-    }
-    
-    pub fn show_text_ime(&mut self, x: f32, y: f32) {
-        self.fit(3);
-        self.mu32(14);
-        self.mf32(x);
-        self.mf32(y);
-    }
-    
-    pub fn hide_text_ime(&mut self) {
-        self.fit(1);
-        self.mu32(15);
-    }
-    
-    pub fn text_copy_response(&mut self, response: &str) {
-        self.fit(1);
-        self.mu32(16);
-        self.add_string(response);
-    }
-    
-    pub fn start_timer(&mut self, id: u64, interval: f64, repeats: bool) {
-        self.fit(2);
-        self.mu32(17);
-        self.mu32(if repeats {1}else {0});
-        self.add_f64(id as f64);
-        self.add_f64(interval);
-    }
-    
-    pub fn stop_timer(&mut self, id: u64) {
-        self.fit(1);
-        self.mu32(18);
-        self.add_f64(id as f64);
-    }
-    
-    pub fn xr_start_presenting(&mut self) {
-        self.fit(1);
-        self.mu32(19);
-    }
-    
-    pub fn xr_stop_presenting(&mut self) {
-        self.fit(1);
-        self.mu32(20);
-    }
-    
-    pub fn begin_render_targets(&mut self, pass_id: usize, width: usize, height: usize) {
-        self.fit(4);
-        self.mu32(21);
-        self.mu32(pass_id as u32);
-        self.mu32(width as u32);
-        self.mu32(height as u32);
-    }
-    
-    pub fn add_color_target(&mut self, texture_id: usize, init_only: bool, color: Vec4) {
-        self.fit(7);
-        self.mu32(22);
-        self.mu32(texture_id as u32);
-        self.mu32(if init_only {1} else {0});
-        self.mf32(color.x);
-        self.mf32(color.y);
-        self.mf32(color.z);
-        self.mf32(color.w);
-    }
-    
-    pub fn set_depth_target(&mut self, texture_id: usize, init_only: bool, depth: f32) {
-        self.fit(4);
-        self.mu32(23);
-        self.mu32(texture_id as u32);
-        self.mu32(if init_only {1} else {0});
-        self.mf32(depth);
-    }
-    
-    pub fn end_render_targets(&mut self) {
-        self.fit(1);
-        self.mu32(24);
-    }
-    
-    pub fn set_default_depth_and_blend_mode(&mut self) {
-        self.fit(1);
-        self.mu32(25);
-    }
-    
-    pub fn begin_main_canvas(&mut self, color: Vec4, depth: f32) {
-        self.fit(6);
-        self.mu32(26);
-        self.mf32(color.x);
-        self.mf32(color.y);
-        self.mf32(color.z);
-        self.mf32(color.w);
-        self.mf32(depth);
-    }
-    
-    
-    fn add_string(&mut self, msg: &str) {
-        let len = msg.chars().count();
-        self.fit(len + 1);
-        self.mu32(len as u32);
-        for c in msg.chars() {
-            self.mu32(c as u32);
-        }
-        self.check();
-    }
-    
-    fn add_u8slice(&mut self, msg: &[u8]) {
-        let u8_len = msg.len();
-        let len = u8_len >> 2;
-        let spare = u8_len & 3;
-        self.fit(len + if spare > 0 {1}else {0} + 1);
-        self.mu32(u8_len as u32);
-        // this is terrible. im sure this can be done so much nicer
-        for i in 0..len {
-            self.mu32(((msg[(i << 2) + 0] as u32)) | ((msg[(i << 2) + 1] as u32) << 8) | ((msg[(i << 2) + 2] as u32) << 16) | ((msg[(i << 2) + 3] as u32) << 24));
-        }
-        match spare {
-            1 => self.mu32(msg[(len << 2) + 0] as u32),
-            2 => self.mu32((msg[(len << 2) + 0] as u32) | ((msg[(len << 2) + 1] as u32) << 8)),
-            3 => self.mu32((msg[(len << 2) + 0] as u32) | ((msg[(len << 2) + 1] as u32) << 8) | ((msg[(len << 2) + 2] as u32) << 16)),
-            _ => ()
-        }
-        self.check();
-    }
-    
-    pub fn http_send(&mut self, verb: &str, path: &str, proto: &str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
-        self.fit(3);
-        self.mu32(27);
-        self.mu32(port as u32);
-        self.mu32(signal.signal_id as u32);
-        self.add_string(verb);
-        self.add_string(path);
-        self.add_string(proto);
-        self.add_string(domain);
-        self.add_string(content_type);
-        self.add_u8slice(body);
-    }
-    
-    pub fn websocket_send(&mut self, url: &str, data: &[u8]) {
-        self.fit(1);
-        self.mu32(30);
-        self.add_string(url);
-        self.add_u8slice(data);
-    }
-    
-    pub fn fullscreen(&mut self) {
-        self.fit(1);
-        self.mu32(28);
-    }
-    
-    pub fn normalscreen(&mut self) {
-        self.fit(1);
-        self.mu32(29);
-    }
-}

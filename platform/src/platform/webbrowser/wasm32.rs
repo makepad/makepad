@@ -270,8 +270,8 @@ impl Cx {
                         modifiers: modifiers,
                         time: time
                     }));
-                },
-                11 => { // finger out
+                }, 
+                11 => { // finger out //????
                     let abs = Vec2 {x: to_wasm.mf32(), y: to_wasm.mf32()};
                     let modifiers = unpack_key_modifier(to_wasm.mu32());
                     let time = to_wasm.mf64();

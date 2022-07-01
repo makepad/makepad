@@ -1,7 +1,6 @@
 #[macro_use]
 pub mod webbrowser;
 pub mod webgl_platform;
-pub mod webutil;
 pub mod from_wasm;
 pub mod to_wasm;
 
