@@ -254,12 +254,12 @@ impl<T, const N:usize> FromWasm for [T;N] where T:FromWasm{
     }
     
     fn from_wasm_js_body(out: &mut String, prop: &str, nest:usize){
-        out.push_str(prop);
-        out.push_str(&format!("if({0} === undefined) {0} = [];\n", prop));
         out.push_str(&format!("
+            if({2} === undefined) {2} = [];\n
+            let t{0} = {2};
             for(let i{0} = 0; i{0} < {1}; i{0}++){{
-        ", nest, N));
-        T::from_wasm_js_body(out, &format!("{}[i{}]", prop, nest), nest+1);
+        ", nest, N, prop));
+        T::from_wasm_js_body(out, &format!("t{0}[i{0}]", nest), nest+1);
         out.push_str("}");
     }
 }
@@ -280,9 +280,10 @@ impl<T, const N:usize> ToWasm for [T;N] where T:ToWasm{
     
     fn to_wasm_js_body(out: &mut String, prop: &str, nest:usize){
         out.push_str(&format!("
+                let t{0} = {2};
                 for(let i{0} = 0; i{0} < {1}; i{0}++){{
-        ", nest, N));
-        T::to_wasm_js_body(out, &format!("{}[i{}]", prop, nest), nest+1);
+        ", nest, N, prop));
+        T::to_wasm_js_body(out, &format!("t{0}[i{0}]", nest), nest+1);
         out.push_str("}");
     }
 }
