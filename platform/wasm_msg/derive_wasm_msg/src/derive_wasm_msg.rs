@@ -237,12 +237,11 @@ pub fn derive_to_wasm_impl(input: TokenStream) -> TokenStream {
             tb.add("    fn type_name()->&'static str{").string(&name).add("}");
             tb.add("    fn live_id()->LiveId{id!(").ident(&name).add(")}");
             
-            let mut tw = TokenBuilder::new();
             let mut js = TokenBuilder::new();
             let mut sz = TokenBuilder::new();
 
-            tw.add("    fn to_wasm(inp:&mut ToWasmMsg)->Self{");
-            tw.add("         match inp.read_u32(){");
+            tb.add("    fn to_wasm(inp:&mut ToWasmMsg)->Self{");
+            tb.add("         match inp.read_u32(){");
 
             js.add("    fn to_wasm_js_body(out:&mut String, prop:&str){");
             js.add("        out.push_str(&format!(").string("switch ({}.type){{\n").add(",prop));");
@@ -261,34 +260,34 @@ pub fn derive_to_wasm_impl(input: TokenStream) -> TokenStream {
                     js.add("out.push_str(").string(&format!("app.u32[this.u32_offset++] = {}\n;", index)).add(");");
 
                     sz.add(".max(1");
-                    tw.unsuf_usize(index as usize).add("=>");
-                    tw.add("Self::");
+                    tb.unsuf_usize(index as usize).add("=>");
+                    tb.add("Self::");
                     if let Some(types) = parser.eat_all_types() {
                         
-                        tw.ident(&variant).add("(");
+                        tb.ident(&variant).add("(");
                         for (index, ty) in types.iter().enumerate() {
                             let ty = type_to_static_callable(ty.clone());
                             js.stream(Some(ty.clone())).add("::to_wasm_js_body(out, &format!(").string(&format!("{{}}[{}]", index)).add(",prop));");
 
-                            tw.add("ToWasm::to_wasm(inp),");
+                            tb.add("ToWasm::to_wasm(inp),");
                             sz.add("+").stream(Some(ty)).add("::u32_size()");
                         }
-                        tw.add(")");
+                        tb.add(")");
                     }
                     else if let Some(fields) = parser.eat_all_struct_fields() { // named variant
-                        tw.ident(&variant).add("{");
+                        tb.ident(&variant).add("{");
                         for field in fields {
                             let ty = type_to_static_callable(field.ty.clone());
                             js.stream(Some(ty.clone())).add("::to_wasm_js_body(out, &format!(").string(&format!("{{}}.{}", field.name)).add(",prop));");
                             
-                            tw.ident(&field.name).add(":ToWasm::to_wasm(inp),");
+                            tb.ident(&field.name).add(":ToWasm::to_wasm(inp),");
                             
                             sz.add("+").stream(Some(ty)).add("::u32_size()");
                         }
-                        tw.add("}");
+                        tb.add("}");
                     }
                     else if parser.is_punct_alone(',') || parser.is_eot() { // bare variant
-                        tw.ident(&variant);
+                        tb.ident(&variant);
                     }
                     else {
                         return parser.unexpected();
@@ -296,7 +295,7 @@ pub fn derive_to_wasm_impl(input: TokenStream) -> TokenStream {
                     js.add("out.push_str(").string("break;\n").add(");");
                     sz.add(")");
                     
-                    tw.add(",");
+                    tb.add(",");
                     index += 1;
                     parser.eat_punct_alone(',');
                 }
@@ -304,30 +303,16 @@ pub fn derive_to_wasm_impl(input: TokenStream) -> TokenStream {
                     return parser.unexpected()
                 }
             }
-            tw.add("_ => panic!(").string("enum variant invalid").add(")}");
+            tb.add("_ => panic!(").string("enum variant invalid").add(")}");
             js.add("out.push_str(").string("}").add(");");
             js.add("}");
             sz.add("}");
-            tw.add("}");
-            tb.stream(Some(tw.end()));
+            tb.add("}");
             tb.stream(Some(js.end()));
             tb.stream(Some(sz.end()));
             tb.add("}");
             return tb.end();
         }
     }
-    // ok so. JS.
-    /*
-    match prop.type{
-        case "Variant":
-            app.u32[this.u32_offset++] = 0
-            this.reserve_u32() // summed size of all the types
-            .. the rest
-            break
-        default:{
-            throw new Error("Invalid variant for type")
-        }
-    }
-    */
     return parser.unexpected()
 }
