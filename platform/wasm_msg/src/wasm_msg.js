@@ -74,7 +74,7 @@ export class WasmApp {
         return new this.msg_class.ToWasmMsg(this)
     }
     
-    static load_wasm_from_url(wasm_url, complete, error) {
+    static load_wasm_from_url(wasm_url) {
         function fetch_wasm(wasmfile) {
             let wasm = null;
             function _console_log(chars_ptr, len) {
@@ -85,19 +85,17 @@ export class WasmApp {
                 }
                 console.log(out);
             }
-            fetch(wasmfile)
+            return fetch(wasmfile)
                 .then(response => response.arrayBuffer())
                 .then(bytes => WebAssembly.instantiate(bytes, {env: {
                 _console_log
             }}))
-                .then(results => {
-                wasm = results;
-                complete(wasm);
-            }, errors => {
-                error(errors);
-            });
+            .then(response=>{
+                wasm = response
+                return response
+            })
         }
-        fetch_wasm(wasm_url);
+        return fetch_wasm(wasm_url);
     }
 }
 

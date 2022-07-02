@@ -3,13 +3,20 @@ use makepad_wasm_msg::*;
 #[derive(Debug, ToWasm)]
 struct SysMouseInput {
     x: u32,
-    y: Vec<SubObj>,
+    y: Vec<EnumTest>,
 }
 
 #[derive(Debug, ToWasm, FromWasm)]
 struct SubObj {
     a:u32,
     b:u32
+}
+
+#[derive(Debug, FromWasm, ToWasm)]
+enum EnumTest {
+    Bare,
+    Tuple(u32),
+    Named{x:u32}
 }
 
 #[derive(Debug, FromWasm)]
@@ -32,7 +39,9 @@ pub unsafe extern "C" fn process_to_wasm_msg(msg_ptr: u32) -> u32 {
                 let inp = SysMouseInput::to_wasm(&mut to_wasm);
                 console_log!("{:?}", inp);
                 ReturnMsg{x:2,y:vec![SubObj{a:3,b:4}]}.from_wasm(&mut from_wasm);
-   console_log!("{:?}", inp);                //ReturnMsg{x:4,y:vec![5,6]}.from_wasm(&mut from_wasm_msg);
+                EnumTest::Bare.from_wasm(&mut from_wasm);
+                EnumTest::Tuple(inp.x).from_wasm(&mut from_wasm);
+                EnumTest::Named{x:456}.from_wasm(&mut from_wasm);
             }
             _=>()
         }
@@ -52,9 +61,11 @@ pub unsafe extern "C" fn get_wasm_js_msg_impl() -> u32 {
     out.push_str("return {");
     out.push_str("   ToWasmMsg:class extends ToWasmMsg{");
     SysMouseInput::to_wasm_js_method(&mut out);
+    EnumTest::to_wasm_js_method(&mut out);
     out.push_str("   },");
     out.push_str("   FromWasmMsg:class extends FromWasmMsg{");
     ReturnMsg::from_wasm_js_method(&mut out);
+    EnumTest::from_wasm_js_method(&mut out);
     out.push_str("   }");
     out.push_str("}");
     
