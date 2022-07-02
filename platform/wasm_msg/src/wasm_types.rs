@@ -246,6 +246,47 @@ impl ToWasm for f64 {
 
 
 
+impl<T, const N:usize> FromWasm for [T;N] where T:FromWasm{
+    fn from_wasm_inner(&self, out: &mut FromWasmMsg) {
+        for item in self{
+            item.from_wasm_inner(out);
+        }
+    }
+    
+    fn from_wasm_js_body(out: &mut String, prop: &str){
+        out.push_str(prop);
+        out.push_str(&format!("if({0} === undefined) {0} = [];\n", prop));
+        out.push_str(&format!("
+            for(let i = 0; i < {0}; i++){{
+        ", N));
+        T::from_wasm_js_body(out, &format!("{}[i]", prop));
+        out.push_str("}");
+    }
+}
+
+impl<T, const N:usize> ToWasm for [T;N] where T:ToWasm{
+    fn u32_size() -> usize{T::u32_size() * N}
+    
+    fn to_wasm(inp: &mut ToWasmMsg) -> Self{
+        unsafe{
+            let mut to = std::mem::MaybeUninit::<[T; N]>::uninit();
+            let top: *mut T = std::mem::transmute(&mut to);
+            for i in 0..N{
+                top.add(i).write(ToWasm::to_wasm(inp));
+            }
+            to.assume_init()
+        }
+    }
+    
+    fn to_wasm_js_body(out: &mut String, prop: &str){
+        out.push_str(&format!("
+                for(let i = 0; i < {0}; i++){{
+        ", N));
+        T::to_wasm_js_body(out, &format!("{}[i]", prop));
+        out.push_str("}");
+    }
+}
+
 impl<T> FromWasm for Vec<T> where T:FromWasm{
     fn from_wasm_inner(&self, out: &mut FromWasmMsg) {
         out.push_u32(self.len() as u32);
@@ -282,9 +323,9 @@ impl<T> ToWasm for Vec<T> where T:ToWasm{
         let item_size = T::u32_size();
         out.push_str(&format!("
             if(Array.isArray({0})){{
-            app.u32[this.u32_offset ++] = {0}.length
-            this.reserve_u32({1} * {0}.length)
-            for(let i = 0; i < {0}.length; i++){{
+                app.u32[this.u32_offset ++] = {0}.length
+                this.reserve_u32({1} * {0}.length)
+                for(let i = 0; i < {0}.length; i++){{
         ", prop, item_size));
         T::to_wasm_js_body(out, &format!("{}[i]", prop));
         out.push_str("}} else {");
@@ -294,3 +335,48 @@ impl<T> ToWasm for Vec<T> where T:ToWasm{
     }
 }
 
+impl<T> FromWasm for Option<T> where T:FromWasm{
+    fn from_wasm_inner(&self, out: &mut FromWasmMsg) {
+        if let Some(val) = self{
+            out.push_u32(1);
+            val.from_wasm_inner(out);
+        }
+        else{
+            out.push_u32(0);
+        }
+    }
+    
+    fn from_wasm_js_body(out: &mut String, prop: &str){
+        out.push_str("if(app.u32[this.u32_offset++] != 0){");
+        T::from_wasm_js_body(out, prop);
+        out.push_str("} else { ");
+        out.push_str(&format!("
+            {0} = undefined
+        }}", prop));
+    }
+}
+
+impl<T> ToWasm for Option<T> where T:ToWasm{
+    fn u32_size() -> usize{1 + T::u32_size()}
+    
+    fn to_wasm(inp: &mut ToWasmMsg) -> Self{
+        if inp.read_u32() == 0{
+            None
+        }
+        else{
+            Some(ToWasm::to_wasm(inp))
+        }
+    }
+    
+    fn to_wasm_js_body(out: &mut String, prop: &str){
+        out.push_str(&format!("
+            if({0} === undefined){{
+                app.u32[this.u32_offset ++] = 0
+            }}
+            else {{
+                app.u32[this.u32_offset ++] = 1
+        ", prop));
+        T::to_wasm_js_body(out, prop);
+        out.push_str("}");
+    }
+}

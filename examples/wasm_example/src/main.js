@@ -14,7 +14,6 @@ class MyWasmApp extends WebGLWasmApp {
 const wasm = await MyWasmApp.load_wasm_from_url("/makepad/target/wasm32-unknown-unknown/debug/wasm_example.wasm");
 
 let app = new MyWasmApp(canvas, wasm);
-console.log(app);
 
 let to_wasm = app.new_to_wasm();
 to_wasm.SysMouseInput({x: 1234, y: [{type:"Tuple",0:1294}]});
