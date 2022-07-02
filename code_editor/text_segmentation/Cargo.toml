@@ -1,5 +1,5 @@
 [package]
-name = "makepad-segment"
+name = "makepad-text-segmentation"
 version = "0.1.0"
 edition = "2021"
 
