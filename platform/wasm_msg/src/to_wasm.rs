@@ -8,7 +8,7 @@ pub trait ToWasm {
     fn live_id()->LiveId{panic!()}
 
     fn to_wasm(inp: &mut ToWasmMsg) -> Self;
-    fn to_wasm_js_body(out: &mut String, prop: &str);
+    fn to_wasm_js_body(out: &mut String, prop: &str, nest:usize);
 
     fn to_wasm_js_method(out: &mut String) {
         let id = Self::live_id();
@@ -21,7 +21,7 @@ pub trait ToWasm {
             let block_len_offset = this.u32_offset ++;
             \n", Self::type_name(), 3 + Self::u32_size(), id.0 & 0xffff_ffff, (id.0 >> 32)));
         
-        Self::to_wasm_js_body(out, "obj");
+        Self::to_wasm_js_body(out, "obj", 0);
         
         out.push_str("
             if( (this.u32_offset & 1) != 0){ app.u32[this.u32_offset ++] = 0;}
