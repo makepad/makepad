@@ -31,13 +31,13 @@ pub fn derive_from_wasm_impl(input: TokenStream) -> TokenStream {
             
             let mut js = TokenBuilder::new();
             
-            js.add("    fn from_wasm_js_body(out:&mut String, prop:&str){");
+            js.add("    fn from_wasm_js_body(out:&mut String, prop:&str, nest:usize){");
             if let Some(types) = &types {
                 js.add("    out.push_str(&format!(").string("if({0} == undefined){0} = [];\n").add(",prop));");
                 for (index, ty) in types.iter().enumerate() {
                     tb.add("self.").unsuf_usize(index).add(".from_wasm_inner(out);");
                     let ty = type_to_static_callable(ty.clone());
-                    js.stream(Some(ty)).add("::from_wasm_js_body(out, &format!(").string(&format!("{{}}.{}", index)).add(",prop));");
+                    js.stream(Some(ty)).add("::from_wasm_js_body(out, &format!(").string(&format!("{{}}.{}", index)).add(",prop), nest+1);");
                 }
             }
             else if let Some(fields) = &fields {
@@ -45,7 +45,7 @@ pub fn derive_from_wasm_impl(input: TokenStream) -> TokenStream {
                 for field in fields {
                     tb.add("self.").ident(&field.name).add(".from_wasm_inner(out);");
                     let ty = type_to_static_callable(field.ty.clone());
-                    js.stream(Some(ty)).add("::from_wasm_js_body(out, &format!(").string(&format!("{{}}.{}", field.name)).add(",prop));");
+                    js.stream(Some(ty)).add("::from_wasm_js_body(out, &format!(").string(&format!("{{}}.{}", field.name)).add(",prop), nest+1);");
                 }
             }
             else {
@@ -81,7 +81,7 @@ pub fn derive_from_wasm_impl(input: TokenStream) -> TokenStream {
             
             let mut js = TokenBuilder::new();
             
-            js.add("    fn from_wasm_js_body(out:&mut String, prop:&str){");
+            js.add("    fn from_wasm_js_body(out:&mut String, prop:&str, nest:usize){");
             
             // ok so the JS
             js.add("        out.push_str(&format!(").string("{0} = {{}};\n").add(",prop));");
@@ -100,7 +100,7 @@ pub fn derive_from_wasm_impl(input: TokenStream) -> TokenStream {
                         tb.add("Self ::").ident(&variant).add("(");
                         for (index, ty) in types.iter().enumerate() {
                             let ty = type_to_static_callable(ty.clone());
-                            js.stream(Some(ty)).add("::from_wasm_js_body(out, &format!(").string(&format!("{{}}[{}]", index)).add(",prop));");
+                            js.stream(Some(ty)).add("::from_wasm_js_body(out, &format!(").string(&format!("{{}}[{}]", index)).add(",prop), nest+1);");
                             tb.ident(&format!("n{}", index)).add(",");
                         }
                         tb.add(") => {").suf_u32(index).add(".from_wasm_inner(out);");
@@ -115,7 +115,7 @@ pub fn derive_from_wasm_impl(input: TokenStream) -> TokenStream {
                             tb.ident(&field.name).add(",");
                             
                             let ty = type_to_static_callable(field.ty.clone());
-                            js.stream(Some(ty)).add("::from_wasm_js_body(out, &format!(").string(&format!("{{}}.{}", field.name)).add(",prop));");
+                            js.stream(Some(ty)).add("::from_wasm_js_body(out, &format!(").string(&format!("{{}}.{}", field.name)).add(",prop), nest+1);");
                         }
                         tb.add("} => {").suf_u32(index).add(".from_wasm_inner(out);");
                         for field in fields {
@@ -182,7 +182,7 @@ pub fn derive_to_wasm_impl(input: TokenStream) -> TokenStream {
             
             let mut js = TokenBuilder::new();
             let mut sz = TokenBuilder::new();
-            js.add("    fn to_wasm_js_body(out:&mut String, prop:&str){");
+            js.add("    fn to_wasm_js_body(out:&mut String, prop:&str, nest:usize){");
             
             tb.add("    fn to_wasm(inp:&mut ToWasmMsg)->Self{");
             sz.add("    fn u32_size()->usize{0");
@@ -191,7 +191,7 @@ pub fn derive_to_wasm_impl(input: TokenStream) -> TokenStream {
                 tb.add("Self(");
                 for (index, ty) in types.iter().enumerate() {
                     let ty = type_to_static_callable(ty.clone());
-                    js.stream(Some(ty.clone())).add("::to_wasm_js_body(out, &format!(").string(&format!("{{}}.{}", index)).add(",prop));");
+                    js.stream(Some(ty.clone())).add("::to_wasm_js_body(out, &format!(").string(&format!("{{}}.{}", index)).add(",prop), nest + 1);");
                     
                     tb.add("ToWasm::to_wasm(inp),");
                     sz.add("+").stream(Some(ty)).add("::u32_size()");
@@ -205,7 +205,7 @@ pub fn derive_to_wasm_impl(input: TokenStream) -> TokenStream {
                     
                     let ty = type_to_static_callable(field.ty.clone());
                     
-                    js.stream(Some(ty.clone())).add("::to_wasm_js_body(out, &format!(").string(&format!("{{}}.{}", field.name)).add(",prop));");
+                    js.stream(Some(ty.clone())).add("::to_wasm_js_body(out, &format!(").string(&format!("{{}}.{}", field.name)).add(",prop), nest + 1);");
                     
                     tb.ident(&field.name).add(":ToWasm::to_wasm(inp),");
                     sz.add("+").stream(Some(ty)).add("::u32_size()");
@@ -243,7 +243,7 @@ pub fn derive_to_wasm_impl(input: TokenStream) -> TokenStream {
             tb.add("    fn to_wasm(inp:&mut ToWasmMsg)->Self{");
             tb.add("         match inp.read_u32(){");
 
-            js.add("    fn to_wasm_js_body(out:&mut String, prop:&str){");
+            js.add("    fn to_wasm_js_body(out:&mut String, prop:&str, nest: usize){");
             js.add("        out.push_str(&format!(").string("switch ({}.type){{\n").add(",prop));");
 
             sz.add("    fn u32_size()->usize{ 0");
@@ -267,7 +267,7 @@ pub fn derive_to_wasm_impl(input: TokenStream) -> TokenStream {
                         tb.ident(&variant).add("(");
                         for (index, ty) in types.iter().enumerate() {
                             let ty = type_to_static_callable(ty.clone());
-                            js.stream(Some(ty.clone())).add("::to_wasm_js_body(out, &format!(").string(&format!("{{}}[{}]", index)).add(",prop));");
+                            js.stream(Some(ty.clone())).add("::to_wasm_js_body(out, &format!(").string(&format!("{{}}[{}]", index)).add(",prop), nest + 1);");
 
                             tb.add("ToWasm::to_wasm(inp),");
                             sz.add("+").stream(Some(ty)).add("::u32_size()");
@@ -278,7 +278,7 @@ pub fn derive_to_wasm_impl(input: TokenStream) -> TokenStream {
                         tb.ident(&variant).add("{");
                         for field in fields {
                             let ty = type_to_static_callable(field.ty.clone());
-                            js.stream(Some(ty.clone())).add("::to_wasm_js_body(out, &format!(").string(&format!("{{}}.{}", field.name)).add(",prop));");
+                            js.stream(Some(ty.clone())).add("::to_wasm_js_body(out, &format!(").string(&format!("{{}}.{}", field.name)).add(",prop), nest + 1);");
                             
                             tb.ident(&field.name).add(":ToWasm::to_wasm(inp),");
                             
