@@ -15,7 +15,7 @@ pub trait FromWasm {
     
     fn from_wasm_inner(&self, out: &mut FromWasmMsg);
     
-    fn from_wasm_js_body(out: &mut String, prop: &str);
+    fn from_wasm_js_body(out: &mut String, prop: &str, nest:usize);
     
     fn from_wasm_js_method(out: &mut String) {
         let id = Self::live_id();
@@ -25,7 +25,7 @@ pub trait FromWasm {
                 let args = app.from_wasm_args;
                 \n", id.0 & 0xffff_ffff));
         
-        Self::from_wasm_js_body(out, &format!("args.{}", Self::type_name()));
+        Self::from_wasm_js_body(out, &format!("args.{}", Self::type_name()), 0);
         
         out.push_str(&format!("
                 app.{0}(args.{0});
