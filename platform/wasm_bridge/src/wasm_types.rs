@@ -104,7 +104,7 @@ impl ToWasm for String {
 
 impl FromWasm for bool {
     fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _nest: usize) {
-        out.push_ln(slot, &format!("{} = app.u32[this.u32_offset++];", prop));
+        out.push_ln(slot, &format!("{} = app.u32[this.u32_offset++]!==0?true:false;", prop));
     }
     
     fn from_wasm_inner(&self, out: &mut FromWasmMsg) {
