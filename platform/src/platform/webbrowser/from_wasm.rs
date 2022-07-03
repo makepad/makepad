@@ -1,5 +1,5 @@
 use crate::{
-    makepad_wasm_msg::*,
+    makepad_wasm_bridge::*,
     makepad_live_id::{LiveId,id},
     cursor::MouseCursor,
 };
