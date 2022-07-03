@@ -10,7 +10,7 @@ export class WasmApp {
         
         this.update_array_buffer_refs();
         
-        let msg = new FromWasmMsg(this, this.get_wasm_js_msg_impl());
+        let msg = new FromWasmMsg(this, this.get_wasm_js_msg_class());
         let code = msg.read_str();
         msg.destroy();
         
@@ -28,8 +28,8 @@ export class WasmApp {
         }
     }
     
-    get_wasm_js_msg_impl() {
-        let new_ptr = this.exports.get_wasm_js_msg_impl();
+    get_wasm_js_msg_class() {
+        let new_ptr = this.exports.get_wasm_js_msg_class();
         this.update_array_buffer_refs();
         return new_ptr
     }
