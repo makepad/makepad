@@ -1,4 +1,4 @@
-import {WasmApp} from "/makepad/platform/wasm_msg/src/wasm_msg.js"
+import {WasmApp} from "/makepad/platform/wasm_bridge/src/wasm_app.js"
 
 export class WebGLWasmApp extends WasmApp{
     constructor(canvas, wasm) {

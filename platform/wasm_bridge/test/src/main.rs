@@ -71,7 +71,7 @@ struct RunTest {
 #[cfg(target_arch = "wasm32")]
 pub unsafe extern "C" fn process_to_wasm_msg(msg_ptr: u32) -> u32 {
     let mut from_wasm = FromWasmMsg::new();
-    let mut to_wasm = ToWasmMsg::new(msg_ptr);
+    let mut to_wasm = ToWasmMsg::take_ownership(msg_ptr);
     
     while !to_wasm.was_last_cmd() {
         let cmd_id = LiveId(to_wasm.read_u64());
@@ -95,7 +95,7 @@ pub unsafe extern "C" fn process_to_wasm_msg(msg_ptr: u32) -> u32 {
         }
         to_wasm.cmd_skip(cmd_skip);
     }
-    from_wasm.into_wasm_ptr()
+    from_wasm.release_ownership()
 }
 
 #[export_name = "get_wasm_js_msg_class"]
@@ -115,7 +115,7 @@ pub unsafe extern "C" fn get_wasm_js_msg_class() -> u32 {
     out.push_str("}");
     
     msg.push_str(&out);
-    msg.into_wasm_ptr()
+    msg.release_ownership()
 }
 
 fn main() {
