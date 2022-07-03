@@ -1,10 +1,11 @@
 use makepad_live_id::*;
+use crate::to_wasm::*;
 
 pub trait FromWasm {
     fn type_name()->&'static str{panic!()}
     fn live_id()->LiveId{panic!()}
 
-    fn from_wasm(&self, out: &mut FromWasmMsg) {
+    fn write_from_wasm(&self, out: &mut FromWasmMsg) {
         out.push_u64(Self::live_id().0);
         let block_len_offset = out.data_len();
         out.push_u32(0);
@@ -15,22 +16,31 @@ pub trait FromWasm {
     
     fn from_wasm_inner(&self, out: &mut FromWasmMsg);
     
-    fn from_wasm_js_body(out: &mut String, prop: &str, nest:usize);
+    fn from_wasm_js_body(out: &mut WasmJSOutput, slot:usize, is_recur: bool, prop:&str, temp:usize);
     
-    fn from_wasm_js_method(out: &mut String) {
+    fn from_wasm_js_method(wrapper: &mut String) {
         let id = Self::live_id();
-        out.push_str(&format!("
-            {0}(){{
-                let app = this.app;
-                let args = app.from_wasm_args;
-                \n", id.0 & 0xffff_ffff));
+
+        wrapper.push_str(&format!("{}(){{\n", id.0 & 0xffff_ffff));
+        wrapper.push_str("let app = this.app;\n");
+        wrapper.push_str("let args = app.from_wasm_args;\n");
         
-        Self::from_wasm_js_body(out, &format!("args.{}", Self::type_name()), 0);
+        let mut out = WasmJSOutput{temp_alloc:0, fns:vec![WasmJSOutputFn{name:String::new(), body:String::new(), temp:0}]};
+        let new_nest = out.alloc_temp();
         
-        out.push_str(&format!("
-                app.{0}(args.{0});
-            }}
-        ", Self::type_name()));
+        Self::from_wasm_js_body(&mut out, 0, false, &format!("args.{}", Self::type_name()), new_nest);
+        
+        for p in out.fns.iter().rev(){
+            if p.name == ""{
+                wrapper.push_str(&p.body);
+            }
+            else{
+                wrapper.push_str(&format!("let {} = (t{})=>{{\n{}}}\n", p.name, p.temp, p.body))
+            }
+        }
+        
+        wrapper.push_str(&format!("app.{0}(args.{0});\n", Self::type_name()));
+        wrapper.push_str("}\n");
     }
 }
 
@@ -92,7 +102,7 @@ impl FromWasmMsg {
         }
     }
     
-    pub fn into_wasm_ptr(self) -> u32 {
+    pub fn release_ownership(self) -> u32 {
         unsafe {
             let mut v = std::mem::ManuallyDrop::new(self.data);
             let ptr = v.as_mut_ptr();
