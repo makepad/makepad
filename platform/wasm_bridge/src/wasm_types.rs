@@ -313,6 +313,32 @@ impl<T> ToWasm for Vec<T> where T: ToWasm {
     }
 }
 
+impl<T> FromWasm for Box<T> where T: FromWasm {
+    fn from_wasm_inner(&self, out: &mut FromWasmMsg) {
+        self.as_ref().from_wasm_inner(out);
+    }
+    
+    fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, nest: usize) {
+        let new_nest = out.alloc_nest();
+        T::from_wasm_js_body(out, slot, true, prop, new_nest);
+    }
+}
+
+impl<T> ToWasm for Box<T> where T: ToWasm {
+    fn u32_size() -> usize {0}
+    
+    fn to_wasm(inp: &mut ToWasmMsg) -> Self {
+        Self::new(ToWasm::to_wasm(inp))
+
+    }
+    
+    fn to_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, nest: usize) {
+        let item_size = T::u32_size();
+        out.push_ln(slot, &format!("this.reserve_u32({});", item_size));
+        T::to_wasm_js_body(out, slot, true, prop, nest);
+    }
+}
+
 impl<T> FromWasm for Option<T> where T: FromWasm {
     fn from_wasm_inner(&self, out: &mut FromWasmMsg) {
         if let Some(val) = self {
@@ -324,10 +350,10 @@ impl<T> FromWasm for Option<T> where T: FromWasm {
         }
     }
     
-    fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _nest: usize) {
+    fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, is_recur: bool, prop: &str, _nest: usize) {
         out.push_ln(slot, "if(app.u32[this.u32_offset++] !== 0){");
         let new_nest = out.alloc_nest();
-        T::from_wasm_js_body(out, slot, true, prop, new_nest);
+        T::from_wasm_js_body(out, slot, is_recur, prop, new_nest);
         out.push_ln(slot, "} else {");
         out.push_ln(slot, &format!("{} = undefined;", prop));
         out.push_ln(slot, "}");
