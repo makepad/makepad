@@ -15,12 +15,12 @@ use {
             cursor::Cursor,
         },
     },
-    
+
     std::slice,
 };
 
 /// A type for representing a set of non-overlapping `Cursor`s.
-/// 
+///
 /// This is used to implement multiple cursor support in the editor. The cursors are stored in a
 /// list, and the list is sorted by the start position of each cursor. The last inserted cursor is
 /// special (because it determines the scroll position in the document), so we also remember its
@@ -35,10 +35,10 @@ impl CursorSet {
     /// Creates a `CursorSet` with a single cursor at the start of the text.
     ///
     /// # Examples
-    /// 
+    ///
     /// ```
     /// use makepad_studio::code_editor::CursorSet;
-    /// 
+    ///
     /// let cursors = CursorSet::new();
     /// ```
     pub fn new() -> CursorSet {
@@ -47,30 +47,30 @@ impl CursorSet {
             last_inserted_index: 0,
         }
     }
-    
+
     /// Returns the number of cursors in this `CursorSet`.
-    /// 
+    ///
     /// This is always at least 1.
-    /// 
+    ///
     /// # Examples
-    /// 
+    ///
     /// ```
     /// use makepad_studio::code_editor::CursorSet;
-    /// 
+    ///
     /// let cursors = CursorSet::new();
     /// assert_eq!(cursors.len(), 1);
     /// ```
     pub fn len(&self) -> usize {
         self.cursors.len()
     }
-    
+
     /// Returns an iterator over the cursors in this `CursorSet`.
-    /// 
+    ///
     /// # Examples
-    /// 
+    ///
     /// ```
     /// use makepad_studio::code_editor::{Cursor, CursorSet, Position};
-    /// 
+    ///
     /// let mut cursors = CursorSet::new();
     /// cursors.add(Position { line: 1, column: 1 });
     /// let mut iter = cursors.iter();
@@ -92,14 +92,14 @@ impl CursorSet {
             iter: self.cursors.iter(),
         }
     }
-    
+
     /// Returns the the last inserted cursor in this `CursorSet`.
-    /// 
+    ///
     /// # Examples
-    /// 
+    ///
     /// ```
     /// use makepad_studio::code_editor::{Cursor, CursorSet, Position};
-    /// 
+    ///
     /// let mut cursors = CursorSet::new();
     /// cursors.add(Position { line: 1, column: 1 });
     /// assert_eq!(
@@ -114,18 +114,18 @@ impl CursorSet {
     pub fn last_inserted(&self) -> &Cursor {
         &self.cursors[self.last_inserted_index]
     }
-    
+
     /// Returns the minimal set of non-overlapping ranges that covers the selections of all cursors
     /// in this `CursorSet`.
-    /// 
+    ///
     /// This is used during rendering, where we perform a linear scan over the text to determine
-    /// where each selection should be drawn. 
-    /// 
+    /// where each selection should be drawn.
+    ///
     /// # Examples
-    /// 
+    ///
     /// ```
     /// use makepad_studio::code_editor::{range_set::Span, CursorSet, Position, Size, Text};
-    /// 
+    ///
     /// let mut cursors = CursorSet::new();
     /// cursors.add(Position { line: 1, column: 1 });
     /// let text = Text::from("abc\ndef");
@@ -159,19 +159,19 @@ impl CursorSet {
         }
         builder.build()
     }
-    
-    /// Returns the minimal set of positions that covers the carets of all cursors in this 
+
+    /// Returns the minimal set of positions that covers the carets of all cursors in this
     /// `CursorSet`.
     ///
-    /// 
+    ///
     /// This is used during rendering, where we perform a linear scan over the text to determine
     /// where each caret should be drawn.
-    /// 
+    ///
     /// # Examples
-    /// 
+    ///
     /// ```
     /// use makepad_studio::code_editor::{CursorSet, Position, Size};
-    /// 
+    ///
     /// let mut cursors = CursorSet::new();
     /// cursors.add(Position { line: 1, column: 1 });
     /// let carets = cursors.carets();
@@ -187,15 +187,15 @@ impl CursorSet {
         }
         builder.build()
     }
-    
+
     /// Replaces this `CursorSet` with a single cursor, such that the caret is at the start of the
     /// given `text` and the selection covers the entire given `text`.
-    /// 
+    ///
     /// # Examples
-    /// 
+    ///
     /// ```
     /// use makepad_studio::code_editor::{Cursor, CursorSet, Position, Text};
-    /// 
+    ///
     /// let mut cursors = CursorSet::new();
     /// let text = Text::from("abc\ndef");
     /// cursors.select_all(&text);
@@ -227,15 +227,15 @@ impl CursorSet {
             max_column: 0
         });
     }
-    
-    /// Adds a cursor to this `CursorSet` with the caret at the given `position` and an empty
+
+    /// Adds a cursor to this `CursorSet`, with the caret at the given `position` and an empty
     /// selection.
-    /// 
+    ///
     /// # Examples
-    /// 
+    ///
     /// ```
     /// use makepad_studio::code_editor::{Cursor, CursorSet, Position};
-    /// 
+    ///
     /// let mut cursors = CursorSet::new();
     /// cursors.add(Position { line: 1, column: 1 });
     /// let mut iter = cursors.iter();
@@ -267,7 +267,7 @@ impl CursorSet {
         self.last_inserted_index = index;
         self.normalize();
     }
-    
+
     /// Move all cursors in this `CursorSet` one column to the left.
     pub fn move_left(&mut self, text: &Text, select: bool) {
         for cursor in &mut self.cursors {
@@ -275,7 +275,7 @@ impl CursorSet {
         }
         self.normalize();
     }
-    
+
     /// Move all cursors in this `CursorSet` one column to the right.
     pub fn move_right(&mut self, text: &Text, select: bool) {
         for cursor in &mut self.cursors {
@@ -283,7 +283,7 @@ impl CursorSet {
         }
         self.normalize();
     }
-    
+
     /// Move all cursors in this `CursorSet` one line up.
     pub fn move_up(&mut self, text: &Text, select: bool) {
         for cursor in &mut self.cursors {
@@ -291,7 +291,7 @@ impl CursorSet {
         }
         self.normalize();
     }
-    
+
     /// Move all cursors in this `CursorSet` one line down.
     pub fn move_down(&mut self, text: &Text, select: bool) {
         for cursor in &mut self.cursors {
@@ -299,7 +299,7 @@ impl CursorSet {
         }
         self.normalize();
     }
-    
+
     /// Move all cursors in this `CursorSet` to the given `position`.
     pub fn move_to(&mut self, position: Position, select: bool) {
         if select {
@@ -315,20 +315,20 @@ impl CursorSet {
             self.last_inserted_index = 0;
         }
     }
-    
+
     pub fn apply_delta(&mut self, delta: &Delta) {
         for cursor in &mut self.cursors {
             cursor.apply_delta(delta);
         }
         self.normalize();
     }
-    
+
     pub fn apply_offsets(&mut self, offsets: &[Size]) {
         for (cursor, &offset) in self.cursors.iter_mut().zip(offsets) {
             cursor.apply_offset(offset);
         }
     }
-    
+
     fn normalize(&mut self) {
         let mut index = 0;
         while index + 1 < self.cursors.len() {
@@ -360,7 +360,7 @@ impl Default for CursorSet {
 impl<'a> IntoIterator for &'a CursorSet {
     type Item = &'a Cursor;
     type IntoIter = Iter<'a>;
-    
+
     fn into_iter(self) -> Self::IntoIter {
         self.iter()
     }
@@ -372,7 +372,7 @@ pub struct Iter<'a> {
 
 impl<'a> Iterator for Iter<'a> {
     type Item = &'a Cursor;
-    
+
     fn next(&mut self) -> Option<Self::Item> {
         self.iter.next()
     }

@@ -19,29 +19,29 @@ use {
         collab::collab_protocol::{CollabRequest, TextFileId},
         editors::EditorViewId,
     },
-    
+
     std::{
         collections::{HashMap, HashSet, VecDeque},
         iter,
-        mem,  
+        mem,
         path::PathBuf,
     },
 };
 
 /// This type contains all the state for the code editor that is not directly related to the UI. It
 /// contains a `Session` for each open file tab, and a `Document` for each open file.
-/// 
+///
 /// Each session refers to exactly one document, and each document is referred to by one or more
 /// session. In addition, each document refers back to the sessions that refer to it. The resulting
 /// data structure is a cyclic graph. These are hard to represent directly in Rust, so we use the
 /// typical approach of storing the sessions and documents in some kind of arena, and then referring
-/// to them by id.  
-/// 
+/// to them by id.
+///
 /// When the user clicks on a file in the file tree, we create both a new session and a new document
 /// for this file. Subsequent attempts to open the same file should create a new session that refers
 /// to the same document. To figure out whether we already have a document for a given file, we
 /// maintain a mapping from file paths to document ids.
-/// 
+///
 /// When a document is first created, it starts out in an uninitialized state, while we fetch its
 /// contents from the collab server. Although the initial message to open the file for a document and
 /// fetch its content uses a file path, subsequent messages to the collab server for the same
@@ -70,10 +70,10 @@ impl EditorState {
     pub fn new() -> EditorState {
         EditorState::default()
     }
-    
+
     /// Either gets or creates the document for the file with the given `path`, and then creates a
     /// session that refers to this document. Returns the id of the newly created session.
-    /// 
+    ///
     /// If the document did not yet exist, the `send_request` callback is used to send a request to
     /// the collab server to open the document's file and fetch its contents.
     pub fn create_session(
@@ -94,10 +94,10 @@ impl EditorState {
         document.session_ids.insert(session_id);
         session_id
     }
-    
+
     /// Destroys the session with the given `session_id`. If this session was the last session that
-    /// referred to its document, the document is destroyed as well.
-    /// 
+    /// referred to its document, the document is scheduled to be destroyed as well.
+    ///
     /// If the document is destroyed, the `send_request` callback is used to send a request to the
     /// collab server to close the document's file.
     pub fn destroy_session(
@@ -114,7 +114,7 @@ impl EditorState {
         }
         self.sessions.remove(&session_id);
     }
-    
+
     /// Either gets or creates the document for the file with the given `path`.
     ///
     /// If the document did not yet exist, the `send_request` callback is used to send a request to
@@ -144,7 +144,8 @@ impl EditorState {
             }
         }
     }
-    
+
+    /// Handles an open file response from the collab server.
     pub fn handle_open_file_response(
         &mut self,
         file_id: TextFileId,
@@ -157,9 +158,7 @@ impl EditorState {
         let token_cache = TokenCache::new(&text);
         let indent_cache = IndentCache::new(&text);
         let msg_cache = MsgCache::new(&text);
-        
-        //let inline_cache = RefCell::new(InlineCache::new(&text));
-        
+
         document.inner = Some(DocumentInner {
             file_id,
             revision,
@@ -178,7 +177,14 @@ impl EditorState {
         }
         document_id
     }
-    
+
+    /// Schedules the document with the given `document_id` to be destroyed.
+    ///
+    /// If the document is already initialized, it is destroyed immediately. Otherwise, destroying
+    /// the document is deferred until it becomes initialized.
+    ///
+    /// If the document is destroyed, the `send_request` callback is used to send a request to the
+    /// collab server to close the document's file.
     pub fn destroy_document(
         &mut self,
         document_id: DocumentId,
@@ -191,7 +197,7 @@ impl EditorState {
             document.should_be_destroyed = true;
         }
     }
-    
+
     fn destroy_document_deferred(
         &mut self,
         document_id: DocumentId,
@@ -205,14 +211,19 @@ impl EditorState {
         self.documents.remove(&document_id);
         send_request(CollabRequest::CloseFile(file_id))
     }
-    
+
+    /// Adds a cursor to the cursor set of the session with the given `session_id`, wotj tje caret
+    /// at the given position.
     pub fn add_cursor(&mut self, session_id: SessionId, position: Position) {
         let session = &mut self.sessions[session_id];
         session.cursors.add(position);
         session.update_selections_and_carets();
         session.injected_char_stack.clear();
     }
-    
+
+    // Replaces the cursor set of the session with the given `session_id` with a single cursor, such
+    // that the caret is at the start of the contents of the document referred to by this session,
+    given `text` and the selection covers the entire given `text`.
     pub fn select_all(&mut self, session_id: SessionId) {
         let session = &mut self.sessions[session_id];
         let document = &self.documents[session.document_id];
@@ -221,7 +232,9 @@ impl EditorState {
         session.update_selections_and_carets();
         session.injected_char_stack.clear();
     }
-    
+
+    /// Move all cursors in the cursor set of the session with the given `session_id` one column to
+    /// the left.
     pub fn move_cursors_left(&mut self, session_id: SessionId, select: bool) {
         let session = &mut self.sessions[session_id];
         let document = &self.documents[session.document_id];
@@ -229,7 +242,9 @@ impl EditorState {
         session.cursors.move_left(&document_inner.text, select);
         session.update_selections_and_carets();
     }
-    
+
+    /// Move all cursors in the cursor set of the session with the given `session_id` one column to
+    /// the left.
     pub fn move_cursors_right(&mut self, session_id: SessionId, select: bool) {
         let session = &mut self.sessions[session_id];
         let document = &self.documents[session.document_id];
@@ -238,7 +253,8 @@ impl EditorState {
         session.update_selections_and_carets();
         session.injected_char_stack.clear();
     }
-    
+
+    /// Move all cursors in the cursor set of the session with the given `session_id` one line up.
     pub fn move_cursors_up(&mut self, session_id: SessionId, select: bool) {
         let session = &mut self.sessions[session_id];
         let document = &self.documents[session.document_id];
@@ -247,7 +263,8 @@ impl EditorState {
         session.update_selections_and_carets();
         session.injected_char_stack.clear();
     }
-    
+
+    /// Move all cursors in the cursor set of the session with the given `session_id` one line down.
     pub fn move_cursors_down(&mut self, session_id: SessionId, select: bool) {
         let session = &mut self.sessions[session_id];
         let document = &self.documents[session.document_id];
@@ -256,14 +273,16 @@ impl EditorState {
         session.update_selections_and_carets();
         session.injected_char_stack.clear();
     }
-    
+
+    /// Move all cursors in the cursor set of the session with the given `session_id` to the given
+    /// `position`.
     pub fn move_cursors_to(&mut self, session_id: SessionId, position: Position, select: bool) {
         let session = &mut self.sessions[session_id];
         session.cursors.move_to(position, select);
         session.update_selections_and_carets();
         session.injected_char_stack.clear();
     }
-    
+
     pub fn replace_text_direct(
         &mut self,
         session_id: SessionId,
@@ -273,21 +292,21 @@ impl EditorState {
         send_request: &mut dyn FnMut(CollabRequest),
     ) {
         let session = &self.sessions[session_id];
-        
+
         let mut builder = delta::Builder::new();
         builder.retain(position - Position::origin());
         builder.delete(size);
         builder.insert(text);
         let delta = builder.build();
-        
+
         let mut offsets = Vec::new();
         for _ in &session.cursors {
             offsets.push(Size::zero());
         }
-        
+
         self.edit(session_id, None, delta, &offsets, send_request);
     }
-    
+
     pub fn insert_text(
         &mut self,
         session_id: SessionId,
@@ -295,7 +314,7 @@ impl EditorState {
         send_request: &mut dyn FnMut(CollabRequest),
     ) {
         let session = &self.sessions[session_id];
-        
+
         if let Some(ch) = text.as_lines().first().and_then( | line | line.first()) {
             if let Some(injected_char) = session.injected_char_stack.last() {
                 if ch == injected_char {
@@ -309,7 +328,7 @@ impl EditorState {
                 }
             }
         }
-        
+
         let injected_char = text
             .as_lines()
             .first()
@@ -320,9 +339,9 @@ impl EditorState {
             '{' => Some('}'),
             _ => None,
         });
-        
+
         let mut offsets = Vec::new();
-        
+
         let mut builder_0 = delta::Builder::new();
         let mut position = Position::origin();
         for cursor in &session.cursors {
@@ -331,7 +350,7 @@ impl EditorState {
             position = cursor.end();
         }
         let delta_0 = builder_0.build();
-        
+
         let mut builder_1 = delta::Builder::new();
         let mut position = Position::origin();
         for cursor in &session.cursors {
@@ -344,10 +363,10 @@ impl EditorState {
             position = cursor.end();
         }
         let delta_1 = builder_1.build();
-        
+
         let (_, new_delta_1) = delta_0.clone().transform(delta_1);
         let delta = delta_0.compose(new_delta_1);
-        
+
         self.edit(
             session_id,
             Some(EditGroup::Char),
@@ -355,13 +374,13 @@ impl EditorState {
             &offsets,
             send_request,
         );
-        
+
         let session = &mut self.sessions[session_id];
         if let Some(injected_char) = injected_char {
             session.injected_char_stack.push(injected_char);
         }
     }
-    
+
     pub fn insert_newline(
         &mut self,
         session_id: SessionId,
@@ -370,9 +389,9 @@ impl EditorState {
         let session = &self.sessions[session_id];
         let document = &self.documents[session.document_id];
         let document_inner = document.inner.as_ref().unwrap();
-        
+
         let mut offsets = Vec::new();
-        
+
         let mut builder_0 = delta::Builder::new();
         let mut position = Position::origin();
         for cursor in &session.cursors {
@@ -381,14 +400,14 @@ impl EditorState {
             position = cursor.end();
         }
         let delta_0 = builder_0.build();
-        
+
         let mut builder_1 = delta::Builder::new();
         let mut position = Position::origin();
         for cursor in &session.cursors {
             builder_1.retain(cursor.start() - position);
-            
+
             let mut indent_count = 0;
-            
+
             // This is sort of a hack. I designed the multiple cursor system so that all
             // cursors are applied at once, but operations such autoindenting are much
             // easier to implement if you apply one cursor at a time. In the future I'd
@@ -430,13 +449,13 @@ impl EditorState {
             position = cursor.end();
         }
         let delta_1 = builder_1.build();
-        
+
         let (_, new_delta_1) = delta_0.clone().transform(delta_1);
         let delta = delta_0.compose(new_delta_1);
-        
+
         self.edit(session_id, None, delta, &offsets, send_request);
     }
-    
+
     pub fn insert_backspace(
         &mut self,
         session_id: SessionId,
@@ -445,7 +464,7 @@ impl EditorState {
         let session = &self.sessions[session_id];
         let document = &self.documents[session.document_id];
         let document_inner = document.inner.as_ref().unwrap();
-        
+
         let last_injected_char_inverse =
         session
             .injected_char_stack
@@ -456,9 +475,9 @@ impl EditorState {
             '}' => '{',
             _ => panic!(),
         });
-        
+
         let mut offsets = Vec::new();
-        
+
         let mut builder_0 = delta::Builder::new();
         let mut position = Position::origin();
         for cursor in &session.cursors {
@@ -467,7 +486,7 @@ impl EditorState {
             position = cursor.end();
         }
         let delta_0 = builder_0.build();
-        
+
         let mut builder_1 = delta::Builder::new();
         let mut position = Position::origin();
         for cursor in &session.cursors {
@@ -544,10 +563,10 @@ impl EditorState {
             position = cursor.start();
         }
         let delta_1 = builder_1.build();
-        
+
         let (_, new_delta_1) = delta_0.clone().transform(delta_1);
         let delta = delta_0.compose(new_delta_1);
-        
+
         self.edit(
             session_id,
             Some(EditGroup::Backspace),
@@ -556,14 +575,14 @@ impl EditorState {
             send_request,
         );
     }
-    
+
     pub fn delete(&mut self, session_id: SessionId, send_request: &mut dyn FnMut(CollabRequest)) {
         let session = &self.sessions[session_id];
         let document = &self.documents[session.document_id];
         let document_inner = document.inner.as_ref().unwrap();
-        
+
         let mut offsets = Vec::new();
-        
+
         let mut builder_0 = delta::Builder::new();
         let mut position = Position::origin();
         for cursor in &session.cursors {
@@ -572,7 +591,7 @@ impl EditorState {
             position = cursor.end();
         }
         let delta_0 = builder_0.build();
-        
+
         let mut builder_1 = delta::Builder::new();
         let mut position = Position::origin();
         for cursor in &session.cursors {
@@ -592,10 +611,10 @@ impl EditorState {
             position = cursor.start();
         }
         let delta_1 = builder_1.build();
-        
+
         let (_, new_delta_1) = delta_0.clone().transform(delta_1);
         let delta = delta_0.compose(new_delta_1);
-        
+
         self.edit(
             session_id,
             Some(EditGroup::Backspace),
@@ -604,7 +623,7 @@ impl EditorState {
             send_request,
         );
     }
-    
+
     fn edit(
         &mut self,
         session_id: SessionId,
@@ -616,7 +635,7 @@ impl EditorState {
         let session = &self.sessions[session_id];
         let document = &mut self.documents[session.document_id];
         let document_inner = document.inner.as_mut().unwrap();
-        
+
         let inverse_delta = delta.clone().invert(&document_inner.text);
         let group_undo = edit_group.map_or(false, | edit_group | {
             document_inner
@@ -639,58 +658,58 @@ impl EditorState {
             });
         }
         document_inner.redo_stack.clear();
-        
+
         let session = &mut self.sessions[session_id];
         session.apply_delta(&delta);
         session.apply_offsets(offsets);
-        
+
         self.apply_delta(session_id, delta, send_request);
     }
-    
+
     pub fn undo(&mut self, session_id: SessionId, send_request: &mut dyn FnMut(CollabRequest)) {
         let session = &self.sessions[session_id];
         let document = &mut self.documents[session.document_id];
         let document_inner = document.inner.as_mut().unwrap();
         if let Some(undo) = document_inner.undo_stack.pop() {
             document_inner.edit_group = None;
-            
+
             let inverse_delta = undo.delta.clone().invert(&document_inner.text);
             document_inner.redo_stack.push(Edit {
                 injected_char_stack: session.injected_char_stack.clone(),
                 cursors: session.cursors.clone(),
                 delta: inverse_delta,
             });
-            
+
             let session = &mut self.sessions[session_id];
             session.cursors = undo.cursors;
             session.update_selections_and_carets();
-            
+
             self.apply_delta(session_id, undo.delta, send_request);
         }
     }
-    
+
     pub fn redo(&mut self, session_id: SessionId, send_request: &mut dyn FnMut(CollabRequest)) {
         let session = &self.sessions[session_id];
         let document = &mut self.documents[session.document_id];
         let document_inner = document.inner.as_mut().unwrap();
         if let Some(redo) = document_inner.redo_stack.pop() {
             document_inner.edit_group = None;
-            
+
             let inverse_delta = redo.delta.clone().invert(&document_inner.text);
             document_inner.undo_stack.push(Edit {
                 injected_char_stack: session.injected_char_stack.clone(),
                 cursors: session.cursors.clone(),
                 delta: inverse_delta,
             });
-            
+
             let session = &mut self.sessions[session_id];
             session.cursors = redo.cursors;
             session.update_selections_and_carets();
-            
+
             self.apply_delta(session_id, redo.delta, send_request);
         }
     }
-    
+
     fn apply_delta(
         &mut self,
         session_id: SessionId,
@@ -699,22 +718,22 @@ impl EditorState {
     ) {
         let session = &mut self.sessions[session_id];
         let document_id = session.document_id;
-        
+
         let document = &self.documents[document_id];
         for other_session_id in document.session_ids.iter().cloned() {
             if other_session_id == session_id {
                 continue;
             }
-            
+
             let other_session = &mut self.sessions[other_session_id];
             other_session.apply_delta(&delta);
         }
-        
+
         let document = &mut self.documents[document_id];
         document.apply_delta(delta.clone());
         document.schedule_apply_delta_request(delta, send_request);
     }
-    
+
     pub fn handle_apply_delta_response(
         &mut self,
         file_id: TextFileId,
@@ -723,7 +742,7 @@ impl EditorState {
         let document_id = self.documents_by_file[file_id];
         let document = &mut self.documents[document_id];
         let document_inner = document.inner.as_mut().unwrap();
-        
+
         document_inner.outstanding_deltas.pop_front();
         document_inner.revision += 1;
         if let Some(outstanding_delta) = document_inner.outstanding_deltas.front() {
@@ -734,7 +753,7 @@ impl EditorState {
             ));
         }
     }
-    
+
     pub fn handle_delta_applied_notification(
         &mut self,
         file_id: TextFileId,
@@ -743,7 +762,7 @@ impl EditorState {
         let document_id = self.documents_by_file[file_id];
         let document = &mut self.documents[document_id];
         let document_inner = document.inner.as_mut().unwrap();
-        
+
         let mut delta = delta;
         for outstanding_delta_ref in &mut document_inner.outstanding_deltas {
             let outstanding_delta = mem::replace(outstanding_delta_ref, Delta::identity());
@@ -751,20 +770,20 @@ impl EditorState {
             delta = new_delta;
             *outstanding_delta_ref = new_outstanding_delta;
         }
-        
+
         transform_edit_stack(&mut document_inner.undo_stack, delta.clone());
         transform_edit_stack(&mut document_inner.redo_stack, delta.clone());
-        
+
         for session_id in document.session_ids.iter().cloned() {
             let session = &mut self.sessions[session_id];
             session.apply_delta(&delta);
         }
-        
+
         let document = &mut self.documents[document_id];
         let document_inner = document.inner.as_mut().unwrap();
         document_inner.revision += 1;
         document.apply_delta(delta);
-        
+
         document_id
     }
 }
@@ -781,7 +800,7 @@ pub struct Session {
     /// The stack of characters that were automatically injected after the cursor during the last few
     /// edit operations. If the next character to be typed is the same as an automatically injected
     /// character, we skip over the automatically inject character rather than insert the same
-    /// character again. 
+    /// character again.
     pub injected_char_stack: Vec<char>,
     /// The set of cursors for this session.
     pub cursors: CursorSet,
@@ -804,14 +823,14 @@ impl Session {
         self.cursors.apply_delta(delta);
         self.update_selections_and_carets();
     }
-    
+
     // Applies an offset to each cursor. This applies the offsets to the set of cursors for this
     // session, and then recomputes the derived information for this set of cursor.
     fn apply_offsets(&mut self, offsets: &[Size]) {
         self.cursors.apply_offsets(offsets);
         self.update_selections_and_carets();
     }
-    
+
     // Recomputes the derived information for the set of cursors for this session.
     fn update_selections_and_carets(&mut self) {
         self.selections = self.cursors.selections();
@@ -839,17 +858,17 @@ impl Document {
     // then invalidates the cached data for this text.
     fn apply_delta(&mut self, delta: Delta) {
         let inner = self.inner.as_mut().unwrap();
-        
+
         inner.token_cache.invalidate(&delta);
         inner.indent_cache.invalidate(&delta);
         inner.msg_cache.invalidate(&delta);
-        
+
         inner.text.apply_delta(delta);
-        
+
         inner.token_cache.refresh(&inner.text);
         inner.indent_cache.refresh(&inner.text);
     }
-    
+
     // Schedules a request to the collab server to apply this delta to the remote document.
     //
     // The actual request is sent by calling the `send_request` callback. However, you should always
@@ -904,8 +923,8 @@ pub struct DocumentInner {
 
 /// An `EditGroup` keeps track of whether the last typed character was a backspace character or a
 /// non-backspace character.
-/// 
-/// This is necessary because when a sequence of backspace characters is typed, they should be 
+///
+/// This is necessary because when a sequence of backspace characters is typed, they should be
 /// grouped together into a single edit operation. Similarly, when a sequence of non-backspace
 /// characters is typed, they should be grouped together into a single operation. However,
 /// alternating sequences of backspace and non-backspace characters should not be grouped together.
@@ -918,7 +937,7 @@ pub enum EditGroup {
 }
 
 /// An `Edit` represents an atomic edit operation.
-/// 
+///
 /// The primary purpose of this type is to be stored on the undo stack.
 #[derive(Debug)]
 pub struct Edit {
