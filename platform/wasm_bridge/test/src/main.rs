@@ -89,9 +89,9 @@ pub unsafe extern "C" fn process_to_wasm_msg(msg_ptr: u32) -> u32 {
     from_wasm.into_wasm_ptr()
 }
 
-#[export_name = "get_wasm_js_msg_impl"]
+#[export_name = "get_wasm_js_msg_class"]
 #[cfg(target_arch = "wasm32")]
-pub unsafe extern "C" fn get_wasm_js_msg_impl() -> u32 {
+pub unsafe extern "C" fn get_wasm_js_msg_class() -> u32 {
     let mut msg = FromWasmMsg::new();
     let mut out = String::new();
    
