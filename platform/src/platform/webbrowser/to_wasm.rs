@@ -1,6 +1,6 @@
 use crate::{
     makepad_live_id::*,
-    makepad_wasm_msg::*,
+    makepad_wasm_bridge::*,
     makepad_math::{Vec2, Vec3, Quat},
     cx::{PlatformType},
     event::{
