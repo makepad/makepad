@@ -94,7 +94,7 @@ pub struct ToWasmCmdSkip{
 
 impl ToWasmMsg {
     
-    pub fn new(val: u32) -> Self {
+    pub fn take_ownership(val: u32) -> Self {
         unsafe {
             let ptr = val as *mut u64;
             let head = ptr.offset(0).read();

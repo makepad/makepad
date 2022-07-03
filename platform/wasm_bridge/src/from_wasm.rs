@@ -102,7 +102,7 @@ impl FromWasmMsg {
         }
     }
     
-    pub fn into_wasm_ptr(self) -> u32 {
+    pub fn release_ownership(self) -> u32 {
         unsafe {
             let mut v = std::mem::ManuallyDrop::new(self.data);
             let ptr = v.as_mut_ptr();

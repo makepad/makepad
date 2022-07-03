@@ -3,7 +3,7 @@ use {
     crate::{
         makepad_live_id::*,
         makepad_math::Vec2,
-        makepad_wasm_msg::{FromWasmMsg, ToWasmMsg, FromWasm, ToWasm},
+        makepad_wasm_bridge::{FromWasmMsg, ToWasmMsg, FromWasm, ToWasm},
         platform::{
             webbrowser::{
                 from_wasm::*,
@@ -37,7 +37,7 @@ impl Cx {
     where F: FnMut(&mut Cx, &mut Event),
     {
         self.event_handler = Some(&mut event_handler as *const dyn FnMut(&mut Cx, &mut Event) as *mut dyn FnMut(&mut Cx, &mut Event));
-        let ret = self.event_loop_core(ToWasmMsg::from_wasm_ptr(msg));
+        let ret = self.event_loop_core(ToWasmMsg::take_ptr_ownership(msg));
         self.event_handler = None;
         ret
     }
@@ -62,7 +62,7 @@ impl Cx {
             let cmd_skip = to_wasm.read_cmd_skip();
             match cmd_id{
                 id!(ToWasmConstructAndGetDeps) => { // fetch_deps
-                    let msg = ToWasmConstructAndGetDeps::to_wasm(&mut to_wasm);
+                    let msg = ToWasmConstructAndGetDeps::read_to_wasm(&mut to_wasm);
                     
                     self.call_event_handler(&mut Event::Construct);
                     
