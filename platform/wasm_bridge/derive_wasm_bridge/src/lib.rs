@@ -2,8 +2,8 @@
 use proc_macro::{TokenStream};
 
 
-mod derive_wasm_msg;
-use derive_wasm_msg::*;
+mod derive_wasm_bridge;
+use derive_wasm_bridge::*;
 
 #[proc_macro_derive(ToWasm)]
 pub fn derive_to_wasm(input: TokenStream) -> TokenStream {
