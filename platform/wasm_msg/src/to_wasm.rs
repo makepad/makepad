@@ -1,6 +1,40 @@
 use makepad_live_id::*;
 use crate::from_wasm::*;
 
+struct WasmJSOutputFn{
+    name: String,
+    body: String,
+    nest: usize
+}
+
+pub struct WasmJSOutput{
+    fns: Vec<WasmJSOutputFn>,
+}
+
+impl WasmJSOutput{
+    pub fn check_slot(&mut self, slot:usize, is_recur:bool, prop:&str, nest:usize, name:&str)->Option<usize>{
+        // ok so if we recur
+        if is_recur{ // call body
+            self.push_ln(slot, &format!("{}({});", name, prop));
+            // check if we already have the fn
+            if self.fns.iter().find(|p| p.name == name).is_some(){
+                return None
+            }
+            self.fns.push(WasmJSOutputFn{name: name.to_string(), body:String::new(), nest});
+            return Some(self.fns.len() - 1)
+        }
+        else{
+            self.push_ln(slot, &format!("let t{} = {};", nest, prop));
+            return Some(slot)
+        }
+    }
+    
+    pub fn push_ln(&mut self, slot:usize, s:&str){
+        self.fns[slot].body.push_str(s);
+        self.fns[slot].body.push_str("\n");
+    }
+}
+
 pub trait ToWasm {
     fn u32_size() -> usize;
     
@@ -8,28 +42,35 @@ pub trait ToWasm {
     fn live_id()->LiveId{panic!()}
 
     fn to_wasm(inp: &mut ToWasmMsg) -> Self;
-    fn to_wasm_js_body(out: &mut String, prop: &str, nest:usize);
+    fn to_wasm_js_body(out: &mut WasmJSOutput, slot:usize, is_recur: bool, prop:&str, nest:usize);
 
-    fn to_wasm_js_method(out: &mut String) {
+    fn to_wasm_js_method(wrapper: &mut String) {
         let id = Self::live_id();
-        out.push_str(&format!("
-            {}(obj){{
-            let app = this.app;
-            this.reserve_u32({});
-            app.u32[this.u32_offset ++] = {};
-            app.u32[this.u32_offset ++] = {};
-            let block_len_offset = this.u32_offset ++;
-            \n", Self::type_name(), 3 + Self::u32_size(), id.0 & 0xffff_ffff, (id.0 >> 32)));
+        wrapper.push_str(&format!("{}(t0){{\n", Self::type_name()));
+        wrapper.push_str("let app = this.app;\n");
+        wrapper.push_str(&format!("this.reserve_u32({});\n", 3 + Self::u32_size()));
+        wrapper.push_str(&format!("app.u32[this.u32_offset ++] = {};\n", id.0 & 0xffff_ffff));
+        wrapper.push_str(&format!("app.u32[this.u32_offset ++] = {};\n", (id.0 >> 32)));
+        wrapper.push_str("let block_len_offset = this.u32_offset ++;\n\n");
         
-        Self::to_wasm_js_body(out, "obj", 0);
+        let mut out = WasmJSOutput{fns:vec![WasmJSOutputFn{name:String::new(), body:String::new(), nest:0}]};
         
-        out.push_str("
-            if( (this.u32_offset & 1) != 0){ app.u32[this.u32_offset ++] = 0;}
-            let new_len = (this.u32_offset - this.u32_ptr) >> 1;
-            app.u32[block_len_offset] = new_len - app.u32[this.u32_ptr + 1];
-            app.u32[this.u32_ptr + 1] = new_len;
+        Self::to_wasm_js_body(&mut out, 0, false, "t0", 1);
+
+        for p in out.fns.iter().rev(){
+            if p.name == ""{
+                wrapper.push_str(&p.body);
             }
-        ");
+            else{
+                wrapper.push_str(&format!("let {} = (t{})=>{{\n{}\n}}\n", p.name, p.nest, p.body))
+            }
+        }
+        
+        wrapper.push_str("if( (this.u32_offset & 1) != 0){ app.u32[this.u32_offset ++] = 0;}\n");
+        wrapper.push_str("let new_len = (this.u32_offset - this.u32_ptr) >> 1;\n");
+        wrapper.push_str("app.u32[block_len_offset] = new_len - app.u32[this.u32_ptr + 1];\n");
+        wrapper.push_str("app.u32[this.u32_ptr + 1] = new_len;\n");
+        wrapper.push_str("}\n");
     }
 }
 
