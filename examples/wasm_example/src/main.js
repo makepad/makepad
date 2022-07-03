@@ -3,11 +3,11 @@ import {WebGLWasmApp} from "/makepad/platform/src/platform/webbrowser/webgl_plat
 const canvas = document.getElementsByClassName('main_canvas')[0];
 
 class MyWasmApp extends WebGLWasmApp {
-    ReturnMsg(obj) {
-        console.log("ReturnMsg arrived", obj)
-    }
-    EnumTest(obj){
-        console.log("EnumTest arrived", obj);
+    BridgeTest(obj) {
+        console.log("BridgeTest arrived", obj)
+        let to_wasm = app.new_to_wasm();
+        to_wasm.BridgeTest(obj);
+        app.to_wasm_pump(to_wasm);
     }
 }
 
@@ -16,7 +16,5 @@ const wasm = await MyWasmApp.load_wasm_from_url("/makepad/target/wasm32-unknown-
 let app = new MyWasmApp(canvas, wasm);
 
 let to_wasm = app.new_to_wasm();
-to_wasm.SysMouseInput({x: 1234, y: [{type:"Tuple",0:1294},{type:"Named",x:12}]});
-to_wasm.SysMouseInput({x: 1511, y: [{type:"Named",x:12345}]});
-
+to_wasm.InitTest();
 app.to_wasm_pump(to_wasm);
