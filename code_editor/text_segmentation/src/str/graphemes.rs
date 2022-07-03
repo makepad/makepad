@@ -38,6 +38,6 @@ impl<'a> DoubleEndedIterator for Graphemes<'a> {
         }
         let end = self.cursor_back.position();
         self.cursor_back.move_prev();
-        Some(&self.string[self.cursor.position()..end])
+        Some(&self.string[self.cursor_back.position()..end])
     }
 }
