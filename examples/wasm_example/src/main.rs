@@ -1,28 +1,61 @@
 use makepad_wasm_msg::*;
 
-#[derive(Debug, ToWasm)]
-struct SysMouseInput {
-    x: u32,
-    y: Vec<EnumTest>,
+#[derive(Debug, FromWasm, ToWasm)]
+struct BridgeTest {
+    u1: u32,
+    b1: bool,
+    e1: EnumTest,
+    e2: EnumTest,
+    e3: EnumTest,
+    e4: EnumTest,
+    o1: Option<u32>,
+    o2: Option<u32>,
+    r1: Vec<RecurTest>
 }
 
-#[derive(Debug, ToWasm, FromWasm)]
-struct SubObj {
-    a:u32,
-    b:u32
+#[derive(Debug, FromWasm, ToWasm)]
+struct RecurTest{
+    u2: u32,
+    b2: bool,
+    r2: Vec<RecurTest>
 }
 
 #[derive(Debug, FromWasm, ToWasm)]
 enum EnumTest {
     Bare,
     Tuple(u32),
+    Recur(Vec<EnumTest>),
     Named{x:u32}
 }
 
-#[derive(Debug, FromWasm)]
-struct ReturnMsg{
-    x:u32,
-    y:Vec<SubObj>
+fn create_test()->BridgeTest{
+    BridgeTest{
+        u1: 1,
+        b1: true,
+        e1: EnumTest::Bare,
+        e2: EnumTest::Tuple(2),
+        e3: EnumTest::Recur(vec!{EnumTest::Bare}),
+        e4: EnumTest::Named{x:3},
+        o1: None,
+        o2: Some(4),
+        r1: vec![RecurTest{
+            u2: 5,
+            b2: false,
+            r2: vec![RecurTest{
+                u2: 5,
+                b2: false,
+                r2: vec![RecurTest{
+                    u2:6,
+                    b2: false,
+                    r2: vec![]
+                }]
+            }]
+        }]
+    }
+}
+
+#[derive(Debug, ToWasm)]
+struct InitTest{
 }
 
 #[export_name = "process_to_wasm_msg"]
@@ -35,19 +68,17 @@ pub unsafe extern "C" fn process_to_wasm_msg(msg_ptr: u32) -> u32 {
         let cmd_id = LiveId(to_wasm.read_u64());
         let cmd_skip = to_wasm.read_cmd_skip();
         match cmd_id{
-            id!(SysMouseInput)=>{
-                let inp = SysMouseInput::to_wasm(&mut to_wasm);
-                console_log!("{:?}", inp);
-                ReturnMsg{x:2,y:vec![SubObj{a:3,b:4}]}.from_wasm(&mut from_wasm);
-                EnumTest::Bare.from_wasm(&mut from_wasm);
-                EnumTest::Tuple(inp.x).from_wasm(&mut from_wasm);
-                EnumTest::Named{x:456}.from_wasm(&mut from_wasm);
+            id!(InitTest)=>{
+                let test = create_test();
+                test.from_wasm(&mut from_wasm);
+            },
+            id!(BridgeTest)=>{
+                let test1 = create_test();
+                let test2 = BridgeTest::to_wasm(&mut to_wasm);
             }
             _=>()
         }
         to_wasm.cmd_skip(cmd_skip);
-        // skip over the command by cmd_len
-        //console_log(&format!("{}", cmd_len));
     }
     from_wasm.into_wasm_ptr()
 }
@@ -58,15 +89,14 @@ pub unsafe extern "C" fn get_wasm_js_msg_impl() -> u32 {
     let mut msg = FromWasmMsg::new();
     let mut out = String::new();
    
-    out.push_str("return {");
-    out.push_str("   ToWasmMsg:class extends ToWasmMsg{");
-    SysMouseInput::to_wasm_js_method(&mut out);
-    EnumTest::to_wasm_js_method(&mut out);
-    out.push_str("   },");
-    out.push_str("   FromWasmMsg:class extends FromWasmMsg{");
-    ReturnMsg::from_wasm_js_method(&mut out);
-    EnumTest::from_wasm_js_method(&mut out);
-    out.push_str("   }");
+    out.push_str("return {\n");
+    out.push_str("ToWasmMsg:class extends ToWasmMsg{\n");
+    InitTest::to_wasm_js_method(&mut out);
+    BridgeTest::to_wasm_js_method(&mut out);
+    out.push_str("},\n");
+    out.push_str("FromWasmMsg:class extends FromWasmMsg{\n");
+    BridgeTest::from_wasm_js_method(&mut out);
+    out.push_str("}\n");
     out.push_str("}");
     
     msg.push_str(&out);
