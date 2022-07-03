@@ -1,17 +1,23 @@
 use makepad_live_id::*;
 use crate::from_wasm::*;
 
-struct WasmJSOutputFn{
-    name: String,
-    body: String,
-    nest: usize
+pub struct WasmJSOutputFn{
+    pub name: String,
+    pub body: String,
+    pub nest: usize
 }
 
 pub struct WasmJSOutput{
-    fns: Vec<WasmJSOutputFn>,
+    pub nest_alloc: usize,
+    pub fns: Vec<WasmJSOutputFn>,
 }
 
 impl WasmJSOutput{
+    pub fn alloc_nest(&mut self)->usize{
+       self.nest_alloc += 1;
+       self.nest_alloc 
+    }
+    
     pub fn check_slot(&mut self, slot:usize, is_recur:bool, prop:&str, nest:usize, name:&str)->Option<usize>{
         // ok so if we recur
         if is_recur{ // call body
@@ -53,9 +59,10 @@ pub trait ToWasm {
         wrapper.push_str(&format!("app.u32[this.u32_offset ++] = {};\n", (id.0 >> 32)));
         wrapper.push_str("let block_len_offset = this.u32_offset ++;\n\n");
         
-        let mut out = WasmJSOutput{fns:vec![WasmJSOutputFn{name:String::new(), body:String::new(), nest:0}]};
+        let mut out = WasmJSOutput{nest_alloc:0, fns:vec![WasmJSOutputFn{name:String::new(), body:String::new(), nest:0}]};
         
-        Self::to_wasm_js_body(&mut out, 0, false, "t0", 1);
+        let new_nest = out.alloc_nest();
+        Self::to_wasm_js_body(&mut out, 0, false, "t0", new_nest);
 
         for p in out.fns.iter().rev(){
             if p.name == ""{
