@@ -46,12 +46,12 @@ fn create_test() -> BridgeTest {
             r2: vec![RecurTest {
                 bx: None,
                 u2: 6,
-                b2: false,
+                b2: true,
                 r2: vec![RecurTest {
                     bx: Some(Box::new(RecurTest {
                         bx: None,
                         u2: 6,
-                        b2: false,
+                        b2: true,
                         r2: vec![]
                     })),
                     u2: 7,
