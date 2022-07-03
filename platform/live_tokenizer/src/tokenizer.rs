@@ -404,9 +404,9 @@ impl InitialState {
     }
 
     fn resource_string(self, cursor: &mut Cursor) -> (State, FullToken) {
-        debug_assert!(cursor.peek(0) == 'b');
+        debug_assert!(cursor.peek(0) == '@');
         cursor.skip(1);
-        self.double_quoted_string(cursor)
+        self.double_quoted_resource(cursor)
     }
     
     fn byte_string(self, cursor: &mut Cursor) -> (State, FullToken) {
