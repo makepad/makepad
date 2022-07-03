@@ -37,7 +37,7 @@ impl Cx {
     where F: FnMut(&mut Cx, &mut Event),
     {
         self.event_handler = Some(&mut event_handler as *const dyn FnMut(&mut Cx, &mut Event) as *mut dyn FnMut(&mut Cx, &mut Event));
-        let ret = self.event_loop_core(ToWasmMsg::take_ptr_ownership(msg));
+        let ret = self.event_loop_core(ToWasmMsg::take_ownership(msg));
         self.event_handler = None;
         ret
     }
