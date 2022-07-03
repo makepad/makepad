@@ -9,7 +9,7 @@ class MyWasmApp extends WasmApp {
     }
 }
 
-const wasm = await MyWasmApp.load_wasm_from_url("/makepad/target/wasm32-unknown-unknown/debug/wasm_example.wasm"); 
+const wasm = await MyWasmApp.load_wasm_from_url("/makepad/target/wasm32-unknown-unknown/debug/wasm_bridge_test.wasm"); 
 
 let app = new MyWasmApp(wasm);
 
