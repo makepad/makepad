@@ -4,21 +4,21 @@ use crate::from_wasm::*;
 pub struct WasmJSOutputFn{
     pub name: String,
     pub body: String,
-    pub nest: usize
+    pub temp: usize
 }
 
 pub struct WasmJSOutput{
-    pub nest_alloc: usize,
+    pub temp_alloc: usize,
     pub fns: Vec<WasmJSOutputFn>,
 }
 
 impl WasmJSOutput{
-    pub fn alloc_nest(&mut self)->usize{
-       self.nest_alloc += 1;
-       self.nest_alloc 
+    pub fn alloc_temp(&mut self)->usize{
+       self.temp_alloc += 1;
+       self.temp_alloc 
     }
     
-    pub fn check_slot(&mut self, slot:usize, is_recur:bool, prop:&str, nest:usize, name:&str)->Option<usize>{
+    pub fn check_slot(&mut self, slot:usize, is_recur:bool, prop:&str, temp:usize, name:&str)->Option<usize>{
         // ok so if we recur
         if is_recur{ // call body
             self.push_ln(slot, &format!("{}({});", name, prop));
@@ -26,11 +26,11 @@ impl WasmJSOutput{
             if self.fns.iter().find(|p| p.name == name).is_some(){
                 return None
             }
-            self.fns.push(WasmJSOutputFn{name: name.to_string(), body:String::new(), nest});
+            self.fns.push(WasmJSOutputFn{name: name.to_string(), body:String::new(), temp});
             return Some(self.fns.len() - 1)
         }
         else{
-            self.push_ln(slot, &format!("let t{} = {};", nest, prop));
+            self.push_ln(slot, &format!("let t{} = {};", temp, prop));
             return Some(slot)
         }
     }
@@ -48,7 +48,7 @@ pub trait ToWasm {
     fn live_id()->LiveId{panic!()}
 
     fn to_wasm(inp: &mut ToWasmMsg) -> Self;
-    fn to_wasm_js_body(out: &mut WasmJSOutput, slot:usize, is_recur: bool, prop:&str, nest:usize);
+    fn to_wasm_js_body(out: &mut WasmJSOutput, slot:usize, is_recur: bool, prop:&str, temp:usize);
 
     fn to_wasm_js_method(wrapper: &mut String) {
         let id = Self::live_id();
@@ -59,9 +59,9 @@ pub trait ToWasm {
         wrapper.push_str(&format!("app.u32[this.u32_offset ++] = {};\n", (id.0 >> 32)));
         wrapper.push_str("let block_len_offset = this.u32_offset ++;\n\n");
         
-        let mut out = WasmJSOutput{nest_alloc:0, fns:vec![WasmJSOutputFn{name:String::new(), body:String::new(), nest:0}]};
+        let mut out = WasmJSOutput{temp_alloc:0, fns:vec![WasmJSOutputFn{name:String::new(), body:String::new(), temp:0}]};
         
-        let new_nest = out.alloc_nest();
+        let new_nest = out.alloc_temp();
         Self::to_wasm_js_body(&mut out, 0, false, "t0", new_nest);
 
         for p in out.fns.iter().rev(){
@@ -69,7 +69,7 @@ pub trait ToWasm {
                 wrapper.push_str(&p.body);
             }
             else{
-                wrapper.push_str(&format!("let {} = (t{})=>{{\n{}}}\n", p.name, p.nest, p.body))
+                wrapper.push_str(&format!("let {} = (t{})=>{{\n{}}}\n", p.name, p.temp, p.body))
             }
         }
         
