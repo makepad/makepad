@@ -47,7 +47,8 @@ pub trait ToWasm {
     fn type_name()->&'static str{panic!()}
     fn live_id()->LiveId{panic!()}
 
-    fn to_wasm(inp: &mut ToWasmMsg) -> Self;
+    fn read_to_wasm(inp: &mut ToWasmMsg) -> Self;
+    
     fn to_wasm_js_body(out: &mut WasmJSOutput, slot:usize, is_recur: bool, prop:&str, temp:usize);
 
     fn to_wasm_js_method(wrapper: &mut String) {
@@ -93,7 +94,7 @@ pub struct ToWasmCmdSkip{
 
 impl ToWasmMsg {
     
-    pub fn from_wasm_ptr(val: u32) -> Self {
+    pub fn new(val: u32) -> Self {
         unsafe {
             let ptr = val as *mut u64;
             let head = ptr.offset(0).read();

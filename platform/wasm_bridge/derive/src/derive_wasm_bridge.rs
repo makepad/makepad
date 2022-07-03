@@ -194,7 +194,7 @@ pub fn derive_to_wasm_impl(input: TokenStream) -> TokenStream {
             js.add("    fn to_wasm_js_body(out: &mut WasmJSOutput, slot:usize, is_recur: bool, prop:&str, temp:usize){");
             js.add("        let slot = out.check_slot(slot, is_recur, prop, temp, ").string(&name).add(");if slot.is_none(){return}; let slot = slot.unwrap();");
 
-            tb.add("    fn to_wasm(inp:&mut ToWasmMsg)->Self{");
+            tb.add("    fn read_to_wasm(inp:&mut ToWasmMsg)->Self{");
             sz.add("    fn u32_size()->usize{0");
             
             if let Some(types) = &types {
@@ -204,7 +204,7 @@ pub fn derive_to_wasm_impl(input: TokenStream) -> TokenStream {
                     js.add("let new_temp = out.alloc_temp();");
                     js.stream(Some(ty.clone())).add("::to_wasm_js_body(out, slot, false, &format!(").string(&format!("t{{}}.{}", index)).add(",temp), new_temp);");
                     
-                    tb.add("ToWasm::to_wasm(inp),");
+                    tb.add("ToWasm::read_to_wasm(inp),");
                     sz.add("+").stream(Some(ty)).add("::u32_size()");
                 }
                 tb.add(")");
@@ -219,7 +219,7 @@ pub fn derive_to_wasm_impl(input: TokenStream) -> TokenStream {
                     js.add("let new_temp = out.alloc_temp();");
                     js.stream(Some(ty.clone())).add("::to_wasm_js_body(out, slot, false, &format!(").string(&format!("t{{}}.{}", field.name)).add(",temp), new_temp);");
                     
-                    tb.ident(&field.name).add(":ToWasm::to_wasm(inp),");
+                    tb.ident(&field.name).add(":ToWasm::read_to_wasm(inp),");
                     sz.add("+").stream(Some(ty)).add("::u32_size()");
                 }
                 tb.add("}");
@@ -252,7 +252,7 @@ pub fn derive_to_wasm_impl(input: TokenStream) -> TokenStream {
             let mut js = TokenBuilder::new();
             let mut sz = TokenBuilder::new();
 
-            tb.add("    fn to_wasm(inp:&mut ToWasmMsg)->Self{");
+            tb.add("    fn read_to_wasm(inp:&mut ToWasmMsg)->Self{");
             tb.add("         match inp.read_u32(){");
 
             js.add("    fn to_wasm_js_body(out: &mut WasmJSOutput, slot:usize, is_recur: bool, prop:&str, temp:usize){");
@@ -283,7 +283,7 @@ pub fn derive_to_wasm_impl(input: TokenStream) -> TokenStream {
                             js.add("let new_temp = out.alloc_temp();");
                             js.stream(Some(ty.clone())).add("::to_wasm_js_body(out, slot, false, &format!(").string(&format!("t{{}}[{}]", index)).add(",temp), new_temp);");
 
-                            tb.add("ToWasm::to_wasm(inp),");
+                            tb.add("ToWasm::read_to_wasm(inp),");
                             sz.add("+").stream(Some(ty)).add("::u32_size()");
                         }
                         tb.add(")");
@@ -295,7 +295,7 @@ pub fn derive_to_wasm_impl(input: TokenStream) -> TokenStream {
                             js.add("let new_temp = out.alloc_temp();");
                             js.stream(Some(ty.clone())).add("::to_wasm_js_body(out, slot, false, &format!(").string(&format!("t{{}}.{}", field.name)).add(",temp), new_temp);");
                             
-                            tb.ident(&field.name).add(":ToWasm::to_wasm(inp),");
+                            tb.ident(&field.name).add(":ToWasm::read_to_wasm(inp),");
                             
                             sz.add("+").stream(Some(ty)).add("::u32_size()");
                         }
