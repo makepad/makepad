@@ -71,7 +71,7 @@ struct RunTest {
 #[cfg(target_arch = "wasm32")]
 pub unsafe extern "C" fn process_to_wasm_msg(msg_ptr: u32) -> u32 {
     let mut from_wasm = FromWasmMsg::new();
-    let mut to_wasm = ToWasmMsg::from_wasm_ptr(msg_ptr);
+    let mut to_wasm = ToWasmMsg::new(msg_ptr);
     
     while !to_wasm.was_last_cmd() {
         let cmd_id = LiveId(to_wasm.read_u64());
@@ -79,11 +79,11 @@ pub unsafe extern "C" fn process_to_wasm_msg(msg_ptr: u32) -> u32 {
         match cmd_id {
             id!(RunTest) => {
                 let test = create_test();
-                test.from_wasm(&mut from_wasm);
+                test.write_from_wasm(&mut from_wasm);
             },
             id!(BridgeTest) => {
                 let test1 = create_test();
-                let test2 = BridgeTest::to_wasm(&mut to_wasm);
+                let test2 = BridgeTest::read_to_wasm(&mut to_wasm);
                 if test1 == test2 {
                     console_log!("test_succeeded!");
                 }

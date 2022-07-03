@@ -11,13 +11,13 @@ pub unsafe extern "C" fn new_wasm_msg_with_u64_capacity(capacity_u64: u32) -> u3
 #[export_name = "wasm_msg_reserve_u64"]
 #[cfg(target_arch = "wasm32")]
 pub unsafe extern "C" fn wasm_msg_reserve_u64(ptr: u32, capacity_u64: u32) -> u32 {
-    ToWasmMsg::from_wasm_ptr(ptr).into_from_wasm().reserve_u64(capacity_u64 as usize).into_wasm_ptr()
+    ToWasmMsg::new(ptr).into_from_wasm().reserve_u64(capacity_u64 as usize).into_wasm_ptr()
 }
 
 #[export_name = "wasm_msg_free"]
 #[cfg(target_arch = "wasm32")]
 pub unsafe extern "C" fn wasm_msg_free(ptr: u32) {
-    ToWasmMsg::from_wasm_ptr(ptr);
+    ToWasmMsg::new(ptr);
 }
 
 #[export_name = "new_to_wasm_data_u8"]

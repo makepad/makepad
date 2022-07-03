@@ -5,7 +5,7 @@ pub trait FromWasm {
     fn type_name()->&'static str{panic!()}
     fn live_id()->LiveId{panic!()}
 
-    fn from_wasm(&self, out: &mut FromWasmMsg) {
+    fn write_from_wasm(&self, out: &mut FromWasmMsg) {
         out.push_u64(Self::live_id().0);
         let block_len_offset = out.data_len();
         out.push_u32(0);

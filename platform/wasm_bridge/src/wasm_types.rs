@@ -18,7 +18,7 @@ impl ToWasmDataU8 {
 
 
 impl ToWasm for ToWasmDataU8 {
-    fn to_wasm(inp: &mut ToWasmMsg) -> Self {
+    fn read_to_wasm(inp: &mut ToWasmMsg) -> Self {
         let ptr = inp.read_u32();
         let len = inp.read_u32() as usize;
         unsafe {
@@ -89,7 +89,7 @@ impl FromWasm for String {
 }
 
 impl ToWasm for String {
-    fn to_wasm(inp: &mut ToWasmMsg) -> Self {
+    fn read_to_wasm(inp: &mut ToWasmMsg) -> Self {
         inp.read_string()
     }
     
@@ -113,7 +113,7 @@ impl FromWasm for bool {
 }
 
 impl ToWasm for bool {
-    fn to_wasm(inp: &mut ToWasmMsg) -> Self {
+    fn read_to_wasm(inp: &mut ToWasmMsg) -> Self {
         inp.read_u32() != 0
     }
     
@@ -136,7 +136,7 @@ impl FromWasm for usize {
 }
 
 impl ToWasm for usize {
-    fn to_wasm(inp: &mut ToWasmMsg) -> Self {
+    fn read_to_wasm(inp: &mut ToWasmMsg) -> Self {
         inp.read_u32() as usize
     }
     
@@ -159,7 +159,7 @@ impl FromWasm for u32 {
 }
 
 impl ToWasm for u32 {
-    fn to_wasm(inp: &mut ToWasmMsg) -> Self {
+    fn read_to_wasm(inp: &mut ToWasmMsg) -> Self {
         inp.read_u32()
     }
     
@@ -183,7 +183,7 @@ impl FromWasm for f32 {
 }
 
 impl ToWasm for f32 {
-    fn to_wasm(inp: &mut ToWasmMsg) -> Self {
+    fn read_to_wasm(inp: &mut ToWasmMsg) -> Self {
         inp.read_f32()
     }
     
@@ -209,7 +209,7 @@ impl FromWasm for f64 {
 }
 
 impl ToWasm for f64 {
-    fn to_wasm(inp: &mut ToWasmMsg) -> Self {
+    fn read_to_wasm(inp: &mut ToWasmMsg) -> Self {
         inp.read_f64()
     }
     
@@ -246,12 +246,12 @@ impl<T, const N: usize> FromWasm for [T; N] where T: FromWasm {
 impl<T, const N: usize> ToWasm for [T; N] where T: ToWasm {
     fn u32_size() -> usize {T::u32_size() * N}
     
-    fn to_wasm(inp: &mut ToWasmMsg) -> Self {
+    fn read_to_wasm(inp: &mut ToWasmMsg) -> Self {
         unsafe {
             let mut to = std::mem::MaybeUninit::<[T; N]>::uninit();
             let top: *mut T = std::mem::transmute(&mut to);
             for i in 0..N {
-                top.add(i).write(ToWasm::to_wasm(inp));
+                top.add(i).write(ToWasm::read_to_wasm(inp));
             }
             to.assume_init()
         }
@@ -287,11 +287,11 @@ impl<T> FromWasm for Vec<T> where T: FromWasm {
 impl<T> ToWasm for Vec<T> where T: ToWasm {
     fn u32_size() -> usize {1}
     
-    fn to_wasm(inp: &mut ToWasmMsg) -> Self {
+    fn read_to_wasm(inp: &mut ToWasmMsg) -> Self {
         let len = inp.read_u32();
         let mut ret = Vec::new();
         for _ in 0..len {
-            ret.push(ToWasm::to_wasm(inp));
+            ret.push(ToWasm::read_to_wasm(inp));
         }
         ret
     }
@@ -327,8 +327,8 @@ impl<T> FromWasm for Box<T> where T: FromWasm {
 impl<T> ToWasm for Box<T> where T: ToWasm {
     fn u32_size() -> usize {0}
     
-    fn to_wasm(inp: &mut ToWasmMsg) -> Self {
-        Self::new(ToWasm::to_wasm(inp))
+    fn read_to_wasm(inp: &mut ToWasmMsg) -> Self {
+        Self::new(ToWasm::read_to_wasm(inp))
 
     }
     
@@ -363,12 +363,12 @@ impl<T> FromWasm for Option<T> where T: FromWasm {
 impl<T> ToWasm for Option<T> where T: ToWasm {
     fn u32_size() -> usize {1 + T::u32_size()}
     
-    fn to_wasm(inp: &mut ToWasmMsg) -> Self {
+    fn read_to_wasm(inp: &mut ToWasmMsg) -> Self {
         if inp.read_u32() == 0 {
             None
         }
         else {
-            Some(ToWasm::to_wasm(inp))
+            Some(ToWasm::read_to_wasm(inp))
         }
     }
     
