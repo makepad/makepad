@@ -23,7 +23,7 @@ pub unsafe extern "C" fn wasm_msg_free(ptr: u32) {
 #[export_name = "new_to_wasm_data_u8"]
 #[cfg(target_arch = "wasm32")]
 pub unsafe extern "C" fn new_to_wasm_data_u8(capacity_u8: u32) -> u32 {
-    ToWasmDataU8::new_into_wasm_ptr(capacity_u8 as usize)
+    ToWasmDataU8::new_and_release_ownership(capacity_u8 as usize)
 }
 
 extern "C" {
