@@ -27,7 +27,7 @@ impl ToWasm for ToWasmDataU8 {
         }
     }
     
-    fn to_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _nest: usize) {
+    fn to_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _temp: usize) {
         out.push_ln(slot, &format!("this.push_data_u8({});", prop));
     }
     
@@ -44,7 +44,7 @@ impl WasmPtrF32 {
 }
 
 impl FromWasm for WasmPtrF32 {
-    fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _nest: usize) {
+    fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _temp: usize) {
         out.push_ln(slot, &format!("{} = app.u32[this.u32_offset++];", prop));
     }
     
@@ -65,7 +65,7 @@ impl WasmPtrU32 {
 }
 
 impl FromWasm for WasmPtrU32 {
-    fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _nest: usize) {
+    fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _temp: usize) {
         out.push_ln(slot, &format!("{} = app.u32[this.u32_offset++];", prop));
     }
     
@@ -79,7 +79,7 @@ impl FromWasm for WasmPtrU32 {
 
 
 impl FromWasm for String {
-    fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _nest: usize) {
+    fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _temp: usize) {
         out.push_ln(slot, &format!("{} = this.read_str();", prop));
     }
     
@@ -93,7 +93,7 @@ impl ToWasm for String {
         inp.read_string()
     }
     
-    fn to_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _nest: usize) {
+    fn to_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _temp: usize) {
         out.push_ln(slot, &format!("this.push_str({});", prop));
     }
     
@@ -103,7 +103,7 @@ impl ToWasm for String {
 
 
 impl FromWasm for bool {
-    fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _nest: usize) {
+    fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _temp: usize) {
         out.push_ln(slot, &format!("{} = app.u32[this.u32_offset++]!==0?true:false;", prop));
     }
     
@@ -117,7 +117,7 @@ impl ToWasm for bool {
         inp.read_u32() != 0
     }
     
-    fn to_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _8nest: usize) {
+    fn to_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _temp: usize) {
         out.push_ln(slot, &format!("app.u32[this.u32_offset++] = {};", prop));
     }
     fn u32_size() -> usize {1}
@@ -126,7 +126,7 @@ impl ToWasm for bool {
 
 impl FromWasm for usize {
     
-    fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _nest: usize) {
+    fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _temp: usize) {
         out.push_ln(slot, &format!("{} = app.u32[this.u32_offset++];", prop));
     }
     
@@ -140,7 +140,7 @@ impl ToWasm for usize {
         inp.read_u32() as usize
     }
     
-    fn to_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _nest: usize) {
+    fn to_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _temp: usize) {
         out.push_ln(slot, &format!("app.u32[this.u32_offset++] = {};", prop));
     }
     fn u32_size() -> usize {1}
@@ -149,7 +149,7 @@ impl ToWasm for usize {
 
 
 impl FromWasm for u32 {
-    fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _nest: usize) {
+    fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _temp: usize) {
         out.push_ln(slot, &format!("{} = app.u32[this.u32_offset++];", prop));
     }
     
@@ -163,7 +163,7 @@ impl ToWasm for u32 {
         inp.read_u32()
     }
     
-    fn to_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _nest: usize) {
+    fn to_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _temp: usize) {
         out.push_ln(slot, &format!("app.u32[this.u32_offset++] = {};", prop));
     }
     fn u32_size() -> usize {1}
@@ -173,7 +173,7 @@ impl ToWasm for u32 {
 
 
 impl FromWasm for f32 {
-    fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _nest: usize) {
+    fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _temp: usize) {
         out.push_ln(slot, &format!("{} = app.f32[this.u32_offset++];", prop));
     }
     
@@ -187,7 +187,7 @@ impl ToWasm for f32 {
         inp.read_f32()
     }
     
-    fn to_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _nest: usize) {
+    fn to_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _temp: usize) {
         out.push_ln(slot, &format!("app.f32[this.u32_offset++] = {};", prop));
     }
     fn u32_size() -> usize {1}
@@ -197,7 +197,7 @@ impl ToWasm for f32 {
 
 
 impl FromWasm for f64 {
-    fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _nest: usize) {
+    fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _temp: usize) {
         out.push_ln(slot, "this.u32_offset += this.u32_offset&1;");
         out.push_ln(slot, &format!("{} = app.f64[this.u32_offset>>1];", prop));
         out.push_ln(slot, "this.u32_offset += 2;");
@@ -213,7 +213,7 @@ impl ToWasm for f64 {
         inp.read_f64()
     }
     
-    fn to_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _nest: usize) {
+    fn to_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _temp: usize) {
         out.push_ln(slot, "this.u32_offset += this.u32_offset&1;");
         out.push_ln(slot, &format!("app.f64[this.u32_offset>>1] = {};", prop));
         out.push_ln(slot, "this.u32_offset += 2;");
@@ -233,12 +233,12 @@ impl<T, const N: usize> FromWasm for [T; N] where T: FromWasm {
         }
     }
     
-    fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, is_recur: bool, prop: &str, nest: usize) {
+    fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, is_recur: bool, prop: &str, temp: usize) {
         out.push_ln(slot, &format!("if({0} === undefined) {0} = [];", prop));
-        out.push_ln(slot, &format!("let t{} = {};", nest, prop));
-        out.push_ln(slot, &format!("for(let i{0} = 0; i{0} < {1}; i{0}++){{", nest, N));
-        let new_nest = out.alloc_nest();
-        T::from_wasm_js_body(out, slot, is_recur, &format!("t{0}[i{0}]", nest), new_nest);
+        out.push_ln(slot, &format!("let t{} = {};", temp, prop));
+        out.push_ln(slot, &format!("for(let i{0} = 0; i{0} < {1}; i{0}++){{", temp, N));
+        let new_temp = out.alloc_temp();
+        T::from_wasm_js_body(out, slot, is_recur, &format!("t{0}[i{0}]", temp), new_temp);
         out.push_ln(slot, "}");
     }
 }
@@ -257,11 +257,11 @@ impl<T, const N: usize> ToWasm for [T; N] where T: ToWasm {
         }
     }
     
-    fn to_wasm_js_body(out: &mut WasmJSOutput, slot: usize, is_recur: bool, prop: &str, nest: usize) {
-        out.push_ln(slot, &format!("let t{} = {}", nest, prop));
-        out.push_ln(slot, &format!("or(let i{0} = 0; i{0} < {1}; i{0}++){{", nest, N));
-        let new_nest = out.alloc_nest();
-        T::to_wasm_js_body(out, slot, is_recur, &format!("t{0}[i{0}]", nest), new_nest);
+    fn to_wasm_js_body(out: &mut WasmJSOutput, slot: usize, is_recur: bool, prop: &str, temp: usize) {
+        out.push_ln(slot, &format!("let t{} = {}", temp, prop));
+        out.push_ln(slot, &format!("or(let i{0} = 0; i{0} < {1}; i{0}++){{", temp, N));
+        let new_temp = out.alloc_temp();
+        T::to_wasm_js_body(out, slot, is_recur, &format!("t{0}[i{0}]", temp), new_temp);
         out.push_ln(slot, "}");
     }
 }
@@ -274,12 +274,12 @@ impl<T> FromWasm for Vec<T> where T: FromWasm {
         }
     }
     
-    fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, nest: usize) {
-        out.push_ln(slot, &format!("let t{} = {} = [];", nest, prop));
-        out.push_ln(slot, &format!("t{}.length = app.u32[this.u32_offset++];", nest));
-        out.push_ln(slot, &format!("for(let i{0} = 0; i{0} < t{0}.length; i{0}++){{", nest));
-        let new_nest = out.alloc_nest();
-        T::from_wasm_js_body(out, slot, true, &format!("t{0}[i{0}]", nest), new_nest);
+    fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, temp: usize) {
+        out.push_ln(slot, &format!("let t{} = {} = [];", temp, prop));
+        out.push_ln(slot, &format!("t{}.length = app.u32[this.u32_offset++];", temp));
+        out.push_ln(slot, &format!("for(let i{0} = 0; i{0} < t{0}.length; i{0}++){{", temp));
+        let new_temp = out.alloc_temp();
+        T::from_wasm_js_body(out, slot, true, &format!("t{0}[i{0}]", temp), new_temp);
         out.push_ln(slot, "}");
     }
 }
@@ -296,16 +296,16 @@ impl<T> ToWasm for Vec<T> where T: ToWasm {
         ret
     }
     
-    fn to_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, nest: usize) {
+    fn to_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, temp: usize) {
         let item_size = T::u32_size();
         
-        out.push_ln(slot, &format!("let t{} = {};", nest, prop));
-        out.push_ln(slot, &format!("if(Array.isArray(t{})){{", nest));
-        out.push_ln(slot, &format!("app.u32[this.u32_offset ++] = t{}.length;", nest));
-        out.push_ln(slot, &format!("this.reserve_u32({} * t{}.length);", item_size, nest));
-        out.push_ln(slot, &format!("for(let i{0} = 0; i{0} < t{0}.length; i{0}++){{", nest));
-        let new_nest = out.alloc_nest();
-        T::to_wasm_js_body(out, slot, true, &format!("t{0}[i{0}]", nest), new_nest);
+        out.push_ln(slot, &format!("let t{} = {};", temp, prop));
+        out.push_ln(slot, &format!("if(Array.isArray(t{})){{", temp));
+        out.push_ln(slot, &format!("app.u32[this.u32_offset ++] = t{}.length;", temp));
+        out.push_ln(slot, &format!("this.reserve_u32({} * t{}.length);", item_size, temp));
+        out.push_ln(slot, &format!("for(let i{0} = 0; i{0} < t{0}.length; i{0}++){{", temp));
+        let new_temp = out.alloc_temp();
+        T::to_wasm_js_body(out, slot, true, &format!("t{0}[i{0}]", temp), new_temp);
         out.push_ln(slot, "}} else {");
         out.push_ln(slot, "   app.u32[this.u32_offset ++] = 0;");
         out.push_ln(slot, "}");
@@ -318,9 +318,9 @@ impl<T> FromWasm for Box<T> where T: FromWasm {
         self.as_ref().from_wasm_inner(out);
     }
     
-    fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, nest: usize) {
-        let new_nest = out.alloc_nest();
-        T::from_wasm_js_body(out, slot, true, prop, new_nest);
+    fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, temp: usize) {
+        let new_temp = out.alloc_temp();
+        T::from_wasm_js_body(out, slot, true, prop, new_temp);
     }
 }
 
@@ -332,10 +332,10 @@ impl<T> ToWasm for Box<T> where T: ToWasm {
 
     }
     
-    fn to_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, nest: usize) {
+    fn to_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, temp: usize) {
         let item_size = T::u32_size();
         out.push_ln(slot, &format!("this.reserve_u32({});", item_size));
-        T::to_wasm_js_body(out, slot, true, prop, nest);
+        T::to_wasm_js_body(out, slot, true, prop, temp);
     }
 }
 
@@ -350,10 +350,10 @@ impl<T> FromWasm for Option<T> where T: FromWasm {
         }
     }
     
-    fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, is_recur: bool, prop: &str, _nest: usize) {
+    fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, is_recur: bool, prop: &str, _temp: usize) {
         out.push_ln(slot, "if(app.u32[this.u32_offset++] !== 0){");
-        let new_nest = out.alloc_nest();
-        T::from_wasm_js_body(out, slot, is_recur, prop, new_nest);
+        let new_temp = out.alloc_temp();
+        T::from_wasm_js_body(out, slot, is_recur, prop, new_temp);
         out.push_ln(slot, "} else {");
         out.push_ln(slot, &format!("{} = undefined;", prop));
         out.push_ln(slot, "}");
@@ -372,12 +372,12 @@ impl<T> ToWasm for Option<T> where T: ToWasm {
         }
     }
     
-    fn to_wasm_js_body(out: &mut WasmJSOutput, slot: usize, is_recur: bool, prop: &str, nest: usize) {
+    fn to_wasm_js_body(out: &mut WasmJSOutput, slot: usize, is_recur: bool, prop: &str, temp: usize) {
         out.push_ln(slot, &format!("if({0} === undefined){{", prop));
         out.push_ln(slot, "app.u32[this.u32_offset ++] = 0;");
         out.push_ln(slot, "} else {");
         out.push_ln(slot, "app.u32[this.u32_offset ++] = 1;");
-        T::to_wasm_js_body(out, slot, is_recur, prop, nest);
+        T::to_wasm_js_body(out, slot, is_recur, prop, temp);
         out.push_ln(slot, "}");
     }
 }
