@@ -16,7 +16,7 @@ pub trait FromWasm {
     
     fn from_wasm_inner(&self, out: &mut FromWasmMsg);
     
-    fn from_wasm_js_body(out: &mut WasmJSOutput, slot:usize, is_recur: bool, prop:&str, nest:usize);
+    fn from_wasm_js_body(out: &mut WasmJSOutput, slot:usize, is_recur: bool, prop:&str, temp:usize);
     
     fn from_wasm_js_method(wrapper: &mut String) {
         let id = Self::live_id();
@@ -25,8 +25,8 @@ pub trait FromWasm {
         wrapper.push_str("let app = this.app;\n");
         wrapper.push_str("let args = app.from_wasm_args;\n");
         
-        let mut out = WasmJSOutput{nest_alloc:0, fns:vec![WasmJSOutputFn{name:String::new(), body:String::new(), nest:0}]};
-        let new_nest = out.alloc_nest();
+        let mut out = WasmJSOutput{temp_alloc:0, fns:vec![WasmJSOutputFn{name:String::new(), body:String::new(), temp:0}]};
+        let new_nest = out.alloc_temp();
         
         Self::from_wasm_js_body(&mut out, 0, false, &format!("args.{}", Self::type_name()), new_nest);
         
@@ -35,7 +35,7 @@ pub trait FromWasm {
                 wrapper.push_str(&p.body);
             }
             else{
-                wrapper.push_str(&format!("let {} = (t{})=>{{\n{}}}\n", p.name, p.nest, p.body))
+                wrapper.push_str(&format!("let {} = (t{})=>{{\n{}}}\n", p.name, p.temp, p.body))
             }
         }
         
