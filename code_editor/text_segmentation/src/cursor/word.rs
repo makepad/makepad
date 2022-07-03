@@ -6,6 +6,7 @@ pub struct Cursor<C> {
     next_word_break: Option<WordBreak>,
     prev_prev_word_break_skip_ignore: Option<Option<WordBreak>>,
     prev_word_break_skip_ignore: Option<Option<WordBreak>>,
+    next_word_break_skip_ignore: Option<Option<WordBreak>>,
     next_next_word_break_skip_ignore: Option<Option<WordBreak>>,
     regional_indicator_count: Option<usize>,
 }
@@ -18,6 +19,7 @@ impl<C: char::Cursor> Cursor<C> {
             next_word_break: None,
             prev_prev_word_break_skip_ignore: None,
             prev_word_break_skip_ignore: None,
+            next_word_break_skip_ignore: None,
             next_next_word_break_skip_ignore: None,
             regional_indicator_count: None,
         }
@@ -43,7 +45,7 @@ impl<C: char::Cursor> Cursor<C> {
         if !self.cursor.is_at_boundary() {
             return false;
         }
-        let x = match (self.prev_word_break(), self.next_word_break()) {
+        match (self.prev_word_break(), self.next_word_break()) {
             (CR, LF) => false,
             (Newline | CR | LF, _) => true,
             (_, Newline | CR | LF) => true,
@@ -53,46 +55,46 @@ impl<C: char::Cursor> Cursor<C> {
             _ => match (
                 self.prev_prev_word_break_skip_ignore(),
                 self.prev_word_break_skip_ignore(),
-                self.next_word_break(),
+                self.next_word_break_skip_ignore(),
                 self.next_next_word_break_skip_ignore(),
             ) {
-                (_, Some(ALetter | HebrewLetter), ALetter | HebrewLetter, _) => false,
+                (_, Some(ALetter | HebrewLetter), Some(ALetter | HebrewLetter), _) => false,
                 (
                     _,
                     Some(ALetter | HebrewLetter),
-                    MidLetter | MidNumLet | SingleQuote,
+                    Some(MidLetter | MidNumLet | SingleQuote),
                     Some(ALetter | HebrewLetter),
                 ) => false,
                 (
                     Some(ALetter | HebrewLetter),
                     Some(MidLetter | MidNumLet | SingleQuote),
-                    ALetter | HebrewLetter,
+                    Some(ALetter | HebrewLetter),
                     _,
                 ) => false,
-                (_, Some(HebrewLetter), SingleQuote, _) => false,
-                (_, Some(HebrewLetter), DoubleQuote, Some(HebrewLetter)) => false,
-                (Some(HebrewLetter), Some(DoubleQuote), HebrewLetter, _) => false,
-                (_, Some(Numeric), Numeric, _) => false,
-                (_, Some(ALetter | HebrewLetter), Numeric, _) => false,
-                (_, Some(Numeric), ALetter | HebrewLetter, _) => false,
-                (Some(Numeric), Some(MidNum | MidNumLet | SingleQuote), Numeric, _) => false,
-                (_, Some(Numeric), MidNum | MidNumLet | SingleQuote, Some(Numeric)) => false,
-                (_, Some(Katakana), Katakana, _) => false,
+                (_, Some(HebrewLetter), Some(SingleQuote), _) => false,
+                (_, Some(HebrewLetter), Some(DoubleQuote), Some(HebrewLetter)) => false,
+                (Some(HebrewLetter), Some(DoubleQuote), Some(HebrewLetter), _) => false,
+                (_, Some(Numeric), Some(Numeric), _) => false,
+                (_, Some(ALetter | HebrewLetter), Some(Numeric), _) => false,
+                (_, Some(Numeric), Some(ALetter | HebrewLetter), _) => false,
+                (Some(Numeric), Some(MidNum | MidNumLet | SingleQuote), Some(Numeric), _) => false,
+                (_, Some(Numeric), Some(MidNum | MidNumLet | SingleQuote), Some(Numeric)) => false,
+                (_, Some(Katakana), Some(Katakana), _) => false,
                 (
                     _,
                     Some(ALetter | HebrewLetter | Numeric | Katakana | ExtendNumLet),
-                    ExtendNumLet,
+                    Some(ExtendNumLet),
                     _,
                 ) => false,
-                (_, Some(ExtendNumLet), ALetter | HebrewLetter | Numeric | Katakana, _) => false,
-                (_, Some(RegionalIndicator), RegionalIndicator, _) => {
+                (_, Some(ExtendNumLet), Some(ALetter | HebrewLetter | Numeric | Katakana), _) => {
+                    false
+                }
+                (_, Some(RegionalIndicator), Some(RegionalIndicator), _) => {
                     self.regional_indicator_count() % 2 == 0
                 }
                 _ => true,
-            }
-        };
-        println!("{:?}", x);
-        x
+            },
+        }
     }
 
     pub fn position(&self) -> usize {
@@ -100,15 +102,26 @@ impl<C: char::Cursor> Cursor<C> {
     }
 
     pub fn move_next(&mut self) {
+        use makepad_ucd::WordBreak::{Extend, Format, RegionalIndicator, ZWJ};
+
         loop {
             self.cursor.move_next();
-            self.prev_word_break = None;
-            self.next_word_break = None;
-            self.prev_prev_word_break_skip_ignore = None;
-            self.prev_word_break_skip_ignore = None;
-            self.next_next_word_break_skip_ignore = None;
-            self.next_next_word_break_skip_ignore = None;
-            self.regional_indicator_count = None;
+            self.prev_word_break = self.next_word_break.take();
+            match self.prev_word_break() {
+                Extend | Format | ZWJ => {}
+                _ => {
+                    self.prev_prev_word_break_skip_ignore = self.prev_word_break_skip_ignore.take();
+                    self.prev_word_break_skip_ignore = self.next_word_break_skip_ignore.take();
+                    self.next_word_break_skip_ignore = self.next_next_word_break_skip_ignore.take();
+                    self.regional_indicator_count =
+                        if self.prev_word_break_skip_ignore() == Some(RegionalIndicator) {
+                            self.regional_indicator_count
+                                .map(|regional_indicator_count| regional_indicator_count + 1)
+                        } else {
+                            Some(0)
+                        };
+                }
+            }
             if self.is_at_boundary() {
                 break;
             }
@@ -116,14 +129,25 @@ impl<C: char::Cursor> Cursor<C> {
     }
 
     pub fn move_prev(&mut self) {
+        use makepad_ucd::WordBreak::{Extend, Format, ZWJ};
+
         loop {
             self.cursor.move_prev();
-            self.prev_word_break = None;
-            self.next_word_break = None;
-            self.prev_prev_word_break_skip_ignore = None;
-            self.prev_word_break_skip_ignore = None;
-            self.next_next_word_break_skip_ignore = None;
-            self.regional_indicator_count = None;
+            self.next_word_break = self.prev_word_break.take();
+            match self.next_word_break() {
+                Extend | Format | ZWJ => {}
+                _ => {
+                    self.next_next_word_break_skip_ignore = self.next_word_break_skip_ignore.take();
+                    self.next_word_break_skip_ignore = self.prev_word_break_skip_ignore.take();
+                    self.prev_word_break_skip_ignore = self.prev_prev_word_break_skip_ignore.take();
+                    self.regional_indicator_count = match self.regional_indicator_count {
+                        Some(regional_indicator_count) if regional_indicator_count > 0 => {
+                            Some(regional_indicator_count - 1)
+                        }
+                        Some(_) | None => None,
+                    };
+                }
+            }
             if self.is_at_boundary() {
                 break;
             }
@@ -154,23 +178,40 @@ impl<C: char::Cursor> Cursor<C> {
     fn next_word_break(&mut self) -> WordBreak {
         use makepad_ucd::Ucd;
 
-        *self.next_word_break.get_or_insert_with(|| {
-            self.cursor.current().word_break()
-        })
+        *self
+            .next_word_break
+            .get_or_insert_with(|| self.cursor.current().word_break())
     }
 
     fn prev_prev_word_break_skip_ignore(&mut self) -> Option<WordBreak> {
         use makepad_ucd::Ucd;
-        
-        *self.prev_prev_word_break_skip_ignore.get_or_insert_with(|| {
+
+        *self
+            .prev_prev_word_break_skip_ignore
+            .get_or_insert_with(|| {
+                let position = self.cursor.position();
+                if !self.cursor.move_prev_skip_ignore() {
+                    self.cursor.set_position(position);
+                    return None;
+                }
+                if !self.cursor.move_prev_skip_ignore() {
+                    self.cursor.set_position(position);
+                    return None;
+                }
+                let word_break = self.cursor.current().word_break();
+                self.cursor.set_position(position);
+                Some(word_break)
+            })
+    }
+
+    fn prev_word_break_skip_ignore(&mut self) -> Option<WordBreak> {
+        use makepad_ucd::Ucd;
+
+        *self.prev_word_break_skip_ignore.get_or_insert_with(|| {
             let position = self.cursor.position();
             if !self.cursor.move_prev_skip_ignore() {
                 self.cursor.set_position(position);
-                return None
-            }
-            if !self.cursor.move_prev_skip_ignore() {
-                self.cursor.set_position(position);
-                return None
+                return None;
             }
             let word_break = self.cursor.current().word_break();
             self.cursor.set_position(position);
@@ -178,15 +219,11 @@ impl<C: char::Cursor> Cursor<C> {
         })
     }
 
-    fn prev_word_break_skip_ignore(&mut self) -> Option<WordBreak> {
+    fn next_word_break_skip_ignore(&mut self) -> Option<WordBreak> {
         use makepad_ucd::Ucd;
-        
-        *self.prev_word_break_skip_ignore.get_or_insert_with(|| {
+
+        *self.next_word_break_skip_ignore.get_or_insert_with(|| {
             let position = self.cursor.position();
-            if !self.cursor.move_prev_skip_ignore() {
-                self.cursor.set_position(position);
-                return None
-            }
             let word_break = self.cursor.current().word_break();
             self.cursor.set_position(position);
             Some(word_break)
@@ -196,16 +233,18 @@ impl<C: char::Cursor> Cursor<C> {
     fn next_next_word_break_skip_ignore(&mut self) -> Option<WordBreak> {
         use makepad_ucd::Ucd;
 
-        *self.next_next_word_break_skip_ignore.get_or_insert_with(|| {
-            let position = self.cursor.position();
-            if !self.cursor.move_next_skip_ignore() {
+        *self
+            .next_next_word_break_skip_ignore
+            .get_or_insert_with(|| {
+                let position = self.cursor.position();
+                if !self.cursor.move_next_skip_ignore() {
+                    self.cursor.set_position(position);
+                    return None;
+                }
+                let word_break = self.cursor.current().word_break();
                 self.cursor.set_position(position);
-                return None;
-            }
-            let word_break = self.cursor.current().word_break();
-            self.cursor.set_position(position);
-            Some(word_break)
-        })
+                Some(word_break)
+            })
     }
 
     fn regional_indicator_count(&mut self) -> usize {
@@ -240,10 +279,10 @@ impl<C: char::Cursor> CharCursorExt for C {
         };
 
         if self.is_at_end() {
-            return false
+            return false;
         }
+        self.move_next();
         loop {
-            self.move_next();
             if self.is_at_end() {
                 return false;
             }
@@ -251,6 +290,7 @@ impl<C: char::Cursor> CharCursorExt for C {
                 Extend | Format | ZWJ => {}
                 _ => break,
             }
+            self.move_next();
         }
         true
     }
