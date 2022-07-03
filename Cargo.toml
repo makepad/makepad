@@ -6,7 +6,7 @@ members = [
     "examples/bare_example", 
     "examples/layout_example", 
     "examples/cmdline_example",
-    "examples/wasm_example",
+    "platform/wasm_bridge/test",
     "examples/fun_audio",
     "studio",
     "tools/webserver",

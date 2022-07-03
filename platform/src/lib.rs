@@ -41,7 +41,7 @@ pub use {
     makepad_shader_compiler::makepad_micro_serde,
     makepad_shader_compiler::makepad_live_compiler,
     makepad_shader_compiler::makepad_live_id,
-    makepad_wasm_msg,
+    makepad_wasm_bridge,
     makepad_derive_live::*,
     makepad_math::*,
     makepad_live_id::*,
