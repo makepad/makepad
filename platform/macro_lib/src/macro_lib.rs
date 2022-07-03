@@ -33,7 +33,7 @@ pub fn type_to_static_callable(input: TokenStream) -> TokenStream {
         }
         tb.ident(&ident);
         tb.add("::<");
-        tb.stream(Some(ty_parser.eat_level_or_punct('>')));
+        tb.stream(Some(type_to_static_callable(ty_parser.eat_level_or_punct('>'))));
         tb.add(">");
         tb.end()
     }

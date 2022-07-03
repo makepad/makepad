@@ -14,9 +14,10 @@ struct BridgeTest {
 }
 
 #[derive(Debug, FromWasm, ToWasm, PartialEq)]
-struct RecurTest{
+struct RecurTest {
     u2: u32,
     b2: bool,
+    bx: Option<Box<RecurTest>>,
     r2: Vec<RecurTest>
 }
 
@@ -25,27 +26,35 @@ enum EnumTest {
     Bare,
     Tuple(u32),
     Recur(Vec<EnumTest>),
-    Named{x:u32}
+    Named {x: u32}
 }
 
-fn create_test()->BridgeTest{
-    BridgeTest{
+fn create_test() -> BridgeTest {
+    BridgeTest {
         u1: 1,
         b1: true,
         e1: EnumTest::Bare,
         e2: EnumTest::Tuple(2),
         e3: EnumTest::Recur(vec!{EnumTest::Bare}),
-        e4: EnumTest::Named{x:3},
+        e4: EnumTest::Named {x: 3},
         o1: None,
         o2: Some(4),
-        r1: vec![RecurTest{
+        r1: vec![RecurTest {
+            bx: None,
             u2: 5,
             b2: false,
-            r2: vec![RecurTest{
+            r2: vec![RecurTest {
+                bx: None,
                 u2: 6,
                 b2: false,
-                r2: vec![RecurTest{
-                    u2:7,
+                r2: vec![RecurTest {
+                    bx: Some(Box::new(RecurTest {
+                        bx: None,
+                        u2: 6,
+                        b2: false,
+                        r2: vec![]
+                    })),
+                    u2: 7,
                     b2: false,
                     r2: vec![]
                 }]
@@ -55,7 +64,7 @@ fn create_test()->BridgeTest{
 }
 
 #[derive(Debug, ToWasm)]
-struct RunTest{
+struct RunTest {
 }
 
 #[export_name = "process_to_wasm_msg"]
@@ -64,25 +73,25 @@ pub unsafe extern "C" fn process_to_wasm_msg(msg_ptr: u32) -> u32 {
     let mut from_wasm = FromWasmMsg::new();
     let mut to_wasm = ToWasmMsg::from_wasm_ptr(msg_ptr);
     
-    while !to_wasm.was_last_cmd(){
+    while !to_wasm.was_last_cmd() {
         let cmd_id = LiveId(to_wasm.read_u64());
         let cmd_skip = to_wasm.read_cmd_skip();
-        match cmd_id{
-            id!(RunTest)=>{
+        match cmd_id {
+            id!(RunTest) => {
                 let test = create_test();
                 test.from_wasm(&mut from_wasm);
             },
-            id!(BridgeTest)=>{
+            id!(BridgeTest) => {
                 let test1 = create_test();
                 let test2 = BridgeTest::to_wasm(&mut to_wasm);
-                if test1 == test2{
+                if test1 == test2 {
                     console_log!("test_succeeded!");
                 }
-                else{
+                else {
                     console_log!("test_failed! {:?}", test2);
                 }
             }
-            _=>()
+            _ => ()
         }
         to_wasm.cmd_skip(cmd_skip);
     }
@@ -94,7 +103,7 @@ pub unsafe extern "C" fn process_to_wasm_msg(msg_ptr: u32) -> u32 {
 pub unsafe extern "C" fn get_wasm_js_msg_class() -> u32 {
     let mut msg = FromWasmMsg::new();
     let mut out = String::new();
-   
+    
     out.push_str("return {\n");
     out.push_str("ToWasmMsg:class extends ToWasmMsg{\n");
     RunTest::to_wasm_js_method(&mut out);
