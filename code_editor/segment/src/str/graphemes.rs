@@ -1,5 +1,9 @@
 use {super::Cursor, crate::cursor::grapheme};
 
+/// An iterator over the graphemes of a `str`.
+///
+/// This struct is created by the `graphemes` method on `StrExt`.
+
 pub struct Graphemes<'a> {
     string: &'a str,
     cursor: grapheme::Cursor<Cursor<'a>>,

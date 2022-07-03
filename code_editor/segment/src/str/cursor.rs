@@ -1,5 +1,8 @@
 use crate::cursor::char;
 
+/// A cursor over a `str`.
+///
+/// A `Cursor` is like an iterator, except that it can freely seek back-and-forth.
 pub struct Cursor<'a> {
     string: &'a str,
     position: usize,
