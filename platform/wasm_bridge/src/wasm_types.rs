@@ -1,7 +1,6 @@
 use crate::from_wasm::*;
 use crate::to_wasm::*;
 
-
 pub struct ToWasmDataU8(Vec<u8>);
 
 impl ToWasmDataU8 {
@@ -318,7 +317,7 @@ impl<T> FromWasm for Box<T> where T: FromWasm {
         self.as_ref().from_wasm_inner(out);
     }
     
-    fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, temp: usize) {
+    fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _temp: usize) {
         let new_temp = out.alloc_temp();
         T::from_wasm_js_body(out, slot, true, prop, new_temp);
     }
