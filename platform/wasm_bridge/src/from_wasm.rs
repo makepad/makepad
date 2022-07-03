@@ -35,7 +35,7 @@ pub trait FromWasm {
                 wrapper.push_str(&p.body);
             }
             else{
-                wrapper.push_str(&format!("let {} = (t{})=>{{\n{}\n}}\n", p.name, p.nest, p.body))
+                wrapper.push_str(&format!("let {} = (t{})=>{{\n{}}}\n", p.name, p.nest, p.body))
             }
         }
         
