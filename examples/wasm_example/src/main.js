@@ -1,8 +1,6 @@
-import {WebGLWasmApp} from "/makepad/platform/src/platform/webbrowser/webgl_platform.js"
+import {WasmApp} from "/makepad/platform/wasm_bridge/src/wasm_bridge.js"
 
-const canvas = document.getElementsByClassName('main_canvas')[0];
-
-class MyWasmApp extends WebGLWasmApp {
+class MyWasmApp extends WasmApp {
     BridgeTest(obj) {
         console.log("BridgeTest arrived", obj)
         let to_wasm = app.new_to_wasm();
@@ -11,10 +9,12 @@ class MyWasmApp extends WebGLWasmApp {
     }
 }
 
-const wasm = await MyWasmApp.load_wasm_from_url("/makepad/target/wasm32-unknown-unknown/debug/wasm_example.wasm");
+const wasm = await MyWasmApp.load_wasm_from_url("/makepad/target/wasm32-unknown-unknown/debug/wasm_example.wasm"); 
 
-let app = new MyWasmApp(canvas, wasm);
+let app = new MyWasmApp(wasm);
+
+console.log(app.msg_class)
 
 let to_wasm = app.new_to_wasm();
-to_wasm.InitTest();
+to_wasm.RunTest();
 app.to_wasm_pump(to_wasm);

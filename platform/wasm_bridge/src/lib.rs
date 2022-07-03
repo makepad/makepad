@@ -1,6 +1,6 @@
 pub use makepad_live_id;
 pub use makepad_live_id::*;
-pub use makepad_derive_wasm_msg::*;
+pub use makepad_derive_wasm_bridge::*;
 
 #[macro_use]
 mod wasm_exports;
