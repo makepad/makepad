@@ -16,7 +16,6 @@ export class WasmApp {
         
         // this class can also be loaded from file.
         this.msg_class = new Function("ToWasmMsg", "FromWasmMsg", code)(ToWasmMsg, FromWasmMsg);
-        console.log(this.msg_class)
     }
     
     update_array_buffer_refs() {
