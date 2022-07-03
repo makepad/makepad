@@ -1,5 +1,5 @@
 [package]
-name = "makepad-derive-wasm-msg"
+name = "makepad-derive-wasm-bridge"
 version = "0.1.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
