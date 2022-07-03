@@ -1,4 +1,4 @@
-import {WasmApp} from "/makepad/platform/wasm_bridge/src/wasm_bridge.js"
+import {WasmApp} from "../../src/wasm_app.js"
 
 class MyWasmApp extends WasmApp {
     BridgeTest(obj) {
