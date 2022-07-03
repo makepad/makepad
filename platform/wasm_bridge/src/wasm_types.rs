@@ -4,7 +4,7 @@ use crate::to_wasm::*;
 pub struct ToWasmDataU8(Vec<u8>);
 
 impl ToWasmDataU8 {
-    pub fn new_into_wasm_ptr(capacity: usize) -> u32 {
+    pub fn new_and_release_ownership(capacity: usize) -> u32 {
         let mut v = Vec::<u8>::new();
         v.reserve_exact(capacity);
         let mut v = std::mem::ManuallyDrop::new(v);
