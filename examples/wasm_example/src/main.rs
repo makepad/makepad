@@ -1,6 +1,6 @@
-use makepad_wasm_msg::*;
+use makepad_wasm_bridge::*;
 
-#[derive(Debug, FromWasm, ToWasm)]
+#[derive(Debug, FromWasm, ToWasm, PartialEq)]
 struct BridgeTest {
     u1: u32,
     b1: bool,
@@ -13,14 +13,14 @@ struct BridgeTest {
     r1: Vec<RecurTest>
 }
 
-#[derive(Debug, FromWasm, ToWasm)]
+#[derive(Debug, FromWasm, ToWasm, PartialEq)]
 struct RecurTest{
     u2: u32,
     b2: bool,
     r2: Vec<RecurTest>
 }
 
-#[derive(Debug, FromWasm, ToWasm)]
+#[derive(Debug, FromWasm, ToWasm, PartialEq)]
 enum EnumTest {
     Bare,
     Tuple(u32),
@@ -42,10 +42,10 @@ fn create_test()->BridgeTest{
             u2: 5,
             b2: false,
             r2: vec![RecurTest{
-                u2: 5,
+                u2: 6,
                 b2: false,
                 r2: vec![RecurTest{
-                    u2:6,
+                    u2:7,
                     b2: false,
                     r2: vec![]
                 }]
@@ -55,7 +55,7 @@ fn create_test()->BridgeTest{
 }
 
 #[derive(Debug, ToWasm)]
-struct InitTest{
+struct RunTest{
 }
 
 #[export_name = "process_to_wasm_msg"]
@@ -68,13 +68,19 @@ pub unsafe extern "C" fn process_to_wasm_msg(msg_ptr: u32) -> u32 {
         let cmd_id = LiveId(to_wasm.read_u64());
         let cmd_skip = to_wasm.read_cmd_skip();
         match cmd_id{
-            id!(InitTest)=>{
+            id!(RunTest)=>{
                 let test = create_test();
                 test.from_wasm(&mut from_wasm);
             },
             id!(BridgeTest)=>{
                 let test1 = create_test();
                 let test2 = BridgeTest::to_wasm(&mut to_wasm);
+                if test1 == test2{
+                    console_log!("test_succeeded!");
+                }
+                else{
+                    console_log!("test_failed! {:?}", test2);
+                }
             }
             _=>()
         }
@@ -91,7 +97,7 @@ pub unsafe extern "C" fn get_wasm_js_msg_impl() -> u32 {
    
     out.push_str("return {\n");
     out.push_str("ToWasmMsg:class extends ToWasmMsg{\n");
-    InitTest::to_wasm_js_method(&mut out);
+    RunTest::to_wasm_js_method(&mut out);
     BridgeTest::to_wasm_js_method(&mut out);
     out.push_str("},\n");
     out.push_str("FromWasmMsg:class extends FromWasmMsg{\n");
