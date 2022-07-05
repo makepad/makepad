@@ -27,7 +27,7 @@ pub enum State {
     Initial(InitialState),
     BlockCommentTail(BlockCommentTailState),
     DoubleQuotedStringTail(DoubleQuotedStringTailState),
-    DoubleQuotedResourceTailState(DoubleQuotedResourceTailState),
+    DoubleQuotedDependencyTailState(DoubleQuotedDependencyTailState),
     RawDoubleQuotedStringTail(RawDoubleQuotedStringTailState),
 }
 
@@ -75,7 +75,7 @@ impl State {
             State::BlockCommentTail(state) => state.next(cursor),
             State::DoubleQuotedStringTail(state) => state.next(cursor),
             State::RawDoubleQuotedStringTail(state) => state.next(cursor),
-            State::DoubleQuotedResourceTailState(state)=> state.next(cursor)
+            State::DoubleQuotedDependencyTailState(state)=> state.next(cursor)
         };
         let end = cursor.index;
         assert!(start < end);
@@ -110,7 +110,7 @@ impl InitialState {
             ('/', '*', _) => self.block_comment(cursor),
             ('b', '\'', _) => self.byte(cursor),
             ('b', '"', _) => self.byte_string(cursor),
-            ('@', '"', _) => self.resource_string(cursor),
+            ('d', '"', _) => self.dependency_string(cursor),
             ('!', '=', _)
                 | ('%', '=', _)
                 | ('&', '&', _)
@@ -403,10 +403,10 @@ impl InitialState {
         self.double_quoted_string(cursor)
     }
 
-    fn resource_string(self, cursor: &mut Cursor) -> (State, FullToken) {
-        debug_assert!(cursor.peek(0) == '@');
+    fn dependency_string(self, cursor: &mut Cursor) -> (State, FullToken) {
+        debug_assert!(cursor.peek(0) == 'd');
         cursor.skip(1);
-        self.double_quoted_resource(cursor)
+        self.double_quoted_dependency(cursor)
     }
     
     fn byte_string(self, cursor: &mut Cursor) -> (State, FullToken) {
@@ -451,10 +451,10 @@ impl InitialState {
         DoubleQuotedStringTailState.next(cursor)
     }
 
-    fn double_quoted_resource(self, cursor: &mut Cursor) -> (State, FullToken) {
+    fn double_quoted_dependency(self, cursor: &mut Cursor) -> (State, FullToken) {
         debug_assert!(cursor.peek(0) == '"');
         cursor.skip(1);
-        DoubleQuotedResourceTailState.next(cursor)
+        DoubleQuotedDependencyTailState.next(cursor)
     }
     
     fn raw_double_quoted_string(self, cursor: &mut Cursor) -> (State, FullToken) {
@@ -531,21 +531,21 @@ impl DoubleQuotedStringTailState {
 
 /// The state of the tokenizer when it is in the middle of a double quoted string.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
-pub struct DoubleQuotedResourceTailState;
+pub struct DoubleQuotedDependencyTailState;
 
-impl DoubleQuotedResourceTailState {
+impl DoubleQuotedDependencyTailState {
     fn next(self, cursor: &mut Cursor<'_>) -> (State, FullToken) {
         loop {
             match (cursor.peek(0), cursor.peek(1)) {
                 ('"', _) => {
                     cursor.skip(1);
                     cursor.skip_suffix();
-                    break (State::Initial(InitialState), FullToken::Resource);
+                    break (State::Initial(InitialState), FullToken::Dependency);
                 }
                 ('\0', _) => {
                     break (
-                        State::DoubleQuotedResourceTailState(DoubleQuotedResourceTailState),
-                        FullToken::Resource,
+                        State::DoubleQuotedDependencyTailState(DoubleQuotedDependencyTailState),
+                        FullToken::Dependency,
                     );
                 }
                 ('\\', '"') => cursor.skip(2),

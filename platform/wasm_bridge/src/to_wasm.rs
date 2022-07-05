@@ -87,7 +87,7 @@ pub struct ToWasmMsg {
     pub u32_offset: usize
 }
 
-pub struct ToWasmCmdSkip{
+pub struct ToWasmBlockSkip{
     len:usize,
     base:usize
 }
@@ -125,15 +125,15 @@ impl ToWasmMsg {
         ret
     }
     
-    pub fn read_cmd_skip(&mut self)->ToWasmCmdSkip{
-        ToWasmCmdSkip{
+    pub fn read_block_skip(&mut self)->ToWasmBlockSkip{
+        ToWasmBlockSkip{
             base: self.u32_offset >> 1,
             len: self.read_u32() as usize, 
         }
     }
     
-    pub fn cmd_skip(&mut self, cmd_skip:ToWasmCmdSkip){
-        self.u32_offset = (cmd_skip.base + cmd_skip.len - 1)<<1
+    pub fn block_skip(&mut self, block_skip:ToWasmBlockSkip){
+        self.u32_offset = (block_skip.base + block_skip.len - 1)<<1
     }
     
     pub fn read_f32(&mut self) -> f32 {
@@ -160,7 +160,7 @@ impl ToWasmMsg {
         out
     }
     
-    pub fn was_last_cmd(&mut self)->bool{
+    pub fn was_last_block(&mut self)->bool{
         self.u32_offset += self.u32_offset & 1;
         self.u32_offset>>1 >= self.data.len()
     }

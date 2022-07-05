@@ -12,7 +12,7 @@ live_register!{
     DrawLabelText: {{DrawLabelText}} {
         text_style: {
             font: {
-                path: "resources/IBMPlexSans-SemiBold.ttf"
+                path: d"resources/IBMPlexSans-SemiBold.ttf"
             }
             font_size: 11.0
         }
