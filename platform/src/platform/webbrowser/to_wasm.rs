@@ -1,3 +1,4 @@
+#![allow(dead_code)]
 use crate::{
     makepad_live_id::*,
     makepad_wasm_bridge::*,
@@ -18,16 +19,65 @@ use crate::{
     window::WindowGeom
 };
 
+
+
 #[derive(ToWasm)]
-pub struct ToWasmGpuInfo {
+pub struct WVec2 {
+    pub x: f32,
+    pub y: f32,
+}
+
+impl Into<Vec2> for WVec2 {
+    fn into(self) -> Vec2 {
+        Vec2{x:self.x, y: self.y}
+    }
+}
+
+#[derive(ToWasm)]
+pub struct WVec3 {
+    pub x: f32,
+    pub y: f32,
+    pub z: f32,
+}
+
+impl Into<Vec3> for WVec3 {
+    fn into(self) -> Vec3 {
+        Vec3{x:self.x, y: self.y, z:self.z}
+    }
+}
+
+#[derive(ToWasm)]
+pub struct WQuat {
+    pub a: f32,
+    pub b: f32,
+    pub c: f32,
+    pub d: f32,
+}
+
+impl Into<Quat> for WQuat {
+    fn into(self) -> Quat {
+        Quat{a:self.a, b: self.b, c:self.c, d:self.d}
+    }
+}
+
+#[derive(ToWasm)]
+pub struct WFinger {
+    pub abs:WVec2,
+    pub digit: usize,
+    pub is_touch: bool,
+    pub modifiers: u32,
+    pub time: f64,
+}
+
+#[derive(ToWasm)]
+pub struct WGpuInfo {
     pub min_uniform_vectors: u32,
     pub vendor: String,
     pub renderer: String
 }
 
 #[derive(ToWasm)]
-pub struct ToWasmBrowserInfo {
-    pub port: u32,
+pub struct WBrowserInfo {
     pub protocol: String,
     pub hostname: String,
     pub pathname: String,
@@ -35,10 +85,9 @@ pub struct ToWasmBrowserInfo {
     pub hash: String,
 }
 
-impl Into<PlatformType> for ToWasmBrowserInfo {
+impl Into<PlatformType> for WBrowserInfo {
     fn into(self) -> PlatformType {
         PlatformType::WebBrowser {
-            port: self.port as u16,
             protocol: self.protocol,
             hostname: self.hostname,
             pathname: self.pathname,
@@ -50,25 +99,23 @@ impl Into<PlatformType> for ToWasmBrowserInfo {
 
 #[derive(ToWasm)]
 pub struct ToWasmConstructAndGetDeps {
-    pub gpu_info: ToWasmGpuInfo,
-    pub browser_info: ToWasmBrowserInfo,
+    pub gpu_info: WGpuInfo,
+    pub browser_info: WBrowserInfo,
 }
 
 #[derive(ToWasm)]
-pub struct ToWasmDepLoaded {
+pub struct WDepLoaded {
     pub path: String,
     pub data: ToWasmDataU8
 }
 
 #[derive(ToWasm)]
 pub struct ToWasmDepsLoaded {
-    pub gpu_info: ToWasmGpuInfo,
-    pub browser_info: ToWasmBrowserInfo,
-    pub deps: Vec<ToWasmDepLoaded>
+    pub deps: Vec<WDepLoaded>
 }
 
 #[derive(ToWasm)]
-pub struct ToWasmWindowInfo {
+pub struct WindowInfo {
     pub is_fullscreen: bool,
     pub can_fullscreen: bool,
     pub xr_is_presenting: bool,
@@ -78,7 +125,7 @@ pub struct ToWasmWindowInfo {
     pub inner_height: f32
 }
 
-impl Into<WindowGeom> for ToWasmWindowInfo {
+impl Into<WindowGeom> for WindowInfo {
     fn into(self) -> WindowGeom {
         WindowGeom {
             is_fullscreen: self.is_fullscreen,
@@ -96,12 +143,12 @@ impl Into<WindowGeom> for ToWasmWindowInfo {
 
 #[derive(ToWasm)]
 pub struct ToWasmInit {
-    pub window_info: ToWasmWindowInfo
+    pub window_info: WindowInfo
 }
 
 #[derive(ToWasm)]
 pub struct ToWasmResizeWindow {
-    pub window_info: ToWasmWindowInfo
+    pub window_info: WindowInfo
 }
 
 #[derive(ToWasm)]
@@ -109,58 +156,9 @@ pub struct ToWasmAnimationFrame {
     pub time: f64
 }
 
-
-#[derive(ToWasm)]
-pub struct ToWasmVec2 {
-    pub x: f32,
-    pub y: f32,
-}
-
-impl Into<Vec2> for ToWasmVec2 {
-    fn into(self) -> Vec2 {
-        Vec2{x:self.x, y: self.y}
-    }
-}
-
-#[derive(ToWasm)]
-pub struct ToWasmVec3 {
-    pub x: f32,
-    pub y: f32,
-    pub z: f32,
-}
-
-impl Into<Vec3> for ToWasmVec3 {
-    fn into(self) -> Vec3 {
-        Vec3{x:self.x, y: self.y, z:self.z}
-    }
-}
-
-#[derive(ToWasm)]
-pub struct ToWasmQuat {
-    pub a: f32,
-    pub b: f32,
-    pub c: f32,
-    pub d: f32,
-}
-
-impl Into<Quat> for ToWasmQuat {
-    fn into(self) -> Quat {
-        Quat{a:self.a, b: self.b, c:self.c, d:self.d}
-    }
-}
-
-#[derive(ToWasm)]
-pub struct ToWasmFinger {
-    pub abs: ToWasmVec2,
-    pub digit: usize,
-    pub is_touch: bool,
-    pub modifiers: u32,
-    pub time: f64,
-}
-
 #[derive(ToWasm)]
 pub struct ToWasmFingerDown {
-    pub finger: ToWasmFinger,
+    pub finger: WFinger,
 }
 
 fn unpack_key_modifier(modifiers: u32) -> KeyModifiers {
@@ -189,7 +187,7 @@ impl ToWasmFingerDown {
 
 #[derive(ToWasm)]
 pub struct ToWasmFingerUp {
-    pub finger: ToWasmFinger,
+    pub finger: WFinger,
 }
 
 impl Into<FingerUpEvent> for ToWasmFingerUp {
@@ -207,7 +205,7 @@ impl Into<FingerUpEvent> for ToWasmFingerUp {
 
 #[derive(ToWasm)]
 pub struct ToWasmFingerMove {
-    pub finger: ToWasmFinger,
+    pub finger: WFinger,
 }
 
 impl Into<FingerMoveEvent> for ToWasmFingerMove {
@@ -225,7 +223,7 @@ impl Into<FingerMoveEvent> for ToWasmFingerMove {
 
 #[derive(ToWasm)]
 pub struct ToWasmFingerHover {
-    pub finger: ToWasmFinger,
+    pub finger: WFinger,
 }
 
 impl Into<FingerHoverEvent> for ToWasmFingerHover {
@@ -244,8 +242,8 @@ impl Into<FingerHoverEvent> for ToWasmFingerHover {
 
 #[derive(ToWasm)]
 pub struct ToWasmFingerScroll {
-    pub finger: ToWasmFinger,
-    pub scroll: ToWasmVec2,
+    pub finger: WFinger,
+    pub scroll: WVec2,
 }
 
 impl Into<FingerScrollEvent> for ToWasmFingerScroll {
@@ -393,14 +391,14 @@ fn web_to_key_code(key_code: u32) -> KeyCode {
 }
 
 #[derive(ToWasm)]
-pub struct ToWasmKey {
+pub struct WKey {
     pub key_code: u32,
     pub modifiers: u32,
     pub time: f64,
     pub is_repeat: bool
 }
 
-impl Into<KeyEvent> for ToWasmKey {
+impl Into<KeyEvent> for WKey {
     fn into(self) -> KeyEvent {
         KeyEvent {
             key_code: web_to_key_code(self.key_code),
@@ -409,6 +407,16 @@ impl Into<KeyEvent> for ToWasmKey {
             time: self.time,
         }
     }
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmKeyDown {
+    pub key: WKey
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmKeyUp {
+    pub key: WKey
 }
 
 
@@ -448,29 +456,29 @@ pub struct ToWasmWindowFocusChange {
 }
 
 #[derive(ToWasm)]
-pub struct ToWasmXRButton {
+pub struct WXRButton {
     pressed: bool,
     value: f32
 }
 
 #[derive(ToWasm)]
-pub struct ToWasmXRTransform {
-    orientation: ToWasmQuat,
-    position: ToWasmVec3,
+pub struct WXRTransform {
+    orientation: WQuat,
+    position: WVec3,
 }
 
 #[derive(ToWasm)]
-pub struct ToWasmXRInput {
+pub struct WXRInput {
     active: bool,
     hand: u32,
-    grip: ToWasmXRTransform,
-    ray: ToWasmXRTransform,
-    buttons: Vec<ToWasmXRButton>,
+    grip: WXRTransform,
+    ray: WXRTransform,
+    buttons: Vec<WXRButton>,
     axes: Vec<f32>
 }
 
 #[derive(ToWasm)]
 pub struct ToWasmXRUpdate {
-    inputs: Vec<ToWasmXRInput>
+    inputs: Vec<WXRInput>
 }
 

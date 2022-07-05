@@ -185,6 +185,12 @@ impl LiveRegistry {
                 origin_doc.get_string(*string_start, *string_count, &mut out);
                 Some(out)
             }
+            LiveValue::Dependency {string_start, string_count} => {
+                let origin_doc = self.token_id_to_origin_doc(node.origin.token_id().unwrap());
+                let mut out = String::new();
+                origin_doc.get_string(*string_start, *string_count, &mut out);
+                Some(out)
+            }
             _ => None
         }
     }
@@ -417,6 +423,15 @@ impl LiveRegistry {
                                 len: len as u32
                             }});
                             let col = pos.column as usize + 1;
+                            strings.extend(&line_chars[col..col + len]);
+                        },
+                        FullToken::Dependency => {
+                            let len = full_token.len - 3;
+                            tokens.push(TokenWithSpan {span: span, token: LiveToken::Dependency {
+                                index: strings.len() as u32,
+                                len: len as u32
+                            }});
+                            let col = pos.column as usize + 2;
                             strings.extend(&line_chars[col..col + len]);
                         },
                         _ => match LiveToken::from_full_token(full_token.token) {

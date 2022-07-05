@@ -664,6 +664,9 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
                 LiveValue::DocumentString {string_start, string_count} => {
                     writeln!(f, "{}{} <DocumentString> string_start:{}, string_end:{}", node.id, pt, string_start, string_count).unwrap();
                 },
+                LiveValue::Dependency {string_start, string_count} => {
+                    writeln!(f, "{}{} <Dependency> string_start:{}, string_end:{}", node.id, pt, string_start, string_count).unwrap();
+                },
                 LiveValue::Bool(v) => {
                     writeln!(f, "{}{} <Bool> {}", node.id, pt, v).unwrap();
                 }

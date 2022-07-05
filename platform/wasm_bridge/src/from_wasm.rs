@@ -113,4 +113,9 @@ impl FromWasmMsg {
             ptr as u32
         }
     }
+
+    pub fn from_wasm(&mut self, from_wasm:impl FromWasm){
+        from_wasm.write_from_wasm(self);
+    }
+
 }

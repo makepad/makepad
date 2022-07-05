@@ -1,7 +1,7 @@
 use {
     std::{
         io::prelude::*,
-   //     fs::File,
+        fs::File,
         io,
     },
     crate::{
@@ -16,7 +16,7 @@ use {
 };
 
 #[macro_export]
-macro_rules!log {
+macro_rules!console_log {
     ( $ ( $t: tt) *) => {
         println!("{}:{} - {}",file!(),line!(),format!($($t)*))
     }
@@ -42,6 +42,23 @@ impl Default for CxDesktop {
 }
 
 impl Cx {
+    
+    pub fn desktop_load_dependencies(&mut self){
+        for (path,dep) in &mut self.dependencies{
+            if let Ok(mut file_handle) = File::open(path) {
+                let mut buffer = Vec::<u8>::new();
+                if file_handle.read_to_end(&mut buffer).is_ok() {
+                    dep.data = Some(Ok(buffer));
+                }
+                else{
+                    dep.data = Some(Err("read_to_end failed".to_string()));
+                }
+            }
+            else{
+                dep.data = Some(Err("File open failed".to_string()));
+            }
+        }
+    }
     
     pub fn get_default_window_size(&self) -> Vec2 {
         return Vec2 {x: 800., y: 600.}

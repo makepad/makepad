@@ -1,5 +1,3 @@
-#![feature(cell_filter_map)]
-
 use makepad_platform::*;
 
 pub mod button_logic;
