@@ -564,6 +564,35 @@ live_primitive!(
     }
 );
 
+#[derive(Debug, Default, Clone)]
+pub struct LiveDependency(String);
+
+impl LiveDependency{
+    pub fn as_ref(&self)->&str{&self.0}
+}
+
+live_primitive!(
+    LiveDependency,
+    LiveDependency::default(),
+    fn apply(&mut self, cx: &mut Cx, _from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        match &nodes[index].value {
+            
+            LiveValue::Dependency {string_start, string_count} => {
+                let live_registry = cx.live_registry.borrow();
+                let origin_doc = live_registry.token_id_to_origin_doc(nodes[index].origin.token_id().unwrap());
+                origin_doc.get_string(*string_start, *string_count, &mut self.0);
+                index + 1
+            }
+            _ => {
+                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "Dependency");
+                nodes.skip_node(index)
+            }
+        }
+    },
+    fn to_live_value(&self) -> LiveValue { panic!() }
+);
+
+
 
 live_primitive!(
     LivePtr,

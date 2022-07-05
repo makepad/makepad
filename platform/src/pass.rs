@@ -146,8 +146,8 @@ impl Default for PassClearColor {
 
 #[derive(Clone)]
 pub enum PassClearDepth {
-    InitWith(f64),
-    ClearWith(f64)
+    InitWith(f32),
+    ClearWith(f32)
 }
 
 #[derive(Default, Clone)]

@@ -8,7 +8,6 @@ use {
             webbrowser::{
                 from_wasm::*,
                 to_wasm::*,
-                webgl_platform::*,
             }
         },
         event::{
@@ -16,12 +15,13 @@ use {
             Signal,
             Event,
             XRInput,
+            DraggedItem,
             WindowGeom
         },
         menu::Menu,
         cursor::MouseCursor,
         cx_api::{CxPlatformApi},
-        cx::{Cx, PlatformType},
+        cx::{Cx},
         window::{CxWindowState, CxWindowCmd},
         pass::CxPassParent,
     }
@@ -33,18 +33,18 @@ impl Cx {
         return self.platform.window_geom.inner_size;
     }
     
-    pub fn process_to_wasm<F>(&mut self, msg: u32, mut event_handler: F) -> u32
+    pub fn process_to_wasm<F>(&mut self, msg_ptr: u32, mut event_handler: F) -> u32
     where F: FnMut(&mut Cx, &mut Event),
     {
         self.event_handler = Some(&mut event_handler as *const dyn FnMut(&mut Cx, &mut Event) as *mut dyn FnMut(&mut Cx, &mut Event));
-        let ret = self.event_loop_core(ToWasmMsg::take_ownership(msg));
+        let ret = self.event_loop_core(ToWasmMsg::take_ownership(msg_ptr));
         self.event_handler = None;
         ret
     }
     
     // incoming to_wasm. There is absolutely no other entrypoint
     // to general rust codeflow than this function. Only the allocators and init
-    pub fn event_loop_core(&mut self, to_wasm: ToWasmMsg) -> u32
+    pub fn event_loop_core(&mut self, mut to_wasm: ToWasmMsg) -> u32
     {
         // store our view root somewhere
         if self.platform.is_initialized == false {
@@ -56,11 +56,11 @@ impl Cx {
         
         self.platform.from_wasm = Some(FromWasmMsg::new());
         
-        let mut is_animation_frame = false;
-        while !to_wasm.was_last_cmd(){
-            let cmd_id = LiveId(to_wasm.read_u64());
-            let cmd_skip = to_wasm.read_cmd_skip();
-            match cmd_id{
+        let is_animation_frame = false;
+        while !to_wasm.was_last_block() {
+            let block_id = LiveId(to_wasm.read_u64());
+            let skip = to_wasm.read_block_skip();
+            match block_id {
                 id!(ToWasmConstructAndGetDeps) => { // fetch_deps
                     let msg = ToWasmConstructAndGetDeps::read_to_wasm(&mut to_wasm);
                     
@@ -74,16 +74,18 @@ impl Cx {
                     
                     self.platform_type = msg.browser_info.into();
                     // send the UI our deps, overlap with shadercompiler
-                    let mut load_deps = Vec::<String>::new();
-                    
-                    for (file, _) in &self.live_styles.font_index { 
-                        load_deps.push(file.to_string());
+                    let mut deps = Vec::<String>::new();
+                    for (path, _) in &self.dependencies {
+                        deps.push(path.to_string());
                     }
                     // other textures, things
-                    self.platform.from_wasm.load_deps(load_deps);
+                    self.platform.from_wasm(
+                        FromWasmLoadDeps {deps}
+                    );
                     
-                    self.webgl_compile_all_shaders();
+                    self.webgl_compile_shaders();
                 },
+                /*
                 2 => { // deps_loaded
                     let len = to_wasm.mu32();
                     self.fonts.resize(self.live_styles.font_index.len(), CxFont::default());
@@ -461,26 +463,29 @@ impl Cx {
                     self.call_event_handler(&mut Event::WebSocketMessage(
                         WebSocketMessageEvent {url, result: Err(err)}
                     ));
-                }
+                }*/
                 _ => {
                     panic!("Message unknown")
                 }
             };
-            to_wasm.cmd_skip(cmd_skip);
+            to_wasm.block_skip(skip);
         };
         
         self.call_signals_and_triggers();
         
-        if is_animation_frame && (self.redraw_child_areas.len()>0 || self.redraw_parent_areas.len()>0) {
+        if self.need_redrawing() || self.new_next_frames.len() != 0 {
             self.call_draw_event();
         }
+        
         self.call_signals_and_triggers();
         
         for window in &mut self.windows {
             
             window.window_state = match &window.window_state {
                 CxWindowState::Create {title, ..} => {
-                    self.platform.from_wasm.set_document_title(&title);
+                    self.platform.from_wasm(FromWasmSetDocumentTitle {
+                        title: title.to_string()
+                    });
                     window.window_geom = self.platform.window_geom.clone();
                     
                     CxWindowState::Created
@@ -494,34 +499,42 @@ impl Cx {
             
             window.window_command = match &window.window_command {
                 CxWindowCmd::XrStartPresenting => {
-                    self.platform.from_wasm.xr_start_presenting();
+                    self.platform.from_wasm(FromWasmXrStartPresenting {});
                     CxWindowCmd::None
                 },
                 CxWindowCmd::XrStopPresenting => {
-                    self.platform.from_wasm.xr_stop_presenting();
+                    self.platform.from_wasm(FromWasmXrStopPresenting {});
                     CxWindowCmd::None
                 },
                 CxWindowCmd::FullScreen => {
-                    self.platform.from_wasm.fullscreen();
+                    self.platform.from_wasm(FromWasmFullScreen {});
                     CxWindowCmd::None
                 },
                 CxWindowCmd::NormalScreen => {
-                    self.platform.from_wasm.normalscreen();
+                    self.platform.from_wasm(FromWasmNormalScreen {});
                     CxWindowCmd::None
                 },
                 _ => CxWindowCmd::None,
             };
         }
         
+        self.webgl_compile_shaders();
+        
         // check if we need to send a cursor
         if !self.down_mouse_cursor.is_none() {
-            self.platform.from_wasm.set_mouse_cursor(self.down_mouse_cursor.as_ref().unwrap().clone())
+            self.platform.from_wasm(
+                FromWasmSetMouseCursor::new(self.down_mouse_cursor.as_ref().unwrap().clone())
+            )
         }
         else if !self.hover_mouse_cursor.is_none() {
-            self.platform.from_wasm.set_mouse_cursor(self.hover_mouse_cursor.as_ref().unwrap().clone())
+            self.platform.from_wasm(
+                FromWasmSetMouseCursor::new(self.hover_mouse_cursor.as_ref().unwrap().clone())
+            )
         }
         else {
-            self.platform.from_wasm.set_mouse_cursor(MouseCursor::Default);
+            self.platform.from_wasm(
+                FromWasmSetMouseCursor::new(MouseCursor::Default)
+            )
         }
         
         let mut passes_todo = Vec::new();
@@ -531,19 +544,19 @@ impl Cx {
         if is_animation_frame {
             if passes_todo.len() > 0 {
                 for pass_id in &passes_todo {
-                    match self.passes[*pass_id].dep_of.clone() {
-                        CxPassDepOf::Window(_) => {
+                    match self.passes[*pass_id].parent.clone() {
+                        CxPassParent::Window(_) => {
                             // find the accompanying render window
                             // its a render window
                             windows_need_repaint -= 1;
                             let dpi_factor = self.platform.window_geom.dpi_factor;
                             self.draw_pass_to_canvas(*pass_id, dpi_factor);
                         }
-                        CxPassDepOf::Pass(parent_pass_id) => {
+                        CxPassParent::Pass(parent_pass_id) => {
                             let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
                             self.draw_pass_to_texture(*pass_id, dpi_factor);
                         },
-                        CxPassDepOf::None => {
+                        CxPassParent::None => {
                             self.draw_pass_to_texture(*pass_id, 1.0);
                         }
                     }
@@ -553,35 +566,12 @@ impl Cx {
         
         // request animation frame if still need to redraw, or repaint
         // we use request animation frame for that.
-        if passes_todo.len() != 0
-            || self.playing_animator_ids.len() != 0
-            || self.redraw_parent_areas.len() != 0
-            || self.redraw_child_areas.len() != 0
-            || self.next_frames.len() != 0
-        {
-            self.platform.from_wasm.request_animation_frame();
+        if self.need_redrawing() || self.new_next_frames.len() != 0 {
+            self.platform.from_wasm(FromWasmRequestAnimationFrame{});
         }
         
-        // lets check our recompile queue
-        if !is_animation_frame {
-            if self.live_styles.changed_live_bodies.len()>0 || self.live_styles.changed_deps.len()>0 {
-                let changed_live_bodies = self.live_styles.changed_live_bodies.clone();
-                let mut errors = self.process_live_styles_changes();
-                self.webgl_update_all_shaders(&mut errors);
-                self.call_live_recompile_event(changed_live_bodies, errors);
-            }
-            /*
-            let mut shader_results = Vec::new();
-            for shader_id in &self.shader_recompiles {
-                shader_results.push(Self::webgl_compile_shader(*shader_id, !self.platform.gpu_spec_is_low_on_uniforms, true, &mut self.shaders[*shader_id], &mut self.platform, &mut self.shader_inherit_cache));
-            }
-            self.shader_recompiles.truncate(0);
-            self.call_shader_recompile_event(shader_results, &mut event_handler);*/
-        }
-        self.process_live_style_errors();
-
         //return wasm pointer to caller
-        self.platform.from_wasm.take().into_wasm_ptr()
+        self.platform.from_wasm.take().unwrap().release_ownership()
     }
     
     // empty stub
@@ -589,58 +579,69 @@ impl Cx {
     where F: FnMut(&mut Cx, Event),
     {
     }
-    
-    pub fn post_signal(_signal: Signal, _value: StatusId) {
-        // todo
+}
+
+
+impl CxPlatformApi for Cx{
+
+    fn show_text_ime(&mut self, x: f32, y: f32) {
+        self.platform.from_wasm(FromWasmShowTextIME{x,y});
     }
     
-    pub fn file_read(&mut self, path: &str) -> FileRead {
+    fn hide_text_ime(&mut self) {
+       self.platform.from_wasm(FromWasmHideTextIME{});
+    }
+    
+    fn post_signal(_signal: Signal, _value: u64) {
+        // todo
+    }
+    /*
+    fn file_read(&mut self, path: &str) -> FileRead {
         let id = self.platform.file_read_id;
         self.platform.from_wasm.read_file(id as u32, path);
         self.platform.file_read_id += 1;
         FileRead {read_id: id, path: path.to_string()}
     }
     
-    pub fn file_write(&mut self, _path: &str, _data: &[u8]) -> u64 {
+    fn file_write(&mut self, _path: &str, _data: &[u8]) -> u64 {
         return 0
     }
-    
-    pub fn set_window_outer_size(&mut self, _size: Vec2) {
+    */
+    fn set_window_outer_size(&mut self, _size: Vec2) {
     }
     
-    pub fn set_window_position(&mut self, _pos: Vec2) {
+    fn set_window_position(&mut self, _pos: Vec2) {
     }
     
-    pub fn show_text_ime(&mut self, x: f32, y: f32) {
-        self.platform.from_wasm.show_text_ime(x, y);
-    }
-    
-    pub fn hide_text_ime(&mut self) {
-        self.platform.from_wasm.hide_text_ime();
-    }
-    
-    pub fn start_timer(&mut self, interval: f64, repeats: bool) -> Timer {
+    fn start_timer(&mut self, interval: f64, repeats: bool) -> Timer {
         self.timer_id += 1;
-        self.platform.from_wasm.start_timer(self.timer_id, interval, repeats);
+        self.platform.from_wasm(FromWasmStartTimer{
+            repeats,
+            interval,
+            id: self.timer_id as f64,
+        });
         Timer {timer_id: self.timer_id}
     }
     
-    pub fn stop_timer(&mut self, timer: &mut Timer) {
+    fn stop_timer(&mut self, timer: Timer) {
         if timer.timer_id != 0 {
-            self.platform.from_wasm.stop_timer(timer.timer_id);
-            timer.timer_id = 0;
+            self.platform.from_wasm(FromWasmStopTimer{
+                id: timer.timer_id as f64,
+            });
         }
     }
-    
-    pub fn http_send(&mut self, verb: &str, path: &str, proto: &str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
+    /*
+    fn http_send(&mut self, verb: &str, path: &str, proto: &str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
         self.platform.from_wasm.http_send(verb, path, proto, domain, port, content_type, body, signal);
     }
     
-    pub fn websocket_send(&mut self, url: &str, data: &[u8]) {
+    fn websocket_send(&mut self, url: &str, data: &[u8]) {
         self.platform.from_wasm.websocket_send(url, data);
+    }*/
+    fn start_dragging(&mut self, _dragged_item: DraggedItem) {
     }
-    
-    pub fn update_menu(&mut self, _menu: &Menu) {
+        
+    fn update_menu(&mut self, _menu: &Menu) {
     }
 }
 
@@ -676,6 +677,73 @@ impl Default for CxPlatform {
 }
 
 impl CxPlatform {
+    pub fn from_wasm(&mut self, from_wasm: impl FromWasm) {
+        self.from_wasm.as_mut().unwrap().from_wasm(from_wasm);
+    }
 }
 
-
+#[export_name = "get_wasm_js_msg_class"]
+#[cfg(target_arch = "wasm32")]
+pub unsafe extern "C" fn get_wasm_js_msg_class() -> u32 {
+    let mut msg = FromWasmMsg::new();
+    let mut out = String::new();
+    
+    out.push_str("return {\n");
+    out.push_str("ToWasmMsg:class extends ToWasmMsg{\n");
+    
+    ToWasmConstructAndGetDeps::to_wasm_js_method(&mut out);
+    ToWasmDepsLoaded::to_wasm_js_method(&mut out);
+    ToWasmInit::to_wasm_js_method(&mut out);
+    ToWasmResizeWindow::to_wasm_js_method(&mut out);
+    ToWasmAnimationFrame::to_wasm_js_method(&mut out);
+    ToWasmFingerDown::to_wasm_js_method(&mut out);
+    ToWasmFingerUp::to_wasm_js_method(&mut out);
+    ToWasmFingerMove::to_wasm_js_method(&mut out);
+    ToWasmFingerHover::to_wasm_js_method(&mut out);
+    ToWasmFingerScroll::to_wasm_js_method(&mut out);
+    ToWasmKeyDown::to_wasm_js_method(&mut out);
+    ToWasmKeyUp::to_wasm_js_method(&mut out);
+    ToWasmTextInput::to_wasm_js_method(&mut out);
+    ToWasmTextCopy::to_wasm_js_method(&mut out);
+    ToWasmTimerFired::to_wasm_js_method(&mut out);
+    ToWasmPaintDirty::to_wasm_js_method(&mut out);
+    ToWasmWindowFocusChange::to_wasm_js_method(&mut out);
+    ToWasmXRUpdate::to_wasm_js_method(&mut out);
+    
+    out.push_str("},\n");
+    out.push_str("FromWasmMsg:class extends FromWasmMsg{\n");
+    
+    FromWasmCompileWebGLShader::from_wasm_js_method(&mut out);
+    FromWasmAllocArrayBuffer::from_wasm_js_method(&mut out);
+    FromWasmAllocIndexBuffer::from_wasm_js_method(&mut out);
+    FromWasmAllocVao::from_wasm_js_method(&mut out);
+    FromWasmDrawCall::from_wasm_js_method(&mut out);
+    FromWasmClear::from_wasm_js_method(&mut out);
+    FromWasmLoadDeps::from_wasm_js_method(&mut out);
+    FromWasmUpdateTextureImage2D::from_wasm_js_method(&mut out);
+    FromWasmRequestAnimationFrame::from_wasm_js_method(&mut out);
+    FromWasmSetDocumentTitle::from_wasm_js_method(&mut out);
+    FromWasmSetMouseCursor::from_wasm_js_method(&mut out);
+    FromWasmReadFile::from_wasm_js_method(&mut out);
+    FromWasmShowTextIME::from_wasm_js_method(&mut out);
+    FromWasmHideTextIME::from_wasm_js_method(&mut out);
+    FromWasmTextCopyResponse::from_wasm_js_method(&mut out);
+    FromWasmStartTimer::from_wasm_js_method(&mut out);
+    FromWasmStopTimer::from_wasm_js_method(&mut out);
+    FromWasmXrStartPresenting::from_wasm_js_method(&mut out);
+    FromWasmXrStopPresenting::from_wasm_js_method(&mut out);
+    FromWasmBeginRenderTargets::from_wasm_js_method(&mut out);
+    FromWasmAddColorTarget::from_wasm_js_method(&mut out);
+    FromWasmSetDepthTarget::from_wasm_js_method(&mut out);
+    FromWasmEndRenderTargets::from_wasm_js_method(&mut out);
+    FromWasmBeginMainCanvas::from_wasm_js_method(&mut out);
+    FromWasmSetDefaultDepthAndBlendMode::from_wasm_js_method(&mut out);
+    FromWasmFullScreen::from_wasm_js_method(&mut out);
+    FromWasmNormalScreen::from_wasm_js_method(&mut out);
+    
+    out.push_str("}\n");
+    out.push_str("}");
+    
+    msg.push_str(&out);
+    msg.release_ownership()
+}

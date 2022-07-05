@@ -17,6 +17,7 @@ pub use {
         makepad_live_id::*,
         cx::Cx,
         live_traits::*,
+        live_prims::LiveDependency,
         shader::geometry_gen::GeometryQuad2D,
         draw_vars::DrawVars,
         draw_2d::view::ManyInstances,
@@ -124,17 +125,18 @@ live_register!{
 #[derive(Clone, Live)]
 pub struct Font {
     #[rust] pub font_id: Option<usize>,
-    #[live] pub path: String
+    #[live] pub path: LiveDependency
 }
 
 impl LiveHook for Font {
     fn after_apply(&mut self, cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
-        self.font_id = Some(cx.get_font_by_path(&self.path));
+        self.font_id = Some(cx.get_font_by_path(self.path.as_ref()));
     }
 }
 
 impl Cx {
     pub fn get_font_by_path(&mut self, path: &str) -> usize {
+
         if let Some(item) = self.path_to_font_id.get(path) {
             return *item;
         }
@@ -142,27 +144,34 @@ impl Cx {
         self.fonts.push(None);
         self.path_to_font_id.insert(path.to_string(), font_id);
         
-        if let Ok(mut file_handle) = File::open(&path) {
-            let mut buffer = Vec::<u8>::new();
-            if file_handle.read_to_end(&mut buffer).is_ok() {
-                match CxFont::load_from_ttf_bytes(&buffer) {
-                    Err(_) => {
-                        println!("Error loading font {} ", path);
-                    }
-                    Ok(mut cxfont) => {
-                        if path == "resources/IBMPlexSans-Text.ttf" {
-                            /*for i in 0..10{
-                                cxfont.ttf_font.char_code_to_glyph_index_map['A' as usize + i] = 70 + i;
-                            }*/
-                            cxfont.ttf_font.char_code_to_glyph_index_map['g' as usize] = 11;
-                            cxfont.ttf_font.char_code_to_glyph_index_map['9' as usize] = 70;
-                            cxfont.ttf_font.char_code_to_glyph_index_map['0' as usize] = 60;
-                            cxfont.ttf_font.char_code_to_glyph_index_map['@' as usize] = 72;
+        if let Some(dep) = self.dependencies.get(path){
+            if let Some(data) = &dep.data{
+                if let Ok(data) = data {
+                    match CxFont::load_from_ttf_bytes(&data) {
+                        Err(_) => {
+                            println!("Error loading font {} ", path);
                         }
-                        self.fonts[font_id] = Some(cxfont);
+                        Ok(mut cxfont) => {
+                            if path == "resources/IBMPlexSans-Text.ttf" {
+                                cxfont.ttf_font.char_code_to_glyph_index_map['g' as usize] = 11;
+                                cxfont.ttf_font.char_code_to_glyph_index_map['9' as usize] = 70;
+                                cxfont.ttf_font.char_code_to_glyph_index_map['0' as usize] = 60;
+                                cxfont.ttf_font.char_code_to_glyph_index_map['@' as usize] = 72;
+                            }
+                            self.fonts[font_id] = Some(cxfont);
+                        }
                     }
                 }
+                else{ // it failed to load
+                    println!("Error loading font {} ", path);
+                }
             }
+            else{
+                panic!("get_font_by_path - dep load not attempted {}", path)
+            }
+        }
+        else{
+            panic!("get_font_by_path - dep not registered {}", path)
         }
         font_id
     }

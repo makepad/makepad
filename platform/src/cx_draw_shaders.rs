@@ -177,7 +177,7 @@ pub struct DrawShaderInput {
 
 
 #[cfg(any(target_os = "linux", target_arch = "wasm32", test))]
-pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformGLSL;
+pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsGLSL;
 #[cfg(any(target_os = "macos", test))]
 pub const DRAW_SHADER_INPUT_PACKING: DrawShaderInputPacking = DrawShaderInputPacking::UniformsMetal;
 #[cfg(any(target_os = "windows", test))]
@@ -248,7 +248,7 @@ impl DrawShaderInputs {
     pub fn finalize(&mut self) {
         match self.packing_method {
             DrawShaderInputPacking::Attribute => (),
-            DrawShaderInputPacking::UniformsGLSL |
+            DrawShaderInputPacking::UniformsGLSL =>(),
             DrawShaderInputPacking::UniformsHLSL |
             DrawShaderInputPacking::UniformsMetal => {
                 if self.total_slots & 3 > 0 {
@@ -261,8 +261,8 @@ impl DrawShaderInputs {
 
 #[derive(Clone)]
 pub struct DrawShaderTextureInput {
-    _id: LiveId,
-    _ty: ShaderTy
+    pub id: LiveId,
+    pub ty: ShaderTy
 }
 
 #[derive(Clone)]
@@ -342,8 +342,8 @@ impl CxDrawShaderMapping {
                 }
                 DrawShaderFieldKind::Texture {..} => {
                     textures.push(DrawShaderTextureInput {
-                        _ty:ty,
-                        _id: field.ident.0,
+                        ty:ty,
+                        id: field.ident.0,
                     });
                 }
                 _ => ()

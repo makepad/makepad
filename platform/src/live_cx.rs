@@ -5,6 +5,7 @@ pub use {
     crate::{
         makepad_math::*,
         cx::Cx,
+        cx::CxDependency,
         event::Event,
         live_traits::*,
         draw_vars::DrawVars,
@@ -129,8 +130,31 @@ impl Cx {
         for err in errs {
             println!("Error expanding live file {}", live_registry.live_error_to_live_file_error(err));
         }
+        // ok now we scan for all dependencies and store them on Cx.
+    }
+
+    pub fn live_scan_dependencies(&mut self){
+        let live_registry = self.live_registry.borrow();
+
+        for file in &live_registry.live_files{
+            for node in &file.original.nodes {
+                match &node.value {
+                    LiveValue::Dependency{string_start, string_count}=> {
+                        let mut path = String::new();
+                        file.original.get_string(*string_start, *string_count, &mut path);
+                        self.dependencies.insert(path,CxDependency{
+                            data: None
+                        });
+                    }, 
+                    _ => {
+                    }
+                }
+            }
+        }
     }
     
+
+
     pub fn register_live_body(&mut self, live_body: LiveBody) {
         //println!("START");
         let result = self.live_registry.borrow_mut().register_live_file(
