@@ -98,8 +98,9 @@ impl EditorState {
     /// Destroys the session with the given `session_id`. If this session was the last session that
     /// referred to its document, the document is scheduled to be destroyed as well.
     ///
-    /// If the document is destroyed, the `send_request` callback is used to send a request to the
-    /// collab server to close the document's file.
+    /// If the document is already initialized, it is destroyed immediately, and the `send_request`
+    /// callback is used to send a request to the collab server to close the document's file.
+    /// Otherwise, destroying the document is deferred until it becomes initialized.
     pub fn destroy_session(
         &mut self,
         session_id: SessionId,
@@ -117,8 +118,9 @@ impl EditorState {
 
     /// Either gets or creates the document for the file with the given `path`.
     ///
-    /// If the document did not yet exist, the `send_request` callback is used to send a request to
-    /// the collab server to open the document's file and fetch its contents.
+    /// If the document did not yet exist, it is created in an uninitialized state, and the
+    /// `send_request` callback is used to send a request to the collab server to open the
+    /// document's file and fetch its contents.
     pub fn get_or_create_document(
         &mut self,
         path: PathBuf,
@@ -146,6 +148,12 @@ impl EditorState {
     }
 
     /// Handles an open file response from the collab server.
+    /// 
+    /// This is usually received in response to a request to the collab server to open the
+    /// document's file and fetch its contents. At this point, we can fully initialize the
+    /// document. If the document was scheduled to be destroyed while we were waiting for
+    /// the document to become fully initialized, it can now be destroyed, and the `send_request`
+    /// callback is used to send a request to the collab server to close the document's file.
     pub fn handle_open_file_response(
         &mut self,
         file_id: TextFileId,
@@ -180,11 +188,9 @@ impl EditorState {
 
     /// Schedules the document with the given `document_id` to be destroyed.
     ///
-    /// If the document is already initialized, it is destroyed immediately. Otherwise, destroying
-    /// the document is deferred until it becomes initialized.
-    ///
-    /// If the document is destroyed, the `send_request` callback is used to send a request to the
-    /// collab server to close the document's file.
+    /// If the document is already initialized, it is destroyed immediately, and the `send_request`
+    /// callback is used to send a request to the collab server to close the document's file.
+    /// Otherwise, destroying the document is deferred until it becomes initialized.
     pub fn destroy_document(
         &mut self,
         document_id: DocumentId,
@@ -192,8 +198,10 @@ impl EditorState {
     ) {
         let document = &mut self.documents[document_id];
         if document.inner.is_some() {
+            // The document is already initialized, so destroy it immediately.
             self.destroy_document_deferred(document_id, send_request);
         } else {
+            // The document is not yet initialized, so scheduled it to be destroyed later.
             document.should_be_destroyed = true;
         }
     }
@@ -223,7 +231,7 @@ impl EditorState {
 
     // Replaces the cursor set of the session with the given `session_id` with a single cursor, such
     // that the caret is at the start of the contents of the document referred to by this session,
-    given `text` and the selection covers the entire given `text`.
+    // given `text` and the selection covers the entire given `text`.
     pub fn select_all(&mut self, session_id: SessionId) {
         let session = &mut self.sessions[session_id];
         let document = &self.documents[session.document_id];
@@ -307,6 +315,8 @@ impl EditorState {
         self.edit(session_id, None, delta, &offsets, send_request);
     }
 
+    /// For each cursor in the cursor set of the session with the given `session_id`, removes the
+    /// selection of the cursor, and then inserts the given text at the caret of the cursor.
     pub fn insert_text(
         &mut self,
         session_id: SessionId,
@@ -315,6 +325,9 @@ impl EditorState {
     ) {
         let session = &self.sessions[session_id];
 
+        // If the character to be inserted is the same as an automatically injected character, we
+        // skip over the automatically injected character rather than insert the same character
+        // again.
         if let Some(ch) = text.as_lines().first().and_then( | line | line.first()) {
             if let Some(injected_char) = session.injected_char_stack.last() {
                 if ch == injected_char {
@@ -329,6 +342,8 @@ impl EditorState {
             }
         }
 
+        // If the character to be inserted is an opening delimiter, we automatically insert the
+        // corresponding closing delimiter.
         let injected_char = text
             .as_lines()
             .first()
@@ -340,6 +355,7 @@ impl EditorState {
             _ => None,
         });
 
+        // Build a delta and a list of cursor offsets for the edit operation.
         let mut offsets = Vec::new();
 
         let mut builder_0 = delta::Builder::new();
@@ -367,6 +383,7 @@ impl EditorState {
         let (_, new_delta_1) = delta_0.clone().transform(delta_1);
         let delta = delta_0.compose(new_delta_1);
 
+        // Apply the edit operation.
         self.edit(
             session_id,
             Some(EditGroup::Char),
@@ -375,12 +392,15 @@ impl EditorState {
             send_request,
         );
 
+        // If we automatically inserted a character, store it on the injected character stack.
         let session = &mut self.sessions[session_id];
         if let Some(injected_char) = injected_char {
             session.injected_char_stack.push(injected_char);
         }
     }
 
+    /// For each cursor in the cursor set of the session with the given `session_id`, removes the
+    /// selection of the cursor, and then inserts a newline at the caret of the cursor.
     pub fn insert_newline(
         &mut self,
         session_id: SessionId,
@@ -390,6 +410,7 @@ impl EditorState {
         let document = &self.documents[session.document_id];
         let document_inner = document.inner.as_ref().unwrap();
 
+        // Build a delta and a list of cursor offsets for the edit operation.
         let mut offsets = Vec::new();
 
         let mut builder_0 = delta::Builder::new();
@@ -408,12 +429,14 @@ impl EditorState {
 
             let mut indent_count = 0;
 
-            // This is sort of a hack. I designed the multiple cursor system so that all
-            // cursors are applied at once, but operations such autoindenting are much
-            // easier to implement if you apply one cursor at a time. In the future I'd
-            // like to refactor the editor to always apply one cursor at a time, but in the
-            // meantime I'll work around this problem by only performing autoindenting if
-            // there is just a single cursor.
+            // Automatically indent the text to be inserted.
+            //
+            // This is sort of a hack. I designed multiple cursors so that all cursors are applied
+            // at once, but operations such as autoindenting are much asier to implement if you
+            // apply one cursor at a time.
+            //
+            // This should be refactored in the future, by in the meantime we work around the 
+            // problem by only performing autoindenting if there is just a single cursor.
             if session.cursors.len() == 1 {
                 let lines = document_inner.text.as_lines();
                 if let Some((first_non_whitespace_line_before, first_non_whitespace_char_before)) =
@@ -453,9 +476,13 @@ impl EditorState {
         let (_, new_delta_1) = delta_0.clone().transform(delta_1);
         let delta = delta_0.compose(new_delta_1);
 
+        // Apply the edit operation.
         self.edit(session_id, None, delta, &offsets, send_request);
     }
 
+    /// For each cursor in the cursor set of the session with the given `session_id`, if the
+    /// selection of the cursor is empty, inserts a backspace at the caret of the cursor.
+    /// Otherwise, removes the selection of the cursor.
     pub fn insert_backspace(
         &mut self,
         session_id: SessionId,
@@ -465,6 +492,8 @@ impl EditorState {
         let document = &self.documents[session.document_id];
         let document_inner = document.inner.as_ref().unwrap();
 
+        // If we automatically injected a character during the previous edit operation, the inverse
+        // of that character is the character that triggered the injection.
         let last_injected_char_inverse =
         session
             .injected_char_stack
@@ -476,6 +505,7 @@ impl EditorState {
             _ => panic!(),
         });
 
+        // Build a delta and a list of cursor offsets for the edit operation.
         let mut offsets = Vec::new();
 
         let mut builder_0 = delta::Builder::new();
@@ -504,12 +534,14 @@ impl EditorState {
                         builder_1.delete(Size {line: 1, column: 0});
                     }
                 } else {
-                    // This is sort of a hack. I designed the multiple cursor system so that all
-                    // cursors are applied at once, but operations such as autodedenting are much
-                    // easier to implement if you apply one cursor at a time. In the future I'd
-                    // like to refactor the editor to always apply one cursor at a time, but in the
-                    // meantime I'll work around this problem by only performing autodedenting if
-                    // there is just a single cursor.
+                    // Automatically dedent indented text.
+                    //
+                    // This is sort of a hack. I designed multiple cursors so that all cursors are
+                    // applied at once, but operations such as autoindenting are much asier to
+                    // implement if you apply one cursor at a time.
+                    //
+                    // This should be refactored in the future, by in the meantime we work around
+                    // the problem by only performing autoindenting if there is just a single cursor.
                     if session.cursors.len() == 1
                         && document_inner.text.as_lines()[cursor.start().line]
                     [..cursor.start().column]
@@ -548,6 +580,9 @@ impl EditorState {
                             } -position,
                         );
                         builder_1.delete(Size {line: 0, column: 1});
+
+                        // If we're deleting the character that triggered an automatic character
+                        // injection, we also remove the automatically injected character.
                         if let Some(last_injected_char_inverse) = last_injected_char_inverse {
                             if document_inner.text.as_lines()[cursor.start().line]
                             [cursor.start().column - 1]
@@ -567,6 +602,7 @@ impl EditorState {
         let (_, new_delta_1) = delta_0.clone().transform(delta_1);
         let delta = delta_0.compose(new_delta_1);
 
+        // Apply the edit operation.
         self.edit(
             session_id,
             Some(EditGroup::Backspace),
@@ -576,6 +612,9 @@ impl EditorState {
         );
     }
 
+    /// For each cursor in the cursor set of the session with the given `session_id`, if the
+    /// selection of the cursor is empty, deletes the character at the caret of the cursor.
+    /// Otherwise, removes the selection of the cursor.
     pub fn delete(&mut self, session_id: SessionId, send_request: &mut dyn FnMut(CollabRequest)) {
         let session = &self.sessions[session_id];
         let document = &self.documents[session.document_id];
@@ -624,6 +663,7 @@ impl EditorState {
         );
     }
 
+    // Applies an edit operation to the text.
     fn edit(
         &mut self,
         session_id: SessionId,
@@ -636,13 +676,19 @@ impl EditorState {
         let document = &mut self.documents[session.document_id];
         let document_inner = document.inner.as_mut().unwrap();
 
+        // Compute the inverse delta so we can put it on the undo stack.
         let inverse_delta = delta.clone().invert(&document_inner.text);
+
+        // Figure out if the edit operation should be grouped with the previous one on the undo
+        // stack.
         let group_undo = edit_group.map_or(false, | edit_group | {
             document_inner
                 .edit_group
                 .map_or(false, | current_edit_group | current_edit_group == edit_group)
         });
+
         if group_undo {
+            // Group the edit operation with the previous one on the undo stack.
             let edit = document_inner.undo_stack.pop().unwrap();
             document_inner.undo_stack.push(Edit {
                 injected_char_stack: edit.injected_char_stack,
@@ -650,6 +696,7 @@ impl EditorState {
                 delta: inverse_delta.compose(edit.delta),
             });
         } else {
+            // Add the edit operation to the undo stack.
             document_inner.edit_group = edit_group;
             document_inner.undo_stack.push(Edit {
                 injected_char_stack: session.injected_char_stack.clone(),
@@ -659,13 +706,16 @@ impl EditorState {
         }
         document_inner.redo_stack.clear();
 
+        // Apply the edit operation to the session.
         let session = &mut self.sessions[session_id];
         session.apply_delta(&delta);
         session.apply_offsets(offsets);
 
+        // Apply the edit operation to the document.
         self.apply_delta(session_id, delta, send_request);
     }
 
+    /// Undoes the last edit operation.
     pub fn undo(&mut self, session_id: SessionId, send_request: &mut dyn FnMut(CollabRequest)) {
         let session = &self.sessions[session_id];
         let document = &mut self.documents[session.document_id];
@@ -688,6 +738,7 @@ impl EditorState {
         }
     }
 
+    /// Redoes the last edit operation.
     pub fn redo(&mut self, session_id: SessionId, send_request: &mut dyn FnMut(CollabRequest)) {
         let session = &self.sessions[session_id];
         let document = &mut self.documents[session.document_id];
@@ -734,6 +785,7 @@ impl EditorState {
         document.schedule_apply_delta_request(delta, send_request);
     }
 
+    /// Handles and apply delta response from the collab server.
     pub fn handle_apply_delta_response(
         &mut self,
         file_id: TextFileId,
@@ -754,6 +806,7 @@ impl EditorState {
         }
     }
 
+    /// Handles a notification from the collab server that a remote delta was applied.
     pub fn handle_delta_applied_notification(
         &mut self,
         file_id: TextFileId,
@@ -799,7 +852,7 @@ pub struct Session {
     pub session_view: Option<EditorViewId>,
     /// The stack of characters that were automatically injected after the cursor during the last few
     /// edit operations. If the next character to be typed is the same as an automatically injected
-    /// character, we skip over the automatically inject character rather than insert the same
+    /// character, we skip over the automatically injected character rather than insert the same
     /// character again.
     pub injected_char_stack: Vec<char>,
     /// The set of cursors for this session.

@@ -1,5 +1,8 @@
 use {super::Cursor, crate::cursor::word};
 
+/// An iterator over the words of a `str`.
+/// 
+/// This struct is created by the `words` method on `StrExt`.
 pub struct Words<'a> {
     string: &'a str,
     cursor: word::Cursor<Cursor<'a>>,
