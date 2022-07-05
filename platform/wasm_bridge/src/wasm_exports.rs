@@ -40,6 +40,6 @@ pub fn console_log_impl(val: &str) {
 #[macro_export]
 macro_rules!console_log {
     ( $ ( $ t: tt) *) => {
-        console_log_impl(&format!("{}:{} - {}", file!(), line!(), format!( $ ( $ t) *)))
+        crate::makepad_wasm_bridge::console_log_impl(&format!("{}:{} - {}", file!(), line!(), format!( $ ( $ t) *)))
     }
 }

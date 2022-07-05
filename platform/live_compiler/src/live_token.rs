@@ -45,7 +45,7 @@ pub enum LiveToken {
     Open(Delim),
     Close(Delim),
     
-    Resource{index: u32, len: u32},
+    Dependency{index: u32, len: u32},
     String {index: u32, len: u32},
     Bool(bool),
     Int(i64),
@@ -203,7 +203,7 @@ impl fmt::Display for LiveToken {
         match self {
             Self::Eof => write!(f, "<eof>"),
             Self::String {..} => write!(f, "\"STRINGDATANOTAVAILABLE\""),
-            Self::Resource {..} => write!(f, "\"STRINGDATANOTAVAILABLE\""),
+            Self::Dependency {..} => write!(f, "\"DEPENDENCYDATANOTAVAILABLE\""),
             Self::Punct(id) => write!(f, "{}", id),
             Self::Ident(id) => write!(f, "{}", id),
             Self::Open(Delim::Paren) => write!(f, "("),

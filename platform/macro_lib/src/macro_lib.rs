@@ -23,7 +23,7 @@ pub fn error_result(err: &str) -> Result<(), TokenStream> {
     Err(tb.end())
 }
 
-pub fn type_to_static_callable(input: TokenStream) -> TokenStream {
+pub fn type_to_static_callable2(input: TokenStream) -> TokenStream {
     let mut ty_parser = TokenParser::new(input.clone());
     let mut tb = TokenBuilder::new();
     if let Some(ident) = ty_parser.eat_any_ident() {
@@ -33,7 +33,7 @@ pub fn type_to_static_callable(input: TokenStream) -> TokenStream {
         }
         tb.ident(&ident);
         tb.add("::<");
-        tb.stream(Some(type_to_static_callable(ty_parser.eat_level_or_punct('>'))));
+        tb.stream(Some(type_to_static_callable2(ty_parser.eat_level_or_punct('>'))));
         tb.add(">");
         tb.end()
     }

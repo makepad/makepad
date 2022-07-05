@@ -309,6 +309,14 @@ impl<'a> LiveParser<'a> {
                                     value: LiveValue::DocumentString {string_start: index as usize, string_count: len as usize}
                                 });
                             },
+                            LiveToken::Dependency {index, len} => {
+                                self.skip_token();
+                                ld.edit_info.push(LiveNode {
+                                    origin: LiveNodeOrigin::from_token_id(self.get_token_id()),
+                                    id: prop_id,
+                                    value: LiveValue::Dependency {string_start: index as usize, string_count: len as usize}
+                                });
+                            },
                             other => return Err(self.error(format!("Unexpected token {} in edit_info", other), live_error_origin!()))
                         }
                         self.accept_optional_delim();
@@ -505,6 +513,14 @@ impl<'a> LiveParser<'a> {
                     origin,
                     id: prop_id,
                     value: LiveValue::DocumentString {string_start: index as usize, string_count: len as usize}
+                });
+            },
+            LiveToken::Dependency {index, len} => {
+                self.skip_token();
+                ld.nodes.push(LiveNode {
+                    origin,
+                    id: prop_id,
+                    value: LiveValue::Dependency {string_start: index as usize, string_count: len as usize}
                 });
             },
             LiveToken::Ident(id!(vec2)) => {
