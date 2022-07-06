@@ -110,6 +110,7 @@ impl FromWasmMsg {
             let cap = v.capacity();
             
             ptr.offset(0).write((len as u64) << 32 | cap as u64);
+
             ptr as u32
         }
     }
