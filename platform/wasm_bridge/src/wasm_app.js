@@ -14,7 +14,7 @@ export class WasmApp {
         
         let msg = new FromWasmMsg(this, this.wasm_get_js_msg_class());
         let code = msg.read_str();
-        msg.destroy();
+        msg.free();
         
         // this class can also be loaded from file.
         this.msg_class = new Function("ToWasmMsg", "FromWasmMsg", code)(ToWasmMsg, FromWasmMsg);
@@ -28,11 +28,13 @@ export class WasmApp {
             this.buffer_ref_len_check = this.exports.memory.buffer.byteLength;
         }
     }
-
-    wasm_create_app() {
-        let new_ptr = this.exports.wasm_create_app();
-        this.update_array_buffer_refs();
-        return new_ptr
+    
+    new_to_wasm(){
+        return new this.msg_class.ToWasmMsg(this);
+    }
+    
+    new_from_wasm(ptr){
+        return new this.msg_class.FromWasmMsg(this, ptr);
     }
     
     wasm_get_js_msg_class() {
@@ -67,23 +69,6 @@ export class WasmApp {
     wasm_init_panic_hook(){
         this.exports.wasm_init_panic_hook();
         this.update_array_buffer_refs();
-    }
-    
-    wasm_process_msg(msg_ptr) {
-        let ret_ptr = this.exports.wasm_process_msg(msg_ptr, this.wasm_app)
-        this.update_array_buffer_refs();
-        return ret_ptr
-    }
-    
-    wasm_pump(to_wasm) {
-        let ret_ptr = this.wasm_process_msg(to_wasm.finalise());
-        let from_wasm = new this.msg_class.FromWasmMsg(this, ret_ptr);
-        from_wasm.dispatch();
-        from_wasm.destroy();
-    }
-    
-    new_to_wasm() {
-        return new this.msg_class.ToWasmMsg(this)
     }
     
     static load_wasm_from_url(wasm_url) {
@@ -170,7 +155,7 @@ export class ToWasmMsg {
         app.u32[this.u32_offset++] = u8_len;
     }
     
-    finalise() {
+    release_ownership() {
         if(this.ptr === 0){
             throw new Error("double finalise")
         }
@@ -212,7 +197,7 @@ export class FromWasmMsg {
         this.u32_offset = this.u32_ptr + 2;
     }
     
-    destroy() {
+    free() {
         let app = this.app;
         app.wasm_msg_free(this.ptr);
         this.app = null;
@@ -231,7 +216,7 @@ export class FromWasmMsg {
         return str
     }
     
-    dispatch() {
+    dispatch_on_app() {
         let app = this.app;
         let u32_len = app.u32[this.u32_ptr + 1]<<1;
         while ((this.u32_offset) - this.u32_ptr < u32_len) {

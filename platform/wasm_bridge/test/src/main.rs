@@ -69,7 +69,7 @@ fn create_test() -> BridgeTest {
 struct RunTest {
 }
 
-#[export_name = "process_to_wasm_msg"]
+#[export_name = "wasm_process_msg"]
 #[cfg(target_arch = "wasm32")]
 pub unsafe extern "C" fn process_to_wasm_msg(msg_ptr: u32) -> u32 {
     let mut from_wasm = FromWasmMsg::new();
@@ -100,7 +100,7 @@ pub unsafe extern "C" fn process_to_wasm_msg(msg_ptr: u32) -> u32 {
     from_wasm.release_ownership()
 }
 
-#[export_name = "get_wasm_js_msg_class"]
+#[export_name = "wasm_get_js_msg_class"]
 #[cfg(target_arch = "wasm32")]
 pub unsafe extern "C" fn get_wasm_js_msg_class() -> u32 {
     let mut msg = FromWasmMsg::new();

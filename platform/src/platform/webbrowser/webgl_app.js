@@ -19,7 +19,7 @@ export class WebGLWasmApp extends WasmApp {
         this.to_wasm = this.new_to_wasm();
         
         // alright lets send the fucker an init
-        this.to_wasm.ToWasmConstructAndGetDeps({
+        this.to_wasm.ToWasmGetDeps({
             gpu_info: this.gpu_info,
             browser_info: {
                 protocol: location.protocol + "",
@@ -30,20 +30,37 @@ export class WebGLWasmApp extends WasmApp {
             }
         });
         
-        this.do_wasm_io();
+        this.do_wasm_pump();
+    }
+
+    wasm_create_app() {
+        let new_ptr = this.exports.wasm_create_app();
+        this.update_array_buffer_refs();
+        return new_ptr
+    }
+    
+    wasm_process_msg(to_wasm) {
+        let ret_ptr = this.exports.wasm_process_msg(to_wasm.release_ownership(), this.wasm_app)
+        this.update_array_buffer_refs();
+        return this.new_from_wasm(ret_ptr);
+    }
+    
+    do_wasm_pump() {
+        let to_wasm = this.to_wasm;
+        this.to_wasm = this.new_to_wasm();
+        let from_wasm = this.wasm_process_msg(to_wasm);
+        from_wasm.dispatch_on_app();
+        from_wasm.free();
+    }
+    
+    FromWasmLoadDeps(args){
+        console.log("LOAD DEPS", args)
     }
     
     FromWasmSetMouseCursor(args) {
         //console.log(args);
         document.body.style.cursor = web_cursor_map[args.web_cursor] || 'default'
     }
-    
-    do_wasm_io() {
-        let to_wasm = this.to_wasm;
-        this.to_wasm = this.new_to_wasm();
-        this.wasm_pump(to_wasm);
-    }
-    
     FromWasmLoadDeps(deps) {
         console.log(deps);
     }
@@ -59,7 +76,7 @@ export class WebGLWasmApp extends WasmApp {
             }
             this.to_wasm.ToWasmAnimationFrame({time:time / 1000.0});
             this.in_animation_frame = true;
-            this.do_wasm_io();
+            this.do_wasm_pump();
             this.in_animation_frame = false;
         })
     }
@@ -269,7 +286,7 @@ export class WebGLWasmApp extends WasmApp {
                         scroll_x: dx,
                         scroll_y: dy
                     });
-                    this.do_wasm_io();
+                    this.do_wasm_pump();
                 }
             }
             
@@ -379,14 +396,14 @@ export class WebGLWasmApp extends WasmApp {
             this.focus_keyboard_input();
             mouse_buttons_down[e.button] = true;
             this.to_wasm.ToWasmFingerDown({finger: mouse_to_finger(e)});
-            this.do_wasm_io();
+            this.do_wasm_pump();
         }
         
         this.handlers.on_mouse_up = e => {
             e.preventDefault();
             mouse_buttons_down[e.button] = false;
             this.to_wasm.ToWasmFingerUp({finger: mouse_to_finger(e)});
-            this.do_wasm_io();
+            this.do_wasm_pump();
         }
         
         this.handlers.on_mouse_move = e => {
@@ -402,13 +419,13 @@ export class WebGLWasmApp extends WasmApp {
             }
             last_mouse_finger = mouse_to_finger(e);
             this.to_wasm.ToWasmFingerHover({finger: last_mouse_finger});
-            this.do_wasm_io();
+            this.do_wasm_pump();
             //console.log("Redraw cycle "+(end-begin)+" ms");
         }
         
         this.handlers.on_mouse_out = e => {
             this.to_wasm.ToWasmFingerOut({finger: mouse_to_finger(e)});
-            this.do_wasm_io();
+            this.do_wasm_pump();
         }
         
         canvas.addEventListener('mousedown', e => this.handlers.on_mouse_down(e))
@@ -430,7 +447,7 @@ export class WebGLWasmApp extends WasmApp {
             for (let i = 0; i < fingers.length; i ++) {
                 this.to_wasm.ToWasmFingerDown({finger: fingers[i]});
             }
-            this.do_wasm_io();
+            this.do_wasm_pump();
             return false
         }
         
@@ -441,7 +458,7 @@ export class WebGLWasmApp extends WasmApp {
             for (let i = 0; i < fingers.length; i ++) {
                 this.to_wasm.ToWasmFingerMove({finger: fingers[i]});
             }
-            this.do_wasm_io();
+            this.do_wasm_pump();
             return false
         }
         
@@ -451,7 +468,7 @@ export class WebGLWasmApp extends WasmApp {
             for (let i = 0; i < fingers.length; i ++) {
                 this.to_wasm.ToWasmFingerUp({finger: fingers[i]});
             }
-            this.do_wasm_io();
+            this.do_wasm_pump();
             return false
         }
         
@@ -492,7 +509,7 @@ export class WebGLWasmApp extends WasmApp {
                 scroll_x: e.deltaX * fac,
                 scroll_y: e.deltaY * fac
             });
-            this.do_wasm_io();
+            this.do_wasm_pump();
         };
         canvas.addEventListener('wheel', e=>this.handlers.on_mouse_wheel(e))
     }
@@ -669,7 +686,7 @@ export class WebGLWasmApp extends WasmApp {
                 modifiers: pack_key_modifier(e)
             })
             
-            this.do_wasm_io();
+            this.do_wasm_pump();
         };
         
         ta.addEventListener('keydown', e=>this.handlers.on_keydown(e));
@@ -693,7 +710,7 @@ export class WebGLWasmApp extends WasmApp {
                 time: e.timeStamp / 1000.0,
                 modifiers: pack_key_modifier(e)
             })
-            this.do_wasm_io();
+            this.do_wasm_pump();
         };
         ta.addEventListener('keyup', e=>this.handlers.on_keyup(e));
         document.body.appendChild(ta);
@@ -740,12 +757,12 @@ export class WebGLWasmApp extends WasmApp {
     
     do_focus() {
         this.to_wasm.ToWasmWindowFocusChange({has_focus: true});
-        this.do_wasm_io();
+        this.do_wasm_pump();
     }
     
     do_blur() {
         this.to_wasm.ToWasmWindowFocusChange({has_focus: false});
-        this.do_wasm_io();
+        this.do_wasm_pump();
     }
     
     focus_keyboard_input() {
