@@ -1,16 +1,20 @@
 import {WasmApp} from "/makepad/platform/wasm_bridge/src/wasm_app.js"
-import {pack_key_modifier} from "./webgl_util.js"
+import {pack_key_modifier, web_cursor_map} from "./webgl_util.js"
 
 export class WebGLWasmApp extends WasmApp {
     constructor(wasm, canvas) {
         super (wasm);
         
+        this.wasm_app = this.wasm_create_app();
+        
         this.canvas = canvas;
+        this.handlers = {};
         
         this.init_detection();
-        this.init_webgl_context();
+        this.bind_screen_resize();
         this.bind_mouse_and_touch();
         this.bind_keyboard();
+        this.init_webgl_context();
         
         this.to_wasm = this.new_to_wasm();
         
@@ -29,81 +33,23 @@ export class WebGLWasmApp extends WasmApp {
         this.do_wasm_io();
     }
     
-    FromWasmSetMouseCursor(args){
-        document.body.style.cursor = this.cursor_map[args.web_cursor] || 'default'
+    FromWasmSetMouseCursor(args) {
+        //console.log(args);
+        document.body.style.cursor = web_cursor_map[args.web_cursor] || 'default'
     }
     
     do_wasm_io() {
         let to_wasm = this.to_wasm;
         this.to_wasm = this.new_to_wasm();
-        this.to_wasm_pump(this.to_wasm);
+        this.wasm_pump(to_wasm);
     }
     
     FromWasmLoadDeps(deps) {
         console.log(deps);
     }
     
-    on_screen_resize() {
-        var dpi_factor = window.devicePixelRatio;
-        var w,
-        h;
-        var canvas = this.canvas;
-        
-        if (this.xr_is_presenting) {
-            let xr_webgllayer = this.xr_session.renderState.baseLayer;
-            this.dpi_factor = 3.0;
-            this.width = 2560.0 / this.dpi_factor;
-            this.height = 2000.0 / this.dpi_factor;
-        }
-        else {
-            if (canvas.getAttribute("fullpage")) {
-                if (this.detect.is_add_to_homescreen_safari) { // extremely ugly. but whatever.
-                    if (window.orientation == 90 || window.orientation == -90) {
-                        h = screen.width;
-                        w = screen.height - 90;
-                    }
-                    else {
-                        w = screen.width;
-                        h = screen.height - 80;
-                    }
-                }
-                else {
-                    w = window.innerWidth;
-                    h = window.innerHeight;
-                }
-            }
-            else {
-                w = canvas.offsetWidth;
-                h = canvas.offsetHeight;
-            }
-            var sw = canvas.width = w * dpi_factor;
-            var sh = canvas.height = h * dpi_factor;
-            
-            this.gl.viewport(0, 0, sw, sh);
-            
-            this.dpi_factor = dpi_factor;
-            this.width = canvas.offsetWidth;
-            this.height = canvas.offsetHeight;
-            // send the wasm a screenresize event
-        }
-        
-        if (this.to_wasm) {
-            // initialize the application
-            this.to_wasm.resize({
-                width: this.width,
-                height: this.height,
-                dpi_factor: this.dpi_factor,
-                xr_is_presenting: this.xr_is_presenting,
-                xr_can_present: this.xr_can_present,
-                is_fullscreen: this.is_fullscreen(),
-                can_fullscreen: this.can_fullscreen()
-            })
-            this.request_animation_frame()
-        }
-    }
-    
     request_animation_frame() {
-        if (this.xr_is_presenting || this.req_anim_frame_id) {
+        if (this.window_info.xr_is_presenting || this.req_anim_frame_id) {
             return;
         }
         this.req_anim_frame_id = window.requestAnimationFrame(time => {
@@ -111,7 +57,7 @@ export class WebGLWasmApp extends WasmApp {
             if (this.xr_is_presenting) {
                 return
             }
-            this.to_wasm.animation_frame(time / 1000.0);
+            this.to_wasm.ToWasmAnimationFrame({time:time / 1000.0});
             this.in_animation_frame = true;
             this.do_wasm_io();
             this.in_animation_frame = false;
@@ -130,26 +76,15 @@ export class WebGLWasmApp extends WasmApp {
     }
     
     init_webgl_context() {
-        
-        window.addEventListener('resize', _ => {
-            this.on_screen_resize()
-        })
-        
-        window.addEventListener('orientationchange', _ => {
-            this.on_screen_resize()
-        })
-        
         let mqString = '(resolution: ' + window.devicePixelRatio + 'dppx)'
         let mq = matchMedia(mqString);
         if (mq && mq.addEventListener) {
-            mq.addEventListener("change", _ => {
-                this.on_screen_resize()
-            });
+            mq.addEventListener("change", this.handlers.on_screen_resize);
         }
         else { // poll for it. yes. its terrible
             window.setInterval(_ => {
                 if (window.devicePixelRation != this.dpi_factor) {
-                    this.on_screen_resize()
+                    this.handlers.on_screen_resize();
                 }
             }, 1000);
         }
@@ -177,6 +112,7 @@ export class WebGLWasmApp extends WasmApp {
             span.innerHTML = "Sorry, makepad needs browser support for WebGL to run<br/>Please update your browser to a more modern one<br/>Update to atleast iOS 10, Safari 10, latest Chrome, Edge or Firefox<br/>Go and update and come back, your browser will be better, faster and more secure!<br/>If you are using chrome on OSX on a 2011/2012 mac please enable your GPU at: Override software rendering list:Enable (the top item) in: <a href='about://flags'>about://flags</a>. Or switch to Firefox or Safari."
             return
         }
+        
         this.OES_standard_derivatives = gl.getExtension('OES_standard_derivatives')
         this.OES_vertex_array_object = gl.getExtension('OES_vertex_array_object')
         this.OES_element_index_uint = gl.getExtension("OES_element_index_uint")
@@ -185,6 +121,7 @@ export class WebGLWasmApp extends WasmApp {
         // check uniform count
         var max_vertex_uniforms = gl.getParameter(gl.MAX_VERTEX_UNIFORM_VECTORS);
         var max_fragment_uniforms = gl.getParameter(gl.MAX_FRAGMENT_UNIFORM_VECTORS);
+        
         this.gpu_info = {
             min_uniforms: Math.min(max_vertex_uniforms, max_fragment_uniforms),
             vendor: "unknown",
@@ -203,37 +140,70 @@ export class WebGLWasmApp extends WasmApp {
         //gl.OES_texture_half_float = gl.getExtension('OES_texture_half_float')
         //gl.OES_texture_float = gl.getExtension('OES_texture_float')
         //gl.WEBGL_depth_texture = gl.getExtension("WEBGL_depth_texture") || gl.getExtension("WEBKIT_WEBGL_depth_texture")
-        this.on_screen_resize()
+        this.handlers.on_screen_resize()
+    }
+    
+    bind_screen_resize() {
+        this.window_info = {};
+        
+        this.handlers.on_screen_resize = () => {
+            var dpi_factor = window.devicePixelRatio;
+            var w;
+            var h;
+            var canvas = this.canvas;
+            
+            if (this.window_info.xr_is_presenting) {
+                let xr_webgllayer = this.xr_session.renderState.baseLayer;
+                this.dpi_factor = 3.0;
+                this.width = 2560.0 / this.dpi_factor;
+                this.height = 2000.0 / this.dpi_factor;
+            }
+            else {
+                if (canvas.getAttribute("fullpage")) {
+                    if (this.detect.is_add_to_homescreen_safari) { // extremely ugly. but whatever.
+                        if (window.orientation == 90 || window.orientation == -90) {
+                            h = screen.width;
+                            w = screen.height - 90;
+                        }
+                        else {
+                            w = screen.width;
+                            h = screen.height - 80;
+                        }
+                    }
+                    else {
+                        w = window.innerWidth;
+                        h = window.innerHeight;
+                    }
+                }
+                else {
+                    w = canvas.offsetWidth;
+                    h = canvas.offsetHeight;
+                }
+                var sw = canvas.width = w * dpi_factor;
+                var sh = canvas.height = h * dpi_factor;
+                
+                this.gl.viewport(0, 0, sw, sh);
+                
+                this.window_info.dpi_factor = dpi_factor;
+                this.window_info.width = canvas.offsetWidth;
+                this.window_info.height = canvas.offsetHeight;
+                // send the wasm a screenresize event
+            }
+            this.window_info.is_fullscreen = this.is_fullscreen();
+            this.window_info.can_fullscreen = this.can_fullscreen();
+            
+            if (this.to_wasm !== undefined){
+                this.to_wasm.ToWasmResizeWindow(this.window_info);
+            }
+            
+            this.request_animation_frame();
+        }
+        
+        window.addEventListener('resize', _ => this.handlers.on_screen_resize)
+        window.addEventListener('orientationchange', _ => this.handlers.on_screen_resize)
     }
     
     bind_mouse_and_touch() {
-        
-        this.cursor_map = [
-            "none", //Hidden=>0
-            "default", //Default=>1,
-            "crosshair", //CrossHair=>2,
-            "pointer", //Hand=>3,
-            "default", //Arrow=>4,
-            "move", //Move=>5,
-            "text", //Text=>6,
-            "wait", //Wait=>7,
-            "help", //Help=>8,
-            "not-allowed", //NotAllowed=>9,
-            "n-resize", // NResize=>10,
-            "ne-resize", // NeResize=>11,
-            "e-resize", // EResize=>12,
-            "se-resize", // SeResize=>13,
-            "s-resize", // SResize=>14,
-            "sw-resize", // SwResize=>15,
-            "w-resize", // WResize=>16,
-            "nw-resize", // NwResize=>17,
-            "ns-resize", //NsResize=>18,
-            "nesw-resize", //NeswResize=>19,
-            "ew-resize", //EwResize=>20,
-            "nwse-resize", //NwseResize=>21,
-            "col-resize", //ColResize=>22,
-            "row-resize", //RowResize=>23,
-        ]
         
         var canvas = this.canvas
         
@@ -273,14 +243,17 @@ export class WebGLWasmApp extends WasmApp {
             let last_scroll_top = ts.scrollTop;
             let last_scroll_left = ts.scrollLeft;
             let scroll_timeout = null;
-            ts.addEventListener('scroll', e => {
+            
+            this.handlers.on_overlay_scroll = e => {
                 let new_scroll_top = ts.scrollTop;
                 let new_scroll_left = ts.scrollLeft;
                 let dx = new_scroll_left - last_scroll_left;
                 let dy = new_scroll_top - last_scroll_top;
                 last_scroll_top = new_scroll_top;
                 last_scroll_left = new_scroll_left;
+                
                 window.clearTimeout(scroll_timeout);
+                
                 scroll_timeout = window.setTimeout(_ => {
                     ts.scrollTop = 200000;
                     ts.scrollLeft = 200000;
@@ -290,16 +263,17 @@ export class WebGLWasmApp extends WasmApp {
                 
                 let finger = last_mouse_finger;
                 if (finger) {
-                    finger.scroll_x = dx;
-                    finger.scroll_y = dy;
-                    finger.is_wheel = true;
+                    finger.is_touch = false;
                     this.to_wasm.ToWasmFingerScroll({
-                        
+                        finger: finger,
+                        scroll_x: dx,
+                        scroll_y: dy
                     });
-                    this.to_wasm.finger_scroll(finger);
                     this.do_wasm_io();
                 }
-            })
+            }
+            
+            ts.addEventListener('scroll', e => this.handlers.on_overlay_scroll(e))
         }
         
         var mouse_fingers = [];
@@ -399,26 +373,23 @@ export class WebGLWasmApp extends WasmApp {
         var easy_xr_presenting_toggle = window.localStorage.getItem("xr_presenting") == "true"
         
         var mouse_buttons_down = [];
-        this.mouse_down_handler = e => {
+        
+        this.handlers.on_mouse_down = e => {
             e.preventDefault();
             this.focus_keyboard_input();
             mouse_buttons_down[e.button] = true;
-            this.to_wasm.finger_down(mouse_to_finger(e))
+            this.to_wasm.ToWasmFingerDown({finger: mouse_to_finger(e)});
             this.do_wasm_io();
         }
         
-        canvas.addEventListener('mousedown', this.mouse_down_handler)
-        
-        this.mouse_up_handler = e => {
+        this.handlers.on_mouse_up = e => {
             e.preventDefault();
             mouse_buttons_down[e.button] = false;
-            this.to_wasm.finger_up(mouse_to_finger(e))
+            this.to_wasm.ToWasmFingerUp({finger: mouse_to_finger(e)});
             this.do_wasm_io();
         }
         
-        window.addEventListener('mouseup', this.mouse_up_handler)
-        
-        let mouse_move = e => {
+        this.handlers.on_mouse_move = e => {
             document.body.scrollTop = 0;
             document.body.scrollLeft = 0;
             
@@ -426,66 +397,73 @@ export class WebGLWasmApp extends WasmApp {
                 if (mouse_buttons_down[i]) {
                     let mf = mouse_to_finger(e);
                     mf.digit = i;
-                    this.to_wasm.finger_move(mf);
+                    this.to_wasm.ToWasmFingerMove({finger: mouse_to_finger(e)});
                 }
             }
             last_mouse_finger = mouse_to_finger(e);
-            this.to_wasm.finger_hover(last_mouse_finger);
+            this.to_wasm.ToWasmFingerHover({finger: last_mouse_finger});
             this.do_wasm_io();
             //console.log("Redraw cycle "+(end-begin)+" ms");
         }
-        window.addEventListener('mousemove', mouse_move);
         
-        window.addEventListener('mouseout', e => {
-            this.to_wasm.finger_out(mouse_to_finger(e)) //e.pageX, e.pageY, pa;
+        this.handlers.on_mouse_out = e => {
+            this.to_wasm.ToWasmFingerOut({finger: mouse_to_finger(e)});
             this.do_wasm_io();
-        });
-        canvas.addEventListener('contextmenu', e => {
+        }
+        
+        canvas.addEventListener('mousedown', e => this.handlers.on_mouse_down(e))
+        window.addEventListener('mouseup', e => this.handlers.on_mouse_up(e))
+        window.addEventListener('mousemove', e => this.handlers.on_mouse_move(e));
+        window.addEventListener('mouseout', e => this.handlers.on_mouse_out(e));
+        
+        this.handlers.on_contextmenu = e => {
             e.preventDefault()
             return false
-        })
-        canvas.addEventListener('touchstart', e => {
+        }
+        
+        canvas.addEventListener('contextmenu', e => this.handlers.on_contextmenu(e))
+        
+        this.handlers.on_touchstart = e => {
             e.preventDefault()
             
             let fingers = touch_to_finger_alloc(e);
             for (let i = 0; i < fingers.length; i ++) {
-                this.to_wasm.finger_down(fingers[i])
-            }
-            this.do_wasm_io();
-            return false
-        })
-        canvas.addEventListener('touchmove', e => {
-            //e.preventDefault();
-            var fingers = touch_to_finger_lookup(e);
-            for (let i = 0; i < fingers.length; i ++) {
-                this.to_wasm.finger_move(fingers[i])
-            }
-            this.do_wasm_io();
-            return false
-        }, {passive: false})
-        
-        var end_cancel_leave = e => {
-            //if (easy_xr_presenting_toggle) {
-            //    easy_xr_presenting_toggle = false;
-            //    this.xr_start_presenting();
-            //};
-            
-            e.preventDefault();
-            var fingers = touch_to_finger_free(e);
-            for (let i = 0; i < fingers.length; i ++) {
-                this.to_wasm.finger_up(fingers[i])
+                this.to_wasm.ToWasmFingerDown({finger: fingers[i]});
             }
             this.do_wasm_io();
             return false
         }
         
-        canvas.addEventListener('touchend', end_cancel_leave);
-        canvas.addEventListener('touchcancel', end_cancel_leave);
-        canvas.addEventListener('touchleave', end_cancel_leave);
+        
+        this.handlers.on_touchmove = e => {
+            //e.preventDefault();
+            var fingers = touch_to_finger_lookup(e);
+            for (let i = 0; i < fingers.length; i ++) {
+                this.to_wasm.ToWasmFingerMove({finger: fingers[i]});
+            }
+            this.do_wasm_io();
+            return false
+        }
+        
+        this.handlers.on_touch_end_cancel_leave = e => {
+            e.preventDefault();
+            var fingers = touch_to_finger_free(e);
+            for (let i = 0; i < fingers.length; i ++) {
+                this.to_wasm.ToWasmFingerUp({finger: fingers[i]});
+            }
+            this.do_wasm_io();
+            return false
+        }
+        
+        canvas.addEventListener('touchstart', e => this.handlers.on_touchstart(e))
+        canvas.addEventListener('touchmove', e => this.handlers.on_touchmove(e), {passive: false})
+        canvas.addEventListener('touchend', e => this.handlers.on_touch_end_cancel_leave(e));
+        canvas.addEventListener('touchcancel', e => this.handlers.on_touch_end_cancel_leave(e));
+        canvas.addEventListener('touchleave', e => this.handlers.on_touch_end_cancel_leave(e));
         
         var last_wheel_time;
         var last_was_wheel;
-        this.mouse_wheel_handler = e => {
+        this.handlers.onm_mouse_wheel = e => {
             var finger = mouse_to_finger(e)
             e.preventDefault()
             let delta = e.timeStamp - last_wheel_time;
@@ -507,22 +485,23 @@ export class WebGLWasmApp extends WasmApp {
             var fac = 1
             if (e.deltaMode === 1) fac = 40
             else if (e.deltaMode === 2) fac = window.offsetHeight
-            finger.scroll_x = e.deltaX * fac
-            finger.scroll_y = e.deltaY * fac
-            finger.is_wheel = last_was_wheel;
-            this.to_wasm.finger_scroll(finger);
+            
+            finger.is_touch = !last_was_wheel;
+            this.to_wasm.ToWasmFingerScroll({
+                finger: finger,
+                scroll_x: e.deltaX * fac,
+                scroll_y: e.deltaY * fac
+            });
             this.do_wasm_io();
         };
-        canvas.addEventListener('wheel', this.mouse_wheel_handler)
-        
-        //window.addEventListener('webkitmouseforcewillbegin', this.onCheckMacForce.bind(this), false)
-        //window.addEventListener('webkitmouseforcechanged', this.onCheckMacForce.bind(this), false)
+        canvas.addEventListener('wheel', e=>this.handlers.on_mouse_wheel(e))
     }
     
     bind_keyboard() {
         if (this.detect.is_mobile_safari || this.detect.is_android) { // mobile keyboards are unusable on a UI like this. Not happening.
             return
         }
+        
         var ta = this.text_area = document.createElement('textarea')
         ta.className = "cx_webgl_textinput"
         ta.setAttribute('autocomplete', 'off')
@@ -530,6 +509,7 @@ export class WebGLWasmApp extends WasmApp {
         ta.setAttribute('autocapitalize', 'off')
         ta.setAttribute('spellcheck', 'false')
         var style = document.createElement('style')
+        
         style.innerHTML = "\n"
             + "textarea.cx_webgl_textinput {\n"
             + "z-index: 1000;\n"
@@ -559,6 +539,7 @@ export class WebGLWasmApp extends WasmApp {
             + "outline: 0px !important;\n"
             + "-webkit-appearance: none;\n"
             + "}"
+            
         document.body.appendChild(style)
         ta.style.left = -100 + 'px'
         ta.style.top = -100 + 'px'
@@ -569,26 +550,36 @@ export class WebGLWasmApp extends WasmApp {
         var was_paste = false;
         this.neutralize_ime = false;
         var last_len = 0;
-        ta.addEventListener('cut', e => {
-            setTimeout(_ => {
-                ta.value = "";
-                last_len = 0;
-            }, 0)
-        })
-        ta.addEventListener('copy', e => {
-            setTimeout(_ => {
-                ta.value = "";
-                last_len = 0;
-            }, 0)
-        })
-        ta.addEventListener('paste', e => {
-            was_paste = true;
-        })
-        ta.addEventListener('select', e => {
-            
-        })
         
-        ta.addEventListener('input', e => {
+        this.handlers.on_cut = e => {
+            setTimeout(_ => {
+                ta.value = "";
+                last_len = 0;
+            }, 0)
+        }
+        
+        ta.addEventListener('cut', e=>this.handlers.on_cut(e));
+        
+        this.handlers.on_copy = e => {
+            setTimeout(_ => {
+                ta.value = "";
+                last_len = 0;
+            }, 0)
+        }
+        
+        ta.addEventListener('copy', e=>this.handlers.on_copy(e));
+        
+        this.handlers.on_paste = e => {
+            was_paste = true;
+        }
+        
+        ta.addEventListener('paste', e=>this.handlers.on_paste(e));
+        
+        this.handlers.on_select = e => {}
+        
+        ta.addEventListener('select', e => this.handlers.on_select(e))
+        
+        this.handlers.on_select = e => {
             if (ta.value.length > 0) {
                 if (was_paste) {
                     was_paste = false;
@@ -612,26 +603,24 @@ export class WebGLWasmApp extends WasmApp {
                     }
                     // we should send a replace last
                     if (replace_last || text_value != '\n') {
-                        this.to_wasm.text_input({
+                        this.to_wasm.ToWasmTextInput({
                             was_paste: false,
                             input: text_value,
                             replace_last: replace_last,
-                        })
+                        });
                     }
                 }
                 this.do_wasm_io();
             }
             last_len = ta.value.length;
-        })
+        };
+        ta.addEventListener('input', e=>this.handlers.on_select(e));
         
-        ta.addEventListener('mousedown', this.mouse_down_handler);
-        ta.addEventListener('mouseup', this.mouse_up_handler);
-        ta.addEventListener('wheel', this.mouse_wheel_handler);
-        ta.addEventListener('contextmenu', e => {
-            e.preventDefault()
-        });
-        //ta.addEventListener('touchmove', e => {
-        //})
+        ta.addEventListener('mousedown', e=>this.handlers.on_mouse_down(e));
+        ta.addEventListener('mouseup', e=>this.handlers.on_mouse_up(e));
+        ta.addEventListener('wheel', e=>this.handlers.on_mouse_wheel(e));
+        
+        ta.addEventListener('contextmenu', e=>this.handlers.on_contextmenu(e));
         
         ta.addEventListener('blur', e => {
             this.focus_keyboard_input();
@@ -639,7 +628,7 @@ export class WebGLWasmApp extends WasmApp {
         
         var ugly_ime_hack = false;
         
-        ta.addEventListener('keydown', e => {
+        this.handlers.on_keydown = e => {
             let code = e.keyCode;
             
             //if (code == 91) {firefox_logo_key = true; e.preventDefault();}
@@ -681,8 +670,11 @@ export class WebGLWasmApp extends WasmApp {
             })
             
             this.do_wasm_io();
-        })
-        ta.addEventListener('keyup', e => {
+        };
+        
+        ta.addEventListener('keydown', e=>this.handlers.on_keydown(e));
+        
+        this.handlers.on_keyup = e => {
             let code = e.keyCode;
             
             if (code == 18 || code == 17 || code == 16) e.preventDefault(); // alt
@@ -702,8 +694,63 @@ export class WebGLWasmApp extends WasmApp {
                 modifiers: pack_key_modifier(e)
             })
             this.do_wasm_io();
-        })
+        };
+        ta.addEventListener('keyup', e=>this.handlers.on_keyup(e));
         document.body.appendChild(ta);
         ta.focus();
     }
+    
+    can_fullscreen() {
+        return (document.fullscreenEnabled || document.webkitFullscreenEnabled || document.mozFullscreenEnabled)? true: false
+    }
+    
+    is_fullscreen() {
+        return (document.fullscreenElement || document.webkitFullscreenElement || document.mozFullscreenElement)? true: false
+    }
+    
+    do_fullscreen() {
+        if (document.body.requestFullscreen) {
+            document.body.requestFullscreen();
+            return
+        }
+        if (document.body.webkitRequestFullscreen) {
+            document.body.webkitRequestFullscreen();
+            return
+        }
+        if (document.body.mozRequestFullscreen) {
+            document.body.mozRequestFullscreen();
+            return
+        }
+    }
+    
+    do_normalscreen() {
+        if (this.canvas.exitFullscreen) {
+            this.canvas.exitFullscreen();
+            return
+        }
+        if (this.canvas.webkitExitFullscreen) {
+            this.canvas.webkitExitFullscreen();
+            return
+        }
+        if (this.canvas.mozExitFullscreen) {
+            this.canvas.mozExitFullscreen();
+            return
+        }
+    }
+    
+    do_focus() {
+        this.to_wasm.ToWasmWindowFocusChange({has_focus: true});
+        this.do_wasm_io();
+    }
+    
+    do_blur() {
+        this.to_wasm.ToWasmWindowFocusChange({has_focus: false});
+        this.do_wasm_io();
+    }
+    
+    focus_keyboard_input() {
+        this.text_area.focus();
+    }
+    
 }
+

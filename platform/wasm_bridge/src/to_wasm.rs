@@ -55,15 +55,15 @@ pub trait ToWasm {
         let id = Self::live_id();
         wrapper.push_str(&format!("{}(t0){{\n", Self::type_name()));
         wrapper.push_str("let app = this.app;\n");
-        wrapper.push_str(&format!("this.reserve_u32({});\n", 3 + Self::u32_size()));
+        wrapper.push_str(&format!("this.reserve_u32({});\n", 4 + Self::u32_size()));
         wrapper.push_str(&format!("app.u32[this.u32_offset ++] = {};\n", id.0 & 0xffff_ffff));
         wrapper.push_str(&format!("app.u32[this.u32_offset ++] = {};\n", (id.0 >> 32)));
         wrapper.push_str("let block_len_offset = this.u32_offset ++;\n\n");
         
         let mut out = WasmJSOutput{temp_alloc:0, fns:vec![WasmJSOutputFn{name:String::new(), body:String::new(), temp:0}]};
         
-        let new_nest = out.alloc_temp();
-        Self::to_wasm_js_body(&mut out, 0, false, "t0", new_nest);
+        let new_temp = out.alloc_temp();
+        Self::to_wasm_js_body(&mut out, 0, false, "t0", new_temp);
 
         for p in out.fns.iter().rev(){
             if p.name == ""{
@@ -100,6 +100,7 @@ impl ToWasmMsg {
             let head = ptr.offset(0).read();
             let len = (head >> 32) as usize;
             let cap = (head & 0xffff_ffff) as usize;
+            
             Self {
                 data: Vec::from_raw_parts(ptr, len, cap),
                 u32_offset: 2,

@@ -402,7 +402,7 @@ macro_rules!main_app {
         #[cfg(target_arch = "wasm32")]
         fn main(){}
         
-        #[export_name = "create_wasm_app"]
+        #[export_name = "wasm_create_app"]
         #[cfg(target_arch = "wasm32")]
         pub extern "C" fn create_wasm_app() -> u32 {
             let mut cx = Box::new(Cx::default());
@@ -412,9 +412,9 @@ macro_rules!main_app {
             Box::into_raw(Box::new((0, Box::into_raw(cx)/*, Box::into_raw(cxafterdraw)*/))) as u32
         }
         
-        #[export_name = "process_to_wasm_msg"]
+        #[export_name = "wasm_process_msg"]
         #[cfg(target_arch = "wasm32")]
-        pub unsafe extern "C" fn process_to_wasm_msg(appcx: u32, msg_ptr: u32) -> u32 {
+        pub unsafe extern "C" fn wasm_process_msg(msg_ptr: u32, appcx: u32) -> u32 {
             let appcx = &*(appcx as *mut (*mut Box<$ app>, *mut Cx/*, *mut CxAfterDraw*/));
             (*appcx.1).process_to_wasm(msg_ptr, | cx, mut event | {
                 if let Event::Construct = event {
