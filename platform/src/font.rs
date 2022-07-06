@@ -167,11 +167,11 @@ impl Cx {
                 }
             }
             else{
-                panic!("get_font_by_path - dep load not attempted {}", path)
+                println!("get_font_by_path - dep load not attempted {}", path)
             }
         }
         else{
-            panic!("get_font_by_path - dep not registered {}", path)
+            println!("get_font_by_path - dep not registered {}", path)
         }
         font_id
     }

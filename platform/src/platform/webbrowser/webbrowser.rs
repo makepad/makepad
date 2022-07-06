@@ -3,7 +3,7 @@ use {
     crate::{
         makepad_live_id::*,
         makepad_math::Vec2,
-        makepad_wasm_bridge::{FromWasmMsg, ToWasmMsg, FromWasm, ToWasm},
+        makepad_wasm_bridge::{console_log, FromWasmMsg, ToWasmMsg, FromWasm, ToWasm},
         platform::{
             webbrowser::{
                 from_wasm::*,
@@ -62,17 +62,17 @@ impl Cx {
             let skip = to_wasm.read_block_skip();
             match block_id {
                 id!(ToWasmGetDeps) => { // fetch_deps
-                    let msg = ToWasmGetDeps::read_to_wasm(&mut to_wasm);
+                    let tw = ToWasmGetDeps::read_to_wasm(&mut to_wasm);
                     
                     //self.call_event_handler(&mut Event::Construct);
                     
                     self.gpu_info.init_from_info(
-                        msg.gpu_info.min_uniform_vectors,
-                        msg.gpu_info.vendor,
-                        msg.gpu_info.renderer
+                        tw.gpu_info.min_uniform_vectors,
+                        tw.gpu_info.vendor,
+                        tw.gpu_info.renderer
                     );
                     
-                    self.platform_type = msg.browser_info.into();
+                    self.platform_type = tw.browser_info.into();
                     // send the UI our deps, overlap with shadercompiler
                     let mut deps = Vec::<String>::new();
                     for (path, _) in &self.dependencies {
@@ -83,45 +83,23 @@ impl Cx {
                         FromWasmLoadDeps {deps}
                     );
                 },
-                /*
-                2 => { // deps_loaded
-                    let len = to_wasm.mu32();
-                    self.fonts.resize(self.live_styles.font_index.len(), CxFont::default());
-                    for _ in 0..len {
-                        let dep_path = to_wasm.parse_string();
-                        let vec_ptr = to_wasm.mu32() as *mut u8;
-                        let vec_len = to_wasm.mu32() as usize;
-                        let vec_rec = unsafe {Vec::<u8>::from_raw_parts(vec_ptr, vec_len, vec_len)};
-                        // check if its a font
-                        for (file, font) in &self.live_styles.font_index {
-                            let file_str = file.to_string();
-                            if file_str.to_string() == dep_path {
-                                let mut cxfont = &mut self.fonts[font.font_id];
-                                // load it
-                                if cxfont.load_from_ttf_bytes(&vec_rec).is_err() {
-                                    println!("Error loading font {} ", dep_path);
-                                }
-                                else {
-                                    cxfont.file = file_str;
-                                }
-                                break;
-                            }
+                
+                id!(ToWasmInit) => { // deps_loaded
+                    let tw = ToWasmInit::read_to_wasm(&mut to_wasm);
+                    
+                    for dep_in in tw.deps{
+                        if let Some(dep) = self.dependencies.get_mut(&dep_in.path){
+                            
+                            dep.data = Some(Ok(dep_in.data.into_vec_u8()))
                         }
                     }
+                    self.platform.window_geom = tw.window_info.into();
+                    //self.default_dpi_factor = self.platform.window_geom.dpi_factor;
+                    
+                    self.call_event_handler(&mut Event::Construct);
                 },
+                /*
                 3 => { // init
-                    self.platform.window_geom = WindowGeom {
-                        is_fullscreen: false,
-                        is_topmost: false,
-                        inner_size: Vec2 {x: to_wasm.mf32(), y: to_wasm.mf32()},
-                        dpi_factor: to_wasm.mf32(),
-                        outer_size: Vec2 {x: 0., y: 0.},
-                        position: Vec2 {x: 0., y: 0.},
-                        xr_is_presenting: false,
-                        xr_can_present: to_wasm.mu32() > 0,
-                        can_fullscreen: to_wasm.mu32() > 0
-                    };
-                    self.default_dpi_factor = self.platform.window_geom.dpi_factor;
                     
                     if self.windows.len() > 0 {
                         self.windows[0].window_geom = self.platform.window_geom.clone();
@@ -463,7 +441,9 @@ impl Cx {
                     ));
                 }*/
                 _ => {
-                    panic!("Message unknown")
+                    console_log!("Message unknown");
+                    
+                    //panic!("Message unknown")
                 }
             };
             to_wasm.block_skip(skip);
@@ -516,7 +496,7 @@ impl Cx {
             };
         }
         
-        self.webgl_compile_shaders();
+        //self.webgl_compile_shaders();
         
         // check if we need to send a cursor
         if let Some(cursor) = self.down_mouse_cursor {
@@ -690,7 +670,6 @@ pub unsafe extern "C" fn wasm_get_js_msg_class() -> u32 {
     out.push_str("ToWasmMsg:class extends ToWasmMsg{\n");
     
     ToWasmGetDeps::to_wasm_js_method(&mut out);
-    ToWasmDepsLoaded::to_wasm_js_method(&mut out);
     ToWasmInit::to_wasm_js_method(&mut out);
     ToWasmResizeWindow::to_wasm_js_method(&mut out);
     ToWasmAnimationFrame::to_wasm_js_method(&mut out);
