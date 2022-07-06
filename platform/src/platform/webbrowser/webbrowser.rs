@@ -521,17 +521,20 @@ impl Cx {
         self.webgl_compile_shaders();
         
         // check if we need to send a cursor
-        if !self.down_mouse_cursor.is_none() {
+        if let Some(cursor) = self.down_mouse_cursor {
+           //console_log!("WHOOO");
             self.platform.from_wasm(
-                FromWasmSetMouseCursor::new(self.down_mouse_cursor.as_ref().unwrap().clone())
+                FromWasmSetMouseCursor::new(cursor)
             )
         }
-        else if !self.hover_mouse_cursor.is_none() {
+        else if let Some(cursor) = self.hover_mouse_cursor{
+            //console_log!("WHOOO {:?}", cursor);
             self.platform.from_wasm(
-                FromWasmSetMouseCursor::new(self.hover_mouse_cursor.as_ref().unwrap().clone())
+                FromWasmSetMouseCursor::new(cursor)
             )
         }
         else {
+           //console_log!("WHOOO");
             self.platform.from_wasm(
                 FromWasmSetMouseCursor::new(MouseCursor::Default)
             )
@@ -682,9 +685,9 @@ impl CxPlatform {
     }
 }
 
-#[export_name = "get_wasm_js_msg_class"]
+#[export_name = "wasm_get_js_msg_class"]
 #[cfg(target_arch = "wasm32")]
-pub unsafe extern "C" fn get_wasm_js_msg_class() -> u32 {
+pub unsafe extern "C" fn wasm_get_js_msg_class() -> u32 {
     let mut msg = FromWasmMsg::new();
     let mut out = String::new();
     
@@ -700,6 +703,7 @@ pub unsafe extern "C" fn get_wasm_js_msg_class() -> u32 {
     ToWasmFingerUp::to_wasm_js_method(&mut out);
     ToWasmFingerMove::to_wasm_js_method(&mut out);
     ToWasmFingerHover::to_wasm_js_method(&mut out);
+    ToWasmFingerOut::to_wasm_js_method(&mut out);
     ToWasmFingerScroll::to_wasm_js_method(&mut out);
     ToWasmKeyDown::to_wasm_js_method(&mut out);
     ToWasmKeyUp::to_wasm_js_method(&mut out);

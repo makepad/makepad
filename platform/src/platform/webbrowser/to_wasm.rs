@@ -61,15 +61,6 @@ impl Into<Quat> for WQuat {
 }
 
 #[derive(ToWasm)]
-pub struct WFinger {
-    pub abs:WVec2,
-    pub digit: usize,
-    pub is_touch: bool,
-    pub modifiers: u32,
-    pub time: f64,
-}
-
-#[derive(ToWasm)]
 pub struct WGpuInfo {
     pub min_uniform_vectors: u32,
     pub vendor: String,
@@ -157,6 +148,16 @@ pub struct ToWasmAnimationFrame {
 }
 
 #[derive(ToWasm)]
+pub struct WFinger {
+    pub x: f32,
+    pub y: f32,
+    pub digit: usize,
+    pub is_touch: bool,
+    pub modifiers: u32,
+    pub time: f64,
+}
+
+#[derive(ToWasm)]
 pub struct ToWasmFingerDown {
     pub finger: WFinger,
 }
@@ -174,7 +175,7 @@ impl ToWasmFingerDown {
     pub fn into_finger_down_event(self, tap_count: u32) -> FingerDownEvent {
         FingerDownEvent {
             window_id: 0,
-            abs: self.finger.abs.into(),
+            abs: Vec2{x:self.finger.x, y:self.finger.y},
             handled: false,
             digit: self.finger.digit,
             input_type: if self.finger.is_touch {FingerInputType::Touch} else {FingerInputType::Mouse},
@@ -194,7 +195,7 @@ impl Into<FingerUpEvent> for ToWasmFingerUp {
     fn into(self) -> FingerUpEvent {
         FingerUpEvent {
             window_id: 0,
-            abs: self.finger.abs.into(),
+            abs: Vec2{x:self.finger.x, y:self.finger.y},
             digit: self.finger.digit,
             input_type: if self.finger.is_touch {FingerInputType::Touch} else {FingerInputType::Mouse},
             modifiers: unpack_key_modifier(self.finger.modifiers),
@@ -212,7 +213,7 @@ impl Into<FingerMoveEvent> for ToWasmFingerMove {
     fn into(self) -> FingerMoveEvent {
         FingerMoveEvent {
             window_id: 0,
-            abs: self.finger.abs.into(),
+            abs: Vec2{x:self.finger.x, y:self.finger.y},
             digit: self.finger.digit,
             input_type: if self.finger.is_touch {FingerInputType::Touch} else {FingerInputType::Mouse},
             modifiers: unpack_key_modifier(self.finger.modifiers),
@@ -230,7 +231,7 @@ impl Into<FingerHoverEvent> for ToWasmFingerHover {
     fn into(self) -> FingerHoverEvent {
         FingerHoverEvent {
             window_id: 0,
-            abs: self.finger.abs.into(),
+            abs: Vec2{x:self.finger.x, y:self.finger.y},
             digit: self.finger.digit,
             handled: false,
             modifiers: unpack_key_modifier(self.finger.modifiers),
@@ -241,9 +242,28 @@ impl Into<FingerHoverEvent> for ToWasmFingerHover {
 
 
 #[derive(ToWasm)]
+pub struct ToWasmFingerOut {
+    pub finger: WFinger,
+}
+
+impl Into<FingerHoverEvent> for ToWasmFingerOut {
+    fn into(self) -> FingerHoverEvent {
+        FingerHoverEvent {
+            window_id: 0,
+            abs: Vec2{x:self.finger.x, y:self.finger.y},
+            digit: self.finger.digit,
+            handled: false,
+            modifiers: unpack_key_modifier(self.finger.modifiers),
+            time: self.finger.time,
+        }
+    }
+}
+
+#[derive(ToWasm)]
 pub struct ToWasmFingerScroll {
     pub finger: WFinger,
-    pub scroll: WVec2,
+    pub scroll_x: f32,
+    pub scroll_y: f32
 }
 
 impl Into<FingerScrollEvent> for ToWasmFingerScroll {
@@ -251,8 +271,8 @@ impl Into<FingerScrollEvent> for ToWasmFingerScroll {
         FingerScrollEvent {
             window_id: 0,
             digit: self.finger.digit,
-            abs: self.finger.abs.into(),
-            scroll: self.scroll.into(),
+            abs: Vec2{x:self.finger.x, y:self.finger.y},
+            scroll: Vec2{x:self.scroll_x, y:self.scroll_y},
             input_type: if self.finger.is_touch {FingerInputType::Touch} else {FingerInputType::Mouse},
             handled_x: false,
             handled_y: false,

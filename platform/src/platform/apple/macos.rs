@@ -186,11 +186,11 @@ impl Cx {
 
                         
                         // set a cursor
-                        if !self.down_mouse_cursor.is_none() {
-                            cocoa_app.set_mouse_cursor(self.down_mouse_cursor.as_ref().unwrap().clone())
+                        if let Some(cursor) = self.down_mouse_cursor {
+                            cocoa_app.set_mouse_cursor(cursor)
                         }
-                        else if !self.hover_mouse_cursor.is_none() {
-                            cocoa_app.set_mouse_cursor(self.hover_mouse_cursor.as_ref().unwrap().clone())
+                        else if let Some(cursor) = self.hover_mouse_cursor{
+                            cocoa_app.set_mouse_cursor(cursor)
                         }
                         else {
                             cocoa_app.set_mouse_cursor(MouseCursor::Default)
