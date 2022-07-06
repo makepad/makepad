@@ -258,7 +258,7 @@ impl<T, const N: usize> ToWasm for [T; N] where T: ToWasm {
     
     fn to_wasm_js_body(out: &mut WasmJSOutput, slot: usize, is_recur: bool, prop: &str, temp: usize) {
         out.push_ln(slot, &format!("let t{} = {}", temp, prop));
-        out.push_ln(slot, &format!("or(let i{0} = 0; i{0} < {1}; i{0}++){{", temp, N));
+        out.push_ln(slot, &format!("for(let i{0} = 0; i{0} < {1}; i{0}++){{", temp, N));
         let new_temp = out.alloc_temp();
         T::to_wasm_js_body(out, slot, is_recur, &format!("t{0}[i{0}]", temp), new_temp);
         out.push_ln(slot, "}");
