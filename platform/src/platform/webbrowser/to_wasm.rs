@@ -101,11 +101,6 @@ pub struct WDepLoaded {
 }
 
 #[derive(ToWasm)]
-pub struct ToWasmDepsLoaded {
-    pub deps: Vec<WDepLoaded>
-}
-
-#[derive(ToWasm)]
 pub struct WindowInfo {
     pub is_fullscreen: bool,
     pub can_fullscreen: bool,
@@ -134,6 +129,7 @@ impl Into<WindowGeom> for WindowInfo {
 
 #[derive(ToWasm)]
 pub struct ToWasmInit {
+    pub deps: Vec<WDepLoaded>,
     pub window_info: WindowInfo
 }
 
@@ -412,6 +408,7 @@ fn web_to_key_code(key_code: u32) -> KeyCode {
 
 #[derive(ToWasm)]
 pub struct WKey {
+    pub char_code: u32,
     pub key_code: u32,
     pub modifiers: u32,
     pub time: f64,

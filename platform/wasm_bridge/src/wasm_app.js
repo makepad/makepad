@@ -1,6 +1,7 @@
 export class WasmApp {
-    constructor(wasm) {
+    constructor(wasm, dispatch) {
         this.wasm = wasm;
+        this.dispatch = dispatch;
         this.exports = wasm.instance.exports;
         this.memory = wasm.instance.exports.memory;
         
@@ -15,7 +16,6 @@ export class WasmApp {
         let msg = new FromWasmMsg(this, this.wasm_get_js_msg_class());
         let code = msg.read_str();
         msg.free();
-        
         // this class can also be loaded from file.
         this.msg_class = new Function("ToWasmMsg", "FromWasmMsg", code)(ToWasmMsg, FromWasmMsg);
     }
@@ -143,7 +143,7 @@ export class ToWasmMsg {
             }
         }
         else { // do a u32 copy
-            let u32_len = u8len >> 2; //4 bytes at a time.
+            let u32_len = u8_len >> 2; //4 bytes at a time.
             var u32_out = new Uint32Array(app.memory.buffer, output_ptr, u32_len)
             var u32_in = new Uint32Array(input_buffer)
             for (let i = 0; i < u32_len; i ++) {
@@ -224,7 +224,12 @@ export class FromWasmMsg {
             this.u32_offset++; // skip second u32 of id
             this.u32_offset++; // skip body len
             // dispatch to deserializer
-            this[msg_id]();
+            if (this[msg_id] !== undefined){
+                this[msg_id]();
+            }
+            else{
+                this.dispatch[msg_id]()
+            }
             this.u32_offset += this.u32_offset&1; // align
         }
     }

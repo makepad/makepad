@@ -13,16 +13,20 @@ impl ToWasmDataU8 {
         if cap != capacity {panic!()};
         ptr as u32
     }
+    
+    pub fn into_vec_u8(self)->Vec<u8>{
+        self.0
+    }
 }
 
 
 impl ToWasm for ToWasmDataU8 {
     fn read_to_wasm(inp: &mut ToWasmMsg) -> Self {
+        
         let ptr = inp.read_u32();
         let len = inp.read_u32() as usize;
         unsafe {
-            let ptr = ptr as *mut u8;
-            Self (Vec::from_raw_parts(ptr, len, len))
+            Self (Vec::from_raw_parts(ptr as *mut u8, len, len))
         }
     }
     
