@@ -61,10 +61,10 @@ impl Cx {
             let block_id = LiveId(to_wasm.read_u64());
             let skip = to_wasm.read_block_skip();
             match block_id {
-                id!(ToWasmConstructAndGetDeps) => { // fetch_deps
-                    let msg = ToWasmConstructAndGetDeps::read_to_wasm(&mut to_wasm);
+                id!(ToWasmGetDeps) => { // fetch_deps
+                    let msg = ToWasmGetDeps::read_to_wasm(&mut to_wasm);
                     
-                    self.call_event_handler(&mut Event::Construct);
+                    //self.call_event_handler(&mut Event::Construct);
                     
                     self.gpu_info.init_from_info(
                         msg.gpu_info.min_uniform_vectors,
@@ -82,8 +82,6 @@ impl Cx {
                     self.platform.from_wasm(
                         FromWasmLoadDeps {deps}
                     );
-                    
-                    self.webgl_compile_shaders();
                 },
                 /*
                 2 => { // deps_loaded
@@ -522,19 +520,16 @@ impl Cx {
         
         // check if we need to send a cursor
         if let Some(cursor) = self.down_mouse_cursor {
-           //console_log!("WHOOO");
             self.platform.from_wasm(
                 FromWasmSetMouseCursor::new(cursor)
             )
         }
         else if let Some(cursor) = self.hover_mouse_cursor{
-            //console_log!("WHOOO {:?}", cursor);
             self.platform.from_wasm(
                 FromWasmSetMouseCursor::new(cursor)
             )
         }
         else {
-           //console_log!("WHOOO");
             self.platform.from_wasm(
                 FromWasmSetMouseCursor::new(MouseCursor::Default)
             )
@@ -694,7 +689,7 @@ pub unsafe extern "C" fn wasm_get_js_msg_class() -> u32 {
     out.push_str("return {\n");
     out.push_str("ToWasmMsg:class extends ToWasmMsg{\n");
     
-    ToWasmConstructAndGetDeps::to_wasm_js_method(&mut out);
+    ToWasmGetDeps::to_wasm_js_method(&mut out);
     ToWasmDepsLoaded::to_wasm_js_method(&mut out);
     ToWasmInit::to_wasm_js_method(&mut out);
     ToWasmResizeWindow::to_wasm_js_method(&mut out);
