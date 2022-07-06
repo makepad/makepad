@@ -1,4 +1,23 @@
-
+export function fetch_path(base, path) {
+    return new Promise(function(resolve, reject) {
+        var req = new XMLHttpRequest()
+        req.addEventListener("error", function() {
+            reject(resource)
+        })
+        req.responseType = 'arraybuffer'
+        req.addEventListener("load", function() {
+            if (req.status !== 200) {
+                return reject(req.status)
+            }
+            resolve({
+                path: path,
+                buffer: req.response
+            })
+        })
+        req.open("GET", base+path)
+        req.send()
+    })
+}
 
 export let web_cursor_map = [
     "none", //Hidden=>0

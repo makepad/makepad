@@ -1,12 +1,12 @@
 import {WasmApp} from "/makepad/platform/wasm_bridge/src/wasm_app.js"
-import {pack_key_modifier, web_cursor_map} from "./webgl_util.js"
+import {pack_key_modifier, web_cursor_map, fetch_path} from "./webgl_util.js"
 
 export class WebGLWasmApp extends WasmApp {
-    constructor(wasm, canvas) {
-        super (wasm);
+    constructor(wasm, dispatch, canvas) {
+        super (wasm, dispatch);
         
         this.wasm_app = this.wasm_create_app();
-        
+        this.dispatch = dispatch;
         this.canvas = canvas;
         this.handlers = {};
         
@@ -31,8 +31,57 @@ export class WebGLWasmApp extends WasmApp {
         });
         
         this.do_wasm_pump();
+        
+        this.load_deps_promise.then(
+            results => {
+                let deps = [];
+                for(let result of results){
+                    deps.push({
+                        path: result.path,
+                        data: result.buffer
+                    })
+                }
+                this.to_wasm.ToWasmInit({
+                    window_info: this.window_info,
+                    deps: deps
+                });
+                this.do_wasm_pump();
+            },
+            error => {
+                console.error("Error loading dep", error)
+            }
+        )
     }
-
+    
+    
+    // from_wasm dispatch_on_app interface
+    
+    FromWasmSetMouseCursor(args) {
+        //console.log(args);
+        document.body.style.cursor = web_cursor_map[args.web_cursor] || 'default'
+    }
+    
+    FromWasmLoadDeps(args) {
+        let promises = [];
+        for (let path of args.deps) {
+            promises.push(fetch_path("/makepad/", path))
+        }
+        
+        this.load_deps_promise = Promise.all(promises);
+    }
+    
+    FromWasmShowTextIME(args) {
+        self.text_area_pos = args;
+        this.update_text_area_pos();
+    }
+    
+    FromWasmSetDocumentTitle(args) {
+        document.title = args.title
+    }
+        
+    // calling into wasm
+    
+    
     wasm_create_app() {
         let new_ptr = this.exports.wasm_create_app();
         this.update_array_buffer_refs();
@@ -53,33 +102,9 @@ export class WebGLWasmApp extends WasmApp {
         from_wasm.free();
     }
     
-    FromWasmLoadDeps(args){
-        console.log("LOAD DEPS", args)
-    }
     
-    FromWasmSetMouseCursor(args) {
-        //console.log(args);
-        document.body.style.cursor = web_cursor_map[args.web_cursor] || 'default'
-    }
-    FromWasmLoadDeps(deps) {
-        console.log(deps);
-    }
+    // init and setup
     
-    request_animation_frame() {
-        if (this.window_info.xr_is_presenting || this.req_anim_frame_id) {
-            return;
-        }
-        this.req_anim_frame_id = window.requestAnimationFrame(time => {
-            this.req_anim_frame_id = 0;
-            if (this.xr_is_presenting) {
-                return
-            }
-            this.to_wasm.ToWasmAnimationFrame({time:time / 1000.0});
-            this.in_animation_frame = true;
-            this.do_wasm_pump();
-            this.in_animation_frame = false;
-        })
-    }
     
     init_detection() {
         this.detect = {
@@ -87,6 +112,7 @@ export class WebGLWasmApp extends WasmApp {
             is_mobile_safari: window.navigator.platform.match(/iPhone|iPad/i),
             is_touch_device: ('ontouchstart' in window || navigator.maxTouchPoints),
             is_firefox: navigator.userAgent.toLowerCase().indexOf('firefox') > -1,
+            use_touch_scroll_overlay: window.ontouchstart === null
         }
         this.detect.is_android = this.detect.user_agent.match(/Android/i)
         this.detect.is_add_to_homescreen_safari = this.is_mobile_safari && navigator.standalone
@@ -209,7 +235,7 @@ export class WebGLWasmApp extends WasmApp {
             this.window_info.is_fullscreen = this.is_fullscreen();
             this.window_info.can_fullscreen = this.can_fullscreen();
             
-            if (this.to_wasm !== undefined){
+            if (this.to_wasm !== undefined) {
                 this.to_wasm.ToWasmResizeWindow(this.window_info);
             }
             
@@ -224,9 +250,9 @@ export class WebGLWasmApp extends WasmApp {
         
         var canvas = this.canvas
         
-        let use_touch_scroll_overlay = window.ontouchstart === null;
+        
         let last_mouse_finger;
-        if (use_touch_scroll_overlay) {
+        if (this.detect.use_touch_scroll_overlay) {
             var ts = this.touch_scroll_overlay = document.createElement('div')
             ts.className = "cx_webgl_scroll_overlay"
             var ts_inner = document.createElement('div')
@@ -451,7 +477,6 @@ export class WebGLWasmApp extends WasmApp {
             return false
         }
         
-        
         this.handlers.on_touchmove = e => {
             //e.preventDefault();
             var fingers = touch_to_finger_lookup(e);
@@ -511,7 +536,7 @@ export class WebGLWasmApp extends WasmApp {
             });
             this.do_wasm_pump();
         };
-        canvas.addEventListener('wheel', e=>this.handlers.on_mouse_wheel(e))
+        canvas.addEventListener('wheel', e => this.handlers.on_mouse_wheel(e))
     }
     
     bind_keyboard() {
@@ -556,7 +581,7 @@ export class WebGLWasmApp extends WasmApp {
             + "outline: 0px !important;\n"
             + "-webkit-appearance: none;\n"
             + "}"
-            
+        
         document.body.appendChild(style)
         ta.style.left = -100 + 'px'
         ta.style.top = -100 + 'px'
@@ -575,7 +600,7 @@ export class WebGLWasmApp extends WasmApp {
             }, 0)
         }
         
-        ta.addEventListener('cut', e=>this.handlers.on_cut(e));
+        ta.addEventListener('cut', e => this.handlers.on_cut(e));
         
         this.handlers.on_copy = e => {
             setTimeout(_ => {
@@ -584,19 +609,19 @@ export class WebGLWasmApp extends WasmApp {
             }, 0)
         }
         
-        ta.addEventListener('copy', e=>this.handlers.on_copy(e));
+        ta.addEventListener('copy', e => this.handlers.on_copy(e));
         
         this.handlers.on_paste = e => {
             was_paste = true;
         }
         
-        ta.addEventListener('paste', e=>this.handlers.on_paste(e));
+        ta.addEventListener('paste', e => this.handlers.on_paste(e));
         
         this.handlers.on_select = e => {}
         
         ta.addEventListener('select', e => this.handlers.on_select(e))
         
-        this.handlers.on_select = e => {
+        this.handlers.on_input = e => {
             if (ta.value.length > 0) {
                 if (was_paste) {
                     was_paste = false;
@@ -631,13 +656,13 @@ export class WebGLWasmApp extends WasmApp {
             }
             last_len = ta.value.length;
         };
-        ta.addEventListener('input', e=>this.handlers.on_select(e));
+        ta.addEventListener('input', e => this.handlers.on_input(e));
         
-        ta.addEventListener('mousedown', e=>this.handlers.on_mouse_down(e));
-        ta.addEventListener('mouseup', e=>this.handlers.on_mouse_up(e));
-        ta.addEventListener('wheel', e=>this.handlers.on_mouse_wheel(e));
+        ta.addEventListener('mousedown', e => this.handlers.on_mouse_down(e));
+        ta.addEventListener('mouseup', e => this.handlers.on_mouse_up(e));
+        ta.addEventListener('wheel', e => this.handlers.on_mouse_wheel(e));
         
-        ta.addEventListener('contextmenu', e=>this.handlers.on_contextmenu(e));
+        ta.addEventListener('contextmenu', e => this.handlers.on_contextmenu(e));
         
         ta.addEventListener('blur', e => {
             this.focus_keyboard_input();
@@ -653,8 +678,8 @@ export class WebGLWasmApp extends WasmApp {
             if (code === 8 || code === 9) e.preventDefault() // backspace/tab
             if ((code === 88 || code == 67) && (e.metaKey || e.ctrlKey)) { // copy or cut
                 // we need to request the clipboard
-                this.to_wasm.text_copy();
-                this.do_wasm_io();
+                this.to_wasm.ToWasmTextCopy();
+                this.do_wasm_pump();
                 ta.value = this.text_copy_response;
                 ta.selectionStart = 0;
                 ta.selectionEnd = ta.value.length;
@@ -678,18 +703,18 @@ export class WebGLWasmApp extends WasmApp {
                 last_len = ta.value.length;
             }
             //if(key_code
-            this.to_wasm.key_down({
+            this.to_wasm.KeyDown({key: {
                 key_code: key_code,
                 char_code: e.charCode,
                 is_repeat: e.repeat,
                 time: e.timeStamp / 1000.0,
                 modifiers: pack_key_modifier(e)
-            })
+            }})
             
             this.do_wasm_pump();
         };
         
-        ta.addEventListener('keydown', e=>this.handlers.on_keydown(e));
+        ta.addEventListener('keydown', e => this.handlers.on_keydown(e));
         
         this.handlers.on_keyup = e => {
             let code = e.keyCode;
@@ -703,18 +728,47 @@ export class WebGLWasmApp extends WasmApp {
                 this.bind_keyboard();
                 this.update_text_area_pos();
             }
-            this.to_wasm.key_up({
+            this.to_wasm.KeyUp({key: {
                 key_code: e.keyCode,
                 char_code: e.charCode,
                 is_repeat: e.repeat,
                 time: e.timeStamp / 1000.0,
                 modifiers: pack_key_modifier(e)
-            })
+            }})
             this.do_wasm_pump();
         };
-        ta.addEventListener('keyup', e=>this.handlers.on_keyup(e));
+        ta.addEventListener('keyup', e => this.handlers.on_keyup(e));
         document.body.appendChild(ta);
         ta.focus();
+    }
+    
+    
+    // internal helper api
+    
+    
+    update_text_area_pos() {
+        var pos = this.text_area_pos;
+        var ta = this.text_area;
+        if (ta && pos) {
+            ta.style.left = (Math.round(pos.x) - 4) + "px";
+            ta.style.top = Math.round(pos.y) + "px"
+        }
+    }
+    
+    request_animation_frame() {
+        if (this.window_info.xr_is_presenting || this.req_anim_frame_id) {
+            return;
+        }
+        this.req_anim_frame_id = window.requestAnimationFrame(time => {
+            this.req_anim_frame_id = 0;
+            if (this.xr_is_presenting) {
+                return
+            }
+            this.to_wasm.ToWasmAnimationFrame({time: time / 1000.0});
+            this.in_animation_frame = true;
+            this.do_wasm_pump();
+            this.in_animation_frame = false;
+        })
     }
     
     can_fullscreen() {
