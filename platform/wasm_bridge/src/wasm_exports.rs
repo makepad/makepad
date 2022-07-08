@@ -63,6 +63,6 @@ pub fn panic_hook(info: &panic::PanicInfo) {
 #[export_name = "wasm_init_panic_hook"]
 #[cfg(target_arch = "wasm32")]
 pub unsafe extern "C" fn init_panic_hook(){
-    panic::set_hook(Box::new(panic_hook));
+        panic::set_hook(Box::new(panic_hook));
 }
 

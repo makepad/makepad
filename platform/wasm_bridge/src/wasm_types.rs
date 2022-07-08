@@ -1,6 +1,7 @@
 use crate::from_wasm::*;
 use crate::to_wasm::*;
-
+use crate::{LiveId,id};
+use makepad_derive_wasm_bridge::*;
 pub struct ToWasmDataU8(Vec<u8>);
 
 impl ToWasmDataU8 {
@@ -57,6 +58,29 @@ impl FromWasm for WasmPtrF32 {
 }
 
 
+#[derive(FromWasm)]
+pub struct WasmDataF32 {
+    pub ptr: WasmPtrF32,
+    pub len: usize
+}
+
+impl WasmDataF32 {
+    pub fn new(data:&[f32]) -> Self {
+        Self{ptr:WasmPtrF32::new(data.as_ptr()), len:data.len()}
+    }
+}
+
+#[derive(FromWasm)]
+pub struct WasmDataU32 {
+    pub ptr: WasmPtrU32,
+    pub len: usize
+}
+
+impl WasmDataU32 {
+    pub fn new(data:&[u32]) -> Self {
+        Self{ptr:WasmPtrU32::new(data.as_ptr()), len:data.len()}
+    }
+}
 
 
 pub struct WasmPtrU32(u32);

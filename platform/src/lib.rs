@@ -149,7 +149,7 @@ pub use {
             FingerDownHitEvent,
             FingerUpHitEvent,
             FingerDragHitEvent,
-            FingerDropHitEvent
+            FingerDropHitEvent,
         },
         cursor::MouseCursor,
         menu::Menu,

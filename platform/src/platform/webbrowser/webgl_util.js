@@ -1,3 +1,12 @@
+
+export function can_fullscreen() {
+    return (document.fullscreenEnabled || document.webkitFullscreenEnabled || document.mozFullscreenEnabled)? true: false
+}
+
+export function is_fullscreen() {
+    return (document.fullscreenElement || document.webkitFullscreenElement || document.mozFullscreenElement)? true: false
+}
+
 export function fetch_path(base, path) {
     return new Promise(function(resolve, reject) {
         var req = new XMLHttpRequest()
@@ -14,7 +23,7 @@ export function fetch_path(base, path) {
                 buffer: req.response
             })
         })
-        req.open("GET", base+path)
+        req.open("GET", base + path)
         req.send()
     })
 }
