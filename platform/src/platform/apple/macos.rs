@@ -83,7 +83,7 @@ impl Cx {
                 }
                 self.process_desktop_pre_event(&mut event);
                 match &event {
-                    Event::AppFocus=>{ // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
+                    Event::AppGotFocus=>{ // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
                         for mw in metal_windows.iter_mut(){
                             if let Some(main_pass_id) = self.windows[mw.window_id].main_pass_id {
                                 self.repaint_pass(main_pass_id);

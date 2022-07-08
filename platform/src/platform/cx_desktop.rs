@@ -92,9 +92,9 @@ impl Cx {
                 }*/
             },
             Event::KeyUp(ke) => {
-                self.process_key_up(&ke);
+                self.process_key_up(ke.clone());
             },
-            Event::AppFocusLost => {
+            Event::AppLostFocus => {
                 self.call_all_keys_up();
             },
             _ => ()
