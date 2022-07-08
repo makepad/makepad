@@ -23,14 +23,13 @@ export class WebGLWasmApp extends WasmApp {
         
         this.draw_shaders = [];
         this.array_buffers = [];
+        this.index_buffers = [];
         this.vaos = [];
         this.textures = [];
         this.framebuffers = [];
         
         this.init_detection();
         this.bind_screen_resize();
-        this.bind_mouse_and_touch();
-        this.bind_keyboard();
         this.init_webgl_context();
         
         this.to_wasm = this.new_to_wasm();
@@ -63,6 +62,17 @@ export class WebGLWasmApp extends WasmApp {
                     deps: deps
                 });
                 this.do_wasm_pump();
+
+                this.bind_mouse_and_touch();
+                this.bind_keyboard();
+                
+                this.to_wasm.ToWasmRedrawAll();
+                this.do_wasm_pump();
+                
+                var loaders = document.getElementsByClassName('canvas_loader');
+                for (var i = 0; i < loaders.length; i ++) {
+                    loaders[i].parentNode.removeChild(loaders[i])
+                }
             },
             error => {
                 console.error("Error loading dep", error)
@@ -285,7 +295,7 @@ export class WebGLWasmApp extends WasmApp {
         };
     }
     
-    FromWasmAllocArrayBuffer(args) {
+    FromWasmAllocIndexBuffer(args) {
         var gl = this.gl;
         
         let buf = this.index_buffers[args.buffer_id];
@@ -294,15 +304,15 @@ export class WebGLWasmApp extends WasmApp {
                 gl_buf: gl.createBuffer(),
             };
         }
-        buf.length = array.length;
         let array = new Uint32Array(this.memory.buffer, args.data.ptr, args.data.len);
+        buf.length = array.length;
         
         gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buf.gl_buf);
         gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, array, gl.STATIC_DRAW);
         gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
     }
     
-    FromWasmAllocIndexBuffer(args) {
+    FromWasmAllocArrayBuffer(args) {
         var gl = this.gl;
         
         let buf = this.array_buffers[args.buffer_id];
@@ -312,9 +322,8 @@ export class WebGLWasmApp extends WasmApp {
             };
         }
         
-        buf.length = array.length;
-        
         let array = new Float32Array(this.memory.buffer, args.data.ptr, args.data.len);
+        buf.length = array.length;
         
         gl.bindBuffer(gl.ARRAY_BUFFER, buf.gl_buf);
         gl.bufferData(gl.ARRAY_BUFFER, array, gl.STATIC_DRAW);
@@ -338,7 +347,7 @@ export class WebGLWasmApp extends WasmApp {
         this.OES_vertex_array_object.bindVertexArrayOES(vao.gl_vao)
         gl.bindBuffer(gl.ARRAY_BUFFER, this.array_buffers[args.geom_vb_id].gl_buf);
         
-        let shader = this.shaders[args.shader_id];
+        let shader = this.draw_shaders[args.shader_id];
         
         for (let i = 0; i < shader.geom_attribs.length; i ++) {
             let attr = shader.geom_attribs[i];
@@ -371,8 +380,8 @@ export class WebGLWasmApp extends WasmApp {
     
     FromWasmDrawCall(args) {
         var gl = this.gl;
-        
-        let shader = this.shaders[args.shader_id];
+
+        let shader = this.draw_shaders[args.shader_id];
         
         gl.useProgram(shader.program);
         
@@ -383,21 +392,22 @@ export class WebGLWasmApp extends WasmApp {
         let instance_buffer = this.array_buffers[vao.inst_vb_id];
         // if vr_presenting
         // TODO CACHE buffers
-        gl.uniform1fv(shader.const_table_uniform, new Float32Array(this.memory.buffer, args.const_table.ptr, args.const_table.len));
-        gl.uniform1fv(shader.pass_uniform, new Float32Array(this.memory.buffer, args.pass_uniform.ptr, args.pass_uniforms.len));
-        gl.uniform1fv(shader.view_uniform, new Float32Array(this.memory.buffer, args.view_uniform.ptr, args.view_uniform.len));
-        gl.uniform1fv(shader.draw_uniform, new Float32Array(this.memory.buffer, args.draw_uniform.ptr, args.draw_uniform.len));
-        gl.uniform1fv(shader.user_uniform, new Float32Array(this.memory.buffer, args.user_uniform.ptr, args.user_uniform.len));
-        gl.uniform1fv(shader.live_uniform, new Float32Array(this.memory.buffer, args.live_uniform.ptr, args.live_uniform.len));
+        if(args.const_table.ptr != 0) gl.uniform1fv(shader.const_table_uniform, new Float32Array(this.memory.buffer, args.const_table.ptr, args.const_table.len));
+        if(args.pass_uniforms.ptr != 0) gl.uniform1fv(shader.pass_uniform, new Float32Array(this.memory.buffer, args.pass_uniforms.ptr, args.pass_uniforms.len));
+        if(args.view_uniforms.ptr != 0) gl.uniform1fv(shader.view_uniform, new Float32Array(this.memory.buffer, args.view_uniforms.ptr, args.view_uniforms.len));
+        if(args.draw_uniforms.ptr != 0) gl.uniform1fv(shader.draw_uniform, new Float32Array(this.memory.buffer, args.draw_uniforms.ptr, args.draw_uniforms.len));
+        if(args.user_uniforms.ptr != 0) gl.uniform1fv(shader.user_uniform, new Float32Array(this.memory.buffer, args.user_uniforms.ptr, args.user_uniforms.len));
+        if(args.live_uniforms.ptr != 0) gl.uniform1fv(shader.live_uniform, new Float32Array(this.memory.buffer, args.live_uniforms.ptr, args.live_uniforms.len));
         
         let texture_slots = shader.texture_locs.length;
         for (let i = 0; i < texture_slots; i ++) {
+            let tex_loc = shader.texture_locs[i];
             let texture_id = args.textures[i]
             if (texture_id !== undefined) {
                 let tex_obj = this.textures[texture_id];
                 gl.activeTexture(gl.TEXTURE0 + i);
                 gl.bindTexture(gl.TEXTURE_2D, tex_obj);
-                gl.uniform1i(tex_slot.loc, i);
+                gl.uniform1i(tex_loc.loc, i);
             }
         }
         
@@ -426,10 +436,9 @@ export class WebGLWasmApp extends WasmApp {
     }
     
     FromWasmBeginRenderTexture(args){
-        
         let gl = this.gl
 
-        var gl_framebuffer = this.framebuffers[pass_id] || (this.framebuffers[pass_id] = gl.createFramebuffer());
+        var gl_framebuffer = this.framebuffers[args.pass_id] || (this.framebuffers[args.pass_id] = gl.createFramebuffer());
         gl.bindFramebuffer(gl.FRAMEBUFFER, gl_framebuffer);
         
         let clear_flags = 0;
@@ -474,10 +483,8 @@ export class WebGLWasmApp extends WasmApp {
     
     FromWasmBeginRenderCanvas(args) {
         let gl = this.gl
-
         gl.bindFramebuffer(gl.FRAMEBUFFER, null);
         gl.viewport(0, 0, this.canvas.width, this.canvas.height);
-        
         let c = args.clear_color;
         gl.clearColor(c.r, c.g, c.b, c.a);
         gl.clearDepth(args.depth);
