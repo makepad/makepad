@@ -1,5 +1,12 @@
 import {WasmApp} from "/makepad/platform/wasm_bridge/src/wasm_app.js"
-import {pack_key_modifier, web_cursor_map, fetch_path} from "./webgl_util.js"
+import {
+    is_fullscreen,
+    can_fullscreen,
+    pack_key_modifier,
+    web_cursor_map,
+    fetch_path,
+    add_line_numbers_to_string
+} from "./webgl_util.js"
 
 export class WebGLWasmApp extends WasmApp {
     constructor(wasm, dispatch, canvas) {
@@ -9,6 +16,16 @@ export class WebGLWasmApp extends WasmApp {
         this.dispatch = dispatch;
         this.canvas = canvas;
         this.handlers = {};
+        
+        this.timers = [];
+        
+        this.text_copy_response = "";
+        
+        this.draw_shaders = [];
+        this.array_buffers = [];
+        this.vaos = [];
+        this.textures = [];
+        this.framebuffers = [];
         
         this.init_detection();
         this.bind_screen_resize();
@@ -35,7 +52,7 @@ export class WebGLWasmApp extends WasmApp {
         this.load_deps_promise.then(
             results => {
                 let deps = [];
-                for(let result of results){
+                for (let result of results) {
                     deps.push({
                         path: result.path,
                         data: result.buffer
@@ -56,10 +73,7 @@ export class WebGLWasmApp extends WasmApp {
     
     // from_wasm dispatch_on_app interface
     
-    FromWasmSetMouseCursor(args) {
-        //console.log(args);
-        document.body.style.cursor = web_cursor_map[args.web_cursor] || 'default'
-    }
+    
     
     FromWasmLoadDeps(args) {
         let promises = [];
@@ -70,15 +84,417 @@ export class WebGLWasmApp extends WasmApp {
         this.load_deps_promise = Promise.all(promises);
     }
     
-    FromWasmShowTextIME(args) {
-        self.text_area_pos = args;
-        this.update_text_area_pos();
+    FromWasmStartTimer(args) {
+        let timer_id = args.timer_id;
+        
+        for (let i = 0; i < this.timers.length; i ++) {
+            if (this.timers[i].timer_id == timer_id) {
+                console.log("Timer ID collision!")
+                return
+            }
+        }
+        
+        var timer = {timer_id, repeats: args.repeats};
+        if (args.repeats !== 0) {
+            timer.sys_id = window.setInterval(e => {
+                this.to_wasm.ToWasmTimerFired({timer_id});
+                this.do_wasm_pump();
+            }, args.interval * 1000.0);
+        }
+        else {
+            timer.sys_id = window.setTimeout(e => {
+                for (let i = 0; i < this.timers.length; i ++) {
+                    let timer = this.timers[i];
+                    if (timer.timer_id == timer_id) {
+                        this.timers.splice(i, 1);
+                        break;
+                    }
+                }
+                this.to_wasm.ToWasmTimerFired({timer_id});
+                this.do_wasm_pump();
+            }, args.interval * 1000.0);
+        }
+        this.timers.push(timer)
+    }
+    
+    FromWasmStopTimer(args) {
+        for (let i = 0; i < this.timers.length; i ++) {
+            let timer = this.timers[i];
+            if (timer.timer_id == args.timer_id) {
+                if (timer.repeats) {
+                    window.clearInterval(timer.sys_id);
+                }
+                else {
+                    window.clearTimeout(timer.sys_id);
+                }
+                this.timers.splice(i, 1);
+                return
+            }
+        }
+    }
+    
+    FromWasmFullScreen() {
+        if (document.body.requestFullscreen) {
+            document.body.requestFullscreen();
+            return
+        }
+        if (document.body.webkitRequestFullscreen) {
+            document.body.webkitRequestFullscreen();
+            return
+        }
+        if (document.body.mozRequestFullscreen) {
+            document.body.mozRequestFullscreen();
+            return
+        }
+    }
+    
+    FromWasmNormalScreen() {
+        if (this.canvas.exitFullscreen) {
+            this.canvas.exitFullscreen();
+            return
+        }
+        if (this.canvas.webkitExitFullscreen) {
+            this.canvas.webkitExitFullscreen();
+            return
+        }
+        if (this.canvas.mozExitFullscreen) {
+            this.canvas.mozExitFullscreen();
+            return
+        }
+    }
+
+    FromWasmRequestAnimationFrame() {
+        if (this.window_info.xr_is_presenting || this.req_anim_frame_id) {
+            return;
+        }
+        this.req_anim_frame_id = window.requestAnimationFrame(time => {
+            this.req_anim_frame_id = 0;
+            if (this.xr_is_presenting) {
+                return
+            }
+            this.to_wasm.ToWasmAnimationFrame({time: time / 1000.0});
+            this.in_animation_frame = true;
+            this.do_wasm_pump();
+            this.in_animation_frame = false;
+        })
     }
     
     FromWasmSetDocumentTitle(args) {
         document.title = args.title
     }
+
+    FromWasmSetMouseCursor(args) {
+        //console.log(args);
+        document.body.style.cursor = web_cursor_map[args.web_cursor] || 'default'
+    }
+
+    FromWasmTextCopyResponse(args) {
+        this.text_copy_response = args.response
+    }
+
+    FromWasmShowTextIME(args) {
+        self.text_area_pos = args;
+        this.update_text_area_pos();
+    }
+    
+    FromWasmHideTextIME(){
+        console.log("IMPLEMENTR!")
+    }
+    
+    
+    // webGL API
+    
+    
+    FromWasmCompileWebGLShader(args) {
+        function get_attrib_locations(gl, program, base, slots) {
+            let attrib_locs = [];
+            let attribs = slots >> 2;
+            let stride = slots * 4;
+            if ((slots & 3) != 0) attribs ++;
+            for (let i = 0; i < attribs; i ++) {
+                let size = (slots - i * 4);
+                if (size > 4) size = 4;
+                attrib_locs.push({
+                    loc: gl.getAttribLocation(program, base + i),
+                    offset: i * 16,
+                    size: size,
+                    stride: slots * 4
+                });
+            }
+            return attrib_locs
+        }
         
+        var gl = this.gl
+        var vsh = gl.createShader(gl.VERTEX_SHADER)
+        
+        gl.shaderSource(vsh, args.vertex)
+        gl.compileShader(vsh)
+        if (!gl.getShaderParameter(vsh, gl.COMPILE_STATUS)) {
+            return console.log(
+                gl.getShaderInfoLog(vsh),
+                add_line_numbers_to_string(args.vertex)
+            )
+        }
+        
+        // compile pixelshader
+        var fsh = gl.createShader(gl.FRAGMENT_SHADER)
+        gl.shaderSource(fsh, args.pixel)
+        gl.compileShader(fsh)
+        if (!gl.getShaderParameter(fsh, gl.COMPILE_STATUS)) {
+            return console.log(
+                gl.getShaderInfoLog(fsh),
+                add_line_numbers_to_string(args.pixel)
+            )
+        }
+        
+        var program = gl.createProgram()
+        gl.attachShader(program, vsh)
+        gl.attachShader(program, fsh)
+        gl.linkProgram(program)
+        if (!gl.getProgramParameter(program, gl.LINK_STATUS)) {
+            return console.log(
+                gl.getProgramInfoLog(program),
+                add_line_numbers_to_string(args.vertex),
+                add_line_numbers_to_string(args.fragment)
+            )
+        }
+        
+        let texture_locs = [];
+        for (let i = 0; i < args.textures.length; i ++) {
+            texture_locs.push({
+                name: args.textures[i].name,
+                ty: args.textures[i].ty,
+                loc: gl.getUniformLocation(program, args.textures[i].name),
+            });
+        }
+        
+        // fetch all attribs and uniforms
+        this.draw_shaders[args.shader_id] = {
+            geom_attribs: get_attrib_locations(gl, program, "packed_geometry_", args.geometry_slots),
+            inst_attribs: get_attrib_locations(gl, program, "packed_instance_", args.instance_slots),
+            pass_uniform: gl.getUniformLocation(program, "pass_table"),
+            view_uniform: gl.getUniformLocation(program, "view_table"),
+            draw_uniform: gl.getUniformLocation(program, "draw_table"),
+            user_uniform: gl.getUniformLocation(program, "user_table"),
+            live_uniform: gl.getUniformLocation(program, "live_table"),
+            texture_locs: texture_locs,
+            geometry_slots: args.geometry_slots,
+            instance_slots: args.instance_slots,
+            const_uniform: gl.getUniformLocation(program, "const_table"),
+            program: program,
+        };
+    }
+    
+    FromWasmAllocArrayBuffer(args) {
+        var gl = this.gl;
+        
+        let buf = this.index_buffers[args.buffer_id];
+        if (buf === undefined) {
+            buf = this.index_buffers[args.buffer_id] = {
+                gl_buf: gl.createBuffer(),
+            };
+        }
+        buf.length = array.length;
+        let array = new Uint32Array(this.memory.buffer, args.data.ptr, args.data.len);
+        
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, buf.gl_buf);
+        gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, array, gl.STATIC_DRAW);
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, null);
+    }
+    
+    FromWasmAllocIndexBuffer(args) {
+        var gl = this.gl;
+        
+        let buf = this.array_buffers[args.buffer_id];
+        if (buf === undefined) {
+            buf = this.array_buffers[args.buffer_id] = {
+                gl_buf: gl.createBuffer(),
+            };
+        }
+        
+        buf.length = array.length;
+        
+        let array = new Float32Array(this.memory.buffer, args.data.ptr, args.data.len);
+        
+        gl.bindBuffer(gl.ARRAY_BUFFER, buf.gl_buf);
+        gl.bufferData(gl.ARRAY_BUFFER, array, gl.STATIC_DRAW);
+        gl.bindBuffer(gl.ARRAY_BUFFER, null);
+    }
+    
+    FromWasmAllocVao(args) {
+        let gl = this.gl;
+        let old_vao = this.vaos[args.vao_id];
+        if (old_vao) {
+            this.OES_vertex_array_object.deleteVertexArrayOES(old_vao.gl);
+        }
+        let gl_vao = this.OES_vertex_array_object.createVertexArrayOES();
+        let vao = this.vaos[args.vao_id] = {
+            gl_vao: gl_vao,
+            geom_ib_id: args.geom_ib_id,
+            geom_vb_id: args.geom_vb_id,
+            inst_vb_id: args.inst_vb_id
+        };
+        
+        this.OES_vertex_array_object.bindVertexArrayOES(vao.gl_vao)
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.array_buffers[args.geom_vb_id].gl_buf);
+        
+        let shader = this.shaders[args.shader_id];
+        
+        for (let i = 0; i < shader.geom_attribs.length; i ++) {
+            let attr = shader.geom_attribs[i];
+            if (attr.loc < 0) {
+                continue;
+            }
+            gl.vertexAttribPointer(attr.loc, attr.size, gl.FLOAT, false, attr.stride, attr.offset);
+            gl.enableVertexAttribArray(attr.loc);
+            this.ANGLE_instanced_arrays.vertexAttribDivisorANGLE(attr.loc, 0);
+        }
+        
+        gl.bindBuffer(gl.ARRAY_BUFFER, this.array_buffers[args.inst_vb_id].gl_buf);
+        
+        for (let i = 0; i < shader.inst_attribs.length; i ++) {
+            let attr = shader.inst_attribs[i];
+            if (attr.loc < 0) {
+                continue;
+            }
+            gl.vertexAttribPointer(attr.loc, attr.size, gl.FLOAT, false, attr.stride, attr.offset);
+            gl.enableVertexAttribArray(attr.loc);
+            this.ANGLE_instanced_arrays.vertexAttribDivisorANGLE(attr.loc, 1);
+        }
+        
+        gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, this.index_buffers[args.geom_ib_id].gl_buf);
+        this.OES_vertex_array_object.bindVertexArrayOES(null);
+    }
+    
+    
+    
+    
+    FromWasmDrawCall(args) {
+        var gl = this.gl;
+        
+        let shader = this.shaders[args.shader_id];
+        
+        gl.useProgram(shader.program);
+        
+        let vao = this.vaos[args.vao_id];
+        this.OES_vertex_array_object.bindVertexArrayOES(vao.gl_vao);
+        
+        let index_buffer = this.index_buffers[vao.geom_ib_id];
+        let instance_buffer = this.array_buffers[vao.inst_vb_id];
+        // if vr_presenting
+        // TODO CACHE buffers
+        gl.uniform1fv(shader.const_table_uniform, new Float32Array(this.memory.buffer, args.const_table.ptr, args.const_table.len));
+        gl.uniform1fv(shader.pass_uniform, new Float32Array(this.memory.buffer, args.pass_uniform.ptr, args.pass_uniforms.len));
+        gl.uniform1fv(shader.view_uniform, new Float32Array(this.memory.buffer, args.view_uniform.ptr, args.view_uniform.len));
+        gl.uniform1fv(shader.draw_uniform, new Float32Array(this.memory.buffer, args.draw_uniform.ptr, args.draw_uniform.len));
+        gl.uniform1fv(shader.user_uniform, new Float32Array(this.memory.buffer, args.user_uniform.ptr, args.user_uniform.len));
+        gl.uniform1fv(shader.live_uniform, new Float32Array(this.memory.buffer, args.live_uniform.ptr, args.live_uniform.len));
+        
+        let texture_slots = shader.texture_locs.length;
+        for (let i = 0; i < texture_slots; i ++) {
+            let texture_id = args.textures[i]
+            if (texture_id !== undefined) {
+                let tex_obj = this.textures[texture_id];
+                gl.activeTexture(gl.TEXTURE0 + i);
+                gl.bindTexture(gl.TEXTURE_2D, tex_obj);
+                gl.uniform1i(tex_slot.loc, i);
+            }
+        }
+        
+        let indices = index_buffer.length;
+        let instances = instance_buffer.length / shader.instance_slots;
+
+        this.ANGLE_instanced_arrays.drawElementsInstancedANGLE(gl.TRIANGLES, indices, gl.UNSIGNED_INT, 0, instances);
+        this.OES_vertex_array_object.bindVertexArrayOES(null);
+    }
+    
+    
+    FromWasmAllocTextureImage2D(args){
+        var gl = this.gl;
+        var gl_tex = this.textures[texture_id] || gl.createTexture()
+        
+        gl.bindTexture(gl.TEXTURE_2D, gl_tex)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+        gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+        
+        let data_array = new Uint8Array(this.memory.buffer, args.data.ptr, args.width * args.height * 4);
+        gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, args.width, args.height, 0, gl.RGBA, gl.UNSIGNED_BYTE, data_array);
+
+        this.textures[texture_id] = gl_tex;
+    }
+    
+    FromWasmBeginRenderTexture(args){
+        
+        let gl = this.gl
+
+        var gl_framebuffer = this.framebuffers[pass_id] || (this.framebuffers[pass_id] = gl.createFramebuffer());
+        gl.bindFramebuffer(gl.FRAMEBUFFER, gl_framebuffer);
+        
+        let clear_flags = 0;
+        let clear_depth = 0.0;
+        let clear_color;
+        
+        for(let i = 0; i < args.color_targets.length; i++){
+            let tgt = args.color_targets[i];
+            
+            var gl_tex = this.textures[tgt.texture_id] || (this.textures[tgt.texture_id] = gl.createTexture());
+            // resize or create texture
+            if (gl_tex.mp_width != args.width || gl_tex.mp_height != this.args.height) {
+                gl.bindTexture(gl.TEXTURE_2D, gl_tex)
+                
+                clear_flags |= gl.COLOR_BUFFER_BIT;
+                clear_color = tgt.clear_color;
+                
+                gl_tex.mp_width = args.width
+                gl_tex.mp_height = args.height
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
+                gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
+                
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl_tex.mp_width, gl_tex.mp_height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+            }
+            else if (!tgt.init_only) {
+                clear_flags |= gl.COLOR_BUFFER_BIT;
+            }
+            
+            gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, gl_tex, 0)
+        }
+        // TODO implement depth target
+        gl.viewport(0, 0, this.target_width, this.target_height);
+        
+        if (clear_flags !== 0) {
+            gl.clearColor(clear_color.r, clear_color.g, clear_color.b, clear_color.a);
+            gl.clearDepth(clear_depth);
+            gl.clear(clear_flags);
+        }
+    }
+    
+    FromWasmBeginRenderCanvas(args) {
+        let gl = this.gl
+
+        gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+        gl.viewport(0, 0, this.canvas.width, this.canvas.height);
+        
+        let c = args.clear_color;
+        gl.clearColor(c.r, c.g, c.b, c.a);
+        gl.clearDepth(args.depth);
+        gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
+    }
+
+    FromWasmSetDefaultDepthAndBlendMode() {
+        let gl = this.gl
+        gl.enable(gl.DEPTH_TEST);
+        gl.depthFunc(gl.LEQUAL);
+        gl.blendEquationSeparate(gl.FUNC_ADD, gl.FUNC_ADD);
+        gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+        gl.enable(gl.BLEND);
+    }
+    
+    
+    
     // calling into wasm
     
     
@@ -232,14 +648,25 @@ export class WebGLWasmApp extends WasmApp {
                 this.window_info.height = canvas.offsetHeight;
                 // send the wasm a screenresize event
             }
-            this.window_info.is_fullscreen = this.is_fullscreen();
-            this.window_info.can_fullscreen = this.can_fullscreen();
+            this.window_info.is_fullscreen = is_fullscreen();
+            this.window_info.can_fullscreen = can_fullscreen();
             
             if (this.to_wasm !== undefined) {
                 this.to_wasm.ToWasmResizeWindow(this.window_info);
             }
             
-            this.request_animation_frame();
+            this.FromWasmRequestAnimationFrame();
+        }
+        
+        // TODO! BIND THESE SOMEWHERE USEFUL
+        this.handlers.on_app_got_focus = () => {
+            this.to_wasm.ToWasmAppGotFocus();
+            this.do_wasm_pump();
+        }
+        
+        this.handlers.on_app_lost_focus = () => {
+            this.to_wasm.ToWasmAppGotFocus();
+            this.do_wasm_pump();
         }
         
         window.addEventListener('resize', _ => this.handlers.on_screen_resize)
@@ -413,8 +840,6 @@ export class WebGLWasmApp extends WasmApp {
             return f
         }
         
-        var easy_xr_presenting_toggle = window.localStorage.getItem("xr_presenting") == "true"
-        
         var mouse_buttons_down = [];
         
         this.handlers.on_mouse_down = e => {
@@ -505,7 +930,7 @@ export class WebGLWasmApp extends WasmApp {
         
         var last_wheel_time;
         var last_was_wheel;
-        this.handlers.onm_mouse_wheel = e => {
+        this.handlers.on_mouse_wheel = e => {
             var finger = mouse_to_finger(e)
             e.preventDefault()
             let delta = e.timeStamp - last_wheel_time;
@@ -652,7 +1077,7 @@ export class WebGLWasmApp extends WasmApp {
                         });
                     }
                 }
-                this.do_wasm_io();
+                this.do_wasm_pump();
             }
             last_len = ta.value.length;
         };
@@ -703,7 +1128,7 @@ export class WebGLWasmApp extends WasmApp {
                 last_len = ta.value.length;
             }
             //if(key_code
-            this.to_wasm.KeyDown({key: {
+            this.to_wasm.ToWasmKeyDown({key: {
                 key_code: key_code,
                 char_code: e.charCode,
                 is_repeat: e.repeat,
@@ -728,7 +1153,7 @@ export class WebGLWasmApp extends WasmApp {
                 this.bind_keyboard();
                 this.update_text_area_pos();
             }
-            this.to_wasm.KeyUp({key: {
+            this.to_wasm.ToWasmKeyUp({key: {
                 key_code: e.keyCode,
                 char_code: e.charCode,
                 is_repeat: e.repeat,
@@ -755,69 +1180,6 @@ export class WebGLWasmApp extends WasmApp {
         }
     }
     
-    request_animation_frame() {
-        if (this.window_info.xr_is_presenting || this.req_anim_frame_id) {
-            return;
-        }
-        this.req_anim_frame_id = window.requestAnimationFrame(time => {
-            this.req_anim_frame_id = 0;
-            if (this.xr_is_presenting) {
-                return
-            }
-            this.to_wasm.ToWasmAnimationFrame({time: time / 1000.0});
-            this.in_animation_frame = true;
-            this.do_wasm_pump();
-            this.in_animation_frame = false;
-        })
-    }
-    
-    can_fullscreen() {
-        return (document.fullscreenEnabled || document.webkitFullscreenEnabled || document.mozFullscreenEnabled)? true: false
-    }
-    
-    is_fullscreen() {
-        return (document.fullscreenElement || document.webkitFullscreenElement || document.mozFullscreenElement)? true: false
-    }
-    
-    do_fullscreen() {
-        if (document.body.requestFullscreen) {
-            document.body.requestFullscreen();
-            return
-        }
-        if (document.body.webkitRequestFullscreen) {
-            document.body.webkitRequestFullscreen();
-            return
-        }
-        if (document.body.mozRequestFullscreen) {
-            document.body.mozRequestFullscreen();
-            return
-        }
-    }
-    
-    do_normalscreen() {
-        if (this.canvas.exitFullscreen) {
-            this.canvas.exitFullscreen();
-            return
-        }
-        if (this.canvas.webkitExitFullscreen) {
-            this.canvas.webkitExitFullscreen();
-            return
-        }
-        if (this.canvas.mozExitFullscreen) {
-            this.canvas.mozExitFullscreen();
-            return
-        }
-    }
-    
-    do_focus() {
-        this.to_wasm.ToWasmWindowFocusChange({has_focus: true});
-        this.do_wasm_pump();
-    }
-    
-    do_blur() {
-        this.to_wasm.ToWasmWindowFocusChange({has_focus: false});
-        this.do_wasm_pump();
-    }
     
     focus_keyboard_input() {
         this.text_area.focus();
