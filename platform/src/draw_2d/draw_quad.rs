@@ -83,7 +83,7 @@ impl DrawQuad {
 
     pub fn draw(&mut self, cx: &mut Cx2d){
         if let Some(mi) = &mut self.many_instances{
-            mi.instances.extend_from_slice(self.draw_vars.as_slice());            
+            mi.instances.extend_from_slice(self.draw_vars.as_slice());
         }
         else if self.draw_vars.can_instance() {
             let new_area = cx.add_aligned_instance(&self.draw_vars);

@@ -119,7 +119,7 @@ impl Cx {
         self.keys_down.push(key_event);
     }
     
-    pub (crate) fn process_key_up(&mut self, key_event: &KeyEvent) {
+    pub (crate) fn process_key_up(&mut self, key_event: KeyEvent) {
         for i in 0..self.keys_down.len() {
             if self.keys_down[i].key_code == key_event.key_code {
                 self.keys_down.remove(i);

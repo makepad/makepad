@@ -280,6 +280,7 @@ pub struct CxDrawShaderMapping {
     pub view_uniforms: DrawShaderInputs,
     pub pass_uniforms: DrawShaderInputs,
     pub textures: Vec<DrawShaderTextureInput>,
+    pub instance_enums: Vec<usize>,
     pub rect_pos: Option<usize>,
     pub rect_size: Option<usize>,
     pub live_uniforms_buf: Vec<f32>
@@ -299,6 +300,7 @@ impl CxDrawShaderMapping {
         let mut view_uniforms = DrawShaderInputs::new(uniform_packing);
         let mut pass_uniforms = DrawShaderInputs::new(uniform_packing);
         let mut textures = Vec::new();
+        let mut instance_enums = Vec::new();
         let mut rect_pos = None;
         let mut rect_size = None;
         
@@ -317,6 +319,9 @@ impl CxDrawShaderMapping {
                     }
                     if var_def_ptr.is_some() {
                         var_instances.push(field.ident.0, ty.clone(), None,);
+                    }
+                    if let ShaderTy::Enum{..} = ty{
+                        instance_enums.push(instances.total_slots);
                     }
                     instances.push(field.ident.0, ty, None);
                     if let LiveFieldKind::Live = live_field_kind {
@@ -377,6 +382,7 @@ impl CxDrawShaderMapping {
             draw_uniforms,
             view_uniforms,
             pass_uniforms,
+            instance_enums,
             textures,
             rect_pos,
             rect_size,

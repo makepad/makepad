@@ -458,6 +458,10 @@ impl<'a> BackendWriter for HlslBackendWriter<'a> {
         false
     }
     
+    fn enum_is_float(&self)->bool{
+        false
+    }
+        
     fn needs_mul_fn_for_matrix_multiplication(&self) -> bool {
         true
     }

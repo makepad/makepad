@@ -61,10 +61,22 @@ impl Cx {
                         self.platform.vertex_buffers += 1;
                     }
                     
+                    let slots = sh.mapping.instances.total_slots;
+                    let instances = draw_call.instances.as_ref().unwrap().len() / slots;
+                    
+                    // lets patch up integer enums to floats because we dont support integers in attributes
+                    for offset in &sh.mapping.instance_enums{
+                        for i in 0..instances{
+                            let instances = draw_call.instances.as_mut().unwrap();
+                            let float = instances[i * sh.mapping.instances.total_slots + offset];
+                            let integer : u32 = unsafe{std::mem::transmute(float)};
+                            instances[i * sh.mapping.instances.total_slots + offset] = integer as f32;
+                        }
+                    }
+                    
                     self.platform.from_wasm(FromWasmAllocArrayBuffer {
                         buffer_id: draw_call.platform.inst_vb_id.unwrap(),
-                        len: draw_call.instances.as_ref().unwrap().len(),
-                        data: WasmPtrF32::new(draw_call.instances.as_ref().unwrap().as_ptr())
+                        data: WasmDataF32::new(draw_call.instances.as_ref().unwrap())
                     });
                     draw_call.instance_dirty = false;
                 }
@@ -87,11 +99,11 @@ impl Cx {
                     let cxtexture = &mut self.textures[texture_id as usize];
                     if cxtexture.update_image {
                         cxtexture.update_image = false;
-                        self.platform.from_wasm(FromWasmUpdateTextureImage2D {
+                        self.platform.from_wasm(FromWasmAllocTextureImage2D {
                             texture_id,
-                            texture_width: cxtexture.desc.width.unwrap(),
-                            texture_height: cxtexture.desc.height.unwrap(),
-                            image: WasmPtrU32::new(cxtexture.image_u32.as_ptr())
+                            width: cxtexture.desc.width.unwrap(),
+                            height: cxtexture.desc.height.unwrap(),
+                            data: WasmDataU32::new(&cxtexture.image_u32)
                         });
                     }
                 }
@@ -114,14 +126,12 @@ impl Cx {
                     }
                     self.platform.from_wasm(FromWasmAllocArrayBuffer {
                         buffer_id: geometry.platform.vb_id.unwrap(),
-                        len: geometry.vertices.len(),
-                        data: WasmPtrF32::new(geometry.vertices.as_ptr())
+                        data: WasmDataF32::new(&geometry.vertices)
                     });
                     
                     self.platform.from_wasm(FromWasmAllocIndexBuffer {
                         buffer_id: geometry.platform.ib_id.unwrap(),
-                        len: geometry.indices.len(),
-                        data: WasmPtrU32::new(geometry.indices.as_ptr())
+                        data: WasmDataU32::new(&geometry.indices)
                     });
                     
                     geometry.dirty = false;
@@ -165,12 +175,12 @@ impl Cx {
                 self.platform.from_wasm(FromWasmDrawCall {
                     shader_id: draw_call.draw_shader.draw_shader_id,
                     vao_id: draw_call.platform.vao.as_ref().unwrap().vao_id,
-                    pass_uniforms: WasmPtrF32::new(pass_uniforms.as_ptr()),
-                    view_uniforms: WasmPtrF32::new(draw_list.draw_list_uniforms.as_slice().as_ptr()),
-                    draw_uniforms: WasmPtrF32::new(draw_call.draw_uniforms.as_slice().as_ptr()),
-                    user_uniforms: WasmPtrF32::new(draw_call.user_uniforms.as_slice().as_ptr()),
-                    live_uniforms: WasmPtrF32::new(sh.mapping.live_uniforms_buf.as_ptr()),
-                    const_table: WasmPtrF32::new(sh.mapping.const_table.table.as_ptr()),
+                    pass_uniforms: WasmDataF32::new(pass_uniforms),
+                    view_uniforms: WasmDataF32::new(draw_list.draw_list_uniforms.as_slice()),
+                    draw_uniforms: WasmDataF32::new(draw_call.draw_uniforms.as_slice()),
+                    user_uniforms: WasmDataF32::new(draw_call.user_uniforms.as_slice()),
+                    live_uniforms: WasmDataF32::new(&sh.mapping.live_uniforms_buf),
+                    const_table: WasmDataF32::new(&sh.mapping.const_table.table),
                     textures: draw_call.texture_slots.clone()
                 });
             }
@@ -219,7 +229,7 @@ impl Cx {
             PassClearDepth::ClearWith(depth) => depth
         };
         
-        self.platform.from_wasm(FromWasmBeginMainCanvas {
+        self.platform.from_wasm(FromWasmBeginRenderCanvas {
             clear_color: clear_color.into(),
             clear_depth,
         });
@@ -247,27 +257,31 @@ impl Cx {
         
         self.setup_render_pass(pass_id, dpi_factor);
         
+        /*
         self.platform.from_wasm(FromWasmBeginRenderTargets {
             pass_id,
             width: (pass_size.x * dpi_factor) as usize,
             height: (pass_size.y * dpi_factor) as usize
-        });
+        });*/
         
-        for color_texture in &self.passes[pass_id].color_textures {
+        let mut color_targets = [WColorTarget::default()];
+        let mut depth_target = WDepthTarget::default();
+        
+        for (index, color_texture) in self.passes[pass_id].color_textures.iter().enumerate() {
             match color_texture.clear_color {
                 PassClearColor::InitWith(clear_color) => {
-                    self.platform.from_wasm(FromWasmAddColorTarget {
+                    color_targets[index] = WColorTarget{
                         texture_id: color_texture.texture_id,
                         init_only: true,
                         clear_color: clear_color.into()
-                    })
+                    };
                 },
                 PassClearColor::ClearWith(clear_color) => {
-                    self.platform.from_wasm(FromWasmAddColorTarget {
+                    color_targets[index] = WColorTarget{
                         texture_id: color_texture.texture_id,
                         init_only: false,
                         clear_color: clear_color.into()
-                    })
+                    };
                 }
             }
         }
@@ -276,23 +290,29 @@ impl Cx {
         if let Some(depth_texture_id) = self.passes[pass_id].depth_texture {
             match self.passes[pass_id].clear_depth {
                 PassClearDepth::InitWith(clear_depth) => {
-                    self.platform.from_wasm(FromWasmSetDepthTarget {
+                    depth_target = WDepthTarget{
                         texture_id: depth_texture_id,
                         init_only: true,
                         clear_depth
-                    });
+                    };
                 },
                 PassClearDepth::ClearWith(clear_depth) => {
-                    self.platform.from_wasm(FromWasmSetDepthTarget {
+                    depth_target = WDepthTarget{
                         texture_id: depth_texture_id,
                         init_only: false,
                         clear_depth
-                    });
+                    };
                 }
             }
         }
         
-        self.platform.from_wasm(FromWasmEndRenderTargets {});
+        self.platform.from_wasm(FromWasmBeginRenderTexture {
+            pass_id,
+            width: (pass_size.x * dpi_factor) as usize,
+            height: (pass_size.y * dpi_factor) as usize,
+            color_targets,
+            depth_target
+        });
         
         // set the default depth and blendmode
         self.platform.from_wasm(FromWasmSetDefaultDepthAndBlendMode {});
@@ -338,22 +358,24 @@ impl Cx {
                 }
                 if cx_shader.platform.is_none() {
                     let shp = CxPlatformDrawShader::new(vertex.clone(), pixel.clone());
-                    cx_shader.platform = Some(self.draw_shaders.platform.len());
-                    self.draw_shaders.platform.push(shp);
                     self.platform.from_wasm(FromWasmCompileWebGLShader{
                         shader_id: item.draw_shader_id,
-                        vertex, 
-                        pixel,
+                        vertex: shp.vertex.clone(), 
+                        pixel: shp.pixel.clone(),
                         geometry_slots: cx_shader.mapping.geometries.total_slots,
                         instance_slots: cx_shader.mapping.instances.total_slots,
+                        /*
                         pass_uniforms_slots: cx_shader.mapping.pass_uniforms.total_slots,
                         view_uniforms_slots: cx_shader.mapping.view_uniforms.total_slots,
                         draw_uniforms_slots: cx_shader.mapping.draw_uniforms.total_slots,
                         user_uniforms_slots: cx_shader.mapping.user_uniforms.total_slots,
                         live_uniforms_slots: cx_shader.mapping.live_uniforms.total_slots,
                         const_table_slots:cx_shader.mapping.const_table.table.len(),
+                        */
                         textures:cx_shader.mapping.textures.iter().map(|v| v.to_from_wasm_texture_input()).collect()
-                    })
+                    });
+                    cx_shader.platform = Some(self.draw_shaders.platform.len());
+                    self.draw_shaders.platform.push(shp);
                 }
             }
         }

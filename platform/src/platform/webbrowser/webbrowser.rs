@@ -10,13 +10,17 @@ use {
                 to_wasm::*,
             }
         },
+        area::Area,
         event::{
             Timer,
             Signal,
             Event,
             XRInput,
+            TextCopyEvent,
+            TimerEvent,
             DraggedItem,
-            WindowGeom
+            WindowGeom,
+            WindowGeomChangeEvent
         },
         menu::Menu,
         cursor::MouseCursor,
@@ -56,15 +60,13 @@ impl Cx {
         
         self.platform.from_wasm = Some(FromWasmMsg::new());
         
-        let is_animation_frame = false;
+        let mut is_animation_frame = false;
         while !to_wasm.was_last_block() {
             let block_id = LiveId(to_wasm.read_u64());
             let skip = to_wasm.read_block_skip();
             match block_id {
                 id!(ToWasmGetDeps) => { // fetch_deps
                     let tw = ToWasmGetDeps::read_to_wasm(&mut to_wasm);
-                    
-                    //self.call_event_handler(&mut Event::Construct);
                     
                     self.gpu_info.init_from_info(
                         tw.gpu_info.min_uniform_vectors,
@@ -73,373 +75,174 @@ impl Cx {
                     );
                     
                     self.platform_type = tw.browser_info.into();
-                    // send the UI our deps, overlap with shadercompiler
+                    
                     let mut deps = Vec::<String>::new();
                     for (path, _) in &self.dependencies {
                         deps.push(path.to_string());
                     }
-                    // other textures, things
+                    
                     self.platform.from_wasm(
                         FromWasmLoadDeps {deps}
                     );
                 },
                 
-                id!(ToWasmInit) => { // deps_loaded
+                id!(ToWasmInit) => {
                     let tw = ToWasmInit::read_to_wasm(&mut to_wasm);
                     
-                    for dep_in in tw.deps{
-                        if let Some(dep) = self.dependencies.get_mut(&dep_in.path){
+                    for dep_in in tw.deps {
+                        if let Some(dep) = self.dependencies.get_mut(&dep_in.path) {
                             
                             dep.data = Some(Ok(dep_in.data.into_vec_u8()))
                         }
                     }
                     self.platform.window_geom = tw.window_info.into();
-                    //self.default_dpi_factor = self.platform.window_geom.dpi_factor;
                     
                     self.call_event_handler(&mut Event::Construct);
+
+                    self.redraw_all();
                 },
-                /*
-                3 => { // init
-                    
-                    if self.windows.len() > 0 {
-                        self.windows[0].window_geom = self.platform.window_geom.clone();
-                    }
-                    
-                    self.redraw_child_area(Area::All);
-                },
-                4 => { // resize
+                
+                id!(ToWasmResizeWindow) => {
+                    let tw = ToWasmResizeWindow::read_to_wasm(&mut to_wasm);
                     let old_geom = self.platform.window_geom.clone();
-                    self.platform.window_geom = WindowGeom {
-                        is_topmost: false,
-                        inner_size: Vec2 {x: to_wasm.mf32(), y: to_wasm.mf32()},
-                        dpi_factor: to_wasm.mf32(),
-                        outer_size: Vec2 {x: 0., y: 0.},
-                        position: Vec2 {x: 0., y: 0.},
-                        xr_is_presenting: to_wasm.mu32() > 0,
-                        xr_can_present: to_wasm.mu32() > 0,
-                        is_fullscreen: to_wasm.mu32() > 0,
-                        can_fullscreen: to_wasm.mu32() > 0,
-                    };
-                    let new_geom = self.platform.window_geom.clone();
-                    
-                    if self.windows.len()>0 {
-                        self.windows[0].window_geom = self.platform.window_geom.clone();
-                    }
+                    let new_geom = tw.window_info.into();
                     if old_geom != new_geom {
+                        self.platform.window_geom = new_geom.clone();
+                        if self.windows.len()>0 {
+                            self.windows[0].window_geom = new_geom.clone();
+                        }
                         self.call_event_handler(&mut Event::WindowGeomChange(WindowGeomChangeEvent {
                             window_id: 0,
                             old_geom: old_geom,
                             new_geom: new_geom
                         }));
                     }
-                    
-                    // do our initial redraw and repaint
-                    self.redraw_child_area(Area::All);
-                },
-                5 => { // animation_frame
+                }
+                
+                id!(ToWasmAnimationFrame) => {
+                    let tw = ToWasmAnimationFrame::read_to_wasm(&mut to_wasm);
                     is_animation_frame = true;
-                    let time = to_wasm.mf64();
-                    self.anim_time = time;
-                    //log!(self, "{} o clock",time);
-                    if self.playing_animator_ids.len() != 0 {
-                        self.call_animate_event(time);
+                    if self.new_next_frames.len() != 0 {
+                        self.call_next_frame_event(tw.time);
                     }
-                    if self.next_frames.len() != 0 {
-                        self.call_next_frame_event(time);
-                    }
-                },
-                6 => { // finger down
-                    let abs = Vec2 {x: to_wasm.mf32(), y: to_wasm.mf32()};
-                    let digit = to_wasm.mu32() as usize;
-                    self.platform.fingers_down[digit] = true;
-                    let is_touch = to_wasm.mu32() > 0;
-                    let modifiers = unpack_key_modifier(to_wasm.mu32());
-                    let time = to_wasm.mf64();
-                    let tap_count = self.process_tap_count(digit, abs, time);
-                    self.call_event_handler(&mut Event::FingerDown(FingerDownEvent {
-                        window_id: 0,
-                        abs: abs,
-                        rel: abs,
-                        rect: Rect::default(),
-                        handled: false,
-                        digit: digit,
-                        input_type: if is_touch {FingerInputType::Touch} else {FingerInputType::Mouse},
-                        modifiers: modifiers,
-                        time: time,
-                        tap_count: tap_count
-                    }));
-                },
-                7 => { // finger up
-                    let abs = Vec2 {x: to_wasm.mf32(), y: to_wasm.mf32()};
-                    let digit = to_wasm.mu32() as usize;
+                }
+                
+                id!(ToWasmFingerDown) => {
+                    let tw = ToWasmFingerDown::read_to_wasm(&mut to_wasm);
+                    
+                    let tap_count = self.process_tap_count(
+                        tw.finger.digit,
+                        Vec2 {x: tw.finger.x, y: tw.finger.y},
+                        tw.finger.time
+                    );
+                    
+                    self.platform.fingers_down[tw.finger.digit] = true;
+                    
+                    self.call_event_handler(&mut Event::FingerDown(
+                        tw.into_finger_down_event(tap_count)
+                    ));
+                }
+                
+                id!(ToWasmFingerUp) => {
+                    let tw = ToWasmFingerUp::read_to_wasm(&mut to_wasm);
+                    
+                    let digit = tw.finger.digit;
                     self.platform.fingers_down[digit] = false;
+                    
                     if !self.platform.fingers_down.iter().any( | down | *down) {
                         self.down_mouse_cursor = None;
                     }
-                    let is_touch = to_wasm.mu32()>0;
-                    let modifiers = unpack_key_modifier(to_wasm.mu32());
-                    let time = to_wasm.mf64();
-                    self.call_event_handler(&mut Event::FingerUp(FingerUpEvent {
-                        window_id: 0,
-                        abs: abs,
-                        rel: abs,
-                        rect: Rect::default(),
-                        abs_start: Vec2::default(),
-                        rel_start: Vec2::default(),
-                        digit: digit,
-                        is_over: false,
-                        input_type: if is_touch {FingerInputType::Touch} else {FingerInputType::Mouse},
-                        modifiers: modifiers,
-                        time: time
-                    }));
+                    
+                    self.call_event_handler(&mut Event::FingerUp(tw.into()));
+                    
                     self.fingers[digit].captured = Area::Empty;
                     self.down_mouse_cursor = None;
-                },
-                8 => { // finger move
-                    let abs = Vec2 {x: to_wasm.mf32(), y: to_wasm.mf32()};
-                    let digit = to_wasm.mu32() as usize;
-                    let is_touch = to_wasm.mu32()>0;
-                    let modifiers = unpack_key_modifier(to_wasm.mu32());
-                    let time = to_wasm.mf64();
-                    self.call_event_handler(&mut Event::FingerMove(FingerMoveEvent {
-                        window_id: 0,
-                        abs: abs,
-                        rel: abs,
-                        rect: Rect::default(),
-                        abs_start: Vec2::default(),
-                        rel_start: Vec2::default(),
-                        is_over: false,
-                        digit: digit,
-                        input_type: if is_touch {FingerInputType::Touch} else {FingerInputType::Mouse},
-                        modifiers: modifiers,
-                        time: time
-                    }));
-                },
-                9 => { // finger hover
+                }
+                
+                id!(ToWasmFingerMove) => {
+                    let tw = ToWasmFingerMove::read_to_wasm(&mut to_wasm);
+                    self.call_event_handler(&mut Event::FingerMove(tw.into()));
+                }
+                
+                id!(ToWasmFingerHover) => {
+                    let tw = ToWasmFingerHover::read_to_wasm(&mut to_wasm);
                     self.fingers[0].over_last = Area::Empty;
-                    let abs = Vec2 {x: to_wasm.mf32(), y: to_wasm.mf32()};
                     self.hover_mouse_cursor = None;
-                    let modifiers = unpack_key_modifier(to_wasm.mu32());
-                    let time = to_wasm.mf64();
-                    self.call_event_handler(&mut Event::FingerHover(FingerHoverEvent {
-                        any_down: false,
-                        digit: 0,
-                        window_id: 0,
-                        abs: abs,
-                        rel: abs,
-                        rect: Rect::default(),
-                        handled: false,
-                        hover_state: HoverState::Over,
-                        modifiers: modifiers,
-                        time: time
-                    }));
+                    self.call_event_handler(&mut Event::FingerHover(tw.into()));
                     self.fingers[0]._over_last = self.fingers[0].over_last;
-                    //if fe.hover_state == HoverState::Out {
-                    //    self.hover_mouse_cursor = None;
-                    // }
-                },
-                10 => { // finger scroll
-                    let abs = Vec2 {x: to_wasm.mf32(), y: to_wasm.mf32()};
-                    let scroll = Vec2 {
-                        x: to_wasm.mf32(),
-                        y: to_wasm.mf32()
-                    };
-                    let is_wheel = to_wasm.mu32() != 0;
-                    let modifiers = unpack_key_modifier(to_wasm.mu32());
-                    let time = to_wasm.mf64();
-                    self.call_event_handler(&mut Event::FingerScroll(FingerScrollEvent {
-                        window_id: 0,
-                        digit: 0,
-                        abs: abs,
-                        rel: abs,
-                        rect: Rect::default(),
-                        handled_x: false,
-                        handled_y: false,
-                        scroll: scroll,
-                        input_type: if is_wheel {FingerInputType::Mouse} else {FingerInputType::Touch},
-                        modifiers: modifiers,
-                        time: time
-                    }));
-                },
-                11 => { // finger out
-                    let abs = Vec2 {x: to_wasm.mf32(), y: to_wasm.mf32()};
-                    let modifiers = unpack_key_modifier(to_wasm.mu32());
-                    let time = to_wasm.mf64();
-                    self.call_event_handler(&mut Event::FingerHover(FingerHoverEvent {
-                        window_id: 0,
-                        digit: 0,
-                        any_down: false,
-                        abs: abs,
-                        rel: abs,
-                        rect: Rect::default(),
-                        handled: false,
-                        hover_state: HoverState::Out,
-                        modifiers: modifiers,
-                        time: time
-                    }));
-                },
-                12 => { // key_down
-                    let key_event = KeyEvent {
-                        key_code: web_to_key_code(to_wasm.mu32()),
-                        //key_char: if let Some(c) = std::char::from_u32(to_wasm.mu32()) {c}else {'?'},
-                        is_repeat: to_wasm.mu32() > 0,
-                        modifiers: unpack_key_modifier(to_wasm.mu32()),
-                        time: to_wasm.mf64()
-                    };
-                    self.process_key_down(key_event.clone());
-                    self.call_event_handler(&mut Event::KeyDown(key_event));
-                },
-                13 => { // key up
-                    let key_event = KeyEvent {
-                        key_code: web_to_key_code(to_wasm.mu32()),
-                        //key_char: if let Some(c) = std::char::from_u32(to_wasm.mu32()) {c}else {'?'},
-                        is_repeat: to_wasm.mu32() > 0,
-                        modifiers: unpack_key_modifier(to_wasm.mu32()),
-                        time: to_wasm.mf64()
-                    };
-                    self.process_key_up(&key_event);
-                    self.call_event_handler(&mut Event::KeyUp(key_event));
-                },
-                14 => { // text input
-                    self.call_event_handler(&mut Event::TextInput(TextInputEvent {
-                        was_paste: to_wasm.mu32()>0,
-                        replace_last: to_wasm.mu32()>0,
-                        input: to_wasm.parse_string(),
-                    }));
-                },
-                15 => { // file read data
-                    let read_id = to_wasm.mu32();
-                    let buf_ptr = to_wasm.mu32() as *mut u8;
-                    let buf_len = to_wasm.mu32() as usize;
-                    let vec_buf = unsafe {Vec::<u8>::from_raw_parts(buf_ptr, buf_len, buf_len)};
-                    
-                    self.call_event_handler(&mut Event::FileRead(FileReadEvent {
-                        read_id: read_id as u64,
-                        data: Ok(vec_buf)
-                    }));
-                },
-                16 => { // file error
-                    let read_id = to_wasm.mu32();
-                    
-                    self.call_event_handler(&mut Event::FileRead(FileReadEvent {
-                        read_id: read_id as u64,
-                        data: Err("Cannot load".to_string())
-                    }));
-                },
-                17 => { // text copy
+                }
+                
+                id!(ToWasmFingerOut) => {
+                    // what was this for again?
+                    let tw = ToWasmFingerOut::read_to_wasm(&mut to_wasm);
+                    self.fingers[0].over_last = Area::Empty;
+                    self.hover_mouse_cursor = None;
+                    self.call_event_handler(&mut Event::FingerHover(tw.into()));
+                    self.fingers[0]._over_last = self.fingers[0].over_last;
+                }
+                
+                id!(ToWasmFingerScroll) => {
+                    let tw = ToWasmFingerScroll::read_to_wasm(&mut to_wasm);
+                    self.call_event_handler(&mut Event::FingerScroll(tw.into()));
+                }
+                
+                id!(ToWasmKeyDown) => {
+                    let tw = ToWasmKeyDown::read_to_wasm(&mut to_wasm);
+                    self.process_key_down(tw.key.clone().into());
+                    self.call_event_handler(&mut Event::KeyDown(tw.key.into()));
+                }
+                
+                id!(ToWasmKeyUp) => {
+                    let tw = ToWasmKeyUp::read_to_wasm(&mut to_wasm);
+                    self.process_key_up(tw.key.clone().into());
+                    self.call_event_handler(&mut Event::KeyUp(tw.key.into()));
+                }
+                
+                id!(ToWasmTextInput) => {
+                    let tw = ToWasmTextInput::read_to_wasm(&mut to_wasm);
+                    self.call_event_handler(&mut Event::TextInput(tw.into()));
+                }
+                
+                id!(ToWasmTextCopy) => {
                     let mut event = Event::TextCopy(TextCopyEvent {
                         response: None
                     });
                     self.call_event_handler(&mut event);
-                    match &event {
-                        Event::TextCopy(req) => if let Some(response) = &req.response {
-                            self.platform.from_wasm.text_copy_response(&response);
-                        }
-                        _ => ()
-                    };
-                },
-                18 => { // timer fired
-                    let timer_id = to_wasm.mf64() as u64;
-                    self.call_event_handler(&mut Event::Timer(TimerEvent {
-                        timer_id: timer_id
-                    }));
-                },
-                19 => { // window focus lost
-                    let focus = to_wasm.mu32();
-                    if focus == 0 {
-                        self.call_all_keys_up();
-                        self.call_event_handler(&mut Event::AppFocusLost);
+                    if let Event::TextCopy(TextCopyEvent {response: Some(response)}) = event {
+                        self.platform.from_wasm(FromWasmTextCopyResponse {response});
                     }
-                    else {
-                        self.call_event_handler(&mut Event::AppFocus);
-                    }
-                },
-                20 => { // xr_update, TODO add all the matrices / tracked hands / position IO'ed here
-                    //is_animation_frame = true;
-                    let inputs_len = to_wasm.mu32();
-                    let time = to_wasm.mf64();
-                    let head_transform = to_wasm.parse_transform();
-                    let mut left_input = XRInput::default();
-                    let mut right_input = XRInput::default();
-                    let mut other_inputs = Vec::new();
-                    for _ in 0..inputs_len {
-                        let skip = to_wasm.mu32();
-                        if skip == 0 {
-                            continue;
-                        }
-                        let mut input = XRInput::default();
-                        input.active = true;
-                        input.grip = to_wasm.parse_transform();
-                        input.ray = to_wasm.parse_transform();
-                        
-                        let hand = to_wasm.mu32();
-                        let num_buttons = to_wasm.mu32() as usize;
-                        input.num_buttons = num_buttons;
-                        for i in 0..num_buttons {
-                            input.buttons[i].pressed = to_wasm.mu32() > 0;
-                            input.buttons[i].value = to_wasm.mf32();
-                        }
-                        
-                        let num_axes = to_wasm.mu32() as usize;
-                        input.num_axes = num_axes;
-                        for i in 0..num_axes {
-                            input.axes[i] = to_wasm.mf32();
-                        }
-                        
-                        if hand == 1 {
-                            left_input = input;
-                        }
-                        else if hand == 2 {
-                            right_input = input;
-                        }
-                        else {
-                            other_inputs.push(input);
-                        }
-                    }
-                    // call the VRUpdate event
-                    self.call_event_handler(&mut Event::XRUpdate(XRUpdateEvent {
-                        time,
-                        head_transform,
-                        last_left_input: self.platform.xr_last_left_input.clone(),
-                        last_right_input: self.platform.xr_last_right_input.clone(),
-                        left_input: left_input.clone(),
-                        right_input: right_input.clone(),
-                        other_inputs,
-                    }));
-                    
-                    self.platform.xr_last_left_input = left_input;
-                    self.platform.xr_last_right_input = right_input;
-                    
-                },
-                21 => { // paint_dirty, only set the passes of the main window to dirty
-                    self.passes[self.windows[0].main_pass_id.unwrap()].paint_dirty = true;
-                },
-                22 => { //http_send_response
-                    let signal_id = to_wasm.mu32();
-                    let success = to_wasm.mu32();
-                    let mut new_set = BTreeSet::new();
-                    new_set.insert(match success {
-                        1 => Cx::status_http_send_ok(),
-                        _ => Cx::status_http_send_fail()
-                    });
-                    self.signals.insert(Signal {signal_id: signal_id as usize}, new_set);
-                },
-                23 => { // websocket message
-                    let vec_ptr = to_wasm.mu32() as *mut u8;
-                    let vec_len = to_wasm.mu32() as usize;
-                    let url = to_wasm.parse_string();
-                    let data = unsafe {Vec::<u8>::from_raw_parts(vec_ptr, vec_len, vec_len)};
-                    self.call_event_handler(&mut Event::WebSocketMessage(
-                        WebSocketMessageEvent {url, result: Ok(data)}
-                    ));
                 }
-                24 => { // websocket error
-                    let url = to_wasm.parse_string();
-                    let err = to_wasm.parse_string();
-                    self.call_event_handler(&mut Event::WebSocketMessage(
-                        WebSocketMessageEvent {url, result: Err(err)}
-                    ));
-                }*/
+                
+                id!(ToWasmTimerFired) => {
+                    let tw = ToWasmTimerFired::read_to_wasm(&mut to_wasm);
+                    self.call_event_handler(&mut Event::Timer(TimerEvent {
+                        timer_id: tw.timer_id as u64
+                    }));
+                }
+                
+                id!(ToWasmAppGotFocus) => {
+                     self.call_event_handler(&mut Event::AppGotFocus);
+                }
+                
+                id!(ToWasmAppLostFocus) => {
+                     self.call_event_handler(&mut Event::AppLostFocus);
+                }
+                
+                id!(ToWasmXRUpdate) => {
+                    let tw = ToWasmXRUpdate::read_to_wasm(&mut to_wasm);
+                    let mut event = Event::XRUpdate(
+                        tw.into_xrupdate_event(self.platform.xr_last_inputs.take())
+                    );
+                    self.call_event_handler(&mut event);
+                    if let Event::XRUpdate(event) = event{
+                        self.platform.xr_last_inputs = Some(event.inputs);
+                    }
+                }
+                
+                id!(ToWasmPaintDirty) => {
+                    self.passes[self.windows[0].main_pass_id.unwrap()].paint_dirty = true;
+                }
+                
                 _ => {
                     console_log!("Message unknown");
                     
@@ -496,7 +299,7 @@ impl Cx {
             };
         }
         
-        //self.webgl_compile_shaders();
+        self.webgl_compile_shaders();
         
         // check if we need to send a cursor
         if let Some(cursor) = self.down_mouse_cursor {
@@ -504,7 +307,7 @@ impl Cx {
                 FromWasmSetMouseCursor::new(cursor)
             )
         }
-        else if let Some(cursor) = self.hover_mouse_cursor{
+        else if let Some(cursor) = self.hover_mouse_cursor {
             self.platform.from_wasm(
                 FromWasmSetMouseCursor::new(cursor)
             )
@@ -545,7 +348,7 @@ impl Cx {
         // request animation frame if still need to redraw, or repaint
         // we use request animation frame for that.
         if self.need_redrawing() || self.new_next_frames.len() != 0 {
-            self.platform.from_wasm(FromWasmRequestAnimationFrame{});
+            self.platform.from_wasm(FromWasmRequestAnimationFrame {});
         }
         
         //return wasm pointer to caller
@@ -560,14 +363,14 @@ impl Cx {
 }
 
 
-impl CxPlatformApi for Cx{
-
+impl CxPlatformApi for Cx {
+    
     fn show_text_ime(&mut self, x: f32, y: f32) {
-        self.platform.from_wasm(FromWasmShowTextIME{x,y});
+        self.platform.from_wasm(FromWasmShowTextIME {x, y});
     }
     
     fn hide_text_ime(&mut self) {
-       self.platform.from_wasm(FromWasmHideTextIME{});
+        self.platform.from_wasm(FromWasmHideTextIME {});
     }
     
     fn post_signal(_signal: Signal, _value: u64) {
@@ -593,17 +396,17 @@ impl CxPlatformApi for Cx{
     
     fn start_timer(&mut self, interval: f64, repeats: bool) -> Timer {
         self.timer_id += 1;
-        self.platform.from_wasm(FromWasmStartTimer{
+        self.platform.from_wasm(FromWasmStartTimer {
             repeats,
             interval,
-            id: self.timer_id as f64,
+            timer_id: self.timer_id as f64,
         });
         Timer {timer_id: self.timer_id}
     }
     
     fn stop_timer(&mut self, timer: Timer) {
         if timer.timer_id != 0 {
-            self.platform.from_wasm(FromWasmStopTimer{
+            self.platform.from_wasm(FromWasmStopTimer {
                 id: timer.timer_id as f64,
             });
         }
@@ -618,7 +421,7 @@ impl CxPlatformApi for Cx{
     }*/
     fn start_dragging(&mut self, _dragged_item: DraggedItem) {
     }
-        
+    
     fn update_menu(&mut self, _menu: &Menu) {
     }
 }
@@ -632,8 +435,7 @@ pub struct CxPlatform {
     pub index_buffers: usize,
     pub vaos: usize,
     pub fingers_down: Vec<bool>,
-    pub xr_last_left_input: XRInput,
-    pub xr_last_right_input: XRInput,
+    pub xr_last_inputs: Option<Vec<XRInput>>,
     pub file_read_id: u64,
 }
 
@@ -648,8 +450,7 @@ impl Default for CxPlatform {
             vaos: 0,
             file_read_id: 1,
             fingers_down: Vec::new(),
-            xr_last_left_input: XRInput::default(),
-            xr_last_right_input: XRInput::default(),
+            xr_last_inputs: None,
         }
     }
 }
@@ -685,40 +486,38 @@ pub unsafe extern "C" fn wasm_get_js_msg_class() -> u32 {
     ToWasmTextCopy::to_wasm_js_method(&mut out);
     ToWasmTimerFired::to_wasm_js_method(&mut out);
     ToWasmPaintDirty::to_wasm_js_method(&mut out);
-    ToWasmWindowFocusChange::to_wasm_js_method(&mut out);
+    ToWasmAppGotFocus::to_wasm_js_method(&mut out);
+    ToWasmAppLostFocus::to_wasm_js_method(&mut out);
     ToWasmXRUpdate::to_wasm_js_method(&mut out);
     
     out.push_str("},\n");
     out.push_str("FromWasmMsg:class extends FromWasmMsg{\n");
     
+    FromWasmLoadDeps::from_wasm_js_method(&mut out);
+    FromWasmStartTimer::from_wasm_js_method(&mut out);
+    FromWasmStopTimer::from_wasm_js_method(&mut out);
+    FromWasmFullScreen::from_wasm_js_method(&mut out);
+    FromWasmNormalScreen::from_wasm_js_method(&mut out);
+    FromWasmRequestAnimationFrame::from_wasm_js_method(&mut out);
+    FromWasmSetDocumentTitle::from_wasm_js_method(&mut out);
+    FromWasmSetMouseCursor::from_wasm_js_method(&mut out);
+    FromWasmTextCopyResponse::from_wasm_js_method(&mut out);
+    FromWasmShowTextIME::from_wasm_js_method(&mut out);
+    FromWasmHideTextIME::from_wasm_js_method(&mut out);
+
     FromWasmCompileWebGLShader::from_wasm_js_method(&mut out);
     FromWasmAllocArrayBuffer::from_wasm_js_method(&mut out);
     FromWasmAllocIndexBuffer::from_wasm_js_method(&mut out);
     FromWasmAllocVao::from_wasm_js_method(&mut out);
+    FromWasmAllocTextureImage2D::from_wasm_js_method(&mut out);
+    FromWasmBeginRenderTexture::from_wasm_js_method(&mut out);
+    FromWasmBeginRenderCanvas::from_wasm_js_method(&mut out);
+    FromWasmSetDefaultDepthAndBlendMode::from_wasm_js_method(&mut out);
     FromWasmDrawCall::from_wasm_js_method(&mut out);
-    FromWasmClear::from_wasm_js_method(&mut out);
-    FromWasmLoadDeps::from_wasm_js_method(&mut out);
-    FromWasmUpdateTextureImage2D::from_wasm_js_method(&mut out);
-    FromWasmRequestAnimationFrame::from_wasm_js_method(&mut out);
-    FromWasmSetDocumentTitle::from_wasm_js_method(&mut out);
-    FromWasmSetMouseCursor::from_wasm_js_method(&mut out);
-    FromWasmReadFile::from_wasm_js_method(&mut out);
-    FromWasmShowTextIME::from_wasm_js_method(&mut out);
-    FromWasmHideTextIME::from_wasm_js_method(&mut out);
-    FromWasmTextCopyResponse::from_wasm_js_method(&mut out);
-    FromWasmStartTimer::from_wasm_js_method(&mut out);
-    FromWasmStopTimer::from_wasm_js_method(&mut out);
+
     FromWasmXrStartPresenting::from_wasm_js_method(&mut out);
     FromWasmXrStopPresenting::from_wasm_js_method(&mut out);
-    FromWasmBeginRenderTargets::from_wasm_js_method(&mut out);
-    FromWasmAddColorTarget::from_wasm_js_method(&mut out);
-    FromWasmSetDepthTarget::from_wasm_js_method(&mut out);
-    FromWasmEndRenderTargets::from_wasm_js_method(&mut out);
-    FromWasmBeginMainCanvas::from_wasm_js_method(&mut out);
-    FromWasmSetDefaultDepthAndBlendMode::from_wasm_js_method(&mut out);
-    FromWasmFullScreen::from_wasm_js_method(&mut out);
-    FromWasmNormalScreen::from_wasm_js_method(&mut out);
-    
+   
     out.push_str("}\n");
     out.push_str("}");
     
