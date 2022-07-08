@@ -98,8 +98,6 @@ impl Cx {
                     self.platform.window_geom = tw.window_info.into();
                     
                     self.call_event_handler(&mut Event::Construct);
-
-                    self.redraw_all();
                 },
                 
                 id!(ToWasmResizeWindow) => {
@@ -239,6 +237,10 @@ impl Cx {
                     }
                 }
                 
+                id!(ToWasmRedrawAll)=>{
+                    self.redraw_all();
+                }
+                
                 id!(ToWasmPaintDirty) => {
                     self.passes[self.windows[0].main_pass_id.unwrap()].paint_dirty = true;
                 }
@@ -256,8 +258,8 @@ impl Cx {
         
         if self.need_redrawing() || self.new_next_frames.len() != 0 {
             self.call_draw_event();
-        }
-        
+            self.platform.from_wasm(FromWasmRequestAnimationFrame {});
+        }        
         self.call_signals_and_triggers();
         
         for window in &mut self.windows {
@@ -347,9 +349,6 @@ impl Cx {
         
         // request animation frame if still need to redraw, or repaint
         // we use request animation frame for that.
-        if self.need_redrawing() || self.new_next_frames.len() != 0 {
-            self.platform.from_wasm(FromWasmRequestAnimationFrame {});
-        }
         
         //return wasm pointer to caller
         self.platform.from_wasm.take().unwrap().release_ownership()
@@ -486,6 +485,7 @@ pub unsafe extern "C" fn wasm_get_js_msg_class() -> u32 {
     ToWasmTextCopy::to_wasm_js_method(&mut out);
     ToWasmTimerFired::to_wasm_js_method(&mut out);
     ToWasmPaintDirty::to_wasm_js_method(&mut out);
+    ToWasmRedrawAll::to_wasm_js_method(&mut out);
     ToWasmAppGotFocus::to_wasm_js_method(&mut out);
     ToWasmAppLostFocus::to_wasm_js_method(&mut out);
     ToWasmXRUpdate::to_wasm_js_method(&mut out);
