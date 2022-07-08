@@ -216,7 +216,7 @@ impl Cx {
         
         // get the color and depth
         let clear_color = if self.passes[pass_id].color_textures.len() == 0 {
-            Vec4::default()
+            self.passes[pass_id].clear_color
         }
         else {
             match self.passes[pass_id].color_textures[0].clear_color {
