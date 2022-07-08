@@ -66,7 +66,12 @@ pub struct WasmDataF32 {
 
 impl WasmDataF32 {
     pub fn new(data:&[f32]) -> Self {
-        Self{ptr:WasmPtrF32::new(data.as_ptr()), len:data.len()}
+        if data.len() != 0{
+            Self{ptr:WasmPtrF32::new(data.as_ptr()), len:data.len()}
+        }
+        else{
+            Self{ptr:WasmPtrF32::new(0 as *const f32), len:0}
+        }
     }
 }
 
@@ -78,7 +83,12 @@ pub struct WasmDataU32 {
 
 impl WasmDataU32 {
     pub fn new(data:&[u32]) -> Self {
-        Self{ptr:WasmPtrU32::new(data.as_ptr()), len:data.len()}
+        if data.len() != 0{
+            Self{ptr:WasmPtrU32::new(data.as_ptr()), len:data.len()}
+        }
+        else{
+            Self{ptr:WasmPtrU32::new(0 as *const u32), len:0}
+        }
     }
 }
 

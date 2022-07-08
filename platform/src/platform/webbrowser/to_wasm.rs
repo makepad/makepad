@@ -445,6 +445,9 @@ pub struct ToWasmPaintDirty {
 }
 
 #[derive(ToWasm)]
+pub struct ToWasmRedrawAll{}
+
+#[derive(ToWasm)]
 pub struct ToWasmAppGotFocus {}
 
 #[derive(ToWasm)]
