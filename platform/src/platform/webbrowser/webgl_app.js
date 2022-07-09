@@ -268,18 +268,20 @@ export class WebGLWasmApp extends WasmApp {
                 add_line_numbers_to_string(args.fragment)
             )
         }
-        
+
         let texture_locs = [];
         for (let i = 0; i < args.textures.length; i ++) {
             texture_locs.push({
                 name: args.textures[i].name,
                 ty: args.textures[i].ty,
-                loc: gl.getUniformLocation(program, args.textures[i].name),
+                loc: gl.getUniformLocation(program, "ds_"+args.textures[i].name),
             });
         }
         
         // fetch all attribs and uniforms
         this.draw_shaders[args.shader_id] = {
+            vertex:args.vertex,
+            pixel:args.pixel,
             geom_attribs: get_attrib_locations(gl, program, "packed_geometry_", args.geometry_slots),
             inst_attribs: get_attrib_locations(gl, program, "packed_instance_", args.instance_slots),
             pass_uniform: gl.getUniformLocation(program, "pass_table"),
@@ -287,10 +289,10 @@ export class WebGLWasmApp extends WasmApp {
             draw_uniform: gl.getUniformLocation(program, "draw_table"),
             user_uniform: gl.getUniformLocation(program, "user_table"),
             live_uniform: gl.getUniformLocation(program, "live_table"),
+            const_uniform: gl.getUniformLocation(program, "const_table"),
             texture_locs: texture_locs,
             geometry_slots: args.geometry_slots,
             instance_slots: args.instance_slots,
-            const_uniform: gl.getUniformLocation(program, "const_table"),
             program: program,
         };
     }
@@ -386,13 +388,14 @@ export class WebGLWasmApp extends WasmApp {
         gl.useProgram(shader.program);
         
         let vao = this.vaos[args.vao_id];
+        
         this.OES_vertex_array_object.bindVertexArrayOES(vao.gl_vao);
         
         let index_buffer = this.index_buffers[vao.geom_ib_id];
         let instance_buffer = this.array_buffers[vao.inst_vb_id];
         // if vr_presenting
         // TODO CACHE buffers
-        if(args.const_table.ptr != 0) gl.uniform1fv(shader.const_table_uniform, new Float32Array(this.memory.buffer, args.const_table.ptr, args.const_table.len));
+        if(args.const_table.ptr != 0) gl.uniform1fv(shader.const_uniform, new Float32Array(this.memory.buffer, args.const_table.ptr, args.const_table.len));
         if(args.pass_uniforms.ptr != 0) gl.uniform1fv(shader.pass_uniform, new Float32Array(this.memory.buffer, args.pass_uniforms.ptr, args.pass_uniforms.len));
         if(args.view_uniforms.ptr != 0) gl.uniform1fv(shader.view_uniform, new Float32Array(this.memory.buffer, args.view_uniforms.ptr, args.view_uniforms.len));
         if(args.draw_uniforms.ptr != 0) gl.uniform1fv(shader.draw_uniform, new Float32Array(this.memory.buffer, args.draw_uniforms.ptr, args.draw_uniforms.len));
@@ -493,7 +496,7 @@ export class WebGLWasmApp extends WasmApp {
 
     FromWasmSetDefaultDepthAndBlendMode() {
         let gl = this.gl
-        gl.enable(gl.DEPTH_TEST);
+        gl.disable(gl.DEPTH_TEST);
         gl.depthFunc(gl.LEQUAL);
         gl.blendEquationSeparate(gl.FUNC_ADD, gl.FUNC_ADD);
         gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
@@ -651,18 +654,17 @@ export class WebGLWasmApp extends WasmApp {
                 this.gl.viewport(0, 0, sw, sh);
                 
                 this.window_info.dpi_factor = dpi_factor;
-                this.window_info.width = canvas.offsetWidth;
-                this.window_info.height = canvas.offsetHeight;
+                this.window_info.inner_width = canvas.offsetWidth;
+                this.window_info.inner_height = canvas.offsetHeight;
                 // send the wasm a screenresize event
             }
             this.window_info.is_fullscreen = is_fullscreen();
             this.window_info.can_fullscreen = can_fullscreen();
             
             if (this.to_wasm !== undefined) {
-                this.to_wasm.ToWasmResizeWindow(this.window_info);
+                this.to_wasm.ToWasmResizeWindow({window_info:this.window_info});
+                this.FromWasmRequestAnimationFrame();
             }
-            
-            this.FromWasmRequestAnimationFrame();
         }
         
         // TODO! BIND THESE SOMEWHERE USEFUL
@@ -676,8 +678,8 @@ export class WebGLWasmApp extends WasmApp {
             this.do_wasm_pump();
         }
         
-        window.addEventListener('resize', _ => this.handlers.on_screen_resize)
-        window.addEventListener('orientationchange', _ => this.handlers.on_screen_resize)
+        window.addEventListener('resize', _ => this.handlers.on_screen_resize())
+        window.addEventListener('orientationchange', _ => this.handlers.on_screen_resize())
     }
     
     bind_mouse_and_touch() {
@@ -688,11 +690,11 @@ export class WebGLWasmApp extends WasmApp {
         let last_mouse_finger;
         if (this.detect.use_touch_scroll_overlay) {
             var ts = this.touch_scroll_overlay = document.createElement('div')
-            ts.className = "cx_webgl_scroll_overlay"
+            ts.className = "makepad_webgl_scroll_overlay"
             var ts_inner = document.createElement('div')
             var style = document.createElement('style')
             style.innerHTML = "\n"
-                + "div.cx_webgl_scroll_overlay {\n"
+                + "div.makepad_webgl_scroll_overlay {\n"
                 + "z-index: 10000;\n"
                 + "margin:0;\n"
                 + "overflow:scroll;\n"

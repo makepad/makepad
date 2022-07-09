@@ -170,12 +170,12 @@ impl Cx {
                     });
                 }
                 
-                let pass_uniforms = self.passes[pass_id].pass_uniforms.as_slice();
+                let pass_uniforms = &self.passes[pass_id].pass_uniforms;
                 
                 self.platform.from_wasm(FromWasmDrawCall {
                     shader_id: draw_call.draw_shader.draw_shader_id,
                     vao_id: draw_call.platform.vao.as_ref().unwrap().vao_id,
-                    pass_uniforms: WasmDataF32::new(pass_uniforms),
+                    pass_uniforms: WasmDataF32::new(pass_uniforms.as_slice()),
                     view_uniforms: WasmDataF32::new(draw_list.draw_list_uniforms.as_slice()),
                     draw_uniforms: WasmDataF32::new(draw_call.draw_uniforms.as_slice()),
                     user_uniforms: WasmDataF32::new(draw_call.user_uniforms.as_slice()),
@@ -240,7 +240,7 @@ impl Cx {
         
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
-        
+
         self.render_view(
             pass_id,
             view_id,
@@ -417,7 +417,7 @@ impl CxPlatformDrawShader{
     
 }
 
-#[derive(Default, Clone)]
+#[derive(Default, Clone, Debug)]
 pub struct CxPlatformPass {
 }
 

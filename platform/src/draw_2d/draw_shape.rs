@@ -15,6 +15,7 @@ live_register!{
         varying vertex_color: vec4
 
         fn vertex(self) -> vec4 {
+            //return vec4(self.geom_pos.x,self.geom_pos.y,0.5,1.0);
             let ret =  self.scroll_and_clip_quad();
             match self.fill {
                 Fill::Color=>{
