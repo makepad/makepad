@@ -78,7 +78,6 @@ impl DrawUniforms {
         self.draw_scroll.z = local_scroll.x;
         self.draw_scroll.w = local_scroll.y;
     }
-    
 }
 
 pub struct DrawItem {

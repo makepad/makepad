@@ -47,7 +47,9 @@ pub trait BackendWriter {
     fn needs_mul_fn_for_matrix_multiplication(&self) -> bool;
     fn needs_unpack_for_matrix_multiplication(&self) -> bool;
     fn const_table_is_vec4(&self) -> bool;
-
+    
+    fn enum_is_float(&self)->bool;
+    
     fn use_cons_fn(&self, what: &str) -> bool;
 
     fn write_var_decl(
@@ -59,7 +61,7 @@ pub trait BackendWriter {
         ident: &dyn fmt::Display,
         ty: &Ty,
     ) -> bool;
-    
+
     fn write_call_expr_hidden_args(&self, string: &mut String, hidden_args:&BTreeSet<HiddenArgKind >, sep: &str);
     fn write_fn_def_hidden_params(&self, string: &mut String, hidden_args:&BTreeSet<HiddenArgKind >, sep: &str);
     
@@ -316,13 +318,21 @@ impl<'a> BlockGenerator<'a> {
         matches: &Vec<Match>,
     ) {
         for (index,match_item) in matches.iter().enumerate(){
+            
             if index != 0{
                 write!(self.string, "else  ").unwrap();
             }
 
-            write!(self.string, "if(").unwrap();
-            self.generate_expr(expr);
-            write!(self.string, " == {})", match_item.enum_value.get().unwrap()).unwrap();
+            if self.backend_writer.enum_is_float(){
+                write!(self.string, "if(abs(").unwrap();
+                self.generate_expr(expr);
+                write!(self.string, " - {}.0)<0.5)", match_item.enum_value.get().unwrap()).unwrap();
+            }
+            else{
+                write!(self.string, "if(").unwrap();
+                self.generate_expr(expr);
+                write!(self.string, " == {})", match_item.enum_value.get().unwrap()).unwrap();
+            }
             
             self.generate_block(&match_item.block);
         }

@@ -131,6 +131,8 @@ pub struct Cx {
     
     pub new_next_frames: HashSet<NextFrame>,
     
+    pub dependencies: HashMap<String, CxDependency>,
+    
     pub signals: HashMap<Signal, Vec<u64 >>,
     pub triggers: HashMap<Area, Vec<u64 >>,
     
@@ -148,13 +150,18 @@ pub struct Cx {
     pub event_handler: Option<*mut dyn FnMut(&mut Cx, &mut Event)>,
 }
 
+pub struct CxDependency{
+    pub data: Option<Result<Vec<u8>, String>>
+}
+
+
 #[derive(Clone)]
 pub enum PlatformType {
     Unknown,
     MsWindows,
     OSX,
     Linux {custom_window_chrome: bool},
-    WebBrowser {protocol: String, hostname: String, port: u16, pathname: String, search: String, hash: String}
+    WebBrowser {protocol: String, hostname: String, pathname: String, search: String, hash: String}
 }
 
 impl PlatformType {
@@ -246,8 +253,6 @@ impl Default for Cx {
             path_to_font_id: HashMap::new(),
             draw_font_atlas: None,
             
-            //registries: CxRegistries::new(),
-            
             new_draw_event: DrawEvent::default(),
             
             redraw_id: 1,
@@ -270,6 +275,8 @@ impl Default for Cx {
             new_drag_area: Area::Empty,
             
             new_next_frames: HashSet::new(),
+            
+            dependencies: HashMap::new(),
             
             signals: HashMap::new(),
             triggers: HashMap::new(),

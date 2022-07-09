@@ -33,7 +33,10 @@ pub enum LiveValue {
     },
     FittedString(FittedString),
     InlineString(InlineString),
-    // bare values
+    Dependency {
+        string_start: usize,
+        string_count: usize
+    },    // bare values
     Bool(bool),
     Int(i64),
     Float(f64),
@@ -73,6 +76,13 @@ impl LiveValue {
         match self {
             Self::DocumentString {string_start, string_count} => {
                 if let LiveToken::String {index, len} = token {
+                    *string_start = *index as usize;
+                    *string_count = *len as usize;
+                    return true
+                }
+            },
+            Self::Dependency {string_start, string_count} => {
+                if let LiveToken::Dependency {index, len} = token {
                     *string_start = *index as usize;
                     *string_count = *len as usize;
                     return true
@@ -663,32 +673,33 @@ impl LiveValue {
             Self::FittedString(_) => 2,
             Self::InlineString {..} => 3,
             Self::DocumentString {..} => 4,
-            Self::Bool(_) => 5,
-            Self::Int(_) => 6,
-            Self::Float(_) => 7,
-            Self::Color(_) => 8,
-            Self::Vec2(_) => 9,
-            Self::Vec3(_) => 10,
-            Self::Vec4(_) => 11,
-            Self::Id(_) => 12,
-            Self::ExprBinOp(_) => 13,
-            Self::ExprUnOp(_) => 14,
-            Self::ExprMember(_) => 15,
-            Self::ExprCall {..} => 16,
+            Self::Dependency {..} => 5,
+            Self::Bool(_) => 6,
+            Self::Int(_) => 7,
+            Self::Float(_) => 8,
+            Self::Color(_) => 9,
+            Self::Vec2(_) => 10,
+            Self::Vec3(_) => 11,
+            Self::Vec4(_) => 12,
+            Self::Id(_) => 13,
+            Self::ExprBinOp(_) => 14,
+            Self::ExprUnOp(_) => 15,
+            Self::ExprMember(_) => 16,
+            Self::ExprCall {..} => 17,
             
-            Self::BareEnum {..} => 17,
-            Self::Array => 18,
-            Self::Expr{..} => 19,
-            Self::TupleEnum {..} => 20,
-            Self::NamedEnum {..} => 21,
-            Self::Object => 22,
-            Self::Clone {..} => 23,
-            Self::Class {..} => 24,
-            Self::Close => 25,
+            Self::BareEnum {..} => 18,
+            Self::Array => 19,
+            Self::Expr{..} => 20,
+            Self::TupleEnum {..} => 21,
+            Self::NamedEnum {..} => 22,
+            Self::Object => 23,
+            Self::Clone {..} => 24,
+            Self::Class {..} => 25,
+            Self::Close => 26,
             
-            Self::DSL {..} => 26,
-            Self::Use {..} => 27,
-            Self::UseComponent {..} => 28
+            Self::DSL {..} => 27,
+            Self::Use {..} => 28,
+            Self::UseComponent {..} => 29
         }
     }
 }
