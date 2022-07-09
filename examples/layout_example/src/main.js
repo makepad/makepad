@@ -1,4 +1,4 @@
-import {WasmWebGL} from "/makepad/platform/src/platform/web_browser/webgl.js"
+import {WasmWebGL} from "/makepad/platform/src/platform/web_browser/web_gl.js"
 
 let canvas = document.getElementsByClassName('main_canvas')[0];
 
