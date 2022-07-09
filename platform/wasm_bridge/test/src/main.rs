@@ -10,6 +10,7 @@ struct BridgeTest {
     e4: EnumTest,
     o1: Option<u32>,
     o2: Option<u32>,
+    v1: [u32;2],
     r1: Vec<RecurTest>
 }
 
@@ -33,6 +34,7 @@ fn create_test() -> BridgeTest {
     BridgeTest {
         u1: 1,
         b1: true,
+        v1: [1,2],
         e1: EnumTest::Bare,
         e2: EnumTest::Tuple(2),
         e3: EnumTest::Recur(vec!{EnumTest::Bare}),
@@ -67,16 +69,16 @@ fn create_test() -> BridgeTest {
 struct RunTest {
 }
 
-#[export_name = "process_to_wasm_msg"]
+#[export_name = "wasm_process_msg"]
 #[cfg(target_arch = "wasm32")]
 pub unsafe extern "C" fn process_to_wasm_msg(msg_ptr: u32) -> u32 {
     let mut from_wasm = FromWasmMsg::new();
     let mut to_wasm = ToWasmMsg::take_ownership(msg_ptr);
     
-    while !to_wasm.was_last_cmd() {
-        let cmd_id = LiveId(to_wasm.read_u64());
-        let cmd_skip = to_wasm.read_cmd_skip();
-        match cmd_id {
+    while !to_wasm.was_last_block() {
+        let id = LiveId(to_wasm.read_u64());
+        let skip = to_wasm.read_block_skip();
+        match id {
             id!(RunTest) => {
                 let test = create_test();
                 test.write_from_wasm(&mut from_wasm);
@@ -93,12 +95,12 @@ pub unsafe extern "C" fn process_to_wasm_msg(msg_ptr: u32) -> u32 {
             }
             _ => ()
         }
-        to_wasm.cmd_skip(cmd_skip);
+        to_wasm.block_skip(skip);
     }
     from_wasm.release_ownership()
 }
 
-#[export_name = "get_wasm_js_msg_class"]
+#[export_name = "wasm_get_js_msg_class"]
 #[cfg(target_arch = "wasm32")]
 pub unsafe extern "C" fn get_wasm_js_msg_class() -> u32 {
     let mut msg = FromWasmMsg::new();

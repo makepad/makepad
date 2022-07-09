@@ -4,6 +4,7 @@ use {
         time::Instant,
     },
     crate::{
+        console_log,
         makepad_math::Vec2,
         cx::Cx,
         event::{
@@ -31,14 +32,12 @@ use {
     }
 };
 
-pub use crate::log;
-
 pub fn profile_start()->Instant {
    Instant::now()
 }
 
 pub fn profile_end(instant: Instant) {
-    log!("Profile time {} ms", (instant.elapsed().as_nanos() as f64) / 1000000f64);
+    console_log!("Profile time {} ms", (instant.elapsed().as_nanos() as f64) / 1000000f64);
 }
 
 pub trait CxPlatformApi{
@@ -388,6 +387,8 @@ macro_rules!main_app {
             let mut cx = Cx::default();
             live_register(&mut cx);
             cx.live_expand();
+            cx.live_scan_dependencies();
+            cx.desktop_load_dependencies();
             let mut app = None;
             cx.event_loop( | cx, mut event | {
                 if let Event::Construct = event {
@@ -398,25 +399,33 @@ macro_rules!main_app {
             });
         }
         
-        #[export_name = "create_wasm_app"]
         #[cfg(target_arch = "wasm32")]
-        pub extern "C" fn create_wasm_app() -> u32 {
-            let mut cx = Box::new(Cx::default());
-            cx.live_register();
-            live_register(&mut cx);
-            cx.live_expand();
-            Box::into_raw(Box::new((0, Box::into_raw(cx)/*, Box::into_raw(cxafterdraw)*/))) as u32
+        fn main(){}
+        
+        struct WasmAppCx{
+            app: Option<$app>,
+            cx: Cx
         }
         
-        #[export_name = "process_to_wasm"]
+        #[export_name = "wasm_create_app"]
         #[cfg(target_arch = "wasm32")]
-        pub unsafe extern "C" fn process_to_wasm(appcx: u32, msg_bytes: u32) -> u32 {
-            let appcx = &*(appcx as *mut (*mut $ app, *mut Cx/*, *mut CxAfterDraw*/));
-            (*appcx.1).process_to_wasm(msg_bytes, | cx, mut event | {
+        pub extern "C" fn create_wasm_app() -> u32 {
+            let mut appcx = Box::new(WasmAppCx{app:None, cx: Cx::default()});
+            live_register(&mut appcx.cx);
+            appcx.cx.live_expand();
+            appcx.cx.live_scan_dependencies();
+            Box::into_raw(appcx) as u32
+        }
+        
+        #[export_name = "wasm_process_msg"]
+        #[cfg(target_arch = "wasm32")]
+        pub unsafe extern "C" fn wasm_process_msg(msg_ptr: u32, appcx: u32) -> u32 {
+            let body = appcx as *mut WasmAppCx;
+            (*body).cx.process_to_wasm(msg_ptr, | cx, mut event | {
                 if let Event::Construct = event {
-                    (*appcx.0) = Box::new( $ app::new_app(&mut cx));
+                    (*body).app = Some($ app::new_app(cx));
                 }
-                (*appcx.0).handle_event(cx, &mut event);
+                (*body).app.as_mut().unwrap().handle_event(cx, &mut event);
                 cx.after_handle_event(&mut event);
             })
         }

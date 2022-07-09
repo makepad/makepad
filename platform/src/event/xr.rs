@@ -11,12 +11,11 @@ pub struct XRButton {
 #[derive(Clone, Debug, Default, PartialEq)]
 pub struct XRInput {
     pub active: bool,
+    pub hand: u32,
     pub grip: Transform,
     pub ray: Transform,
-    pub num_buttons: usize,
-    pub buttons: [XRButton; 8],
-    pub num_axes: usize,
-    pub axes: [f32; 8],
+    pub buttons: Vec<XRButton>,
+    pub axes: Vec<f32>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -24,9 +23,6 @@ pub struct XRUpdateEvent {
     // alright what data are we stuffing in
     pub time: f64,
     pub head_transform: Transform,
-    pub left_input: XRInput,
-    pub last_left_input: XRInput,
-    pub right_input: XRInput,
-    pub last_right_input: XRInput,
-    pub other_inputs: Vec<XRInput>
+    pub inputs: Vec<XRInput>,
+    pub last_inputs: Option<Vec<XRInput>>
 }

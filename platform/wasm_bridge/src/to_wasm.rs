@@ -55,15 +55,15 @@ pub trait ToWasm {
         let id = Self::live_id();
         wrapper.push_str(&format!("{}(t0){{\n", Self::type_name()));
         wrapper.push_str("let app = this.app;\n");
-        wrapper.push_str(&format!("this.reserve_u32({});\n", 3 + Self::u32_size()));
+        wrapper.push_str(&format!("this.reserve_u32({});\n", 4 + Self::u32_size()));
         wrapper.push_str(&format!("app.u32[this.u32_offset ++] = {};\n", id.0 & 0xffff_ffff));
         wrapper.push_str(&format!("app.u32[this.u32_offset ++] = {};\n", (id.0 >> 32)));
         wrapper.push_str("let block_len_offset = this.u32_offset ++;\n\n");
         
         let mut out = WasmJSOutput{temp_alloc:0, fns:vec![WasmJSOutputFn{name:String::new(), body:String::new(), temp:0}]};
         
-        let new_nest = out.alloc_temp();
-        Self::to_wasm_js_body(&mut out, 0, false, "t0", new_nest);
+        let new_temp = out.alloc_temp();
+        Self::to_wasm_js_body(&mut out, 0, false, "t0", new_temp);
 
         for p in out.fns.iter().rev(){
             if p.name == ""{
@@ -87,7 +87,7 @@ pub struct ToWasmMsg {
     pub u32_offset: usize
 }
 
-pub struct ToWasmCmdSkip{
+pub struct ToWasmBlockSkip{
     len:usize,
     base:usize
 }
@@ -100,6 +100,7 @@ impl ToWasmMsg {
             let head = ptr.offset(0).read();
             let len = (head >> 32) as usize;
             let cap = (head & 0xffff_ffff) as usize;
+            
             Self {
                 data: Vec::from_raw_parts(ptr, len, cap),
                 u32_offset: 2,
@@ -125,15 +126,15 @@ impl ToWasmMsg {
         ret
     }
     
-    pub fn read_cmd_skip(&mut self)->ToWasmCmdSkip{
-        ToWasmCmdSkip{
+    pub fn read_block_skip(&mut self)->ToWasmBlockSkip{
+        ToWasmBlockSkip{
             base: self.u32_offset >> 1,
             len: self.read_u32() as usize, 
         }
     }
     
-    pub fn cmd_skip(&mut self, cmd_skip:ToWasmCmdSkip){
-        self.u32_offset = (cmd_skip.base + cmd_skip.len - 1)<<1
+    pub fn block_skip(&mut self, block_skip:ToWasmBlockSkip){
+        self.u32_offset = (block_skip.base + block_skip.len - 1)<<1
     }
     
     pub fn read_f32(&mut self) -> f32 {
@@ -160,7 +161,7 @@ impl ToWasmMsg {
         out
     }
     
-    pub fn was_last_cmd(&mut self)->bool{
+    pub fn was_last_block(&mut self)->bool{
         self.u32_offset += self.u32_offset & 1;
         self.u32_offset>>1 >= self.data.len()
     }

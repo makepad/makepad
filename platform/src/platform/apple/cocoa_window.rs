@@ -334,12 +334,12 @@ impl CocoaWindow {
         
     }
     
-    pub fn send_focus_event(&mut self) {
-        self.do_callback(&mut vec![Event::AppFocus]);
+    pub fn send_got_focus_event(&mut self) {
+        self.do_callback(&mut vec![Event::AppGotFocus]);
     }
     
-    pub fn send_focus_lost_event(&mut self) {
-        self.do_callback(&mut vec![Event::AppFocusLost]);
+    pub fn send_lost_focus_event(&mut self) {
+        self.do_callback(&mut vec![Event::AppLostFocus]);
     }
     
     pub fn mouse_down_can_drag_window(&mut self) -> bool {

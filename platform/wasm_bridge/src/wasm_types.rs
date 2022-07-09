@@ -1,6 +1,7 @@
 use crate::from_wasm::*;
 use crate::to_wasm::*;
-
+use crate::{LiveId,id};
+use makepad_derive_wasm_bridge::*;
 pub struct ToWasmDataU8(Vec<u8>);
 
 impl ToWasmDataU8 {
@@ -13,16 +14,20 @@ impl ToWasmDataU8 {
         if cap != capacity {panic!()};
         ptr as u32
     }
+    
+    pub fn into_vec_u8(self)->Vec<u8>{
+        self.0
+    }
 }
 
 
 impl ToWasm for ToWasmDataU8 {
     fn read_to_wasm(inp: &mut ToWasmMsg) -> Self {
+        
         let ptr = inp.read_u32();
         let len = inp.read_u32() as usize;
         unsafe {
-            let ptr = ptr as *mut u8;
-            Self (Vec::from_raw_parts(ptr, len, len))
+            Self (Vec::from_raw_parts(ptr as *mut u8, len, len))
         }
     }
     
@@ -53,6 +58,39 @@ impl FromWasm for WasmPtrF32 {
 }
 
 
+#[derive(FromWasm)]
+pub struct WasmDataF32 {
+    pub ptr: WasmPtrF32,
+    pub len: usize
+}
+
+impl WasmDataF32 {
+    pub fn new(data:&[f32]) -> Self {
+        if data.len() != 0{
+            Self{ptr:WasmPtrF32::new(data.as_ptr()), len:data.len()}
+        }
+        else{
+            Self{ptr:WasmPtrF32::new(0 as *const f32), len:0}
+        }
+    }
+}
+
+#[derive(FromWasm)]
+pub struct WasmDataU32 {
+    pub ptr: WasmPtrU32,
+    pub len: usize
+}
+
+impl WasmDataU32 {
+    pub fn new(data:&[u32]) -> Self {
+        if data.len() != 0{
+            Self{ptr:WasmPtrU32::new(data.as_ptr()), len:data.len()}
+        }
+        else{
+            Self{ptr:WasmPtrU32::new(0 as *const u32), len:0}
+        }
+    }
+}
 
 
 pub struct WasmPtrU32(u32);
@@ -258,7 +296,7 @@ impl<T, const N: usize> ToWasm for [T; N] where T: ToWasm {
     
     fn to_wasm_js_body(out: &mut WasmJSOutput, slot: usize, is_recur: bool, prop: &str, temp: usize) {
         out.push_ln(slot, &format!("let t{} = {}", temp, prop));
-        out.push_ln(slot, &format!("or(let i{0} = 0; i{0} < {1}; i{0}++){{", temp, N));
+        out.push_ln(slot, &format!("for(let i{0} = 0; i{0} < {1}; i{0}++){{", temp, N));
         let new_temp = out.alloc_temp();
         T::to_wasm_js_body(out, slot, is_recur, &format!("t{0}[i{0}]", temp), new_temp);
         out.push_ln(slot, "}");
