@@ -96,7 +96,7 @@ impl Cx {
                         }
                     }
                     self.platform.window_geom = tw.window_info.into();
-                    
+
                     self.call_event_handler(&mut Event::Construct);
                 },
                 
@@ -114,6 +114,7 @@ impl Cx {
                             old_geom: old_geom,
                             new_geom: new_geom
                         }));
+                        self.redraw_all();
                     }
                 }
                 
