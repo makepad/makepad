@@ -6,7 +6,7 @@ use {
         makepad_wasm_bridge::*,
         makepad_math::*,
         platform::{
-            webbrowser::{
+            web_browser::{
                 from_wasm::*
             }
         },
