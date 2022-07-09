@@ -13,8 +13,8 @@ pub mod apple;
 pub use crate::platform::apple::*;
 
 #[cfg(target_arch = "wasm32")]
-pub mod webbrowser;
+pub mod web_browser;
 
 #[cfg(target_arch = "wasm32")]
-pub use crate::platform::webbrowser::*;
+pub use crate::platform::web_browser::*;
 
