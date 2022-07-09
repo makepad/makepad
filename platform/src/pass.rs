@@ -132,7 +132,7 @@ impl Pass {
 
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum PassClearColor {
     InitWith(Vec4),
     ClearWith(Vec4)
@@ -144,19 +144,19 @@ impl Default for PassClearColor {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub enum PassClearDepth {
     InitWith(f32),
     ClearWith(f32)
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone)]
 pub struct CxPassColorTexture {
     pub clear_color: PassClearColor,
     pub texture_id: usize
 }
 
-#[derive(Default, Clone, Debug)]
+#[derive(Default, Clone)]
 #[repr(C)]
 pub struct PassUniforms{
     camera_projection:Mat4,
@@ -180,7 +180,7 @@ pub enum PassMatrixMode{
     Projection{fov_y:f32, near:f32, far:f32, cam:Mat4}
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct CxPass {
     pub debug: bool,
     pub matrix_mode: PassMatrixMode,
