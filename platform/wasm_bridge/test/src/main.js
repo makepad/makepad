@@ -5,7 +5,14 @@ class MyWasmApp extends WasmApp {
         console.log("BridgeTest arrived", obj)
         let to_wasm = app.new_to_wasm();
         to_wasm.BridgeTest(obj);
-        app.to_wasm_pump(to_wasm);
+        app.do_wasm_pump(to_wasm);
+    }
+    
+    do_wasm_pump(to_wasm) {
+        let ret_ptr = this.exports.wasm_process_msg(to_wasm.release_ownership());
+        let from_wasm = this.new_from_wasm(ret_ptr);
+        from_wasm.dispatch_on_app();
+        from_wasm.free();
     }
 }
 
@@ -17,4 +24,4 @@ console.log(app.msg_class)
 
 let to_wasm = app.new_to_wasm();
 to_wasm.RunTest();
-app.to_wasm_pump(to_wasm);
+app.do_wasm_pump(to_wasm);

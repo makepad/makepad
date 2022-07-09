@@ -1,108 +1,56 @@
 use crate::{
     makepad_wasm_bridge::*,
+    makepad_math::Vec4,
     makepad_live_id::{LiveId,id},
     cursor::MouseCursor,
+    cx_draw_shaders::DrawShaderTextureInput,
+    draw_vars::{
+        DRAW_CALL_TEXTURE_SLOTS
+    },
 };
 
 #[derive(FromWasm)]
-struct FromWasmShaderPropDef {
-    ty: String,
-    name: String
+pub struct FromWasmLoadDeps {
+    pub deps: Vec<String>
+}
+
+
+#[derive(FromWasm)]
+pub struct FromWasmStartTimer {
+    pub repeats: bool,
+    pub timer_id: f64,
+    pub interval: f64
 }
 
 #[derive(FromWasm)]
-struct FromWasmCompileWebGLShader {
-    shader_id: usize,
-    fragment: String,
-    vertex: String,
-    geometry_slots: usize,
-    instance_slots: usize,
-    pass_uniforms: Vec<FromWasmShaderPropDef>,
-    view_uniforms: Vec<FromWasmShaderPropDef>,
-    draw_uniforms: Vec<FromWasmShaderPropDef>,
-    user_uniforms: Vec<FromWasmShaderPropDef>,
-    live_uniforms: Vec<FromWasmShaderPropDef>,
-    textures: Vec<FromWasmShaderPropDef>
+pub struct FromWasmStopTimer {
+    pub id: f64,
 }
 
 #[derive(FromWasm)]
-struct FromWasmAllocArrayBuffer {
-    buffer_id: usize,
-    len: usize,
-    data: WasmPtrF32,
+pub struct FromWasmFullScreen {
 }
 
 #[derive(FromWasm)]
-struct FromWasmAllocIndexBuffer {
-    buffer_id: usize,
-    len: usize,
-    data: WasmPtrU32,
+pub struct FromWasmNormalScreen {
 }
 
 #[derive(FromWasm)]
-struct FromWasmAllocVao {
-    vao_id: usize,
-    shader_id: usize,
-    geom_ib_id: usize,
-    geom_vb_id: usize,
-    inst_vb_id: usize,
+pub struct FromWasmRequestAnimationFrame {
 }
 
 #[derive(FromWasm)]
-struct FromWasmDrawCall {
-    vao_id: usize,
-    shader_id: usize,
-    pass_uniforms: WasmPtrF32,
-    view_uniforms: WasmPtrF32,
-    draw_uniforms: WasmPtrF32,
-    user_uniforms: WasmPtrF32,
-    live_uniforms: WasmPtrF32,
-    textures: WasmPtrU32,
-    const_table: WasmPtrU32
+pub struct FromWasmSetDocumentTitle {
+    pub title: String
 }
 
 #[derive(FromWasm)]
-struct FromWasmColor {
-    r: f32,
-    g: f32,
-    b: f32,
-    a: f32
-}
-
-#[derive(FromWasm)]
-struct FromWasmClear {
-    color: FromWasmColor
-}
-
-#[derive(FromWasm)]
-struct FromWasmLoadDeps {
-    deps: Vec<String>
-}
-
-#[derive(FromWasm)]
-struct FromWasmUpdateTextureImage2D {
-    texture_id: usize,
-    texture_width: usize,
-    texture_height: usize,
-    image: WasmPtrU32
-}
-
-#[derive(FromWasm)]
-struct FromWasmRequestAnimationFrame {
-}
-
-#[derive(FromWasm)]
-struct FromWasmSetDocumentTitle {
-    title: String
-}
-
-#[derive(FromWasm)]
-struct FromWasmSetMouseCursor {
-    web_cursor: u32
+pub struct FromWasmSetMouseCursor {
+    pub web_cursor: u32
 }
 
 impl FromWasmSetMouseCursor {
-    fn new(mouse_cursor: MouseCursor) -> Self {
+    pub fn new(mouse_cursor: MouseCursor) -> Self {
         Self {
             web_cursor: match mouse_cursor {
                 MouseCursor::Hidden => 0,
@@ -136,82 +84,182 @@ impl FromWasmSetMouseCursor {
 }
 
 #[derive(FromWasm)]
-struct FromWasmReadFile {
-    id: u32,
-    path: String
+pub struct FromWasmTextCopyResponse {
+    pub response: String
 }
 
 #[derive(FromWasm)]
-struct FromWasmShowTextIME {
-    x: f32,
-    y: f32
+pub struct FromWasmShowTextIME {
+    pub x: f32,
+    pub y: f32
 }
 
 #[derive(FromWasm)]
-struct FromWasmHideTextIME {
-}
-
-#[derive(FromWasm)]
-struct FromWasmTextCopyResponse {
-    response: String
-}
-
-#[derive(FromWasm)]
-struct FromWasmStartTimer {
-    repeats: bool,
-    id: usize,
-    interval: f64
-}
-
-#[derive(FromWasm)]
-struct FromWasmStopTimer {
-    id: usize,
-}
-
-#[derive(FromWasm)]
-struct FromWasmXrStartPresenting {
-}
-
-#[derive(FromWasm)]
-struct FromWasmXrStopPresenting {
-}
-
-#[derive(FromWasm)]
-struct FromWasmBeginRenderTargets {
-    pass_id: usize,
-    width: usize,
-    height: usize
+pub struct FromWasmHideTextIME {
 }
 
 
 #[derive(FromWasm)]
-struct FromWasmAddColorTarget {
-    texture_id: usize,
-    init_only: bool,
-    color: FromWasmColor
+pub struct WTextureInput {
+    pub ty: String,
+    pub name: String
+}
+
+impl DrawShaderTextureInput{
+    pub fn to_from_wasm_texture_input(&self)->WTextureInput{
+        WTextureInput{
+            ty: self.ty.to_string(),
+            name: self.id.to_string()
+        }
+    }
 }
 
 #[derive(FromWasm)]
-struct FromWasmSetDepthTarget {
-    texture_id: usize,
-    init_only: bool,
-    depth: f32
+pub struct FromWasmCompileWebGLShader {
+    pub shader_id: usize,
+    pub vertex: String,
+    pub pixel: String,
+    pub geometry_slots: usize,
+    pub instance_slots: usize,
+    pub textures: Vec<WTextureInput>
 }
 
 #[derive(FromWasm)]
-struct FromWasmEndRenderTargets {
+pub struct FromWasmAllocArrayBuffer {
+    pub buffer_id: usize,
+    pub data: WasmDataF32,
 }
 
 #[derive(FromWasm)]
-struct FromWasmBeginMainCanvas {
-    color: FromWasmColor,
-    depth: f32
+pub struct FromWasmAllocIndexBuffer {
+    pub buffer_id: usize,
+    pub data: WasmDataU32,
 }
 
 #[derive(FromWasm)]
-struct FromWasmFullScreen {
+pub struct FromWasmAllocVao {
+    pub vao_id: usize,
+    pub shader_id: usize,
+    pub geom_ib_id: usize,
+    pub geom_vb_id: usize,
+    pub inst_vb_id: usize,
+}
+
+
+#[derive(FromWasm, Default)]
+pub struct WColor {
+    pub r: f32,
+    pub g: f32,
+    pub b: f32,
+    pub a: f32
+}
+
+impl Into<WColor> for Vec4{
+    fn into(self)->WColor{WColor{r:self.x, g:self.y, b:self.z,a:self.w}}
 }
 
 #[derive(FromWasm)]
-struct FromWasmNormalScreen {
+pub struct FromWasmAllocTextureImage2D {
+    pub texture_id: usize,
+    pub width: usize,
+    pub height: usize,
+    pub data: WasmDataU32
+}
+
+#[derive(FromWasm, Default)]
+pub struct WColorTarget {
+    pub texture_id: usize,
+    pub init_only: bool,
+    pub clear_color: WColor
+}
+
+#[derive(FromWasm, Default)]
+pub struct WDepthTarget {
+    pub texture_id: usize,
+    pub init_only: bool,
+    pub clear_depth: f32
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmBeginRenderTexture {
+    pub pass_id: usize,
+    pub width: usize,
+    pub height: usize,
+    pub color_targets: [WColorTarget;1],
+    pub depth_target: WDepthTarget
+}
+/*
+#[derive(FromWasm)]
+pub struct FromWasmAddColorTarget {
+    pub texture_id: usize,
+    pub init_only: bool,
+    pub clear_color: WColor
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmSetDepthTarget {
+    pub texture_id: usize,
+    pub init_only: bool,
+    pub clear_depth: f32
+}*/
+/*
+#[derive(FromWasm)]
+pub struct FromWasmEndRenderTargets {
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmBeginRenderTargets {
+    pub pass_id: usize,
+    pub width: usize,
+    pub height: usize
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmAddColorTarget {
+    pub texture_id: usize,
+    pub init_only: bool,
+    pub clear_color: WColor
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmSetDepthTarget {
+    pub texture_id: usize,
+    pub init_only: bool,
+    pub clear_depth: f32
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmEndRenderTargets {
+}
+*/
+
+#[derive(FromWasm)]
+pub struct FromWasmBeginRenderCanvas {
+    pub clear_color: WColor,
+    pub clear_depth: f32
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmSetDefaultDepthAndBlendMode {
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmDrawCall {
+    pub vao_id: usize,
+    pub shader_id: usize,
+    pub pass_uniforms: WasmDataF32,
+    pub view_uniforms: WasmDataF32,
+    pub draw_uniforms: WasmDataF32,
+    pub user_uniforms: WasmDataF32,
+    pub live_uniforms: WasmDataF32,
+    pub const_table: WasmDataF32,
+    pub textures: [Option<usize>; DRAW_CALL_TEXTURE_SLOTS],
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmXrStartPresenting {
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmXrStopPresenting {
 }

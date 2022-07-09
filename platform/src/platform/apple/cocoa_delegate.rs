@@ -281,12 +281,12 @@ pub fn define_cocoa_window_delegate() -> *const Class {
     
     extern fn window_did_become_key(this: &Object, _: Sel, _: ObjcId) {
         let cw = get_cocoa_window(this);
-        cw.send_focus_event();
+        cw.send_got_focus_event();
     }
     
     extern fn window_did_resign_key(this: &Object, _: Sel, _: ObjcId) {
         let cw = get_cocoa_window(this);
-        cw.send_focus_lost_event();
+        cw.send_lost_focus_event();
     }
     
     // Invoked when the dragged image enters destination bounds or frame

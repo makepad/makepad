@@ -30,7 +30,7 @@ pub enum FullToken {
     Close(Delim),
 
     String,
-    Resource,
+    Dependency,
     Bool(bool),
     Color(u32),
     Float(f64),

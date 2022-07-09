@@ -455,6 +455,10 @@ impl<'a> BackendWriter for MetalBackendWriter<'a> {
     fn needs_unpack_for_matrix_multiplication(&self) -> bool {
         true
     }
+
+    fn enum_is_float(&self)->bool{
+        false
+    }
     
     fn const_table_is_vec4(&self) -> bool {
         false
