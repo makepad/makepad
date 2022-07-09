@@ -5,10 +5,10 @@ use {
         makepad_math::Vec2,
         makepad_wasm_bridge::{console_log, FromWasmMsg, ToWasmMsg, FromWasm, ToWasm},
         platform::{
-            webbrowser::{
+            web_browser::{
                 from_wasm::*,
                 to_wasm::*,
-            }
+            } 
         },
         area::Area,
         event::{

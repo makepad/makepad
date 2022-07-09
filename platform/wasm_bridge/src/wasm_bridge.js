@@ -1,4 +1,4 @@
-export class WasmApp {
+export class WasmBridge {
     constructor(wasm, dispatch) {
         this.wasm = wasm;
         this.dispatch = dispatch;
