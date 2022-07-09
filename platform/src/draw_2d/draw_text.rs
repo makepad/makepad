@@ -24,7 +24,7 @@ live_register!{
         wrapping: Wrapping::None
         text_style: {
             font: {
-                path: "resources/IBMPlexSans-Text.ttf"
+                path: d"resources/IBMPlexSans-Text.ttf"
             }
         }
         
