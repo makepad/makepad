@@ -13,8 +13,9 @@ onmessage = async function(e) {
     });
     let bridge = new WasmWorker(wasm);
 
-    let tls = bridge.exports.wasm_thread_alloc_tls(bridge.exports.__tls_size.value);
-    bridge.exports.__wasm_init_tls(tls);
+    console.log(bridge.exports);
+    bridge.exports.__stack_pointer.value = data.stack_ptr;
+    bridge.exports.__wasm_init_tls(data.tls_ptr);
     
     bridge.exports.wasm_thread_entrypoint(data.closure_ptr);
 }

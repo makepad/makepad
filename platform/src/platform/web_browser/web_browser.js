@@ -199,7 +199,20 @@ export class WasmWebBrowser extends WasmBridge {
             '/makepad/platform/src/platform/web_browser/web_worker.js',
             {type: 'module'}
         );
+        
+        // thanks to JP Posma with Zaplib for figuring out how to do the stack_pointer export without wasm bindgen
+        // https://github.com/Zaplib/zaplib/blob/650305c856ea64d9c2324cbd4b8751ffbb971ac3/zaplib/cargo-zaplib/src/build.rs#L48
+        // https://github.com/Zaplib/zaplib/blob/7cb3bead16f963e60c840aa2be3bf28a47ac533e/zaplib/web/common.ts#L313
+        // And Ingvar Stepanyan for https://web.dev/webassembly-threads/
+        
+        let tls_size = this.exports.__tls_size.value;
+        let stack_size = 2*1024*1024; // 2mb
+        let tls_ptr = this.exports.wasm_thread_alloc_tls_and_stack(tls_size + stack_size / 8);
+        let stack_ptr = tls_ptr + tls_size + stack_size - 8;
+
         worker.postMessage({
+            tls_ptr,
+            stack_ptr,
             closure_ptr: args.closure_ptr,
             bytes: this.wasm._bytes,
             memory: this.wasm._memory

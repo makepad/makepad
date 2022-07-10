@@ -61,7 +61,7 @@ impl App {
             Event::Signal(se)=>{
                 if let Ok(data) = self.to_ui.try_recv(se){
                     console_log!("GOT DATA {:?}", data);
-                    //self.from_ui.send(FromUI::TestMessage(vec![4,5,6])).unwrap();
+                    self.from_ui.send(FromUI::TestMessage(vec![4,5,6])).unwrap();
                 }
             }
             Event::Construct => {
@@ -72,7 +72,7 @@ impl App {
                     to_ui.send(ToUI::TestMessage(vec![1,2,3])).unwrap();
                     loop{
                         if let Ok(data) = from_ui.try_recv(){
-                        //    console_log!("GOT FROM UI {:?}", data);
+                            console_log!("GOT FROM UI {:?}", data);
                         }
                     }
                         //console_log!("Hi from wasm worker");

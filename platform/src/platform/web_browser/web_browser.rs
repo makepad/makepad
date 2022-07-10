@@ -452,9 +452,9 @@ pub unsafe extern "C" fn wasm_thread_entrypoint(closure_ptr:u32){
     closure();
 }
 
-#[export_name = "wasm_thread_alloc_tls"]
+#[export_name = "wasm_thread_alloc_tls_and_stack"]
 #[cfg(target_arch = "wasm32")]
-pub unsafe extern "C" fn wasm_thread_alloc_tls(tls_size:u32)->u32{
+pub unsafe extern "C" fn wasm_thread_alloc_tls_and_stack(tls_size:u32)->u32{
     let mut v = Vec::<u64>::new();
     v.reserve_exact(tls_size as usize);
     let mut v = std::mem::ManuallyDrop::new(v);
