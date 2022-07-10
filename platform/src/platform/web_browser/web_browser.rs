@@ -8,7 +8,7 @@ use {
             web_browser::{
                 from_wasm::*,
                 to_wasm::*,
-            } 
+            }
         },
         area::Area,
         event::{
@@ -96,8 +96,10 @@ impl Cx {
                         }
                     }
                     self.platform.window_geom = tw.window_info.into();
-
+                    
                     self.call_event_handler(&mut Event::Construct);
+                    
+                    self.platform.from_wasm(FromWasmCreateThread{thread_id:1});
                 },
                 
                 id!(ToWasmResizeWindow) => {
@@ -220,11 +222,11 @@ impl Cx {
                 }
                 
                 id!(ToWasmAppGotFocus) => {
-                     self.call_event_handler(&mut Event::AppGotFocus);
+                    self.call_event_handler(&mut Event::AppGotFocus);
                 }
                 
                 id!(ToWasmAppLostFocus) => {
-                     self.call_event_handler(&mut Event::AppLostFocus);
+                    self.call_event_handler(&mut Event::AppLostFocus);
                 }
                 
                 id!(ToWasmXRUpdate) => {
@@ -233,12 +235,12 @@ impl Cx {
                         tw.into_xrupdate_event(self.platform.xr_last_inputs.take())
                     );
                     self.call_event_handler(&mut event);
-                    if let Event::XRUpdate(event) = event{
+                    if let Event::XRUpdate(event) = event {
                         self.platform.xr_last_inputs = Some(event.inputs);
                     }
                 }
                 
-                id!(ToWasmRedrawAll)=>{
+                id!(ToWasmRedrawAll) => {
                     self.redraw_all();
                 }
                 
@@ -260,7 +262,7 @@ impl Cx {
         if self.need_redrawing() || self.new_next_frames.len() != 0 {
             self.call_draw_event();
             self.platform.from_wasm(FromWasmRequestAnimationFrame {});
-        }        
+        }
         self.call_signals_and_triggers();
         
         for window in &mut self.windows {
@@ -435,7 +437,7 @@ pub struct CxPlatform {
     pub index_buffers: usize,
     pub vaos: usize,
     pub fingers_down: Vec<bool>,
-    pub xr_last_inputs: Option<Vec<XRInput>>,
+    pub xr_last_inputs: Option<Vec<XRInput >>,
     pub file_read_id: u64,
 }
 
@@ -459,6 +461,13 @@ impl CxPlatform {
     pub fn from_wasm(&mut self, from_wasm: impl FromWasm) {
         self.from_wasm.as_mut().unwrap().from_wasm(from_wasm);
     }
+}
+
+
+#[export_name = "wasm_thread_entrypoint"]
+#[cfg(target_arch = "wasm32")]
+pub unsafe extern "C" fn wasm_thread_entrypoint() {
+    console_log!("Hi from wasm worker");
 }
 
 #[export_name = "wasm_get_js_msg_class"]
@@ -505,7 +514,8 @@ pub unsafe extern "C" fn wasm_get_js_msg_class() -> u32 {
     FromWasmTextCopyResponse::from_wasm_js_method(&mut out);
     FromWasmShowTextIME::from_wasm_js_method(&mut out);
     FromWasmHideTextIME::from_wasm_js_method(&mut out);
-
+    FromWasmCreateThread::from_wasm_js_method(&mut out);
+    
     FromWasmCompileWebGLShader::from_wasm_js_method(&mut out);
     FromWasmAllocArrayBuffer::from_wasm_js_method(&mut out);
     FromWasmAllocIndexBuffer::from_wasm_js_method(&mut out);
@@ -515,10 +525,10 @@ pub unsafe extern "C" fn wasm_get_js_msg_class() -> u32 {
     FromWasmBeginRenderCanvas::from_wasm_js_method(&mut out);
     FromWasmSetDefaultDepthAndBlendMode::from_wasm_js_method(&mut out);
     FromWasmDrawCall::from_wasm_js_method(&mut out);
-
+    
     FromWasmXrStartPresenting::from_wasm_js_method(&mut out);
     FromWasmXrStopPresenting::from_wasm_js_method(&mut out);
-   
+    
     out.push_str("}\n");
     out.push_str("}");
     

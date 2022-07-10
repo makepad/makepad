@@ -1,4 +1,4 @@
-pub use makepad_component::{self, *};
+ pub use makepad_component::{self, *};
 pub use makepad_platform::{self, *, audio::*, midi::*};
 
 mod piano;

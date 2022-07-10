@@ -1,13 +1,13 @@
 import {WasmWebGL} from "/makepad/platform/src/platform/web_browser/web_gl.js"
-
-let canvas = document.getElementsByClassName('main_canvas')[0];
+const wasm = await WasmWebGL.fetch_and_instantiate_wasm_multi_threaded(
+    "/makepad/target/wasm32-unknown-unknown/debug/layout_example.wasm"
+);
 
 class MyWasmApp {
-    constructor(wasm, canvas){
-        this.app = new WasmWebGL (wasm, this, canvas);
+    constructor(wasm) {
+        let canvas = document.getElementsByClassName('full_canvas')[0];
+        this.webgl = new WasmWebGL (wasm, this, canvas);
     }
 }
 
-const wasm = await WasmWebGL.load_wasm_from_url("/makepad/target/wasm32-unknown-unknown/debug/layout_example.wasm"); 
-
-let app = new MyWasmApp(wasm, canvas);
+let app = new MyWasmApp(wasm);

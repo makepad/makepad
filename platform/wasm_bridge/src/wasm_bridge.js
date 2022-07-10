@@ -3,8 +3,8 @@ export class WasmBridge {
         this.wasm = wasm;
         this.dispatch = dispatch;
         this.exports = wasm.instance.exports;
-        this.memory = wasm.instance.exports.memory;
-        
+        this.memory = wasm._memory;
+        this.wasm_url = wasm._wasm_url;
         this.buffer_ref_len_check = 0;
         
         this.from_wasm_args = {};
@@ -21,19 +21,19 @@ export class WasmBridge {
     }
     
     update_array_buffer_refs() {
-        if (this.buffer_ref_len_check != this.exports.memory.buffer.byteLength) {
-            this.f32 = new Float32Array(this.exports.memory.buffer);
-            this.u32 = new Uint32Array(this.exports.memory.buffer);
-            this.f64 = new Float64Array(this.exports.memory.buffer);
-            this.buffer_ref_len_check = this.exports.memory.buffer.byteLength;
+        if (this.buffer_ref_len_check != this.memory.buffer.byteLength) {
+            this.f32 = new Float32Array(this.memory.buffer);
+            this.u32 = new Uint32Array(this.memory.buffer);
+            this.f64 = new Float64Array(this.memory.buffer);
+            this.buffer_ref_len_check = this.memory.buffer.byteLength;
         }
     }
     
-    new_to_wasm(){
+    new_to_wasm() {
         return new this.msg_class.ToWasmMsg(this);
     }
     
-    new_from_wasm(ptr){
+    new_from_wasm(ptr) {
         return new this.msg_class.FromWasmMsg(this, ptr);
     }
     
@@ -60,46 +60,63 @@ export class WasmBridge {
         this.update_array_buffer_refs();
     }
     
-    wasm_new_data_u8(capacity){
+    wasm_new_data_u8(capacity) {
         let new_ptr = this.exports.wasm_new_data_u8(capacity);
         this.update_array_buffer_refs();
-        return new_ptr        
+        return new_ptr
     }
-
-    wasm_init_panic_hook(){
+    
+    wasm_init_panic_hook() {
         this.exports.wasm_init_panic_hook();
         this.update_array_buffer_refs();
     }
     
-    static load_wasm_from_url(wasm_url) {
-        function fetch_wasm(wasmfile) {
-            let wasm = null;
-            function chars_to_string(chars_ptr, len){
-                let out = "";
-                let array = new Uint32Array(wasm.instance.exports.memory.buffer, chars_ptr, len);
-                for (let i = 0; i < len; i ++) {
-                    out += String.fromCharCode(array[i]);
-                }
-                return out
+    static fetch_and_instantiate_wasm_multi_threaded(wasm_url) {
+        let memory = new WebAssembly.Memory({initial: 64, maximum: 16384, shared: true});
+        return this.fetch_and_instantiate_wasm(wasm_url, memory);
+    }
+    
+    static fetch_and_instantiate_wasm_single_threaded(wasm_url) {
+        let memory = new WebAssembly.Memory({initial: 64, maximum: 16384, shared: false});
+        return this.fetch_and_instantiate_wasm(wasm_url, null);
+    }
+    
+    static instantiate_wasm(bytes, memory) {
+        let wasm_for_imports = null;
+        function chars_to_string(chars_ptr, len) {
+            let out = "";
+            let array = new Uint32Array(wasm_for_imports._memory.buffer, chars_ptr, len);
+            for (let i = 0; i < len; i ++) {
+                out += String.fromCharCode(array[i]);
             }
-            function _console_log(chars_ptr, len) {
-                console.log(chars_to_string(chars_ptr, len));
-            }
-            function _console_error(chars_ptr, len) {
-                console.error(chars_to_string(chars_ptr, len));
-            }
-            return fetch(wasmfile)
-                .then(response => response.arrayBuffer())
-                .then(bytes => WebAssembly.instantiate(bytes, {env: {
+            return out
+        }
+        function _console_log(chars_ptr, len) {
+            console.log(chars_to_string(chars_ptr, len));
+        }
+        function _console_error(chars_ptr, len) {
+            console.error(chars_to_string(chars_ptr, len));
+        }
+        return WebAssembly.instantiate(bytes, {
+            env: {
+                memory,
                 _console_log,
                 _console_error
-            }}))
-            .then(response=>{
-                wasm = response
-                return response
-            })
-        }
-        return fetch_wasm(wasm_url);
+            }
+        }).then(wasm => {
+            wasm_for_imports = wasm;
+            wasm._memory = memory;
+            wasm._bytes = bytes;
+            return wasm
+        }, error => {
+            console.log(error)
+        })
+    }
+    
+    static fetch_and_instantiate_wasm(wasm_url, memory) {
+        return fetch(wasm_url)
+            .then(response => response.arrayBuffer())
+            .then(bytes => this.instantiate_wasm(bytes, memory))
     }
 }
 
@@ -109,7 +126,7 @@ export class ToWasmMsg {
         this.ptr = app.wasm_new_msg_with_u64_capacity(1024);
         this.u32_ptr = this.ptr >> 2;
         this.u32_offset = this.u32_ptr + 2;
-        this.u32_needed_capacity = 0;//app.u32[this.u32_ptr] << 1;
+        this.u32_needed_capacity = 0; //app.u32[this.u32_ptr] << 1;
     }
     
     reserve_u32(u32_capacity) {
@@ -119,7 +136,7 @@ export class ToWasmMsg {
         let u64_needed_capacity = ((this.u32_needed_capacity & 1) + this.u32_needed_capacity) >> 1;
         let offset = this.u32_offset - this.u32_ptr;
         let u64_len = ((offset & 1) + offset) >> 1;
-
+        
         if (app.u32[this.u32_ptr] - u64_len < u64_needed_capacity) {
             app.u32[this.u32_ptr + 1] = u64_len;
             this.ptr = this.app.wasm_msg_reserve_u64(this.ptr, u64_capacity_needed);
@@ -127,7 +144,7 @@ export class ToWasmMsg {
             this.u32_offset = this.u32_ptr + offset;
         }
     }
-
+    
     // i forgot how to do memcpy with typed arrays. so, we'll do this.
     push_data_u8(input_buffer) {
         let app = this.app;
@@ -151,12 +168,12 @@ export class ToWasmMsg {
             }
         }
         
-        app.u32[this.u32_offset++] = output_ptr;
-        app.u32[this.u32_offset++] = u8_len;
+        app.u32[this.u32_offset ++] = output_ptr;
+        app.u32[this.u32_offset ++] = u8_len;
     }
     
     release_ownership() {
-        if(this.ptr === 0){
+        if (this.ptr === 0) {
             throw new Error("double finalise")
         }
         let app = this.app;
@@ -169,7 +186,7 @@ export class ToWasmMsg {
         
         let u64_len = ((offset & 1) + offset) >> 1;
         app.u32[this.u32_ptr + 1] = u64_len;
-
+        
         this.app = null;
         this.ptr = 0;
         this.u32_ptr = 0;
@@ -218,19 +235,19 @@ export class FromWasmMsg {
     
     dispatch_on_app() {
         let app = this.app;
-        let u32_len = app.u32[this.u32_ptr + 1]<<1;
+        let u32_len = app.u32[this.u32_ptr + 1] << 1;
         while ((this.u32_offset) - this.u32_ptr < u32_len) {
-            let msg_id = app.u32[this.u32_offset++];
-            this.u32_offset++; // skip second u32 of id
-            this.u32_offset++; // skip body len
+            let msg_id = app.u32[this.u32_offset ++];
+            this.u32_offset ++; // skip second u32 of id
+            this.u32_offset ++; // skip body len
             // dispatch to deserializer
-            if (this[msg_id] !== undefined){
+            if (this[msg_id] !== undefined) {
                 this[msg_id]();
             }
-            else{
+            else {
                 this.dispatch[msg_id]()
             }
-            this.u32_offset += this.u32_offset&1; // align
+            this.u32_offset += this.u32_offset & 1; // align
         }
     }
 }
