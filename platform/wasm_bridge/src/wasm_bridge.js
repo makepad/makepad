@@ -73,15 +73,15 @@ export class WasmBridge {
     
     static fetch_and_instantiate_wasm_multi_threaded(wasm_url) {
         let memory = new WebAssembly.Memory({initial: 64, maximum: 16384, shared: true});
-        return this.fetch_and_instantiate_wasm(wasm_url, memory);
+        return this.fetch_and_instantiate_wasm(wasm_url, memory, null);
     }
     
     static fetch_and_instantiate_wasm_single_threaded(wasm_url) {
         let memory = new WebAssembly.Memory({initial: 64, maximum: 16384, shared: false});
-        return this.fetch_and_instantiate_wasm(wasm_url, null);
+        return this.fetch_and_instantiate_wasm(wasm_url, null, null);
     }
     
-    static instantiate_wasm(bytes, memory) {
+    static instantiate_wasm(bytes, memory, post_signal) {
         let wasm_for_imports = null;
         function chars_to_string(chars_ptr, len) {
             let out = "";
@@ -97,11 +97,15 @@ export class WasmBridge {
         function _console_error(chars_ptr, len) {
             console.error(chars_to_string(chars_ptr, len));
         }
+        function _post_signal(signal, hi, lo){
+            post_signal(signal, hi, lo)
+        }
         return WebAssembly.instantiate(bytes, {
             env: {
                 memory,
                 _console_log,
-                _console_error
+                _console_error,
+                _post_signal
             }
         }).then(wasm => {
             wasm_for_imports = wasm;

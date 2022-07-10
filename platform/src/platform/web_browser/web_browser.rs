@@ -98,8 +98,7 @@ impl Cx {
                     self.platform.window_geom = tw.window_info.into();
                     
                     self.call_event_handler(&mut Event::Construct);
-                    
-                    self.platform.from_wasm(FromWasmCreateThread{thread_id:1});
+                    //self.platform.from_wasm(FromWasmCreateThread{thread_id:1});
                 },
                 
                 id!(ToWasmResizeWindow) => {
@@ -248,6 +247,12 @@ impl Cx {
                     self.passes[self.windows[0].main_pass_id.unwrap()].paint_dirty = true;
                 }
                 
+                id!(ToWasmSignal)=>{
+                    let tw = ToWasmSignal::read_to_wasm(&mut to_wasm);
+                    let data = ((tw.data_hi as u64)<<32) | (tw.data_lo as u64);
+                    self.send_signal(Signal{signal_id: tw.signal_id as usize}, Some(data));
+                }
+                
                 _ => {
                     console_log!("Message unknown");
                     
@@ -366,7 +371,7 @@ impl Cx {
 
 
 impl CxPlatformApi for Cx {
-    
+
     fn show_text_ime(&mut self, x: f32, y: f32) {
         self.platform.from_wasm(FromWasmShowTextIME {x, y});
     }
@@ -375,7 +380,8 @@ impl CxPlatformApi for Cx {
         self.platform.from_wasm(FromWasmHideTextIME {});
     }
     
-    fn post_signal(_signal: Signal, _value: u64) {
+    fn post_signal(signal: Signal, value: u64) {
+        unsafe{_post_signal(signal.signal_id as u32, (value>>32) as u32, value as u32)};
         // todo
     }
     /*
@@ -426,6 +432,33 @@ impl CxPlatformApi for Cx {
     
     fn update_menu(&mut self, _menu: &Menu) {
     }
+    
+    fn spawn_thread<F>(&mut self, closure: F) where F: FnOnce() + Send + 'static{
+        let closure_box:Box<dyn FnOnce() + Send + 'static> = Box::new(closure);
+        let closure_ptr = Box::into_raw(Box::new(closure_box));
+        self.platform.from_wasm(FromWasmCreateThread{closure_ptr: closure_ptr as u32});
+    }
+}
+
+extern "C" {
+    pub fn _post_signal(signal: u32, data_hi: u32, data_lo: u32);
+}
+
+
+#[export_name = "wasm_thread_entrypoint"]
+#[cfg(target_arch = "wasm32")]
+pub unsafe extern "C" fn wasm_thread_entrypoint(closure_ptr:u32){
+    let closure = Box::from_raw(closure_ptr as *mut Box<dyn FnOnce() + Send + 'static>);
+    closure();
+}
+
+#[export_name = "wasm_thread_alloc_tls"]
+#[cfg(target_arch = "wasm32")]
+pub unsafe extern "C" fn wasm_thread_alloc_tls(tls_size:u32)->u32{
+    let mut v = Vec::<u64>::new();
+    v.reserve_exact(tls_size as usize);
+    let mut v = std::mem::ManuallyDrop::new(v);
+    v.as_mut_ptr() as u32
 }
 
 // storage buffers for graphics API related platform
@@ -464,11 +497,6 @@ impl CxPlatform {
 }
 
 
-#[export_name = "wasm_thread_entrypoint"]
-#[cfg(target_arch = "wasm32")]
-pub unsafe extern "C" fn wasm_thread_entrypoint() {
-    console_log!("Hi from wasm worker");
-}
 
 #[export_name = "wasm_get_js_msg_class"]
 #[cfg(target_arch = "wasm32")]
@@ -496,9 +524,10 @@ pub unsafe extern "C" fn wasm_get_js_msg_class() -> u32 {
     ToWasmTimerFired::to_wasm_js_method(&mut out);
     ToWasmPaintDirty::to_wasm_js_method(&mut out);
     ToWasmRedrawAll::to_wasm_js_method(&mut out);
+    ToWasmXRUpdate::to_wasm_js_method(&mut out);
     ToWasmAppGotFocus::to_wasm_js_method(&mut out);
     ToWasmAppLostFocus::to_wasm_js_method(&mut out);
-    ToWasmXRUpdate::to_wasm_js_method(&mut out);
+    ToWasmSignal::to_wasm_js_method(&mut out);
     
     out.push_str("},\n");
     out.push_str("FromWasmMsg:class extends FromWasmMsg{\n");
