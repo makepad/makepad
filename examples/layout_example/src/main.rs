@@ -45,7 +45,16 @@ impl App {
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
         self.window.handle_event(cx, event);
         match event {
+            Event::Signal(se)=>{
+                console_log!("Received signal");
+            }
             Event::Construct => {
+                // lets spawn up a thread
+                cx.spawn_thread(||{
+                    console_log!("Hi from wasm worker");
+                    // lets post to our main thread
+                    Cx::post_signal(Signal{signal_id:1}, 0);
+                });
             }
             Event::Draw(draw_event) => {
                 self.draw(&mut Cx2d::new(cx, draw_event));

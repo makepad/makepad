@@ -48,6 +48,7 @@ pub trait CxPlatformApi{
     fn start_timer(&mut self, interval: f64, repeats: bool) -> Timer;
     fn stop_timer(&mut self, timer: Timer); 
     fn post_signal(signal: Signal, status: u64); 
+    fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static;
     fn update_menu(&mut self, menu: &Menu);
     fn start_dragging(&mut self, dragged_item: DraggedItem);
 }
@@ -250,6 +251,7 @@ impl Cx {
     }
     
     pub fn send_signal(&mut self, signal: Signal, status: Option<u64>) {
+        // TODO CLEAN THIS UP no more status-set just u64s
         if signal.signal_id == 0 {
             return
         }

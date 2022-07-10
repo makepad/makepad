@@ -200,10 +200,15 @@ export class WasmWebBrowser extends WasmBridge {
             {type: 'module'}
         );
         worker.postMessage({
-            thread_id: args.thread_id,
+            closure_ptr: args.closure_ptr,
             bytes: this.wasm._bytes,
             memory: this.wasm._memory
         });
+        worker.addEventListener("message", (e)=>{
+            let data = e.data;
+            this.to_wasm.ToWasmSignal(data)
+            this.do_wasm_pump();
+        })
     }
     
     // calling into wasm
