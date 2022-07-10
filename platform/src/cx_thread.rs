@@ -1,5 +1,5 @@
 use {
-    std::sync::mpsc::{channel, Sender, Receiver,TryRecvError, SendError},
+    std::sync::mpsc::{channel, Sender, Receiver,RecvError,TryRecvError, SendError},
     crate::{
         cx::Cx,
         cx_api::*,
@@ -110,6 +110,10 @@ impl<T> FromUISender<T>{
 }
 
 impl<T> FromUIReceiver<T>{    
+    pub fn recv(&self)->Result<T,RecvError>{
+        self.receiver.recv()
+    }
+
     pub fn try_recv(&self)->Result<T,TryRecvError>{
         self.receiver.try_recv()
     }
