@@ -115,6 +115,11 @@ impl DrawShaderTextureInput{
 }
 
 #[derive(FromWasm)]
+pub struct FromWasmCreateThread {
+    pub thread_id: usize,
+}
+
+#[derive(FromWasm)]
 pub struct FromWasmCompileWebGLShader {
     pub shader_id: usize,
     pub vertex: String,

@@ -3,7 +3,7 @@ import {WasmBridge} from "/makepad/platform/wasm_bridge/src/wasm_bridge.js"
 export class WasmWebBrowser extends WasmBridge {
     constructor(wasm, dispatch, canvas) {
         super (wasm, dispatch);
-
+        
         this.wasm_app = this.wasm_create_app();
         this.dispatch = dispatch;
         this.canvas = canvas;
@@ -15,10 +15,10 @@ export class WasmWebBrowser extends WasmBridge {
         this.bind_screen_resize();
     }
     
-    load_deps(){
+    load_deps() {
         this.to_wasm = this.new_to_wasm();
-
-        this.to_wasm.ToWasmGetDeps({
+        
+        this.to_wasm.ToWasmGetDeps({ 
             gpu_info: this.gpu_info,
             browser_info: {
                 protocol: location.protocol + "",
@@ -30,7 +30,7 @@ export class WasmWebBrowser extends WasmBridge {
         });
         
         this.do_wasm_pump();
-
+        
         this.load_deps_promise.then(
             results => {
                 let deps = [];
@@ -45,7 +45,7 @@ export class WasmWebBrowser extends WasmBridge {
                     deps: deps
                 });
                 this.do_wasm_pump();
-
+                
                 this.bind_mouse_and_touch();
                 this.bind_keyboard();
                 
@@ -154,7 +154,7 @@ export class WasmWebBrowser extends WasmBridge {
             return
         }
     }
-
+    
     FromWasmRequestAnimationFrame() {
         if (this.window_info.xr_is_presenting || this.req_anim_frame_id) {
             return;
@@ -174,26 +174,37 @@ export class WasmWebBrowser extends WasmBridge {
     FromWasmSetDocumentTitle(args) {
         document.title = args.title
     }
-
+    
     FromWasmSetMouseCursor(args) {
         //console.log(args);
         document.body.style.cursor = web_cursor_map[args.web_cursor] || 'default'
     }
-
+    
     FromWasmTextCopyResponse(args) {
         this.text_copy_response = args.response
     }
-
+    
     FromWasmShowTextIME(args) {
         self.text_area_pos = args;
         this.update_text_area_pos();
     }
     
-    FromWasmHideTextIME(){
+    FromWasmHideTextIME() {
         console.log("IMPLEMENTR!")
     }
     
-    
+    FromWasmCreateThread(args) {
+        // ok we need to start a worker with our wasm
+        let worker = new Worker(
+            '/makepad/platform/src/platform/web_browser/web_worker.js',
+            {type: 'module'}
+        );
+        worker.postMessage({
+            thread_id: args.thread_id,
+            bytes: this.wasm._bytes,
+            memory: this.wasm._memory
+        });
+    }
     
     // calling into wasm
     
@@ -284,7 +295,7 @@ export class WasmWebBrowser extends WasmBridge {
             this.window_info.can_fullscreen = can_fullscreen();
             
             if (this.to_wasm !== undefined) {
-                this.to_wasm.ToWasmResizeWindow({window_info:this.window_info});
+                this.to_wasm.ToWasmResizeWindow({window_info: this.window_info});
                 this.FromWasmRequestAnimationFrame();
             }
         }
