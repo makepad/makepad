@@ -27,10 +27,23 @@ live_register!{
 }
 main_app!(App);
 
+#[derive(Clone, Debug)]
+pub enum ToUI {
+    TestMessage(Vec<u32>),
+}
+
+#[derive(Clone, Debug)]
+pub enum FromUI {
+    TestMessage(Vec<u32>),
+}
+
+
 #[derive(Live, LiveHook)]
 pub struct App {
     frame: Frame,
     window: DesktopWindow,
+    #[rust(ToUIReceiver::new(cx))] to_ui: ToUIReceiver<ToUI>,
+    #[rust] from_ui: FromUISender<FromUI>,
 }
 
 impl App {
@@ -46,14 +59,25 @@ impl App {
         self.window.handle_event(cx, event);
         match event {
             Event::Signal(se)=>{
-                console_log!("Received signal");
+                if let Ok(data) = self.to_ui.try_recv(se){
+                    console_log!("GOT DATA {:?}", data);
+                    //self.from_ui.send(FromUI::TestMessage(vec![4,5,6])).unwrap();
+                }
             }
             Event::Construct => {
                 // lets spawn up a thread
-                cx.spawn_thread(||{
-                    console_log!("Hi from wasm worker");
+                let to_ui = self.to_ui.sender();
+                let from_ui = self.from_ui.receiver();
+                cx.spawn_thread(move ||{
+                    to_ui.send(ToUI::TestMessage(vec![1,2,3])).unwrap();
+                    loop{
+                        if let Ok(data) = from_ui.try_recv(){
+                        //    console_log!("GOT FROM UI {:?}", data);
+                        }
+                    }
+                        //console_log!("Hi from wasm worker");
                     // lets post to our main thread
-                    Cx::post_signal(Signal{signal_id:1}, 0);
+                    //Cx::post_signal(Signal{signal_id:1}, 0);
                 });
             }
             Event::Draw(draw_event) => {
