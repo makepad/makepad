@@ -32,10 +32,10 @@ pub struct WVec2 {
 
 impl Into<Vec2> for WVec2 {
     fn into(self) -> Vec2 {
-        Vec2{x:self.x, y: self.y}
+        Vec2 {x: self.x, y: self.y}
     }
 }
- 
+
 
 #[derive(ToWasm)]
 pub struct WGpuInfo {
@@ -148,7 +148,7 @@ impl ToWasmFingerDown {
     pub fn into_finger_down_event(self, tap_count: u32) -> FingerDownEvent {
         FingerDownEvent {
             window_id: 0,
-            abs: Vec2{x:self.finger.x, y:self.finger.y},
+            abs: Vec2 {x: self.finger.x, y: self.finger.y},
             handled: false,
             digit: self.finger.digit,
             input_type: if self.finger.is_touch {FingerInputType::Touch} else {FingerInputType::Mouse},
@@ -168,7 +168,7 @@ impl Into<FingerUpEvent> for ToWasmFingerUp {
     fn into(self) -> FingerUpEvent {
         FingerUpEvent {
             window_id: 0,
-            abs: Vec2{x:self.finger.x, y:self.finger.y},
+            abs: Vec2 {x: self.finger.x, y: self.finger.y},
             digit: self.finger.digit,
             input_type: if self.finger.is_touch {FingerInputType::Touch} else {FingerInputType::Mouse},
             modifiers: unpack_key_modifier(self.finger.modifiers),
@@ -186,7 +186,7 @@ impl Into<FingerMoveEvent> for ToWasmFingerMove {
     fn into(self) -> FingerMoveEvent {
         FingerMoveEvent {
             window_id: 0,
-            abs: Vec2{x:self.finger.x, y:self.finger.y},
+            abs: Vec2 {x: self.finger.x, y: self.finger.y},
             digit: self.finger.digit,
             input_type: if self.finger.is_touch {FingerInputType::Touch} else {FingerInputType::Mouse},
             modifiers: unpack_key_modifier(self.finger.modifiers),
@@ -204,7 +204,7 @@ impl Into<FingerHoverEvent> for ToWasmFingerHover {
     fn into(self) -> FingerHoverEvent {
         FingerHoverEvent {
             window_id: 0,
-            abs: Vec2{x:self.finger.x, y:self.finger.y},
+            abs: Vec2 {x: self.finger.x, y: self.finger.y},
             digit: self.finger.digit,
             handled: false,
             modifiers: unpack_key_modifier(self.finger.modifiers),
@@ -223,7 +223,7 @@ impl Into<FingerHoverEvent> for ToWasmFingerOut {
     fn into(self) -> FingerHoverEvent {
         FingerHoverEvent {
             window_id: 0,
-            abs: Vec2{x:self.finger.x, y:self.finger.y},
+            abs: Vec2 {x: self.finger.x, y: self.finger.y},
             digit: self.finger.digit,
             handled: false,
             modifiers: unpack_key_modifier(self.finger.modifiers),
@@ -244,8 +244,8 @@ impl Into<FingerScrollEvent> for ToWasmFingerScroll {
         FingerScrollEvent {
             window_id: 0,
             digit: self.finger.digit,
-            abs: Vec2{x:self.finger.x, y:self.finger.y},
-            scroll: Vec2{x:self.scroll_x, y:self.scroll_y},
+            abs: Vec2 {x: self.finger.x, y: self.finger.y},
+            scroll: Vec2 {x: self.scroll_x, y: self.scroll_y},
             input_type: if self.finger.is_touch {FingerInputType::Touch} else {FingerInputType::Mouse},
             handled_x: false,
             handled_y: false,
@@ -445,13 +445,7 @@ pub struct ToWasmPaintDirty {
 }
 
 #[derive(ToWasm)]
-pub struct ToWasmRedrawAll{}
-
-#[derive(ToWasm)]
-pub struct ToWasmAppGotFocus {}
-
-#[derive(ToWasm)]
-pub struct ToWasmAppLostFocus {}
+pub struct ToWasmRedrawAll {}
 
 #[derive(ToWasm, Clone)]
 pub struct WVec3 {
@@ -462,7 +456,7 @@ pub struct WVec3 {
 
 impl Into<Vec3> for WVec3 {
     fn into(self) -> Vec3 {
-        Vec3{x:self.x, y: self.y, z:self.z}
+        Vec3 {x: self.x, y: self.y, z: self.z}
     }
 }
 
@@ -476,7 +470,7 @@ pub struct WQuat {
 
 impl Into<Quat> for WQuat {
     fn into(self) -> Quat {
-        Quat{a:self.a, b: self.b, c:self.c, d:self.d}
+        Quat {a: self.a, b: self.b, c: self.c, d: self.d}
     }
 }
 
@@ -501,7 +495,7 @@ impl Into<Transform> for WXRTransform {
     }
 }
 
-impl Into<XRButton>  for WXRButton {
+impl Into<XRButton> for WXRButton {
     fn into(self) -> XRButton {
         XRButton {
             value: self.value,
@@ -528,7 +522,7 @@ impl Into<XRInput> for WXRInput {
             grip: self.grip.into(),
             ray: self.ray.into(),
             axes: self.axes,
-            buttons: self.buttons.into_iter().map(|v|v.into()).collect(),
+            buttons: self.buttons.into_iter().map( | v | v.into()).collect(),
         }
     }
 }
@@ -541,12 +535,26 @@ pub struct ToWasmXRUpdate {
 }
 
 impl ToWasmXRUpdate {
-    pub fn into_xrupdate_event(self, last_inputs:Option<Vec<XRInput>>) -> XRUpdateEvent {
+    pub fn into_xrupdate_event(self, last_inputs: Option<Vec<XRInput >>) -> XRUpdateEvent {
         XRUpdateEvent {
             time: self.time,
             head_transform: self.head_transform.into(),
-            inputs: self.inputs.into_iter().map(|v|v.into()).collect(),
+            inputs: self.inputs.into_iter().map( | v | v.into()).collect(),
             last_inputs
         }
     }
 }
+
+#[derive(ToWasm)]
+pub struct ToWasmAppGotFocus {}
+
+#[derive(ToWasm)]
+pub struct ToWasmAppLostFocus {}
+
+#[derive(ToWasm)]
+pub struct ToWasmSignal {
+    pub signal_id: u32,
+    pub data_lo: u32,
+    pub data_hi: u32
+}
+
