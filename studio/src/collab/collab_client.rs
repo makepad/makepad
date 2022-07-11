@@ -2,10 +2,8 @@ use {
     crate::{
         makepad_micro_serde::*,
         makepad_platform::*,
-        collab::{
-            collab_protocol::{CollabRequest, CollabClientAction},
-            collab_server::{CollabConnection, CollabServer},
-        }
+        makepad_collab_protocol::{CollabRequest, CollabClientAction},
+        makepad_collab_server::{CollabConnection, CollabServer},
     },
     std::{
         env,

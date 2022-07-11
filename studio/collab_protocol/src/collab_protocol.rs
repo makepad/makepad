@@ -1,11 +1,11 @@
 use {
     crate::{
-        code_editor::{
+        makepad_editor_core::{
             delta::Delta,
             text::Text
         },
+        makepad_live_id::*,
         makepad_micro_serde::{SerBin, DeBin, DeBinErr},
-        makepad_platform::*,
     },
     std::{
         ffi::OsString,

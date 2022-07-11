@@ -1,6 +1,6 @@
 use {
     crate::{
-        code_editor::{
+        makepad_editor_core::{
             delta::Delta,
             position::Position,
             position_set,

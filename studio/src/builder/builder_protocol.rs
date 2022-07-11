@@ -1,6 +1,6 @@
 use {
     crate::{
-        code_editor::{Range},
+        makepad_editor_core::range::{Range},
         makepad_micro_serde::{SerBin, DeBin, DeBinErr},
     }
 };

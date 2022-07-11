@@ -1,6 +1,6 @@
 use {
     std::{iter, ops::{Deref, Index}, slice::Iter},
-    crate::code_editor::{
+    crate::makepad_editor_core::{
         range::Range,
         delta::{Delta, OperationRange},
         text::Text,

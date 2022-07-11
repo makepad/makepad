@@ -6,6 +6,9 @@ use crate::live_id::*;
 #[path = "../../src/live_id.rs"]
 mod live_id; 
 
+mod derive_from_live_id;
+use crate::derive_from_live_id::*;
+
 #[proc_macro] 
 pub fn id(item: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new(); 
@@ -109,4 +112,7 @@ pub fn id_from_str(item: TokenStream) -> TokenStream {
     }
 }
 
-
+#[proc_macro_derive(FromLiveId)]
+pub fn derive_from_live_id(input: TokenStream) -> TokenStream {
+    derive_from_live_id_impl(input)
+}

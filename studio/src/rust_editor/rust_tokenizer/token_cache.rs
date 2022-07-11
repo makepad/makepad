@@ -1,5 +1,5 @@
 use {
-    crate::code_editor::{
+    crate::makepad_editor_core::{
         delta::{Delta, OperationRange},
         text::Text,
     },
