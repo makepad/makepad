@@ -10,8 +10,8 @@ use {
         },
         makepad_platform::*,
         editor_state::{EditorState, SessionId},
-        collab::{
-            collab_protocol::{FileNodeData, FileTreeData},
+        makepad_collab_protocol::{
+            FileNodeData, FileTreeData,
         },
     },
     std::{

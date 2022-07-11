@@ -1,7 +1,7 @@
 use {
     crate::{
         makepad_platform::*,
-        code_editor::{
+        makepad_editor_core::{
             text::{Text},
         },
         rust_editor::rust_tokenizer::{
@@ -16,9 +16,7 @@ use {
             code_editor_impl::{CodeEditorImpl, CodeEditorAction, LinesLayout, LineLayoutOutput}
         },
         rust_editor::rust_tokenizer::token_cache::TokenCache,
-        collab::{
-            collab_protocol::CollabRequest,
-        },
+        makepad_collab_protocol::CollabRequest,
         editor_state::{
             SessionId
         },

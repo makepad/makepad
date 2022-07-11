@@ -14,12 +14,12 @@ use {
         },
         collab::{
             collab_client::CollabClient,
-            collab_protocol::{
-                FileTreeData,
-                CollabRequest,
-                CollabResponse,
-                CollabClientAction
-            },
+        },
+        makepad_collab_protocol::{
+            FileTreeData,
+            CollabRequest,
+            CollabResponse,
+            CollabClientAction
         },
         builder::{
             builder_client::BuilderClient,

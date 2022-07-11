@@ -1,6 +1,6 @@
 use {
     crate::makepad_micro_serde::*,
-    crate::code_editor::{
+    crate::{
         position::Position
     }
 };
