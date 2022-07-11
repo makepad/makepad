@@ -1,21 +1,19 @@
 use {
     crate::{
-        makepad_platform::*,
-        code_editor::{
+        makepad_editor_core::{
             delta::Delta,
             text::Text
         },
-        collab::{
-            collab_protocol::{
-                DirectoryEntry,
-                TextFileId,
-                FileNodeData,
-                FileTreeData,
-                CollabError,
-                CollabNotification,
-                CollabRequest,
-                CollabResponse,
-            },
+        makepad_live_id::LiveIdMap,
+        makepad_collab_protocol::{
+            DirectoryEntry,
+            TextFileId,
+            FileNodeData,
+            FileTreeData,
+            CollabError,
+            CollabNotification,
+            CollabRequest,
+            CollabResponse,
         },
     },
     std::{ 

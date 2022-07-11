@@ -18,12 +18,10 @@ use {
                 CodeEditorAction
             },
         },
-        collab::{
-            collab_protocol::{
-                CollabNotification,
-                CollabRequest,
-                CollabResponse
-            },
+        makepad_collab_protocol::{
+            CollabNotification,
+            CollabRequest,
+            CollabResponse
         },
         builder::{
             builder_protocol::{
