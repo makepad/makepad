@@ -1,12 +1,14 @@
 use {
     crate::{
-        code_editor::{
+        makepad_editor_core::{
             position::Position,
-            position_set::PositionSet,
             range::Range,
-            range_set::{RangeSet, Span},
             size::Size,
             text::{Text},
+        },
+        makepad_editor_core::{
+            position_set::PositionSet,
+            range_set::{RangeSet, Span},
         },
         makepad_platform::*,
         makepad_component::{ 
@@ -30,9 +32,7 @@ use {
         builder::{
             builder_protocol::{BuilderMsg, BuilderMsgLevel}
         },
-        collab::{
-            collab_protocol::CollabRequest,
-        }
+        makepad_collab_protocol::CollabRequest,
     },
     std::mem,
 };

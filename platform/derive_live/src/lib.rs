@@ -38,10 +38,6 @@ pub fn derive_live_apply(input: TokenStream) -> TokenStream {
     derive_live_hook_impl(input)
 }
 
-#[proc_macro_derive(FromLiveId)]
-pub fn derive_from_live_id(input: TokenStream) -> TokenStream {
-    derive_from_live_id_impl(input)
-}
 
 #[proc_macro]
 pub fn live(input: TokenStream) -> TokenStream {

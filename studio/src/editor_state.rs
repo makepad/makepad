@@ -1,7 +1,7 @@
 use {
     crate::{
         makepad_platform::*,
-        code_editor::{
+        makepad_editor_core::{
             delta::{self, Delta},
             position::Position,
             position_set::PositionSet,
@@ -16,7 +16,7 @@ use {
             msg_cache::MsgCache,
         },
         rust_editor::rust_tokenizer::token_cache::TokenCache,
-        collab::collab_protocol::{CollabRequest, TextFileId},
+        makepad_collab_protocol::{CollabRequest, TextFileId},
         editors::EditorViewId,
     },
 

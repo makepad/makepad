@@ -1,5 +1,5 @@
 use {
-    crate::code_editor::{
+    crate::{
         position::Position,
         size::Size
     },
