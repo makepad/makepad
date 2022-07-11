@@ -308,6 +308,10 @@ impl Cx {
 }
 
 impl CxPlatformApi for Cx{
+
+    fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static{
+        std::thread::spawn(f);
+    }
     
     fn show_text_ime(&mut self, x: f32, y: f32) {
         self.platform.set_ime_position = Some(Vec2 {x: x, y: y});
