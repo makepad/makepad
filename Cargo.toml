@@ -1,7 +1,6 @@
 [workspace]
 
 members = [
-    "code_editor/regex",
     "code_editor/segment",
     "code_editor/ucd",
     "examples/bare_example", 
