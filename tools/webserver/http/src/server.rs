@@ -8,110 +8,51 @@ use crate::websocket::{WebSocket, WebSocketMessage};
 use crate::utils::*;
 
 #[derive(Clone)]
-pub struct HttpServer{
+pub struct HttpServer {
     pub listen_address: SocketAddr,
-    pub request: mpsc::Sender<HttpMessage>,
+    pub request: mpsc::Sender<HttpRequest>,
     pub post_max_size: u64
 }
 
-pub struct HttpResponse{
+pub struct HttpResponse {
     pub header: String,
     pub body: Vec<u8>
 }
 
-pub enum HttpMessage{
-    WebSocketMessageBinary{
-        data: Vec<u8>,
-        response: mpsc::Sender<Vec<u8>>,
+pub enum HttpRequest {
+    ConnectWebSocket {
+        web_socket_id: u64,
+        headers:HttpHeaders,
+        response_sender: mpsc::Sender<Vec<u8 >>,
     },
-    HttpGet{
+    DisconnectWebSocket {
+        web_socket_id: u64,
+    },
+    BinaryMessage {
+        web_socket_id: u64,
+        response_sender: mpsc::Sender<Vec<u8 >>,
+        data: Vec<u8>
+    },
+    Get {
         headers: HttpHeaders,
-        response: mpsc::Sender<HttpResponse>,
+        response_sender: mpsc::Sender<HttpResponse>,
     },
-    HttpPost{
+    Post {
         headers: HttpHeaders,
         body: Vec<u8>,
         response: mpsc::Sender<HttpResponse>,
     }
 }
 
-/*
-impl HttpGetConnection {
-    fn get_mime_type(&self) -> Option<&'static str> {
-        let path = &self.headers.path;
-        if path.ends_with(".html") {Some("text/html")}
-        else if path.ends_with(".wasm") {Some("application/wasm")}
-        else if path.ends_with(".js") {Some("text/javascript")}
-        else if path.ends_with(".ttf") {Some("application/ttf")}
-        else {None}
-    }
-    
-    fn handle_get(mut self) {
-        let mime_type = self.get_mime_type();
-        if mime_type.is_none() {
-            return http_error_out(self.tcp_stream, 500);
-        }
-        let mime_type = mime_type.unwrap();
-        
-        // lets read the file from disk and return it
-        
-        /*
-        if accept_encoding.contains("br") { // we want the brotli
-            if let Some(brotli_filecache) = brotli_filecache.cache {
-                if let Some(data) = brotli_filecache.get(path) {
-                    let header = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\n\
-                            Content-encoding: br\r\n\
-                            Cache-Control: max-age:0\r\n\
-                            Content-Length: {}\r\n\
-                            Connection: close\r\n\r\n",
-                        mime_type,
-                        data.len()
-                    );
-                    write_bytes_to_tcp_stream_no_error(&mut tcp_stream, header.as_bytes());
-                    write_bytes_to_tcp_stream_no_error(&mut tcp_stream, &data);
-                    let _ = tcp_stream.shutdown(Shutdown::Both);
-                }
-                else {
-                    return http_error_out(tcp_stream, 404);
-                }
-            }
-        }
-        
-        if accept_encoding.contains("gzip") || accept_encoding.contains("deflate") {
-            if let Some(zlib_filecache) = zlib_filecache.cache {
-                if let Some(data) = zlib_filecache.get(path) {
-                    let header = format!(
-                        "HTTP/1.1 200 OK\r\nContent-Type: {}\r\n\
-                            Content-encoding: deflate\r\n\
-                            Cache-Control: max-age:0\r\n\
-                            Content-Length: {}\r\n\
-                            Connection: close\r\n\r\n",
-                        mime_type,
-                        data.len()
-                    );
-                    write_bytes_to_tcp_stream_no_error(&mut tcp_stream, header.as_bytes());
-                    write_bytes_to_tcp_stream_no_error(&mut tcp_stream, &data);
-                    let _ = tcp_stream.shutdown(Shutdown::Both);
-                    return
-                }
-                else {
-                    return http_error_out(tcp_stream, 404);
-                }
-            }
-        }*/
-        return http_error_out(self.tcp_stream, 500);
-    }
-}*/
-
 pub fn start_http_server(
     http_server: HttpServer,
-) ->  Option<std::thread::JoinHandle<() >> {
+) -> Option<std::thread::JoinHandle<() >> {
     
     let listener = if let Ok(listener) = TcpListener::bind(http_server.listen_address.clone()) {listener} else {println!("Cannot bind http server port"); return None};
     
     let listen_thread = {
         std::thread::spawn(move || {
+            let mut web_socket_id = 0;
             for tcp_stream in listener.incoming() {
                 let mut tcp_stream = if let Ok(tcp_stream) = tcp_stream {
                     tcp_stream
@@ -130,13 +71,14 @@ pub fn start_http_server(
                     let headers = headers.unwrap();
                     
                     if headers.sec_websocket_key.is_some() {
-                        return handle_web_socket(http_server, tcp_stream, headers);
+                        web_socket_id += 1;
+                        return handle_web_socket(http_server, tcp_stream, headers, web_socket_id);
                     }
                     if headers.verb == "POST" {
-                        return handle_post(http_server,tcp_stream, headers);
+                        return handle_post(http_server, tcp_stream, headers);
                     }
                     if headers.verb == "GET" {
-                        return handle_get(http_server,tcp_stream, headers);
+                        return handle_get(http_server, tcp_stream, headers);
                     }
                     return http_error_out(tcp_stream, 500);
                 });
@@ -146,19 +88,19 @@ pub fn start_http_server(
     Some(listen_thread)
 }
 
-fn handle_post(http_server:HttpServer, mut tcp_stream:TcpStream, headers:HttpHeaders) {
+fn handle_post(http_server: HttpServer, mut tcp_stream: TcpStream, headers: HttpHeaders) {
     // we have to have a content-length or bust
     if headers.content_length.is_none() {
         return http_error_out(tcp_stream, 500);
     }
     let content_length = headers.content_length.unwrap();
-    if content_length > http_server.post_max_size{
+    if content_length > http_server.post_max_size {
         return http_error_out(tcp_stream, 500);
     }
     let bytes_total = content_length as usize;
     let mut body = Vec::new();
     body.resize(bytes_total, 0u8);
-    // lets read content_length
+    
     let mut bytes_left = bytes_total;
     while bytes_left > 0 {
         let buf = &mut body[(bytes_total - bytes_left)..bytes_total];
@@ -172,13 +114,13 @@ fn handle_post(http_server:HttpServer, mut tcp_stream:TcpStream, headers:HttpHea
         }
         bytes_left -= bytes_read;
     }
-    // send our channel the post
+    
     let (tx_socket, rx_socket) = mpsc::channel::<HttpResponse> ();
-    if http_server.request.send(HttpMessage::HttpPost{
+    if http_server.request.send(HttpRequest::Post {
         headers,
         body,
         response: tx_socket
-    }).is_err(){
+    }).is_err() {
         return http_error_out(tcp_stream, 500);
     };
     
@@ -189,8 +131,8 @@ fn handle_post(http_server:HttpServer, mut tcp_stream:TcpStream, headers:HttpHea
     let _ = tcp_stream.shutdown(Shutdown::Both);
 }
 
-fn handle_web_socket(http_server:HttpServer, mut tcp_stream:TcpStream, headers:HttpHeaders) {
-    let upgrade_response = WebSocket::create_upgrade_response(&headers.sec_websocket_key.unwrap());
+fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers: HttpHeaders, web_socket_id: u64) {
+    let upgrade_response = WebSocket::create_upgrade_response(headers.sec_websocket_key.as_ref().unwrap());
     
     write_bytes_to_tcp_stream_no_error(&mut tcp_stream, upgrade_response.as_bytes());
     
@@ -198,22 +140,29 @@ fn handle_web_socket(http_server:HttpServer, mut tcp_stream:TcpStream, headers:H
     let (tx_socket, rx_socket) = mpsc::channel::<Vec<u8 >> ();
     
     let _write_thread = std::thread::spawn(move || {
-        // we have a bus we read from, which we hand to our websocket server.
         while let Ok(data) = rx_socket.recv() {
             write_bytes_to_tcp_stream_no_error(&mut write_tcp_stream, &data);
         }
         let _ = write_tcp_stream.shutdown(Shutdown::Both);
     });
     
-    let mut web_socket = WebSocket::new();
+    if http_server.request.send(HttpRequest::ConnectWebSocket {
+        headers,
+        web_socket_id,
+        response_sender: tx_socket.clone()
+    }).is_err() {
+        let _ = tcp_stream.shutdown(Shutdown::Both);
+        return
+    };
     
+    let mut web_socket = WebSocket::new();
     loop {
         let mut data = [0u8; 1024];
         match tcp_stream.read(&mut data) {
             Ok(n) => {
                 if n == 0 {
-                    let _  = tcp_stream.shutdown(Shutdown::Both);
-                    return
+                    let _ = tcp_stream.shutdown(Shutdown::Both);
+                    break
                 }
                 web_socket.parse(&data[0..n], | result | {
                     match result {
@@ -222,15 +171,13 @@ fn handle_web_socket(http_server:HttpServer, mut tcp_stream:TcpStream, headers:H
                         Ok(WebSocketMessage::Text(_text)) => {
                         }
                         Ok(WebSocketMessage::Binary(data)) => {
-                            if http_server.request.send(HttpMessage::WebSocketMessageBinary{
+                            if http_server.request.send(HttpRequest::BinaryMessage {
+                                web_socket_id,
+                                response_sender: tx_socket.clone(),
                                 data: data.to_vec(),
-                                response: tx_socket.clone()
-                            }).is_err(){
+                            }).is_err() {
                                 let _ = tcp_stream.shutdown(Shutdown::Both);
                             };
-                            // we have to send this to the websocket server
-                            //x_bus.send((socket_id.clone(),data)).unwrap();
-                            //let s = std::str::from_utf8(&data);
                         },
                         Ok(WebSocketMessage::Close) => {
                         }
@@ -243,28 +190,23 @@ fn handle_web_socket(http_server:HttpServer, mut tcp_stream:TcpStream, headers:H
             }
             Err(_) => {
                 let _ = tcp_stream.shutdown(Shutdown::Both);
-                return
+                break;
             }
         }
     }
+    
+    let _ =  http_server.request.send(HttpRequest::DisconnectWebSocket {
+        web_socket_id,
+    });
 }
-/*
-fn get_mime_type(&self) -> Option<&'static str> {
-    let path = &self.headers.path;
-    if path.ends_with(".html") {Some("text/html")}
-    else if path.ends_with(".wasm") {Some("application/wasm")}
-    else if path.ends_with(".js") {Some("text/javascript")}
-    else if path.ends_with(".ttf") {Some("application/ttf")}
-    else {None}
-}*/
 
-fn handle_get(http_server:HttpServer, mut tcp_stream: TcpStream, headers:HttpHeaders) {
-        // send our channel the post
+fn handle_get(http_server: HttpServer, mut tcp_stream: TcpStream, headers: HttpHeaders) {
+    // send our channel the post
     let (tx_socket, rx_socket) = mpsc::channel::<HttpResponse> ();
-    if http_server.request.send(HttpMessage::HttpGet{
+    if http_server.request.send(HttpRequest::Get {
         headers,
-        response: tx_socket
-    }).is_err(){
+        response_sender: tx_socket
+    }).is_err() {
         return http_error_out(tcp_stream, 500);
     };
     
