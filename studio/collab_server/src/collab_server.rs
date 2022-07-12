@@ -27,13 +27,21 @@ use {
     },
 };
 
+/// A collab server.
+/// 
+/// The collab server is designed to be transport agnostic. That is, it does not make any
+/// assumptions about whether it is running over Tcp, WebSockets, etc. The idea is that an embedder
+/// can take the server and easily implement its own transport layer on top of it.
 pub struct CollabServer {
+    // The id for the next connection
     next_connection_id: usize,
-    shared: Arc<RwLock<Shared >>,
+    // State that is shared between every connection
+    shared: Arc<RwLock<Shared>>,
 }
 
 impl CollabServer {
-    pub fn new<P: Into<PathBuf >> (path: P) -> CollabServer {
+    /// Creates a new collab server rooted at the given path.
+    pub fn new<P: Into<PathBuf>>(path: P) -> CollabServer {
         CollabServer {
             next_connection_id: 0,
             shared: Arc::new(RwLock::new(Shared {
@@ -44,6 +52,10 @@ impl CollabServer {
         }
     }
     
+    /// Creates a new connection to this collab server.
+    /// 
+    /// The given `notification_sender` is called whenever the server wants to send a notification
+    /// for this connection. The embedder is responsible for sending the notification.
     pub fn connect(&mut self, notification_sender: Box<dyn NotificationSender>) -> CollabConnection {
         let connection_id = ConnectionId(self.next_connection_id);
         self.next_connection_id += 1;
@@ -55,13 +67,21 @@ impl CollabServer {
     }
 }
 
+/// A connection to a collab server.
 pub struct CollabConnection {
+    // The id for this connection.
     connection_id: ConnectionId,
-    shared: Arc<RwLock<Shared >>,
+    // State is shared between every connection.
+    shared: Arc<RwLock<Shared>>,
+    // Used to send notifications for this connection.
     notification_sender: Box<dyn NotificationSender>,
 }
 
 impl CollabConnection {
+    /// Handles the given `request` for this connection, and returns the corresponding response.
+    /// 
+    /// The embedder is responsible for receiving requests, calling this method to handle them, and
+    /// sending back the response.
     pub fn handle_request(&self, request: CollabRequest) -> CollabResponse {
         match request {
             CollabRequest::LoadFileTree {with_data} => CollabResponse::LoadFileTree(self.load_file_tree(with_data)),
@@ -77,25 +97,40 @@ impl CollabConnection {
         }
     }
     
-    pub fn load_file_tree(&self, with_data: bool) -> Result<FileTreeData, CollabError> {
+    // Handles a `LoadFileTree` request.
+    fn load_file_tree(&self, with_data: bool) -> Result<FileTreeData, CollabError> {
+        // A recursive helper function for traversing the entries of a directory and creating the
+        // data structures that describe them.
         fn get_directory_entries(path: &Path, with_data: bool) -> Result<Vec<DirectoryEntry>, CollabError> {
             let mut entries = Vec::new();
-            for entry in fs::read_dir(path).map_err( | error | CollabError::Unknown(error.to_string())) ? {
-                let entry = entry.map_err( | error | CollabError::Unknown(error.to_string())) ?;
+            for entry in fs::read_dir(path).map_err( | error | CollabError::Unknown(error.to_string()))? {
+                // We can't get the entry for some unknown reason. Raise an error.
+                let entry = entry.map_err( | error | CollabError::Unknown(error.to_string()))?;
+                // Get the path for the entry.
                 let entry_path = entry.path();
+                // Get the file name for the entry.
                 let name = entry.file_name();
                 if let Ok(name_string) = name.into_string() {
                     if entry_path.is_dir() && name_string == "target"
                         || name_string.starts_with('.') {
+                        // Skip over directories called "target". This is sort of a hack. The reason
+                        // it's here is that the "target" directory for Rust projects is huge, and
+                        // our current implementation of the file tree widget is not yet fast enough
+                        // to display vast numbers of nodes. We paper over this by pretending the
+                        // "target" directory does not exist.
                         continue;
                     }
                 }
                 else {
+                    // Skip over entries with a non UTF-8 file name.
                     continue;
                 }
+                // Create a `DirectoryEntry` for this entry and add it to the list of entries.
                 entries.push(DirectoryEntry {
                     name: entry.file_name(),
                     node: if entry_path.is_dir() {
+                        // If this entry is a subdirectory, recursively create `DirectoryEntry`'s
+                        // for its entries as well.
                         FileNodeData::Directory {
                             entries: get_directory_entries(&entry_path, with_data) ?,
                         }
@@ -111,11 +146,15 @@ impl CollabConnection {
                         }
                     }
                     else {
+                        // If this entry is neither a directory or a file, skip it. This ignores
+                        // things such as symlinks, for which we are not yet sure how we want to
+                        // handle them.
                         continue
                     },
                 });
             }
             
+            /// Sort all the entries by name, directories first, and files second.
             entries.sort_by( | entry_0, entry_1 | {
                 match &entry_0.node{
                     FileNodeData::Directory{..}=>match &entry_1.node{
@@ -139,7 +178,8 @@ impl CollabConnection {
         Ok(FileTreeData {path:"".into(), root})
     }
     
-    pub fn open_file(&self, path: PathBuf) -> Result<(TextFileId, usize, Text), CollabError> {
+    // Handles an `OpenFile` request.
+    fn open_file(&self, path: PathBuf) -> Result<(TextFileId, usize, Text), CollabError> {
         let mut shared_guard = self.shared.write().unwrap();
         match shared_guard.file_ids_by_path.get(&path) {
             Some(&file_id) => {
@@ -202,6 +242,7 @@ impl CollabConnection {
         }
     }
     
+    // Handles an `ApplyDelta` request.
     fn apply_delta(
         &self,
         file_id: TextFileId,
@@ -251,6 +292,7 @@ impl CollabConnection {
         Ok(file_id)
     }
     
+    // Handles a `CloseFile` request.
     fn close_file(&self, file_id: TextFileId) -> Result<TextFileId, CollabError> {
         let mut shared_guard = self.shared.write().unwrap();
         
@@ -311,6 +353,7 @@ impl fmt::Debug for dyn NotificationSender {
     }
 }
 
+// State that is shared between every connection.
 #[derive(Debug)]
 struct Shared {
     path: PathBuf,
@@ -318,6 +361,7 @@ struct Shared {
     file_ids_by_path: HashMap<PathBuf, TextFileId>,
 }
 
+/// An identifier for a connection.
 #[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
 struct ConnectionId(usize);
 
