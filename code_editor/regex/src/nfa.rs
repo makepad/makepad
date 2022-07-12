@@ -1,6 +1,7 @@
 use crate::{
+    input::Cursor,
     program::{Inst, InstPtr},
-    Cursor, Program, SparseSet,
+    Program, SparseSet,
 };
 
 pub struct Nfa {
@@ -18,7 +19,7 @@ impl Nfa {
         }
     }
 
-    pub fn run<C: Cursor>(&mut self, program: &Program, mut cursor: C) {
+    pub fn run<C: Cursor>(&mut self, program: &Program, mut cursor: C) -> bool {
         use std::mem;
 
         let mut matched = false;
@@ -35,8 +36,8 @@ impl Nfa {
             if self.current_threads.inst.is_empty() {
                 break;
             }
-            let c0 = cursor.peek_char();
-            cursor.skip_char();
+            let c0 = cursor.peek_next_char();
+            cursor.skip_next_char();
             for &inst in &self.current_threads.inst {
                 match program.insts[inst] {
                     Inst::Match => {
@@ -57,6 +58,7 @@ impl Nfa {
                 break;
             }
         }
+        matched
     }
 }
 
@@ -76,11 +78,11 @@ impl Threads {
         while let Some(mut inst) = stack.pop() {
             while self.inst.insert(inst) {
                 match insts[inst] {
-                    Inst::Match | Inst::Char(_, _) => break,
                     Inst::Split(next_0, next_1) => {
                         stack.push(next_1);
                         inst = next_0;
                     }
+                    _ => break,
                 }
             }
         }
