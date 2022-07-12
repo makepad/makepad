@@ -1,6 +1,4 @@
-#[cfg(os="unix")]
 pub mod collab_server;
-#[cfg(os="unix")]
 pub use collab_server::*;
 
 pub use makepad_micro_serde;
