@@ -1,96 +1,110 @@
 use crate::{
-    ast::Regex,
     program,
     program::{Inst, InstPtr},
+    Ast, Program,
 };
 
-pub struct Generator {
+pub fn generate(regex: &Ast) -> Program {
+    GenerateContext { insts: Vec::new() }.generate(regex)
+}
+
+struct GenerateContext {
     insts: Vec<Inst>,
 }
 
-impl Generator {
-    fn generate(&mut self, regex: &Regex) -> Frag {
-        match *regex {
-            Regex::Alt(ref regexes) => {
-                let mut regexes = regexes.into_iter();
-                let mut acc = self.generate(regexes.next().unwrap());
-                for regex in regexes {
-                    let frag = self.generate(regex);
-                    acc = self.generate_alt(acc, frag);
+impl GenerateContext {
+    fn generate(mut self, ast: &Ast) -> Program {
+        self.emit_inst(Inst::Nop);
+        let fragment = self.generate_recursive(ast);
+        let inst = self.emit_inst(Inst::Match);
+        fragment.ends.fill(inst, &mut self.insts);
+        Program {
+            insts: self.insts,
+            start: fragment.start,
+        }
+    }
+
+    fn generate_recursive(&mut self, ast: &Ast) -> Fragment {
+        match *ast {
+            Ast::Alt(ref asts) => {
+                let mut asts = asts.into_iter();
+                let mut acc = self.generate_recursive(asts.next().unwrap());
+                for ast in asts {
+                    let fragment = self.generate_recursive(ast);
+                    acc = self.generate_alt(acc, fragment);
                 }
                 acc
             }
-            Regex::Cat(ref regexes) => {
-                let mut regexes = regexes.into_iter();
-                let mut acc = self.generate(regexes.next().unwrap());
-                for regex in regexes {
-                    let frag = self.generate(regex);
-                    acc = self.generate_cat(acc, frag);
+            Ast::Cat(ref asts) => {
+                let mut asts = asts.into_iter();
+                let mut acc = self.generate_recursive(asts.next().unwrap());
+                for ast in asts {
+                    let fragment = self.generate_recursive(ast);
+                    acc = self.generate_cat(acc, fragment);
                 }
                 acc
             }
-            Regex::Quest(ref regex) => {
-                let frag = self.generate(regex);
-                self.generate_quest(frag)
+            Ast::Quest(ref asts) => {
+                let fragment = self.generate_recursive(asts);
+                self.generate_quest(fragment)
             }
-            Regex::Star(ref regex) => {
-                let frag = self.generate(regex);
-                self.generate_star(frag)
+            Ast::Star(ref ast) => {
+                let fragment = self.generate_recursive(ast);
+                self.generate_star(fragment)
             }
-            Regex::Plus(ref regex) => {
-                let frag = self.generate(regex);
-                self.generate_plus(frag)
+            Ast::Plus(ref ast) => {
+                let fragment = self.generate_recursive(ast);
+                self.generate_plus(fragment)
             }
-            Regex::Char(c) => self.generate_char(c),
-            _ => unimplemented!(),
+            Ast::Char(c) => self.generate_char(c),
         }
     }
 
-    fn generate_alt(&mut self, frag_0: Frag, frag_1: Frag) -> Frag {
-        let inst = self.emit_inst(Inst::split(frag_0.start, frag_1.start));
-        Frag {
+    fn generate_alt(&mut self, fragment_0: Fragment, fragment_1: Fragment) -> Fragment {
+        let inst = self.emit_inst(Inst::split(fragment_0.start, fragment_1.start));
+        Fragment {
             start: inst,
-            ends: frag_0.ends.concat(frag_1.ends, &mut self.insts),
+            ends: fragment_0.ends.concat(fragment_1.ends, &mut self.insts),
         }
     }
 
-    fn generate_cat(&mut self, frag_0: Frag, frag_1: Frag) -> Frag {
-        frag_1.ends.fill(frag_0.start, &mut self.insts);
-        Frag {
-            start: frag_1.start,
-            ends: frag_0.ends,
+    fn generate_cat(&mut self, fragment_0: Fragment, fragment_1: Fragment) -> Fragment {
+        fragment_1.ends.fill(fragment_0.start, &mut self.insts);
+        Fragment {
+            start: fragment_1.start,
+            ends: fragment_0.ends,
         }
     }
 
-    fn generate_quest(&mut self, frag: Frag) -> Frag {
-        let inst = self.emit_inst(Inst::split(frag.start, program::NULL_INST_PTR));
-        Frag {
+    fn generate_quest(&mut self, fragment: Fragment) -> Fragment {
+        let inst = self.emit_inst(Inst::split(fragment.start, program::NULL_INST_PTR));
+        Fragment {
             start: inst,
-            ends: frag.ends.append(HolePtr::next_1(inst), &mut self.insts),
+            ends: fragment.ends.append(HolePtr::next_1(inst), &mut self.insts),
         }
     }
 
-    fn generate_star(&mut self, frag: Frag) -> Frag {
-        let inst = self.emit_inst(Inst::split(frag.start, program::NULL_INST_PTR));
-        frag.ends.fill(inst, &mut self.insts);
-        Frag {
+    fn generate_star(&mut self, fragment: Fragment) -> Fragment {
+        let inst = self.emit_inst(Inst::split(fragment.start, program::NULL_INST_PTR));
+        fragment.ends.fill(inst, &mut self.insts);
+        Fragment {
             start: inst,
             ends: HolePtrList::unit(HolePtr::next_1(inst)),
         }
     }
 
-    fn generate_plus(&mut self, frag: Frag) -> Frag {
-        let inst = self.emit_inst(Inst::split(frag.start, program::NULL_INST_PTR));
-        frag.ends.fill(inst, &mut self.insts);
-        Frag {
-            start: frag.start,
+    fn generate_plus(&mut self, fragment: Fragment) -> Fragment {
+        let inst = self.emit_inst(Inst::split(fragment.start, program::NULL_INST_PTR));
+        fragment.ends.fill(inst, &mut self.insts);
+        Fragment {
+            start: fragment.start,
             ends: HolePtrList::unit(HolePtr::next_1(inst)),
         }
     }
 
-    fn generate_char(&mut self, c: char) -> Frag {
+    fn generate_char(&mut self, c: char) -> Fragment {
         let inst = self.emit_inst(Inst::char(program::NULL_INST_PTR, c));
-        Frag {
+        Fragment {
             start: inst,
             ends: HolePtrList::unit(HolePtr::next_0(inst)),
         }
@@ -103,7 +117,7 @@ impl Generator {
     }
 }
 
-struct Frag {
+struct Fragment {
     start: InstPtr,
     ends: HolePtrList,
 }
@@ -153,10 +167,6 @@ impl HolePtrList {
 struct HolePtr(usize);
 
 impl HolePtr {
-    fn null() -> Self {
-        Self(program::NULL_INST_PTR)
-    }
-
     fn next_0(inst: InstPtr) -> Self {
         Self(inst << 1)
     }

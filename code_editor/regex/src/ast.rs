@@ -1,8 +1,8 @@
-pub enum Regex {
-    Alt(Vec<Regex>),
-    Cat(Vec<Regex>),
-    Quest(Box<Regex>),
-    Star(Box<Regex>),
-    Plus(Box<Regex>),
+pub enum Ast {
+    Alt(Vec<Ast>),
+    Cat(Vec<Ast>),
+    Quest(Box<Ast>),
+    Star(Box<Ast>),
+    Plus(Box<Ast>),
     Char(char),
 }

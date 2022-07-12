@@ -6,6 +6,7 @@ pub struct Program {
 }
 
 pub enum Inst {
+    Nop,
     Match,
     Char(InstPtr, char),
     Split(InstPtr, InstPtr),
