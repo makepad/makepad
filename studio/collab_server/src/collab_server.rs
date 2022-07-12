@@ -83,9 +83,12 @@ impl CollabConnection {
     /// The embedder is responsible for receiving requests, calling this method to handle them, and
     /// sending back the response.
     pub fn handle_request(&self, request: CollabRequest) -> CollabResponse {
+        use std::{ffi::OsString, os::unix::ffi::OsStringExt};
+
         match request {
             CollabRequest::LoadFileTree {with_data} => CollabResponse::LoadFileTree(self.load_file_tree(with_data)),
             CollabRequest::OpenFile(path) => {
+                let path = PathBuf::from(OsString::from_vec(path));
                 let mut base_path = self.shared.read().unwrap().path.clone();
                 base_path.push(path);
                 CollabResponse::OpenFile(self.open_file(base_path))
@@ -99,6 +102,8 @@ impl CollabConnection {
     
     // Handles a `LoadFileTree` request.
     fn load_file_tree(&self, with_data: bool) -> Result<FileTreeData, CollabError> {
+        use std::os::unix::ffi::OsStringExt;
+
         // A recursive helper function for traversing the entries of a directory and creating the
         // data structures that describe them.
         fn get_directory_entries(path: &Path, with_data: bool) -> Result<Vec<DirectoryEntry>, CollabError> {
@@ -127,7 +132,7 @@ impl CollabConnection {
                 }
                 // Create a `DirectoryEntry` for this entry and add it to the list of entries.
                 entries.push(DirectoryEntry {
-                    name: entry.file_name(),
+                    name: entry.file_name().into_vec(),
                     node: if entry_path.is_dir() {
                         // If this entry is a subdirectory, recursively create `DirectoryEntry`'s
                         // for its entries as well.
