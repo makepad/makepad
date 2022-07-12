@@ -43,7 +43,7 @@ pub enum CollabRequest {
     /// Requests the collab server to add the client as a participant to the file with the given id.
     /// If the client is the first participant for the file, this also causes the file to be opened
     /// on the server.
-    OpenFile(Vec<u8>),
+    OpenFile(PathBuf),
     /// Requests the collab server to apply the given delta to the given revision of the file with
     /// the given id.
     ApplyDelta(TextFileId, usize, Delta),
@@ -82,7 +82,7 @@ pub enum CollabResponse {
 #[derive(Clone, Debug, SerBin, DeBin)]
 pub struct FileTreeData {
     /// The path to the root of this file tree.
-    pub path: Vec<u8>,
+    pub path: PathBuf,
     /// Data about the root of this file tree.
     pub root: FileNodeData,
 }
@@ -102,7 +102,7 @@ pub enum FileNodeData {
 #[derive(Clone, Debug, SerBin, DeBin)]
 pub struct DirectoryEntry {
     /// The name of this entry.
-    pub name: Vec<u8>,
+    pub name: OsString,
     /// The node for this entry.
     pub node: FileNodeData,
 }
