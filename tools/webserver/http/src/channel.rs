@@ -47,7 +47,6 @@ impl WebSocketChannels{
         
         // start a thread for the write side
         let mut write_tcp_stream = tcp_stream.try_clone().unwrap();
-
         let (tx_socket, rx_socket) = mpsc::channel::<Vec<u8>>();
         
         let (socket_id, tx_bus) = self.add_socket_tx(url, tx_socket);
@@ -76,15 +75,14 @@ impl WebSocketChannels{
                     }
                     for result in web_socket.parse(&data[0..n]){
                         match result{
-                            WebSocketResult::Ping(_)=>{},
-                            WebSocketResult::Pong(_)=>{},
-                            WebSocketResult::Data(data)=>{
+                            Ok(WebSocketMessage::Ping)=>{},
+                            Ok(WebSocketMessage::Pong)=>{},
+                            Ok(WebSocketMessage::Data(data))=>{
                                 // we have to send this to the websocket server
                                 tx_bus.send((socket_id.clone(),data)).unwrap();
                                 //let s = std::str::from_utf8(&data);
                             },
-                            WebSocketResult::Error(_)=>{},
-                            WebSocketResult::Close=>{
+                            Ok(WebSocketMessage::Close)=>{
                             }
                         }
                     }

@@ -60,7 +60,7 @@ pub fn parse_url_path(url: &str) -> Option<(String, Option<String>)> {
     Some((url, search))
 }
 
-pub struct HttpHeader {
+pub struct HttpHeaders {
     pub lines: Vec<String>,
     pub verb: String,
     pub path: String,
@@ -71,8 +71,8 @@ pub struct HttpHeader {
     pub sec_websocket_key: Option<String>
 }
 
-impl HttpHeader {
-    pub fn from_tcp_stream(tcp_stream: TcpStream) -> Option<HttpHeader> {
+impl HttpHeaders {
+    pub fn from_tcp_stream(tcp_stream: &mut TcpStream) -> Option<HttpHeaders> {
       let mut reader = BufReader::new(tcp_stream);
                       
         let mut lines = Vec::new();
@@ -131,7 +131,7 @@ impl HttpHeader {
         }
         let path = path.unwrap();
 
-        return Some(HttpHeader {
+        return Some(HttpHeaders {
             verb: verb.to_string(),
             path_no_slash: path.0[1..].to_string(),
             path: path.0,
