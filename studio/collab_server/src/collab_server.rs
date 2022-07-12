@@ -154,7 +154,7 @@ impl CollabConnection {
                 });
             }
             
-            /// Sort all the entries by name, directories first, and files second.
+            // Sort all the entries by name, directories first, and files second.
             entries.sort_by( | entry_0, entry_1 | {
                 match &entry_0.node{
                     FileNodeData::Directory{..}=>match &entry_1.node{
