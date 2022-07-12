@@ -1,26 +1,76 @@
 // this webserver is serving our site. Why? WHYYY. Because it was fun to write. And MUCH faster and MUCH simpler than anything else imaginable.
 
 use makepad_http::server::*;
+use makepad_collab_server::{
+    NotificationSender,
+    CollabNotification,
+    CollabRequest,
+    CollabServer,
+    makepad_micro_serde::*
+};
 use std::{
+    collections::HashMap,
     net::SocketAddr,
     sync::mpsc,
     io::prelude::*,
     fs::File,
 };
 
+#[derive(Clone)]
+struct CollabNotificationSender{
+    sender: mpsc::Sender<Vec<u8>>,
+}
+
+impl NotificationSender for CollabNotificationSender{
+    fn box_clone(&self) -> Box<dyn NotificationSender> {
+        Box::new(self.clone())
+    }
+    fn send_notification(&self, notification: CollabNotification) {
+        let mut buf = Vec::new();
+        notification.ser_bin(&mut buf);
+        self.sender.send(buf).unwrap();
+    }
+}
+
 fn main() {
-    let (tx_socket, rx_socket) = mpsc::channel::<HttpMessage> ();
+    let (tx_request, rx_request) = mpsc::channel::<HttpRequest> ();
     
     start_http_server(HttpServer{
         listen_address:SocketAddr::from(([0, 0, 0, 0], 8080)),
         post_max_size: 1024*1024,
-        request: tx_socket
+        request: tx_request
     });
-    while let Ok(message) = rx_socket.recv() {
+    
+    let mut clb_server = CollabServer::new("./");
+    let mut clb_connections = HashMap::new();
+    
+    while let Ok(message) = rx_request.recv() {
         match message{
-            HttpMessage::WebSocketMessageBinary{data, response}=>{
+            HttpRequest::ConnectWebSocket {web_socket_id, response_sender, ..}=>{
+                let sender = CollabNotificationSender{
+                    sender:response_sender
+                };
+                clb_connections.insert(
+                    web_socket_id,
+                    clb_server.connect(Box::new(sender))
+                );
+            },
+            HttpRequest::DisconnectWebSocket {web_socket_id}=>{
+                // eddy do something here
+                clb_connections.remove(&web_socket_id);
+            },
+            HttpRequest::BinaryMessage {web_socket_id, response_sender, data}=>{
+                if let Some(connection) = clb_connections.get(&web_socket_id){
+                    // turn data into a request
+                    if let Ok(request) = CollabRequest::de_bin(&mut 0, &data){
+                        let response = connection.handle_request(request);
+                        let mut buf = Vec::new();
+                        response.ser_bin(&mut buf);
+                        response_sender.send(buf).unwrap();
+                    }
+                }
             }
-            HttpMessage::HttpGet{headers, response}=>{
+            HttpRequest::Get{headers, response_sender}=>{
                 let path = &headers.path;
                 
                 if path == "/$watch"{
@@ -29,13 +79,13 @@ fn main() {
                             Cache-Control: max-age:0\r\n\
                             Connection: close\r\n\r\n",
                     );
-                    let _ = response.send(HttpResponse{header, body:vec![]});
+                    let _ = response_sender.send(HttpResponse{header, body:vec![]});
                     continue
                 }
                 
                 if path == "/favicon.ico"{
                     let header = format!("HTTP/1.1 200 OK\r\n\r\n");
-                    let _ = response.send(HttpResponse{header, body:vec![]});
+                    let _ = response_sender.send(HttpResponse{header, body:vec![]});
                     continue
                 }
                 
@@ -62,12 +112,12 @@ fn main() {
                                 mime_type,
                                 body.len()
                             );
-                            let _ = response.send(HttpResponse{header, body});
+                            let _ = response_sender.send(HttpResponse{header, body});
                         }
                     }
                 }
             }
-            HttpMessage::HttpPost{..}=>{//headers, body, response}=>{
+            HttpRequest::Post{..}=>{//headers, body, response}=>{
             }
         }
     }
