@@ -16,7 +16,10 @@ use {
             code_editor_impl::{CodeEditorImpl, CodeEditorAction, LinesLayout, LineLayoutOutput}
         },
         rust_editor::rust_tokenizer::token_cache::TokenCache,
-        makepad_collab_protocol::CollabRequest,
+        makepad_collab_protocol::{
+            CollabRequest,
+            unix_path::UnixPath,
+        },
         editor_state::{
             SessionId
         },
@@ -114,7 +117,7 @@ impl RustEditor {
     }
     
     
-    pub fn calc_layout_with_widgets(&mut self, cx: &mut Cx2d, _path: &[u8], document_inner: &DocumentInner) {
+    pub fn calc_layout_with_widgets(&mut self, cx: &mut Cx2d, _path: &UnixPath, document_inner: &DocumentInner) {
         
         let token_cache = &document_inner.token_cache;
         

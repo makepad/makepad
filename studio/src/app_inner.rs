@@ -20,7 +20,7 @@ use {
             CollabRequest,
             CollabResponse,
             CollabClientAction,
-            unix_path::UnixPathBuf,
+            unix_path::{UnixPath, UnixPathBuf},
         },
         builder::{
             builder_client::BuilderClient,
@@ -173,7 +173,7 @@ impl AppInner {
                 }
                 DockAction::TabBarReceivedDraggedItem(panel_id, item) => {
                     for file_url in &item.file_urls {
-                        let path = Path::new(&file_url[7..]).to_path_buf();
+                        let path = UnixPath::new(&file_url[7..]).to_unix_path_buf();
                         self.create_code_editor_tab(cx, state, panel_id, None, path, true);
                     }
                 }
@@ -205,7 +205,7 @@ impl AppInner {
                 }
                 DockAction::TabReceivedDraggedItem(panel_id, tab_id, item) => {
                     for file_url in &item.file_urls {
-                        let path = Path::new(&file_url[7..]).to_path_buf();
+                        let path = UnixPath::new(&file_url[7..]).to_unix_path_buf();
                         self.create_code_editor_tab(cx, state, panel_id, Some(tab_id), path, true);
                     }
                 }
@@ -215,7 +215,7 @@ impl AppInner {
                         _ => self.split_tab_panel(cx, state, panel_id, position),
                     };
                     for file_url in &item.file_urls {
-                        let path = Path::new(&file_url[7..]).to_path_buf();
+                        let path = UnixPath::new(&file_url[7..]).to_unix_path_buf();
                         self.create_code_editor_tab(cx, state, panel_id, None, path, true);
                     }
                 }
@@ -238,7 +238,7 @@ impl AppInner {
                         file_node_id,
                         DraggedItem {
                             file_urls: vec![
-                                String::from("file://") + &*path.into_os_string().to_string_lossy(),
+                                String::from("file://") + &*path.into_unix_string().to_string_lossy(),
                             ],
                         },
                     )

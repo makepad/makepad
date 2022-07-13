@@ -165,7 +165,7 @@ impl AppState {
             let file_node_id = file_node_id.unwrap_or(file_nodes.alloc_key());
             let name = parent_edge.as_ref().map_or_else(
                 || String::from("root"),
-                | edge | name.to_string_lossy().to_owned(),
+                | edge | edge.name.to_string_lossy().to_string(),
             );
             let node = FileNode {
                 parent_edge,
