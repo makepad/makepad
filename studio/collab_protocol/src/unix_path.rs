@@ -1,6 +1,7 @@
 use {
     crate::unix_str::{UnixString, UnixStr},
     makepad_micro_serde::{DeBin, DeBinErr, SerBin},
+    std::{iter::FromIterator, ops::Deref},
 };
 
 #[derive(Clone, DeBin, Debug, SerBin)]
@@ -9,8 +10,44 @@ pub struct UnixPathBuf {
 }
 
 impl UnixPathBuf {
+    pub fn new() -> Self {
+        Self {
+            string: UnixString::new()
+        }
+    }
+
     pub fn into_unix_string(self) -> UnixString {
         self.string
+    }
+
+    pub fn as_unix_path(&self) -> &UnixPath {
+        UnixPath::new(&self.string)
+    }
+
+    pub fn as_mut_vec(&mut self) -> &mut Vec<u8> {
+        self.string.as_mut_vec()
+    }
+
+    pub fn push<P: AsRef<UnixPath>>(&mut self, path: P) {
+        self._push(path.as_ref())
+    }
+
+    fn _push(&mut self, path: &UnixPath) {
+        // in general, a separator is needed if the rightmost byte is not a separator
+        let need_sep = self
+            .as_mut_vec()
+            .last()
+            .map(|c| *c != b'/')
+            .unwrap_or(false);
+
+        // absolute `path` replaces `self`
+        if path.is_absolute() || path.has_root() {
+            self.as_mut_vec().truncate(0);
+        } else if need_sep {
+            self.string.push("/");
+        }
+
+        self.string.push(path.as_unix_str());
     }
 }
 
@@ -23,6 +60,34 @@ impl<T: ?Sized + AsRef<UnixStr>> From<&T> for UnixPathBuf {
 impl From<UnixString> for UnixPathBuf {
     fn from(string: UnixString) -> Self {
         Self { string }
+    }
+}
+
+impl<P: AsRef<UnixPath>> FromIterator<P> for UnixPathBuf {
+    fn from_iter<I: IntoIterator<Item = P>>(iter: I) -> Self {
+        let mut buf = Self::new();
+        buf.extend(iter);
+        buf
+    }
+}
+
+impl Deref for UnixPathBuf {
+    type Target = UnixPath;
+
+    fn deref(&self) -> &UnixPath {
+        self.as_unix_path()
+    }
+}
+
+impl AsRef<UnixPath> for UnixPathBuf {
+    fn as_ref(&self) -> &UnixPath {
+        self.as_unix_path()
+    }
+}
+
+impl<P: AsRef<UnixPath>> Extend<P> for UnixPathBuf {
+    fn extend<I: IntoIterator<Item = P>>(&mut self, iter: I) {
+        iter.into_iter().for_each(move |path| self.push(path.as_ref()));
     }
 }
 
@@ -47,6 +112,40 @@ impl UnixPath {
 
     pub fn as_bytes(&self) -> &[u8] {
         self.string.as_bytes()
+    }
+
+    /// Returns `true` if the `Path` is absolute, i.e., if it is independent of
+    /// the current directory.
+    ///
+    /// A path is absolute if it starts with the root, so `is_absolute` and
+    /// [`has_root`] are equivalent.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use unix_path::Path;
+    ///
+    /// assert!(!Path::new("foo.txt").is_absolute());
+    /// ```
+    ///
+    /// [`has_root`]: #method.has_root
+    pub fn is_absolute(&self) -> bool {
+        self.has_root()
+    }
+
+    /// Returns `true` if the `Path` has a root.
+    ///
+    /// A path has a root if it begins with `/`.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use unix_path::Path;
+    ///
+    /// assert!(Path::new("/etc/passwd").has_root());
+    /// ```
+    pub fn has_root(&self) -> bool {
+        self.components().has_root()
     }
 
     pub fn file_name(&self) -> Option<&UnixStr> {
@@ -97,6 +196,26 @@ impl UnixPath {
             front: State::Prefix,
             back: State::Body,
         }
+    }
+
+    pub fn join<P: AsRef<Self>>(&self, path: P) -> UnixPathBuf {
+        self._join(path.as_ref())
+    }
+
+    fn _join(&self, path: &Self) -> UnixPathBuf {
+        let mut buf = self.to_unix_path_buf();
+        buf.push(path);
+        buf
+    }
+
+    pub fn to_unix_path_buf(&self) -> UnixPathBuf {
+        UnixPathBuf::from(&self.string)
+    }
+}
+
+impl AsRef<UnixPath> for UnixPath {
+    fn as_ref(&self) -> &UnixPath {
+        self
     }
 }
 

@@ -44,6 +44,10 @@ impl UnixString {
         UnixStr::from_mut_bytes(&mut self.bytes)
     }
 
+    pub fn as_mut_vec(&mut self) -> &mut Vec<u8> {
+        &mut self.bytes
+    }
+
     pub fn reserve(&mut self, additional: usize) {
         self.bytes.reserve(additional)
     }
