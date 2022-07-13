@@ -1,5 +1,6 @@
 use {
     crate::{
+        makepad_live_id::LiveId,
         event::KeyCode
     },
 };
@@ -14,10 +15,13 @@ pub struct CxCommandSetting {
 
 // Command
 
-#[derive(PartialEq, Copy, Clone, Hash, Eq, Debug)]
-pub struct CommandId(pub u64);
+#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq)]
+pub struct Command(pub LiveId);
+impl From<LiveId> for Command {
+    fn from(live_id: LiveId) -> Command {Command(live_id)}
+}
 
-impl CommandId{
+impl Command{
     //pub fn from_id(id:LiveId)->Self{Self(id.0)}
     /*
     pub fn set_enabled(&self, cx:&mut Cx, enabled:bool)->Self{
@@ -47,7 +51,7 @@ impl CommandId{
 #[derive(PartialEq, Clone)]
 pub enum Menu {
     Main {items:Vec<Menu>},
-    Item {name: String, command:CommandId},
+    Item {name: String, command:Command},
     Sub {name: String, items: Vec<Menu>},
     Line
 }
@@ -68,7 +72,7 @@ impl Menu {
         Menu::Line
     }
     
-    pub fn item(name: &str, command: CommandId) -> Menu {
+    pub fn item(name: &str, command: Command) -> Menu {
         Menu::Item {
             name: name.to_string(),
             command: command

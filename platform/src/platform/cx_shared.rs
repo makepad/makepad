@@ -1,6 +1,6 @@
 #![allow(dead_code)]
 use {
-    std::collections::{HashMap, HashSet},
+    std::collections::{HashSet, HashMap},
     crate::{
         makepad_math::Vec2,
         cx::Cx,
@@ -53,7 +53,7 @@ impl Cx {
         passes_todo.clear();
         
         // we need this because we don't mark the entire deptree of passes dirty every small paint
-        loop { // loop untill we don't propagate anymore
+        loop {  // loop untill we don't propagate anymore
             let mut altered = false;
             for pass_id in 0..self.passes.len() {
                 if self.passes[pass_id].paint_dirty {
@@ -159,11 +159,10 @@ impl Cx {
     
     pub (crate) fn call_signals_and_triggers(&mut self)
     {
-        
         let mut counter = 0;
         while self.signals.len() != 0 {
             counter += 1;
-            let mut signals = HashMap::new();
+            let mut signals = HashSet::new();
             std::mem::swap(&mut self.signals, &mut signals);
             
             self.call_event_handler(&mut Event::Signal(SignalEvent {
@@ -191,7 +190,6 @@ impl Cx {
                 break
             }
         }
-        
     }
     
     pub (crate) fn call_all_keys_up(&mut self)

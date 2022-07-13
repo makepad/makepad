@@ -7,6 +7,8 @@ use {
             metal::{MetalCx, MetalWindow}
         },
         event::{
+            WebSocket,
+            WebSocketReconnect,
             Timer,
             Signal,
             Event,
@@ -331,19 +333,17 @@ impl CxPlatformApi for Cx{
     fn start_timer(&mut self, interval: f64, repeats: bool) -> Timer {
         self.timer_id += 1;
         self.platform.start_timer.push((self.timer_id, interval, repeats));
-        Timer {timer_id: self.timer_id}
+        Timer(self.timer_id)
     }
     
     fn stop_timer(&mut self, timer: Timer) {
-        if timer.timer_id != 0 {
-            self.platform.stop_timer.push(timer.timer_id);
+        if timer.0 != 0 {
+            self.platform.stop_timer.push(timer.0);
         }
     }
     
-    fn post_signal(signal: Signal, status: u64) {
-        if signal.signal_id != 0 {
-            CocoaApp::post_signal(signal.signal_id, status);
-        }
+    fn post_signal(signal: Signal) {
+        CocoaApp::post_signal(signal.0.0);
     }
     
     fn update_menu(&mut self, menu: &Menu) {
@@ -359,6 +359,15 @@ impl CxPlatformApi for Cx{
         assert!(self.platform.start_dragging.is_none());
         self.platform.start_dragging = Some(dragged_item);
     }
+    
+    fn web_socket_open(&mut self, _url: String, _rec: WebSocketReconnect) -> WebSocket {
+        todo!()
+    }
+    
+    fn web_socket_send(&mut self, _websocket: WebSocket, _data: Vec<u8>) {
+        todo!()
+    }
+    
 }
 
 #[derive(Clone, Default)]

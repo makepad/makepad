@@ -51,6 +51,7 @@ pub struct WBrowserInfo {
     pub pathname: String,
     pub search: String,
     pub hash: String,
+    pub has_thread_support: bool,
 }
 
 impl Into<PlatformType> for WBrowserInfo {
@@ -74,7 +75,7 @@ pub struct ToWasmGetDeps {
 #[derive(ToWasm)]
 pub struct WDepLoaded {
     pub path: String,
-    pub data: ToWasmDataU8
+    pub data: WasmDataU8
 }
 
 #[derive(ToWasm)]
@@ -553,8 +554,28 @@ pub struct ToWasmAppLostFocus {}
 
 #[derive(ToWasm)]
 pub struct ToWasmSignal {
-    pub signal_id: u32,
-    pub data_lo: u32,
-    pub data_hi: u32
+    pub signal_hi: u32,
+    pub signal_lo: u32,
 }
 
+#[derive(ToWasm)]
+pub struct ToWasmWebSocketClose {
+    pub web_socket_id: usize
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmWebSocketOpen {
+    pub web_socket_id: usize
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmWebSocketError {
+    pub web_socket_id: usize,
+    pub error: String
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmWebSocketMessage {
+    pub web_socket_id: usize,
+    pub data: WasmDataU8
+}
