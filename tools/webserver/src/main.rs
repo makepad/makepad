@@ -1,4 +1,5 @@
 use makepad_http::server::*;
+use makepad_http::websocket::BinaryMessageBuilder;
 use makepad_collab_server::{
     NotificationSender,
     CollabNotification,
@@ -23,10 +24,11 @@ impl NotificationSender for CollabNotificationSender{
     fn box_clone(&self) -> Box<dyn NotificationSender> {
         Box::new(self.clone())
     }
+    
     fn send_notification(&self, notification: CollabNotification) {
-        let mut buf = Vec::new();
-        notification.ser_bin(&mut buf);
-        self.sender.send(buf).unwrap();
+        let mut buf = BinaryMessageBuilder::new_len_u64(Vec::new());
+        notification.ser_bin(buf.as_mut());
+        self.sender.send(buf.take()).unwrap();
     }
 }
 
@@ -62,10 +64,9 @@ fn main() {
                     // turn data into a request
                     if let Ok(request) = CollabRequest::de_bin(&mut 0, &data){
                         let response = connection.handle_request(request);
-                        let mut buf = Vec::new();
-                        
-                        response.ser_bin(&mut buf);
-                        response_sender.send(buf).unwrap();
+                        let mut buf = BinaryMessageBuilder::new_len_u64(Vec::new());
+                        response.ser_bin(buf.as_mut());
+                        response_sender.send(buf.take()).unwrap();
                     }
                 }
             }

@@ -1,3 +1,5 @@
+#![allow(unused_imports)]
+#![allow(dead_code)]
 use {
     crate::{
         makepad_micro_serde::*,
@@ -39,6 +41,7 @@ impl LiveHook for BuilderClient{
 
 impl BuilderClient{
     
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn send_cmd(&mut self, cmd: BuilderCmd) {
         self.inner.as_ref().unwrap().cmd_sender.send(BuilderCmdWrap{
             cmd_id: BuilderCmdId(self.cmd_id_counter),
@@ -47,6 +50,9 @@ impl BuilderClient{
         self.cmd_id_counter += 1;
     }
     
+    #[cfg(target_arch = "wasm32")]
+    pub fn send_cmd(&mut self, _cmd: BuilderCmd) {
+    }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> Vec<BuilderMsgWrap> {
         let mut a = Vec::new();
@@ -80,6 +86,20 @@ pub struct BuilderClientInner {
 }
 
 impl BuilderClientInner {
+    
+    #[cfg(target_arch = "wasm32")]
+    pub fn new_with_local_server(_ubdir:&str) -> Self {
+        let (cmd_sender, _cmd_receiver) = mpsc::channel();
+        let msg_signal = LiveId::unique().into();
+        let (_msg_sender, msg_receiver) = mpsc::channel();
+        Self {
+            cmd_sender,
+            msg_signal,
+            msg_receiver,
+        }
+    }
+    
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn new_with_local_server(subdir:&str) -> Self {
         let (cmd_sender, cmd_receiver) = mpsc::channel();
         let msg_signal = LiveId::unique().into();
