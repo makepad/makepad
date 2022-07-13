@@ -9,10 +9,6 @@ use {
         unix_path::UnixPathBuf,
         unix_str::UnixString,
     },
-    std::{
-        ffi::OsString,
-        path::PathBuf
-    },
 };
 
 /// Types for the collab protocol.
