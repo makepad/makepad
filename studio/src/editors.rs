@@ -230,7 +230,7 @@ impl Editors {
             let msg_id = state.messages.len();
             match &wrap.msg {
                 BuilderMsg::Location(loc) => {
-                    if let Some(doc_id) = state.documents_by_path.get(&PathBuf::from(loc.file_name.clone())) {
+                    if let Some(doc_id) = state.documents_by_path.get(loc.file_name.as_bytes()) {
                         let doc = &mut state.documents[*doc_id];
                         if let Some(inner) = &mut doc.inner {
                             inner.msg_cache.add_range(&inner.text, msg_id, loc.range);
