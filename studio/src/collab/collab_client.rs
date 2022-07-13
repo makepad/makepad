@@ -27,9 +27,9 @@ pub struct CollabClient {
 }
 
 impl LiveHook for CollabClient {
-    fn after_apply(&mut self, cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
+    fn after_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
         if self.inner.is_none() {
-            self.inner = Some(CollabClientInner::new_with_local_server(cx, &self.path))
+            self.inner = Some(CollabClientInner::new_with_local_server(&self.path))
         }
     }
 }
@@ -60,7 +60,7 @@ impl CollabClient {
         let inner = self.inner.as_ref().unwrap();
         match event {
             Event::Signal(event)
-            if event.signals.contains_key(&inner.action_signal) => {
+            if event.signals.contains(&inner.action_signal) => {
                 loop {
                     match inner.action_receiver.try_recv() {
                         Ok(action) => dispatch_action(cx, action),
@@ -76,9 +76,9 @@ impl CollabClient {
 }
 
 impl CollabClientInner {
-    pub fn new_with_local_server(cx: &mut Cx, subdir:&str) -> Self {
+    pub fn new_with_local_server(subdir:&str) -> Self {
         let (request_sender, request_receiver) = mpsc::channel();
-        let action_signal = cx.new_signal();
+        let action_signal = LiveId::unique().into();
         let (action_sender, action_receiver) = mpsc::channel();
         
         let base_path = env::current_dir().unwrap();
@@ -90,7 +90,7 @@ impl CollabClientInner {
                 let action_sender = action_sender.clone();
                 move | notification | {
                     action_sender.send(CollabClientAction::Notification(notification)).unwrap();
-                    Cx::post_signal(action_signal, 0);
+                    Cx::post_signal(action_signal);
                 }
             })),
             action_signal,
@@ -105,9 +105,9 @@ impl CollabClientInner {
         }
     }
     
-    pub fn new_connect_remote(cx: &mut Cx, to_server: &str) -> Self {
+    pub fn new_connect_remote(to_server: &str) -> Self {
         let (request_sender, request_receiver) = mpsc::channel();
-        let action_signal = cx.new_signal();
+        let action_signal = LiveId::unique().into();
         let (action_sender, action_receiver) = mpsc::channel();
         
         let stream = TcpStream::connect(to_server).unwrap();
@@ -151,8 +151,6 @@ fn spawn_remote_request_handler(
     mut stream: TcpStream,
     action_sender: Sender<CollabClientAction>,
 ) {
-    use std::mem;
-
     thread::spawn(move || loop {
         let mut len_bytes = [0; 4];
         stream.read_exact(&mut len_bytes).unwrap();
@@ -208,7 +206,7 @@ fn spawn_response_or_notification_receiver(
         let action = DeBin::deserialize_bin(action_bytes.as_slice()).unwrap();
         action_sender.send(action).unwrap();
         
-        Cx::post_signal(action_signal, 0);
+        Cx::post_signal(action_signal);
     });
 }
 
@@ -222,6 +220,6 @@ fn spawn_local_request_handler(
         let request = request_receiver.recv().unwrap();
         let response = connection.handle_request(request);
         action_sender.send(CollabClientAction::Response(response)).unwrap();
-        Cx::post_signal(action_signal, 0);
+        Cx::post_signal(action_signal);
     });
 }

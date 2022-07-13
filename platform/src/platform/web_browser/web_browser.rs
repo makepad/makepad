@@ -3,7 +3,7 @@ use {
     crate::{
         makepad_live_id::*,
         makepad_math::Vec2,
-        makepad_wasm_bridge::{console_log, FromWasmMsg, ToWasmMsg, FromWasm, ToWasm},
+        makepad_wasm_bridge::{console_log, WasmDataU8, FromWasmMsg, ToWasmMsg, FromWasm, ToWasm},
         platform::{
             web_browser::{
                 from_wasm::*,
@@ -12,6 +12,10 @@ use {
         },
         area::Area,
         event::{
+            WebSocket,
+            WebSocketErrorEvent,
+            WebSocketMessageEvent,
+            WebSocketReconnect,
             Timer,
             Signal,
             Event,
@@ -48,8 +52,7 @@ impl Cx {
     
     // incoming to_wasm. There is absolutely no other entrypoint
     // to general rust codeflow than this function. Only the allocators and init
-    pub fn event_loop_core(&mut self, mut to_wasm: ToWasmMsg) -> u32
-    {
+    pub fn event_loop_core(&mut self, mut to_wasm: ToWasmMsg) -> u32 {
         // store our view root somewhere
         if self.platform.is_initialized == false {
             self.platform.is_initialized = true;
@@ -247,10 +250,40 @@ impl Cx {
                     self.passes[self.windows[0].main_pass_id.unwrap()].paint_dirty = true;
                 }
                 
-                id!(ToWasmSignal)=>{
+                id!(ToWasmSignal) => {
                     let tw = ToWasmSignal::read_to_wasm(&mut to_wasm);
-                    let data = ((tw.data_hi as u64)<<32) | (tw.data_lo as u64);
-                    self.send_signal(Signal{signal_id: tw.signal_id as usize}, Some(data));
+                    let signal_id = ((tw.signal_hi as u64) << 32) | (tw.signal_lo as u64);
+                    self.send_signal(Signal(LiveId(signal_id)));
+                }
+                
+                id!(ToWasmWebSocketClose) => {
+                    let tw = ToWasmWebSocketClose::read_to_wasm(&mut to_wasm);
+                    let web_socket = WebSocket(tw.web_socket_id as u64);
+                    self.call_event_handler(&mut Event::WebSocketClose(web_socket));
+                }
+                
+                id!(ToWasmWebSocketOpen) => {
+                    let tw = ToWasmWebSocketOpen::read_to_wasm(&mut to_wasm);
+                    let web_socket = WebSocket(tw.web_socket_id as u64);
+                    self.call_event_handler(&mut Event::WebSocketOpen(web_socket));
+                }
+                
+                id!(ToWasmWebSocketError) => {
+                    let tw = ToWasmWebSocketError::read_to_wasm(&mut to_wasm);
+                    let web_socket = WebSocket(tw.web_socket_id as u64);
+                    self.call_event_handler(&mut Event::WebSocketError(WebSocketErrorEvent{
+                        web_socket,
+                        error: tw.error,
+                    }));
+                }
+                
+                id!(ToWasmWebSocketMessage) => {
+                    let tw = ToWasmWebSocketMessage::read_to_wasm(&mut to_wasm);
+                    let web_socket = WebSocket(tw.web_socket_id as u64);
+                    self.call_event_handler(&mut Event::WebSocketMessage(WebSocketMessageEvent{
+                        web_socket,
+                        data: tw.data.into_vec_u8()
+                    }));
                 }
                 
                 _ => {
@@ -371,7 +404,7 @@ impl Cx {
 
 
 impl CxPlatformApi for Cx {
-
+    
     fn show_text_ime(&mut self, x: f32, y: f32) {
         self.platform.from_wasm(FromWasmShowTextIME {x, y});
     }
@@ -380,10 +413,31 @@ impl CxPlatformApi for Cx {
         self.platform.from_wasm(FromWasmHideTextIME {});
     }
     
-    fn post_signal(signal: Signal, value: u64) {
-        unsafe{_post_signal(signal.signal_id as u32, (value>>32) as u32, value as u32)};
+    fn post_signal(signal: Signal,) {
+        unsafe {_post_signal((signal.0.0 >> 32) as u32, signal.0.0 as u32)};
         // todo
     }
+    
+    fn web_socket_open(&mut self, url: String, rec: WebSocketReconnect) -> WebSocket {
+        let web_socket_id = self.web_socket_id;
+        self.web_socket_id += 1;
+        
+        self.platform.from_wasm(FromWasmWebSocketOpen {
+            url,
+            web_socket_id: web_socket_id as usize,
+            auto_reconnect: if let WebSocketReconnect::Automatic = rec {true} else {false},
+            
+        });
+        WebSocket(web_socket_id)
+    }
+    
+    fn web_socket_send(&mut self, websocket: WebSocket, data: Vec<u8>) {
+        self.platform.from_wasm(FromWasmWebSocketSend {
+            web_socket_id: websocket.0 as usize,
+            data: WasmDataU8::from_vec_u8(data)
+        });
+    }
+    
     /*
     fn file_read(&mut self, path: &str) -> FileRead {
         let id = self.platform.file_read_id;
@@ -409,13 +463,13 @@ impl CxPlatformApi for Cx {
             interval,
             timer_id: self.timer_id as f64,
         });
-        Timer {timer_id: self.timer_id}
+        Timer(self.timer_id)
     }
     
     fn stop_timer(&mut self, timer: Timer) {
-        if timer.timer_id != 0 {
+        if timer.0 != 0 {
             self.platform.from_wasm(FromWasmStopTimer {
-                id: timer.timer_id as f64,
+                id: timer.0 as f64,
             });
         }
     }
@@ -433,28 +487,27 @@ impl CxPlatformApi for Cx {
     fn update_menu(&mut self, _menu: &Menu) {
     }
     
-    fn spawn_thread<F>(&mut self, closure: F) where F: FnOnce() + Send + 'static{
-        let closure_box:Box<dyn FnOnce() + Send + 'static> = Box::new(closure);
+    fn spawn_thread<F>(&mut self, closure: F) where F: FnOnce() + Send + 'static {
+        let closure_box: Box<dyn FnOnce() + Send + 'static> = Box::new(closure);
         let closure_ptr = Box::into_raw(Box::new(closure_box));
-        self.platform.from_wasm(FromWasmCreateThread{closure_ptr: closure_ptr as u32});
+        self.platform.from_wasm(FromWasmCreateThread {closure_ptr: closure_ptr as u32});
     }
 }
 
 extern "C" {
-    pub fn _post_signal(signal: u32, data_hi: u32, data_lo: u32);
+    pub fn _post_signal(signal_hi: u32, signal_lo: u32);
 }
-
 
 #[export_name = "wasm_thread_entrypoint"]
 #[cfg(target_arch = "wasm32")]
-pub unsafe extern "C" fn wasm_thread_entrypoint(closure_ptr:u32){
+pub unsafe extern "C" fn wasm_thread_entrypoint(closure_ptr: u32) {
     let closure = Box::from_raw(closure_ptr as *mut Box<dyn FnOnce() + Send + 'static>);
     closure();
 }
 
 #[export_name = "wasm_thread_alloc_tls_and_stack"]
 #[cfg(target_arch = "wasm32")]
-pub unsafe extern "C" fn wasm_thread_alloc_tls_and_stack(tls_size:u32)->u32{
+pub unsafe extern "C" fn wasm_thread_alloc_tls_and_stack(tls_size: u32) -> u32 {
     let mut v = Vec::<u64>::new();
     v.reserve_exact(tls_size as usize);
     let mut v = std::mem::ManuallyDrop::new(v);
@@ -528,7 +581,10 @@ pub unsafe extern "C" fn wasm_get_js_msg_class() -> u32 {
     ToWasmAppGotFocus::to_wasm_js_method(&mut out);
     ToWasmAppLostFocus::to_wasm_js_method(&mut out);
     ToWasmSignal::to_wasm_js_method(&mut out);
-    
+    ToWasmWebSocketOpen::to_wasm_js_method(&mut out);
+    ToWasmWebSocketClose::to_wasm_js_method(&mut out);
+    ToWasmWebSocketError::to_wasm_js_method(&mut out);
+    ToWasmWebSocketMessage::to_wasm_js_method(&mut out);
     out.push_str("},\n");
     out.push_str("FromWasmMsg:class extends FromWasmMsg{\n");
     
@@ -544,6 +600,7 @@ pub unsafe extern "C" fn wasm_get_js_msg_class() -> u32 {
     FromWasmShowTextIME::from_wasm_js_method(&mut out);
     FromWasmHideTextIME::from_wasm_js_method(&mut out);
     FromWasmCreateThread::from_wasm_js_method(&mut out);
+    FromWasmWebSocketOpen::from_wasm_js_method(&mut out);
     
     FromWasmCompileWebGLShader::from_wasm_js_method(&mut out);
     FromWasmAllocArrayBuffer::from_wasm_js_method(&mut out);

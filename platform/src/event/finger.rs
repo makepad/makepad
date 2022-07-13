@@ -3,7 +3,7 @@ use {
     crate::{
         makepad_math::*,
         event::{
-            event::{Event, HitEvent, TriggerHitEvent, DragEvent}
+            event::{Event, HitEvent, DragEvent}
         },
         cx::Cx,
         draw_2d::turtle::{Margin},
@@ -305,11 +305,6 @@ impl Event {
             return HitEvent::None
         }
         match self {
-            Event::Trigger(te)=>{
-                if let Some(data) = te.triggers.get(&area){
-                    return HitEvent::Trigger(TriggerHitEvent(data))
-                }
-            },
             Event::KeyFocus(kf) => {
                 if area == kf.prev {
                     return HitEvent::KeyFocusLost(kf.clone())

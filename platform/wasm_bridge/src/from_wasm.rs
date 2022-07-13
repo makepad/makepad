@@ -5,7 +5,7 @@ pub trait FromWasm {
     fn type_name()->&'static str{panic!()}
     fn live_id()->LiveId{panic!()}
 
-    fn write_from_wasm(&self, out: &mut FromWasmMsg) {
+    fn write_from_wasm(self, out: &mut FromWasmMsg) where Self:Sized {
         out.push_u64(Self::live_id().0);
         let block_len_offset = out.data_len();
         out.push_u32(0);
@@ -14,7 +14,7 @@ pub trait FromWasm {
         // align it
     }
     
-    fn from_wasm_inner(&self, out: &mut FromWasmMsg);
+    fn from_wasm_inner(self, out: &mut FromWasmMsg);
     
     fn from_wasm_js_body(out: &mut WasmJSOutput, slot:usize, is_recur: bool, prop:&str, temp:usize);
     

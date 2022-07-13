@@ -4,6 +4,7 @@ use {
         os::raw::{c_void}
     },
     crate::{
+        makepad_live_id::LiveId,
         makepad_math::{
             Vec2,
         },
@@ -26,7 +27,7 @@ use {
             },
         },
         menu::{
-            CommandId
+            Command
         },
         event::{
             Signal,
@@ -162,7 +163,7 @@ pub fn define_menu_target_class() -> *const Class {
             else {
                 panic!("Cannot lock cmd_map")
             };*/
-            ca.send_command_event(CommandId(command_u64));
+            ca.send_command_event(Command(LiveId(command_u64)));
         }
     }
     
@@ -203,15 +204,14 @@ pub fn define_cocoa_post_delegate() -> *const Class {
     extern fn received_post(this: &Object, _: Sel, _nstimer: ObjcId) {
         let ca = get_cocoa_app(this);
         unsafe {
-            let signal_id: usize = *this.get_ivar("signal_id");
-            let status: u64 = *this.get_ivar("status");
+            let signal_id: u64 = *this.get_ivar("signal_id");
             /*let status = if let Ok(status_map) = ca.status_map.lock() {
                 *status_map.usize_to_status.get(&status).expect("status invalid")
             }
             else {
                 panic!("cannot lock cmd_map")
             };*/
-            ca.send_signal_event(Signal {signal_id: signal_id}, status);
+            ca.send_signal_event(Signal(LiveId(signal_id)));
         }
     }
     
