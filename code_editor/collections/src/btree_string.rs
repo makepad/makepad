@@ -1,5 +1,6 @@
 use {crate::{btree, BTree}, std::ops::{AddAssign, SubAssign}};
 
+#[derive(Clone)]
 pub struct BTreeString {
     btree: BTree<Chunk>,
 }
@@ -13,7 +14,7 @@ impl BTreeString {
 }
 
 #[derive(Clone)]
-pub struct Chunk(String);
+struct Chunk(String);
 
 impl btree::Chunk for Chunk {
     type Info = Info;
