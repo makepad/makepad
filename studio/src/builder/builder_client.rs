@@ -137,10 +137,10 @@ fn spawn_remote_cmd_handler(
     mut stream: TcpStream,
 ) {
     thread::spawn(move || loop {
-        let mut len_bytes = [0; 8];
+        let mut len_bytes = [0; 4];
         stream.read_exact(&mut len_bytes).unwrap();
-        let len = usize::from_be_bytes(len_bytes);
-        let mut request_bytes = vec![0; len];
+        let len = u32::from_be_bytes(len_bytes);
+        let mut request_bytes = vec![0; len as usize];
         stream.read_exact(&mut request_bytes).unwrap();
         
         let cmd = DeBin::deserialize_bin(request_bytes.as_slice()).unwrap();
@@ -182,11 +182,11 @@ fn _spawn_msg_receiver(
     msg_sender: Sender<BuilderMsgWrap>,
 ) {
     thread::spawn(move || loop {
-        let mut len_bytes = [0; 8];
+        let mut len_bytes = [0; 4];
         stream.read_exact(&mut len_bytes).unwrap();
         
-        let len = usize::from_be_bytes(len_bytes);
-        let mut msg_bytes = vec![0; len];
+        let len = u32::from_be_bytes(len_bytes);
+        let mut msg_bytes = vec![0; len as usize];
         stream.read_exact(&mut msg_bytes).unwrap();
         
         let msg = DeBin::deserialize_bin(msg_bytes.as_slice()).unwrap();

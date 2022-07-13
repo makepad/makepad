@@ -151,11 +151,13 @@ fn spawn_remote_request_handler(
     mut stream: TcpStream,
     action_sender: Sender<CollabClientAction>,
 ) {
+    use std::mem;
+
     thread::spawn(move || loop {
-        let mut len_bytes = [0; 8];
+        let mut len_bytes = [0; 4];
         stream.read_exact(&mut len_bytes).unwrap();
-        let len = usize::from_be_bytes(len_bytes);
-        let mut request_bytes = vec![0; len];
+        let len = u32::from_be_bytes(len_bytes);
+        let mut request_bytes = vec![0; len as usize];
         stream.read_exact(&mut request_bytes).unwrap();
         
         let request = DeBin::deserialize_bin(request_bytes.as_slice()).unwrap();
@@ -197,11 +199,11 @@ fn spawn_response_or_notification_receiver(
     action_sender: Sender<CollabClientAction>,
 ) {
     thread::spawn(move || loop {
-        let mut len_bytes = [0; 8];
+        let mut len_bytes = [0; 4];
         stream.read_exact(&mut len_bytes).unwrap();
         
-        let len = usize::from_be_bytes(len_bytes);
-        let mut action_bytes = vec![0; len];
+        let len = u32::from_be_bytes(len_bytes);
+        let mut action_bytes = vec![0; len as usize];
         stream.read_exact(&mut action_bytes).unwrap();
         let action = DeBin::deserialize_bin(action_bytes.as_slice()).unwrap();
         action_sender.send(action).unwrap();

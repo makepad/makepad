@@ -27,7 +27,7 @@ pub struct AppState {
     
     pub selected_panel_id: PanelId,
     
-    pub path: PathBuf,
+    pub path: Vec<u8>,
     pub editor_state: EditorState,
 }
 
@@ -125,7 +125,7 @@ impl AppState {
             tabs,
             selected_panel_id: id!(content).into(),
             file_nodes,
-            path: PathBuf::new(),
+            path: Vec::new(),
             editor_state: EditorState::new(),
         }
     }
@@ -163,7 +163,7 @@ impl AppState {
             let file_node_id = file_node_id.unwrap_or(file_nodes.alloc_key());
             let name = parent_edge.as_ref().map_or_else(
                 || String::from("root"),
-                | edge | edge.name.to_string_lossy().into_owned(),
+                | edge | String::from_utf8_lossy(&edge.name).to_string(),
             );
             let node = FileNode {
                 parent_edge,
@@ -304,7 +304,7 @@ impl FileNode {
 
 #[derive(Debug)]
 pub struct FileEdge { 
-    pub name: OsString,
+    pub name: Vec<u8>,
     pub file_node_id: FileNodeId,
 }
 
