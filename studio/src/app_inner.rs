@@ -357,11 +357,11 @@ impl AppInner {
         state: &mut AppState,
         panel_id: PanelId,
         next_tab_id: Option<TabId>,
-        path: PathBuf,
+        path: Vec<u8>,
         select: bool
     ) {
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
-        
+
         let session_id = state.editor_state.create_session(path, &mut self.collab_client.request_sender());
         
         let tab_id = state.tabs.insert_unique(Tab {

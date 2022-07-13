@@ -114,7 +114,7 @@ impl RustEditor {
     }
     
     
-    pub fn calc_layout_with_widgets(&mut self, cx: &mut Cx2d, _path: &str, document_inner: &DocumentInner) {
+    pub fn calc_layout_with_widgets(&mut self, cx: &mut Cx2d, _path: &[u8], document_inner: &DocumentInner) {
         
         let token_cache = &document_inner.token_cache;
         
@@ -162,7 +162,7 @@ impl RustEditor {
     
     pub fn draw(&mut self, cx: &mut Cx2d, state: &EditorState) {
         if let Ok((document, document_inner, session)) = self.editor_impl.begin(cx, state) {
-            let path = document.path.clone().into_os_string().into_string().unwrap();
+            let path = document.path.clone();
             
             // if we are folding we need to store the last lead cursor y pos
             // then we calc layout and get a new one, then we scroll, and calc again

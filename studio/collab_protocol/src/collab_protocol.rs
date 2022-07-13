@@ -6,6 +6,8 @@ use {
         },
         makepad_live_id::*,
         makepad_micro_serde::{SerBin, DeBin, DeBinErr},
+        unix_path::UnixPathBuf,
+        unix_str::UnixString,
     },
     std::{
         ffi::OsString,
@@ -43,7 +45,7 @@ pub enum CollabRequest {
     /// Requests the collab server to add the client as a participant to the file with the given id.
     /// If the client is the first participant for the file, this also causes the file to be opened
     /// on the server.
-    OpenFile(PathBuf),
+    OpenFile(UnixPathBuf),
     /// Requests the collab server to apply the given delta to the given revision of the file with
     /// the given id.
     ApplyDelta(TextFileId, usize, Delta),
@@ -82,7 +84,7 @@ pub enum CollabResponse {
 #[derive(Clone, Debug, SerBin, DeBin)]
 pub struct FileTreeData {
     /// The path to the root of this file tree.
-    pub path: PathBuf,
+    pub path: UnixPathBuf,
     /// Data about the root of this file tree.
     pub root: FileNodeData,
 }
@@ -102,7 +104,7 @@ pub enum FileNodeData {
 #[derive(Clone, Debug, SerBin, DeBin)]
 pub struct DirectoryEntry {
     /// The name of this entry.
-    pub name: OsString,
+    pub name: UnixString,
     /// The node for this entry.
     pub node: FileNodeData,
 }

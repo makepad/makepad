@@ -56,7 +56,7 @@ pub struct EditorState {
     /// An arena for all documents in this code editor.
     pub documents: LiveIdMap<DocumentId, Document>,
     /// A map from file paths to document ids (see above for why this is needed)
-    pub documents_by_path: HashMap<PathBuf, DocumentId>,
+    pub documents_by_path: HashMap<Vec<u8>, DocumentId>,
     /// A map from file ids to document ids (see above for why this is needed)
     pub documents_by_file: LiveIdMap<TextFileId, DocumentId>,
     /// The queue of outstanding documents for this code editor. A document is outstanding if it has
@@ -78,7 +78,7 @@ impl EditorState {
     /// the collab server to open the document's file and fetch its contents.
     pub fn create_session(
         &mut self,
-        path: PathBuf,
+        path: Vec<u8>,
         send_request: &mut dyn FnMut(CollabRequest),
     ) -> SessionId {
         let document_id = self.get_or_create_document(path, send_request);
@@ -123,7 +123,7 @@ impl EditorState {
     /// document's file and fetch its contents.
     pub fn get_or_create_document(
         &mut self,
-        path: PathBuf,
+        path: Vec<u8>,
         send_request: &mut dyn FnMut(CollabRequest),
     ) -> DocumentId {
         match self.documents_by_path.get(&path) {
@@ -902,7 +902,7 @@ pub struct Document {
     /// The sessions that refer to this document.
     pub session_ids: HashSet<SessionId>,
     pub should_be_destroyed: bool,
-    pub path: PathBuf,
+    pub path: Vec<u8>,
     pub inner: Option<DocumentInner>,
 }
 
