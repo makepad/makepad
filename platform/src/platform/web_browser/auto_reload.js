@@ -11,6 +11,9 @@ function watchFileChange() {
     req.addEventListener("load", function() {
         if (req.status === 201) return watchFileChange();
         if (req.status === 200) {
+            if (req.response == ""){
+                return
+            }
             var msg = JSON.parse(req.response);
             if (msg.type == "file_change") {
                 location.href = location.href

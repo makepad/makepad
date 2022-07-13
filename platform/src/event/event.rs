@@ -1,9 +1,10 @@
 use {
     std::{
-        collections::{HashMap, HashSet}
+        collections::{HashSet, HashMap}
     },
     crate::{
         makepad_live_compiler::LiveEditEvent,
+        makepad_live_id::LiveId,
         cx::Cx,
         area::Area,
         event::{
@@ -13,7 +14,7 @@ use {
             xr::*,
         },
         cursor::MouseCursor,
-        menu::CommandId,
+        menu::Command,
     },
 };
 
@@ -29,12 +30,14 @@ pub enum Event {
     AppLostFocus,
     NextFrame(NextFrameEvent),
     XRUpdate(XRUpdateEvent),
+    
     WindowSetHoverCursor(MouseCursor),
     WindowDragQuery(WindowDragQueryEvent),
     WindowCloseRequested(WindowCloseRequestedEvent),
     WindowClosed(WindowClosedEvent),
     WindowGeomChange(WindowGeomChangeEvent),
     WindowResizeLoop(WindowResizeLoopEvent),
+    
     FingerDown(FingerDownEvent),
     FingerMove(FingerMoveEvent),
     FingerHover(FingerHoverEvent),
@@ -44,7 +47,7 @@ pub enum Event {
     
     Signal(SignalEvent),
     Trigger(TriggerEvent),
-    Command(CommandId),
+    Command(Command),
     KeyFocus(KeyFocusEvent),
     KeyFocusLost(KeyFocusEvent),
     KeyDown(KeyEvent),
@@ -54,6 +57,11 @@ pub enum Event {
     FingerDrag(FingerDragEvent),
     FingerDrop(FingerDropEvent),
     DragEnd,
+    
+    WebSocketClose(WebSocket),
+    WebSocketOpen(WebSocket),
+    WebSocketError(WebSocketErrorEvent),
+    WebSocketMessage(WebSocketMessageEvent),
 }
 
 pub enum HitEvent<'a>{
@@ -77,6 +85,11 @@ pub enum DragEvent<'a>{
     FingerDrop(FingerDropHitEvent<'a>),
     DragEnd,
     None
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TriggerEvent {
+    pub triggers: HashMap<Area, HashSet<Trigger>>
 }
 
 #[derive(Clone, Default, Debug, PartialEq)]
@@ -133,34 +146,47 @@ pub struct TimerEvent {
     pub timer_id: u64
 }
 
-#[derive(Hash, Eq, PartialEq, Clone, Copy, Debug, Default)]
-pub struct Signal {
-    pub signal_id: usize
+#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq)]
+pub struct Signal(pub LiveId);
+impl From<LiveId> for Signal {
+    fn from(live_id: LiveId) -> Signal {Signal(live_id)}
 }
 
-impl Signal {
-    pub fn empty() -> Signal {
-        Signal{signal_id:0}
-    }
-    
-    pub fn is_empty(&self) -> bool {
-        self.signal_id == 0
-    }
+
+#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq)]
+pub struct Trigger(pub LiveId);
+impl From<LiveId> for Trigger {
+    fn from(live_id: LiveId) -> Trigger {Trigger(live_id)}
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct TriggerHitEvent<'a>(pub &'a HashSet<Trigger>);
+
+
+pub enum WebSocketReconnect{
+    Automatic,
+    Manual
+}
+
+#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq)]
+pub struct WebSocket(pub u64);
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WebSocketErrorEvent {
+    pub web_socket: WebSocket,
+    pub error: String
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct WebSocketMessageEvent {
+    pub web_socket: WebSocket,
+    pub data: Vec<u8>
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct SignalEvent {
-    pub signals: HashMap<Signal, Vec<u64>>
+    pub signals: HashSet<Signal>
 }
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct TriggerEvent {
-    pub triggers: HashMap<Area, Vec<u64>>
-}
-
-#[derive(Clone, Debug, PartialEq)]
-pub struct TriggerHitEvent<'a>(pub &'a [u64]);
-
 
 impl Default for Event {
     fn default() -> Event {
@@ -172,23 +198,19 @@ impl Default for Event {
 pub struct NextFrame(pub u64);
 
 #[derive(Copy, Clone, Debug, Default)]
-pub struct Timer {
-    pub timer_id: u64
-}
+pub struct Timer(pub u64);
 
 impl Timer {
     pub fn empty() -> Timer {
-        Timer {
-            timer_id: 0,
-        }
+        Timer(0)
     }
     
     pub fn is_empty(&self) -> bool {
-        self.timer_id == 0
+        self.0 == 0
     }
     
     pub fn is_timer(&mut self, te: &TimerEvent) -> bool {
-        te.timer_id == self.timer_id
+        te.timer_id == self.0
     }
 }
 
@@ -233,7 +255,7 @@ impl Event {
     pub fn is_timer(&self, timer: Timer) -> bool{
         match self {
             Event::Timer(te) => {
-                return te.timer_id == timer.timer_id
+                return te.timer_id == timer.0
             }
             _ => ()
         }
