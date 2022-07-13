@@ -80,8 +80,8 @@ impl BinaryMessageBuilder{
         BinaryMessageBuilder{data, check_len}
     }
     
-    pub fn extend_from_slice(&mut self, data:&[u8]){
-        self.data.extend_from_slice(data);
+    pub fn as_mut(&mut self)->&mut Vec<u32>{
+        &mut self.data
     }
     
     pub fn take(self)->Vec<u8>{

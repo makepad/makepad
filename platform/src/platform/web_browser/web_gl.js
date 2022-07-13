@@ -375,7 +375,6 @@ export class WasmWebGL extends WasmWebBrowser {
         //gl.OES_texture_half_float = gl.getExtension('OES_texture_half_float')
         //gl.OES_texture_float = gl.getExtension('OES_texture_float')
         //gl.WEBGL_depth_texture = gl.getExtension("WEBGL_depth_texture") || gl.getExtension("WEBKIT_WEBGL_depth_texture")
-        this.handlers.on_screen_resize()
     }
     
 }

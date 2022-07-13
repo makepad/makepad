@@ -32,9 +32,6 @@ use {
         log_view::{LogView},
         editors::{Editors},
     },
-    std::{
-        path::{Path, PathBuf},
-    },
 };
 
 live_register!{

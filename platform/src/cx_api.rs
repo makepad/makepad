@@ -2,6 +2,7 @@ use {
     std::{
         fmt::Write,
         time::Instant,
+        collections::HashSet,
     },
     crate::{
         console_log,
@@ -10,7 +11,10 @@ use {
         event::{
             DraggedItem,
             Timer,
+            Trigger,
             Signal,
+            WebSocketReconnect,
+            WebSocket,
             NextFrame,
         },
         cursor::{
@@ -43,12 +47,19 @@ pub fn profile_end(instant: Instant) {
 pub trait CxPlatformApi{
     fn show_text_ime(&mut self, x: f32, y: f32);
     fn hide_text_ime(&mut self);
+
     fn set_window_outer_size(&mut self, size: Vec2);
     fn set_window_position(&mut self, pos: Vec2);
+
     fn start_timer(&mut self, interval: f64, repeats: bool) -> Timer;
     fn stop_timer(&mut self, timer: Timer); 
-    fn post_signal(signal: Signal, status: u64); 
+
+    fn post_signal(signal: Signal); 
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static;
+    
+    fn web_socket_open(&mut self, url:String, rec:WebSocketReconnect)->WebSocket;
+    fn web_socket_send(&mut self, socket:WebSocket, data:Vec<u8>);
+
     fn update_menu(&mut self, menu: &Menu);
     fn start_dragging(&mut self, dragged_item: DraggedItem);
 }
@@ -245,43 +256,19 @@ impl Cx {
         res
     }
     
-    pub fn new_signal(&mut self) -> Signal {
-        self.signal_id += 1;
-        return Signal {signal_id: self.signal_id};
-    }
-    
-    pub fn send_signal(&mut self, signal: Signal, status: Option<u64>) {
-        // TODO CLEAN THIS UP no more status-set just u64s
-        if signal.signal_id == 0 {
-            return
-        }
-        if let Some(set) = self.signals.get_mut(&signal) {
-            if let Some(status) = status{
-                set.push(status);
-            }
-        }
-        else {
-            let mut set = Vec::new();
-            if let Some(status) = status{
-                set.push(status);
-            }
-            self.signals.insert(signal, set);
-        }
+    pub fn send_signal(&mut self, signal: Signal) {
+        self.signals.insert(signal);
     }
 
-    pub fn send_trigger(&mut self, area:Area, trigger_id:Option<u64>){
-         if let Some(triggers) = self.triggers.get_mut(&area) {
-            if let Some(trigger_id) = trigger_id{
-                triggers.push(trigger_id);
-            }
+    pub fn send_trigger(&mut self, area:Area, trigger:Trigger){
+        if let Some(triggers) = self.triggers.get_mut(&area) {
+            triggers.insert(trigger);
         }
         else {
-            let mut new_set = Vec::new();
-            if let Some(trigger_id) = trigger_id{
-                new_set.push(trigger_id);
-            }
+            let mut new_set = HashSet::new();
+            new_set.insert(trigger);
             self.triggers.insert(area, new_set);
-        }
+        }    
     }
     
     pub fn set_down_mouse_cursor(&mut self, mouse_cursor: MouseCursor) {

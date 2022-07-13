@@ -10,15 +10,17 @@ export class WasmWebBrowser extends WasmBridge {
         this.handlers = {};
         this.timers = [];
         this.text_copy_response = "";
+        this.web_sockets = [];
+        this.window_info = {}
         
         this.init_detection();
-        this.bind_screen_resize();
+        
     }
     
     load_deps() {
         this.to_wasm = this.new_to_wasm();
         
-        this.to_wasm.ToWasmGetDeps({ 
+        this.to_wasm.ToWasmGetDeps({
             gpu_info: this.gpu_info,
             browser_info: {
                 protocol: location.protocol + "",
@@ -26,6 +28,7 @@ export class WasmWebBrowser extends WasmBridge {
                 pathname: location.pathname + "",
                 search: location.search + "",
                 hash: location.hash + "",
+                has_threading_support: this.wasm._has_threading_support
             }
         });
         
@@ -40,14 +43,18 @@ export class WasmWebBrowser extends WasmBridge {
                         data: result.buffer
                     })
                 }
+                this.update_window_info();
                 this.to_wasm.ToWasmInit({
                     window_info: this.window_info,
                     deps: deps
                 });
                 this.do_wasm_pump();
-                
+
+                // only bind the event handlers now
+                // to stop them firing into wasm early
                 this.bind_mouse_and_touch();
                 this.bind_keyboard();
+                this.bind_screen_resize();
                 
                 this.to_wasm.ToWasmRedrawAll();
                 this.do_wasm_pump();
@@ -81,7 +88,7 @@ export class WasmWebBrowser extends WasmBridge {
         
         for (let i = 0; i < this.timers.length; i ++) {
             if (this.timers[i].timer_id == timer_id) {
-                console.log("Timer ID collision!")
+                console.error("Timer ID collision!")
                 return
             }
         }
@@ -194,22 +201,32 @@ export class WasmWebBrowser extends WasmBridge {
     }
     
     FromWasmCreateThread(args) {
-        // ok we need to start a worker with our wasm
         let worker = new Worker(
             '/makepad/platform/src/platform/web_browser/web_worker.js',
             {type: 'module'}
         );
         
+        if (!this.wasm._has_thread_support) {
+            console.error("FromWasmCreateThread not available, wasm file not compiled with threading support");
+            return
+        }
+        if (this.exports.__stack_pointer === undefined) {
+            console.error("FromWasmCreateThread not available, wasm file not compiled with -C link-arg=--export=__stack_pointer");
+            return
+        }
+        
         // thanks to JP Posma with Zaplib for figuring out how to do the stack_pointer export without wasm bindgen
         // https://github.com/Zaplib/zaplib/blob/650305c856ea64d9c2324cbd4b8751ffbb971ac3/zaplib/cargo-zaplib/src/build.rs#L48
         // https://github.com/Zaplib/zaplib/blob/7cb3bead16f963e60c840aa2be3bf28a47ac533e/zaplib/web/common.ts#L313
         // And Ingvar Stepanyan for https://web.dev/webassembly-threads/
+        // example build command:
+        // RUSTFLAGS="-C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--export=__stack_pointer" cargo build -p thing_to_compile --target=wasm32-unknown-unknown -Z build-std=panic_abort,std
         
         let tls_size = this.exports.__tls_size.value;
-        let stack_size = 2*1024*1024; // 2mb
+        let stack_size = 2 * 1024 * 1024; // 2mb
         let tls_ptr = this.exports.wasm_thread_alloc_tls_and_stack(tls_size + stack_size / 8);
         let stack_ptr = tls_ptr + tls_size + stack_size - 8;
-
+        
         worker.postMessage({
             tls_ptr,
             stack_ptr,
@@ -217,11 +234,54 @@ export class WasmWebBrowser extends WasmBridge {
             bytes: this.wasm._bytes,
             memory: this.wasm._memory
         });
-        worker.addEventListener("message", (e)=>{
+        worker.addEventListener("message", (e) => {
             let data = e.data;
             this.to_wasm.ToWasmSignal(data)
             this.do_wasm_pump();
         })
+    }
+    
+    FromWasmWebSocketOpen(args) {
+        let auto_reconnect = args.auto_reconnect;
+        let web_socket_id = args.web_socket_id;
+        let url = args.url;
+        let web_socket = new WebSocket(args.url);
+        this.web_sockets[args.web_socket_id] = web_socket;
+        web_socket.onclose = e => {
+            this.to_wasm.ToWasmWebSocketClose({web_socket_id})
+            this.do_wasm_pump();
+            if (auto_reconnect) {
+                this.FromWasmOpenWebSocket({
+                    web_socket_id,
+                    auto_reconnect,
+                    url
+                });
+            }
+        }
+        web_socket.onerror = e => {
+            this.to_wasm.ToWasmWebSocketError({web_socket_id, error: "" + e})
+            this.do_wasm_pump();
+        }
+        web_socket.onmessage = e => {
+            // ok send the binary message
+            this.to_wasm.ToWasmWebSocketMessage({
+                web_socket_id,
+                data:e.data
+            })
+            this.do_wasm_pump();
+        }
+        websocket.onopen = e => {
+            this.to_wasm.ToWasmWebSocketOpen({web_socket_id})
+            this.do_wasm_pump();
+        }
+    }
+    
+    FromWasmWebSocketSend(args) {
+        let web_socket = this.web_sockets[args.web_socket_id];
+        let data_view = this.view_data_u8(args.data);
+        web_socket.send(data_view);
+        console.log("Sending websocket", data_view)
+        this.free_data_u8(args.data);
     }
     
     // calling into wasm
@@ -263,55 +323,58 @@ export class WasmWebBrowser extends WasmBridge {
         this.detect.is_add_to_homescreen_safari = this.is_mobile_safari && navigator.standalone
     }
     
+    update_window_info(){
+        var dpi_factor = window.devicePixelRatio;
+        var w;
+        var h;
+        var canvas = this.canvas;
+        
+        if (this.window_info.xr_is_presenting) {
+            let xr_webgllayer = this.xr_session.renderState.baseLayer;
+            this.dpi_factor = 3.0;
+            this.width = 2560.0 / this.dpi_factor;
+            this.height = 2000.0 / this.dpi_factor;
+        }
+        else {
+            if (canvas.getAttribute("fullpage")) {
+                if (this.detect.is_add_to_homescreen_safari) { // extremely ugly. but whatever.
+                    if (window.orientation == 90 || window.orientation == -90) {
+                        h = screen.width;
+                        w = screen.height - 90;
+                    }
+                    else {
+                        w = screen.width;
+                        h = screen.height - 80;
+                    }
+                }
+                else {
+                    w = window.innerWidth;
+                    h = window.innerHeight;
+                }
+            }
+            else {
+                w = canvas.offsetWidth;
+                h = canvas.offsetHeight;
+            }
+            var sw = canvas.width = w * dpi_factor;
+            var sh = canvas.height = h * dpi_factor;
+            
+            this.gl.viewport(0, 0, sw, sh);
+            
+            this.window_info.dpi_factor = dpi_factor;
+            this.window_info.inner_width = canvas.offsetWidth;
+            this.window_info.inner_height = canvas.offsetHeight;
+            // send the wasm a screenresize event
+        }
+        this.window_info.is_fullscreen = is_fullscreen();
+        this.window_info.can_fullscreen = can_fullscreen();
+    }
+    
     bind_screen_resize() {
         this.window_info = {};
         
         this.handlers.on_screen_resize = () => {
-            var dpi_factor = window.devicePixelRatio;
-            var w;
-            var h;
-            var canvas = this.canvas;
-            
-            if (this.window_info.xr_is_presenting) {
-                let xr_webgllayer = this.xr_session.renderState.baseLayer;
-                this.dpi_factor = 3.0;
-                this.width = 2560.0 / this.dpi_factor;
-                this.height = 2000.0 / this.dpi_factor;
-            }
-            else {
-                if (canvas.getAttribute("fullpage")) {
-                    if (this.detect.is_add_to_homescreen_safari) { // extremely ugly. but whatever.
-                        if (window.orientation == 90 || window.orientation == -90) {
-                            h = screen.width;
-                            w = screen.height - 90;
-                        }
-                        else {
-                            w = screen.width;
-                            h = screen.height - 80;
-                        }
-                    }
-                    else {
-                        w = window.innerWidth;
-                        h = window.innerHeight;
-                    }
-                }
-                else {
-                    w = canvas.offsetWidth;
-                    h = canvas.offsetHeight;
-                }
-                var sw = canvas.width = w * dpi_factor;
-                var sh = canvas.height = h * dpi_factor;
-                
-                this.gl.viewport(0, 0, sw, sh);
-                
-                this.window_info.dpi_factor = dpi_factor;
-                this.window_info.inner_width = canvas.offsetWidth;
-                this.window_info.inner_height = canvas.offsetHeight;
-                // send the wasm a screenresize event
-            }
-            this.window_info.is_fullscreen = is_fullscreen();
-            this.window_info.can_fullscreen = can_fullscreen();
-            
+            this.update_window_info();
             if (this.to_wasm !== undefined) {
                 this.to_wasm.ToWasmResizeWindow({window_info: this.window_info});
                 this.FromWasmRequestAnimationFrame();
@@ -596,7 +659,7 @@ export class WasmWebBrowser extends WasmBridge {
             let delta = e.timeStamp - last_wheel_time;
             last_wheel_time = e.timeStamp;
             // typical web bullshit. this reliably detects mousewheel or touchpad on mac in safari
-            if (is_firefox) {
+            if (this.detect.is_firefox) {
                 last_was_wheel = e.deltaMode == 1
             }
             else { // detect it
