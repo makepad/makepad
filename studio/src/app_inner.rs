@@ -19,7 +19,8 @@ use {
             FileTreeData,
             CollabRequest,
             CollabResponse,
-            CollabClientAction
+            CollabClientAction,
+            unix_path::UnixPathBuf,
         },
         builder::{
             builder_client::BuilderClient,
@@ -357,7 +358,7 @@ impl AppInner {
         state: &mut AppState,
         panel_id: PanelId,
         next_tab_id: Option<TabId>,
-        path: Vec<u8>,
+        path: UnixPathBuf,
         select: bool
     ) {
         let name = path.file_name().unwrap().to_string_lossy().into_owned();

@@ -123,7 +123,7 @@ impl EditorState {
     /// document's file and fetch its contents.
     pub fn get_or_create_document(
         &mut self,
-        path: Vec<u8>,
+        path: UnixPathBuf,
         send_request: &mut dyn FnMut(CollabRequest),
     ) -> DocumentId {
         match self.documents_by_path.get(&path) {
