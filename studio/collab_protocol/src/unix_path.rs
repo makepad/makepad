@@ -1,10 +1,10 @@
 use {
     crate::unix_str::{UnixString, UnixStr},
     makepad_micro_serde::{DeBin, DeBinErr, SerBin},
-    std::{iter::FromIterator, ops::Deref},
+    std::{borrow::Borrow, iter::FromIterator, ops::Deref},
 };
 
-#[derive(Clone, DeBin, Debug, SerBin)]
+#[derive(Clone, DeBin, Debug, Eq, Hash, PartialEq, PartialOrd, Ord, SerBin)]
 pub struct UnixPathBuf {
     string: UnixString
 }
@@ -85,13 +85,19 @@ impl AsRef<UnixPath> for UnixPathBuf {
     }
 }
 
+impl Borrow<UnixPath> for UnixPathBuf {
+    fn borrow(&self) -> &UnixPath {
+        self.as_unix_path()
+    }
+}
+
 impl<P: AsRef<UnixPath>> Extend<P> for UnixPathBuf {
     fn extend<I: IntoIterator<Item = P>>(&mut self, iter: I) {
         iter.into_iter().for_each(move |path| self.push(path.as_ref()));
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Eq, Hash, PartialEq, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct UnixPath {
     string: UnixStr
@@ -550,4 +556,28 @@ enum State {
 /// Says whether the first byte after the prefix is a separator.
 fn has_physical_root(path: &[u8]) -> bool {
     !path.is_empty() && path[0] == b'/'
+}
+
+impl AsRef<UnixPath> for UnixStr {
+    fn as_ref(&self) -> &UnixPath {
+        UnixPath::new(self)
+    }
+}
+
+impl AsRef<UnixPath> for UnixString {
+    fn as_ref(&self) -> &UnixPath {
+        UnixPath::new(self.as_unix_str())
+    }
+}
+
+impl AsRef<UnixPath> for String {
+    fn as_ref(&self) -> &UnixPath {
+        UnixPath::new(self.as_str())
+    }
+}
+
+impl AsRef<UnixPath> for str {
+    fn as_ref(&self) -> &UnixPath {
+        UnixPath::new(self)
+    }
 }

@@ -83,6 +83,12 @@ impl DerefMut for UnixString {
     }
 }
 
+impl AsRef<UnixStr> for UnixString {
+    fn as_ref(&self) -> &UnixStr {
+        self.as_unix_str()
+    }
+}
+
 #[derive(Eq, Debug, Hash, PartialEq, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct UnixStr {
@@ -139,12 +145,6 @@ impl UnixStr {
 impl AsRef<UnixStr> for UnixStr {
     fn as_ref(&self) -> &UnixStr {
         self
-    }
-}
-
-impl AsRef<UnixStr> for UnixString {
-    fn as_ref(&self) -> &UnixStr {
-        self.as_unix_str()
     }
 }
 
