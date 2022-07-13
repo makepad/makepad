@@ -12,6 +12,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.text_copy_response = "";
         this.web_sockets = [];
         this.window_info = {}
+        this.signals = [];
         
         this.init_detection();
         
@@ -72,7 +73,18 @@ export class WasmWebBrowser extends WasmBridge {
     
     // from_wasm dispatch_on_app interface
     
-    
+    js_post_signal(signal_hi, signal_lo) {
+        this.signals.push({signal_hi, signal_lo});
+        if(this.signal_timeout === undefined){
+            this.signal_timeout = setTimeout(_=>{
+                for(let signal of this.signals){
+                    this.to_wasm.ToWasmSignal({signal_hi, signal_lo})
+                }
+                this.signal_timeout = 0;
+                this.do_wasm_pump();
+            },0)
+        }
+    }
     
     FromWasmLoadDeps(args) {
         let promises = [];
@@ -246,6 +258,7 @@ export class WasmWebBrowser extends WasmBridge {
         let web_socket_id = args.web_socket_id;
         let url = args.url;
         let web_socket = new WebSocket(args.url);
+        web_socket.binaryType = "arraybuffer";
         this.web_sockets[args.web_socket_id] = web_socket;
         web_socket.onclose = e => {
             this.to_wasm.ToWasmWebSocketClose({web_socket_id})
@@ -270,17 +283,25 @@ export class WasmWebBrowser extends WasmBridge {
             })
             this.do_wasm_pump();
         }
-        websocket.onopen = e => {
-            this.to_wasm.ToWasmWebSocketOpen({web_socket_id})
+        web_socket.onopen = e => {
+            for(let item of web_socket._queue){
+                web_socket.send(item);
+            }
+            web_socket._queue.length = 0;
+            this.to_wasm.ToWasmWebSocketOpen({web_socket_id});
             this.do_wasm_pump();
         }
+        web_socket._queue = []
     }
     
     FromWasmWebSocketSend(args) {
         let web_socket = this.web_sockets[args.web_socket_id];
-        let data_view = this.view_data_u8(args.data);
-        web_socket.send(data_view);
-        console.log("Sending websocket", data_view)
+        if(web_socket.readyState == 0){
+            web_socket._queue.push(this.clone_data_u8(args.data))
+        }
+        else{
+            web_socket.send(this.view_data_u8(args.data));
+        }
         this.free_data_u8(args.data);
     }
     

@@ -1,6 +1,7 @@
 export class WasmBridge {
     constructor(wasm, dispatch) {
         this.wasm = wasm;
+        this.wasm._bridge = this;
         this.dispatch = dispatch;
         this.exports = wasm.instance.exports;
         this.memory = wasm._memory;
@@ -35,6 +36,13 @@ export class WasmBridge {
     
     new_from_wasm(ptr) {
         return new this.msg_class.FromWasmMsg(this, ptr);
+    }
+
+    clone_data_u8(obj){
+        var dst = new ArrayBuffer(obj.len);
+        let u8 = new Uint8Array(dst);
+        u8.set(this.view_data_u8(obj));
+        return u8;
     }
 
     view_data_u8(obj){
@@ -84,12 +92,29 @@ export class WasmBridge {
         this.update_array_buffer_refs();
     }
     
+    chars_to_string(chars_ptr, len) {
+        let out = "";
+        let array = new Uint32Array(this.memory.buffer, chars_ptr, len);
+        for (let i = 0; i < len; i ++) {
+            out += String.fromCharCode(array[i]);
+        }
+        return out
+    }
+    
+    js_console_log(chars_ptr, len) {
+        console.log(this.chars_to_string(chars_ptr, len));
+    }
+        
+    js_console_error(chars_ptr, len) {
+        console.error(this.chars_to_string(chars_ptr, len));
+    }
+    
     static create_shared_memory(){
         return new WebAssembly.Memory({initial: 64, maximum: 16384, shared: true});
     }
     
     static instantiate_wasm(bytes, memory, env) {
-        let wasm_for_imports = null;
+        let _wasm = null;
         function chars_to_string(chars_ptr, len) {
             let out = "";
             let array = new Uint32Array(wasm_for_imports._memory.buffer, chars_ptr, len);
@@ -99,27 +124,16 @@ export class WasmBridge {
             return out
         }
         
-        function _console_log(chars_ptr, len) {
-            console.log(chars_to_string(chars_ptr, len));
-        }
+        env._console_log = (chars_ptr, len) => _wasm._bridge.js_console_log(chars_ptr, len);
+        env._console_error = (chars_ptr, len) => _wasm._bridge.js_console_error(chars_ptr, len);
+        env._post_signal = (hi, lo) => _wasm._bridge.js_post_signal(hi, lo);
         
-        function _console_error(chars_ptr, len) {
-            console.error(chars_to_string(chars_ptr, len));
-        }
-        
-        function _post_signal(hi, lo) {
-            post_signal(hi, lo)
-        }
-        
-        env._console_log = _console_log;
-        env._console_error = _console_error;
-
         if(memory !== undefined){
             env.memory = memory;
         }
         
         return WebAssembly.instantiate(bytes, {env}).then(wasm => {
-            wasm_for_imports = wasm;
+            _wasm = wasm;
             wasm._has_thread_support = env.memory !== undefined;
             wasm._memory = env.memory? env.memory: wasm.instance.exports.memory;
             wasm._bytes = bytes;
@@ -128,7 +142,7 @@ export class WasmBridge {
             if (error.name == "LinkError") { // retry as multithreaded
                 env.memory = this.create_shared_memory();
                 return WebAssembly.instantiate(bytes, {env}).then(wasm => {
-                    wasm_for_imports = wasm;
+                    _wasm = wasm;
                     wasm._has_thread_support = true;
                     wasm._memory = env.memory;
                     wasm._bytes = bytes;
