@@ -18,6 +18,7 @@ pub use makepad_studio_component::makepad_component;
 pub use makepad_component::makepad_platform;
 pub use makepad_platform::makepad_micro_serde;
 pub use makepad_platform::makepad_live_id;
+pub use makepad_platform::makepad_wasm_bridge;
 //pub use makepad_platform::makepad_live_tokenizer;
 pub use makepad_platform::makepad_live_compiler;
 pub use makepad_platform::makepad_math;
