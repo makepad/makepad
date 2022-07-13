@@ -41,7 +41,7 @@ impl App {
         
         makepad_studio_component::live_register(cx);
         crate::builder::builder_client::live_register(cx);
-        crate::collab::collab_client::live_register(cx);
+        crate::collab_client::live_register(cx);
         crate::rust_editor::live_register(cx);
         crate::log_view::live_register(cx);
         crate::code_editor::code_editor_impl::live_register(cx);
