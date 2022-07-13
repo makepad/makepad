@@ -1,6 +1,7 @@
-#![cfg(target_os="macos")]
 
+#[cfg(not(target_arch = "wasm32"))]
 pub mod collab_server;
+#[cfg(not(target_arch = "wasm32"))]
 pub use collab_server::*;
 
 pub use makepad_micro_serde;

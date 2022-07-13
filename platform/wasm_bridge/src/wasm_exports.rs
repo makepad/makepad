@@ -53,7 +53,13 @@ pub unsafe extern "C" fn wasm_msg_free(ptr: u32) {
 #[export_name = "wasm_new_data_u8"]
 #[cfg(target_arch = "wasm32")]
 pub unsafe extern "C" fn wasm_new_data_u8(capacity_u8: u32) -> u32 {
-    ToWasmDataU8::new_and_release_ownership(capacity_u8 as usize)
+    WasmDataU8::new_and_release_ownership(capacity_u8 as usize)
+}
+
+#[export_name = "wasm_free_data_u8"]
+#[cfg(target_arch = "wasm32")]
+pub unsafe extern "C" fn wasm_free_data_u8(ptr: u32, len:u32, cap:u32) {
+    WasmDataU8::take_ownership(ptr, len, cap);
 }
 
 pub fn panic_hook(info: &panic::PanicInfo) {
@@ -63,6 +69,6 @@ pub fn panic_hook(info: &panic::PanicInfo) {
 #[export_name = "wasm_init_panic_hook"]
 #[cfg(target_arch = "wasm32")]
 pub unsafe extern "C" fn init_panic_hook(){
-        panic::set_hook(Box::new(panic_hook));
+    panic::set_hook(Box::new(panic_hook));
 }
 

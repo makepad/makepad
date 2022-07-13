@@ -1,7 +1,4 @@
 use {
-    std::{
-        path::PathBuf,
-    },
     crate::{
         makepad_component::{
             ComponentMap,
@@ -22,7 +19,7 @@ use {
             CollabNotification,
             CollabRequest,
             CollabResponse,
-            unix_path::{UnixPath, UnixPathBuf},
+            unix_path::{UnixPath},
         },
         builder::{
             builder_protocol::{

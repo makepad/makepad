@@ -4,7 +4,7 @@ use std::net::{TcpListener, TcpStream, SocketAddr, Shutdown};
 use std::io::prelude::*;
 use std::sync::{mpsc};
 
-use crate::websocket::{WebSocket, WebSocketMessage};
+use crate::websocket::{WebSocket, WebSocketMessage, BinaryMessageHeader};
 use crate::utils::*;
 
 #[derive(Clone)]
@@ -141,6 +141,9 @@ fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers
     
     let _write_thread = std::thread::spawn(move || {
         while let Ok(data) = rx_socket.recv() {
+            // we have a datachunk. lets write out the header for it
+            let header = BinaryMessageHeader::from_len(data.len());
+            write_bytes_to_tcp_stream_no_error(&mut write_tcp_stream, &header.as_slice());
             write_bytes_to_tcp_stream_no_error(&mut write_tcp_stream, &data);
         }
         let _ = write_tcp_stream.shutdown(Shutdown::Both);
