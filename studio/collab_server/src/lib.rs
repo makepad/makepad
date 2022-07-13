@@ -1,3 +1,5 @@
+#![cfg(target_os="macos")]
+
 pub mod collab_server;
 pub use collab_server::*;
 
