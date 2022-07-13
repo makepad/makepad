@@ -76,7 +76,7 @@ fn main() {
                 
                 if path == "/$watch"{
                     let header = format!(
-                        "HTTP/1.1 200 OK\r\n
+                        "HTTP/1.1 200 OK\r\n\
                             Cache-Control: max-age:0\r\n\
                             Connection: close\r\n\r\n",
                     );
