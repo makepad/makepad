@@ -16,7 +16,11 @@ use {
             msg_cache::MsgCache,
         },
         rust_editor::rust_tokenizer::token_cache::TokenCache,
-        makepad_collab_protocol::{CollabRequest, TextFileId},
+        makepad_collab_protocol::{
+            CollabRequest,
+            TextFileId,
+            unix_path::UnixPathBuf,
+        },
         editors::EditorViewId,
     },
 
@@ -56,7 +60,7 @@ pub struct EditorState {
     /// An arena for all documents in this code editor.
     pub documents: LiveIdMap<DocumentId, Document>,
     /// A map from file paths to document ids (see above for why this is needed)
-    pub documents_by_path: HashMap<Vec<u8>, DocumentId>,
+    pub documents_by_path: HashMap<UnixPathBuf, DocumentId>,
     /// A map from file ids to document ids (see above for why this is needed)
     pub documents_by_file: LiveIdMap<TextFileId, DocumentId>,
     /// The queue of outstanding documents for this code editor. A document is outstanding if it has
@@ -78,7 +82,7 @@ impl EditorState {
     /// the collab server to open the document's file and fetch its contents.
     pub fn create_session(
         &mut self,
-        path: Vec<u8>,
+        path: UnixPathBuf,
         send_request: &mut dyn FnMut(CollabRequest),
     ) -> SessionId {
         let document_id = self.get_or_create_document(path, send_request);
@@ -902,7 +906,7 @@ pub struct Document {
     /// The sessions that refer to this document.
     pub session_ids: HashSet<SessionId>,
     pub should_be_destroyed: bool,
-    pub path: Vec<u8>,
+    pub path: UnixPathBuf,
     pub inner: Option<DocumentInner>,
 }
 
