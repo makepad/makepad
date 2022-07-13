@@ -77,7 +77,7 @@ impl<'a> DrawShaderGenerator<'a> {
         )
             .unwrap()
     }
-
+    
     
     fn generate_vertex_shader(&mut self) {
         let packed_geometries_slots = self.compute_packed_geometries_slots();
@@ -128,6 +128,7 @@ impl<'a> DrawShaderGenerator<'a> {
         writeln!(self.string, "void main() {{").unwrap();
         
         self.generate_uniform_block_unpack();
+        self.generate_live_unpack();
         
         let mut geometry_unpacker = VarUnpacker::new(
             "packed_geometry",
@@ -198,9 +199,9 @@ impl<'a> DrawShaderGenerator<'a> {
         }
         
         // all our live ref uniforms
-        for (live_ref, ty) in self.draw_shader_def.all_live_refs.borrow().iter() {
-            self.generate_live_decl(*live_ref, ty);
-        }
+        //for (live_ref, ty) in self.draw_shader_def.all_live_refs.borrow().iter() {
+        //    self.generate_live_decl(*live_ref, ty);
+        //}
         
         // we have all the structs already from analyse
         for struct_ptr in struct_deps.iter().rev() {
@@ -208,7 +209,7 @@ impl<'a> DrawShaderGenerator<'a> {
             self.generate_struct_def(*struct_ptr, struct_def);
         }
         
-        for (ty_lit, param_tys) in all_constructor_fns{
+        for (ty_lit, param_tys) in all_constructor_fns {
             generate_cons_fn(self.backend_writer, self.string, ty_lit, &param_tys);
         }
         write!(self.string, "\n").unwrap();
@@ -285,6 +286,7 @@ impl<'a> DrawShaderGenerator<'a> {
         writeln!(self.string, "void main() {{").unwrap();
         
         self.generate_uniform_block_unpack();
+        self.generate_live_unpack();
         
         let mut varying_unpacker = VarUnpacker::new(
             "packed_varying",
@@ -340,6 +342,19 @@ impl<'a> DrawShaderGenerator<'a> {
         }
     }
     
+    fn generate_live_unpack(
+        &mut self,
+    ) {
+        let mut slots = 0;
+        for (live_ref, ty) in self.draw_shader_def.all_live_refs.borrow().iter() {
+            
+            write!(self.string, "    {} = ", &live_ref).unwrap();
+            self.write_uniform_ty_unpack(ty, "live_table", slots);
+            write!(self.string, ";\n").unwrap();
+            slots += ty.slots();
+        }
+    }
+    
     fn generate_decls(
         &mut self,
         packed_attributes_size: Option<usize>,
@@ -348,13 +363,20 @@ impl<'a> DrawShaderGenerator<'a> {
     ) {
         
         if self.const_table.table.len()>0 {
-            writeln!(
-                self.string,
-                "uniform float const_table[{}];",
-                self.const_table.table.len()
-            ).unwrap();
+            writeln!(self.string, "uniform float const_table[{}];", self.const_table.table.len()).unwrap();
         }
         write!(self.string, "\n").unwrap();
+        
+        let live_slots = self.calc_live_slots();
+        if live_slots >0 {
+            writeln!(self.string, "uniform float live_table[{}];", live_slots).unwrap();
+        }
+        
+        for (live_ref, ty) in self.draw_shader_def.all_live_refs.borrow().iter() {
+            self.write_var_decl(live_ref, ty);
+            writeln!(self.string, ";").unwrap();
+        }
+        
         for (ident, vec) in self.draw_shader_def.fields_as_uniform_blocks() {
             let mut slots = 0;
             
@@ -430,13 +452,13 @@ impl<'a> DrawShaderGenerator<'a> {
         writeln!(self.string, ";").unwrap();
     }
     
-    fn generate_live_decl(&mut self, ptr: ValuePtr, ty: &Ty) {
-        write!(self.string, "uniform ").unwrap();
-        self.write_var_decl(
-            &ptr,
-            ty,
-        );
-        writeln!(self.string, ";").unwrap();
+    
+    pub fn calc_live_slots(&self) -> usize {
+        let mut slots = 0;
+        for (_, ty) in self.draw_shader_def.all_live_refs.borrow().iter() {
+            slots += ty.slots();
+        }
+        slots
     }
     
     fn generate_texture_decl(&mut self, decl: &DrawShaderFieldDef) {
@@ -539,7 +561,7 @@ impl<'a> DrawShaderGenerator<'a> {
             _ => panic!("unexpected as initializeable type {:?}", ty),
         }.unwrap()
     }
-        
+    
     fn generate_expr(&mut self, expr: &Expr) {
         ExprGenerator {
             fn_def: None,
@@ -609,7 +631,7 @@ impl<'a> VarPacker<'a> {
                 )
                     .unwrap();
             }
-            write!(self.string, " = {}",  &DisplayDsIdent(ident)).unwrap();
+            write!(self.string, " = {}", &DisplayDsIdent(ident)).unwrap();
             if var_slots > 1 {
                 if var_slots <= 4 {
                     in_matrix = None;
@@ -751,8 +773,8 @@ impl<'a> BackendWriter for GlslBackendWriter<'a> {
     fn needs_cstyle_struct_cons(&self) -> bool {
         true
     }
-
-    fn enum_is_float(&self)->bool{
+    
+    fn enum_is_float(&self) -> bool {
         true
     }
     

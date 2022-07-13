@@ -287,7 +287,7 @@ impl Cx {
                 }
                 
                 _ => {
-                    console_log!("Message unknown");
+                    console_log!("Message unknown {}", block_id);
                     
                     //panic!("Message unknown")
                 }
@@ -601,6 +601,7 @@ pub unsafe extern "C" fn wasm_get_js_msg_class() -> u32 {
     FromWasmHideTextIME::from_wasm_js_method(&mut out);
     FromWasmCreateThread::from_wasm_js_method(&mut out);
     FromWasmWebSocketOpen::from_wasm_js_method(&mut out);
+    FromWasmWebSocketSend::from_wasm_js_method(&mut out);
     
     FromWasmCompileWebGLShader::from_wasm_js_method(&mut out);
     FromWasmAllocArrayBuffer::from_wasm_js_method(&mut out);

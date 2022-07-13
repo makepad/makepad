@@ -110,6 +110,8 @@ pub use {
             HitEvent,
             DragEvent,
             Signal,
+            WebSocket,
+            WebSocketReconnect,
             Timer,
             NextFrame,
             KeyModifiers,

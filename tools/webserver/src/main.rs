@@ -1,7 +1,7 @@
 use makepad_http::server::*;
-use makepad_http::websocket::BinaryMessageBuilder;
 use makepad_collab_server::{
     NotificationSender,
+    CollabClientAction,
     CollabNotification,
     CollabRequest,
     CollabServer,
@@ -26,9 +26,9 @@ impl NotificationSender for CollabNotificationSender{
     }
     
     fn send_notification(&self, notification: CollabNotification) {
-        let mut buf = BinaryMessageBuilder::new_len_u64(Vec::new());
-        notification.ser_bin(buf.as_mut());
-        self.sender.send(buf.take()).unwrap();
+        let mut buf = Vec::new();
+        CollabClientAction::Notification(notification).ser_bin(&mut buf);
+        let _ = self.sender.send(buf);
     }
 }
 
@@ -36,11 +36,11 @@ fn main() {
     let (tx_request, rx_request) = mpsc::channel::<HttpRequest> ();
     
     start_http_server(HttpServer{
-        listen_address:SocketAddr::from(([0, 0, 0, 0], 8080)),
+        listen_address:SocketAddr::from(([127, 0, 0, 1], 8080)),
         post_max_size: 1024*1024,
         request: tx_request
     });
-    
+    println!("Server listening on 127.0.0.1:8080");
     let mut clb_server = CollabServer::new("./");
     let mut clb_connections = HashMap::new();
     
@@ -60,13 +60,14 @@ fn main() {
                 clb_connections.remove(&web_socket_id);
             },
             HttpRequest::BinaryMessage {web_socket_id, response_sender, data}=>{
+                
                 if let Some(connection) = clb_connections.get(&web_socket_id){
                     // turn data into a request
                     if let Ok(request) = CollabRequest::de_bin(&mut 0, &data){
                         let response = connection.handle_request(request);
-                        let mut buf = BinaryMessageBuilder::new_len_u64(Vec::new());
-                        response.ser_bin(buf.as_mut());
-                        response_sender.send(buf.take()).unwrap();
+                        let mut buf = Vec::new();
+                        CollabClientAction::Response(response).ser_bin(&mut buf);
+                        let _ = response_sender.send(buf);
                     }
                 }
             }

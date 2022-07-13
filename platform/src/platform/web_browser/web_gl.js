@@ -38,7 +38,7 @@ export class WasmWebGL extends WasmWebBrowser {
             }
             return attrib_locs
         }
-        
+
         var gl = this.gl
         var vsh = gl.createShader(gl.VERTEX_SHADER)
         
@@ -258,20 +258,19 @@ export class WasmWebGL extends WasmWebBrowser {
             
             var gl_tex = this.textures[tgt.texture_id] || (this.textures[tgt.texture_id] = gl.createTexture());
             // resize or create texture
-            if (gl_tex.mp_width != args.width || gl_tex.mp_height != this.args.height) {
+            if (gl_tex._width != args.width || gl_tex._height != args.height) {
                 gl.bindTexture(gl.TEXTURE_2D, gl_tex)
                 
                 clear_flags |= gl.COLOR_BUFFER_BIT;
                 clear_color = tgt.clear_color;
                 
-                gl_tex.mp_width = args.width
-                gl_tex.mp_height = args.height
+                gl_tex._width = args.width
+                gl_tex._height = args.height
                 gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR)
                 gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR)
                 gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE)
                 gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE)
-                
-                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl_tex.mp_width, gl_tex.mp_height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl_tex._width, gl_tex._height, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
             }
             else if (!tgt.init_only) {
                 clear_flags |= gl.COLOR_BUFFER_BIT;
@@ -280,7 +279,7 @@ export class WasmWebGL extends WasmWebBrowser {
             gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, gl_tex, 0)
         }
         // TODO implement depth target
-        gl.viewport(0, 0, this.target_width, this.target_height);
+        gl.viewport(0, 0, args.width, args.height);
         
         if (clear_flags !== 0) {
             gl.clearColor(clear_color.r, clear_color.g, clear_color.b, clear_color.a);
@@ -302,7 +301,7 @@ export class WasmWebGL extends WasmWebBrowser {
     FromWasmSetDefaultDepthAndBlendMode() {
         let gl = this.gl
         gl.disable(gl.DEPTH_TEST);
-        gl.depthFunc(gl.LEQUAL);
+        gl.depthFunc(gl.GEQUAL);
         gl.blendEquationSeparate(gl.FUNC_ADD, gl.FUNC_ADD);
         gl.blendFuncSeparate(gl.ONE, gl.ONE_MINUS_SRC_ALPHA, gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
         gl.enable(gl.BLEND);

@@ -53,48 +53,41 @@ pub enum WebSocketError {
     TextNotUTF8,
 }
 
-pub struct BinaryMessageBuilder{
-    data:Vec<u8>
+pub struct BinaryMessageHeader{
+    len: usize,
+    data:[u8;10]
 }
 
-impl BinaryMessageBuilder{
-    pub fn new_len_u64(mut data:Vec<u8>)->BinaryMessageBuilder{
-        data.clear();
-        data.push(128 | 2); // binary single message
-        /*
+impl BinaryMessageHeader{
+    pub fn from_len(len:usize)->Self{
+        let mut data = [0u8;10];
+        
+        data[0] = 128 | 2; // binary single message
+        
         if len < 126{
-            data.push(len as u8);
-            check_len = len + 2;
+            data[1] = len as u8;
+            return BinaryMessageHeader{len:2, data}
         }
         else if len < 65536{
-            data.push(126); 
-            data.extend_from_slice(&(len as u16).to_be_bytes());
-            check_len = len + 4;
+            data[1] = 126; 
+            let bytes = &(len as u16).to_be_bytes();
+            for i in 0..bytes.len(){
+                data[i+2] = bytes[i]
+            }
+            return BinaryMessageHeader{len:4, data}
         }
-        else{*/
-        // patch in 0s
-        data.push(127);
-        for _ in 0..8{
-            data.push(0)
+        else{
+            data[1] = 127;
+            let bytes = &(len as u64).to_be_bytes();
+            for i in 0..bytes.len(){
+                data[i+2] = bytes[i]
+            }
+            return BinaryMessageHeader{len:10, data}
         }
-        // lets push in 
-        //data.extend_from_slice(&(len as u64).to_be_bytes());
-        //}
-        BinaryMessageBuilder{data}
     }
     
-    pub fn as_mut(&mut self)->&mut Vec<u8>{
-        &mut self.data
-    }
-    
-    pub fn take(mut self)->Vec<u8>{
-        // lets patch in the length
-        let len = self.data.len() - 10;
-        let bytes = (len as u64).to_be_bytes();
-        for i in 0..8{
-            self.data[i+2] = bytes[i];
-        }
-        self.data
+    pub fn as_slice(&self)->&[u8]{
+        &self.data[0..self.len]
     }
 }
 
