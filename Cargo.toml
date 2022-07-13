@@ -1,6 +1,7 @@
 [workspace]
 
 members = [
+    "code_editor/btree",
     "code_editor/segment",
     "code_editor/ucd",
     "examples/bare_example", 
