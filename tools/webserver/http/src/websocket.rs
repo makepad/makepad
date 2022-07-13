@@ -54,15 +54,14 @@ pub enum WebSocketError {
 }
 
 pub struct BinaryMessageBuilder{
-    check_len: usize,
     data:Vec<u8>
 }
 
 impl BinaryMessageBuilder{
-    pub fn new(mut data:Vec<u8>, len: usize)->BinaryMessageBuilder{
+    pub fn new_len_u64(mut data:Vec<u8>)->BinaryMessageBuilder{
         data.clear();
-        let check_len;
         data.push(128 | 2); // binary single message
+        /*
         if len < 126{
             data.push(len as u8);
             check_len = len + 2;
@@ -72,21 +71,28 @@ impl BinaryMessageBuilder{
             data.extend_from_slice(&(len as u16).to_be_bytes());
             check_len = len + 4;
         }
-        else{
-            data.push(127);
-            data.extend_from_slice(&(len as u64).to_be_bytes());
-            check_len = len + 10;
+        else{*/
+        // patch in 0s
+        data.push(127);
+        for _ in 0..8{
+            data.push(0)
         }
-        BinaryMessageBuilder{data, check_len}
+        // lets push in 
+        //data.extend_from_slice(&(len as u64).to_be_bytes());
+        //}
+        BinaryMessageBuilder{data}
     }
     
-    pub fn as_mut(&mut self)->&mut Vec<u32>{
+    pub fn as_mut(&mut self)->&mut Vec<u8>{
         &mut self.data
     }
     
-    pub fn take(self)->Vec<u8>{
-        if self.check_len != self.data.len(){
-            panic!();
+    pub fn take(mut self)->Vec<u8>{
+        // lets patch in the length
+        let len = self.data.len() - 10;
+        let bytes = (len as u64).to_be_bytes();
+        for i in 0..8{
+            self.data[i+2] = bytes[i];
         }
         self.data
     }

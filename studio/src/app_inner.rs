@@ -12,9 +12,7 @@ use {
             slides_view::SlidesView,
             file_tree::{FileTreeAction, FileNodeId, FileTree},
         },
-        collab::{
-            collab_client::CollabClient,
-        },
+        collab_client::CollabClient,
         makepad_collab_protocol::{
             FileTreeData,
             CollabRequest,
