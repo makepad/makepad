@@ -42,7 +42,7 @@ pub enum FromUI {
 pub struct App {
     frame: Frame,
     window: DesktopWindow,
-    #[rust(ToUIReceiver::new(cx))] to_ui: ToUIReceiver<ToUI>,
+    #[rust] to_ui: ToUIReceiver<ToUI>,
     #[rust] from_ui: FromUISender<FromUI>,
 }
 

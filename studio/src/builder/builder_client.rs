@@ -30,9 +30,9 @@ pub struct BuilderClient {
 }
 
 impl LiveHook for BuilderClient{
-    fn after_apply(&mut self, cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
+    fn after_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
         if self.inner.is_none(){
-            self.inner = Some(BuilderClientInner::new_with_local_server(cx, &self.path))
+            self.inner = Some(BuilderClientInner::new_with_local_server(&self.path))
         }
     }
 }
@@ -58,7 +58,7 @@ impl BuilderClient{
         let inner = self.inner.as_ref().unwrap();
         match event {
             Event::Signal(event)
-            if event.signals.contains_key(&inner.msg_signal) => {
+            if event.signals.contains(&inner.msg_signal) => {
                 loop {
                     match inner.msg_receiver.try_recv() {
                         Ok(msg) => dispatch_msg(cx, msg),
@@ -80,9 +80,9 @@ pub struct BuilderClientInner {
 }
 
 impl BuilderClientInner {
-    pub fn new_with_local_server(cx: &mut Cx, subdir:&str) -> Self {
+    pub fn new_with_local_server(subdir:&str) -> Self {
         let (cmd_sender, cmd_receiver) = mpsc::channel();
-        let msg_signal = cx.new_signal();
+        let msg_signal = LiveId::unique().into();
         let (msg_sender, msg_receiver) = mpsc::channel();
         
         let base_path = env::current_dir().unwrap();
@@ -95,7 +95,7 @@ impl BuilderClientInner {
                 let msg_sender = msg_sender.clone();
                 move | msg | {
                     msg_sender.send(msg).unwrap();
-                    Cx::post_signal(msg_signal, 0);
+                    Cx::post_signal(msg_signal);
                 }
             })),
         );
@@ -192,7 +192,7 @@ fn _spawn_msg_receiver(
         let msg = DeBin::deserialize_bin(msg_bytes.as_slice()).unwrap();
         
         msg_sender.send(msg).unwrap();
-        Cx::post_signal(msg_signal, 0);
+        Cx::post_signal(msg_signal);
     });
 }
 

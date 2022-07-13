@@ -1130,7 +1130,7 @@ impl CodeEditorImpl {
             else {
                 select_scroll.at_end = true;
             }
-            cx.send_trigger(self.scroll_view.area(), Some(id!(scroll).0));
+            cx.send_trigger(self.scroll_view.area(), id!(scroll).into());
         }
     }
     
