@@ -12,6 +12,8 @@ use {
         editor_state::{EditorState, SessionId},
         makepad_collab_protocol::{
             FileNodeData, FileTreeData,
+            unix_path::UnixPathBuf,
+            unix_str::UnixString,
         },
     },
     std::{
@@ -27,7 +29,7 @@ pub struct AppState {
     
     pub selected_panel_id: PanelId,
     
-    pub path: Vec<u8>,
+    pub path: UnixPathBuf,
     pub editor_state: EditorState,
 }
 
@@ -125,7 +127,7 @@ impl AppState {
             tabs,
             selected_panel_id: id!(content).into(),
             file_nodes,
-            path: Vec::new(),
+            path: UnixPathBuf::new(),
             editor_state: EditorState::new(),
         }
     }
@@ -139,18 +141,18 @@ impl AppState {
         None
     }
     
-    pub fn file_node_path(&self, file_node_id: FileNodeId) -> PathBuf {
+    pub fn file_node_path(&self, file_node_id: FileNodeId) -> UnixPathBuf {
         let mut components = Vec::new();
         let mut file_node = &self.file_nodes[file_node_id];
         while let Some(edge) = &file_node.parent_edge {
             components.push(&edge.name);
             file_node = &self.file_nodes[edge.file_node_id];
         }
-        self.path.join(components.into_iter().rev().collect::<PathBuf>())
+        self.path.join(components.into_iter().rev().collect::<UnixPathBuf>())
     }
     
-    pub fn file_path_join(&self, components: &[&str]) -> PathBuf {
-        self.path.join(components.into_iter().rev().collect::<PathBuf>())
+    pub fn file_path_join(&self, components: &[&str]) -> UnixPathBuf {
+        self.path.join(components.into_iter().rev().collect::<UnixPathBuf>())
     }
     
     pub fn load_file_tree(&mut self, tree_data: FileTreeData) {
@@ -163,7 +165,7 @@ impl AppState {
             let file_node_id = file_node_id.unwrap_or(file_nodes.alloc_key());
             let name = parent_edge.as_ref().map_or_else(
                 || String::from("root"),
-                | edge | String::from_utf8_lossy(&edge.name).to_string(),
+                | edge | name.to_string_lossy().to_owned(),
             );
             let node = FileNode {
                 parent_edge,
@@ -304,7 +306,7 @@ impl FileNode {
 
 #[derive(Debug)]
 pub struct FileEdge { 
-    pub name: Vec<u8>,
+    pub name: UnixString,
     pub file_node_id: FileNodeId,
 }
 
