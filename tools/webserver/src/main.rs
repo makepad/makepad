@@ -1,5 +1,3 @@
-// this webserver is serving our site. Why? WHYYY. Because it was fun to write. And MUCH faster and MUCH simpler than anything else imaginable.
-
 use makepad_http::server::*;
 use makepad_collab_server::{
     NotificationSender,
@@ -65,6 +63,7 @@ fn main() {
                     if let Ok(request) = CollabRequest::de_bin(&mut 0, &data){
                         let response = connection.handle_request(request);
                         let mut buf = Vec::new();
+                        
                         response.ser_bin(&mut buf);
                         response_sender.send(buf).unwrap();
                     }

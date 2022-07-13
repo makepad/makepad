@@ -1,6 +1,7 @@
 use {
     std::sync::mpsc::{channel, Sender, Receiver,RecvError,TryRecvError, SendError},
     crate::{
+        makepad_live_id::LiveId,
         cx::Cx,
         cx_api::*,
         event::{Signal, SignalEvent}
@@ -26,16 +27,18 @@ impl<T> Clone for ToUISender<T>{
 
 unsafe impl<T> Send for ToUISender<T>{}
 
-impl<T> ToUIReceiver<T>{
-    pub fn new(cx:&mut Cx)->Self{
+impl<T> Default for ToUIReceiver<T>{
+    fn default()->Self{
         let (sender, receiver) = channel();
         Self{
             sender,
             receiver,
-            signal:cx.new_signal()
+            signal:LiveId::unique().into()
         }
     }
-    
+}
+
+impl<T> ToUIReceiver<T>{
     pub fn sender(&self)->ToUISender<T>{
         ToUISender{
             sender:self.sender.clone(),
@@ -56,7 +59,7 @@ impl<T> ToUIReceiver<T>{
 impl<T> ToUISender<T>{
     pub fn send(&self, t:T)->Result<(), SendError<T>>{
         let res = self.sender.send(t);
-        Cx::post_signal(self.signal, 0);
+        Cx::post_signal(self.signal);
         res
     }
 }
@@ -73,18 +76,16 @@ pub struct FromUISender<T>{
 unsafe impl<T> Send for FromUIReceiver<T>{}
 
 impl<T> Default for FromUISender<T>{
-    fn default()->Self{Self::new()}
-}
-
-impl<T> FromUISender<T>{
-    pub fn new()->Self{
+    fn default()->Self{
         let (sender, receiver) = channel();
         Self{
             sender,
             receiver:Some(receiver),
         }
     }
-    
+}
+
+impl<T> FromUISender<T>{
     pub fn new_channel(&mut self){
         let (sender, receiver) = channel();
         self.sender = sender;

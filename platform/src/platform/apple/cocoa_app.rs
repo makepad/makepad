@@ -3,7 +3,7 @@ use {
     std::{
         ptr,
         time::Instant,
-        collections::HashMap,
+        collections::{HashMap,HashSet},
         os::raw::{c_void}
     },
     crate::{
@@ -45,7 +45,7 @@ use {
         cursor::MouseCursor,
         menu::{
             Menu,
-            CommandId
+            Command
         }
     }
 };
@@ -156,14 +156,14 @@ impl CocoaApp {
         }
     }
     
-    pub fn update_app_menu(&mut self, menu: &Menu, command_settings: &HashMap<CommandId, CxCommandSetting>,) {
+    pub fn update_app_menu(&mut self, menu: &Menu, command_settings: &HashMap<Command, CxCommandSetting>,) {
         unsafe fn make_menu(
             parent_menu: ObjcId,
             delegate: ObjcId,
             menu_target_class: *const Class,
             menu: &Menu,
             //status_map: &Mutex<CocoaStatusMap>,
-            command_settings: &HashMap<CommandId, CxCommandSetting>
+            command_settings: &HashMap<Command, CxCommandSetting>
         ) {
             match menu {
                 Menu::Main {items} => {
@@ -232,7 +232,7 @@ impl CocoaApp {
                     };*/
                     
                     (*target).set_ivar("cocoa_app_ptr", GLOBAL_COCOA_APP as *mut _ as *mut c_void);
-                    (*target).set_ivar("command_usize", command.0);
+                    (*target).set_ivar("command_usize", command.0.0);
                 },
                 Menu::Line => {
                     let sep_item: ObjcId = msg_send![class!(NSMenuItem), separatorItem];
@@ -616,7 +616,7 @@ impl CocoaApp {
         }
     }
     
-    pub fn post_signal(signal_id: usize, status: u64) {
+    pub fn post_signal(signal_id: u64) {
         unsafe {
             let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
             
@@ -641,7 +641,6 @@ impl CocoaApp {
             
             (*post_delegate_instance).set_ivar("cocoa_app_ptr", GLOBAL_COCOA_APP as *mut _ as *mut c_void);
             (*post_delegate_instance).set_ivar("signal_id", signal_id);
-            (*post_delegate_instance).set_ivar("status", status);
             let nstimer: ObjcId = msg_send![
                 class!(NSTimer),
                 timerWithTimeInterval: 0.
@@ -740,11 +739,9 @@ impl CocoaApp {
         }
     }
     
-    pub fn send_signal_event(&mut self, signal: Signal, status: u64) {
-        let mut signals = HashMap::new();
-        let mut new_set = Vec::new();
-        new_set.push(status);
-        signals.insert(signal, new_set);
+    pub fn send_signal_event(&mut self, signal: Signal) {
+        let mut signals = HashSet::new();
+        signals.insert(signal);
         self.do_callback(&mut vec![
             Event::Signal(SignalEvent {
                 signals: signals,
@@ -753,7 +750,7 @@ impl CocoaApp {
         self.do_callback(&mut vec![Event::Paint]);
     }
     
-    pub fn send_command_event(&mut self, command: CommandId) {
+    pub fn send_command_event(&mut self, command: Command) {
         self.do_callback(&mut vec![
             Event::Command(command)
         ]);
