@@ -16,10 +16,6 @@ use {
             unix_str::UnixString,
         },
     },
-    std::{
-        ffi::OsString,
-        path::{ PathBuf},
-    },
 };
 
 pub struct AppState {

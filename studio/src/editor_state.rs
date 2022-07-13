@@ -28,7 +28,6 @@ use {
         collections::{HashMap, HashSet, VecDeque},
         iter,
         mem,
-        path::PathBuf,
     },
 };
 

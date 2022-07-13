@@ -37,12 +37,13 @@ use {
             NUM_FINGERS,
             Event,
             Signal,
+            Trigger,
             KeyEvent,
             NextFrame,
         },
         menu::{
             CxCommandSetting,
-            CommandId
+            Command
         },
         cursor::{
             MouseCursor
@@ -115,7 +116,7 @@ pub struct Cx {
     pub event_id: u64,
     pub timer_id: u64,
     pub next_frame_id: u64,
-    pub signal_id: usize,
+    pub web_socket_id: u64,
     
     pub prev_key_focus: Area,
     pub next_key_focus: Area,
@@ -133,8 +134,8 @@ pub struct Cx {
     
     pub dependencies: HashMap<String, CxDependency>,
     
-    pub signals: HashMap<Signal, Vec<u64 >>,
-    pub triggers: HashMap<Area, Vec<u64 >>,
+    pub signals: HashSet<Signal>,
+    pub triggers: HashMap<Area,HashSet<Trigger>>,
     
     pub profiles: HashMap<u64, Instant>,
     
@@ -143,7 +144,7 @@ pub struct Cx {
     
     pub live_edit_event: Option<LiveEditEvent>,
     
-    pub command_settings: HashMap<CommandId, CxCommandSetting>,
+    pub command_settings: HashMap<Command, CxCommandSetting>,
     
     pub platform: CxPlatform,
     // this cuts the compiletime of an end-user application in half
@@ -259,8 +260,8 @@ impl Default for Cx {
             event_id: 1,
             repaint_id: 1,
             timer_id: 1,
-            signal_id: 1,
             next_frame_id: 1,
+            web_socket_id: 1,
             
             next_key_focus: Area::Empty,
             prev_key_focus: Area::Empty,
@@ -278,7 +279,7 @@ impl Default for Cx {
             
             dependencies: HashMap::new(),
             
-            signals: HashMap::new(),
+            signals: HashSet::new(),
             triggers: HashMap::new(),
             
             profiles: HashMap::new(),
