@@ -28,7 +28,7 @@ struct PluginEffect {
     input: AudioComponentRef,
     #[rust] audio_device: Option<AudioDevice>,
     #[rust] from_ui: FromUISender<FromUI>,
-    #[rust(ToUIReceiver::new(cx))] to_ui: ToUIReceiver<ToUI>,
+    #[rust] to_ui: ToUIReceiver<ToUI>,
 }
 
 struct Node {
