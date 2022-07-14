@@ -1,9 +1,9 @@
 use {
     makepad_micro_serde::{DeBin, DeBinErr, SerBin},
-    std::{borrow::Cow, ops::{Deref, DerefMut}}
+    std::{borrow::Cow, fmt, ops::{Deref, DerefMut}}
 };
 
-#[derive(Clone, Default, DeBin, Debug, Eq, Hash, PartialEq, PartialOrd, Ord, SerBin)]
+#[derive(Clone, Default, DeBin, Eq, Hash, PartialEq, PartialOrd, Ord, SerBin)]
 pub struct UnixString {
     bytes: Vec<u8>
 }
@@ -83,13 +83,19 @@ impl DerefMut for UnixString {
     }
 }
 
+impl fmt::Debug for UnixString {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "\"{}\"", self.to_string_lossy())
+    }
+}
+
 impl AsRef<UnixStr> for UnixString {
     fn as_ref(&self) -> &UnixStr {
         self.as_unix_str()
     }
 }
 
-#[derive(Eq, Debug, Hash, PartialEq, PartialOrd, Ord)]
+#[derive(Eq, Hash, PartialEq, PartialOrd, Ord)]
 #[repr(transparent)]
 pub struct UnixStr {
     bytes: [u8]
@@ -139,6 +145,12 @@ impl UnixStr {
 
     pub fn to_string_lossy(&self) -> Cow<'_, str> {
         String::from_utf8_lossy(&self.bytes)
+    }
+}
+
+impl fmt::Debug for UnixStr {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "\"{}\"", self.to_string_lossy())
     }
 }
 
