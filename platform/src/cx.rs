@@ -162,7 +162,7 @@ pub enum PlatformType {
     MsWindows,
     OSX,
     Linux {custom_window_chrome: bool},
-    WebBrowser {protocol: String, hostname: String, pathname: String, search: String, hash: String}
+    WebBrowser {protocol: String, host:String, hostname: String, pathname: String, search: String, hash: String}
 }
 
 impl PlatformType {

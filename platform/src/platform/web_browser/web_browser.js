@@ -25,6 +25,7 @@ export class WasmWebBrowser extends WasmBridge {
             gpu_info: this.gpu_info,
             browser_info: {
                 protocol: location.protocol + "",
+                host:location.host+"",
                 hostname: location.hostname + "",
                 pathname: location.pathname + "",
                 search: location.search + "",
