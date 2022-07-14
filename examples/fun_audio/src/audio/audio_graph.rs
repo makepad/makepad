@@ -39,7 +39,7 @@ pub enum AudioGraphAction {
 pub struct AudioGraph {
     root: AudioComponentRef,
     #[rust] from_ui: FromUISender<FromUI>,
-    #[rust(ToUIReceiver::new(cx))] to_ui: ToUIReceiver<ToUI>,
+    #[rust] to_ui: ToUIReceiver<ToUI>,
 }
 
 impl LiveHook for AudioGraph {

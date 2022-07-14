@@ -3,7 +3,7 @@ use std::io::{Read, Write};
 use std::fs;    
     
 fn main() {
-   let data = fs::read("target/wasm32-unknown-unknown/release/layout_example.wasm").expect("Can't read file");
+   let data = fs::read("target/wasm32-unknown-unknown/release/makepad_studio.wasm").expect("Can't read file");
     // lets brotli it
     let mut result = Vec::new();
     {

@@ -271,7 +271,7 @@ impl App {
                 }) {
                     
                     instrument.add_child(cx, id!(my_stack1), ids!(stack), live!{
-                        header: {label = {text: "MyStackItem"}}
+                        header: {label = {text: (format!("HELLO WORLD {}", 3+4))}}
                     });
                     
                     instrument.add_child(cx, id!(my_stack2), ids!(stack), live!{
