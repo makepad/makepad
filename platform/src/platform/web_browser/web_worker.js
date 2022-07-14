@@ -1,4 +1,4 @@
-import {WasmBridge} from "/makepad/platform/wasm_bridge/src/wasm_bridge.js"
+import {WasmBridge} from "/makepad/platform/wasm_bridge/src/wasm_bridge.js";
 
 class WasmWorker extends WasmBridge {
     constructor(wasm) {
