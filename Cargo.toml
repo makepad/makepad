@@ -4,7 +4,6 @@ members = [
     "code_editor/collections",
     "code_editor/segment",
     "code_editor/ucd",
-    "examples/bare_example", 
     "examples/layout_example", 
     "examples/cmdline_example",
     "platform/wasm_bridge/test",

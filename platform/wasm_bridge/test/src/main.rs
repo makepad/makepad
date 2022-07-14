@@ -1,3 +1,4 @@
+#![allow(unused)]
 use makepad_wasm_bridge::*;
 
 #[derive(Debug, FromWasm, ToWasm, PartialEq)]
