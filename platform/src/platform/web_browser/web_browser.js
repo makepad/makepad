@@ -77,10 +77,10 @@ export class WasmWebBrowser extends WasmBridge {
         this.signals.push({signal_hi, signal_lo});
         if(this.signal_timeout === undefined){
             this.signal_timeout = setTimeout(_=>{
+                this.signal_timeout = undefined;
                 for(let signal of this.signals){
                     this.to_wasm.ToWasmSignal({signal_hi, signal_lo})
                 }
-                this.signal_timeout = 0;
                 this.do_wasm_pump();
             },0)
         }
