@@ -14,9 +14,11 @@ onmessage = async function(e) {
     let data = e.data;
     let wasm = await WasmBridge.instantiate_wasm(data.bytes, data.memory, {
     });
+    
     wasm.instance.exports.__stack_pointer.value = data.stack_ptr;
     wasm.instance.exports.__wasm_init_tls(data.tls_ptr);
-    wasm.instance.exports.wasm_thread_entrypoint(data.closure_ptr);
     
     let bridge = new WasmWorker(wasm);
+
+    wasm.instance.exports.wasm_thread_entrypoint(data.closure_ptr);
 }
