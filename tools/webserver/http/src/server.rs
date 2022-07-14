@@ -52,7 +52,7 @@ pub fn start_http_server(
     
     let listen_thread = {
         std::thread::spawn(move || {
-            let mut web_socket_id = 0;
+            let mut connection_counter = 0u64;
             for tcp_stream in listener.incoming() {
                 let mut tcp_stream = if let Ok(tcp_stream) = tcp_stream {
                     tcp_stream
@@ -62,6 +62,7 @@ pub fn start_http_server(
                     continue
                 };
                 let http_server = http_server.clone();
+                connection_counter += 1;
                 let _read_thread = std::thread::spawn(move || {
                     
                     let headers = HttpHeaders::from_tcp_stream(&mut tcp_stream);
@@ -71,8 +72,7 @@ pub fn start_http_server(
                     let headers = headers.unwrap();
                     
                     if headers.sec_websocket_key.is_some() {
-                        web_socket_id += 1;
-                        return handle_web_socket(http_server, tcp_stream, headers, web_socket_id);
+                        return handle_web_socket(http_server, tcp_stream, headers, connection_counter);
                     }
                     if headers.verb == "POST" {
                         return handle_post(http_server, tcp_stream, headers);
