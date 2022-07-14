@@ -1,4 +1,4 @@
-import {WasmWebBrowser} from "./web_browser.js"
+import {WasmWebBrowser} from "./web_browser.js";
 
 export class WasmWebGL extends WasmWebBrowser {
     constructor(wasm, dispatch, canvas) {
