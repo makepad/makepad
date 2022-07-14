@@ -11,6 +11,7 @@ members = [
     "examples/fun_audio",
     "studio",
     "tools/webserver",
+    "tools/wasm_strip",
     "tools/brotli_check",
 ]
 
