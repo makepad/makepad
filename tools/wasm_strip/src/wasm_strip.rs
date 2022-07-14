@@ -71,7 +71,7 @@ impl<'a> Reader<'a> {
 
 }
 
-struct WasmSection{
+pub struct WasmSection{
     pub type_id: u8,
     pub start: usize,
     pub end: usize,
