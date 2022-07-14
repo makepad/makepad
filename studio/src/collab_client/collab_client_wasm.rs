@@ -28,11 +28,11 @@ impl LiveHook for CollabClient {
     fn after_apply(&mut self, cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
         if self.web_socket.is_none() {
             // connect websocket
-            let host = if let PlatformType::WebBrowser{host,..} = &cx.platform_type{host}else{panic!()};
+            let (host, protocol) = if let PlatformType::WebBrowser{host,protocol,..} = &cx.platform_type{(host,protocol)}else{panic!()};
             
             self.web_socket = Some(
                 cx.web_socket_open(
-                    format!("ws://{}",host),
+                    format!("{}://{}",if protocol=="https:"{"wss"}else{"ws"}, host),
                     WebSocketReconnect::Automatic
                 )
             )
