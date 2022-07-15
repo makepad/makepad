@@ -989,6 +989,8 @@ impl State {
             }
         }
         self.swap_in_state(state);
+        // animate once
+        //self.next_frame = cx.new_next_frame();
     }
     
     pub fn init_as_needed(&mut self, cx:&mut Cx, index:usize, nodes:&[LiveNode]){
@@ -1029,7 +1031,7 @@ impl State {
     }
         
     pub fn animate_to(&mut self, cx: &mut Cx, state_pair: &StatePair, index: usize, nodes: &[LiveNode]) {
-        
+       
         let mut reader = if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(apply).as_field()) {
             reader
         }
@@ -1200,6 +1202,7 @@ impl State {
         }
         
         self.swap_in_state(state);
+        
         self.next_frame = cx.new_next_frame();
     }
     

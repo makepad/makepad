@@ -2,9 +2,10 @@
 #![feature(proc_macro_span)]
 use proc_macro::{TokenStream, TokenTree};
 
-#[path = "../../../../platform/micro_serde/derive/src/macro_lib.rs"]
-mod macro_lib;
-use macro_lib::{TokenBuilder, TokenParser};
+use makepad_macro_lib::{
+    TokenBuilder,
+    TokenParser,
+};
 
 #[proc_macro_derive(DeriveExample)]
 pub fn derive_example(input: TokenStream) -> TokenStream {

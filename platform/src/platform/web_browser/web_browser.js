@@ -25,6 +25,7 @@ export class WasmWebBrowser extends WasmBridge {
             gpu_info: this.gpu_info,
             browser_info: {
                 protocol: location.protocol + "",
+                host: location.host + "",
                 hostname: location.hostname + "",
                 pathname: location.pathname + "",
                 search: location.search + "",
@@ -50,13 +51,13 @@ export class WasmWebBrowser extends WasmBridge {
                     deps: deps
                 });
                 this.do_wasm_pump();
-
+                
                 // only bind the event handlers now
                 // to stop them firing into wasm early
                 this.bind_mouse_and_touch();
                 this.bind_keyboard();
                 this.bind_screen_resize();
-                
+                this.focus_keyboard_input();
                 this.to_wasm.ToWasmRedrawAll();
                 this.do_wasm_pump();
                 
@@ -75,14 +76,14 @@ export class WasmWebBrowser extends WasmBridge {
     
     js_post_signal(signal_hi, signal_lo) {
         this.signals.push({signal_hi, signal_lo});
-        if(this.signal_timeout === undefined){
-            this.signal_timeout = setTimeout(_=>{
+        if (this.signal_timeout === undefined) {
+            this.signal_timeout = setTimeout(_ => {
                 this.signal_timeout = undefined;
-                for(let signal of this.signals){
-                    this.to_wasm.ToWasmSignal({signal_hi, signal_lo})
+                for (let signal of this.signals) {
+                    this.to_wasm.ToWasmSignal({signal_hi, signal_lo});
                 }
                 this.do_wasm_pump();
-            },0)
+            }, 0)
         }
     }
     
@@ -212,6 +213,90 @@ export class WasmWebBrowser extends WasmBridge {
         console.log("IMPLEMENTR!")
     }
     
+    
+    FromWasmWebSocketOpen(args) {
+        let auto_reconnect = args.auto_reconnect;
+        let web_socket_id = args.web_socket_id;
+        let url = args.url;
+        let web_socket = new WebSocket(args.url);
+        web_socket.binaryType = "arraybuffer";
+        this.web_sockets[args.web_socket_id] = web_socket;
+        
+        web_socket.onclose = e => {
+            console.log("Websocket close");
+            return
+            console.log("Auto reconnecting websocket");
+            this.to_wasm.ToWasmWebSocketClose({web_socket_id})
+            this.do_wasm_pump();
+            if (auto_reconnect) {
+                this.FromWasmWebSocketOpen({
+                    web_socket_id,
+                    auto_reconnect,
+                    url
+                });
+            }
+        }
+        web_socket.onerror = e => {
+            console.error("Websocket error", e);
+            this.to_wasm.ToWasmWebSocketError({web_socket_id, error: "" + e})
+            this.do_wasm_pump();
+        }
+        web_socket.onmessage = e => {
+            // ok send the binary message
+            this.to_wasm.ToWasmWebSocketMessage({
+                web_socket_id,
+                data: e.data
+            })
+            this.do_wasm_pump();
+        }
+        web_socket.onopen = e => {
+            for (let item of web_socket._queue) {
+                web_socket.send(item);
+            }
+            web_socket._queue.length = 0;
+            this.to_wasm.ToWasmWebSocketOpen({web_socket_id});
+            this.do_wasm_pump();
+        }
+        web_socket._queue = []
+    }
+    
+    FromWasmWebSocketSend(args) {
+        let web_socket = this.web_sockets[args.web_socket_id];
+        if (web_socket.readyState == 0) {
+            web_socket._queue.push(this.clone_data_u8(args.data))
+        }
+        else {
+            web_socket.send(this.view_data_u8(args.data));
+        }
+        this.free_data_u8(args.data);
+    }
+    
+    FromWasmWebAudioEnumerateDevices() {
+        web_audio_enumerate_devices();
+    }
+    
+    alloc_thread_stack(closure_ptr) {
+        let tls_size = this.exports.__tls_size.value;
+        let stack_size = 2 * 1024 * 1024; // 2mb
+        let tls_ptr = this.exports.wasm_thread_alloc_tls_and_stack(tls_size + stack_size / 8);
+        this.update_array_buffer_refs();
+        let stack_ptr = tls_ptr + tls_size + stack_size - 8;
+        return {
+            tls_ptr,
+            stack_ptr,
+            bytes: this.wasm._bytes,
+            memory: this.wasm._memory,
+            closure_ptr
+        }
+    }
+    
+    
+    // thanks to JP Posma with Zaplib for figuring out how to do the stack_pointer export without wasm bindgen
+    // https://github.com/Zaplib/zaplib/blob/650305c856ea64d9c2324cbd4b8751ffbb971ac3/zaplib/cargo-zaplib/src/build.rs#L48
+    // https://github.com/Zaplib/zaplib/blob/7cb3bead16f963e60c840aa2be3bf28a47ac533e/zaplib/web/common.ts#L313
+    // And Ingvar Stepanyan for https://web.dev/webassembly-threads/
+    // example build command:
+    // RUSTFLAGS="-C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--export=__stack_pointer" cargo build -p thing_to_compile --target=wasm32-unknown-unknown -Z build-std=panic_abort,std
     FromWasmCreateThread(args) {
         let worker = new Worker(
             '/makepad/platform/src/platform/web_browser/web_worker.js',
@@ -227,25 +312,10 @@ export class WasmWebBrowser extends WasmBridge {
             return
         }
         
-        // thanks to JP Posma with Zaplib for figuring out how to do the stack_pointer export without wasm bindgen
-        // https://github.com/Zaplib/zaplib/blob/650305c856ea64d9c2324cbd4b8751ffbb971ac3/zaplib/cargo-zaplib/src/build.rs#L48
-        // https://github.com/Zaplib/zaplib/blob/7cb3bead16f963e60c840aa2be3bf28a47ac533e/zaplib/web/common.ts#L313
-        // And Ingvar Stepanyan for https://web.dev/webassembly-threads/
-        // example build command:
-        // RUSTFLAGS="-C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--export=__stack_pointer" cargo build -p thing_to_compile --target=wasm32-unknown-unknown -Z build-std=panic_abort,std
+        let thread_info = self.get_thread_info();
         
-        let tls_size = this.exports.__tls_size.value;
-        let stack_size = 2 * 1024 * 1024; // 2mb
-        let tls_ptr = this.exports.wasm_thread_alloc_tls_and_stack(tls_size + stack_size / 8);
-        let stack_ptr = tls_ptr + tls_size + stack_size - 8;
+        worker.postMessage(this.alloc_thread_stack(args.closure_ptr));
         
-        worker.postMessage({
-            tls_ptr,
-            stack_ptr,
-            closure_ptr: args.closure_ptr,
-            bytes: this.wasm._bytes,
-            memory: this.wasm._memory
-        });
         worker.addEventListener("message", (e) => {
             let data = e.data;
             this.to_wasm.ToWasmSignal(data)
@@ -253,56 +323,50 @@ export class WasmWebBrowser extends WasmBridge {
         })
     }
     
-    FromWasmWebSocketOpen(args) {
-        let auto_reconnect = args.auto_reconnect;
-        let web_socket_id = args.web_socket_id;
-        let url = args.url;
-        let web_socket = new WebSocket(args.url);
-        web_socket.binaryType = "arraybuffer";
-        this.web_sockets[args.web_socket_id] = web_socket;
-        web_socket.onclose = e => {
-            this.to_wasm.ToWasmWebSocketClose({web_socket_id})
-            this.do_wasm_pump();
-            if (auto_reconnect) {
-                this.FromWasmOpenWebSocket({
-                    web_socket_id,
-                    auto_reconnect,
-                    url
+    FromWasmSpawnAudioOutput(args) {
+        if (!this.audio_context) {
+            const start_audio = async () => {
+                let context = this.audio_context = new AudioContext();
+                
+                await context.audioWorklet.addModule("/makepad/platform/src/platform/web_browser/audio_worklet.js", {credentials: 'omit'});
+                
+                const audio_worklet = new AudioWorkletNode(context, 'audio-worklet', {
+                    numberOfInputs: 0,
+                    numberOfOutputs: 1,
+                    outputChannelCount: [2],
+                    processorOptions: {thread_info: this.alloc_thread_stack(args.closure_ptr)}
                 });
-            }
-        }
-        web_socket.onerror = e => {
-            this.to_wasm.ToWasmWebSocketError({web_socket_id, error: "" + e})
-            this.do_wasm_pump();
-        }
-        web_socket.onmessage = e => {
-            // ok send the binary message
-            this.to_wasm.ToWasmWebSocketMessage({
-                web_socket_id,
-                data:e.data
+                
+                audio_worklet.port.onmessage = (e) => {
+                    let data = e.data;
+                    switch (data.message_type) {
+                        case "console_log":
+                        console.log(data.value);
+                        break;
+                        
+                        case "console_error":
+                        console.error(data.value);
+                        break;
+                        
+                        case "signal":
+                        this.to_wasm.ToWasmSignal(data)
+                        this.do_wasm_pump();
+                        break;
+                    }
+                };
+                audio_worklet.onprocessorerror = (err) => {
+                    console.error(err);
+                }
+                audio_worklet.connect(context.destination);
+                return audio_worklet;
+            };
+            
+            start_audio();
+            
+            window.addEventListener('click', async () => {
+                this.audio_context.resume();
             })
-            this.do_wasm_pump();
         }
-        web_socket.onopen = e => {
-            for(let item of web_socket._queue){
-                web_socket.send(item);
-            }
-            web_socket._queue.length = 0;
-            this.to_wasm.ToWasmWebSocketOpen({web_socket_id});
-            this.do_wasm_pump();
-        }
-        web_socket._queue = []
-    }
-    
-    FromWasmWebSocketSend(args) {
-        let web_socket = this.web_sockets[args.web_socket_id];
-        if(web_socket.readyState == 0){
-            web_socket._queue.push(this.clone_data_u8(args.data))
-        }
-        else{
-            web_socket.send(this.view_data_u8(args.data));
-        }
-        this.free_data_u8(args.data);
     }
     
     // calling into wasm
@@ -344,7 +408,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.detect.is_add_to_homescreen_safari = this.is_mobile_safari && navigator.standalone
     }
     
-    update_window_info(){
+    update_window_info() {
         var dpi_factor = window.devicePixelRatio;
         var w;
         var h;
