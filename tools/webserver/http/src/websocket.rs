@@ -41,17 +41,17 @@ pub struct WebSocket {
 }
 
 pub enum WebSocketMessage<'a> {
-    Ping,
-    Pong,
+    Ping(&'a [u8]),
+    Pong(&'a [u8]),
     Text(&'a str),
     Binary(&'a [u8]),
     Close
 }
 
 #[derive(Debug)]
-pub enum WebSocketError {
+pub enum WebSocketError<'a> {
     OpcodeNotSupported(u8),
-    TextNotUTF8,
+    TextNotUTF8(&'a [u8]),
 }
 
 pub const PING_MESSAGE:[u8;2] = [128 | 9,0];
@@ -268,10 +268,10 @@ impl WebSocket {
                     }
                     else {
                         if self.is_ping {
-                            result(Ok(WebSocketMessage::Ping));
+                            result(Ok(WebSocketMessage::Ping(&self.data)));
                         }
                         else if self.is_pong {
-                            result(Ok(WebSocketMessage::Pong));
+                            result(Ok(WebSocketMessage::Pong(&self.data)));
                         }
                         else {
                             if self.is_text{
@@ -279,7 +279,7 @@ impl WebSocket {
                                     result(Ok(WebSocketMessage::Text(text)));
                                 }
                                 else{
-                                    result(Err(WebSocketError::TextNotUTF8))
+                                    result(Err(WebSocketError::TextNotUTF8(&self.data)))
                                 }
                             }
                             else{
