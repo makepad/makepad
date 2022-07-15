@@ -186,7 +186,7 @@ export class ToWasmMsg {
         
         if (app.u32[this.u32_ptr] - u64_len < u64_needed_capacity) {
             app.u32[this.u32_ptr + 1] = u64_len;
-            this.ptr = this.app.wasm_msg_reserve_u64(this.ptr, u64_capacity_needed);
+            this.ptr = this.app.wasm_msg_reserve_u64(this.ptr, u64_needed_capacity);
             this.u32_ptr = this.ptr >> 2;
             this.u32_offset = this.u32_ptr + offset;
         }
