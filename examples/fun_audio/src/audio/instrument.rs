@@ -2,7 +2,7 @@ use {
     crate::{
         audio::*,
         makepad_component::*,
-        makepad_platform::{*, audio::*, midi::*}
+        makepad_platform::*
     },
 };
 

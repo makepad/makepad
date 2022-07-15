@@ -1,16 +1,14 @@
 #![allow(unused_variables)]
+#![allow(dead_code)]
 use {
     crate::{
         audio::*,
         makepad_platform::*,
-        makepad_platform::platform::apple::{
-            audio_unit::*,
-        },
     },
     std::sync::{Arc, Mutex}
 };
 
-pub use crate::makepad_platform::platform::apple::core_midi::*;
+//pub use crate::makepad_platform::platform::apple::core_midi::*;
 
 // lets give this a stable pointer for the UI
 live_register!{
@@ -28,6 +26,7 @@ pub enum FromUI {
 
 #[derive(Clone)]
 pub enum ToUI {
+    Blarp,
     Midi1Data(Midi1Data),
 }
 
@@ -47,14 +46,14 @@ impl LiveHook for AudioGraph {
         // we should have a component
         if let Some(root) = self.root.as_mut() {
             let graph_node = root.get_graph_node();
-            self.from_ui.send(FromUI::NewRoot(graph_node)).unwrap();
+            //self.from_ui.send(FromUI::NewRoot(graph_node)).unwrap();
         }
         //println!("{}", nodes.to_string(index,100))
     }
     
-    fn after_new(&mut self, _cx: &mut Cx) {
-        Self::start_midi_input(self.from_ui.sender(), self.to_ui.sender());
-        Self::start_audio_output(self.from_ui.receiver(), self.to_ui.sender());
+    fn after_new(&mut self, cx: &mut Cx) {
+        Self::start_midi_input(cx, self.from_ui.sender(), self.to_ui.sender());
+        Self::start_audio_output(cx, self.from_ui.receiver(), self.to_ui.sender());
     }
 }
 
@@ -65,18 +64,19 @@ struct Node {
 }
 
 impl AudioGraph {
-    fn start_midi_input(from_ui: FromUISender<FromUI>, to_ui: ToUISender<ToUI>) {
+    fn start_midi_input(cx: &mut Cx, from_ui: FromUISender<FromUI>, to_ui: ToUISender<ToUI>) {
+        /*
         Midi::new_midi_1_input(move | data | {
             let _ = from_ui.send(FromUI::Midi1Data(data));
             let _ = to_ui.send(ToUI::Midi1Data(data));
-        }).unwrap();
+        }).unwrap();*/
     }
     
     pub fn send_midi_1_data(&self, data: Midi1Data) {
-        self.from_ui.send(FromUI::Midi1Data(data)).unwrap();
+        //self.from_ui.send(FromUI::Midi1Data(data)).unwrap();
     }
     
-    fn render_to_output_buffer(node: &mut Node, time:AudioTime, output:&mut AudioOutputBuffer) {
+    fn render_to_output_buffer(node: &mut Node, time:AudioTime, output:&mut impl AudioOutputBuffer) {
         while let Ok(msg) = node.from_ui.try_recv() {
             match msg {
                 FromUI::NewRoot(new_root) => {
@@ -97,8 +97,16 @@ impl AudioGraph {
         }
     }
     
-    fn start_audio_output(from_ui: FromUIReceiver<FromUI>, to_ui: ToUISender<ToUI>) {
+    fn start_audio_output(cx: &mut Cx, from_ui: FromUIReceiver<FromUI>, to_ui: ToUISender<ToUI>) {
         let state = Arc::new(Mutex::new(Node {from_ui, buffer:AudioBuffer::default(), root: None}));
+        
+        let to_ui = Arc::new(Mutex::new(to_ui));
+        cx.spawn_audio_output(move ||{
+            let to_ui = to_ui.lock().unwrap();
+            to_ui.send(ToUI::Blarp);
+            console_log!("HELLO FROM CLOSURE");
+        });
+        /*
         std::thread::spawn(move || {
             let out = &AudioFactory::query_devices(AudioDeviceType::DefaultOutput)[0];
             AudioFactory::new_device(out, move | result | {
@@ -117,7 +125,7 @@ impl AudioGraph {
                     Err(err) => println!("Error {:?}", err)
                 }
             });
-        });
+        });*/
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event)->Vec<AudioGraphAction> {
@@ -138,6 +146,9 @@ impl AudioGraph {
             }
             Event::Signal(se) => while let Ok(to_ui) = self.to_ui.try_recv(se) {
                 match to_ui {
+                    ToUI::Blarp=>{
+                        console_log!("GOT SHIT FROM AUDIO THREAD")
+                    },
                     ToUI::Midi1Data(data) => {
                         dispatch_action(cx, AudioGraphAction::Midi1Data(data))
                     },

@@ -299,7 +299,7 @@ impl Cx {
         
         if self.need_redrawing() || self.new_next_frames.len() != 0 {
             self.call_draw_event();
-            self.platform.from_wasm(FromWasmRequestAnimationFrame {});
+            //self.platform.from_wasm(FromWasmRequestAnimationFrame {});
         }
         self.call_signals_and_triggers();
         
@@ -388,8 +388,9 @@ impl Cx {
             }
         }
         
-        // request animation frame if still need to redraw, or repaint
-        // we use request animation frame for that.
+        if passes_todo.len() > 0 {
+            self.platform.from_wasm(FromWasmRequestAnimationFrame {});
+        }
         
         //return wasm pointer to caller
         self.platform.from_wasm.take().unwrap().release_ownership()
@@ -413,43 +414,6 @@ impl CxPlatformApi for Cx {
         self.platform.from_wasm(FromWasmHideTextIME {});
     }
     
-    fn post_signal(signal: Signal,) {
-        unsafe {_post_signal((signal.0.0 >> 32) as u32, signal.0.0 as u32)};
-        // todo
-    }
-    
-    fn web_socket_open(&mut self, url: String, rec: WebSocketReconnect) -> WebSocket {
-        let web_socket_id = self.web_socket_id;
-        self.web_socket_id += 1;
-        
-        self.platform.from_wasm(FromWasmWebSocketOpen {
-            url,
-            web_socket_id: web_socket_id as usize,
-            auto_reconnect: if let WebSocketReconnect::Automatic = rec {true} else {false},
-            
-        });
-        WebSocket(web_socket_id)
-    }
-    
-    fn web_socket_send(&mut self, websocket: WebSocket, data: Vec<u8>) {
-        self.platform.from_wasm(FromWasmWebSocketSend {
-            web_socket_id: websocket.0 as usize,
-            data: WasmDataU8::from_vec_u8(data)
-        });
-    }
-    
-    /*
-    fn file_read(&mut self, path: &str) -> FileRead {
-        let id = self.platform.file_read_id;
-        self.platform.from_wasm.read_file(id as u32, path);
-        self.platform.file_read_id += 1;
-        FileRead {read_id: id, path: path.to_string()}
-    }
-    
-    fn file_write(&mut self, _path: &str, _data: &[u8]) -> u64 {
-        return 0
-    }
-    */
     fn set_window_outer_size(&mut self, _size: Vec2) {
     }
     
@@ -473,6 +437,73 @@ impl CxPlatformApi for Cx {
             });
         }
     }
+    
+    fn post_signal(signal: Signal,) {
+        unsafe {_post_signal((signal.0.0 >> 32) as u32, signal.0.0 as u32)};
+    }
+    
+    fn spawn_thread<F>(&mut self, closure: F) where F: FnOnce() + Send + 'static {
+        let closure_box: Box<dyn FnOnce() + Send + 'static> = Box::new(closure);
+        let closure_ptr = Box::into_raw(Box::new(closure_box));
+        self.platform.from_wasm(FromWasmCreateThread {closure_ptr: closure_ptr as u32});
+    }
+    
+    fn web_socket_open(&mut self, url: String, rec: WebSocketReconnect) -> WebSocket {
+        let web_socket_id = self.web_socket_id;
+        self.web_socket_id += 1;
+        
+        self.platform.from_wasm(FromWasmWebSocketOpen {
+            url,
+            web_socket_id: web_socket_id as usize,
+            auto_reconnect: if let WebSocketReconnect::Automatic = rec {true} else {false},
+            
+        });
+        WebSocket(web_socket_id)
+    }
+    
+    fn web_socket_send(&mut self, websocket: WebSocket, data: Vec<u8>) {
+        self.platform.from_wasm(FromWasmWebSocketSend {
+            web_socket_id: websocket.0 as usize,
+            data: WasmDataU8::from_vec_u8(data)
+        });
+    }
+        
+    fn enumerate_midi_devices(&mut self){
+        
+        todo!();
+    }
+    
+    fn enumerate_audio_devices(&mut self){
+        self.platform.from_wasm(FromWasmWebAudioEnumerateDevices{});
+    }
+    
+    fn spawn_audio_output<F>(&mut self, closure: F) where F: FnMut() + Send + 'static{
+        let closure_box: Box<dyn FnMut() + Send + 'static> = Box::new(closure);
+        let closure_ptr = Box::into_raw(Box::new(closure_box));
+        self.platform.from_wasm(FromWasmSpawnAudioOutput{closure_ptr: closure_ptr as u32});
+    }
+    
+    fn update_menu(&mut self, _menu: &Menu) {
+    }
+    
+    fn start_dragging(&mut self, _dragged_item: DraggedItem) {
+    }
+    
+    
+
+    
+    /*
+    fn file_read(&mut self, path: &str) -> FileRead {
+        let id = self.platform.file_read_id;
+        self.platform.from_wasm.read_file(id as u32, path);
+        self.platform.file_read_id += 1;
+        FileRead {read_id: id, path: path.to_string()}
+    }
+    
+    fn file_write(&mut self, _path: &str, _data: &[u8]) -> u64 {
+        return 0
+    }
+    */
     /*
     fn http_send(&mut self, verb: &str, path: &str, proto: &str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
         self.platform.from_wasm.http_send(verb, path, proto, domain, port, content_type, body, signal);
@@ -481,17 +512,7 @@ impl CxPlatformApi for Cx {
     fn websocket_send(&mut self, url: &str, data: &[u8]) {
         self.platform.from_wasm.websocket_send(url, data);
     }*/
-    fn start_dragging(&mut self, _dragged_item: DraggedItem) {
-    }
-    
-    fn update_menu(&mut self, _menu: &Menu) {
-    }
-    
-    fn spawn_thread<F>(&mut self, closure: F) where F: FnOnce() + Send + 'static {
-        let closure_box: Box<dyn FnOnce() + Send + 'static> = Box::new(closure);
-        let closure_ptr = Box::into_raw(Box::new(closure_box));
-        self.platform.from_wasm(FromWasmCreateThread {closure_ptr: closure_ptr as u32});
-    }
+
 }
 
 extern "C" {
@@ -503,6 +524,14 @@ extern "C" {
 pub unsafe extern "C" fn wasm_thread_entrypoint(closure_ptr: u32) {
     let closure = Box::from_raw(closure_ptr as *mut Box<dyn FnOnce() + Send + 'static>);
     closure();
+}
+
+#[export_name = "wasm_audio_entrypoint"]
+#[cfg(target_arch = "wasm32")]
+pub unsafe extern "C" fn wasm_audio_entrypoint(closure_ptr: u32) {
+    let mut closure = Box::from_raw(closure_ptr as *mut Box<dyn FnMut() + Send + 'static>);
+    closure();
+    Box::into_raw(closure);
 }
 
 #[export_name = "wasm_thread_alloc_tls_and_stack"]
@@ -616,6 +645,8 @@ pub unsafe extern "C" fn wasm_get_js_msg_class() -> u32 {
     FromWasmXrStartPresenting::from_wasm_js_method(&mut out);
     FromWasmXrStopPresenting::from_wasm_js_method(&mut out);
     
+    FromWasmWebAudioEnumerateDevices::from_wasm_js_method(&mut out);
+    FromWasmSpawnAudioOutput::from_wasm_js_method(&mut out);
     out.push_str("}\n");
     out.push_str("}");
     

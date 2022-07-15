@@ -48,6 +48,7 @@ pub struct WGpuInfo {
 pub struct WBrowserInfo {
     pub protocol: String,
     pub hostname: String,
+    pub host: String,
     pub pathname: String,
     pub search: String,
     pub hash: String,
@@ -59,6 +60,7 @@ impl Into<PlatformType> for WBrowserInfo {
         PlatformType::WebBrowser {
             protocol: self.protocol,
             hostname: self.hostname,
+            host:self.host,
             pathname: self.pathname,
             search: self.search,
             hash: self.hash,
