@@ -1,7 +1,26 @@
-use {crate::{btree, BTree}, std::{iter::Sum, ops::{AddAssign, SubAssign}}};
+use {
+    crate::{btree, BTree},
+    std::ops::{AddAssign, SubAssign},
+};
 
 pub struct BTreeString {
     btree: BTree<Chunk>,
+}
+
+impl BTreeString {
+    pub fn new() -> Self {
+        Self {
+            btree: BTree::new()
+        }
+    }
+    
+    pub fn prepend(&mut self, other: Self) {
+        self.btree.prepend(other.btree);
+    }
+
+    pub fn append(&mut self, other: Self) {
+        self.btree.append(other.btree);
+    }
 }
 
 #[derive(Clone)]
@@ -19,7 +38,7 @@ impl btree::Chunk for Chunk {
     fn len(&self) -> usize {
         self.0.len()
     }
-    
+
     fn info(&self) -> Self::Info {
         Info {
             char_count: self.0.chars().count(),
@@ -39,14 +58,12 @@ impl btree::Chunk for Chunk {
 
 #[derive(Clone, Copy)]
 struct Info {
-    char_count: usize
+    char_count: usize,
 }
 
-impl Info {
+impl btree::Info for Info {
     fn new() -> Self {
-        Info {
-            char_count: 0
-        }
+        Self { char_count: 0 }
     }
 }
 
@@ -59,18 +76,5 @@ impl AddAssign for Info {
 impl SubAssign for Info {
     fn sub_assign(&mut self, other: Self) {
         self.char_count -= other.char_count;
-    }
-}
-
-impl Sum for Info {
-    fn sum<I>(iter: I) -> Self
-    where
-        I: Iterator<Item = Self>
-    {
-        let mut summed_info = Info::new();
-        for info in iter {
-            summed_info += info;
-        }
-        summed_info
     }
 }
