@@ -13,7 +13,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.web_sockets = [];
         this.window_info = {}
         this.signals = [];
-        
+        this.thread_stack_size = 2 * 1024 * 1024;
         this.init_detection();
         
     }
@@ -277,8 +277,10 @@ export class WasmWebBrowser extends WasmBridge {
     
     alloc_thread_stack(closure_ptr) {
         let tls_size = this.exports.__tls_size.value;
-        let stack_size = 2 * 1024 * 1024; // 2mb
-        let tls_ptr = this.exports.wasm_thread_alloc_tls_and_stack(tls_size + stack_size / 8);
+        tls_size += 8 - (tls_size & 7); // align it to 8 bytes
+        let stack_size = this.thread_stack_size; // 2mb
+        if ((tls_size + stack_size) & 7 != 0) throw new Error("stack size not 8 byte aligned");
+        let tls_ptr = this.exports.wasm_thread_alloc_tls_and_stack((tls_size + stack_size) >> 3);
         this.update_array_buffer_refs();
         let stack_ptr = tls_ptr + tls_size + stack_size - 8;
         return {

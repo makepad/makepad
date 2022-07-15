@@ -268,7 +268,7 @@ pub struct FromWasmWebAudioEnumerateDevices{
 
 #[derive(FromWasm)]
 pub struct FromWasmSpawnAudioOutput{
-    pub closure_ptr: u32
+    pub closure_ptr: u32,
 }
 
 
