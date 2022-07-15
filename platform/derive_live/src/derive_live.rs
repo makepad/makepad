@@ -95,84 +95,6 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         if draw_vars.is_some() && !geometry.is_some() {
             return error_result("drawvars requires a geometry object to be present");
         }
-        /*
-        let animator_kv = if let Some(animator) = animator {
-            let kv = if let Some(attr) = animator.attrs.iter().find( | attr | attr.name == "state") {
-                if let Some(args) = &attr.args {
-                    let mut parser = TokenParser::new(args.clone());
-                    // ok its key:value comma
-                    let mut kv = Vec::new();
-                    while !parser.eat_eot() {
-                        let def = parser.expect_any_ident() ?;
-                        parser.eat_punct_alone(',');
-                        kv.push(def);
-                    }
-                    kv
-                }
-                else {
-                    return error_result("state attribute needs arguments");
-                }
-            }
-            else {
-                return error_result("Animator needs a state(state_default) attribute");
-            };
-            
-            tb.add("impl").stream(generic.clone());
-            tb.add("LiveAnimate for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-            tb.add("    fn init_animator(&mut self, cx: &mut Cx) {");
-            for def in &kv {
-                tb.add("    self.animator.cut_to_live(cx,self.").ident(def).add(");");
-            }
-            tb.add("    }");
-            
-            tb.add("    fn animate_to(&mut self, cx: &mut Cx, state: Option<LivePtr>) {");
-            tb.add("        if self.animator.state.is_none() {");
-            tb.add("            self.init_animator(cx);");
-            tb.add("         }");
-            tb.add("         self.animator.animate_to_live(cx, state);");
-            tb.add("    }");
-            
-            tb.add("    fn apply_animator(&mut self, cx: &mut Cx) {");
-            tb.add("        let state = self.animator.swap_out_state();");
-            tb.add("        self.apply(cx, ApplyFrom::Animate, state.child_by_name(0,id!(state).as_field()).unwrap(), &state);");
-            tb.add("        self.animator.swap_in_state(state);");
-            tb.add("    }");
-            
-            
-            tb.add("    fn animate_cut(&mut self, cx: &mut Cx, state: Option<LivePtr>) {");
-            tb.add("        if self.animator.state.is_none() {");
-            tb.add("            self.init_animator(cx);");
-            tb.add("         }");
-            tb.add("         self.animator.cut_to_live(cx, state);");
-            tb.add("         self.apply_animator(cx);");
-            tb.add("    }");
-            
-            
-            tb.add("    fn animator_is_in_state(&mut self, cx: &mut Cx, state: Option<LivePtr>)->bool{");
-            tb.add("        if state.is_none() { return false }");
-            tb.add("        if self.animator.state.is_none() {");
-            for def in &kv {
-                tb.add("         if state == self.").ident(def).add("{ return true }");
-            }
-            tb.add("             return false");
-            tb.add("         }");
-            tb.add("         else{");
-            tb.add("             return self.animator.is_in_state(cx, state)");
-            tb.add("         }");
-            tb.add("    }");
-            
-            
-            tb.add("    fn animator_handle_event(&mut self, cx: &mut Cx, event: &mut Event)->AnimatorAction{");
-            tb.add("        let ret = self.animator.handle_event(cx, event);");
-            tb.add("        if ret.is_animating(){self.apply_animator(cx);}");
-            tb.add("        ret");
-            tb.add("    }");
-            tb.add("}");
-            Some(kv)
-        }
-        else {
-            None
-        };*/
         
         if state.is_some() {
             
@@ -188,17 +110,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
             tb.add("         self.state.cut_to_live(cx, state);");
             tb.add("         self.apply_animating_state(cx);");
             tb.add("    }");
-            
-            // this applies all the default states
-            // however what if we are a non-file apply on the 'state' property
-            // this is a state-override from a parent node
-            
-            // we have 3 cases.
-            // 1. StateInit (process the 'state' structure)
-            // 2. from file id (run defaults)
-            // 3. actual animate (process the 'state' structure and call animate_to/cut depending)
-            //
-            
+
             tb.add("    fn after_apply_state_changed(&mut self, cx:&mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]){");
             tb.add("        let mut index = index + 1;");
             tb.add("        match apply_from{"); // if apply from is file, run defaults
