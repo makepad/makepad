@@ -1,4 +1,7 @@
+pub mod btree_string;
+
 mod btree;
-mod btree_string;
+
+pub use self::btree_string::BTreeString;
 
 use self::btree::BTree;
