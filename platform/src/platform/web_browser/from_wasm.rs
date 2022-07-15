@@ -9,6 +9,15 @@ use crate::{
     },
 };
 
+
+
+
+// WebBrowser API
+
+
+
+
+
 #[derive(FromWasm)]
 pub struct FromWasmLoadDeps {
     pub deps: Vec<String>
@@ -131,6 +140,14 @@ pub struct FromWasmCreateThread {
     pub closure_ptr: u32,
 }
 
+
+
+
+// WebGL API
+
+
+
+
 #[derive(FromWasm)]
 pub struct FromWasmCompileWebGLShader {
     pub shader_id: usize,
@@ -205,50 +222,6 @@ pub struct FromWasmBeginRenderTexture {
     pub color_targets: [WColorTarget;1],
     pub depth_target: WDepthTarget
 }
-/*
-#[derive(FromWasm)]
-pub struct FromWasmAddColorTarget {
-    pub texture_id: usize,
-    pub init_only: bool,
-    pub clear_color: WColor
-}
-
-#[derive(FromWasm)]
-pub struct FromWasmSetDepthTarget {
-    pub texture_id: usize,
-    pub init_only: bool,
-    pub clear_depth: f32
-}*/
-/*
-#[derive(FromWasm)]
-pub struct FromWasmEndRenderTargets {
-}
-
-#[derive(FromWasm)]
-pub struct FromWasmBeginRenderTargets {
-    pub pass_id: usize,
-    pub width: usize,
-    pub height: usize
-}
-
-#[derive(FromWasm)]
-pub struct FromWasmAddColorTarget {
-    pub texture_id: usize,
-    pub init_only: bool,
-    pub clear_color: WColor
-}
-
-#[derive(FromWasm)]
-pub struct FromWasmSetDepthTarget {
-    pub texture_id: usize,
-    pub init_only: bool,
-    pub clear_depth: f32
-}
-
-#[derive(FromWasm)]
-pub struct FromWasmEndRenderTargets {
-}
-*/
 
 #[derive(FromWasm)]
 pub struct FromWasmBeginRenderCanvas {
@@ -280,3 +253,26 @@ pub struct FromWasmXrStartPresenting {
 #[derive(FromWasm)]
 pub struct FromWasmXrStopPresenting {
 }
+
+
+
+
+
+// WebAudio API
+
+
+
+#[derive(FromWasm)]
+pub struct FromWasmWebAudioEnumerateDevices{
+}
+
+#[derive(FromWasm)]
+pub struct FromWasmSpawnAudioOutput{
+    pub closure_ptr: u32
+}
+
+
+
+
+
+

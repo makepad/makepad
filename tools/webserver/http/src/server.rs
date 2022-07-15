@@ -2,9 +2,10 @@
 
 use std::net::{TcpListener, TcpStream, SocketAddr, Shutdown};
 use std::io::prelude::*;
-use std::sync::{mpsc};
+use std::sync::{mpsc, mpsc::{RecvTimeoutError}};
+use std::time::Duration;
 
-use crate::websocket::{WebSocket, WebSocketMessage, BinaryMessageHeader};
+use crate::websocket::{WebSocket, WebSocketMessage, BinaryMessageHeader, PingMessage};
 use crate::utils::*;
 
 #[derive(Clone)]
@@ -140,11 +141,21 @@ fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers
     let (tx_socket, rx_socket) = mpsc::channel::<Vec<u8 >> ();
     
     let _write_thread = std::thread::spawn(move || {
-        while let Ok(data) = rx_socket.recv() {
-            // we have a datachunk. lets write out the header for it
-            let header = BinaryMessageHeader::from_len(data.len());
-            write_bytes_to_tcp_stream_no_error(&mut write_tcp_stream, &header.as_slice());
-            write_bytes_to_tcp_stream_no_error(&mut write_tcp_stream, &data);
+        loop{
+            match rx_socket.recv_timeout(Duration::from_millis(2000)){
+                Ok(data)=>{
+                    let header = BinaryMessageHeader::from_len(data.len());
+                    write_bytes_to_tcp_stream_no_error(&mut write_tcp_stream, &header.as_slice());
+                    write_bytes_to_tcp_stream_no_error(&mut write_tcp_stream, &data);
+                },
+                Err(RecvTimeoutError::Timeout)=>{ 
+                    write_bytes_to_tcp_stream_no_error(&mut write_tcp_stream, &PingMessage);
+                }
+                Err(RecvTimeoutError::Disconnected)=>{
+                    println!("Write socket closed");
+                    break
+                }
+            }
         }
         let _ = write_tcp_stream.shutdown(Shutdown::Both);
     });
@@ -160,38 +171,47 @@ fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers
     
     let mut web_socket = WebSocket::new();
     loop {
-        let mut data = [0u8; 1024];
+        let mut data = [0u8; 65535];
         match tcp_stream.read(&mut data) {
             Ok(n) => {
                 if n == 0 {
+                    println!("Websocket closed");
                     let _ = tcp_stream.shutdown(Shutdown::Both);
-                    break
+                    break 
                 }
                 web_socket.parse(&data[0..n], | result | {
                     match result {
-                        Ok(WebSocketMessage::Ping) => {},
-                        Ok(WebSocketMessage::Pong) => {},
+                        Ok(WebSocketMessage::Ping) => {
+                        },
+                        Ok(WebSocketMessage::Pong) => {
+                        },
                         Ok(WebSocketMessage::Text(_text)) => {
+                            println!("Websocket text");
                         }
                         Ok(WebSocketMessage::Binary(data)) => {
+                            //println!("Websocket binary data {}", data.len());
                             if http_server.request.send(HttpRequest::BinaryMessage {
                                 web_socket_id,
                                 response_sender: tx_socket.clone(),
                                 data: data.to_vec(),
                             }).is_err() {
+                                eprintln!("Websocket message deserialize error");
                                 let _ = tcp_stream.shutdown(Shutdown::Both);
                             };
                         },
                         Ok(WebSocketMessage::Close) => {
+                            println!("Websocket close message");
+                            let _ = tcp_stream.shutdown(Shutdown::Both);
                         }
-                        Err(_) => {
-                            eprintln!("Websocket error");
+                        Err(e) => {
+                            eprintln!("Websocket error {:?}", e);
                             let _ = tcp_stream.shutdown(Shutdown::Both);
                         }
                     }
                 });
             }
             Err(_) => {
+                println!("Websocket closed");
                 let _ = tcp_stream.shutdown(Shutdown::Both);
                 break;
             }
