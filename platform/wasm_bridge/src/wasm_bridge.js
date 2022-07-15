@@ -114,6 +114,7 @@ export class WasmBridge {
     }
     
     static instantiate_wasm(bytes, memory, env) {
+
         let _wasm = null;
         function chars_to_string(chars_ptr, len) {
             let out = "";
@@ -131,7 +132,7 @@ export class WasmBridge {
         if(memory !== undefined){
             env.memory = memory;
         }
-        
+
         return WebAssembly.instantiate(bytes, {env}).then(wasm => {
             _wasm = wasm;
             wasm._has_thread_support = env.memory !== undefined;
@@ -149,10 +150,12 @@ export class WasmBridge {
                     return wasm
                 }, error => {
                     console.error(error);
+                    return error
                 })
             }
             else {
-                console.error(error);
+                console_log(error);
+                return error
             }
         })
     }

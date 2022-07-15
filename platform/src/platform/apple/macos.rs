@@ -311,10 +311,6 @@ impl Cx {
 
 impl CxPlatformApi for Cx{
 
-    fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static{
-        std::thread::spawn(f);
-    }
-    
     fn show_text_ime(&mut self, x: f32, y: f32) {
         self.platform.set_ime_position = Some(Vec2 {x: x, y: y});
     }
@@ -340,11 +336,36 @@ impl CxPlatformApi for Cx{
         if timer.0 != 0 {
             self.platform.stop_timer.push(timer.0);
         }
-    }
-    
+    }    
+
     fn post_signal(signal: Signal) {
         CocoaApp::post_signal(signal.0.0);
     }
+    
+    fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static{
+        std::thread::spawn(f);
+    }
+
+    fn web_socket_open(&mut self, _url: String, _rec: WebSocketReconnect) -> WebSocket {
+        todo!()
+    }
+    
+    fn web_socket_send(&mut self, _websocket: WebSocket, _data: Vec<u8>) {
+        todo!()
+    }
+
+    fn query_midi_devices(&mut self){
+        todo!();
+    }
+    
+    fn query_audio_devices(&mut self){
+        todo!();
+    }
+    
+    fn spawn_audio_output<F>(&mut self, _f: F) where F: FnOnce() + Send + 'static{
+        todo!();
+    }
+    
     
     fn update_menu(&mut self, menu: &Menu) {
         // lets walk the menu and do the cocoa equivalents
@@ -359,15 +380,6 @@ impl CxPlatformApi for Cx{
         assert!(self.platform.start_dragging.is_none());
         self.platform.start_dragging = Some(dragged_item);
     }
-    
-    fn web_socket_open(&mut self, _url: String, _rec: WebSocketReconnect) -> WebSocket {
-        todo!()
-    }
-    
-    fn web_socket_send(&mut self, _websocket: WebSocket, _data: Vec<u8>) {
-        todo!()
-    }
-    
 }
 
 #[derive(Clone, Default)]
