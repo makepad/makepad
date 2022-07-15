@@ -201,32 +201,11 @@ impl WebSocket {
                     let len_type = self.head[0] & 127;
                     if len_type < 126 {
                         self.data_len = len_type as usize;
-                        if len_type == 0 {
-                            if self.is_ping || self.is_pong {
-                                if !self.is_masked {
-                                    self.to_state(State::Data);
-                                }
-                                else {
-                                    self.to_state(State::Mask);
-                                }                                
-                            }
-                            else if self.is_text{
-                                result(Ok(WebSocketMessage::Text("")));
-                                self.to_state(State::Opcode)
-                            }
-                            else{
-                                result(Ok(WebSocketMessage::Binary(&[])));
-                                self.to_state(State::Opcode)
-                            }
-                            
+                        if !self.is_masked {
+                            self.to_state(State::Data);
                         }
                         else {
-                            if !self.is_masked {
-                                self.to_state(State::Data);
-                            }
-                            else {
-                                self.to_state(State::Mask);
-                            }
+                            self.to_state(State::Mask);
                         }
                     }
                     else if len_type == 126 {

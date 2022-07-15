@@ -378,7 +378,7 @@ impl AudioDevice {
         }
     }
     
-    pub fn set_input_callback<F: Fn(AudioTime, &mut AudioOutputBuffer) + Send + 'static>(&self, audio_callback: F) {
+    pub fn set_input_callback<F: Fn(AudioTime, &mut dyn AudioOutputBuffer) + Send + 'static>(&self, audio_callback: F) {
         match self.device_type {
             AudioDeviceType::DefaultOutput => (),
             AudioDeviceType::Effect => (),
