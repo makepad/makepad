@@ -181,9 +181,9 @@ fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers
                 }
                 web_socket.parse(&data[0..n], | result | {
                     match result {
-                        Ok(WebSocketMessage::Ping) => {
+                        Ok(WebSocketMessage::Ping(_)) => {
                         },
-                        Ok(WebSocketMessage::Pong) => {
+                        Ok(WebSocketMessage::Pong(_)) => {
                         },
                         Ok(WebSocketMessage::Text(_text)) => {
                             println!("Websocket text");
