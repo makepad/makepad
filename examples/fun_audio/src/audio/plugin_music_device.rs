@@ -66,6 +66,7 @@ impl LiveHook for PluginMusicDevice {
 impl PluginMusicDevice{
     fn load_audio_device(&mut self){
         // alright lets create an audio device 
+        /*
         let list = AudioFactory::query_devices(AudioDeviceType::MusicDevice);
         let sender = self.to_ui.sender();
         if let Some(info) = list.iter().find( | item | item.name == self.plugin) {
@@ -87,7 +88,7 @@ impl PluginMusicDevice{
             for item in &list{
                 println!("MusicDevices: {}", item.name);
             }
-        }
+        }*/
     }
 }
 

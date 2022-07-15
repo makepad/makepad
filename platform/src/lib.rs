@@ -177,7 +177,16 @@ pub use {
                 Cx2d
             },
         },
-        
+        audio::{
+            AudioTime,
+            AudioOutputBuffer,
+            AudioBuffer
+        },
+        midi::{
+            Midi1Data,
+            Midi1Note,
+            Midi1Event
+        },
         window::Window,
         pass::{
             Pass,

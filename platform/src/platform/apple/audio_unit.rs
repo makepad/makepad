@@ -3,7 +3,8 @@ use {
     std::mem,
     std::sync::{Arc, Mutex},
     crate::{
-        platform::apple::core_midi::*,
+        audio::*,
+        midi::*,
         platform::apple::cocoa_delegate::*,
         platform::apple::frameworks::*,
         platform::apple::cocoa_app::*,
@@ -20,13 +21,6 @@ pub struct AudioDeviceInfo {
     pub name: String,
     pub device_type: AudioDeviceType,
     desc: CAudioComponentDescription
-}
-
-#[derive(Copy, Clone)]
-pub enum AudioDeviceType {
-    DefaultOutput,
-    MusicDevice,
-    Effect
 }
 
 unsafe impl Send for AudioDevice {}
@@ -49,24 +43,17 @@ pub struct AudioDeviceClone {
     device_type: AudioDeviceType
 }
 
-#[derive(Copy, Clone)]
-pub struct AudioTime {
-    pub sample_time: f64,
-    pub host_time: u64,
-    pub rate_scalar: f64,
-}
-
-pub struct AudioOutputBuffer {
+pub struct CAudioOutputBuffer {
     data: [*mut f32; MAX_AUDIO_BUFFERS],
     frame_count: usize,
     channel_count: usize
 }
 
-impl AudioOutputBuffer {
-    pub fn frame_count(&self)->usize{self.frame_count}
-    pub fn channel_count(&self)->usize{self.channel_count}
+impl AudioOutputBuffer for CAudioOutputBuffer {
+    fn frame_count(&self)->usize{self.frame_count}
+    fn channel_count(&self)->usize{self.channel_count}
 
-    pub fn channel_mut(&mut self, channel: usize) -> &mut [f32] {
+    fn channel_mut(&mut self, channel: usize) -> &mut [f32] {
         unsafe {
             std::slice::from_raw_parts_mut(
                 self.data[channel] as *mut f32,
@@ -75,7 +62,7 @@ impl AudioOutputBuffer {
         }
     }
     
-    pub fn zero(&mut self) {
+    fn zero(&mut self) {
         for i in 0..self.channel_count {
             let data = self.channel_mut(i);
             for j in 0..data.len() {
@@ -84,7 +71,7 @@ impl AudioOutputBuffer {
         }
     }
     
-    pub fn copy_from_buffer(&mut self, buffer:&AudioBuffer){
+    fn copy_from_buffer(&mut self, buffer:&AudioBuffer){
         if self.channel_count != buffer.channel_count{
             panic!("Output buffer channel_count != buffer channel_count {} {}",self.channel_count, buffer.channel_count );
         }
@@ -99,13 +86,6 @@ impl AudioOutputBuffer {
     }
 }
 
-
-#[derive(Clone, Default)]
-pub struct AudioBuffer {
-    data: Vec<f32>,
-    frame_count: usize,
-    channel_count: usize
-}
 
 impl AudioTime {
     fn to_audio_time_stamp(&self) -> CAudioTimeStamp {
@@ -122,38 +102,6 @@ impl AudioTime {
 }
 
 impl AudioBuffer {
-    pub fn frame_count(&self)->usize{self.frame_count}
-    pub fn channel_count(&self)->usize{self.channel_count}
-    
-    pub fn resize_like(&mut self, like:&AudioBuffer)->&mut Self{
-        self.resize(like.frame_count(), like.channel_count());
-        self
-    }
-
-    pub fn resize_like_output(&mut self, like:&AudioOutputBuffer)->&mut Self{
-        self.resize(like.frame_count(), like.channel_count());
-        self
-    }    
-    pub fn resize(&mut self, frame_count: usize, channel_count: usize) {
-        self.frame_count = frame_count;
-        self.channel_count = channel_count;
-        self.data.resize(frame_count * channel_count as usize, 0.0);
-    }
-
-    pub fn channel_mut(&mut self, channel: usize) -> &mut [f32] {
-        &mut self.data[channel * self.frame_count..(channel+1) * self.frame_count]
-    }
-
-    pub fn channel(&self, channel: usize) -> &[f32] {
-        &self.data[channel * self.frame_count..(channel+1) * self.frame_count]
-    }
-
-    pub fn zero(&mut self) {
-        for i in 0..self.data.len() {
-            self.data[i] = 0.0;
-        }
-    }
-
     unsafe fn to_audio_buffer_list(&mut self) -> CAudioBufferList {
         let mut ab = CAudioBufferList {
             mNumberBuffers: self.channel_count.min(MAX_AUDIO_BUFFERS) as u32,
@@ -445,7 +393,7 @@ impl AudioDevice {
                 buffers: *mut CAudioBufferList |: i32 {
                     let buffers_ref = &*buffers;
                     //println!("IN OUTPUT {} {:?}", buffers_ref.mBuffers[0].mData as u64, *timestamp);
-                    let mut output = AudioOutputBuffer {
+                    let mut output = CAudioOutputBuffer {
                         data: [0 as *mut f32; MAX_AUDIO_BUFFERS],
                         frame_count: frame_count as usize,
                         channel_count: buffers_ref.mNumberBuffers as usize
