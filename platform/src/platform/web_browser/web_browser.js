@@ -982,6 +982,7 @@ export class WasmWebBrowser extends WasmBridge {
     
     
     update_text_area_pos() {
+        if(!this.text_area)return;
         var pos = this.text_area_pos;
         var ta = this.text_area;
         if (ta && pos) {
@@ -992,6 +993,7 @@ export class WasmWebBrowser extends WasmBridge {
     
     
     focus_keyboard_input() {
+        if(!this.text_area)return;
         this.text_area.focus();
     }
     
