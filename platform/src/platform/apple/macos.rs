@@ -354,11 +354,11 @@ impl CxPlatformApi for Cx{
         todo!()
     }
 
-    fn query_midi_devices(&mut self){
+    fn enumerate_midi_devices(&mut self){
         todo!();
     }
     
-    fn query_audio_devices(&mut self){
+    fn enumerate_audio_devices(&mut self){
         todo!();
     }
     
