@@ -3,7 +3,7 @@ use {
         audio_component_factory,
         audio::*,
         makepad_component::*,
-        makepad_platform::{*, audio::*}
+        makepad_platform::*
     },
 };
 

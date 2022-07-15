@@ -41,17 +41,21 @@ pub struct WebSocket {
 }
 
 pub enum WebSocketMessage<'a> {
-    Ping,
-    Pong,
+    Ping(&'a [u8]),
+    Pong(&'a [u8]),
     Text(&'a str),
     Binary(&'a [u8]),
     Close
 }
 
-pub enum WebSocketError {
+#[derive(Debug)]
+pub enum WebSocketError<'a> {
     OpcodeNotSupported(u8),
-    TextNotUTF8,
+    TextNotUTF8(&'a [u8]),
 }
+
+pub const PING_MESSAGE:[u8;2] = [128 | 9,0];
+pub const PONG_MESSAGE:[u8;2] = [128 | 10,0];
 
 pub struct BinaryMessageHeader{
     len: usize,
@@ -196,24 +200,12 @@ impl WebSocket {
                     self.is_masked = (self.head[0] & 128) > 0;
                     let len_type = self.head[0] & 127;
                     if len_type < 126 {
-                        if len_type == 0 {
-                            // emit a size 0 datapacket
-                            if self.is_text{
-                                result(Ok(WebSocketMessage::Text("")));
-                            }
-                            else{
-                                result(Ok(WebSocketMessage::Binary(&[])));
-                            }
-                            self.to_state(State::Opcode)
+                        self.data_len = len_type as usize;
+                        if !self.is_masked {
+                            self.to_state(State::Data);
                         }
                         else {
-                            self.data_len = len_type as usize;
-                            if !self.is_masked {
-                                self.to_state(State::Data);
-                            }
-                            else {
-                                self.to_state(State::Mask);
-                            }
+                            self.to_state(State::Mask);
                         }
                     }
                     else if len_type == 126 {
@@ -276,10 +268,10 @@ impl WebSocket {
                     }
                     else {
                         if self.is_ping {
-                            result(Ok(WebSocketMessage::Ping));
+                            result(Ok(WebSocketMessage::Ping(&self.data)));
                         }
                         else if self.is_pong {
-                            result(Ok(WebSocketMessage::Pong));
+                            result(Ok(WebSocketMessage::Pong(&self.data)));
                         }
                         else {
                             if self.is_text{
@@ -287,7 +279,7 @@ impl WebSocket {
                                     result(Ok(WebSocketMessage::Text(text)));
                                 }
                                 else{
-                                    result(Err(WebSocketError::TextNotUTF8))
+                                    result(Err(WebSocketError::TextNotUTF8(&self.data)))
                                 }
                             }
                             else{
