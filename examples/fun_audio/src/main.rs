@@ -89,13 +89,16 @@ live_register!{
                     preset_data: "21adslkfjalkwqwe"
                 }*/
                 c1 = Instrument {
+                    IronFish {
+                    }
                     //key_range: {start: 34, end: 47 shift: 30}
+                    /*
                     PluginEffect {
                         plugin: "AUReverb2"
                     }
                     PluginMusicDevice {
                         plugin: "Kontakt"
-                    }
+                    }*/
                 }
             }
         }
@@ -229,6 +232,7 @@ impl App {
         makepad_component::live_register(cx);
         crate::audio::live_register(cx);
         crate::piano::live_register(cx);
+        
     }
     
     pub fn new_app(cx: &mut Cx) -> Self {

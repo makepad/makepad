@@ -24,7 +24,19 @@ pub trait AudioOutputBuffer{
     fn channel_count(&self)->usize;
     fn channel_mut(&mut self, channel: usize) -> &mut [f32];
     fn zero(&mut self);
-    fn copy_from_buffer(&mut self, buffer:&AudioBuffer);
+    fn copy_from_buffer(&mut self, buffer:&AudioBuffer){
+        if self.channel_count() != buffer.channel_count{
+            panic!("Output buffer channel_count != buffer channel_count {} {}",self.channel_count(), buffer.channel_count );
+        }
+        if self.frame_count() != buffer.frame_count{
+            panic!("Output buffer frame_count != buffer frame_count ");
+        }
+        for i in 0..self.channel_count(){
+            let output = self.channel_mut(i);
+            let input = buffer.channel(i);
+            output.copy_from_slice(input);
+        }        
+    }
 }
 
 #[derive(Clone, Default)]
@@ -43,7 +55,7 @@ impl AudioBuffer {
         self
     }
 
-    pub fn resize_like_output(&mut self, like:&mut impl AudioOutputBuffer)->&mut Self{
+    pub fn resize_like_output(&mut self, like:&mut dyn AudioOutputBuffer)->&mut Self{
         self.resize(like.frame_count(), like.channel_count());
         self
     }    
@@ -51,6 +63,11 @@ impl AudioBuffer {
         self.frame_count = frame_count;
         self.channel_count = channel_count;
         self.data.resize(frame_count * channel_count as usize, 0.0);
+    }
+
+    pub fn stereo_mut(&mut self) -> (&mut [f32],&mut [f32]) {
+        if self.channel_count != 2{panic!()}
+        self.data.split_at_mut(self.frame_count)
     }
 
     pub fn channel_mut(&mut self, channel: usize) -> &mut [f32] {

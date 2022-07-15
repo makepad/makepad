@@ -85,16 +85,6 @@ impl AudioComponent for Mixer {
             buffer: AudioBuffer::default(),
             _from_ui: self.from_ui.receiver()
         })
-        /* same but written as combinators harder to read imho
-           let self_inputs = &mut self.inputs;
-           let inputs = self.input_order.iter()
-               .filter_map(
-               | input_id | self_inputs
-                   .get_mut(input_id)
-                   .and_then( | component_ref | component_ref.as_mut())
-                   .map( | component | component.get_graph_node(Vec::new()))
-               ).collect::<Vec<_ >> ();
-        */
     }
     
     fn handle_event_with_fn(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
