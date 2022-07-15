@@ -35,12 +35,17 @@ impl NotificationSender for CollabNotificationSender{
 fn main() {
     let (tx_request, rx_request) = mpsc::channel::<HttpRequest> ();
     
+    #[cfg(target_os = "linux")]
+    let addr = SocketAddr::from(([0, 0, 0, 0], 80));
+    #[cfg(target_os = "macos")]
+    let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
+    
     start_http_server(HttpServer{
-        listen_address:SocketAddr::from(([127, 0, 0, 1], 8080)),
+        listen_address:addr,
         post_max_size: 1024*1024,
         request: tx_request
     });
-    println!("Server listening on 127.0.0.1:8080");
+    println!("Server listening on {}", addr);
     let mut clb_server = CollabServer::new("./");
     let mut clb_connections = HashMap::new();
     

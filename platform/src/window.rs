@@ -39,7 +39,7 @@ impl LiveNew for Window {
             let window_id = cx.windows.len();
             cx.windows.push(CxWindow {
                 window_state: CxWindowState::Create {
-                    title: "Fill in here".to_string(),
+                    title: "Makepad".to_string(),
                     inner_size: cx.get_default_window_size(),
                     position: None
                 },

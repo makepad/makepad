@@ -11,14 +11,15 @@ class WasmWorker extends WasmBridge {
 }
 
 onmessage = async function(e) {
-    let data = e.data;
-    let wasm = await WasmBridge.instantiate_wasm(data.bytes, data.memory, {
+    let thread_info = e.data;
+
+    let wasm = await WasmBridge.instantiate_wasm(thread_info.bytes, thread_info.memory, {
     });
     
-    wasm.instance.exports.__stack_pointer.value = data.stack_ptr;
-    wasm.instance.exports.__wasm_init_tls(data.tls_ptr);
+    wasm.instance.exports.__stack_pointer.value = thread_info.stack_ptr;
+    wasm.instance.exports.__wasm_init_tls(thread_info.tls_ptr);
     
     let bridge = new WasmWorker(wasm);
 
-    wasm.instance.exports.wasm_thread_entrypoint(data.closure_ptr);
+    wasm.instance.exports.wasm_thread_entrypoint(thread_info.closure_ptr);
 }
