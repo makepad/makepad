@@ -1,16 +1,7 @@
-use {crate::{btree, BTree}, std::ops::{AddAssign, SubAssign}};
+use {crate::{btree, BTree}, std::{iter::Sum, ops::{AddAssign, SubAssign}}};
 
-#[derive(Clone)]
 pub struct BTreeString {
     btree: BTree<Chunk>,
-}
-
-impl BTreeString {
-    pub fn new() -> Self {
-        Self {
-            btree: BTree::<Chunk>::new(),
-        }
-    }
 }
 
 #[derive(Clone)]
@@ -22,47 +13,64 @@ impl btree::Chunk for Chunk {
     const MAX_LEN: usize = 1024;
 
     fn new() -> Self {
-        unimplemented!()
+        Chunk(String::new())
     }
 
-    fn is_empty(&self) -> bool {
-        unimplemented!()
+    fn len(&self) -> usize {
+        self.0.len()
     }
     
-    fn len(&self) -> usize {
-        unimplemented!()
-    }
-
     fn info(&self) -> Self::Info {
-        unimplemented!()
+        Info {
+            char_count: self.0.chars().count(),
+        }
     }
 
     fn move_left(&mut self, other: &mut Self, end: usize) {
-        unimplemented!()
+        self.0.push_str(&other.0[..end]);
+        other.0.replace_range(..end, "");
     }
 
-    fn move_right(&mut self, other: &mut Self, end: usize) {
-        unimplemented!()
+    fn move_right(&mut self, other: &mut Self, start: usize) {
+        other.0.replace_range(..0, &self.0[start..]);
+        self.0.truncate(start);
     }
 }
 
 #[derive(Clone, Copy)]
-struct Info;
+struct Info {
+    char_count: usize
+}
 
-impl btree::Info for Info {
+impl Info {
     fn new() -> Self {
-        unimplemented!()
+        Info {
+            char_count: 0
+        }
     }
 }
 
 impl AddAssign for Info {
     fn add_assign(&mut self, other: Self) {
-        unimplemented!()
+        self.char_count += other.char_count;
     }
 }
 
 impl SubAssign for Info {
     fn sub_assign(&mut self, other: Self) {
-        unimplemented!()
+        self.char_count -= other.char_count;
+    }
+}
+
+impl Sum for Info {
+    fn sum<I>(iter: I) -> Self
+    where
+        I: Iterator<Item = Self>
+    {
+        let mut summed_info = Info::new();
+        for info in iter {
+            summed_info += info;
+        }
+        summed_info
     }
 }
