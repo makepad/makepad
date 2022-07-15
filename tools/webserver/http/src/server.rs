@@ -5,7 +5,7 @@ use std::io::prelude::*;
 use std::sync::{mpsc, mpsc::{RecvTimeoutError}};
 use std::time::Duration;
 
-use crate::websocket::{WebSocket, WebSocketMessage, BinaryMessageHeader, PingMessage};
+use crate::websocket::{WebSocket, WebSocketMessage, BinaryMessageHeader, PING_MESSAGE};
 use crate::utils::*;
 
 #[derive(Clone)]
@@ -149,7 +149,7 @@ fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers
                     write_bytes_to_tcp_stream_no_error(&mut write_tcp_stream, &data);
                 },
                 Err(RecvTimeoutError::Timeout)=>{ 
-                    write_bytes_to_tcp_stream_no_error(&mut write_tcp_stream, &PingMessage);
+                    write_bytes_to_tcp_stream_no_error(&mut write_tcp_stream, &PING_MESSAGE);
                 }
                 Err(RecvTimeoutError::Disconnected)=>{
                     println!("Write socket closed");

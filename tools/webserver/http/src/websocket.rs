@@ -54,8 +54,8 @@ pub enum WebSocketError {
     TextNotUTF8,
 }
 
-pub const PingMessage:[u8;2] = [128 | 9,0];
-pub const PongMessage:[u8;2] = [128 | 10,0];
+pub const PING_MESSAGE:[u8;2] = [128 | 9,0];
+pub const PONG_MESSAGE:[u8;2] = [128 | 10,0];
 
 pub struct BinaryMessageHeader{
     len: usize,
