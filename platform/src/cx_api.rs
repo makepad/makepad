@@ -17,6 +17,10 @@ use {
             WebSocket,
             NextFrame,
         },
+        audio::{
+          AudioTime,
+          AudioOutputBuffer  
+        },
         cursor::{
             MouseCursor
         },
@@ -62,7 +66,7 @@ pub trait CxPlatformApi{
 
     fn enumerate_midi_devices(&mut self);
     fn enumerate_audio_devices(&mut self);
-    fn spawn_audio_output<F>(&mut self, f: F) where F: FnMut() + Send + 'static;
+    fn spawn_audio_output<F>(&mut self, f: F) where F: FnMut(AudioTime, &mut dyn AudioOutputBuffer) + Send + 'static;
 
     fn update_menu(&mut self, menu: &Menu);
     fn start_dragging(&mut self, dragged_item: DraggedItem);

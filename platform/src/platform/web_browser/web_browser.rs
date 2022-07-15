@@ -8,9 +8,14 @@ use {
             web_browser::{
                 from_wasm::*,
                 to_wasm::*,
-            }
+            },
+            web_audio::*,
         },
         area::Area,
+        audio::{
+            AudioTime,
+            AudioOutputBuffer
+        },
         event::{
             WebSocket,
             WebSocketErrorEvent,
@@ -442,8 +447,8 @@ impl CxPlatformApi for Cx {
         unsafe {_post_signal((signal.0.0 >> 32) as u32, signal.0.0 as u32)};
     }
     
-    fn spawn_thread<F>(&mut self, closure: F) where F: FnOnce() + Send + 'static {
-        let closure_box: Box<dyn FnOnce() + Send + 'static> = Box::new(closure);
+    fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
+        let closure_box: Box<dyn FnOnce() + Send + 'static> = Box::new(f);
         let closure_ptr = Box::into_raw(Box::new(closure_box));
         self.platform.from_wasm(FromWasmCreateThread {closure_ptr: closure_ptr as u32});
     }
@@ -477,9 +482,11 @@ impl CxPlatformApi for Cx {
         self.platform.from_wasm(FromWasmWebAudioEnumerateDevices{});
     }
     
-    fn spawn_audio_output<F>(&mut self, closure: F) where F: FnMut() + Send + 'static{
-        let closure_box: Box<dyn FnMut() + Send + 'static> = Box::new(closure);
-        let closure_ptr = Box::into_raw(Box::new(closure_box));
+    fn spawn_audio_output<F>(&mut self, f: F) where F: FnMut(AudioTime, &mut dyn AudioOutputBuffer) + Send + 'static{
+        let closure_ptr= Box::into_raw(Box::new(WebAudioOutputClosure{
+            callback: Box::new(f),
+            output_buffer: WebAudioOutputBuffer::default()
+        }));
         self.platform.from_wasm(FromWasmSpawnAudioOutput{closure_ptr: closure_ptr as u32});
     }
     
@@ -524,14 +531,6 @@ extern "C" {
 pub unsafe extern "C" fn wasm_thread_entrypoint(closure_ptr: u32) {
     let closure = Box::from_raw(closure_ptr as *mut Box<dyn FnOnce() + Send + 'static>);
     closure();
-}
-
-#[export_name = "wasm_audio_entrypoint"]
-#[cfg(target_arch = "wasm32")]
-pub unsafe extern "C" fn wasm_audio_entrypoint(closure_ptr: u32) {
-    let mut closure = Box::from_raw(closure_ptr as *mut Box<dyn FnMut() + Send + 'static>);
-    closure();
-    Box::into_raw(closure);
 }
 
 #[export_name = "wasm_thread_alloc_tls_and_stack"]

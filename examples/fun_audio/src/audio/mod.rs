@@ -1,5 +1,6 @@
 use crate::makepad_platform::Cx;
 
+pub mod iron_fish;
 pub mod audio_graph;
 pub mod basic_synth;
 pub mod instrument;
@@ -23,6 +24,7 @@ pub fn live_register(cx:&mut Cx){
     #[cfg(target_os = "macos")]
     crate::audio::plugin_effect::live_register(cx);
     crate::audio::basic_synth::live_register(cx);
+    crate::audio::iron_fish::live_register(cx);
     crate::audio::instrument::live_register(cx);
     crate::audio::mixer::live_register(cx);
     crate::audio::audio_graph::live_register(cx);
