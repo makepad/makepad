@@ -6,6 +6,10 @@ use {
             cx_desktop::CxDesktop,
             metal::{MetalCx, MetalWindow}
         },
+        audio::{
+            AudioTime,
+            AudioOutputBuffer
+        },
         event::{
             WebSocket,
             WebSocketReconnect,
@@ -362,7 +366,7 @@ impl CxPlatformApi for Cx{
         todo!();
     }
     
-    fn spawn_audio_output<F>(&mut self, _f: F) where F: FnOnce() + Send + 'static{
+    fn spawn_audio_output<F>(&mut self, _f: F) where F: FnMut(AudioTime, &mut dyn AudioOutputBuffer) + Send + 'static{
         todo!();
     }
     
