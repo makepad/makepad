@@ -1,4 +1,4 @@
- pub use makepad_component::{self, *};
+pub use makepad_component::{self, *};
 pub use makepad_platform::{self, *, audio::*, midi::*};
 
 mod piano;
@@ -14,7 +14,7 @@ live_register!{
     use makepad_platform::shader::std::*;
     
     MainHeader: FoldHeader {
-        walk:{
+        walk: {
         }
         state: {
             open = {
@@ -52,7 +52,7 @@ live_register!{
             label = Label {text: "Keys"}
         }
         state: {
-            open ={
+            open = {
                 off = {apply: {body: {g1 = {bg: {color: #0000}}}}}
                 on = {apply: {body: {g1 = {bg: {color: #000a}}}}}
             }
@@ -154,7 +154,7 @@ live_register!{
                             layout: {flow: Down}
                             instrument = ? InstrumentHeader {
                                 header: {
-                                    layout:{align:{y:0.5}}
+                                    layout: {align: {y: 0.5}}
                                     fold_button = FoldButton {}
                                     swatch = Circle {
                                         width: 10,
@@ -169,11 +169,11 @@ live_register!{
                                     stack = ? LayerHeader {
                                         header: {
                                             fold_button = FoldButton {}
-                                            label = Label {text: "Stack item", walk:{width:Fill}}
+                                            label = Label {text: "Stack item", walk: {width: Fill}}
                                             range = Frame {
                                                 width: Fit
                                                 user_draw: false,
-                                                layout: {flow: Right,spacing: 4}
+                                                layout: {flow: Right, spacing: 4}
                                                 Label {text: "Start"}
                                                 Label {text: "D#3"}
                                                 Label {text: "-"}
@@ -192,9 +192,9 @@ live_register!{
                                                 width: Fill
                                                 height: Fit
                                                 layout: {flow: Right, padding: 8, spacing: 5, align: {y: 0.5}}
-                                                slider = Slider{
-                                                    label:"CutOff"
-                                                    height:22
+                                                slider = Slider {
+                                                    label: "CutOff"
+                                                    height: 22
                                                 }
                                             }
                                         }
@@ -260,9 +260,14 @@ impl App {
         };
         
         match event {
-            Event::Midi1InputData(input) => if let Midi1Event::Note(note) = input.data.decode(){
-                let piano = self.frame.child_mut::<Piano>(id!(piano)).unwrap();
+            Event::Midi1InputData(inputs) => for input in inputs {
+                if let Midi1Event::Note(note) = input.data.decode() {
+                    let piano = self.frame.child_mut::<Piano>(id!(piano)).unwrap();
                     piano.set_note(cx, note.is_on, note.note_number)
+                }
+            }
+            Event::MidiInputList(inputs) => {
+                //console_log!("{:#?}", inputs);
             }
             Event::Construct => {
                 
@@ -271,13 +276,13 @@ impl App {
                 }) {
                     
                     instrument.add_child(cx, id!(my_stack1), ids!(stack), live!{
-                        header: {label = {text: (format!("HELLO WORLD {}", 3+4))}}
+                        header: {label = {text: (format!("HELLO WORLD {}", 3 + 4))}}
                     });
                     
                     instrument.add_child(cx, id!(my_stack2), ids!(stack), live!{
                         header: {label = {text: "MyStackItem2"}, range = {mylabel = {text: "WHEE"}}}
                     });
-
+                    
                     instrument.add_child(cx, id!(my_stack3), ids!(stack), live!{
                         header: {label = {text: "MyStackItem3"}, range = {mylabel = {text: "WHEE"}}}
                     });
@@ -303,7 +308,7 @@ impl App {
                 self.draw(&mut Cx2d::new(cx, draw_event));
                 //self.piano.set_key_focus(cx);
             }
-            _=>()
+            _ => ()
         }
     }
     
