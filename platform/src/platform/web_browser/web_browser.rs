@@ -473,13 +473,9 @@ impl CxPlatformApi for Cx {
         });
     }
         
-    fn enumerate_midi_devices(&mut self){
-        
-        todo!();
-    }
-    
-    fn enumerate_audio_devices(&mut self){
-        self.platform.from_wasm(FromWasmWebAudioEnumerateDevices{});
+    fn start_midi_input(&mut self){
+        self.platform.from_wasm(FromWasmStartMidiInput {
+        });
     }
     
     fn spawn_audio_output<F>(&mut self, f: F) where F: FnMut(AudioTime, &mut dyn AudioOutputBuffer) + Send + 'static{
@@ -607,7 +603,7 @@ pub unsafe extern "C" fn wasm_get_js_msg_class() -> u32 {
     FromWasmWebSocketSend::from_wasm_js(&mut out);
     FromWasmXrStartPresenting::from_wasm_js(&mut out);
     FromWasmXrStopPresenting::from_wasm_js(&mut out);
-    FromWasmWebAudioEnumerateDevices::from_wasm_js(&mut out);
+    FromWasmStartMidiInput::from_wasm_js(&mut out);
     FromWasmSpawnAudioOutput::from_wasm_js(&mut out);
     
     FromWasmCompileWebGLShader::from_wasm_js_reuse(&mut out);

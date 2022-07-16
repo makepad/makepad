@@ -50,7 +50,7 @@ impl LiveHook for AudioGraph {
     }
     
     fn after_new(&mut self, cx: &mut Cx) {
-        Self::start_midi_input(cx, self.from_ui.sender(), self.to_ui.sender());
+        cx.start_midi_input();
         Self::start_audio_output(cx, self.from_ui.receiver(), self.to_ui.sender());
     }
 }
@@ -62,13 +62,6 @@ struct Node {
 }
 
 impl AudioGraph {
-    fn start_midi_input(cx: &mut Cx, from_ui: FromUISender<FromUI>, to_ui: ToUISender<ToUI>) {
-        /*
-        Midi::new_midi_1_input(move | data | {
-            let _ = from_ui.send(FromUI::Midi1Data(data));
-            let _ = to_ui.send(ToUI::Midi1Data(data));
-        }).unwrap();*/
-    }
     
     pub fn send_midi_1_data(&self, data: Midi1Data) {
         self.from_ui.send(FromUI::Midi1Data(data)).unwrap();
