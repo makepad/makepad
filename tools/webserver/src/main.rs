@@ -110,11 +110,14 @@ fn main() {
                         let mut body = Vec::<u8>::new();
                         if file_handle.read_to_end(&mut body).is_ok() {
                             let header = format!(
-                                "HTTP/1.1 200 OK\r\nContent-Type: {}\r\n\
-                                    Content-encoding: none\r\n\
-                                    Cache-Control: max-age:0\r\n\
-                                    Content-Length: {}\r\n\
-                                    Connection: close\r\n\r\n",
+                                "HTTP/1.1 200 OK\r\n\
+                                Content-Type: {}\r\n\
+                                Cross-Origin-Embedder-Policy: require-corp\r\n\
+                                Cross-Origin-Opener-Policy: same-origin\r\n\
+                                Content-encoding: none\r\n\
+                                Cache-Control: max-age:0\r\n\
+                                Content-Length: {}\r\n\
+                                Connection: close\r\n\r\n",
                                 mime_type,
                                 body.len()
                             );
