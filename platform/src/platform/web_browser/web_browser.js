@@ -289,7 +289,6 @@ export class WasmWebBrowser extends WasmBridge {
         }
     }
     
-    
     // thanks to JP Posma with Zaplib for figuring out how to do the stack_pointer export without wasm bindgen
     // https://github.com/Zaplib/zaplib/blob/650305c856ea64d9c2324cbd4b8751ffbb971ac3/zaplib/cargo-zaplib/src/build.rs#L48
     // https://github.com/Zaplib/zaplib/blob/7cb3bead16f963e60c840aa2be3bf28a47ac533e/zaplib/web/common.ts#L313
@@ -483,8 +482,6 @@ export class WasmWebBrowser extends WasmBridge {
     bind_mouse_and_touch() {
         
         var canvas = this.canvas
-        
-        
         let last_mouse_finger;
         if (this.detect.use_touch_scroll_overlay) {
             var ts = this.touch_scroll_overlay = document.createElement('div')
