@@ -10,16 +10,14 @@ pub struct BTreeString {
 impl BTreeString {
     pub fn new() -> Self {
         Self {
-            btree: BTree::new()
+            btree: BTree::new(),
         }
     }
-    
-    pub fn prepend(&mut self, other: Self) {
-        self.btree.prepend(other.btree);
-    }
 
-    pub fn append(&mut self, other: Self) {
-        self.btree.append(other.btree);
+    pub fn concat(self, other: Self) -> Self {
+        Self {
+            btree: self.btree.concat(other.btree),
+        }
     }
 }
 
