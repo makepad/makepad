@@ -20,7 +20,7 @@ use {
             WebSocket,
             WebSocketErrorEvent,
             WebSocketMessageEvent,
-            WebSocketReconnect,
+            WebSocketAutoReconnect,
             Timer,
             Signal,
             Event,
@@ -453,14 +453,14 @@ impl CxPlatformApi for Cx {
         self.platform.from_wasm(FromWasmCreateThread {closure_ptr: closure_ptr as u32});
     }
     
-    fn web_socket_open(&mut self, url: String, rec: WebSocketReconnect) -> WebSocket {
+    fn web_socket_open(&mut self, url: String, rec: WebSocketAutoReconnect) -> WebSocket {
         let web_socket_id = self.web_socket_id;
         self.web_socket_id += 1;
         
         self.platform.from_wasm(FromWasmWebSocketOpen {
             url,
             web_socket_id: web_socket_id as usize,
-            auto_reconnect: if let WebSocketReconnect::Automatic = rec {true} else {false},
+            auto_reconnect: if let WebSocketAutoReconnect::Yes = rec {true} else {false},
             
         });
         WebSocket(web_socket_id)

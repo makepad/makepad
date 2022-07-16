@@ -163,9 +163,9 @@ impl From<LiveId> for Trigger {
 pub struct TriggerHitEvent<'a>(pub &'a HashSet<Trigger>);
 
 
-pub enum WebSocketReconnect{
-    Automatic,
-    Manual
+pub enum WebSocketAutoReconnect{
+    Yes,
+    No
 }
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq)]

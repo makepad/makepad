@@ -351,7 +351,7 @@ impl CxPlatformApi for Cx{
         std::thread::spawn(f);
     }
 
-    fn web_socket_open(&mut self, _url: String, _rec: WebSocketReconnect) -> WebSocket {
+    fn web_socket_open(&mut self, _url: String, _rec: WebSocketAutoReconnect) -> WebSocket {
         todo!()
     }
     
