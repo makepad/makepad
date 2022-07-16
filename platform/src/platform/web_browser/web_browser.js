@@ -357,21 +357,45 @@ export class WasmWebBrowser extends WasmBridge {
             };
             
             start_audio();
-            
-            window.addEventListener('click', async () => {
+            let user_interact_hook = () => {
                 this.audio_context.resume();
-            })
-            window.addEventListener('touchstart', async () => {
-                this.audio_context.resume();
-            })
+            }
+            window.addEventListener('click', user_interact_hook)
+            window.addEventListener('touchstart', user_interact_hook)
         }
     }
     
-    FromWasmStartMidiInput(){
+    FromWasmStartMidiInput() {
         navigator.requestMIDIAccess().then((midi) => {
-            for(let input of midi.inputs){
-                console.log(input);
+            
+            let reload_midi_ports = () => {
+                
+                let inputs = [];
+                let input_id = 0;
+                for (let input_pair of midi.inputs) {
+                    let input = input_pair[1];
+                    inputs.push({
+                        uid: "" + input.id,
+                        name: input.name,
+                        manufacturer: input.manufacturer,
+                    });
+                    input.onmidimessage = (e) => {
+                        let data = e.data;
+                        this.to_wasm.ToWasmMidiInputData({
+                            input_id: input_id,
+                            data: (data[0] << 16) | (data[1] << 8) | data[2],
+                        });
+                        this.do_wasm_pump();
+                    }
+                    input_id += 1;
+                }
+                this.to_wasm.ToWasmMidiInputList({inputs});
+                this.do_wasm_pump();
             }
+            midi.onstatechange = (e) => {
+                reload_midi_ports();
+            }
+            reload_midi_ports();
         }, () => {
             console.error("Cannot open midi");
         });

@@ -183,6 +183,7 @@ pub use {
             AudioBuffer
         },
         midi::{
+            Midi1InputData,
             Midi1Data,
             Midi1Note,
             Midi1Event
