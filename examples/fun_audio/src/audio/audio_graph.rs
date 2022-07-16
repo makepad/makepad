@@ -91,41 +91,18 @@ impl AudioGraph {
         if let Some(root) = node.root.as_mut() {
             // we should create a real output buffer
             node.buffer.resize_like_output(output);
-            //console_log!("RENDER {} {}", output.frame_count(), output.channel_count());
             root.render_to_audio_buffer(time, &mut [&mut node.buffer], &[]);
-
             output.copy_from_buffer(&node.buffer);
         }
     }
     
     fn start_audio_output(cx: &mut Cx, from_ui: FromUIReceiver<FromUI>, to_ui: ToUISender<ToUI>) {
         let state = Arc::new(Mutex::new(Node {from_ui, buffer:AudioBuffer::default(), root: None}));
-        
         let to_ui = Arc::new(Mutex::new(to_ui));
         cx.spawn_audio_output(move |time, output_buffer|{
             let mut state = state.lock().unwrap();
             Self::render_to_output_buffer(&mut state, time, output_buffer);
         });
-        /*
-        std::thread::spawn(move || {
-            let out = &AudioFactory::query_devices(AudioDeviceType::DefaultOutput)[0];
-            AudioFactory::new_device(out, move | result | {
-                match result {
-                    Ok(device) => {
-                        let state = state.clone();
-                        device.set_input_callback(move | time, output_buffer | {
-                            // the core of the audio flow..
-                            let mut state = state.lock().unwrap();
-                            Self::render_to_output_buffer(&mut state, time, output_buffer);
-                        });
-                        loop {
-                            std::thread::sleep(std::time::Duration::from_millis(100));
-                        }
-                    }
-                    Err(err) => println!("Error {:?}", err)
-                }
-            });
-        });*/
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event)->Vec<AudioGraphAction> {

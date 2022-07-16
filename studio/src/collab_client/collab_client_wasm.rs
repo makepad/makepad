@@ -33,7 +33,7 @@ impl LiveHook for CollabClient {
             self.web_socket = Some(
                 cx.web_socket_open(
                     format!("{}://{}",if protocol=="https:"{"wss"}else{"ws"}, host),
-                    WebSocketReconnect::Automatic
+                    WebSocketAutoReconnect::Yes
                 )
             )
             //self.inner = Some(CollabClientInner::new_with_local_server(&self.path))
