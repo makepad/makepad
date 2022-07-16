@@ -291,8 +291,18 @@ impl Cx {
                     }));
                 }
                 
+                id!(ToWasmMidiInputData) => {
+                    let tw = ToWasmMidiInputData::read_to_wasm(&mut to_wasm);
+                    self.call_event_handler(&mut Event::Midi1InputData(tw.into()));
+                }
+                 
+                id!(ToWasmMidiInputList) => {
+                    let tw = ToWasmMidiInputList::read_to_wasm(&mut to_wasm);
+                    self.call_event_handler(&mut Event::MidiInputList(tw.into()));
+                }
+
                 _ => {
-                    console_log!("Message unknown {}", block_id);
+                    console_log!("Message not handled in wasm {}", block_id);
                     
                     //panic!("Message unknown")
                 }
@@ -584,6 +594,9 @@ pub unsafe extern "C" fn wasm_get_js_msg_class() -> u32 {
     ToWasmWebSocketClose::to_wasm_js(&mut out);
     ToWasmWebSocketError::to_wasm_js(&mut out);
     ToWasmWebSocketMessage::to_wasm_js(&mut out);
+    ToWasmMidiInputList::to_wasm_js(&mut out);
+    ToWasmMidiInputData::to_wasm_js(&mut out);
+    
     out.push_str("},\n");
     
     out.push_str("FromWasmMsg:class extends FromWasmMsg{\n");

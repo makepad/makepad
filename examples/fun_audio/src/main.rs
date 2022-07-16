@@ -256,14 +256,14 @@ impl App {
         
         for action in self.audio_graph.handle_event(cx, event) {
             match action {
-                AudioGraphAction::Midi1Data(data) => if let Midi1Event::Note(note) = data.decode() {
-                    let piano = self.frame.child_mut::<Piano>(id!(piano)).unwrap();
-                    piano.set_note(cx, note.is_on, note.note_number)
-                }
             }
         };
         
         match event {
+            Event::Midi1InputData(input) => if let Midi1Event::Note(note) = input.data.decode(){
+                let piano = self.frame.child_mut::<Piano>(id!(piano)).unwrap();
+                    piano.set_note(cx, note.is_on, note.note_number)
+            }
             Event::Construct => {
                 
                 if let Some(instrument) = self.frame.add_child(cx, id!(my_instrument), ids!(instrument), live!{
