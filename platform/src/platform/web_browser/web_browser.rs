@@ -495,31 +495,6 @@ impl CxPlatformApi for Cx {
     
     fn start_dragging(&mut self, _dragged_item: DraggedItem) {
     }
-    
-    
-
-    
-    /*
-    fn file_read(&mut self, path: &str) -> FileRead {
-        let id = self.platform.file_read_id;
-        self.platform.from_wasm.read_file(id as u32, path);
-        self.platform.file_read_id += 1;
-        FileRead {read_id: id, path: path.to_string()}
-    }
-    
-    fn file_write(&mut self, _path: &str, _data: &[u8]) -> u64 {
-        return 0
-    }
-    */
-    /*
-    fn http_send(&mut self, verb: &str, path: &str, proto: &str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
-        self.platform.from_wasm.http_send(verb, path, proto, domain, port, content_type, body, signal);
-    }
-    
-    fn websocket_send(&mut self, url: &str, data: &[u8]) {
-        self.platform.from_wasm.websocket_send(url, data);
-    }*/
-
 }
 
 extern "C" {
@@ -586,67 +561,67 @@ pub unsafe extern "C" fn wasm_get_js_msg_class() -> u32 {
     let mut out = String::new();
     
     out.push_str("return {\n");
+    
     out.push_str("ToWasmMsg:class extends ToWasmMsg{\n");
-    
-    ToWasmGetDeps::to_wasm_js_method(&mut out);
-    ToWasmInit::to_wasm_js_method(&mut out);
-    ToWasmResizeWindow::to_wasm_js_method(&mut out);
-    ToWasmAnimationFrame::to_wasm_js_method(&mut out);
-    ToWasmFingerDown::to_wasm_js_method(&mut out);
-    ToWasmFingerUp::to_wasm_js_method(&mut out);
-    ToWasmFingerMove::to_wasm_js_method(&mut out);
-    ToWasmFingerHover::to_wasm_js_method(&mut out);
-    ToWasmFingerOut::to_wasm_js_method(&mut out);
-    ToWasmFingerScroll::to_wasm_js_method(&mut out);
-    ToWasmKeyDown::to_wasm_js_method(&mut out);
-    ToWasmKeyUp::to_wasm_js_method(&mut out);
-    ToWasmTextInput::to_wasm_js_method(&mut out);
-    ToWasmTextCopy::to_wasm_js_method(&mut out);
-    ToWasmTimerFired::to_wasm_js_method(&mut out);
-    ToWasmPaintDirty::to_wasm_js_method(&mut out);
-    ToWasmRedrawAll::to_wasm_js_method(&mut out);
-    ToWasmXRUpdate::to_wasm_js_method(&mut out);
-    ToWasmAppGotFocus::to_wasm_js_method(&mut out);
-    ToWasmAppLostFocus::to_wasm_js_method(&mut out);
-    ToWasmSignal::to_wasm_js_method(&mut out);
-    ToWasmWebSocketOpen::to_wasm_js_method(&mut out);
-    ToWasmWebSocketClose::to_wasm_js_method(&mut out);
-    ToWasmWebSocketError::to_wasm_js_method(&mut out);
-    ToWasmWebSocketMessage::to_wasm_js_method(&mut out);
+    ToWasmGetDeps::to_wasm_js(&mut out);
+    ToWasmInit::to_wasm_js(&mut out);
+    ToWasmResizeWindow::to_wasm_js(&mut out);
+    ToWasmAnimationFrame::to_wasm_js(&mut out);
+    ToWasmFingerDown::to_wasm_js(&mut out);
+    ToWasmFingerUp::to_wasm_js(&mut out);
+    ToWasmFingerMove::to_wasm_js(&mut out);
+    ToWasmFingerHover::to_wasm_js(&mut out);
+    ToWasmFingerOut::to_wasm_js(&mut out);
+    ToWasmFingerScroll::to_wasm_js(&mut out);
+    ToWasmKeyDown::to_wasm_js(&mut out);
+    ToWasmKeyUp::to_wasm_js(&mut out);
+    ToWasmTextInput::to_wasm_js(&mut out);
+    ToWasmTextCopy::to_wasm_js(&mut out);
+    ToWasmTimerFired::to_wasm_js(&mut out);
+    ToWasmPaintDirty::to_wasm_js(&mut out);
+    ToWasmRedrawAll::to_wasm_js(&mut out);
+    ToWasmXRUpdate::to_wasm_js(&mut out);
+    ToWasmAppGotFocus::to_wasm_js(&mut out);
+    ToWasmAppLostFocus::to_wasm_js(&mut out);
+    ToWasmSignal::to_wasm_js(&mut out);
+    ToWasmWebSocketOpen::to_wasm_js(&mut out);
+    ToWasmWebSocketClose::to_wasm_js(&mut out);
+    ToWasmWebSocketError::to_wasm_js(&mut out);
+    ToWasmWebSocketMessage::to_wasm_js(&mut out);
     out.push_str("},\n");
+    
     out.push_str("FromWasmMsg:class extends FromWasmMsg{\n");
+    FromWasmLoadDeps::from_wasm_js(&mut out);
+    FromWasmStartTimer::from_wasm_js_reuse(&mut out);
+    FromWasmStopTimer::from_wasm_js_reuse(&mut out);
+    FromWasmFullScreen::from_wasm_js(&mut out);
+    FromWasmNormalScreen::from_wasm_js(&mut out);
+    FromWasmRequestAnimationFrame::from_wasm_js_reuse(&mut out);
+    FromWasmSetDocumentTitle::from_wasm_js(&mut out);
+    FromWasmSetMouseCursor::from_wasm_js(&mut out);
+    FromWasmTextCopyResponse::from_wasm_js(&mut out);
+    FromWasmShowTextIME::from_wasm_js(&mut out);
+    FromWasmHideTextIME::from_wasm_js(&mut out);
+    FromWasmCreateThread::from_wasm_js(&mut out);
+    FromWasmWebSocketOpen::from_wasm_js(&mut out);
+    FromWasmWebSocketSend::from_wasm_js(&mut out);
+    FromWasmXrStartPresenting::from_wasm_js(&mut out);
+    FromWasmXrStopPresenting::from_wasm_js(&mut out);
+    FromWasmWebAudioEnumerateDevices::from_wasm_js(&mut out);
+    FromWasmSpawnAudioOutput::from_wasm_js(&mut out);
     
-    FromWasmLoadDeps::from_wasm_js_method(&mut out);
-    FromWasmStartTimer::from_wasm_js_method(&mut out);
-    FromWasmStopTimer::from_wasm_js_method(&mut out);
-    FromWasmFullScreen::from_wasm_js_method(&mut out);
-    FromWasmNormalScreen::from_wasm_js_method(&mut out);
-    FromWasmRequestAnimationFrame::from_wasm_js_method(&mut out);
-    FromWasmSetDocumentTitle::from_wasm_js_method(&mut out);
-    FromWasmSetMouseCursor::from_wasm_js_method(&mut out);
-    FromWasmTextCopyResponse::from_wasm_js_method(&mut out);
-    FromWasmShowTextIME::from_wasm_js_method(&mut out);
-    FromWasmHideTextIME::from_wasm_js_method(&mut out);
-    FromWasmCreateThread::from_wasm_js_method(&mut out);
-    FromWasmWebSocketOpen::from_wasm_js_method(&mut out);
-    FromWasmWebSocketSend::from_wasm_js_method(&mut out);
+    FromWasmCompileWebGLShader::from_wasm_js_reuse(&mut out);
+    FromWasmAllocArrayBuffer::from_wasm_js_reuse(&mut out);
+    FromWasmAllocIndexBuffer::from_wasm_js_reuse(&mut out);
+    FromWasmAllocVao::from_wasm_js_reuse(&mut out);
+    FromWasmAllocTextureImage2D::from_wasm_js_reuse(&mut out);
+    FromWasmBeginRenderTexture::from_wasm_js_reuse(&mut out);
+    FromWasmBeginRenderCanvas::from_wasm_js_reuse(&mut out);
+    FromWasmSetDefaultDepthAndBlendMode::from_wasm_js_reuse(&mut out);
+    FromWasmDrawCall::from_wasm_js_reuse(&mut out);
     
-    FromWasmCompileWebGLShader::from_wasm_js_method(&mut out);
-    FromWasmAllocArrayBuffer::from_wasm_js_method(&mut out);
-    FromWasmAllocIndexBuffer::from_wasm_js_method(&mut out);
-    FromWasmAllocVao::from_wasm_js_method(&mut out);
-    FromWasmAllocTextureImage2D::from_wasm_js_method(&mut out);
-    FromWasmBeginRenderTexture::from_wasm_js_method(&mut out);
-    FromWasmBeginRenderCanvas::from_wasm_js_method(&mut out);
-    FromWasmSetDefaultDepthAndBlendMode::from_wasm_js_method(&mut out);
-    FromWasmDrawCall::from_wasm_js_method(&mut out);
-    
-    FromWasmXrStartPresenting::from_wasm_js_method(&mut out);
-    FromWasmXrStopPresenting::from_wasm_js_method(&mut out);
-    
-    FromWasmWebAudioEnumerateDevices::from_wasm_js_method(&mut out);
-    FromWasmSpawnAudioOutput::from_wasm_js_method(&mut out);
     out.push_str("}\n");
+    
     out.push_str("}");
     
     msg.push_str(&out);

@@ -14,42 +14,49 @@ use {
 };
 
 
-pub struct AudioFactory {}
+#[derive(Copy, Clone)]
+pub enum AudioUnitType {
+    DefaultOutput,
+    MusicDevice,
+    Effect
+}
+
+pub struct AudioUnitFactory {}
 
 #[derive(Clone)]
-pub struct AudioDeviceInfo {
+pub struct AudioUnitInfo {
     pub name: String,
-    pub device_type: AudioDeviceType,
+    pub unit_type: AudioUnitType,
     desc: CAudioComponentDescription
 }
 
-unsafe impl Send for AudioDevice {}
-unsafe impl Sync for AudioDevice {}
-pub struct AudioDevice {
+unsafe impl Send for AudioUnit {}
+unsafe impl Sync for AudioUnit {}
+pub struct AudioUnit {
     param_tree_observer: Option<KeyValueObserver>,
     av_audio_unit: ObjcId,
     au_audio_unit: ObjcId,
     render_block: Option<ObjcId>,
     view_controller: Arc<Mutex<Option<ObjcId >> >,
-    device_type: AudioDeviceType
+    unit_type: AudioUnitType
 }
 
-unsafe impl Send for AudioDeviceClone {}
-unsafe impl Sync for AudioDeviceClone {}
-pub struct AudioDeviceClone {
+unsafe impl Send for AudioUnitClone {}
+unsafe impl Sync for AudioUnitClone {}
+pub struct AudioUnitClone {
     av_audio_unit: ObjcId,
     _au_audio_unit: ObjcId,
     render_block: Option<ObjcId>,
-    device_type: AudioDeviceType
+    unit_type: AudioUnitType
 }
 
-pub struct CAudioOutputBuffer {
+pub struct AudioUnitOutputBuffer {
     data: [*mut f32; MAX_AUDIO_BUFFERS],
     frame_count: usize,
     channel_count: usize
 }
 
-impl AudioOutputBuffer for CAudioOutputBuffer {
+impl AudioOutputBuffer for AudioUnitOutputBuffer {
     fn frame_count(&self)->usize{self.frame_count}
     fn channel_count(&self)->usize{self.channel_count}
 
@@ -161,12 +168,12 @@ pub struct AudioInstrumentState {
 }
 
 
-impl AudioDeviceClone {
+impl AudioUnitClone {
     
     pub fn render_to_audio_buffer(&self, time: AudioTime, outputs: &mut [&mut AudioBuffer], inputs: &[&AudioBuffer]) {
-        match self.device_type {
-            AudioDeviceType::MusicDevice => (),
-            AudioDeviceType::Effect => (),
+        match self.unit_type {
+            AudioUnitType::MusicDevice => (),
+            AudioUnitType::Effect => (),
             _ => panic!("render_to_audio_buffer not supported on this device")
         }
         if let Some(render_block) = self.render_block {
@@ -234,8 +241,8 @@ impl AudioDeviceClone {
     }
     
     pub fn handle_midi_1_data(&self, event: Midi1Data) {
-        match self.device_type {
-            AudioDeviceType::MusicDevice => (),
+        match self.unit_type {
+            AudioUnitType::MusicDevice => (),
             _ => panic!("send_midi_1_event not supported on this device")
         }
         unsafe {
@@ -244,14 +251,14 @@ impl AudioDeviceClone {
     }
 }
 
-impl AudioDevice {
+impl AudioUnit {
     
-    pub fn clone(&self) -> AudioDeviceClone {
-        AudioDeviceClone {
+    pub fn clone(&self) -> AudioUnitClone {
+        AudioUnitClone {
             av_audio_unit: self.av_audio_unit,
             _au_audio_unit: self.au_audio_unit,
             render_block: self.render_block,
-            device_type: self.device_type,
+            unit_type: self.unit_type,
         }
     }
     
@@ -264,9 +271,9 @@ impl AudioDevice {
     }
     
     pub fn dump_parameter_tree(&self) {
-        match self.device_type {
-            AudioDeviceType::MusicDevice => (),
-            AudioDeviceType::Effect => (),
+        match self.unit_type {
+            AudioUnitType::MusicDevice => (),
+            AudioUnitType::Effect => (),
             _ => panic!("dump_parameter_tree on this device")
         }
         unsafe {
@@ -298,8 +305,8 @@ impl AudioDevice {
     }
     
     pub fn get_instrument_state(&self) -> AudioInstrumentState {
-        match self.device_type {
-            AudioDeviceType::MusicDevice => (),
+        match self.unit_type {
+            AudioUnitType::MusicDevice => (),
             _ => panic!("start_audio_output_with_fn on this device")
         }
         unsafe {
@@ -343,8 +350,8 @@ impl AudioDevice {
     }
     
     pub fn set_instrument_state(&self, in_state: &AudioInstrumentState) {
-        match self.device_type {
-            AudioDeviceType::MusicDevice => (),
+        match self.unit_type {
+            AudioUnitType::MusicDevice => (),
             _ => panic!("start_audio_output_with_fn on this device")
         }
         unsafe {
@@ -379,9 +386,9 @@ impl AudioDevice {
     }
     
     pub fn set_input_callback<F: Fn(AudioTime, &mut dyn AudioOutputBuffer) + Send + 'static>(&self, audio_callback: F) {
-        match self.device_type {
-            AudioDeviceType::DefaultOutput => (),
-            AudioDeviceType::Effect => (),
+        match self.unit_type {
+            AudioUnitType::DefaultOutput => (),
+            AudioUnitType::Effect => (),
             _ => panic!("set_input_callback on this device")
         }
         unsafe {
@@ -393,7 +400,7 @@ impl AudioDevice {
                 buffers: *mut CAudioBufferList |: i32 {
                     let buffers_ref = &*buffers;
                     //println!("IN OUTPUT {} {:?}", buffers_ref.mBuffers[0].mData as u64, *timestamp);
-                    let mut output = CAudioOutputBuffer {
+                    let mut output = AudioUnitOutputBuffer {
                         data: [0 as *mut f32; MAX_AUDIO_BUFFERS],
                         frame_count: frame_count as usize,
                         channel_count: buffers_ref.mNumberBuffers as usize
@@ -417,9 +424,9 @@ impl AudioDevice {
     }
     
     pub fn request_ui<F: Fn() + Send + 'static>(&self, view_loaded: F) {
-        match self.device_type {
-            AudioDeviceType::MusicDevice => (),
-            AudioDeviceType::Effect => (),
+        match self.unit_type {
+            AudioUnitType::MusicDevice => (),
+            AudioUnitType::Effect => (),
             _ => panic!("request_ui not supported on this device")
         }
         
@@ -524,24 +531,24 @@ pub enum AudioError {
     NoDevice
 }
 
-impl AudioFactory {
+impl AudioUnitFactory {
     
-    pub fn query_devices(device_type: AudioDeviceType) -> Vec<AudioDeviceInfo> {
+    pub fn query_audio_units(unit_type: AudioUnitType) -> Vec<AudioUnitInfo> {
         unsafe {
-            let desc = match device_type {
-                AudioDeviceType::MusicDevice => {
+            let desc = match unit_type {
+                AudioUnitType::MusicDevice => {
                     CAudioComponentDescription::new_all_manufacturers(
                         CAudioUnitType::MusicDevice,
                         CAudioUnitSubType::Undefined,
                     )
                 }
-                AudioDeviceType::DefaultOutput => {
+                AudioUnitType::DefaultOutput => {
                     CAudioComponentDescription::new_apple(
                         CAudioUnitType::IO,
                         CAudioUnitSubType::DefaultOutput,
                     )
                 }
-                AudioDeviceType::Effect => {
+                AudioUnitType::Effect => {
                     CAudioComponentDescription::new_all_manufacturers(
                         CAudioUnitType::Effect,
                         CAudioUnitSubType::Undefined,
@@ -557,21 +564,21 @@ impl AudioFactory {
                 let component: ObjcId = msg_send![components, objectAtIndex: i];
                 let name = nsstring_to_string(msg_send![component, name]);
                 let desc: CAudioComponentDescription = msg_send!(component, audioComponentDescription);
-                out.push(AudioDeviceInfo {device_type, name, desc});
+                out.push(AudioUnitInfo {unit_type, name, desc});
             }
             out
         }
     }
     
-    pub fn new_device<F: Fn(Result<AudioDevice, AudioError>) + Send + 'static>(
-        device_info: &AudioDeviceInfo,
-        device_callback: F,
+    pub fn new_audio_unit<F: Fn(Result<AudioUnit, AudioError>) + Send + 'static>(
+        unit_info: &AudioUnitInfo,
+        unit_callback: F,
     ) {
         unsafe {
-            let device_type = device_info.device_type;
+            let unit_type = unit_info.unit_type;
             let instantiation_handler = objc_block!(move | av_audio_unit: ObjcId, error: ObjcId | {
                 let () = msg_send![av_audio_unit, retain];
-                unsafe fn inner(av_audio_unit: ObjcId, error: ObjcId, device_type: AudioDeviceType) -> Result<AudioDevice, OSError> {
+                unsafe fn inner(av_audio_unit: ObjcId, error: ObjcId, unit_type: AudioUnitType) -> Result<AudioUnit, OSError> {
                     OSError::from_nserror(error) ?;
                     let au_audio_unit: ObjcId = msg_send![av_audio_unit, AUAudioUnit];
                     
@@ -579,19 +586,19 @@ impl AudioFactory {
                     let () = msg_send![au_audio_unit, allocateRenderResourcesAndReturnError: &mut err];
                     OSError::from_nserror(err) ?;
                     let mut render_block = None;
-                    match device_type {
-                        AudioDeviceType::DefaultOutput => {
+                    match unit_type {
+                        AudioUnitType::DefaultOutput => {
                             let () = msg_send![au_audio_unit, setOutputEnabled: true];
                             let mut err: ObjcId = nil;
                             let () = msg_send![au_audio_unit, startHardwareAndReturnError: &mut err];
                             OSError::from_nserror(err) ?;
                         }
-                        AudioDeviceType::MusicDevice => {
+                        AudioUnitType::MusicDevice => {
                             let block_ptr: ObjcId = msg_send![au_audio_unit, renderBlock];
                             let () = msg_send![block_ptr, retain];
                             render_block = Some(block_ptr);
                         }
-                        AudioDeviceType::Effect => {
+                        AudioUnitType::Effect => {
                             let block_ptr: ObjcId = msg_send![au_audio_unit, renderBlock];
                             let input_busses: ObjcId = msg_send![au_audio_unit, inputBusses];
                             let count: usize = msg_send![input_busses, count];
@@ -605,26 +612,26 @@ impl AudioFactory {
                         }
                     }
                     
-                    Ok(AudioDevice {
+                    Ok(AudioUnit {
                         view_controller: Arc::new(Mutex::new(None)),
                         param_tree_observer: None,
                         render_block,
-                        device_type,
+                        unit_type,
                         av_audio_unit,
                         au_audio_unit
                     })
                 }
                 
-                match inner(av_audio_unit, error, device_type) {
-                    Err(err) => device_callback(Err(AudioError::System(format!("{:?}", err)))),
-                    Ok(device) => device_callback(Ok(device))
+                match inner(av_audio_unit, error, unit_type) {
+                    Err(err) => unit_callback(Err(AudioError::System(format!("{:?}", err)))),
+                    Ok(device) => unit_callback(Ok(device))
                 }
             });
             
             // Instantiate output audio unit
             let () = msg_send![
                 class!(AVAudioUnit),
-                instantiateWithComponentDescription: device_info.desc
+                instantiateWithComponentDescription: unit_info.desc
                 options: kAudioComponentInstantiation_LoadOutOfProcess
                 completionHandler: &instantiation_handler
             ];
