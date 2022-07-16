@@ -209,7 +209,7 @@ export class WasmWebBrowser extends WasmBridge {
     }
     
     FromWasmHideTextIME() {
-        console.log("IMPLEMENTR!")
+        console.error("IMPLEMENTR!")
     }
     
     
@@ -268,10 +268,6 @@ export class WasmWebBrowser extends WasmBridge {
         this.free_data_u8(args.data);
     }
     
-    FromWasmWebAudioEnumerateDevices() {
-        web_audio_enumerate_devices();
-    }
-    
     alloc_thread_stack(closure_ptr) {
         let tls_size = this.exports.__tls_size.value;
         tls_size += 8 - (tls_size & 7); // align it to 8 bytes
@@ -322,6 +318,7 @@ export class WasmWebBrowser extends WasmBridge {
     }
     
     FromWasmSpawnAudioOutput(args) {
+        
         if (!this.audio_context) {
             const start_audio = async () => {
                 let context = this.audio_context = new AudioContext();
@@ -364,7 +361,20 @@ export class WasmWebBrowser extends WasmBridge {
             window.addEventListener('click', async () => {
                 this.audio_context.resume();
             })
+            window.addEventListener('touchstart', async () => {
+                this.audio_context.resume();
+            })
         }
+    }
+    
+    FromWasmStartMidiInput(){
+        navigator.requestMIDIAccess().then((midi) => {
+            for(let input of midi.inputs){
+                console.log(input);
+            }
+        }, () => {
+            console.error("Cannot open midi");
+        });
     }
     
     // calling into wasm
@@ -976,7 +986,7 @@ export class WasmWebBrowser extends WasmBridge {
     
     
     update_text_area_pos() {
-        if(!this.text_area)return;
+        if (!this.text_area)return;
         var pos = this.text_area_pos;
         var ta = this.text_area;
         if (ta && pos) {
@@ -987,7 +997,7 @@ export class WasmWebBrowser extends WasmBridge {
     
     
     focus_keyboard_input() {
-        if(!this.text_area)return;
+        if (!this.text_area)return;
         this.text_area.focus();
     }
     
