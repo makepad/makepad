@@ -13,9 +13,8 @@ export class WasmWebBrowser extends WasmBridge {
         this.web_sockets = [];
         this.window_info = {}
         this.signals = [];
-        
+        this.thread_stack_size = 2 * 1024 * 1024;
         this.init_detection();
-        
     }
     
     load_deps() {
@@ -223,8 +222,6 @@ export class WasmWebBrowser extends WasmBridge {
         this.web_sockets[args.web_socket_id] = web_socket;
         
         web_socket.onclose = e => {
-            console.log("Websocket close");
-            return
             console.log("Auto reconnecting websocket");
             this.to_wasm.ToWasmWebSocketClose({web_socket_id})
             this.do_wasm_pump();
@@ -277,8 +274,10 @@ export class WasmWebBrowser extends WasmBridge {
     
     alloc_thread_stack(closure_ptr) {
         let tls_size = this.exports.__tls_size.value;
-        let stack_size = 2 * 1024 * 1024; // 2mb
-        let tls_ptr = this.exports.wasm_thread_alloc_tls_and_stack(tls_size + stack_size / 8);
+        tls_size += 8 - (tls_size & 7); // align it to 8 bytes
+        let stack_size = this.thread_stack_size; // 2mb
+        if ((tls_size + stack_size) & 7 != 0) throw new Error("stack size not 8 byte aligned");
+        let tls_ptr = this.exports.wasm_thread_alloc_tls_and_stack((tls_size + stack_size) >> 3);
         this.update_array_buffer_refs();
         let stack_ptr = tls_ptr + tls_size + stack_size - 8;
         return {
@@ -289,7 +288,6 @@ export class WasmWebBrowser extends WasmBridge {
             closure_ptr
         }
     }
-    
     
     // thanks to JP Posma with Zaplib for figuring out how to do the stack_pointer export without wasm bindgen
     // https://github.com/Zaplib/zaplib/blob/650305c856ea64d9c2324cbd4b8751ffbb971ac3/zaplib/cargo-zaplib/src/build.rs#L48
@@ -484,8 +482,6 @@ export class WasmWebBrowser extends WasmBridge {
     bind_mouse_and_touch() {
         
         var canvas = this.canvas
-        
-        
         let last_mouse_finger;
         if (this.detect.use_touch_scroll_overlay) {
             var ts = this.touch_scroll_overlay = document.createElement('div')
@@ -980,6 +976,7 @@ export class WasmWebBrowser extends WasmBridge {
     
     
     update_text_area_pos() {
+        if(!this.text_area)return;
         var pos = this.text_area_pos;
         var ta = this.text_area;
         if (ta && pos) {
@@ -990,6 +987,7 @@ export class WasmWebBrowser extends WasmBridge {
     
     
     focus_keyboard_input() {
+        if(!this.text_area)return;
         this.text_area.focus();
     }
     
