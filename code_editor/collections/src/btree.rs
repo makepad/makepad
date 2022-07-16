@@ -25,11 +25,38 @@ impl<T: Chunk> BTree<T> {
         self.root.summed_info()
     }
 
-    pub fn concat(mut self, mut other: Self) -> Self {
+    pub fn prepend(&mut self, mut other: Self) {
         if self.height < other.height {
             if let Some(node) = other
                 .root
-                .prepend_at_depth(self.root, other.height - self.height)
+                .append_at_depth(self.root.clone(), other.height - self.height)
+            {
+                let mut branch = Branch::new();
+                branch.push_back(other.root);
+                branch.push_back(node);
+                other.height += 1;
+                other.root = Node::Branch(branch);
+            }
+            *self = other;
+        } else {
+            if let Some(node) = self
+                .root
+                .prepend_at_depth(other.root, self.height - other.height)
+            {
+                let mut branch = Branch::new();
+                branch.push_front(self.root.clone());
+                branch.push_front(node);
+                self.height += 1;
+                self.root = Node::Branch(branch);
+            }
+        }
+    }
+
+    pub fn append(&mut self, mut other: Self) {
+        if self.height < other.height {
+            if let Some(node) = other
+                .root
+                .prepend_at_depth(self.root.clone(), other.height - self.height)
             {
                 let mut branch = Branch::new();
                 branch.push_front(other.root);
@@ -37,19 +64,36 @@ impl<T: Chunk> BTree<T> {
                 other.height += 1;
                 other.root = Node::Branch(branch);
             }
-            other
+            *self = other;
         } else {
             if let Some(node) = self
                 .root
                 .append_at_depth(other.root, self.height - other.height)
             {
                 let mut branch = Branch::new();
-                branch.push_back(self.root);
+                branch.push_back(self.root.clone());
                 branch.push_back(node);
                 self.height += 1;
                 self.root = Node::Branch(branch);
             }
-            self
+        }
+    }
+
+    pub fn split_off(&mut self, at: usize) -> Self {
+        use std::mem;
+
+        if at == 0 {
+            return mem::replace(self, Self::new());
+        }
+        if at == self.len() {
+            return Self::new();
+        }
+        let mut other_root = self.root.split_off(at);
+        let other_height = self.height - other_root.pull_up_singular_nodes();
+        self.height -= self.root.pull_up_singular_nodes();
+        Self {
+            root: other_root,
+            height: other_height,
         }
     }
 }
@@ -91,13 +135,6 @@ impl<T: Chunk> Node<T> {
         }
     }
 
-    fn as_leaf(&self) -> &Leaf<T> {
-        match self {
-            Self::Leaf(leaf) => leaf,
-            _ => panic!(),
-        }
-    }
-
     fn summed_len(&self) -> usize {
         match self {
             Self::Leaf(leaf) => leaf.len(),
@@ -116,6 +153,36 @@ impl<T: Chunk> Node<T> {
         match self {
             Self::Branch(branch) => branch,
             _ => panic!(),
+        }
+    }
+
+    fn split_off(&mut self, index: usize) -> Self {
+        match self {
+            Self::Leaf(leaf) => Node::Leaf(leaf.split_off(index)),
+            Self::Branch(branch) => {
+                let (index, summed_len) = search_by_index(branch, index);
+                if index == summed_len {
+                    return Node::Branch(branch.split_off(index));
+                }
+                let mut other_branch = branch.split_off(index + 1);
+                let mut node = branch.pop_back().unwrap();
+                let mut other_node = node.split_off(index - summed_len);
+                if branch.is_empty() {
+                    branch.push_back(node)
+                } else {
+                    let count = node.pull_up_singular_nodes();
+                    self.append_at_depth(node, count + 1);
+                }
+                if other_branch.is_empty() {
+                    other_branch.push_front(other_node);
+                    Node::Branch(other_branch)
+                } else {
+                    let count = other_node.pull_up_singular_nodes();
+                    let mut other = Node::Branch(other_branch);
+                    other.prepend_at_depth(other_node, count + 1);
+                    other
+                }
+            }
         }
     }
 
@@ -165,22 +232,18 @@ impl<T: Chunk> Node<T> {
         }
     }
 
-    fn split_off(&mut self, at: usize) -> Self {
-        match self {
-            Self::Leaf(leaf) => Node::Leaf(leaf.split_off(at)),
-            Self::Branch(branch) => {
-                let (index, summed_len) = search_by_index(branch, at);
-                if at == summed_len {
-                    return Node::Branch(branch.split_off(index));
+    fn pull_up_singular_nodes(&mut self) -> usize {
+        let mut count = 0;
+        loop {
+            match self {
+                Node::Branch(branch) if branch.len() == 1 => {
+                    *self = branch.pop_back().unwrap();
+                    count += 1;
                 }
-                let mut other_branch = branch.split_off(index + 1);
-                let mut node = branch.pop_back().unwrap();
-                let other_node = node.split_off(at - summed_len);
-                branch.push_back(node);
-                other_branch.push_front(other_node);
-                Node::Branch(other_branch)
+                _ => break,
             }
         }
+        count
     }
 }
 
@@ -204,10 +267,6 @@ impl<T: Chunk> Leaf<T> {
 
     fn info(&self) -> T::Info {
         self.chunk.info()
-    }
-
-    fn as_chunk(&self) -> &T {
-        &self.chunk
     }
 
     fn prepend_or_distribute(&mut self, mut other: Self) -> Option<Self> {
@@ -437,6 +496,6 @@ fn sum_infos<T: Chunk>(nodes: &[Node<T>]) -> T::Info {
     summed_info
 }
 
-fn search_by_index<T: Chunk>(nodes: &[Node<T>], index: usize) -> (usize, usize) {
+fn search_by_index<T: Chunk>(_nodes: &[Node<T>], _index: usize) -> (usize, usize) {
     unimplemented!()
 }
