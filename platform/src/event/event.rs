@@ -7,6 +7,7 @@ use {
         makepad_live_id::LiveId,
         cx::Cx,
         area::Area,
+        midi::{Midi1InputData, MidiInputInfo},
         event::{
             finger::*,
             keyboard::*,
@@ -62,6 +63,9 @@ pub enum Event {
     WebSocketOpen(WebSocket),
     WebSocketError(WebSocketErrorEvent),
     WebSocketMessage(WebSocketMessageEvent),
+    
+    Midi1InputData(Midi1InputData),
+    MidiInputList(MidiInputListEvent),
 }
 
 pub enum HitEvent<'a>{
@@ -90,6 +94,11 @@ pub enum DragEvent<'a>{
 #[derive(Clone, Debug, PartialEq)]
 pub struct TriggerEvent {
     pub triggers: HashMap<Area, HashSet<Trigger>>
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct MidiInputListEvent {
+    pub inputs: Vec<MidiInputInfo>,
 }
 
 #[derive(Clone, Default, Debug, PartialEq)]

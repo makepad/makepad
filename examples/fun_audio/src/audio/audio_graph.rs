@@ -26,11 +26,9 @@ pub enum FromUI {
 
 #[derive(Clone)]
 pub enum ToUI {
-    Midi1Data(Midi1Data),
 }
 
 pub enum AudioGraphAction {
-    Midi1Data(Midi1Data),
 }
 
 #[derive(Live)]
@@ -75,9 +73,11 @@ impl AudioGraph {
                     node.root = Some(new_root);
                 }
                 FromUI::Midi1Data(data) => {
+                    //if data.channel() == 0{
                     if let Some(root) = node.root.as_mut() {
                         root.handle_midi_1_data(data);
                     }
+                   // }
                 }
             }
         }
@@ -108,6 +108,9 @@ impl AudioGraph {
             });
         }
         match event {
+            Event::Midi1InputData(input)=>{
+                self.from_ui.send(FromUI::Midi1Data(input.data)).unwrap();
+            }
             Event::KeyDown(ke) => {
                 if let KeyCode::F1 = ke.key_code {
                 }
@@ -116,9 +119,6 @@ impl AudioGraph {
             }
             Event::Signal(se) => while let Ok(to_ui) = self.to_ui.try_recv(se) {
                 match to_ui {
-                    ToUI::Midi1Data(data) => {
-                        dispatch_action(cx, AudioGraphAction::Midi1Data(data))
-                    },
                 }
                 // ok something sent us a signal.
             }
