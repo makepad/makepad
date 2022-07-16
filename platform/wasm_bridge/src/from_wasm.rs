@@ -18,12 +18,25 @@ pub trait FromWasm {
     
     fn from_wasm_js_body(out: &mut WasmJSOutput, slot:usize, is_recur: bool, prop:&str, temp:usize);
     
-    fn from_wasm_js_method(wrapper: &mut String) {
+    fn from_wasm_js_reuse(wrapper: &mut String) {
+        Self::from_wasm_js_inner(wrapper, true);
+    }
+    
+    fn from_wasm_js(wrapper: &mut String) {
+        Self::from_wasm_js_inner(wrapper, false);
+    }
+    
+    fn from_wasm_js_inner(wrapper:&mut String, reuse_arg:bool){
         let id = Self::live_id();
 
         wrapper.push_str(&format!("{}(){{\n", id.0 & 0xffff_ffff));
         wrapper.push_str("let app = this.app;\n");
-        wrapper.push_str("let args = app.from_wasm_args;\n");
+        if reuse_arg{
+            wrapper.push_str("let args = app.from_wasm_args;\n");
+        }
+        else{
+            wrapper.push_str("let args = {};\n");
+        }
         
         let mut out = WasmJSOutput{temp_alloc:0, fns:vec![WasmJSOutputFn{name:String::new(), body:String::new(), temp:0}]};
         let new_nest = out.alloc_temp();
