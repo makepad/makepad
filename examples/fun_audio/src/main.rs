@@ -84,18 +84,17 @@ live_register!{
         window: {pass: {clear_color: (COLOR_BG_APP)}}
         audio_graph: {
             root: Mixer {
-                /*c0: BasicSynth {
-                    plugin: "AUMIDISynth"
-                    preset_data: "21adslkfjalkwqwe"
-                }*/
                 c1 = Instrument {
+                    IronFish {
+                    }
                     //key_range: {start: 34, end: 47 shift: 30}
-                    PluginEffect {
+                    /*
+                    AudioUnitEffect {
                         plugin: "AUReverb2"
                     }
-                    PluginMusicDevice {
+                    AudioUnitInstrument {
                         plugin: "Kontakt"
-                    }
+                    }*/
                 }
             }
         }
@@ -229,6 +228,7 @@ impl App {
         makepad_component::live_register(cx);
         crate::audio::live_register(cx);
         crate::piano::live_register(cx);
+        
     }
     
     pub fn new_app(cx: &mut Cx) -> Self {

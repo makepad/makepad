@@ -125,9 +125,9 @@ export class WasmBridge {
             return out
         }
         
-        env._console_log = (chars_ptr, len) => _wasm._bridge.js_console_log(chars_ptr, len);
-        env._console_error = (chars_ptr, len) => _wasm._bridge.js_console_error(chars_ptr, len);
-        env._post_signal = (hi, lo) => _wasm._bridge.js_post_signal(hi, lo);
+        env.js_console_log = (chars_ptr, len) => _wasm._bridge.js_console_log(chars_ptr, len);
+        env.js_console_error = (chars_ptr, len) => _wasm._bridge.js_console_error(chars_ptr, len);
+        env.js_post_signal = (hi, lo) => _wasm._bridge.js_post_signal(hi, lo);
         
         if(memory !== undefined){
             env.memory = memory;
@@ -154,7 +154,7 @@ export class WasmBridge {
                 })
             }
             else {
-                console_log(error);
+                console.error(error);
                 return error
             }
         })
@@ -186,7 +186,7 @@ export class ToWasmMsg {
         
         if (app.u32[this.u32_ptr] - u64_len < u64_needed_capacity) {
             app.u32[this.u32_ptr + 1] = u64_len;
-            this.ptr = this.app.wasm_msg_reserve_u64(this.ptr, u64_capacity_needed);
+            this.ptr = this.app.wasm_msg_reserve_u64(this.ptr, u64_needed_capacity);
             this.u32_ptr = this.ptr >> 2;
             this.u32_offset = this.u32_ptr + offset;
         }

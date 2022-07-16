@@ -4,7 +4,12 @@ use {
         platform::{
             cocoa_app::CocoaApp,
             cx_desktop::CxDesktop,
-            metal::{MetalCx, MetalWindow}
+            metal::{MetalCx, MetalWindow},
+            audio_unit::*,
+        },
+        audio::{
+            AudioTime,
+            AudioOutputBuffer
         },
         event::{
             WebSocket,
@@ -346,7 +351,7 @@ impl CxPlatformApi for Cx{
         std::thread::spawn(f);
     }
 
-    fn web_socket_open(&mut self, _url: String, _rec: WebSocketReconnect) -> WebSocket {
+    fn web_socket_open(&mut self, _url: String, _rec: WebSocketAutoReconnect) -> WebSocket {
         todo!()
     }
     
@@ -362,10 +367,29 @@ impl CxPlatformApi for Cx{
         todo!();
     }
     
-    fn spawn_audio_output<F>(&mut self, _f: F) where F: FnOnce() + Send + 'static{
-        todo!();
+    fn spawn_audio_output<F>(&mut self, f: F) where F: FnMut(AudioTime, &mut dyn AudioOutputBuffer) + Send + 'static{
+        let fbox = std::sync::Arc::new(std::sync::Mutex::new(Box::new(f)));
+        std::thread::spawn(move || {
+            let out = &AudioUnitFactory::query_audio_units(AudioUnitType::DefaultOutput)[0];
+            let fbox = fbox.clone();
+            AudioUnitFactory::new_audio_unit(out, move | result | {
+                match result {
+                    Ok(audio_unit) => {
+                        let fbox = fbox.clone();
+                        audio_unit.set_input_callback(move |time, output|{
+                            if let Ok(mut fbox) = fbox.lock(){
+                                fbox(time, output);
+                            }
+                        });
+                        loop {
+                            std::thread::sleep(std::time::Duration::from_millis(100));
+                        }
+                    }
+                    Err(err) => println!("Error {:?}", err)
+                }
+            });
+        });
     }
-    
     
     fn update_menu(&mut self, menu: &Menu) {
         // lets walk the menu and do the cocoa equivalents

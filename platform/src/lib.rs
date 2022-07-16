@@ -111,7 +111,7 @@ pub use {
             DragEvent,
             Signal,
             WebSocket,
-            WebSocketReconnect,
+            WebSocketAutoReconnect,
             Timer,
             NextFrame,
             KeyModifiers,

@@ -8,14 +8,19 @@ use {
             web_browser::{
                 from_wasm::*,
                 to_wasm::*,
-            }
+            },
+            web_audio::*,
         },
         area::Area,
+        audio::{
+            AudioTime,
+            AudioOutputBuffer
+        },
         event::{
             WebSocket,
             WebSocketErrorEvent,
             WebSocketMessageEvent,
-            WebSocketReconnect,
+            WebSocketAutoReconnect,
             Timer,
             Signal,
             Event,
@@ -439,23 +444,23 @@ impl CxPlatformApi for Cx {
     }
     
     fn post_signal(signal: Signal,) {
-        unsafe {_post_signal((signal.0.0 >> 32) as u32, signal.0.0 as u32)};
+        unsafe {js_post_signal((signal.0.0 >> 32) as u32, signal.0.0 as u32)};
     }
     
-    fn spawn_thread<F>(&mut self, closure: F) where F: FnOnce() + Send + 'static {
-        let closure_box: Box<dyn FnOnce() + Send + 'static> = Box::new(closure);
+    fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
+        let closure_box: Box<dyn FnOnce() + Send + 'static> = Box::new(f);
         let closure_ptr = Box::into_raw(Box::new(closure_box));
         self.platform.from_wasm(FromWasmCreateThread {closure_ptr: closure_ptr as u32});
     }
     
-    fn web_socket_open(&mut self, url: String, rec: WebSocketReconnect) -> WebSocket {
+    fn web_socket_open(&mut self, url: String, rec: WebSocketAutoReconnect) -> WebSocket {
         let web_socket_id = self.web_socket_id;
         self.web_socket_id += 1;
         
         self.platform.from_wasm(FromWasmWebSocketOpen {
             url,
             web_socket_id: web_socket_id as usize,
-            auto_reconnect: if let WebSocketReconnect::Automatic = rec {true} else {false},
+            auto_reconnect: if let WebSocketAutoReconnect::Yes = rec {true} else {false},
             
         });
         WebSocket(web_socket_id)
@@ -477,9 +482,11 @@ impl CxPlatformApi for Cx {
         self.platform.from_wasm(FromWasmWebAudioEnumerateDevices{});
     }
     
-    fn spawn_audio_output<F>(&mut self, closure: F) where F: FnMut() + Send + 'static{
-        let closure_box: Box<dyn FnMut() + Send + 'static> = Box::new(closure);
-        let closure_ptr = Box::into_raw(Box::new(closure_box));
+    fn spawn_audio_output<F>(&mut self, f: F) where F: FnMut(AudioTime, &mut dyn AudioOutputBuffer) + Send + 'static{
+        let closure_ptr= Box::into_raw(Box::new(WebAudioOutputClosure{
+            callback: Box::new(f),
+            output_buffer: WebAudioOutputBuffer::default()
+        }));
         self.platform.from_wasm(FromWasmSpawnAudioOutput{closure_ptr: closure_ptr as u32});
     }
     
@@ -488,35 +495,10 @@ impl CxPlatformApi for Cx {
     
     fn start_dragging(&mut self, _dragged_item: DraggedItem) {
     }
-    
-    
-
-    
-    /*
-    fn file_read(&mut self, path: &str) -> FileRead {
-        let id = self.platform.file_read_id;
-        self.platform.from_wasm.read_file(id as u32, path);
-        self.platform.file_read_id += 1;
-        FileRead {read_id: id, path: path.to_string()}
-    }
-    
-    fn file_write(&mut self, _path: &str, _data: &[u8]) -> u64 {
-        return 0
-    }
-    */
-    /*
-    fn http_send(&mut self, verb: &str, path: &str, proto: &str, domain: &str, port: u16, content_type: &str, body: &[u8], signal: Signal) {
-        self.platform.from_wasm.http_send(verb, path, proto, domain, port, content_type, body, signal);
-    }
-    
-    fn websocket_send(&mut self, url: &str, data: &[u8]) {
-        self.platform.from_wasm.websocket_send(url, data);
-    }*/
-
 }
 
 extern "C" {
-    pub fn _post_signal(signal_hi: u32, signal_lo: u32);
+    pub fn js_post_signal(signal_hi: u32, signal_lo: u32);
 }
 
 #[export_name = "wasm_thread_entrypoint"]
@@ -524,14 +506,6 @@ extern "C" {
 pub unsafe extern "C" fn wasm_thread_entrypoint(closure_ptr: u32) {
     let closure = Box::from_raw(closure_ptr as *mut Box<dyn FnOnce() + Send + 'static>);
     closure();
-}
-
-#[export_name = "wasm_audio_entrypoint"]
-#[cfg(target_arch = "wasm32")]
-pub unsafe extern "C" fn wasm_audio_entrypoint(closure_ptr: u32) {
-    let mut closure = Box::from_raw(closure_ptr as *mut Box<dyn FnMut() + Send + 'static>);
-    closure();
-    Box::into_raw(closure);
 }
 
 #[export_name = "wasm_thread_alloc_tls_and_stack"]
@@ -587,67 +561,67 @@ pub unsafe extern "C" fn wasm_get_js_msg_class() -> u32 {
     let mut out = String::new();
     
     out.push_str("return {\n");
+    
     out.push_str("ToWasmMsg:class extends ToWasmMsg{\n");
-    
-    ToWasmGetDeps::to_wasm_js_method(&mut out);
-    ToWasmInit::to_wasm_js_method(&mut out);
-    ToWasmResizeWindow::to_wasm_js_method(&mut out);
-    ToWasmAnimationFrame::to_wasm_js_method(&mut out);
-    ToWasmFingerDown::to_wasm_js_method(&mut out);
-    ToWasmFingerUp::to_wasm_js_method(&mut out);
-    ToWasmFingerMove::to_wasm_js_method(&mut out);
-    ToWasmFingerHover::to_wasm_js_method(&mut out);
-    ToWasmFingerOut::to_wasm_js_method(&mut out);
-    ToWasmFingerScroll::to_wasm_js_method(&mut out);
-    ToWasmKeyDown::to_wasm_js_method(&mut out);
-    ToWasmKeyUp::to_wasm_js_method(&mut out);
-    ToWasmTextInput::to_wasm_js_method(&mut out);
-    ToWasmTextCopy::to_wasm_js_method(&mut out);
-    ToWasmTimerFired::to_wasm_js_method(&mut out);
-    ToWasmPaintDirty::to_wasm_js_method(&mut out);
-    ToWasmRedrawAll::to_wasm_js_method(&mut out);
-    ToWasmXRUpdate::to_wasm_js_method(&mut out);
-    ToWasmAppGotFocus::to_wasm_js_method(&mut out);
-    ToWasmAppLostFocus::to_wasm_js_method(&mut out);
-    ToWasmSignal::to_wasm_js_method(&mut out);
-    ToWasmWebSocketOpen::to_wasm_js_method(&mut out);
-    ToWasmWebSocketClose::to_wasm_js_method(&mut out);
-    ToWasmWebSocketError::to_wasm_js_method(&mut out);
-    ToWasmWebSocketMessage::to_wasm_js_method(&mut out);
+    ToWasmGetDeps::to_wasm_js(&mut out);
+    ToWasmInit::to_wasm_js(&mut out);
+    ToWasmResizeWindow::to_wasm_js(&mut out);
+    ToWasmAnimationFrame::to_wasm_js(&mut out);
+    ToWasmFingerDown::to_wasm_js(&mut out);
+    ToWasmFingerUp::to_wasm_js(&mut out);
+    ToWasmFingerMove::to_wasm_js(&mut out);
+    ToWasmFingerHover::to_wasm_js(&mut out);
+    ToWasmFingerOut::to_wasm_js(&mut out);
+    ToWasmFingerScroll::to_wasm_js(&mut out);
+    ToWasmKeyDown::to_wasm_js(&mut out);
+    ToWasmKeyUp::to_wasm_js(&mut out);
+    ToWasmTextInput::to_wasm_js(&mut out);
+    ToWasmTextCopy::to_wasm_js(&mut out);
+    ToWasmTimerFired::to_wasm_js(&mut out);
+    ToWasmPaintDirty::to_wasm_js(&mut out);
+    ToWasmRedrawAll::to_wasm_js(&mut out);
+    ToWasmXRUpdate::to_wasm_js(&mut out);
+    ToWasmAppGotFocus::to_wasm_js(&mut out);
+    ToWasmAppLostFocus::to_wasm_js(&mut out);
+    ToWasmSignal::to_wasm_js(&mut out);
+    ToWasmWebSocketOpen::to_wasm_js(&mut out);
+    ToWasmWebSocketClose::to_wasm_js(&mut out);
+    ToWasmWebSocketError::to_wasm_js(&mut out);
+    ToWasmWebSocketMessage::to_wasm_js(&mut out);
     out.push_str("},\n");
+    
     out.push_str("FromWasmMsg:class extends FromWasmMsg{\n");
+    FromWasmLoadDeps::from_wasm_js(&mut out);
+    FromWasmStartTimer::from_wasm_js_reuse(&mut out);
+    FromWasmStopTimer::from_wasm_js_reuse(&mut out);
+    FromWasmFullScreen::from_wasm_js(&mut out);
+    FromWasmNormalScreen::from_wasm_js(&mut out);
+    FromWasmRequestAnimationFrame::from_wasm_js_reuse(&mut out);
+    FromWasmSetDocumentTitle::from_wasm_js(&mut out);
+    FromWasmSetMouseCursor::from_wasm_js(&mut out);
+    FromWasmTextCopyResponse::from_wasm_js(&mut out);
+    FromWasmShowTextIME::from_wasm_js(&mut out);
+    FromWasmHideTextIME::from_wasm_js(&mut out);
+    FromWasmCreateThread::from_wasm_js(&mut out);
+    FromWasmWebSocketOpen::from_wasm_js(&mut out);
+    FromWasmWebSocketSend::from_wasm_js(&mut out);
+    FromWasmXrStartPresenting::from_wasm_js(&mut out);
+    FromWasmXrStopPresenting::from_wasm_js(&mut out);
+    FromWasmWebAudioEnumerateDevices::from_wasm_js(&mut out);
+    FromWasmSpawnAudioOutput::from_wasm_js(&mut out);
     
-    FromWasmLoadDeps::from_wasm_js_method(&mut out);
-    FromWasmStartTimer::from_wasm_js_method(&mut out);
-    FromWasmStopTimer::from_wasm_js_method(&mut out);
-    FromWasmFullScreen::from_wasm_js_method(&mut out);
-    FromWasmNormalScreen::from_wasm_js_method(&mut out);
-    FromWasmRequestAnimationFrame::from_wasm_js_method(&mut out);
-    FromWasmSetDocumentTitle::from_wasm_js_method(&mut out);
-    FromWasmSetMouseCursor::from_wasm_js_method(&mut out);
-    FromWasmTextCopyResponse::from_wasm_js_method(&mut out);
-    FromWasmShowTextIME::from_wasm_js_method(&mut out);
-    FromWasmHideTextIME::from_wasm_js_method(&mut out);
-    FromWasmCreateThread::from_wasm_js_method(&mut out);
-    FromWasmWebSocketOpen::from_wasm_js_method(&mut out);
-    FromWasmWebSocketSend::from_wasm_js_method(&mut out);
+    FromWasmCompileWebGLShader::from_wasm_js_reuse(&mut out);
+    FromWasmAllocArrayBuffer::from_wasm_js_reuse(&mut out);
+    FromWasmAllocIndexBuffer::from_wasm_js_reuse(&mut out);
+    FromWasmAllocVao::from_wasm_js_reuse(&mut out);
+    FromWasmAllocTextureImage2D::from_wasm_js_reuse(&mut out);
+    FromWasmBeginRenderTexture::from_wasm_js_reuse(&mut out);
+    FromWasmBeginRenderCanvas::from_wasm_js_reuse(&mut out);
+    FromWasmSetDefaultDepthAndBlendMode::from_wasm_js_reuse(&mut out);
+    FromWasmDrawCall::from_wasm_js_reuse(&mut out);
     
-    FromWasmCompileWebGLShader::from_wasm_js_method(&mut out);
-    FromWasmAllocArrayBuffer::from_wasm_js_method(&mut out);
-    FromWasmAllocIndexBuffer::from_wasm_js_method(&mut out);
-    FromWasmAllocVao::from_wasm_js_method(&mut out);
-    FromWasmAllocTextureImage2D::from_wasm_js_method(&mut out);
-    FromWasmBeginRenderTexture::from_wasm_js_method(&mut out);
-    FromWasmBeginRenderCanvas::from_wasm_js_method(&mut out);
-    FromWasmSetDefaultDepthAndBlendMode::from_wasm_js_method(&mut out);
-    FromWasmDrawCall::from_wasm_js_method(&mut out);
-    
-    FromWasmXrStartPresenting::from_wasm_js_method(&mut out);
-    FromWasmXrStopPresenting::from_wasm_js_method(&mut out);
-    
-    FromWasmWebAudioEnumerateDevices::from_wasm_js_method(&mut out);
-    FromWasmSpawnAudioOutput::from_wasm_js_method(&mut out);
     out.push_str("}\n");
+    
     out.push_str("}");
     
     msg.push_str(&out);
