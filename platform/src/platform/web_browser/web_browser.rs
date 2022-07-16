@@ -291,8 +291,18 @@ impl Cx {
                     }));
                 }
                 
+                id!(ToWasmMidiInputData) => {
+                    let tw = ToWasmMidiInputData::read_to_wasm(&mut to_wasm);
+                    self.call_event_handler(&mut Event::Midi1InputData(tw.into()));
+                }
+                 
+                id!(ToWasmMidiInputList) => {
+                    let tw = ToWasmMidiInputList::read_to_wasm(&mut to_wasm);
+                    self.call_event_handler(&mut Event::MidiInputList(tw.into()));
+                }
+
                 _ => {
-                    console_log!("Message unknown {}", block_id);
+                    console_log!("Message not handled in wasm {}", block_id);
                     
                     //panic!("Message unknown")
                 }
@@ -473,13 +483,9 @@ impl CxPlatformApi for Cx {
         });
     }
         
-    fn enumerate_midi_devices(&mut self){
-        
-        todo!();
-    }
-    
-    fn enumerate_audio_devices(&mut self){
-        self.platform.from_wasm(FromWasmWebAudioEnumerateDevices{});
+    fn start_midi_input(&mut self){
+        self.platform.from_wasm(FromWasmStartMidiInput {
+        });
     }
     
     fn spawn_audio_output<F>(&mut self, f: F) where F: FnMut(AudioTime, &mut dyn AudioOutputBuffer) + Send + 'static{
@@ -588,6 +594,9 @@ pub unsafe extern "C" fn wasm_get_js_msg_class() -> u32 {
     ToWasmWebSocketClose::to_wasm_js(&mut out);
     ToWasmWebSocketError::to_wasm_js(&mut out);
     ToWasmWebSocketMessage::to_wasm_js(&mut out);
+    ToWasmMidiInputList::to_wasm_js(&mut out);
+    ToWasmMidiInputData::to_wasm_js(&mut out);
+    
     out.push_str("},\n");
     
     out.push_str("FromWasmMsg:class extends FromWasmMsg{\n");
@@ -607,7 +616,7 @@ pub unsafe extern "C" fn wasm_get_js_msg_class() -> u32 {
     FromWasmWebSocketSend::from_wasm_js(&mut out);
     FromWasmXrStartPresenting::from_wasm_js(&mut out);
     FromWasmXrStopPresenting::from_wasm_js(&mut out);
-    FromWasmWebAudioEnumerateDevices::from_wasm_js(&mut out);
+    FromWasmStartMidiInput::from_wasm_js(&mut out);
     FromWasmSpawnAudioOutput::from_wasm_js(&mut out);
     
     FromWasmCompileWebGLShader::from_wasm_js_reuse(&mut out);
