@@ -14,9 +14,17 @@ impl BTreeString {
         }
     }
 
-    pub fn concat(self, other: Self) -> Self {
+    pub fn prepend(&mut self, other: Self) {
+        self.btree.prepend(other.btree);
+    }
+
+    pub fn append(&mut self, other: Self) {
+        self.btree.append(other.btree);
+    }
+
+    pub fn split_off(&mut self, at: usize) -> Self {
         Self {
-            btree: self.btree.concat(other.btree),
+            btree: self.btree.split_off(at),
         }
     }
 }
