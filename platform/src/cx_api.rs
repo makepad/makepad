@@ -13,9 +13,13 @@ use {
             Timer,
             Trigger,
             Signal,
-            WebSocketReconnect,
+            WebSocketAutoReconnect,
             WebSocket,
             NextFrame,
+        },
+        audio::{
+          AudioTime,
+          AudioOutputBuffer  
         },
         cursor::{
             MouseCursor
@@ -57,12 +61,12 @@ pub trait CxPlatformApi{
     fn post_signal(signal: Signal); 
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static;
     
-    fn web_socket_open(&mut self, url:String, rec:WebSocketReconnect)->WebSocket;
+    fn web_socket_open(&mut self, url:String, rec:WebSocketAutoReconnect)->WebSocket;
     fn web_socket_send(&mut self, socket:WebSocket, data:Vec<u8>);
 
     fn enumerate_midi_devices(&mut self);
     fn enumerate_audio_devices(&mut self);
-    fn spawn_audio_output<F>(&mut self, f: F) where F: FnMut() + Send + 'static;
+    fn spawn_audio_output<F>(&mut self, f: F) where F: FnMut(AudioTime, &mut dyn AudioOutputBuffer) + Send + 'static;
 
     fn update_menu(&mut self, menu: &Menu);
     fn start_dragging(&mut self, dragged_item: DraggedItem);

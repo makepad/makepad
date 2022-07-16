@@ -7,7 +7,7 @@ const wasm = await WasmWebGL.fetch_and_instantiate_wasm(
 class MyWasmApp {
     constructor(wasm) {
         let canvas = document.getElementsByClassName('full_canvas')[0];
-        this.webgl = new WasmWebGL (wasm, this, canvas);
+        this.bridge = new WasmWebGL (wasm, this, canvas);
     }
 } 
 
