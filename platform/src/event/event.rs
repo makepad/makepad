@@ -64,7 +64,7 @@ pub enum Event {
     WebSocketError(WebSocketErrorEvent),
     WebSocketMessage(WebSocketMessageEvent),
     
-    Midi1InputData(Midi1InputData),
+    Midi1InputData(Vec<Midi1InputData>),
     MidiInputList(MidiInputListEvent),
 }
 

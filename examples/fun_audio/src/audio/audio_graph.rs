@@ -108,8 +108,10 @@ impl AudioGraph {
             });
         }
         match event {
-            Event::Midi1InputData(input)=>{
-                self.from_ui.send(FromUI::Midi1Data(input.data)).unwrap();
+            Event::Midi1InputData(inputs)=>{
+                for input in inputs{
+                    self.from_ui.send(FromUI::Midi1Data(input.data)).unwrap();
+                }
             }
             Event::KeyDown(ke) => {
                 if let KeyCode::F1 = ke.key_code {
