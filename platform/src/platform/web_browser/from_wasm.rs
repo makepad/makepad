@@ -263,7 +263,7 @@ pub struct FromWasmXrStopPresenting {
 
 
 #[derive(FromWasm)]
-pub struct FromWasmWebAudioEnumerateDevices{
+pub struct FromWasmStartMidiInput{
 }
 
 #[derive(FromWasm)]

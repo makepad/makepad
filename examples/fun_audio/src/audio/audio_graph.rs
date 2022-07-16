@@ -26,11 +26,9 @@ pub enum FromUI {
 
 #[derive(Clone)]
 pub enum ToUI {
-    Midi1Data(Midi1Data),
 }
 
 pub enum AudioGraphAction {
-    Midi1Data(Midi1Data),
 }
 
 #[derive(Live)]
@@ -50,7 +48,7 @@ impl LiveHook for AudioGraph {
     }
     
     fn after_new(&mut self, cx: &mut Cx) {
-        Self::start_midi_input(cx, self.from_ui.sender(), self.to_ui.sender());
+        cx.start_midi_input();
         Self::start_audio_output(cx, self.from_ui.receiver(), self.to_ui.sender());
     }
 }
@@ -62,13 +60,6 @@ struct Node {
 }
 
 impl AudioGraph {
-    fn start_midi_input(cx: &mut Cx, from_ui: FromUISender<FromUI>, to_ui: ToUISender<ToUI>) {
-        /*
-        Midi::new_midi_1_input(move | data | {
-            let _ = from_ui.send(FromUI::Midi1Data(data));
-            let _ = to_ui.send(ToUI::Midi1Data(data));
-        }).unwrap();*/
-    }
     
     pub fn send_midi_1_data(&self, data: Midi1Data) {
         self.from_ui.send(FromUI::Midi1Data(data)).unwrap();
@@ -82,9 +73,11 @@ impl AudioGraph {
                     node.root = Some(new_root);
                 }
                 FromUI::Midi1Data(data) => {
+                    //if data.channel() == 0{
                     if let Some(root) = node.root.as_mut() {
                         root.handle_midi_1_data(data);
                     }
+                   // }
                 }
             }
         }
@@ -115,6 +108,9 @@ impl AudioGraph {
             });
         }
         match event {
+            Event::Midi1InputData(input)=>{
+                self.from_ui.send(FromUI::Midi1Data(input.data)).unwrap();
+            }
             Event::KeyDown(ke) => {
                 if let KeyCode::F1 = ke.key_code {
                 }
@@ -123,9 +119,6 @@ impl AudioGraph {
             }
             Event::Signal(se) => while let Ok(to_ui) = self.to_ui.try_recv(se) {
                 match to_ui {
-                    ToUI::Midi1Data(data) => {
-                        dispatch_action(cx, AudioGraphAction::Midi1Data(data))
-                    },
                 }
                 // ok something sent us a signal.
             }
