@@ -293,7 +293,7 @@ impl Cx {
                 
                 id!(ToWasmMidiInputData) => {
                     let tw = ToWasmMidiInputData::read_to_wasm(&mut to_wasm);
-                    self.call_event_handler(&mut Event::Midi1InputData(tw.into()));
+                    self.call_event_handler(&mut Event::Midi1InputData(vec![tw.into()]));
                 }
                  
                 id!(ToWasmMidiInputList) => {
