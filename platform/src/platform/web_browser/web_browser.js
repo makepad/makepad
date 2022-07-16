@@ -222,8 +222,6 @@ export class WasmWebBrowser extends WasmBridge {
         this.web_sockets[args.web_socket_id] = web_socket;
         
         web_socket.onclose = e => {
-            console.log("Websocket close");
-            return
             console.log("Auto reconnecting websocket");
             this.to_wasm.ToWasmWebSocketClose({web_socket_id})
             this.do_wasm_pump();

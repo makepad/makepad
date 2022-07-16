@@ -125,9 +125,9 @@ export class WasmBridge {
             return out
         }
         
-        env._console_log = (chars_ptr, len) => _wasm._bridge.js_console_log(chars_ptr, len);
-        env._console_error = (chars_ptr, len) => _wasm._bridge.js_console_error(chars_ptr, len);
-        env._post_signal = (hi, lo) => _wasm._bridge.js_post_signal(hi, lo);
+        env.js_console_log = (chars_ptr, len) => _wasm._bridge.js_console_log(chars_ptr, len);
+        env.js_console_error = (chars_ptr, len) => _wasm._bridge.js_console_error(chars_ptr, len);
+        env.js_post_signal = (hi, lo) => _wasm._bridge.js_post_signal(hi, lo);
         
         if(memory !== undefined){
             env.memory = memory;
@@ -154,7 +154,7 @@ export class WasmBridge {
                 })
             }
             else {
-                console_log(error);
+                console.error(error);
                 return error
             }
         })

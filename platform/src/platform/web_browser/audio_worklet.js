@@ -1,75 +1,85 @@
-import {WasmBridge} from "/makepad/platform/wasm_bridge/src/wasm_bridge.js";
-
-class WasmAudioWorker extends WasmBridge {
-    constructor(wasm, worklet, closure_ptr) {
-        super (wasm);
-        this.closure_ptr = closure_ptr,
-        this.worklet = worklet;
-    }
-
-    js_console_error(chars_ptr, len) {
-        this.worklet.port.postMessage({
-            message_type:"console_error",
-            value:this.chars_to_string(chars_ptr, len)
-        });   
-    }
-
-    js_console_log(chars_ptr, len) {
-        this.worklet.port.postMessage({
-            message_type:"console_log",
-            value:this.chars_to_string(chars_ptr, len)
-        });    
-    }
-
-    js_post_signal(signal_hi, signal_lo) {
-        this.worklet.port.postMessage({
-            message_type:"signal",
-            signal_hi, signal_lo
-        });
-    }
-    
-    wasm_audio_entrypoint(frames, channels) {
-        let audio_ptr = this.exports.wasm_audio_entrypoint(this.closure_ptr, frames, channels);
-        this.update_array_buffer_refs();
-        return audio_ptr
-    }
-}
-
 class AudioWorklet extends AudioWorkletProcessor {
     constructor(options) {
-        super(options);
+        super (options);
         
         let thread_info = options.processorOptions.thread_info;
-
-        WasmBridge.instantiate_wasm(thread_info.bytes, thread_info.memory, {}).then(wasm=>{
+        
+        function chars_to_string(chars_ptr, len) {
+            let out = "";
+            let array = new Uint32Array(thread_info.memory.buffer, chars_ptr, len);
+            for (let i = 0; i < len; i ++) {
+                out += String.fromCharCode(array[i]);
+            }
+            return out
+        }
+        
+        let env = {
+            memory: thread_info.memory,
+            
+            js_console_error: (chars_ptr, len) => {
+                this.port.postMessage({
+                    message_type: "console_error",
+                    value: chars_to_string(chars_ptr, len)
+                });
+            },
+            
+            js_console_log: (chars_ptr, len) => {
+                this.port.postMessage({
+                    message_type: "console_log",
+                    value: chars_to_string(chars_ptr, len)
+                });
+            },
+            
+            js_post_signal: (signal_hi, signal_lo) => {
+                this.port.postMessage({
+                    message_type: "signal",
+                    signal_hi,
+                    signal_lo
+                });
+            }
+        };
+        
+        WebAssembly.instantiate(thread_info.bytes, {env}).then(wasm => {
+            
             wasm.instance.exports.__stack_pointer.value = thread_info.stack_ptr;
             wasm.instance.exports.__wasm_init_tls(thread_info.tls_ptr);
-            let bridge = new WasmAudioWorker(wasm, this, thread_info.closure_ptr);
-            this._bridge = bridge;
-        }, error=>{
-            console_log("Error in audio worklet" + error);
-        });
-    }
 
+            this._closure_ptr = thread_info.closure_ptr;
+            this._wasm = wasm;
+            this._memory = env.memory;
+        }, error => {
+            this.port.postMessage({
+                message_type: "console_error",
+                value: "Cannot instantiate wasm" + error
+            });
+        })
+    }
+    _update_array_buffer_refs() {
+        if (this._buffer_ref_len_check != this._memory.buffer.byteLength) {
+            this._f32 = new Float32Array(this._memory.buffer);
+            this._buffer_ref_len_check = this._memory.buffer.byteLength;
+        }
+    }
+    
     process(inputs, outputs, parameters) {
-        // ok great.. lets call wasm
-        if(this._bridge !== undefined){
+        if (this._wasm !== undefined) {
             let frames = outputs[0][0].length;
             let channels = outputs[0].length;
-            let bridge = this._bridge;
-            let ptr = bridge.wasm_audio_entrypoint(frames, channels);
-            let ptr_f32 = ptr>>2;
-            let f32 = bridge.f32;
+            
+            let ptr = this._wasm.instance.exports.wasm_audio_entrypoint(this._closure_ptr, frames, channels);
+            this._update_array_buffer_refs();
+            
+            let ptr_f32 = ptr >> 2;
+            let f32 = this._f32;
             // lets copy the values
-            for(let c = 0; c < channels; c++){
+            for (let c = 0; c < channels; c ++) {
                 let base = c * frames + ptr_f32;
                 let out = outputs[0][c];
-                for(let i = 0; i < frames; i++){
+                for (let i = 0; i < frames; i ++) {
                     out[i] = f32[base + i];
                 }
             }
         }
-        
         return true;
     }
 }
