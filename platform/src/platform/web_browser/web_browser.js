@@ -15,7 +15,6 @@ export class WasmWebBrowser extends WasmBridge {
         this.signals = [];
         this.thread_stack_size = 2 * 1024 * 1024;
         this.init_detection();
-        
     }
     
     load_deps() {
