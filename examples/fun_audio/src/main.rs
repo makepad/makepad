@@ -267,7 +267,7 @@ impl App {
                 }
             }
             Event::MidiInputList(inputs) => {
-                console_log!("{:#?}", inputs);
+                //console_log!("{:#?}", inputs);
             }
             Event::Construct => {
                 

@@ -1,13 +1,16 @@
 use std::env;
 use std::io::{ Write};
 use std::fs;    
-    
+use deflate::deflate_bytes;
+
 fn main() {
     let args:Vec<String> = env::args().collect();
     let file_path = &args[1];
 
     let data = fs::read(file_path).expect("Can't read file"); 
     // lets brotli it
+    let compressed = deflate_bytes(&data);
+    println!("Deflate compressed size {}kb", compressed.len()/1024);
     
     for i in 1..12{
         println!("Compressing {} level {} ...", file_path, i);
