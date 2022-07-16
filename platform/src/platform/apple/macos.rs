@@ -1,7 +1,11 @@
 use {
+    std::cell::RefCell,
+    std::sync::{Arc,Mutex},
     crate::{
+        makepad_live_id::*,
         makepad_math::Vec2,
         platform::{
+            core_midi::CoreMidiAccess,
             cocoa_app::CocoaApp,
             cx_desktop::CxDesktop,
             metal::{MetalCx, MetalWindow},
@@ -11,12 +15,17 @@ use {
             AudioTime,
             AudioOutputBuffer
         },
+        midi::{
+            Midi1InputData
+        },
         event::{
             WebSocket,
-            WebSocketReconnect,
+            WebSocketAutoReconnect,
             Timer,
             Signal,
+            SignalEvent,
             Event,
+            MidiInputListEvent,
             DraggedItem
         },
         menu::Menu,
@@ -276,7 +285,11 @@ impl Cx {
                     },
                     Event::None => {
                     },
-                    Event::Signal {..} => {
+                    Event::Signal(se) => {
+                        self.handle_core_midi_signals(se);
+                        // this is a PostSignal
+                        // see if it was a midi signal.
+                        
                         self.call_event_handler(&mut event);
                         self.call_signals_and_triggers();
                     },
@@ -312,6 +325,28 @@ impl Cx {
             }
         })
     }
+
+    fn handle_core_midi_signals(&mut self, se:&SignalEvent){
+        if self.platform.midi_access.is_some(){
+            if se.signals.contains(&id!(CoreMidiInputData).into()){
+                let out_data = if let Ok(data) = self.platform.midi_input_data.lock(){
+                    let mut data = data.borrow_mut();
+                    let out_data = data.clone();
+                    data.clear();
+                    out_data
+                }
+                else{
+                    panic!();
+                };
+                self.call_event_handler(&mut Event::Midi1InputData(out_data));
+            }
+            else if se.signals.contains(&id!(CoreMidiInputsChanged).into()){
+                let inputs = self.platform.midi_access.as_ref().unwrap().connect_all_inputs();
+                self.call_event_handler(&mut Event::MidiInputList(MidiInputListEvent{inputs}));
+            }
+        }
+    }
+
 }
 
 impl CxPlatformApi for Cx{
@@ -359,12 +394,25 @@ impl CxPlatformApi for Cx{
         todo!()
     }
 
-    fn enumerate_midi_devices(&mut self){
-        todo!();
-    }
-    
-    fn enumerate_audio_devices(&mut self){
-        todo!();
+    fn start_midi_input(&mut self){
+        let midi_input_data = self.platform.midi_input_data.clone();
+        if self.platform.midi_access.is_none(){
+            if let Ok(ma) = CoreMidiAccess::new_midi_1_input(
+                move |datas|{
+                    if let Ok(midi_input_data) = midi_input_data.lock(){
+                        let mut midi_input_data = midi_input_data.borrow_mut();
+                        midi_input_data.extend_from_slice(&datas);
+                        Cx::post_signal(id!(CoreMidiInputData).into());
+                    }
+                },
+                move ||{
+                    Cx::post_signal(id!(CoreMidiInputsChanged).into());
+                }
+            ){
+                self.platform.midi_access = Some(ma);
+            }
+        }
+        Cx::post_signal(id!(CoreMidiInputsChanged).into());
     }
     
     fn spawn_audio_output<F>(&mut self, f: F) where F: FnMut(AudioTime, &mut dyn AudioOutputBuffer) + Send + 'static{
@@ -406,8 +454,10 @@ impl CxPlatformApi for Cx{
     }
 }
 
-#[derive(Clone, Default)]
+#[derive(Default)]
 pub struct CxPlatform {
+    pub midi_access: Option<CoreMidiAccess>,
+    pub midi_input_data: Arc<Mutex<RefCell<Vec<Midi1InputData>>>>,
     pub bytes_written: usize,
     pub draw_calls_done: usize,
     pub last_menu: Option<Menu>,

@@ -174,9 +174,6 @@ impl OscillatorState {
         
         
         return tmp_a[0] * self.dpw_gain2; //* self.dpw_gain;
-        
-        
-        
     }
     
     fn trivialsaw(self) -> f32{
@@ -539,8 +536,7 @@ impl IronFishVoice {
     
 }
 pub struct IronFishState {
-    
-    pub settings: IronFishSettings,
+    pub settings: Box<IronFishSettings>,
     pub voices: [IronFishVoice; 16]
 }
 
@@ -587,7 +583,7 @@ impl IronFishState {
 impl Default for IronFishState {
     fn default() -> Self {
         Self {
-            settings: IronFishSettings::default(),
+            settings: Box::new(IronFishSettings::default()),
             voices: [IronFishVoice::default(); 16]
         }
     }
