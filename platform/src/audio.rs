@@ -1,16 +1,3 @@
-#[cfg(target_os = "macos")]
-pub use crate::platform::apple::audio_unit::{
-    AudioFactory,
-    AudioDevice,
-    AudioDeviceClone,
-};
-
-#[derive(Copy, Clone)]
-pub enum AudioDeviceType {
-    DefaultOutput,
-    MusicDevice,
-    Effect
-}
 
 #[derive(Copy, Clone)]
 pub struct AudioTime {

@@ -93,10 +93,10 @@ live_register!{
                     }
                     //key_range: {start: 34, end: 47 shift: 30}
                     /*
-                    PluginEffect {
+                    AudioUnitEffect {
                         plugin: "AUReverb2"
                     }
-                    PluginMusicDevice {
+                    AudioUnitInstrument {
                         plugin: "Kontakt"
                     }*/
                 }
