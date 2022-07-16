@@ -4,24 +4,24 @@ use crate::wasm_types::*;
 use std::panic;
 
 extern "C" {
-    pub fn _console_log(chars: u32, len: u32);
+    pub fn js_console_log(chars: u32, len: u32);
 }
 
 pub fn console_log_impl(val: &str) {
     unsafe {
         let chars = val.chars().collect::<Vec<char >> ();
-        _console_log(chars.as_ptr() as u32, chars.len() as u32);
+        js_console_log(chars.as_ptr() as u32, chars.len() as u32);
     }
 }
 
-extern "C" {
-    pub fn _console_error(chars: u32, len: u32);
+extern "C" { 
+    pub fn js_console_error(chars: u32, len: u32);
 }
 
 pub fn console_error_impl(val: &str) {
     unsafe {
         let chars = val.chars().collect::<Vec<char >> ();
-        _console_error(chars.as_ptr() as u32, chars.len() as u32);
+        js_console_error(chars.as_ptr() as u32, chars.len() as u32);
     }
 }
 

@@ -84,10 +84,6 @@ live_register!{
         window: {pass: {clear_color: (COLOR_BG_APP)}}
         audio_graph: {
             root: Mixer {
-                /*c0: BasicSynth {
-                    plugin: "AUMIDISynth"
-                    preset_data: "21adslkfjalkwqwe"
-                }*/
                 c1 = Instrument {
                     IronFish {
                     }
