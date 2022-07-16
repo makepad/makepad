@@ -1,7 +1,7 @@
 import {WasmWebGL} from "/makepad/platform/src/platform/web_browser/web_gl.js"
 
 const wasm = await WasmWebGL.fetch_and_instantiate_wasm(
-    "/makepad/target/wasm32-unknown-unknown/release/fun_audio.wasm"
+    "/makepad/target/wasm32-unknown-unknown/debug/fun_audio.wasm"
 );
 
 class MyWasmApp {

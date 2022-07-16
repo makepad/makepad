@@ -444,7 +444,7 @@ impl CxPlatformApi for Cx {
     }
     
     fn post_signal(signal: Signal,) {
-        unsafe {_post_signal((signal.0.0 >> 32) as u32, signal.0.0 as u32)};
+        unsafe {js_post_signal((signal.0.0 >> 32) as u32, signal.0.0 as u32)};
     }
     
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
@@ -498,7 +498,7 @@ impl CxPlatformApi for Cx {
 }
 
 extern "C" {
-    pub fn _post_signal(signal_hi: u32, signal_lo: u32);
+    pub fn js_post_signal(signal_hi: u32, signal_lo: u32);
 }
 
 #[export_name = "wasm_thread_entrypoint"]
