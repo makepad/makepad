@@ -43,10 +43,11 @@ class AudioWorklet extends AudioWorkletProcessor {
             
             wasm.instance.exports.__stack_pointer.value = thread_info.stack_ptr;
             wasm.instance.exports.__wasm_init_tls(thread_info.tls_ptr);
-
-            this._closure_ptr = thread_info.closure_ptr;
-            this._wasm = wasm;
-            this._memory = env.memory;
+            this._context = {
+                exports: wasm.instance.exports,
+                memory: env.memory,
+                closure_ptr: thread_info.closure_ptr,
+            }
         }, error => {
             this.port.postMessage({
                 message_type: "console_error",
@@ -54,23 +55,21 @@ class AudioWorklet extends AudioWorkletProcessor {
             });
         })
     }
-    _update_array_buffer_refs() {
-        if (this._buffer_ref_len_check != this._memory.buffer.byteLength) {
-            this._f32 = new Float32Array(this._memory.buffer);
-            this._buffer_ref_len_check = this._memory.buffer.byteLength;
-        }
-    }
     
     process(inputs, outputs, parameters) {
-        if (this._wasm !== undefined) {
+        if (this._context !== undefined) {
+            let context = this._context;
             let frames = outputs[0][0].length;
             let channels = outputs[0].length;
             
-            let ptr = this._wasm.instance.exports.wasm_audio_entrypoint(this._closure_ptr, frames, channels);
-            this._update_array_buffer_refs();
+            let ptr = context.exports.wasm_audio_entrypoint(context.closure_ptr, frames, channels);
+            if (context.buffer_ref_len_check != context.memory.buffer.byteLength) {
+                context.f32 = new Float32Array(context.memory.buffer);
+                context.buffer_ref_len_check = context.memory.buffer.byteLength;
+            }
             
             let ptr_f32 = ptr >> 2;
-            let f32 = this._f32;
+            let f32 = context.f32;
             // lets copy the values
             for (let c = 0; c < channels; c ++) {
                 let base = c * frames + ptr_f32;
