@@ -81,4 +81,9 @@ pub fn derive_live_component_registry(input: TokenStream) -> TokenStream {
 pub fn derive_frame_component_action(input: TokenStream) -> TokenStream {
     derive_frame_component_action_impl(input)
 }
+// move elsewhere
+#[proc_macro_derive(FrameComponent)]
+pub fn derive_frame_component(input: TokenStream) -> TokenStream {
+    derive_frame_component_impl(input)
+}
 

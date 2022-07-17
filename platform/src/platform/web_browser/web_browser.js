@@ -306,8 +306,6 @@ export class WasmWebBrowser extends WasmBridge {
             return
         }
         
-        let thread_info = self.get_thread_info();
-        
         worker.postMessage(this.alloc_thread_stack(args.closure_ptr));
         
         worker.addEventListener("message", (e) => {

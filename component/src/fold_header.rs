@@ -41,7 +41,7 @@ live_register!{
 }
 
 #[derive(Live, LiveHook)]
-#[live_register(register_as_frame_component!(FoldHeader))]
+#[live_register(frame_component!(FoldHeader))]
 pub struct FoldHeader {
     #[rust] draw_state: DrawStateWrap<DrawState>,
     header: FrameComponentRef,
@@ -112,15 +112,15 @@ impl FrameComponent for FoldHeader {
     }
     
     fn find_child(&self, id: &[LiveId]) -> Option<&Box<dyn FrameComponent >> {
-        frame_component_find_child_impl!(id, self.header, self.body)
+        find_child_impl!(id, self.header, self.body)
     }
     
     fn find_child_mut(&mut self, id: &[LiveId]) -> Option<&mut Box<dyn FrameComponent >> {
-        frame_component_find_child_mut_impl!(id, self.header, self.body)
+        find_child_mut_impl!(id, self.header, self.body)
     }
 
     fn create_child(&mut self, cx:&mut Cx, at:CreateAt, id:LiveId, path: &[LiveId], nodes:&[LiveNode]) -> Option<&mut Box<dyn FrameComponent >> {
-        frame_component_create_child_impl!(cx, at, id, path, nodes, self.header, self.body)
+        create_child_impl!(cx, at, id, path, nodes, self.header, self.body)
     }
     
     fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId> {

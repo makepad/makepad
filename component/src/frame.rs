@@ -29,7 +29,7 @@ live_register!{
 // Frame
 
 #[derive(Live)]
-#[live_register(register_as_frame_component!(Frame))]
+#[live_register(frame_component!(Frame))]
 pub struct Frame { // draw info per UI element
     bg: DrawShape,
     

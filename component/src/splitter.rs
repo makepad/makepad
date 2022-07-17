@@ -101,7 +101,7 @@ pub struct DrawSplitter {
 }
 
 #[derive(Live, LiveHook)]
-#[live_register(register_as_frame_component!(Splitter))]
+#[live_register(frame_component!(Splitter))]
 pub struct Splitter {
     #[live(Axis::Horizontal)] pub axis: Axis,
     #[live(SplitterAlign::Weighted(0.5))] pub align: SplitterAlign,
@@ -161,15 +161,15 @@ impl FrameComponent for Splitter {
     }
     
     fn find_child(&self, id: &[LiveId]) -> Option<&Box<dyn FrameComponent >> {
-        frame_component_find_child_impl!(id, self.a, self.b)
+        find_child_impl!(id, self.a, self.b)
     }
     
     fn find_child_mut(&mut self, id: &[LiveId]) -> Option<&mut Box<dyn FrameComponent >> {
-        frame_component_find_child_mut_impl!(id, self.a, self.b)
+        find_child_mut_impl!(id, self.a, self.b)
     }
 
     fn create_child(&mut self, cx:&mut Cx, at:CreateAt, id:LiveId, path: &[LiveId], nodes:&[LiveNode]) -> Option<&mut Box<dyn FrameComponent >> {
-        frame_component_create_child_impl!(cx, at, id, path, nodes, self.a, self.b)
+        create_child_impl!(cx, at, id, path, nodes, self.a, self.b)
     }
     
     fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId> {

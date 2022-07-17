@@ -121,8 +121,8 @@ live_register!{
     }
 }
 
-#[derive(Live, LiveHook)]
-#[live_register(register_as_frame_component!(Button))]
+#[derive(Live, LiveHook, FrameComponent)]
+#[live_register(frame_component!(Button))]
 pub struct Button {
     #[rust] pub button_logic: ButtonLogic,
 
@@ -145,21 +145,6 @@ struct DrawLabelText {
     deref_target: DrawText,
     hover: f32,
     pressed: f32,
-}
-
-impl FrameComponent for Button {
-    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, _self_id: LiveId) -> FrameComponentActionRef {
-        self.handle_event(cx, event).into()
-    }
-    
-    fn get_walk(&self) -> Walk {
-        self.walk
-    }
-    
-    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId> {
-        self.draw_walk(cx, walk);
-        Ok(())
-    }
 }
 
 impl Button {
