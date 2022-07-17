@@ -174,7 +174,7 @@ impl Slider {
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> SliderAction {
         self.state_handle_event(cx, event);
         self.text_input.handle_event(cx, event);
-        match event.hits(cx, self.draw_slider.draw_vars.area) {
+        match event.hits(cx, self.draw_slider.area()) {
             HitEvent::KeyFocusLost(_) => {
                 self.animate_state(cx, ids!(focus.off));
             }
@@ -195,7 +195,7 @@ impl Slider {
                 }
             },
             HitEvent::FingerDown(_fe) => {
-                cx.set_key_focus(self.draw_slider.draw_vars.area);
+                cx.set_key_focus(self.draw_slider.area());
                 cx.set_down_mouse_cursor(MouseCursor::Arrow);
                 self.animate_state(cx, ids!(drag.on));
                 self.dragging = Some(self.value);
@@ -218,7 +218,7 @@ impl Slider {
                 // lets drag the fucker
                 if let Some(start_pos) = self.dragging {
                     self.value = (start_pos + (fe.rel.x - fe.rel_start.x) / fe.rect.size.x).max(0.0).min(1.0);
-                    self.draw_slider.draw_vars.redraw(cx);
+                    self.draw_slider.area().redraw(cx);
                     /*self.draw_slider.apply_over(cx, live!{
                         slide_pos: (self.value)
                     });*/

@@ -6,6 +6,7 @@ use {
             ShaderTy,
         },
         makepad_live_id::*,
+        area::Area,
         cx::Cx,
         draw_2d::cx_2d::Cx2d,
         live_traits::*,

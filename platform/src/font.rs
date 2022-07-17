@@ -15,6 +15,7 @@ pub use {
         makepad_derive_live::*,
         makepad_live_compiler::*,
         makepad_live_id::*,
+        area::Area,
         cx::Cx,
         live_traits::*,
         live_prims::LiveDependency,

@@ -152,7 +152,7 @@ impl Button {
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonAction {
         
         self.state_handle_event(cx, event);
-        let res = self.button_logic.handle_event(cx, event, self.bg_quad.draw_vars.area);
+        let res = self.button_logic.handle_event(cx, event, self.bg_quad.area());
         
         match res.state {
             ButtonState::Pressed => self.animate_state(cx, ids!(hover.pressed)),

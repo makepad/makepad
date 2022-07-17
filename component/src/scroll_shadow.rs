@@ -62,6 +62,6 @@ impl ScrollShadow{
             pos: rect.pos + vec2(0., offset.y),
             size: vec2(rect.size.x, shadow_size)
         });
-        self.draw_vars.area.set_no_scroll(cx, true, true);
+        self.area().set_no_scroll(cx, true, true);
     }
 }
