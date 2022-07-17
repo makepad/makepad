@@ -96,7 +96,7 @@ live_register!{
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawSplitter {
-    deref_target: DrawQuad,
+    draw_super: DrawQuad,
     is_vertical: f32,
 }
 

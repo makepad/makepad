@@ -127,7 +127,7 @@ impl DrawVars {
                                 
                                 let mut slots = 0;
                                 for field in &lf.fields {
-                                    if field.id == id!(deref_target) {
+                                    if field.id == id!(draw_super) {
                                         recur_expand(live_registry, shader_registry, level + 1, after_draw_vars, field.live_type_info.live_type, draw_shader_def, span);
                                         continue
                                     }

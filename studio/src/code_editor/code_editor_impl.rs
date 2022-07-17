@@ -233,7 +233,7 @@ pub struct CodeEditorImpl {
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawSelection {
-    deref_target: DrawQuad,
+    draw_super: DrawQuad,
     prev_x: f32,
     prev_w: f32,
     next_x: f32,
@@ -243,7 +243,7 @@ pub struct DrawSelection {
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawIndentLine {
-    deref_target: DrawQuad, 
+    draw_super: DrawQuad, 
     indent_id: f32
 }
 
@@ -268,7 +268,7 @@ impl From<BuilderMsgLevel> for MsgLineLevel {
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawMsgLine {
-    deref_target: DrawQuad,
+    draw_super: DrawQuad,
     level: MsgLineLevel
 }
 

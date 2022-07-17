@@ -41,7 +41,7 @@ live_register!{
 #[repr(C)]
 pub struct ScrollShadow {
     shadow_size: f32,
-    deref_target: DrawQuad,
+    draw_super: DrawQuad,
     shadow_is_top: f32,
 }
 
