@@ -3,7 +3,7 @@ use {
     crate::makepad_platform::*,
     std::collections::BTreeMap,
 };
-pub use crate::register_as_frame_component;
+pub use crate::frame_component;
 
 pub struct DrawStateWrap<T: Clone> {
     state: Option<T>,
@@ -206,7 +206,6 @@ generate_clone_cast_api!(FrameComponentAction);
 
 pub type FrameComponentActionRef = Option<Box<dyn FrameComponentAction >>;
 
-
 impl Clone for Box<dyn FrameComponentAction> {
     fn clone(&self) -> Box<dyn FrameComponentAction> {
         self.as_ref().box_clone()
@@ -224,28 +223,6 @@ impl FrameComponentRef {
     pub fn as_mut(&mut self) -> Option<&mut Box<dyn FrameComponent >> {
         self.0.as_mut()
     }
-    /*
-    pub fn find_child<'a>(refs:&[&'a FrameComponentRef], id:LiveId)->Option<&'a Box<dyn FrameComponent >>{
-        for r in refs{
-            if let Some(a) = r.as_ref() {
-                if let Some(c) = a.find_child(id) {
-                    return Some(c)
-                }
-            }
-        }
-        None
-    }
-    pub fn find_child_mut<'a>(refs:&mut [&'a mut FrameComponentRef], id:LiveId)->Option<&'a mut Box<dyn FrameComponent >>{
-        for r in refs{
-            if let Some(a) = r.as_mut() {
-                if let Some(c) = a.find_child_mut(id) {
-                    return Some(c)
-                }
-            }
-        }
-        None
-    }*/
-    
 }
 
 impl LiveHook for FrameComponentRef {}
@@ -289,7 +266,7 @@ impl LiveNew for FrameComponentRef {
 }
 
 #[macro_export]
-macro_rules!register_as_frame_component {
+macro_rules!frame_component {
     ( $ ty: ty) => {
         | cx: &mut Cx | {
             struct Factory();
@@ -304,7 +281,7 @@ macro_rules!register_as_frame_component {
 }
 
 #[macro_export]
-macro_rules!frame_component_find_child_impl {
+macro_rules!find_child_impl {
     ( $ id: ident, $ ( $ arg: expr), *) => {
         {
             ( $ (
@@ -320,7 +297,7 @@ macro_rules!frame_component_find_child_impl {
 }
 
 #[macro_export]
-macro_rules!frame_component_create_child_impl {
+macro_rules!create_child_impl {
     ( $cx: ident, $at: ident, $ id: ident, $path:ident, $nodes: ident, $ ( $ arg: expr), *) => {
         {
             ( $ (
@@ -336,7 +313,7 @@ macro_rules!frame_component_create_child_impl {
 }
 
 #[macro_export]
-macro_rules!frame_component_find_child_mut_impl {
+macro_rules!find_child_mut_impl {
     ( $ id: ident, $ ( $ arg: expr), *) => {
         {
             ( $ (

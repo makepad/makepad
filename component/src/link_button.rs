@@ -4,7 +4,7 @@ use {
         makepad_platform::*,
         button_logic::*,
         frame_component::*,
-        register_as_frame_component,
+        frame_component,
         button::Button
     }
 };
