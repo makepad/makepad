@@ -14,6 +14,14 @@ impl BTreeString {
         }
     }
 
+    pub fn len(&self) -> usize {
+        self.btree.len()
+    }
+
+    pub fn char_count(&self) -> usize {
+        self.btree.info().char_count
+    }
+    
     pub fn prepend(&mut self, other: Self) {
         self.btree.prepend(other.btree);
     }
@@ -26,6 +34,14 @@ impl BTreeString {
         Self {
             btree: self.btree.split_off(at),
         }
+    }
+
+    pub fn remove_range_from(&mut self, start: usize) {
+        self.btree.remove_range_from(start);
+    }
+
+    pub fn remove_range_to(&mut self, end: usize) {
+        self.btree.remove_range_to(end);
     }
 }
 
@@ -59,6 +75,14 @@ impl btree::Chunk for Chunk {
     fn move_right(&mut self, other: &mut Self, start: usize) {
         other.0.replace_range(..0, &self.0[start..]);
         self.0.truncate(start);
+    }
+
+    fn remove_range_from(&mut self, start: usize) {
+        self.0.truncate(start);
+    }
+
+    fn remove_range_to(&mut self, end: usize) {
+        self.0.replace_range(..end, "");
     }
 }
 
