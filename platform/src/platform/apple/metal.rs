@@ -872,6 +872,7 @@ impl CxPlatformTexture {
         let descriptor = RcObjcId::from_owned(NonNull::new(unsafe {
             msg_send![class!(MTLTextureDescriptor), new]
         }).unwrap());
+        
         let texture = RcObjcId::from_owned(NonNull::new(unsafe {
             let _: () = msg_send![descriptor.as_id(), setTextureType: MTLTextureType::D2];
             let _: () = msg_send![descriptor.as_id(), setWidth: width as u64];

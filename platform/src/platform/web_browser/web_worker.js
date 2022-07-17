@@ -12,7 +12,6 @@ class WasmWorker extends WasmBridge {
 
 onmessage = async function(e) {
     let thread_info = e.data;
-
     let wasm = await WasmBridge.instantiate_wasm(thread_info.bytes, thread_info.memory, {});
     
     wasm.instance.exports.__stack_pointer.value = thread_info.stack_ptr;
@@ -21,4 +20,6 @@ onmessage = async function(e) {
     let bridge = new WasmWorker(wasm);
 
     wasm.instance.exports.wasm_thread_entrypoint(thread_info.closure_ptr);
+    
+    close();
 }

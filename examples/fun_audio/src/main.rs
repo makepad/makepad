@@ -316,31 +316,8 @@ impl App {
         if self.window.begin(cx).is_err() {
             return;
         }
-        /*
-        if let Some(instrument) = self.frame.create_child(id!(instrument), id!(my_id), live!{
-            header: {label = {text: "MyInstrument"}}
-        }) {
-            // lets render/append all instruments
-            instrument.template(id!(stack), id!(my_id), live!{
-                header {label = {text: "MyStack"}}
-            });
-        }*/
-        // ok so.. what do we do.
-        // we should reference a node
-        // then override properties
-        // as in, what if we don't do any expansions. justz
+
         while let Err(_child) = self.frame.draw(cx) {
-            /*
-            match child.id {
-                id!(myframe) => if let Some(frame) = child.as_frame() {
-                    while let Err(child) = self.frame.draw(cx) {
-                        
-                    }
-                }
-                id!(mylabel) => draw_apply!(frame, cx, {
-                    text: "hello world"
-                })
-            }*/
         };
         
         self.window.end(cx);
