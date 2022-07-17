@@ -158,7 +158,7 @@ impl Tab {
         self.bg_quad.end(cx);
         
         if self.is_dragged {
-            self.drag_quad.draw_abs(cx, self.bg_quad.draw_vars.area.get_rect(cx));
+            self.drag_quad.draw_abs(cx, self.bg_quad.area().get_rect(cx));
         }
     }
     
@@ -217,12 +217,12 @@ impl Tab {
             DragEvent::FingerDrag(f) => match f.state {
                 DragState::In => {
                     self.is_dragged = true;
-                    self.bg_quad.draw_vars.redraw(cx);
+                    self.bg_quad.area().redraw(cx);
                     *f.action = DragAction::Copy;
                 }
                 DragState::Out => {
                     self.is_dragged = false;
-                    self.bg_quad.draw_vars.redraw(cx);
+                    self.bg_quad.area().redraw(cx);
                 }
                 DragState::Over => match event {
                     Event::FingerDrag(event) => {
@@ -233,7 +233,7 @@ impl Tab {
             },
             DragEvent::FingerDrop(f) => {
                 self.is_dragged = false;
-                self.bg_quad.draw_vars.redraw(cx);
+                self.bg_quad.area().redraw(cx);
                 dispatch_action(cx, TabAction::ReceivedDraggedItem(f.dragged_item.clone()))
             }
             _ => {}

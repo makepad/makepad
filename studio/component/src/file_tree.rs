@@ -366,9 +366,9 @@ impl FileTreeNode {
         dispatch_action: &mut dyn FnMut(&mut Cx, FileTreeNodeAction),
     ) {
         if self.state_handle_event(cx, event).must_redraw() {
-            self.bg_quad.draw_vars.redraw(cx);
+            self.bg_quad.area().redraw(cx);
         }
-        match event.hits(cx, self.bg_quad.draw_vars.area) {
+        match event.hits(cx, self.bg_quad.area()) {
             HitEvent::FingerHover(f) => {
                 cx.set_hover_mouse_cursor(MouseCursor::Hand);
                 match f.hover_state {

@@ -68,6 +68,11 @@ impl Into<Area> for InstanceArea {
 
 impl Area {
     
+    pub fn redraw(&self, cx: &mut Cx) {
+        cx.redraw_area(*self);
+    }
+    
+    
     pub fn valid_instance(&self, cx: &Cx) -> Option<&InstanceArea> {
         if self.is_valid(cx) {
             if let Self::Instance(inst) = self {

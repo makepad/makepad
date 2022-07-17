@@ -88,7 +88,7 @@ impl ShaderView {
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
         self.state_handle_event(cx, event);
         
-        match event.hits(cx, self.bg_quad.draw_vars.area) {
+        match event.hits(cx, self.bg_quad.area()) {
             HitEvent::FingerHover(fe) => {
                 cx.set_hover_mouse_cursor(MouseCursor::Arrow);
                 
@@ -120,7 +120,7 @@ impl ShaderView {
     }
     
     pub fn redraw(&mut self, cx: &mut Cx) {
-        self.bg_quad.draw_vars.redraw(cx);
+        self.bg_quad.area().redraw(cx);
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {

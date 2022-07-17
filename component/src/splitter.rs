@@ -264,7 +264,7 @@ impl Splitter {
         self.state_handle_event(cx, event);
         match event.hits_with_options(
             cx,
-            self.bar_quad.draw_vars.area,
+            self.bar_quad.area(),
             HitOptions {
                 margin: Some(self.margin()),
                 ..HitOptions::default()
@@ -332,7 +332,7 @@ impl Splitter {
                             }
                         }
                     };
-                    cx.redraw_area(self.bar_quad.draw_vars.area);
+                    self.bar_quad.area().redraw(cx);
                     dispatch_action(cx, SplitterAction::Changed {axis: self.axis, align: self.align});
                 }
             }
