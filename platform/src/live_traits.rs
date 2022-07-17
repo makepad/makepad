@@ -97,11 +97,7 @@ pub trait LiveApply: LiveHook {
     fn apply_over(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
         self.apply(cx, ApplyFrom::ApplyOver, 0, nodes);
     }
-    /*
-    fn apply_clear(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
-        self.apply(cx, ApplyFrom::ApplyClear, 0, nodes);
-    }*/
-    
+
     fn handle_live_edit_event(&mut self, cx: &mut Cx, event: &Event, id: LiveId) {
         match event {
             Event::LiveEdit(live_edit_event) => {
@@ -129,9 +125,7 @@ pub trait LiveApply: LiveHook {
             }
             _ => ()
         }
-        
     }
-    //fn type_id(&self) -> TypeId;
 }
 
 pub struct LiveBody {
@@ -190,6 +184,14 @@ pub trait LiveHook {
 
     fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode])->Option<usize>{None}
     fn after_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {}
+    fn after_apply_from(&mut self, cx: &mut Cx, apply_from: ApplyFrom) {
+        match apply_from{
+            ApplyFrom::NewFromDoc{..}=>self.after_new_from_doc(cx),
+            _=>()
+        }
+    }
+    
+    fn after_new_from_doc(&mut self, _cx:&mut Cx){}
     fn after_new(&mut self, _cx: &mut Cx) {}
 }
 

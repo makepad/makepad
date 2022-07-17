@@ -150,7 +150,7 @@ pub enum DesktopButtonType {
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawDesktopButton {
-    deref_target: DrawQuad,
+    draw_super: DrawQuad,
     hover: f32,
     pressed: f32,
     button_type: DesktopButtonType

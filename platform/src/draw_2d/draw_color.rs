@@ -2,7 +2,6 @@ use {
     crate::{
         makepad_derive_live::*,
         makepad_math::*,
-        area::Area,
         cx::Cx,
         live_traits::*,
         draw_2d::draw_quad::DrawQuad
@@ -20,6 +19,6 @@ live_register!{
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawColor {
-    #[live()] pub deref_target: DrawQuad,
+    #[live()] pub draw_super: DrawQuad,
     #[live()] pub color: Vec4
 }
