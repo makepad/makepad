@@ -72,7 +72,7 @@ live_register!{
 
 #[derive(Live, LiveHook)]#[repr(C)]
 pub struct DrawLogIconQuad {
-    deref_target: DrawQuad,
+    draw_super: DrawQuad,
     selected: f32,
     hover: f32,
     pub icon_type: LogIconType

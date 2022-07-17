@@ -133,7 +133,7 @@ live_register!{
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawSlider {
-    deref_target: DrawQuad,
+    draw_super: DrawQuad,
     slide_pos: f32
 }
 
@@ -161,7 +161,7 @@ pub struct Slider {
     #[rust] pub dragging: Option<f32>,
 }
 
-#[derive(Copy, Clone, PartialEq, FrameComponentAction)]
+#[derive(Clone, FrameComponentAction)]
 pub enum SliderAction {
     StartSlide,
     Slide(f32),

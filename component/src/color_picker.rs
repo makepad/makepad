@@ -113,7 +113,7 @@ live_register!{
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawColorWheel {
-    deref_target: DrawQuad,
+    draw_super: DrawQuad,
     hue: f32,
     sat: f32,
     val: f32,

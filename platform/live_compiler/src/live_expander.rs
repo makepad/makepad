@@ -353,7 +353,7 @@ impl<'a> LiveExpander<'a> {
                     let mut live_type_info = self.live_registry.live_type_infos.get(live_type).unwrap();
                     
                     let mut has_deref_hop = false;
-                    while let Some(field) = live_type_info.fields.iter().find( | f | f.id == id!(deref_target)) {
+                    while let Some(field) = live_type_info.fields.iter().find( | f | f.id == id!(draw_super)) {
                         has_deref_hop = true;
                         live_type_info = &field.live_type_info;
                     }

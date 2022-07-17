@@ -142,7 +142,7 @@ pub struct Button {
 
 #[derive(Live, LiveHook)]#[repr(C)]
 struct DrawLabelText {
-    deref_target: DrawText,
+    draw_super: DrawText,
     hover: f32,
     pressed: f32,
 }

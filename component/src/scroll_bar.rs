@@ -114,7 +114,7 @@ pub struct ScrollBar {
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawScrollBar {
-    deref_target: DrawQuad,
+    draw_super: DrawQuad,
     is_vertical: f32,
     norm_handle: f32,
     norm_scroll: f32

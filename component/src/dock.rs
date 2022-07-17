@@ -62,7 +62,7 @@ live_register!{
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawRoundCorner {
-    deref_target: DrawQuad,
+    draw_super: DrawQuad,
     border_radius: f32,
     flip: Vec2,
 }
