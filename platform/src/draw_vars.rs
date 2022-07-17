@@ -43,10 +43,6 @@ impl DrawVars {
         self.draw_shader.is_some()
     }
     
-    pub fn redraw(&self, cx: &mut Cx) {
-        cx.redraw_area(self.area);
-    }
-    
     pub fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
         LiveTypeInfo {
             module_id: LiveModuleId::from_str(&module_path!()).unwrap(),

@@ -3,6 +3,7 @@ use {
         makepad_derive_live::*,
         makepad_math::*,
         cx::Cx,
+        area::Area,
         draw_2d::cx_2d::Cx2d,
         live_traits::*,
         shader::geometry_gen::GeometryQuad2D,

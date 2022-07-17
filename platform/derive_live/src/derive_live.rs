@@ -84,6 +84,16 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         let deref_target = fields.iter().find( | field | field.name == "deref_target");
         let draw_vars = fields.iter().find( | field | field.name == "draw_vars");
         let geometry = fields.iter().find( | field | field.name == "geometry");
+
+        if draw_vars.is_some(){
+            tb.add("impl ").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+            tb.add("    pub fn area(&self)->Area {");
+            tb.add("        self.draw_vars.area");
+            tb.add("    }");
+            tb.add("}");
+        }
+
+        
         //let animator = fields.iter().find( | field | field.name == "animator");
         let state = fields.iter().find( | field | field.name == "state");
         // ok we have to parse the animator args fields
