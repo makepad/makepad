@@ -21,7 +21,7 @@ live_register!{
 }
 
 #[derive(Live, LiveHook)]
-#[live_register(register_as_frame_component!(Label))]
+#[live_register(frame_component!(Label))]
 pub struct Label {
     label_text: DrawText,
     walk: Walk,

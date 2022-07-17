@@ -79,7 +79,7 @@ live_register!{
 }
 
 #[derive(Live, LiveHook)]
-#[live_register(register_as_frame_component!(FoldButton))]
+#[live_register(frame_component!(FoldButton))]
 pub struct FoldButton {
     #[rust] button_logic: ButtonLogic,
     

@@ -24,7 +24,6 @@ live_register!{
                     layout: {align: {x: 0.5, y: 0.5}},
                     Label {text: (caption), walk: {margin: {left: 100}}}
                 }
-                
                 //min_btn:= DesktopButton {button_type: DesktopButtonType::WindowsMin}
                 //max_btn:= DesktopButton {button_type: DesktopButtonType::WindowsMax}
                 //close_btn:= DesktopButton {button_type: DesktopButtonType::WindowsClose}
