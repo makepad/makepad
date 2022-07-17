@@ -131,7 +131,7 @@ impl FoldButton {
                 dispatch_action(cx, FoldButtonAction::Animating(self.opened))
             }
         };
-        let res = self.button_logic.handle_event(cx, event, self.bg_quad.draw_vars.area);
+        let res = self.button_logic.handle_event(cx, event, self.bg_quad.area());
         
         match res.state {
             ButtonState::Pressed => {

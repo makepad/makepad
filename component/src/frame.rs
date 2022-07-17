@@ -273,7 +273,7 @@ impl Frame {
             }
         }
         if let Some(cursor) = &self.mouse_cursor {
-            match event.hits(cx, self.bg.draw_vars.area) {
+            match event.hits(cx, self.bg.area()) {
                 HitEvent::FingerHover(f) => {
                     match f.hover_state {
                         HoverState::In => {

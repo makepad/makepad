@@ -346,7 +346,7 @@ impl ScrollBar {
                 return self.make_scroll_event()
             }
             
-            match event.hits(cx, self.bar_quad.draw_vars.area) {
+            match event.hits(cx, self.bar_quad.area()) {
                 HitEvent::FingerDown(fe) => {
                     self.animate_state(cx, ids!(hover.pressed));
                     let rel = match self.axis {
@@ -443,7 +443,7 @@ impl ScrollBar {
                             size: vec2(self.scroll_size, self.bar_size),
                         }
                     );
-                    self.bar_quad.draw_vars.area.set_no_scroll(cx, true, true);
+                    self.bar_quad.area().set_no_scroll(cx, true, true);
                 }
             },
             Axis::Vertical => {
@@ -470,7 +470,7 @@ impl ScrollBar {
                             size: vec2(self.bar_size, self.scroll_size)
                         }
                     );
-                    self.bar_quad.draw_vars.area.set_no_scroll(cx, true, true);
+                    self.bar_quad.area().set_no_scroll(cx, true, true);
                 }
             }
         }
