@@ -125,11 +125,11 @@ live_register!{
     }
 }
 
-#[derive(Live, LiveHook)]
-#[live_register(register_as_frame_component!(DesktopButton))]
+#[derive(Live, LiveHook, FrameComponent)]
+#[live_register(frame_component!(DesktopButton))]
 pub struct DesktopButton {
     #[rust] button_logic: ButtonLogic,
-    
+    walk: Walk,
     state: State,
     
     #[alias(button_type, bg.button_type)]
@@ -167,21 +167,6 @@ impl DrawDesktopButton{
             DesktopButtonType::Fullscreen => (50., 36.),
         };
         Walk::fixed_size(w, h)
-    }
-}
-
-impl FrameComponent for DesktopButton {
-    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, _self_id:LiveId) -> FrameComponentActionRef {
-        self.handle_event(cx, event).into()
-    }
-
-    fn get_walk(&self)->Walk{
-        self.bg.get_walk()
-    }
-    
-    fn draw_component(&mut self, cx: &mut Cx2d, walk:Walk)->Result<(), LiveId>{
-        self.draw_walk(cx, walk);
-        Ok(())
     }
 }
 

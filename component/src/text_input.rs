@@ -105,8 +105,8 @@ live_register!{
     }
 }
 
-#[derive(Live, LiveHook)]
-#[live_register(register_as_frame_component!(TextInput))]
+#[derive(Live, LiveHook, FrameComponent)]
+#[live_register(frame_component!(TextInput))]
 pub struct TextInput {
     state: State,
     
@@ -118,21 +118,6 @@ pub struct TextInput {
     layout: Layout,
     
     pub value: String
-}
-
-impl FrameComponent for TextInput {
-    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, self_id: LiveId) -> FrameComponentActionRef {
-        self.handle_event(cx, event).into()
-    }
-    
-    fn get_walk(&self) -> Walk {
-        self.walk
-    }
-    
-    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId> {
-        self.draw_walk(cx, walk);
-        Ok(())
-    }
 }
 
 #[derive(Copy, Clone, PartialEq, FrameComponentAction)]

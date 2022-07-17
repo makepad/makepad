@@ -137,8 +137,8 @@ pub struct DrawSlider {
     slide_pos: f32
 }
 
-#[derive(Live, LiveHook)]
-#[live_register(register_as_frame_component!(Slider))]
+#[derive(Live, LiveHook, FrameComponent)]
+#[live_register(frame_component!(Slider))]
 pub struct Slider {
     draw_slider: DrawSlider,
     
@@ -159,21 +159,6 @@ pub struct Slider {
     
     #[rust] pub value: f32,
     #[rust] pub dragging: Option<f32>,
-}
-
-impl FrameComponent for Slider {
-    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, _self_id: LiveId) -> FrameComponentActionRef {
-        self.handle_event(cx, event).into()
-    }
-    
-    fn get_walk(&self) -> Walk {
-        self.walk
-    }
-    
-    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId> {
-        self.draw_walk(cx, walk);
-        Ok(())
-    }
 }
 
 #[derive(Copy, Clone, PartialEq, FrameComponentAction)]
