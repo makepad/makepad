@@ -1,5 +1,3 @@
-#![allow(unused_variables)]
-#![allow(dead_code)]
 use {
     crate::{
         audio::*,
@@ -39,7 +37,7 @@ pub struct AudioGraph {
 }
 
 impl LiveHook for AudioGraph {
-    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+    fn after_new_from_doc(&mut self, _cx: &mut Cx) {
         // we should have a component
         if let Some(root) = self.root.as_mut() {
             let graph_node = root.get_graph_node();
@@ -91,7 +89,7 @@ impl AudioGraph {
     
     fn start_audio_output(cx: &mut Cx, from_ui: FromUIReceiver<FromUI>, to_ui: ToUISender<ToUI>) {
         let state = Arc::new(Mutex::new(Node {from_ui, buffer:AudioBuffer::default(), root: None}));
-        let to_ui = Arc::new(Mutex::new(to_ui));
+        let _to_ui = Arc::new(Mutex::new(to_ui));
         cx.spawn_audio_output(move |time, output_buffer|{
             let mut state = state.lock().unwrap();
             Self::render_to_output_buffer(&mut state, time, output_buffer);
@@ -102,7 +100,7 @@ impl AudioGraph {
         let mut a = Vec::new(); self.handle_event_with_fn(cx, event, &mut |_,ac| a.push(ac)); a
     }
     
-    pub fn handle_event_with_fn(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, AudioGraphAction)) {
+    pub fn handle_event_with_fn(&mut self, cx: &mut Cx, event: &mut Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioGraphAction)) {
         if let Some(root) = self.root.as_mut() {
             root.handle_event_with_fn(cx, event, &mut | _cx, _action | {
             });

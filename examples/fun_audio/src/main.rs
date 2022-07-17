@@ -266,7 +266,7 @@ impl App {
                     piano.set_note(cx, note.is_on, note.note_number)
                 }
             }
-            Event::MidiInputList(inputs) => {
+            Event::MidiInputList(_inputs) => {
                 //console_log!("{:#?}", inputs);
             }
             Event::Construct => {

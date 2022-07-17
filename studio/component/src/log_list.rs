@@ -119,7 +119,7 @@ live_register!{
 // TODO support a shared 'inputs' struct on drawshaders
 #[derive(Live, LiveHook)]#[repr(C)]
 struct DrawBgQuad {
-    deref_target: DrawQuad,
+    draw_super: DrawQuad,
     is_even: f32,
     selected: f32,
     hover: f32,
@@ -128,7 +128,7 @@ struct DrawBgQuad {
 
 #[derive(Live, LiveHook)]#[repr(C)]
 struct DrawNameText {
-    deref_target: DrawText,
+    draw_super: DrawText,
     is_even: f32,
     selected: f32,
     hover: f32,

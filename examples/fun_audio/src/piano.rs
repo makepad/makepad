@@ -117,7 +117,7 @@ live_register!{
 // TODO support a shared 'inputs' struct on drawshaders
 #[derive(Live, LiveHook)]#[repr(C)]
 struct DrawKeyQuad {
-    deref_target: DrawQuad,
+    draw_super: DrawQuad,
     is_black: f32,
     pressed: f32,
     focussed: f32,
@@ -132,7 +132,7 @@ pub struct PianoKey {
 }
 
 #[derive(Live)]
-#[live_register(register_as_frame_component!(Piano))]
+#[live_register(frame_component!(Piano))]
 pub struct Piano {
     view: View,
     walk: Walk,
@@ -213,7 +213,7 @@ impl PianoKey {
         dispatch_action: &mut dyn FnMut(&mut Cx, PianoKeyAction),
     ) {
         if self.state_handle_event(cx, event).must_redraw() {
-            self.key_quad.draw_vars.redraw(cx);
+            self.key_quad.area().redraw(cx);
         }
         match event.hits(cx, self.key_quad.draw_vars.area) {
             HitEvent::FingerHover(f) => {

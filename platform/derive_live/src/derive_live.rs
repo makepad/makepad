@@ -81,7 +81,7 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         }
         
         // special marker fields
-        let deref_target = fields.iter().find( | field | field.name == "deref_target");
+        let draw_super = fields.iter().find( | field | field.name == "draw_super");
         let draw_vars = fields.iter().find( | field | field.name == "draw_vars");
         let geometry = fields.iter().find( | field | field.name == "geometry");
 
@@ -98,8 +98,8 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         let state = fields.iter().find( | field | field.name == "state");
         // ok we have to parse the animator args fields
         
-        if deref_target.is_some() && draw_vars.is_some() {
-            return error_result("Cannot dereive Live with more than one of: both draw_vars and deref_target");
+        if draw_super.is_some() && draw_vars.is_some() {
+            return error_result("Cannot dereive Live with more than one of: both draw_vars and draw_super");
         }
         
         if draw_vars.is_some() && !geometry.is_some() {
@@ -185,16 +185,16 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
             }
         }
         
-        if let Some(deref_target) = deref_target {
+        if let Some(draw_super) = draw_super {
             tb.add("impl").stream(generic.clone());
             tb.add("std::ops::Deref for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-            tb.add("    type Target = ").stream(Some(deref_target.ty.clone())).add(";");
-            tb.add("    fn deref(&self) -> &Self::Target {&self.deref_target}");
+            tb.add("    type Target = ").stream(Some(draw_super.ty.clone())).add(";");
+            tb.add("    fn deref(&self) -> &Self::Target {&self.draw_super}");
             tb.add("}");
             tb.add("impl").stream(generic.clone());
             
             tb.add("std::ops::DerefMut for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-            tb.add("    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.deref_target}");
+            tb.add("    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.draw_super}");
             tb.add("}");
         }
         
@@ -214,8 +214,8 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
             tb.add("            LiveId(").suf_u64(LiveId::from_str(&alias_var).unwrap().0).add(")=>self.").stream(Some(alias_redir)).add(".apply(cx, apply_from, index, nodes),");
         }
         // Unknown value handling
-        if deref_target.is_some() {
-            tb.add("            _=> self.deref_target.apply_value(cx, apply_from, index, nodes)");
+        if draw_super.is_some() {
+            tb.add("            _=> self.draw_super.apply_value(cx, apply_from, index, nodes)");
         }
         else {
             if draw_vars.is_some() {
@@ -232,23 +232,23 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         tb.add("}");
         
         // forward a potential deref_target
-        if draw_vars.is_some() || deref_target.is_some() {
+        if draw_vars.is_some() || draw_super.is_some() {
             tb.add("impl").stream(generic.clone()).ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-            tb.add("    pub fn deref_target_before_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]){");
+            tb.add("    pub fn draw_super_before_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]){");
             tb.add("        self.before_apply(cx, apply_from, index, nodes);");
             if draw_vars.is_some() {
                 tb.add("    self.draw_vars.before_apply(cx, apply_from, index, nodes, &self.geometry);");
             }
-            else if deref_target.is_some() {
-                tb.add("    self.deref_target.deref_target_before_apply(cx, apply_from, index, nodes);");
+            else if draw_super.is_some() {
+                tb.add("    self.draw_super.draw_super_before_apply(cx, apply_from, index, nodes);");
             }
             tb.add("    }");
-            tb.add("    pub fn deref_target_after_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]){");
+            tb.add("    pub fn draw_super_after_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]){");
             if draw_vars.is_some() {
                 tb.add("    self.draw_vars.after_apply(cx, apply_from, index, nodes, &self.geometry);");
             }
-            else if deref_target.is_some() {
-                tb.add("    self.deref_target.deref_target_after_apply(cx, apply_from, index, nodes);");
+            else if draw_super.is_some() {
+                tb.add("    self.draw_super.draw_super_after_apply(cx, apply_from, index, nodes);");
             }
             tb.add("        self.after_apply(cx, apply_from, index, nodes);");
             tb.add("    }");
@@ -264,8 +264,8 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         if draw_vars.is_some() {
             tb.add("    self.draw_vars.before_apply(cx, apply_from, start_index, nodes, &self.geometry);");
         }
-        else if deref_target.is_some() {
-            tb.add("    self.deref_target.deref_target_before_apply(cx, apply_from, start_index, nodes);");
+        else if draw_super.is_some() {
+            tb.add("    self.draw_super.draw_super_before_apply(cx, apply_from, start_index, nodes);");
         }
         if state.is_some() { // apply the default states
             tb.add("    let mut state_index = None;");
@@ -296,8 +296,8 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         if let Some(_) = draw_vars {
             tb.add("    self.draw_vars.after_apply(cx, apply_from, start_index, nodes, &self.geometry);");
         }
-        else if let Some(_) = deref_target {
-            tb.add("    self.deref_target.deref_target_after_apply(cx, apply_from, start_index, nodes);");
+        else if let Some(_) = draw_super {
+            tb.add("    self.draw_super.draw_super_after_apply(cx, apply_from, start_index, nodes);");
         }
         /*
         if let Some(_) = animator { // apply the default states
@@ -318,6 +318,9 @@ fn parse_live_type(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Result<()
         }
         
         tb.add("        self.after_apply(cx, apply_from, start_index, nodes);");
+        
+        tb.add("        self.after_apply_from(cx, apply_from);");
+        
         
         tb.add("        return index;");
         tb.add("    }");

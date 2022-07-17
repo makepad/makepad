@@ -3,7 +3,6 @@ use {
         makepad_derive_live::*,
         makepad_shader_compiler::ShaderEnum,
         makepad_math::*,
-        area::Area,
         cx::Cx,
         live_traits::*,
         draw_2d::draw_quad::DrawQuad
@@ -202,7 +201,7 @@ pub enum Fill {
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawShape {
-    #[live] pub deref_target: DrawQuad,
+    #[live] pub draw_super: DrawQuad,
     #[live] pub shape: Shape,
     #[live] pub fill: Fill,
     #[live(vec4(0.0,1.0,0.0,1.0))] pub color: Vec4,
