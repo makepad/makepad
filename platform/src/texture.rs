@@ -55,14 +55,6 @@ impl Default for TextureDesc {
     }
 }
 
-
-
-pub trait TextureCx {
-    fn set_desc(&mut self, cx:&mut Cx, desc:TextureDesc);
-    fn get_desc(&self, cx:&mut Cx) -> TextureDesc;
-}
-
-
 impl LiveHook for Texture{}
 impl LiveNew for Texture {
     fn new(cx: &mut Cx)->Self{
@@ -86,14 +78,12 @@ impl LiveNew for Texture {
             module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
             live_type: LiveType::of::<Self>(),
             fields: Vec::new(),
-            //kind: LiveTypeKind::Object,
             type_name: LiveId::from_str("Texture").unwrap()
         }
     }
 }
 
 impl LiveApply for Texture {
-    //fn type_id(&self)->std::any::TypeId{ std::any::TypeId::of::<Self>()}
     fn apply(&mut self, cx: &mut Cx, _apply_from: ApplyFrom, start_index: usize, nodes: &[LiveNode]) -> usize {
         
         if !nodes[start_index].value.is_structy_type() {
@@ -119,23 +109,29 @@ impl LiveApply for Texture {
 }
 
 
-impl TextureCx for Texture{
-    fn set_desc(&mut self, cx:&mut Cx, desc:TextureDesc){
+impl Texture{
+    pub fn set_desc(&self, cx:&mut Cx, desc:TextureDesc){
         let cxtexture = &mut cx.textures[self.texture_id as usize];
         cxtexture.desc = desc;
     }
 
-    fn get_desc(&self, cx:&mut Cx) -> TextureDesc {
+    pub fn get_desc(&self, cx:&mut Cx) -> TextureDesc {
         cx.textures[self.texture_id as usize].desc.clone()
+    }
+    
+    pub fn swap_image_u32(&self, cx: &mut Cx, image_u32:&mut Vec<u32>){
+        let cxtexture = &mut cx.textures[self.texture_id as usize];
+        std::mem::swap(&mut cxtexture.image_u32, image_u32);
+        cxtexture.update_image = true;
     }
 }
 
 
 #[derive(Default)]
 pub struct CxTexture {
-    pub desc: TextureDesc,
-    pub image_u32: Vec<u32>,
-    pub image_f32: Vec<f32>,
-    pub update_image: bool,
-    pub platform: CxPlatformTexture
+    pub(crate) desc: TextureDesc,
+    pub(crate) image_u32: Vec<u32>,
+    //pub(crate) _image_f32: Vec<f32>,
+    pub(crate) update_image: bool,
+    pub(crate) platform: CxPlatformTexture
 }
