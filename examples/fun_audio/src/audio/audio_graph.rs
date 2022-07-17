@@ -6,9 +6,6 @@ use {
     std::sync::{Arc, Mutex}
 };
 
-//pub use crate::makepad_platform::platform::apple::core_midi::*;
-
-// lets give this a stable pointer for the UI
 live_register!{
     use AudioComponent::*;
     AudioGraph: {{AudioGraph}} {
@@ -37,17 +34,14 @@ pub struct AudioGraph {
 }
 
 impl LiveHook for AudioGraph {
-    fn after_new_from_doc(&mut self, _cx: &mut Cx) {
+    fn after_new_from_doc(&mut self, cx: &mut Cx) {
+        cx.start_midi_input();
+        Self::start_audio_output(cx, self.from_ui.receiver(), self.to_ui.sender());
         // we should have a component
         if let Some(root) = self.root.as_mut() {
             let graph_node = root.get_graph_node();
             self.from_ui.send(FromUI::NewRoot(graph_node)).unwrap();
         }
-    }
-    
-    fn after_new(&mut self, cx: &mut Cx) {
-        cx.start_midi_input();
-        Self::start_audio_output(cx, self.from_ui.receiver(), self.to_ui.sender());
     }
 }
 
@@ -105,6 +99,12 @@ impl AudioGraph {
             root.handle_event_with_fn(cx, event, &mut | _cx, _action | {
             });
         }
+        
+        while let Ok(to_ui) = self.to_ui.try_recv(event) {
+            match to_ui {
+            }
+        }
+
         match event {
             Event::Midi1InputData(inputs)=>{
                 for input in inputs{
@@ -116,11 +116,6 @@ impl AudioGraph {
                 }
                 if let KeyCode::Escape = ke.key_code {
                 }
-            }
-            Event::Signal(se) => while let Ok(to_ui) = self.to_ui.try_recv(se) {
-                match to_ui {
-                }
-                // ok something sent us a signal.
             }
             _ => ()
         }
