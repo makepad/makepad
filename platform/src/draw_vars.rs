@@ -4,6 +4,7 @@ use {
         makepad_live_id::*,
         makepad_math::*,
         cx::Cx,
+        texture::Texture,
         console_log,
         area::Area,
         geometry::{GeometryFields},
@@ -38,6 +39,10 @@ pub struct DrawVars {
 }
 
 impl DrawVars {
+    
+    pub fn set_texture(&mut self, slot:usize, texture:&Texture){
+        self.texture_slots[slot] = Some(texture.texture_id);
+    }
     
     pub fn can_instance(&self) -> bool {
         self.draw_shader.is_some()

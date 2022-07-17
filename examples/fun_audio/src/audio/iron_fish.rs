@@ -617,7 +617,6 @@ impl Default for IronFishVoice {
 
 live_register!{
     IronFish: {{IronFish}} {
-        prop:1.0
     }
 }
 

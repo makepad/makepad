@@ -8,12 +8,12 @@ mod live_prims;
 #[macro_use]
 mod cx;
 mod cx_api;
-mod cx_thread;
 mod cx_draw_shaders;
 
 pub mod live_traits;
 pub mod live_cx;
 
+mod thread;
 mod event;
 mod area;
 mod font;
@@ -194,8 +194,18 @@ pub use {
             PassClearColor,
             PassClearDepth
         },
-        cx_thread::{FromUIReceiver, FromUISender, ToUISender, ToUIReceiver},
-        texture::{Texture, TextureFormat},
+        thread::{
+            FromUIReceiver,
+            FromUISender,
+            ToUISender,
+            ToUIReceiver,
+            ThreadPool
+        },
+        texture::{
+            Texture,
+            TextureFormat,
+            TextureDesc
+        },
         live_traits::{
             LiveNew,
             LiveApply,
@@ -229,7 +239,7 @@ pub use {
             draw_quad::DrawQuad,
             draw_text::{
                 DrawText,
-            }, 
+            },
             draw_color::DrawColor,
         },
         shader::{

@@ -191,7 +191,7 @@ impl Default for Cx {
                 multisample: None
             },
             image_u32: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
-            image_f32: Vec::new(),
+            //image_f32: Vec::new(),
             update_image: true,
             platform: CxPlatformTexture::default()
         }];

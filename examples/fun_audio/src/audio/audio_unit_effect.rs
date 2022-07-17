@@ -1,4 +1,3 @@
-#![allow(unused_variables)]
 use {
     crate::{
         audio::*,
@@ -38,7 +37,7 @@ struct Node {
 }
 
 impl AudioGraphNode for Node {
-    fn handle_midi_1_data(&mut self, data: Midi1Data) {
+    fn handle_midi_1_data(&mut self, _data: Midi1Data) {
     }
     
     fn render_to_audio_buffer(&mut self, time: AudioTime, outputs: &mut [&mut AudioBuffer], inputs: &[&AudioBuffer]) {
@@ -56,7 +55,7 @@ impl AudioGraphNode for Node {
 }
 
 impl LiveHook for AudioUnitEffect {
-    fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
+    fn after_new_from_doc(&mut self, _cx: &mut Cx) {
         self.load_audio_unit();
     }
 }
@@ -95,17 +94,14 @@ impl AudioComponent for AudioUnitEffect {
         })
     }
     
-    fn handle_event_with_fn(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
-        match event {
-            Event::Signal(se) => while let Ok(to_ui) = self.to_ui.try_recv(se) {
-                match to_ui {
-                    ToUI::NewAudioUnit(audio_unit) => {
-                        self.from_ui.send(FromUI::NewAudioUnit(audio_unit.clone())).unwrap();
-                        self.audio_unit = Some(audio_unit);
-                    }
+    fn handle_event_with_fn(&mut self, _cx: &mut Cx, event: &mut Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
+        while let Ok(to_ui) = self.to_ui.try_recv(event) {
+            match to_ui {
+                ToUI::NewAudioUnit(audio_unit) => {
+                    self.from_ui.send(FromUI::NewAudioUnit(audio_unit.clone())).unwrap();
+                    self.audio_unit = Some(audio_unit);
                 }
             }
-            _ => ()
         }
     }
 }
