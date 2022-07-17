@@ -96,6 +96,30 @@ impl<T: Chunk> BTree<T> {
             height: other_height,
         }
     }
+
+    pub fn remove_range_from(&mut self, start: usize) {
+        if start == 0 {
+            *self = Self::new();
+            return;
+        }
+        if start == self.len() {
+            return;
+        }
+        self.root.remove_range_from(start);
+        self.height -= self.root.pull_up_singular_nodes();
+    }
+
+    pub fn remove_range_to(&mut self, end: usize) {
+        if end == 0 {
+            return;
+        }
+        if end == self.len() {
+            *self = Self::new();
+            return;
+        }
+        self.root.remove_range_to(end);
+        self.height -= self.root.pull_up_singular_nodes();
+    }
 }
 
 pub trait Chunk: Clone {
@@ -108,6 +132,8 @@ pub trait Chunk: Clone {
     fn info(&self) -> Self::Info;
     fn move_left(&mut self, other: &mut Self, end: usize);
     fn move_right(&mut self, other: &mut Self, start: usize);
+    fn remove_range_from(&mut self, start: usize);
+    fn remove_range_to(&mut self, end: usize);
 }
 
 pub trait Info: Copy + AddAssign + SubAssign {
@@ -186,6 +212,50 @@ impl<T: Chunk> Node<T> {
         }
     }
 
+    fn remove_range_from(&mut self, start: usize) {
+        match self {
+            Self::Leaf(leaf) => leaf.remove_range_from(start),
+            Self::Branch(branch) => {
+                let (index, summed_len) = search_by_index(branch, start);
+                if start == summed_len {
+                    branch.remove_range_from(index);
+                } else {
+                    branch.remove_range_from(index + 1);
+                    let mut node = branch.pop_back().unwrap();
+                    node.remove_range_from(start - summed_len);
+                    if branch.is_empty() {
+                        branch.push_back(node);
+                    } else {
+                        let count = node.pull_up_singular_nodes();
+                        self.append_at_depth(node, count + 1);
+                    }
+                }
+            }
+        }
+    }
+
+    fn remove_range_to(&mut self, end: usize) {
+        match self {
+            Self::Leaf(leaf) => leaf.remove_range_to(end),
+            Self::Branch(branch) => {
+                let (index, summed_len) = search_by_index(branch, end);
+                if end == summed_len {
+                    branch.remove_range_to(index);
+                } else {
+                    branch.remove_range_to(index);
+                    let mut node = branch.pop_front().unwrap();
+                    node.remove_range_to(end - summed_len);
+                    if branch.is_empty() {
+                        branch.push_front(node);
+                    } else {
+                        let count = node.pull_up_singular_nodes();
+                        self.prepend_at_depth(node, count + 1);
+                    }
+                }
+            }
+        }
+    }
+
     fn prepend_at_depth(&mut self, other: Node<T>, depth: usize) -> Option<Self> {
         if depth == 0 {
             match self {
@@ -249,7 +319,7 @@ impl<T: Chunk> Node<T> {
 
 #[derive(Clone)]
 struct Leaf<T> {
-    chunk: T,
+    chunk: Arc<T>,
 }
 
 impl<T: Chunk> Leaf<T> {
@@ -257,7 +327,7 @@ impl<T: Chunk> Leaf<T> {
 
     fn new() -> Self {
         Self {
-            chunk: Chunk::new(),
+            chunk: Arc::new(Chunk::new()),
         }
     }
 
@@ -305,11 +375,19 @@ impl<T: Chunk> Leaf<T> {
     }
 
     fn move_left(&mut self, other: &mut Self, end: usize) {
-        self.chunk.move_left(&mut other.chunk, end);
+        Arc::make_mut(&mut self.chunk).move_left(Arc::make_mut(&mut other.chunk), end);
     }
 
     fn move_right(&mut self, other: &mut Self, start: usize) {
-        self.chunk.move_right(&mut other.chunk, start);
+        Arc::make_mut(&mut self.chunk).move_right(Arc::make_mut(&mut other.chunk), start);
+    }
+
+    fn remove_range_from(&mut self, start: usize) {
+        Arc::make_mut(&mut self.chunk).remove_range_from(start);
+    }
+
+    fn remove_range_to(&mut self, end: usize) {
+        Arc::make_mut(&mut self.chunk).remove_range_to(end);
     }
 }
 
@@ -461,6 +539,14 @@ impl<T: Chunk> Branch<T> {
         other.summed_info += info;
         let nodes = Arc::make_mut(&mut self.nodes).drain(start..);
         Arc::make_mut(&mut other.nodes).splice(..0, nodes);
+    }
+
+    fn remove_range_from(&mut self, start: usize) {
+        Arc::make_mut(&mut self.nodes).truncate(start);
+    }
+
+    fn remove_range_to(&mut self, end: usize) {
+        Arc::make_mut(&mut self.nodes).drain(..end);
     }
 }
 
