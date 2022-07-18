@@ -56,9 +56,9 @@ pub trait CxPlatformApi{
     fn set_window_position(&mut self, pos: Vec2);
 
     fn start_timer(&mut self, interval: f64, repeats: bool) -> Timer;
-    fn stop_timer(&mut self, timer: Timer); 
+    fn stop_timer(&mut self, timer: Timer);
 
-    fn post_signal(signal: Signal); 
+    fn post_signal(signal: Signal);
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static;
     
     fn web_socket_open(&mut self, url:String, rec:WebSocketAutoReconnect)->WebSocket;
