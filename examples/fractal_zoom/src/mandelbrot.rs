@@ -83,18 +83,34 @@ impl TextureTile {
     }
 }
 
+pub enum ZoomMode{
+    In(f64),
+    Out(f64),
+}
+
 #[derive(Live, FrameComponent)]
 #[live_register(frame_component!(Mandelbrot))]
 pub struct Mandelbrot {
     draw_mandelbrot: DrawMandelbrot,
     max_iter: usize,
     #[rust] next_frame: NextFrame,
+    
+    #[rust(vec2f64(-1.5,0.0))] fractal_center: Vec2F64,
+    #[rust(0.5)] fractal_zoom: f64,
+    #[rust(0.5)] layer_zoom: f64,
+    
+    view: View,
     state: State,
     walk: Walk,
     #[rust(TileCache::new(cx))] tile_cache: TileCache,
+    #[rust] once:bool,
+
+    #[rust] zoom_mode: Option<ZoomMode>,
     #[rust] view_rect: Rect,
+    #[rust] view_center: Vec2,
+    #[rust] view_shift: Vec2,
     #[rust] current_dpi_factor: f32,
-    #[rust(ThreadPool::new(cx, 4))] pool: ThreadPool,
+    #[rust(ThreadPool::new(cx, 1))] pool: ThreadPool,
     #[rust] to_ui: ToUIReceiver<ToUI>,
 }
 
@@ -161,15 +177,13 @@ impl Mandelbrot {
         return (max_iter, dist)
     }
 
-    pub fn render_tiles(&mut self) {
+    pub fn render_tiles(&mut self, fractal_zoom:f64, fractal_center:Vec2F64) {
         let max_iter = self.max_iter;
 
         let tile_size = vec2(TILE_SIZE_X as f32, TILE_SIZE_Y as f32) / self.current_dpi_factor;
         let view_rect = self.view_rect;
         let view_center = view_rect.size * 0.5 - tile_size * 0.5;
         
-        let fractal_center = vec2f64(-1.5,0.0);
-        let fractal_zoom = 0.5;
         let fractal_size = vec2f64(fractal_zoom, fractal_zoom);
         
         let tile_cache = &mut self.tile_cache;
@@ -219,32 +233,85 @@ impl Mandelbrot {
         }
     }
     
+    pub fn zoom_around(&mut self, abs:Vec2){
+        let scale = (self.layer_zoom / self.fractal_zoom) as f32;
+        // this is the new pos
+        let real = (abs - self.view_shift - self.view_center) / scale + self.view_center;
+        let p_old = self.view_center - self.view_center * scale;
+        let p_new = real - real * scale;
+        // shift to keep the point in the same place
+        self.view_center = real;
+        self.view_shift += p_old - p_new;
+    }
+    
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> MandelbrotAction {
         self.state_handle_event(cx, event);
         if let Some(_ne) = self.next_frame.triggered(event) {
-            self.render_tiles();
-            console_log!("ONCE");
+            
+            if !self.once{
+                self.render_tiles(self.fractal_zoom, self.fractal_center);
+                self.once = true;
+            }
+            match self.zoom_mode{
+                Some(ZoomMode::In(f))=>{
+                    self.fractal_zoom *= f;
+                    self.next_frame = cx.new_next_frame();
+                    self.view.redraw(cx);
+                }
+                Some(ZoomMode::Out(f))=>{
+                    self.fractal_zoom *= f;
+                    self.next_frame = cx.new_next_frame();
+                    self.view.redraw(cx);
+                }
+                None=>()
+            }
         }
         
         while let Ok(msg) = self.to_ui.try_recv(event) {
             let ToUI::TileDone(mut tile) = msg;
             tile.texture.swap_image_u32(cx, &mut tile.buffer);
             self.tile_cache.filled.push(tile);
-            cx.redraw_all();
+            self.view.redraw(cx);
         }
         
-        match event.hits(cx, self.draw_mandelbrot.area()) {
-            _ => ()
+        match event.hits(cx, self.view.area()) {
+            HitEvent::FingerDown(fe) => {
+                self.zoom_around(fe.abs);
+                if fe.digit == 0{
+                    self.zoom_mode = Some(ZoomMode::In(0.98));
+                }
+                else{
+                    self.zoom_mode = Some(ZoomMode::Out(1.02));
+                }
+                self.next_frame = cx.new_next_frame();
+            },
+            HitEvent::FingerMove(fe) => {
+                self.zoom_around(fe.abs);
+            }
+            HitEvent::FingerUp(_) => {
+                self.zoom_mode = None;
+            }
+            _=>()
         }
         MandelbrotAction::None
     }
     
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        self.view_rect = cx.walk_turtle(walk);
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk)-> ViewRedraw {
+        self.view.begin(cx, walk, Layout::flow_right())?;
+        
+        self.view_rect = cx.turtle().rect();
         self.current_dpi_factor = cx.current_dpi_factor;
+        
         for tile in &self.tile_cache.filled{
             self.draw_mandelbrot.draw_vars.set_texture(0, &tile.texture);
-            self.draw_mandelbrot.draw_abs(cx, tile.display);
+            
+            let scale = (self.layer_zoom / self.fractal_zoom) as f32;
+            let display = tile.display.scale_and_shift(self.view_center, scale as f32, self.view_shift);
+            self.draw_mandelbrot.draw_abs(cx, display);
         }
+        
+        self.view.end(cx);
+        
+        Ok(())
     }
 }

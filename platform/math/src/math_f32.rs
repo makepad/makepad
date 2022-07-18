@@ -35,6 +35,14 @@ impl Rect {
         return pos.x >= self.pos.x && pos.x <= self.pos.x + self.size.x &&
         pos.y >= self.pos.y && pos.y <= self.pos.y + self.size.y;
     }
+    
+    pub fn scale_and_shift(&self, center: Vec2, scale:f32, shift: Vec2) -> Rect {
+        Rect{
+            pos: (self.pos - center)*scale + center + shift,
+            size: self.size * scale
+        }
+    }
+    
     pub fn intersects(&self, r: Rect) -> bool {
         !(
             r.pos.x > self.pos.x + self.size.x ||
