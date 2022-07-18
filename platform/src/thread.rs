@@ -159,16 +159,8 @@ impl ThreadPool {
         }
     }
     
-    // synchronously process task
-    /*
-    pub fn single_thread_handle_event(&mut self, cx:&mut Cx, event:&mut Event){
-    }*/
-    
     pub fn execute<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
-        // add task
         self.tasks.lock().unwrap().borrow_mut().push(ThreadPoolTask{callback:Box::new(f)});
-        
-        // let all threads know there is something to look at, first one to pick it up wins
         for sender in &self.senders{
             sender.send(()).unwrap();
         }
