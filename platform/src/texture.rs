@@ -1,5 +1,6 @@
 pub use {
     std::{
+        sync::Arc,
         rc::Rc,
         cell::RefCell
     },
@@ -16,7 +17,6 @@ pub use {
 #[derive(PartialEq)]
 pub struct Texture {
     pub texture_id: usize,
-    pub textures_free: Rc<RefCell<Vec<usize>>>,
 }
 
 #[derive(Clone, Copy, PartialEq)]
@@ -58,18 +58,18 @@ impl Default for TextureDesc {
 impl LiveHook for Texture{}
 impl LiveNew for Texture {
     fn new(cx: &mut Cx)->Self{
-        let textures_free = cx.textures_free.clone();
+        /*let textures_free = cx.textures_free.clone();
         let texture_id =  if let Some(texture_id) = textures_free.borrow_mut().pop(  ){
             texture_id 
         }
-        else{
+        else{*/
             let texture_id = cx.textures.len();
             cx.textures.push(CxTexture::default());
-            texture_id
-        };        
+            //texture_id
+        //};        
         Self{
             texture_id,
-            textures_free
+        //    textures_free
         }
     }
     
