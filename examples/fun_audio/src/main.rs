@@ -12,7 +12,7 @@ live_register!{
     use makepad_component::theme::*;
     use makepad_component::frame::*;
     use makepad_platform::shader::std::*;
-    
+     
     MainHeader: FoldHeader {
         walk: {
         }
