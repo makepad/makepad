@@ -5,6 +5,7 @@ use {
             HashSet,
         },
         time::Instant,
+        sync::Arc,
         rc::Rc,
         rc::Weak,
         cell::RefCell,
@@ -94,7 +95,7 @@ pub struct Cx {
     pub draw_lists_free: Rc<RefCell<Vec<usize >> >,
     
     pub textures: Vec<CxTexture>,
-    pub textures_free: Rc<RefCell<Vec<usize >> >,
+    pub textures_free: Arc<RefCell<Vec<usize >> >,
     
     pub geometries: Vec<CxGeometry>,
     pub geometries_free: Rc<RefCell<Vec<usize >> >,
@@ -241,7 +242,7 @@ impl Default for Cx {
             draw_lists_free: Rc::new(RefCell::new(Vec::new())),
             
             textures: textures,
-            textures_free: Rc::new(RefCell::new(Vec::new())),
+            textures_free: Arc::new(RefCell::new(Vec::new())),
             
             geometries: Vec::new(),
             geometries_free: Rc::new(RefCell::new(Vec::new())),
