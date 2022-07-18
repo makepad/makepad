@@ -9,9 +9,7 @@ live_register!{
     use makepad_platform::shader::std::*;
     
     DrawMandelbrot: {{DrawMandelbrot}} {
-        
         texture tex: texture2d
-        
         fn pixel(self) -> vec4 {
             let fractal = sample2d(self.tex, self.pos)
             let iter = fractal.y * 65535 + fractal.x*255;
@@ -27,8 +25,8 @@ live_register!{
     Mandelbrot: {{Mandelbrot}} {
         num_threads: 1,
         max_iter: 256,
-        tile_width: 512,
-        tile_height: 512,
+        tile_width: 1024,
+        tile_height: 1024,
     }
 }
 
@@ -69,7 +67,6 @@ impl LiveHook for Mandelbrot {
         });
         self.pool.add_threads(cx, self.num_threads);
         self.render_tile();
-        
     }
 }
 
@@ -110,19 +107,6 @@ impl Mandelbrot {
         let cx = -1.5;
         let cy = -1.0;
         let _zoom = 1.0;
-        /*
-        let input_float = 32.52;
-        
-        let intpack = (input_float*256.0 + 127.0 * 255.0).max(0.0).min(65535.0) as u32;
-        
-        let float_x = (intpack & 0xff) as f32  / 255.0;
-        let float_y = ((intpack>>8) & 0xff) as f32 / 255.0;
-        
-        let rebuild = (float_y * 256.0 + float_x - 127.0);
-        
-        console_log!("X {} Y {} INTPACK {} INPUT {} REBUILD {}", float_x, float_y, intpack, input_float, rebuild);
-        
-        */
         
         let mut image_u32 = Vec::new();
         self.pool.execute(move || {
@@ -133,14 +117,7 @@ impl Mandelbrot {
                 for x in 0..tile_width {
                     let fx = (x as f64 / tile_width as f64)*3.0 + cx;
                     let fy = (y as f64 / tile_height as f64)*2.0 + cy;
-                    
                     let (iter, dist) = Self::mandelbrot_f64(max_iter, fx, fy);
-                    //console_log!("{}", iter);
-                    // pack iteration and distance into rg and ba
-                    //console_log!("{} {} {}", fx, fy, iter);
-                    // we have to map dist into a 16 bit number
-                    
-                    
                     let dist = (dist * 256.0 + 127.0 * 255.0).max(0.0).min(65535.0) as u32;
                     let data = iter as u32 | (dist << 16);
                     image_u32[y * tile_width + x] =  data;
@@ -154,10 +131,7 @@ impl Mandelbrot {
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> MandelbrotAction {
         self.state_handle_event(cx, event);
         while let Ok(msg) = self.to_ui.try_recv(event) {
-            
-            
             let ToUI::TileDone(mut image_u32) = msg;
-            // update the texture
             self.texture.swap_image_u32(cx, &mut image_u32);
             self.draw_mandelbrot.area().redraw(cx);
         }
