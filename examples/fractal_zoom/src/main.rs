@@ -19,7 +19,7 @@ live_register!{
     }
 }
 main_app!(App);
-
+ 
 #[derive(Live, LiveHook)]
 pub struct App {
     frame: Frame,
