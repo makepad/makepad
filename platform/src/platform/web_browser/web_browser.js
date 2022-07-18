@@ -701,7 +701,7 @@ export class WasmWebBrowser extends WasmBridge {
                 if (mouse_buttons_down[i]) {
                     let mf = mouse_to_finger(e);
                     mf.digit = i;
-                    this.to_wasm.ToWasmFingerMove({finger: mouse_to_finger(e)});
+                    this.to_wasm.ToWasmFingerMove({finger: mf});
                 }
             }
             last_mouse_finger = mouse_to_finger(e);

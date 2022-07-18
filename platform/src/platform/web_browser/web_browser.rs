@@ -314,7 +314,7 @@ impl Cx {
         
         if self.need_redrawing() || self.new_next_frames.len() != 0 {
             self.call_draw_event();
-            //self.platform.from_wasm(FromWasmRequestAnimationFrame {});
+            self.platform.from_wasm(FromWasmRequestAnimationFrame {});
         }
         self.call_signals_and_triggers();
         
