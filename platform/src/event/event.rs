@@ -206,6 +206,17 @@ impl Default for Event {
 #[derive(Clone, Debug, Default, Eq, PartialEq, Copy, Hash)]
 pub struct NextFrame(pub u64);
 
+impl NextFrame{
+    pub fn triggered(&self, event:&Event)->Option<NextFrameEvent>{
+        if let Event::NextFrame(ne) = event{
+            if ne.set.contains(&self){
+                return Some(ne.clone())
+            }
+        }
+        None
+    }
+}
+
 #[derive(Copy, Clone, Debug, Default)]
 pub struct Timer(pub u64);
 
