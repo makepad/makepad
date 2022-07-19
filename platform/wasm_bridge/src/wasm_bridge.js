@@ -120,7 +120,7 @@ export class WasmBridge {
     }
     
     static create_shared_memory(){
-        return new WebAssembly.Memory({initial: 2048, maximum: 8192, shared: true});
+        return new WebAssembly.Memory({initial: 64, maximum: 8192, shared: true});
     }
     
     static instantiate_wasm(bytes, memory, env) {
