@@ -396,8 +396,6 @@ impl Mandelbrot {
             // ok so we should compute which tiles to retire
             // tiles that are outside of our viewport for instance
             // or tiles that are overlapped completely.
-            
-            
             if self.tile_cache.renders_in_queue == 0 && self.tile_cache.next_zoom != self.fractal_zoom{
                 self.mandelbrot_tile_generator(
                     cx,

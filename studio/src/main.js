@@ -2,7 +2,7 @@ import {WasmWebGL} from "/makepad/platform/src/platform/web_browser/web_gl.js";
 
 const wasm = await WasmWebGL.fetch_and_instantiate_wasm(
     location.hostname=="localhost"?
-    "/makepad/target/wasm32-unknown-unknown/release/makepad_studio.wasm":
+    "/makepad/target/wasm32-unknown-unknown/debug/makepad_studio.wasm":
     "/makepad/target/wasm32-unknown-unknown/release/makepad_studio.wasm"
 );
 
