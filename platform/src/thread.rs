@@ -1,4 +1,5 @@
 use {
+    std::rc::Rc,
     std::sync::{
         mpsc::{
             channel,
@@ -131,8 +132,12 @@ impl<T> FromUIReceiver<T> {
     }
 }
 
-pub struct ThreadPool {
+pub struct ThreadPoolSender {
     sender: Sender<Box<dyn FnOnce() + Send + 'static>>,
+}
+
+pub struct ThreadPool {
+    sender_id: usize,
 }
 
 impl ThreadPool {
@@ -154,41 +159,18 @@ impl ThreadPool {
                 task();
             })
         }
-        Self {sender}
-    }
-    
-    pub fn execute<F>(&mut self, task: F) where F: FnOnce() + Send + 'static {
-        self.sender.send(Box::new(task)).unwrap();
-    }
-}
-/*
-pub struct WasmThreadPool {
-    sender: Sender<Box<dyn FnOnce() + Send + 'static>>,
-}
-
-impl WasmThreadPool {
-    pub fn new(cx: &mut Cx, num_threads: usize) -> Self {
-        let (sender, receiver) = channel::<Box<dyn FnOnce() + Send + 'static>>();
-        let receiver = Arc::new(Mutex::new(receiver));
-        for _ in 0..num_threads {
-            let receiver = receiver.clone();
-            cx.spawn_thread(move || loop {
-                let task = if let Ok(receiver) = receiver.lock() {
-                    match receiver.recv() {
-                        Ok(task) => task,
-                        Err(_) => return
-                    }
-                }
-                else {
-                    panic!();
-                };
-                task();
-            })
+        let sender_id = cx.platform.pool_senders.len();
+        cx.platform.pool_senders.push(Some(ThreadPoolSender{
+            sender
+        }));
+        Self{
+            sender_id
         }
-        Self {sender}
     }
     
-    pub fn execute<F>(&mut self, task: F) where F: FnOnce() + Send + 'static {
-        self.sender.send(Box::new(task)).unwrap();
+    pub fn execute<F>(&mut self, cx:&mut Cx, task: F) where F: FnOnce() + Send + 'static {
+        if let Some(tps) = &cx.platform.pool_senders[self.sender_id]{
+            tps.sender.send(Box::new(task)).unwrap();
+        }
     }
-}*/
+}
