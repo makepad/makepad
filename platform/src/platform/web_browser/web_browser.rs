@@ -1,5 +1,6 @@
 
 use {
+    std::rc::Rc,
     crate::{
         makepad_live_id::*,
         makepad_math::Vec2,
@@ -31,6 +32,7 @@ use {
             WindowGeom,
             WindowGeomChangeEvent
         },
+        thread::ThreadPoolSender,
         menu::Menu,
         cursor::MouseCursor,
         cx_api::{CxPlatformApi},
@@ -525,6 +527,7 @@ pub unsafe extern "C" fn wasm_thread_alloc_tls_and_stack(tls_size: u32) -> u32 {
 
 // storage buffers for graphics API related platform
 pub struct CxPlatform {
+    pub pool_senders: Vec<Option<ThreadPoolSender>>,
     pub is_initialized: bool,
     pub window_geom: WindowGeom,
     pub from_wasm: Option<FromWasmMsg>,
@@ -539,6 +542,7 @@ pub struct CxPlatform {
 impl Default for CxPlatform {
     fn default() -> CxPlatform {
         CxPlatform {
+            pool_senders: Vec::new(),
             is_initialized: false,
             window_geom: WindowGeom::default(),
             from_wasm: None,
@@ -553,6 +557,10 @@ impl Default for CxPlatform {
 }
 
 impl CxPlatform {
+    pub fn terminate_thread_pools(&mut self){
+        self.pool_senders.clear();
+    }
+    
     pub fn from_wasm(&mut self, from_wasm: impl FromWasm) {
         self.from_wasm.as_mut().unwrap().from_wasm(from_wasm);
     }
