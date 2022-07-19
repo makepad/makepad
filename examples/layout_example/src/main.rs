@@ -58,7 +58,6 @@ impl App {
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
         self.window.handle_event(cx, event);
         
-        
         if let Ok(data) = self.to_ui.try_recv(event){
             console_log!("GOT DATA {:?}", data);
             self.from_ui.send(FromUI::TestMessage(vec![4,5,6])).unwrap();
