@@ -6,6 +6,9 @@ export class WasmWebBrowser extends WasmBridge {
         
         window.onbeforeunload = _=>{
             this.wasm_terminate_thread_pools();
+            for(let worker in this.workers){
+                worker.terminate();
+            }
         }
 
         this.wasm_app = this.wasm_create_app();
