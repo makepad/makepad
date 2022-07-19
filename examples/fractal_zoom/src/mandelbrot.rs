@@ -165,7 +165,7 @@ pub struct Mandelbrot {
     walk: Walk,
     #[rust(TileCache::new(cx))] tile_cache: TileCache,
     
-    #[rust(ThreadPool::new(cx, 4))] pool: ThreadPool,
+    #[rust(ThreadPool::new(cx, 1))] pool: ThreadPool,
     #[rust] to_ui: ToUIReceiver<ToUI>,
 }
 
@@ -418,7 +418,6 @@ impl Mandelbrot {
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) -> ViewRedraw {
         self.view.begin(cx, walk, Layout::flow_right()) ?;
-        
         self.space.tile_size = vec2f64(TILE_SIZE_X as f64, TILE_SIZE_Y as f64) / cx.current_dpi_factor as f64;
         self.space.view_rect = cx.turtle().rect();
         self.draw_mandelbrot.alpha = 1.0;
