@@ -258,8 +258,16 @@ impl Mandelbrot {
     }
     
     pub fn zoom_around(&mut self, factor: f64, around: Vec2) {
+        
+        
         let fpos1 = self.space.view_to_fractal(self.fractal_zoom, self.fractal_center, around);
         self.fractal_zoom *= factor;
+        if self.fractal_zoom < 5e-14f64{
+            self.fractal_zoom = 5e-14f64
+        }
+        if self.fractal_zoom > 2.0{
+            self.fractal_zoom = 2.0;
+        }
         let fpos2 = self.space.view_to_fractal(self.fractal_zoom, self.fractal_center, around);
         self.fractal_center += fpos1 - fpos2;
     }
@@ -382,7 +390,6 @@ impl Mandelbrot {
                     self.is_zoom_in
                 );
             }
-            //console_log!("GOT MSG");
             self.view.redraw(cx);
         }
         
