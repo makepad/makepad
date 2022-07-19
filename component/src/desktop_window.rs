@@ -16,7 +16,7 @@ live_register!{
         frame: {
             layout: {
                 flow: Flow::Down
-            },
+            },/*
             windows_buttons = Solid {
                 bg: {color: (COLOR_BG_APP)}
                 height: 29
@@ -28,7 +28,7 @@ live_register!{
                 //max_btn:= DesktopButton {button_type: DesktopButtonType::WindowsMax}
                 //close_btn:= DesktopButton {button_type: DesktopButtonType::WindowsClose}
                 
-            }
+            }*/
             inner_view = Frame {user_draw: true}
         }
         
