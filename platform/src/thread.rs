@@ -1,5 +1,4 @@
 use {
-    std::rc::Rc,
     std::sync::{
         mpsc::{
             channel,
