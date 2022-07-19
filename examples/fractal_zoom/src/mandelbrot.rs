@@ -19,7 +19,7 @@ live_register!{
             let iter = fractal.y * 65535 + fractal.x * 255;
             let dist = (fractal.w * 256 + fractal.z - 127);
             
-            let index = abs(8.0 * iter / self.max_iter - 0.2 * log(dist));
+            let index = abs(6.0 * iter / self.max_iter - 0.1 * log(dist));
             if iter > self.max_iter {
                 return vec4(0, 0, 0, self.alpha);
             }
@@ -54,7 +54,7 @@ pub struct TextureTile {
 
 const TILE_SIZE_X: usize = 256;
 const TILE_SIZE_Y: usize = 256;
-const CACHE_MAX: usize = 100;
+const CACHE_MAX: usize = 300;
 
 #[derive(Default)]
 pub struct TileCache {
@@ -77,6 +77,7 @@ impl TileCache {
             ..Default::default()
         }
     }
+    
     fn discard_current(&mut self) {
         while let Some(item) = self.current.pop() {
             self.empty.push(item);
@@ -392,6 +393,11 @@ impl Mandelbrot {
             else {
                 self.tile_cache.next.push(tile);
             }
+            // ok so we should compute which tiles to retire
+            // tiles that are outside of our viewport for instance
+            // or tiles that are overlapped completely.
+            
+            
             if self.tile_cache.renders_in_queue == 0 && self.tile_cache.next_zoom != self.fractal_zoom{
                 self.mandelbrot_tile_generator(
                     cx,
