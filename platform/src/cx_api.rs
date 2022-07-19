@@ -413,6 +413,13 @@ macro_rules!main_app {
             Box::into_raw(appcx) as u32
         }
         
+        #[export_name = "wasm_terminate_thread_pools"]
+        #[cfg(target_arch = "wasm32")]
+        pub unsafe extern "C" fn wasm_terminate_thread_pools(appcx: u32) {
+            let body = appcx as *mut WasmAppCx;
+            (*body).cx.platform.terminate_thread_pools();
+        }
+        
         #[export_name = "wasm_process_msg"]
         #[cfg(target_arch = "wasm32")]
         pub unsafe extern "C" fn wasm_process_msg(msg_ptr: u32, appcx: u32) -> u32 {
