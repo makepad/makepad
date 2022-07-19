@@ -165,7 +165,7 @@ pub struct Mandelbrot {
     walk: Walk,
     #[rust(TileCache::new(cx))] tile_cache: TileCache,
     
-    #[rust(ThreadPool::new(cx, 4))] pool: ThreadPool,
+    #[rust(ThreadPool::new(cx, 1))] pool: ThreadPool,
     #[rust] to_ui: ToUIReceiver<ToUI>,
 }
 
@@ -255,7 +255,7 @@ impl Mandelbrot {
                 tile.buffer[y * TILE_SIZE_X + x] = data;
             }
         }
-        std::thread::sleep(std::time::Duration::from_millis(100));
+        std::thread::sleep(std::time::Duration::from_millis(1000));
     }
     
     pub fn zoom_around(&mut self, factor: f64, around: Vec2) {
