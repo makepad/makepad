@@ -1,5 +1,6 @@
 use{
     std::{fmt,ops},
+    crate::math_f64::*,
 //    makepad_microserde::*,
 //    crate::colorhex::*
 };
@@ -145,6 +146,11 @@ pub struct Vec2 {
 impl Vec2 {
     pub fn new() -> Vec2 {
         Vec2::default()
+    }
+    
+    
+    pub fn into_vec2f64(self)->Vec2F64{
+        Vec2F64{x:self.x as f64, y:self.y as f64}
     }
     
     pub fn all(x: f32) -> Vec2 {
