@@ -54,7 +54,7 @@ pub struct TextureTile {
 
 const TILE_SIZE_X: usize = 256;
 const TILE_SIZE_Y: usize = 256;
-const CACHE_MAX: usize = 300;
+const CACHE_MAX: usize = 100;
 
 #[derive(Default)]
 pub struct TileCache {
