@@ -5,9 +5,6 @@ export class WasmWebBrowser extends WasmBridge {
         super (wasm, dispatch);
         
         window.onbeforeunload = _=>{
-            //if (this.detect.is_mobile_safari){
-                return "Refreshing the browser on safari might break";
-            //}
             this.wasm_terminate_thread_pools();
             this.clear_memory_refs();
             for(let worker of this.workers){
