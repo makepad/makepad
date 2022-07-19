@@ -155,7 +155,7 @@ pub struct Mandelbrot {
     max_iter: usize,
     #[rust] next_frame: NextFrame,
     
-    #[rust(vec2f64(-1.5, 0.0))] fractal_center: Vec2F64,
+    #[rust(vec2f64(-0.5, 0.0))] fractal_center: Vec2F64,
     #[rust(0.5)] fractal_zoom: f64,
     
     #[rust] finger_abs: Vec2,
