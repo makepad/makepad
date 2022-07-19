@@ -12,7 +12,7 @@ live_register!{
     use makepad_component::theme::*;
     use makepad_component::frame::*;
     use makepad_platform::shader::std::*;
-    
+     
     MainHeader: FoldHeader {
         walk: {
         }
@@ -228,7 +228,6 @@ impl App {
         makepad_component::live_register(cx);
         crate::audio::live_register(cx);
         crate::piano::live_register(cx);
-        
     }
     
     pub fn new_app(cx: &mut Cx) -> Self {
@@ -267,7 +266,6 @@ impl App {
                 }
             }
             Event::MidiInputList(_inputs) => {
-                //console_log!("{:#?}", inputs);
             }
             Event::Construct => {
                 

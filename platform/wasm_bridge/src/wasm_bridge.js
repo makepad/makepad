@@ -21,6 +21,16 @@ export class WasmBridge {
         this.msg_class = new Function("ToWasmMsg", "FromWasmMsg", code)(ToWasmMsg, FromWasmMsg);
     }
     
+    clear_memory_refs(){
+        this.exports = null;
+        this.memory = null;
+        this.wasm._memory = null;
+        this.f32 = null;
+        this.u32 = null;
+        this.f64 = null;
+        this.wasm = null;
+    }
+    
     update_array_buffer_refs() {
         if (this.buffer_ref_len_check != this.memory.buffer.byteLength) {
             this.f32 = new Float32Array(this.memory.buffer);
@@ -110,7 +120,7 @@ export class WasmBridge {
     }
     
     static create_shared_memory(){
-        return new WebAssembly.Memory({initial: 64, maximum: 16384, shared: true});
+        return new WebAssembly.Memory({initial: 4096, maximum: 4096, shared: true});
     }
     
     static instantiate_wasm(bytes, memory, env) {

@@ -4,6 +4,14 @@ export class WasmWebBrowser extends WasmBridge {
     constructor(wasm, dispatch, canvas) {
         super (wasm, dispatch);
         
+        window.onbeforeunload = _=>{
+            this.wasm_terminate_thread_pools();
+            this.clear_memory_refs();
+            for(let worker of this.workers){
+                worker.terminate();
+            }
+        }
+        
         this.wasm_app = this.wasm_create_app();
         this.dispatch = dispatch;
         this.canvas = canvas;
@@ -13,6 +21,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.web_sockets = [];
         this.window_info = {}
         this.signals = [];
+        this.workers = [];
         this.thread_stack_size = 2 * 1024 * 1024;
         this.init_detection();
     }
@@ -59,7 +68,7 @@ export class WasmWebBrowser extends WasmBridge {
                 this.focus_keyboard_input();
                 this.to_wasm.ToWasmRedrawAll();
                 this.do_wasm_pump();
-                
+
                 var loaders = document.getElementsByClassName('canvas_loader');
                 for (var i = 0; i < loaders.length; i ++) {
                     loaders[i].parentNode.removeChild(loaders[i])
@@ -313,6 +322,8 @@ export class WasmWebBrowser extends WasmBridge {
             this.to_wasm.ToWasmSignal(data)
             this.do_wasm_pump();
         })
+        
+        this.workers.push(worker);
     }
     
     FromWasmSpawnAudioOutput(args) {
@@ -401,6 +412,10 @@ export class WasmWebBrowser extends WasmBridge {
     
     // calling into wasm
     
+    
+    wasm_terminate_thread_pools() {
+        this.exports.wasm_terminate_thread_pools(this.wasm_app);
+    }
     
     wasm_create_app() {
         let new_ptr = this.exports.wasm_create_app();
@@ -701,7 +716,7 @@ export class WasmWebBrowser extends WasmBridge {
                 if (mouse_buttons_down[i]) {
                     let mf = mouse_to_finger(e);
                     mf.digit = i;
-                    this.to_wasm.ToWasmFingerMove({finger: mouse_to_finger(e)});
+                    this.to_wasm.ToWasmFingerMove({finger: mf});
                 }
             }
             last_mouse_finger = mouse_to_finger(e);
