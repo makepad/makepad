@@ -19,7 +19,7 @@ live_register!{
             let iter = fractal.y * 65535 + fractal.x * 255;
             let dist = (fractal.w * 256 + fractal.z - 127);
             
-            let index = abs(8.0 * iter / 256 - 0.2 * log(dist));
+            let index = abs(8.0 * iter / self.max_iter - 0.2 * log(dist));
             if iter > self.max_iter {
                 return vec4(0, 0, 0, self.alpha);
             }
