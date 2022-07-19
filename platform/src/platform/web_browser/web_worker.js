@@ -23,5 +23,6 @@ onmessage = async function(e) {
     
     // so depending on what you return here we can sleep the webworker and re-enter
     console.log("terminating worker");
+    bridge.clear_memory_refs();
     close();
 }
