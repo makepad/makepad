@@ -391,7 +391,7 @@ impl Mandelbrot {
             }
             if self.tile_cache.renders_in_queue == 0 {
                 console_log!("REMOVING POOL");
-                //self.pool = None;
+                self.pool = None;
             }
             if self.tile_cache.renders_in_queue == 0 && self.tile_cache.next_zoom != self.fractal_zoom{
                 self.mandelbrot_tile_generator(
