@@ -56,9 +56,9 @@ pub trait CxPlatformApi{
     fn set_window_position(&mut self, pos: Vec2);
 
     fn start_timer(&mut self, interval: f64, repeats: bool) -> Timer;
-    fn stop_timer(&mut self, timer: Timer); 
+    fn stop_timer(&mut self, timer: Timer);
 
-    fn post_signal(signal: Signal); 
+    fn post_signal(signal: Signal);
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static;
     
     fn web_socket_open(&mut self, url:String, rec:WebSocketAutoReconnect)->WebSocket;
@@ -411,6 +411,13 @@ macro_rules!main_app {
             appcx.cx.live_expand();
             appcx.cx.live_scan_dependencies();
             Box::into_raw(appcx) as u32
+        }
+        
+        #[export_name = "wasm_terminate_thread_pools"]
+        #[cfg(target_arch = "wasm32")]
+        pub unsafe extern "C" fn wasm_terminate_thread_pools(appcx: u32) {
+            let body = appcx as *mut WasmAppCx;
+            (*body).cx.platform.terminate_thread_pools();
         }
         
         #[export_name = "wasm_process_msg"]

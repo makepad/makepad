@@ -1,4 +1,5 @@
 use {
+    std::rc::Rc,
     std::sync::{
         mpsc::{
             channel,
@@ -11,7 +12,6 @@ use {
         Arc,
         Mutex
     },
-    std::cell::RefCell,
     crate::{
         makepad_live_id::LiveId,
         cx::Cx,
@@ -58,9 +58,9 @@ impl<T> ToUIReceiver<T> {
         }
     }
     
-    pub fn try_recv(&self, event:&Event)->Result<T,TryRecvError>{
-        if let Event::Signal(se) = event{
-            if se.signals.get(&self.signal).is_some(){
+    pub fn try_recv(&self, event: &Event) -> Result<T, TryRecvError> {
+        if let Event::Signal(se) = event {
+            if se.signals.get(&self.signal).is_some() {
                 return self.receiver.try_recv()
             }
         }
@@ -132,45 +132,45 @@ impl<T> FromUIReceiver<T> {
     }
 }
 
-struct ThreadPoolTask {
-    callback: Box<dyn FnOnce() + Send + 'static>,
+pub struct ThreadPoolSender {
+    sender: Sender<Box<dyn FnOnce() + Send + 'static>>,
 }
 
-#[derive(Default)]
 pub struct ThreadPool {
-    senders: Vec<Sender<()>>,
-    tasks: Arc<Mutex<RefCell<Vec<ThreadPoolTask>>>>,
+    sender_id: usize,
 }
 
 impl ThreadPool {
-    pub fn add_threads(&mut self, cx: &mut Cx, num_threads: usize){
-        for _ in 0..num_threads{
-            let (sender, receiver) = channel();
-            self.senders.push(sender);
-            let tasks = self.tasks.clone();
-            cx.spawn_thread(move ||{
-                while let Ok(()) = receiver.recv(){
-                    if let Some(task) = tasks.lock().unwrap().borrow_mut().pop(){
-                        let callback = task.callback;
-                        callback();
+    pub fn new(cx: &mut Cx, num_threads: usize) -> Self {
+        let (sender, receiver) = channel::<Box<dyn FnOnce() + Send + 'static>>();
+        let receiver = Arc::new(Mutex::new(receiver));
+        for _ in 0..num_threads {
+            let receiver = receiver.clone();
+            cx.spawn_thread(move || loop {
+                let task = if let Ok(receiver) = receiver.lock() {
+                    match receiver.recv() {
+                        Ok(task) => task,
+                        Err(_) => return
                     }
                 }
+                else {
+                    panic!();
+                };
+                task();
             })
+        }
+        let sender_id = cx.platform.pool_senders.len();
+        cx.platform.pool_senders.push(Some(ThreadPoolSender{
+            sender
+        }));
+        Self{
+            sender_id
         }
     }
     
-    // synchronously process task
-    /*
-    pub fn single_thread_handle_event(&mut self, cx:&mut Cx, event:&mut Event){
-    }*/
-    
-    pub fn execute<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
-        // add task
-        self.tasks.lock().unwrap().borrow_mut().push(ThreadPoolTask{callback:Box::new(f)});
-        
-        // let all threads know there is something to look at, first one to pick it up wins
-        for sender in &self.senders{
-            sender.send(()).unwrap();
+    pub fn execute<F>(&mut self, cx:&mut Cx, task: F) where F: FnOnce() + Send + 'static {
+        if let Some(tps) = &cx.platform.pool_senders[self.sender_id]{
+            tps.sender.send(Box::new(task)).unwrap();
         }
     }
 }

@@ -1,5 +1,6 @@
 use{
     std::{fmt,ops},
+    crate::math_f64::*,
 //    makepad_microserde::*,
 //    crate::colorhex::*
 };
@@ -18,18 +19,6 @@ impl fmt::Display for PrettyPrintedF32 {
 }
 
 
-pub struct PrettyPrintedF64(pub f64);
-
-impl fmt::Display for PrettyPrintedF64 { 
-    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        if self.0.abs().fract() < 0.00000001 {
-            write!(f, "{}.0", self.0)
-        } else {
-            write!(f, "{}", self.0)
-        }
-    }
-}
-
 
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct Rect {
@@ -47,6 +36,14 @@ impl Rect {
         return pos.x >= self.pos.x && pos.x <= self.pos.x + self.size.x &&
         pos.y >= self.pos.y && pos.y <= self.pos.y + self.size.y;
     }
+    
+    pub fn scale_and_shift(&self, center: Vec2, scale:f32, shift: Vec2) -> Rect {
+        Rect{
+            pos: (self.pos - center)*scale + center + shift,
+            size: self.size * scale
+        }
+    }
+    
     pub fn intersects(&self, r: Rect) -> bool {
         !(
             r.pos.x > self.pos.x + self.size.x ||
@@ -149,6 +146,11 @@ pub struct Vec2 {
 impl Vec2 {
     pub fn new() -> Vec2 {
         Vec2::default()
+    }
+    
+    
+    pub fn into_vec2f64(self)->Vec2F64{
+        Vec2F64{x:self.x as f64, y:self.y as f64}
     }
     
     pub fn all(x: f32) -> Vec2 {
