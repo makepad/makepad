@@ -26,6 +26,7 @@ export class WasmWebBrowser extends WasmBridge {
     }
     
     load_deps() {
+        console.log("LOAD DEPS");
         this.to_wasm = this.new_to_wasm();
         
         this.to_wasm.ToWasmGetDeps({
@@ -67,6 +68,7 @@ export class WasmWebBrowser extends WasmBridge {
                 this.focus_keyboard_input();
                 this.to_wasm.ToWasmRedrawAll();
                 this.do_wasm_pump();
+        console.log("HERE");
                 
                 var loaders = document.getElementsByClassName('canvas_loader');
                 for (var i = 0; i < loaders.length; i ++) {
