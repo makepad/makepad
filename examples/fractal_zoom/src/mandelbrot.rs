@@ -278,6 +278,7 @@ impl Mandelbrot {
     
     pub fn mandelbrot_tile_generator(
         &mut self,
+        cx:&mut Cx,
         fractal_zoom: f64,
         fractal_center: Vec2F64,
         fractal_rect: RectF64,
@@ -330,7 +331,7 @@ impl Mandelbrot {
         if is_zoom_in {
             for mut tile in render_queue {
                 let to_ui = self.to_ui.sender();
-                self.pool.as_mut().unwrap().execute(move || {
+                self.pool.as_mut().unwrap().execute(cx, move || {
                     Self::mandelbrot_f64(&mut tile, max_iter);
                     to_ui.send(ToUI::TileDone {tile, into_current}).unwrap();
                 })
@@ -339,7 +340,7 @@ impl Mandelbrot {
         else { // on zoom out reverse the spiral
             for mut tile in render_queue.into_iter().rev() {
                 let to_ui = self.to_ui.sender();
-                self.pool.as_mut().unwrap().execute(move || {
+                self.pool.as_mut().unwrap().execute(cx, move || {
                     Self::mandelbrot_f64(&mut tile, max_iter);
                     to_ui.send(ToUI::TileDone {tile, into_current}).unwrap();
                 })
@@ -352,6 +353,7 @@ impl Mandelbrot {
         if let Some(ne) = self.next_frame.triggered(event) {
             if self.tile_cache.renders_in_queue == 0 && self.tile_cache.current.is_empty() {
                 self.mandelbrot_tile_generator(
+                    cx,
                     self.fractal_zoom,
                     self.fractal_center,
                     self.space.view_fractal_rect(self.fractal_zoom, self.fractal_center),
@@ -365,6 +367,7 @@ impl Mandelbrot {
                     !self.is_zoom_in && self.fractal_zoom > self.tile_cache.next_zoom){
                     let zoom = self.fractal_zoom * if self.is_zoom_in{0.5} else{2.0};
                     self.mandelbrot_tile_generator(
+                        cx,
                         zoom,
                         self.space.view_to_fractal(zoom, self.fractal_center, self.finger_abs),
                         self.space.view_fractal_rect(zoom, self.fractal_center),
@@ -389,12 +392,9 @@ impl Mandelbrot {
             else {
                 self.tile_cache.next.push(tile);
             }
-            if self.tile_cache.renders_in_queue == 0 {
-                console_log!("REMOVING POOL");
-                self.pool = None;
-            }
             if self.tile_cache.renders_in_queue == 0 && self.tile_cache.next_zoom != self.fractal_zoom{
                 self.mandelbrot_tile_generator(
+                    cx,
                     self.fractal_zoom,
                     self.space.view_to_fractal(self.fractal_zoom, self.fractal_center, self.finger_abs),
                     self.space.view_fractal_rect(self.fractal_zoom, self.fractal_center),

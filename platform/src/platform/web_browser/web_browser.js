@@ -5,11 +5,7 @@ export class WasmWebBrowser extends WasmBridge {
         super (wasm, dispatch);
         
         window.onbeforeunload = _=>{
-            for(let worker of this.workers){
-                worker.terminate()
-                console.log("Terminate")
-            }
-            console.log("Terminate HOO")
+            this.wasm_terminate_thread_pools();
         }
 
         this.wasm_app = this.wasm_create_app();
@@ -412,6 +408,10 @@ export class WasmWebBrowser extends WasmBridge {
     
     // calling into wasm
     
+    
+    wasm_terminate_thread_pools() {
+        this.exports.wasm_terminate_thread_pools(this.wasm_app);
+    }
     
     wasm_create_app() {
         let new_ptr = this.exports.wasm_create_app();
