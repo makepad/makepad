@@ -169,7 +169,7 @@ pub struct Mandelbrot {
     walk: Walk,
     #[rust(TileCache::new(cx))] tile_cache: TileCache,
     
-    #[rust(Some(ThreadPool::new(cx, 1)))] pool: Option<ThreadPool>,
+    #[rust(Some(ThreadPool::new(cx, 4)))] pool: Option<ThreadPool>,
     #[rust] to_ui: ToUIReceiver<ToUI>,
 }
 
