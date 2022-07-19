@@ -1,5 +1,6 @@
 use{
     std::{fmt,ops},
+    crate::math_f32::*,
 //    makepad_microserde::*,
 //    crate::colorhex::*
 };
@@ -92,6 +93,10 @@ impl Vec2F64 {
         Vec2F64 {x: x, y: x}
     }
     
+    pub fn into_vec2(self)->Vec2{
+        Vec2{x:self.x as f32, y:self.y as f32}
+    }
+    
     pub fn from_lerp(a: Vec2F64, b: Vec2F64, f: f64) -> Vec2F64 {
         let nf = 1.0 - f;
         return Vec2F64{
@@ -106,7 +111,6 @@ impl Vec2F64 {
         (dx * dx + dy * dy).sqrt()
     }
 }
-
 
 impl fmt::Display for Vec2F64 {
     // This trait requires `fmt` with this exact signature.
