@@ -410,7 +410,7 @@ impl Mandelbrot {
             self.view.redraw(cx);
         }
         
-        match event.hits(cx, self.view.area()) {
+        match event.hits_with_options(cx, self.view.area(), HitOptions{use_multi_touch:true, margin:None}) {
             HitEvent::FingerDown(fe) => {
                 self.finger_abs = fe.abs;
                 self.is_zooming = true;
@@ -425,8 +425,13 @@ impl Mandelbrot {
             HitEvent::FingerMove(fe) => {
                 self.finger_abs = fe.abs;
             }
-            HitEvent::FingerUp(_) => {
-                self.is_zooming = false;
+            HitEvent::FingerUp(fe) => {
+                if fe.input_type.is_touch() && fe.digit == 1{
+                    self.is_zoom_in = true;
+                }
+                else{
+                    self.is_zooming = false;
+                }
             }
             _ => ()
         }
