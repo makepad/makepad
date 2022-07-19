@@ -28,7 +28,7 @@ live_register!{
                     ),
                     mix(
                         #9,
-                        #f00,
+                        #f,
                         self.selected
                     ),
                     self.focus
