@@ -161,3 +161,34 @@ impl ThreadPool {
         self.sender.send(Box::new(task)).unwrap();
     }
 }
+/*
+pub struct WasmThreadPool {
+    sender: Sender<Box<dyn FnOnce() + Send + 'static>>,
+}
+
+impl WasmThreadPool {
+    pub fn new(cx: &mut Cx, num_threads: usize) -> Self {
+        let (sender, receiver) = channel::<Box<dyn FnOnce() + Send + 'static>>();
+        let receiver = Arc::new(Mutex::new(receiver));
+        for _ in 0..num_threads {
+            let receiver = receiver.clone();
+            cx.spawn_thread(move || loop {
+                let task = if let Ok(receiver) = receiver.lock() {
+                    match receiver.recv() {
+                        Ok(task) => task,
+                        Err(_) => return
+                    }
+                }
+                else {
+                    panic!();
+                };
+                task();
+            })
+        }
+        Self {sender}
+    }
+    
+    pub fn execute<F>(&mut self, task: F) where F: FnOnce() + Send + 'static {
+        self.sender.send(Box::new(task)).unwrap();
+    }
+}*/
