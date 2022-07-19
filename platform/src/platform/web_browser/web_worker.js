@@ -22,6 +22,6 @@ onmessage = async function(e) {
     wasm.instance.exports.wasm_thread_entrypoint(thread_info.closure_ptr);
     
     // so depending on what you return here we can sleep the webworker and re-enter
-    
+    console.log("terminating worker");
     close();
 }

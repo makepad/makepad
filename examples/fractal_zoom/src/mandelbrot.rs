@@ -169,7 +169,7 @@ pub struct Mandelbrot {
     walk: Walk,
     #[rust(TileCache::new(cx))] tile_cache: TileCache,
     
-    #[rust(ThreadPool::new(cx, 1))] pool: ThreadPool,
+    #[rust(Some(ThreadPool::new(cx, 1)))] pool: Option<ThreadPool>,
     #[rust] to_ui: ToUIReceiver<ToUI>,
 }
 
@@ -324,10 +324,13 @@ impl Mandelbrot {
 
         self.tile_cache.renders_in_queue = render_queue.len();
         let max_iter = self.max_iter;
+        if self.pool.is_none(){
+            return;
+        }
         if is_zoom_in {
             for mut tile in render_queue {
                 let to_ui = self.to_ui.sender();
-                self.pool.execute(move || {
+                self.pool.as_mut().unwrap().execute(move || {
                     Self::mandelbrot_f64(&mut tile, max_iter);
                     to_ui.send(ToUI::TileDone {tile, into_current}).unwrap();
                 })
@@ -336,7 +339,7 @@ impl Mandelbrot {
         else { // on zoom out reverse the spiral
             for mut tile in render_queue.into_iter().rev() {
                 let to_ui = self.to_ui.sender();
-                self.pool.execute(move || {
+                self.pool.as_mut().unwrap().execute(move || {
                     Self::mandelbrot_f64(&mut tile, max_iter);
                     to_ui.send(ToUI::TileDone {tile, into_current}).unwrap();
                 })
@@ -385,6 +388,10 @@ impl Mandelbrot {
             }
             else {
                 self.tile_cache.next.push(tile);
+            }
+            if self.tile_cache.renders_in_queue == 0 {
+                console_log!("REMOVING POOL");
+                self.pool = None;
             }
             if self.tile_cache.renders_in_queue == 0 && self.tile_cache.next_zoom != self.fractal_zoom{
                 self.mandelbrot_tile_generator(
