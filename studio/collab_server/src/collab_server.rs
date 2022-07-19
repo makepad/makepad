@@ -185,7 +185,7 @@ impl CollabConnection {
     }
     
     // Handles an `OpenFile` request.
-    fn open_file(&self, path: PathBuf) -> Result<(TextFileId, usize, Text), CollabError> {
+    fn open_file(&self, path: PathBuf) -> Result<(TextFileId, u32, Text), CollabError> {
         // We need to update the list of files in the shared state, so lock it for writing. This is
         // necessary so other clients cannot close the file while we are still in the process of
         // opening it.
@@ -226,7 +226,7 @@ impl CollabConnection {
                 
                 drop(shared_guard);
                 
-                Ok((file_id, their_revision, text))
+                Ok((file_id, their_revision as u32, text))
             }
             None => {
                 // The file was not yet opened, so we need to open it, and then add the client as
@@ -281,7 +281,7 @@ impl CollabConnection {
     fn apply_delta(
         &self,
         file_id: TextFileId,
-        their_revision: usize,
+        their_revision: u32,
         delta: Delta,
     ) -> Result<TextFileId, CollabError> {
         // We need only need to get the list of files in the shared state, so lock it for reading.
@@ -294,14 +294,14 @@ impl CollabConnection {
         let mut file_guard = shared_guard.files[file_id].lock().unwrap();
         
         // The number of deltas that has been seen by the server but not the client.
-        let unseen_delta_count = file_guard.our_revision - their_revision;
+        let unseen_delta_count = file_guard.our_revision - their_revision ;
         // The number of deltas that has been seen by both the server and the client.
-        let seen_delta_count = file_guard.outstanding_deltas.len() - unseen_delta_count;
+        let seen_delta_count = file_guard.outstanding_deltas.len() as u32 - unseen_delta_count;
 
         // Transform the delta against each delta that has been seen by the server but not by the
         // client to obtain a delta that can be applied to the newest revision of the file.
         let mut delta = delta;
-        for unseen_delta in file_guard.outstanding_deltas.iter().skip(seen_delta_count) {
+        for unseen_delta in file_guard.outstanding_deltas.iter().skip(seen_delta_count as usize) {
             delta = unseen_delta.clone().transform(delta).1;
         }
         
@@ -328,10 +328,10 @@ impl CollabConnection {
         // The number of deltas that has been seen by the server, but not *every* client.
         let unsettled_delta_count = file_guard.our_revision - settled_revision;
         // The number of deltas that has been seen by both the server and *every* client.
-        let settled_delta_count = file_guard.outstanding_deltas.len() - unsettled_delta_count;
+        let settled_delta_count = file_guard.outstanding_deltas.len() as u32 - unsettled_delta_count;
         // Remove any deltas that have been seen by both the server and *every* client from the list
         // of deltas that have been seen by the server but not *every* client.
-        file_guard.outstanding_deltas.drain(..settled_delta_count);
+        file_guard.outstanding_deltas.drain(..(settled_delta_count as usize));
         
         // Notify the other participants that a delta has been applied to this file.
         file_guard.notify_other_participants(
@@ -444,7 +444,7 @@ struct File {
     // The path to this file on the disk
     path: PathBuf,
     // The current revision of the file
-    our_revision: usize,
+    our_revision: u32,
     // The current contents of this file
     text: Text,
     // The list of deltas that has been seen by the server, but not yet by *every* client.
@@ -473,7 +473,7 @@ impl File {
 #[derive(Debug)]
 struct Participant {
     // The last revision that has been seen by this participant.
-    their_revision: usize,
+    their_revision: u32,
     // Used to send notifications to (the connection of) this participant.
     notification_sender: Box<dyn NotificationSender>,
 }
