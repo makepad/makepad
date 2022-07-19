@@ -54,7 +54,7 @@ pub struct TextureTile {
 
 const TILE_SIZE_X: usize = 256;
 const TILE_SIZE_Y: usize = 256;
-const CACHE_MAX: usize = 512;
+const CACHE_MAX: usize = 300;
 
 #[derive(Default)]
 pub struct TileCache {
@@ -95,8 +95,12 @@ impl TextureTile {
             height: Some(TILE_SIZE_Y),
             multisample: None
         });
+        let mut buffer = Vec::new();
+        buffer.resize(TILE_SIZE_X * TILE_SIZE_Y, 0);
+        texture.swap_image_u32(cx, &mut buffer);
+        buffer.resize(TILE_SIZE_X * TILE_SIZE_Y, 0);
         Self {
-            buffer: Vec::new(),
+            buffer,
             texture,
             fractal: RectF64::default()
         }
@@ -241,7 +245,7 @@ impl Mandelbrot {
     }
     
     fn mandelbrot_f64(tile: &mut TextureTile, max_iter: usize) {
-        tile.buffer.resize(TILE_SIZE_X * TILE_SIZE_Y, 0);
+        
         let tile_size = vec2f64(TILE_SIZE_X as f64, TILE_SIZE_Y as f64);
         // ok lets draw our mandelbrot f64
         for y in 0..TILE_SIZE_Y {
@@ -255,7 +259,6 @@ impl Mandelbrot {
                 tile.buffer[y * TILE_SIZE_X + x] = data;
             }
         }
-        std::thread::sleep(std::time::Duration::from_millis(1000));
     }
     
     pub fn zoom_around(&mut self, factor: f64, around: Vec2) {
