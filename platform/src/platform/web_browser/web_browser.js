@@ -4,6 +4,14 @@ export class WasmWebBrowser extends WasmBridge {
     constructor(wasm, dispatch, canvas) {
         super (wasm, dispatch);
         
+        window.onbeforeunload = _=>{
+            for(let worker of this.workers){
+                worker.terminate()
+                console.log("Terminate")
+            }
+            console.log("Terminate HOO")
+        }
+
         this.wasm_app = this.wasm_create_app();
         this.dispatch = dispatch;
         this.canvas = canvas;
@@ -13,6 +21,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.web_sockets = [];
         this.window_info = {}
         this.signals = [];
+        this.workers = [];
         this.thread_stack_size = 2 * 1024 * 1024;
         this.init_detection();
     }
@@ -313,6 +322,8 @@ export class WasmWebBrowser extends WasmBridge {
             this.to_wasm.ToWasmSignal(data)
             this.do_wasm_pump();
         })
+        
+        this.workers.push(worker);
     }
     
     FromWasmSpawnAudioOutput(args) {
