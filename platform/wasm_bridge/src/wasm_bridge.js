@@ -22,6 +22,7 @@ export class WasmBridge {
     }
     
     clear_memory_refs(){
+        this.wasm._memory.grow(16384);
         this.exports = null;
         this.memory = null;
         this.wasm._memory = null;
