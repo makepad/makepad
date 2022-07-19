@@ -7,11 +7,11 @@ export class WasmWebBrowser extends WasmBridge {
         window.onbeforeunload = _=>{
             this.wasm_terminate_thread_pools();
             this.clear_memory_refs();
-            for(let worker in this.workers){
+            for(let worker of this.workers){
                 worker.terminate();
             }
         }
-
+        
         this.wasm_app = this.wasm_create_app();
         this.dispatch = dispatch;
         this.canvas = canvas;
