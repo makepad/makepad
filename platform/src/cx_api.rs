@@ -417,7 +417,7 @@ macro_rules!main_app {
         #[cfg(target_arch = "wasm32")]
         pub unsafe extern "C" fn wasm_terminate_thread_pools(appcx: u32) {
             let body = appcx as *mut WasmAppCx;
-            (*body).cx.platform.terminate_thread_pools();
+            (*body).cx.terminate_thread_pools();
         }
         
         #[export_name = "wasm_process_msg"]
