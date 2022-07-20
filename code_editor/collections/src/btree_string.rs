@@ -192,13 +192,13 @@ impl<'a> Cursor<'a> {
     pub fn move_next_byte(&mut self) {
         self.index += 1;
         if self.index == self.chunk.len() {
-            self.cursor.move_next_chunk();
+            self.move_next_chunk();
         }
     }
 
     pub fn move_prev_byte(&mut self) {
         if self.index == 0 {
-            self.cursor.move_prev_chunk();
+            self.move_prev_chunk();
         }
         self.index -= 1;
     }
@@ -389,6 +389,24 @@ mod tests {
 
     proptest! {
         #[test]
+        fn test_bytes(string in any::<String>()) {
+            let btree_string = BTreeString::from(&string);
+            assert_eq!(
+                btree_string.bytes().collect::<Vec<_>>(),
+                string.bytes().collect::<Vec<_>>()
+            );
+        }
+
+        #[test]
+        fn test_bytes_rev(string in any::<String>()) {
+            let btree_string = BTreeString::from(&string);
+            assert_eq!(
+                btree_string.bytes().rev().collect::<Vec<_>>(),
+                string.bytes().rev().collect::<Vec<_>>()
+            );
+        }
+
+        #[test]
         fn test_chars(string in any::<String>()) {
             let btree_string = BTreeString::from(&string);
             assert_eq!(
@@ -403,6 +421,30 @@ mod tests {
             assert_eq!(
                 btree_string.chars().rev().collect::<Vec<_>>(),
                 string.chars().rev().collect::<Vec<_>>()
+            );
+        }
+
+        #[test]
+        fn test_prepend(mut string in any::<String>(), other_string in any::<String>()) {
+            let mut btree_string = BTreeString::from(&string);
+            btree_string.prepend(BTreeString::from(&other_string));
+            string.replace_range(..0, &other_string);
+            // TODO: Iterate over chunks instead of chars
+            assert_eq!(
+                btree_string.chars().collect::<Vec<_>>(),
+                string.chars().collect::<Vec<_>>()
+            );
+        }
+
+        #[test]
+        fn test_append(mut string in any::<String>(), other_string in any::<String>()) {
+            let mut btree_string = BTreeString::from(&string);
+            btree_string.append(BTreeString::from(&other_string));
+            string.push_str(&other_string);
+            // TODO: Iterate over chunks instead of chars
+            assert_eq!(
+                btree_string.chars().collect::<Vec<_>>(),
+                string.chars().collect::<Vec<_>>()
             );
         }
     }
