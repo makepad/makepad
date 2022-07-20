@@ -1,3 +1,4 @@
+#![feature(portable_simd)]
 use makepad_component::*;
 use makepad_platform::*;
 mod mandelbrot;

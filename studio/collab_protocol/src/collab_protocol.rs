@@ -44,7 +44,7 @@ pub enum CollabRequest {
     OpenFile(UnixPathBuf),
     /// Requests the collab server to apply the given delta to the given revision of the file with
     /// the given id.
-    ApplyDelta(TextFileId, usize, Delta),
+    ApplyDelta(TextFileId, u32, Delta),
     /// Requests the collab server to remove the client as a participant from the file with the
     /// given id. If the client was the last participant for the file, this also closes the file on
     /// the collab server.
@@ -67,7 +67,7 @@ pub enum CollabResponse {
     LoadFileTree(Result<FileTreeData, CollabError>),
     /// The result of requesting the collab server to add the client as a participant to the file
     /// with the given id.
-    OpenFile(Result<(TextFileId, usize, Text), CollabError>),
+    OpenFile(Result<(TextFileId, u32, Text), CollabError>),
     /// The result of requesting the collab server to apply a delta to a revision of the file with
     /// the given id.
     ApplyDelta(Result<TextFileId, CollabError>),
