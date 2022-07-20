@@ -310,8 +310,15 @@ impl Mandelbrot {
             // lets check our tile still intersects the view when we start to compute it
             // otherwise we abort
             let (is_zoom_in,bail_window) = bail_window.lock().unwrap().borrow().clone();
-            if is_zoom_in && !tile.fractal.intersects(bail_window){
-                return to_ui.send(ToUI::TileBailed {tile}).unwrap();
+            if is_zoom_in{
+                if !tile.fractal.intersects(bail_window){
+                    return to_ui.send(ToUI::TileBailed {tile}).unwrap();
+                }
+            }
+            else{ // compare the size of the bail window against the tile
+                if tile.fractal.size.x * tile.fractal.size.y < bail_window.size.x * bail_window.size.y * 0.007{
+                    return to_ui.send(ToUI::TileBailed {tile}).unwrap();
+                }
             }
             
             if fractal_zoom >2e-5 {
