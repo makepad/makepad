@@ -270,29 +270,29 @@ impl App {
             Event::Construct => {
                 
                 if let Some(instrument) = self.frame.add_child(cx, id!(my_instrument), ids!(instrument), live!{
-                    header: {label = {text: "HELLO WORLD"}}
+                    header: {label = {text: "Instrument header"}}
                 }) {
                     
                     instrument.add_child(cx, id!(my_stack1), ids!(stack), live!{
-                        header: {label = {text: (format!("HELLO WORLD {}", 3 + 4))}}
+                        header: {label = {text: (format!("Key range {}", 3 + 4))}}
                     });
                     
                     instrument.add_child(cx, id!(my_stack2), ids!(stack), live!{
-                        header: {label = {text: "MyStackItem2"}, range = {mylabel = {text: "WHEE"}}}
+                        header: {label = {text: "Synth value"}, range = {mylabel = {text: "WHEE"}}}
                     });
                     
                     instrument.add_child(cx, id!(my_stack3), ids!(stack), live!{
-                        header: {label = {text: "MyStackItem3"}, range = {mylabel = {text: "WHEE"}}}
+                        header: {label = {text: "Synth value"}, range = {mylabel = {text: "WHEE"}}}
                     });
                 }
                 if let Some(instrument) = self.frame.add_child(cx, id!(my_id2), ids!(instrument), live!{
                     header: {label = {text: "MyInstrument"}}
                 }) {
                     instrument.add_child(cx, id!(my_stack1), ids!(stack), live!{
-                        header: {label = {text: "MyStackItem"}}
+                        header: {label = {text: "Synth value"}}
                     });
                     instrument.add_child(cx, id!(my_stack2), ids!(stack), live!{
-                        header: {label = {text: "MyStackItem2"}, range = {mylabel = {text: "WHEE"}}}
+                        header: {label = {text: "Synth value"}, range = {mylabel = {text: "WHEE"}}}
                     });
                 }
             }

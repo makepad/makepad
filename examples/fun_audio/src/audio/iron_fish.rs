@@ -526,7 +526,7 @@ impl IronFishVoice {
         let frame_count = buffer.frame_count();
         let (left, right) = buffer.stereo_mut();
         for i in 0..frame_count {
-            let output = self.one(&settings);
+            let output = self.one(&settings) * 8.0;
             left[i] += output as f32;
             right[i] += output as f32;
         }

@@ -188,6 +188,9 @@ export class WasmWebBrowser extends WasmBridge {
             return;
         }
         this.req_anim_frame_id = window.requestAnimationFrame(time => {
+            if(this.wasm == null){
+                return
+            }
             this.req_anim_frame_id = 0;
             if (this.xr_is_presenting) {
                 return

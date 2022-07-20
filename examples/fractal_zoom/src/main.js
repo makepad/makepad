@@ -11,6 +11,6 @@ class MyWasmApp {
         let canvas = document.getElementsByClassName('full_canvas')[0];
         this.bridge = new WasmWebGL (wasm, this, canvas);
     }
-} 
+}  
 
 let app = new MyWasmApp(wasm);
