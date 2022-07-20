@@ -429,7 +429,7 @@ impl Mandelbrot {
                         }
                         
                         if self.tile_cache.renders_in_queue == 0 && self.tile_cache.next_zoom != self.fractal_zoom {
-                            let zoom = self.fractal_zoom * if self.is_zooming{if self.is_zoom_in{0.8}else{3.0}}else{1.0};
+                            let zoom = self.fractal_zoom * if self.is_zooming{if self.is_zoom_in{0.8}else{2.0}}else{1.0};
                             self.mandelbrot_tile_generator(
                                 cx,
                                 zoom,
@@ -463,7 +463,7 @@ impl Mandelbrot {
             if self.is_zooming { // this only fires once 
                 self.zoom_around(if self.is_zoom_in {0.98} else {1.02}, self.finger_abs);
                 if self.tile_cache.renders_in_queue == 0{
-                    let zoom = self.fractal_zoom * if self.is_zoom_in {0.8} else {3.0};
+                    let zoom = self.fractal_zoom * if self.is_zoom_in {0.8} else {2.0};
                     self.mandelbrot_tile_generator(
                         cx,
                         zoom,
@@ -482,8 +482,10 @@ impl Mandelbrot {
         
         match event.hits_with_options(cx, self.view.area(), HitOptions {use_multi_touch: true, margin: None}) {
             HitEvent::FingerDown(fe) => {
-                self.finger_abs = fe.abs;
                 self.is_zooming = true;
+                if !fe.input_type.is_touch() || fe.digit == 0 {
+                    self.finger_abs = fe.abs;
+                }
                 if fe.digit == 0 {
                     self.is_zoom_in = true;
                 }
@@ -493,7 +495,9 @@ impl Mandelbrot {
                 self.next_frame = cx.new_next_frame();
             },
             HitEvent::FingerMove(fe) => {
-                self.finger_abs = fe.abs;
+                if !fe.input_type.is_touch() || fe.digit == 0 {
+                    self.finger_abs = fe.abs;
+                }
             }
             HitEvent::FingerUp(fe) => {
                 if fe.input_type.is_touch() && fe.digit == 1 {
