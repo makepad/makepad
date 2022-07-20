@@ -1,7 +1,6 @@
 
 use {
     std::simd::*,
-    crate::makepad_platform::*,
     crate::mandelbrot::*
 };
 
