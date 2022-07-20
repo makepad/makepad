@@ -120,7 +120,12 @@ export class WasmBridge {
     }
     
     static create_shared_memory(){
-        return new WebAssembly.Memory({initial: 4096, maximum: 4096, shared: true});
+        let timeout = setTimeout(_=>{
+            document.body.innerHTML = "<div style='margin-top:30px;margin-left:30px; color:white;'>Please close and re-open the browsertab - Shared memory allocation failed, this is a bug of iOS safari and apple needs to fix it.</div>"
+        }, 1000)
+        let mem =new WebAssembly.Memory({initial: 64, maximum: 8192, shared: true});
+        clearTimeout(timeout);
+        return mem;
     }
     
     static instantiate_wasm(bytes, memory, env) {
@@ -144,6 +149,7 @@ export class WasmBridge {
         }
 
         return WebAssembly.instantiate(bytes, {env}).then(wasm => {
+            console.log("THIS WORKED", wasm);
             _wasm = wasm;
             wasm._has_thread_support = env.memory !== undefined;
             wasm._memory = env.memory? env.memory: wasm.instance.exports.memory;

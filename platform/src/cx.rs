@@ -22,9 +22,9 @@ use {
         makepad_shader_compiler::{
             ShaderRegistry
         },  
-        /*cx_registries::{
-            CxRegistries
-        },*/
+        thread::{
+            ThreadPoolSender
+        },
         cx_draw_shaders::{
             CxDrawShaders
         },
@@ -146,6 +146,8 @@ pub struct Cx {
     pub live_edit_event: Option<LiveEditEvent>,
     
     pub command_settings: HashMap<Command, CxCommandSetting>,
+    
+    pub thread_pool_senders: Vec<Arc<RefCell<Option<ThreadPoolSender>>>>,
     
     pub platform: CxPlatform,
     // this cuts the compiletime of an end-user application in half
@@ -291,6 +293,8 @@ impl Default for Cx {
             command_settings: HashMap::new(),
             
             platform: CxPlatform {..Default::default()},
+            
+            thread_pool_senders: Vec::new(),
             
             live_edit_event: None,
             

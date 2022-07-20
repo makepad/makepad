@@ -133,5 +133,5 @@ pub struct CxTexture {
     pub(crate) image_u32: Vec<u32>,
     //pub(crate) _image_f32: Vec<f32>,
     pub(crate) update_image: bool,
-    pub(crate) platform: CxPlatformTexture
+    pub platform: CxPlatformTexture
 }
