@@ -160,7 +160,7 @@ impl EditorState {
     pub fn handle_open_file_response(
         &mut self,
         file_id: TextFileId,
-        revision: usize,
+        revision: u32,
         text: Text,
         send_request: &mut dyn FnMut(CollabRequest),
     ) -> DocumentId {
@@ -172,7 +172,7 @@ impl EditorState {
 
         document.inner = Some(DocumentInner {
             file_id,
-            revision,
+            revision: revision as usize,
             text,
             token_cache,
             indent_cache,
@@ -803,7 +803,7 @@ impl EditorState {
         if let Some(outstanding_delta) = document_inner.outstanding_deltas.front() {
             send_request(CollabRequest::ApplyDelta(
                 file_id,
-                document_inner.revision,
+                document_inner.revision as u32,
                 outstanding_delta.clone(),
             ));
         }
@@ -946,7 +946,7 @@ impl Document {
             if inner.outstanding_deltas.len() == 1 {
                 send_request(CollabRequest::ApplyDelta(
                     inner.file_id,
-                    inner.revision,
+                    inner.revision as u32,
                     inner.outstanding_deltas.front().unwrap().clone(),
                 ));
             }

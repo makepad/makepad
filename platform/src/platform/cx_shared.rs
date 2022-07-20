@@ -212,4 +212,12 @@ impl Cx {
         std::mem::swap(&mut set, &mut self.new_next_frames);
         self.call_event_handler(&mut Event::NextFrame(NextFrameEvent {set, time: time, frame: self.repaint_id}));
     }
+    
+    pub fn terminate_thread_pools(&mut self){
+        for pool in &self.thread_pool_senders{
+            pool.borrow_mut().take();
+        }
+    }
+    
+
 }
