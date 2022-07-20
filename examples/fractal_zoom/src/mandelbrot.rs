@@ -2,6 +2,9 @@
 #![allow(unused)]
 
 use {
+    std::sync::Arc,
+    std::sync::Mutex,
+    std::cell::RefCell,
     std::simd::*,
     crate::{
         makepad_platform::*,
@@ -50,6 +53,7 @@ pub struct DrawMandelbrot {
 
 pub enum ToUI {
     TileDone {tile: TextureTile, into_current: bool},
+    TileBailed {tile: TextureTile},
 }
 
 pub struct TextureTile {
@@ -216,6 +220,8 @@ pub struct Mandelbrot {
     #[rust(true)] is_zoom_in: bool,
     #[rust] cycle: f32,
     
+    #[rust] bail_window: Arc<Mutex<RefCell<(bool,RectF64)>>>,
+    
     #[rust] space: FractalSpace,
     
     view: View,
@@ -299,7 +305,15 @@ impl Mandelbrot {
         // lets swap our texture to the tile
         let max_iter = self.max_iter;
         let to_ui = self.to_ui.sender();
+        let bail_window = self.bail_window.clone();
         self.pool.as_mut().unwrap().execute(move || {
+            // lets check our tile still intersects the view when we start to compute it
+            // otherwise we abort
+            let (is_zoom_in,bail_window) = bail_window.lock().unwrap().borrow().clone();
+            if is_zoom_in && !tile.fractal.intersects(bail_window){
+                return to_ui.send(ToUI::TileBailed {tile}).unwrap();
+            }
+            
             if fractal_zoom >2e-5 {
                 mandelbrot_f32_simd(&mut tile, max_iter);
             }
@@ -396,31 +410,38 @@ impl Mandelbrot {
         if let Some(ne) = self.next_frame.triggered(event) {
             let mut too_many_textures = 0;
             while let Ok(msg) = self.to_ui.receiver.try_recv() {
-                let ToUI::TileDone {mut tile, into_current} = msg;
-                self.tile_cache.renders_in_queue -= 1;
-                // swap it back on the texture
-                tile.swap_buffer_with_texture(cx);
-                if into_current {
-                    self.tile_cache.current.push(tile);
+                match msg{
+                    ToUI::TileDone {mut tile, into_current}=>{
+                        self.tile_cache.renders_in_queue -= 1;
+                        tile.swap_buffer_with_texture(cx);
+                        if into_current {
+                            self.tile_cache.current.push(tile);
+                        }
+                        else {
+                            self.tile_cache.next.push(tile);
+                        }
+                        
+                        if self.tile_cache.renders_in_queue == 0 && self.tile_cache.next_zoom != self.fractal_zoom {
+                            let zoom = self.fractal_zoom * if self.is_zooming{if self.is_zoom_in{0.8}else{3.0}}else{1.0};
+                            self.mandelbrot_tile_generator(
+                                cx,
+                                zoom,
+                                self.space.view_to_fractal(zoom, self.fractal_center, self.finger_abs),
+                                self.space.view_fractal_rect(zoom, self.fractal_center),
+                                self.is_zoom_in
+                            );
+                        }
+                        too_many_textures += 1;
+                        if too_many_textures > 10{
+                            break;
+                        }
+                    }
+                    ToUI::TileBailed{mut tile}=>{
+                        self.tile_cache.renders_in_queue -= 1;
+                        self.tile_cache.empty.push(tile);
+                    }
                 }
-                else {
-                    self.tile_cache.next.push(tile);
-                }
-                
-                if self.tile_cache.renders_in_queue == 0 && self.tile_cache.next_zoom != self.fractal_zoom {
-                    let zoom = self.fractal_zoom * if self.is_zooming{if self.is_zoom_in{0.8}else{3.0}}else{1.0};
-                    self.mandelbrot_tile_generator(
-                        cx,
-                        zoom,
-                        self.space.view_to_fractal(zoom, self.fractal_center, self.finger_abs),
-                        self.space.view_fractal_rect(zoom, self.fractal_center),
-                        self.is_zoom_in
-                    );
-                }
-                too_many_textures += 1;
-                if too_many_textures > 10{
-                    break;
-                }
+
             }
             // initial tile render
             if self.tile_cache.renders_in_queue == 0 && self.tile_cache.current.is_empty() {
@@ -485,6 +506,9 @@ impl Mandelbrot {
         self.view.begin(cx, walk, Layout::flow_right()) ?;
         self.space.tile_size = vec2f64(TILE_SIZE_X as f64, TILE_SIZE_Y as f64) / cx.current_dpi_factor as f64;
         self.space.view_space = cx.turtle().rect();
+        
+        *self.bail_window.lock().unwrap().borrow_mut() = (self.is_zoom_in,self.space.view_fractal_rect(self.fractal_zoom, self.fractal_center));
+        
         self.draw_mandelbrot.alpha = 1.0;
         self.draw_mandelbrot.max_iter = self.max_iter as f32;
         self.draw_mandelbrot.cycle = self.cycle;
