@@ -285,7 +285,7 @@ impl Mandelbrot {
         let mut x = c_x;
         let mut y = c_y;
         let mut dist_out = f32x4s(0.0);
-        let mut iter_out = u32x4s(2);
+        let mut iter_out = u32x4s(max_iter);
         let mut exitted = m32x4s(false);
         for n in 0..max_iter {
             let xy = x * y;
@@ -337,7 +337,7 @@ impl Mandelbrot {
         let mut x = c_x;
         let mut y = c_y;
         let mut dist_out = f64x2s(0.0);
-        let mut iter_out = u64x2s(2);
+        let mut iter_out = u64x2s(max_iter);
         let mut exitted = m64x2s(false);
         for n in 0..max_iter {
             let xy = x * y;
