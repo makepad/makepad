@@ -31,10 +31,15 @@ impl RectF64 {
         RectF64 {pos: self.pos + pos, size: self.size}
     }
     
+    pub fn add_margin(self, size: Vec2F64) -> RectF64 {
+        RectF64 {pos: self.pos - size, size: self.size + 2.0 * size}
+    }
+    
     pub fn contains(&self, pos: Vec2F64) -> bool {
         return pos.x >= self.pos.x && pos.x <= self.pos.x + self.size.x &&
         pos.y >= self.pos.y && pos.y <= self.pos.y + self.size.y;
     }
+    
     pub fn intersects(&self, r: RectF64) -> bool {
         !(
             r.pos.x > self.pos.x + self.size.x ||
