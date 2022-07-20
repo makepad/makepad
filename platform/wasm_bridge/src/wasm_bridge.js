@@ -128,6 +128,17 @@ export class WasmBridge {
         return mem;
     }
     
+
+    static async supports_simd(){
+        let bytes = Uint8Array.from([0,97,115,109,1,0,0,0,1,5,1,96,0,1,123,3,2,1,0,10,10,1,8,0,65,0,253,15,253,98,11,0,10,4,110,97,109,101,2,3,1,0,0]);
+        return WebAssembly.instantiate(bytes).then(_=>{
+            return true
+        },
+        _=>{
+            return false
+        })
+    }
+    
     static instantiate_wasm(bytes, memory, env) {
 
         let _wasm = null;
@@ -313,4 +324,15 @@ export class FromWasmMsg {
             this.u32_offset += this.u32_offset & 1; // align
         }
     }
+}
+
+function base64_to_array_buffer(base64) {
+    var bin = window.atob(base64);
+    var u8 = new Uint8Array(bin.length);
+    for (var i = 0; i < bin.length; i++) {
+        u8[i] = bin.charCodeAt(i);
+        console.log(u8[i]);
+    }
+    console.log(u8)
+    return u8.buffer;
 }
