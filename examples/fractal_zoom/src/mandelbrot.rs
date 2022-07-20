@@ -18,9 +18,9 @@ live_register!{
     DrawMandelbrot: {{DrawMandelbrot}} {
         texture tex: texture2d
         fn pixel(self) -> vec4 {
-            let tile_size = vec2(256.0,256.0);
-            let texpos = floor(vec2(self.pos.x, 1.0 - self.pos.y) * tile_size) / tile_size;
-            let fractal = sample2d(self.tex, texpos)
+            //let tile_size = vec2(255.0,255.0);
+            //let texpos = floor(vec2(self.pos.x, 1.0 - self.pos.y) * tile_size + vec2(0.5,0.5)) / tile_size;
+            let fractal = sample2d(self.tex, vec2(self.pos.x, 1.0 - self.pos.y))
             // unpack iteration and distance
             let iter = fractal.y * 65535 + fractal.x * 255;
             let dist = (fractal.w * 256 + fractal.z - 127);
