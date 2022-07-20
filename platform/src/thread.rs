@@ -1,4 +1,5 @@
 use {
+    std::cell::RefCell,
     std::sync::{
         mpsc::{
             channel,
@@ -136,7 +137,13 @@ pub struct ThreadPoolSender {
 }
 
 pub struct ThreadPool {
-    sender_id: usize,
+    sender: Arc<RefCell<Option<ThreadPoolSender>>>,
+}
+
+impl Drop for ThreadPool{
+    fn drop(&mut self){
+        self.sender.borrow_mut().take();
+    }
 }
 
 impl ThreadPool {
@@ -158,17 +165,18 @@ impl ThreadPool {
                 task();
             })
         }
-        let sender_id = cx.platform.pool_senders.len();
-        cx.platform.pool_senders.push(Some(ThreadPoolSender{
+        let sender = Arc::new(RefCell::new(Some(ThreadPoolSender{
             sender
-        }));
+        })));
+        cx.thread_pool_senders.push(sender.clone());
         Self{
-            sender_id
+            sender
         }
     }
     
-    pub fn execute<F>(&mut self, cx:&mut Cx, task: F) where F: FnOnce() + Send + 'static {
-        if let Some(tps) = &cx.platform.pool_senders[self.sender_id]{
+    pub fn execute<F>(&mut self, task: F) where F: FnOnce() + Send + 'static {
+        let sender = self.sender.borrow_mut();
+        if let Some(tps) = sender.as_ref(){
             tps.sender.send(Box::new(task)).unwrap();
         }
     }
