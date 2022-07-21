@@ -20,7 +20,7 @@ live_register!{
     DrawTile: {{DrawTile}} {
         texture tex: texture2d
         fn pixel(self) -> vec4 {
-            let fractal = sample2d(self.tex, vec2(self.pos.x, 1.0 - self.pos.y))
+            let fractal = sample2d(self.tex, vec2(self.pos.x,self.pos.y))
             
             // unpack iteration and magnitude squared from our u32 buffer
             let iter = fractal.y * 65535 + fractal.x * 255;
@@ -35,14 +35,14 @@ live_register!{
     }
     
     Mandelbrot: {{Mandelbrot}} {
-        max_iter: 320,
+        max_iter: 8096,
     }
 }
 
 pub const TILE_SIZE_X: usize = 256;
 pub const TILE_SIZE_Y: usize = 256;
 pub const TILE_CACHE_SIZE: usize = 500;
-pub const POOL_THREAD_COUNT: usize = 4;
+pub const POOL_THREAD_COUNT: usize = 8;
 
 // the shader struct used to draw
 
@@ -60,7 +60,7 @@ pub struct DrawTile {
     color_cycle: f32
 }
 
-// basic plain f64 loop, not called in SIMD mode. 
+// basic plain f64 loop, not called in SIMD mode.
 // Returns the iteration count when the loop goes to infinity,
 // and the squared magnitude of the complex number at the time of exit
 // you can use this number to create the nice color bands you see in the output
@@ -133,7 +133,7 @@ pub struct BailWindow {
     space: RectF64,
     // if zooming in, the bail-test is wether a tile is outside of the view
     // if zooming out if a tile uses less than X percentage of the view is.
-    is_zoom_in: bool 
+    is_zoom_in: bool
 }
 
 pub struct TileCache {
@@ -423,6 +423,9 @@ pub struct Mandelbrot {
     #[rust(FractalSpace::new(vec2f64(-0.5, 0.0), 0.5))]
     space: FractalSpace,
     
+    #[rust]
+    had_first_draw:bool,
+    
     // the tilecache holding all the tiles
     #[rust(TileCache::new(cx))]
     tile_cache: TileCache,
@@ -464,7 +467,7 @@ impl Mandelbrot {
                 // as f32 has limited zoom-depth it can support
                 mandelbrot_f32x4(&mut tile, max_iter);
             }
-            else { 
+            else {
                 // otherwise we use a higher resolution f64
                 mandelbrot_f64x2(&mut tile, max_iter);
             }
@@ -526,14 +529,20 @@ impl Mandelbrot {
         }
         
         if let Some(ne) = self.next_frame.triggered(event) {
-            let mut tiles_received = 0;
+            // If we don't have a current layer, initiate the first tile render on the center of the screen
+            if self.had_first_draw && self.tile_cache.generate_completed() && self.tile_cache.current.is_empty() {
+                self.generate_tiles_around_finger(cx, self.space.zoom, self.space.view_rect.center());
+            }
+            
             // try pulling tiles from our message channel from the worker threads
+            let mut tiles_received = 0;
             while let Ok(msg) = self.to_ui.receiver.try_recv() {
                 match msg {
                     ToUI::TileDone {tile} => {
                         self.tile_cache.tile_completed(cx, tile);
                         
-                        // trigger a new tile render if we didn't render pixel accurate already
+                        // when we have all the tiles, and aren't pixel accurate, fire a new tile render
+                        // this is the common path for initiating a tile render
                         if self.tile_cache.generate_completed() && self.tile_cache.next_zoom != self.space.zoom {
                             let zoom = self.space.zoom * if self.is_zooming {if self.is_zoom_in {0.8}else {2.0}}else {1.0};
                             self.generate_tiles_around_finger(cx, zoom, self.finger_abs);
@@ -550,28 +559,27 @@ impl Mandelbrot {
                     }
                 }
             }
-            // initial tile render
-            if self.tile_cache.generate_completed() && self.tile_cache.current.is_empty() {
-                self.generate_tiles_around_finger(cx, self.space.zoom, self.space.view_rect.center());
-            }
             
-            if self.is_zooming { // this only fires once the zoom is starting and the queue is emptying
+            // We are zooming, so animate the zoom
+            if self.is_zooming {
                 self.space.zoom_around(if self.is_zoom_in {0.98} else {1.02}, self.finger_abs);
-                // this kickstarts the tile cache generation when zooming.
+                // this kickstarts the tile cache generation when zooming, only happens once per zoom
                 if self.tile_cache.generate_completed() {
                     let zoom = self.space.zoom * if self.is_zoom_in {0.8} else {2.0};
                     self.generate_tiles_around_finger(cx, zoom, self.finger_abs);
                 }
             }
             
-            // animnate color cycle
-            self.draw_tile.color_cycle  = (ne.time * 0.2).fract() as f32;
+            // animate color cycle
+            self.draw_tile.color_cycle = (ne.time * 0.2).fract() as f32;
             
-            // this triggers a draw_walk call
+            // this triggers a draw_walk call and another 'next frame' event
             self.view.redraw(cx);
             self.next_frame = cx.new_next_frame();
         }
         
+        // check if we click/touch the mandelbrot view in multitouch mode
+        // in this mode we get fingerdown events for each finger.
         match event.hits_with_options(cx, self.view.area(), HitOptions {use_multi_touch: true, margin: None}) {
             HitEvent::FingerDown(fe) => {
                 self.is_zooming = true;
@@ -605,12 +613,17 @@ impl Mandelbrot {
             }
             _ => ()
         }
+        
+        // no actions to report, future expansion possible.
         MandelbrotAction::None
     }
     
+    // draw the mandelbrot view
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) -> ViewRedraw {
+        // checks if our view is dirty, exits here if its clean
         self.view.begin(cx, walk, Layout::flow_right()) ?;
         
+        self.had_first_draw = true;
         // store the view information here as its the only place it's known in the codeflow
         self.space.tile_size = vec2f64(TILE_SIZE_X as f64, TILE_SIZE_Y as f64) / cx.current_dpi_factor as f64;
         self.space.view_rect = cx.turtle().rect();
@@ -621,12 +634,18 @@ impl Mandelbrot {
             space: self.space.view_rect_to_fractal()
         });
         
-        // pass the data onto the shader object
+        // pass the max_iter value to the shader
         self.draw_tile.max_iter = self.max_iter as f32;
-                // iterate the current and next tile caches and draw the fractal tile
+        
+        // iterate the current and next tile caches and draw the fractal tile
         for tile in self.tile_cache.current.iter().chain(self.tile_cache.next.iter()) {
             let rect = self.space.fractal_to_screen_rect(tile.fractal);
+            // set texture by index. 
             self.draw_tile.draw_vars.set_texture(0, &tile.texture);
+            
+            // this emits the drawcall onto the drawlists that go to the renderbackend
+            // By changing the texture every time we cause to emit multiple drawcalls.
+            // if we wouldn't change the texture, it would batch all draws into one instanced array.
             self.draw_tile.draw_abs(cx, rect);
         }
         
