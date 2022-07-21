@@ -374,17 +374,17 @@ impl<T: Chunk> Node<T> {
         }
     }
 
-    fn split_off(&mut self, index: usize) -> Self {
+    fn split_off(&mut self, at: usize) -> Self {
         match self {
-            Self::Leaf(leaf) => Node::Leaf(leaf.split_off(index)),
+            Self::Leaf(leaf) => Node::Leaf(leaf.split_off(at)),
             Self::Branch(branch) => {
-                let (index, summed_len) = search_by_index(branch, index);
-                if index == summed_len {
+                let (index, summed_len) = search_by_position(branch, at);
+                if at == summed_len {
                     return Node::Branch(branch.split_off(index));
                 }
                 let mut other_branch = branch.split_off(index + 1);
                 let mut node = branch.pop_back().unwrap();
-                let mut other_node = node.split_off(index - summed_len);
+                let mut other_node = node.split_off(at - summed_len);
                 if branch.is_empty() {
                     branch.push_back(node)
                 } else {
@@ -408,7 +408,7 @@ impl<T: Chunk> Node<T> {
         match self {
             Self::Leaf(leaf) => leaf.truncate_front(end),
             Self::Branch(branch) => {
-                let (index, summed_len) = search_by_index(branch, end);
+                let (index, summed_len) = search_by_position(branch, end);
                 if end == summed_len {
                     branch.truncate_front(index);
                 } else {
@@ -430,7 +430,7 @@ impl<T: Chunk> Node<T> {
         match self {
             Self::Leaf(leaf) => leaf.truncate_back(start),
             Self::Branch(branch) => {
-                let (index, summed_len) = search_by_index(branch, start);
+                let (index, summed_len) = search_by_position(branch, start);
                 if start == summed_len {
                     branch.truncate_back(index);
                 } else {
@@ -734,7 +734,7 @@ impl<T: Chunk> Branch<T> {
         use std::cmp::Ordering;
 
         match self.len().cmp(&other.len()) {
-            Ordering::Less => self.move_left(other, (self.len() - other.len()) / 2),
+            Ordering::Less => self.move_left(other, (other.len() - self.len()) / 2),
             Ordering::Greater => self.move_right(other, (self.len() + other.len()) / 2),
             _ => {}
         }
@@ -822,6 +822,16 @@ fn sum_infos<T: Chunk>(nodes: &[Node<T>]) -> T::Info {
     summed_info
 }
 
-fn search_by_index<T: Chunk>(_nodes: &[Node<T>], _index: usize) -> (usize, usize) {
-    unimplemented!() // TODO
+fn search_by_position<T: Chunk>(nodes: &[Node<T>], position: usize) -> (usize, usize) {
+    let mut index = 0;
+    let mut summed_len = 0;
+    for node in nodes {
+        let new_summed_len = summed_len + node.summed_len();
+        if position < new_summed_len {
+            break;
+        }
+        index += 1;
+        summed_len = new_summed_len;
+    }
+    (index, summed_len)
 }
