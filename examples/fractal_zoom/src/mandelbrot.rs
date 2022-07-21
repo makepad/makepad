@@ -62,26 +62,26 @@ pub struct DrawTile {
 
 // basic plain f64 loop, not called in SIMD mode. 
 // Returns the iteration count when the loop goes to infinity,
-// and the squared value of the real and imaginary components at the time of loop exit
+// and the squared magnitude of the complex number at the time of exit
 // you can use this number to create the nice color bands you see in the output
 // For a more detailed description, see mandelbrot explanations online
 #[allow(dead_code)]
 fn mandelbrot_pixel_f64(max_iter: usize, c_x: f64, c_y: f64) -> (usize, f64) {
     let mut x = c_x;
     let mut y = c_y;
-    let mut dist = 0.0;
+    let mut magsq = 0.0;
     for n in 0..max_iter {
         let xy = x * y;
         let xx = x * x;
         let yy = y * y;
-        dist = xx + yy;
-        if dist > 4.0 {
-            return (n, dist)
+        magsq = xx + yy;
+        if magsq > 4.0 {
+            return (n, magsq)
         }
         x = (xx - yy) + c_x;
         y = (xy + xy) + c_y;
     }
-    return (max_iter, dist)
+    return (max_iter, magsq)
 }
 
 #[allow(dead_code)]
