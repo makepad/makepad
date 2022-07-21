@@ -156,8 +156,6 @@ impl TileCache {
     }
 }
 
-
-
 pub enum ToUI {
     TileDone {tile: Tile},
     TileBailed {tile: Tile},
