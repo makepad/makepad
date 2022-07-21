@@ -20,7 +20,7 @@ live_register!{
     DrawTile: {{DrawTile}} {
         texture tex: texture2d
         fn pixel(self) -> vec4 {
-            let fractal = sample2d(self.tex, vec2(self.pos.x, 1.0 - self.pos.y))
+            let fractal = sample2d(self.tex, vec2(self.pos.x,self.pos.y))
             
             // unpack iteration and magnitude squared from our u32 buffer
             let iter = fractal.y * 65535 + fractal.x * 255;
@@ -35,14 +35,14 @@ live_register!{
     }
     
     Mandelbrot: {{Mandelbrot}} {
-        max_iter: 320,
+        max_iter: 2048,
     }
 }
 
 pub const TILE_SIZE_X: usize = 256;
 pub const TILE_SIZE_Y: usize = 256;
 pub const TILE_CACHE_SIZE: usize = 500;
-pub const POOL_THREAD_COUNT: usize = 4;
+pub const POOL_THREAD_COUNT: usize = 8;
 
 // the shader struct used to draw
 
@@ -423,6 +423,9 @@ pub struct Mandelbrot {
     #[rust(FractalSpace::new(vec2f64(-0.5, 0.0), 0.5))]
     space: FractalSpace,
     
+    #[rust]
+    had_first_draw:bool,
+    
     // the tilecache holding all the tiles
     #[rust(TileCache::new(cx))]
     tile_cache: TileCache,
@@ -462,11 +465,11 @@ impl Mandelbrot {
             if fractal_zoom >2e-5 {
                 // we can use a f32x4 path when we aren't zoomed in far (2x faster)
                 // as f32 has limited zoom-depth it can support
-                mandelbrot_f32x4(&mut tile, max_iter);
+                mandelbrot_f64x2_aa(&mut tile, max_iter);
             }
             else {
                 // otherwise we use a higher resolution f64
-                mandelbrot_f64x2(&mut tile, max_iter);
+                mandelbrot_f64x2_aa(&mut tile, max_iter);
             }
             to_ui.send(ToUI::TileDone {tile}).unwrap();
         })
@@ -526,9 +529,8 @@ impl Mandelbrot {
         }
         
         if let Some(ne) = self.next_frame.triggered(event) {
-            
             // If we don't have a current layer, initiate the first tile render on the center of the screen
-            if self.tile_cache.generate_completed() && self.tile_cache.current.is_empty() {
+            if self.had_first_draw && self.tile_cache.generate_completed() && self.tile_cache.current.is_empty() {
                 self.generate_tiles_around_finger(cx, self.space.zoom, self.space.view_rect.center());
             }
             
@@ -621,6 +623,7 @@ impl Mandelbrot {
         // checks if our view is dirty, exits here if its clean
         self.view.begin(cx, walk, Layout::flow_right()) ?;
         
+        self.had_first_draw = true;
         // store the view information here as its the only place it's known in the codeflow
         self.space.tile_size = vec2f64(TILE_SIZE_X as f64, TILE_SIZE_Y as f64) / cx.current_dpi_factor as f64;
         self.space.view_rect = cx.turtle().rect();
@@ -637,7 +640,6 @@ impl Mandelbrot {
         // iterate the current and next tile caches and draw the fractal tile
         for tile in self.tile_cache.current.iter().chain(self.tile_cache.next.iter()) {
             let rect = self.space.fractal_to_screen_rect(tile.fractal);
-            
             // set texture by index. 
             self.draw_tile.draw_vars.set_texture(0, &tile.texture);
             
