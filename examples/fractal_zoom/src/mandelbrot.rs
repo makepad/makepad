@@ -8,7 +8,8 @@ use {
     }
 };
 
-#[cfg(any(not(target_arch = "wasm32"), all(target_arch = "wasm32", target_feature = "simd128")))]
+// include the SIMD path if we support it
+#[cfg(any(not(target_arch = "wasm32"), target_feature = "simd128"))]
 use crate::mandelbrot_simd::*;
 
 live_register!{
@@ -53,7 +54,8 @@ pub const TILE_SIZE_Y: usize = 256;
 pub const TILE_CACHE_SIZE: usize = 500;
 pub const POOL_THREAD_COUNT: usize = 4;
 
-// basic plain f64 loop
+// basic plain f64 loop, not called in SIMD mode
+#[allow(dead_code)]
 fn mandelbrot_pixel_f64(max_iter: usize, c_x: f64, c_y: f64) -> (usize, f64) {
     let mut x = c_x;
     let mut y = c_y;
@@ -72,6 +74,7 @@ fn mandelbrot_pixel_f64(max_iter: usize, c_x: f64, c_y: f64) -> (usize, f64) {
     return (max_iter, dist)
 }
 
+#[allow(dead_code)]
 fn mandelbrot_f64(tile: &mut Tile, max_iter: usize) {
     let tile_size = vec2f64(TILE_SIZE_X as f64, TILE_SIZE_Y as f64);
     for y in 0..TILE_SIZE_Y {
