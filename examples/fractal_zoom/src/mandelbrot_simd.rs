@@ -48,7 +48,7 @@ fn mandelbrot_pixel_f32_simd(max_iter: u32, c_x: f32x4, c_y: f32x4) -> (u32x4, f
         let yy = y * y;
         let magsq = xx + yy;
         
-        // this compares the magsq to < 4.0 and stores the result in a mask
+        // this compares the magsq to > 4.0 and stores the result in a mask
         // masks are vectors of bools you can use to select values
         // in simd types by lane
         let if_exit = magsq.lanes_gt(f32x4s(4.0));
