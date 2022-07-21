@@ -161,7 +161,7 @@ pub enum ToUI {
     TileBailed {tile: Tile},
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct FractalSpace {
     view_rect: Rect,
     tile_size: Vec2F64,
@@ -178,19 +178,28 @@ impl FractalSpace {
             ..Self::default()
         }
     }
-    fn fractal_to_screen(&self, other_zoom: f64, other_center: Vec2F64, pos: Vec2F64) -> Vec2 {
-        let view_center = self.view_rect.pos + self.view_rect.size * 0.5;
-        return (((pos - other_center) / other_zoom) * self.tile_size).into_vec2() + view_center;
+    
+    fn other(&self, other_zoom: f64, other_center: Vec2F64)->Self{
+        Self{
+            center: other_center,
+            zoom: other_zoom,
+            ..self.clone()
+        }
     }
     
-    fn screen_to_fractal(&self, other_zoom: f64, other_center: Vec2F64, pos: Vec2) -> Vec2F64 {
+    fn fractal_to_screen(&self, pos: Vec2F64) -> Vec2 {
         let view_center = self.view_rect.pos + self.view_rect.size * 0.5;
-        return (((pos - view_center).into_vec2f64() / self.tile_size) * other_zoom) + other_center;
+        return (((pos - self.center) / self.zoom) * self.tile_size).into_vec2() + view_center;
     }
     
-    fn fractal_to_screen_rect(&self, other_zoom: f64, other_center: Vec2F64, rect: RectF64) -> Rect {
-        let pos1 = self.fractal_to_screen(other_zoom, other_center, rect.pos);
-        let pos2 = self.fractal_to_screen(other_zoom, other_center, rect.pos + rect.size);
+    fn screen_to_fractal(&self, pos: Vec2) -> Vec2F64 {
+        let view_center = self.view_rect.pos + self.view_rect.size * 0.5;
+        return (((pos - view_center).into_vec2f64() / self.tile_size) * self.zoom) + self.center;
+    }
+    
+    fn fractal_to_screen_rect(&self, rect: RectF64) -> Rect {
+        let pos1 = self.fractal_to_screen(rect.pos);
+        let pos2 = self.fractal_to_screen(rect.pos + rect.size);
         Rect {
             pos: pos1,
             size: pos2 - pos1
@@ -198,9 +207,9 @@ impl FractalSpace {
     }
     
     // transform a rect in view space to fractal space
-    fn screen_to_fractal_rect(&self, other_zoom: f64, other_center: Vec2F64, rect: Rect) -> RectF64 {
-        let pos1 = self.screen_to_fractal(other_zoom, other_center, rect.pos);
-        let pos2 = self.screen_to_fractal(other_zoom, other_center, rect.pos + rect.size);
+    fn screen_to_fractal_rect(&self,rect: Rect) -> RectF64 {
+        let pos1 = self.screen_to_fractal(rect.pos);
+        let pos2 = self.screen_to_fractal(rect.pos + rect.size);
         RectF64 {
             pos: pos1,
             size: pos2 - pos1
@@ -208,7 +217,7 @@ impl FractalSpace {
     }
     
     fn zoom_around(&mut self, factor: f64, around: Vec2) {
-        let fpos1 = self.screen_to_fractal(self.zoom, self.center, around);
+        let fpos1 = self.screen_to_fractal(around);
         self.zoom *= factor;
         if self.zoom < 5e-14f64 {
             self.zoom = 5e-14f64
@@ -216,13 +225,13 @@ impl FractalSpace {
         if self.zoom > 2.0 {
             self.zoom = 2.0;
         }
-        let fpos2 = self.screen_to_fractal(self.zoom, self.center, around);
+        let fpos2 = self.screen_to_fractal(around);
         self.center += fpos1 - fpos2;
     }
     
     // self.view_rect in fractal space
-    fn view_rect_to_fractal(&self, fractal_zoom: f64, fractal_center: Vec2F64) -> RectF64 {
-        self.screen_to_fractal_rect(fractal_zoom, fractal_center, self.view_rect)
+    fn view_rect_to_fractal(&self) -> RectF64 {
+        self.screen_to_fractal_rect(self.view_rect)
     }
 }
 
@@ -235,27 +244,32 @@ pub struct BailWindow{
 #[derive(Live, FrameComponent)]
 #[live_register(frame_component!(Mandelbrot))]
 pub struct Mandelbrot {
+    // DSL accessible
     draw_tile: DrawTile,
     max_iter: usize,
-    #[rust] next_frame: NextFrame,
-    
-    //#[rust(vec2f64(-0.5, 0.0))] fractal_center: Vec2F64,
-    //#[rust(0.5)] fractal_zoom: f64,
-    
-    #[rust] finger_abs: Vec2,
-    #[rust] is_zooming: bool,
-    #[rust(true)] is_zoom_in: bool,
-    #[rust] cycle: f32,
-    // cross thread checkable window to see if a tile needs to be abandoned (outside the view)
-    #[rust] bail_window: Arc<Mutex<RefCell<BailWindow>> >,
-    #[rust(FractalSpace::new(vec2f64(-0.5, 0.0), 0.5))] space: FractalSpace,
-    
     view: View,
     state: State,
     walk: Walk,
-    #[rust(TileCache::new(cx))] tile_cache: TileCache,
     
-    #[rust(ThreadPool::new(cx, 4))] pool: ThreadPool,
+    // non DSL accessible
+    #[rust] next_frame: NextFrame,
+    #[rust] finger_abs: Vec2,
+    #[rust] is_zooming: bool,
+    #[rust] cycle: f32,
+    #[rust] bail_window: Arc<Mutex<RefCell<BailWindow>> >,
+
+    #[rust(true)] 
+    is_zoom_in: bool,
+    
+    #[rust(FractalSpace::new(vec2f64(-0.5, 0.0), 0.5))] 
+    space: FractalSpace,
+    
+    #[rust(TileCache::new(cx))] 
+    tile_cache: TileCache,
+    
+    #[rust(ThreadPool::new(cx, 4))] 
+    pool: ThreadPool,
+    
     #[rust] to_ui: ToUIReceiver<ToUI>,
 }
 
@@ -363,8 +377,8 @@ impl Mandelbrot {
         self.generate_tiles(
             cx,
             zoom,
-            self.space.screen_to_fractal(zoom, self.space.center, around),
-            self.space.view_rect_to_fractal(zoom, self.space.center),
+            self.space.other(zoom, self.space.center).screen_to_fractal(around),
+            self.space.other(zoom, self.space.center).view_rect_to_fractal(),
             self.is_zoom_in
         );
     }
@@ -511,7 +525,7 @@ impl Mandelbrot {
         
         *self.bail_window.lock().unwrap().borrow_mut() = BailWindow{
             is_zoom_in: self.is_zoom_in, 
-            window:self.space.view_rect_to_fractal(self.space.zoom, self.space.center)
+            window:self.space.view_rect_to_fractal()
         };
         
         self.draw_tile.alpha = 1.0;
@@ -521,7 +535,7 @@ impl Mandelbrot {
         let tc = &mut self.tile_cache;
         
         for tile in tc.current.iter().chain(tc.next.iter()) {
-            let rect = self.space.fractal_to_screen_rect(self.space.zoom, self.space.center, tile.fractal);
+            let rect = self.space.fractal_to_screen_rect(tile.fractal);
             self.draw_tile.draw_vars.set_texture(0, &tile.texture);
             self.draw_tile.draw_abs(cx, rect);
         }
