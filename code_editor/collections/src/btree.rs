@@ -28,45 +28,15 @@ impl<T: Chunk> BTree<T> {
     }
 
     pub(crate) fn cursor_front(&self) -> Cursor<'_, T> {
-        let mut path = Vec::new();
-        let mut node = &self.root;
-        loop {
-            match node {
-                Node::Leaf(_) => break,
-                Node::Branch(branch) => {
-                    path.push((branch, 0));
-                    node = branch.first().unwrap();
-                }
-            }
-        }
-        Cursor {
-            root: &self.root,
-            start: 0,
-            end: self.len(),
-            position: 0,
-            path,
-        }
+        let mut cursor = Cursor::new(&self.root, 0, self.len());
+        cursor.descend_left();
+        cursor
     }
 
     pub(crate) fn cursor_back(&self) -> Cursor<'_, T> {
-        let mut path = Vec::new();
-        let mut node = &self.root;
-        loop {
-            match node {
-                Node::Leaf(_) => break,
-                Node::Branch(branch) => {
-                    path.push((branch, 0));
-                    node = branch.first().unwrap();
-                }
-            }
-        };
-        Cursor {
-            root: &self.root,
-            start: 0,
-            end: self.len(),
-            position: self.len(),
-            path,
-        }
+        let mut cursor = Cursor::new(&self.root, 0, self.len());
+        cursor.descend_right();
+        cursor
     }
 
     pub(crate) fn prepend(&mut self, mut other: Self) {
@@ -230,12 +200,12 @@ pub(crate) struct Cursor<'a, T: Chunk> {
 }
 
 impl<'a, T: Chunk> Cursor<'a, T> {
-    pub(crate) fn is_at_start(&self) -> bool {
+    pub(crate) fn is_at_front(&self) -> bool {
         self.position <= self.start
     }
 
-    pub(crate) fn is_at_end(&self) -> bool {
-        self.position >= self.end
+    pub(crate) fn is_at_back(&self) -> bool {
+        self.position + self.chunk().len() >= self.end
     }
 
     pub(crate) fn position(&self) -> usize {
@@ -266,6 +236,32 @@ impl<'a, T: Chunk> Cursor<'a, T> {
             }
             self.path.pop();
         }
+        self.descend_left();
+    }
+
+    pub(crate) fn move_prev_chunk(&mut self) {
+        while let Some((branch, index)) = self.path.last_mut() {
+            if *index > 0 {
+                *index -= 1;
+                self.position -= branch[*index].summed_len();
+                break;
+            }
+            self.path.pop();
+        }
+        self.descend_right();
+    }
+
+    fn new(root: &'a Node<T>, start: usize, end: usize) -> Self {
+        Self {
+            root,
+            start,
+            end,
+            position: 0,
+            path: Vec::new(),
+        }
+    }
+
+    fn descend_left(&mut self) {
         let mut node = self
             .path
             .last()
@@ -281,14 +277,7 @@ impl<'a, T: Chunk> Cursor<'a, T> {
         }
     }
 
-    pub(crate) fn move_prev_chunk(&mut self) {
-        while let Some((_, index)) = self.path.last_mut() {
-            if *index > 0 {
-                *index -= 1;
-                break;
-            }
-            self.path.pop();
-        }
+    fn descend_right(&mut self) {
         let mut node = self
             .path
             .last()
@@ -297,12 +286,12 @@ impl<'a, T: Chunk> Cursor<'a, T> {
             match node {
                 Node::Leaf(_) => break,
                 Node::Branch(branch) => {
-                    self.path.push((branch, branch.len() - 1));
                     node = branch.last().unwrap();
+                    self.position += branch.summed_len() - node.summed_len();
+                    self.path.push((branch, branch.len() - 1));
                 }
             }
         }
-        self.position -= self.chunk().len();
     }
 }
 
