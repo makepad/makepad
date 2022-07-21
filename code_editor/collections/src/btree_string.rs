@@ -444,7 +444,31 @@ fn len_utf8_from_first_byte(byte: u8) -> usize {
 mod tests {
     use {super::*, proptest::prelude::*};
 
+    fn string_and_index() -> impl Strategy<Value = (String, usize)> {
+        any::<String>().prop_flat_map(|string| {
+            let string_len = string.len();
+            (Just(string), 0..=string_len)
+        }.prop_map(|(string, mut index)| {
+            while !string.is_char_boundary(index) {
+                index -= 1;
+            }
+            (string, index)
+        }))
+    }
+
     proptest! {
+        #[test]
+        fn test_len(string in any::<String>()) {
+            let btree_string = BTreeString::from(&string);
+            assert_eq!(btree_string.len(), string.len());
+        }
+
+        #[test]
+        fn test_char_count(string in any::<String>()) {
+            let btree_string = BTreeString::from(&string);
+            assert_eq!(btree_string.char_count(), string.chars().count());
+        }
+
         #[test]
         fn test_chunks(string in any::<String>()) {
             let btree_string = BTreeString::from(&string);
@@ -505,10 +529,7 @@ mod tests {
             let mut btree_string = BTreeString::from(&string);
             btree_string.prepend(BTreeString::from(&other_string));
             string.replace_range(..0, &other_string);
-            assert_eq!(
-                btree_string.chars().collect::<String>(),
-                string,
-            );
+            assert_eq!(btree_string.chars().collect::<String>(), string);
         }
 
         #[test]
@@ -516,10 +537,32 @@ mod tests {
             let mut btree_string = BTreeString::from(&string);
             btree_string.append(BTreeString::from(&other_string));
             string.push_str(&other_string);
-            assert_eq!(
-                btree_string.chunks().collect::<String>(),
-                string,
-            );
+            assert_eq!(btree_string.chunks().collect::<String>(), string);
+        }
+
+        #[test]
+        fn test_split_off((mut string, at) in string_and_index()) {
+            let mut btree_string = BTreeString::from(&string);
+            let string_2 = string.split_off(at);
+            let btree_string_2 = btree_string.split_off(at);
+            assert_eq!(btree_string.chunks().collect::<String>(), string);
+            assert_eq!(btree_string_2.chunks().collect::<String>(), string_2);
+        }
+
+        #[test]
+        fn test_truncate_front((mut string, end) in string_and_index()) {
+            let mut btree_string = BTreeString::from(&string);
+            string.replace_range(..end, "");
+            btree_string.truncate_front(end);
+            assert_eq!(btree_string.chunks().collect::<String>(), string);
+        }
+
+        #[test]
+        fn test_truncate_back((mut string, start) in string_and_index()) {
+            let mut btree_string = BTreeString::from(&string);
+            string.truncate(start);
+            btree_string.truncate_back(start);
+            assert_eq!(btree_string.chunks().collect::<String>(), string);
         }
     }
 }
