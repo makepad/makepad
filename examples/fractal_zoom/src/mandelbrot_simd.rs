@@ -4,7 +4,8 @@ use {
     crate::mandelbrot::*
 };
 
-// simd constructor helpers to declog the code
+// simd constructor helpers to make the code readable
+// the syntax is simdtype+v for 'vector' and +s for 'scalar' 
 fn f32x4v(a: f32, b: f32, c: f32, d: f32) -> f32x4 {f32x4::from_array([a, b, c, d])}
 fn f32x4s(a: f32) -> f32x4 {f32x4::from_array([a; 4])}
 fn m32x4s(a: bool) -> Mask::<i32, 4> {Mask::<i32, 4>::from_array([a; 4])}
@@ -24,7 +25,7 @@ fn mandelbrot_pixel_f32_simd(max_iter: u32, c_x: f32x4, c_y: f32x4) -> (u32x4, f
     let mut y = c_y;
 
     // in SIMD mandelbrot the loop has to continue
-    // until all the 4 lanes have an exit state
+    // until all the 4 lanes have exitted
     // this means you need to hold onto the magsq/iter 
     // values per lane at the moment it needs to exit
     // until everyone has exitted
@@ -38,18 +39,20 @@ fn mandelbrot_pixel_f32_simd(max_iter: u32, c_x: f32x4, c_y: f32x4) -> (u32x4, f
         let yy = y * y;
         let magsq = xx + yy;
         
-        // using a mask, you can write parallel if/else code 
+        // this compares the magsq to < 4.0 and stores the result in a mask
+        // masks are vectors of bools you can use to select values
+        // in simd types by lane
         let if_exit = magsq.lanes_gt(f32x4s(4.0));
 
         // this boolean logic is only 1 when the value 'changed to 1'
         // and 0 otherwise. so it stores if we have a new exit on our lanes
         let new_exit = (if_exit ^ exitted) & if_exit;
-        // mask it into our exitted set 
+        // merge it into our exitted set 
         exitted = exitted | new_exit;
         
         // when a lane has a 'new exit' it stores the current value
         // otherwise it uses the old value (magsq and iter)
-        // the syntax is mask.select(truevec, falsevec)
+        // the syntax is mask.select(truesimd, falsesimd)
         magsq_out = new_exit.select(magsq, magsq_out);
         iter_out = new_exit.select(u32x4s(n), iter_out);
 
