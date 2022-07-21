@@ -3,7 +3,7 @@ use makepad_component::*;
 use makepad_platform::*;
 mod mandelbrot;
 
-#[cfg(any(not(target_arch = "wasm32"),all(target_arch = "wasm32",target_feature = "simd128")))]
+#[cfg(any(not(target_arch = "wasm32"), target_feature = "simd128"))]
 mod mandelbrot_simd;
 
 live_register!{
