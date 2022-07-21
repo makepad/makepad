@@ -47,7 +47,7 @@ fn _u64x2v(a: u64, b: u64) -> u64x2 {u64x2::from_array([a, b])}
 // you can construct very efficient code.
 
 // here we use f32x4 to compute 4 mandelbrot pixels at the same time with f32 precision.
-fn mandelbrot_pixel_f32_simd(max_iter: u32, c_x: f32x4, c_y: f32x4) -> (u32x4, f32x4) {
+fn mandelbrot_pixel_f32x4(max_iter: u32, c_x: f32x4, c_y: f32x4) -> (u32x4, f32x4) {
     let mut x = c_x;
     let mut y = c_y;
     
@@ -96,7 +96,7 @@ fn mandelbrot_pixel_f32_simd(max_iter: u32, c_x: f32x4, c_y: f32x4) -> (u32x4, f
 }
 
 // this is the main image loop for the f32 SIMD
-pub fn mandelbrot_f32_simd(tile: &mut Tile, max_iter: usize) {
+pub fn mandelbrot_f32x4(tile: &mut Tile, max_iter: usize) {
     
     // store the tile size / fractals position and size into simd vectors
     // this way we can do math with it on 4 pixel positions in parallel
@@ -116,7 +116,7 @@ pub fn mandelbrot_f32_simd(tile: &mut Tile, max_iter: usize) {
             let fp_y = fractal_pos.1 + fractal_size.1 * pixel_pos.1 / tile_size.1;
             
             // compute 4 pixels in parallel 
-            let (iter, magsq) = mandelbrot_pixel_f32_simd(max_iter as u32, fp_x, fp_y);
+            let (iter, magsq) = mandelbrot_pixel_f32x4(max_iter as u32, fp_x, fp_y);
             
             // scale and clamp the magnitude squared so that it can become a 
             // fixed point 16 bit value we can pack into 2x8bit components of the texture 
@@ -136,7 +136,7 @@ pub fn mandelbrot_f32_simd(tile: &mut Tile, max_iter: usize) {
 
 
 // The same as the above, except using 2 lanes of f64s
-fn mandelbrot_pixel_f64_simd(max_iter: u64, c_x: f64x2, c_y: f64x2) -> (u64x2, f64x2) {
+fn mandelbrot_pixel_f64x2(max_iter: u64, c_x: f64x2, c_y: f64x2) -> (u64x2, f64x2) {
     let mut x = c_x;
     let mut y = c_y;
     let mut magsq_out = f64x2s(0.0);
@@ -163,7 +163,7 @@ fn mandelbrot_pixel_f64_simd(max_iter: u64, c_x: f64x2, c_y: f64x2) -> (u64x2, f
     return (iter_out, magsq_out)
 }
 
-pub fn mandelbrot_f64_simd(tile: &mut Tile, max_iter: usize) {
+pub fn mandelbrot_f64x2(tile: &mut Tile, max_iter: usize) {
     let tile_size = (f64x2s(TILE_SIZE_X as f64), f64x2s(TILE_SIZE_Y as f64));
     let fractal_pos = (f64x2s(tile.fractal.pos.x), f64x2s(tile.fractal.pos.y));
     let fractal_size = (f64x2s(tile.fractal.size.x), f64x2s(tile.fractal.size.y));
@@ -174,7 +174,7 @@ pub fn mandelbrot_f64_simd(tile: &mut Tile, max_iter: usize) {
             let pixel_pos = (f64x2v(xf, xf + 1.0), f64x2s(y as f64));
             let fp_x = fractal_pos.0 + fractal_size.0 * pixel_pos.0 / tile_size.0;
             let fp_y = fractal_pos.1 + fractal_size.1 * pixel_pos.1 / tile_size.1;
-            let (iter, magsq) = mandelbrot_pixel_f64_simd(max_iter as u64, fp_x, fp_y);
+            let (iter, magsq) = mandelbrot_pixel_f64x2(max_iter as u64, fp_x, fp_y);
             let magsq = (magsq + f64x2s(127.0)) * f64x2s(256.0);
             let magsq = magsq.clamp(f64x2s(0.0), f64x2s(65535.0));
             let magsq: u64x2 = magsq.cast();
@@ -187,7 +187,7 @@ pub fn mandelbrot_f64_simd(tile: &mut Tile, max_iter: usize) {
 
 // 2 lane f64 antialiased by supersampling 4 pixels
 #[allow(dead_code)]
-pub fn mandelbrot_f64_simd_aa(tile: &mut Tile, max_iter: usize) {
+pub fn mandelbrot_f64x2_aa(tile: &mut Tile, max_iter: usize) {
     let tile_size = (f64x2s(TILE_SIZE_X as f64), f64x2s(TILE_SIZE_Y as f64));
     let fractal_pos = (f64x2s(tile.fractal.pos.x), f64x2s(tile.fractal.pos.y));
     let fractal_size = (f64x2s(tile.fractal.size.x), f64x2s(tile.fractal.size.y));
@@ -199,11 +199,11 @@ pub fn mandelbrot_f64_simd_aa(tile: &mut Tile, max_iter: usize) {
             let pixel_pos = (f64x2v(xf, xf + 0.5), f64x2s(yf));
             let fp_x = fractal_pos.0 + fractal_size.0 * pixel_pos.0 / tile_size.0;
             let fp_y = fractal_pos.1 + fractal_size.1 * pixel_pos.1 / tile_size.1;
-            let (iter1, magsq1) = mandelbrot_pixel_f64_simd(max_iter as u64, fp_x, fp_y);
+            let (iter1, magsq1) = mandelbrot_pixel_f64x2(max_iter as u64, fp_x, fp_y);
             let pixel_pos = (f64x2v(xf, xf + 0.5), f64x2s(yf+0.5));
             let fp_x = fractal_pos.0 + fractal_size.0 * pixel_pos.0 / tile_size.0;
             let fp_y = fractal_pos.1 + fractal_size.1 * pixel_pos.1 / tile_size.1;
-            let (iter2, magsq2) = mandelbrot_pixel_f64_simd(max_iter as u64, fp_x, fp_y);
+            let (iter2, magsq2) = mandelbrot_pixel_f64x2(max_iter as u64, fp_x, fp_y);
             let iter = (iter1 + iter2).reduce_sum() / 4;
             let magsq = (magsq1 + magsq2).reduce_sum() / 4.0;
             let magsq = ((magsq + 127.0)* 256.0).max(0.0).min(65535.0) as u32;
