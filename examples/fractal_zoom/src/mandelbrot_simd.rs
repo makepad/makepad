@@ -26,7 +26,7 @@ fn _u64x2v(a: u64, b: u64) -> u64x2 {u64x2::from_array([a, b])}
 // a+b is then [1+3,2+4]
 // For the CPU this code takes (roughly) the same time to execute as 1+3
 // So you get 2 times the performance here. And you can also use
-// SIMD widths of 2,4,8 depending on your CPU's abilities.
+// SIMD widths of 2,4,8 depending on your CPU's abilities
 // to get a 2x 4x or 8x speedup (rougly) of what you are doing.
 
 // Most ARM chips (and the WASM standard) have a SIMD width of 128 bits
