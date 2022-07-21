@@ -121,6 +121,7 @@ pub fn mandelbrot_f64_simd(tile: &mut Tile, max_iter: usize) {
 }
 
 // 2 lane f64 antialiased
+#[allow(dead_code)]
 pub fn mandelbrot_f64_simd_aa(tile: &mut Tile, max_iter: usize) {
     let tile_size = (f64x2s(TILE_SIZE_X as f64), f64x2s(TILE_SIZE_Y as f64));
     let fractal_pos = (f64x2s(tile.fractal.pos.x), f64x2s(tile.fractal.pos.y));
