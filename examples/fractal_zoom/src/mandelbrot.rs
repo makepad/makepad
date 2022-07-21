@@ -62,7 +62,9 @@ pub struct DrawTile {
 
 // basic plain f64 loop, not called in SIMD mode. 
 // Returns the iteration count when the loop goes to infinity,
-// and the distance at that point
+// and the squared value of the real and imaginary components at the time of loop exit
+// you can use this number to create the nice color bands you see in the output
+// For a more detailed description, see mandelbrot explanations online
 #[allow(dead_code)]
 fn mandelbrot_pixel_f64(max_iter: usize, c_x: f64, c_y: f64) -> (usize, f64) {
     let mut x = c_x;
@@ -231,6 +233,8 @@ impl TileCache {
         let mut render_tasks = Vec::new();
         let window = window.add_margin(size);
         // create a spiralling walk around the center point, usually your mouse
+        // this is a nice pattern because you look at and zoom around your mouse
+        // and so rendering those tiles first in a circular pattern is good UX
         Self::spiral_walk( | _step, i, j | {
             let fractal = RectF64 {
                 pos: center + size * vec2f64(i as f64, j as f64) - 0.5 * size,
@@ -273,9 +277,16 @@ impl TileCache {
                 let t = di;
                 di = -dj;
                 dj = t;
-                if dj == 0 { // check if we had any intersections
+                if dj == 0 {
                     intersect_step += 1;
+                    // cover the case that a spiral-edge step up does not match
+                    // a complete circle
                     if intersect_step > 2 {
+                        // at the end of a circular walk
+                        // we check if we had any intersections with the viewport.
+                        // (the closure returned true)
+                        // ifso we keep spiralling
+                        // otherwise we are done
                         if !any_intersect {
                             return
                         }
@@ -297,9 +308,13 @@ pub enum ToUI {
 // Space transforms from view (screen) to fractal and back
 #[derive(Default, Clone)]
 pub struct FractalSpace {
+    // the rectangle of the viewport on screen
     view_rect: Rect,
+    // the size of the tile in fractal space
     tile_size: Vec2F64,
+    // the center of the fractal space
     center: Vec2F64,
+    // the zoomfactor in the fractal space
     zoom: f64,
 }
 
@@ -350,16 +365,20 @@ impl FractalSpace {
         }
     }
     
+    // this zooms the fractal space around a point on the screen
     fn zoom_around(&mut self, factor: f64, around: Vec2) {
+        // hold on to the current position in fractal space
         let fpos1 = self.screen_to_fractal(around);
         self.zoom *= factor;
         if self.zoom < 5e-14f64 { // maximum zoom for f64
             self.zoom = 5e-14f64
         }
-        if self.zoom > 2.0 {
+        if self.zoom > 2.0 { // don't go too far out
             self.zoom = 2.0;
         }
         let fpos2 = self.screen_to_fractal(around);
+        // by comparing the position in fractal space before and after the zoomstep
+        // we can move the center so it stays in the same spot
         self.center += fpos1 - fpos2;
     }
     
