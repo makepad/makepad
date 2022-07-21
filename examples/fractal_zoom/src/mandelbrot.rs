@@ -1,17 +1,18 @@
 use {
-    std::sync::Arc,
-    std::sync::Mutex,
-    std::cell::RefCell,
+    std::{
+        sync::{Arc, Mutex},
+        cell::RefCell,
+    },
     crate::{
         makepad_platform::*,
         frame_component::*,
     }
 };
-
 // include the SIMD path if we support it
 #[cfg(any(not(target_arch = "wasm32"), target_feature = "simd128"))]
 use crate::mandelbrot_simd::*;
 
+// Our live DSL to define the shader and UI def
 live_register!{
     use makepad_platform::shader::std::*;
     
@@ -20,7 +21,7 @@ live_register!{
         texture tex: texture2d
         fn pixel(self) -> vec4 {
             let fractal = sample2d(self.tex, vec2(self.pos.x, 1.0 - self.pos.y))
-
+            
             // unpack iteration and distance from our u32 buffer
             let iter = fractal.y * 65535 + fractal.x * 255;
             let dist = (fractal.w * 256 + fractal.z - 127);
@@ -35,9 +36,13 @@ live_register!{
     
     Mandelbrot: {{Mandelbrot}} {
         max_iter: 320,
-        tile_size: vec2(128, 128),
     }
 }
+
+pub const TILE_SIZE_X: usize = 256;
+pub const TILE_SIZE_Y: usize = 256;
+pub const TILE_CACHE_SIZE: usize = 500;
+pub const POOL_THREAD_COUNT: usize = 4;
 
 // the shader struct used to draw
 
@@ -48,11 +53,6 @@ pub struct DrawTile {
     max_iter: f32,
     color_cycle: f32
 }
-
-pub const TILE_SIZE_X: usize = 256;
-pub const TILE_SIZE_Y: usize = 256;
-pub const TILE_CACHE_SIZE: usize = 500;
-pub const POOL_THREAD_COUNT: usize = 4;
 
 // basic plain f64 loop, not called in SIMD mode
 #[allow(dead_code)]
@@ -203,8 +203,8 @@ impl TileCache {
         std::mem::swap(&mut self.current, &mut self.next);
     }
     
-    
-    pub fn generate_queue(&mut self, cx: &mut Cx, zoom: f64, center: Vec2F64, window: RectF64, is_zoom_in: bool) -> Vec<Tile> {
+    // generates a queue
+    pub fn generate_tasks_and_flip_layers(&mut self, cx: &mut Cx, zoom: f64, center: Vec2F64, window: RectF64, is_zoom_in: bool) -> Vec<Tile> {
         let size = vec2f64(zoom, zoom);
         
         // discard the next layer if we don't fill the screen yet at this point and reuse old
@@ -217,7 +217,7 @@ impl TileCache {
         
         self.next_zoom = zoom;
         
-        let mut render_queue = Vec::new();
+        let mut render_tasks = Vec::new();
         let window = window.add_margin(size);
         // create a spiralling walk around the center point, usually your mouse
         Self::spiral_walk( | _step, i, j | {
@@ -228,7 +228,7 @@ impl TileCache {
             if window.intersects(fractal) {
                 if let Some(mut tile) = self.empty.pop() {
                     tile.fractal = fractal;
-                    render_queue.push(tile);
+                    render_tasks.push(tile);
                 }
                 true
             }
@@ -236,8 +236,8 @@ impl TileCache {
                 false
             }
         });
-        self.tiles_in_flight = render_queue.len();
-        render_queue
+        self.tiles_in_flight = render_tasks.len();
+        render_tasks
     }
     
     // creates a nice spiral ordering to the tile rendering
@@ -384,7 +384,7 @@ pub struct Mandelbrot {
     #[rust(TileCache::new(cx))]
     tile_cache: TileCache,
     
-    
+    // the channel that can transmit events to the UI from workers
     #[rust] to_ui: ToUIReceiver<ToUI>,
 }
 
@@ -449,15 +449,16 @@ impl Mandelbrot {
         );
     }
     
+    // generates the tiles and emits them in the right spiral order
     pub fn generate_tiles(&mut self, cx: &mut Cx, zoom: f64, center: Vec2F64, window: RectF64, is_zoom_in: bool) {
-        let render_queue = self.tile_cache.generate_queue(cx, zoom, center, window, is_zoom_in);
+        let render_tasks = self.tile_cache.generate_tasks_and_flip_layers(cx, zoom, center, window, is_zoom_in);
         if is_zoom_in {
-            for tile in render_queue {
+            for tile in render_tasks {
                 self.render_tile(tile, zoom)
             }
         }
         else { // on zoom out reverse the spiral compared to zoom_in
-            for tile in render_queue.into_iter().rev() {
+            for tile in render_tasks.into_iter().rev() {
                 self.render_tile(tile, zoom)
             }
         }
@@ -503,7 +504,7 @@ impl Mandelbrot {
             
             if self.is_zooming { // this only fires once the zoom is starting and the queue is emptying
                 self.space.zoom_around(if self.is_zoom_in {0.98} else {1.02}, self.finger_abs);
-                // this kickstarts the tile cache generation when zooming. 
+                // this kickstarts the tile cache generation when zooming.
                 if self.tile_cache.generate_completed() {
                     let zoom = self.space.zoom * if self.is_zoom_in {0.8} else {2.0};
                     self.generate_tiles_around_finger(cx, zoom, self.finger_abs);
