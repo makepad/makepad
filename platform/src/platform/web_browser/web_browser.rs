@@ -31,7 +31,6 @@ use {
             WindowGeom,
             WindowGeomChangeEvent
         },
-        thread::ThreadPoolSender,
         menu::Menu,
         cursor::MouseCursor,
         cx_api::{CxPlatformApi},
@@ -258,8 +257,10 @@ impl Cx {
                 
                 id!(ToWasmSignal) => {
                     let tw = ToWasmSignal::read_to_wasm(&mut to_wasm);
-                    let signal_id = ((tw.signal_hi as u64) << 32) | (tw.signal_lo as u64);
-                    self.send_signal(Signal(LiveId(signal_id)));
+                    for sig in tw.signals{
+                        let signal_id = ((sig.signal_hi as u64) << 32) | (sig.signal_lo as u64);
+                        self.send_signal(Signal(LiveId(signal_id)));
+                    }
                 }
                 
                 id!(ToWasmWebSocketClose) => {
@@ -313,7 +314,7 @@ impl Cx {
         
         self.call_signals_and_triggers();
         
-        if self.need_redrawing() || self.new_next_frames.len() != 0 {
+        if self.need_redrawing(){
             self.call_draw_event();
             self.platform.from_wasm(FromWasmRequestAnimationFrame {});
         }
@@ -404,7 +405,7 @@ impl Cx {
             }
         }
         
-        if passes_todo.len() > 0 {
+        if passes_todo.len() > 0 || self.new_next_frames.len() != 0 {
             self.platform.from_wasm(FromWasmRequestAnimationFrame {});
         }
         
