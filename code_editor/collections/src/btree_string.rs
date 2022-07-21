@@ -36,10 +36,11 @@ impl BTreeString {
     pub fn cursor_back(&self) -> Cursor<'_> {
         let cursor = self.btree.cursor_back();
         let chunk = &cursor.chunk()[cursor.range()];
+        let index = chunk.len();
         Cursor {
             cursor,
             chunk,
-            index: 0,
+            index,
         }
     }
 
@@ -156,11 +157,11 @@ pub struct Cursor<'a> {
 
 impl<'a> Cursor<'a> {
     pub fn is_at_start(&self) -> bool {
-        self.cursor.is_at_start() && self.index == 0
+        self.cursor.is_at_front() && self.index == 0
     }
 
     pub fn is_at_end(&self) -> bool {
-        self.cursor.is_at_end()
+        self.cursor.is_at_back() && self.index == self.chunk.len()
     }
 
     pub fn is_at_char_boundary(&self) -> bool {
@@ -188,12 +189,20 @@ impl<'a> Cursor<'a> {
     }
 
     pub fn move_next_chunk(&mut self) {
+        if self.cursor.is_at_back() {
+            self.index = self.chunk.len();
+            return;
+        }
         self.cursor.move_next_chunk();
         self.chunk = &self.cursor.chunk()[self.cursor.range()];
         self.index = 0;
     }
 
     pub fn move_prev_chunk(&mut self) {
+        if self.is_at_end() {
+            self.index = 0;
+            return;
+        }
         self.cursor.move_prev_chunk();
         self.chunk = &self.cursor.chunk()[self.cursor.range()];
         self.index = 0;
@@ -208,7 +217,7 @@ impl<'a> Cursor<'a> {
 
     pub fn move_prev_byte(&mut self) {
         if self.index == 0 {
-            self.move_end_of_prev_chunk();
+            self.move_prev_chunk_back();
         }
         self.index -= 1;
     }
@@ -222,7 +231,7 @@ impl<'a> Cursor<'a> {
 
     pub fn move_prev_char(&mut self) {
         if self.index == 0 {
-            self.move_end_of_prev_chunk();
+            self.move_prev_chunk_back();
         }
         self.index -= 1;
         while !self.chunk.is_char_boundary(self.index) {
@@ -230,7 +239,7 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    fn move_end_of_prev_chunk(&mut self) {
+    fn move_prev_chunk_back(&mut self) {
         self.cursor.move_prev_chunk();
         self.chunk = &self.cursor.chunk()[self.cursor.range()];
         self.index = self.chunk.len();
@@ -255,7 +264,7 @@ impl<'a> Iterator for Chunks<'a> {
             |cursor_back| cursor_front.position() == cursor_back.position(),
         ) {
             return None;
-        }
+        };
         let chunk = cursor_front.chunk();
         cursor_front.move_next_chunk();
         Some(chunk)
