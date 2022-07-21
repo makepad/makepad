@@ -195,6 +195,15 @@ impl Cx {
                     
                     let cxtexture = &mut self.textures[texture_id as usize];
                     
+                    if cxtexture.update_image {
+                        cxtexture.update_image = false;
+                        cxtexture.platform.update_normal_texture(
+                            metal_cx,
+                            &cxtexture.desc,
+                            &cxtexture.image_u32
+                        );
+                    }
+                    
                     if let Some(inner) = cxtexture.platform.inner.as_ref() {
                         let () = unsafe {msg_send![
                             encoder,
@@ -268,9 +277,9 @@ impl Cx {
                 let color_attachment: ObjcId = unsafe {msg_send![color_attachments, objectAtIndexedSubscript: index as u64]};
                 
                 let cxtexture = &mut self.textures[color_texture.texture_id as usize];
-                cxtexture.platform.update(metal_cx, AttachmentKind::Color, cxtexture.desc, dpi_factor * pass_size);
+                cxtexture.platform.update_render_target(metal_cx, AttachmentKind::Color, &cxtexture.desc, dpi_factor * pass_size);
                 
-                let is_initial = !cxtexture.platform.inner.as_ref().unwrap().is_inited;
+                let is_initial = !cxtexture.platform.inner.as_mut().unwrap().initial();
                 
                 if let Some(inner) = cxtexture.platform.inner.as_ref() {
                     let () = unsafe {msg_send![
@@ -317,8 +326,8 @@ impl Cx {
         // attach depth texture
         if let Some(depth_texture_id) = self.passes[pass_id].depth_texture {
             let cxtexture = &mut self.textures[depth_texture_id as usize];
-            cxtexture.platform.update(metal_cx, AttachmentKind::Depth, cxtexture.desc, dpi_factor * pass_size);
-            let is_initial = !cxtexture.platform.inner.as_ref().unwrap().is_inited;
+            cxtexture.platform.update_render_target(metal_cx, AttachmentKind::Depth, &cxtexture.desc, dpi_factor * pass_size);
+            let is_initial = cxtexture.platform.inner.as_mut().unwrap().initial();
             
             let depth_attachment: ObjcId = unsafe {msg_send![render_pass_descriptor, depthAttachment]};
             
@@ -840,33 +849,95 @@ pub struct CxPlatformTexture {
 }
 
 impl CxPlatformTexture {
-    fn update(
+
+
+    fn update_normal_texture(
+        &mut self,
+        metal_cx: &MetalCx,
+        desc: &TextureDesc,
+        data: &[u32],
+    ) {
+        // we need a width/height for this one.
+        if desc.width.is_none() || desc.height.is_none(){
+            println!("Normal texture width/height is undefined, cannot allocate it");
+            return
+        }
+        
+        let width = desc.width.unwrap() as u64;
+        let height = desc.height.unwrap() as u64;
+        
+        let need_alloc = if let Some(inner) = &self.inner{
+            CxPlatformTextureInner::need_alloc(width, height, desc, inner)
+        }
+        else{
+            true
+        };
+        
+        if need_alloc{
+            let descriptor = RcObjcId::from_owned(NonNull::new(unsafe {
+                msg_send![class!(MTLTextureDescriptor), new]
+            }).unwrap());
+            
+            let texture = RcObjcId::from_owned(NonNull::new(unsafe {
+                let _: () = msg_send![descriptor.as_id(), setTextureType: MTLTextureType::D2];
+                let _: () = msg_send![descriptor.as_id(), setWidth: width as u64];
+                let _: () = msg_send![descriptor.as_id(), setHeight: height as u64];
+                let _: () = msg_send![descriptor.as_id(), setDepth: 1u64];
+                let _: () = msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Managed];
+                let _: () = msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::ShaderRead];
+                match desc.format {
+                    TextureFormat::ImageBGRA | TextureFormat::Default => {
+                        let _: () = msg_send![
+                            descriptor.as_id(),
+                            setPixelFormat: MTLPixelFormat::RGBA8Unorm
+                        ];
+                    }
+                    _ => panic!(),
+                }
+                msg_send![metal_cx.device, newTextureWithDescriptor: descriptor]
+            }).unwrap());
+        
+            self.inner = Some(CxPlatformTextureInner {
+                is_initial: true,
+                width,
+                height,
+                format: desc.format,
+                multisample: desc.multisample,
+                texture,
+            });
+        }
+        
+        let inner = self.inner.as_ref().unwrap();
+        
+        // ok now update the texture
+        let region = MTLRegion {
+            origin: MTLOrigin {x: 0, y: 0, z: 0},
+            size: MTLSize {width: width as u64, height: height as u64, depth: 1}
+        };
+        
+        let () = unsafe {msg_send![
+            inner.texture.as_id(),
+            replaceRegion: region
+            mipmapLevel: 0
+            withBytes: data.as_ptr() as *const std::ffi::c_void
+            bytesPerRow: (width * std::mem::size_of::<u32>() as u64 )
+        ]};
+    }
+    
+    fn update_render_target(
         &mut self,
         metal_cx: &MetalCx,
         attachment_kind: AttachmentKind,
-        desc: TextureDesc,
+        desc: &TextureDesc,
         default_size: Vec2
     ) {
         let width = desc.width.unwrap_or(default_size.x as usize) as u64;
         let height = desc.height.unwrap_or(default_size.y as usize) as u64;
         
-        if self.inner.as_mut().map_or(false, | inner | {
-            if inner.width != width {
-                return false;
+        if let Some(inner) = &self.inner{
+            if !CxPlatformTextureInner::need_alloc(width, height, desc, inner){
+                return 
             }
-            if inner.height != height {
-                return false;
-            }
-            if inner.format != desc.format {
-                return false;
-            }
-            if inner.multisample != desc.multisample {
-                return false;
-            }
-            inner.is_inited = true;
-            true
-        }) {
-            return;
         }
         
         let descriptor = RcObjcId::from_owned(NonNull::new(unsafe {
@@ -908,7 +979,7 @@ impl CxPlatformTexture {
         }).unwrap());
         
         self.inner = Some(CxPlatformTextureInner {
-            is_inited: false,
+            is_initial: true,
             width,
             height,
             format: desc.format,
@@ -919,12 +990,36 @@ impl CxPlatformTexture {
 }
 
 struct CxPlatformTextureInner {
-    is_inited: bool,
+    is_initial: bool,
     width: u64,
     height: u64,
     format: TextureFormat,
     multisample: Option<usize>,
     texture: RcObjcId
+}
+
+impl CxPlatformTextureInner{
+    fn need_alloc(width:u64, height: u64, desc:&TextureDesc, inner:&CxPlatformTextureInner)->bool{
+        if inner.width != width {
+            return true;
+        }
+        if inner.height != height {
+            return true;
+        }
+        if inner.format != desc.format {
+            return true;
+        }
+        if inner.multisample != desc.multisample {
+            return true;
+        }
+        false
+    }
+    
+    fn initial(&mut self)->bool{
+        let ret = self.is_initial;
+        self.is_initial = false;
+        ret
+    }
 }
 
 enum AttachmentKind {

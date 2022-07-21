@@ -18,8 +18,6 @@ fn m64x2s(a: bool) -> Mask::<i64, 2> {Mask::<i64, 2>::from_array([a; 2])}
 fn u64x2s(a: u64) -> u64x2 {u64x2::from_array([a; 2])}
 fn _u64x2v(a: u64, b: u64) -> u64x2 {u64x2::from_array([a, b])}
 
-// 4 lane f32 
-
 // SIMD is a way to do computations in parallel using vector types
 // for example:
 // let a:u32x2 = [1,2]; let b:u32x2 = [3,4];
