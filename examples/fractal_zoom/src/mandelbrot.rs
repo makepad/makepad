@@ -49,7 +49,10 @@ pub const POOL_THREAD_COUNT: usize = 4;
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawTile {
-    // the shader inherits from the super class DrawQuad
+    // this shader structs inherits from the super class DrawQuad
+    // the shader compiler allows a form of inheritance where you
+    // define a 'draw_super' field, which projects all values in the chain
+    // onto the 'self' property in the shader. This is useful to partially reuse shadercode.
     draw_super: DrawQuad,
     // max iterations of the mandelbrot fractal
     max_iter: f32,
