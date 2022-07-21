@@ -29,6 +29,14 @@ fn _u64x2v(a: u64, b: u64) -> u64x2 {u64x2::from_array([a, b])}
 // to run 2 4 or 8 steps at a time using simd types
 // computing a mandelbrot fractal is such an ideal case
 
+// each component of the vector [1,2] is called a 'lane'
+// in order to still be able to do logic on those lanes independently
+// SIMD has something called 'masks'. These are the same vectors,
+// except they store bools. So [true,false] for instance.
+// And then you can use mask.select(iftruevec, iffalsevec) to use the true/false
+// to pick from truevec or falsevec. With this and binary logic such as
+// AND and OR and XOR, you can construct very efficient logic.
+
 fn mandelbrot_pixel_f32_simd(max_iter: u32, c_x: f32x4, c_y: f32x4) -> (u32x4, f32x4) {
     let mut x = c_x;
     let mut y = c_y;
