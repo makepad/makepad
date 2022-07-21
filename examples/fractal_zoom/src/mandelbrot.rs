@@ -305,6 +305,8 @@ impl TileCache {
     }
 }
 
+// the worker threads send the UI thread this message
+// the tile is passed by value, meaning the ownership returns to the UI thread via this path
 pub enum ToUI {
     TileDone {tile: Tile},
     TileBailed {tile: Tile},
@@ -360,7 +362,6 @@ impl FractalSpace {
         }
     }
     
-    // transform a rect in view space to fractal space
     fn screen_to_fractal_rect(&self, rect: Rect) -> RectF64 {
         let pos1 = self.screen_to_fractal(rect.pos);
         let pos2 = self.screen_to_fractal(rect.pos + rect.size);
@@ -426,7 +427,7 @@ pub struct Mandelbrot {
     #[rust(TileCache::new(cx))]
     tile_cache: TileCache,
     
-    // the channel that can transmit events to the UI from workers
+    // the channel that can transmit message to the UI from workers
     #[rust] to_ui: ToUIReceiver<ToUI>,
 }
 
@@ -447,18 +448,24 @@ impl Mandelbrot {
     // the SIMD tile rendering, uses the threadpool to draw the tile
     #[cfg(any(not(target_arch = "wasm32"), target_feature = "simd128"))]
     pub fn render_tile(&mut self, mut tile: Tile, fractal_zoom: f64) {
-        // lets swap our texture to the tile
         let max_iter = self.max_iter;
+        // we pull a cloneable sender from the to_ui message channel for the worker
         let to_ui = self.to_ui.sender();
+        // clone a ref to the bail window for the worker
         let bail_window = self.tile_cache.bail_window.clone();
+        // create a new task on the threadpool
+        // this is run on any one of our worker threads that's free
         self.tile_cache.thread_pool.execute(move || {
             if TileCache::tile_needs_to_bail(&tile, bail_window) {
                 return to_ui.send(ToUI::TileBailed {tile}).unwrap();
             }
             if fractal_zoom >2e-5 {
+                // we can use a f32x4 path when we aren't zoomed in far (2x faster)
+                // as f32 has limited zoom-depth it can support
                 mandelbrot_f32_simd(&mut tile, max_iter);
             }
-            else {
+            else { 
+                // otherwise we use a higher resolution f64
                 mandelbrot_f64_simd(&mut tile, max_iter);
             }
             to_ui.send(ToUI::TileDone {tile}).unwrap();
@@ -468,14 +475,18 @@ impl Mandelbrot {
     // Normal tile rendering, uses the threadpool to draw the tile
     #[cfg(all(target_arch = "wasm32", not(target_feature = "simd128")))]
     pub fn render_tile(&mut self, mut tile: Tile, _fractal_zoom: f64) {
-        // lets swap our texture to the tile
         let max_iter = self.max_iter;
+        // we pull a cloneable sender from the to_ui message channel for the worker
         let to_ui = self.to_ui.sender();
+        // clone a ref to the bail window for the worker
         let bail_window = self.tile_cache.bail_window.clone();
+        // create a new task on the threadpool
+        // this is run on any one of our worker threads that's free
         self.tile_cache.thread_pool.execute(move || {
             if TileCache::tile_needs_to_bail(&tile, bail_window) {
                 return to_ui.send(ToUI::TileBailed {tile}).unwrap();
             }
+            // use the non SIMD mandelbrot. This path is used on safari
             mandelbrot_f64(&mut tile, max_iter);
             to_ui.send(ToUI::TileDone {tile}).unwrap();
         })
