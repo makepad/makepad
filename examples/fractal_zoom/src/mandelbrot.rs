@@ -1,11 +1,7 @@
-#![allow(dead_code)]
-#![allow(unused)]
-
 use {
     std::sync::Arc,
     std::sync::Mutex,
     std::cell::RefCell,
-    std::simd::*,
     crate::{
         makepad_platform::*,
         frame_component::*,
@@ -111,20 +107,19 @@ impl Tile {
             fractal: RectF64::default()
         }
     }
-    
-    fn swap_buffer_with_texture(&mut self, cx: &mut Cx) {
-        self.texture.swap_image_u32(cx, &mut self.buffer);
-    }
 }
 
 #[derive(Default)]
 pub struct TileCache {
+    // the current layer of tiles
     current: Vec<Tile>,
-    next: Vec<Tile>,
-    empty: Vec<Tile>,
+    // next layer of tiles 
+    next: Vec<Tile>, 
+    // the empty tilecache we can render to from workers
+    empty: Vec<Tile>, 
     current_zoom: f64,
     next_zoom: f64,
-    renders_in_queue: usize,
+    tiles_in_flight: usize,
 }
 
 impl TileCache {
@@ -139,138 +134,73 @@ impl TileCache {
         }
     }
     
+    fn tile_completed(&mut self, cx:&mut Cx, mut tile: Tile){
+        self.tiles_in_flight-=1;
+        tile.texture.swap_image_u32(cx, &mut tile.buffer);
+        self.next.push(tile)
+    }
+    
+    fn tile_bailed(&mut self, tile: Tile){
+        self.tiles_in_flight-=1;
+        self.empty.push(tile);
+    }
+    
+    fn generate_completed(&self)-> bool{
+        self.tiles_in_flight == 0
+    }
+    
     fn discard_next_layer(&mut self, cx: &mut Cx) {
-        while let Some(mut item) = self.next.pop() {
-            item.swap_buffer_with_texture(cx);
-            self.empty.push(item);
+        while let Some(mut tile) = self.next.pop() {
+            tile.texture.swap_image_u32(cx, &mut tile.buffer);
+            self.empty.push(tile);
         }
     }
     
     fn discard_current_layer(&mut self, cx: &mut Cx) {
-        while let Some(mut item) = self.current.pop() {
-            item.swap_buffer_with_texture(cx);
-            self.empty.push(item);
+        while let Some(mut tile) = self.current.pop() {
+            tile.texture.swap_image_u32(cx, &mut tile.buffer);
+            self.empty.push(tile);
         }
         self.current_zoom = self.next_zoom;
         std::mem::swap(&mut self.current, &mut self.next);
     }
-}
-
-pub enum ToUI {
-    TileDone {tile: Tile},
-    TileBailed {tile: Tile},
-}
-
-#[derive(Default)]
-pub struct FractalSpace {
-    view_rect: Rect,
-    tile_size: Vec2F64,
-    center: Vec2F64,
-    zoom: f64,
-}
-
-// Space transforms from view (screen) to fractal and back
-impl FractalSpace {
-    fn new(center: Vec2F64, zoom: f64)->Self{
-        Self{
-            center,
-            zoom,
-            ..Self::default()
+    
+        
+    pub fn generate_queue(&mut self, cx: &mut Cx, zoom: f64, center: Vec2F64, window: RectF64, is_zoom_in: bool)->Vec<Tile> {
+        let size = vec2f64(zoom, zoom);
+        
+        // discard the next layer if we don't fill the screen yet at this point and reuse old
+        if is_zoom_in && !self.next.is_empty() && self.next[0].fractal.size.x < 0.8 * zoom{
+            self.discard_next_layer(cx);
         }
-    }
-    fn fractal_to_screen(&self, other_zoom: f64, other_center: Vec2F64, pos: Vec2F64) -> Vec2 {
-        let view_center = self.view_rect.pos + self.view_rect.size * 0.5;
-        return (((pos - other_center) / other_zoom) * self.tile_size).into_vec2() + view_center;
-    }
-    
-    fn screen_to_fractal(&self, other_zoom: f64, other_center: Vec2F64, pos: Vec2) -> Vec2F64 {
-        let view_center = self.view_rect.pos + self.view_rect.size * 0.5;
-        return (((pos - view_center).into_vec2f64() / self.tile_size) * other_zoom) + other_center;
-    }
-    
-    fn fractal_to_screen_rect(&self, other_zoom: f64, other_center: Vec2F64, rect: RectF64) -> Rect {
-        let pos1 = self.fractal_to_screen(other_zoom, other_center, rect.pos);
-        let pos2 = self.fractal_to_screen(other_zoom, other_center, rect.pos + rect.size);
-        Rect {
-            pos: pos1,
-            size: pos2 - pos1
+        else{
+            self.discard_current_layer(cx);
         }
+        
+        self.next_zoom = zoom;
+        
+        let mut render_queue = Vec::new();
+        let window = window.add_margin(size);
+        // create a spiralling walk around the center point, usually your mouse
+        Self::spiral_walk( | _step, i, j | {
+            let fractal = RectF64 {
+                pos: center + size * vec2f64(i as f64, j as f64) - 0.5 * size,
+                size: size
+            };
+            if window.intersects(fractal) {
+                if let Some(mut tile) = self.empty.pop() {
+                    tile.fractal = fractal;
+                    render_queue.push(tile);
+                }
+                true
+            }
+            else {
+                false
+            }
+        });
+        self.tiles_in_flight = render_queue.len();
+        render_queue
     }
-    
-    // transform a rect in view space to fractal space
-    fn screen_to_fractal_rect(&self, other_zoom: f64, other_center: Vec2F64, rect: Rect) -> RectF64 {
-        let pos1 = self.screen_to_fractal(other_zoom, other_center, rect.pos);
-        let pos2 = self.screen_to_fractal(other_zoom, other_center, rect.pos + rect.size);
-        RectF64 {
-            pos: pos1,
-            size: pos2 - pos1
-        }
-    }
-    
-    fn zoom_around(&mut self, factor: f64, around: Vec2) {
-        let fpos1 = self.screen_to_fractal(self.zoom, self.center, around);
-        self.zoom *= factor;
-        if self.zoom < 5e-14f64 {
-            self.zoom = 5e-14f64
-        }
-        if self.zoom > 2.0 {
-            self.zoom = 2.0;
-        }
-        let fpos2 = self.screen_to_fractal(self.zoom, self.center, around);
-        self.center += fpos1 - fpos2;
-    }
-    
-    // self.view_rect in fractal space
-    fn view_rect_to_fractal(&self, fractal_zoom: f64, fractal_center: Vec2F64) -> RectF64 {
-        self.screen_to_fractal_rect(fractal_zoom, fractal_center, self.view_rect)
-    }
-}
-
-#[derive(Clone, Default)]
-pub struct BailWindow{
-    window: RectF64,
-    is_zoom_in: bool
-}
-
-#[derive(Live, FrameComponent)]
-#[live_register(frame_component!(Mandelbrot))]
-pub struct Mandelbrot {
-    draw_tile: DrawTile,
-    max_iter: usize,
-    #[rust] next_frame: NextFrame,
-    
-    //#[rust(vec2f64(-0.5, 0.0))] fractal_center: Vec2F64,
-    //#[rust(0.5)] fractal_zoom: f64,
-    
-    #[rust] finger_abs: Vec2,
-    #[rust] is_zooming: bool,
-    #[rust(true)] is_zoom_in: bool,
-    #[rust] cycle: f32,
-    // cross thread checkable window to see if a tile needs to be abandoned (outside the view)
-    #[rust] bail_window: Arc<Mutex<RefCell<BailWindow>> >,
-    #[rust(FractalSpace::new(vec2f64(-0.5, 0.0), 0.5))] space: FractalSpace,
-    
-    view: View,
-    state: State,
-    walk: Walk,
-    #[rust(TileCache::new(cx))] tile_cache: TileCache,
-    
-    #[rust(ThreadPool::new(cx, 4))] pool: ThreadPool,
-    #[rust] to_ui: ToUIReceiver<ToUI>,
-}
-
-impl LiveHook for Mandelbrot {
-    fn after_new_from_doc(&mut self, cx: &mut Cx) {
-        self.next_frame = cx.new_next_frame();
-    }
-}
-
-#[derive(Clone, FrameComponentAction)]
-pub enum MandelbrotAction {
-    None
-}
-
-impl Mandelbrot {
     
     // creates a nice spiral ordering to the tile rendering
     fn spiral_walk<F: FnMut(usize, isize, isize) -> bool>(mut f: F) {
@@ -308,17 +238,150 @@ impl Mandelbrot {
             }
         }
     }
+}
+
+pub enum ToUI {
+    TileDone {tile: Tile},
+    TileBailed {tile: Tile},
+}
+
+// Space transforms from view (screen) to fractal and back
+#[derive(Default, Clone)]
+pub struct FractalSpace {
+    view_rect: Rect,
+    tile_size: Vec2F64,
+    center: Vec2F64,
+    zoom: f64,
+}
+
+impl FractalSpace {
+    fn new(center: Vec2F64, zoom: f64)->Self{
+        Self{
+            center,
+            zoom,
+            ..Self::default()
+        }
+    }
+    
+    fn other(&self, other_zoom: f64, other_center: Vec2F64)->Self{
+        Self{
+            center: other_center,
+            zoom: other_zoom,
+            ..self.clone()
+        }
+    }
+    
+    fn fractal_to_screen(&self, pos: Vec2F64) -> Vec2 {
+        let view_center = self.view_rect.pos + self.view_rect.size * 0.5;
+        return (((pos - self.center) / self.zoom) * self.tile_size).into_vec2() + view_center;
+    }
+    
+    fn screen_to_fractal(&self, pos: Vec2) -> Vec2F64 {
+        let view_center = self.view_rect.pos + self.view_rect.size * 0.5;
+        return (((pos - view_center).into_vec2f64() / self.tile_size) * self.zoom) + self.center;
+    }
+    
+    fn fractal_to_screen_rect(&self, rect: RectF64) -> Rect {
+        let pos1 = self.fractal_to_screen(rect.pos);
+        let pos2 = self.fractal_to_screen(rect.pos + rect.size);
+        Rect {
+            pos: pos1,
+            size: pos2 - pos1
+        }
+    }
+    
+    // transform a rect in view space to fractal space
+    fn screen_to_fractal_rect(&self,rect: Rect) -> RectF64 {
+        let pos1 = self.screen_to_fractal(rect.pos);
+        let pos2 = self.screen_to_fractal(rect.pos + rect.size);
+        RectF64 {
+            pos: pos1,
+            size: pos2 - pos1
+        }
+    }
+    
+    fn zoom_around(&mut self, factor: f64, around: Vec2) {
+        let fpos1 = self.screen_to_fractal(around);
+        self.zoom *= factor;
+        if self.zoom < 5e-14f64 {
+            self.zoom = 5e-14f64
+        }
+        if self.zoom > 2.0 {
+            self.zoom = 2.0;
+        }
+        let fpos2 = self.screen_to_fractal(around);
+        self.center += fpos1 - fpos2;
+    }
+    
+    // self.view_rect in fractal space
+    fn view_rect_to_fractal(&self) -> RectF64 {
+        self.screen_to_fractal_rect(self.view_rect)
+    }
+}
+
+// used to last minute test if a tile is outside the view
+#[derive(Clone, Default)]
+pub struct BailWindow{
+    space: RectF64, // fractal space window
+    is_zoom_in: bool // used to determine if we are zooming in
+}
+
+#[derive(Live, FrameComponent)]
+#[live_register(frame_component!(Mandelbrot))]
+pub struct Mandelbrot {
+    // DSL accessible
+    draw_tile: DrawTile,
+    max_iter: usize,
+    view: View,
+    state: State,
+    walk: Walk,
+    
+    // non DSL accessible
+    #[rust] next_frame: NextFrame,
+    #[rust] finger_abs: Vec2,
+    #[rust] is_zooming: bool,
+    #[rust] cycle: f32,
+    #[rust] bail_window: Arc<Mutex<RefCell<BailWindow>> >,
+
+    #[rust(true)] 
+    is_zoom_in: bool,
+    
+    #[rust(FractalSpace::new(vec2f64(-0.5, 0.0), 0.5))] 
+    space: FractalSpace,
+    
+    #[rust(TileCache::new(cx))] 
+    tile_cache: TileCache,
+    
+    #[rust(ThreadPool::new(cx, 4))] 
+    pool: ThreadPool,
+    
+    #[rust] to_ui: ToUIReceiver<ToUI>,
+}
+
+impl LiveHook for Mandelbrot {
+    fn after_new_from_doc(&mut self, cx: &mut Cx) {
+        // starts the animation cycle on startup
+        self.next_frame = cx.new_next_frame();
+    }
+}
+
+#[derive(Clone, FrameComponentAction)]
+pub enum MandelbrotAction {
+    None
+}
+
+impl Mandelbrot {
     
     pub fn check_bail_window(tile: Tile, to_ui:&ToUISender<ToUI>, bail_window:Arc<Mutex<RefCell<BailWindow>> >)->Option<Tile>{
         let bail = bail_window.lock().unwrap().borrow().clone();
         if bail.is_zoom_in {
-            if !tile.fractal.intersects(bail.window) {
+            if !tile.fractal.intersects(bail.space) {
                 to_ui.send(ToUI::TileBailed {tile}).unwrap();
                 return None
             }
         }
         else { // compare the size of the bail window against the tile
-            if tile.fractal.size.x * tile.fractal.size.y < bail.window.size.x * bail.window.size.y * 0.007 {
+            if tile.fractal.size.x * tile.fractal.size.y < bail.space.size.x * bail.space.size.y * 0.007 {
                 to_ui.send(ToUI::TileBailed {tile}).unwrap();
                 return None
             }
@@ -327,7 +390,7 @@ impl Mandelbrot {
     }
     
     #[cfg(any(not(target_arch = "wasm32"), target_feature = "simd128"))]
-    pub fn render_tile(&mut self, mut tile: Tile, fractal_zoom: f64) {
+    pub fn render_tile(&mut self, tile: Tile, fractal_zoom: f64) {
         // lets swap our texture to the tile
         let max_iter = self.max_iter;
         let to_ui = self.to_ui.sender();
@@ -363,54 +426,22 @@ impl Mandelbrot {
         self.generate_tiles(
             cx,
             zoom,
-            self.space.screen_to_fractal(zoom, self.space.center, around),
-            self.space.view_rect_to_fractal(zoom, self.space.center),
+            self.space.other(zoom, self.space.center).screen_to_fractal(around),
+            self.space.other(zoom, self.space.center).view_rect_to_fractal(),
             self.is_zoom_in
         );
     }
     
-    pub fn generate_tiles(&mut self, cx: &mut Cx, zoom: f64, center: Vec2F64, space: RectF64, is_zoom_in: bool) {
-        let size = vec2f64(zoom, zoom);
-        
-        let tile_cache = &mut self.tile_cache;
-        
-        if is_zoom_in && !tile_cache.next.is_empty() && tile_cache.next[0].fractal.size.x < 0.8 * zoom{
-            tile_cache.discard_next_layer(cx);
-        }
-        else{
-            tile_cache.discard_current_layer(cx);
-        }
-        
-        tile_cache.next_zoom = zoom;
-        
-        let mut render_queue = Vec::new();
-        let space = space.add_margin(size);
-        // create a spiralling walk around the center point, usually your mouse
-        Self::spiral_walk( | _step, i, j | {
-            let fractal = RectF64 {
-                pos: center + size * vec2f64(i as f64, j as f64) - 0.5 * size,
-                size: size
-            };
-            if space.intersects(fractal) {
-                if let Some(mut tile) = tile_cache.empty.pop() {
-                    tile.fractal = fractal;
-                    render_queue.push(tile);
-                }
-                true
-            }
-            else {
-                false
-            }
-        });
-        self.tile_cache.renders_in_queue = render_queue.len();
-        
+    pub fn generate_tiles(&mut self, cx: &mut Cx, zoom: f64, center: Vec2F64, window: RectF64, is_zoom_in: bool) {
+        let render_queue = self.tile_cache.generate_queue(cx, zoom, center, window, is_zoom_in);
+        // on zoom out reverse the spiral compared to zoom_in
         if is_zoom_in {
-            for mut tile in render_queue {
+            for tile in render_queue {
                 self.render_tile(tile, zoom)
             }
         }
-        else { // on zoom out reverse the spiral
-            for mut tile in render_queue.into_iter().rev() {
+        else { 
+            for tile in render_queue.into_iter().rev() {
                 self.render_tile(tile, zoom)
             }
         }
@@ -420,37 +451,37 @@ impl Mandelbrot {
         self.state_handle_event(cx, event);
         
         if let Event::Signal(_) = event {
-            // this batches up all the input signals
+            // this batches up all the input signals into a single animation frame
             self.next_frame = cx.new_next_frame();
         }
         
         if let Some(ne) = self.next_frame.triggered(event) {
-            let mut too_many_textures = 0;
+            let mut tiles_received = 0;
+            // try pulling tiles from our message channel from the worker threads
             while let Ok(msg) = self.to_ui.receiver.try_recv() {
-                self.tile_cache.renders_in_queue -= 1;
                 match msg {
-                    ToUI::TileDone {mut tile} => {
-                        tile.swap_buffer_with_texture(cx);
-                        self.tile_cache.next.push(tile);
+                    ToUI::TileDone {tile} => {
+                        self.tile_cache.tile_completed(cx, tile);
                         
                         // trigger a new tile render if we didn't render pixel accurate already
-                        if self.tile_cache.renders_in_queue == 0 && self.tile_cache.next_zoom != self.space.zoom {
+                        if self.tile_cache.generate_completed() && self.tile_cache.next_zoom != self.space.zoom {
                             let zoom = self.space.zoom * if self.is_zooming {if self.is_zoom_in {0.8}else {2.0}}else {1.0};
                             self.generate_tiles_around(cx, zoom, self.finger_abs);
                         }
                         
-                        too_many_textures += 1;
-                        if too_many_textures > 10 {
+                        tiles_received += 1;
+                        // dont process too many tiles at once as this hiccups the renderer
+                        if tiles_received > 10 { 
                             break;
                         }
                     }
-                    ToUI::TileBailed {mut tile} => {
-                        self.tile_cache.empty.push(tile);
+                    ToUI::TileBailed {tile} => {
+                        self.tile_cache.tile_bailed(tile);
                     }
                 }
             }
             // initial tile render
-            if self.tile_cache.renders_in_queue == 0 && self.tile_cache.current.is_empty() {
+            if self.tile_cache.generate_completed() && self.tile_cache.current.is_empty() {
                 self.generate_tiles_around(cx, self.space.zoom, self.space.view_rect.center());
             }
             
@@ -477,7 +508,7 @@ impl Mandelbrot {
                     self.is_zoom_in = false;
                 }
                 // see if we need to kickstart a render
-                if self.tile_cache.renders_in_queue == 0 {
+                if self.tile_cache.generate_completed(){
                     let zoom = self.space.zoom * if self.is_zoom_in {0.8} else {2.0};
                     self.generate_tiles_around(cx, zoom, self.finger_abs);
                 }
@@ -511,7 +542,7 @@ impl Mandelbrot {
         
         *self.bail_window.lock().unwrap().borrow_mut() = BailWindow{
             is_zoom_in: self.is_zoom_in, 
-            window:self.space.view_rect_to_fractal(self.space.zoom, self.space.center)
+            space:self.space.view_rect_to_fractal()
         };
         
         self.draw_tile.alpha = 1.0;
@@ -521,7 +552,7 @@ impl Mandelbrot {
         let tc = &mut self.tile_cache;
         
         for tile in tc.current.iter().chain(tc.next.iter()) {
-            let rect = self.space.fractal_to_screen_rect(self.space.zoom, self.space.center, tile.fractal);
+            let rect = self.space.fractal_to_screen_rect(tile.fractal);
             self.draw_tile.draw_vars.set_texture(0, &tile.texture);
             self.draw_tile.draw_abs(cx, rect);
         }
