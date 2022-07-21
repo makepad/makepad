@@ -126,11 +126,14 @@ impl Tile {
     }
 }
 
-// used to last minute test if a tile is outside the view
+// used to last minute test if a tile is to be discarded by a worker
 #[derive(Clone, Default)]
 pub struct BailWindow {
-    space: RectF64, // fractal space window
-    is_zoom_in: bool // used to determine if we are zooming in
+    // the position of our viewport in fractal space
+    space: RectF64,
+    // if zooming in, the bail-test is wether a tile is outside of the view
+    // if zooming out if a tile uses less than X percentage of the view is.
+    is_zoom_in: bool 
 }
 
 pub struct TileCache {
@@ -144,7 +147,9 @@ pub struct TileCache {
     next_zoom: f64,
     tiles_in_flight: usize,
     
+    // this holds a Wasm compatible threadpool
     thread_pool: ThreadPool,
+    // this is accessed from threads to check if a tile is to be discarded
     bail_window: Arc<Mutex<RefCell<BailWindow >> >,
 }
 
