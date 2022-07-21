@@ -22,11 +22,11 @@ live_register!{
         fn pixel(self) -> vec4 {
             let fractal = sample2d(self.tex, vec2(self.pos.x, 1.0 - self.pos.y))
             
-            // unpack iteration and distance from our u32 buffer
+            // unpack iteration and magnitude squared from our u32 buffer
             let iter = fractal.y * 65535 + fractal.x * 255;
-            let dist = (fractal.w * 256 + fractal.z - 127);
+            let magsq = (fractal.w * 256 + fractal.z - 127);
             
-            let index = abs((6.0 * iter / self.max_iter) - 0.1 * log(dist));
+            let index = abs((6.0 * iter / self.max_iter) - 0.1 * log(magsq));
             if iter > self.max_iter {
                 return vec4(0, 0, 0, 1.0);
             }
