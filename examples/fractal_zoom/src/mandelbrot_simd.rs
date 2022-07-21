@@ -21,7 +21,7 @@ fn _u64x2v(a: u64, b: u64) -> u64x2 {u64x2::from_array([a, b])}
 // 4 lane f32 
 
 // SIMD is a way to do computations in parallel using vector types
-// any operations you do on them execute on the 'lanes' in parallel.
+// any operations you do on them execute in parallel.
 // for example:
 // let a:u32x2 = [1,2]; let b:u32x2 = [3,4];
 // a+b is then [1+3,2+4]
