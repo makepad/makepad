@@ -36,6 +36,14 @@ impl Rect {
         return pos.x >= self.pos.x && pos.x <= self.pos.x + self.size.x &&
         pos.y >= self.pos.y && pos.y <= self.pos.y + self.size.y;
     }
+
+    pub fn center(&self) -> Vec2 {
+        Vec2{
+            x:self.pos.x + self.size.x*0.5,
+            y:self.pos.y + self.size.y*0.5,
+        }
+    }
+
     
     pub fn scale_and_shift(&self, center: Vec2, scale:f32, shift: Vec2) -> Rect {
         Rect{
