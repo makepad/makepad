@@ -15,20 +15,21 @@ use crate::mandelbrot_simd::*;
 live_register!{
     use makepad_platform::shader::std::*;
     
-    // the shader to draw the texturte tiles
+    // the shader to draw the texture tiles
     DrawTile: {{DrawTile}} {
         texture tex: texture2d
         fn pixel(self) -> vec4 {
             let fractal = sample2d(self.tex, vec2(self.pos.x, 1.0 - self.pos.y))
-            // unpack iteration and distance
+
+            // unpack iteration and distance from our u32 buffer
             let iter = fractal.y * 65535 + fractal.x * 255;
             let dist = (fractal.w * 256 + fractal.z - 127);
             
             let index = abs((6.0 * iter / self.max_iter) - 0.1 * log(dist));
             if iter > self.max_iter {
-                return vec4(0, 0, 0, self.alpha);
+                return vec4(0, 0, 0, 1.0);
             }
-            return vec4(Pal::iq2(index + self.cycle) * self.alpha, self.alpha);
+            return vec4(Pal::iq2(index + self.color_cycle), 1.0);
         }
     }
     
@@ -45,8 +46,7 @@ live_register!{
 pub struct DrawTile {
     draw_super: DrawQuad,
     max_iter: f32,
-    alpha: f32,
-    cycle: f32
+    color_cycle: f32
 }
 
 pub const TILE_SIZE_X: usize = 256;
@@ -301,6 +301,7 @@ impl FractalSpace {
         }
     }
     
+    // constructs a copy of self with other zoom/center values
     fn other(&self, other_zoom: f64, other_center: Vec2F64) -> Self {
         Self {
             center: other_center,
@@ -372,7 +373,7 @@ pub struct Mandelbrot {
     #[rust] next_frame: NextFrame,
     #[rust] finger_abs: Vec2,
     #[rust] is_zooming: bool,
-    #[rust] cycle: f32,
+    #[rust] color_cycle: f32,
     
     #[rust(true)]
     is_zoom_in: bool,
@@ -401,7 +402,7 @@ pub enum MandelbrotAction {
 
 impl Mandelbrot {
     
-    // the SIMD tile rendering
+    // the SIMD tile rendering, uses the threadpool to draw the tile
     #[cfg(any(not(target_arch = "wasm32"), target_feature = "simd128"))]
     pub fn render_tile(&mut self, mut tile: Tile, fractal_zoom: f64) {
         // lets swap our texture to the tile
@@ -422,7 +423,7 @@ impl Mandelbrot {
         })
     }
     
-    // Normal tile rendering
+    // Normal tile rendering, uses the threadpool to draw the tile
     #[cfg(all(target_arch = "wasm32", not(target_feature = "simd128")))]
     pub fn render_tile(&mut self, mut tile: Tile, _fractal_zoom: f64) {
         // lets swap our texture to the tile
@@ -450,13 +451,12 @@ impl Mandelbrot {
     
     pub fn generate_tiles(&mut self, cx: &mut Cx, zoom: f64, center: Vec2F64, window: RectF64, is_zoom_in: bool) {
         let render_queue = self.tile_cache.generate_queue(cx, zoom, center, window, is_zoom_in);
-        // on zoom out reverse the spiral compared to zoom_in
         if is_zoom_in {
             for tile in render_queue {
                 self.render_tile(tile, zoom)
             }
         }
-        else {
+        else { // on zoom out reverse the spiral compared to zoom_in
             for tile in render_queue.into_iter().rev() {
                 self.render_tile(tile, zoom)
             }
@@ -503,10 +503,17 @@ impl Mandelbrot {
             
             if self.is_zooming { // this only fires once the zoom is starting and the queue is emptying
                 self.space.zoom_around(if self.is_zoom_in {0.98} else {1.02}, self.finger_abs);
+                // this kickstarts the tile cache generation when zooming. 
+                if self.tile_cache.generate_completed() {
+                    let zoom = self.space.zoom * if self.is_zoom_in {0.8} else {2.0};
+                    self.generate_tiles_around_finger(cx, zoom, self.finger_abs);
+                }
             }
             
-            // ok now the cycle.
-            self.cycle = (ne.time * 0.2).fract() as f32;
+            // animnate color cycle
+            self.color_cycle = (ne.time * 0.2).fract() as f32;
+            
+            // this triggers a draw_walk call
             self.view.redraw(cx);
             self.next_frame = cx.new_next_frame();
         }
@@ -523,11 +530,7 @@ impl Mandelbrot {
                 else {
                     self.is_zoom_in = false;
                 }
-                // see if we need to kickstart a render
-                if self.tile_cache.generate_completed() {
-                    let zoom = self.space.zoom * if self.is_zoom_in {0.8} else {2.0};
-                    self.generate_tiles_around_finger(cx, zoom, self.finger_abs);
-                }
+                
                 self.view.redraw(cx);
                 
                 self.next_frame = cx.new_next_frame();
@@ -553,21 +556,23 @@ impl Mandelbrot {
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) -> ViewRedraw {
         self.view.begin(cx, walk, Layout::flow_right()) ?;
+        
+        // store the view information here as its the only place it's known in the codeflow
         self.space.tile_size = vec2f64(TILE_SIZE_X as f64, TILE_SIZE_Y as f64) / cx.current_dpi_factor as f64;
         self.space.view_rect = cx.turtle().rect();
         
+        // update bail window the workers check to skip tiles that are no longer in view
         self.tile_cache.set_bail_window(BailWindow {
             is_zoom_in: self.is_zoom_in,
             space: self.space.view_rect_to_fractal()
         });
         
-        self.draw_tile.alpha = 1.0;
+        // pass the data onto the shader object
         self.draw_tile.max_iter = self.max_iter as f32;
-        self.draw_tile.cycle = self.cycle;
+        self.draw_tile.color_cycle = self.color_cycle;
         
-        let tc = &mut self.tile_cache;
-        
-        for tile in tc.current.iter().chain(tc.next.iter()) {
+        // iterate the current and next tile caches and draw the fractal tile
+        for tile in self.tile_cache.current.iter().chain(self.tile_cache.next.iter()) {
             let rect = self.space.fractal_to_screen_rect(tile.fractal);
             self.draw_tile.draw_vars.set_texture(0, &tile.texture);
             self.draw_tile.draw_abs(cx, rect);
