@@ -395,22 +395,29 @@ pub struct Mandelbrot {
     // DSL accessible
     draw_tile: DrawTile,
     max_iter: usize,
+    // thew view container that contains our mandelbrot UI
     view: View,
-    state: State,
+    // the 'walk' of the mandelbrot view, used in layouting
     walk: Walk,
     
-    // non DSL accessible
+    // prepending #[rust] makes derive(Live) ignore these fields
+    // and they dont get DSL accessors
     #[rust] next_frame: NextFrame,
+    // where your finger/mouse was when moved
     #[rust] finger_abs: Vec2,
+    // set to true when the fractal is actively zoom animating
     #[rust] is_zooming: bool,
-    #[rust] color_cycle: f32,
     
+    // this bool flips wether or not you were zooming in or out
+    // used to decide tile generation strategy
     #[rust(true)]
     is_zoom_in: bool,
     
+    // default fractal space for looking at a mandelbrot
     #[rust(FractalSpace::new(vec2f64(-0.5, 0.0), 0.5))]
     space: FractalSpace,
     
+    // the tilecache holding all the tiles
     #[rust(TileCache::new(cx))]
     tile_cache: TileCache,
     
@@ -542,7 +549,7 @@ impl Mandelbrot {
             }
             
             // animnate color cycle
-            self.color_cycle = (ne.time * 0.2).fract() as f32;
+            self.draw_tile.color_cycle  = (ne.time * 0.2).fract() as f32;
             
             // this triggers a draw_walk call
             self.view.redraw(cx);
@@ -600,9 +607,7 @@ impl Mandelbrot {
         
         // pass the data onto the shader object
         self.draw_tile.max_iter = self.max_iter as f32;
-        self.draw_tile.color_cycle = self.color_cycle;
-        
-        // iterate the current and next tile caches and draw the fractal tile
+                // iterate the current and next tile caches and draw the fractal tile
         for tile in self.tile_cache.current.iter().chain(self.tile_cache.next.iter()) {
             let rect = self.space.fractal_to_screen_rect(tile.fractal);
             self.draw_tile.draw_vars.set_texture(0, &tile.texture);
