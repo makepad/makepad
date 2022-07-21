@@ -22,7 +22,7 @@ use {
 
 pub struct ToUIReceiver<T> {
     sender: Sender<T>,
-    receiver: Receiver<T>,
+    pub receiver: Receiver<T>,
     signal: Signal
 }
 
@@ -57,6 +57,7 @@ impl<T> ToUIReceiver<T> {
             signal: self.signal.clone()
         }
     }
+    
     
     pub fn try_recv(&self, event: &Event) -> Result<T, TryRecvError> {
         if let Event::Signal(se) = event {
