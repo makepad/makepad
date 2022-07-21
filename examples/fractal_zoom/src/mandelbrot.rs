@@ -502,7 +502,7 @@ impl Mandelbrot {
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> MandelbrotAction {
-        self.state_handle_event(cx, event);
+        //self.state_handle_event(cx, event);
         
         if let Event::Signal(_) = event {
             // this batches up all the input signals into a single animation frame
