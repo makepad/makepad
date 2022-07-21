@@ -3,6 +3,9 @@ use makepad_component::*;
 use makepad_platform::*;
 mod mandelbrot;
 
+#[cfg(any(not(target_arch = "wasm32"), target_feature = "simd128"))]
+mod mandelbrot_simd;
+
 live_register!{
     use makepad_component::frame::*;
     use FrameComponent::*;

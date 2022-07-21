@@ -11,7 +11,6 @@ export class WasmWebBrowser extends WasmBridge {
                 worker.terminate();
             }
         }
-        
         this.wasm_app = this.wasm_create_app();
         this.dispatch = dispatch;
         this.canvas = canvas;
@@ -21,6 +20,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.web_sockets = [];
         this.window_info = {}
         this.signals = [];
+        this.signal_timeout = null;
         this.workers = [];
         this.thread_stack_size = 2 * 1024 * 1024;
         this.init_detection();
@@ -321,9 +321,17 @@ export class WasmWebBrowser extends WasmBridge {
         worker.postMessage(this.alloc_thread_stack(args.closure_ptr));
         
         worker.addEventListener("message", (e) => {
-            let data = e.data;
-            this.to_wasm.ToWasmSignal(data)
-            this.do_wasm_pump();
+            // this one collects signals to stop swamping the main thread
+            this.signals.push(e.data);
+            if(this.signal_timeout === null){
+                this.signal_timeout = setTimeout(_=>{
+                    this.signal_timeout = null;
+                    let signals = this.signals;
+                    this.signals = [];
+                    this.to_wasm.ToWasmSignal({signals})
+                    this.do_wasm_pump();
+                },1)
+            }
         })
         
         this.workers.push(worker);
