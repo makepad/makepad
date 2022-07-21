@@ -18,8 +18,6 @@ fn m64x2s(a: bool) -> Mask::<i64, 2> {Mask::<i64, 2>::from_array([a; 2])}
 fn u64x2s(a: u64) -> u64x2 {u64x2::from_array([a; 2])}
 fn _u64x2v(a: u64, b: u64) -> u64x2 {u64x2::from_array([a, b])}
 
-// 4 lane f32 
-
 // SIMD is a way to do computations in parallel using vector types
 // for example:
 // let a:u32x2 = [1,2]; let b:u32x2 = [3,4];
@@ -167,7 +165,6 @@ pub fn mandelbrot_f64x2(tile: &mut Tile, max_iter: usize) {
     let tile_size = (f64x2s(TILE_SIZE_X as f64), f64x2s(TILE_SIZE_Y as f64));
     let fractal_pos = (f64x2s(tile.fractal.pos.x), f64x2s(tile.fractal.pos.y));
     let fractal_size = (f64x2s(tile.fractal.size.x), f64x2s(tile.fractal.size.y));
-    // ok lets draw our mandelbrot f64
     for y in 0..TILE_SIZE_Y {
         for x in (0..TILE_SIZE_X).step_by(2) {
             let xf = x as f64;
@@ -191,7 +188,6 @@ pub fn mandelbrot_f64x2_aa(tile: &mut Tile, max_iter: usize) {
     let tile_size = (f64x2s(TILE_SIZE_X as f64), f64x2s(TILE_SIZE_Y as f64));
     let fractal_pos = (f64x2s(tile.fractal.pos.x), f64x2s(tile.fractal.pos.y));
     let fractal_size = (f64x2s(tile.fractal.size.x), f64x2s(tile.fractal.size.y));
-    // ok lets draw our mandelbrot f64
     for y in 0..TILE_SIZE_Y {
         for x in 0..TILE_SIZE_X {
             let xf = x as f64;
