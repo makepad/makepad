@@ -9,7 +9,7 @@ live_register!{
     use makepad_platform::shader::std::*;
     use makepad_component::theme::*;
     
-    DrawKeyQuad: {{DrawKeyQuad}} {
+    DrawKey: {{DrawKey}} {
         
         fn height_map(self, pos: vec2) -> float {
             let fx = 1 - pow(1.2 - sin(pos.x * PI), 10.8);
@@ -24,7 +24,7 @@ live_register!{
             let dy = self.height_map(self.pos + vec2(0, delta))
             let dx = self.height_map(self.pos + vec2(delta, 0))
             let normal = normalize(cross(vec3(delta, 0, dx - d), vec3(0, delta, dy - d)))
-            let light = normalize(vec3(1.5, 0.5, 1.1))
+            //let light = normalize(vec3(1.5, 0.5, 1.1))
             let light = normalize(vec3(0.75, 0.5, 0.5))
             let light_hover = normalize(vec3(0.75, 0.5, 1.5))
             let diff = pow(max(dot(mix(light, light_hover, self.hover * (1 - self.pressed)), normal), 0), 3)
@@ -68,12 +68,12 @@ live_register!{
                 default: off,
                 off = {
                     from: {all: Play::Forward{duration:0.2}}
-                    apply: {key_quad: {hover: 0.0}}
+                    apply: {draw_key: {hover: 0.0}}
                 }
                 
                 on = {
                     from: {all: Play::Snap}
-                    apply: {key_quad: {hover: 1.0}}
+                    apply: {draw_key: {hover: 1.0}}
                 }
             }
             
@@ -82,24 +82,24 @@ live_register!{
                 
                 off = {
                     from: {all: Play::Snap}
-                    apply: {key_quad: {focussed: 1.0}}
+                    apply: {draw_key: {focussed: 1.0}}
                 }
                 
                 on = {
                     from: {all: Play::Forward{duration:0.05}}
-                    apply: {key_quad: {focussed: 0.0}}
+                    apply: {draw_key: {focussed: 0.0}}
                 }
             }
             pressed = {
                 default: off 
                 off = {
                     from: {all: Play::Forward{duration:0.05}}
-                    apply: {key_quad: {pressed: 0.0}}
+                    apply: {draw_key: {pressed: 0.0}}
                 }
                 
                 on = {
                     from: {all: Play::Snap}
-                    apply: {key_quad: {pressed: 1.0}}
+                    apply: {draw_key: {pressed: 1.0}}
                 }
             }
         }
@@ -116,7 +116,7 @@ live_register!{
 
 // TODO support a shared 'inputs' struct on drawshaders
 #[derive(Live, LiveHook)]#[repr(C)]
-struct DrawKeyQuad {
+struct DrawKey {
     draw_super: DrawQuad,
     is_black: f32,
     pressed: f32,
@@ -126,7 +126,7 @@ struct DrawKeyQuad {
 
 #[derive(Live, LiveHook)]
 pub struct PianoKey {
-    key_quad: DrawKeyQuad,
+    draw_key: DrawKey,
     
     state: State,
 }
@@ -194,8 +194,8 @@ pub enum PianoKeyAction {
 impl PianoKey {
     
     pub fn draw_abs(&mut self, cx: &mut Cx2d, is_black: f32, rect: Rect) {
-        self.key_quad.is_black = is_black;
-        self.key_quad.draw_abs(cx, rect);
+        self.draw_key.is_black = is_black;
+        self.draw_key.draw_abs(cx, rect);
     }
     
     fn set_is_pressed(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
@@ -213,9 +213,9 @@ impl PianoKey {
         dispatch_action: &mut dyn FnMut(&mut Cx, PianoKeyAction),
     ) {
         if self.state_handle_event(cx, event).must_redraw() {
-            self.key_quad.area().redraw(cx);
+            self.draw_key.area().redraw(cx);
         }
-        match event.hits(cx, self.key_quad.draw_vars.area) {
+        match event.hits(cx, self.draw_key.area()) {
             HitEvent::FingerHover(f) => {
                 cx.set_hover_mouse_cursor(MouseCursor::Hand);
                 match f.hover_state {
