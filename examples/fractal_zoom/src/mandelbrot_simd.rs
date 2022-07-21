@@ -20,10 +20,19 @@ fn _u64x2v(a: u64, b: u64) -> u64x2 {u64x2::from_array([a, b])}
 
 // 4 lane f32 
 
+// SIMD is a way to do computations in parallel using vector types
+// any operations you do on them execute on the 'lanes' in parallel.
+// for example:
+// let a:u32x2 = [1,2]; let b:u32x2 = [3,4];
+// a+b is then [1+3,2+4]
+// this can be great for computations where you can arrange a loop
+// to run 2 4 or 8 steps at a time using simd types
+// computing a mandelbrot fractal is such an ideal case
+
 fn mandelbrot_pixel_f32_simd(max_iter: u32, c_x: f32x4, c_y: f32x4) -> (u32x4, f32x4) {
     let mut x = c_x;
     let mut y = c_y;
-
+    
     // in SIMD mandelbrot the loop has to continue
     // until all the 4 lanes have exitted
     // this means you need to hold onto the magsq/iter 
