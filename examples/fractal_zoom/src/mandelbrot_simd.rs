@@ -47,7 +47,7 @@ fn mandelbrot_pixel_f32_simd(max_iter: u32, c_x: f32x4, c_y: f32x4) -> (u32x4, f
     return (iter_out, dist_out)
 }
 
-pub fn mandelbrot_f32_simd(tile: &mut TextureTile, max_iter: usize) {
+pub fn mandelbrot_f32_simd(tile: &mut Tile, max_iter: usize) {
     let tile_size = (f32x4s(TILE_SIZE_X as f32), f32x4s(TILE_SIZE_Y as f32));
     let fractal_pos = (f32x4s(tile.fractal.pos.x as f32), f32x4s(tile.fractal.pos.y as f32));
     let fractal_size = (f32x4s(tile.fractal.size.x as f32), f32x4s(tile.fractal.size.y as f32));
@@ -98,7 +98,7 @@ fn mandelbrot_pixel_f64_simd(max_iter: u64, c_x: f64x2, c_y: f64x2) -> (u64x2, f
     return (iter_out, dist_out)
 }
 
-pub fn mandelbrot_f64_simd(tile: &mut TextureTile, max_iter: usize) {
+pub fn mandelbrot_f64_simd(tile: &mut Tile, max_iter: usize) {
     let tile_size = (f64x2s(TILE_SIZE_X as f64), f64x2s(TILE_SIZE_Y as f64));
     let fractal_pos = (f64x2s(tile.fractal.pos.x), f64x2s(tile.fractal.pos.y));
     let fractal_size = (f64x2s(tile.fractal.size.x), f64x2s(tile.fractal.size.y));
@@ -121,7 +121,7 @@ pub fn mandelbrot_f64_simd(tile: &mut TextureTile, max_iter: usize) {
 }
 
 // 2 lane f64 antialiased
-pub fn _mandelbrot_f64_simd_aa(tile: &mut TextureTile, max_iter: usize) {
+pub fn mandelbrot_f64_simd_aa(tile: &mut Tile, max_iter: usize) {
     let tile_size = (f64x2s(TILE_SIZE_X as f64), f64x2s(TILE_SIZE_Y as f64));
     let fractal_pos = (f64x2s(tile.fractal.pos.x), f64x2s(tile.fractal.pos.y));
     let fractal_size = (f64x2s(tile.fractal.size.x), f64x2s(tile.fractal.size.y));
