@@ -462,11 +462,11 @@ impl Mandelbrot {
             if fractal_zoom >2e-5 {
                 // we can use a f32x4 path when we aren't zoomed in far (2x faster)
                 // as f32 has limited zoom-depth it can support
-                mandelbrot_f32_simd(&mut tile, max_iter);
+                mandelbrot_f32x4(&mut tile, max_iter);
             }
             else { 
                 // otherwise we use a higher resolution f64
-                mandelbrot_f64_simd(&mut tile, max_iter);
+                mandelbrot_f64x2(&mut tile, max_iter);
             }
             to_ui.send(ToUI::TileDone {tile}).unwrap();
         })
