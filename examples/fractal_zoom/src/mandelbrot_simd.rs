@@ -22,9 +22,16 @@ fn _u64x2v(a: u64, b: u64) -> u64x2 {u64x2::from_array([a, b])}
 fn mandelbrot_pixel_f32_simd(max_iter: u32, c_x: f32x4, c_y: f32x4) -> (u32x4, f32x4) {
     let mut x = c_x;
     let mut y = c_y;
+
+    // in SIMD mandelbrot the loop has to continue
+    // until all the 4 lanes have an exit state
+    // this means you need to hold onto the magsq/iter 
+    // values per lane at the moment it needs to exit
+    // until everyone has exitted
     let mut magsq_out = f32x4s(0.0);
     let mut iter_out = u32x4s(max_iter);
     let mut exitted = m32x4s(false);
+    
     for n in 0..max_iter {
         let xy = x * y;
         let xx = x * x;
@@ -33,15 +40,20 @@ fn mandelbrot_pixel_f32_simd(max_iter: u32, c_x: f32x4, c_y: f32x4) -> (u32x4, f
         
         // using a mask, you can write parallel if/else code 
         let if_exit = magsq.lanes_gt(f32x4s(4.0));
+
         // this boolean logic is only 1 when the value 'changed to 1'
         // and 0 otherwise. so it stores if we have a new exit on our lanes
         let new_exit = (if_exit ^ exitted) & if_exit;
         // mask it into our exitted set 
         exitted = exitted | new_exit;
+        
         // when a lane has a 'new exit' it stores the current value
-        // otherwise it uses the old value (distance and iter)
+        // otherwise it uses the old value (magsq and iter)
+        // the syntax is mask.select(truevec, falsevec)
         magsq_out = new_exit.select(magsq, magsq_out);
         iter_out = new_exit.select(u32x4s(n), iter_out);
+
+        // if all our lanes have exitted, return the results
         if exitted.all() {
             return (iter_out, magsq_out)
         }
@@ -49,6 +61,7 @@ fn mandelbrot_pixel_f32_simd(max_iter: u32, c_x: f32x4, c_y: f32x4) -> (u32x4, f
         x = (xx - yy) + c_x;
         y = (xy + xy) + c_y;
     }
+    // one of our lanes has hit max_iter. 
     return (iter_out, magsq_out)
 }
 
