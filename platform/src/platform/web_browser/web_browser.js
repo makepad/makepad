@@ -330,7 +330,7 @@ export class WasmWebBrowser extends WasmBridge {
                     this.signals = [];
                     this.to_wasm.ToWasmSignal({signals})
                     this.do_wasm_pump();
-                },2)
+                },1)
             }
         })
         
