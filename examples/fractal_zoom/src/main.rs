@@ -13,9 +13,13 @@ live_register!{
         frame: {
             width: Fill
             height: Fill
+            
             Mandelbrot{
                 walk:{width: Fill, height: Fill}
             }
+            
+            // alright lets put a slider over the thing
+            
         }
     }
 }
