@@ -1,6 +1,6 @@
 use std::{
     fmt,
-    ops::{AddAssign, Deref, Index, SubAssign},
+    ops::{AddAssign, Deref, Index, Range, SubAssign},
     slice::SliceIndex,
     sync::Arc,
 };
@@ -59,7 +59,7 @@ impl<T: Chunk> BTree<T> {
                     node = branch.first().unwrap();
                 }
             }
-        }
+        };
         Cursor {
             root: &self.root,
             start: 0,
@@ -168,7 +168,7 @@ impl<T: Chunk> BTree<T> {
 
 impl<T: Chunk + fmt::Debug> fmt::Debug for BTree<T>
 where
-    T::Info: fmt::Debug
+    T::Info: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("BTree")
@@ -231,11 +231,11 @@ pub(crate) struct Cursor<'a, T: Chunk> {
 
 impl<'a, T: Chunk> Cursor<'a, T> {
     pub(crate) fn is_at_start(&self) -> bool {
-        self.position == self.start
+        self.position <= self.start
     }
 
     pub(crate) fn is_at_end(&self) -> bool {
-        self.position == self.end
+        self.position >= self.end
     }
 
     pub(crate) fn position(&self) -> usize {
@@ -248,6 +248,13 @@ impl<'a, T: Chunk> Cursor<'a, T> {
             .map_or(self.root, |(branch, index)| &branch[*index])
             .as_leaf()
             .as_chunk()
+    }
+
+    pub(crate) fn range(&self) -> Range<usize> {
+        Range {
+            start: self.start.saturating_sub(self.position),
+            end: self.chunk().len() - self.position.saturating_sub(self.end),
+        }
     }
 
     pub(crate) fn move_next_chunk(&mut self) {
@@ -504,7 +511,7 @@ impl<T: Chunk> Node<T> {
 
 impl<T: Chunk + fmt::Debug> fmt::Debug for Node<T>
 where
-    T::Info: fmt::Debug
+    T::Info: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
@@ -772,7 +779,7 @@ impl<T: Chunk> Branch<T> {
 
 impl<T: Chunk + fmt::Debug> fmt::Debug for Branch<T>
 where
-    T::Info: fmt::Debug
+    T::Info: fmt::Debug,
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         f.debug_struct("Branch")
