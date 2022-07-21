@@ -167,7 +167,6 @@ pub fn mandelbrot_f64x2(tile: &mut Tile, max_iter: usize) {
     let tile_size = (f64x2s(TILE_SIZE_X as f64), f64x2s(TILE_SIZE_Y as f64));
     let fractal_pos = (f64x2s(tile.fractal.pos.x), f64x2s(tile.fractal.pos.y));
     let fractal_size = (f64x2s(tile.fractal.size.x), f64x2s(tile.fractal.size.y));
-    // ok lets draw our mandelbrot f64
     for y in 0..TILE_SIZE_Y {
         for x in (0..TILE_SIZE_X).step_by(2) {
             let xf = x as f64;
@@ -191,7 +190,6 @@ pub fn mandelbrot_f64x2_aa(tile: &mut Tile, max_iter: usize) {
     let tile_size = (f64x2s(TILE_SIZE_X as f64), f64x2s(TILE_SIZE_Y as f64));
     let fractal_pos = (f64x2s(tile.fractal.pos.x), f64x2s(tile.fractal.pos.y));
     let fractal_size = (f64x2s(tile.fractal.size.x), f64x2s(tile.fractal.size.y));
-    // ok lets draw our mandelbrot f64
     for y in 0..TILE_SIZE_Y {
         for x in 0..TILE_SIZE_X {
             let xf = x as f64;
