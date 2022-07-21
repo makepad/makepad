@@ -49,12 +49,17 @@ pub const POOL_THREAD_COUNT: usize = 4;
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawTile {
+    // the shader inherits from the super class DrawQuad
     draw_super: DrawQuad,
+    // max iterations of the mandelbrot fractal
     max_iter: f32,
+    // a value that cycles the color in the palette (0..1)
     color_cycle: f32
 }
 
-// basic plain f64 loop, not called in SIMD mode
+// basic plain f64 loop, not called in SIMD mode. 
+// Returns the iteration count when the loop goes to infinity,
+// and the distance at that point
 #[allow(dead_code)]
 fn mandelbrot_pixel_f64(max_iter: usize, c_x: f64, c_y: f64) -> (usize, f64) {
     let mut x = c_x;
@@ -88,8 +93,11 @@ fn mandelbrot_f64(tile: &mut Tile, max_iter: usize) {
 }
 
 pub struct Tile {
+    // the memory buffer thats used when a tile is rendered
     pub buffer: Vec<u32>,
+    // the makepad system texture backing the tile, when ready for drawing 'buffer' is swapped onto it
     pub texture: Texture,
+    // the fractal space rectangle that this tile represents
     pub fractal: RectF64,
 }
 
