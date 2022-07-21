@@ -118,11 +118,14 @@ pub fn mandelbrot_f32_simd(tile: &mut Tile, max_iter: usize) {
             // compute 4 pixels in parallel 
             let (iter, magsq) = mandelbrot_pixel_f32_simd(max_iter as u32, fp_x, fp_y);
             
-            // scale the magnitude to fit in a u16 
-            let magsq = (magsq * f32x4s(255.0)) + f32x4s(127.0 * 255.0);
+            // scale and clamp the magnitude squared so that it can become a 
+            // fixed point 16 bit value we can pack into 2x8bit components of the texture 
+            let magsq = (magsq + f32x4s(127.0)) * f32x4s(256.0);
             let magsq = magsq.clamp(f32x4s(0.0), f32x4s(65535.0));
+            // cast our float magnitude squared into an integer simd vector
             let magsq: u32x4 = magsq.cast();
             
+            // here we unpack the simd vectors and write into the texture buffer
             for i in 0..4 {
                 // we use a u32 (W Z Y X) to pack in our fractal data, we unpack this in the shader
                 tile.buffer[y * TILE_SIZE_X + x + i] = iter[i] as u32 | ((magsq[i]) << 16);
@@ -172,7 +175,7 @@ pub fn mandelbrot_f64_simd(tile: &mut Tile, max_iter: usize) {
             let fp_x = fractal_pos.0 + fractal_size.0 * pixel_pos.0 / tile_size.0;
             let fp_y = fractal_pos.1 + fractal_size.1 * pixel_pos.1 / tile_size.1;
             let (iter, magsq) = mandelbrot_pixel_f64_simd(max_iter as u64, fp_x, fp_y);
-            let magsq = (magsq * f64x2s(255.0)) + f64x2s(127.0 * 255.0);
+            let magsq = (magsq + f64x2s(127.0)) * f64x2s(256.0);
             let magsq = magsq.clamp(f64x2s(0.0), f64x2s(65535.0));
             let magsq: u64x2 = magsq.cast();
             for i in 0..2 {
@@ -203,7 +206,7 @@ pub fn mandelbrot_f64_simd_aa(tile: &mut Tile, max_iter: usize) {
             let (iter2, magsq2) = mandelbrot_pixel_f64_simd(max_iter as u64, fp_x, fp_y);
             let iter = (iter1 + iter2).reduce_sum() / 4;
             let magsq = (magsq1 + magsq2).reduce_sum() / 4.0;
-            let magsq = (magsq * 256.0 + 127.0 * 255.0).max(0.0).min(65535.0) as u32;
+            let magsq = ((magsq + 127.0)* 256.0).max(0.0).min(65535.0) as u32;
             tile.buffer[y * TILE_SIZE_X + x] = iter as u32 | (magsq << 16);
         }
     }
