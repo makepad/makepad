@@ -13,9 +13,7 @@ We also maintain online versions of the builds below:\
 Fractal zoomer:\
 [http://makepad.nl/makepad/examples/fractal_zoom/src/index.html](http://makepad.nl/makepad/examples/fractal_zoom/src/index.html)\
 Fun audio:\
-[http://makepad.nl/makepad/examples/fun_audio/src/index.html](http://makepad.nl/makepad/examples/fun_audio/src/index.html)\
-Makepad Studio:\
-[http://makepad.nl/makepad/studio/src/index.html](http://makepad.nl/makepad/studio/src/index.html)
+[http://makepad.nl/makepad/examples/fun_audio/src/index.html](http://makepad.nl/makepad/examples/fun_audio/src/index.html)
 
 ### Prerequisites
 
