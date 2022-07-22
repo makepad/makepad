@@ -9,6 +9,7 @@ use makepad_collab_server::{
 };
 use std::{
     collections::HashMap,
+    env,
     net::SocketAddr,
     sync::mpsc,
     io::prelude::*,
@@ -34,12 +35,14 @@ impl NotificationSender for CollabNotificationSender{
 
 fn main() {
     let (tx_request, rx_request) = mpsc::channel::<HttpRequest> ();
-    
-    #[cfg(target_os = "linux")]
-    let addr = SocketAddr::from(([0, 0, 0, 0], 80));
-    #[cfg(target_os = "macos")]
-    let addr = SocketAddr::from(([127, 0, 0, 1], 8080));
-    
+  
+    let args: Vec<String> = env::args().collect();
+    let addr = if args.get(1).map(|string| string.as_str()) == Some(&"--public") {
+    	SocketAddr::from(([0, 0, 0, 0], 80))
+    } else {
+        SocketAddr::from(([127, 0, 0, 1], 8080))
+    };
+
     start_http_server(HttpServer{
         listen_address:addr,
         post_max_size: 1024*1024,
