@@ -19,7 +19,11 @@ live_register!{
             }
             
             // alright lets put a slider over the thing
-            
+            // ok so first i want a panel
+            // something that has an icon
+            // and animates closed
+            // and open.
+            // OK go 
         }
     }
 }

@@ -1,80 +1,35 @@
 use {
+    std::ops::{ControlFlow, Try, FromResidual},
     std::any::TypeId,
     crate::makepad_platform::*,
     std::collections::BTreeMap,
 };
 pub use crate::frame_component;
 
-pub struct DrawStateWrap<T: Clone> {
-    state: Option<T>,
-    redraw_id: u64
-}
-
-impl<T: Clone> Default for DrawStateWrap<T> {
-    fn default() -> Self {
-        Self {
-            state: None,
-            redraw_id: 0
-        }
-    }
-}
-
-impl<T: Clone> DrawStateWrap<T> {
-    pub fn begin(&mut self, cx: &Cx2d, init: T) -> bool {
-        if self.redraw_id != cx.redraw_id {
-            self.redraw_id = cx.redraw_id;
-            self.state = Some(init);
-            true
-        }
-        else {
-            false
-        }
-    }
-    
-    pub fn get(&self) -> T {
-        self.state.clone().unwrap()
-    }
-    
-    pub fn set(&mut self, value: T) {
-        self.state = Some(value);
-    }
-    
-    pub fn end(&mut self) {
-        self.state = None;
-    }
-}
-
-#[derive(Clone,Copy)]
-pub enum CreateAt{
-    Begin,
-    After(LiveId),
-    Before(LiveId),
-    End
-}
 
 pub trait FrameComponent: LiveApply {
     // to implement
     fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, self_id: LiveId) -> FrameComponentActionRef;
     fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId>;
     fn get_walk(&self) -> Walk;
+ 
     // defaults
     fn redraw(&mut self, _cx:&mut Cx){}
     fn draw_walk_component(&mut self, cx: &mut Cx2d) -> Result<(), LiveId>{self.draw_component(cx, self.get_walk())}
 
-    fn create_child(&mut self, _cx:&mut Cx, _at:CreateAt,  _id:LiveId, _path: &[LiveId], _nodes:&[LiveNode]) -> Option<&mut Box<dyn FrameComponent >> {
-        None
+    fn create_child(&mut self, _cx:&mut Cx, _at:CreateAt,  _id:LiveId, _path: &[LiveId], _nodes:&[LiveNode]) -> ChildResult {
+        NoChild
     }
 
-    fn add_child(&mut self, cx:&mut Cx, id:LiveId, path: &[LiveId], nodes:&[LiveNode]) -> Option<&mut Box<dyn FrameComponent >> {
-        self.create_child(cx, CreateAt::End, id, path, nodes)
+    fn add_child(&mut self, cx:&mut Cx, id:LiveId, path: &[LiveId], nodes:&[LiveNode]) -> ChildResult {
+        self.create_child(cx, CreateAt::End, id, path, nodes)?;
+        NoChild
     }
     
-    fn find_child(&self, _id: &[LiveId]) -> Option<&Box<dyn FrameComponent >> {None}
-    
-    fn find_child_mut(&mut self, _id: &[LiveId]) -> Option<&mut Box<dyn FrameComponent >> {None}
+    fn find_child(&mut self, _id: &[LiveId]) -> ChildResult {NoChild}
 
     fn apply_child(&mut self, cx:&mut Cx, id: &[LiveId], nodes:&[LiveNode]) {
-        if let Some(child) = self.find_child_mut(id){
+        if let Child(child) = self.find_child(id){
             child.apply(cx, ApplyFrom::ApplyOver, 0, nodes);
         }
     }
@@ -223,6 +178,68 @@ impl FrameComponentRef {
     pub fn as_mut(&mut self) -> Option<&mut Box<dyn FrameComponent >> {
         self.0.as_mut()
     }
+
+    pub fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, self_id: LiveId) -> FrameComponentActionRef{
+        if let Some(inner) = &mut self.0{
+            return inner.handle_component_event(cx, event, self_id)
+        }
+        None
+    }
+    
+    pub fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId>{
+        if let Some(inner) = &mut self.0{
+            return inner.draw_component(cx, walk)
+        }
+        Ok(())
+    }
+    
+    pub fn get_walk(&mut self) -> Walk{
+        if let Some(inner) = &mut self.0{
+            return inner.get_walk()
+        }
+        Walk::default()
+    }
+
+    // forwarding FrameComponent trait
+    pub fn redraw(&mut self, cx:&mut Cx){
+        if let Some(inner) = &mut self.0{
+            return inner.redraw(cx)
+        }
+    }
+    
+    pub fn draw_walk_component(&mut self, cx: &mut Cx2d) -> Result<(), LiveId>{
+        if let Some(inner) = &mut self.0{
+            return inner.draw_walk_component(cx)
+        }
+        Ok(())
+    }
+
+    pub fn create_child(&mut self, cx:&mut Cx, at:CreateAt,  id:LiveId, path: &[LiveId], nodes:&[LiveNode]) -> ChildResult {
+        if let Some(inner) = &mut self.0{
+            return inner.create_child(cx, at, id, path, nodes)
+        }
+        NoChild
+    }
+
+    pub fn add_child(&mut self, cx:&mut Cx, id:LiveId, path: &[LiveId], nodes:&[LiveNode]) -> ChildResult {
+        if let Some(inner) = &mut self.0{
+            return inner.add_child(cx, id, path, nodes)
+        }
+        NoChild
+    }
+    
+    pub fn find_child(&mut self, id: &[LiveId]) -> ChildResult {
+        if let Some(inner) = &mut self.0{
+            return inner.find_child(id)
+        }
+        NoChild
+    }
+
+    pub fn apply_child(&mut self, cx:&mut Cx, id: &[LiveId], nodes:&[LiveNode]) {
+        if let Some(inner) = &mut self.0{
+            return inner.apply_child(cx, id, nodes)
+        }
+    }
 }
 
 impl LiveHook for FrameComponentRef {}
@@ -265,6 +282,81 @@ impl LiveNew for FrameComponentRef {
     }
 }
 
+pub struct DrawStateWrap<T: Clone> {
+    state: Option<T>,
+    redraw_id: u64
+}
+
+impl<T: Clone> Default for DrawStateWrap<T> {
+    fn default() -> Self {
+        Self {
+            state: None,
+            redraw_id: 0
+        }
+    }
+}
+
+impl<T: Clone> DrawStateWrap<T> {
+    pub fn begin(&mut self, cx: &Cx2d, init: T) -> bool {
+        if self.redraw_id != cx.redraw_id {
+            self.redraw_id = cx.redraw_id;
+            self.state = Some(init);
+            true
+        }
+        else {
+            false
+        }
+    }
+    
+    pub fn get(&self) -> T {
+        self.state.clone().unwrap()
+    }
+    
+    pub fn set(&mut self, value: T) {
+        self.state = Some(value);
+    }
+    
+    pub fn end(&mut self) {
+        self.state = None;
+    }
+}
+
+pub enum ChildResult<'a>{
+    NoChild,
+    Child(&'a mut Box<dyn FrameComponent >)
+}
+pub use ChildResult::*;
+
+impl<'a> FromResidual for ChildResult<'a> {
+    fn from_residual(residual:&'a mut Box<dyn FrameComponent>) -> Self{
+        ChildResult::Child(residual)
+    }
+}
+
+impl<'a> Try for ChildResult<'a>{
+    type Output = ();
+    type Residual = &'a mut Box<dyn FrameComponent >;
+
+    fn from_output(_: Self::Output) -> Self{
+        ChildResult::NoChild
+    }
+    
+    fn branch(self) -> ControlFlow<Self::Residual, Self::Output>{
+        match self{
+            Self::NoChild=>ControlFlow::Continue(()),
+            Self::Child(c)=>ControlFlow::Break(c)
+        }
+    }
+}
+
+#[derive(Clone,Copy)]
+pub enum CreateAt{
+    Begin,
+    After(LiveId),
+    Before(LiveId),
+    End
+}
+
 #[macro_export]
 macro_rules!frame_component {
     ( $ ty: ty) => {
@@ -276,54 +368,6 @@ macro_rules!frame_component {
                 }
             }
             register_component_factory!(cx, FrameComponentRegistry, $ ty, Factory);
-        }
-    }
-}
-
-#[macro_export]
-macro_rules!find_child_impl {
-    ( $ id: ident, $ ( $ arg: expr), *) => {
-        {
-            ( $ (
-                if let Some(a) = $ arg.as_ref() {
-                    if let Some(c) = a.find_child( $ id) {
-                        return Some(c)
-                    }
-                }
-            ), *);
-            return None;
-        }
-    }
-}
-
-#[macro_export]
-macro_rules!create_child_impl {
-    ( $cx: ident, $at: ident, $ id: ident, $path:ident, $nodes: ident, $ ( $ arg: expr), *) => {
-        {
-            ( $ (
-                if let Some(a) = $ arg.as_mut() {
-                    if let Some(c) = a.create_child( $cx, $at, $ id, $path, $nodes) {
-                        return Some(c)
-                    }
-                }
-            ), *);
-            return None;
-        }
-    }
-}
-
-#[macro_export]
-macro_rules!find_child_mut_impl {
-    ( $ id: ident, $ ( $ arg: expr), *) => {
-        {
-            ( $ (
-                if let Some(a) = $ arg.as_mut() {
-                    if let Some(c) = a.find_child_mut( $ id) {
-                        return Some(c)
-                    }
-                }
-            ), *);
-            return None;
         }
     }
 }
