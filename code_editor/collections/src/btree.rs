@@ -1,6 +1,6 @@
 use std::{
     fmt,
-    ops::{AddAssign, Deref, Index, Range, SubAssign},
+    ops::{AddAssign, Deref, Index, Range, RangeBounds, SubAssign},
     slice::SliceIndex,
     sync::Arc,
 };
@@ -25,6 +25,28 @@ impl<T: Chunk> BTree<T> {
 
     pub(crate) fn info(&self) -> T::Info {
         self.root.summed_info()
+    }
+
+    pub(crate) fn slice<R: RangeBounds<usize>>(&self, range: R) -> Slice<'_, T> {
+        use std::ops::Bound;
+
+        let start = match range.start_bound() {
+            Bound::Excluded(&start) => start + 1,
+            Bound::Included(&start) => start,
+            Bound::Unbounded => 0,
+        };
+        let end = match range.end_bound() {
+            Bound::Excluded(&end) => end,
+            Bound::Included(&end) => end + 1,
+            Bound::Unbounded => self.len(),
+        };
+        assert!(start <= end);
+        assert!(end <= self.len());
+        Slice {
+            root: &self.root,
+            start,
+            end,
+        }
     }
 
     pub(crate) fn cursor_front(&self) -> Cursor<'_, T> {
@@ -191,6 +213,46 @@ impl<T: Chunk> Builder<T> {
     }
 }
 
+#[derive(Clone)]
+pub(crate) struct Slice<'a, T: Chunk> {
+    root: &'a Node<T>,
+    start: usize,
+    end: usize,
+}
+
+impl<'a, T: Chunk> Slice<'a, T> {
+    pub fn is_empty(self) -> bool {
+        self.start == self.end
+    }
+
+    pub fn len(self) -> usize {
+        self.end - self.start
+    }
+
+    pub fn cursor_front(self) -> Cursor<'a, T> {
+        let mut cursor = Cursor::new(self.root, self.start, self.end);
+        if self.start == 0 {
+            cursor.descend_left();
+        } else {
+            cursor.descend_to(self.start);
+        }
+        cursor
+    }
+
+    pub fn cursor_back(self) -> Cursor<'a, T> {
+        let mut cursor = Cursor::new(self.root, self.start, self.end);
+        if self.end == self.root.summed_len() {
+            cursor.descend_right();
+        } else {
+            cursor.descend_to(self.end);
+        }
+        cursor
+    }
+}
+
+impl<'a, T: Chunk> Copy for Slice<'a, T> {}
+
+#[derive(Clone)]
 pub(crate) struct Cursor<'a, T: Chunk> {
     root: &'a Node<T>,
     start: usize,
@@ -208,16 +270,20 @@ impl<'a, T: Chunk> Cursor<'a, T> {
         self.position + self.chunk().len() >= self.end
     }
 
+    pub(crate) fn start(&self) -> usize {
+        self.start
+    }
+
+    pub(crate) fn end(&self) -> usize {
+        self.end
+    }
+
     pub(crate) fn position(&self) -> usize {
         self.position
     }
 
     pub(crate) fn chunk(&self) -> &'a T {
-        self.path
-            .last()
-            .map_or(self.root, |(branch, index)| &branch[*index])
-            .as_leaf()
-            .as_chunk()
+        self.node().as_leaf().as_chunk()
     }
 
     pub(crate) fn range(&self) -> Range<usize> {
@@ -261,11 +327,15 @@ impl<'a, T: Chunk> Cursor<'a, T> {
         }
     }
 
-    fn descend_left(&mut self) {
-        let mut node = self
+    fn node(&self) -> &'a Node<T> {
+        self
             .path
             .last()
-            .map_or(self.root, |(branch, index)| &branch[*index]);
+            .map_or(self.root, |(branch, index)| &branch[*index])
+    }
+
+    fn descend_left(&mut self) {
+        let mut node = self.node();
         loop {
             match node {
                 Node::Leaf(_) => break,
@@ -278,10 +348,7 @@ impl<'a, T: Chunk> Cursor<'a, T> {
     }
 
     fn descend_right(&mut self) {
-        let mut node = self
-            .path
-            .last()
-            .map_or(self.root, |(branch, index)| &branch[*index]);
+        let mut node = self.node();
         loop {
             match node {
                 Node::Leaf(_) => break,
@@ -289,6 +356,21 @@ impl<'a, T: Chunk> Cursor<'a, T> {
                     node = branch.last().unwrap();
                     self.position += branch.summed_len() - node.summed_len();
                     self.path.push((branch, branch.len() - 1));
+                }
+            }
+        }
+    }
+
+    fn descend_to(&mut self, position: usize) {
+        let mut node = self.node();
+        loop {
+            match node {
+                Node::Leaf(_) => break,
+                Node::Branch(branch) => {
+                    let (index, summed_len) = search_by_position(branch, position - self.position);
+                    self.position += summed_len;
+                    self.path.push((branch, index));
+                    node = &branch[index];
                 }
             }
         }
