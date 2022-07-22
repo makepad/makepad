@@ -44,15 +44,15 @@ At the moment of this writing, the following features are not yet supported by M
 
 #### Native
 
-To run Makepad Studio natively, use the following command:
+To run Makepad Studio natively, use the following command:\
 ```cargo run -p makepad_studio```
 
 At the moment, Makepad Studio only runs natively on MacOS, but support for Windows/Linux is coming soon.
 
 #### Web
 
-To run Makepad studio on the web, use the following commands:
-```tools/build_wasm_normal.sh makepad_studio```
+To run Makepad studio on the web, use the following commands:\
+```tools/build_wasm_normal.sh makepad_studio```\
 ```cargo run -p webserver --release```
 
 Once the web server is running, open the following URL in a browser:\
