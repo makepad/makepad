@@ -9,7 +9,7 @@ Makepad consists of the following parts:
 
 ## Prerequisites
 
-Note: Our Linux and Windows platform layers are currently WIP and don't run.
+Note: Our Linux and Windows platform layers are currently WIP and don't run. Build on MacOS for now.
 
 In order to compile makepad applications you need to first install Rust.\
 [https://www.rust-lang.org/tools/install](https://www.rust-lang.org/tools/install)
