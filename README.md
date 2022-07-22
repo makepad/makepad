@@ -1,62 +1,71 @@
-# Introducing Makepad Framework and Makepad Studio
+# Makepad
 
-Makepad Framework is a new web and native-rendering UI framework for Rust.
-Makepad Studio is an IDE with an integrated designtool to develop applications with Makepad Framework.
+This is Makepad, a new way to do UIs in Rust. At the moment, Makepad is primarily a UI framework, called Makepad Framework. In the future, Makepad will also be a UI designer application, called Makepad Designer, which we hope to build on top of Makepad Framework.
 
-All code in this repository EXCEPT the files in studio/src/design_editor are licensed as MIT/Apache2.
+Applications written in Makepad Framework:
+-   Are written in Rust
+-   Can run natively and on the web
+-   Are rendered entirely on the GPU
+-   Are both small and fast
 
-This means the code editing part of Makepad Studio is licensed MIT/Apache2, and the visual designtooling is not.
-For our commercial offering we are building a visual designer, we hope the value this creates is worth paying for.
+To give you an idea of the kind of applications you can build with Makepad, this repository contains both Makepad Studio, which is a prototype of a code editor that will eventually serve as the open source foundation for Makepad Designer, and several smaller examples.
 
-During the alpha/beta phase of the product development we keep the files for the visual designer inside the OSS repository,
-however after product launch we will distribute these in a different manner.
+## Makepad Studio
 
-For the first build of our editor / UI you can look at the following URL in your browser,
+### What Makepad Studio Is
 
-https://makepad.dev
+Makepad Studio is a prototype of a code editor written in Makepad. For now, it is primarily intended to show off how one could write their own code editor in Makepad. Our eventual goal is to evolve this into a feature complete, fully extendable IDE.
 
-# How to install the native version
+Our intention is to develop Makepad Designer as a commercially licensed extension on top of Makepad Studio. Makepad Studio itself will always remain free and open source.  
 
-On all platforms first install Rust. 
-We are currently relying on nightly because of the procmacro span information needed. Hopefully this will stabilise soon.
+At the moment of this writing, the following features are supported by Makepad Studio:
 
-https://www.rust-lang.org/tools/install
+-   File tree
+-   Basic edit operations
+-   Undo/redo
+-   Basic syntax highlighting (Rust only)
+    
 
-# MacOS
+### What Makepad Studio Is Not
 
-```
-git clone https://github.com/makepad/makepad
-cd makepad
-tools/macos_rustup.sh
-cargo run -p makepad_studio --release
-```
+Makepad Studio is not intended to compete with existing IDEs, such as Visual Studio Code. There won't be an extension store. It's primary purpose is to serve as the open source foundation for our own commercial offering, as well as offer an extendible framework for others to build their own solutions with.
 
-# Windows
+At the moment of this writing, the following features are not yet supported by Makepad Studio:
 
-Clone this repo using either gitub desktop or commandline: https://github.com/makepad/makepad
-Open a cmd.exe in the directory you just cloned. Gh desktop makes: Documents\\Github\\makepad
+-   Unicode support
+-   Search/replace
+-   Regular expressions
+-   Internationalization
+-   Accessibility
+-   Extensibility
+    
 
-```
-tools/windows_rustup.bat
-cargo run -p makepad_studio --release
-```
+### Build Instructions
 
-# Linux
-```
-git clone https://github.com/makepad/makepad
-cd makepad
-tools/linux_rustup.sh
-cargo run -p makepad_studio --release
-```
+#### Native
 
-# Troubleshooting
-```
-Delete old settings unix: rm *.ron
-Delete old settings windows: del *.ron
-Make sure you are on master: git checkout master
-Update rust: rustup update
-Make sure you have wasm: rustup target add wasm32-unknown-unknown
-Pull the latest: git pull
-```
+To run Makepad Studio natively, use the following command:
+```cargo run -p makepad_studio```
 
-Still have a problem? Report here: https://github.com/makepad/makepad/issues
+At the moment, Makepad Studio only runs natively on MacOS, but support for Windows/Linux is coming soon.
+
+#### Web
+
+To run Makepad studio on the web, use the following commands:
+```tools/build_wasm_normal.sh makepad_studio```
+```cargo run -p webserver --release```
+
+Once the web server is running, open the following URL in a browser:
+[http://127.0.0.1:8080/makepad/studio/src/index.html](http://127.0.0.1:8080/makepad/studio/src/index.html)
+
+## Examples
+
+<TODO>
+
+## Contact
+
+If you have any problems/questions, or want to reach out for some other reason, you can find our discord channel at:
+[https://discord.com/invite/urEMqtMcSd](https://discord.com/invite/urEMqtMcSd)
+
+Keep in mind that we are a small team, so we might not always be able to respond immediately.
+
