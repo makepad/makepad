@@ -9,6 +9,8 @@ Makepad consists of the following parts:
 
 ## Prerequisites
 
+Note: Our Linux and Windows platform layers are currently WIP and don't run.
+
 In order to compile makepad applications you need to first install Rust.\
 [https://www.rust-lang.org/tools/install](https://www.rust-lang.org/tools/install)
 
@@ -22,8 +24,7 @@ Then to build the webassembly versions you need to install the wasm32 toolchain\
 Open source UI framework that you can use to build UI's for web and native applications. 
 
 Makepad framework applications are built straight onto the platform layer, and are small and lightweight.
-We have platform layers for Web, MacOS, Linux and Windows. Linux and Windows builds are currently WIP and don't run.
-All rendering is GPU based and we use a shader DSL for all visual styling
+We have platform layers for Web, MacOS, Linux and Windows. All rendering is GPU based and we use a shader DSL for all visual styling
 
 ## Makepad Examples 
 Open source example applications to learn how to build makepad framework applications
