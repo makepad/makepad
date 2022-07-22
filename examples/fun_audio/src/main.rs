@@ -261,15 +261,14 @@ impl App {
         match event {
             Event::Midi1InputData(inputs) => for input in inputs {
                 if let Midi1Event::Note(note) = input.data.decode() {
-                    let piano = self.frame.child_mut::<Piano>(id!(piano)).unwrap();
+                    let piano = self.frame.child::<Piano>(id!(piano)).unwrap();
                     piano.set_note(cx, note.is_on, note.note_number)
                 }
             }
             Event::MidiInputList(_inputs) => {
             }
             Event::Construct => {
-                
-                if let Some(instrument) = self.frame.add_child(cx, id!(my_instrument), ids!(instrument), live!{
+                if let Child(instrument) = self.frame.add_child(cx, id!(my_instrument), ids!(instrument), live!{
                     header: {label = {text: "Instrument header"}}
                 }) {
                     
@@ -285,7 +284,7 @@ impl App {
                         header: {label = {text: "Synth value"}, range = {mylabel = {text: "WHEE"}}}
                     });
                 }
-                if let Some(instrument) = self.frame.add_child(cx, id!(my_id2), ids!(instrument), live!{
+                if let Child(instrument) = self.frame.add_child(cx, id!(my_id2), ids!(instrument), live!{
                     header: {label = {text: "MyInstrument"}}
                 }) {
                     instrument.add_child(cx, id!(my_stack1), ids!(stack), live!{

@@ -99,28 +99,24 @@ impl FrameComponent for FoldHeader {
 
     fn redraw(&mut self, cx:&mut Cx){
         self.view.redraw(cx);
-        if let Some(child) = self.header.as_mut(){
-            child.redraw(cx);
-        }
-        if let Some(child) = self.body.as_mut(){
-            child.redraw(cx);
-        }
+        self.header.redraw(cx);
+        self.body.redraw(cx);
     }
     
     fn get_walk(&self) -> Walk {
         self.walk
     }
     
-    fn find_child(&self, id: &[LiveId]) -> Option<&Box<dyn FrameComponent >> {
-        find_child_impl!(id, self.header, self.body)
+    fn find_child(&mut self, id: &[LiveId]) -> ChildResult {
+        self.header.find_child(id)?;
+        self.body.find_child(id)?;
+        NoChild
     }
     
-    fn find_child_mut(&mut self, id: &[LiveId]) -> Option<&mut Box<dyn FrameComponent >> {
-        find_child_mut_impl!(id, self.header, self.body)
-    }
-
-    fn create_child(&mut self, cx:&mut Cx, at:CreateAt, id:LiveId, path: &[LiveId], nodes:&[LiveNode]) -> Option<&mut Box<dyn FrameComponent >> {
-        create_child_impl!(cx, at, id, path, nodes, self.header, self.body)
+    fn create_child(&mut self, cx:&mut Cx, at:CreateAt, id:LiveId, path: &[LiveId], nodes:&[LiveNode]) -> ChildResult {
+        self.header.create_child(cx, at, id, path, nodes)?;
+        self.body.create_child(cx, at, id, path, nodes)?;
+        NoChild
     }
     
     fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId> {
