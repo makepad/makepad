@@ -15,6 +15,10 @@ impl BTreeString {
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.btree.is_empty()
+    }
+    
     pub fn len(&self) -> usize {
         self.btree.len()
     }
@@ -52,25 +56,37 @@ impl BTreeString {
 
     pub fn chunks(&self) -> Chunks<'_> {
         Chunks {
-            slice: self.slice(..),
-            cursor_front: None,
-            cursor_back: None,
+            cursor: self.cursor_front(),
+        }
+    }
+
+    pub fn chunks_rev(&self) -> ChunksRev<'_> {
+        ChunksRev {
+            cursor: self.cursor_back(),
         }
     }
 
     pub fn bytes(&self) -> Bytes<'_> {
         Bytes {
-            slice: self.slice(..),
-            cursor_front: None,
-            cursor_back: None,
+            cursor: self.cursor_front(),
+        }
+    }
+
+    pub fn bytes_rev(&self) -> BytesRev<'_> {
+        BytesRev {
+            cursor: self.cursor_back(),
         }
     }
 
     pub fn chars(&self) -> Chars<'_> {
         Chars {
-            slice: self.slice(..),
-            cursor_front: None,
-            cursor_back: None,
+            cursor: self.cursor_front(),
+        }
+    }
+
+    pub fn chars_rev(&self) -> CharsRev<'_> {
+        CharsRev {
+            cursor: self.cursor_back(), 
         }
     }
 
@@ -172,18 +188,17 @@ impl<'a> Slice<'a> {
     pub fn cursor_front(self) -> Cursor<'a> {
         let cursor = self.slice.cursor_front();
         let chunk = &cursor.chunk()[cursor.range()];
-        let index = cursor.start() - cursor.position();
         Cursor {
             cursor,
             chunk,
-            index,
+            index: 0,
         }
     }
 
     pub fn cursor_back(self) -> Cursor<'a> {
         let cursor = self.slice.cursor_back();
         let chunk = &cursor.chunk()[cursor.range()];
-        let index = cursor.end() - cursor.position();
+        let index = chunk.len();
         Cursor {
             cursor,
             chunk,
@@ -193,25 +208,37 @@ impl<'a> Slice<'a> {
 
     pub fn chunks(self) -> Chunks<'a> {
         Chunks {
-            slice: self,
-            cursor_front: None,
-            cursor_back: None,
+            cursor: self.cursor_front(),
+        }
+    }
+
+    pub fn chunks_rev(self) -> ChunksRev<'a> {
+        ChunksRev {
+            cursor: self.cursor_back(),
         }
     }
 
     pub fn bytes(self) -> Bytes<'a> {
         Bytes {
-            slice: self,
-            cursor_front: None,
-            cursor_back: None,
+            cursor: self.cursor_front(),
+        }
+    }
+
+    pub fn bytes_rev(&self) -> BytesRev<'a> {
+        BytesRev {
+            cursor: self.cursor_back(),
         }
     }
 
     pub fn chars(self) -> Chars<'a> {
         Chars {
-            slice: self,
-            cursor_front: None,
-            cursor_back: None,
+            cursor: self.cursor_front()
+        }
+    }
+
+    pub fn chars_rev(self) -> CharsRev<'a> {
+        CharsRev {
+            cursor: self.cursor_back()
         }
     }
 }
@@ -229,7 +256,7 @@ impl<'a> Cursor<'a> {
     }
 
     pub fn is_at_end(&self) -> bool {
-        self.cursor.is_at_back() && self.index == self.chunk.len()
+        self.index == self.chunk.len()
     }
 
     pub fn is_at_char_boundary(&self) -> bool {
@@ -237,7 +264,7 @@ impl<'a> Cursor<'a> {
     }
 
     pub fn position(&self) -> usize {
-        (self.cursor.position() + self.index) - self.cursor.start()
+        self.cursor.position() + self.index
     }
 
     pub fn chunk(&self) -> &'a str {
@@ -267,7 +294,7 @@ impl<'a> Cursor<'a> {
     }
 
     pub fn move_prev_chunk(&mut self) {
-        if self.is_at_end() {
+        if !self.chunk.is_empty() && self.index == self.chunk.len() {
             self.index = 0;
             return;
         }
@@ -315,127 +342,103 @@ impl<'a> Cursor<'a> {
 }
 
 pub struct Chunks<'a> {
-    slice: Slice<'a>,
-    cursor_front: Option<Cursor<'a>>,
-    cursor_back: Option<Cursor<'a>>,
+    cursor: Cursor<'a>,
 }
 
 impl<'a> Iterator for Chunks<'a> {
     type Item = &'a str;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let cursor_front = self
-            .cursor_front
-            .get_or_insert_with(|| self.slice.cursor_front());
-        if self.cursor_back.as_ref().map_or_else(
-            || cursor_front.is_at_end(),
-            |cursor_back| cursor_front.position() == cursor_back.position(),
-        ) {
+        if self.cursor.is_at_end() {
             return None;
-        };
-        let chunk = cursor_front.chunk();
-        cursor_front.move_next_chunk();
+        }
+        let chunk = self.cursor.chunk();
+        self.cursor.move_next_chunk();
         Some(chunk)
     }
 }
 
-impl<'a> DoubleEndedIterator for Chunks<'a> {
-    fn next_back(&mut self) -> Option<Self::Item> {
-        let cursor_back = self
-            .cursor_back
-            .get_or_insert_with(|| self.slice.cursor_back());
-        if self.cursor_front.as_ref().map_or_else(
-            || cursor_back.is_at_start(),
-            |cursor_front| cursor_front.position() == cursor_back.position(),
-        ) {
+pub struct ChunksRev<'a> {
+    cursor: Cursor<'a>,
+}
+
+impl<'a> Iterator for ChunksRev<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.cursor.is_at_start() {
             return None;
         }
-        cursor_back.move_prev_chunk();
-        let chunk = cursor_back.chunk();
+        self.cursor.move_prev_chunk();
+        let chunk = self.cursor.chunk();
         Some(chunk)
     }
 }
 
 pub struct Bytes<'a> {
-    slice: Slice<'a>,
-    cursor_front: Option<Cursor<'a>>,
-    cursor_back: Option<Cursor<'a>>,
+    cursor: Cursor<'a>,
 }
 
 impl<'a> Iterator for Bytes<'a> {
     type Item = u8;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let cursor_front = self
-            .cursor_front
-            .get_or_insert_with(|| self.slice.cursor_front());
-        if self.cursor_back.as_ref().map_or_else(
-            || cursor_front.is_at_end(),
-            |cursor_back| cursor_front.position() == cursor_back.position(),
-        ) {
+        if self.cursor.is_at_end() {
             return None;
         }
-        let byte = cursor_front.byte();
-        cursor_front.move_next_byte();
+        let byte = self.cursor.byte();
+        self.cursor.move_next_byte();
         Some(byte)
     }
 }
 
-impl<'a> DoubleEndedIterator for Bytes<'a> {
-    fn next_back(&mut self) -> Option<Self::Item> {
-        let cursor_back = self
-            .cursor_back
-            .get_or_insert_with(|| self.slice.cursor_back());
-        if self.cursor_front.as_ref().map_or_else(
-            || cursor_back.is_at_start(),
-            |cursor_front| cursor_front.position() == cursor_back.position(),
-        ) {
+pub struct BytesRev<'a> {
+    cursor: Cursor<'a>,
+}
+
+impl<'a> Iterator for BytesRev<'a> {
+    type Item = u8;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.cursor.is_at_start() {
             return None;
         }
-        cursor_back.move_prev_byte();
-        let byte = cursor_back.byte();
+        self.cursor.move_prev_byte();
+        let byte = self.cursor.byte();
         Some(byte)
     }
 }
 
 pub struct Chars<'a> {
-    slice: Slice<'a>,
-    cursor_front: Option<Cursor<'a>>,
-    cursor_back: Option<Cursor<'a>>,
+    cursor: Cursor<'a>,
 }
 
 impl<'a> Iterator for Chars<'a> {
     type Item = char;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let cursor_front = self
-            .cursor_front
-            .get_or_insert_with(|| self.slice.cursor_front());
-        if self.cursor_back.as_ref().map_or_else(
-            || cursor_front.is_at_end(),
-            |cursor_back| cursor_front.position() == cursor_back.position(),
-        ) {
+        if self.cursor.is_at_end() {
             return None;
         }
-        let char = cursor_front.char();
-        cursor_front.move_next_char();
+        let char = self.cursor.char();
+        self.cursor.move_next_char();
         Some(char)
     }
 }
 
-impl<'a> DoubleEndedIterator for Chars<'a> {
-    fn next_back(&mut self) -> Option<Self::Item> {
-        let cursor_back = self
-            .cursor_back
-            .get_or_insert_with(|| self.slice.cursor_back());
-        if self.cursor_front.as_ref().map_or_else(
-            || cursor_back.is_at_start(),
-            |cursor_front| cursor_front.position() == cursor_back.position(),
-        ) {
+pub struct CharsRev<'a> {
+    cursor: Cursor<'a>,
+}
+
+impl<'a> Iterator for CharsRev<'a> {
+    type Item = char;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.cursor.is_at_start() {
             return None;
         }
-        cursor_back.move_prev_char();
-        let char = cursor_back.char();
+        self.cursor.move_prev_char();
+        let char = self.cursor.char();
         Some(char)
     }
 }
@@ -568,8 +571,7 @@ mod tests {
             let btree_string = BTreeString::from(&string);
             assert_eq!(
                 btree_string
-                    .chunks()
-                    .rev()
+                    .chunks_rev()
                     .map(|chunk| chunk.chars().rev().collect::<String>())
                     .collect::<String>(),
                 string.chars().rev().collect::<String>(),
@@ -589,7 +591,7 @@ mod tests {
         fn test_bytes_rev(string in any::<String>()) {
             let btree_string = BTreeString::from(&string);
             assert_eq!(
-                btree_string.bytes().rev().collect::<Vec<_>>(),
+                btree_string.bytes_rev().collect::<Vec<_>>(),
                 string.bytes().rev().collect::<Vec<_>>()
             );
         }
@@ -607,7 +609,7 @@ mod tests {
         fn test_chars_rev(string in any::<String>()) {
             let btree_string = BTreeString::from(&string);
             assert_eq!(
-                btree_string.chars().rev().collect::<Vec<_>>(),
+                btree_string.chars_rev().collect::<Vec<_>>(),
                 string.chars().rev().collect::<Vec<_>>()
             );
         }
@@ -651,6 +653,74 @@ mod tests {
             string.truncate(start);
             btree_string.truncate_back(start);
             assert_eq!(btree_string.chunks().collect::<String>(), string);
+        }
+
+        #[test]
+        fn test_slice_len((string, range) in string_and_range()) {
+            let btree_string = BTreeString::from(&string);
+            let slice = &string[range.clone()];
+            let btree_slice = btree_string.slice(range);
+            assert_eq!(btree_slice.len(), slice.len());
+        }
+
+        #[test]
+        fn test_slice_chunks((string, range) in string_and_range()) {
+            let btree_string = BTreeString::from(&string);
+            let slice = &string[range.clone()];
+            let btree_slice = btree_string.slice(range);
+            assert_eq!(btree_slice.chunks().collect::<String>(), slice);
+        }
+
+        #[test]
+        fn test_slice_chunks_rev((string, range) in string_and_range()) {
+            let btree_string = BTreeString::from(&string);
+            let slice = &string[range.clone()];
+            let btree_slice = btree_string.slice(range);
+            assert_eq!(
+                btree_slice
+                    .chunks_rev()
+                    .map(|chunk| chunk.chars().rev().collect::<String>())
+                    .collect::<String>(),
+                slice.chars().rev().collect::<String>(),
+            );
+        }
+
+        #[test]
+        fn test_slice_bytes((string, range) in string_and_range()) {
+            let btree_string = BTreeString::from(&string);
+            let slice = &string[range.clone()];
+            let btree_slice = btree_string.slice(range);
+            assert_eq!(btree_slice.bytes().collect::<Vec<_>>(), slice.bytes().collect::<Vec<_>>());
+        }
+
+        #[test]
+        fn test_slice_bytes_rev((string, range) in string_and_range()) {
+            let btree_string = BTreeString::from(&string);
+            let slice = &string[range.clone()];
+            let btree_slice = btree_string.slice(range);
+            assert_eq!(
+                btree_slice.bytes_rev().collect::<Vec<_>>(),
+                slice.bytes().rev().collect::<Vec<_>>()
+            );
+        }
+
+        #[test]
+        fn test_slice_chars((string, range) in string_and_range()) {
+            let btree_string = BTreeString::from(&string);
+            let slice = &string[range.clone()];
+            let btree_slice = btree_string.slice(range);
+            assert_eq!(btree_slice.chars().collect::<Vec<_>>(), slice.chars().collect::<Vec<_>>());
+        }
+
+        #[test]
+        fn test_slice_chars_rev((string, range) in string_and_range()) {
+            let btree_string = BTreeString::from(&string);
+            let slice = &string[range.clone()];
+            let btree_slice = btree_string.slice(range);
+            assert_eq!(
+                btree_slice.chars_rev().collect::<Vec<_>>(),
+                slice.chars().rev().collect::<Vec<_>>()
+            );
         }
     }
 }
