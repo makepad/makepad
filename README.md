@@ -12,7 +12,7 @@ Makepad consists of the following parts:
 In order to compile makepad applications you need to first install Rust.\
 [https://www.rust-lang.org/tools/install](https://www.rust-lang.org/tools/install)
 
-Makepad require rust nightly, install it here\
+After installing rust, install the nightly toolchain\
 ```rustup toolchain install nightly```
 
 Then to build the webassembly versions you need to install the wasm32 toolchain\
