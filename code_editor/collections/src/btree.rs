@@ -374,6 +374,9 @@ impl<'a, T: Chunk> Cursor<'a, T> {
                 }
             }
         }
+        if self.position == self.end {
+            self.move_prev_chunk()
+        }
     }
 }
 
@@ -385,7 +388,7 @@ pub(crate) trait Chunk: Clone {
     fn new() -> Self;
     fn len(&self) -> usize;
     fn info(&self) -> Self::Info;
-    fn can_split_at(&self, index: usize) -> bool;
+    fn is_boundary(&self, index: usize) -> bool;
     fn move_left(&mut self, other: &mut Self, end: usize);
     fn move_right(&mut self, other: &mut Self, start: usize);
     fn truncate_back(&mut self, start: usize);
@@ -592,6 +595,7 @@ where
     }
 }
 
+
 #[derive(Clone, Debug)]
 struct Leaf<T> {
     chunk: Arc<T>,
@@ -637,14 +641,14 @@ impl<T: Chunk> Leaf<T> {
         match self.len().cmp(&other.len()) {
             Ordering::Less => {
                 let mut end = (other.len() - self.len()) / 2;
-                while !other.can_split_at(end) {
+                while !other.is_boundary(end) {
                     end -= 1;
                 }
                 self.move_left(other, end);
             }
             Ordering::Greater => {
                 let mut start = (self.len() + other.len()) / 2;
-                while !self.can_split_at(start) {
+                while !self.is_boundary(start) {
                     start += 1;
                 }
                 self.move_right(other, start);
