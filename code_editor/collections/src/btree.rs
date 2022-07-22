@@ -19,6 +19,10 @@ impl<T: Chunk> BTree<T> {
         }
     }
 
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
     pub(crate) fn len(&self) -> usize {
         self.root.summed_len()
     }
@@ -233,6 +237,8 @@ impl<'a, T: Chunk> Slice<'a, T> {
         let mut cursor = Cursor::new(self.root, self.start, self.end);
         if self.start == 0 {
             cursor.descend_left();
+        } else if self.start == self.root.summed_len() {
+            cursor.descend_right();
         } else {
             cursor.descend_to(self.start);
         }
@@ -241,7 +247,9 @@ impl<'a, T: Chunk> Slice<'a, T> {
 
     pub fn cursor_back(self) -> Cursor<'a, T> {
         let mut cursor = Cursor::new(self.root, self.start, self.end);
-        if self.end == self.root.summed_len() {
+        if self.end == 0 {
+            cursor.descend_left();
+        } else if self.end == self.root.summed_len() {
             cursor.descend_right();
         } else {
             cursor.descend_to(self.end);
@@ -270,16 +278,8 @@ impl<'a, T: Chunk> Cursor<'a, T> {
         self.position + self.chunk().len() >= self.end
     }
 
-    pub(crate) fn start(&self) -> usize {
-        self.start
-    }
-
-    pub(crate) fn end(&self) -> usize {
-        self.end
-    }
-
     pub(crate) fn position(&self) -> usize {
-        self.position
+        self.position.saturating_sub(self.start)
     }
 
     pub(crate) fn chunk(&self) -> &'a T {
@@ -289,7 +289,7 @@ impl<'a, T: Chunk> Cursor<'a, T> {
     pub(crate) fn range(&self) -> Range<usize> {
         Range {
             start: self.start.saturating_sub(self.position),
-            end: self.chunk().len() - self.position.saturating_sub(self.end),
+            end: self.chunk().len() - (self.position + self.chunk().len()).saturating_sub(self.end),
         }
     }
 
