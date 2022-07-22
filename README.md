@@ -1,22 +1,49 @@
 # Makepad
 
-This is Makepad, a new way to do UIs in Rust. At the moment, Makepad is primarily a UI framework, called Makepad Framework. In the future, Makepad will also be a UI designer application, called Makepad Designer, which we hope to build on top of Makepad Framework.
+This is Makepad, a new way to do UIs in Rust for native and web. 
+Makepad consists of the following parts:
+- Makepad Framework
+- Makepad Examples
+- Makepad Studio
+- Makepad Designer
 
-Applications written in Makepad Framework:
--   Are written in Rust
--   Can run natively and on the web
--   Are rendered entirely on the GPU
--   Are both small and fast
+Each part is explained below
 
-To give you an idea of the kind of applications you can build with Makepad, this repository contains both Makepad Studio, which is a prototype of a code editor that will eventually serve as the open source foundation for Makepad Designer, and several smaller examples.
+## Makepad Framework 
+Open source UI framework that you can use to build UI's for web and native applications. 
 
-## Makepad Studio
+Makepad framework applications are built straight onto the platform layer, and are small and lightweight.
+We have platform layers for Web, MacOS, Linux and Windows. Linux and Windows builds are currently WIP and don't run.
+All rendering is GPU based and we use a shader DSL for all visual styling
+
+## Makepad Examples 
+Open source example applications to learn how to build makepad framework applications
+
+### The fractal zoomer example:
+To run natively use the following command (MacOS only for now):\
+```cargo run -p fractal_zoom --release```
+To run the webassembly version build with this command:\
+```./tools/build_wasm_simd.sh fractal_zoom```
+Start the webserver with:\
+```cargo run -p webserver --release```
+Then you can open this url in Chrome:
+[http://127.0.0.1:8080/makepad/examples/fractal_zoom/src/index.html](http://127.0.0.1:8080/makepad/examples/fractal_zoom/src/index.html)
+
+### The fun audio example:
+To run natively use the following command (MacOS only for now):\
+```cargo run -p fun_audio --release```
+To run the webassembly version build with this command:\
+```./tools/build_wasm_simd.sh fun_audio```
+Start the webserver with:\
+```cargo run -p webserver --release```
+Then you can open this url in Chrome:
+[http://127.0.0.1:8080/makepad/examples/fun_audio/src/index.html](http://127.0.0.1:8080/makepad/examples/fun_audio/src/index.html)
+
+## Makepad Studio 
 
 ### What Makepad Studio Is
 
-Makepad Studio is a prototype of a code editor written in Makepad. For now, it is primarily intended to show off how one could write their own code editor in Makepad. Our eventual goal is to evolve this into a feature complete, fully extendable IDE.
-
-Our intention is to develop Makepad Designer as a commercially licensed extension on top of Makepad Studio. Makepad Studio itself will always remain free and open source.  
+Makepad Studio is a prototype of a code editor written in Makepad. For now, it is primarily intended to show off how one could write their own code editor in Makepad. Our eventual goal is to evolve this into a feature complete, fully extendable Rust IDE.
 
 At the moment of this writing, the following features are supported by Makepad Studio:
 
@@ -24,7 +51,6 @@ At the moment of this writing, the following features are supported by Makepad S
 -   Basic edit operations
 -   Undo/redo
 -   Basic syntax highlighting (Rust only)
-    
 
 ### What Makepad Studio Is Not
 
@@ -39,28 +65,21 @@ At the moment of this writing, the following features are not yet supported by M
 -   Accessibility
 -   Extensibility
     
-
 ### Build Instructions
 
-#### Native
-
-To run Makepad Studio natively, use the following command:\
-```cargo run -p makepad_studio```
-
-At the moment, Makepad Studio only runs natively on MacOS, but support for Windows/Linux is coming soon.
-
-#### Web
-
-To run Makepad studio on the web, use the following commands:\
-```tools/build_wasm_normal.sh makepad_studio```\
+To run natively use the following command (MacOS only for now):\
+```cargo run -p makepad_studio --release```
+To run the webassembly version build with this command:\
+```./tools/build_wasm_normal.sh makepad_studio```
+Start the webserver with:\
 ```cargo run -p webserver --release```
+Then you can open this url in Chrome:
+[http://127.0.0.1:8080/makepad/makepad_studio/src/index.html](http://127.0.0.1:8080/makepad/makepad_studio/src/index.html)
 
-Once the web server is running, open the following URL in a browser:\
-[http://127.0.0.1:8080/makepad/studio/src/index.html](http://127.0.0.1:8080/makepad/studio/src/index.html)
+## Makepad Designer 
 
-## Examples
-
-<TODO>
+Makepad Designer will be our commercially licensed designtool built as extension of Makepad Studio.
+The designer will have a visual UI designer to allow creating makepad applications visually and unify the workflow of Designers and programmers in a new way.
 
 ## Contact
 
