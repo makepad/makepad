@@ -7,6 +7,8 @@ Makepad consists of the following parts:
 - Makepad Studio
 - Makepad Designer
 
+## Prerequisites
+
 In order to compile makepad applications you need to first install Rust.\
 [https://www.rust-lang.org/tools/install](https://www.rust-lang.org/tools/install)
 
