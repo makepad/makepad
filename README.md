@@ -7,7 +7,9 @@ Makepad consists of the following parts:
 - Makepad Studio
 - Makepad Designer
 
-## Prerequisites
+What these are is explained below. But first
+
+### Prerequisites
 
 Note: Our Linux and Windows platform layers are currently WIP and don't run. Build on MacOS for now.
 
