@@ -96,7 +96,7 @@ Start the webserver with:\
 ```cargo +nightly run -p webserver --release```
 
 Then you can open this url in Chrome:\
-[http://127.0.0.1:8080/makepad/makepad_studio/src/index.html](http://127.0.0.1:8080/makepad/makepad_studio/src/index.html)
+[http://127.0.0.1:8080/makepad/studio/src/index.html](http://127.0.0.1:8080/makepad/makepad_studio/src/index.html)
 
 ## Makepad Designer 
 
