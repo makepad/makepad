@@ -22,20 +22,26 @@ Open source example applications to learn how to build makepad framework applica
 ### The fractal zoomer example:
 To run natively use the following command (MacOS only for now):\
 ```cargo run -p fractal_zoom --release```
+
 To run the webassembly version build with this command:\
 ```./tools/build_wasm_simd.sh fractal_zoom```
+
 Start the webserver with:\
 ```cargo run -p webserver --release```
+
 Then you can open this url in Chrome:
 [http://127.0.0.1:8080/makepad/examples/fractal_zoom/src/index.html](http://127.0.0.1:8080/makepad/examples/fractal_zoom/src/index.html)
 
 ### The fun audio example:
 To run natively use the following command (MacOS only for now):\
 ```cargo run -p fun_audio --release```
+
 To run the webassembly version build with this command:\
 ```./tools/build_wasm_simd.sh fun_audio```
+
 Start the webserver with:\
 ```cargo run -p webserver --release```
+
 Then you can open this url in Chrome:
 [http://127.0.0.1:8080/makepad/examples/fun_audio/src/index.html](http://127.0.0.1:8080/makepad/examples/fun_audio/src/index.html)
 
@@ -69,10 +75,13 @@ At the moment of this writing, the following features are not yet supported by M
 
 To run natively use the following command (MacOS only for now):\
 ```cargo run -p makepad_studio --release```
+
 To run the webassembly version build with this command:\
 ```./tools/build_wasm_normal.sh makepad_studio```
+
 Start the webserver with:\
 ```cargo run -p webserver --release```
+
 Then you can open this url in Chrome:
 [http://127.0.0.1:8080/makepad/makepad_studio/src/index.html](http://127.0.0.1:8080/makepad/makepad_studio/src/index.html)
 
