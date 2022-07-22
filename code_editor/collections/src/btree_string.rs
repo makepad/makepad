@@ -294,7 +294,7 @@ impl<'a> Cursor<'a> {
     }
 
     pub fn move_prev_chunk(&mut self) {
-        if !self.chunk.is_empty() && self.index == self.chunk.len() {
+        if self.index == self.chunk.len() {
             self.index = 0;
             return;
         }
@@ -318,7 +318,7 @@ impl<'a> Cursor<'a> {
     }
 
     pub fn move_next_char(&mut self) {
-        self.index += len_utf8_from_first_byte(self.byte());
+        self.index += self.byte().utf8_char_len();
         if self.index == self.chunk.len() {
             self.move_next_chunk();
         }
@@ -458,12 +458,12 @@ impl btree::Chunk for String {
 
     fn info(&self) -> Self::Info {
         Info {
-            char_count: self.chars().count(),
+            char_count: self.count_chars(),
         }
     }
 
-    fn can_split_at(&self, index: usize) -> bool {
-        self.is_char_boundary(index)
+    fn is_boundary(&self, index: usize) -> bool {
+        self.as_str().is_boundary(index)
     }
 
     fn move_left(&mut self, other: &mut Self, end: usize) {
@@ -508,15 +508,51 @@ impl SubAssign for Info {
     }
 }
 
-fn len_utf8_from_first_byte(byte: u8) -> usize {
-    if byte < 0x80 {
-        1
-    } else if byte < 0xE0 {
-        2
-    } else if byte < 0xF0 {
-        3
-    } else {
-        4
+trait U8Ext {
+    fn is_utf8_char_start(self) -> bool;
+    fn utf8_char_len(self) -> usize;
+}
+
+impl U8Ext for u8 {
+    fn is_utf8_char_start(self) -> bool {
+        (self as i8) >= -0x40
+    }
+
+    fn utf8_char_len(self) -> usize {
+        if self < 0x80 {
+            1
+        } else if self < 0xE0 {
+            2
+        } else if self < 0xF0 {
+            3
+        } else {
+            4
+        }
+    }
+}
+
+trait StrExt {
+    fn count_chars(&self) -> usize;
+    fn is_boundary(&self, index: usize) -> bool;
+}
+
+impl StrExt for str {
+    fn count_chars(&self) -> usize {
+        let mut count = 0;
+        for byte in self.bytes() {
+            if byte.is_utf8_char_start() {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    fn is_boundary(&self, index: usize) -> bool {
+        if index == 0 || index == self.len() {
+            return true;
+        }
+        let bytes = self.as_bytes();
+        bytes[index].is_utf8_char_start() && bytes[index - 1] != 0x0D && bytes[index] != 0x0F
     }
 }
 
@@ -548,6 +584,12 @@ mod tests {
     }
 
     proptest! {
+        #[test]
+        fn test_is_empty(string in any::<String>()) {
+            let btree_string = BTreeString::from(&string);
+            assert_eq!(btree_string.is_empty(), string.is_empty());
+        }
+
         #[test]
         fn test_len(string in any::<String>()) {
             let btree_string = BTreeString::from(&string);
@@ -653,6 +695,14 @@ mod tests {
             string.truncate(start);
             btree_string.truncate_back(start);
             assert_eq!(btree_string.chunks().collect::<String>(), string);
+        }
+
+        #[test]
+        fn test_slice_is_empty((string, range) in string_and_range()) {
+            let btree_string = BTreeString::from(&string);
+            let slice = &string[range.clone()];
+            let btree_slice = btree_string.slice(range);
+            assert_eq!(btree_slice.is_empty(), slice.is_empty());
         }
 
         #[test]
