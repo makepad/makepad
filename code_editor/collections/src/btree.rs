@@ -595,7 +595,6 @@ where
     }
 }
 
-
 #[derive(Clone, Debug)]
 struct Leaf<T> {
     chunk: Arc<T>,
