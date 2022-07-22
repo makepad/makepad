@@ -44,18 +44,18 @@ pub struct Frame { // draw info per UI element
     hidden: bool,
     user_draw: bool,
     mouse_cursor: Option<MouseCursor>,
-    #[live(false)] design_mode: bool, 
+    #[live(false)] design_mode: bool,
     #[rust] pub view: Option<View>,
     
-    scroll_x: FrameComponentRef,
-    scroll_y: FrameComponentRef,
+    scroll_x: FrameRef,
+    scroll_y: FrameRef,
     
     #[rust] self_id: LiveId,
     
     #[rust] defer_walks: Vec<(LiveId, DeferWalk)>,
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust] templates: ComponentMap<LiveId, LivePtr>,
-    #[rust] children: ComponentMap<LiveId, FrameComponentRef>,
+    #[rust] children: ComponentMap<LiveId, FrameRef>,
     #[rust] draw_order: Vec<LiveId>
 }
 
@@ -80,7 +80,7 @@ impl LiveHook for Frame {
     fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         let id = nodes[index].id;
         match from {
-            ApplyFrom::Animate | ApplyFrom::ApplyOver=> {
+            ApplyFrom::Animate | ApplyFrom::ApplyOver => {
                 if let Some(component) = self.children.get_mut(&nodes[index].id) {
                     component.apply(cx, from, index, nodes)
                 }
@@ -88,7 +88,7 @@ impl LiveHook for Frame {
                     nodes.skip_node(index)
                 }
             }
-            ApplyFrom::NewFromDoc{file_id} | ApplyFrom::UpdateFromDoc{file_id} => {
+            ApplyFrom::NewFromDoc {file_id} | ApplyFrom::UpdateFromDoc {file_id} => {
                 if !self.design_mode && nodes[index].origin.has_prop_type(LivePropType::Template) {
                     // lets store a pointer into our templates.
                     let live_ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
@@ -98,7 +98,7 @@ impl LiveHook for Frame {
                 else if nodes[index].origin.has_prop_type(LivePropType::Instance)
                     || self.design_mode && nodes[index].origin.has_prop_type(LivePropType::Template) {
                     self.draw_order.push(id);
-                    return self.children.get_or_insert(cx, id, | cx | {FrameComponentRef::new(cx)})
+                    return self.children.get_or_insert(cx, id, | cx | {FrameRef::new(cx)})
                         .apply(cx, from, index, nodes);
                 }
                 else {
@@ -106,7 +106,7 @@ impl LiveHook for Frame {
                     nodes.skip_node(index)
                 }
             }
-            _=>{
+            _ => {
                 nodes.skip_node(index)
             }
         }
@@ -115,8 +115,36 @@ impl LiveHook for Frame {
 
 
 impl FrameComponent for Frame {
-    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, _self_id: LiveId) -> FrameComponentActionRef {
-        self.handle_event(cx, event).into()
+    
+    fn handle_component_event(
+        &mut self,
+        cx: &mut Cx,
+        event: &mut Event,
+        dispatch_action: &mut dyn FnMut(&mut Cx, FramePath, Box<dyn FrameAction>)
+    ) {
+        
+        for id in &self.draw_order {
+            if let Some(child) = self.children.get_mut(id) {
+                let uid = child.as_uid();
+                child.handle_component_event(cx, event, &mut | cx, path, action | {
+                    dispatch_action(cx, path.add(*id, uid), action);
+                });
+            }
+        }
+        
+        if let Some(cursor) = &self.mouse_cursor {
+            match event.hits(cx, self.bg.area()) {
+                HitEvent::FingerHover(f) => {
+                    match f.hover_state {
+                        HoverState::In => {
+                            cx.set_hover_mouse_cursor(*cursor);
+                        }
+                        _ => {}
+                    }
+                }
+                _ => ()
+            }
+        }
     }
     
     fn get_walk(&self) -> Walk {
@@ -136,52 +164,52 @@ impl FrameComponent for Frame {
         }
     }
     
-    fn create_child(&mut self, cx:&mut Cx, at:CreateAt, id: LiveId, path: &[LiveId],  nodes: &[LiveNode]) -> ChildResult {
-        if self.design_mode{
+    fn create_child(&mut self, cx: &mut Cx, at: CreateAt, id: LiveId, path: &[LiveId], nodes: &[LiveNode]) -> ChildResult {
+        if self.design_mode {
             return NoChild
         }
         if path.len()>1 {
             if self.children.get(&path[0]).is_some() {
-                return self.children.get_mut(&path[0]).unwrap().as_mut().unwrap().create_child(cx, at, id, &path[1..],nodes)
+                return self.children.get_mut(&path[0]).unwrap().as_mut().unwrap().create_child(cx, at, id, &path[1..], nodes)
             }
             return NoChild
         }
-        if let Some(live_ptr) = self.templates.get(&path[0]){
+        if let Some(live_ptr) = self.templates.get(&path[0]) {
             // remove from draworder
-            self.draw_order.retain(|v| *v != id);
+            self.draw_order.retain( | v | *v != id);
             // lets resolve the live ptr to something
-            let mut x = FrameComponentRef::new_from_ptr(cx, Some(live_ptr.clone()));
+            let mut x = FrameRef::new_from_ptr(cx, Some(live_ptr.clone()));
             x.as_mut().unwrap().apply(cx, ApplyFrom::ApplyOver, 0, nodes);
             self.children.insert(id, x);
-            match at{
-                CreateAt::Begin=>{
+            match at {
+                CreateAt::Begin => {
                     self.draw_order.insert(0, id);
                 }
-                CreateAt::End=>{
+                CreateAt::End => {
                     self.draw_order.push(id);
                 }
-                CreateAt::After(id)=>{
-                    if let Some(index) = self.draw_order.iter().position(|v| *v == id){
+                CreateAt::After(id) => {
+                    if let Some(index) = self.draw_order.iter().position( | v | *v == id) {
                         self.draw_order.insert(index + 1, id);
                     }
-                    else{
+                    else {
                         self.draw_order.push(id);
                     }
                 }
-                CreateAt::Before(id)=>{
-                    if let Some(index) = self.draw_order.iter().position(|v| *v == id){
+                CreateAt::Before(id) => {
+                    if let Some(index) = self.draw_order.iter().position( | v | *v == id) {
                         self.draw_order.insert(index, id);
                     }
-                    else{
+                    else {
                         self.draw_order.push(id);
                     }
                 }
             }
             return Child(self.children.get_mut(&id).unwrap().as_mut().unwrap())
         }
-        else{
+        else {
             for child in self.children.values_mut() {
-                child.create_child(cx, at, id, path, nodes)?;
+                child.create_child(cx, at, id, path, nodes) ?;
             }
         }
         NoChild
@@ -208,6 +236,7 @@ enum DrawState {
     DeferWalk(usize)
 }
 
+
 impl Frame {
     
     pub fn child<T: 'static + FrameComponent>(&mut self, id: LiveId) -> Option<&mut T> {
@@ -228,35 +257,13 @@ impl Frame {
         }
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> FrameActions {
-        let mut actions = Vec::new();
-        for id in &self.draw_order {
-            if let Some(child) = self.children.get_mut(id).unwrap().as_mut() {
-                actions.merge(*id, child.handle_component_event(cx, event, *id));
-            }
-        }
-        if let Some(cursor) = &self.mouse_cursor {
-            match event.hits(cx, self.bg.area()) {
-                HitEvent::FingerHover(f) => {
-                    match f.hover_state {
-                        HoverState::In => {
-                            cx.set_hover_mouse_cursor(*cursor);
-                        }
-                        _ => {}
-                    }
-                }
-                _ => ()
-            }
-        }
-        
-        FrameActions::from_vec(actions)
-    }
     
-    pub fn area(&self)->Area{
-        if let Some(view) = &self.view{
+    
+    pub fn area(&self) -> Area {
+        if let Some(view) = &self.view {
             view.area()
         }
-        else{
+        else {
             self.bg.draw_vars.area
         }
     }

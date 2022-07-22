@@ -286,7 +286,7 @@ impl Dock {
                 Panel::Split(panel) => {
                     panel
                         .splitter
-                        .handle_event_with_fn(cx, event, &mut | cx, action | match action {
+                        .handle_event(cx, event, &mut | cx, action | match action {
                         SplitterAction::Changed {axis, align} => {
                             dispatch_action(cx, DockAction::SplitPanelChanged {panel_id: *panel_id, axis, align});
                         },

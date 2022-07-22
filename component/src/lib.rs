@@ -38,7 +38,7 @@ mod theme;
 pub use crate::{
     bare_window::BareWindow,
     component_map::ComponentMap,
-    button_logic::{ButtonLogic, ButtonAction},
+    button_logic::{button_logic_handle_event, ButtonAction},
     button::{Button},
     text_input::{TextInput},
     link_button::{LinkButton},
@@ -51,13 +51,12 @@ pub use crate::{
         Child,
         NoChild,
         CreateAt,
-        FrameActions,
-        FrameActionItem,
+        FramePath,
+        FrameRef,
         FrameComponent,
         FrameComponentRegistry,
         FrameComponentFactory,
-        FrameComponentAction,
-        FrameComponentActionRef
+        FrameAction,
     }
 };
 

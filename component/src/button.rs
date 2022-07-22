@@ -51,13 +51,13 @@ live_register!{
                 
                 // the little drop shadow at the bottom
                 let shift_inward = BORDER_RADIUS + 4.0;
-                sdf.move_to(shift_inward,self.rect_size.y-BORDER_RADIUS);
-                sdf.line_to(self.rect_size.x-shift_inward,self.rect_size.y-BORDER_RADIUS);
+                sdf.move_to(shift_inward, self.rect_size.y - BORDER_RADIUS);
+                sdf.line_to(self.rect_size.x - shift_inward, self.rect_size.y - BORDER_RADIUS);
                 sdf.stroke(
-                    mix(mix(#2f,#1f,self.hover), #0000, self.pressed),
+                    mix(mix(#2f, #1f, self.hover), #0000, self.pressed),
                     BORDER_RADIUS
                 )
-
+                
                 sdf.box(
                     1.,
                     1.,
@@ -87,7 +87,7 @@ live_register!{
             padding: {left: 14.0, top: 10.0, right: 14.0, bottom: 10.0}
         }
         
-        state:{
+        state: {
             hover = {
                 default: off,
                 off = {
@@ -124,18 +124,16 @@ live_register!{
 #[derive(Live, LiveHook, FrameComponent)]
 #[live_register(frame_component!(Button))]
 pub struct Button {
-    #[rust] pub button_logic: ButtonLogic,
-
     state: State,
-
+    
     bg_quad: DrawQuad,
     label_text: DrawLabelText,
-
+    
     #[alias(width, walk.width)]
     #[alias(height, walk.height)]
     #[alias(margin, walk.margin)]
     walk: Walk,
-
+    
     layout: Layout,
     label: String
 }
@@ -149,18 +147,14 @@ struct DrawLabelText {
 
 impl Button {
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonAction {
-        
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction),) {
         self.state_handle_event(cx, event);
-        let res = self.button_logic.handle_event(cx, event, self.bg_quad.area());
-        
-        match res.state {
+        match button_logic_handle_event(cx, event, self.bg_quad.area(), dispatch_action) {
             ButtonState::Pressed => self.animate_state(cx, ids!(hover.pressed)),
             ButtonState::Default => self.animate_state(cx, ids!(hover.off)),
             ButtonState::Hover => self.animate_state(cx, ids!(hover.on)),
             _ => ()
         };
-        res.action
     }
     
     pub fn draw_label(&mut self, cx: &mut Cx2d, label: &str) {

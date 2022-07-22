@@ -2,7 +2,8 @@ use crate::{
     makepad_platform::*,
     button_logic::*,
     window_menu::*,
-    frame::*
+    frame::*,
+    frame_component::*
 };
 
 live_register!{
@@ -83,8 +84,8 @@ impl DesktopWindow {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> DesktopWindowEvent {
         
-        for item in self.frame.handle_event(cx, event) {
-            if let ButtonAction::WasClicked = item.action.cast() {match item.id {
+        for item in self.frame.handle_component_event_vec(cx, event) {
+            if let ButtonAction::WasClicked = item.action.cast() {match item.id() {
                 id!(min_btn) => {
                     self.window.minimize(cx);
                 }
