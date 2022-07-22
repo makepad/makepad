@@ -81,8 +81,6 @@ live_register!{
 #[derive(Live, LiveHook)]
 #[live_register(frame_component!(FoldButton))]
 pub struct FoldButton {
-    #[rust] button_logic: ButtonLogic,
-    
     state: State,
     
     opened: f32,
@@ -93,7 +91,7 @@ pub struct FoldButton {
     walk: Walk,
 }
 
-#[derive(Clone, FrameComponentAction)]
+#[derive(Clone, FrameAction)]
 pub enum FoldButtonAction {
     None,
     Opening,
@@ -102,10 +100,10 @@ pub enum FoldButtonAction {
 }
 
 impl FrameComponent for FoldButton {
-    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, self_id: LiveId) -> FrameComponentActionRef {
-        let mut a = Vec::new();
-        self.handle_event_with_fn(cx, event, &mut | _, v | a.push(FrameActionItem::new(self_id, v.into())));
-        FrameActions::Actions(a).into()
+    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, FramePath, Box<dyn FrameAction>)) {
+        self.handle_event(cx, event, &mut |cx, action|{
+            dispatch_action(cx, FramePath::empty(), action.into())
+        });
     }
     
     fn get_walk(&self) -> Walk {
@@ -120,7 +118,7 @@ impl FrameComponent for FoldButton {
 
 impl FoldButton {
     
-    pub fn handle_event_with_fn(
+    pub fn handle_event(
         &mut self,
         cx: &mut Cx,
         event: &mut Event,
@@ -131,9 +129,8 @@ impl FoldButton {
                 dispatch_action(cx, FoldButtonAction::Animating(self.opened))
             }
         };
-        let res = self.button_logic.handle_event(cx, event, self.bg_quad.area());
         
-        match res.state {
+        match button_logic_handle_event(cx, event, self.bg_quad.area(), &mut |_,_|{}) {
             ButtonState::Pressed => {
                 if self.state.is_in_state(cx, ids!(open.yes)) {
                     self.animate_state(cx, ids!(open.no));
