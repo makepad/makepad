@@ -2,7 +2,7 @@ use proc_macro::{TokenStream};
 
 use makepad_macro_lib::{TokenBuilder, TokenParser};
 
-pub fn derive_frame_component_action_impl(input: TokenStream) -> TokenStream {
+pub fn derive_frame_action_impl(input: TokenStream) -> TokenStream {
     let mut tb = TokenBuilder::new();
     let mut parser = TokenParser::new(input);
     let _main_attribs = parser.eat_attributes();
@@ -11,13 +11,10 @@ pub fn derive_frame_component_action_impl(input: TokenStream) -> TokenStream {
         if let Some(enum_name) = parser.eat_any_ident() {
             let generic = parser.eat_generic();
             let where_clause = parser.eat_where_clause(None);
-            tb.add("impl").stream(generic.clone());
-            tb.add("Into<FrameComponentActionRef> for").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-            tb.add("    fn into(self)->Option<Box<dyn FrameComponentAction>>{");
-            tb.add("        match &self{");
-            tb.add("            Self::None=>None,");
-            tb.add("            _=>Some(Box::new(self))");
-            tb.add("        }");
+            tb.add("impl Into<Box<dyn FrameAction>> for ").ident(&enum_name).stream(generic.clone()).stream(where_clause.clone());
+            tb.add("{");
+            tb.add("    fn into(self)->Box<dyn FrameAction>{");
+            tb.add("        Box::new(self)");
             tb.add("    }");
             tb.add("}");
             tb.add("impl").stream(generic.clone());
@@ -43,13 +40,15 @@ pub fn derive_frame_component_impl(input: TokenStream) -> TokenStream {
             let where_clause = parser.eat_where_clause(None); //Some("LiveUpdateHooks"));
             tb.add("impl").stream(generic.clone());
             tb.add("FrameComponent for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-            tb.add("    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, _self_id: LiveId) -> FrameComponentActionRef {");
-            tb.add("        self.handle_event(cx, event).into()");
+            tb.add("    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, FramePath, Box<dyn FrameAction>)) {");
+            tb.add("        self.handle_event(cx, event, &mut |cx, action|{");
+            tb.add("            dispatch_action(cx, FramePath::empty(), action.into())");
+            tb.add("        });");
             tb.add("    }");
             tb.add("    fn get_walk(&self) -> Walk {");
             tb.add("        self.walk");
             tb.add("    }");
-            tb.add("    #[allow(unused_must_use)]fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId> {");
+            tb.add("    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId> {");
             tb.add("        self.draw_walk(cx, walk);");
             tb.add("        Ok(())");
             tb.add("    }");

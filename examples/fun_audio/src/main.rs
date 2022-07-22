@@ -239,8 +239,8 @@ impl App {
         //self.desktop_window.handle_event(cx, event);
         self.scroll_view.handle_event(cx, event);
         
-        for item in self.frame.handle_event(cx, event) {
-            match item.id {
+        for item in self.frame.handle_component_event_vec(cx, event) {
+            match item.id() {
                 id!(piano) => if let PianoAction::Note {is_on, note_number, velocity} = item.action.cast() {
                     self.audio_graph.send_midi_1_data(Midi1Note {
                         is_on,
@@ -314,7 +314,10 @@ impl App {
             return;
         }
 
-        while let Err(_child) = self.frame.draw(cx) {
+        while let Err(uid) = self.frame.draw(cx) {
+            if let Some(piano) = self.frame.child::<Piano>(uid){
+                
+            }
         };
         
         self.window.end(cx);

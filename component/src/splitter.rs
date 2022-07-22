@@ -55,7 +55,7 @@ live_register!{
         min_vertical: (DIM_SPLITTER_MIN_VERTICAL)
         max_vertical: (DIM_SPLITTER_MAX_VERTICAL)
         
-        state:{
+        state: {
             hover = {
                 default: off
                 off = {
@@ -108,7 +108,7 @@ pub struct Splitter {
     #[rust] rect: Rect,
     #[rust] position: f32,
     #[rust] drag_start_align: Option<SplitterAlign>,
-
+    
     state: State,
     
     min_vertical: f32,
@@ -121,39 +121,37 @@ pub struct Splitter {
     
     // framecomponent mode
     #[rust] draw_state: DrawStateWrap<DrawState>,
-    a: FrameComponentRef,
-    b: FrameComponentRef,
+    a: FrameRef,
+    b: FrameRef,
     walk: Walk,
 }
 
 #[derive(Clone)]
-enum DrawState{
+enum DrawState {
     DrawA,
     DrawSplit,
     DrawB
 }
 
 impl FrameComponent for Splitter {
-    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, self_id: LiveId) -> FrameComponentActionRef {
-        let mut actions = Vec::new();
+    
+    fn handle_component_event(
+        &mut self,
+        cx: &mut Cx,
+        event: &mut Event,
+        dispatch_action: &mut dyn FnMut(&mut Cx, FramePath, Box<dyn FrameAction>)
+    ) {
         let mut redraw = false;
-        self.handle_event_with_fn(cx, event, &mut |_,action|{
-            actions.merge(self_id,action.into()); 
+        self.handle_event(cx, event, &mut | cx, action | {
+            dispatch_action(cx, FramePath::empty(), action.into());
             redraw = true;
         });
-        if let Some(child) = self.a.as_mut(){
-            if redraw{
-                child.redraw(cx);
-            }
-            actions.merge(id!(a), child.handle_component_event(cx, event, id!(a)));
+        self.a.handle_component_event(cx, event, dispatch_action);
+        self.b.handle_component_event(cx, event, dispatch_action);
+        if redraw {
+            self.a.redraw(cx);
+            self.b.redraw(cx);
         }
-        if let Some(child) = self.b.as_mut(){
-            if redraw{
-                child.redraw(cx);
-            }
-            actions.merge(id!(b), child.handle_component_event(cx, event, id!(b)));
-        }
-        FrameActions::from_vec(actions).into()
     }
     
     fn get_walk(&self) -> Walk {
@@ -161,36 +159,32 @@ impl FrameComponent for Splitter {
     }
     
     fn find_child(&mut self, id: &[LiveId]) -> ChildResult {
-        self.a.find_child(id)?;
-        self.b.find_child(id)?;
+        self.a.find_child(id) ?;
+        self.b.find_child(id) ?;
         NoChild
     }
-
-    fn create_child(&mut self, cx:&mut Cx, at:CreateAt, id:LiveId, path: &[LiveId], nodes:&[LiveNode]) -> ChildResult {
-        self.a.create_child(cx, at, id, path, nodes)?;
-        self.b.create_child(cx, at, id, path, nodes)?;
+    
+    fn create_child(&mut self, cx: &mut Cx, at: CreateAt, id: LiveId, path: &[LiveId], nodes: &[LiveNode]) -> ChildResult {
+        self.a.create_child(cx, at, id, path, nodes) ?;
+        self.b.create_child(cx, at, id, path, nodes) ?;
         NoChild
     }
     
     fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId> {
-        if self.draw_state.begin(cx, DrawState::DrawA){
+        if self.draw_state.begin(cx, DrawState::DrawA) {
             self.begin(cx, walk);
         }
-        if let DrawState::DrawA = self.draw_state.get(){
-            if let Some(child) = self.a.as_mut(){
-                child.draw_walk_component(cx)?;
-            }
+        if let DrawState::DrawA = self.draw_state.get() {
+            self.a.draw_walk_component(cx) ?;
             self.draw_state.set(DrawState::DrawSplit);
         }
-        if let DrawState::DrawSplit = self.draw_state.get(){
+        if let DrawState::DrawSplit = self.draw_state.get() {
             self.middle(cx);
             self.draw_state.set(DrawState::DrawB)
         }
         
-        if let DrawState::DrawB = self.draw_state.get(){
-            if let Some(child) = self.b.as_mut(){
-                child.draw_walk_component(cx)?;
-            }
+        if let DrawState::DrawB = self.draw_state.get() {
+            self.b.draw_walk_component(cx) ?;
             self.end(cx);
             self.draw_state.end();
         }
@@ -199,7 +193,7 @@ impl FrameComponent for Splitter {
 }
 
 impl Splitter {
-    pub fn begin(&mut self, cx: &mut Cx2d, walk:Walk) {
+    pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
         // we should start a fill turtle in the layout direction of choice
         match self.axis {
             Axis::Horizontal => {
@@ -212,7 +206,7 @@ impl Splitter {
         
         self.rect = cx.turtle().padded_rect();
         self.position = self.align.to_position(self.axis, self.rect);
-
+        
         let walk = match self.axis {
             Axis::Horizontal => Walk::size(Size::Fixed(self.position), Size::Fill),
             Axis::Vertical => Walk::size(Size::Fill, Size::Fixed(self.position)),
@@ -256,7 +250,7 @@ impl Splitter {
         self.align = align;
     }
     
-    pub fn handle_event_with_fn(
+    pub fn handle_event(
         &mut self,
         cx: &mut Cx,
         event: &mut Event,
@@ -383,7 +377,7 @@ impl SplitterAlign {
     }
 }
 
-#[derive(Clone, FrameComponentAction)]
+#[derive(Clone, FrameAction)]
 pub enum SplitterAction {
     None,
     Changed {axis: Axis, align: SplitterAlign},

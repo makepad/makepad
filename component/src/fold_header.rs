@@ -44,8 +44,8 @@ live_register!{
 #[live_register(frame_component!(FoldHeader))]
 pub struct FoldHeader {
     #[rust] draw_state: DrawStateWrap<DrawState>,
-    header: FrameComponentRef,
-    body: FrameComponentRef,
+    header: FrameRef,
+    body: FrameRef,
 
     state: State,
     opened: f32,
@@ -63,38 +63,31 @@ enum DrawState{
 }
 
 impl FrameComponent for FoldHeader {
-    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, _self_id: LiveId) -> FrameComponentActionRef {
+    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, FramePath, Box<dyn FrameAction>)) {
         if self.state_handle_event(cx, event).must_redraw() {
             if self.state.is_track_animating(cx, id!(open)) {
                 let rect = self.view.get_rect(cx);
                 self.view.set_scroll_pos(cx, vec2(0.0,rect.size.y * (1.0-self.opened)));
-                //cx.redraw_all();
                 self.view.redraw(cx);
             }
         };
-        let mut actions = Vec::new();
-        if let Some(child) = self.header.as_mut(){
-            if let Some(action) = child.handle_component_event(cx, event, id!(header)){
-                for item in action.cast::<FrameActions>(){
-                    if item.id == id!(fold_button){
-                        match item.action.cast(){
-                            FoldButtonAction::Opening=>{
-                                self.animate_state(cx, ids!(open.on))
-                            }
-                            FoldButtonAction::Closing=>{
-                                self.animate_state(cx, ids!(open.off))
-                            }
-                            _=>()
-                        }
+        
+        for item in self.header.handle_component_event_vec(cx, event){
+            if item.id() == id!(fold_button){
+                match item.action.cast(){
+                    FoldButtonAction::Opening=>{
+                        self.animate_state(cx, ids!(open.on))
                     }
+                    FoldButtonAction::Closing=>{
+                        self.animate_state(cx, ids!(open.off))
+                    }
+                    _=>()
                 }
-                actions.merge(id!(header), Some(action));
             }
+            dispatch_action(cx, item.path, item.action)
         }
-        if let Some(child) = self.body.as_mut(){
-            actions.merge(id!(body), child.handle_component_event(cx, event, id!(body)));
-        }
-        FrameActions::from_vec(actions).into()
+        
+        self.body.handle_component_event(cx, event, dispatch_action);  
     }
 
     fn redraw(&mut self, cx:&mut Cx){
@@ -157,7 +150,7 @@ impl FoldHeader{
     }
 }
 
-#[derive(Clone, FrameComponentAction)]
+#[derive(Clone, FrameAction)]
 pub enum FoldHeaderAction {
     Opening,
     Closing,
