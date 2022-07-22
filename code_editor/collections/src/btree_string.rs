@@ -1,6 +1,6 @@
 use {
     crate::{btree, BTree},
-    std::ops::{AddAssign, SubAssign},
+    std::ops::{AddAssign, RangeBounds, SubAssign},
 };
 
 #[derive(Clone, Debug)]
@@ -15,12 +15,22 @@ impl BTreeString {
         }
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.btree.is_empty()
+    }
+    
     pub fn len(&self) -> usize {
         self.btree.len()
     }
 
     pub fn char_count(&self) -> usize {
         self.btree.info().char_count
+    }
+
+    pub fn slice<R: RangeBounds<usize>>(&self, range: R) -> Slice<'_> {
+        Slice {
+            slice: self.btree.slice(range)
+        }
     }
 
     pub fn cursor_front(&self) -> Cursor<'_> {
@@ -36,34 +46,47 @@ impl BTreeString {
     pub fn cursor_back(&self) -> Cursor<'_> {
         let cursor = self.btree.cursor_back();
         let chunk = &cursor.chunk()[cursor.range()];
+        let index = chunk.len();
         Cursor {
             cursor,
             chunk,
-            index: 0,
+            index,
         }
     }
 
     pub fn chunks(&self) -> Chunks<'_> {
         Chunks {
-            string: self,
-            cursor_front: None,
-            cursor_back: None,
+            cursor: self.cursor_front(),
+        }
+    }
+
+    pub fn chunks_rev(&self) -> ChunksRev<'_> {
+        ChunksRev {
+            cursor: self.cursor_back(),
         }
     }
 
     pub fn bytes(&self) -> Bytes<'_> {
         Bytes {
-            string: self,
-            cursor_front: None,
-            cursor_back: None,
+            cursor: self.cursor_front(),
+        }
+    }
+
+    pub fn bytes_rev(&self) -> BytesRev<'_> {
+        BytesRev {
+            cursor: self.cursor_back(),
         }
     }
 
     pub fn chars(&self) -> Chars<'_> {
         Chars {
-            string: self,
-            cursor_front: None,
-            cursor_back: None,
+            cursor: self.cursor_front(),
+        }
+    }
+
+    pub fn chars_rev(&self) -> CharsRev<'_> {
+        CharsRev {
+            cursor: self.cursor_back(), 
         }
     }
 
@@ -148,6 +171,79 @@ impl Builder {
     }
 }
 
+#[derive(Clone, Copy)]
+pub struct Slice<'a> {
+    slice: btree::Slice<'a, String>,
+}
+
+impl<'a> Slice<'a> {
+    pub fn is_empty(self) -> bool {
+        self.slice.is_empty()
+    }
+
+    pub fn len(self) -> usize {
+        self.slice.len()
+    }
+
+    pub fn cursor_front(self) -> Cursor<'a> {
+        let cursor = self.slice.cursor_front();
+        let chunk = &cursor.chunk()[cursor.range()];
+        Cursor {
+            cursor,
+            chunk,
+            index: 0,
+        }
+    }
+
+    pub fn cursor_back(self) -> Cursor<'a> {
+        let cursor = self.slice.cursor_back();
+        let chunk = &cursor.chunk()[cursor.range()];
+        let index = chunk.len();
+        Cursor {
+            cursor,
+            chunk,
+            index,
+        }
+    }
+
+    pub fn chunks(self) -> Chunks<'a> {
+        Chunks {
+            cursor: self.cursor_front(),
+        }
+    }
+
+    pub fn chunks_rev(self) -> ChunksRev<'a> {
+        ChunksRev {
+            cursor: self.cursor_back(),
+        }
+    }
+
+    pub fn bytes(self) -> Bytes<'a> {
+        Bytes {
+            cursor: self.cursor_front(),
+        }
+    }
+
+    pub fn bytes_rev(&self) -> BytesRev<'a> {
+        BytesRev {
+            cursor: self.cursor_back(),
+        }
+    }
+
+    pub fn chars(self) -> Chars<'a> {
+        Chars {
+            cursor: self.cursor_front()
+        }
+    }
+
+    pub fn chars_rev(self) -> CharsRev<'a> {
+        CharsRev {
+            cursor: self.cursor_back()
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct Cursor<'a> {
     cursor: btree::Cursor<'a, String>,
     chunk: &'a str,
@@ -156,11 +252,11 @@ pub struct Cursor<'a> {
 
 impl<'a> Cursor<'a> {
     pub fn is_at_start(&self) -> bool {
-        self.cursor.is_at_start() && self.index == 0
+        self.cursor.is_at_front() && self.index == 0
     }
 
     pub fn is_at_end(&self) -> bool {
-        self.cursor.is_at_end()
+        self.index == self.chunk.len()
     }
 
     pub fn is_at_char_boundary(&self) -> bool {
@@ -188,12 +284,20 @@ impl<'a> Cursor<'a> {
     }
 
     pub fn move_next_chunk(&mut self) {
+        if self.cursor.is_at_back() {
+            self.index = self.chunk.len();
+            return;
+        }
         self.cursor.move_next_chunk();
         self.chunk = &self.cursor.chunk()[self.cursor.range()];
         self.index = 0;
     }
 
     pub fn move_prev_chunk(&mut self) {
+        if self.index == self.chunk.len() {
+            self.index = 0;
+            return;
+        }
         self.cursor.move_prev_chunk();
         self.chunk = &self.cursor.chunk()[self.cursor.range()];
         self.index = 0;
@@ -208,13 +312,13 @@ impl<'a> Cursor<'a> {
 
     pub fn move_prev_byte(&mut self) {
         if self.index == 0 {
-            self.move_end_of_prev_chunk();
+            self.move_prev_chunk_back();
         }
         self.index -= 1;
     }
 
     pub fn move_next_char(&mut self) {
-        self.index += len_utf8_from_first_byte(self.byte());
+        self.index += self.byte().utf8_char_len();
         if self.index == self.chunk.len() {
             self.move_next_chunk();
         }
@@ -222,7 +326,7 @@ impl<'a> Cursor<'a> {
 
     pub fn move_prev_char(&mut self) {
         if self.index == 0 {
-            self.move_end_of_prev_chunk();
+            self.move_prev_chunk_back();
         }
         self.index -= 1;
         while !self.chunk.is_char_boundary(self.index) {
@@ -230,7 +334,7 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    fn move_end_of_prev_chunk(&mut self) {
+    fn move_prev_chunk_back(&mut self) {
         self.cursor.move_prev_chunk();
         self.chunk = &self.cursor.chunk()[self.cursor.range()];
         self.index = self.chunk.len();
@@ -238,127 +342,103 @@ impl<'a> Cursor<'a> {
 }
 
 pub struct Chunks<'a> {
-    string: &'a BTreeString,
-    cursor_front: Option<Cursor<'a>>,
-    cursor_back: Option<Cursor<'a>>,
+    cursor: Cursor<'a>,
 }
 
 impl<'a> Iterator for Chunks<'a> {
     type Item = &'a str;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let cursor_front = self
-            .cursor_front
-            .get_or_insert_with(|| self.string.cursor_front());
-        if self.cursor_back.as_ref().map_or_else(
-            || cursor_front.is_at_end(),
-            |cursor_back| cursor_front.position() == cursor_back.position(),
-        ) {
+        if self.cursor.is_at_end() {
             return None;
         }
-        let chunk = cursor_front.chunk();
-        cursor_front.move_next_chunk();
+        let chunk = self.cursor.chunk();
+        self.cursor.move_next_chunk();
         Some(chunk)
     }
 }
 
-impl<'a> DoubleEndedIterator for Chunks<'a> {
-    fn next_back(&mut self) -> Option<Self::Item> {
-        let cursor_back = self
-            .cursor_back
-            .get_or_insert_with(|| self.string.cursor_back());
-        if self.cursor_front.as_ref().map_or_else(
-            || cursor_back.is_at_start(),
-            |cursor_front| cursor_front.position() == cursor_back.position(),
-        ) {
+pub struct ChunksRev<'a> {
+    cursor: Cursor<'a>,
+}
+
+impl<'a> Iterator for ChunksRev<'a> {
+    type Item = &'a str;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.cursor.is_at_start() {
             return None;
         }
-        cursor_back.move_prev_chunk();
-        let chunk = cursor_back.chunk();
+        self.cursor.move_prev_chunk();
+        let chunk = self.cursor.chunk();
         Some(chunk)
     }
 }
 
 pub struct Bytes<'a> {
-    string: &'a BTreeString,
-    cursor_front: Option<Cursor<'a>>,
-    cursor_back: Option<Cursor<'a>>,
+    cursor: Cursor<'a>,
 }
 
 impl<'a> Iterator for Bytes<'a> {
     type Item = u8;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let cursor_front = self
-            .cursor_front
-            .get_or_insert_with(|| self.string.cursor_front());
-        if self.cursor_back.as_ref().map_or_else(
-            || cursor_front.is_at_end(),
-            |cursor_back| cursor_front.position() == cursor_back.position(),
-        ) {
+        if self.cursor.is_at_end() {
             return None;
         }
-        let byte = cursor_front.byte();
-        cursor_front.move_next_byte();
+        let byte = self.cursor.byte();
+        self.cursor.move_next_byte();
         Some(byte)
     }
 }
 
-impl<'a> DoubleEndedIterator for Bytes<'a> {
-    fn next_back(&mut self) -> Option<Self::Item> {
-        let cursor_back = self
-            .cursor_back
-            .get_or_insert_with(|| self.string.cursor_back());
-        if self.cursor_front.as_ref().map_or_else(
-            || cursor_back.is_at_start(),
-            |cursor_front| cursor_front.position() == cursor_back.position(),
-        ) {
+pub struct BytesRev<'a> {
+    cursor: Cursor<'a>,
+}
+
+impl<'a> Iterator for BytesRev<'a> {
+    type Item = u8;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.cursor.is_at_start() {
             return None;
         }
-        cursor_back.move_prev_byte();
-        let byte = cursor_back.byte();
+        self.cursor.move_prev_byte();
+        let byte = self.cursor.byte();
         Some(byte)
     }
 }
 
 pub struct Chars<'a> {
-    string: &'a BTreeString,
-    cursor_front: Option<Cursor<'a>>,
-    cursor_back: Option<Cursor<'a>>,
+    cursor: Cursor<'a>,
 }
 
 impl<'a> Iterator for Chars<'a> {
     type Item = char;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let cursor_front = self
-            .cursor_front
-            .get_or_insert_with(|| self.string.cursor_front());
-        if self.cursor_back.as_ref().map_or_else(
-            || cursor_front.is_at_end(),
-            |cursor_back| cursor_front.position() == cursor_back.position(),
-        ) {
+        if self.cursor.is_at_end() {
             return None;
         }
-        let char = cursor_front.char();
-        cursor_front.move_next_char();
+        let char = self.cursor.char();
+        self.cursor.move_next_char();
         Some(char)
     }
 }
 
-impl<'a> DoubleEndedIterator for Chars<'a> {
-    fn next_back(&mut self) -> Option<Self::Item> {
-        let cursor_back = self
-            .cursor_back
-            .get_or_insert_with(|| self.string.cursor_back());
-        if self.cursor_front.as_ref().map_or_else(
-            || cursor_back.is_at_start(),
-            |cursor_front| cursor_front.position() == cursor_back.position(),
-        ) {
+pub struct CharsRev<'a> {
+    cursor: Cursor<'a>,
+}
+
+impl<'a> Iterator for CharsRev<'a> {
+    type Item = char;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.cursor.is_at_start() {
             return None;
         }
-        cursor_back.move_prev_char();
-        let char = cursor_back.char();
+        self.cursor.move_prev_char();
+        let char = self.cursor.char();
         Some(char)
     }
 }
@@ -378,12 +458,12 @@ impl btree::Chunk for String {
 
     fn info(&self) -> Self::Info {
         Info {
-            char_count: self.chars().count(),
+            char_count: self.count_chars(),
         }
     }
 
-    fn can_split_at(&self, index: usize) -> bool {
-        self.is_char_boundary(index)
+    fn is_boundary(&self, index: usize) -> bool {
+        self.as_str().is_boundary(index)
     }
 
     fn move_left(&mut self, other: &mut Self, end: usize) {
@@ -428,21 +508,57 @@ impl SubAssign for Info {
     }
 }
 
-fn len_utf8_from_first_byte(byte: u8) -> usize {
-    if byte < 0x80 {
-        1
-    } else if byte < 0xE0 {
-        2
-    } else if byte < 0xF0 {
-        3
-    } else {
-        4
+trait U8Ext {
+    fn is_utf8_char_start(self) -> bool;
+    fn utf8_char_len(self) -> usize;
+}
+
+impl U8Ext for u8 {
+    fn is_utf8_char_start(self) -> bool {
+        (self as i8) >= -0x40
+    }
+
+    fn utf8_char_len(self) -> usize {
+        if self < 0x80 {
+            1
+        } else if self < 0xE0 {
+            2
+        } else if self < 0xF0 {
+            3
+        } else {
+            4
+        }
+    }
+}
+
+trait StrExt {
+    fn count_chars(&self) -> usize;
+    fn is_boundary(&self, index: usize) -> bool;
+}
+
+impl StrExt for str {
+    fn count_chars(&self) -> usize {
+        let mut count = 0;
+        for byte in self.bytes() {
+            if byte.is_utf8_char_start() {
+                count += 1;
+            }
+        }
+        count
+    }
+
+    fn is_boundary(&self, index: usize) -> bool {
+        if index == 0 || index == self.len() {
+            return true;
+        }
+        let bytes = self.as_bytes();
+        bytes[index].is_utf8_char_start() && bytes[index - 1] != 0x0D && bytes[index] != 0x0F
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use {super::*, proptest::prelude::*};
+    use {std::ops::Range, super::*, proptest::prelude::*};
 
     fn string_and_index() -> impl Strategy<Value = (String, usize)> {
         any::<String>().prop_flat_map(|string| {
@@ -456,7 +572,24 @@ mod tests {
         }))
     }
 
+    fn string_and_range() -> impl Strategy<Value = (String, Range<usize>)> {
+        string_and_index().prop_flat_map(|(string, end)| {
+            (Just(string), 0..=end, Just(end))
+        }).prop_map(|(string, mut start, end)| {
+            while !string.is_char_boundary(start) {
+                start -= 1;
+            }
+            (string, start..end)
+        })
+    }
+
     proptest! {
+        #[test]
+        fn test_is_empty(string in any::<String>()) {
+            let btree_string = BTreeString::from(&string);
+            assert_eq!(btree_string.is_empty(), string.is_empty());
+        }
+
         #[test]
         fn test_len(string in any::<String>()) {
             let btree_string = BTreeString::from(&string);
@@ -480,8 +613,7 @@ mod tests {
             let btree_string = BTreeString::from(&string);
             assert_eq!(
                 btree_string
-                    .chunks()
-                    .rev()
+                    .chunks_rev()
                     .map(|chunk| chunk.chars().rev().collect::<String>())
                     .collect::<String>(),
                 string.chars().rev().collect::<String>(),
@@ -501,7 +633,7 @@ mod tests {
         fn test_bytes_rev(string in any::<String>()) {
             let btree_string = BTreeString::from(&string);
             assert_eq!(
-                btree_string.bytes().rev().collect::<Vec<_>>(),
+                btree_string.bytes_rev().collect::<Vec<_>>(),
                 string.bytes().rev().collect::<Vec<_>>()
             );
         }
@@ -519,7 +651,7 @@ mod tests {
         fn test_chars_rev(string in any::<String>()) {
             let btree_string = BTreeString::from(&string);
             assert_eq!(
-                btree_string.chars().rev().collect::<Vec<_>>(),
+                btree_string.chars_rev().collect::<Vec<_>>(),
                 string.chars().rev().collect::<Vec<_>>()
             );
         }
@@ -563,6 +695,82 @@ mod tests {
             string.truncate(start);
             btree_string.truncate_back(start);
             assert_eq!(btree_string.chunks().collect::<String>(), string);
+        }
+
+        #[test]
+        fn test_slice_is_empty((string, range) in string_and_range()) {
+            let btree_string = BTreeString::from(&string);
+            let slice = &string[range.clone()];
+            let btree_slice = btree_string.slice(range);
+            assert_eq!(btree_slice.is_empty(), slice.is_empty());
+        }
+
+        #[test]
+        fn test_slice_len((string, range) in string_and_range()) {
+            let btree_string = BTreeString::from(&string);
+            let slice = &string[range.clone()];
+            let btree_slice = btree_string.slice(range);
+            assert_eq!(btree_slice.len(), slice.len());
+        }
+
+        #[test]
+        fn test_slice_chunks((string, range) in string_and_range()) {
+            let btree_string = BTreeString::from(&string);
+            let slice = &string[range.clone()];
+            let btree_slice = btree_string.slice(range);
+            assert_eq!(btree_slice.chunks().collect::<String>(), slice);
+        }
+
+        #[test]
+        fn test_slice_chunks_rev((string, range) in string_and_range()) {
+            let btree_string = BTreeString::from(&string);
+            let slice = &string[range.clone()];
+            let btree_slice = btree_string.slice(range);
+            assert_eq!(
+                btree_slice
+                    .chunks_rev()
+                    .map(|chunk| chunk.chars().rev().collect::<String>())
+                    .collect::<String>(),
+                slice.chars().rev().collect::<String>(),
+            );
+        }
+
+        #[test]
+        fn test_slice_bytes((string, range) in string_and_range()) {
+            let btree_string = BTreeString::from(&string);
+            let slice = &string[range.clone()];
+            let btree_slice = btree_string.slice(range);
+            assert_eq!(btree_slice.bytes().collect::<Vec<_>>(), slice.bytes().collect::<Vec<_>>());
+        }
+
+        #[test]
+        fn test_slice_bytes_rev((string, range) in string_and_range()) {
+            let btree_string = BTreeString::from(&string);
+            let slice = &string[range.clone()];
+            let btree_slice = btree_string.slice(range);
+            assert_eq!(
+                btree_slice.bytes_rev().collect::<Vec<_>>(),
+                slice.bytes().rev().collect::<Vec<_>>()
+            );
+        }
+
+        #[test]
+        fn test_slice_chars((string, range) in string_and_range()) {
+            let btree_string = BTreeString::from(&string);
+            let slice = &string[range.clone()];
+            let btree_slice = btree_string.slice(range);
+            assert_eq!(btree_slice.chars().collect::<Vec<_>>(), slice.chars().collect::<Vec<_>>());
+        }
+
+        #[test]
+        fn test_slice_chars_rev((string, range) in string_and_range()) {
+            let btree_string = BTreeString::from(&string);
+            let slice = &string[range.clone()];
+            let btree_slice = btree_string.slice(range);
+            assert_eq!(
+                btree_slice.chars_rev().collect::<Vec<_>>(),
+                slice.chars().rev().collect::<Vec<_>>()
+            );
         }
     }
 }
