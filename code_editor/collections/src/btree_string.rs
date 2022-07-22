@@ -1,6 +1,6 @@
 use {
     crate::{btree, BTree},
-    std::ops::{AddAssign, SubAssign},
+    std::ops::{AddAssign, RangeBounds, SubAssign},
 };
 
 #[derive(Clone, Debug)]
@@ -21,6 +21,12 @@ impl BTreeString {
 
     pub fn char_count(&self) -> usize {
         self.btree.info().char_count
+    }
+
+    pub fn slice<R: RangeBounds<usize>>(&self, range: R) -> Slice<'_> {
+        Slice {
+            slice: self.btree.slice(range)
+        }
     }
 
     pub fn cursor_front(&self) -> Cursor<'_> {
@@ -46,7 +52,7 @@ impl BTreeString {
 
     pub fn chunks(&self) -> Chunks<'_> {
         Chunks {
-            string: self,
+            slice: self.slice(..),
             cursor_front: None,
             cursor_back: None,
         }
@@ -54,7 +60,7 @@ impl BTreeString {
 
     pub fn bytes(&self) -> Bytes<'_> {
         Bytes {
-            string: self,
+            slice: self.slice(..),
             cursor_front: None,
             cursor_back: None,
         }
@@ -62,7 +68,7 @@ impl BTreeString {
 
     pub fn chars(&self) -> Chars<'_> {
         Chars {
-            string: self,
+            slice: self.slice(..),
             cursor_front: None,
             cursor_back: None,
         }
@@ -149,6 +155,68 @@ impl Builder {
     }
 }
 
+#[derive(Clone, Copy)]
+pub struct Slice<'a> {
+    slice: btree::Slice<'a, String>,
+}
+
+impl<'a> Slice<'a> {
+    pub fn is_empty(self) -> bool {
+        self.slice.is_empty()
+    }
+
+    pub fn len(self) -> usize {
+        self.slice.len()
+    }
+
+    pub fn cursor_front(self) -> Cursor<'a> {
+        let cursor = self.slice.cursor_front();
+        let chunk = &cursor.chunk()[cursor.range()];
+        let index = cursor.start() - cursor.position();
+        Cursor {
+            cursor,
+            chunk,
+            index,
+        }
+    }
+
+    pub fn cursor_back(self) -> Cursor<'a> {
+        let cursor = self.slice.cursor_back();
+        let chunk = &cursor.chunk()[cursor.range()];
+        let index = cursor.end() - cursor.position();
+        Cursor {
+            cursor,
+            chunk,
+            index,
+        }
+    }
+
+    pub fn chunks(self) -> Chunks<'a> {
+        Chunks {
+            slice: self,
+            cursor_front: None,
+            cursor_back: None,
+        }
+    }
+
+    pub fn bytes(self) -> Bytes<'a> {
+        Bytes {
+            slice: self,
+            cursor_front: None,
+            cursor_back: None,
+        }
+    }
+
+    pub fn chars(self) -> Chars<'a> {
+        Chars {
+            slice: self,
+            cursor_front: None,
+            cursor_back: None,
+        }
+    }
+}
+
+#[derive(Clone)]
 pub struct Cursor<'a> {
     cursor: btree::Cursor<'a, String>,
     chunk: &'a str,
@@ -169,7 +237,7 @@ impl<'a> Cursor<'a> {
     }
 
     pub fn position(&self) -> usize {
-        self.cursor.position() + self.index
+        (self.cursor.position() + self.index) - self.cursor.start()
     }
 
     pub fn chunk(&self) -> &'a str {
@@ -247,7 +315,7 @@ impl<'a> Cursor<'a> {
 }
 
 pub struct Chunks<'a> {
-    string: &'a BTreeString,
+    slice: Slice<'a>,
     cursor_front: Option<Cursor<'a>>,
     cursor_back: Option<Cursor<'a>>,
 }
@@ -258,7 +326,7 @@ impl<'a> Iterator for Chunks<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         let cursor_front = self
             .cursor_front
-            .get_or_insert_with(|| self.string.cursor_front());
+            .get_or_insert_with(|| self.slice.cursor_front());
         if self.cursor_back.as_ref().map_or_else(
             || cursor_front.is_at_end(),
             |cursor_back| cursor_front.position() == cursor_back.position(),
@@ -275,7 +343,7 @@ impl<'a> DoubleEndedIterator for Chunks<'a> {
     fn next_back(&mut self) -> Option<Self::Item> {
         let cursor_back = self
             .cursor_back
-            .get_or_insert_with(|| self.string.cursor_back());
+            .get_or_insert_with(|| self.slice.cursor_back());
         if self.cursor_front.as_ref().map_or_else(
             || cursor_back.is_at_start(),
             |cursor_front| cursor_front.position() == cursor_back.position(),
@@ -289,7 +357,7 @@ impl<'a> DoubleEndedIterator for Chunks<'a> {
 }
 
 pub struct Bytes<'a> {
-    string: &'a BTreeString,
+    slice: Slice<'a>,
     cursor_front: Option<Cursor<'a>>,
     cursor_back: Option<Cursor<'a>>,
 }
@@ -300,7 +368,7 @@ impl<'a> Iterator for Bytes<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         let cursor_front = self
             .cursor_front
-            .get_or_insert_with(|| self.string.cursor_front());
+            .get_or_insert_with(|| self.slice.cursor_front());
         if self.cursor_back.as_ref().map_or_else(
             || cursor_front.is_at_end(),
             |cursor_back| cursor_front.position() == cursor_back.position(),
@@ -317,7 +385,7 @@ impl<'a> DoubleEndedIterator for Bytes<'a> {
     fn next_back(&mut self) -> Option<Self::Item> {
         let cursor_back = self
             .cursor_back
-            .get_or_insert_with(|| self.string.cursor_back());
+            .get_or_insert_with(|| self.slice.cursor_back());
         if self.cursor_front.as_ref().map_or_else(
             || cursor_back.is_at_start(),
             |cursor_front| cursor_front.position() == cursor_back.position(),
@@ -331,7 +399,7 @@ impl<'a> DoubleEndedIterator for Bytes<'a> {
 }
 
 pub struct Chars<'a> {
-    string: &'a BTreeString,
+    slice: Slice<'a>,
     cursor_front: Option<Cursor<'a>>,
     cursor_back: Option<Cursor<'a>>,
 }
@@ -342,7 +410,7 @@ impl<'a> Iterator for Chars<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         let cursor_front = self
             .cursor_front
-            .get_or_insert_with(|| self.string.cursor_front());
+            .get_or_insert_with(|| self.slice.cursor_front());
         if self.cursor_back.as_ref().map_or_else(
             || cursor_front.is_at_end(),
             |cursor_back| cursor_front.position() == cursor_back.position(),
@@ -359,7 +427,7 @@ impl<'a> DoubleEndedIterator for Chars<'a> {
     fn next_back(&mut self) -> Option<Self::Item> {
         let cursor_back = self
             .cursor_back
-            .get_or_insert_with(|| self.string.cursor_back());
+            .get_or_insert_with(|| self.slice.cursor_back());
         if self.cursor_front.as_ref().map_or_else(
             || cursor_back.is_at_start(),
             |cursor_front| cursor_front.position() == cursor_back.position(),
@@ -451,7 +519,7 @@ fn len_utf8_from_first_byte(byte: u8) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use {super::*, proptest::prelude::*};
+    use {std::ops::Range, super::*, proptest::prelude::*};
 
     fn string_and_index() -> impl Strategy<Value = (String, usize)> {
         any::<String>().prop_flat_map(|string| {
@@ -463,6 +531,17 @@ mod tests {
             }
             (string, index)
         }))
+    }
+
+    fn string_and_range() -> impl Strategy<Value = (String, Range<usize>)> {
+        string_and_index().prop_flat_map(|(string, end)| {
+            (Just(string), 0..=end, Just(end))
+        }).prop_map(|(string, mut start, end)| {
+            while !string.is_char_boundary(start) {
+                start -= 1;
+            }
+            (string, start..end)
+        })
     }
 
     proptest! {
