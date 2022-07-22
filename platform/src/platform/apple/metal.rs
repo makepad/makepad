@@ -279,7 +279,7 @@ impl Cx {
                 let cxtexture = &mut self.textures[color_texture.texture_id as usize];
                 cxtexture.platform.update_render_target(metal_cx, AttachmentKind::Color, &cxtexture.desc, dpi_factor * pass_size);
                 
-                let is_initial = !cxtexture.platform.inner.as_mut().unwrap().initial();
+                let is_initial = cxtexture.platform.inner.as_mut().unwrap().initial();
                 
                 if let Some(inner) = cxtexture.platform.inner.as_ref() {
                     let () = unsafe {msg_send![
