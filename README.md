@@ -55,7 +55,7 @@ To run Makepad studio on the web, use the following commands:
 ```tools/build_wasm_normal.sh makepad_studio```
 ```cargo run -p webserver --release```
 
-Once the web server is running, open the following URL in a browser:
+Once the web server is running, open the following URL in a browser:\
 [http://127.0.0.1:8080/makepad/studio/src/index.html](http://127.0.0.1:8080/makepad/studio/src/index.html)
 
 ## Examples
@@ -64,7 +64,7 @@ Once the web server is running, open the following URL in a browser:
 
 ## Contact
 
-If you have any problems/questions, or want to reach out for some other reason, you can find our discord channel at:
+If you have any problems/questions, or want to reach out for some other reason, you can find our discord channel at:\
 [https://discord.com/invite/urEMqtMcSd](https://discord.com/invite/urEMqtMcSd)
 
 Keep in mind that we are a small team, so we might not always be able to respond immediately.
