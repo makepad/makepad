@@ -160,16 +160,16 @@ impl FrameComponent for Splitter {
         self.walk
     }
     
-    fn find_child(&self, id: &[LiveId]) -> Option<&Box<dyn FrameComponent >> {
-        find_child_impl!(id, self.a, self.b)
-    }
-    
-    fn find_child_mut(&mut self, id: &[LiveId]) -> Option<&mut Box<dyn FrameComponent >> {
-        find_child_mut_impl!(id, self.a, self.b)
+    fn find_child(&mut self, id: &[LiveId]) -> ChildResult {
+        self.a.find_child(id)?;
+        self.b.find_child(id)?;
+        NoChild
     }
 
-    fn create_child(&mut self, cx:&mut Cx, at:CreateAt, id:LiveId, path: &[LiveId], nodes:&[LiveNode]) -> Option<&mut Box<dyn FrameComponent >> {
-        create_child_impl!(cx, at, id, path, nodes, self.a, self.b)
+    fn create_child(&mut self, cx:&mut Cx, at:CreateAt, id:LiveId, path: &[LiveId], nodes:&[LiveNode]) -> ChildResult {
+        self.a.create_child(cx, at, id, path, nodes)?;
+        self.b.create_child(cx, at, id, path, nodes)?;
+        NoChild
     }
     
     fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId> {
@@ -186,6 +186,7 @@ impl FrameComponent for Splitter {
             self.middle(cx);
             self.draw_state.set(DrawState::DrawB)
         }
+        
         if let DrawState::DrawB = self.draw_state.get(){
             if let Some(child) = self.b.as_mut(){
                 child.draw_walk_component(cx)?;
