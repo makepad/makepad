@@ -136,15 +136,15 @@ impl FrameComponent for Frame {
         }
     }
     
-    fn create_child(&mut self, cx:&mut Cx, at:CreateAt, id: LiveId, path: &[LiveId],  nodes: &[LiveNode]) -> Option<&mut Box<dyn FrameComponent >> {
+    fn create_child(&mut self, cx:&mut Cx, at:CreateAt, id: LiveId, path: &[LiveId],  nodes: &[LiveNode]) -> ChildResult {
         if self.design_mode{
-            return None
+            return NoChild
         }
         if path.len()>1 {
             if self.children.get(&path[0]).is_some() {
                 return self.children.get_mut(&path[0]).unwrap().as_mut().unwrap().create_child(cx, at, id, &path[1..],nodes)
             }
-            return None
+            return NoChild
         }
         if let Some(live_ptr) = self.templates.get(&path[0]){
             // remove from draworder
@@ -177,47 +177,28 @@ impl FrameComponent for Frame {
                     }
                 }
             }
-            return self.children.get_mut(&id).unwrap().as_mut()
+            return Child(self.children.get_mut(&id).unwrap().as_mut().unwrap())
         }
         else{
             for child in self.children.values_mut() {
-                if let Some(c) = child.as_mut().unwrap().create_child(cx, at, id, path, nodes) {
-                    return Some(c)
-                }
+                child.create_child(cx, at, id, path, nodes)?;
             }
         }
-        None
-    }
-    
-    fn find_child(&self, id: &[LiveId]) -> Option<&Box<dyn FrameComponent >> {
-        if let Some(child) = self.children.get(&id[0]) {
-            if id.len()>1 {
-                return child.as_ref().unwrap().find_child(&id[1..])
-            }
-            return child.as_ref();
-        }
-        for child in self.children.values() {
-            if let Some(c) = child.as_ref().unwrap().find_child(id) {
-                return Some(c)
-            }
-        }
-        None
+        NoChild
     }
     
     
-    fn find_child_mut(&mut self, id: &[LiveId]) -> Option<&mut Box<dyn FrameComponent >> {
+    fn find_child(&mut self, id: &[LiveId]) -> ChildResult {
         if self.children.get(&id[0]).is_some() {
             if id.len()>1 {
-                return self.children.get_mut(&id[0]).unwrap().as_mut().unwrap().find_child_mut(&id[1..])
+                return self.children.get_mut(&id[0]).unwrap().as_mut().unwrap().find_child(&id[1..])
             }
-            return self.children.get_mut(&id[0]).unwrap().as_mut()
+            return Child(self.children.get_mut(&id[0]).unwrap().as_mut().unwrap())
         }
         for child in self.children.values_mut() {
-            if let Some(c) = child.as_mut().unwrap().find_child_mut(id) {
-                return Some(c)
-            }
+            return child.as_mut().unwrap().find_child(id)
         }
-        None
+        NoChild
     }
 }
 
@@ -229,17 +210,8 @@ enum DrawState {
 
 impl Frame {
     
-    pub fn child<T: 'static + FrameComponent>(&self, id: LiveId) -> Option<&T> {
-        if let Some(child) = self.find_child(&[id]) {
-            child.cast::<T>()
-        }
-        else {
-            None
-        }
-    }
-    
-    pub fn child_mut<T: 'static + FrameComponent>(&mut self, id: LiveId) -> Option<&mut T> {
-        if let Some(child) = self.find_child_mut(&[id]) {
+    pub fn child<T: 'static + FrameComponent>(&mut self, id: LiveId) -> Option<&mut T> {
+        if let Child(child) = self.find_child(&[id]) {
             child.cast_mut::<T>()
         }
         else {
@@ -247,17 +219,8 @@ impl Frame {
         }
     }
     
-    pub fn child_path<T: 'static + FrameComponent>(&self, id: &[LiveId]) -> Option<&T> {
-        if let Some(child) = self.find_child(id) {
-            child.cast::<T>()
-        }
-        else {
-            None
-        }
-    }
-    
-    pub fn child_path_mut<T: 'static + FrameComponent>(&mut self, id: &[LiveId]) -> Option<&mut T> {
-        if let Some(child) = self.find_child_mut(id) {
+    pub fn child_path<T: 'static + FrameComponent>(&mut self, id: &[LiveId]) -> Option<&mut T> {
+        if let Child(child) = self.find_child(id) {
             child.cast_mut::<T>()
         }
         else {
