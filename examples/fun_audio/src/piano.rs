@@ -67,7 +67,7 @@ live_register!{
             hover = {
                 default: off,
                 off = {
-                    from: {all: Play::Forward{duration:0.2}}
+                    from: {all: Play::Forward {duration: 0.2}}
                     apply: {draw_key: {hover: 0.0}}
                 }
                 
@@ -86,14 +86,14 @@ live_register!{
                 }
                 
                 on = {
-                    from: {all: Play::Forward{duration:0.05}}
+                    from: {all: Play::Forward {duration: 0.05}}
                     apply: {draw_key: {focussed: 0.0}}
                 }
             }
             pressed = {
-                default: off 
+                default: off
                 off = {
-                    from: {all: Play::Forward{duration:0.05}}
+                    from: {all: Play::Forward {duration: 0.05}}
                     apply: {draw_key: {pressed: 0.0}}
                 }
                 
@@ -152,10 +152,15 @@ pub struct Piano {
 }
 
 impl FrameComponent for Piano {
-    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, self_id: LiveId) -> FrameComponentActionRef {
-        let mut a = Vec::new();
-        self.handle_event_with_fn(cx, event, &mut | _, v | a.push(FrameActionItem::new(self_id, v.into())));
-        FrameActions::Actions(a).into()
+    fn handle_component_event(
+        &mut self,
+        cx: &mut Cx,
+        event: &mut Event,
+        dispatch_action: &mut dyn FnMut(&mut Cx, FramePath, Box<dyn FrameAction>)
+    ) {
+        self.handle_event(cx, event, &mut | cx, action | {
+            dispatch_action(cx, FramePath::empty(), action.into());
+        });
     }
     
     fn get_walk(&self) -> Walk {
@@ -180,7 +185,7 @@ impl LiveHook for Piano {
 }
 
 
-#[derive(Clone, FrameComponentAction)]
+#[derive(Clone, FrameAction)]
 pub enum PianoAction {
     Note {is_on: bool, note_number: u8, velocity: u8},
     None
@@ -326,7 +331,7 @@ impl Piano {
         }
     }
     
-    pub fn handle_event_with_fn(
+    pub fn handle_event(
         &mut self,
         cx: &mut Cx,
         event: &mut Event,

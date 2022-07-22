@@ -128,7 +128,6 @@ live_register!{
 #[derive(Live, LiveHook, FrameComponent)]
 #[live_register(frame_component!(DesktopButton))]
 pub struct DesktopButton {
-    #[rust] button_logic: ButtonLogic,
     walk: Walk,
     state: State,
     
@@ -171,17 +170,14 @@ impl DrawDesktopButton{
 }
 
 impl DesktopButton {
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> ButtonAction {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction),) {
         self.state_handle_event(cx, event);
-        let res = self.button_logic.handle_event(cx, event, self.bg.area());
-        // println!("{:?}", res.state);
-        match res.state {
+        match button_logic_handle_event(cx, event, self.bg.area(), dispatch_action) {
             ButtonState::Pressed => self.animate_state(cx, ids!(hover.pressed)),
             ButtonState::Default => self.animate_state(cx, ids!(hover.off)),
             ButtonState::Hover => self.animate_state(cx, ids!(hover.on)),
             _ => ()
-        };
-        res.action
+        }
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk:Walk) {

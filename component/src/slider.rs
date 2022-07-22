@@ -161,7 +161,7 @@ pub struct Slider {
     #[rust] pub dragging: Option<f32>,
 }
 
-#[derive(Clone, FrameComponentAction)]
+#[derive(Clone, FrameAction)]
 pub enum SliderAction {
     StartSlide,
     Slide(f32),
@@ -171,9 +171,9 @@ pub enum SliderAction {
 
 impl Slider {
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> SliderAction {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, SliderAction)){
         self.state_handle_event(cx, event);
-        self.text_input.handle_event(cx, event);
+        self.text_input.handle_event(cx, event, &mut |_,_|{});
         match event.hits(cx, self.draw_slider.area()) {
             HitEvent::KeyFocusLost(_) => {
                 self.animate_state(cx, ids!(focus.off));
@@ -199,7 +199,7 @@ impl Slider {
                 cx.set_down_mouse_cursor(MouseCursor::Arrow);
                 self.animate_state(cx, ids!(drag.on));
                 self.dragging = Some(self.value);
-                return SliderAction::StartSlide
+                dispatch_action(cx, SliderAction::StartSlide);
             },
             HitEvent::FingerUp(fe) => {
                 // if the finger hasn't moved further than X we jump to edit-all on the text thing
@@ -212,7 +212,7 @@ impl Slider {
                     self.animate_state(cx, ids!(hover.off));
                 }
                 self.dragging = None;
-                return SliderAction::EndSlide;
+                dispatch_action(cx, SliderAction::EndSlide);
             }
             HitEvent::FingerMove(fe) => {
                 // lets drag the fucker
@@ -227,7 +227,6 @@ impl Slider {
             }
             _ => ()
         }
-        SliderAction::None
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {

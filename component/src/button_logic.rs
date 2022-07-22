@@ -1,13 +1,9 @@
-use{
+use {
     crate::{
         makepad_platform::*,
         frame_component::*
     }
 };
-
-#[derive(Default, Clone)]
-pub struct ButtonLogic {
-}
 
 #[derive(Clone, PartialEq)]
 pub enum ButtonState {
@@ -21,7 +17,7 @@ impl Default for ButtonState {
     fn default() -> Self {Self::None}
 }
 
-#[derive(Clone, FrameComponentAction)]
+#[derive(Clone, FrameAction)]
 pub enum ButtonAction {
     None,
     WasClicked,
@@ -29,65 +25,43 @@ pub enum ButtonAction {
     IsUp
 }
 
-#[derive(Clone, Default)]
-pub struct ButtonHandleResult {
-    pub action: ButtonAction,
-    pub state: ButtonState
-}
-
-impl ButtonLogic {
-    
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, area: Area) -> ButtonHandleResult
-    {
-        match event.hits(cx, area) {
-            HitEvent::FingerDown(_fe) => {
-                return ButtonHandleResult {
-                    action: ButtonAction::IsPressed,
-                    state: ButtonState::Pressed
-                };
-            },
-            HitEvent::FingerHover(fe) => {
-                cx.set_hover_mouse_cursor(MouseCursor::Hand);
-                match fe.hover_state {
-                    HoverState::In => if fe.any_down {
-                        return ButtonHandleResult {
-                            action: ButtonAction::None,
-                            state: ButtonState::Pressed
-                        };
-                    }
-                    else {
-                        return ButtonHandleResult {
-                            action: ButtonAction::None,
-                            state: ButtonState::Hover
-                        };
-                    },
-                    HoverState::Out => return ButtonHandleResult {
-                        action: ButtonAction::None,
-                        state: ButtonState::Default
-                    },
-                    _ => ()
+pub fn button_logic_handle_event(
+    cx: &mut Cx,
+    event: &mut Event,
+    area: Area,
+    dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction)
+) -> ButtonState
+{
+    match event.hits(cx, area) {
+        HitEvent::FingerDown(_fe) => {
+            dispatch_action(cx, ButtonAction::IsPressed);
+            return ButtonState::Pressed;
+        },
+        HitEvent::FingerHover(fe) => {
+            cx.set_hover_mouse_cursor(MouseCursor::Hand);
+            match fe.hover_state {
+                HoverState::In => if fe.any_down {
+                    return ButtonState::Pressed;
                 }
-            },
-            HitEvent::FingerUp(fe) => if fe.is_over {
-                if fe.input_type.has_hovers() {
-                    return ButtonHandleResult {
-                        action: ButtonAction::WasClicked,
-                        state: ButtonState::Hover
-                    };
-                }
-                return ButtonHandleResult {
-                    action: ButtonAction::WasClicked,
-                    state: ButtonState::Default
-                };
+                else {
+                    return ButtonState::Hover;
+                },
+                HoverState::Out => return ButtonState::Default,
+                _ => ()
             }
-            else {
-                return ButtonHandleResult {
-                    action: ButtonAction::IsUp,
-                    state: ButtonState::Default
-                };
+        },
+        HitEvent::FingerUp(fe) => if fe.is_over {
+            dispatch_action(cx, ButtonAction::WasClicked);
+            if fe.input_type.has_hovers() {
+                return ButtonState::Hover;
             }
-            _ => ()
-        };
-        ButtonHandleResult::default()
-    }
+            return ButtonState::Default;
+        }
+        else {
+            dispatch_action(cx, ButtonAction::IsUp);
+            return ButtonState::Default
+        }
+        _ => ()
+    };
+    ButtonState::Default
 }

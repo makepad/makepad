@@ -120,16 +120,14 @@ pub struct TextInput {
     pub value: String
 }
 
-#[derive(Copy, Clone, PartialEq, FrameComponentAction)]
+#[derive(Copy, Clone, PartialEq, FrameAction)]
 pub enum TextInputAction {
     None
 }
 
 impl TextInput {
-    
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> TextInputAction {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, TextInputAction)){
         self.state_handle_event(cx, event);
-        TextInputAction::None
         /*
         self.animator_handle_event(cx, event);
         let res = self.button_logic.handle_event(cx, event, self.bg_quad.draw_vars.area);
