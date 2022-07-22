@@ -1,3 +1,4 @@
+#![feature(try_trait_v2)]
 use makepad_platform::*;
 
 pub mod button_logic;
@@ -47,6 +48,8 @@ pub use crate::{
     scroll_bar::{ScrollBar},
     frame::{Frame},
     frame_component::{
+        Child,
+        NoChild,
         CreateAt,
         FrameActions,
         FrameActionItem,

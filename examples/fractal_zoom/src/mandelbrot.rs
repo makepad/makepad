@@ -14,35 +14,39 @@ use crate::mandelbrot_simd::*;
 
 // Our live DSL to define the shader and UI def
 live_register!{
+    // include shader standard library with the Pal object
     use makepad_platform::shader::std::*;
     
     // the shader to draw the texture tiles
     DrawTile: {{DrawTile}} {
         texture tex: texture2d
         fn pixel(self) -> vec4 {
-            let fractal = sample2d(self.tex, vec2(self.pos.x,self.pos.y))
+            let fractal = sample2d(self.tex, self.pos)
             
             // unpack iteration and magnitude squared from our u32 buffer
             let iter = fractal.y * 65535 + fractal.x * 255;
             let magsq = (fractal.w * 256 + fractal.z - 127);
             
-            let index = abs((6.0 * iter / self.max_iter) - 0.1 * log(magsq));
+            // create a nice palette index
+            let index = abs((6.0 * iter / self.max_iter*8.0) - 0.1 * log(magsq));
+            // if the iter > max_iter we return black
             if iter > self.max_iter {
                 return vec4(0, 0, 0, 1.0);
             }
+            // fetch a color using iq2 (inigo quilez' shadertoy palette #2)
             return vec4(Pal::iq2(index + self.color_cycle), 1.0);
         }
     }
     
     Mandelbrot: {{Mandelbrot}} {
-        max_iter: 8096,
+        max_iter: 320,
     }
 }
 
 pub const TILE_SIZE_X: usize = 256;
 pub const TILE_SIZE_Y: usize = 256;
 pub const TILE_CACHE_SIZE: usize = 500;
-pub const POOL_THREAD_COUNT: usize = 8;
+pub const POOL_THREAD_COUNT: usize = 4;
 
 // the shader struct used to draw
 
@@ -128,7 +132,7 @@ impl Tile {
 
 // used to last minute test if a tile is to be discarded by a worker
 #[derive(Clone, Default)]
-pub struct BailWindow {
+pub struct BailTest {
     // the position of our viewport in fractal space
     space: RectF64,
     // if zooming in, the bail-test is wether a tile is outside of the view
@@ -150,7 +154,7 @@ pub struct TileCache {
     // this holds a Wasm compatible threadpool
     thread_pool: ThreadPool,
     // this is accessed from threads to check if a tile is to be discarded
-    bail_window: Arc<Mutex<RefCell<BailWindow >> >,
+    bail_test: Arc<Mutex<RefCell<BailTest >> >,
 }
 
 impl TileCache {
@@ -167,7 +171,7 @@ impl TileCache {
             next_zoom: 0.0,
             tiles_in_flight: 0,
             thread_pool: ThreadPool::new(cx, POOL_THREAD_COUNT),
-            bail_window: Default::default(),
+            bail_test: Default::default(),
         }
     }
     
@@ -182,11 +186,11 @@ impl TileCache {
         self.empty.push(tile);
     }
     
-    fn set_bail_window(&self, bail_window: BailWindow) {
-        *self.bail_window.lock().unwrap().borrow_mut() = bail_window;
+    fn set_bail_test(&self, bail_test: BailTest) {
+        *self.bail_test.lock().unwrap().borrow_mut() = bail_test;
     }
     
-    fn tile_needs_to_bail(tile: &Tile, bail_window: Arc<Mutex<RefCell<BailWindow >> >) -> bool {
+    fn tile_needs_to_bail(tile: &Tile, bail_window: Arc<Mutex<RefCell<BailTest >> >) -> bool {
         let bail = bail_window.lock().unwrap().borrow().clone();
         if bail.is_zoom_in {
             if !tile.fractal.intersects(bail.space) {
@@ -455,14 +459,18 @@ impl Mandelbrot {
         // we pull a cloneable sender from the to_ui message channel for the worker
         let to_ui = self.to_ui.sender();
         // clone a ref to the bail window for the worker
-        let bail_window = self.tile_cache.bail_window.clone();
+        let bail_test = self.tile_cache.bail_test.clone();
         // create a new task on the threadpool
         // this is run on any one of our worker threads that's free
+        let is_zooming = self.is_zooming;
         self.tile_cache.thread_pool.execute(move || {
-            if TileCache::tile_needs_to_bail(&tile, bail_window) {
+            if TileCache::tile_needs_to_bail(&tile, bail_test) {
                 return to_ui.send(ToUI::TileBailed {tile}).unwrap();
             }
-            if fractal_zoom >2e-5 {
+            if !is_zooming{
+                mandelbrot_f64x2_aa(&mut tile, max_iter);
+            }
+            else if fractal_zoom >2e-5 {
                 // we can use a f32x4 path when we aren't zoomed in far (2x faster)
                 // as f32 has limited zoom-depth it can support
                 mandelbrot_f32x4(&mut tile, max_iter);
@@ -571,7 +579,7 @@ impl Mandelbrot {
             }
             
             // animate color cycle
-            self.draw_tile.color_cycle = (ne.time * 0.2).fract() as f32;
+            self.draw_tile.color_cycle = (ne.time * 0.01).fract() as f32;
             
             // this triggers a draw_walk call and another 'next frame' event
             self.view.redraw(cx);
@@ -629,7 +637,7 @@ impl Mandelbrot {
         self.space.view_rect = cx.turtle().rect();
         
         // update bail window the workers check to skip tiles that are no longer in view
-        self.tile_cache.set_bail_window(BailWindow {
+        self.tile_cache.set_bail_test(BailTest {
             is_zoom_in: self.is_zoom_in,
             space: self.space.view_rect_to_fractal()
         });
