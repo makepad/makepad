@@ -57,6 +57,7 @@ At the moment of this writing, the following features are supported by Makepad S
 -   Basic edit operations
 -   Undo/redo
 -   Basic syntax highlighting (Rust only)
+-   Basic collaborative editing
 
 ### What Makepad Studio Is Not
 
