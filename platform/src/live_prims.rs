@@ -279,6 +279,50 @@ live_primitive!(
 );
 
 live_primitive!(
+    u32,
+    0u32,
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        match &nodes[index].value {
+            LiveValue::Float(val) => {
+                *self = *val as u32;
+                index + 1
+            }
+            LiveValue::Int(val) => {
+                *self = *val as u32;
+                index + 1
+            }
+            LiveValue::Expr {..} => {
+                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
+                    Ok(ret) => match ret {
+                        LiveEval::Float(v) => {*self = v as u32;}
+                        LiveEval::Int(v) => {*self = v as u32;}
+                        _ => {
+                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "i64", ret);
+                        }
+                    }
+                    Err(err) => cx.apply_error_eval(err)
+                }
+                nodes.skip_node(index)
+            },
+            LiveValue::Array => {
+                if let Some(index) = State::last_keyframe_value_from_array(index, nodes) {
+                    self.apply(cx, from, index, nodes);
+                }
+                nodes.skip_node(index)
+            }
+            LiveValue::DSL {..} => nodes.skip_node(index),
+            _ => {
+                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "i64");
+                nodes.skip_node(index)
+            }
+        }
+    },
+    fn to_live_value(&self) -> LiveValue {
+        LiveValue::Int(*self as i64)
+    }
+);
+
+live_primitive!(
     usize,
     0usize,
     fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {

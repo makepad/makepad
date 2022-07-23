@@ -1,4 +1,5 @@
 use crate::{
+    makepad_derive_frame::*,
     makepad_platform::*,
     frame_traits::*,
     fold_button::*
@@ -108,7 +109,7 @@ impl FrameComponent for FoldHeader {
         self.body.query_child(query, callback)
     }
     
-    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk, self_uid: FrameUid) -> DrawResult {
+    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk, _self_uid: FrameUid) -> DrawResult {
         if self.draw_state.begin(cx, DrawState::DrawHeader) {
             cx.begin_turtle(walk, self.layout);
         }

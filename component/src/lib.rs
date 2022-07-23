@@ -26,6 +26,9 @@ pub mod frame;
 pub mod window_menu;
 
 pub use makepad_platform;
+pub use makepad_derive_frame;
+
+pub use makepad_derive_frame::*;
 
 pub mod bare_window;
 pub mod fold_button;

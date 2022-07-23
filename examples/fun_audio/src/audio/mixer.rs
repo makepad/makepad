@@ -71,13 +71,13 @@ impl AudioGraphNode for Node {
 
 
 impl AudioComponent for Mixer {
-    fn get_graph_node(&mut self) -> Box<dyn AudioGraphNode + Send> {
+    fn get_graph_node(&mut self, cx:&mut Cx) -> Box<dyn AudioGraphNode + Send> {
         
         self.from_ui.new_channel();
         let mut inputs = Vec::new();
         for input in self.inputs.values_mut() {
             if let Some(input) = input.as_mut() {
-                inputs.push(input.get_graph_node());
+                inputs.push(input.get_graph_node(cx));
             }
         }
         Box::new(Node {
