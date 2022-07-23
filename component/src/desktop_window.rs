@@ -158,7 +158,7 @@ impl DesktopWindow {
         self.main_view.begin(cx, Walk::default(), Layout::flow_right()).unwrap();
         
         //while self.frame.draw(cx).is_ok(){}
-        if self.frame.draw(cx).is_ok() {
+        if self.frame.draw(cx).is_done() {
             self.main_view.end(cx);
             cx.end_pass(&self.pass);
             return Err(())
@@ -168,7 +168,7 @@ impl DesktopWindow {
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
-        while self.frame.draw(cx).is_err() {}
+        while self.frame.draw(cx).not_done() {}
         self.main_view.end(cx);
         cx.end_pass(&self.pass);
     }

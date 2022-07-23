@@ -139,8 +139,8 @@ impl FrameComponent for Frame {
         self.walk
     }
     
-    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId> {
-        self.draw_walk(cx, walk)
+    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk, self_uid: FrameUid) -> DrawResult {
+        self.draw_walk(cx, walk, self_uid)
     }
     
     fn redraw(&mut self, cx: &mut Cx) {
@@ -201,65 +201,45 @@ impl FrameComponent for Frame {
         self.children.get_mut(&new_id).unwrap().as_mut()
     }
     
-    fn query_child(&mut self, query: &QueryChild, callback: &mut Option<&mut dyn FnMut(QueryInner)>) -> QueryResult{
+    fn query_template(&self, id: LiveId) -> Option<LivePtr> {
+        self.templates.get(&id).cloned()
+    }
+    
+    fn query_child(&mut self, query: &QueryChild, callback: &mut Option<&mut dyn FnMut(QueryInner)>) -> QueryResult {
         match query {
             QueryChild::Path(path) => {
-                 if self.children.get(&path[0]).is_none() {
+                if self.children.get(&path[0]).is_none() {
                     for child in self.children.values_mut() {
-                        child.as_mut().unwrap().query_child(query, callback)?;
+                        child.as_mut().unwrap().query_child(query, callback) ?;
                     }
-                 }
-                 else{
+                }
+                else {
                     if path.len()>1 {
                         self.children.get_mut(&path[0]).unwrap().as_mut().unwrap().query_child(
                             &QueryChild::Path(&path[1..]),
                             callback
-                        )?;
+                        ) ?;
                     }
                     else {
                         let child = self.children.get_mut(&path[0]).unwrap().as_mut().unwrap();
-                        if let Some(callback) = callback{
+                        if let Some(callback) = callback {
                             callback(QueryInner::Child(child));
                         }
-                        else{
+                        else {
                             return QueryResult::child(child);
                         }
                     }
                 }
                 
             }
-            QueryChild::Uid(uid) => {
+            QueryChild::Uid(_) => {
                 for child in self.children.values_mut() {
-                    if child.as_uid() == *uid {
-                        if let Some(callback) = callback{
-                            callback(QueryInner::Child(child.as_mut().unwrap()));
-                        }
-                        else{
-                            return QueryResult::child(child.as_mut().unwrap());
-                        }
-                        break;
-                    }
-                    else {
-                        child.as_mut().unwrap().query_child(query, callback)?;
-                    }
+                    child.query_child(query, callback) ?
                 }
             }
         }
         QueryResult::NotFound
     }
-    /*
-    fn find_child(&mut self, id: &[LiveId]) -> ChildResult {
-        if self.children.get(&id[0]).is_some() {
-            if id.len()>1 {
-                return self.children.get_mut(&id[0]).unwrap().as_mut().unwrap().find_child(&id[1..])
-            }
-            return Child(self.children.get_mut(&id[0]).unwrap().as_mut().unwrap())
-        }
-        for child in self.children.values_mut() {
-            return child.as_mut().unwrap().find_child(id)
-        }
-        NoChild
-    }*/
 }
 
 #[derive(Clone)]
@@ -287,13 +267,13 @@ impl Frame {
         }
     }
     
-    pub fn draw(&mut self, cx: &mut Cx2d) -> Result<(), LiveId> {
-        self.draw_walk(cx, self.get_walk())
+    pub fn draw(&mut self, cx: &mut Cx2d,) -> DrawResult {
+        self.draw_walk(cx, self.get_walk(), FrameUid::default())
     }
     
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, mut walk: Walk) -> Result<(), LiveId> {
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, mut walk: Walk, self_uid: FrameUid) -> DrawResult {
         if self.hidden {
-            return Ok(())
+            return DrawResult::Done
         }
         // the beginning state
         if self.draw_state.begin(cx, DrawState::Drawing(0)) {
@@ -301,7 +281,7 @@ impl Frame {
             
             if self.clip {
                 if self.view.as_mut().unwrap().begin(cx, walk, self.layout).is_err() {
-                    return Ok(())
+                    return DrawResult::Done
                 };
                 walk = Walk::default();
             }
@@ -315,14 +295,14 @@ impl Frame {
             }
             
             if self.user_draw {
-                return Err(self.self_id)
+                return DrawResult::UserDraw(self_uid)
             }
         }
         
         while let DrawState::Drawing(step) = self.draw_state.get() {
             if step < self.draw_order.len() {
                 let id = self.draw_order[step];
-                if let Some(child) = self.children.get_mut(&id).unwrap().as_mut() {
+                if let Some(child) = self.children.get_mut(&id) {
                     let walk = child.get_walk();
                     if let Some(fw) = cx.defer_walk(walk) {
                         self.defer_walks.push((id, fw));
@@ -341,7 +321,7 @@ impl Frame {
         while let DrawState::DeferWalk(step) = self.draw_state.get() {
             if step < self.defer_walks.len() {
                 let (id, dw) = &self.defer_walks[step];
-                if let Some(child) = self.children.get_mut(&id).unwrap().as_mut() {
+                if let Some(child) = self.children.get_mut(&id) {
                     let walk = dw.resolve(cx);
                     child.draw_component(cx, walk) ?;
                 }
@@ -361,8 +341,7 @@ impl Frame {
                 break;
             }
         }
-        
-        return Ok(());
+        DrawResult::Done
     }
 }
 
