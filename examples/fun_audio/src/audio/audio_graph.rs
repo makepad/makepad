@@ -39,7 +39,7 @@ impl LiveHook for AudioGraph {
         Self::start_audio_output(cx, self.from_ui.receiver(), self.to_ui.sender());
         // we should have a component
         if let Some(root) = self.root.as_mut() {
-            let graph_node = root.get_graph_node();
+            let graph_node = root.get_graph_node(cx);
             self.from_ui.send(FromUI::NewRoot(graph_node)).unwrap();
         }
     }

@@ -13,9 +13,6 @@ use crate::live_macro::*;
 mod derive_live_registry;
 use crate::derive_live_registry::*;
 
-mod derive_frame_component_action;
-use crate::derive_frame_component_action::*;
-
 #[path = "../../live_tokenizer/src/colorhex.rs"]
 mod colorhex;
 
@@ -38,7 +35,6 @@ pub fn derive_live_apply(input: TokenStream) -> TokenStream {
     derive_live_hook_impl(input)
 }
 
-
 #[proc_macro]
 pub fn live(input: TokenStream) -> TokenStream {
     live_impl(input)
@@ -60,7 +56,6 @@ pub fn generate_ref_cast_api(input: TokenStream) -> TokenStream {
     generate_ref_cast_api_impl(input)
 }
 
-
 #[proc_macro]
 pub fn generate_clone_cast_api(input: TokenStream) -> TokenStream {
     generate_clone_cast_api_impl(input)
@@ -76,14 +71,8 @@ pub fn derive_live_component_registry(input: TokenStream) -> TokenStream {
     derive_live_component_registry_impl(input)
 }
 
-// move elsewhere
-#[proc_macro_derive(FrameAction)]
-pub fn derive_frame_action(input: TokenStream) -> TokenStream {
-    derive_frame_action_impl(input)
-}
-// move elsewhere
-#[proc_macro_derive(FrameComponent)]
-pub fn derive_frame_component(input: TokenStream) -> TokenStream {
-    derive_frame_component_impl(input)
+#[proc_macro_derive(LiveAtomic)]
+pub fn derive_live_atomic(input: TokenStream) -> TokenStream {
+    derive_live_atomic_impl(input)
 }
 

@@ -4,24 +4,29 @@
 
 #![allow(unused)]
 use {
+    std::sync::Arc,
     crate::{
         audio::*,
+        makepad_platform::live_atomic::*,
         makepad_platform::*
     },
 };
 
 
+#[derive(Live, LiveHook, LiveAtomic)]
+#[repr(u32)]
 pub enum OscType {
     DPWSawPulse,
     TrivialSaw,
-    BlampTri,
+    #[pick] BlampTri,
     Naive,
     Pure
 }
 
-#[derive(PartialEq)]
+#[derive(Live, LiveHook, PartialEq, LiveAtomic)]
+#[repr(u32)]
 pub enum FilterType {
-    Lowpass,
+    #[pick] Lowpass,
     Highpass,
     Bandpass
 }
@@ -51,77 +56,41 @@ impl Default for LaddFilterCoefficients {
     }
 }*/
 
+#[derive(Live, LiveHook, LiveAtomic)]
 pub struct OscSettings {
-    pub osc_type: OscType,
-    pub transpose: i8,
-    pub detune: f32
+    osc_type: U32A<OscType>,
+    #[live(-12)] transpose: i64a,
+    #[live(0.0)] detune: f32a
 }
 
-impl Default for OscSettings {
-    fn default() -> Self {
-        Self {
-            osc_type: OscType::BlampTri,
-            transpose: -12,
-            detune: 0.0
-        }
-    }
-}
-
+#[derive(Live, LiveHook, LiveAtomic)]
 pub struct EnvelopeSettings {
-    pub predelay: f32,
-    pub a: f32,
-    pub h: f32,
-    pub d: f32,
-    pub s: f32,
-    pub r: f32
+    #[live(0.0)] predelay: f32a,
+    #[live(0.1)] a: f32a,
+    #[live(0.0)] h: f32a,
+    #[live(0.6)] d: f32a,
+    #[live(0.3)] s: f32a,
+    #[live(0.5)] r: f32a
 }
 
-impl Default for EnvelopeSettings {
-    fn default() -> Self {
-        Self {
-            predelay: 0.0,
-            a: 0.1,
-            h: 0.0,
-            d: 0.6,
-            s: 0.3,
-            r: 0.5
-        }
-    }
-}
-
+#[derive(Live, LiveHook, LiveAtomic)]
 pub struct FilterSettings {
-    pub cutoff: f32,
-    pub resonance: f32,
-    pub filter_type: FilterType,
-    pub envelope: EnvelopeSettings,
-    pub envelope_amount: f32,
-    pub envelope_curvature: f32
-}
-// AudioValue generates a reflection layer
-// what can we do with this reflection layer
-// how far can i automate the UI binding
-
-
-impl Default for FilterSettings {
-    fn default() -> Self {
-        Self {
-            cutoff: 300.0 / 44100.0,
-            resonance: 0.05,
-            envelope: EnvelopeSettings::default(),
-            envelope_amount: 0.1,
-            envelope_curvature: 0.0,
-            filter_type: FilterType::Lowpass
-        }
-    }
+    filter_type: U32A<FilterType>,
+    envelope: EnvelopeSettings,
+    #[live(300.0 / 44100.0)] cutoff: f32a,
+    #[live(0.05)] resonance: f32a,
+    #[live(0.1)] envelope_amount: f32a,
+    #[live(0.0)] envelope_curvature: f32a
 }
 
+#[derive(Live, LiveHook, LiveAtomic)]
 pub struct IronFishSettings {
-    pub osc1: OscSettings,
-    pub osc2: OscSettings,
-    pub osc_balance: f32,
-    pub filter1: FilterSettings,
-    pub volume_envelope: EnvelopeSettings,
-    pub sample_rate: f32
+    osc1: OscSettings,
+    osc2: OscSettings,
+    filter1: FilterSettings,
+    volume_envelope: EnvelopeSettings,
+    #[live(44100.0)] sample_rate: f32a,
+    #[live(0.5)] osc_balance: f32a,
 }
 
 #[derive(Copy, Clone)]
@@ -223,17 +192,17 @@ impl OscillatorState {
         }
         // return self.dpw();
         
-        match settings.osc_type {
-            OscType::Pure => return (self.phase * 6.283).sin(),
-            OscType::DPWSawPulse => return self.dpw(),
-            OscType::TrivialSaw => return self.trivialsaw(),
-            OscType::BlampTri => return self.blamptriangle(),
-            OscType::Naive => return 0.0,
+        match settings.osc_type.get() {
+            OscType::Pure => (self.phase * 6.283).sin(),
+            OscType::DPWSawPulse => self.dpw(),
+            OscType::TrivialSaw => self.trivialsaw(),
+            OscType::BlampTri => self.blamptriangle(),
+            OscType::Naive => 0.0,
         }
     }
     
     fn set_note(&mut self, note: u8, samplerate: f32, settings: &OscSettings){
-        let freq = 440.0 * f32::powf(2.0, ((note as f32) - 69.0 + settings.transpose as f32 + settings.detune) / 12.0);
+        let freq = 440.0 * f32::powf(2.0, ((note as f32) - 69.0 + settings.transpose.get() as f32 + settings.detune.get()) / 12.0);
         self.delta_phase = (6.283 * freq) / samplerate;
         //let w = freq * 6.283 / samplerate;
         let sampletime = 1.0 / samplerate;
@@ -244,8 +213,6 @@ impl OscillatorState {
         
         // println!("gain: {} {} ", self.dpw_gain, prep);
         //  gain = std::pow(1.f / factorial(dpwOrder) * std::pow(M_PI / (2.f*sin(M_PI*pitch * APP->engine->getSampleTime())),  dpwOrder-1.f), 1.0 / (dpwOrder-1.f));
-        
-        
     }
 }
 
@@ -299,7 +266,6 @@ struct EnvelopeState {
     state_time: i32
 }
 
-
 impl Default for EnvelopeState {
     fn default() -> Self {
         Self {
@@ -324,37 +290,37 @@ impl EnvelopeState {
             match self.phase {
                 
                 EnvelopePhase::Attack => {
-                    if settings.h != 0.0 {
+                    if settings.h.get() != 0.0 {
                         self.phase = EnvelopePhase::Hold;
                         self.delta_value = 0.0;
                         self.current_value = 1.0;
                         self.target_value = 1.0;
-                        self.state_time = (settings.h * samplerate) as i32;
+                        self.state_time = (settings.h.get() * samplerate) as i32;
                         
                     }
                     else {
                         self.phase = EnvelopePhase::Decay;
-                        self.delta_value = -(1.0 - settings.s) / (settings.d * samplerate);
+                        self.delta_value = -(1.0 - settings.s.get()) / (settings.d.get() * samplerate);
                         self.current_value = 1.0;
-                        self.target_value = settings.s;
-                        self.state_time = (settings.d * samplerate) as i32;
+                        self.target_value = settings.s.get();
+                        self.state_time = (settings.d.get() * samplerate) as i32;
                     }
                 }
                 
                 EnvelopePhase::Hold => {
                     
                     self.phase = EnvelopePhase::Decay;
-                    self.delta_value = -(1.0 - settings.s) / (settings.d * samplerate);
+                    self.delta_value = -(1.0 - settings.s.get()) / (settings.d.get() * samplerate);
                     self.current_value = 1.0;
-                    self.target_value = settings.s;
-                    self.state_time = (settings.d * samplerate) as i32;
+                    self.target_value = settings.s.get();
+                    self.state_time = (settings.d.get() * samplerate) as i32;
                 }
                 
                 EnvelopePhase::Decay => {
                     self.phase = EnvelopePhase::Sustain;
                     self.delta_value = 0.0;
-                    self.current_value = settings.s;
-                    self.target_value = settings.s;
+                    self.current_value = settings.s.get();
+                    self.target_value = settings.s.get();
                     self.state_time = -1;
                 }
                 
@@ -368,8 +334,8 @@ impl EnvelopeState {
                 }
                 EnvelopePhase::Predelay => {
                     self.phase = EnvelopePhase::Attack;
-                    self.delta_value = (1.0 - self.current_value) / (settings.a * samplerate);
-                    self.state_time = (settings.a * samplerate) as i32;
+                    self.delta_value = (1.0 - self.current_value) / (settings.a.get() * samplerate);
+                    self.state_time = (settings.a.get() * samplerate) as i32;
                     self.target_value = 1.0;
                 }
                 
@@ -380,7 +346,7 @@ impl EnvelopeState {
     }
     
     fn trigger_on(&mut self, velocity: f32, settings: &EnvelopeSettings, samplerate: f32) {
-        if settings.predelay != 0.0 {
+        if settings.predelay.get() != 0.0 {
             if self.phase != EnvelopePhase::Idle {
                 self.phase = EnvelopePhase::FastRelease;
                 self.target_value = 0.0;
@@ -392,13 +358,13 @@ impl EnvelopeState {
             self.current_value = 0.0;
             self.target_value = 0.0;
             self.phase = EnvelopePhase::Predelay;
-            self.state_time = (samplerate * settings.predelay) as i32;
+            self.state_time = (samplerate * settings.predelay.get()) as i32;
             return;
         };
         
         self.phase = EnvelopePhase::Attack;
-        self.delta_value = (1.0 - self.current_value) / (settings.a * samplerate);
-        self.state_time = (settings.a * samplerate) as i32;
+        self.delta_value = (1.0 - self.current_value) / (settings.a.get() * samplerate);
+        self.state_time = (settings.a.get() * samplerate) as i32;
         self.target_value = 1.0;
         //  println!("attacking with {} {} {} {} {}",self.state_time,  settings.a, samplerate, settings.a * samplerate, self.delta_value);
     }
@@ -411,8 +377,8 @@ impl EnvelopeState {
             EnvelopePhase::Sustain => {
                 self.phase = EnvelopePhase::Release;
                 self.target_value = 0.0;
-                self.delta_value = -self.current_value / (settings.r * samplerate);
-                self.state_time = (settings.r * samplerate) as i32;
+                self.delta_value = -self.current_value / (settings.r.get() * samplerate);
+                self.state_time = (settings.r.get() * samplerate) as i32;
             }
             _ => {}
         }
@@ -441,8 +407,8 @@ impl FilterState {
     }
     
     fn set_cutoff(&mut self, settings: &FilterSettings, envelope: f32, sample_rate: f32) {
-        self.fc = (settings.cutoff + envelope * settings.envelope_amount).clamp(0.0, 1.0);
-        self.damp = settings.resonance;
+        self.fc = (settings.cutoff.get() + envelope * settings.envelope_amount.get()).clamp(0.0, 1.0);
+        self.damp = settings.resonance.get();
         let preclamp = 2.0 * ((3.1415 * self.fc).sin());
         self.phi = (preclamp).clamp(0.0, 1.0);
         self.gamma = (2.0 * self.damp).clamp(0.0, 1.0);
@@ -496,33 +462,33 @@ impl IronFishVoice {
     
     pub fn note_off(&mut self, b1: u8, b2: u8, settings: &IronFishSettings) {
         let velocity = (b2 as f32) / 127.0;
-        self.volume_envelope.trigger_off(velocity, &settings.volume_envelope, settings.sample_rate);
-        self.filter1.filter_envelope.trigger_off(velocity, &settings.filter1.envelope, settings.sample_rate);
+        self.volume_envelope.trigger_off(velocity, &settings.volume_envelope, settings.sample_rate.get());
+        self.filter1.filter_envelope.trigger_off(velocity, &settings.filter1.envelope, settings.sample_rate.get());
     }
     
     pub fn note_on(&mut self, b1: u8, b2: u8, settings: &IronFishSettings) {
         
         let velocity = (b2 as f32) / 127.0;
-        self.osc1.set_note(b1, settings.sample_rate, &settings.osc1);
-        self.osc2.set_note(b1, settings.sample_rate, &settings.osc2);
-        self.volume_envelope.trigger_on(velocity, &settings.volume_envelope, settings.sample_rate);
-        self.filter1.filter_envelope.trigger_on(velocity, &settings.filter1.envelope, settings.sample_rate);
+        self.osc1.set_note(b1, settings.sample_rate.get(), &settings.osc1);
+        self.osc2.set_note(b1, settings.sample_rate.get(), &settings.osc2);
+        self.volume_envelope.trigger_on(velocity, &settings.volume_envelope, settings.sample_rate.get());
+        self.filter1.filter_envelope.trigger_on(velocity, &settings.filter1.envelope, settings.sample_rate.get());
         self.current_note = b1 as i16;
     }
     
     pub fn one(&mut self, settings: &IronFishSettings) -> f32 {
-        let osc1 = self.osc1.get(&settings.osc1, settings.sample_rate);
-        let osc2 = self.osc2.get(&settings.osc2, settings.sample_rate);
-        let volume_envelope = self.volume_envelope.get(&settings.volume_envelope, settings.sample_rate);
-        let filter_envelope = self.filter1.filter_envelope.get(&settings.filter1.envelope, settings.sample_rate);
+        let osc1 = self.osc1.get(&settings.osc1, settings.sample_rate.get());
+        let osc2 = self.osc2.get(&settings.osc2, settings.sample_rate.get());
+        let volume_envelope = self.volume_envelope.get(&settings.volume_envelope, settings.sample_rate.get());
+        let filter_envelope = self.filter1.filter_envelope.get(&settings.filter1.envelope, settings.sample_rate.get());
         
-        self.filter1.set_cutoff(&settings.filter1, filter_envelope, settings.sample_rate);
-        let oscinput = osc1 * settings.osc_balance + osc2 * (1.0 - settings.osc_balance);
+        self.filter1.set_cutoff(&settings.filter1, filter_envelope, settings.sample_rate.get());
+        let oscinput = osc1 * settings.osc_balance.get() + osc2 * (1.0 - settings.osc_balance.get());
         let filter = self.filter1.get(oscinput);
         
         let output = volume_envelope * filter;
         
-        return output * 0.006; //* 1000.0;
+        return output * 0.0006; //* 1000.0;
     }
     
     pub fn fill_buffer(&mut self, buffer: &mut AudioBuffer, settings: &IronFishSettings) {
@@ -531,7 +497,7 @@ impl IronFishVoice {
         let frame_count = buffer.frame_count();
         let (left, right) = buffer.stereo_mut();
         for i in 0..frame_count {
-            let output = self.one(&settings) * 8.0;
+            let output = self.one(&settings);
             left[i] += output as f32;
             right[i] += output as f32;
         }
@@ -541,7 +507,7 @@ impl IronFishVoice {
     
 }
 pub struct IronFishState {
-    pub settings: Box<IronFishSettings>,
+    pub settings: Arc<IronFishSettings>,
     pub voices: [IronFishVoice; 16]
 }
 
@@ -584,30 +550,6 @@ impl IronFishState {
     }
 }
 
-
-impl Default for IronFishState {
-    fn default() -> Self {
-        Self {
-            settings: Box::new(IronFishSettings::default()),
-            voices: [IronFishVoice::default(); 16]
-        }
-    }
-}
-
-
-impl Default for IronFishSettings {
-    fn default() -> Self {
-        Self {
-            filter1: FilterSettings::default(),
-            osc1: OscSettings::default(),
-            osc2: OscSettings::default(),
-            osc_balance: 0.5,
-            volume_envelope: EnvelopeSettings::default(),
-            sample_rate: 44100.0
-        }
-    }
-}
-
 impl Default for IronFishVoice {
     fn default() -> Self {
         Self {
@@ -622,6 +564,7 @@ impl Default for IronFishVoice {
 
 live_register!{
     IronFish: {{IronFish}} {
+        settings:{}
     }
 }
 
@@ -631,23 +574,19 @@ enum FromUI {}
 #[derive(Live, LiveHook)]
 #[live_register(audio_component_factory!(IronFish))]
 struct IronFish {
+    settings: Arc<IronFishSettings>,
     #[rust] from_ui: FromUISender<FromUI>,
 }
-
-#[derive(Default)]
-struct Node {
-    iron_fish_state: IronFishState,
-}
-
-impl AudioGraphNode for Node{
+ 
+impl AudioGraphNode for IronFishState{
     fn handle_midi_1_data(&mut self, data:Midi1Data){
         match data.decode(){
             Midi1Event::Note(note)  =>{
                 if note.is_on{
-                    self.iron_fish_state.note_on(note.note_number, note.velocity);
+                    self.note_on(note.note_number, note.velocity);
                 }
                 else{
-                    self.iron_fish_state.note_off(note.note_number, note.velocity);
+                    self.note_off(note.note_number, note.velocity);
                 }
             }
             _=>()
@@ -655,50 +594,21 @@ impl AudioGraphNode for Node{
     }
     
     fn render_to_audio_buffer(&mut self, _time: AudioTime, outputs: &mut [&mut AudioBuffer], _inputs: &[&AudioBuffer]){
-        self.iron_fish_state.fill_buffer(outputs[0])
+        self.fill_buffer(outputs[0])
     }
 }
 
 impl AudioComponent for IronFish {
-    fn get_graph_node(&mut self) -> Box<dyn AudioGraphNode + Send>{
+    fn get_graph_node(&mut self, cx:&mut Cx) -> Box<dyn AudioGraphNode + Send>{
         self.from_ui.new_channel();
-        Box::new(Node::default())
+        Box::new(IronFishState{
+            settings: self.settings.clone(),
+            voices:Default::default()
+        })
     }
     
     fn handle_event_with_fn(&mut self, _cx: &mut Cx, _event: &mut Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)){
     }
 }
-/*
-pub fn ironfish_print()
-{
-    return;
-    
-    let mut fish = IronFishState::default();
-    let mut env = EnvelopeState::default();
-    
-    let envset = EnvelopeSettings::default();
-    println!("on");
-    env.trigger_on(1.0, &envset, 44100.0);
-    fish.note_on(0x90, 127);
-    for i in 0..100000 {
-        let envres = env.get(&envset, 44100.0);
-        let one = fish.one();
-        if i % 2000 == 0 {
-            println!("env: {} {} {}", i, envres, one);
-        }
-    }
-    println!("off");
-    env.trigger_off(1.0, &envset, 44100.0);
-    for i in 0..100000 {
-        let envres = env.get(&envset, 44100.0);
-        let one = fish.one();
-        if i % 2000 == 0 {
-            println!("env: {} {} {}", i + 10000, envres, one);
-        }
-    }
-}
-fn main()
-{
-    
-}*/
+
 

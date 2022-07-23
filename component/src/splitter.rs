@@ -1,4 +1,5 @@
 use crate::{
+    makepad_derive_frame::*,
     makepad_platform::*,
     frame_traits::*,
 };
@@ -162,7 +163,7 @@ impl FrameComponent for Splitter {
         self.b.query_child(query, callback)
     }
     
-    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk, self_uid: FrameUid) ->DrawResult{
+    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk, _self_uid: FrameUid) ->DrawResult{
         if self.draw_state.begin(cx, DrawState::DrawA) {
             self.begin(cx, walk);
         }

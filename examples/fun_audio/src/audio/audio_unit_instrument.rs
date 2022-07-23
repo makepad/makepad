@@ -93,7 +93,7 @@ impl AudioUnitInstrument{
 }
 
 impl AudioComponent for AudioUnitInstrument {
-    fn get_graph_node(&mut self) -> Box<dyn AudioGraphNode + Send>{
+    fn get_graph_node(&mut self, _cx:&mut Cx) -> Box<dyn AudioGraphNode + Send>{
         self.from_ui.new_channel();
         Box::new(Node{
             from_ui: self.from_ui.receiver(),
