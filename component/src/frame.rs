@@ -2,7 +2,7 @@ use {
     crate::{
         makepad_platform::*,
         component_map::*,
-        frame_component::*
+        frame_traits::*
     }
 };
 
@@ -60,21 +60,10 @@ pub struct Frame { // draw info per UI element
 }
 
 impl LiveHook for Frame {
-    fn before_apply(&mut self, _cx: &mut Cx, _from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) -> Option<usize> {
-        /*if let ApplyFrom::ApplyClear = from {
-            self.create_order.clear();
-        }*/
-        None
-    }
-    
     fn after_apply(&mut self, cx: &mut Cx, _from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
         if self.clip && self.view.is_none() {
             self.view = Some(View::new(cx));
         }
-        //self.self_id = nodes[index].id;
-        //if let Some(file_id) = from.file_id() {
-        //self.live_ptr = Some(LivePtr::from_index(file_id, index, cx.live_registry.borrow().file_id_to_file(file_id).generation));
-        //}
     }
     
     fn apply_value_instance(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
@@ -122,7 +111,6 @@ impl FrameComponent for Frame {
         event: &mut Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, FramePath, Box<dyn FrameAction>)
     ) {
-        
         for id in &self.draw_order {
             if let Some(child) = self.children.get_mut(id) {
                 let uid = child.as_uid();
@@ -156,66 +144,110 @@ impl FrameComponent for Frame {
     }
     
     fn redraw(&mut self, cx: &mut Cx) {
-        if self.clip {
-            self.view.as_mut().unwrap().redraw(cx);
+        if let Some(view) = &mut self.view {
+            view.redraw(cx);
         }
         for child in self.children.values_mut() {
             child.as_mut().unwrap().redraw(cx);
         }
     }
     
-    fn create_child(&mut self, cx: &mut Cx, at: CreateAt, id: LiveId, path: &[LiveId], nodes: &[LiveNode]) -> ChildResult {
+    fn create_child(
+        &mut self,
+        cx: &mut Cx,
+        live_ptr: LivePtr,
+        at: CreateAt,
+        new_id: LiveId,
+        nodes: &[LiveNode]
+    ) -> Option<&mut Box<dyn FrameComponent >> {
         if self.design_mode {
-            return NoChild
+            return None
         }
-        if path.len()>1 {
-            if self.children.get(&path[0]).is_some() {
-                return self.children.get_mut(&path[0]).unwrap().as_mut().unwrap().create_child(cx, at, id, &path[1..], nodes)
+        
+        self.draw_order.retain( | v | *v != new_id);
+        
+        // lets resolve the live ptr to something
+        let mut x = FrameRef::new_from_ptr(cx, Some(live_ptr));
+        
+        x.as_mut().unwrap().apply(cx, ApplyFrom::ApplyOver, 0, nodes);
+        
+        self.children.insert(new_id, x);
+        
+        match at {
+            CreateAt::Begin => {
+                self.draw_order.insert(0, new_id);
             }
-            return NoChild
-        }
-        if let Some(live_ptr) = self.templates.get(&path[0]) {
-            // remove from draworder
-            self.draw_order.retain( | v | *v != id);
-            // lets resolve the live ptr to something
-            let mut x = FrameRef::new_from_ptr(cx, Some(live_ptr.clone()));
-            x.as_mut().unwrap().apply(cx, ApplyFrom::ApplyOver, 0, nodes);
-            self.children.insert(id, x);
-            match at {
-                CreateAt::Begin => {
-                    self.draw_order.insert(0, id);
+            CreateAt::End => {
+                self.draw_order.push(new_id);
+            }
+            CreateAt::After(after_id) => {
+                if let Some(index) = self.draw_order.iter().position( | v | *v == after_id) {
+                    self.draw_order.insert(index + 1, new_id);
                 }
-                CreateAt::End => {
-                    self.draw_order.push(id);
-                }
-                CreateAt::After(id) => {
-                    if let Some(index) = self.draw_order.iter().position( | v | *v == id) {
-                        self.draw_order.insert(index + 1, id);
-                    }
-                    else {
-                        self.draw_order.push(id);
-                    }
-                }
-                CreateAt::Before(id) => {
-                    if let Some(index) = self.draw_order.iter().position( | v | *v == id) {
-                        self.draw_order.insert(index, id);
-                    }
-                    else {
-                        self.draw_order.push(id);
-                    }
+                else {
+                    self.draw_order.push(new_id);
                 }
             }
-            return Child(self.children.get_mut(&id).unwrap().as_mut().unwrap())
-        }
-        else {
-            for child in self.children.values_mut() {
-                child.create_child(cx, at, id, path, nodes) ?;
+            CreateAt::Before(before_id) => {
+                if let Some(index) = self.draw_order.iter().position( | v | *v == before_id) {
+                    self.draw_order.insert(index, new_id);
+                }
+                else {
+                    self.draw_order.push(new_id);
+                }
             }
         }
-        NoChild
+        
+        self.children.get_mut(&new_id).unwrap().as_mut()
     }
     
-    
+    fn query_child(&mut self, query: &QueryChild, callback: &mut Option<&mut dyn FnMut(QueryInner)>) -> QueryResult{
+        match query {
+            QueryChild::Path(path) => {
+                 if self.children.get(&path[0]).is_none() {
+                    for child in self.children.values_mut() {
+                        child.as_mut().unwrap().query_child(query, callback)?;
+                    }
+                 }
+                 else{
+                    if path.len()>1 {
+                        self.children.get_mut(&path[0]).unwrap().as_mut().unwrap().query_child(
+                            &QueryChild::Path(&path[1..]),
+                            callback
+                        )?;
+                    }
+                    else {
+                        let child = self.children.get_mut(&path[0]).unwrap().as_mut().unwrap();
+                        if let Some(callback) = callback{
+                            callback(QueryInner::Child(child));
+                        }
+                        else{
+                            return QueryResult::child(child);
+                        }
+                    }
+                }
+                
+            }
+            QueryChild::Uid(uid) => {
+                for child in self.children.values_mut() {
+                    if child.as_uid() == *uid {
+                        if let Some(callback) = callback{
+                            callback(QueryInner::Child(child.as_mut().unwrap()));
+                        }
+                        else{
+                            return QueryResult::child(child.as_mut().unwrap());
+                        }
+                        break;
+                    }
+                    else {
+                        child.as_mut().unwrap().query_child(query, callback)?;
+                    }
+                }
+            }
+        }
+        QueryResult::NotFound
+    }
+    /*
     fn find_child(&mut self, id: &[LiveId]) -> ChildResult {
         if self.children.get(&id[0]).is_some() {
             if id.len()>1 {
@@ -227,7 +259,7 @@ impl FrameComponent for Frame {
             return child.as_mut().unwrap().find_child(id)
         }
         NoChild
-    }
+    }*/
 }
 
 #[derive(Clone)]
@@ -236,28 +268,15 @@ enum DrawState {
     DeferWalk(usize)
 }
 
-
 impl Frame {
     
-    pub fn child<T: 'static + FrameComponent>(&mut self, id: LiveId) -> Option<&mut T> {
-        if let Child(child) = self.find_child(&[id]) {
-            child.cast_mut::<T>()
+    pub fn child<T: 'static + FrameComponent>(&mut self, path: &[LiveId]) -> Option<&mut T> {
+        
+        if let QueryResult::Found(QueryInner::Child(child)) = self.query_child(&QueryChild::Path(path), &mut None) {
+            return child.cast_mut::<T>()
         }
-        else {
-            None
-        }
+        None
     }
-    
-    pub fn child_path<T: 'static + FrameComponent>(&mut self, id: &[LiveId]) -> Option<&mut T> {
-        if let Child(child) = self.find_child(id) {
-            child.cast_mut::<T>()
-        }
-        else {
-            None
-        }
-    }
-    
-    
     
     pub fn area(&self) -> Area {
         if let Some(view) = &self.view {

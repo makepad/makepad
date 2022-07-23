@@ -97,6 +97,10 @@ pub struct FilterSettings {
     pub envelope_amount: f32,
     pub envelope_curvature: f32
 }
+// AudioValue generates a reflection layer
+// what can we do with this reflection layer
+// how far can i automate the UI binding
+
 
 impl Default for FilterSettings {
     fn default() -> Self {
@@ -110,6 +114,7 @@ impl Default for FilterSettings {
         }
     }
 }
+
 pub struct IronFishSettings {
     pub osc1: OscSettings,
     pub osc2: OscSettings,
