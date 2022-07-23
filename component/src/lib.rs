@@ -48,6 +48,8 @@ pub use crate::{
     scroll_bar::{ScrollBar},
     frame::{Frame},
     frame_traits::{
+        DrawResult,
+        FrameUid,
         CreateAt,
         FramePath,
         FrameRef,

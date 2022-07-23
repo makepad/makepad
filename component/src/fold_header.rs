@@ -108,7 +108,7 @@ impl FrameComponent for FoldHeader {
         self.body.query_child(query, callback)
     }
     
-    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId> {
+    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk, self_uid: FrameUid) -> DrawResult {
         if self.draw_state.begin(cx, DrawState::DrawHeader) {
             cx.begin_turtle(walk, self.layout);
         }
@@ -118,7 +118,7 @@ impl FrameComponent for FoldHeader {
                 self.reverse_walk_opened(cx);
                 cx.end_turtle();
                 self.draw_state.end();
-                return Ok(())
+                return DrawResult::Done
             };
             self.draw_state.set(DrawState::DrawBody);
         }
@@ -130,7 +130,7 @@ impl FrameComponent for FoldHeader {
             cx.end_turtle();
             self.draw_state.end();
         }
-        Ok(())
+        DrawResult::Done
     }
 }
 
