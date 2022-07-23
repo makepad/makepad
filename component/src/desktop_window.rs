@@ -3,7 +3,7 @@ use crate::{
     button_logic::*,
     window_menu::*,
     frame::*,
-    frame_component::*
+    frame_traits::*
 };
 
 live_register!{
@@ -84,7 +84,7 @@ impl DesktopWindow {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> DesktopWindowEvent {
         
-        for item in self.frame.handle_component_event_vec(cx, event) {
+        for item in self.frame.handle_event_iter(cx, event) {
             if let ButtonAction::WasClicked = item.action.cast() {match item.id() {
                 id!(min_btn) => {
                     self.window.minimize(cx);

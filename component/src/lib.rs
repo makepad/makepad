@@ -21,7 +21,7 @@ pub mod text_input;
 pub mod slider;
 
 #[macro_use]
-pub mod frame_component;
+pub mod frame_traits;
 pub mod frame;
 pub mod window_menu;
 
@@ -47,9 +47,7 @@ pub use crate::{
     scroll_shadow::{ScrollShadow},
     scroll_bar::{ScrollBar},
     frame::{Frame},
-    frame_component::{
-        Child,
-        NoChild,
+    frame_traits::{
         CreateAt,
         FramePath,
         FrameRef,
