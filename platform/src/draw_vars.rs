@@ -38,6 +38,30 @@ pub struct DrawVars {
     pub var_instances: [f32; DRAW_CALL_VAR_INSTANCES]
 }
 
+impl LiveNew for DrawVars{
+    
+    fn new(_cx:&mut Cx)->Self{
+        Self::default()
+    }
+    
+    fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
+        LiveTypeInfo {
+            module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
+            live_type: std::any::TypeId::of::<Self>(),
+            fields: Vec::new(),
+            type_name: LiveId::from_str("DrawVars").unwrap()
+        }
+    }
+}
+
+impl LiveApply for DrawVars{
+    fn apply(&mut self, _cx: &mut Cx, _from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) -> usize{
+        panic!()
+    }
+}
+
+impl LiveHook for DrawVars{}
+
 impl DrawVars {
     
     pub fn set_texture(&mut self, slot:usize, texture:&Texture){
@@ -48,14 +72,6 @@ impl DrawVars {
         self.draw_shader.is_some()
     }
     
-    pub fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
-        LiveTypeInfo {
-            module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
-            live_type: std::any::TypeId::of::<Self>(),
-            fields: Vec::new(),
-            type_name: LiveId::from_str("DrawVars").unwrap()
-        }
-    }
     
     pub fn live_register(_cx: &mut Cx) {}
     

@@ -15,7 +15,7 @@ pub enum AudioComponentAction {}
 pub trait AudioComponent: LiveApply {
     fn type_id(&self) -> LiveType where Self: 'static {LiveType::of::<Self>()}
     fn handle_event_with_fn(&mut self, _cx: &mut Cx, event: &mut Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction));
-    fn get_graph_node(&mut self) -> Box<dyn AudioGraphNode + Send>;
+    fn get_graph_node(&mut self, cx:&mut Cx) -> Box<dyn AudioGraphNode + Send>;
 }
 
 pub trait AudioGraphNode {
@@ -27,7 +27,6 @@ pub trait AudioGraphNode {
 
 
 //generate_ref_cast_api!(AudioComponent);
-
 
 
 // Audio component registry

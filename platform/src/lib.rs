@@ -12,6 +12,7 @@ mod cx_draw_shaders;
 
 pub mod live_traits;
 pub mod live_cx;
+pub mod live_atomic;
 
 mod thread;
 mod event;
