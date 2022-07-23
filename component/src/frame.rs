@@ -50,8 +50,6 @@ pub struct Frame { // draw info per UI element
     scroll_x: FrameRef,
     scroll_y: FrameRef,
     
-    #[rust] self_id: LiveId,
-    
     #[rust] defer_walks: Vec<(LiveId, DeferWalk)>,
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust] templates: ComponentMap<LiveId, LivePtr>,

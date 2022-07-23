@@ -88,13 +88,13 @@ impl LiveHook for Instrument {
 }
 
 impl AudioComponent for Instrument {
-    fn get_graph_node(&mut self) -> Box<dyn AudioGraphNode + Send> {
+    fn get_graph_node(&mut self, cx:&mut Cx) -> Box<dyn AudioGraphNode + Send> {
         self.from_ui.new_channel();
         let mut steps = Vec::new();
         for step_id in &self.step_order {
             if let Some(input) = self.steps.get_mut(step_id).unwrap().as_mut() {
                 steps.push(Step {
-                    graph_node: input.get_graph_node(),
+                    graph_node: input.get_graph_node(cx),
                     input_buffer: AudioBuffer::default()
                 });
             }

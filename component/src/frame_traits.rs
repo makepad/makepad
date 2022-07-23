@@ -6,7 +6,6 @@ use {
 };
 pub use crate::frame_component;
 
-
 pub trait FrameComponent: LiveApply {
     fn handle_component_event(
         &mut self,
@@ -72,7 +71,7 @@ pub trait FrameComponent: LiveApply {
         }
     }
     
-    fn query_template(&self, id: LiveId) -> Option<LivePtr> {
+    fn query_template(&self, _id: LiveId) -> Option<LivePtr> {
         None
     }
     
@@ -268,8 +267,7 @@ impl FrameRef {
                             return QueryResult::template(inner, live_ptr)
                         }
                     }
-                },
-                _ => ()
+                }
             }
             inner.query_child(query, callback)
         }
