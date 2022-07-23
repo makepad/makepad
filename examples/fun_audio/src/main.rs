@@ -238,9 +238,26 @@ impl App {
         
         //self.desktop_window.handle_event(cx, event);
         self.scroll_view.handle_event(cx, event);
+
+        /*// lets fetch ironfish from the audiograph
+        let iron_fish = self.audio_graph.child::<IronFish>().unwrap();
         
-        for item in self.frame.handle_component_event_vec(cx, event) {
+        self.frame.handle_data_out(iron_fish.thing);
+        self.frame.handle_event_iter()
+             iron_fish.handle_data_in(item);
+             
+        
+        // in our nextframe event we can update our slider animation
+        self.frame.apply_child(cx, id!(my_slider), live!{
+            some_prop:(iron_fish.setting100.get())
+        });*/
+        
+        // how would/could we map our C struct directly to our UI.
+        for item in self.frame.handle_event_iter(cx, event) {
             match item.id() {
+                /*id!(slider) => if let SliderAction::Slide(value) = item.action.cast(){
+                    iron_fish.dosomethingwithslider();
+                },*/
                 id!(piano) => if let PianoAction::Note {is_on, note_number, velocity} = item.action.cast() {
                     self.audio_graph.send_midi_1_data(Midi1Note {
                         is_on,
@@ -261,36 +278,41 @@ impl App {
         match event {
             Event::Midi1InputData(inputs) => for input in inputs {
                 if let Midi1Event::Note(note) = input.data.decode() {
-                    let piano = self.frame.child::<Piano>(id!(piano)).unwrap();
+                    let piano = self.frame.child::<Piano>(ids!(piano)).unwrap();
                     piano.set_note(cx, note.is_on, note.note_number)
                 }
             }
             Event::MidiInputList(_inputs) => {
             }
             Event::Construct => {
-                if let Child(instrument) = self.frame.add_child(cx, id!(my_instrument), ids!(instrument), live!{
+                
+                /*if let Some(instrument) = self.frame.template(cx, ids!(instrument), id!(my_instrument), live!{
+                    
+                })*/
+                
+                if let Some(instrument) = self.frame.template(cx, ids!(instrument), id!(my_instrument), live!{
                     header: {label = {text: "Instrument header"}}
                 }) {
                     
-                    instrument.add_child(cx, id!(my_stack1), ids!(stack), live!{
+                    instrument.template(cx, ids!(stack), id!(my_stack1), live!{
                         header: {label = {text: (format!("Key range {}", 3 + 4))}}
                     });
                     
-                    instrument.add_child(cx, id!(my_stack2), ids!(stack), live!{
+                    instrument.template(cx, ids!(stack), id!(my_stack2), live!{
                         header: {label = {text: "Synth value"}, range = {mylabel = {text: "WHEE"}}}
                     });
                     
-                    instrument.add_child(cx, id!(my_stack3), ids!(stack), live!{
+                    instrument.template(cx, ids!(stack),id!(my_stack3),  live!{
                         header: {label = {text: "Synth value"}, range = {mylabel = {text: "WHEE"}}}
                     });
                 }
-                if let Child(instrument) = self.frame.add_child(cx, id!(my_id2), ids!(instrument), live!{
+                if let Some(instrument) = self.frame.template(cx, ids!(instrument),id!(my_id2),  live!{
                     header: {label = {text: "MyInstrument"}}
                 }) {
-                    instrument.add_child(cx, id!(my_stack1), ids!(stack), live!{
+                    instrument.template(cx, ids!(stack),id!(my_stack1),  live!{
                         header: {label = {text: "Synth value"}}
                     });
-                    instrument.add_child(cx, id!(my_stack2), ids!(stack), live!{
+                    instrument.template(cx, ids!(stack),id!(my_stack2),  live!{
                         header: {label = {text: "Synth value"}, range = {mylabel = {text: "WHEE"}}}
                     });
                 }
@@ -314,10 +336,10 @@ impl App {
             return;
         }
 
-        while let Err(uid) = self.frame.draw(cx) {
-            if let Some(piano) = self.frame.child::<Piano>(uid){
+        while let Err(_) = self.frame.draw(cx) {
+            /*if let Some(piano) = self.frame.child::<Piano>(uid){
                 
-            }
+            }*/
         };
         
         self.window.end(cx);

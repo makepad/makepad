@@ -1,24 +1,24 @@
 use crate::{
     makepad_platform::*,
-    frame_component::*,
+    frame_traits::*,
     fold_button::*
 };
 
 live_register!{
     FoldHeader: {{FoldHeader}} {
-        walk:{
-            width:Size::Fill,
-            height:Size::Fit
+        walk: {
+            width: Size::Fill,
+            height: Size::Fit
         }
-        body_walk:{
-            width:Size::Fill,
-            height:Size::Fit
+        body_walk: {
+            width: Size::Fill,
+            height: Size::Fit
         }
-        layout:{
-            flow:Flow::Down,
+        layout: {
+            flow: Flow::Down,
         }
         
-        state:{
+        state: {
             open = {
                 default: on
                 off = {
@@ -46,10 +46,10 @@ pub struct FoldHeader {
     #[rust] draw_state: DrawStateWrap<DrawState>,
     header: FrameRef,
     body: FrameRef,
-
+    
     state: State,
     opened: f32,
-
+    
     view: View,
     layout: Layout,
     walk: Walk,
@@ -57,71 +57,64 @@ pub struct FoldHeader {
 }
 
 #[derive(Clone)]
-enum DrawState{
+enum DrawState {
     DrawHeader,
     DrawBody
 }
 
 impl FrameComponent for FoldHeader {
-    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, FramePath, Box<dyn FrameAction>)) {
+    fn handle_component_event(
+        &mut self,
+        cx: &mut Cx,
+        event: &mut Event,
+        dispatch_action: &mut dyn FnMut(&mut Cx, FramePath, Box<dyn FrameAction>)
+    ) {
         if self.state_handle_event(cx, event).must_redraw() {
             if self.state.is_track_animating(cx, id!(open)) {
                 let rect = self.view.get_rect(cx);
-                self.view.set_scroll_pos(cx, vec2(0.0,rect.size.y * (1.0-self.opened)));
+                self.view.set_scroll_pos(cx, vec2(0.0, rect.size.y * (1.0 - self.opened)));
                 self.view.redraw(cx);
             }
         };
         
-        for item in self.header.handle_component_event_vec(cx, event){
-            if item.id() == id!(fold_button){
-                match item.action.cast(){
-                    FoldButtonAction::Opening=>{
+        for item in self.header.handle_event_iter(cx, event) {
+            if item.id() == id!(fold_button) {
+                match item.action.cast() {
+                    FoldButtonAction::Opening => {
                         self.animate_state(cx, ids!(open.on))
                     }
-                    FoldButtonAction::Closing=>{
+                    FoldButtonAction::Closing => {
                         self.animate_state(cx, ids!(open.off))
                     }
-                    _=>()
+                    _ => ()
                 }
             }
             dispatch_action(cx, item.path, item.action)
         }
         
-        self.body.handle_component_event(cx, event, dispatch_action);  
+        self.body.handle_component_event(cx, event, dispatch_action);
     }
-
-    fn redraw(&mut self, cx:&mut Cx){
+    
+    fn redraw(&mut self, cx: &mut Cx) {
         self.view.redraw(cx);
         self.header.redraw(cx);
         self.body.redraw(cx);
     }
     
-    fn get_walk(&self) -> Walk {
-        self.walk
-    }
+    fn get_walk(&self) -> Walk {self.walk}
     
-    fn find_child(&mut self, id: &[LiveId]) -> ChildResult {
-        self.header.find_child(id)?;
-        self.body.find_child(id)?;
-        NoChild
-    }
-    
-    fn create_child(&mut self, cx:&mut Cx, at:CreateAt, id:LiveId, path: &[LiveId], nodes:&[LiveNode]) -> ChildResult {
-        self.header.create_child(cx, at, id, path, nodes)?;
-        self.body.create_child(cx, at, id, path, nodes)?;
-        NoChild
+    fn query_child(&mut self, query: &QueryChild, callback: &mut Option<&mut dyn FnMut(QueryInner)>) -> QueryResult{
+        self.header.query_child(query, callback)?;
+        self.body.query_child(query, callback)
     }
     
     fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId> {
-        if self.draw_state.begin(cx, DrawState::DrawHeader){
+        if self.draw_state.begin(cx, DrawState::DrawHeader) {
             cx.begin_turtle(walk, self.layout);
-            // lets draw our header
         }
-        if let DrawState::DrawHeader = self.draw_state.get(){
-            if let Some(child) = self.header.as_mut(){
-                child.draw_walk_component(cx)?;
-            }
-            if self.view.begin(cx, self.body_walk, Layout::flow_down()).is_err(){
+        if let DrawState::DrawHeader = self.draw_state.get() {
+            self.header.draw_walk_component(cx) ?;
+            if self.view.begin(cx, self.body_walk, Layout::flow_down()).is_err() {
                 self.reverse_walk_opened(cx);
                 cx.end_turtle();
                 self.draw_state.end();
@@ -129,10 +122,8 @@ impl FrameComponent for FoldHeader {
             };
             self.draw_state.set(DrawState::DrawBody);
         }
-        if let DrawState::DrawBody = self.draw_state.get(){
-            if let Some(child) = self.body.as_mut(){
-                child.draw_walk_component(cx)?;
-            }
+        if let DrawState::DrawBody = self.draw_state.get() {
+            self.body.draw_walk_component(cx) ?;
             self.view.end(cx);
             // reverse walk
             self.reverse_walk_opened(cx);
@@ -143,10 +134,10 @@ impl FrameComponent for FoldHeader {
     }
 }
 
-impl FoldHeader{
-    fn reverse_walk_opened(&mut self, cx:&mut Cx2d){
+impl FoldHeader {
+    fn reverse_walk_opened(&mut self, cx: &mut Cx2d) {
         let rect = self.view.get_rect(cx);
-        cx.walk_turtle(Walk::size(Size::Fill, Size::Negative(rect.size.y * (1.0-self.opened))));
+        cx.walk_turtle(Walk::size(Size::Fill, Size::Negative(rect.size.y * (1.0 - self.opened))));
     }
 }
 

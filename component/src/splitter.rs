@@ -1,6 +1,6 @@
 use crate::{
     makepad_platform::*,
-    frame_component::*,
+    frame_traits::*,
 };
 
 
@@ -158,16 +158,9 @@ impl FrameComponent for Splitter {
         self.walk
     }
     
-    fn find_child(&mut self, id: &[LiveId]) -> ChildResult {
-        self.a.find_child(id) ?;
-        self.b.find_child(id) ?;
-        NoChild
-    }
-    
-    fn create_child(&mut self, cx: &mut Cx, at: CreateAt, id: LiveId, path: &[LiveId], nodes: &[LiveNode]) -> ChildResult {
-        self.a.create_child(cx, at, id, path, nodes) ?;
-        self.b.create_child(cx, at, id, path, nodes) ?;
-        NoChild
+    fn query_child(&mut self, query: &QueryChild, callback: &mut Option<&mut dyn FnMut(QueryInner)>) -> QueryResult{
+        self.a.query_child(query, callback)?;
+        self.b.query_child(query, callback)
     }
     
     fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId> {
@@ -182,7 +175,6 @@ impl FrameComponent for Splitter {
             self.middle(cx);
             self.draw_state.set(DrawState::DrawB)
         }
-        
         if let DrawState::DrawB = self.draw_state.get() {
             self.b.draw_walk_component(cx) ?;
             self.end(cx);
