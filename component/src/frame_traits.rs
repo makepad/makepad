@@ -6,58 +6,28 @@ use {
 };
 pub use crate::frame_component;
 
-#[derive(Clone, Copy)]
-pub struct FrameUid(u64);
-
-#[derive(Default)]
-pub struct FramePath {
-    pub uids: Vec<FrameUid>,
-    pub ids: Vec<LiveId>
-}
-
-impl FramePath {
-    pub fn empty()->Self{
-        Self::default()
-    }
-    pub fn add(mut self, id: LiveId, uid: FrameUid) -> Self {
-        self.uids.push(uid);
-        self.ids.push(id);
-        Self {
-            uids: self.uids,
-            ids: self.ids
-        }
-    }
-}
-
-pub struct FrameActionItem{
-    pub path: FramePath,
-    pub action: Box<dyn FrameAction>
-}
-
-
-impl FrameActionItem{
-    pub fn id(&self)->LiveId{
-        self.path.ids[0]
-    }
-}
 
 pub trait FrameComponent: LiveApply {
     fn handle_component_event(
         &mut self,
-        cx: &mut Cx,
-        event: &mut Event,
-        fn_action: &mut dyn FnMut(&mut Cx, FramePath, Box<dyn FrameAction>)
-    ){}
+        _cx: &mut Cx,
+        _event: &mut Event,
+        _fn_action: &mut dyn FnMut(&mut Cx, FramePath, Box<dyn FrameAction>)
+    ) {}
     
-    fn handle_component_event_vec(&mut self, cx: &mut Cx, event: &mut Event) -> Vec<FrameActionItem> {
+    fn handle_event_iter(&mut self, cx: &mut Cx, event: &mut Event) -> Vec<FrameActionItem> {
         let mut actions = Vec::new();
-        self.handle_component_event(cx, event, &mut |_, path, action|{
-            actions.push(FrameActionItem{
+        self.handle_component_event(cx, event, &mut | _, path, action | {
+            actions.push(FrameActionItem {
                 action: action,
                 path
             });
         });
         actions
+    }
+    
+    fn query_child(&mut self, _query: &QueryChild, _callback: &mut Option<&mut dyn FnMut(QueryInner)>) -> QueryResult {
+        return QueryResult::NotFound
     }
     
     fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId>;
@@ -70,26 +40,90 @@ pub trait FrameComponent: LiveApply {
         self.draw_component(cx, self.get_walk())
     }
     
-    fn create_child(&mut self, _cx: &mut Cx, _at: CreateAt, _id: LiveId, _path: &[LiveId], _nodes: &[LiveNode]) -> ChildResult {
-        NoChild
+    fn create_child(
+        &mut self,
+        _cx: &mut Cx,
+        _live_ptr: LivePtr,
+        _at: CreateAt,
+        _new_id: LiveId,
+        _nodes: &[LiveNode]
+    ) -> Option<&mut Box<dyn FrameComponent >> {
+        None
     }
     
-    fn add_child(&mut self, cx: &mut Cx, id: LiveId, path: &[LiveId], nodes: &[LiveNode]) -> ChildResult {
-        self.create_child(cx, CreateAt::End, id, path, nodes) ?;
-        NoChild
-    }
-    
-    fn find_child(&mut self, _id: &[LiveId]) -> ChildResult {
-        NoChild
-    }
-    
-    fn apply_child(&mut self, cx: &mut Cx, id: &[LiveId], nodes: &[LiveNode]) {
-        if let Child(child) = self.find_child(id) {
-            child.apply(cx, ApplyFrom::ApplyOver, 0, nodes);
+    fn template(
+        &mut self,
+        cx: &mut Cx,
+        path: &[LiveId],
+        new_id: LiveId,
+        nodes: &[LiveNode]
+    ) -> Option<&mut Box<dyn FrameComponent >> {
+        // first we query the template
+        if let QueryResult::Found(QueryInner::Template(child, live_ptr)) =
+        self.query_child(&QueryChild::Path(path), &mut None) {
+            child.create_child(cx, live_ptr, CreateAt::End, new_id, nodes)
+        }
+        else {
+            None
         }
     }
     
     fn type_id(&self) -> LiveType where Self: 'static {LiveType::of::<Self>()}
+}
+
+pub enum QueryChild<'a> {
+    Path(&'a [LiveId]),
+    Uid(FrameUid),
+}
+
+pub enum QueryInner<'a> {
+    Child(&'a mut Box<dyn FrameComponent >),
+    Template(&'a mut Box<dyn FrameComponent >, LivePtr)
+}
+
+pub enum QueryResult<'a> {
+    NotFound,
+    Found(QueryInner<'a>)
+}
+
+impl<'a> QueryResult<'a> {
+    pub fn child(value: &'a mut Box<dyn FrameComponent >) -> Self {
+        Self::Found(QueryInner::Child(value))
+    }
+    pub fn template(value: &'a mut Box<dyn FrameComponent >, live_ptr: LivePtr) -> Self {
+        Self::Found(QueryInner::Template(value, live_ptr))
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum CreateAt {
+    Begin,
+    After(LiveId),
+    Before(LiveId),
+    End
+}
+
+impl<'a> FromResidual for QueryResult<'a> {
+    fn from_residual(residual: QueryInner<'a>) -> Self {
+        QueryResult::Found(residual)
+    }
+}
+
+impl<'a> Try for QueryResult<'a> {
+    type Output = ();
+    type Residual = QueryInner<'a>;
+    
+    fn from_output(_: Self::Output) -> Self {
+        QueryResult::NotFound
+    }
+    
+    fn branch(self) -> ControlFlow<Self::Residual,
+    Self::Output> {
+        match self {
+            Self::NotFound => ControlFlow::Continue(()),
+            Self::Found(c) => ControlFlow::Break(c)
+        }
+    }
 }
 
 generate_ref_cast_api!(FrameComponent);
@@ -153,11 +187,35 @@ impl FrameRef {
         }
     }
     
-    pub fn handle_component_event_vec(&mut self, cx: &mut Cx, event: &mut Event) -> Vec<FrameActionItem> {
+    pub fn handle_event_iter(&mut self, cx: &mut Cx, event: &mut Event) -> Vec<FrameActionItem> {
         if let Some(inner) = &mut self.0 {
-            return inner.handle_component_event_vec(cx, event)
+            return inner.handle_event_iter(cx, event)
         }
         Vec::new()
+    }
+    
+    pub fn query_child(&mut self, query: &QueryChild, callback: &mut Option<&mut dyn FnMut(QueryInner)>) -> QueryResult {
+        if let Some(inner) = &mut self.0 {
+            inner.query_child(query, callback)
+        }
+        else{
+            QueryResult::NotFound
+        }
+    }
+    
+    pub fn template(
+        &mut self,
+        cx: &mut Cx,
+        path: &[LiveId],
+        new_id: LiveId,
+        nodes: &[LiveNode]
+    ) -> Option<&mut Box<dyn FrameComponent >> {
+        if let Some(inner) = &mut self.0 {
+            return inner.template(cx, path, new_id, nodes);
+        }
+        else {
+            None
+        }
     }
     
     pub fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId> {
@@ -186,33 +244,6 @@ impl FrameRef {
             return inner.draw_walk_component(cx)
         }
         Ok(())
-    }
-    
-    pub fn create_child(&mut self, cx: &mut Cx, at: CreateAt, id: LiveId, path: &[LiveId], nodes: &[LiveNode]) -> ChildResult {
-        if let Some(inner) = &mut self.0 {
-            return inner.create_child(cx, at, id, path, nodes)
-        }
-        NoChild
-    }
-    
-    pub fn add_child(&mut self, cx: &mut Cx, id: LiveId, path: &[LiveId], nodes: &[LiveNode]) -> ChildResult {
-        if let Some(inner) = &mut self.0 {
-            return inner.add_child(cx, id, path, nodes)
-        }
-        NoChild
-    }
-    
-    pub fn find_child(&mut self, id: &[LiveId]) -> ChildResult {
-        if let Some(inner) = &mut self.0 {
-            return inner.find_child(id)
-        }
-        NoChild
-    }
-    
-    pub fn apply_child(&mut self, cx: &mut Cx, id: &[LiveId], nodes: &[LiveNode]) {
-        if let Some(inner) = &mut self.0 {
-            return inner.apply_child(cx, id, nodes)
-        }
     }
 }
 
@@ -256,6 +287,41 @@ impl LiveNew for FrameRef {
     }
 }
 
+#[derive(Clone, Copy, PartialEq)]
+pub struct FrameUid(u64);
+
+#[derive(Default)]
+pub struct FramePath {
+    pub uids: Vec<FrameUid>,
+    pub ids: Vec<LiveId>
+}
+
+impl FramePath {
+    pub fn empty() -> Self {
+        Self::default()
+    }
+    pub fn add(mut self, id: LiveId, uid: FrameUid) -> Self {
+        self.uids.push(uid);
+        self.ids.push(id);
+        Self {
+            uids: self.uids,
+            ids: self.ids
+        }
+    }
+}
+
+pub struct FrameActionItem {
+    pub path: FramePath,
+    pub action: Box<dyn FrameAction>
+}
+
+impl FrameActionItem {
+    pub fn id(&self) -> LiveId {
+        self.path.ids[0]
+    }
+}
+
+
 pub struct DrawStateWrap<T: Clone> {
     state: Option<T>,
     redraw_id: u64
@@ -293,43 +359,6 @@ impl<T: Clone> DrawStateWrap<T> {
     pub fn end(&mut self) {
         self.state = None;
     }
-}
-
-pub enum ChildResult<'a> {
-    NoChild,
-    Child(&'a mut Box<dyn FrameComponent >)
-}
-pub use ChildResult::*;
-
-impl<'a> FromResidual for ChildResult<'a> {
-    fn from_residual(residual: &'a mut Box<dyn FrameComponent>) -> Self {
-        ChildResult::Child(residual)
-    }
-}
-
-impl<'a> Try for ChildResult<'a> {
-    type Output = ();
-    type Residual = &'a mut Box<dyn FrameComponent >;
-    
-    fn from_output(_: Self::Output) -> Self {
-        ChildResult::NoChild
-    }
-    
-    fn branch(self) -> ControlFlow<Self::Residual,
-    Self::Output> {
-        match self {
-            Self::NoChild => ControlFlow::Continue(()),
-            Self::Child(c) => ControlFlow::Break(c)
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-pub enum CreateAt {
-    Begin,
-    After(LiveId),
-    Before(LiveId),
-    End
 }
 
 #[macro_export]

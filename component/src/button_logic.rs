@@ -1,7 +1,7 @@
 use {
     crate::{
         makepad_platform::*,
-        frame_component::*
+        frame_traits::*
     }
 };
 
