@@ -26,18 +26,22 @@ pub trait FrameComponent: LiveApply {
         actions
     }
     
-    fn query_child(&mut self, _query: &QueryChild, _callback: &mut Option<&mut dyn FnMut(QueryInner)>) -> QueryResult {
+    fn query_child(
+        &mut self,
+        _query: &QueryChild,
+        _callback: &mut Option<&mut dyn FnMut(QueryInner)>
+    ) -> QueryResult {
         return QueryResult::NotFound
     }
     
-    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId>;
+    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk, self_uid: FrameUid) -> DrawResult;
     fn get_walk(&self) -> Walk;
     
     // defaults
     fn redraw(&mut self, _cx: &mut Cx) {}
     
-    fn draw_walk_component(&mut self, cx: &mut Cx2d) -> Result<(), LiveId> {
-        self.draw_component(cx, self.get_walk())
+    fn draw_walk_component(&mut self, cx: &mut Cx2d, self_uid: FrameUid) -> DrawResult {
+        self.draw_component(cx, self.get_walk(), self_uid)
     }
     
     fn create_child(
@@ -68,7 +72,19 @@ pub trait FrameComponent: LiveApply {
         }
     }
     
+    fn query_template(&self, id: LiveId) -> Option<LivePtr> {
+        None
+    }
+    
     fn type_id(&self) -> LiveType where Self: 'static {LiveType::of::<Self>()}
+}
+
+#[derive(Clone, Copy)]
+pub enum CreateAt {
+    Begin,
+    After(LiveId),
+    Before(LiveId),
+    End
 }
 
 pub enum QueryChild<'a> {
@@ -95,17 +111,9 @@ impl<'a> QueryResult<'a> {
     }
 }
 
-#[derive(Clone, Copy)]
-pub enum CreateAt {
-    Begin,
-    After(LiveId),
-    Before(LiveId),
-    End
-}
-
 impl<'a> FromResidual for QueryResult<'a> {
     fn from_residual(residual: QueryInner<'a>) -> Self {
-        QueryResult::Found(residual)
+        Self::Found(residual)
     }
 }
 
@@ -125,6 +133,50 @@ impl<'a> Try for QueryResult<'a> {
         }
     }
 }
+
+pub enum DrawResult {
+    Done,
+    UserDraw(FrameUid)
+}
+
+impl DrawResult {
+    pub fn is_done(&self) -> bool {
+        match self {
+            Self::Done => true,
+            _ => false
+        }
+    }
+    pub fn not_done(&self) -> bool {
+        match self {
+            Self::Done => false,
+            _ => true
+        }
+    }
+}
+
+impl FromResidual for DrawResult {
+    fn from_residual(residual: FrameUid) -> Self {
+        Self::UserDraw(residual)
+    }
+}
+
+impl Try for DrawResult {
+    type Output = ();
+    type Residual = FrameUid;
+    
+    fn from_output(_: Self::Output) -> Self {
+        DrawResult::Done
+    }
+    
+    fn branch(self) -> ControlFlow<Self::Residual,
+    Self::Output> {
+        match self {
+            Self::Done => ControlFlow::Continue(()),
+            Self::UserDraw(c) => ControlFlow::Break(c)
+        }
+    }
+}
+
 
 generate_ref_cast_api!(FrameComponent);
 
@@ -166,8 +218,8 @@ impl FrameRef {
     pub fn empty() -> Self {Self (None)}
     
     pub fn as_uid(&self) -> FrameUid {
-        if let Some(ptr) = &self.0 {
-            FrameUid(&*ptr as *const _ as u64)
+        if let Some(inner) = &self.0 {
+            FrameUid(&*inner as *const _ as u64)
         }
         else {
             FrameUid(0)
@@ -196,9 +248,32 @@ impl FrameRef {
     
     pub fn query_child(&mut self, query: &QueryChild, callback: &mut Option<&mut dyn FnMut(QueryInner)>) -> QueryResult {
         if let Some(inner) = &mut self.0 {
+            match query {
+                QueryChild::Uid(uid) => {
+                    if *uid == FrameUid(&*inner as *const _ as u64) {
+                        if let Some(callback) = callback {
+                            callback(QueryInner::Child(inner))
+                        }
+                        else {
+                            return QueryResult::child(inner)
+                        }
+                    }
+                }
+                QueryChild::Path(path) => {
+                    if let Some(live_ptr) = inner.query_template(path[0]) {
+                        if let Some(callback) = callback {
+                            callback(QueryInner::Template(inner, live_ptr))
+                        }
+                        else {
+                            return QueryResult::template(inner, live_ptr)
+                        }
+                    }
+                },
+                _ => ()
+            }
             inner.query_child(query, callback)
         }
-        else{
+        else {
             QueryResult::NotFound
         }
     }
@@ -218,11 +293,11 @@ impl FrameRef {
         }
     }
     
-    pub fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId> {
+    pub fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> DrawResult {
         if let Some(inner) = &mut self.0 {
-            return inner.draw_component(cx, walk)
+            return inner.draw_component(cx, walk, FrameUid(&*inner as *const _ as u64))
         }
-        Ok(())
+        DrawResult::Done
     }
     
     pub fn get_walk(&mut self) -> Walk {
@@ -239,11 +314,11 @@ impl FrameRef {
         }
     }
     
-    pub fn draw_walk_component(&mut self, cx: &mut Cx2d) -> Result<(), LiveId> {
+    pub fn draw_walk_component(&mut self, cx: &mut Cx2d) -> DrawResult {
         if let Some(inner) = &mut self.0 {
-            return inner.draw_walk_component(cx)
+            return inner.draw_walk_component(cx, FrameUid(&*inner as *const _ as u64))
         }
-        Ok(())
+        DrawResult::Done
     }
 }
 
@@ -287,7 +362,7 @@ impl LiveNew for FrameRef {
     }
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Default)]
 pub struct FrameUid(u64);
 
 #[derive(Default)]
