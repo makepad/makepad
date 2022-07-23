@@ -131,7 +131,7 @@ pub struct PianoKey {
     state: State,
 }
 
-#[derive(Live)]
+#[derive(Live, FrameComponent)]
 #[live_register(frame_component!(Piano))]
 pub struct Piano {
     view: View,
@@ -149,28 +149,6 @@ pub struct Piano {
     
     #[rust] white_keys: ComponentMap<PianoKeyId, PianoKey>,
     #[rust] black_keys: ComponentMap<PianoKeyId, PianoKey>,
-}
-
-impl FrameComponent for Piano {
-    fn handle_component_event(
-        &mut self,
-        cx: &mut Cx,
-        event: &mut Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, FramePath, Box<dyn FrameAction>)
-    ) {
-        self.handle_event(cx, event, &mut | cx, action | {
-            dispatch_action(cx, FramePath::empty(), action.into());
-        });
-    }
-    
-    fn get_walk(&self) -> Walk {
-        Walk::empty()
-    }
-    
-    fn draw_component(&mut self, cx: &mut Cx2d, _walk: Walk) -> Result<(), LiveId> {
-        self.draw_walk(cx, self.walk);
-        Ok(())
-    }
 }
 
 impl LiveHook for Piano {

@@ -336,10 +336,7 @@ impl App {
             return;
         }
 
-        while let Err(_) = self.frame.draw(cx) {
-            /*if let Some(piano) = self.frame.child::<Piano>(uid){
-                
-            }*/
+        while self.frame.draw(cx).not_done( ) {
         };
         
         self.window.end(cx);

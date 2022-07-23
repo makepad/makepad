@@ -3,7 +3,6 @@ use crate::{
     frame_traits::*,
 };
 
-
 live_register!{
     use makepad_platform::shader::std::*;
     use makepad_component::theme::*;
@@ -163,7 +162,7 @@ impl FrameComponent for Splitter {
         self.b.query_child(query, callback)
     }
     
-    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId> {
+    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk, self_uid: FrameUid) ->DrawResult{
         if self.draw_state.begin(cx, DrawState::DrawA) {
             self.begin(cx, walk);
         }
@@ -180,7 +179,7 @@ impl FrameComponent for Splitter {
             self.end(cx);
             self.draw_state.end();
         }
-        Ok(())
+        DrawResult::Done
     }
 }
 

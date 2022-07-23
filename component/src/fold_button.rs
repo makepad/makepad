@@ -78,7 +78,7 @@ live_register!{
     }
 }
 
-#[derive(Live, LiveHook)]
+#[derive(Live, LiveHook, FrameComponent)]
 #[live_register(frame_component!(FoldButton))]
 pub struct FoldButton {
     state: State,
@@ -99,22 +99,6 @@ pub enum FoldButtonAction {
     Animating(f32)
 }
 
-impl FrameComponent for FoldButton {
-    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, FramePath, Box<dyn FrameAction>)) {
-        self.handle_event(cx, event, &mut |cx, action|{
-            dispatch_action(cx, FramePath::empty(), action.into())
-        });
-    }
-    
-    fn get_walk(&self) -> Walk {
-        self.walk
-    }
-    
-    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> Result<(), LiveId> {
-        self.draw_walk(cx, walk);
-        Ok(())
-    }
-}
 
 impl FoldButton {
     
