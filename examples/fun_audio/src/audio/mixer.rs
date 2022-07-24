@@ -1,7 +1,8 @@
 use {
     crate::{
-        audio_component_factory,
+        audio_component,
         audio::*,
+        makepad_platform::thread::*,
         makepad_component::*,
         makepad_platform::*
     },
@@ -16,7 +17,7 @@ live_register!{
 enum FromUI {}
 
 #[derive(Live)]
-#[live_register(audio_component_factory!(Mixer))]
+#[live_register(audio_component!(Mixer))]
 struct Mixer {
     #[rust] inputs: ComponentMap<LiveId, AudioComponentRef>,
     #[rust] from_ui: FromUISender<FromUI>,

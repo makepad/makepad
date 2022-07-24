@@ -6,21 +6,19 @@ use {
 };
 pub use crate::frame_component;
 
+
 pub trait FrameComponent: LiveApply {
     fn handle_component_event(
         &mut self,
         _cx: &mut Cx,
         _event: &mut Event,
-        _fn_action: &mut dyn FnMut(&mut Cx, FramePath, Box<dyn FrameAction>)
+        _fn_action: &mut dyn FnMut(&mut Cx, FrameActionItem)
     ) {}
     
     fn handle_event_iter(&mut self, cx: &mut Cx, event: &mut Event) -> Vec<FrameActionItem> {
         let mut actions = Vec::new();
-        self.handle_component_event(cx, event, &mut | _, path, action | {
-            actions.push(FrameActionItem {
-                action: action,
-                path
-            });
+        self.handle_component_event(cx, event, &mut | _, action | {
+            actions.push(action);
         });
         actions
     }
@@ -28,18 +26,18 @@ pub trait FrameComponent: LiveApply {
     fn frame_query(
         &mut self,
         _query: &FrameQuery,
-        _callback: &mut Option<&mut dyn FnMut(FrameResultInner)>
+        _callback: &mut Option<FrameQueryCb>
     ) -> FrameResult {
         return FrameResult::NotFound
     }
     
-    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk, self_uid: FrameUid) -> DrawResult;
+    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk, self_uid: FrameUid) -> FrameDraw;
     fn get_walk(&self) -> Walk;
     
     // defaults
     fn redraw(&mut self, _cx: &mut Cx) {}
     
-    fn draw_walk_component(&mut self, cx: &mut Cx2d, self_uid: FrameUid) -> DrawResult {
+    fn draw_walk_component(&mut self, cx: &mut Cx2d, self_uid: FrameUid) -> FrameDraw {
         self.draw_component(cx, self.get_walk(), self_uid)
     }
     
@@ -67,7 +65,7 @@ pub trait FrameComponent: LiveApply {
                 return self.create_child(cx, live_ptr, CreateAt::Template, new_id, nodes)
             }
         }
-        if let FrameResult::Found(FrameResultInner::Template(child, live_ptr)) =
+        if let FrameResult::Found(FrameFound::Template(child, live_ptr)) =
         self.frame_query(&FrameQuery::Path(path), &mut None) {
             child.create_child(cx, live_ptr, CreateAt::Template, new_id, nodes)
         }
@@ -80,7 +78,22 @@ pub trait FrameComponent: LiveApply {
         None
     }
     
+    fn data_bind_read(&mut self, _cx:&mut Cx, _nodes:&[LiveNode]){
+    }
+    
     fn type_id(&self) -> LiveType where Self: 'static {LiveType::of::<Self>()}
+}
+
+pub struct FrameQueryCb<'a>{
+    pub cx:&'a mut Cx,
+    pub cb:&'a mut dyn FnMut(&mut Cx, FrameFound)
+}
+
+impl<'a> FrameQueryCb<'a>{
+    pub fn call(&mut self, args:FrameFound){
+        let cb = &mut self.cb;
+        cb(self.cx, args)
+    }
 }
 
 #[derive(Clone, Copy)]
@@ -93,39 +106,40 @@ pub enum CreateAt {
 }
 
 pub enum FrameQuery<'a> {
+    All,
     TypeId(std::any::TypeId),
     Path(&'a [LiveId]),
     Uid(FrameUid),
 }
 
-pub enum FrameResultInner<'a> {
+pub enum FrameFound<'a> {
     Child(&'a mut Box<dyn FrameComponent >),
     Template(&'a mut Box<dyn FrameComponent >, LivePtr)
 }
 
 pub enum FrameResult<'a> {
     NotFound,
-    Found(FrameResultInner<'a>)
+    Found(FrameFound<'a>)
 }
 
 impl<'a> FrameResult<'a> {
     pub fn child(value: &'a mut Box<dyn FrameComponent >) -> Self {
-        Self::Found(FrameResultInner::Child(value))
+        Self::Found(FrameFound::Child(value))
     }
     pub fn template(value: &'a mut Box<dyn FrameComponent >, live_ptr: LivePtr) -> Self {
-        Self::Found(FrameResultInner::Template(value, live_ptr))
+        Self::Found(FrameFound::Template(value, live_ptr))
     }
 }
 
 impl<'a> FromResidual for FrameResult<'a> {
-    fn from_residual(residual: FrameResultInner<'a>) -> Self {
+    fn from_residual(residual: FrameFound<'a>) -> Self {
         Self::Found(residual)
     }
 }
 
 impl<'a> Try for FrameResult<'a> {
     type Output = ();
-    type Residual = FrameResultInner<'a>;
+    type Residual = FrameFound<'a>;
     
     fn from_output(_: Self::Output) -> Self {
         FrameResult::NotFound
@@ -140,12 +154,12 @@ impl<'a> Try for FrameResult<'a> {
     }
 }
 
-pub enum DrawResult {
+pub enum FrameDraw {
     Done,
-    UserDraw(FrameUid)
+    FrameUid(FrameUid)
 }
 
-impl DrawResult {
+impl FrameDraw {
     pub fn is_done(&self) -> bool {
         match self {
             Self::Done => true,
@@ -160,25 +174,25 @@ impl DrawResult {
     }
 }
 
-impl FromResidual for DrawResult {
+impl FromResidual for FrameDraw {
     fn from_residual(residual: FrameUid) -> Self {
-        Self::UserDraw(residual)
+        Self::FrameUid(residual)
     }
 }
 
-impl Try for DrawResult {
+impl Try for FrameDraw {
     type Output = ();
     type Residual = FrameUid;
     
     fn from_output(_: Self::Output) -> Self {
-        DrawResult::Done
+        FrameDraw::Done
     }
     
     fn branch(self) -> ControlFlow<Self::Residual,
     Self::Output> {
         match self {
             Self::Done => ControlFlow::Continue(()),
-            Self::UserDraw(c) => ControlFlow::Break(c)
+            Self::FrameUid(c) => ControlFlow::Break(c)
         }
     }
 }
@@ -239,7 +253,7 @@ impl FrameRef {
         self.0.as_mut()
     }
     
-    pub fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, FramePath, Box<dyn FrameAction>)) {
+    pub fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, FrameActionItem)) {
         if let Some(inner) = &mut self.0 {
             return inner.handle_component_event(cx, event, dispatch_action)
         }
@@ -252,13 +266,21 @@ impl FrameRef {
         Vec::new()
     }
     
-    pub fn frame_query(&mut self, query: &FrameQuery, callback: &mut Option<&mut dyn FnMut(FrameResultInner)>) -> FrameResult {
+    pub fn frame_query(&mut self, query: &FrameQuery, callback: &mut Option<FrameQueryCb>) -> FrameResult {
         if let Some(inner) = &mut self.0 {
             match query {
+                FrameQuery::All => {
+                    if let Some(callback) = callback {
+                        callback.call(FrameFound::Child(inner))
+                    }
+                    else {
+                        return FrameResult::child(inner)
+                    }
+                },
                 FrameQuery::TypeId(id) => {
                     if inner.type_id() == *id{
                         if let Some(callback) = callback {
-                            callback(FrameResultInner::Child(inner))
+                            callback.call(FrameFound::Child(inner))
                         }
                         else {
                             return FrameResult::child(inner)
@@ -268,7 +290,7 @@ impl FrameRef {
                 FrameQuery::Uid(uid) => {
                     if *uid == FrameUid(&*inner as *const _ as u64) {
                         if let Some(callback) = callback {
-                            callback(FrameResultInner::Child(inner))
+                            callback.call(FrameFound::Child(inner))
                         }
                         else {
                             return FrameResult::child(inner)
@@ -278,7 +300,7 @@ impl FrameRef {
                 FrameQuery::Path(path) => if path.len() == 1{
                     if let Some(live_ptr) = inner.query_template(path[0]) {
                         if let Some(callback) = callback {
-                            callback(FrameResultInner::Template(inner, live_ptr))
+                            callback.call(FrameFound::Template(inner, live_ptr))
                         }
                         else {
                             return FrameResult::template(inner, live_ptr)
@@ -308,11 +330,11 @@ impl FrameRef {
         }
     }
     
-    pub fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> DrawResult {
+    pub fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk) -> FrameDraw {
         if let Some(inner) = &mut self.0 {
             return inner.draw_component(cx, walk, FrameUid(&*inner as *const _ as u64))
         }
-        DrawResult::Done
+        FrameDraw::Done
     }
     
     pub fn get_walk(&mut self) -> Walk {
@@ -329,11 +351,11 @@ impl FrameRef {
         }
     }
     
-    pub fn draw_walk_component(&mut self, cx: &mut Cx2d) -> DrawResult {
+    pub fn draw_walk_component(&mut self, cx: &mut Cx2d) -> FrameDraw {
         if let Some(inner) = &mut self.0 {
             return inner.draw_walk_component(cx, FrameUid(&*inner as *const _ as u64))
         }
-        DrawResult::Done
+        FrameDraw::Done
     }
 }
 
@@ -380,34 +402,36 @@ impl LiveNew for FrameRef {
 #[derive(Clone, Copy, PartialEq, Default)]
 pub struct FrameUid(u64);
 
-#[derive(Default)]
-pub struct FramePath {
-    pub uids: Vec<FrameUid>,
-    pub ids: Vec<LiveId>
-}
-
-impl FramePath {
-    pub fn empty() -> Self {
-        Self::default()
-    }
-    pub fn add(mut self, id: LiveId, uid: FrameUid) -> Self {
-        self.uids.push(uid);
-        self.ids.push(id);
-        Self {
-            uids: self.uids,
-            ids: self.ids
-        }
-    }
-}
-
 pub struct FrameActionItem {
-    pub path: FramePath,
+    pub uids: Vec<FrameUid>,
+    pub ids: Vec<LiveId>,
+    pub data_bind: Vec<LiveNode>,
     pub action: Box<dyn FrameAction>
 }
 
 impl FrameActionItem {
-    pub fn id(&self) -> LiveId {
-        self.path.ids[0]
+    pub fn from_action(action: Box<dyn FrameAction>) -> Self {
+        Self{
+            uids: Vec::new(),
+            ids: Vec::new(),
+            data_bind: Vec::new(),
+            action
+        }
+    }
+    
+    pub fn id(&self)->LiveId{
+        self.ids[0]
+    }
+    
+    pub fn add(mut self, id: LiveId, uid: FrameUid) -> Self {
+        self.uids.push(uid);
+        self.ids.push(id);
+        Self {
+            data_bind: self.data_bind,
+            uids: self.uids,
+            ids: self.ids,
+            action:self.action
+        }
     }
 }
 

@@ -115,20 +115,22 @@ impl FoldButton {
             }
         };
         
-        match button_logic_handle_event(cx, event, self.bg_quad.area(), &mut |_,_|{}) {
-            ButtonState::Pressed => {
-                if self.state.is_in_state(cx, ids!(open.yes)) {
-                    self.animate_state(cx, ids!(open.no));
-                    dispatch_action(cx, FoldButtonAction::Closing)
+        let state = button_logic_handle_event(cx, event, self.bg_quad.area(), &mut |_,_|{});
+        if let Some(state) = state {
+            match state {
+                ButtonState::Pressed => {
+                    if self.state.is_in_state(cx, ids!(open.yes)) {
+                        self.animate_state(cx, ids!(open.no));
+                        dispatch_action(cx, FoldButtonAction::Closing)
+                    }
+                    else {
+                        self.animate_state(cx, ids!(open.yes));
+                        dispatch_action(cx, FoldButtonAction::Opening)
+                    }
                 }
-                else {
-                    self.animate_state(cx, ids!(open.yes));
-                    dispatch_action(cx, FoldButtonAction::Opening)
-                }
+                ButtonState::Default => self.animate_state(cx, ids!(hover.off)),
+                ButtonState::Hover => self.animate_state(cx, ids!(hover.on)),
             }
-            ButtonState::Default => self.animate_state(cx, ids!(hover.off)),
-            ButtonState::Hover => self.animate_state(cx, ids!(hover.on)),
-            _ => ()
         };
     }
     

@@ -1,6 +1,7 @@
 use {
     crate::{
         audio::*,
+        makepad_platform::thread::*,
         makepad_platform::*
     },
 };
@@ -15,7 +16,7 @@ live_register!{
 enum FromUI {}
 
 #[derive(Live, LiveHook)]
-#[live_register(audio_component_factory!(BasicSynth))]
+#[live_register(audio_component!(BasicSynth))]
 struct BasicSynth {
     prop:f64,
     #[rust] from_ui: FromUISender<FromUI>,
@@ -72,5 +73,9 @@ impl AudioComponent for BasicSynth {
     }
     
     fn handle_event(&mut self, _cx: &mut Cx, _event: &mut Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)){
+    }
+    // we dont have inputs
+    fn audio_query(&mut self, _query: &AudioQuery, _callback: &mut Option<&mut dyn FnMut(&mut Box<dyn AudioComponent >)>) -> AudioResult{
+        AudioResult::NotFound
     }
 }

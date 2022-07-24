@@ -173,11 +173,14 @@ impl DrawDesktopButton{
 impl DesktopButton {
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction),) {
         self.state_handle_event(cx, event);
-        match button_logic_handle_event(cx, event, self.bg.area(), dispatch_action) {
-            ButtonState::Pressed => self.animate_state(cx, ids!(hover.pressed)),
-            ButtonState::Default => self.animate_state(cx, ids!(hover.off)),
-            ButtonState::Hover => self.animate_state(cx, ids!(hover.on)),
-            _ => ()
+
+        let state = button_logic_handle_event(cx, event, self.bg.area(), dispatch_action);
+        if let Some(state) = state {
+            match state {
+                ButtonState::Pressed => self.animate_state(cx, ids!(hover.pressed)),
+                ButtonState::Default => self.animate_state(cx, ids!(hover.off)),
+                ButtonState::Hover => self.animate_state(cx, ids!(hover.on)),
+            }
         }
     }
     
