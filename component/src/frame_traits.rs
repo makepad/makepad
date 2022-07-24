@@ -78,7 +78,7 @@ pub trait FrameComponent: LiveApply {
         None
     }
     
-    fn data_bind_read(&mut self, _cx:&mut Cx, _nodes:&[LiveNode]){
+    fn bind_read(&mut self, _cx:&mut Cx, _nodes:&[LiveNode]){
     }
     
     fn type_id(&self) -> LiveType where Self: 'static {LiveType::of::<Self>()}
