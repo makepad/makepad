@@ -1,10 +1,13 @@
+#![feature(try_trait_v2)]
+
 pub use makepad_component::{self, *};
 pub use makepad_platform::{self, *, audio::*, midi::*};
-
 mod piano;
 mod audio;
 use crate::piano::*;
 use crate::audio::*;
+use crate::audio::iron_fish::*;
+
 
 live_register!{
     use AudioComponent::*;
@@ -239,10 +242,13 @@ impl App {
         //self.desktop_window.handle_event(cx, event);
         self.scroll_view.handle_event(cx, event);
         
-        //let iron_fish = self.audio_graph.child::<IronFish>().unwrap();
-
+        //let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
+        let _iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
+        
+        // ok we have ironfish. now what.
+        
+        
         /*// lets fetch ironfish from the audiograph
-        let iron_fish = self.audio_graph.child::<IronFish>().unwrap();
         
         self.frame.handle_data_out(iron_fish.thing);
         self.frame.handle_event_iter()
@@ -272,7 +278,7 @@ impl App {
             }
         }
         
-        for action in self.audio_graph.handle_event(cx, event) {
+        for action in self.audio_graph.handle_event_iter(cx, event) {
             match action {
             }
         };
@@ -280,7 +286,7 @@ impl App {
         match event {
             Event::Midi1InputData(inputs) => for input in inputs {
                 if let Midi1Event::Note(note) = input.data.decode() {
-                    let piano = self.frame.child::<Piano>(ids!(piano)).unwrap();
+                    let piano = self.frame.by_type::<Piano>().unwrap();
                     piano.set_note(cx, note.is_on, note.note_number)
                 }
             }

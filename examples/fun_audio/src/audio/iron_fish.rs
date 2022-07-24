@@ -571,7 +571,7 @@ enum FromUI {}
 
 #[derive(Live, LiveHook)]
 #[live_register(audio_component_factory!(IronFish))]
-struct IronFish {
+pub struct IronFish {
     settings: Arc<IronFishSettings>,
     #[rust] from_ui: FromUISender<FromUI>,
 }
@@ -605,7 +605,7 @@ impl AudioComponent for IronFish {
         })
     }
     
-    fn handle_event_with_fn(&mut self, _cx: &mut Cx, _event: &mut Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)){
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &mut Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)){
     }
 }
 
