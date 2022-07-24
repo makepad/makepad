@@ -315,7 +315,7 @@ impl Frame {
     }
     
     // fetch all the children on this frame and call data_bind_read
-    pub fn data_bind_read(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
+    pub fn bind_read(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
         self.frame_query(&FrameQuery::All, &mut Some(FrameQueryCb {cx: cx, cb: &mut | cx, result | {
             if let FrameFound::Child(child) = result {
                 child.data_bind_read(cx, nodes);

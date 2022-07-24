@@ -132,14 +132,22 @@ impl LiveNode {
             value: LiveValue::None
         }
     }
-    pub fn id_value(id:LiveId, value:LiveValue) -> Self {
+    pub fn from_id_value(id:LiveId, value:LiveValue) -> Self {
         Self {
             origin: LiveNodeOrigin::empty(),
             id,
             value
         }
     }
-
+    
+    pub fn from_value(value:LiveValue) -> Self {
+        Self {
+            origin: LiveNodeOrigin::empty(),
+            id:LiveId(0),
+            value
+        }
+    }
+    
     pub fn is_token_id_inside_dsl(&self, other_token: LiveTokenId) -> bool {
         if let Some(token_id) = self.origin.token_id(){
             if token_id.file_id() != other_token.file_id() {
