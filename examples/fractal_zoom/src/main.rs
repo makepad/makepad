@@ -1,6 +1,7 @@
 #![feature(portable_simd)]
 use makepad_component::*;
 use makepad_platform::*;
+pub use makepad_component;
 mod mandelbrot;
 
 #[cfg(any(not(target_arch = "wasm32"), target_feature = "simd128"))]
@@ -48,7 +49,7 @@ impl App {
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
         self.window.handle_event(cx, event);
         
-        for _ in self.frame.handle_event(cx, event) {
+        for _ in self.frame.handle_event_iter(cx, event) {
         }
         
         match event {
@@ -63,7 +64,7 @@ impl App {
         if self.window.begin(cx, None).is_err() {
             return;
         }
-        while let Err(_child) = self.frame.draw(cx){
+        while self.frame.draw(cx).not_done(){
         };
         self.window.end(cx);
     }
