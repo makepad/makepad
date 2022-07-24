@@ -142,7 +142,13 @@ pub trait LiveApply: LiveHook {
 }
 
 pub trait LiveRead{
-    fn live_read(&self, id:LiveId, out:&mut Vec<LiveNode>);
+    fn live_read_to(&self, id:LiveId, out:&mut Vec<LiveNode>);
+    fn live_read(&self)->Vec<LiveNode>{
+        let mut out = Vec::new();
+        self.live_read_to(LiveId(0),&mut out);
+        out
+    }
+    
 }
 
 

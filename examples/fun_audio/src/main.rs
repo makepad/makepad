@@ -244,28 +244,20 @@ impl App {
         
         //let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
         let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
-        
-        let mut nodes = Vec::new();
-        iron_fish.settings.live_read(LiveId(0), &mut nodes);
-        // alright we have a live node set. now what.
-        self.frame.data_bind_read(cx, &nodes);
-        // ok now, we need to call something like 'apply
-        /*// lets fetch ironfish from the audiograph
-        self.frame.handle_data_out(iron_fish.thing);
-        self.frame.handle_event_iter()
-             iron_fish.handle_data_in(item);
-        // in our nextframe event we can update our slider animation
-        self.frame.apply_child(cx, id!(my_slider), live!{
-            some_prop:(iron_fish.setting100.get())
-        });*/
+        self.frame.data_bind_read(cx, &iron_fish.settings.live_read());
         
         // how would/could we map our C struct directly to our UI.
         for item in self.frame.handle_event_iter(cx, event) {
+            if item.has_data_bind(){
+                // ok we have databinding data.
+                let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
+                iron_fish.settings.apply_over(cx, &item.data_bind);
+            }
             match item.id() {
                 /*id!(slider) => if let SliderAction::Slide(value) = item.action.cast(){
                     iron_fish.dosomethingwithslider();
                 },*/
-                id!(piano) => if let PianoAction::Note {is_on, note_number, velocity} = item.action.cast() {
+                id!(piano) => if let PianoAction::Note {is_on, note_number, velocity} = item.action() {
                     self.audio_graph.send_midi_1_data(Midi1Note {
                         is_on,
                         note_number,

@@ -20,6 +20,9 @@ use crate::live_register_macro::*;
 mod live_macro;
 use crate::live_macro::*;
 
+mod generate_cast;
+use crate::generate_cast::*;
+
 mod derive_live_registry;
 use crate::derive_live_registry::*;
 

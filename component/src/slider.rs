@@ -174,6 +174,10 @@ pub enum SliderAction {
 
 impl FrameComponent for Slider {
     fn data_bind_read(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
+        // ok we have a bind string
+        // we can now query that thing in our nodes
+        // and set our value
+        
     }
     
     fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, FrameActionItem)) {
@@ -253,7 +257,6 @@ impl Slider {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.draw_slider.slide_pos = self.value;
         self.draw_slider.begin(cx, walk, self.layout);
-        // ok so. we wanna do a 'fill' here with the label and request a future
         if let Some(dw) = cx.defer_walk(self.label_walk) {
             self.text_input.value = format!("{:.2}", self.value); //, (self.value*100.0) as usize);
             self.text_input.draw_walk(cx, self.text_input.get_walk());
