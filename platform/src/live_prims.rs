@@ -27,7 +27,7 @@ macro_rules!live_primitive {
             $ to_live_value
         }
         impl LiveRead for $ ty {
-            fn live_read(&self, id:LiveId, out:&mut Vec<LiveNode>){
+            fn live_read_to(&self, id:LiveId, out:&mut Vec<LiveNode>){
                 out.push(LiveNode::id_value(id, self.to_live_value()));
             }
         }

@@ -419,11 +419,19 @@ impl FrameActionItem {
         }
     }
     
+    pub fn action<T: FrameAction + 'static >(&self)->T where T:Default + Clone{
+        self.action.cast::<T>()
+    }
+    
     pub fn id(&self)->LiveId{
         self.ids[0]
     }
     
-    pub fn add(mut self, id: LiveId, uid: FrameUid) -> Self {
+    pub fn has_data_bind(&self)->bool{
+        self.data_bind.len()>0
+    }
+    
+    pub fn mark(mut self, id: LiveId, uid: FrameUid) -> Self {
         self.uids.push(uid);
         self.ids.push(id);
         Self {
