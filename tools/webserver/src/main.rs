@@ -52,7 +52,6 @@ fn main() {
     while let Ok(message) = rx_request.recv() {
         match message{
             HttpRequest::ConnectWebSocket {web_socket_id, response_sender, ..}=>{
-                println!("GOT WEBSOCKET CONNECT");
                 let sender = CollabNotificationSender{
                     sender:response_sender
                 };
@@ -66,12 +65,9 @@ fn main() {
                 clb_connections.remove(&web_socket_id);
             },
             HttpRequest::BinaryMessage {web_socket_id, response_sender, data}=>{
-                println!("GOT BINARY MESSAGE");
                 if let Some(connection) = clb_connections.get(&web_socket_id){
-                    println!("GOT CLB CONNECTION");
                     // turn data into a request
                     if let Ok(request) = CollabRequest::de_bin(&mut 0, &data){
-                        println!("GOT REQUEST {:?}", request);
                         let response = connection.handle_request(request);
                         let mut buf = Vec::new();
                         CollabClientAction::Response(response).ser_bin(&mut buf);
