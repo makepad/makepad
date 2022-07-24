@@ -55,8 +55,8 @@ pub struct AppInner {
 impl AppInner {
     
     pub fn draw(&mut self, cx: &mut Cx2d, state: &AppState) {
-        if self.window.begin(cx, None).is_ok() {
-            if self.dock.begin(cx).is_ok() {
+        if self.window.begin(cx, None).is_redrawing() {
+            if self.dock.begin(cx).is_redrawing() {
                 self.draw_panel(cx, state, id!(root).into());
                 self.dock.end(cx);
             }
@@ -76,7 +76,7 @@ impl AppInner {
             }
             Panel::Tab(TabPanel {tab_ids, selected_tab}) => {
                 self.dock.begin_tab_panel(cx, panel_id);
-                if self.dock.begin_tab_bar(cx, *selected_tab).is_ok() {
+                if self.dock.begin_tab_bar(cx, *selected_tab).is_redrawing() {
                     for tab_id in tab_ids {
                         let tab = &state.tabs[*tab_id];
                         self.dock.draw_tab(cx, *tab_id, &tab.name);
@@ -96,7 +96,7 @@ impl AppInner {
                             self.log_view.draw(cx, &state.editor_state)
                         }
                         TabKind::FileTree => {
-                            if self.file_tree.begin(cx).is_ok() {
+                            if self.file_tree.begin(cx).is_redrawing() {
                                 self.draw_file_node(cx, state, id!(root).into());
                                 self.file_tree.end(cx);
                             }

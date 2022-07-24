@@ -61,7 +61,7 @@ impl App {
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
-        if self.window.begin(cx, None).is_err() {
+        if self.window.begin(cx, None).not_redrawing() {
             return;
         }
         while self.frame.draw(cx).not_done(){

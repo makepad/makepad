@@ -11,7 +11,7 @@ use {
             range_set::{RangeSet, Span},
         },
         makepad_platform::*,
-        makepad_component::{ 
+        makepad_component::{
             ScrollView,
             ScrollShadow
         },
@@ -119,8 +119,8 @@ live_register!{
         }
         
         code_text: {
-            //draw_depth: 1.0 
-            text_style: FONT_CODE{}
+            //draw_depth: 1.0
+            text_style: FONT_CODE {}
         }
         
         line_num_text: code_text {
@@ -144,9 +144,9 @@ live_register!{
         
         text_color_linenum: (COLOR_TEXT_META)
         text_color_linenum_current: (COLOR_TEXT_DEFAULT)
-        text_color_indent_line:(COLOR_TEXT_DEFAULT)
+        text_color_indent_line: (COLOR_TEXT_DEFAULT)
         
-        caret_quad: { 
+        caret_quad: {
             color: (COLOR_FG_CURSOR)
         }
         
@@ -155,15 +155,15 @@ live_register!{
             color: (COLOR_BG_CURSOR)
         }
         
-        state:{
+        state: {
             caret = {
-                default:on
+                default: on
                 on = {
                     from: {all: Play::Snap}
                     apply: {caret_quad: {color: #b0}}
                 }
                 
-                off =  {
+                off = {
                     from: {all: Play::Snap}
                     apply: {caret_quad: {color: #0000}}
                 }
@@ -243,7 +243,7 @@ pub struct DrawSelection {
 #[derive(Live, LiveHook)]
 #[repr(C)]
 pub struct DrawIndentLine {
-    draw_super: DrawQuad, 
+    draw_super: DrawQuad,
     indent_id: f32
 }
 
@@ -283,24 +283,29 @@ impl CodeEditorImpl {
         self.scroll_view.redraw(cx);
     }
     
-    pub fn begin<'a>(&mut self, cx: &mut Cx2d, state: &'a EditorState) -> Result<(&'a Document, &'a DocumentInner, &'a Session), ()> {
+    pub fn begin(&mut self, cx: &mut Cx2d) -> ViewRedrawing {
         self.scroll_view.begin(cx, Walk::default(), Layout::flow_right()) ?;
-        
+        self.text_glyph_size = self.code_text.text_style.font_size * self.code_text.get_monospace_base(cx);
+        self.handle_select_scroll_in_draw(cx);
+        self.begin_instances(cx);
+        ViewRedrawing::Yes
+    }
+    
+    pub fn state_has_document_inner<'a>(&mut self,state: &'a EditorState) -> bool {
         if let Some(session_id) = self.session_id {
-            
             let session = &state.sessions[session_id];
             let document = &state.documents[session.document_id];
-            
-            if let Some(document_inner) = document.inner.as_ref() {
-                self.text_glyph_size = self.code_text.text_style.font_size * self.code_text.get_monospace_base(cx);
-                
-                self.handle_select_scroll_in_draw(cx);
-                self.begin_instances(cx);
-                return Ok((document, document_inner, session))
-            }
+            return document.inner.is_some()
         }
-        self.scroll_view.end(cx);
-        Err(())
+        false
+    }
+    
+    pub fn get_state<'a>(&mut self, cx: &mut Cx2d, state: &'a EditorState) -> (&'a Document, &'a DocumentInner, &'a Session) {
+        let session_id = self.session_id.unwrap();
+        let session = &state.sessions[session_id];
+        let document = &state.documents[session.document_id];
+        let document_inner = document.inner.as_ref().unwrap();
+        return (document, document_inner, session)
     }
     
     pub fn end(&mut self, cx: &mut Cx2d, lines_layout: &LinesLayout) {
@@ -488,7 +493,7 @@ impl CodeEditorImpl {
                         ..span.len
                     },
                     ..span
-                }); 
+                });
                 break;
             }
             line_count -= span.len.line;
@@ -735,7 +740,7 @@ impl CodeEditorImpl {
                         self.msg_line_quad.level = MsgLineLevel::from(loc.level);
                         self.msg_line_quad.draw_abs(cx, Rect {
                             pos: origin + start,
-                            size: vec2(end.x - start.x, layout.total_height+1.0),
+                            size: vec2(end.x - start.x, layout.total_height + 1.0),
                         });
                     }
                     _ => ()
@@ -1023,7 +1028,7 @@ impl CodeEditorImpl {
                     dispatch_action(cx, CodeEditorAction::RedrawViewsForDocument(session.document_id))
                 }
             }
-            HitEvent::KeyDown(KeyEvent { 
+            HitEvent::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyA,
                 modifiers,
                 ..

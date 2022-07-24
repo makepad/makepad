@@ -23,15 +23,15 @@ impl LiveHook for BareWindow{
 }
 
 impl BareWindow {
-    pub fn begin(&mut self, cx: &mut Cx2d) -> ViewRedraw {
+    pub fn begin(&mut self, cx: &mut Cx2d) -> ViewRedrawing {
         if !cx.view_will_redraw(&self.main_view) {
-            return Err(())
+            return ViewRedrawing::No
         }
         cx.begin_pass(&self.pass);
         
-        self.main_view.begin(cx, Walk::default(), Layout::flow_right()).unwrap();
+        self.main_view.begin(cx, Walk::default(), Layout::flow_right()).assume_redrawing();
         
-        Ok(())
+        ViewRedrawing::Yes
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {

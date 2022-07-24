@@ -115,7 +115,7 @@ impl FrameComponent for FoldHeader {
         }
         if let DrawState::DrawHeader = self.draw_state.get() {
             self.header.draw_walk_component(cx) ?;
-            if self.view.begin(cx, self.body_walk, Layout::flow_down()).is_err() {
+            if self.view.begin(cx, self.body_walk, Layout::flow_down()).not_redrawing() {
                 self.reverse_walk_opened(cx);
                 cx.end_turtle();
                 self.draw_state.end();

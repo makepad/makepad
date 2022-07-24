@@ -102,13 +102,13 @@ impl LiveHook for Dock {
 
 impl Dock {
     
-    pub fn begin(&mut self, cx: &mut Cx2d) -> Result<(), ()> {
+    pub fn begin(&mut self, cx: &mut Cx2d) -> ViewRedrawing  {
         self.view.begin(cx, Walk::default(), self.layout) ?;
-        Ok(())
+        ViewRedrawing::Yes
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
-        if self.overlay_view.begin(cx, Walk::default(), Layout::flow_right()).is_ok() {
+        if self.overlay_view.begin(cx, Walk::default(), Layout::flow_right()).is_redrawing() {
             if let Some(drag) = self.drag.as_ref() {
                 let panel = self.panels[drag.panel_id].as_tab_panel();
                 let rect = compute_drag_rect(panel.contents_rect, drag.position);
@@ -187,16 +187,17 @@ impl Dock {
         let _ = self.panel_id_stack.pop().unwrap();
     }
     
-    pub fn begin_tab_bar(&mut self, cx: &mut Cx2d, selected_tab: Option<usize>) -> Result<(), ()> {
+    pub fn begin_tab_bar(&mut self, cx: &mut Cx2d, selected_tab: Option<usize>) -> ViewRedrawing {
         let panel_id = *self.panel_id_stack.last().unwrap();
         let panel = self.panels[panel_id].as_tab_panel_mut();
         panel.full_rect = cx.turtle().rect();
         
-        if let Err(error) = panel.tab_bar.begin(cx, selected_tab) {
+        if panel.tab_bar.begin(cx, selected_tab).not_redrawing() {
             self.contents(cx);
-            return Err(error);
+            return ViewRedrawing::No
         }
-        Ok(())
+        
+        ViewRedrawing::Yes
     }
     
     pub fn end_tab_bar(&mut self, cx: &mut Cx2d) {
