@@ -237,7 +237,7 @@ impl Slider {
                 }
             },
             HitEvent::FingerDown(_fe) => {
-                cx.set_key_focus(self.draw_slider.area());
+               // cx.set_key_focus(self.draw_slider.area());
                 cx.set_down_mouse_cursor(MouseCursor::Arrow);
                 self.animate_state(cx, ids!(drag.on));
                 self.dragging = Some(self.value);
