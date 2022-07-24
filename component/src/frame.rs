@@ -173,7 +173,6 @@ impl FrameComponent for Frame {
         
         match at {
             CreateAt::Template => {
-                console_log!("HERE!");
                 if let Some((_, draw_order)) = self.templates.values().find(| l | l.0 == live_ptr){
                     self.draw_order.insert(*draw_order, new_id);
                 }
@@ -209,7 +208,7 @@ impl FrameComponent for Frame {
     }
     
     fn query_template(&self, id: LiveId) -> Option<LivePtr> {
-        if let Some((live_ptr, draw_order)) = self.templates.get(&id){
+        if let Some((live_ptr, _)) = self.templates.get(&id){
             Some(*live_ptr)
         }
         else{
