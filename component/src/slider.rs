@@ -179,7 +179,7 @@ pub enum SliderAction {
 }
 
 impl FrameComponent for Slider {
-    fn data_bind_read(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
+    fn bind_read(&mut self, _cx: &mut Cx, nodes: &[LiveNode]) {
         // ok we have a bind string
         if let Some(LiveValue::Float(v)) = nodes.read_path(&self.bind){
             self.value = (*v as f32- self.min)/(self.max-self.min);
