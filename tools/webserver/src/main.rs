@@ -52,6 +52,7 @@ fn main() {
     while let Ok(message) = rx_request.recv() {
         match message{
             HttpRequest::ConnectWebSocket {web_socket_id, response_sender, ..}=>{
+                println!("GOT WEBSOCKET CONNECT");
                 let sender = CollabNotificationSender{
                     sender:response_sender
                 };
