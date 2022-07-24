@@ -29,19 +29,19 @@ impl LiveHook for CollabClient {
         if self.web_socket.is_none() {
             // connect websocket
             let (host, protocol) = if let PlatformType::WebBrowser{host,protocol,..} = &cx.platform_type{(host,protocol)}else{panic!()};
-            /*
+            
             self.web_socket = Some(
                 cx.web_socket_open(
                     format!("{}://{}",if protocol=="https:"{"wss"}else{"ws"}, host),
                     WebSocketAutoReconnect::Yes
                 )
-            )*/
-            self.web_socket = Some(
+            )
+            /*self.web_socket = Some(
                 cx.web_socket_open(
                     format!("wss://makepad.nl/"),
                     WebSocketAutoReconnect::Yes
                 )
-            )
+            )*/
 
             //self.inner = Some(CollabClientInner::new_with_local_server(&self.path))
         }
