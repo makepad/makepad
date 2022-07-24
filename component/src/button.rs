@@ -148,7 +148,7 @@ struct DrawLabelText {
 
 impl Button {
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction),) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction)) {
         self.state_handle_event(cx, event);
         match button_logic_handle_event(cx, event, self.bg_quad.area(), dispatch_action) {
             ButtonState::Pressed => self.animate_state(cx, ids!(hover.pressed)),

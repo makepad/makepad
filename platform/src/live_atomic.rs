@@ -1,5 +1,6 @@
 #![allow(non_camel_case_types)]
 pub use {
+    std::fmt::{Formatter,Debug, Error},
     std::marker::PhantomData,
     std::{
         sync::Arc,
@@ -41,6 +42,12 @@ impl <T> U32A<T> where T: LiveAtomicU32Enum {
     
     pub fn get(&self) -> T {
         T::from_u32(self.0.load(Ordering::Relaxed))
+    }
+}
+
+impl<T> Debug for U32A<T> where T: LiveAtomicU32Enum + Debug{
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error>{
+        self.get().fmt(f)
     }
 }
 
@@ -99,8 +106,6 @@ impl<T> LiveNew for Arc<T> where T: LiveApply + LiveNew + 'static + LiveAtomic {
 }
 
 
-
-
 pub trait AtomicGetSet<T> {
     fn get(&self) -> T;
     fn set(&self, val: T);
@@ -136,6 +141,14 @@ impl LiveApply for f32a {
         self.apply_atomic(cx, from, index, nodes)
     }
 }
+
+impl Debug for f32a{
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error>{
+        self.get().fmt(f)
+    }
+}
+
+
 
 impl Into<f32a> for f32 {
     fn into(self) -> f32a {
@@ -185,6 +198,12 @@ impl LiveApply for u32a {
     }
 }
 
+impl Debug for u32a{
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error>{
+        self.get().fmt(f)
+    }
+}
+
 impl Into<u32a> for u32 {
     fn into(self) -> u32a {
         u32a(AtomicU32::new(self))
@@ -229,6 +248,12 @@ impl LiveHook for i64a {}
 impl LiveApply for i64a {
     fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         self.apply_atomic(cx, from, index, nodes)
+    }
+}
+
+impl Debug for i64a{
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error>{
+        self.get().fmt(f)
     }
 }
 
