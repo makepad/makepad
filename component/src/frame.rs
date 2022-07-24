@@ -52,7 +52,7 @@ pub struct Frame { // draw info per UI element
     
     #[rust] defer_walks: Vec<(LiveId, DeferWalk)>,
     #[rust] draw_state: DrawStateWrap<DrawState>,
-    #[rust] templates: ComponentMap<LiveId, LivePtr>,
+    #[rust] templates: ComponentMap<LiveId, (LivePtr, usize)>,
     #[rust] children: ComponentMap<LiveId, FrameRef>,
     #[rust] draw_order: Vec<LiveId>
 }
@@ -79,7 +79,7 @@ impl LiveHook for Frame {
                 if !self.design_mode && nodes[index].origin.has_prop_type(LivePropType::Template) {
                     // lets store a pointer into our templates.
                     let live_ptr = cx.live_registry.borrow().file_id_index_to_live_ptr(file_id, index);
-                    self.templates.insert(id, live_ptr);
+                    self.templates.insert(id, (live_ptr, self.draw_order.len()));
                     nodes.skip_node(index)
                 }
                 else if nodes[index].origin.has_prop_type(LivePropType::Instance)
@@ -172,6 +172,15 @@ impl FrameComponent for Frame {
         self.children.insert(new_id, x);
         
         match at {
+            CreateAt::Template => {
+                console_log!("HERE!");
+                if let Some((_, draw_order)) = self.templates.values().find(| l | l.0 == live_ptr){
+                    self.draw_order.insert(*draw_order, new_id);
+                }
+                else{
+                    self.draw_order.push(new_id);
+                }
+            }
             CreateAt::Begin => {
                 self.draw_order.insert(0, new_id);
             }
@@ -200,7 +209,12 @@ impl FrameComponent for Frame {
     }
     
     fn query_template(&self, id: LiveId) -> Option<LivePtr> {
-        self.templates.get(&id).cloned()
+        if let Some((live_ptr, draw_order)) = self.templates.get(&id){
+            Some(*live_ptr)
+        }
+        else{
+            None
+        }
     }
     
     fn query_child(&mut self, query: &QueryChild, callback: &mut Option<&mut dyn FnMut(QueryInner)>) -> QueryResult {

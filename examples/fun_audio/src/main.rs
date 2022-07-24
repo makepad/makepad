@@ -238,6 +238,8 @@ impl App {
         
         //self.desktop_window.handle_event(cx, event);
         self.scroll_view.handle_event(cx, event);
+        
+        //let iron_fish = self.audio_graph.child::<IronFish>().unwrap();
 
         /*// lets fetch ironfish from the audiograph
         let iron_fish = self.audio_graph.child::<IronFish>().unwrap();

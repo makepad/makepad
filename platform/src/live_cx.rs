@@ -246,5 +246,21 @@ impl Cx {
         }
         change
     }
+    
+    pub fn get_nodes_from_live_ptr<CB>(&mut self, live_ptr: LivePtr, cb: CB)
+    where CB: FnOnce(&mut Cx, LiveFileId, usize, &[LiveNode]) -> usize {
+        let live_registry_rc = self.live_registry.clone();
+        let live_registry = live_registry_rc.borrow();
+        if !live_registry.generation_valid(live_ptr){
+            println!("Generation invalid in get_nodes_from_live_ptr");
+            return
+        }
+        let doc = live_registry.ptr_to_doc(live_ptr);
+    
+        let next_index = cb(self, live_ptr.file_id, live_ptr.index as usize, &doc.nodes);
+        if next_index <= live_ptr.index as usize + 2 {
+            self.apply_error_empty_object(live_error_origin!(), live_ptr.index as usize, &doc.nodes);
+        }
+    }
 }
 
