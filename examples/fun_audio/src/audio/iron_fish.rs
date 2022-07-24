@@ -13,7 +13,7 @@ use {
 };
 
 
-#[derive(Live, LiveHook, LiveAtomic)]
+#[derive(Live, LiveHook, LiveAtomic, Debug)]
 pub enum OscType {
     DPWSawPulse,
     TrivialSaw,
@@ -22,7 +22,7 @@ pub enum OscType {
     Pure
 }
 
-#[derive(Live, LiveHook, PartialEq, LiveAtomic)]
+#[derive(Live, LiveHook, PartialEq, LiveAtomic, Debug)]
 pub enum FilterType {
     #[pick] Lowpass,
     Highpass,
@@ -54,14 +54,14 @@ impl Default for LaddFilterCoefficients {
     }
 }*/
 
-#[derive(Live, LiveHook, LiveAtomic)]
+#[derive(Live, LiveHook, LiveAtomic, Debug)]
 pub struct OscSettings {
     osc_type: U32A<OscType>,
     #[live(-12)] transpose: i64a,
     #[live(0.0)] detune: f32a
 }
 
-#[derive(Live, LiveHook, LiveAtomic)]
+#[derive(Live, LiveHook, LiveAtomic, Debug)]
 pub struct EnvelopeSettings {
     #[live(0.0)] predelay: f32a,
     #[live(0.1)] a: f32a,
@@ -71,7 +71,7 @@ pub struct EnvelopeSettings {
     #[live(0.5)] r: f32a
 }
 
-#[derive(Live, LiveHook, LiveAtomic)]
+#[derive(Live, LiveHook, LiveAtomic, Debug)]
 pub struct FilterSettings {
     filter_type: U32A<FilterType>,
     envelope: EnvelopeSettings,
@@ -81,7 +81,7 @@ pub struct FilterSettings {
     #[live(0.0)] envelope_curvature: f32a
 }
 
-#[derive(Live, LiveHook, LiveAtomic)]
+#[derive(Live, LiveHook, LiveAtomic, Debug)]
 pub struct IronFishSettings {
     osc1: OscSettings,
     osc2: OscSettings,
@@ -486,7 +486,7 @@ impl IronFishVoice {
         
         let output = volume_envelope * filter;
         
-        return output * 0.0006; //* 1000.0;
+        return output * 0.006; //* 1000.0;
     }
     
     pub fn fill_buffer(&mut self, buffer: &mut AudioBuffer, settings: &IronFishSettings) {
@@ -495,7 +495,7 @@ impl IronFishVoice {
         let frame_count = buffer.frame_count();
         let (left, right) = buffer.stereo_mut();
         for i in 0..frame_count {
-            let output = self.one(&settings);
+            let output = self.one(&settings) * 8.0;
             left[i] += output as f32;
             right[i] += output as f32;
         }

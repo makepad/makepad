@@ -5,7 +5,7 @@ use {
     },
     crate::{
         makepad_platform::*,
-        frame_component::*,
+        makepad_component::*,
     }
 };
 // include the SIMD path if we support it
@@ -21,6 +21,7 @@ live_register!{
     DrawTile: {{DrawTile}} {
         texture tex: texture2d
         fn pixel(self) -> vec4 {
+            //return vec4(self.max_iter / 1000.0,0.0,0.0,1.0);
             let fractal = sample2d(self.tex, self.pos)
             
             // unpack iteration and magnitude squared from our u32 buffer
@@ -28,7 +29,7 @@ live_register!{
             let magsq = (fractal.w * 256 + fractal.z - 127);
             
             // create a nice palette index
-            let index = abs((6.0 * iter / self.max_iter*8.0) - 0.1 * log(magsq));
+            let index = abs((1.0 * iter / self.max_iter*8.0) - 0.1 * log(magsq));
             // if the iter > max_iter we return black
             if iter > self.max_iter {
                 return vec4(0, 0, 0, 1.0);
@@ -95,7 +96,7 @@ fn mandelbrot_f64(tile: &mut Tile, max_iter: usize) {
         for x in 0..TILE_SIZE_X {
             let fp = tile.fractal.pos + tile.fractal.size * (vec2f64(x as f64, y as f64) / tile_size);
             let (iter, dist) = mandelbrot_pixel_f64(max_iter, fp.x, fp.y);
-            let dist = (dist * 256.0 + 127.0 * 255.0).max(0.0).min(65535.0) as u32;
+            let dist = ((dist+ 127.0) * 256.0).max(0.0).min(65535.0) as u32;
             tile.buffer[y * TILE_SIZE_X + x] = iter as u32 | (dist << 16);
         }
     }
@@ -445,7 +446,7 @@ impl LiveHook for Mandelbrot {
     }
 }
 
-#[derive(Clone, FrameComponentAction)]
+#[derive(Clone, FrameAction)]
 pub enum MandelbrotAction {
     None
 }
@@ -453,6 +454,7 @@ pub enum MandelbrotAction {
 impl Mandelbrot {
     
     // the SIMD tile rendering, uses the threadpool to draw the tile
+    
     #[cfg(any(not(target_arch = "wasm32"), target_feature = "simd128"))]
     pub fn render_tile(&mut self, mut tile: Tile, fractal_zoom: f64) {
         let max_iter = self.max_iter;
@@ -467,18 +469,18 @@ impl Mandelbrot {
             if TileCache::tile_needs_to_bail(&tile, bail_test) {
                 return to_ui.send(ToUI::TileBailed {tile}).unwrap();
             }
-            if !is_zooming{
+            /*if !is_zooming{
                 mandelbrot_f64x2_aa(&mut tile, max_iter);
-            }
-            else if fractal_zoom >2e-5 {
+            } 
+            else if fractal_zoom >2e-5 {*/
                 // we can use a f32x4 path when we aren't zoomed in far (2x faster)
                 // as f32 has limited zoom-depth it can support
                 mandelbrot_f32x4(&mut tile, max_iter);
-            }
+            /*}
             else {
                 // otherwise we use a higher resolution f64
                 mandelbrot_f64x2(&mut tile, max_iter);
-            }
+            }*/
             to_ui.send(ToUI::TileDone {tile}).unwrap();
         })
     }
@@ -490,11 +492,11 @@ impl Mandelbrot {
         // we pull a cloneable sender from the to_ui message channel for the worker
         let to_ui = self.to_ui.sender();
         // clone a ref to the bail window for the worker
-        let bail_window = self.tile_cache.bail_window.clone();
+        let bail_test = self.tile_cache.bail_test.clone();
         // create a new task on the threadpool
         // this is run on any one of our worker threads that's free
         self.tile_cache.thread_pool.execute(move || {
-            if TileCache::tile_needs_to_bail(&tile, bail_window) {
+            if TileCache::tile_needs_to_bail(&tile, bail_test) {
                 return to_ui.send(ToUI::TileBailed {tile}).unwrap();
             }
             // use the non SIMD mandelbrot. This path is used on safari
@@ -528,9 +530,8 @@ impl Mandelbrot {
         }
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> MandelbrotAction {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event,_: &mut dyn FnMut(&mut Cx, MandelbrotAction)){
         //self.state_handle_event(cx, event);
-        
         if let Event::Signal(_) = event {
             // this batches up all the input signals into a single animation frame
             self.next_frame = cx.new_next_frame();
@@ -579,8 +580,7 @@ impl Mandelbrot {
             }
             
             // animate color cycle
-            self.draw_tile.color_cycle = (ne.time * 0.01).fract() as f32;
-            
+            self.draw_tile.color_cycle = (ne.time * 0.1).fract() as f32;
             // this triggers a draw_walk call and another 'next frame' event
             self.view.redraw(cx);
             self.next_frame = cx.new_next_frame();
@@ -621,9 +621,6 @@ impl Mandelbrot {
             }
             _ => ()
         }
-        
-        // no actions to report, future expansion possible.
-        MandelbrotAction::None
     }
     
     // draw the mandelbrot view
