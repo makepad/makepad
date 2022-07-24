@@ -146,6 +146,22 @@ live_register!{
                             label: "Envelope Amount"
                         }
                     }
+                    InstrumentSlider {
+                        slider = {
+                            bind: "osc1.detune"
+                            min: 0.0
+                            max: 10.0
+                            label: "Osc1 detune"
+                        }
+                    }
+                    InstrumentSlider {
+                        slider = {
+                            bind: "osc2.detune"
+                            min: 0.0
+                            max: 10.0
+                            label: "Osc2 detune"
+                        }
+                    }
                 }
             }
         }
