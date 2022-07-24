@@ -291,7 +291,7 @@ impl Frame {
             self.defer_walks.clear();
             
             if self.clip {
-                if self.view.as_mut().unwrap().begin(cx, walk, self.layout).is_err() {
+                if self.view.as_mut().unwrap().begin(cx, walk, self.layout).not_redrawing() {
                     return DrawResult::Done
                 };
                 walk = Walk::default();

@@ -164,7 +164,14 @@ impl RustEditor {
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d, state: &EditorState) {
-        if let Ok((document, document_inner, session)) = self.editor_impl.begin(cx, state) {
+        if !self.editor_impl.state_has_document_inner(state){
+            return
+        }
+        
+        if self.editor_impl.begin(cx).is_redrawing(){
+            
+            let (document, document_inner, session) = self.editor_impl.get_state(cx, state);
+            
             let path = document.path.clone();
             
             // if we are folding we need to store the last lead cursor y pos

@@ -151,23 +151,23 @@ impl DesktopWindow {
         }
     }
     
-    pub fn begin(&mut self, cx: &mut Cx2d, _menu: Option<&Menu>) -> ViewRedraw {
+    pub fn begin(&mut self, cx: &mut Cx2d, _menu: Option<&Menu>) -> ViewRedrawing {
         if !cx.view_will_redraw(&self.main_view) {
-            return Err(())
+            return ViewRedrawing::No
         }
         
         cx.begin_pass(&self.pass);
         
-        self.main_view.begin(cx, Walk::default(), Layout::flow_right()).unwrap();
+        self.main_view.begin(cx, Walk::default(), Layout::flow_right()).assume_redrawing();
         
         //while self.frame.draw(cx).is_ok(){}
         if self.frame.draw(cx).is_done() {
             self.main_view.end(cx);
             cx.end_pass(&self.pass);
-            return Err(())
+            return ViewRedrawing::No
         }
         
-        Ok(())
+        ViewRedrawing::Yes
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
