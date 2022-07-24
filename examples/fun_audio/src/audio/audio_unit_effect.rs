@@ -75,9 +75,9 @@ impl AudioUnitEffect {
                 }
             })
         }
-        else{
+        else {
             println!("Cannot find effect {}", self.plugin);
-            for item in &list{
+            for item in &list {
                 println!("Effects: {}", item.name);
             }
         }
@@ -86,7 +86,7 @@ impl AudioUnitEffect {
 
 impl AudioComponent for AudioUnitEffect {
     
-    fn get_graph_node(&mut self, _cx:&mut Cx) -> Box<dyn AudioGraphNode + Send> {
+    fn get_graph_node(&mut self, _cx: &mut Cx) -> Box<dyn AudioGraphNode + Send> {
         self.from_ui.new_channel();
         Box::new(Node {
             from_ui: self.from_ui.receiver(),
@@ -94,7 +94,7 @@ impl AudioComponent for AudioUnitEffect {
         })
     }
     
-    fn handle_event_with_fn(&mut self, _cx: &mut Cx, event: &mut Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
+    fn handle_event(&mut self, _cx: &mut Cx, event: &mut Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
         while let Ok(to_ui) = self.to_ui.try_recv(event) {
             match to_ui {
                 ToUI::NewAudioUnit(audio_unit) => {
@@ -103,6 +103,10 @@ impl AudioComponent for AudioUnitEffect {
                 }
             }
         }
+    }
+    
+    fn audio_query(&mut self, query: &AudioQuery, callback: &mut Option<&mut dyn FnMut(&mut Box<dyn AudioComponent >)>) -> AudioResult {
+        self.input.audio_query(query, callback)
     }
 }
 

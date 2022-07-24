@@ -1,5 +1,6 @@
 use {
     std::collections::BTreeMap,
+    std::ops::{ControlFlow, Try, FromResidual},
     crate::{
         makepad_platform::*,
         //audio_engine::AudioEngine
@@ -9,13 +10,51 @@ use {
 
 // Audio component API
 
+pub enum AudioQuery {
+    TypeId(std::any::TypeId),
+}
 
+pub enum AudioResult<'a> {
+    NotFound,
+    Found(&'a mut Box<dyn AudioComponent>)
+}
+
+impl<'a> FromResidual for AudioResult<'a> {
+    fn from_residual(residual: &'a mut Box<dyn AudioComponent>) -> Self {
+        Self::Found(residual)
+    }
+}
+
+impl<'a> Try for AudioResult<'a> {
+    type Output = ();
+    type Residual = &'a mut Box<dyn AudioComponent>;
+    
+    fn from_output(_: Self::Output) -> Self {
+        AudioResult::NotFound
+    }
+    
+    fn branch(self) -> ControlFlow<Self::Residual,
+    Self::Output> {
+        match self {
+            Self::NotFound => ControlFlow::Continue(()),
+            Self::Found(c) => ControlFlow::Break(c)
+        }
+    }
+}
 
 pub enum AudioComponentAction {}
 pub trait AudioComponent: LiveApply {
     fn type_id(&self) -> LiveType where Self: 'static {LiveType::of::<Self>()}
-    fn handle_event_with_fn(&mut self, _cx: &mut Cx, event: &mut Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction));
+    fn handle_event(&mut self, _cx: &mut Cx, event: &mut Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction));
     fn get_graph_node(&mut self, cx:&mut Cx) -> Box<dyn AudioGraphNode + Send>;
+    
+    fn audio_query(
+        &mut self,
+        _query: &AudioQuery,
+        _callback: &mut Option<&mut dyn FnMut(&mut Box<dyn AudioComponent >)>
+    ) -> AudioResult {
+        return AudioResult::NotFound
+    }
 }
 
 pub trait AudioGraphNode {
@@ -26,7 +65,7 @@ pub trait AudioGraphNode {
 //pub type AudioGraphNodeRef = Option<Box<dyn AudioGraphNode + Send >>;
 
 
-//generate_ref_cast_api!(AudioComponent);
+generate_ref_cast_api!(AudioComponent);
 
 
 // Audio component registry
@@ -53,6 +92,27 @@ impl AudioComponentRef {
     }
     pub fn as_mut(&mut self) -> Option<&mut Box<dyn AudioComponent >> {
         self.0.as_mut()
+    }
+    
+    pub fn audio_query(&mut self, query: &AudioQuery, callback: &mut Option<&mut dyn FnMut(&mut Box<dyn AudioComponent >)>) -> AudioResult {
+        if let Some(inner) = &mut self.0 {
+            match query {
+                AudioQuery::TypeId(id) => {
+                    if inner.type_id() == *id{
+                        if let Some(callback) = callback {
+                            callback(inner)
+                        }
+                        else {
+                            return AudioResult::Found(inner)
+                        }
+                    }
+                },
+            }
+            inner.audio_query(query, callback)
+        }
+        else {
+            AudioResult::NotFound
+        }
     }
 }
 

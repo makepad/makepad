@@ -71,6 +71,6 @@ impl AudioComponent for BasicSynth {
         Box::new(Node::default())
     }
     
-    fn handle_event_with_fn(&mut self, _cx: &mut Cx, _event: &mut Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)){
+    fn handle_event(&mut self, _cx: &mut Cx, _event: &mut Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)){
     }
 }
