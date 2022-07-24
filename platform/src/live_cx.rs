@@ -23,6 +23,15 @@ pub fn live_register(cx:&mut Cx) {
     crate::font::live_register(cx);
 }
 
+pub struct LiveBody {
+    pub file: String,
+    pub module_path: String,
+    pub line: usize,
+    pub column: usize,
+    pub code: String,
+    pub live_type_infos: Vec<LiveTypeInfo>
+}
+
 impl Cx {
     
     pub fn apply_error_tuple_enum_arg_not_found(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], enum_id: LiveId, base: LiveId, arg: usize) {

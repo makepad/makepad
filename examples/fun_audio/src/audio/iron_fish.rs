@@ -8,12 +8,13 @@ use {
     crate::{
         audio::*,
         makepad_platform::live_atomic::*,
+        makepad_platform::thread::*,
         makepad_platform::*
     },
 };
 
 
-#[derive(Live, LiveHook, LiveAtomic, Debug)]
+#[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub enum OscType {
     DPWSawPulse,
     TrivialSaw,
@@ -22,7 +23,7 @@ pub enum OscType {
     Pure
 }
 
-#[derive(Live, LiveHook, PartialEq, LiveAtomic, Debug)]
+#[derive(Live, LiveHook, PartialEq, LiveAtomic, Debug, LiveRead)]
 pub enum FilterType {
     #[pick] Lowpass,
     Highpass,
@@ -54,14 +55,14 @@ impl Default for LaddFilterCoefficients {
     }
 }*/
 
-#[derive(Live, LiveHook, LiveAtomic, Debug)]
+#[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub struct OscSettings {
     osc_type: U32A<OscType>,
     #[live(-12)] transpose: i64a,
     #[live(0.0)] detune: f32a
 }
 
-#[derive(Live, LiveHook, LiveAtomic, Debug)]
+#[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub struct EnvelopeSettings {
     #[live(0.0)] predelay: f32a,
     #[live(0.1)] a: f32a,
@@ -71,7 +72,7 @@ pub struct EnvelopeSettings {
     #[live(0.5)] r: f32a
 }
 
-#[derive(Live, LiveHook, LiveAtomic, Debug)]
+#[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub struct FilterSettings {
     filter_type: U32A<FilterType>,
     envelope: EnvelopeSettings,
@@ -81,7 +82,7 @@ pub struct FilterSettings {
     #[live(0.0)] envelope_curvature: f32a
 }
 
-#[derive(Live, LiveHook, LiveAtomic, Debug)]
+#[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub struct IronFishSettings {
     osc1: OscSettings,
     osc2: OscSettings,
@@ -570,9 +571,9 @@ live_register!{
 enum FromUI {}
 
 #[derive(Live, LiveHook)]
-#[live_register(audio_component_factory!(IronFish))]
+#[live_register(audio_component!(IronFish))]
 pub struct IronFish {
-    settings: Arc<IronFishSettings>,
+    pub settings: Arc<IronFishSettings>,
     #[rust] from_ui: FromUISender<FromUI>,
 }
  
@@ -606,6 +607,10 @@ impl AudioComponent for IronFish {
     }
     
     fn handle_event(&mut self, _cx: &mut Cx, _event: &mut Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)){
+    }
+    // we dont have inputs
+    fn audio_query(&mut self, _query: &AudioQuery, _callback: &mut Option<&mut dyn FnMut(&mut Box<dyn AudioComponent >)>) -> AudioResult{
+        AudioResult::NotFound
     }
 }
 

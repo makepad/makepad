@@ -108,13 +108,13 @@ impl FrameComponent for Frame {
         &mut self,
         cx: &mut Cx,
         event: &mut Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, FramePath, Box<dyn FrameAction>)
+        dispatch_action: &mut dyn FnMut(&mut Cx, FrameActionItem)
     ) {
         for id in &self.draw_order {
             if let Some(child) = self.children.get_mut(id) {
                 let uid = child.as_uid();
-                child.handle_component_event(cx, event, &mut | cx, path, action | {
-                    dispatch_action(cx, path.add(*id, uid), action);
+                child.handle_component_event(cx, event, &mut | cx, action | {
+                    dispatch_action(cx, action.add(*id, uid));
                 });
             }
         }
@@ -138,7 +138,7 @@ impl FrameComponent for Frame {
         self.walk
     }
     
-    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk, self_uid: FrameUid) -> DrawResult {
+    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk, self_uid: FrameUid) -> FrameDraw {
         self.draw_walk(cx, walk, self_uid)
     }
     
@@ -174,10 +174,10 @@ impl FrameComponent for Frame {
         
         match at {
             CreateAt::Template => {
-                if let Some((_, draw_order)) = self.templates.values().find(| l | l.0 == live_ptr){
+                if let Some((_, draw_order)) = self.templates.values().find( | l | l.0 == live_ptr) {
                     self.draw_order.insert(*draw_order, new_id);
                 }
-                else{
+                else {
                     self.draw_order.push(new_id);
                 }
             }
@@ -209,17 +209,17 @@ impl FrameComponent for Frame {
     }
     
     fn query_template(&self, id: LiveId) -> Option<LivePtr> {
-        if let Some((live_ptr, _)) = self.templates.get(&id){
+        if let Some((live_ptr, _)) = self.templates.get(&id) {
             Some(*live_ptr)
         }
-        else{
+        else {
             None
         }
     }
     
-    fn frame_query(&mut self, query: &FrameQuery, callback: &mut Option<&mut dyn FnMut(FrameResultInner)>) -> FrameResult {
+    fn frame_query(&mut self, query: &FrameQuery, callback: &mut Option<FrameQueryCb>) -> FrameResult {
         match query {
-            FrameQuery::TypeId(_) => {
+            FrameQuery::All | FrameQuery::TypeId(_) => {
                 for child in self.children.values_mut() {
                     child.frame_query(query, callback) ?
                 }
@@ -240,7 +240,7 @@ impl FrameComponent for Frame {
                     else {
                         let child = self.children.get_mut(&path[0]).unwrap().as_mut().unwrap();
                         if let Some(callback) = callback {
-                            callback(FrameResultInner::Child(child));
+                            callback.call(FrameFound::Child(child));
                         }
                         else {
                             return FrameResult::child(child);
@@ -257,6 +257,8 @@ impl FrameComponent for Frame {
         }
         FrameResult::NotFound
     }
+    
+    
 }
 
 #[derive(Clone)]
@@ -265,10 +267,9 @@ enum DrawState {
     DeferWalk(usize)
 }
 
-impl Frame {
-    
+impl dyn FrameComponent {
     pub fn by_path<T: 'static + FrameComponent>(&mut self, path: &[LiveId]) -> Option<&mut T> {
-        if let FrameResult::Found(FrameResultInner::Child(child)) = self.frame_query(&FrameQuery::Path(path), &mut None) {
+        if let FrameResult::Found(FrameFound::Child(child)) = self.frame_query(&FrameQuery::Path(path), &mut None) {
             return child.cast_mut::<T>()
         }
         None
@@ -276,7 +277,25 @@ impl Frame {
     
     pub fn by_type<T: 'static + FrameComponent>(&mut self) -> Option<&mut T> {
         
-        if let FrameResult::Found(FrameResultInner::Child(child)) = self.frame_query(&FrameQuery::TypeId(TypeId::of::<T>()), &mut None) {
+        if let FrameResult::Found(FrameFound::Child(child)) = self.frame_query(&FrameQuery::TypeId(TypeId::of::<T>()), &mut None) {
+            return child.cast_mut::<T>()
+        }
+        None
+    }
+}
+
+impl Frame {
+    
+    pub fn by_path<T: 'static + FrameComponent>(&mut self, path: &[LiveId]) -> Option<&mut T> {
+        if let FrameResult::Found(FrameFound::Child(child)) = self.frame_query(&FrameQuery::Path(path), &mut None) {
+            return child.cast_mut::<T>()
+        }
+        None
+    }
+    
+    pub fn by_type<T: 'static + FrameComponent>(&mut self) -> Option<&mut T> {
+        
+        if let FrameResult::Found(FrameFound::Child(child)) = self.frame_query(&FrameQuery::TypeId(TypeId::of::<T>()), &mut None) {
             return child.cast_mut::<T>()
         }
         None
@@ -291,13 +310,22 @@ impl Frame {
         }
     }
     
-    pub fn draw(&mut self, cx: &mut Cx2d,) -> DrawResult {
+    pub fn draw(&mut self, cx: &mut Cx2d,) -> FrameDraw {
         self.draw_walk(cx, self.get_walk(), FrameUid::default())
     }
     
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, mut walk: Walk, self_uid: FrameUid) -> DrawResult {
+    // fetch all the children on this frame and call data_bind_read
+    pub fn data_bind_read(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
+        self.frame_query(&FrameQuery::All, &mut Some(FrameQueryCb {cx: cx, cb: &mut | cx, result | {
+            if let FrameFound::Child(child) = result {
+                child.data_bind_read(cx, nodes);
+            }
+        }}));
+    }
+    
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, mut walk: Walk, self_uid: FrameUid) -> FrameDraw {
         if self.hidden {
-            return DrawResult::Done
+            return FrameDraw::Done
         }
         // the beginning state
         if self.draw_state.begin(cx, DrawState::Drawing(0)) {
@@ -305,7 +333,7 @@ impl Frame {
             
             if self.clip {
                 if self.view.as_mut().unwrap().begin(cx, walk, self.layout).not_redrawing() {
-                    return DrawResult::Done
+                    return FrameDraw::Done
                 };
                 walk = Walk::default();
             }
@@ -319,7 +347,7 @@ impl Frame {
             }
             
             if self.user_draw {
-                return DrawResult::UserDraw(self_uid)
+                return FrameDraw::FrameUid(self_uid)
             }
         }
         
@@ -365,7 +393,7 @@ impl Frame {
                 break;
             }
         }
-        DrawResult::Done
+        FrameDraw::Done
     }
 }
 

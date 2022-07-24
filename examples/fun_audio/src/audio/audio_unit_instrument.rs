@@ -2,6 +2,7 @@ use {
     crate::{
         audio::*,
         makepad_platform::platform::apple::audio_unit::*,
+        makepad_platform::thread::*,
         makepad_platform::*
     },
 };
@@ -22,7 +23,7 @@ enum FromUI {
 }
 
 #[derive(Live)]
-#[live_register(audio_component_factory!(AudioUnitInstrument))]
+#[live_register(audio_component!(AudioUnitInstrument))]
 struct AudioUnitInstrument {
     plugin:String,
     preset_data:String,
@@ -116,6 +117,10 @@ impl AudioComponent for AudioUnitInstrument {
                 }
             }
         }
+    }
+    // we dont have inputs
+    fn audio_query(&mut self, _query: &AudioQuery, _callback: &mut Option<&mut dyn FnMut(&mut Box<dyn AudioComponent >)>) -> AudioResult{
+        AudioResult::NotFound
     }
 }
 
