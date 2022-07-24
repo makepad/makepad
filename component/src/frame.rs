@@ -3,7 +3,8 @@ use {
         makepad_platform::*,
         component_map::*,
         frame_traits::*
-    }
+    },
+    std::any::TypeId
 };
 
 live_register!{
@@ -216,40 +217,45 @@ impl FrameComponent for Frame {
         }
     }
     
-    fn query_child(&mut self, query: &QueryChild, callback: &mut Option<&mut dyn FnMut(QueryInner)>) -> QueryResult {
+    fn frame_query(&mut self, query: &FrameQuery, callback: &mut Option<&mut dyn FnMut(FrameResultInner)>) -> FrameResult {
         match query {
-            QueryChild::Path(path) => {
+            FrameQuery::TypeId(_) => {
+                for child in self.children.values_mut() {
+                    child.frame_query(query, callback) ?
+                }
+            },
+            FrameQuery::Path(path) => {
                 if self.children.get(&path[0]).is_none() {
                     for child in self.children.values_mut() {
-                        child.as_mut().unwrap().query_child(query, callback) ?;
+                        child.as_mut().unwrap().frame_query(query, callback) ?;
                     }
                 }
                 else {
                     if path.len()>1 {
-                        self.children.get_mut(&path[0]).unwrap().as_mut().unwrap().query_child(
-                            &QueryChild::Path(&path[1..]),
+                        self.children.get_mut(&path[0]).unwrap().as_mut().unwrap().frame_query(
+                            &FrameQuery::Path(&path[1..]),
                             callback
                         ) ?;
                     }
                     else {
                         let child = self.children.get_mut(&path[0]).unwrap().as_mut().unwrap();
                         if let Some(callback) = callback {
-                            callback(QueryInner::Child(child));
+                            callback(FrameResultInner::Child(child));
                         }
                         else {
-                            return QueryResult::child(child);
+                            return FrameResult::child(child);
                         }
                     }
                 }
                 
             }
-            QueryChild::Uid(_) => {
+            FrameQuery::Uid(_) => {
                 for child in self.children.values_mut() {
-                    child.query_child(query, callback) ?
+                    child.frame_query(query, callback) ?
                 }
             }
         }
-        QueryResult::NotFound
+        FrameResult::NotFound
     }
 }
 
@@ -261,9 +267,16 @@ enum DrawState {
 
 impl Frame {
     
-    pub fn child<T: 'static + FrameComponent>(&mut self, path: &[LiveId]) -> Option<&mut T> {
+    pub fn by_path<T: 'static + FrameComponent>(&mut self, path: &[LiveId]) -> Option<&mut T> {
+        if let FrameResult::Found(FrameResultInner::Child(child)) = self.frame_query(&FrameQuery::Path(path), &mut None) {
+            return child.cast_mut::<T>()
+        }
+        None
+    }
+    
+    pub fn by_type<T: 'static + FrameComponent>(&mut self) -> Option<&mut T> {
         
-        if let QueryResult::Found(QueryInner::Child(child)) = self.query_child(&QueryChild::Path(path), &mut None) {
+        if let FrameResult::Found(FrameResultInner::Child(child)) = self.frame_query(&FrameQuery::TypeId(TypeId::of::<T>()), &mut None) {
             return child.cast_mut::<T>()
         }
         None

@@ -87,12 +87,20 @@ impl AudioComponent for Mixer {
         })
     }
     
-    fn handle_event_with_fn(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
         for input in self.inputs.values_mut() {
             if let Some(input) = input.as_mut() {
-                input.handle_event_with_fn(cx, event, dispatch_action)
+                input.handle_event(cx, event, dispatch_action)
             }
         }
     }
+
+    fn audio_query(&mut self, query: &AudioQuery, callback: &mut Option<&mut dyn FnMut(&mut Box<dyn AudioComponent >)>) -> AudioResult {
+        for input in self.inputs.values_mut(){
+            input.audio_query(query, callback)?;
+        }
+        AudioResult::NotFound
+    }
+
 }
 

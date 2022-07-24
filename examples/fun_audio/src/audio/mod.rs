@@ -6,7 +6,7 @@ pub mod basic_synth;
 pub mod instrument;
 pub mod mixer;
 #[macro_use]
-mod audio_component;
+mod audio_traits;
 
 #[cfg(target_os = "macos")]
 pub mod audio_unit_effect;
@@ -14,7 +14,7 @@ pub mod audio_unit_effect;
 pub mod audio_unit_instrument;
 
 pub use audio_graph::*;
-pub use audio_component::*;
+pub use audio_traits::*;
 pub use audio_component_factory;
 
 pub fn live_register(cx:&mut Cx){
