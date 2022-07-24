@@ -254,8 +254,6 @@ export class WasmWebBrowser extends WasmBridge {
             this.do_wasm_pump();
         }
         web_socket.onmessage = e => {
-            // ok send the binary message
-            console.log("Websocket message incoming");
             this.to_wasm.ToWasmWebSocketMessage({
                 web_socket_id,
                 data: e.data
@@ -263,9 +261,7 @@ export class WasmWebBrowser extends WasmBridge {
             this.do_wasm_pump();
         }
         web_socket.onopen = e => {
-            console.log("Websocket open");
             for (let item of web_socket._queue) {
-                console.log("Websocket sending queue");
                 web_socket.send(item);
             }
             web_socket._queue.length = 0;
@@ -278,11 +274,9 @@ export class WasmWebBrowser extends WasmBridge {
     FromWasmWebSocketSend(args) {
         let web_socket = this.web_sockets[args.web_socket_id];
         if (web_socket.readyState == 0) {
-            console.log("Sending websocket queue", web_socket)
             web_socket._queue.push(this.clone_data_u8(args.data))
         }
         else {
-            console.log("Sending websocket direct", web_socket)
             web_socket.send(this.view_data_u8(args.data));
         }
         this.free_data_u8(args.data);
