@@ -14,7 +14,6 @@ use {
 
 
 #[derive(Live, LiveHook, LiveAtomic)]
-#[repr(u32)]
 pub enum OscType {
     DPWSawPulse,
     TrivialSaw,
@@ -24,7 +23,6 @@ pub enum OscType {
 }
 
 #[derive(Live, LiveHook, PartialEq, LiveAtomic)]
-#[repr(u32)]
 pub enum FilterType {
     #[pick] Lowpass,
     Highpass,
