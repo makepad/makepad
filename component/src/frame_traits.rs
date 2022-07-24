@@ -405,7 +405,7 @@ pub struct FrameUid(u64);
 pub struct FrameActionItem {
     pub uids: Vec<FrameUid>,
     pub ids: Vec<LiveId>,
-    pub data_bind: Vec<LiveNode>,
+    pub bind_apply: Vec<LiveNode>,
     pub action: Box<dyn FrameAction>
 }
 
@@ -414,7 +414,16 @@ impl FrameActionItem {
         Self{
             uids: Vec::new(),
             ids: Vec::new(),
-            data_bind: Vec::new(),
+            bind_apply: Vec::new(),
+            action
+        }
+    }
+    
+    pub fn from_bind_apply(bind_apply: Vec<LiveNode>, action: Box<dyn FrameAction>) -> Self {
+        Self{
+            uids: Vec::new(),
+            ids: Vec::new(),
+            bind_apply,
             action
         }
     }
@@ -427,15 +436,15 @@ impl FrameActionItem {
         self.ids[0]
     }
     
-    pub fn has_data_bind(&self)->bool{
-        self.data_bind.len()>0
+    pub fn has_bind_apply(&self)->bool{
+        self.bind_apply.len()>0
     }
     
     pub fn mark(mut self, id: LiveId, uid: FrameUid) -> Self {
         self.uids.push(uid);
         self.ids.push(id);
         Self {
-            data_bind: self.data_bind,
+            bind_apply: self.bind_apply,
             uids: self.uids,
             ids: self.ids,
             action:self.action
