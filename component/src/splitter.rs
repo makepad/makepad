@@ -158,9 +158,9 @@ impl FrameComponent for Splitter {
         self.walk
     }
     
-    fn query_child(&mut self, query: &QueryChild, callback: &mut Option<&mut dyn FnMut(QueryInner)>) -> QueryResult{
-        self.a.query_child(query, callback)?;
-        self.b.query_child(query, callback)
+    fn frame_query(&mut self, query: &FrameQuery, callback: &mut Option<&mut dyn FnMut(FrameResultInner)>) -> FrameResult {
+        self.a.frame_query(query, callback)?;
+        self.b.frame_query(query, callback)
     }
     
     fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk, _self_uid: FrameUid) ->DrawResult{

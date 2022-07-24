@@ -104,9 +104,9 @@ impl FrameComponent for FoldHeader {
     
     fn get_walk(&self) -> Walk {self.walk}
     
-    fn query_child(&mut self, query: &QueryChild, callback: &mut Option<&mut dyn FnMut(QueryInner)>) -> QueryResult{
-        self.header.query_child(query, callback)?;
-        self.body.query_child(query, callback)
+    fn frame_query(&mut self, query: &FrameQuery, callback: &mut Option<&mut dyn FnMut(FrameResultInner)>) -> FrameResult {
+        self.header.frame_query(query, callback)?;
+        self.body.frame_query(query, callback)
     }
     
     fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk, _self_uid: FrameUid) -> DrawResult {

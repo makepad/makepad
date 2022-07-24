@@ -105,11 +105,18 @@ impl AudioComponent for Instrument {
         })
     }
     
-    fn handle_event_with_fn(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
         for step in self.steps.values_mut(){
             if let Some(step) = step.as_mut(){
-                step.handle_event_with_fn(cx, event, dispatch_action)
+                step.handle_event(cx, event, dispatch_action)
             }
         }
+    }
+    
+      fn audio_query(&mut self, query: &AudioQuery, callback: &mut Option<&mut dyn FnMut(&mut Box<dyn AudioComponent >)>) -> AudioResult {
+        for input in self.steps.values_mut(){
+            input.audio_query(query, callback)?;
+        }
+        AudioResult::NotFound
     }
 }

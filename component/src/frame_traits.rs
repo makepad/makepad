@@ -1,8 +1,8 @@
 use {
     std::ops::{ControlFlow, Try, FromResidual},
-    std::any::TypeId,
     crate::makepad_platform::*,
     std::collections::BTreeMap,
+    std::any::TypeId
 };
 pub use crate::frame_component;
 
@@ -25,12 +25,12 @@ pub trait FrameComponent: LiveApply {
         actions
     }
     
-    fn query_child(
+    fn frame_query(
         &mut self,
-        _query: &QueryChild,
-        _callback: &mut Option<&mut dyn FnMut(QueryInner)>
-    ) -> QueryResult {
-        return QueryResult::NotFound
+        _query: &FrameQuery,
+        _callback: &mut Option<&mut dyn FnMut(FrameResultInner)>
+    ) -> FrameResult {
+        return FrameResult::NotFound
     }
     
     fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk, self_uid: FrameUid) -> DrawResult;
@@ -67,8 +67,8 @@ pub trait FrameComponent: LiveApply {
                 return self.create_child(cx, live_ptr, CreateAt::Template, new_id, nodes)
             }
         }
-        if let QueryResult::Found(QueryInner::Template(child, live_ptr)) =
-        self.query_child(&QueryChild::Path(path), &mut None) {
+        if let FrameResult::Found(FrameResultInner::Template(child, live_ptr)) =
+        self.frame_query(&FrameQuery::Path(path), &mut None) {
             child.create_child(cx, live_ptr, CreateAt::Template, new_id, nodes)
         }
         else {
@@ -92,42 +92,43 @@ pub enum CreateAt {
     End
 }
 
-pub enum QueryChild<'a> {
+pub enum FrameQuery<'a> {
+    TypeId(std::any::TypeId),
     Path(&'a [LiveId]),
     Uid(FrameUid),
 }
 
-pub enum QueryInner<'a> {
+pub enum FrameResultInner<'a> {
     Child(&'a mut Box<dyn FrameComponent >),
     Template(&'a mut Box<dyn FrameComponent >, LivePtr)
 }
 
-pub enum QueryResult<'a> {
+pub enum FrameResult<'a> {
     NotFound,
-    Found(QueryInner<'a>)
+    Found(FrameResultInner<'a>)
 }
 
-impl<'a> QueryResult<'a> {
+impl<'a> FrameResult<'a> {
     pub fn child(value: &'a mut Box<dyn FrameComponent >) -> Self {
-        Self::Found(QueryInner::Child(value))
+        Self::Found(FrameResultInner::Child(value))
     }
     pub fn template(value: &'a mut Box<dyn FrameComponent >, live_ptr: LivePtr) -> Self {
-        Self::Found(QueryInner::Template(value, live_ptr))
+        Self::Found(FrameResultInner::Template(value, live_ptr))
     }
 }
 
-impl<'a> FromResidual for QueryResult<'a> {
-    fn from_residual(residual: QueryInner<'a>) -> Self {
+impl<'a> FromResidual for FrameResult<'a> {
+    fn from_residual(residual: FrameResultInner<'a>) -> Self {
         Self::Found(residual)
     }
 }
 
-impl<'a> Try for QueryResult<'a> {
+impl<'a> Try for FrameResult<'a> {
     type Output = ();
-    type Residual = QueryInner<'a>;
+    type Residual = FrameResultInner<'a>;
     
     fn from_output(_: Self::Output) -> Self {
-        QueryResult::NotFound
+        FrameResult::NotFound
     }
     
     fn branch(self) -> ControlFlow<Self::Residual,
@@ -251,34 +252,44 @@ impl FrameRef {
         Vec::new()
     }
     
-    pub fn query_child(&mut self, query: &QueryChild, callback: &mut Option<&mut dyn FnMut(QueryInner)>) -> QueryResult {
+    pub fn frame_query(&mut self, query: &FrameQuery, callback: &mut Option<&mut dyn FnMut(FrameResultInner)>) -> FrameResult {
         if let Some(inner) = &mut self.0 {
             match query {
-                QueryChild::Uid(uid) => {
-                    if *uid == FrameUid(&*inner as *const _ as u64) {
+                FrameQuery::TypeId(id) => {
+                    if inner.type_id() == *id{
                         if let Some(callback) = callback {
-                            callback(QueryInner::Child(inner))
+                            callback(FrameResultInner::Child(inner))
                         }
                         else {
-                            return QueryResult::child(inner)
+                            return FrameResult::child(inner)
+                        }
+                    }
+                },
+                FrameQuery::Uid(uid) => {
+                    if *uid == FrameUid(&*inner as *const _ as u64) {
+                        if let Some(callback) = callback {
+                            callback(FrameResultInner::Child(inner))
+                        }
+                        else {
+                            return FrameResult::child(inner)
                         }
                     }
                 }
-                QueryChild::Path(path) => if path.len() == 1{
+                FrameQuery::Path(path) => if path.len() == 1{
                     if let Some(live_ptr) = inner.query_template(path[0]) {
                         if let Some(callback) = callback {
-                            callback(QueryInner::Template(inner, live_ptr))
+                            callback(FrameResultInner::Template(inner, live_ptr))
                         }
                         else {
-                            return QueryResult::template(inner, live_ptr)
+                            return FrameResult::template(inner, live_ptr)
                         }
                     }
                 }
             }
-            inner.query_child(query, callback)
+            inner.frame_query(query, callback)
         }
         else {
-            QueryResult::NotFound
+            FrameResult::NotFound
         }
     }
     

@@ -3,7 +3,8 @@ use {
         audio::*,
         makepad_platform::*,
     },
-    std::sync::{Arc, Mutex}
+    std::any::TypeId,
+    std::sync::{Arc, Mutex},
 };
 
 live_register!{
@@ -53,6 +54,13 @@ struct Node {
 
 impl AudioGraph {
     
+     pub fn by_type<T: 'static + AudioComponent>(&mut self) -> Option<&mut T> {
+        if let AudioResult::Found(child) = self.root.audio_query(&AudioQuery::TypeId(TypeId::of::<T>()), &mut None) {
+            return child.cast_mut::<T>()
+        }
+        None
+    }
+    
     pub fn send_midi_1_data(&self, data: Midi1Data) {
         self.from_ui.send(FromUI::Midi1Data(data)).unwrap();
     }
@@ -90,13 +98,13 @@ impl AudioGraph {
         });
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event)->Vec<AudioGraphAction> {
-        let mut a = Vec::new(); self.handle_event_with_fn(cx, event, &mut |_,ac| a.push(ac)); a
+    pub fn handle_event_iter(&mut self, cx: &mut Cx, event: &mut Event)->Vec<AudioGraphAction> {
+        let mut a = Vec::new(); self.handle_event(cx, event, &mut |_,ac| a.push(ac)); a
     }
     
-    pub fn handle_event_with_fn(&mut self, cx: &mut Cx, event: &mut Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioGraphAction)) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioGraphAction)) {
         if let Some(root) = self.root.as_mut() {
-            root.handle_event_with_fn(cx, event, &mut | _cx, _action | {
+            root.handle_event(cx, event, &mut | _cx, _action | {
             });
         }
         
