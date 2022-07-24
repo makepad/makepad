@@ -287,11 +287,7 @@ impl App {
             Event::MidiInputList(_inputs) => {
             }
             Event::Construct => {
-                
-                /*if let Some(instrument) = self.frame.template(cx, ids!(instrument), id!(my_instrument), live!{
-                    
-                })*/
-                
+
                 if let Some(instrument) = self.frame.template(cx, ids!(instrument), id!(my_instrument), live!{
                     header: {label = {text: "Instrument header"}}
                 }) {
