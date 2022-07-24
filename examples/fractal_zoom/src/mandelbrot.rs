@@ -643,7 +643,7 @@ impl Mandelbrot {
     }
     
     // draw the mandelbrot view
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) -> ViewRedraw {
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) -> ViewRedrawing {
         // checks if our view is dirty, exits here if its clean
         self.view.begin(cx, walk, Layout::flow_right()) ?;
         
@@ -675,6 +675,6 @@ impl Mandelbrot {
         
         self.view.end(cx);
         
-        Ok(())
+        ViewRedrawing::Yes
     }
 }

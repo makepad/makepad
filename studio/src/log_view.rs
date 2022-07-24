@@ -55,7 +55,7 @@ impl LogView {
     pub fn draw(&mut self, cx: &mut Cx2d, state: &EditorState) {
         let mut file = String::new();
         let mut body = String::new();
-        if self.log_list.begin(cx).is_ok(){
+        if self.log_list.begin(cx).is_redrawing(){
             for (index, msg) in state.messages.iter().enumerate(){
                 if self.log_list.should_node_draw(cx){
                     file.clear();

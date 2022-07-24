@@ -73,14 +73,15 @@ impl LiveHook for TabBar {
 }
 
 impl TabBar {
-    pub fn begin(&mut self, cx: &mut Cx2d, selected_tab: Option<usize>) -> Result<(), ()> {
+    pub fn begin(&mut self, cx: &mut Cx2d, selected_tab: Option<usize>) -> ViewRedrawing {
         self.selected_tab = selected_tab;
         //if selected_tab.is_some(){
         //    self.selected_tab_id = None
         // }
         self.scroll_view.begin(cx, self.walk, Layout::flow_right()) ?;
         self.tab_order.clear();
-        Ok(())
+
+        ViewRedrawing::Yes
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
