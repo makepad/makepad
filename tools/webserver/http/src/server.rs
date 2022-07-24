@@ -134,7 +134,7 @@ fn handle_post(http_server: HttpServer, mut tcp_stream: TcpStream, headers: Http
 
 fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers: HttpHeaders, web_socket_id: u64) {
     let upgrade_response = WebSocket::create_upgrade_response(headers.sec_websocket_key.as_ref().unwrap());
-    
+    println!("GOT WEBSOCKET UPGRADE");
     write_bytes_to_tcp_stream_no_error(&mut tcp_stream, upgrade_response.as_bytes());
     
     let mut write_tcp_stream = tcp_stream.try_clone().unwrap();
@@ -189,7 +189,7 @@ fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers
                             println!("Websocket text");
                         }
                         Ok(WebSocketMessage::Binary(data)) => {
-                            //println!("Websocket binary data {}", data.len());
+                            println!("Websocket binary data {}", data.len());
                             if http_server.request.send(HttpRequest::BinaryMessage {
                                 web_socket_id,
                                 response_sender: tx_socket.clone(),
