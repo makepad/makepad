@@ -330,7 +330,7 @@ impl App {
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
-        if self.window.begin(cx).is_err() {
+        if self.window.begin(cx).not_redrawing() {
             return;
         }
 
