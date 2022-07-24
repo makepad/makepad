@@ -1,4 +1,4 @@
-
+#![feature(try_trait_v2)]
 
 pub mod platform;
 
@@ -172,7 +172,7 @@ pub use {
             view::{
                 View,
                 ManyInstances,
-                ViewRedraw
+                ViewRedrawing
             },
             cx_2d::{
                 Cx2d
