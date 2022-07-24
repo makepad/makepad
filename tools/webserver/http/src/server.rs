@@ -189,7 +189,6 @@ fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers
                             println!("Websocket text");
                         }
                         Ok(WebSocketMessage::Binary(data)) => {
-                            println!("Websocket binary data {}", data.len());
                             if http_server.request.send(HttpRequest::BinaryMessage {
                                 web_socket_id,
                                 response_sender: tx_socket.clone(),
@@ -200,7 +199,6 @@ fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers
                             };
                         },
                         Ok(WebSocketMessage::Close) => {
-                            println!("Websocket close message");
                             let _ = tcp_stream.shutdown(Shutdown::Both);
                         }
                         Err(e) => {
