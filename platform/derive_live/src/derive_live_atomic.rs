@@ -168,7 +168,6 @@ fn derive_live_atomic_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder
         tb.add("    }");
         tb.add("}");
         
-        tb.eprint();
         Ok(())
     }
     else {

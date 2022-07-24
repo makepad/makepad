@@ -68,7 +68,7 @@ impl ViewRedrawing {
 }
 
 impl FromResidual for ViewRedrawing {
-    fn from_residual(residual: ()) -> Self {
+    fn from_residual(_: ()) -> Self {
         Self::No
     }
 }

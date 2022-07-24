@@ -378,6 +378,10 @@ export class WasmWebBrowser extends WasmBridge {
     }
     
     FromWasmStartMidiInput() {
+        if(!navigator.requestMIDIAccess){
+            console.log("Browser does not support midi access");
+            return
+        }
         navigator.requestMIDIAccess().then((midi) => {
             
             let reload_midi_ports = () => {
