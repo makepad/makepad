@@ -22,11 +22,16 @@ Note: Our Linux and Windows platform layers are currently WIP and don't run. Bui
 In order to compile makepad applications you need to first install Rust.\
 [https://www.rust-lang.org/tools/install](https://www.rust-lang.org/tools/install)
 
+Note that since we use new nightly features, makepad needs to compile with a specific nightly beacuse these API's break all the time.
+
 After installing rust, install the nightly toolchain\
 ```rustup toolchain install nightly-2022-07-09```
 
 Then to build the webassembly versions you need to install the wasm32 toolchain\
-```rustup target add wasm32-unknown-unknown --toolchain nightly-2022-07-09```
+```rustup target add wasm32-unknown-unknown --toolchain nightly-2022-07-09```\
+
+Then add the rust std library source for compiling the threads and wasm features\
+```rustup component add rust-src --toolchain nightly-2022-07-09```
 
 ## Makepad Framework 
 Open source UI framework that you can use to build UI's for web and native applications. 
