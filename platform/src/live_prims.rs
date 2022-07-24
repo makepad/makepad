@@ -26,6 +26,11 @@ macro_rules!live_primitive {
         impl ToLiveValue for $ ty {
             $ to_live_value
         }
+        impl LiveRead for $ ty {
+            fn live_read(&self, id:LiveId, out:&mut Vec<LiveNode>){
+                out.push(LiveNode::id_value(id, self.to_live_value()));
+            }
+        }
         impl LiveApply for $ ty {
             //fn type_id(&self) -> TypeId {
             //    TypeId::of::< $ ty>()

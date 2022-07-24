@@ -91,8 +91,8 @@ impl Cx {
                                 keep_alive_counter -= 1;
                                 self.repaint_windows();
                                 paint_dirty = true;
-                                continue;
                             }
+                            continue;
                         }
                     }
                     _=>()
@@ -327,6 +327,7 @@ impl Cx {
     }
 
     fn handle_core_midi_signals(&mut self, se:&SignalEvent){
+        
         if self.platform.midi_access.is_some(){
             if se.signals.contains(&id!(CoreMidiInputData).into()){
                 let out_data = if let Ok(data) = self.platform.midi_input_data.lock(){
@@ -396,6 +397,7 @@ impl CxPlatformApi for Cx{
 
     fn start_midi_input(&mut self){
         let midi_input_data = self.platform.midi_input_data.clone();
+        
         if self.platform.midi_access.is_none(){
             if let Ok(ma) = CoreMidiAccess::new_midi_1_input(
                 move |datas|{

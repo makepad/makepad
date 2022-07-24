@@ -38,11 +38,11 @@ impl FrameComponent for Label {
         self.walk
     }
     
-    fn draw_component(&mut self, cx: &mut Cx2d, walk:Walk, self_uid:FrameUid)->DrawResult{
+    fn draw_component(&mut self, cx: &mut Cx2d, walk:Walk, self_uid:FrameUid)->FrameDraw{
         let mut lines = self.text.split("\\n");
         for line in lines{
             self.label_text.draw_walk(cx, walk, self.align, line);
         }
-        DrawResult::Done
+        FrameDraw::Done
     }
 }

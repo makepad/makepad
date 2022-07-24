@@ -1,6 +1,7 @@
 use {
     crate::{
         audio::*,
+        makepad_platform::thread::*,
         makepad_component::*,
         makepad_platform::*
     },
@@ -15,7 +16,7 @@ live_register!{
 enum FromUI {}
 
 #[derive(Live)]
-#[live_register(audio_component_factory!(Instrument))]
+#[live_register(audio_component!(Instrument))]
 struct Instrument {
     #[rust] step_order: Vec<LiveId>,
     #[rust] steps: ComponentMap<LiveId, AudioComponentRef>,

@@ -11,6 +11,8 @@ pub use {
     }
 };
 
+pub use crate::live_cx::LiveBody;
+
 pub trait LiveHook {
     fn apply_value_unknown(&mut self, cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         if !nodes[index].id.is_capitalised() && !nodes[index].origin.node_has_prefix() {
@@ -139,13 +141,8 @@ pub trait LiveApply: LiveHook {
     }
 }
 
-pub struct LiveBody {
-    pub file: String,
-    pub module_path: String,
-    pub line: usize,
-    pub column: usize,
-    pub code: String,
-    pub live_type_infos: Vec<LiveTypeInfo>
+pub trait LiveRead{
+    fn live_read(&self, id:LiveId, out:&mut Vec<LiveNode>);
 }
 
 
@@ -194,7 +191,7 @@ impl<T> LiveApply for Option<T> where T: LiveApply + LiveNew + 'static {
             index
         }
     }
-}
+} 
 
 impl<T> LiveNew for Option<T> where T: LiveApply + LiveNew + 'static{
     fn new(_cx: &mut Cx) -> Self {

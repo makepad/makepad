@@ -14,7 +14,7 @@ pub mod live_traits;
 pub mod live_cx;
 pub mod live_atomic;
 
-mod thread;
+pub mod thread;
 mod event;
 mod area;
 mod font;
@@ -195,26 +195,19 @@ pub use {
             PassClearColor,
             PassClearDepth
         },
-        thread::{
-            FromUIReceiver,
-            FromUISender,
-            ToUISender,
-            ToUIReceiver,
-            ThreadPool
-        },
         texture::{
             Texture,
             TextureFormat,
             TextureDesc
         },
         live_traits::{
+            LiveBody,
             LiveNew,
             LiveApply,
             LiveHook,
             LiveApplyValue,
             ToLiveValue,
             ApplyFrom,
-            LiveBody,
         },
         state::{
             Ease,

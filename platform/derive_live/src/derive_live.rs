@@ -190,7 +190,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("            match nodes[index].id {");
         
         for field in &fields {
-            if field.attrs[0].name == "live" || field.attrs[0].name == "into"{
+            if field.attrs[0].name == "live"{
                 tb.add("        LiveId(").suf_u64(LiveId::from_str(&field.name).unwrap().0).add(")=>self.").ident(&field.name).add(".apply(cx, apply_from, index, nodes),");
             }
         }

@@ -10,6 +10,10 @@ use crate::derive_live_atomic::*;
 mod derive_live_hook;
 use crate::derive_live_hook::*;
 
+mod derive_live_read;
+use crate::derive_live_read::*;
+
+
 mod live_register_macro;
 use crate::live_register_macro::*;
 
@@ -39,6 +43,11 @@ pub fn derive_live(input: TokenStream) -> TokenStream {
 #[proc_macro_derive(LiveHook)]
 pub fn derive_live_apply(input: TokenStream) -> TokenStream {
     derive_live_hook_impl(input)
+}
+
+#[proc_macro_derive(LiveRead)]
+pub fn derive_live_read(input: TokenStream) -> TokenStream {
+    derive_live_read_impl(input)
 }
 
 #[proc_macro]

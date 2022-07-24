@@ -15,7 +15,7 @@ pub mod audio_unit_instrument;
 
 pub use audio_graph::*;
 pub use audio_traits::*;
-pub use audio_component_factory;
+pub use audio_component;
 
 pub fn live_register(cx:&mut Cx){
     #[cfg(target_os = "macos")]

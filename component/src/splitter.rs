@@ -139,11 +139,11 @@ impl FrameComponent for Splitter {
         &mut self,
         cx: &mut Cx,
         event: &mut Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, FramePath, Box<dyn FrameAction>)
+        dispatch_action: &mut dyn FnMut(&mut Cx, FrameActionItem)
     ) {
         let mut redraw = false;
         self.handle_event(cx, event, &mut | cx, action | {
-            dispatch_action(cx, FramePath::empty(), action.into());
+            dispatch_action(cx, FrameActionItem::from_action(action.into()));
             redraw = true;
         });
         self.a.handle_component_event(cx, event, dispatch_action);
@@ -158,12 +158,12 @@ impl FrameComponent for Splitter {
         self.walk
     }
     
-    fn frame_query(&mut self, query: &FrameQuery, callback: &mut Option<&mut dyn FnMut(FrameResultInner)>) -> FrameResult {
+    fn frame_query(&mut self, query: &FrameQuery, callback: &mut Option<FrameQueryCb>) -> FrameResult {
         self.a.frame_query(query, callback)?;
         self.b.frame_query(query, callback)
     }
     
-    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk, _self_uid: FrameUid) ->DrawResult{
+    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk, _self_uid: FrameUid) ->FrameDraw{
         if self.draw_state.begin(cx, DrawState::DrawA) {
             self.begin(cx, walk);
         }
@@ -180,7 +180,7 @@ impl FrameComponent for Splitter {
             self.end(cx);
             self.draw_state.end();
         }
-        DrawResult::Done
+        FrameDraw::Done
     }
 }
 
