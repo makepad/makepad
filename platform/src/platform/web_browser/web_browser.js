@@ -82,7 +82,7 @@ export class WasmWebBrowser extends WasmBridge {
     
     // from_wasm dispatch_on_app interface
     
-    js_post_signal(signal_hi, signal_lo) {
+    post_signal_to_wasm(signal_hi, signal_lo){
         this.signals.push({signal_hi, signal_lo});
         if (this.signal_timeout === null) {
             this.signal_timeout = setTimeout(_ => {
@@ -93,6 +93,10 @@ export class WasmWebBrowser extends WasmBridge {
                 this.do_wasm_pump();
             }, 0)
         }
+    }
+    
+    js_post_signal(signal_hi, signal_lo) {
+        this.post_signal_to_wasm(signal_hi, signal_lo);
     }
     
     FromWasmLoadDeps(args) {
@@ -326,17 +330,7 @@ export class WasmWebBrowser extends WasmBridge {
         worker.postMessage(this.alloc_thread_stack(args.closure_ptr));
         
         worker.addEventListener("message", (e) => {
-            // this one collects signals to stop swamping the main thread
-            this.signals.push(e.data);
-            if(this.signal_timeout === null){
-                this.signal_timeout = setTimeout(_=>{
-                    this.signal_timeout = null;
-                    let signals = this.signals;
-                    this.signals = [];
-                    this.to_wasm.ToWasmSignal({signals})
-                    this.do_wasm_pump();
-                },1)
-            }
+            this.post_signal_to_wasm(e.data.signal_hi, e.data.signal_lo);
         })
         
         this.workers.push(worker);

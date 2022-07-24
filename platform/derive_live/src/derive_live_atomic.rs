@@ -153,7 +153,7 @@ fn derive_live_atomic_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder
         
         tb.add("        match(self){");
         for (index,item) in items.iter().enumerate() {
-            tb.add("        ").ident(&item.name).add("=>").unsuf_usize(index).add(",");
+            tb.add("        Self::").ident(&item.name).add("=>").unsuf_usize(index).add(",");
         }
         tb.add("        }");
         tb.add("    }");
@@ -168,7 +168,7 @@ fn derive_live_atomic_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder
         tb.add("    }");
         tb.add("}");
         
-        //tb.eprint();
+        tb.eprint();
         Ok(())
     }
     else {
