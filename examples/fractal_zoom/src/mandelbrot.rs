@@ -6,6 +6,7 @@ use {
     crate::{
         makepad_platform::*,
         makepad_component::*,
+        makepad_platform::thread::*
     }
 };
 // include the SIMD path if we support it

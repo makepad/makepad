@@ -51,10 +51,10 @@ pub use crate::{
     scroll_bar::{ScrollBar},
     frame::{Frame},
     frame_traits::{
-        DrawResult,
+        FrameDraw,
         FrameUid,
         CreateAt,
-        FramePath,
+        FrameActionItem,
         FrameRef,
         FrameComponent,
         FrameComponentRegistry,

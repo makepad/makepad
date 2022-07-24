@@ -1,13 +1,18 @@
 #![feature(try_trait_v2)]
-
 pub use makepad_component::{self, *};
-pub use makepad_platform::{self, *, audio::*, midi::*};
+pub use makepad_platform::{
+    self,
+    *,
+    audio::*,
+    midi::*,
+    live_atomic::*,
+};
+
 mod piano;
 mod audio;
 use crate::piano::*;
 use crate::audio::*;
 use crate::audio::iron_fish::*;
-
 
 live_register!{
     use AudioComponent::*;
@@ -15,7 +20,7 @@ live_register!{
     use makepad_component::theme::*;
     use makepad_component::frame::*;
     use makepad_platform::shader::std::*;
-     
+    
     MainHeader: FoldHeader {
         walk: {
         }
@@ -79,6 +84,49 @@ live_register!{
                 width: Fill
                 height: 2
                 bg: {color: #000a, color2: #0000, no_v_scroll: true}
+            }
+        }
+    }
+    
+    InstrumentSlider: Rect {
+        bg: {color: #4}
+        width: Fill
+        height: Fit
+        layout: {flow: Right, padding: 8, spacing: 5, align: {y: 0.5}}
+        slider = Slider {
+            label: "CutOff1",
+            bind: "",
+            height: 22
+        }
+    }
+    
+    IronFishUI: InstrumentHeader {
+        header: {
+            layout: {align: {y: 0.5}}
+            fold_button = FoldButton {}
+            swatch = Circle {
+                width: 10,
+                height: 10
+                bg: {color: #f00}
+            }
+            label = Label {text: "IronFish"}
+        }
+        body: Frame {
+            layout: {flow: Down}
+            stack = LayerHeader {
+                header: {
+                    fold_button = FoldButton {}
+                    label = Label {text: "Stack item", walk: {width: Fill}}
+                }
+                body: Frame {
+                    layout: {flow: Down}
+                    bg: {color: #f00},
+                    width: Fill
+                    height: Fit
+                    InstrumentSlider {
+                        slider = {label: "MyLabel"}
+                    }
+                }
             }
         }
     }
@@ -155,55 +203,7 @@ live_register!{
                         }
                         body: Frame {
                             layout: {flow: Down}
-                            instrument = ? InstrumentHeader {
-                                header: {
-                                    layout: {align: {y: 0.5}}
-                                    fold_button = FoldButton {}
-                                    swatch = Circle {
-                                        width: 10,
-                                        height: 10
-                                        bg: {color: #f00}
-                                    }
-                                    label = Label {text: "Instrument"}
-                                    //Rect {bg: {color: #f00}, width: Fill, height: 2}
-                                }
-                                body: Frame {
-                                    layout: {flow: Down}
-                                    stack = ? LayerHeader {
-                                        header: {
-                                            fold_button = FoldButton {}
-                                            label = Label {text: "Stack item", walk: {width: Fill}}
-                                            range = Frame {
-                                                width: Fit
-                                                user_draw: false,
-                                                layout: {flow: Right, spacing: 4}
-                                                Label {text: "Start"}
-                                                Label {text: "D#3"}
-                                                Label {text: "-"}
-                                                Label {text: "End"}
-                                                mylabel = Label {text: "E-4"}
-                                            }
-                                        }
-                                        body: Frame {
-                                            layout: {flow: Down}
-                                            bg: {color: #f00},
-                                            width: Fill
-                                            height: Fit
-                                            Rect {
-                                                mouse_cursor: Default
-                                                bg: {color: #4}
-                                                width: Fill
-                                                height: Fit
-                                                layout: {flow: Right, padding: 8, spacing: 5, align: {y: 0.5}}
-                                                slider = Slider {
-                                                    label: "CutOff"
-                                                    height: 22
-                                                }
-                                            }
-                                        }
-                                    }
-                                }
-                            }
+                            instrument = IronFishUI {}
                         }
                     }
                 }
@@ -243,18 +243,17 @@ impl App {
         self.scroll_view.handle_event(cx, event);
         
         //let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
-        let _iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
+        let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
         
-        // ok we have ironfish. now what.
-        
-        
+        let mut nodes = Vec::new();
+        iron_fish.settings.live_read(LiveId(0), &mut nodes);
+        // alright we have a live node set. now what.
+        self.frame.data_bind_read(cx, &nodes);
+        // ok now, we need to call something like 'apply
         /*// lets fetch ironfish from the audiograph
-        
         self.frame.handle_data_out(iron_fish.thing);
         self.frame.handle_event_iter()
              iron_fish.handle_data_in(item);
-             
-        
         // in our nextframe event we can update our slider animation
         self.frame.apply_child(cx, id!(my_slider), live!{
             some_prop:(iron_fish.setting100.get())
@@ -293,7 +292,7 @@ impl App {
             Event::MidiInputList(_inputs) => {
             }
             Event::Construct => {
-
+                /*
                 if let Some(instrument) = self.frame.template(cx, ids!(instrument), id!(my_instrument), live!{
                     header: {label = {text: "Instrument header"}}
                 }) {
@@ -319,7 +318,7 @@ impl App {
                     instrument.template(cx, ids!(stack),id!(my_stack2),  live!{
                         header: {label = {text: "Synth value"}, range = {mylabel = {text: "WHEE"}}}
                     });
-                }
+                }*/
             }
             Event::KeyDown(ke) => {
                 if let KeyCode::F1 = ke.key_code {
@@ -339,8 +338,8 @@ impl App {
         if self.window.begin(cx).not_redrawing() {
             return;
         }
-
-        while self.frame.draw(cx).not_done( ) {
+        
+        while self.frame.draw(cx).not_done() {
         };
         
         self.window.end(cx);

@@ -68,7 +68,7 @@ impl FrameComponent for FoldHeader {
         &mut self,
         cx: &mut Cx,
         event: &mut Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, FramePath, Box<dyn FrameAction>)
+        dispatch_action: &mut dyn FnMut(&mut Cx, FrameActionItem)
     ) {
         if self.state_handle_event(cx, event).must_redraw() {
             if self.state.is_track_animating(cx, id!(open)) {
@@ -90,7 +90,7 @@ impl FrameComponent for FoldHeader {
                     _ => ()
                 }
             }
-            dispatch_action(cx, item.path, item.action)
+            dispatch_action(cx, item)
         }
         
         self.body.handle_component_event(cx, event, dispatch_action);
@@ -104,12 +104,12 @@ impl FrameComponent for FoldHeader {
     
     fn get_walk(&self) -> Walk {self.walk}
     
-    fn frame_query(&mut self, query: &FrameQuery, callback: &mut Option<&mut dyn FnMut(FrameResultInner)>) -> FrameResult {
+    fn frame_query(&mut self, query: &FrameQuery, callback: &mut Option<FrameQueryCb>) -> FrameResult {
         self.header.frame_query(query, callback)?;
         self.body.frame_query(query, callback)
     }
     
-    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk, _self_uid: FrameUid) -> DrawResult {
+    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk, _self_uid: FrameUid) -> FrameDraw {
         if self.draw_state.begin(cx, DrawState::DrawHeader) {
             cx.begin_turtle(walk, self.layout);
         }
@@ -119,7 +119,7 @@ impl FrameComponent for FoldHeader {
                 self.reverse_walk_opened(cx);
                 cx.end_turtle();
                 self.draw_state.end();
-                return DrawResult::Done
+                return FrameDraw::Done
             };
             self.draw_state.set(DrawState::DrawBody);
         }
@@ -131,7 +131,7 @@ impl FrameComponent for FoldHeader {
             cx.end_turtle();
             self.draw_state.end();
         }
-        DrawResult::Done
+        FrameDraw::Done
     }
 }
 

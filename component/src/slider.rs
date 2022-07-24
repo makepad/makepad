@@ -67,18 +67,18 @@ live_register!{
     
     Slider: {{Slider}} {
         
-        label_text:{
-            color:#9
+        label_text: {
+            color: #9
         }
         
-        label_walk:{
-            margin:{left:4.0}
-            width:Fill,
-            height:Fill
+        label_walk: {
+            margin: {left: 4.0}
+            width: Fill,
+            height: Fill
         }
         
-        label_align:{
-            y:0.5
+        label_align: {
+            y: 0.5
         }
         
         state: {
@@ -138,7 +138,7 @@ pub struct DrawSlider {
     slide_pos: f32
 }
 
-#[derive(Live, LiveHook, FrameComponent)]
+#[derive(Live, LiveHook)]
 #[live_register(frame_component!(Slider))]
 pub struct Slider {
     draw_slider: DrawSlider,
@@ -156,6 +156,8 @@ pub struct Slider {
     label_text: DrawText,
     label: String,
     
+    bind: String,
+    
     text_input: TextInput,
     
     #[rust] pub value: f32,
@@ -170,11 +172,29 @@ pub enum SliderAction {
     None
 }
 
+impl FrameComponent for Slider {
+    fn data_bind_read(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
+    }
+    
+    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, FrameActionItem)) {
+        self.handle_event(cx, event, &mut | cx, action | {
+            dispatch_action(cx, FrameActionItem::from_action(action.into()))
+        });
+    }
+    
+    fn get_walk(&self) -> Walk {self.walk}
+    
+    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk, _self_uid: FrameUid) -> FrameDraw {
+        self.draw_walk(cx, walk);
+        FrameDraw::Done
+    }
+}
+
 impl Slider {
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, SliderAction)){
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, SliderAction)) {
         self.state_handle_event(cx, event);
-        self.text_input.handle_event(cx, event, &mut |_,_|{});
+        self.text_input.handle_event(cx, event, &mut | _, _ | {});
         match event.hits(cx, self.draw_slider.area()) {
             HitEvent::KeyFocusLost(_) => {
                 self.animate_state(cx, ids!(focus.off));
@@ -234,7 +254,7 @@ impl Slider {
         self.draw_slider.slide_pos = self.value;
         self.draw_slider.begin(cx, walk, self.layout);
         // ok so. we wanna do a 'fill' here with the label and request a future
-        if let Some(dw) = cx.defer_walk(self.label_walk){
+        if let Some(dw) = cx.defer_walk(self.label_walk) {
             self.text_input.value = format!("{:.2}", self.value); //, (self.value*100.0) as usize);
             self.text_input.draw_walk(cx, self.text_input.get_walk());
             self.label_text.draw_walk(cx, dw.resolve(cx), self.label_align, &self.label);

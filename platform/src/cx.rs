@@ -22,9 +22,6 @@ use {
         makepad_shader_compiler::{
             ShaderRegistry
         },  
-        thread::{
-            ThreadPoolSender
-        },
         cx_draw_shaders::{
             CxDrawShaders
         },
@@ -147,7 +144,7 @@ pub struct Cx {
     
     pub command_settings: HashMap<Command, CxCommandSetting>,
     
-    pub thread_pool_senders: Vec<Arc<RefCell<Option<ThreadPoolSender>>>>,
+    pub thread_pool_senders: Vec<Arc<RefCell<Option<std::sync::mpsc::Sender<()>>>>>,
     
     pub platform: CxPlatform,
     // this cuts the compiletime of an end-user application in half

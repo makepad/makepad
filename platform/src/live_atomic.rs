@@ -76,6 +76,12 @@ impl<T> LiveNew for U32A<T> where T: LiveApply + LiveNew + 'static +  LiveAtomic
         T::live_type_info(_cx)
     }
 }
+
+impl<T> LiveRead for U32A<T> where T:LiveRead + LiveAtomicU32Enum{
+    fn live_read(&self, id:LiveId, out:&mut Vec<LiveNode>){
+        self.get().live_read(id, out);
+    }
+}
 /*
 impl Into<U32A<T>> for T where T: LiveApply + LiveNew + 'static + LiveAtomic + LiveAtomicU32Enum{
     fn into(self) -> U32A<T> {
@@ -105,11 +111,17 @@ impl<T> LiveNew for Arc<T> where T: LiveApply + LiveNew + 'static + LiveAtomic {
     }
 }
 
+impl<T> LiveRead for Arc<T> where T:LiveRead{
+    fn live_read(&self, id:LiveId, out:&mut Vec<LiveNode>){
+        (self as &T).live_read(id, out);
+    }
+}
 
 pub trait AtomicGetSet<T> {
     fn get(&self) -> T;
     fn set(&self, val: T);
 }
+
 
 
 // atomic f32
@@ -130,7 +142,7 @@ impl LiveAtomic for f32a {
     fn apply_atomic(&self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
         let mut val = 0.0f32;
         let index = val.apply(cx, apply_from, index, nodes);
-        self.0.store(val.to_bits(), Ordering::Relaxed);
+        self.set(val);
         index
     }
 }
@@ -148,7 +160,11 @@ impl Debug for f32a{
     }
 }
 
-
+impl LiveRead for f32a{
+    fn live_read(&self, id:LiveId, out:&mut Vec<LiveNode>){
+        self.get().live_read(id, out);
+    }
+}
 
 impl Into<f32a> for f32 {
     fn into(self) -> f32a {
@@ -220,6 +236,11 @@ impl LiveNew for u32a {
     }
 }
 
+impl LiveRead for u32a{
+    fn live_read(&self, id:LiveId, out:&mut Vec<LiveNode>){
+        self.get().live_read(id, out);
+    }
+}
 
 // atomic i64
 
@@ -273,5 +294,9 @@ impl LiveNew for i64a {
     }
 }
 
-
+impl LiveRead for i64a{
+    fn live_read(&self, id:LiveId, out:&mut Vec<LiveNode>){
+        self.get().live_read(id, out);
+    }
+}
 

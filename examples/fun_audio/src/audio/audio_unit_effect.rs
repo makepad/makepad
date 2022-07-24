@@ -2,6 +2,7 @@ use {
     crate::{
         audio::*,
         makepad_platform::platform::apple::audio_unit::*,
+        makepad_platform::thread::*,
         makepad_platform::*
     },
 };
@@ -21,7 +22,7 @@ enum FromUI {
 }
 
 #[derive(Live)]
-#[live_register(audio_component_factory!(AudioUnitEffect))]
+#[live_register(audio_component!(AudioUnitEffect))]
 struct AudioUnitEffect {
     plugin: String,
     preset_data: String,

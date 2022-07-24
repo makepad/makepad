@@ -10,60 +10,20 @@ use {
 
 // Audio component API
 
-pub enum AudioQuery {
-    TypeId(std::any::TypeId),
-}
 
-pub enum AudioResult<'a> {
-    NotFound,
-    Found(&'a mut Box<dyn AudioComponent>)
-}
-
-impl<'a> FromResidual for AudioResult<'a> {
-    fn from_residual(residual: &'a mut Box<dyn AudioComponent>) -> Self {
-        Self::Found(residual)
-    }
-}
-
-impl<'a> Try for AudioResult<'a> {
-    type Output = ();
-    type Residual = &'a mut Box<dyn AudioComponent>;
-    
-    fn from_output(_: Self::Output) -> Self {
-        AudioResult::NotFound
-    }
-    
-    fn branch(self) -> ControlFlow<Self::Residual,
-    Self::Output> {
-        match self {
-            Self::NotFound => ControlFlow::Continue(()),
-            Self::Found(c) => ControlFlow::Break(c)
-        }
-    }
-}
 
 pub enum AudioComponentAction {}
 pub trait AudioComponent: LiveApply {
     fn type_id(&self) -> LiveType where Self: 'static {LiveType::of::<Self>()}
     fn handle_event(&mut self, _cx: &mut Cx, event: &mut Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction));
-    fn get_graph_node(&mut self, cx:&mut Cx) -> Box<dyn AudioGraphNode + Send>;
-    
-    fn audio_query(
-        &mut self,
-        _query: &AudioQuery,
-        _callback: &mut Option<&mut dyn FnMut(&mut Box<dyn AudioComponent >)>
-    ) -> AudioResult {
-        return AudioResult::NotFound
-    }
+    fn get_graph_node(&mut self, cx: &mut Cx) -> Box<dyn AudioGraphNode + Send>;
+    fn audio_query(&mut self, _query: &AudioQuery, _callback: &mut Option<&mut dyn FnMut(&mut Box<dyn AudioComponent >)>) -> AudioResult;
 }
 
 pub trait AudioGraphNode {
     fn handle_midi_1_data(&mut self, data: Midi1Data);
     fn render_to_audio_buffer(&mut self, time: AudioTime, outputs: &mut [&mut AudioBuffer], inputs: &[&AudioBuffer]);
 }
-
-//pub type AudioGraphNodeRef = Option<Box<dyn AudioGraphNode + Send >>;
-
 
 generate_ref_cast_api!(AudioComponent);
 
@@ -98,7 +58,7 @@ impl AudioComponentRef {
         if let Some(inner) = &mut self.0 {
             match query {
                 AudioQuery::TypeId(id) => {
-                    if inner.type_id() == *id{
+                    if inner.type_id() == *id {
                         if let Some(callback) = callback {
                             callback(inner)
                         }
@@ -130,8 +90,8 @@ impl LiveApply for AudioComponentRef {
             }
             if let Some(component) = cx.live_registry.clone().borrow()
                 .components.get::<AudioComponentRegistry>().new(cx, live_type) {
-                 self.0 = Some(component);
-                 return self.0.as_mut().unwrap().apply(cx, from, index, nodes);
+                self.0 = Some(component);
+                return self.0.as_mut().unwrap().apply(cx, from, index, nodes);
             }
         }
         else if let Some(component) = &mut self.0 {
@@ -145,7 +105,7 @@ impl LiveNew for AudioComponentRef {
     fn new(_cx: &mut Cx) -> Self {
         Self (None)
     }
-
+    
     fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
         LiveTypeInfo {
             module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
@@ -156,8 +116,40 @@ impl LiveNew for AudioComponentRef {
     }
 }
 
+pub enum AudioQuery {
+    TypeId(std::any::TypeId),
+}
+
+pub enum AudioResult<'a> {
+    NotFound,
+    Found(&'a mut Box<dyn AudioComponent>)
+}
+
+impl<'a> FromResidual for AudioResult<'a> {
+    fn from_residual(residual: &'a mut Box<dyn AudioComponent>) -> Self {
+        Self::Found(residual)
+    }
+}
+
+impl<'a> Try for AudioResult<'a> {
+    type Output = ();
+    type Residual = &'a mut Box<dyn AudioComponent>;
+    
+    fn from_output(_: Self::Output) -> Self {
+        AudioResult::NotFound
+    }
+    
+    fn branch(self) -> ControlFlow<Self::Residual,
+    Self::Output> {
+        match self {
+            Self::NotFound => ControlFlow::Continue(()),
+            Self::Found(c) => ControlFlow::Break(c)
+        }
+    }
+}
+
 #[macro_export]
-macro_rules!audio_component_factory {
+macro_rules!audio_component {
     ( $ ty: ident) => {
         | cx: &mut Cx | {
             struct Factory();
