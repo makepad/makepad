@@ -290,7 +290,7 @@ impl AppInner {
             self.log_view.redraw(cx);
         }
         
-        self.log_view.handle_event_with_fn(cx, event,&mut |_,_|{});
+        self.log_view.handle_event(cx, event,&mut |_,_|{});
         self.shader_view.handle_event(cx, event);
         self.slides_view.handle_event(cx, event);
     }

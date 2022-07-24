@@ -4,7 +4,7 @@ use {
     },
     crate::{
         makepad_component::{
-            frame_component::*,
+            frame_traits::*,
             component_map::ComponentMap,
             fold_button::FoldButton,
             scroll_view::ScrollView,
@@ -244,7 +244,7 @@ impl LogListNode {
         self.fold_button.set_is_open(cx, is_open, animate);
     }
     
-    pub fn handle_event_with_fn(
+    pub fn handle_event(
         &mut self,
         cx: &mut Cx,
         event: &mut Event,
@@ -254,11 +254,9 @@ impl LogListNode {
             self.bg_quad.area().redraw(cx);
         }
         
-        self.fold_button.handle_event_with_fn(cx, event, &mut | _cx, _action | {
-            
-        });
+        self.fold_button.handle_event(cx, event, &mut |_,_|{});
         
-        self.link_button.handle_event(cx, event);
+        self.link_button.handle_event(cx, event, &mut |_,_|{});
         
         match event.hits(cx, self.bg_quad.area()) {
             HitEvent::FingerHover(f) => {
@@ -476,7 +474,7 @@ impl LogList {
         self.scroll_view.redraw(cx);
     }*/
     
-    pub fn handle_event_with_fn(
+    pub fn handle_event(
         &mut self,
         cx: &mut Cx,
         event: &mut Event,
@@ -488,7 +486,7 @@ impl LogList {
         
         let mut actions = Vec::new();
         for (node_id, node) in self.fold_nodes.iter_mut() {
-            node.handle_event_with_fn(cx, event, &mut | _, e | actions.push((*node_id, e)));
+            node.handle_event(cx, event, &mut | _, e | actions.push((*node_id, e)));
         }
         
         for (node_id, action) in actions {

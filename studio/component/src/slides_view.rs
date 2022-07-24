@@ -114,7 +114,7 @@ impl SlidesView {
             },
             _=>()
         }
-        self.frame.handle_event(cx, event);
+        self.frame.handle_event_iter(cx, event);
     }
     
     pub fn redraw(&mut self, cx: &mut Cx) {
@@ -122,7 +122,7 @@ impl SlidesView {
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
-        while let Err(_child) = self.frame.draw(cx) {
+        while self.frame.draw(cx).not_done() {
         }
     }
 }
