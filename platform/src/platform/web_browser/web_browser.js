@@ -90,6 +90,7 @@ export class WasmWebBrowser extends WasmBridge {
                 for (let signal of this.signals) {
                     this.to_wasm.ToWasmSignal(signal);
                 }
+                this.signals.length = 0
                 this.do_wasm_pump();
             }, 0)
         }
