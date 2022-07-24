@@ -78,8 +78,8 @@ impl<T> LiveNew for U32A<T> where T: LiveApply + LiveNew + 'static +  LiveAtomic
 }
 
 impl<T> LiveRead for U32A<T> where T:LiveRead + LiveAtomicU32Enum{
-    fn live_read(&self, id:LiveId, out:&mut Vec<LiveNode>){
-        self.get().live_read(id, out);
+    fn live_read_to(&self, id:LiveId, out:&mut Vec<LiveNode>){
+        self.get().live_read_to(id, out);
     }
 }
 /*
@@ -112,8 +112,8 @@ impl<T> LiveNew for Arc<T> where T: LiveApply + LiveNew + 'static + LiveAtomic {
 }
 
 impl<T> LiveRead for Arc<T> where T:LiveRead{
-    fn live_read(&self, id:LiveId, out:&mut Vec<LiveNode>){
-        (self as &T).live_read(id, out);
+    fn live_read_to(&self, id:LiveId, out:&mut Vec<LiveNode>){
+        (self as &T).live_read_to(id, out);
     }
 }
 
@@ -161,8 +161,8 @@ impl Debug for f32a{
 }
 
 impl LiveRead for f32a{
-    fn live_read(&self, id:LiveId, out:&mut Vec<LiveNode>){
-        self.get().live_read(id, out);
+    fn live_read_to(&self, id:LiveId, out:&mut Vec<LiveNode>){
+        self.get().live_read_to(id, out);
     }
 }
 
@@ -237,8 +237,8 @@ impl LiveNew for u32a {
 }
 
 impl LiveRead for u32a{
-    fn live_read(&self, id:LiveId, out:&mut Vec<LiveNode>){
-        self.get().live_read(id, out);
+    fn live_read_to(&self, id:LiveId, out:&mut Vec<LiveNode>){
+        self.get().live_read_to(id, out);
     }
 }
 
@@ -295,8 +295,8 @@ impl LiveNew for i64a {
 }
 
 impl LiveRead for i64a{
-    fn live_read(&self, id:LiveId, out:&mut Vec<LiveNode>){
-        self.get().live_read(id, out);
+    fn live_read_to(&self, id:LiveId, out:&mut Vec<LiveNode>){
+        self.get().live_read_to(id, out);
     }
 }
 

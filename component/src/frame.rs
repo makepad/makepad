@@ -114,7 +114,7 @@ impl FrameComponent for Frame {
             if let Some(child) = self.children.get_mut(id) {
                 let uid = child.as_uid();
                 child.handle_component_event(cx, event, &mut | cx, action | {
-                    dispatch_action(cx, action.add(*id, uid));
+                    dispatch_action(cx, action.mark(*id, uid));
                 });
             }
         }
