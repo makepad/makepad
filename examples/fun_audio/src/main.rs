@@ -95,7 +95,6 @@ live_register!{
         layout: {flow: Right, padding: 8, spacing: 5, align: {y: 0.5}}
         slider = Slider {
             label: "CutOff1",
-            bind: "",
             height: 22
         }
     }
@@ -124,7 +123,28 @@ live_register!{
                     width: Fill
                     height: Fit
                     InstrumentSlider {
-                        slider = {label: "MyLabel"}
+                        slider = {
+                            bind: "filter1.cutoff"
+                            min: 0.0
+                            max: 1.0
+                            label: "Filter Cutoff"
+                        }
+                    }
+                    InstrumentSlider {
+                        slider = {
+                            bind: "filter1.resonance"
+                            min: 0.02
+                            max: 1.0
+                            label: "Filter Resonance"
+                        }
+                    }
+                    InstrumentSlider {
+                        slider = {
+                            bind: "filter1.envelope_amount"
+                            min: 0.0
+                            max: 1.0
+                            label: "Envelope Amount"
+                        }
                     }
                 }
             }
@@ -243,15 +263,13 @@ impl App {
         self.scroll_view.handle_event(cx, event);
         
         //let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
-        let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
-        self.frame.data_bind_read(cx, &iron_fish.settings.live_read());
+        
         
         // how would/could we map our C struct directly to our UI.
         for item in self.frame.handle_event_iter(cx, event) {
-            if item.has_data_bind(){
-                // ok we have databinding data.
+            if item.has_bind_apply() {
                 let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
-                iron_fish.settings.apply_over(cx, &item.data_bind);
+                iron_fish.settings.apply_over(cx, &item.bind_apply);
             }
             match item.id() {
                 /*id!(slider) => if let SliderAction::Slide(value) = item.action.cast(){
@@ -284,6 +302,8 @@ impl App {
             Event::MidiInputList(_inputs) => {
             }
             Event::Construct => {
+                let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
+                self.frame.bind_read(cx, &iron_fish.settings.live_read());
                 /*
                 if let Some(instrument) = self.frame.template(cx, ids!(instrument), id!(my_instrument), live!{
                     header: {label = {text: "Instrument header"}}

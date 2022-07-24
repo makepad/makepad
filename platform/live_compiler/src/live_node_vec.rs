@@ -10,7 +10,9 @@ use {
             live_object
         },
         makepad_math::{
-            Vec2, Vec3, Vec4
+            Vec2,
+            Vec3,
+            Vec4
         },
         makepad_live_tokenizer::LiveId,
         live_token::LiveTokenId,
@@ -34,9 +36,10 @@ pub trait LiveNodeSlice {
     fn sibling_by_name(&self, start_index: usize, name: LiveProp) -> Option<usize>;
     fn child_by_path(&self, parent_index: usize, path: &[LiveProp]) -> Option<usize>;
     fn child_value_by_path(&self, parent_index: usize, path: &[LiveProp]) -> Option<&LiveValue>;
+    fn read_path(&self, path: &str) -> Option<&LiveValue>;
     
-    fn first_node_with_token_id(&self, match_token_id:LiveTokenId, also_in_dsl:bool)->Option<usize>;
-
+    fn first_node_with_token_id(&self, match_token_id: LiveTokenId, also_in_dsl: bool) -> Option<usize>;
+    
     fn get_num_sibling_nodes(&self, child_index: usize) -> usize;
     
     fn scope_up_by_name(&self, parent_index: usize, name: LiveProp) -> Option<usize>;
@@ -55,7 +58,8 @@ pub trait LiveNodeVec {
     
     fn insert_children_from_other(&mut self, from_index: usize, insert_start: usize, other: &[LiveNode]);
     fn insert_children_from_self(&mut self, from_index: usize, insert_start: usize);
-
+    
+    fn write_path(&mut self, path: &str, value: LiveValue);
     fn replace_or_insert_last_node_by_path(&mut self, start_index: usize, path: &[LiveProp], other: &[LiveNode]);
     fn replace_or_insert_first_node_by_path(&mut self, start_index: usize, path: &[LiveProp], other: &[LiveNode]);
     
@@ -85,22 +89,22 @@ pub trait LiveNodeVec {
 // accessing the Gen structure like a tree
 impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
     
-    fn first_node_with_token_id(&self, match_token_id:LiveTokenId, also_in_dsl:bool) -> Option<usize> {
+    fn first_node_with_token_id(&self, match_token_id: LiveTokenId, also_in_dsl: bool) -> Option<usize> {
         for (node_index, node) in self.as_ref().iter().enumerate() {
             if let Some(token_id) = node.origin.token_id() {
                 if token_id == match_token_id {
                     return Some(node_index)
                 }
                 // lets see if we are a DSL node then match the token range
-                if also_in_dsl && token_id.file_id() == match_token_id.file_id(){
-                    match node.value{
-                        LiveValue::DSL{token_start, token_count, ..}=>{
+                if also_in_dsl && token_id.file_id() == match_token_id.file_id() {
+                    match node.value {
+                        LiveValue::DSL {token_start, token_count, ..} => {
                             let index = match_token_id.token_index() as u32;
-                            if index>=token_start && index <=token_start + token_count{
+                            if index >= token_start && index <= token_start + token_count {
                                 return Some(node_index);
                             }
                         }
-                        _=>()
+                        _ => ()
                     }
                 }
             }
@@ -149,7 +153,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
                 if stack_depth>0 {
                     stack_depth -= 1;
                 }
-                else{
+                else {
                     return start_index - index;
                 }
             }
@@ -203,7 +207,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         // scan backwards to find a node with this name
         loop {
             if self_ref[index].is_open() {
-                if stack_depth == 0{
+                if stack_depth == 0 {
                     if let Some(child_index) = self.child_by_name(index, name) {
                         if child_index != start_index {
                             return Some(child_index)
@@ -370,7 +374,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
             &self.as_ref()[start_index + 1..next_index - 1]
         }
     }
-
+    
     
     fn append_child_index(&self, parent_index: usize) -> usize {
         let self_ref = self.as_ref();
@@ -405,7 +409,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         while index < self_ref.len() {
             if self_ref[index].is_open() {
                 if stack_depth == 1 {
-                    if  self_ref[index].origin.has_prop_type(child_name.1) &&  self_ref[index].id == child_name.0 {
+                    if self_ref[index].origin.has_prop_type(child_name.1) && self_ref[index].id == child_name.0 {
                         return Ok(index);
                     }
                 }
@@ -419,7 +423,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
             }
             else {
                 if stack_depth == 1 {
-                    if  self_ref[index].origin.has_prop_type(child_name.1) &&  self_ref[index].id == child_name.0 {
+                    if self_ref[index].origin.has_prop_type(child_name.1) && self_ref[index].id == child_name.0 {
                         return Ok(index);
                     }
                 }
@@ -440,7 +444,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
             None
         }
     }
-/*
+    /*
     fn sibling_by_name(&self, start_index: usize, name: LiveId) -> Option<usize>{
         let self_ref = self.as_ref();
         let mut stack_depth = 0;
@@ -471,7 +475,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         }
         None
     }*/
-
+    
     
     fn sibling_by_name(&self, child_index: usize, child_name: LiveProp) -> Option<usize> {
         let self_ref = self.as_ref();
@@ -523,6 +527,25 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
     
     fn child_value_by_path(&self, parent_index: usize, path: &[LiveProp]) -> Option<&LiveValue> {
         if let Some(index) = self.child_by_path(parent_index, path) {
+            Some(&self.as_ref()[index].value)
+        }
+        else {
+            None
+        }
+    }
+    
+    fn read_path(&self, path: &str) -> Option<&LiveValue> {
+        let mut ids = [LiveProp(LiveId(0), LivePropType::Field); 8];
+        let mut parsed = 0;
+        for (index, step) in path.split(".").enumerate() {
+            if parsed >= ids.len() {
+                eprintln!("read_path too many path segs");
+                return None
+            }
+            ids[index] = LiveProp(LiveId::from_str(step).unwrap(), LivePropType::Field);
+            parsed += 1;
+        }
+        if let Some(index) = self.child_by_path(0, &ids[0..parsed]) {
             Some(&self.as_ref()[index].value)
         }
         else {
@@ -642,11 +665,11 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
             for _ in 0..stack_depth {
                 write!(f, "|   ").unwrap();
             }
-            let pt = match node.origin.prop_type(){
-                LivePropType::Field=>":",
-                LivePropType::Instance=>"=",
-                LivePropType::Template=>"=?",
-                LivePropType::Nameless=>"??"
+            let pt = match node.origin.prop_type() {
+                LivePropType::Field => ":",
+                LivePropType::Instance => "=",
+                LivePropType::Template => "=?",
+                LivePropType::Nameless => "??"
             };
             match &node.value {
                 LiveValue::None => {
@@ -704,7 +727,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
                     writeln!(f, "{}{} <BareEnum> {}::{}", node.id, pt, base, variant).unwrap();
                 },
                 // stack items
-                LiveValue::Expr{expand_index} => {
+                LiveValue::Expr {expand_index} => {
                     writeln!(f, "{}{} <Expr> {:?}", node.id, pt, expand_index).unwrap();
                     stack_depth += 1;
                 },
@@ -752,7 +775,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
                     token_count,
                     expand_index
                 } => {
-                    writeln!(f, "<DSL> {} :token_start:{}, token_count:{} expand_index:{:?}", node.id, token_start, token_count,expand_index).unwrap();
+                    writeln!(f, "<DSL> {} :token_start:{}, token_count:{} expand_index:{:?}", node.id, token_start, token_count, expand_index).unwrap();
                 },
                 LiveValue::Use(module_path) => {
                     writeln!(f, "<Use> {}::{}", module_path, node.id).unwrap();
@@ -827,9 +850,27 @@ impl LiveNodeVec for Vec<LiveNode> {
         let next_source = other.skip_node(source_index);
         let num_nodes = next_source - source_index;
         // make space
-        self.splice(insert_point..insert_point, other[source_index..(source_index+num_nodes)].iter().cloned());
+        self.splice(insert_point..insert_point, other[source_index..(source_index + num_nodes)].iter().cloned());
         
         insert_point + num_nodes
+    }
+    
+    fn write_path(&mut self, path: &str, value: LiveValue) {
+        let mut ids = [LiveProp(LiveId(0), LivePropType::Field); 8];
+        let mut parsed = 0;
+        for (index, step) in path.split(".").enumerate() {
+            if parsed >= ids.len() {
+                eprintln!("write_path too many path segs");
+                return
+            }
+            ids[index] = LiveProp(LiveId::from_str(step).unwrap(), LivePropType::Field);
+            parsed += 1;
+        }
+        self.replace_or_insert_last_node_by_path(
+            0,
+            &ids[0..parsed],
+            &[LiveNode::from_value(value)]
+        );
     }
     
     fn replace_or_insert_last_node_by_path(&mut self, start_index: usize, path: &[LiveProp], other: &[LiveNode]) {
@@ -971,7 +1012,7 @@ impl<'a> LiveNodeReader<'a> {
             None
         }
     }
-
+    
     pub fn node(&self) -> &LiveNode {
         if self.eot {panic!();}
         &self.nodes[self.index]
@@ -1050,7 +1091,7 @@ impl<'a> LiveNodeReader<'a> {
     pub fn is_eot(&self) -> bool {
         return self.eot
     }
-
+    
     pub fn index(&self) -> usize {
         self.index
     }
@@ -1087,7 +1128,7 @@ impl<'a> LiveNodeMutReader<'a> {
             nodes
         }
     }
-
+    
     pub fn node(&mut self) -> &mut LiveNode {
         if self.eot {panic!();}
         &mut self.nodes[self.index]
@@ -1144,7 +1185,7 @@ impl<'a> LiveNodeMutReader<'a> {
     pub fn is_eot(&mut self) -> bool {
         return self.eot
     }
-
+    
     pub fn index(&mut self) -> usize {
         self.index
     }

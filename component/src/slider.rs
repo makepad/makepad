@@ -66,6 +66,9 @@ live_register!{
     }
     
     Slider: {{Slider}} {
+        min: 0.0,
+        
+        max: 1.0,
         
         label_text: {
             color: #9
@@ -160,6 +163,9 @@ pub struct Slider {
     
     text_input: TextInput,
     
+    min: f32,
+    max: f32,
+    
     #[rust] pub value: f32,
     #[rust] pub dragging: Option<f32>,
 }
@@ -175,14 +181,25 @@ pub enum SliderAction {
 impl FrameComponent for Slider {
     fn data_bind_read(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
         // ok we have a bind string
-        // we can now query that thing in our nodes
-        // and set our value
-        
+        if let Some(LiveValue::Float(v)) = nodes.read_path(&self.bind){
+            self.value = (*v as f32- self.min)/(self.max-self.min);
+        }
     }
     
     fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, FrameActionItem)) {
-        self.handle_event(cx, event, &mut | cx, action | {
-            dispatch_action(cx, FrameActionItem::from_action(action.into()))
+        self.handle_event(cx, event, &mut | bind, cx, action | {
+            let mut apply = Vec::new();
+            match &action{
+                SliderAction::Slide(v)=>{
+                    if bind.len()>0{
+                        apply.open();
+                        apply.write_path(bind, LiveValue::Float(*v as f64));
+                        apply.close();
+                    }
+                },
+                _=>()
+            };
+            dispatch_action(cx, FrameActionItem::from_bind_apply(apply, action.into()))
         });
     }
     
@@ -196,7 +213,7 @@ impl FrameComponent for Slider {
 
 impl Slider {
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, SliderAction)) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&String, &mut Cx, SliderAction)) {
         self.state_handle_event(cx, event);
         self.text_input.handle_event(cx, event, &mut | _, _ | {});
         match event.hits(cx, self.draw_slider.area()) {
@@ -224,7 +241,7 @@ impl Slider {
                 cx.set_down_mouse_cursor(MouseCursor::Arrow);
                 self.animate_state(cx, ids!(drag.on));
                 self.dragging = Some(self.value);
-                dispatch_action(cx, SliderAction::StartSlide);
+                dispatch_action(&self.bind, cx, SliderAction::StartSlide);
             },
             HitEvent::FingerUp(fe) => {
                 // if the finger hasn't moved further than X we jump to edit-all on the text thing
@@ -237,17 +254,13 @@ impl Slider {
                     self.animate_state(cx, ids!(hover.off));
                 }
                 self.dragging = None;
-                dispatch_action(cx, SliderAction::EndSlide);
+                dispatch_action(&self.bind, cx, SliderAction::EndSlide);
             }
             HitEvent::FingerMove(fe) => {
-                // lets drag the fucker
                 if let Some(start_pos) = self.dragging {
                     self.value = (start_pos + (fe.rel.x - fe.rel_start.x) / fe.rect.size.x).max(0.0).min(1.0);
                     self.draw_slider.area().redraw(cx);
-                    /*self.draw_slider.apply_over(cx, live!{
-                        slide_pos: (self.value)
-                    });*/
-                    //return self.handle_finger(cx, fe.rel)
+                    dispatch_action(&self.bind, cx, SliderAction::Slide(self.value * (self.max-self.min)+self.min));
                 }
             }
             _ => ()
@@ -258,7 +271,7 @@ impl Slider {
         self.draw_slider.slide_pos = self.value;
         self.draw_slider.begin(cx, walk, self.layout);
         if let Some(dw) = cx.defer_walk(self.label_walk) {
-            self.text_input.value = format!("{:.2}", self.value); //, (self.value*100.0) as usize);
+            self.text_input.value = format!("{:.2}", self.value * (self.max-self.min)+self.min); //, (self.value*100.0) as usize);
             self.text_input.draw_walk(cx, self.text_input.get_walk());
             self.label_text.draw_walk(cx, dw.resolve(cx), self.label_align, &self.label);
         }
