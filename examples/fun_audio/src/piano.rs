@@ -230,7 +230,7 @@ impl PianoKey {
 impl Piano {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         // alright lets draw em fuckers
-        if self.view.begin(cx, walk, Layout::default()).is_err() {
+        if self.view.begin(cx, walk, Layout::default()).not_redrawing() {
             return
         };
         let start_pos = cx.turtle().pos(); //+ vec2(10., 10.);
