@@ -11,21 +11,31 @@ pub use {
     }
 };
 
-pub fn from_ptr_impl<CB>(cx: &mut Cx, live_ptr: LivePtr, cb: CB)
-where CB: FnOnce(&mut Cx, LiveFileId, usize, &[LiveNode]) -> usize {
-    let live_registry_rc = cx.live_registry.clone();
-    let live_registry = live_registry_rc.borrow();
-    if !live_registry.generation_valid(live_ptr){
-        println!("Generation invalid in new_from_ptr");
-        return
+pub trait LiveHook {
+    fn apply_value_unknown(&mut self, cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        if !nodes[index].id.is_capitalised() && !nodes[index].origin.node_has_prefix() {
+            cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
+        }
+        nodes.skip_node(index)
     }
-    let doc = live_registry.ptr_to_doc(live_ptr);
 
-    let next_index = cb(cx, live_ptr.file_id, live_ptr.index as usize, &doc.nodes);
-    if next_index <= live_ptr.index as usize + 2 {
-        cx.apply_error_empty_object(live_error_origin!(), live_ptr.index as usize, &doc.nodes);
+    fn apply_value_instance(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        nodes.skip_node(index)
     }
+
+    fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode])->Option<usize>{None}
+    fn after_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {}
+    fn after_apply_from(&mut self, cx: &mut Cx, apply_from: ApplyFrom) {
+        match apply_from{
+            ApplyFrom::NewFromDoc{..}=>self.after_new_from_doc(cx),
+            _=>()
+        }
+    }
+    
+    fn after_new_from_doc(&mut self, _cx:&mut Cx){}
+    fn after_new(&mut self, _cx: &mut Cx) {}
 }
+
 
 pub trait LiveNew: LiveApply {
     fn new(cx: &mut Cx) -> Self;
@@ -49,7 +59,7 @@ pub trait LiveNew: LiveApply {
     fn new_from_ptr(cx: &mut Cx, live_ptr: Option<LivePtr>) -> Self where Self: Sized {
         let mut ret = Self::new(cx);
         if let Some(live_ptr) = live_ptr{
-            from_ptr_impl(cx, live_ptr, |cx, file_id, index, nodes|{
+            cx.get_nodes_from_live_ptr(live_ptr, |cx, file_id, index, nodes|{
                 ret.apply(cx, ApplyFrom::NewFromDoc {file_id}, index, nodes)
             });
         }
@@ -170,30 +180,6 @@ impl ApplyFrom {
     }
 }
 
-pub trait LiveHook {
-    fn apply_value_unknown(&mut self, cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
-        if !nodes[index].id.is_capitalised() && !nodes[index].origin.node_has_prefix() {
-            cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
-        }
-        nodes.skip_node(index)
-    }
-
-    fn apply_value_instance(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
-        nodes.skip_node(index)
-    }
-
-    fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode])->Option<usize>{None}
-    fn after_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {}
-    fn after_apply_from(&mut self, cx: &mut Cx, apply_from: ApplyFrom) {
-        match apply_from{
-            ApplyFrom::NewFromDoc{..}=>self.after_new_from_doc(cx),
-            _=>()
-        }
-    }
-    
-    fn after_new_from_doc(&mut self, _cx:&mut Cx){}
-    fn after_new(&mut self, _cx: &mut Cx) {}
-}
 
 impl<T> LiveHook for Option<T> where T: LiveApply + LiveNew + 'static {}
 impl<T> LiveApply for Option<T> where T: LiveApply + LiveNew + 'static {
@@ -224,3 +210,5 @@ impl<T> LiveNew for Option<T> where T: LiveApply + LiveNew + 'static{
         T::live_type_info(_cx)
     }
 }
+
+

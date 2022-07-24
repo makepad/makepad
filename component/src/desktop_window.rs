@@ -17,8 +17,8 @@ live_register!{
         frame: {
             layout: {
                 flow: Flow::Down
-            },/*
-            windows_buttons = Solid {
+            },
+            windows_buttons =? Solid {
                 bg: {color: (COLOR_BG_APP)}
                 height: 29
                 caption_label = Frame {
@@ -29,7 +29,7 @@ live_register!{
                 //max_btn:= DesktopButton {button_type: DesktopButtonType::WindowsMax}
                 //close_btn:= DesktopButton {button_type: DesktopButtonType::WindowsClose}
                 
-            }*/
+            }
             inner_view = Frame {user_draw: true}
         }
         
@@ -66,9 +66,12 @@ pub struct DesktopWindow {
 }
 
 impl LiveHook for DesktopWindow {
-    fn after_new(&mut self, cx: &mut Cx) {
+    fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.window.set_pass(cx, &self.pass);
         self.pass.set_depth_texture(cx, &self.depth_texture, PassClearDepth::ClearWith(1.0));
+        if cx.platform_type.is_desktop(){
+            self.frame.template(cx, ids!(windows_buttons), id!(my_instrument), live!{});
+        }
     }
 }
 

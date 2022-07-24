@@ -62,9 +62,14 @@ pub trait FrameComponent: LiveApply {
         nodes: &[LiveNode]
     ) -> Option<&mut Box<dyn FrameComponent >> {
         // first we query the template
+        if path.len() == 1{
+            if let Some(live_ptr) = self.query_template(path[0]){
+                return self.create_child(cx, live_ptr, CreateAt::Template, new_id, nodes)
+            }
+        }
         if let QueryResult::Found(QueryInner::Template(child, live_ptr)) =
         self.query_child(&QueryChild::Path(path), &mut None) {
-            child.create_child(cx, live_ptr, CreateAt::End, new_id, nodes)
+            child.create_child(cx, live_ptr, CreateAt::Template, new_id, nodes)
         }
         else {
             None
@@ -80,6 +85,7 @@ pub trait FrameComponent: LiveApply {
 
 #[derive(Clone, Copy)]
 pub enum CreateAt {
+    Template,
     Begin,
     After(LiveId),
     Before(LiveId),
@@ -258,7 +264,7 @@ impl FrameRef {
                         }
                     }
                 }
-                QueryChild::Path(path) => {
+                QueryChild::Path(path) => if path.len() == 1{
                     if let Some(live_ptr) = inner.query_template(path[0]) {
                         if let Some(callback) = callback {
                             callback(QueryInner::Template(inner, live_ptr))

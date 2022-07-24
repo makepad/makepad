@@ -37,7 +37,7 @@ pub fn derive_live_component_registry_impl(input: TokenStream) -> TokenStream {
             tb.add("        self.map.get(&ty).map( | (info, fac) | {");
             tb.add("            let mut ret = fac.new(cx);");
             tb.add("            let live_ptr = cx.live_registry.borrow().module_id_and_name_to_ptr(info.module_id, info.name).unwrap();");
-            tb.add("            live_traits::from_ptr_impl(cx, live_ptr, |cx, file_id, index, nodes|{");
+            tb.add("            cx.get_nodes_from_live_ptr(live_ptr, |cx, file_id, index, nodes|{");
             tb.add("                ret.apply(cx, ApplyFrom::NewFromDoc {file_id}, index, nodes)");
             tb.add("            });");
            tb.add("             ret");

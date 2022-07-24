@@ -4,6 +4,12 @@ use proc_macro::{TokenStream};
 mod derive_live;
 use crate::derive_live::*;
 
+mod derive_live_atomic;
+use crate::derive_live_atomic::*;
+
+mod derive_live_hook;
+use crate::derive_live_hook::*;
+
 mod live_register_macro;
 use crate::live_register_macro::*;
 
