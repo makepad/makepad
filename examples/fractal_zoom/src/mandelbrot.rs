@@ -199,9 +199,9 @@ impl TileCache {
             }
         }
         else { // compare the size of the bail window against the tile
-            if tile.fractal.size.x * tile.fractal.size.y < bail.space.size.x * bail.space.size.y * 0.007 {
-                return true
-            }
+            //if tile.fractal.size.x * tile.fractal.size.y < bail.space.size.x * bail.space.size.y * 0.007 {
+            //    return true
+            //}
         }
         false
     }
@@ -242,25 +242,44 @@ impl TileCache {
         
         let mut render_tasks = Vec::new();
         let window = window.add_margin(size);
-        // create a spiralling walk around the center point, usually your mouse
-        // this is a nice pattern because you look at and zoom around your mouse
-        // and so rendering those tiles first in a circular pattern is good UX
-        Self::spiral_walk( | _step, i, j | {
-            let fractal = RectF64 {
-                pos: center + size * vec2f64(i as f64, j as f64) - 0.5 * size,
-                size: size
-            };
-            if window.intersects(fractal) {
-                if let Some(mut tile) = self.empty.pop() {
-                    tile.fractal = fractal;
-                    render_tasks.push(tile);
+        
+        // ok in a zoom-out situation we should generate what exactly
+        //if is_zoom_in{
+            // create a spiralling walk around the center point, usually your mouse
+            // this is a nice pattern because you look at and zoom around your mouse
+            // and so rendering those tiles first in a circular pattern is good UX
+            Self::spiral_walk( | _step, i, j | {
+                let fractal = RectF64 {
+                    pos: center + size * vec2f64(i as f64, j as f64) - 0.5 * size,
+                    size: size
+                };
+                if window.intersects(fractal) {
+                    if let Some(mut tile) = self.empty.pop() {
+                        tile.fractal = fractal;
+                        render_tasks.push(tile);
+                    }
+                    true
                 }
-                true
+                else {
+                    false
+                }
+            });
+        /*}
+        else{
+            // cut the window into 9 tiles
+            let size = window.size / vec2f64(3.0,3.0);
+            for i in 0..3{
+                for j in 0..3{
+                    if let Some(mut tile) = self.empty.pop() {
+                        tile.fractal = RectF64 {
+                            pos: window.pos + size * vec2f64(i as f64, j as f64) ,
+                            size: size
+                        };
+                        render_tasks.push(tile);
+                    }
+                }
             }
-            else {
-                false
-            }
-        });
+        }*/
         self.tiles_in_flight = render_tasks.len();
         render_tasks
     }
@@ -464,7 +483,6 @@ impl Mandelbrot {
         let bail_test = self.tile_cache.bail_test.clone();
         // create a new task on the threadpool
         // this is run on any one of our worker threads that's free
-        let is_zooming = self.is_zooming;
         self.tile_cache.thread_pool.execute(move || {
             if TileCache::tile_needs_to_bail(&tile, bail_test) {
                 return to_ui.send(ToUI::TileBailed {tile}).unwrap();
