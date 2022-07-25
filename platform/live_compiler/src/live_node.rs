@@ -362,6 +362,7 @@ pub struct LiveTypeInfo {
     pub live_type: LiveType,
     pub type_name: LiveId,
     pub module_id: LiveModuleId,
+    pub live_ignore: bool,
     pub fields: Vec<LiveTypeField>
 }
 

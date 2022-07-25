@@ -9,8 +9,7 @@ use {
 
 live_register!{
     use makepad_platform::shader::std::*;
-    
-    DrawSlider: {{DrawSlider}} {
+   DrawSlider: {{DrawSlider}} {
         instance hover: float
         instance focus: float
         instance drag: float
@@ -18,15 +17,16 @@ live_register!{
         fn pixel(self) -> vec4 {
             let slider_height = 3;
             let nub_size = mix(3,4, self.hover);
-            let nubbg_size = 8
+            let nubbg_size = 18
             
             let sdf = Sdf2d::viewport(self.pos * self.rect_size)
             
-            let slider_bg_color = #3;
+            let slider_bg_color = mix(#38, #30, self.focus);
+            // let slider_bg_color = #38;
             
-            let slider_color = mix(mix(#7, #8, self.hover), #9, self.focus);
-            let nub_color = mix(mix(#9, #c, self.hover), mix(#e, #3, self.drag), self.focus);
-            let nubbg_color = mix(#eee0, #e, self.drag);
+            let slider_color = mix(mix(#5, #68, self.hover), #68, self.focus);
+            let nub_color = mix(mix(#8, #f, self.hover), mix(#c, #f, self.drag), self.focus);
+            let nubbg_color = mix(#eee0, #8, self.drag);
             
             
             sdf.rect(0, self.rect_size.y - slider_height, self.rect_size.x, slider_height)
