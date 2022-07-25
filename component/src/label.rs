@@ -14,7 +14,7 @@ live_register!{
             width:Fit
             height:Fit
         }
-        label_text:{
+        label:{
             color:#8
         }
     }
@@ -23,7 +23,7 @@ live_register!{
 #[derive(Live, LiveHook)]
 #[live_register(frame_component!(Label))]
 pub struct Label {
-    label_text: DrawText,
+    label: DrawText,
     walk: Walk,
     
 //    overflow: Overflow,
@@ -41,7 +41,7 @@ impl FrameComponent for Label {
     fn draw_component(&mut self, cx: &mut Cx2d, walk:Walk, self_uid:FrameUid)->FrameDraw{
         let mut lines = self.text.split("\\n");
         for line in lines{
-            self.label_text.draw_walk(cx, walk, self.align, line);
+            self.label.draw_walk(cx, walk, self.align, line);
         }
         FrameDraw::Done
     }

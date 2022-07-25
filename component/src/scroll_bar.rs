@@ -54,7 +54,7 @@ live_register!{
                 off = {
                     from: {all: Play::Forward {duration: 0.1}}
                     apply: {
-                        bar_quad: {pressed: 0.0, hover: 0.0}
+                        bar: {pressed: 0.0, hover: 0.0}
                     }
                 }
                 
@@ -64,7 +64,7 @@ live_register!{
                         pressed: Play::Forward {duration: 0.01}
                     }
                     apply: {
-                        bar_quad: {
+                        bar: {
                             pressed: 0.0,
                             hover: [{time: 0.0, value: 1.0}],
                         }
@@ -74,7 +74,7 @@ live_register!{
                 pressed = {
                     from: {all: Play::Snap}
                     apply: {
-                        bar_quad: {
+                        bar: {
                             pressed: 1.0,
                             hover: 1.0,
                         }
@@ -87,7 +87,7 @@ live_register!{
 
 #[derive(Live, LiveHook)]
 pub struct ScrollBar {
-    bar_quad: DrawScrollBar,
+    bar: DrawScrollBar,
     pub bar_size: f32,
     pub min_handle_size: f32, //minimum size of the handle in pixels
     bar_side_margin: f32,
@@ -168,7 +168,7 @@ impl ScrollBar {
     // writes the norm_scroll value into the shader
     pub fn update_shader_scroll_pos(&mut self, cx: &mut Cx) {
         let (norm_scroll, _) = self.get_normalized_scroll_pos();
-        self.bar_quad.apply_over(cx, live!{
+        self.bar.apply_over(cx, live!{
             norm_scroll: (norm_scroll)
         });
         //self.bg.set_norm_scroll(cx, norm_scroll);
@@ -346,7 +346,7 @@ impl ScrollBar {
                 return self.make_scroll_event()
             }
             
-            match event.hits(cx, self.bar_quad.area()) {
+            match event.hits(cx, self.bar.area()) {
                 HitEvent::FingerDown(fe) => {
                     self.animate_state(cx, ids!(hover.pressed));
                     let rel = match self.axis {
@@ -433,17 +433,17 @@ impl ScrollBar {
                 
                 if self.visible {
                     let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
-                    self.bar_quad.is_vertical = 0.0;
-                    self.bar_quad.norm_scroll = norm_scroll;
-                    self.bar_quad.norm_handle = norm_handle;
-                    self.bar_quad.draw_rel(
+                    self.bar.is_vertical = 0.0;
+                    self.bar.norm_scroll = norm_scroll;
+                    self.bar.norm_handle = norm_handle;
+                    self.bar.draw_rel(
                         cx,
                         Rect {
                             pos: vec2(self.bar_side_margin, view_rect.size.y - self.bar_size),
                             size: vec2(self.scroll_size, self.bar_size),
                         }
                     );
-                    self.bar_quad.area().set_no_scroll(cx, true, true);
+                    self.bar.area().set_no_scroll(cx, true, true);
                 }
             },
             Axis::Vertical => {
@@ -460,17 +460,17 @@ impl ScrollBar {
                 self.scroll_pos = self.scroll_pos.min(self.view_total - self.view_visible).max(0.);
                 if self.visible {
                     let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
-                    self.bar_quad.is_vertical = 1.0;
-                    self.bar_quad.norm_scroll = norm_scroll;
-                    self.bar_quad.norm_handle = norm_handle;
-                    self.bar_quad.draw_rel(
+                    self.bar.is_vertical = 1.0;
+                    self.bar.norm_scroll = norm_scroll;
+                    self.bar.norm_handle = norm_handle;
+                    self.bar.draw_rel(
                         cx,
                         Rect {
                             pos: vec2(view_rect.size.x - self.bar_size, self.bar_side_margin),
                             size: vec2(self.bar_size, self.scroll_size)
                         }
                     );
-                    self.bar_quad.area().set_no_scroll(cx, true, true);
+                    self.bar.area().set_no_scroll(cx, true, true);
                 }
             }
         }

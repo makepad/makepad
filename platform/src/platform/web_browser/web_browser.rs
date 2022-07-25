@@ -252,7 +252,7 @@ impl Cx {
                 
                 id!(ToWasmSignal) => {
                     let tw = ToWasmSignal::read_to_wasm(&mut to_wasm);
-                    for sig in tw.signals{
+                    for sig in tw.signals {
                         let signal_id = ((sig.signal_hi as u64) << 32) | (sig.signal_lo as u64);
                         self.send_signal(Signal(LiveId(signal_id)));
                     }
@@ -273,7 +273,7 @@ impl Cx {
                 id!(ToWasmWebSocketError) => {
                     let tw = ToWasmWebSocketError::read_to_wasm(&mut to_wasm);
                     let web_socket = WebSocket(tw.web_socket_id as u64);
-                    self.call_event_handler(&mut Event::WebSocketError(WebSocketErrorEvent{
+                    self.call_event_handler(&mut Event::WebSocketError(WebSocketErrorEvent {
                         web_socket,
                         error: tw.error,
                     }));
@@ -282,7 +282,7 @@ impl Cx {
                 id!(ToWasmWebSocketMessage) => {
                     let tw = ToWasmWebSocketMessage::read_to_wasm(&mut to_wasm);
                     let web_socket = WebSocket(tw.web_socket_id as u64);
-                    self.call_event_handler(&mut Event::WebSocketMessage(WebSocketMessageEvent{
+                    self.call_event_handler(&mut Event::WebSocketMessage(WebSocketMessageEvent {
                         web_socket,
                         data: tw.data.into_vec_u8()
                     }));
@@ -292,12 +292,12 @@ impl Cx {
                     let tw = ToWasmMidiInputData::read_to_wasm(&mut to_wasm);
                     self.call_event_handler(&mut Event::Midi1InputData(vec![tw.into()]));
                 }
-                 
+                
                 id!(ToWasmMidiInputList) => {
                     let tw = ToWasmMidiInputList::read_to_wasm(&mut to_wasm);
                     self.call_event_handler(&mut Event::MidiInputList(tw.into()));
                 }
-
+                
                 _ => {
                     console_log!("Message not handled in wasm {}", block_id);
                     
@@ -309,7 +309,7 @@ impl Cx {
         
         self.call_signals_and_triggers();
         
-        if self.need_redrawing(){
+        if self.need_redrawing() {
             self.call_draw_event();
             self.platform.from_wasm(FromWasmRequestAnimationFrame {});
         }
@@ -322,7 +322,7 @@ impl Cx {
         
         let has_passes = self.handle_repaint(is_animation_frame);
         
-        if  has_passes || self.new_next_frames.len() != 0 {
+        if has_passes || self.new_next_frames.len() != 0 {
             self.platform.from_wasm(FromWasmRequestAnimationFrame {});
         }
         
@@ -332,10 +332,8 @@ impl Cx {
     
     // empty stub
     pub fn event_loop<F>(&mut self, mut _event_handler: F)
-    where F: FnMut(&mut Cx, Event),
-    {
+    where F: FnMut(&mut Cx, Event) {
     }
-    
     
     fn handle_platform_ops(&mut self) {
         let mut set_cursor = false;
@@ -360,10 +358,10 @@ impl Cx {
                 CxPlatformOp::FullscreenWindow(_window_id) => {
                     self.platform.from_wasm(FromWasmFullScreen {});
                 },
-                CxPlatformOp::NormalizeWindow(_window_id)=>{
-                   self.platform.from_wasm(FromWasmNormalScreen {});
+                CxPlatformOp::NormalizeWindow(_window_id) => {
+                    self.platform.from_wasm(FromWasmNormalScreen {});
                 }
-                CxPlatformOp::SetTopmost(_window_id, _is_topmost)=>{
+                CxPlatformOp::SetTopmost(_window_id, _is_topmost) => {
                     todo!()
                 }
                 CxPlatformOp::XrStartPresenting(_) => {
@@ -373,7 +371,7 @@ impl Cx {
                     self.platform.from_wasm(FromWasmXrStopPresenting {});
                 },
                 CxPlatformOp::ShowTextIME(pos) => {
-                    self.platform.from_wasm(FromWasmShowTextIME {x:pos.x, y:pos.y});
+                    self.platform.from_wasm(FromWasmShowTextIME {x: pos.x, y: pos.y});
                 },
                 CxPlatformOp::HideTextIME => {
                     self.platform.from_wasm(FromWasmHideTextIME {});
@@ -401,13 +399,9 @@ impl Cx {
                 },
                 CxPlatformOp::StartDragging(_dragged_item) => {
                 }
-                CxPlatformOp::UpdateMenu(_menu)=>{
+                CxPlatformOp::UpdateMenu(_menu) => {
                 }
             }
-        }
-        
-        if !set_cursor {
-            self.platform.from_wasm(FromWasmSetMouseCursor::new(MouseCursor::Default));
         }
     }
 }
@@ -444,18 +438,18 @@ impl CxPlatformApi for Cx {
             data: WasmDataU8::from_vec_u8(data)
         });
     }
-        
-    fn start_midi_input(&mut self){
+    
+    fn start_midi_input(&mut self) {
         self.platform.from_wasm(FromWasmStartMidiInput {
         });
     }
     
-    fn spawn_audio_output<F>(&mut self, f: F) where F: FnMut(AudioTime, &mut dyn AudioOutputBuffer) + Send + 'static{
-        let closure_ptr= Box::into_raw(Box::new(WebAudioOutputClosure{
+    fn spawn_audio_output<F>(&mut self, f: F) where F: FnMut(AudioTime, &mut dyn AudioOutputBuffer) + Send + 'static {
+        let closure_ptr = Box::into_raw(Box::new(WebAudioOutputClosure {
             callback: Box::new(f),
             output_buffer: WebAudioOutputBuffer::default()
         }));
-        self.platform.from_wasm(FromWasmSpawnAudioOutput{closure_ptr: closure_ptr as u32});
+        self.platform.from_wasm(FromWasmSpawnAudioOutput {closure_ptr: closure_ptr as u32});
     }
 }
 

@@ -31,7 +31,7 @@ live_register!{
     }
     
     Button: {{Button}} {
-        bg_quad: {
+        bg: {
             instance hover: 0.0
             instance pressed: 0.0
             
@@ -94,8 +94,8 @@ live_register!{
                 off = {
                     from: {all: Play::Forward {duration: 0.1}}
                     apply: {
-                        bg_quad: {pressed: 0.0, hover: 0.0}
-                        label_text: {pressed: 0.0, hover: 0.0}
+                        bg: {pressed: 0.0, hover: 0.0}
+                        label: {pressed: 0.0, hover: 0.0}
                     }
                 }
                 
@@ -105,16 +105,16 @@ live_register!{
                         pressed: Play::Forward {duration: 0.01}
                     }
                     apply: {
-                        bg_quad: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
-                        label_text: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        bg: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
+                        label: {pressed: 0.0, hover: [{time: 0.0, value: 1.0}],}
                     }
                 }
                 
                 pressed = {
                     from: {all: Play::Forward {duration: 0.2}}
                     apply: {
-                        bg_quad: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
-                        label_text: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        bg: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
+                        label: {pressed: [{time: 0.0, value: 1.0}], hover: 1.0,}
                     }
                 }
             }
@@ -127,8 +127,8 @@ live_register!{
 pub struct Button {
     state: State,
     
-    bg_quad: DrawQuad,
-    label_text: DrawLabelText,
+    bg: DrawQuad,
+    label: DrawLabelText,
     
     #[alias(width, walk.width)]
     #[alias(height, walk.height)]
@@ -136,7 +136,7 @@ pub struct Button {
     walk: Walk,
     
     layout: Layout,
-    label: String
+    text: String
 }
 
 #[derive(Live, LiveHook)]#[repr(C)]
@@ -150,7 +150,7 @@ impl Button {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction)) {
         self.state_handle_event(cx, event);
-        let state = button_logic_handle_event(cx, event, self.bg_quad.area(), dispatch_action);
+        let state = button_logic_handle_event(cx, event, self.bg.area(), dispatch_action);
         if let Some(state) = state {
             match state {
                 ButtonState::Pressed => self.animate_state(cx, ids!(hover.pressed)),
@@ -161,14 +161,14 @@ impl Button {
     }
     
     pub fn draw_label(&mut self, cx: &mut Cx2d, label: &str) {
-        self.bg_quad.begin(cx, self.walk, self.layout);
-        self.label_text.draw_walk(cx, Walk::fit(), Align::default(), label);
-        self.bg_quad.end(cx);
+        self.bg.begin(cx, self.walk, self.layout);
+        self.label.draw_walk(cx, Walk::fit(), Align::default(), label);
+        self.bg.end(cx);
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        self.bg_quad.begin(cx, walk, self.layout);
-        self.label_text.draw_walk(cx, Walk::fit(), Align::default(), &self.label);
-        self.bg_quad.end(cx);
+        self.bg.begin(cx, walk, self.layout);
+        self.label.draw_walk(cx, Walk::fit(), Align::default(), &self.text);
+        self.bg.end(cx);
     }
 }

@@ -97,7 +97,15 @@ live_register!{
             height: 22
         }
     }
-    
+      InstrumentSlider2: Rect {
+        bg: {color: #4}
+        width: Fill
+        height: Fit
+        layout: {flow: Right, padding: 8, spacing: 5, align: {y: 0.5}}
+        TextInput{
+            text:"Hello WOrld"
+        }
+    }
     IronFishUI: InstrumentHeader {
         header: {
             layout: {align: {y: 0.5}}
@@ -161,6 +169,8 @@ live_register!{
                             label: "Osc2 detune"
                         }
                     }
+                    InstrumentSlider2{}
+                    
                 }
             }
         }
@@ -197,9 +207,9 @@ live_register!{
             Frame {
                 layout: {flow: Right, spacing: 5.0}
                 walk: {margin: {left: 60}, height: Fit}
-                Button {label: "+  Band"}
-                Button {label: "<"}
-                Button {label: ">"}
+                Button {text: "+  Band"}
+                Button {text: "<"}
+                Button {text: ">"}
                 Solid {
                     width: Fill
                     height: 36
