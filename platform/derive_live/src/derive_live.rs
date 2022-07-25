@@ -346,6 +346,8 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("        LiveTypeInfo{");
         tb.add("            module_id: LiveModuleId::from_str(&module_path!()).unwrap(),");
         tb.add("            live_type: LiveType::of::<Self>(),");
+        let live_ignore = main_attribs.iter().any( | attr | attr.name == "live_ignore");
+        tb.add("            live_ignore: ").ident(if live_ignore{"true"} else{"false"}).add(",");
         tb.add("            fields,");
         
         tb.add("            type_name: LiveId::from_str(").string(&struct_name).add(").unwrap()");
@@ -492,6 +494,8 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("            module_id: LiveModuleId::from_str(&module_path!()).unwrap(),");
         tb.add("            live_type: LiveType::of::<Self>(),");
         tb.add("            fields: Vec::new(),");
+        let live_ignore = main_attribs.iter().any( | attr | attr.name == "live_ignore");
+        tb.add("            live_ignore: ").ident(if live_ignore{"true"} else{"false"}).add(",");
         tb.add("            type_name: LiveId::from_str(").string(&enum_name).add(").unwrap(),");
         /*tb.add("            kind: LiveTypeKind::Enum,");*/
         tb.add("        }");

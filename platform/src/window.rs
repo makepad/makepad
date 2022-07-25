@@ -60,7 +60,7 @@ impl LiveNew for Window {
             module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
             live_type: LiveType::of::<Self>(),
             fields: Vec::new(),
-           // kind: LiveTypeKind::Object,
+            live_ignore: true,
             type_name: LiveId::from_str("Window").unwrap()
         }
     }

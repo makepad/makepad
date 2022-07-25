@@ -48,6 +48,7 @@ impl LiveNew for DrawVars{
         LiveTypeInfo {
             module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
             live_type: std::any::TypeId::of::<Self>(),
+            live_ignore: true,
             fields: Vec::new(),
             type_name: LiveId::from_str("DrawVars").unwrap()
         }

@@ -1,6 +1,6 @@
 //use crate::id::Id;
 use {
-    std::collections::{HashMap, HashSet, BTreeSet},
+    std::collections::{HashMap, BTreeSet},
     crate::{
         makepad_live_id::*,
         makepad_live_tokenizer::{Delim, TokenPos, TokenRange, TokenWithLen, FullToken, LiveId, State, Cursor, live_error_origin, LiveErrorOrigin},
@@ -41,18 +41,18 @@ pub struct LiveRegistry {
     pub module_id_to_file_id: HashMap<LiveModuleId, LiveFileId>,
     pub live_files: Vec<LiveFile>,
     pub live_type_infos: HashMap<LiveType, LiveTypeInfo>,
-    pub ignore_no_dsl: HashSet<LiveId>,
+    //pub ignore_no_dsl: HashSet<LiveId>,
     pub main_module: Option<LiveFileId>,
     pub components: LiveComponentRegistries
 }
 
 impl Default for LiveRegistry {
     fn default() -> Self {
-        let mut ignore_no_dsl = HashSet::new();
-        ignore_no_dsl.insert(id!(Namespace));
-        ignore_no_dsl.insert(id!(Struct));
+        //let mut ignore_no_dsl = HashSet::new();
+        //ignore_no_dsl.insert(id!(Namespace));
+        //ignore_no_dsl.insert(id!(Struct));
         Self {
-            ignore_no_dsl,
+            //ignore_no_dsl,
             main_module: None,
             file_ids: HashMap::new(),
             module_id_to_file_id: HashMap::new(),
@@ -84,11 +84,11 @@ pub enum LiveEditEvent {
 }
 
 impl LiveRegistry {
-    pub fn add_ignore_no_dsl(&mut self, live_ids: &[LiveId]) {
-        for id in live_ids {
-            self.ignore_no_dsl.insert(*id);
-        }
-    }
+   // pub fn add_ignore_no_dsl(&mut self, live_ids: &[LiveId]) {
+   //     for id in live_ids {
+   //         self.ignore_no_dsl.insert(*id);
+   //     }
+   // }
     
     pub fn generation_valid(&self, live_ptr: LivePtr) -> bool {
         let doc = &self.live_files[live_ptr.file_id.to_index()];

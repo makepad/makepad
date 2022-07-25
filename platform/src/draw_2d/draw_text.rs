@@ -125,6 +125,7 @@ live_register!{
 }
 
 #[derive(Clone, Live, LiveHook)]
+#[live_ignore]
 pub struct TextStyle {
     #[live()] pub font: Font,
     #[live(9.0)] pub font_size: f32,

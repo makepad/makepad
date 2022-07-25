@@ -394,6 +394,7 @@ impl LiveNew for FrameRef {
             module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
             live_type: LiveType::of::<dyn FrameComponent>(),
             fields: Vec::new(),
+            live_ignore: true,
             type_name: LiveId(0)
         }
     }

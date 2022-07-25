@@ -77,6 +77,7 @@ impl LiveNew for Texture {
         LiveTypeInfo {
             module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
             live_type: LiveType::of::<Self>(),
+            live_ignore: true,
             fields: Vec::new(),
             type_name: LiveId::from_str("Texture").unwrap()
         }

@@ -7,6 +7,7 @@ use {
 };
 
 #[derive(Clone, Copy, Debug, Hash, PartialEq, Live, LiveHook)]
+#[live_ignore]
 pub enum MouseCursor {
     // don't show the cursor
     Hidden,

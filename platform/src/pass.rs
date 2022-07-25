@@ -52,6 +52,7 @@ impl LiveNew for Pass {
             module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
             live_type: LiveType::of::<Self>(),
             fields: Vec::new(),
+            live_ignore: true,
             //kind: LiveTypeKind::Object,
             type_name: LiveId::from_str("Pass").unwrap()
         }
