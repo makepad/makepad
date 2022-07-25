@@ -5,7 +5,7 @@ live_register!{
     use makepad_component::theme::*;
     
     TabCloseButton: {{TabCloseButton}} {
-        button_quad: {
+        button: {
             
             instance hover: float;
             instance selected: float;
@@ -34,14 +34,14 @@ live_register!{
                 off = {
                     from: {all: Play::Forward {duration: 0.2}}
                     apply: {
-                        button_quad: {hover: 0.0}
+                        button: {hover: 0.0}
                     }
                 }
                 
                 on =  {
                     from: {all: Play::Snap}
                     apply: {
-                        button_quad: {hover:1.0}
+                        button: {hover:1.0}
                     }
                 }
             }
@@ -57,7 +57,7 @@ live_register!{
 
 #[derive(Live, LiveHook)]
 pub struct TabCloseButton {
-    button_quad: DrawQuad,
+    button: DrawQuad,
     state: State,
 
     walk: Walk
@@ -66,7 +66,7 @@ pub struct TabCloseButton {
 impl TabCloseButton {
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
-        self.button_quad.draw_walk(
+        self.button.draw_walk(
             cx,
             self.walk
         );
@@ -78,7 +78,7 @@ impl TabCloseButton {
         event: &mut Event,
     ) -> TabCloseButtonAction {
         self.state_handle_event(cx, event);
-        match event.hits(cx, self.button_quad.draw_vars.area) {
+        match event.hits(cx, self.button.area()) {
             HitEvent::FingerHover(f) => {
                 cx.set_hover_mouse_cursor(MouseCursor::Hand);
                 match f.hover_state {

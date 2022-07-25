@@ -22,12 +22,10 @@ live_register!{
             let sdf = Sdf2d::viewport(self.pos * self.rect_size)
             
             let slider_bg_color = mix(#38, #30, self.focus);
-            // let slider_bg_color = #38;
             
             let slider_color = mix(mix(#5, #68, self.hover), #68, self.focus);
             let nub_color = mix(mix(#8, #f, self.hover), mix(#c, #f, self.drag), self.focus);
             let nubbg_color = mix(#eee0, #8, self.drag);
-            
             
             sdf.rect(0, self.rect_size.y - slider_height, self.rect_size.x, slider_height)
             sdf.fill(slider_bg_color);
@@ -72,14 +70,14 @@ live_register!{
                 off = {
                     from: {all: Play::Forward {duration: 0.1}}
                     apply: {
-                        draw_slider: {hover: 0.0}
+                        slider: {hover: 0.0}
                         text_input: {state: {hover = off}}
                     }
                 }
                 on = {
                     from: {all: Play::Snap}
                     apply: {
-                        draw_slider: {hover: 1.0}
+                        slider: {hover: 1.0}
                         text_input: {state: {hover = on}}
                     }
                 }
@@ -89,14 +87,14 @@ live_register!{
                 off = {
                     from: {all: Play::Forward {duration: 0.1}}
                     apply: {
-                        draw_slider: {focus: 0.0}
+                        slider: {focus: 0.0}
                         text_input: {state: {focus = off}}
                     }
                 }
                 on = {
                     from: {all: Play::Snap}
                     apply: {
-                        draw_slider: {focus: 1.0}
+                        slider: {focus: 1.0}
                         text_input: {state: {focus = on}}
                     }
                 }
@@ -105,11 +103,11 @@ live_register!{
                 default: off
                 off = {
                     from: {all: Play::Forward {duration: 0.1}}
-                    apply: {draw_slider: {drag: 0.0}}
+                    apply: {slider: {drag: 0.0}}
                 }
                 on = {
                     from: {all: Play::Snap}
-                    apply: {draw_slider: {drag: 1.0}}
+                    apply: {slider: {drag: 1.0}}
                 }
             }
         }
@@ -126,7 +124,7 @@ pub struct DrawSlider {
 #[derive(Live, LiveHook)]
 #[live_register(frame_component!(Slider))]
 pub struct Slider {
-    draw_slider: DrawSlider,
+    slider: DrawSlider,
     
     #[alias(width, walk.width)]
     #[alias(height, walk.height)]
@@ -203,7 +201,7 @@ impl Slider {
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, &mut Self, SliderAction)) {
         self.state_handle_event(cx, event);
         self.text_input.handle_event(cx, event, &mut | _, _ | {});
-        match event.hits(cx, self.draw_slider.area()) {
+        match event.hits(cx, self.slider.area()) {
             HitEvent::KeyFocusLost(_) => {
                 self.animate_state(cx, ids!(focus.off));
             }
@@ -224,7 +222,7 @@ impl Slider {
                 }
             },
             HitEvent::FingerDown(_fe) => {
-                cx.set_key_focus(self.draw_slider.area());
+                cx.set_key_focus(self.slider.area());
                 cx.set_down_mouse_cursor(MouseCursor::Arrow);
                 self.animate_state(cx, ids!(drag.on));
                 self.dragging = Some(self.value);
@@ -246,7 +244,7 @@ impl Slider {
             HitEvent::FingerMove(fe) => {
                 if let Some(start_pos) = self.dragging {
                     self.value = (start_pos + (fe.rel.x - fe.rel_start.x) / fe.rect.size.x).max(0.0).min(1.0);
-                    self.draw_slider.area().redraw(cx);
+                    self.slider.area().redraw(cx);
                     dispatch_action(cx, self, SliderAction::Slide(self.to_external()));
                 }
             }
@@ -255,14 +253,14 @@ impl Slider {
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        self.draw_slider.slide_pos = self.value;
-        self.draw_slider.begin(cx, walk, self.layout);
+        self.slider.slide_pos = self.value;
+        self.slider.begin(cx, walk, self.layout);
         if let Some(dw) = cx.defer_walk(self.label_walk) {
-            self.text_input.value = format!("{:.2}", self.to_external()); //, (self.value*100.0) as usize);
+            self.text_input.text = format!("{:.2}", self.to_external()); //, (self.value*100.0) as usize);
             self.text_input.draw_walk(cx, self.text_input.get_walk());
             self.label_text.draw_walk(cx, dw.resolve(cx), self.label_align, &self.label);
         }
-        self.draw_slider.end(cx);
+        self.slider.end(cx);
     }
 }
 

@@ -10,7 +10,7 @@ live_register!{
     use makepad_platform::shader::std::*;
     
     FoldButton: {{FoldButton}} {
-        bg_quad: {
+        bg: {
             instance opened: 0.0
             instance hover: 0.0
             
@@ -47,12 +47,12 @@ live_register!{
                 default:off
                 off = {
                     from: {all: Play::Forward{duration: 0.1}}
-                    apply: {bg_quad: {hover: 0.0}}
+                    apply: {bg: {hover: 0.0}}
                 }
                 
                 on =  {
                     from: {all: Play::Snap}
-                    apply: {bg_quad: {hover: 1.0}}
+                    apply: {bg: {hover: 1.0}}
                 }
             }
             
@@ -63,7 +63,7 @@ live_register!{
                     redraw: true
                     apply: {
                         opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
-                        bg_quad: {opened: (opened)}
+                        bg: {opened: (opened)}
                     }
                 }
                 yes = {
@@ -71,7 +71,7 @@ live_register!{
                     redraw: true
                     apply: {
                         opened: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]
-                        bg_quad: {opened: (opened)}
+                        bg: {opened: (opened)}
                     }
                 }
             }
@@ -86,7 +86,7 @@ pub struct FoldButton {
     
     opened: f32,
     
-    bg_quad: DrawQuad,
+    bg: DrawQuad,
     abs_size: Vec2,
     abs_offset: Vec2,
     walk: Walk,
@@ -115,7 +115,7 @@ impl FoldButton {
             }
         };
         
-        let state = button_logic_handle_event(cx, event, self.bg_quad.area(), &mut |_,_|{});
+        let state = button_logic_handle_event(cx, event, self.bg.area(), &mut |_,_|{});
         if let Some(state) = state {
             match state {
                 ButtonState::Pressed => {
@@ -139,12 +139,12 @@ impl FoldButton {
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        self.bg_quad.draw_walk(cx, walk);
+        self.bg.draw_walk(cx, walk);
     }
     
     pub fn draw_abs(&mut self, cx: &mut Cx2d, pos: Vec2, fade: f32) {
-        self.bg_quad.apply_over(cx, live!{fade: (fade)});
-        self.bg_quad.draw_abs(cx, Rect {
+        self.bg.apply_over(cx, live!{fade: (fade)});
+        self.bg.draw_abs(cx, Rect {
             pos: pos + self.abs_offset,
             size: self.abs_size
         });

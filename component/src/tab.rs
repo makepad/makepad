@@ -10,7 +10,7 @@ live_register!{
     use makepad_component::theme::*;
     
     Tab: {{Tab}} {
-        name_text: {
+        name: {
             text_style: FONT_LABEL {}
             instance hover: 0.0
             instance selected: 0.0
@@ -27,7 +27,7 @@ live_register!{
             }
         }
         
-        bg_quad: {
+        bg: {
             instance hover: float
             instance selected: float
             
@@ -72,8 +72,8 @@ live_register!{
                     from: {all: Play::Forward {duration: 0.2}}
                     apply: {
                         hover: 0.0,
-                        bg_quad: {hover: (hover)}
-                        name_text: {hover: (hover)}
+                        bg: {hover: (hover)}
+                        name: {hover: (hover)}
                     }
                 }
                 
@@ -91,9 +91,9 @@ live_register!{
                     from: {all: Play::Forward {duration: 0.3}}
                     apply: {
                         selected: 0.0,
-                        close_button: {button_quad: {selected: (selected)}}
-                        bg_quad: {selected: (selected)}
-                        name_text: {selected: (selected)}
+                        close_button: {button: {selected: (selected)}}
+                        bg: {selected: (selected)}
+                        name: {selected: (selected)}
                     }
                 }
                 
@@ -113,9 +113,9 @@ pub struct Tab {
     #[rust] is_selected: bool,
     #[rust] is_dragged: bool,
     
-    bg_quad: DrawQuad,
-    name_text: DrawText,
-    drag_quad: DrawColor,
+    bg: DrawQuad,
+    name: DrawText,
+    drag: DrawColor,
     
     state: State,
     
@@ -149,16 +149,16 @@ impl Tab {
     
     pub fn draw(&mut self, cx: &mut Cx2d, name: &str) {
         //self.bg_quad.color = self.color(self.is_selected);
-        self.bg_quad.begin(cx, self.walk, self.layout);
+        self.bg.begin(cx, self.walk, self.layout);
         //self.name_text.color = self.name_color(self.is_selected);
         self.close_button.draw(cx);
         //cx.turtle_align_y();
-        self.name_text.draw_walk(cx, Walk::fit(), Align::default(),  name);
+        self.name.draw_walk(cx, Walk::fit(), Align::default(),  name);
         //cx.turtle_align_y();
-        self.bg_quad.end(cx);
+        self.bg.end(cx);
         
         if self.is_dragged {
-            self.drag_quad.draw_abs(cx, self.bg_quad.area().get_rect(cx));
+            self.drag.draw_abs(cx, self.bg.area().get_rect(cx));
         }
     }
     
@@ -195,7 +195,7 @@ impl Tab {
             _ => ()
         };
         
-        match event.hits(cx, self.bg_quad.draw_vars.area) {
+        match event.hits(cx, self.bg.area()) {
             HitEvent::FingerHover(f) => {
                 cx.set_hover_mouse_cursor(MouseCursor::Hand);
                 match f.hover_state {
@@ -213,16 +213,16 @@ impl Tab {
             }
             _ => {}
         }
-        match event.drag_hits(cx, self.bg_quad.draw_vars.area) {
+        match event.drag_hits(cx, self.bg.area()) {
             DragEvent::FingerDrag(f) => match f.state {
                 DragState::In => {
                     self.is_dragged = true;
-                    self.bg_quad.area().redraw(cx);
+                    self.bg.area().redraw(cx);
                     *f.action = DragAction::Copy;
                 }
                 DragState::Out => {
                     self.is_dragged = false;
-                    self.bg_quad.area().redraw(cx);
+                    self.bg.area().redraw(cx);
                 }
                 DragState::Over => match event {
                     Event::FingerDrag(event) => {
@@ -233,7 +233,7 @@ impl Tab {
             },
             DragEvent::FingerDrop(f) => {
                 self.is_dragged = false;
-                self.bg_quad.area().redraw(cx);
+                self.bg.area().redraw(cx);
                 dispatch_action(cx, TabAction::ReceivedDraggedItem(f.dragged_item.clone()))
             }
             _ => {}

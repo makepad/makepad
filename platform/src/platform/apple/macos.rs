@@ -256,9 +256,9 @@ impl Cx {
             }
         }
         
-        if !set_cursor {
-            cocoa_app.set_mouse_cursor(MouseCursor::Default)
-        }
+        //if !set_cursor {
+        //    cocoa_app.set_mouse_cursor(MouseCursor::Default)
+        //}
     }
     
     fn handle_core_midi_signals(&mut self, se: &SignalEvent) {
