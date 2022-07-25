@@ -3,7 +3,6 @@ use {
     std::sync::{Arc, Mutex},
     crate::{
         makepad_live_id::*,
-        makepad_math::Vec2,
         platform::{
             core_midi::CoreMidiAccess,
             cocoa_app::{CocoaApp, get_cocoa_app_global, init_cocoa_globals},
@@ -25,9 +24,7 @@ use {
             SignalEvent,
             Event,
             MidiInputListEvent,
-            DraggedItem
         },
-        menu::Menu,
         cursor::MouseCursor,
         cx_api::{CxPlatformApi, CxPlatformOp},
         cx::{Cx, PlatformType},
@@ -159,10 +156,6 @@ impl Cx {
                         self.call_live_edit();
                         self.call_signals_and_triggers();
                     }
-                }
-                
-                if let Some(dragged_item) = self.platform.start_dragging.take() {
-                    cocoa_app.start_dragging(dragged_item);
                 }
                 
                 if self.process_desktop_post_event(event) {
@@ -304,12 +297,11 @@ impl Cx {
                 CxPlatformOp::StopTimer(timer_id) => {
                     cocoa_app.stop_timer(timer_id);
                 },
-                CxPlatformOp::StartDragging(item) => {
+                CxPlatformOp::StartDragging(dragged_item) => {
+                    cocoa_app.start_dragging(dragged_item);
                 }
                 CxPlatformOp::UpdateMenu(menu)=>{
-                    if let Some(menu) = &self.platform.last_menu {
-                        cocoa_app.update_app_menu(menu, &self.command_settings)
-                    }
+                    cocoa_app.update_app_menu(&menu, &self.command_settings)
                 }
             }
         }
@@ -414,14 +406,14 @@ pub struct CxPlatform {
     pub midi_input_data: Arc<Mutex<RefCell<Vec<Midi1InputData >> >>,
     pub bytes_written: usize,
     pub draw_calls_done: usize,
-    pub last_menu: Option<Menu>,
-    pub set_menu: bool,
-    pub set_window_position: Option<Vec2>,
-    pub set_window_outer_size: Option<Vec2>,
-    pub set_ime_position: Option<Vec2>,
-    pub start_timer: Vec<(u64, f64, bool)>,
-    pub stop_timer: Vec<u64>,
+    //pub last_menu: Option<Menu>,
+    //pub set_menu: bool,
+    //pub set_window_position: Option<Vec2>,
+    //pub set_window_outer_size: Option<Vec2>,
+    //pub set_ime_position: Option<Vec2>,
+    //pub start_timer: Vec<(u64, f64, bool)>,
+    //pub stop_timer: Vec<u64>,
     pub text_clipboard_response: Option<String>,
     pub desktop: CxDesktop,
-    pub start_dragging: Option<DraggedItem>,
+    //pub start_dragging: Option<DraggedItem>,
 }

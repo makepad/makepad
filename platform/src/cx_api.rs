@@ -54,8 +54,6 @@ pub trait CxPlatformApi {
     
     fn start_midi_input(&mut self);
     fn spawn_audio_output<F>(&mut self, f: F) where F: FnMut(AudioTime, &mut dyn AudioOutputBuffer) + Send + 'static;
-    
-    fn update_menu(&mut self, menu: &Menu) {}
 }
 
 #[derive(PartialEq)]
@@ -82,7 +80,7 @@ pub enum CxPlatformOp {
 }
 
 impl Cx {
-    fn update_menu(&mut self, menu: Menu) {
+    pub fn update_menu(&mut self, menu: Menu) {
         self.platform_ops.push(CxPlatformOp::UpdateMenu(menu));
     }
     
@@ -100,7 +98,7 @@ impl Cx {
         self.platform_ops.push(CxPlatformOp::HideTextIME);
     }
     
-    fn start_dragging(&mut self, dragged_item: DraggedItem) {
+    pub fn start_dragging(&mut self, dragged_item: DraggedItem) {
         self.platform_ops.iter().for_each( | p | {
             if let CxPlatformOp::StartDragging(_) = p {
                 panic!("start drag twice");
