@@ -26,7 +26,7 @@ live_register!{
             
             let slider_color = mix(mix(#7, #8, self.hover), #9, self.focus);
             let nub_color = mix(mix(#9, #c, self.hover), #e, self.focus);
-            let nubbg_color = mix(#bbb0, #b, self.focus);
+            let nubbg_color = mix(#bbb0, #b, self.drag);
             
             
             sdf.rect(0, self.rect_size.y - slider_height, self.rect_size.x, slider_height)
