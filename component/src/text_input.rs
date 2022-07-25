@@ -14,12 +14,15 @@ live_register!{
     
     TextInput: {{TextInput}} {
         
-        label_text: {
+        cursor: {
+        }
+        
+        label: {
             instance hover: 0.0
             instance focus: 0.0
             instance selected: 1.0
 
-            text_style: FONT_CODE {}
+            text_style: FONT_LABEL {}
             fn get_color(self) -> vec4 {
                 return mix(
                     mix(
@@ -37,7 +40,7 @@ live_register!{
             }
         }
         
-        select_quad: {
+        select: {
             instance hover: 0.0
             instance focus: 0.0
             
@@ -58,8 +61,8 @@ live_register!{
         }
         
         walk: {
-            width: Size::Fit,
-            height: Size::Fill,
+            width: Fit,
+            height: Fill,
             margin: {left: 1.0, right: 5.0, top: 0.0, bottom: 2.0},
         }
         
@@ -73,15 +76,15 @@ live_register!{
                 off = {
                     from: {all: Play::Forward {duration: 0.1}}
                     apply: {
-                        select_quad: {hover: 0.0}
-                        label_text: {hover: 0.0}
+                        select: {hover: 0.0}
+                        label: {hover: 0.0}
                     }
                 }
                 on = {
                     from: {all: Play::Snap}
                     apply: {
-                        select_quad: {hover: 1.0}
-                        label_text: {hover: 1.0}
+                        select: {hover: 1.0}
+                        label: {hover: 1.0}
                     }
                 }
             }
@@ -90,15 +93,15 @@ live_register!{
                 off = {
                     from: {all: Play::Forward {duration: 0.1}}
                     apply: {
-                        select_quad: {focus: 0.0}
-                        label_text: {focus: 0.0}
+                        select: {focus: 0.0}
+                        label: {focus: 0.0}
                     }
                 }
                 on = {
                     from: {all: Play::Snap}
                     apply: {
-                        select_quad: {focus: 1.0}
-                        label_text: {focus: 1.0}
+                        select: {focus: 1.0}
+                        label: {focus: 1.0}
                     }
                 }
             }
@@ -106,19 +109,26 @@ live_register!{
     }
 }
 
-#[derive(Live, LiveHook, FrameComponent)]
+#[derive(Live, FrameComponent)]
 #[live_register(frame_component!(TextInput))]
 pub struct TextInput {
     state: State,
     
-    select_quad: DrawQuad,
-    label_text: DrawText,
+    select: DrawQuad,
+    cursor: DrawColor,
+    label: DrawText,
     
     walk: Walk,
     align: Align,
     layout: Layout,
     
-    pub value: String
+    pub text: String
+}
+impl LiveHook for TextInput{
+  fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode])->Option<usize>{
+      //nodes.debug_print(index,100);
+      None
+  }
 }
 
 #[derive(Copy, Clone, PartialEq, FrameAction)]
@@ -129,22 +139,13 @@ pub enum TextInputAction {
 impl TextInput {
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, TextInputAction)){
         self.state_handle_event(cx, event);
-        /*
-        self.animator_handle_event(cx, event);
-        let res = self.button_logic.handle_event(cx, event, self.bg_quad.draw_vars.area);
+        // ok so lets test this text input first as a normal text input
         
-        match res.state {
-            ButtonState::Pressed => self.animate_to(cx, self.pressed_state),
-            ButtonState::Default => self.animate_to(cx, self.default_state),
-            ButtonState::Hover => self.animate_to(cx, self.hover_state),
-            _ => ()
-        };
-        res.action*/
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         //self.bg_quad.begin(cx, walk, self.layout);
-        self.label_text.draw_walk(cx, walk, self.align, &self.value);
+        self.label.draw_walk(cx, walk, self.align, &self.text);
         // ok next problem.
         // how will we get the text geom
         // 

@@ -78,7 +78,7 @@ live_register!{
                 off = {
                     from: {all: Play::Forward {duration: 0.1}}
                     apply: {
-                        draw_wheel: {pressed: 0.0, hover: 0.0}
+                        wheel: {pressed: 0.0, hover: 0.0}
                     }
                 }
                 
@@ -88,7 +88,7 @@ live_register!{
                         pressed: Play::Forward {duration: 0.01}
                     }
                     apply: {
-                        draw_wheel: {
+                        wheel: {
                             pressed: 0.0,
                             hover: [{time: 0.0, value: 1.0}],
                         }
@@ -98,7 +98,7 @@ live_register!{
                 pressed = {
                     from: {all: Play::Forward {duration: 0.2}}
                     apply: {
-                        draw_wheel: {
+                        wheel: {
                             pressed: [{time: 0.0, value: 1.0}],
                             hover: 1.0,
                         }
@@ -121,7 +121,7 @@ pub struct DrawColorWheel {
 
 #[derive(Live, LiveHook)]
 pub struct ColorPicker {
-    draw_wheel: DrawColorWheel,
+    wheel: DrawColorWheel,
     
     state: State,
     
@@ -172,15 +172,15 @@ impl ColorPicker {
         let mut changed = false;
         
         if last_hue != self.hue {
-            self.draw_wheel.apply_over(cx, live!{hue: (self.hue)});
+            self.wheel.apply_over(cx, live!{hue: (self.hue)});
             changed = true;
         }
         if last_sat != self.sat {
-            self.draw_wheel.apply_over(cx, live!{sat: (self.sat)});
+            self.wheel.apply_over(cx, live!{sat: (self.sat)});
             changed = true;
         }
         if last_val != self.val {
-            self.draw_wheel.apply_over(cx, live!{val: (self.val)});
+            self.wheel.apply_over(cx, live!{val: (self.val)});
             changed = true;
         }
         if changed {
@@ -198,7 +198,7 @@ impl ColorPicker {
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> ColorPickerAction {
         self.state_handle_event(cx, event);
         
-        match event.hits(cx, self.draw_wheel.area()) {
+        match event.hits(cx, self.wheel.area()) {
             HitEvent::FingerHover(fe) => {
                 cx.set_hover_mouse_cursor(MouseCursor::Arrow);
                 
@@ -263,10 +263,10 @@ impl ColorPicker {
         //self.wheel.shader = live_shader!(cx, self::shader_wheel);
         // i wanna draw a wheel with 'width' set but height a fixed height.
         self.size = cx.turtle().rect().size.y;
-        self.draw_wheel.hue = self.hue;
-        self.draw_wheel.sat = self.sat;
-        self.draw_wheel.val = self.val;
-        self.draw_wheel.draw_walk(cx, Walk::fixed_size(self.size * height_scale, self.size * height_scale));
+        self.wheel.hue = self.hue;
+        self.wheel.sat = self.sat;
+        self.wheel.val = self.val;
+        self.wheel.draw_walk(cx, Walk::fixed_size(self.size * height_scale, self.size * height_scale));
     }
 }
 

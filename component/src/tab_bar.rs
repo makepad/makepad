@@ -14,7 +14,7 @@ live_register!{
     
     TabBar: {{TabBar}} {
         tab: Tab {}
-        draw_drag: {
+        drag: {
             draw_depth: 10
             color: #c
         }
@@ -43,7 +43,7 @@ live_register!{
 pub struct TabBar {
     
     scroll_view: ScrollView,
-    draw_drag: DrawColor,
+    drag: DrawColor,
     
     bar_fill: DrawColor,
     walk: Walk,
@@ -86,7 +86,7 @@ impl TabBar {
     
     pub fn end(&mut self, cx: &mut Cx2d) {
         if self.is_dragged {
-            self.draw_drag.draw_walk(
+            self.drag.draw_walk(
                 cx,
                 Walk {
                     width: Size::Fill,
