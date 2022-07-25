@@ -8,7 +8,7 @@ live_register!{
     const SLIDE_WIDTH: 800
     
     Body: Label {
-        label_text: {
+        label: {
             color: #f
             text_style: {
                 font_size: 35
@@ -22,7 +22,7 @@ live_register!{
         walk: {width: (SLIDE_WIDTH), height: Fill}
         layout: {align: {x: 0.5, y: 0.5}, flow: Down, spacing: 40}
         title = Label {
-            label_text: {
+            text: {
                 color: #f
                 text_style: {
                     font_size: 64

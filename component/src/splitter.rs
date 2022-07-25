@@ -61,7 +61,7 @@ live_register!{
                 off = {
                     from: {all: Play::Forward {duration: 0.1}}
                     apply: {
-                        bar_quad: {pressed: 0.0, hover: 0.0}
+                        bar: {pressed: 0.0, hover: 0.0}
                     }
                 }
                 
@@ -71,7 +71,7 @@ live_register!{
                         state_down: Play::Forward {duration: 0.01}
                     }
                     apply: {
-                        bar_quad: {
+                        bar: {
                             pressed: 0.0,
                             hover: [{time: 0.0, value: 1.0}],
                         }
@@ -81,7 +81,7 @@ live_register!{
                 pressed = {
                     from: {all: Play::Forward {duration: 0.1}}
                     apply: {
-                        bar_quad: {
+                        bar: {
                             pressed: [{time: 0.0, value: 1.0}],
                             hover: 1.0,
                         }
@@ -116,7 +116,7 @@ pub struct Splitter {
     min_horizontal: f32,
     max_horizontal: f32,
     
-    bar_quad: DrawSplitter,
+    bar: DrawSplitter,
     split_bar_size: f32,
     
     // framecomponent mode
@@ -210,12 +210,12 @@ impl Splitter {
         cx.end_turtle();
         match self.axis {
             Axis::Horizontal => {
-                self.bar_quad.is_vertical = 1.0;
-                self.bar_quad.draw_walk(cx, Walk::size(Size::Fixed(self.split_bar_size), Size::Fill));
+                self.bar.is_vertical = 1.0;
+                self.bar.draw_walk(cx, Walk::size(Size::Fixed(self.split_bar_size), Size::Fill));
             }
             Axis::Vertical => {
-                self.bar_quad.is_vertical = 0.0;
-                self.bar_quad.draw_walk(cx, Walk::size(Size::Fill, Size::Fixed(self.split_bar_size)));
+                self.bar.is_vertical = 0.0;
+                self.bar.draw_walk(cx, Walk::size(Size::Fill, Size::Fixed(self.split_bar_size)));
             }
         }
         cx.begin_turtle(Walk::default(), Layout::flow_down());
@@ -251,7 +251,7 @@ impl Splitter {
         self.state_handle_event(cx, event);
         match event.hits_with_options(
             cx,
-            self.bar_quad.area(),
+            self.bar.area(),
             HitOptions {
                 margin: Some(self.margin()),
                 ..HitOptions::default()
@@ -319,7 +319,7 @@ impl Splitter {
                             }
                         }
                     };
-                    self.bar_quad.area().redraw(cx);
+                    self.bar.area().redraw(cx);
                     dispatch_action(cx, SplitterAction::Changed {axis: self.axis, align: self.align});
                 }
             }
