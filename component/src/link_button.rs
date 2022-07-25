@@ -47,7 +47,7 @@ live_register!{
             walk: {
                 width: Size::Fit,
                 height: Size::Fit,
-                margin: Margin {left: 5.0, top: 0.0, right: 5.0}
+                margin: {left: 5.0, top: 0.0, right: 5.0}
             }
             
             layout: {

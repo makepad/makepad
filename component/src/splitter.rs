@@ -346,6 +346,7 @@ impl Splitter {
 }
 
 #[derive(Clone, Copy, Debug, Live, LiveHook)]
+#[live_ignore]
 pub enum SplitterAlign {
     #[live(50.0)] FromStart(f32),
     #[live(50.0)] FromEnd(f32),
