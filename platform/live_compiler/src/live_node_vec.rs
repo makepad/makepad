@@ -542,7 +542,7 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
                 eprintln!("read_path too many path segs");
                 return None
             }
-            ids[index] = LiveProp(LiveId::from_str(step).unwrap(), LivePropType::Field);
+            ids[index] = LiveProp(LiveId::from_str_unchecked(step), LivePropType::Field);
             parsed += 1;
         }
         if let Some(index) = self.child_by_path(0, &ids[0..parsed]) {
@@ -863,14 +863,21 @@ impl LiveNodeVec for Vec<LiveNode> {
                 eprintln!("write_path too many path segs");
                 return
             }
-            ids[index] = LiveProp(LiveId::from_str(step).unwrap(), LivePropType::Field);
+            ids[index] = LiveProp(LiveId::from_str_unchecked(step), LivePropType::Field);
             parsed += 1;
+        }
+        let was_empty = self.len() == 0;
+        if was_empty{
+            self.open();
         }
         self.replace_or_insert_last_node_by_path(
             0,
             &ids[0..parsed],
             &[LiveNode::from_value(value)]
         );
+        if was_empty{
+            self.close();
+        }
     }
     
     fn replace_or_insert_last_node_by_path(&mut self, start_index: usize, path: &[LiveProp], other: &[LiveNode]) {

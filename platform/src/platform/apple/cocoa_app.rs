@@ -50,7 +50,30 @@ use {
     }
 };
 
-static mut GLOBAL_COCOA_APP: *mut CocoaApp = 0 as *mut _;
+// this is unsafe, however we don't have much choice since the system calls into 
+// the objective C entrypoints we need to enter our eventloop
+// So wherever we put this boundary, it will be unsafe
+pub static mut COCOA_CLASSES: *const CocoaClasses = 0 as *const _;
+pub static mut COCOA_APP : *mut CocoaApp = 0 as *mut _;
+
+pub fn init_cocoa_globals(){
+    unsafe{
+        COCOA_CLASSES = Box::into_raw(Box::new(CocoaClasses::new()));
+        COCOA_APP = Box::into_raw(Box::new(CocoaApp::new()));
+    }
+}
+
+pub fn get_cocoa_app_global() -> &'static mut CocoaApp {
+    unsafe {
+        &mut *(COCOA_APP)
+    }
+}
+
+pub fn get_cocoa_class_global() -> &'static CocoaClasses {
+    unsafe {
+        &*(COCOA_CLASSES)
+    }
+}
 
 #[derive(Clone)]
 pub struct CocoaTimer {
@@ -59,18 +82,35 @@ pub struct CocoaTimer {
     repeats: bool
 }
 
+pub struct CocoaClasses {
+    pub window: *const Class,
+    pub window_delegate: *const Class,
+    pub post_delegate: *const Class,
+    pub timer_delegate: *const Class,
+    pub menu_delegate: *const Class,
+    pub app_delegate: *const Class,
+    pub menu_target: *const Class,
+    pub view: *const Class,
+    pub key_value_observing_delegate: *const Class,
+}
+
+impl CocoaClasses{
+    pub fn new()->Self{
+        Self{
+            window: define_cocoa_window_class(),
+            window_delegate: define_cocoa_window_delegate(),
+            post_delegate: define_cocoa_post_delegate(),
+            timer_delegate: define_cocoa_timer_delegate(),
+            menu_delegate: define_menu_delegate(),
+            app_delegate: define_app_delegate(),
+            menu_target: define_menu_target_class(),
+            view: define_cocoa_view_class(),
+            key_value_observing_delegate: define_key_value_observing_delegate(),
+        }
+    }
+}
+
 pub struct CocoaApp {
-    
-    pub window_class: *const Class,
-    pub window_delegate_class: *const Class,
-    pub post_delegate_class: *const Class,
-    pub timer_delegate_class: *const Class,
-    pub menu_delegate_class: *const Class,
-    pub app_delegate_class: *const Class,
-    pub menu_target_class: *const Class,
-    pub view_class: *const Class,
-    pub key_value_observing_delegate_class: *const Class,
-    
     pub menu_delegate_instance: ObjcId,
     pub app_delegate_instance: ObjcId,
     pub const_attributes_for_marked_text: ObjcId,
@@ -88,28 +128,12 @@ pub struct CocoaApp {
     pub loop_block: bool,
     pub cursors: HashMap<MouseCursor, ObjcId>,
     pub current_cursor: MouseCursor,
-    //pub status_map: Mutex<CocoaStatusMap>,
     pub ns_event: ObjcId,
 }
-/*
-#[derive(Default)]
-pub struct CocoaStatusMap {
-    pub status_to_usize: HashMap<StatusId, usize>,
-    pub usize_to_status: HashMap<usize, StatusId>,
-    pub command_to_usize: HashMap<CommandId, usize>,
-    pub usize_to_command: HashMap<usize, CommandId>,
-}
-*/
+
 impl CocoaApp {
     pub fn new() -> CocoaApp {
         unsafe {
-            
-            let timer_delegate_class = define_cocoa_timer_delegate();
-            let timer_delegate_instance: ObjcId = msg_send![timer_delegate_class, new];
-            let menu_delegate_class = define_menu_delegate();
-            let menu_delegate_instance: ObjcId = msg_send![menu_delegate_class, new];
-            let app_delegate_class = define_app_delegate();
-            let app_delegate_instance: ObjcId = msg_send![app_delegate_class, new];
             
             let const_attributes = vec![
                 RcObjcId::from_unowned(NonNull::new(str_to_nsstring("NSMarkedClauseSegment")).unwrap()).forget(),
@@ -127,20 +151,9 @@ impl CocoaApp {
                 const_empty_string: RcObjcId::from_unowned(NonNull::new(str_to_nsstring("")).unwrap()),
                 pasteboard: msg_send![class!(NSPasteboard), generalPasteboard],
                 time_start: Instant::now(),
-                timer_delegate_instance: timer_delegate_instance,
-                timer_delegate_class: timer_delegate_class,
-                
-                post_delegate_class: define_cocoa_post_delegate(),
-                window_class: define_cocoa_window_class(),
-                window_delegate_class: define_cocoa_window_delegate(),
-                view_class: define_cocoa_view_class(),
-                menu_target_class: define_menu_target_class(),
-                key_value_observing_delegate_class: define_key_value_observing_delegate(),
-                
-                menu_delegate_class,
-                menu_delegate_instance,
-                app_delegate_class,
-                app_delegate_instance,
+                timer_delegate_instance:msg_send![get_cocoa_class_global().timer_delegate, new],
+                menu_delegate_instance:msg_send![get_cocoa_class_global().menu_delegate, new],
+                app_delegate_instance:msg_send![get_cocoa_class_global().app_delegate, new],
                 timers: Vec::new(),
                 cocoa_windows: Vec::new(),
                 loop_block: false,
@@ -231,7 +244,7 @@ impl CocoaApp {
                         panic!("cannot lock cmd_map");
                     };*/
                     
-                    (*target).set_ivar("cocoa_app_ptr", GLOBAL_COCOA_APP as *mut _ as *mut c_void);
+                    //(*target).set_ivar("cocoa_app_ptr", GLOBAL_COCOA_APP as *mut _ as *mut c_void);
                     (*target).set_ivar("command_usize", command.0.0);
                 },
                 Menu::Line => {
@@ -244,7 +257,7 @@ impl CocoaApp {
             }
         }
         unsafe {
-            make_menu(nil, self.menu_delegate_instance, self.menu_target_class, menu, command_settings);
+            make_menu(nil, self.menu_delegate_instance, get_cocoa_class_global().menu_target, menu, command_settings);
         }
     }
     /*
@@ -339,11 +352,11 @@ impl CocoaApp {
     
     pub fn init(&mut self) {
         unsafe {
-            GLOBAL_COCOA_APP = self;
+            //GLOBAL_COCOA_APP = self;
             let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
-            (*self.timer_delegate_instance).set_ivar("cocoa_app_ptr", self as *mut _ as *mut c_void);
-            (*self.menu_delegate_instance).set_ivar("cocoa_app_ptr", self as *mut _ as *mut c_void);
-            (*self.app_delegate_instance).set_ivar("cocoa_app_ptr", self as *mut _ as *mut c_void);
+            //(*self.timer_delegate_instance).set_ivar("cocoa_app_ptr", self as *mut _ as *mut c_void);
+            //(*self.menu_delegate_instance).set_ivar("cocoa_app_ptr", self as *mut _ as *mut c_void);
+            //(*self.app_delegate_instance).set_ivar("cocoa_app_ptr", self as *mut _ as *mut c_void);
             let () = msg_send![ns_app, setDelegate: self.app_delegate_instance];
             let () = msg_send![ns_app, setActivationPolicy: NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular as i64];
             //let () = msg_send![ns_app, finishLaunching];
@@ -620,8 +633,8 @@ impl CocoaApp {
         unsafe {
             let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
             
-            let cocoa_app = &mut (*GLOBAL_COCOA_APP);
-            let post_delegate_instance: ObjcId = msg_send![cocoa_app.post_delegate_class, new];
+            //let cocoa_app = get_cocoa_app_global();
+            let post_delegate_instance: ObjcId = msg_send![get_cocoa_class_global().post_delegate, new];
             /*
             // lock it
             let status_id = if let Ok(mut status_map) = cocoa_app.status_map.lock() {
@@ -639,7 +652,7 @@ impl CocoaApp {
                 panic!("Cannot lock cmd_map");
             };*/
             
-            (*post_delegate_instance).set_ivar("cocoa_app_ptr", GLOBAL_COCOA_APP as *mut _ as *mut c_void);
+            //(*post_delegate_instance).set_ivar("cocoa_app_ptr", GLOBAL_COCOA_APP as *mut _ as *mut c_void);
             (*post_delegate_instance).set_ivar("signal_id", signal_id);
             let nstimer: ObjcId = msg_send![
                 class!(NSTimer),
@@ -772,16 +785,11 @@ impl CocoaApp {
         cocoa_window.start_dragging(self.ns_event, dragged_item);
     }
 }
-
-pub fn get_cocoa_app(this: &Object) -> &mut CocoaApp {
+/*
+pub fn get_cocoa_app2(this: &Object) -> &mut CocoaApp {
     unsafe {
         let ptr: *mut c_void = *this.get_ivar("cocoa_app_ptr");
         &mut *(ptr as *mut CocoaApp)
     }
-}
+}*/
 
-pub fn get_cocoa_app_global() -> &'static mut CocoaApp {
-    unsafe {
-        &mut *(GLOBAL_COCOA_APP)
-    }
-}
