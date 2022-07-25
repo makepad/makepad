@@ -106,7 +106,7 @@ impl AudioComponent for AudioUnitEffect {
         }
     }
     
-    fn audio_query(&mut self, query: &AudioQuery, callback: &mut Option<&mut dyn FnMut(&mut Box<dyn AudioComponent >)>) -> AudioResult {
+    fn audio_query(&mut self, query: &AudioQuery, callback: &mut Option<AudioQueryCb>) -> AudioResult {
         self.input.audio_query(query, callback)
     }
 }

@@ -278,19 +278,12 @@ impl App {
         //self.desktop_window.handle_event(cx, event);
         self.scroll_view.handle_event(cx, event);
         
-        //let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
-        
-        
-        // how would/could we map our C struct directly to our UI.
         for item in self.frame.handle_event_iter(cx, event) {
             if item.has_bind_apply() {
                 let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
                 iron_fish.settings.apply_over(cx, &item.bind_apply);
             }
             match item.id() {
-                /*id!(slider) => if let SliderAction::Slide(value) = item.action.cast(){
-                    iron_fish.dosomethingwithslider();
-                },*/
                 id!(piano) => if let PianoAction::Note {is_on, note_number, velocity} = item.action() {
                     self.audio_graph.send_midi_1_data(Midi1Note {
                         is_on,
@@ -320,33 +313,6 @@ impl App {
             Event::Construct => {
                 let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
                 self.frame.bind_read(cx, &iron_fish.settings.live_read());
-                /*
-                if let Some(instrument) = self.frame.template(cx, ids!(instrument), id!(my_instrument), live!{
-                    header: {label = {text: "Instrument header"}}
-                }) {
-                    
-                    instrument.template(cx, ids!(stack), id!(my_stack1), live!{
-                        header: {label = {text: (format!("Key range {}", 3 + 4))}}
-                    });
-                    
-                    instrument.template(cx, ids!(stack), id!(my_stack2), live!{
-                        header: {label = {text: "Synth value"}, range = {mylabel = {text: "WHEE"}}}
-                    });
-                    
-                    instrument.template(cx, ids!(stack),id!(my_stack3),  live!{
-                        header: {label = {text: "Synth value"}, range = {mylabel = {text: "WHEE"}}}
-                    });
-                }
-                if let Some(instrument) = self.frame.template(cx, ids!(instrument),id!(my_id2),  live!{
-                    header: {label = {text: "MyInstrument"}}
-                }) {
-                    instrument.template(cx, ids!(stack),id!(my_stack1),  live!{
-                        header: {label = {text: "Synth value"}}
-                    });
-                    instrument.template(cx, ids!(stack),id!(my_stack2),  live!{
-                        header: {label = {text: "Synth value"}, range = {mylabel = {text: "WHEE"}}}
-                    });
-                }*/
             }
             Event::KeyDown(ke) => {
                 if let KeyCode::F1 = ke.key_code {
@@ -356,7 +322,6 @@ impl App {
             }
             Event::Draw(draw_event) => {
                 self.draw(&mut Cx2d::new(cx, draw_event));
-                //self.piano.set_key_focus(cx);
             }
             _ => ()
         }
