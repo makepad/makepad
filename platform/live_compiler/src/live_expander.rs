@@ -20,12 +20,7 @@ pub struct LiveExpander<'a> {
 
 impl<'a> LiveExpander<'a> {
     pub fn is_baseclass(id: LiveId) -> bool {
-        id == id!(Component)
-            || id == id!(Enum)
-            || id == id!(Struct)
-            || id == id!(Namespace)
-            || id == id!(DrawShader)
-            || id == id!(Geometry)
+        id == id!(Struct)
     }
     
     pub fn shift_parent_stack(&self, parents: &mut Vec<(LiveId, usize)>, nodes: &[LiveNode], after_point: usize, old_size: usize, new_size: usize) {
@@ -334,7 +329,7 @@ impl<'a> LiveExpander<'a> {
                         };
                         //overwrite value, this copies the Class
                     }
-                    else if !self.live_registry.ignore_no_dsl.contains(clone) {
+                    else if !Self::is_baseclass(*clone){//if !self.live_registry.ignore_no_dsl.contains(clone) {
                         self.errors.push(LiveError {
                             origin: live_error_origin!(),
                             span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).into(),
@@ -383,7 +378,7 @@ impl<'a> LiveExpander<'a> {
                                         
                                         out_doc.nodes[node_insert_point].id = field.id;
                                     }
-                                    else if !self.live_registry.ignore_no_dsl.contains(&lti.type_name) {
+                                    else if !lti.live_ignore {
                                         self.errors.push(LiveError {
                                             origin: live_error_origin!(),
                                             span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).into(),
@@ -419,7 +414,7 @@ impl<'a> LiveExpander<'a> {
                                     }
                                 }
                             }
-                            else if !self.live_registry.ignore_no_dsl.contains(&lti.type_name) && lti.type_name != LiveId(0) {
+                            else if !lti.live_ignore {
                                 self.errors.push(LiveError {
                                     origin: live_error_origin!(),
                                     span: in_doc.token_id_to_span(in_node.origin.token_id().unwrap()).into(),

@@ -123,6 +123,7 @@ impl LiveNew for AudioComponentRef {
             module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
             live_type: LiveType::of::<dyn AudioComponent>(),
             fields: Vec::new(),
+            live_ignore: true,
             type_name: LiveId(0)
         }
     }

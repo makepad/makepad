@@ -11,10 +11,6 @@ use {
         cell::RefCell,
     },
     crate::{
-        makepad_live_id::{
-            id,
-            LiveId,
-        },
         makepad_live_compiler::{
             LiveEditEvent,
             LiveRegistry
@@ -193,37 +189,6 @@ impl Default for Cx {
             platform: CxPlatformTexture::default()
         }];
         
-        let mut live_registry = LiveRegistry::default();
-        live_registry.add_ignore_no_dsl(&[
-            id!(Margin),
-            id!(Walk),
-            id!(Align),
-            id!(ScrollBarAxis),
-            id!(Layout),
-            id!(Padding),
-            id!(Axis),
-            id!(f32),
-            id!(usize),
-            id!(f64),
-            id!(bool),
-            id!(DrawVars),
-            id!(Vec2),
-            id!(Vec3),
-            id!(Vec4),
-            id!(LivePtr),
-            id!(String),
-            id!(View),
-            id!(States),
-            id!(Pass),
-            id!(Texture),
-            id!(Window),
-            id!(TextStyle),
-            id!(Wrapping),
-            id!(Overflow),
-            id!(SplitterAlign),
-            id!(MouseCursor)
-        ]);
-        
         Self {
             platform_type: PlatformType::Unknown,
             gpu_info: GpuInfo::default(),
@@ -281,7 +246,7 @@ impl Default for Cx {
             
             profiles: HashMap::new(),
             
-            live_registry: Rc::new(RefCell::new(live_registry)),
+            live_registry: Rc::new(RefCell::new(LiveRegistry::default())),
             shader_registry: ShaderRegistry::new(),
             
             command_settings: HashMap::new(),

@@ -82,10 +82,10 @@ live_register!{
             padding: {left: 5.0, bottom: 1.0,},
         }
         
-        icon_walk: Walk {
+        icon_walk:{
             width: Size::Fixed((DIM_DATA_ICON_WIDTH)),
             height: Size::Fixed((DIM_DATA_ICON_HEIGHT)),
-            margin: Margin {
+            margin:{
                 left: 1
                 top: 0
                 right: 4

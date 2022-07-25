@@ -18,7 +18,7 @@ live_register!{
     const TORAD: 0.017453292519943295
     const GOLDEN: 1.618033988749895
     
-    Math: Namespace {
+    Math: {
         fn rotate_2d(v: vec2, a: float) -> vec2 {
             let ca = cos(a);
             let sa = sin(a);
@@ -26,7 +26,7 @@ live_register!{
         }
     }
     
-    Pal: Namespace {
+    Pal: {
         
         fn premul(v: vec4) -> vec4 {
             return vec4(v.x * v.w, v.y * v.w, v.z * v.w, v.w);

@@ -85,6 +85,7 @@ pub struct FilterSettings {
 }
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
+#[live_ignore]
 pub struct IronFishSettings {
     osc1: OscSettings,
     osc2: OscSettings,

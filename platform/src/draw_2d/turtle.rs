@@ -10,6 +10,7 @@ use {
 };
 
 #[derive(Copy, Clone, Default, Debug, Live, LiveHook)]
+#[live_ignore]
 pub struct Layout {
     pub padding: Padding,
     pub align: Align,
@@ -18,6 +19,7 @@ pub struct Layout {
 } 
 
 #[derive(Copy, Clone, Default, Debug, Live, LiveHook)]
+#[live_ignore]
 pub struct Walk {
     pub abs_pos: Option<Vec2>,
     pub margin: Margin,
@@ -26,12 +28,14 @@ pub struct Walk {
 }
 
 #[derive(Clone, Copy, Debug, Live, LiveHook)]
+#[live_ignore]
 pub struct Align {
     pub x: f32,
     pub y: f32
 }
 
 #[derive(Clone, Copy, Default, Debug, Live)]
+#[live_ignore]
 pub struct Margin {
     pub left: f32,
     pub top: f32,
@@ -40,6 +44,7 @@ pub struct Margin {
 }
 
 #[derive(Clone, Copy, Default, Debug, Live)]
+#[live_ignore]
 pub struct Padding {
     pub left: f32,
     pub top: f32,
@@ -48,6 +53,7 @@ pub struct Padding {
 }
 
 #[derive(Copy, Clone, Debug, Live, LiveHook)]
+#[live_ignore]
 pub enum Axis {
     #[pick] Horizontal,
     Vertical
@@ -60,6 +66,7 @@ impl Default for Axis {
 }
 
 #[derive(Copy, Clone, Debug, Live, LiveHook)]
+#[live_ignore]
 pub enum Flow {
     #[pick] Right,
     Down,
@@ -67,6 +74,7 @@ pub enum Flow {
 }
 
 #[derive(Copy, Clone, Debug, Live)]
+#[live_ignore]
 pub enum Size {
     #[pick] Fill,
     #[live(200.0)] Fixed(f32),
