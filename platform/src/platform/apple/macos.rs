@@ -28,8 +28,6 @@ use {
         cursor::MouseCursor,
         cx_api::{CxPlatformApi, CxPlatformOp},
         cx::{Cx, PlatformType},
-        pass::CxPassParent,
-        
     }
 };
 
@@ -169,54 +167,6 @@ impl Cx {
                 true
             }
         })
-    }
-    
-    fn handle_repaint(&mut self, metal_windows: &mut Vec<MetalWindow>, metal_cx: &mut MetalCx) {
-        let mut windows_need_repaint = 0;
-        
-        let mut passes_todo = Vec::new();
-        self.compute_passes_to_repaint(&mut passes_todo, &mut windows_need_repaint);
-        if passes_todo.len() == 0 {
-            return
-        }
-        self.repaint_id += 1;
-        for pass_id in &passes_todo {
-            match self.passes[*pass_id].parent.clone() {
-                CxPassParent::Window(window_id) => {
-                    // find the accompanying render window
-                    // its a render window
-                    windows_need_repaint -= 1;
-                    if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
-                        let dpi_factor = metal_window.window_geom.dpi_factor;
-                        metal_window.resize_core_animation_layer(&metal_cx);
-                        
-                        self.draw_pass_to_layer(
-                            *pass_id,
-                            dpi_factor,
-                            metal_window.ca_layer,
-                            metal_cx,
-                            metal_window.is_resizing
-                        );
-                    }
-                    
-                }
-                CxPassParent::Pass(parent_pass_id) => {
-                    let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_texture(
-                        *pass_id,
-                        dpi_factor,
-                        metal_cx,
-                    );
-                },
-                CxPassParent::None => {
-                    self.draw_pass_to_texture(
-                        *pass_id,
-                        1.0,
-                        metal_cx,
-                    );
-                }
-            }
-        }
     }
     
     fn handle_platform_ops(&mut self, metal_windows: &mut Vec<MetalWindow>, metal_cx: &MetalCx, cocoa_app: &mut CocoaApp) {
@@ -406,14 +356,6 @@ pub struct CxPlatform {
     pub midi_input_data: Arc<Mutex<RefCell<Vec<Midi1InputData >> >>,
     pub bytes_written: usize,
     pub draw_calls_done: usize,
-    //pub last_menu: Option<Menu>,
-    //pub set_menu: bool,
-    //pub set_window_position: Option<Vec2>,
-    //pub set_window_outer_size: Option<Vec2>,
-    //pub set_ime_position: Option<Vec2>,
-    //pub start_timer: Vec<(u64, f64, bool)>,
-    //pub stop_timer: Vec<u64>,
     pub text_clipboard_response: Option<String>,
     pub desktop: CxDesktop,
-    //pub start_dragging: Option<DraggedItem>,
 }
