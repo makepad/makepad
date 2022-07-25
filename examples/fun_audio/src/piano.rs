@@ -141,7 +141,7 @@ pub struct Piano {
     #[rust([0; 20])]
     keyboard_keys_down: [u8; 20],
     
-    #[rust(5)]
+    #[rust(4)]
     keyboard_octave: u8,
     
     #[rust(100)]
@@ -362,8 +362,8 @@ impl Piano {
             }
         }
         
-        match event.hits(cx, self.view.area()) {
-            HitEvent::KeyDown(ke) => if !ke.is_repeat {
+        match event{
+             Event::KeyDown(ke) => if !ke.is_repeat {
                 if let Some(nn) = key_map(ke.key_code) {
                     let note_number = nn + self.keyboard_octave * 12;
                     self.keyboard_keys_down[nn as usize] = note_number;
@@ -390,12 +390,15 @@ impl Piano {
                     _ => ()
                 }}
             }
-            HitEvent::KeyUp(ke) => if let Some(nn) = key_map(ke.key_code) {
+            Event::KeyUp(ke) => if let Some(nn) = key_map(ke.key_code) {
                 let note_number = self.keyboard_keys_down[nn as usize];
                 self.keyboard_keys_down[nn as usize] = 0;
                 self.set_note(cx, false, note_number);
                 dispatch_action(cx, PianoAction::Note {is_on: false, note_number, velocity: self.keyboard_velocity});
             },
+            _=>()
+        }
+        match event.hits(cx, self.view.area()) {
             HitEvent::KeyFocus(_) => {
                 for piano_key in self.white_keys.values_mut().chain(self.black_keys.values_mut()) {
                     piano_key.set_is_focussed(cx, true, Animate::Yes)
