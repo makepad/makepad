@@ -609,7 +609,7 @@ impl AudioComponent for IronFish {
     fn handle_event(&mut self, _cx: &mut Cx, _event: &mut Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)){
     }
     // we dont have inputs
-    fn audio_query(&mut self, _query: &AudioQuery, _callback: &mut Option<&mut dyn FnMut(&mut Box<dyn AudioComponent >)>) -> AudioResult{
+    fn audio_query(&mut self, _query: &AudioQuery, _callback: &mut Option<AudioQueryCb>) -> AudioResult{
         AudioResult::NotFound
     }
 }

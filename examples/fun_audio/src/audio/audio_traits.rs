@@ -17,7 +17,7 @@ pub trait AudioComponent: LiveApply {
     fn type_id(&self) -> LiveType where Self: 'static {LiveType::of::<Self>()}
     fn handle_event(&mut self, _cx: &mut Cx, event: &mut Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction));
     fn get_graph_node(&mut self, cx: &mut Cx) -> Box<dyn AudioGraphNode + Send>;
-    fn audio_query(&mut self, _query: &AudioQuery, _callback: &mut Option<&mut dyn FnMut(&mut Box<dyn AudioComponent >)>) -> AudioResult;
+    fn audio_query(&mut self, _query: &AudioQuery, _callback: &mut Option<AudioQueryCb>) -> AudioResult;
 }
 
 pub trait AudioGraphNode {
@@ -43,6 +43,16 @@ pub trait AudioComponentFactory {
 
 // Live bindings for AudioComponentRef
 
+pub struct AudioQueryCb<'a>{
+    pub cb:&'a mut dyn FnMut(&mut Box<dyn AudioComponent >)
+}
+
+impl<'a> AudioQueryCb<'a>{
+    pub fn call(&mut self, args:&mut Box<dyn AudioComponent >){
+        let cb = &mut self.cb;
+        cb(args)
+    }
+}
 
 pub struct AudioComponentRef(Option<Box<dyn AudioComponent >>);
 
@@ -54,13 +64,13 @@ impl AudioComponentRef {
         self.0.as_mut()
     }
     
-    pub fn audio_query(&mut self, query: &AudioQuery, callback: &mut Option<&mut dyn FnMut(&mut Box<dyn AudioComponent >)>) -> AudioResult {
+    pub fn audio_query(&mut self, query: &AudioQuery, callback: &mut Option<AudioQueryCb>) -> AudioResult {
         if let Some(inner) = &mut self.0 {
             match query {
                 AudioQuery::TypeId(id) => {
                     if inner.type_id() == *id {
                         if let Some(callback) = callback {
-                            callback(inner)
+                            callback.call(inner)
                         }
                         else {
                             return AudioResult::Found(inner)

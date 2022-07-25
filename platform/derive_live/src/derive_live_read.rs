@@ -50,11 +50,6 @@ fn derive_live_read_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) 
             }
         }
         
-        // special marker fields
-        //let draw_super = fields.iter().find( | field | field.name == "draw_super");
-        //let draw_vars = fields.iter().find( | field | field.name == "draw_vars");
-        //let geometry = fields.iter().find( | field | field.name == "geometry");
-        
         tb.add("impl").stream(generic.clone());
         tb.add("LiveRead for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
         
@@ -111,7 +106,6 @@ fn derive_live_read_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) 
                     return error_result("unexpected whilst parsing enum")
                 }
             }
-            //eprintln!("HERE2");
             parser.eat_punct_alone(',');
         }
         

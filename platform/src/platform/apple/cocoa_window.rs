@@ -13,7 +13,7 @@ use {
             apple::apple_util::{
                 str_to_nsstring,
             },
-            cocoa_app::CocoaApp,
+            cocoa_app::{CocoaApp,get_cocoa_class_global},
         },
         event::{
             WindowGeom,
@@ -62,9 +62,9 @@ impl CocoaWindow {
         unsafe {
             let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
             
-            let window: ObjcId = msg_send![cocoa_app.window_class, alloc];
-            let window_delegate: ObjcId = msg_send![cocoa_app.window_delegate_class, new];
-            let view: ObjcId = msg_send![cocoa_app.view_class, alloc];
+            let window: ObjcId = msg_send![get_cocoa_class_global().window, alloc];
+            let window_delegate: ObjcId = msg_send![get_cocoa_class_global().window_delegate, new];
+            let view: ObjcId = msg_send![get_cocoa_class_global().view, alloc];
             
             let () = msg_send![pool, drain];
             cocoa_app.cocoa_windows.push((window, view));

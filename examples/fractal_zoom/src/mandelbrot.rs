@@ -484,15 +484,16 @@ impl Mandelbrot {
         let bail_test = self.tile_cache.bail_test.clone();
         // create a new task on the threadpool
         // this is run on any one of our worker threads that's free
+        let is_zooming = self.is_zooming;
         self.tile_cache.thread_pool.execute(move || {
             if TileCache::tile_needs_to_bail(&tile, bail_test) {
                 return to_ui.send(ToUI::TileBailed {tile}).unwrap();
             }
-            /*if !is_zooming{
+            
+            if !is_zooming{
                 mandelbrot_f64x2_aa(&mut tile, max_iter);
             } 
-            else */
-            if fractal_zoom >2e-5 {
+            else if fractal_zoom >2e-5 {
                 // we can use a f32x4 path when we aren't zoomed in far (2x faster)
                 // as f32 has limited zoom-depth it can support
                 mandelbrot_f32x4(&mut tile, max_iter);

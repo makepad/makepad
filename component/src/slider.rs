@@ -180,21 +180,18 @@ pub enum SliderAction {
 
 impl FrameComponent for Slider {
     fn bind_read(&mut self, _cx: &mut Cx, nodes: &[LiveNode]) {
-        // ok we have a bind string
         if let Some(LiveValue::Float(v)) = nodes.read_path(&self.bind){
             self.value = (*v as f32- self.min)/(self.max-self.min);
         }
     }
     
     fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, FrameActionItem)) {
-        self.handle_event(cx, event, &mut | bind, cx, action | {
+        self.handle_event(cx, event, &mut | cx, slider, action | {
             let mut apply = Vec::new();
             match &action{
                 SliderAction::Slide(v)=>{
-                    if bind.len()>0{
-                        apply.open();
-                        apply.write_path(bind, LiveValue::Float(*v as f64));
-                        apply.close();
+                    if slider.bind.len()>0{
+                        apply.write_path(&slider.bind, LiveValue::Float(*v as f64));
                     }
                 },
                 _=>()
@@ -213,7 +210,7 @@ impl FrameComponent for Slider {
 
 impl Slider {
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&String, &mut Cx, SliderAction)) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, &mut Self, SliderAction)) {
         self.state_handle_event(cx, event);
         self.text_input.handle_event(cx, event, &mut | _, _ | {});
         match event.hits(cx, self.draw_slider.area()) {
@@ -241,7 +238,7 @@ impl Slider {
                 cx.set_down_mouse_cursor(MouseCursor::Arrow);
                 self.animate_state(cx, ids!(drag.on));
                 self.dragging = Some(self.value);
-                dispatch_action(&self.bind, cx, SliderAction::StartSlide);
+                dispatch_action(cx, self, SliderAction::StartSlide);
             },
             HitEvent::FingerUp(fe) => {
                 // if the finger hasn't moved further than X we jump to edit-all on the text thing
@@ -254,13 +251,13 @@ impl Slider {
                     self.animate_state(cx, ids!(hover.off));
                 }
                 self.dragging = None;
-                dispatch_action(&self.bind, cx, SliderAction::EndSlide);
+                dispatch_action(cx, self,  SliderAction::EndSlide);
             }
             HitEvent::FingerMove(fe) => {
                 if let Some(start_pos) = self.dragging {
                     self.value = (start_pos + (fe.rel.x - fe.rel_start.x) / fe.rect.size.x).max(0.0).min(1.0);
                     self.draw_slider.area().redraw(cx);
-                    dispatch_action(&self.bind, cx, SliderAction::Slide(self.value * (self.max-self.min)+self.min));
+                    dispatch_action(cx, self, SliderAction::Slide(self.value * (self.max-self.min)+self.min));
                 }
             }
             _ => ()
