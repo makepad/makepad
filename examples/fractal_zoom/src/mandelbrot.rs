@@ -491,7 +491,7 @@ impl Mandelbrot {
             }
             
             if !is_zooming{
-                mandelbrot_f64x2_aa(&mut tile, max_iter);
+                mandelbrot_f64x2_4xaa(&mut tile, max_iter);
             } 
             else if fractal_zoom >2e-5 {
                 // we can use a f32x4 path when we aren't zoomed in far (2x faster)

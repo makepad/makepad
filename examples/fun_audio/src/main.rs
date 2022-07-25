@@ -93,7 +93,7 @@ live_register!{
         height: Fit
         layout: {flow: Right, padding: 8, spacing: 5, align: {y: 0.5}}
         slider = Slider {
-            label: "CutOff1",
+            label: "CutOff1"
             height: 22
         }
     }
@@ -103,8 +103,8 @@ live_register!{
             layout: {align: {y: 0.5}}
             fold_button = FoldButton {}
             swatch = Circle {
-                width: 10,
-                height: 10
+                width: 10 
+                height: 10 
                 bg: {color: #f00}
             }
             label = Label {text: "IronFish"}
@@ -274,7 +274,7 @@ impl App {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
         
-        //self.desktop_window.handle_event(cx, event);
+        //self.window.handle_event(cx, event);
         self.scroll_view.handle_event(cx, event);
         
         for item in self.frame.handle_event_iter(cx, event) {
