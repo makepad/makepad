@@ -19,25 +19,30 @@ live_register!{
             
             let sdf = Sdf2d::viewport(self.pos * self.rect_size)
             
-            let slider_color = mix(#5, #7, self.focus);
+            let slider_bg_color = #3;
+            
+            let slider_color = mix(mix(#7, #8, self.hover), #9, self.focus);
             let nub_color = mix(mix(#9, #c, self.hover), #e, self.focus);
-            let nubbg_color = mix(#5, #a, self.focus);
+            let nubbg_color = mix(#0000, #a, self.focus);
             
             let slider_height = 3;
             
-            sdf.rect(0, self.rect_size.y - slider_height, self.rect_size.x, self.rect_size.y)
+            sdf.rect(0, self.rect_size.y - slider_height, self.rect_size.x, slider_height)
+            sdf.fill(slider_bg_color);
+            
+            sdf.rect(0, self.rect_size.y - slider_height, self.slide_pos * self.rect_size.x, slider_height)
             sdf.fill(slider_color);
             
             let nub_size = 3
             let nubbg_size = 8
             
             let nubbg_x = self.slide_pos * (self.rect_size.x - nub_size) - nubbg_size * 0.5 + 0.5* nub_size;
-            sdf.rect(nubbg_x, self.rect_size.y - slider_height, nubbg_size, self.rect_size.y)
+            sdf.rect(nubbg_x, self.rect_size.y - slider_height, nubbg_size, slider_height)
             sdf.fill(nubbg_color);
             
             // the nub
             let nub_x = self.slide_pos * (self.rect_size.x - nub_size);
-            sdf.rect(nub_x, self.rect_size.y - slider_height, nub_size, self.rect_size.y)
+            sdf.rect(nub_x, self.rect_size.y - slider_height, nub_size, slider_height)
             sdf.fill(nub_color);
             
             
