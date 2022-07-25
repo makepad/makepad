@@ -3,7 +3,9 @@ use {
     std::ops::{ControlFlow, Try, FromResidual},
     crate::{
         makepad_platform::*,
-        //audio_engine::AudioEngine
+        makepad_platform::audio::*,
+        makepad_platform::midi::*,
+       //audio_engine::AudioEngine
     }
 };
 

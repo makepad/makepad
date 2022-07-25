@@ -11,11 +11,42 @@ use {
             }
         },
         cx::Cx,
-        pass::{PassClearColor, PassClearDepth},
+        pass::{CxPassParent, PassClearColor, PassClearDepth},
     },
 };
 
 impl Cx {
+    
+    pub fn handle_repaint(&mut self, is_animation_frame:bool)->bool{
+        let mut passes_todo = Vec::new();
+        let mut windows_need_repaint = 0;
+        self.compute_passes_to_repaint(&mut passes_todo, &mut windows_need_repaint);
+        
+        if is_animation_frame {
+            if passes_todo.len() > 0 {
+                for pass_id in &passes_todo {
+                    match self.passes[*pass_id].parent.clone() {
+                        CxPassParent::Window(_) => {
+                            // find the accompanying render window
+                            // its a render window
+                            windows_need_repaint -= 1;
+                            let dpi_factor = self.platform.window_geom.dpi_factor;
+                            self.draw_pass_to_canvas(*pass_id, dpi_factor);
+                        }
+                        CxPassParent::Pass(parent_pass_id) => {
+                            let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
+                            self.draw_pass_to_texture(*pass_id, dpi_factor);
+                        },
+                        CxPassParent::None => {
+                            self.draw_pass_to_texture(*pass_id, 1.0);
+                        }
+                    }
+                }
+            }
+        }
+        passes_todo.len() > 0
+    }
+    
     pub fn render_view(
         &mut self,
         pass_id: usize,
