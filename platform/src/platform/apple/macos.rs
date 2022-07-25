@@ -6,7 +6,7 @@ use {
         makepad_math::Vec2,
         platform::{
             core_midi::CoreMidiAccess,
-            cocoa_app::CocoaApp,
+            cocoa_app::{CocoaApp,get_cocoa_app_global, init_cocoa_globals},
             cx_desktop::CxDesktop,
             metal::{MetalCx, MetalWindow},
             audio_unit::*,
@@ -51,7 +51,9 @@ impl Cx {
     pub fn event_loop_core(&mut self) {
         self.platform_type = PlatformType::OSX;
         
-        let mut cocoa_app = CocoaApp::new();
+        init_cocoa_globals();
+        
+        let cocoa_app = get_cocoa_app_global();
         
         cocoa_app.init();
         

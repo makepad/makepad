@@ -11,8 +11,7 @@ use {
         platform::{
             apple::frameworks::*,
             cocoa_app::{
-//                CocoaApp,
-                get_cocoa_app,
+                get_cocoa_class_global,
                 get_cocoa_app_global
             },
             cocoa_window::{
@@ -58,8 +57,8 @@ impl KeyValueObserver {
     pub fn new(target: ObjcId, name: &str, callback: Box<dyn Fn()>) -> Self {
         unsafe {
             let double_box = Box::new(callback);
-            let cocoa_app = get_cocoa_app_global();
-            let observer = RcObjcId::from_owned(msg_send![cocoa_app.key_value_observing_delegate_class, alloc]);
+            //let cocoa_app = get_cocoa_app_global();
+            let observer = RcObjcId::from_owned(msg_send![get_cocoa_class_global().key_value_observing_delegate, alloc]);
             
             (*observer.as_id()).set_ivar("key_value_observer_callback", &*double_box as *const _ as *const c_void);
             
@@ -118,13 +117,13 @@ pub fn define_key_value_observing_delegate() -> *const Class {
 
 pub fn define_cocoa_timer_delegate() -> *const Class {
     
-    extern fn received_timer(this: &Object, _: Sel, nstimer: ObjcId) {
-        let ca = get_cocoa_app(this);
+    extern fn received_timer(_this: &Object, _: Sel, nstimer: ObjcId) {
+        let ca = get_cocoa_app_global();
         ca.send_timer_received(nstimer);
     }
     
-    extern fn received_live_resize(this: &Object, _: Sel, _nstimer: ObjcId) {
-        let ca = get_cocoa_app(this);
+    extern fn received_live_resize(_this: &Object, _: Sel, _nstimer: ObjcId) {
+        let ca = get_cocoa_app_global();
         ca.send_paint_event();
     }
     
@@ -154,7 +153,7 @@ pub fn define_menu_target_class() -> *const Class {
     
     extern fn menu_action(this: &Object, _sel: Sel, _item: ObjcId) {
         //println!("markedRange");
-        let ca = get_cocoa_app(this);
+        let ca = get_cocoa_app_global();
         unsafe {
             let command_u64: u64 = *this.get_ivar("command_usize");
             /*let cmd = if let Ok(status_map) = ca.status_map.lock() {
@@ -179,9 +178,9 @@ pub fn define_menu_target_class() -> *const Class {
 
 pub fn define_menu_delegate() -> *const Class {
     // NSMenuDelegate protocol
-    extern fn menu_will_open(this: &Object, _sel: Sel, _item: ObjcId) {
+    extern fn menu_will_open(_this: &Object, _sel: Sel, _item: ObjcId) {
         //println!("markedRange");
-        let _ca = get_cocoa_app(this);
+        //let _ca = get_cocoa_app(this);
     }
     
     let superclass = class!(NSObject);
@@ -202,7 +201,7 @@ struct CocoaPostInit {
 pub fn define_cocoa_post_delegate() -> *const Class {
     
     extern fn received_post(this: &Object, _: Sel, _nstimer: ObjcId) {
-        let ca = get_cocoa_app(this);
+        let ca = get_cocoa_app_global();
         unsafe {
             let signal_id: u64 = *this.get_ivar("signal_id");
             /*let status = if let Ok(status_map) = ca.status_map.lock() {
@@ -225,7 +224,7 @@ pub fn define_cocoa_post_delegate() -> *const Class {
     // Store internal state as user data
     decl.add_ivar::<*mut c_void>("cocoa_app_ptr");
     decl.add_ivar::<usize>("signal_id");
-    decl.add_ivar::<usize>("status");
+    //decl.add_ivar::<usize>("status");
     
     return decl.register();
 }
