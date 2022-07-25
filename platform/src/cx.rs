@@ -43,9 +43,7 @@ use {
             CxCommandSetting,
             Command
         },
-        cursor::{
-            MouseCursor
-        },
+        cx_api::{CxPlatformOp},
         area::{
             Area,
         },
@@ -105,8 +103,6 @@ pub struct Cx {
     pub path_to_font_id: HashMap<String, usize>,
     pub draw_font_atlas: Option<Box<CxDrawFontAtlas >>,
     
-    //pub registries: CxRegistries,
-    
     pub new_draw_event: DrawEvent,
     
     pub redraw_id: u64,
@@ -121,8 +117,9 @@ pub struct Cx {
     pub key_focus: Area,
     pub keys_down: Vec<KeyEvent>,
     
-    pub down_mouse_cursor: Option<MouseCursor>,
-    pub hover_mouse_cursor: Option<MouseCursor>,
+    pub platform_ops: Vec<CxPlatformOp>,
+    //pub down_mouse_cursor: Option<MouseCursor>,
+    //pub hover_mouse_cursor: Option<MouseCursor>,
     pub fingers: Vec<CxPerFinger>,
     
     pub drag_area: Area,
@@ -268,8 +265,8 @@ impl Default for Cx {
             key_focus: Area::Empty,
             keys_down: Vec::new(),
             
-            down_mouse_cursor: None,
-            hover_mouse_cursor: None,
+            platform_ops: Vec::new(),
+            
             fingers: fingers,
             
             drag_area: Area::Empty,
