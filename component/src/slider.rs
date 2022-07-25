@@ -26,7 +26,7 @@ live_register!{
             
             let slider_color = mix(mix(#7, #8, self.hover), #9, self.focus);
             let nub_color = mix(mix(#9, #c, self.hover), #e, self.focus);
-            let nubbg_color = mix(#aaa0, #a, self.focus);
+            let nubbg_color = mix(#bbb0, #b, self.focus);
             
             
             sdf.rect(0, self.rect_size.y - slider_height, self.rect_size.x, slider_height)
@@ -34,8 +34,6 @@ live_register!{
             
             sdf.rect(0, self.rect_size.y - slider_height, self.slide_pos * (self.rect_size.x - nub_size) + nub_size, slider_height)
             sdf.fill(slider_color);
-            
-            
             
             let nubbg_x = self.slide_pos * (self.rect_size.x - nub_size) - nubbg_size * 0.5 + 0.5 * nub_size;
             sdf.rect(nubbg_x, self.rect_size.y - slider_height, nubbg_size, slider_height)
@@ -46,55 +44,7 @@ live_register!{
             sdf.rect(nub_x, self.rect_size.y - slider_height, nub_size, slider_height)
             sdf.fill(nub_color);
             
-            
             return sdf.result
-            /*
-            let hover = max(self.hover, self.drag);
-            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-            let grad_top = 5.0;
-            let grad_bot = 1.0;
-            
-            // we need to move the slider range slightly inward
-            let xbody = self.slide_pos * (self.rect_size.x - 1.0) + 0.5;
-            // show the slider position in the body
-            let body = mix(
-                mix(#3a, #3, hover),
-                mix(#5, #6, hover),
-                step(sdf.pos.x, xbody)
-            );
-            
-            let body_transp = vec4(body.xyz, 0.0);
-            let top_gradient = mix(body_transp, #1f, max(0.0, grad_top - sdf.pos.y) / grad_top);
-            let inset_gradient = mix(
-                #5c,
-                top_gradient,
-                clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
-            );
-            
-            sdf.box(
-                1.,
-                1. + (self.rect_size.y - 4.0) * (1.0 - self.focus),
-                self.rect_size.x - 2.0,
-                (self.rect_size.y - 4.0) * self.focus + 2.0,
-                mix(1.0, 2.0, self.focus)
-            )
-            sdf.fill_keep(body)
-            
-            sdf.stroke(
-                mix(inset_gradient, body, (1.0 - self.focus)),
-                0.75
-            )
-            
-            let xs = self.slide_pos * (self.rect_size.x - 5.0) + 2.0;
-            sdf.rect(
-                xs - 1.5,
-                1. + (self.rect_size.y - 5.0) * (1.0 - self.focus),
-                3.0,
-                (self.rect_size.y - 4.0) * (self.focus) + mix(4.0, 2.0, self.focus)
-            );
-            sdf.fill(mix(#0000, #7, hover))
-            */
-            //return sdf.result
         }
     }
     
