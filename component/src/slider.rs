@@ -16,6 +16,33 @@ live_register!{
         instance drag: float
         
         fn pixel(self) -> vec4 {
+            
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+            
+            let slider_color = mix(#5, #7, self.focus);
+            let nub_color = mix(mix(#9, #c, self.hover), #e, self.focus);
+            let nubbg_color = mix(#5, #a, self.focus);
+            
+            let slider_height = 3;
+            
+            sdf.rect(0, self.rect_size.y - slider_height, self.rect_size.x, self.rect_size.y)
+            sdf.fill(slider_color);
+            
+            let nub_size = 3
+            let nubbg_size = 8
+            
+            let nubbg_x = self.slide_pos * (self.rect_size.x - nub_size) - nubbg_size * 0.5 + 0.5* nub_size;
+            sdf.rect(nubbg_x, self.rect_size.y - slider_height, nubbg_size, self.rect_size.y)
+            sdf.fill(nubbg_color);
+            
+            // the nub
+            let nub_x = self.slide_pos * (self.rect_size.x - nub_size);
+            sdf.rect(nub_x, self.rect_size.y - slider_height, nub_size, self.rect_size.y)
+            sdf.fill(nub_color);
+            
+            
+            return sdf.result
+            /*
             let hover = max(self.hover, self.drag);
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
             let grad_top = 5.0;
@@ -60,14 +87,13 @@ live_register!{
                 (self.rect_size.y - 4.0) * (self.focus) + mix(4.0, 2.0, self.focus)
             );
             sdf.fill(mix(#0000, #7, hover))
-            
-            return sdf.result
+            */
+            //return sdf.result
         }
     }
     
     Slider: {{Slider}} {
         min: 0.0,
-        
         max: 1.0,
         
         label_text: {
@@ -180,21 +206,21 @@ pub enum SliderAction {
 
 impl FrameComponent for Slider {
     fn bind_read(&mut self, _cx: &mut Cx, nodes: &[LiveNode]) {
-        if let Some(LiveValue::Float(v)) = nodes.read_path(&self.bind){
-            self.value = (*v as f32- self.min)/(self.max-self.min);
+        if let Some(LiveValue::Float(v)) = nodes.read_path(&self.bind) {
+            self.set_internal(*v as f32);
         }
     }
     
     fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, FrameActionItem)) {
         self.handle_event(cx, event, &mut | cx, slider, action | {
             let mut apply = Vec::new();
-            match &action{
-                SliderAction::Slide(v)=>{
-                    if slider.bind.len()>0{
+            match &action {
+                SliderAction::Slide(v) => {
+                    if slider.bind.len()>0 {
                         apply.write_path(&slider.bind, LiveValue::Float(*v as f64));
                     }
                 },
-                _=>()
+                _ => ()
             };
             dispatch_action(cx, FrameActionItem::from_bind_apply(apply, action.into()))
         });
@@ -209,6 +235,14 @@ impl FrameComponent for Slider {
 }
 
 impl Slider {
+    
+    fn to_external(&self) -> f32 {
+        self.value * (self.max - self.min) + self.min
+    }
+    
+    fn set_internal(&mut self, external: f32) {
+        self.value = (external - self.min) / (self.max - self.min)
+    }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, &mut Self, SliderAction)) {
         self.state_handle_event(cx, event);
@@ -234,7 +268,7 @@ impl Slider {
                 }
             },
             HitEvent::FingerDown(_fe) => {
-               // cx.set_key_focus(self.draw_slider.area());
+                cx.set_key_focus(self.draw_slider.area());
                 cx.set_down_mouse_cursor(MouseCursor::Arrow);
                 self.animate_state(cx, ids!(drag.on));
                 self.dragging = Some(self.value);
@@ -251,13 +285,13 @@ impl Slider {
                     self.animate_state(cx, ids!(hover.off));
                 }
                 self.dragging = None;
-                dispatch_action(cx, self,  SliderAction::EndSlide);
+                dispatch_action(cx, self, SliderAction::EndSlide);
             }
             HitEvent::FingerMove(fe) => {
                 if let Some(start_pos) = self.dragging {
                     self.value = (start_pos + (fe.rel.x - fe.rel_start.x) / fe.rect.size.x).max(0.0).min(1.0);
                     self.draw_slider.area().redraw(cx);
-                    dispatch_action(cx, self, SliderAction::Slide(self.value * (self.max-self.min)+self.min));
+                    dispatch_action(cx, self, SliderAction::Slide(self.to_external()));
                 }
             }
             _ => ()
@@ -268,7 +302,7 @@ impl Slider {
         self.draw_slider.slide_pos = self.value;
         self.draw_slider.begin(cx, walk, self.layout);
         if let Some(dw) = cx.defer_walk(self.label_walk) {
-            self.text_input.value = format!("{:.2}", self.value * (self.max-self.min)+self.min); //, (self.value*100.0) as usize);
+            self.text_input.value = format!("{:.2}", self.to_external()); //, (self.value*100.0) as usize);
             self.text_input.draw_walk(cx, self.text_input.get_walk());
             self.label_text.draw_walk(cx, dw.resolve(cx), self.label_align, &self.label);
         }
