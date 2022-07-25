@@ -17,7 +17,7 @@ live_register!{
         
         fn pixel(self) -> vec4 {
             let slider_height = 3;
-            let nub_size = 3
+            let nub_size = mix(3,4, self.hover);
             let nubbg_size = 8
             
             let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -25,8 +25,8 @@ live_register!{
             let slider_bg_color = #3;
             
             let slider_color = mix(mix(#7, #8, self.hover), #9, self.focus);
-            let nub_color = mix(mix(#9, #c, self.hover), #e, self.focus);
-            let nubbg_color = mix(#bbb0, #b, self.drag);
+            let nub_color = mix(mix(#9, #c, self.hover), mix(#e, #3, self.drag), self.focus);
+            let nubbg_color = mix(#eee0, #e, self.drag);
             
             
             sdf.rect(0, self.rect_size.y - slider_height, self.rect_size.x, slider_height)
