@@ -1,7 +1,6 @@
 #![feature(try_trait_v2)]
 pub use makepad_component::{self, *};
 pub use makepad_platform::{
-    self,
     *,
     audio::*,
     midi::*,

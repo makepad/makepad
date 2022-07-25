@@ -70,7 +70,6 @@ pub use {
         LivePropType,
         LiveProp,
         LiveIdAsProp,
-        //LiveTypeKind,
         LiveValue,
         FittedString,
         InlineString,
@@ -90,10 +89,6 @@ pub use {
             profile_start,
             profile_end
         },
-        /*cx_registries::{
-            CxRegistries,
-            CxRegistryNew,
-        },*/
         cx_draw_shaders::{
         },
         cx::{
@@ -177,17 +172,6 @@ pub use {
             cx_2d::{
                 Cx2d
             },
-        },
-        audio::{
-            AudioTime,
-            AudioOutputBuffer,
-            AudioBuffer
-        },
-        midi::{
-            Midi1InputData,
-            Midi1Data,
-            Midi1Note,
-            Midi1Event
         },
         window::Window,
         pass::{

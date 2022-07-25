@@ -9,6 +9,8 @@ use {
         audio::*,
         makepad_platform::live_atomic::*,
         makepad_platform::thread::*,
+        makepad_platform::audio::*,
+        makepad_platform::midi::*,
         makepad_platform::*
     },
 };
