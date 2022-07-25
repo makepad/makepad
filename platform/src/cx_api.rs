@@ -18,8 +18,8 @@ use {
             NextFrame,
         },
         audio::{
-          AudioTime,
-          AudioOutputBuffer  
+            AudioTime,
+            AudioOutputBuffer
         },
         cursor::{
             MouseCursor
@@ -27,9 +27,6 @@ use {
         area::{
             Area,
             DrawListArea
-        },
-        window::{
-            CxWindowState
         },
         menu::{
             Menu,
@@ -40,38 +37,124 @@ use {
     }
 };
 
-pub fn profile_start()->Instant {
-   Instant::now()
+pub fn profile_start() -> Instant {
+    Instant::now()
 }
 
 pub fn profile_end(instant: Instant) {
     console_log!("Profile time {} ms", (instant.elapsed().as_nanos() as f64) / 1000000f64);
 }
 
-pub trait CxPlatformApi{
-    fn show_text_ime(&mut self, x: f32, y: f32);
-    fn hide_text_ime(&mut self);
-
-    fn set_window_outer_size(&mut self, size: Vec2);
-    fn set_window_position(&mut self, pos: Vec2);
-
-    fn start_timer(&mut self, interval: f64, repeats: bool) -> Timer;
-    fn stop_timer(&mut self, timer: Timer);
-
+pub trait CxPlatformApi {
     fn post_signal(signal: Signal);
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static;
     
-    fn web_socket_open(&mut self, url:String, rec:WebSocketAutoReconnect)->WebSocket;
-    fn web_socket_send(&mut self, socket:WebSocket, data:Vec<u8>);
-
+    fn web_socket_open(&mut self, url: String, rec: WebSocketAutoReconnect) -> WebSocket;
+    fn web_socket_send(&mut self, socket: WebSocket, data: Vec<u8>);
+    
     fn start_midi_input(&mut self);
     fn spawn_audio_output<F>(&mut self, f: F) where F: FnMut(AudioTime, &mut dyn AudioOutputBuffer) + Send + 'static;
+    
+    fn update_menu(&mut self, menu: &Menu) {}
+}
 
-    fn update_menu(&mut self, menu: &Menu);
-    fn start_dragging(&mut self, dragged_item: DraggedItem);
+#[derive(PartialEq)]
+pub enum CxPlatformOp {
+    CreateWindow(usize),
+    CloseWindow(usize),
+    MinimizeWindow(usize),
+    MaximizeWindow(usize),
+    FullscreenWindow(usize),
+    NormalizeWindow(usize),
+    RestoreWindow(usize),
+    SetTopmost(usize, bool),
+    XrStartPresenting(usize),
+    XrStopPresenting(usize),
+    
+    ShowTextIME(Vec2),
+    HideTextIME,
+    SetHoverCursor(MouseCursor),
+    SetDownCursor(MouseCursor),
+    StartTimer {timer_id: u64, interval: f64, repeats: bool},
+    StopTimer(u64),
+    StartDragging(DraggedItem),
+    UpdateMenu(Menu)
 }
 
 impl Cx {
+    fn update_menu(&mut self, menu: Menu) {
+        self.platform_ops.push(CxPlatformOp::UpdateMenu(menu));
+    }
+    
+    pub fn push_unique_platform_op(&mut self, op:CxPlatformOp){
+        if self.platform_ops.iter().find(|o| **o == op).is_none(){
+            self.platform_ops.push(op);
+        }
+    }
+    
+    pub fn show_text_ime(&mut self, pos: Vec2) {
+        self.platform_ops.push(CxPlatformOp::ShowTextIME(pos));
+    }
+    
+    pub fn hide_text_ime(&mut self) {
+        self.platform_ops.push(CxPlatformOp::HideTextIME);
+    }
+    
+    fn start_dragging(&mut self, dragged_item: DraggedItem) {
+        self.platform_ops.iter().for_each( | p | {
+            if let CxPlatformOp::StartDragging(_) = p {
+                panic!("start drag twice");
+            }
+        });
+        self.platform_ops.push(CxPlatformOp::StartDragging(dragged_item));
+    }
+    
+    pub fn set_down_mouse_cursor(&mut self, cursor: MouseCursor) {
+        // down cursor overrides the hover cursor
+        if let Some(p) = self.platform_ops.iter_mut().find( | p | match p {
+            CxPlatformOp::SetHoverCursor(_) |
+            CxPlatformOp::SetDownCursor(_) => true,
+            _ => false
+        }) {
+            *p = CxPlatformOp::SetDownCursor(cursor)
+        }
+        else {
+            self.platform_ops.push(CxPlatformOp::SetDownCursor(cursor))
+        }
+    }
+    
+    pub fn set_hover_mouse_cursor(&mut self, cursor: MouseCursor) {
+        let mut was_hover = false;
+        // if we already have a downcursor, skip
+        if let Some(p) = self.platform_ops.iter_mut().find( | p | match p {
+            CxPlatformOp::SetHoverCursor(_) => {was_hover = true; true}
+            CxPlatformOp::SetDownCursor(_) => true,
+            _ => false
+        }) {
+            if was_hover{
+                *p = CxPlatformOp::SetHoverCursor(cursor)
+            }
+        }
+        else{
+            self.platform_ops.push(CxPlatformOp::SetHoverCursor(cursor))
+        }
+    }
+    
+    pub fn start_timer(&mut self, interval: f64, repeats: bool) -> Timer {
+        self.timer_id += 1;
+        self.platform_ops.push(CxPlatformOp::StartTimer {
+            timer_id: self.timer_id,
+            interval,
+            repeats
+        });
+        Timer(self.timer_id)
+    }
+    
+    pub fn stop_timer(&mut self, timer: Timer) {
+        if timer.0 != 0 {
+            self.platform_ops.push(CxPlatformOp::StopTimer(timer.0));
+        }
+    }
     
     pub fn get_dpi_factor_of(&mut self, area: &Area) -> f32 {
         match area {
@@ -89,21 +172,14 @@ impl Cx {
     }
     
     pub fn get_delegated_dpi_factor(&mut self, pass_id: usize) -> f32 {
-        let mut dpi_factor = 1.0;
         let mut pass_id_walk = pass_id;
         for _ in 0..25 {
             match self.passes[pass_id_walk].parent {
                 CxPassParent::Window(window_id) => {
-                    dpi_factor = match self.windows[window_id].window_state {
-                        CxWindowState::Create {..} => {
-                            panic!();
-                        },
-                        CxWindowState::Created => {
-                            self.windows[window_id].window_geom.dpi_factor
-                        },
-                        _ => 1.0
-                    };
-                    break;
+                    if !self.windows[window_id].is_created{
+                        panic!();
+                    }
+                    return self.windows[window_id].window_geom.dpi_factor;
                 },
                 CxPassParent::Pass(next_pass_id) => {
                     pass_id_walk = next_pass_id;
@@ -111,9 +187,9 @@ impl Cx {
                 _ => {break;}
             }
         }
-        dpi_factor
+        1.0
     }
-
+    
     pub fn redraw_pass_of(&mut self, area: Area) {
         // we walk up the stack of area
         match area {
@@ -137,7 +213,7 @@ impl Cx {
                 CxPassParent::Pass(next_pass_id) => {
                     walk_pass_id = next_pass_id;
                 },
-                _ => { 
+                _ => {
                     break;
                 }
             }
@@ -185,8 +261,8 @@ impl Cx {
             self.new_draw_event.draw_lists_and_children.push(draw_list_id);
         }
     }
-
-
+    
+    
     pub fn set_view_scroll_x(&mut self, draw_list_id: usize, scroll_pos: f32) {
         let fac = self.get_delegated_dpi_factor(self.draw_lists[draw_list_id].pass_id);
         let cxview = &mut self.draw_lists[draw_list_id];
@@ -266,8 +342,8 @@ impl Cx {
     pub fn send_signal(&mut self, signal: Signal) {
         self.signals.insert(signal);
     }
-
-    pub fn send_trigger(&mut self, area:Area, trigger:Trigger){
+    
+    pub fn send_trigger(&mut self, area: Area, trigger: Trigger) {
         if let Some(triggers) = self.triggers.get_mut(&area) {
             triggers.insert(trigger);
         }
@@ -275,21 +351,11 @@ impl Cx {
             let mut new_set = HashSet::new();
             new_set.insert(trigger);
             self.triggers.insert(area, new_set);
-        }    
+        }
     }
     
-    pub fn set_down_mouse_cursor(&mut self, mouse_cursor: MouseCursor) {
-        // ok so lets set the down mouse cursor
-        self.down_mouse_cursor = Some(mouse_cursor);
-    }
-    pub fn set_hover_mouse_cursor(&mut self, mouse_cursor: MouseCursor) {
-        // the down mouse cursor gets removed when there are no captured fingers
-        self.hover_mouse_cursor = Some(mouse_cursor);
-    }
-
-   
     pub fn debug_draw_tree(&self, dump_instances: bool, draw_list_id: usize) {
-        fn debug_draw_tree_recur(cx:&Cx, dump_instances: bool, s: &mut String, draw_list_id: usize, depth: usize) {
+        fn debug_draw_tree_recur(cx: &Cx, dump_instances: bool, s: &mut String, draw_list_id: usize, depth: usize) {
             if draw_list_id >= cx.draw_lists.len() {
                 writeln!(s, "---------- Drawlist still empty ---------").unwrap();
                 return
@@ -396,17 +462,17 @@ macro_rules!main_app {
         }
         
         #[cfg(target_arch = "wasm32")]
-        fn main(){}
+        fn main() {}
         
-        struct WasmAppCx{
-            app: Option<$app>,
+        struct WasmAppCx {
+            app: Option< $ app>,
             cx: Cx
         }
         
         #[export_name = "wasm_create_app"]
         #[cfg(target_arch = "wasm32")]
         pub extern "C" fn create_wasm_app() -> u32 {
-            let mut appcx = Box::new(WasmAppCx{app:None, cx: Cx::default()});
+            let mut appcx = Box::new(WasmAppCx {app: None, cx: Cx::default()});
             live_register(&mut appcx.cx);
             appcx.cx.live_expand();
             appcx.cx.live_scan_dependencies();
@@ -426,7 +492,7 @@ macro_rules!main_app {
             let body = appcx as *mut WasmAppCx;
             (*body).cx.process_to_wasm(msg_ptr, | cx, mut event | {
                 if let Event::Construct = event {
-                    (*body).app = Some($ app::new_app(cx));
+                    (*body).app = Some( $ app::new_app(cx));
                 }
                 (*body).app.as_mut().unwrap().handle_event(cx, &mut event);
                 cx.after_handle_event(&mut event);
@@ -436,20 +502,20 @@ macro_rules!main_app {
 }
 
 #[macro_export]
-macro_rules!register_component_factory{
-    ($cx: ident, $registry: ident, $ ty: ty, $factory: ident) => {
+macro_rules!register_component_factory {
+    ( $ cx: ident, $ registry: ident, $ ty: ty, $ factory: ident) => {
         let module_id = LiveModuleId::from_str(&module_path!()).unwrap();
-        if let Some((reg,_)) = $cx.live_registry.borrow().components.get_or_create::<$registry>().map.get(&LiveType::of::< $ ty>()){
-            if reg.module_id != module_id{
-                panic!("Component already registered {} {}",stringify!($ty),reg.module_id);
+        if let Some((reg, _)) = $ cx.live_registry.borrow().components.get_or_create::< $ registry>().map.get(&LiveType::of::< $ ty>()) {
+            if reg.module_id != module_id {
+                panic!("Component already registered {} {}", stringify!( $ ty), reg.module_id);
             }
         }
-        $cx.live_registry.borrow().components.get_or_create::<$registry>().map.insert(
+        $ cx.live_registry.borrow().components.get_or_create::< $ registry>().map.insert(
             LiveType::of::< $ ty>(),
             (LiveComponentInfo {
                 name: LiveId::from_str(stringify!( $ ty)).unwrap(),
                 module_id
-            }, Box::new($factory()))
+            }, Box::new( $ factory()))
         );
     }
 }

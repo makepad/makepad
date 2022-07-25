@@ -72,7 +72,7 @@ impl Cx {
                 //self.hover_mouse_cursor = None;
             },
             Event::FingerUp(_fe) => {
-                self.down_mouse_cursor = None;
+                //self.down_mouse_cursor = None;
             },
             Event::WindowCloseRequested(_cr) => {
             },

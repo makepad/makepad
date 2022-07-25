@@ -53,7 +53,10 @@ use {
 // this is unsafe, however we don't have much choice since the system calls into 
 // the objective C entrypoints we need to enter our eventloop
 // So wherever we put this boundary, it will be unsafe
+
+// this value will be fetched from multiple threads (post signal uses it)
 pub static mut COCOA_CLASSES: *const CocoaClasses = 0 as *const _;
+// this value should not. Todo: guard this somehow proper
 pub static mut COCOA_APP : *mut CocoaApp = 0 as *mut _;
 
 pub fn init_cocoa_globals(){
@@ -162,7 +165,6 @@ impl CocoaApp {
                 event_recur_block: false,
                 event_loop_running: true,
                 cursors: HashMap::new(),
-                //status_map: Mutex::new(CocoaStatusMap::default()),
                 current_cursor: MouseCursor::Default,
                 ns_event: ptr::null_mut(),
             }
@@ -175,7 +177,6 @@ impl CocoaApp {
             delegate: ObjcId,
             menu_target_class: *const Class,
             menu: &Menu,
-            //status_map: &Mutex<CocoaStatusMap>,
             command_settings: &HashMap<Command, CxCommandSetting>
         ) {
             match menu {

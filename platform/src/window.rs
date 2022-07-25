@@ -14,6 +14,7 @@ pub use {
         area::Area,
         pass::{Pass,CxPassParent},
         cx::Cx,
+        cx_api::CxPlatformOp,
         live_traits::*,
     }
 };
@@ -38,13 +39,13 @@ impl LiveNew for Window {
         else{
             let window_id = cx.windows.len();
             cx.windows.push(CxWindow {
-                window_state: CxWindowState::Create {
-                    title: "Makepad".to_string(),
-                    inner_size: cx.get_default_window_size(),
-                    position: None
-                },
+                is_created:false,
+                create_title:"Makepad".to_string(),
+                create_inner_size: cx.get_default_window_size(),
+                create_position: None,
                 ..Default::default()
             });
+            cx.platform_ops.push(CxPlatformOp::CreateWindow(window_id));
             window_id
         };
         
@@ -80,24 +81,17 @@ impl LiveApply for Window {
                 break;
             }
             match nodes[index].id {
-                id!(position) => cx.windows[self.window_id].window_set_position = Some(LiveNew::new_apply_mut_index(cx, from, &mut index, nodes)),
                 id!(inner_size) => {
                     let v = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes);
-                    if let CxWindowState::Create{inner_size,..} = &mut cx.windows[self.window_id].window_state{
-                        *inner_size = v;
-                    }
+                    cx.windows[self.window_id].create_inner_size = v;
                 },
                 id!(title) => {
                     let v = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes);
-                    if let CxWindowState::Create{title,..} = &mut cx.windows[self.window_id].window_state{
-                        *title = v;
-                    }
+                    cx.windows[self.window_id].create_title = v;
                 }
                 id!(position) => {
                     let v = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes);
-                    if let CxWindowState::Create{position,..} = &mut cx.windows[self.window_id].window_state{
-                        *position = v;
-                    }
+                    cx.windows[self.window_id].create_position = Some(v);
                 }
                 _=> {
                     cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
@@ -118,34 +112,28 @@ impl Window {
     }
 
     pub fn get_inner_size(&mut self, cx: &mut Cx) -> Vec2 {
-        return cx.windows[self.window_id].get_inner_size()
+        cx.windows[self.window_id].get_inner_size()
     }
     
-    pub fn get_position(&mut self, cx: &mut Cx) -> Option<Vec2> {
-        return cx.windows[self.window_id].get_position()
-    }
-    
-        
-    pub fn set_position(&mut self, cx: &mut Cx, pos:Vec2) {
-        return cx.windows[self.window_id].window_set_position = Some(pos);
+    pub fn get_position(&mut self, cx: &mut Cx) -> Vec2 {
+        cx.windows[self.window_id].get_position()
     }
 
     pub fn minimize(&mut self, cx: &mut Cx) {
-        cx.windows[self.window_id].window_command = CxWindowCmd::Minimize;
+        cx.push_unique_platform_op(CxPlatformOp::MinimizeWindow(self.window_id));
     }
     
     pub fn maximize(&mut self, cx: &mut Cx) {
-        cx.windows[self.window_id].window_command = CxWindowCmd::Maximize;
+        cx.push_unique_platform_op(CxPlatformOp::MaximizeWindow(self.window_id));
     }
     
     pub fn fullscreen(&mut self, cx:&mut Cx){
-        cx.windows[self.window_id].window_command = CxWindowCmd::FullScreen;
+        cx.push_unique_platform_op(CxPlatformOp::FullscreenWindow(self.window_id));
     }
     
     pub fn normal(&mut self, cx:&mut Cx){
-        cx.windows[self.window_id].window_command = CxWindowCmd::NormalScreen;
+        cx.push_unique_platform_op(CxPlatformOp::NormalizeWindow(self.window_id));
     }
-    
         
     pub fn can_fullscreen(&mut self, cx: &mut Cx) -> bool {
         cx.windows[self.window_id].window_geom.can_fullscreen
@@ -164,89 +152,66 @@ impl Window {
     }
     
     pub fn xr_start_presenting(&mut self, cx: &mut Cx){
-        cx.windows[self.window_id].window_command = CxWindowCmd::XrStartPresenting;
+        cx.push_unique_platform_op(CxPlatformOp::XrStartPresenting(self.window_id));
     }
     
     pub fn xr_stop_presenting(&mut self, cx: &mut Cx){
-        cx.windows[self.window_id].window_command = CxWindowCmd::XrStopPresenting;
+        cx.push_unique_platform_op(CxPlatformOp::XrStopPresenting(self.window_id));
     }
     
     pub fn is_topmost(&mut self, cx: &mut Cx) -> bool {
         cx.windows[self.window_id].window_geom.is_topmost
     }
     
-    pub fn set_topmost(&mut self, cx: &mut Cx, topmost: bool) {
-        cx.windows[self.window_id].window_topmost = Some(topmost);
+    pub fn set_topmost(&mut self, cx: &mut Cx, set_topmost:bool) {
+        cx.push_unique_platform_op(CxPlatformOp::SetTopmost(self.window_id, set_topmost));
     }
     
     pub fn restore(&mut self, cx: &mut Cx) {
-        cx.windows[self.window_id].window_command = CxWindowCmd::Restore;
+        cx.push_unique_platform_op(CxPlatformOp::RestoreWindow(self.window_id));
     }
     
     pub fn close(&mut self, cx: &mut Cx) {
-        cx.windows[self.window_id].window_state = CxWindowState::Close;
+        cx.push_unique_platform_op(CxPlatformOp::CloseWindow(self.window_id));
     }
-}
-
-#[derive(Clone)]
-pub enum CxWindowState {
-    Create {title: String, inner_size: Vec2, position: Option<Vec2>},
-    Created,
-    Close,
-    Closed
-}
-
-#[derive(Clone)]
-pub enum CxWindowCmd {
-    None,
-    Restore,
-    Maximize,
-    Minimize,
-    XrStartPresenting,
-    XrStopPresenting,
-    FullScreen,
-    NormalScreen
-}
-
-impl Default for CxWindowCmd {
-    fn default() -> Self {CxWindowCmd::None}
-}
-
-impl Default for CxWindowState {
-    fn default() -> Self {CxWindowState::Closed}
 }
 
 #[derive(Clone, Default)]
 pub struct CxWindow {
-    pub window_state: CxWindowState,
-    pub window_command: CxWindowCmd,
-    pub window_set_position: Option<Vec2>,
-    pub window_topmost: Option<bool>,
+    pub create_title: String,
+    pub create_position: Option<Vec2>,
+    pub create_inner_size: Vec2,
+    pub is_created: bool,
     pub window_geom: WindowGeom,
     pub main_pass_id: Option<usize>,
 }
 
 impl CxWindow {
+    
     pub fn get_inner_size(&mut self) -> Vec2 {
-        match &self.window_state {
-            CxWindowState::Create {inner_size, ..} => *inner_size,
-            CxWindowState::Created => self.window_geom.inner_size,
-            _ => Vec2::default()
+        if !self.is_created{
+            self.create_inner_size
+        }
+        else{
+            self.window_geom.inner_size
         }
     }
     
-    pub fn get_position(&mut self) -> Option<Vec2> {
-        match &self.window_state {
-            CxWindowState::Create {position, ..} => *position,
-            CxWindowState::Created => Some(self.window_geom.position),
-            _ => None
+    pub fn get_position(&mut self) -> Vec2 {
+        if !self.is_created{
+            self.create_position.unwrap()
+        }
+        else{
+            self.window_geom.position
         }
     }
     
     pub fn get_dpi_factor(&mut self) -> Option<f32> {
-        match &self.window_state {
-            CxWindowState::Created => Some(self.window_geom.dpi_factor),
-            _ => None
+        if self.is_created {
+            Some(self.window_geom.dpi_factor)
+        }
+        else{
+            None
         }
     }
 }
