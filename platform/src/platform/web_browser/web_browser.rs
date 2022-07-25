@@ -21,21 +21,17 @@ use {
             WebSocketErrorEvent,
             WebSocketMessageEvent,
             WebSocketAutoReconnect,
-            Timer,
             Signal,
             Event,
             XRInput,
             TextCopyEvent,
             TimerEvent,
-            DraggedItem,
             WindowGeom,
             WindowGeomChangeEvent
         },
-        menu::Menu,
         cursor::MouseCursor,
-        cx_api::{CxPlatformApi},
+        cx_api::{CxPlatformApi, CxPlatformOp},
         cx::{Cx},
-        window::{CxWindowState, CxWindowCmd},
         pass::CxPassParent,
     }
 };
@@ -157,14 +153,14 @@ impl Cx {
                     let digit = tw.finger.digit;
                     self.platform.fingers_down[digit] = false;
                     
-                    if !self.platform.fingers_down.iter().any( | down | *down) {
-                        self.down_mouse_cursor = None;
-                    }
+                    //if !self.platform.fingers_down.iter().any( | down | *down) {
+                    //    self.down_mouse_cursor = None;
+                    //}
                     
                     self.call_event_handler(&mut Event::FingerUp(tw.into()));
                     
                     self.fingers[digit].captured = Area::Empty;
-                    self.down_mouse_cursor = None;
+                    //self.down_mouse_cursor = None;
                 }
                 
                 id!(ToWasmFingerMove) => {
@@ -175,7 +171,7 @@ impl Cx {
                 id!(ToWasmFingerHover) => {
                     let tw = ToWasmFingerHover::read_to_wasm(&mut to_wasm);
                     self.fingers[0].over_last = Area::Empty;
-                    self.hover_mouse_cursor = None;
+                    //self.hover_mouse_cursor = None;
                     self.call_event_handler(&mut Event::FingerHover(tw.into()));
                     self.fingers[0]._over_last = self.fingers[0].over_last;
                 }
@@ -184,7 +180,7 @@ impl Cx {
                     // what was this for again?
                     let tw = ToWasmFingerOut::read_to_wasm(&mut to_wasm);
                     self.fingers[0].over_last = Area::Empty;
-                    self.hover_mouse_cursor = None;
+                    //self.hover_mouse_cursor = None;
                     self.call_event_handler(&mut Event::FingerHover(tw.into()));
                     self.fingers[0]._over_last = self.fingers[0].over_last;
                 }
@@ -320,63 +316,11 @@ impl Cx {
         }
         self.call_signals_and_triggers();
         
-        for window in &mut self.windows {
-            
-            window.window_state = match &window.window_state {
-                CxWindowState::Create {title, ..} => {
-                    self.platform.from_wasm(FromWasmSetDocumentTitle {
-                        title: title.to_string()
-                    });
-                    window.window_geom = self.platform.window_geom.clone();
-                    
-                    CxWindowState::Created
-                },
-                CxWindowState::Close => {
-                    CxWindowState::Closed
-                },
-                CxWindowState::Created => CxWindowState::Created,
-                CxWindowState::Closed => CxWindowState::Closed
-            };
-            
-            window.window_command = match &window.window_command {
-                CxWindowCmd::XrStartPresenting => {
-                    self.platform.from_wasm(FromWasmXrStartPresenting {});
-                    CxWindowCmd::None
-                },
-                CxWindowCmd::XrStopPresenting => {
-                    self.platform.from_wasm(FromWasmXrStopPresenting {});
-                    CxWindowCmd::None
-                },
-                CxWindowCmd::FullScreen => {
-                    self.platform.from_wasm(FromWasmFullScreen {});
-                    CxWindowCmd::None
-                },
-                CxWindowCmd::NormalScreen => {
-                    self.platform.from_wasm(FromWasmNormalScreen {});
-                    CxWindowCmd::None
-                },
-                _ => CxWindowCmd::None,
-            };
-        }
+        self.handle_platform_ops();
+        
         
         self.webgl_compile_shaders();
         
-        // check if we need to send a cursor
-        if let Some(cursor) = self.down_mouse_cursor {
-            self.platform.from_wasm(
-                FromWasmSetMouseCursor::new(cursor)
-            )
-        }
-        else if let Some(cursor) = self.hover_mouse_cursor {
-            self.platform.from_wasm(
-                FromWasmSetMouseCursor::new(cursor)
-            )
-        }
-        else {
-            self.platform.from_wasm(
-                FromWasmSetMouseCursor::new(MouseCursor::Default)
-            )
-        }
         
         let mut passes_todo = Vec::new();
         let mut windows_need_repaint = 0;
@@ -418,42 +362,85 @@ impl Cx {
     where F: FnMut(&mut Cx, Event),
     {
     }
+    
+    
+    fn handle_platform_ops(&mut self) {
+        let mut set_cursor = false;
+        while let Some(op) = self.platform_ops.pop() {
+            match op {
+                CxPlatformOp::CreateWindow(window_id) => {
+                    let window = &mut self.windows[window_id];
+                    self.platform.from_wasm(FromWasmSetDocumentTitle {
+                        title: window.create_title.clone()
+                    });
+                    window.window_geom = self.platform.window_geom.clone();
+                    window.is_created = true;
+                },
+                CxPlatformOp::CloseWindow(_window_id) => {
+                },
+                CxPlatformOp::MinimizeWindow(_window_id) => {
+                },
+                CxPlatformOp::MaximizeWindow(_window_id) => {
+                },
+                CxPlatformOp::RestoreWindow(_window_id) => {
+                },
+                CxPlatformOp::FullscreenWindow(_window_id) => {
+                    self.platform.from_wasm(FromWasmFullScreen {});
+                },
+                CxPlatformOp::NormalizeWindow(_window_id)=>{
+                   self.platform.from_wasm(FromWasmNormalScreen {});
+                }
+                CxPlatformOp::SetTopmost(_window_id, _is_topmost)=>{
+                    todo!()
+                }
+                CxPlatformOp::XrStartPresenting(_) => {
+                    self.platform.from_wasm(FromWasmXrStartPresenting {});
+                },
+                CxPlatformOp::XrStopPresenting(_) => {
+                    self.platform.from_wasm(FromWasmXrStopPresenting {});
+                },
+                CxPlatformOp::ShowTextIME(pos) => {
+                    self.platform.from_wasm(FromWasmShowTextIME {x:pos.x, y:pos.y});
+                },
+                CxPlatformOp::HideTextIME => {
+                    self.platform.from_wasm(FromWasmHideTextIME {});
+                },
+                
+                CxPlatformOp::SetHoverCursor(cursor) => {
+                    set_cursor = true;
+                    self.platform.from_wasm(FromWasmSetMouseCursor::new(cursor));
+                },
+                CxPlatformOp::SetDownCursor(cursor) => {
+                    set_cursor = true;
+                    self.platform.from_wasm(FromWasmSetMouseCursor::new(cursor));
+                },
+                CxPlatformOp::StartTimer {timer_id, interval, repeats} => {
+                    self.platform.from_wasm(FromWasmStartTimer {
+                        repeats,
+                        interval,
+                        timer_id: timer_id as f64,
+                    });
+                },
+                CxPlatformOp::StopTimer(timer_id) => {
+                    self.platform.from_wasm(FromWasmStopTimer {
+                        id: timer_id as f64,
+                    });
+                },
+                CxPlatformOp::StartDragging(_dragged_item) => {
+                }
+                CxPlatformOp::UpdateMenu(_menu)=>{
+                }
+            }
+        }
+        
+        if !set_cursor {
+            self.platform.from_wasm(FromWasmSetMouseCursor::new(MouseCursor::Default));
+        }
+    }
 }
 
 
 impl CxPlatformApi for Cx {
-    
-    fn show_text_ime(&mut self, x: f32, y: f32) {
-        self.platform.from_wasm(FromWasmShowTextIME {x, y});
-    }
-    
-    fn hide_text_ime(&mut self) {
-        self.platform.from_wasm(FromWasmHideTextIME {});
-    }
-    
-    fn set_window_outer_size(&mut self, _size: Vec2) {
-    }
-    
-    fn set_window_position(&mut self, _pos: Vec2) {
-    }
-    
-    fn start_timer(&mut self, interval: f64, repeats: bool) -> Timer {
-        self.timer_id += 1;
-        self.platform.from_wasm(FromWasmStartTimer {
-            repeats,
-            interval,
-            timer_id: self.timer_id as f64,
-        });
-        Timer(self.timer_id)
-    }
-    
-    fn stop_timer(&mut self, timer: Timer) {
-        if timer.0 != 0 {
-            self.platform.from_wasm(FromWasmStopTimer {
-                id: timer.0 as f64,
-            });
-        }
-    }
     
     fn post_signal(signal: Signal,) {
         unsafe {js_post_signal((signal.0.0 >> 32) as u32, signal.0.0 as u32)};
@@ -496,12 +483,6 @@ impl CxPlatformApi for Cx {
             output_buffer: WebAudioOutputBuffer::default()
         }));
         self.platform.from_wasm(FromWasmSpawnAudioOutput{closure_ptr: closure_ptr as u32});
-    }
-    
-    fn update_menu(&mut self, _menu: &Menu) {
-    }
-    
-    fn start_dragging(&mut self, _dragged_item: DraggedItem) {
     }
 }
 
