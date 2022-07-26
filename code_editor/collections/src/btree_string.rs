@@ -1,5 +1,5 @@
 use {
-    crate::{btree, BTree},
+    crate::{btree, btree::Measure, BTree},
     std::ops::{AddAssign, RangeBounds, SubAssign},
 };
 
@@ -18,7 +18,7 @@ impl BTreeString {
     pub fn is_empty(&self) -> bool {
         self.btree.is_empty()
     }
-    
+
     pub fn len(&self) -> usize {
         self.btree.len()
     }
@@ -27,9 +27,20 @@ impl BTreeString {
         self.btree.info().char_count
     }
 
+    pub fn char_count_at(&self, position: usize) -> usize {
+        if position == 0 {
+            return 0;
+        }
+        if position == self.len() {
+            return self.char_count();
+        }
+        let (chunk, summed_len, summed_char_count) = self.btree.chunk_at::<CharMeasure>(position);
+        summed_char_count + chunk[..position - summed_len].count_chars()
+    }
+
     pub fn slice<R: RangeBounds<usize>>(&self, range: R) -> Slice<'_> {
         Slice {
-            slice: self.btree.slice(range)
+            slice: self.btree.slice(range),
         }
     }
 
@@ -86,7 +97,7 @@ impl BTreeString {
 
     pub fn chars_rev(&self) -> CharsRev<'_> {
         CharsRev {
-            cursor: self.cursor_back(), 
+            cursor: self.cursor_back(),
         }
     }
 
@@ -116,7 +127,7 @@ impl BTreeString {
 impl From<String> for BTreeString {
     fn from(string: String) -> Self {
         Self::from(string.as_str())
-    }
+    } 
 }
 
 impl From<&String> for BTreeString {
@@ -232,13 +243,13 @@ impl<'a> Slice<'a> {
 
     pub fn chars(self) -> Chars<'a> {
         Chars {
-            cursor: self.cursor_front()
+            cursor: self.cursor_front(),
         }
     }
 
     pub fn chars_rev(self) -> CharsRev<'a> {
         CharsRev {
-            cursor: self.cursor_back()
+            cursor: self.cursor_back(),
         }
     }
 }
@@ -508,6 +519,14 @@ impl SubAssign for Info {
     }
 }
 
+struct CharMeasure;
+
+impl Measure<Info> for CharMeasure {
+    fn measure(info: Info) -> usize {
+        info.char_count
+    }
+}
+
 trait U8Ext {
     fn is_utf8_char_start(self) -> bool;
     fn utf8_char_len(self) -> usize;
@@ -558,29 +577,32 @@ impl StrExt for str {
 
 #[cfg(test)]
 mod tests {
-    use {std::ops::Range, super::*, proptest::prelude::*};
+    use {super::*, proptest::prelude::*, std::ops::Range};
 
     fn string_and_index() -> impl Strategy<Value = (String, usize)> {
         any::<String>().prop_flat_map(|string| {
-            let string_len = string.len();
-            (Just(string), 0..=string_len)
-        }.prop_map(|(string, mut index)| {
-            while !string.is_char_boundary(index) {
-                index -= 1;
+            {
+                let string_len = string.len();
+                (Just(string), 0..=string_len)
             }
-            (string, index)
-        }))
+            .prop_map(|(string, mut index)| {
+                while !string.is_char_boundary(index) {
+                    index -= 1;
+                }
+                (string, index)
+            })
+        })
     }
 
     fn string_and_range() -> impl Strategy<Value = (String, Range<usize>)> {
-        string_and_index().prop_flat_map(|(string, end)| {
-            (Just(string), 0..=end, Just(end))
-        }).prop_map(|(string, mut start, end)| {
-            while !string.is_char_boundary(start) {
-                start -= 1;
-            }
-            (string, start..end)
-        })
+        string_and_index()
+            .prop_flat_map(|(string, end)| (Just(string), 0..=end, Just(end)))
+            .prop_map(|(string, mut start, end)| {
+                while !string.is_char_boundary(start) {
+                    start -= 1;
+                }
+                (string, start..end)
+            })
     }
 
     proptest! {
@@ -600,6 +622,12 @@ mod tests {
         fn test_char_count(string in any::<String>()) {
             let btree_string = BTreeString::from(&string);
             assert_eq!(btree_string.char_count(), string.chars().count());
+        }
+
+        #[test]
+        fn test_char_count_at((string, index) in string_and_index()) {
+            let btree_string = BTreeString::from(&string);
+            assert_eq!(btree_string.char_count_at(index), string[..index].chars().count());
         }
 
         #[test]
