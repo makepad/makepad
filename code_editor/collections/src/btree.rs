@@ -65,6 +65,14 @@ impl<T: Chunk> BTree<T> {
         }
     }
 
+    pub(crate) fn front_chunk(&self) -> &T {
+        self.root.front_chunk()
+    }
+
+    pub(crate) fn back_chunk(&self) -> &T {
+        self.root.back_chunk()
+    }
+
     pub(crate) fn cursor_front(&self) -> Cursor<'_, T> {
         let mut cursor = Cursor::new(&self.root, 0, self.len());
         cursor.descend_left();
@@ -272,7 +280,7 @@ impl<'a, T: Chunk> Slice<'a, T> {
         if position == self.len() {
             return M::measure_info(self.info());
         }
-        self.root.measure_at::<M>(self.start + position) -  M::measure_info(self.start_info)
+        self.root.measure_at::<M>(self.start + position) - M::measure_info(self.start_info)
     }
 
     pub(crate) fn cursor_front(self) -> Cursor<'a, T> {
@@ -432,15 +440,17 @@ pub(crate) trait Chunk: Clone {
 
     fn new() -> Self;
     fn len(&self) -> usize;
+    fn can_split_at(&self, index: usize) -> bool;
     fn info_at(&self, index: usize) -> Self::Info;
-    fn is_boundary(&self, index: usize) -> bool;
     fn move_left(&mut self, other: &mut Self, end: usize);
     fn move_right(&mut self, other: &mut Self, start: usize);
     fn truncate_back(&mut self, start: usize);
     fn truncate_front(&mut self, end: usize);
 }
 
-pub(crate) trait Info: Copy + Add<Output = Self> + AddAssign + Sub<Output = Self> + SubAssign {
+pub(crate) trait Info:
+    Copy + Add<Output = Self> + AddAssign + Sub<Output = Self> + SubAssign
+{
     fn new() -> Self;
 }
 
@@ -514,7 +524,9 @@ impl<T: Chunk> Node<T> {
         let mut summed_measure = 0;
         loop {
             match node {
-                Node::Leaf(leaf) => break summed_measure + M::measure_chunk_at(leaf, position - summed_len),
+                Node::Leaf(leaf) => {
+                    break summed_measure + M::measure_chunk_at(leaf, position - summed_len)
+                }
                 Node::Branch(branch) => {
                     let (index, len, measure) =
                         branch.search_with_measure::<M>(position - summed_len);
@@ -522,6 +534,26 @@ impl<T: Chunk> Node<T> {
                     summed_len += len;
                     summed_measure += measure;
                 }
+            }
+        }
+    }
+
+    fn front_chunk(&self) -> &T {
+        let mut node = self;
+        loop {
+            match node {
+                Node::Leaf(leaf) => break leaf.as_chunk(),
+                Node::Branch(branch) => node = branch.first().unwrap(),
+            }
+        }
+    }
+
+    fn back_chunk(&self) -> &T {
+        let mut node = self;
+        loop {
+            match node {
+                Node::Leaf(leaf) => break leaf.as_chunk(),
+                Node::Branch(branch) => node = branch.last().unwrap(),
             }
         }
     }
@@ -725,14 +757,14 @@ impl<T: Chunk> Leaf<T> {
         match self.len().cmp(&other.len()) {
             Ordering::Less => {
                 let mut end = (other.len() - self.len()) / 2;
-                while !other.is_boundary(end) {
+                while !other.can_split_at(end) {
                     end -= 1;
                 }
                 self.move_left(other, end);
             }
             Ordering::Greater => {
                 let mut start = (self.len() + other.len()) / 2;
-                while !self.is_boundary(start) {
+                while !self.can_split_at(start) {
                     start += 1;
                 }
                 self.move_right(other, start);
