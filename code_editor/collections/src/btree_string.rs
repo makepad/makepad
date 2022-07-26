@@ -27,6 +27,10 @@ impl BTreeString {
         self.btree.measure::<CharMeasure>()
     }
 
+    pub fn line_count(&self) -> usize {
+        self.btree.measure::<LineBreakMeasure>() + 1
+    }
+
     pub fn char_count_at(&self, position: usize) -> usize {
         self.btree.measure_at::<CharMeasure>(position)
     }
@@ -35,6 +39,14 @@ impl BTreeString {
         Slice {
             slice: self.btree.slice(range),
         }
+    }
+
+    pub fn front_chunk(&self) -> &str {
+        self.btree.front_chunk()
+    }
+
+    pub fn back_chunk(&self) -> &str {
+        self.btree.back_chunk()
     }
 
     pub fn cursor_front(&self) -> Cursor<'_> {
@@ -324,7 +336,7 @@ impl<'a> Cursor<'a> {
 
     pub fn move_prev_byte(&mut self) {
         if self.index == 0 {
-            self.move_prev_chunk_back();
+            self.move_prev_back_chunk();
         }
         self.index -= 1;
     }
@@ -338,7 +350,7 @@ impl<'a> Cursor<'a> {
 
     pub fn move_prev_char(&mut self) {
         if self.index == 0 {
-            self.move_prev_chunk_back();
+            self.move_prev_back_chunk();
         }
         self.index -= 1;
         while !self.chunk.is_char_boundary(self.index) {
@@ -346,7 +358,7 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    fn move_prev_chunk_back(&mut self) {
+    fn move_prev_back_chunk(&mut self) {
         self.cursor.move_prev_chunk();
         self.chunk = &self.cursor.chunk()[self.cursor.range()];
         self.index = self.chunk.len();
@@ -464,6 +476,10 @@ impl btree::Chunk for String {
         String::new()
     }
 
+    fn can_split_at(&self, index: usize) -> bool {
+        self.as_str().is_boundary(index)
+    }
+
     fn len(&self) -> usize {
         self.len()
     }
@@ -471,11 +487,8 @@ impl btree::Chunk for String {
     fn info_at(&self, index: usize) -> Self::Info {
         Info {
             char_count: self[..index].count_chars(),
+            line_break_count: self[..index].count_line_breaks(),
         }
-    }
-
-    fn is_boundary(&self, index: usize) -> bool {
-        self.as_str().is_boundary(index)
     }
 
     fn move_left(&mut self, other: &mut Self, end: usize) {
@@ -500,11 +513,15 @@ impl btree::Chunk for String {
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct Info {
     char_count: usize,
+    line_break_count: usize,
 }
 
 impl btree::Info for Info {
     fn new() -> Self {
-        Self { char_count: 0 }
+        Self {
+            char_count: 0,
+            line_break_count: 0,
+        }
     }
 }
 
@@ -513,7 +530,8 @@ impl Add for Info {
 
     fn add(self, other: Self) -> Self::Output {
         Self {
-            char_count: self.char_count + other.char_count
+            char_count: self.char_count + other.char_count,
+            line_break_count: self.line_break_count + other.line_break_count,
         }
     }
 }
@@ -526,10 +544,11 @@ impl AddAssign for Info {
 
 impl Sub for Info {
     type Output = Self;
-    
+
     fn sub(self, other: Self) -> Self::Output {
         Self {
-            char_count: self.char_count - other.char_count
+            char_count: self.char_count - other.char_count,
+            line_break_count: self.line_break_count - other.line_break_count,
         }
     }
 }
@@ -549,6 +568,18 @@ impl Measure<String> for CharMeasure {
 
     fn measure_info(info: Info) -> usize {
         info.char_count
+    }
+}
+
+struct LineBreakMeasure;
+
+impl Measure<String> for LineBreakMeasure {
+    fn measure_chunk_at(chunk: &String, index: usize) -> usize {
+        chunk[..index].count_line_breaks()
+    }
+
+    fn measure_info(info: Info) -> usize {
+        info.line_break_count
     }
 }
 
@@ -577,6 +608,7 @@ impl U8Ext for u8 {
 
 trait StrExt {
     fn count_chars(&self) -> usize;
+    fn count_line_breaks(&self) -> usize;
     fn is_boundary(&self, index: usize) -> bool;
 }
 
@@ -586,6 +618,36 @@ impl StrExt for str {
         for byte in self.bytes() {
             if byte.is_utf8_char_start() {
                 count += 1;
+            }
+        }
+        count
+    }
+
+    fn count_line_breaks(&self) -> usize {
+        let mut count = 0;
+        let bytes = self.as_bytes();
+        let mut index = 0;
+        while index < bytes.len() {
+            let byte = bytes[index];
+            if byte >= 0x0A && byte <= 0x0D {
+                count += 1;
+                if byte == 0x0D && index + 1 < bytes.len() && bytes[index + 1] == 0x0A {
+                    index += 2;
+                } else {
+                    index += 1;
+                };
+            } else if byte == 0xC2 && index + 1 < bytes.len() && bytes[index + 1] == 0x85 {
+                count += 1;
+                index += 2;
+            } else if byte == 0xE2
+                && index + 2 < bytes.len()
+                && bytes[index + 1] == 0x80
+                && bytes[index + 2] >> 1 == 0x54
+            {
+                count += 1;
+                index += 3;
+            } else {
+                index += 1;
             }
         }
         count
@@ -629,19 +691,20 @@ mod tests {
                 (string, start..end)
             })
     }
-    
+
     fn string_and_range_and_index() -> impl Strategy<Value = (String, Range<usize>, usize)> {
-        string_and_range().prop_flat_map(|(string, range)| {
-            let range_len = range.len();
-            (Just(string), Just(range), 0..=range_len)
-        })
-        .prop_map(|(string, range, mut index)| {
-            let slice = &string[range.clone()];
-            while !slice.is_char_boundary(index) {
-                index -= 1;
-            }
-            (string, range, index)
-        })
+        string_and_range()
+            .prop_flat_map(|(string, range)| {
+                let range_len = range.len();
+                (Just(string), Just(range), 0..=range_len)
+            })
+            .prop_map(|(string, range, mut index)| {
+                let slice = &string[range.clone()];
+                while !slice.is_char_boundary(index) {
+                    index -= 1;
+                }
+                (string, range, index)
+            })
     }
 
     proptest! {
@@ -660,13 +723,32 @@ mod tests {
         #[test]
         fn test_char_count(string in any::<String>()) {
             let btree_string = BTreeString::from(&string);
-            assert_eq!(btree_string.char_count(), string.chars().count());
+            assert_eq!(btree_string.char_count(), string.count_chars());
+        }
+
+        #[test]
+        fn test_line_count(string in "[.\r\n]*") {
+            let btree_string = BTreeString::from(&string);
+            println!("{:#?}", btree_string);
+            assert_eq!(btree_string.line_count(), string.count_line_breaks() + 1);
         }
 
         #[test]
         fn test_char_count_at((string, index) in string_and_index()) {
             let btree_string = BTreeString::from(&string);
             assert_eq!(btree_string.char_count_at(index), string[..index].chars().count());
+        }
+
+        #[test]
+        fn test_front_chunk(string in any::<String>()) {
+            let btree_string = BTreeString::from(&string);
+            assert!(string.starts_with(btree_string.front_chunk()));
+        }
+
+        #[test]
+        fn test_back_chunk(string in any::<String>()) {
+            let btree_string = BTreeString::from(&string);
+            assert!(string.ends_with(btree_string.back_chunk()));
         }
 
         #[test]
