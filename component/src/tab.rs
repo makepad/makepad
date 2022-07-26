@@ -196,33 +196,28 @@ impl Tab {
         };
         
         match event.hits(cx, self.bg.area()) {
-            HitEvent::FingerHover(f) => {
-                cx.set_hover_mouse_cursor(MouseCursor::Hand);
-                match f.hover_state {
-                    HoverState::In => {
-                        self.animate_state(cx, ids!(hover.on));
-                    }
-                    HoverState::Out => if !block_hover_out {
-                        self.animate_state(cx, ids!(hover.off));
-                    }
-                    _ => {}
-                }
+            Hit::FingerHoverIn(_) => {
+                cx.set_hover_cursor(MouseCursor::Hand);
+                self.animate_state(cx, ids!(hover.on));
             }
-            HitEvent::FingerDown(_) => {
+            Hit::FingerHoverOut(_) => if !block_hover_out {
+                self.animate_state(cx, ids!(hover.off));
+            }
+            Hit::FingerDown(_) => {
                 dispatch_action(cx, TabAction::WasPressed);
             }
             _ => {}
         }
         match event.drag_hits(cx, self.bg.area()) {
-            DragEvent::FingerDrag(f) => match f.state {
+            DragHit::FingerDrag(f) => match f.state {
                 DragState::In => {
                     self.is_dragged = true;
-                    self.bg.area().redraw(cx);
+                    self.bg.redraw(cx);
                     *f.action = DragAction::Copy;
                 }
                 DragState::Out => {
                     self.is_dragged = false;
-                    self.bg.area().redraw(cx);
+                    self.bg.redraw(cx);
                 }
                 DragState::Over => match event {
                     Event::FingerDrag(event) => {
@@ -231,7 +226,7 @@ impl Tab {
                     _ => panic!(),
                 },
             },
-            DragEvent::FingerDrop(f) => {
+            DragHit::FingerDrop(f) => {
                 self.is_dragged = false;
                 self.bg.area().redraw(cx);
                 dispatch_action(cx, TabAction::ReceivedDraggedItem(f.dragged_item.clone()))

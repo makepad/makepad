@@ -30,7 +30,7 @@ live_register!{
             let magsq = (fractal.w * 256 + fractal.z - 127);
             
             // create a nice palette index
-            let index = abs((1.0 * iter / self.max_iter*8.0) - 0.1 * log(magsq));
+            let index = abs((1.0 * iter / self.max_iter * 8.0) - 0.1 * log(magsq));
             // if the iter > max_iter we return black
             if iter > self.max_iter {
                 return vec4(0, 0, 0, 1.0);
@@ -41,14 +41,14 @@ live_register!{
     }
     
     Mandelbrot: {{Mandelbrot}} {
-        max_iter: 320,
+        max_iter: 3000,
     }
 }
 
 pub const TILE_SIZE_X: usize = 256;
 pub const TILE_SIZE_Y: usize = 256;
 pub const TILE_CACHE_SIZE: usize = 500;
-pub const POOL_THREAD_COUNT: usize = 4;
+pub const POOL_THREAD_COUNT: usize =;
 
 // the shader struct used to draw
 
@@ -97,7 +97,7 @@ fn mandelbrot_f64(tile: &mut Tile, max_iter: usize) {
         for x in 0..TILE_SIZE_X {
             let fp = tile.fractal.pos + tile.fractal.size * (vec2f64(x as f64, y as f64) / tile_size);
             let (iter, dist) = mandelbrot_pixel_f64(max_iter, fp.x, fp.y);
-            let dist = ((dist+ 127.0) * 256.0).max(0.0).min(65535.0) as u32;
+            let dist = ((dist + 127.0) * 256.0).max(0.0).min(65535.0) as u32;
             tile.buffer[y * TILE_SIZE_X + x] = iter as u32 | (dist << 16);
         }
     }
@@ -244,43 +244,23 @@ impl TileCache {
         let mut render_tasks = Vec::new();
         let window = window.add_margin(size);
         
-        // ok in a zoom-out situation we should generate what exactly
-        //if is_zoom_in{
-            // create a spiralling walk around the center point, usually your mouse
-            // this is a nice pattern because you look at and zoom around your mouse
-            // and so rendering those tiles first in a circular pattern is good UX
-            Self::spiral_walk( | _step, i, j | {
-                let fractal = RectF64 {
-                    pos: center + size * vec2f64(i as f64, j as f64) - 0.5 * size,
-                    size: size
-                };
-                if window.intersects(fractal) {
-                    if let Some(mut tile) = self.empty.pop() {
-                        tile.fractal = fractal;
-                        render_tasks.push(tile);
-                    }
-                    true
+        Self::spiral_walk( | _step, i, j | {
+            let fractal = RectF64 {
+                pos: center + size * vec2f64(i as f64, j as f64) - 0.5 * size,
+                size: size
+            };
+            if window.intersects(fractal) {
+                if let Some(mut tile) = self.empty.pop() {
+                    tile.fractal = fractal;
+                    render_tasks.push(tile);
                 }
-                else {
-                    false
-                }
-            });
-        /*}
-        else{
-            // cut the window into 9 tiles
-            let size = window.size / vec2f64(3.0,3.0);
-            for i in 0..3{
-                for j in 0..3{
-                    if let Some(mut tile) = self.empty.pop() {
-                        tile.fractal = RectF64 {
-                            pos: window.pos + size * vec2f64(i as f64, j as f64) ,
-                            size: size
-                        };
-                        render_tasks.push(tile);
-                    }
-                }
+                true
             }
-        }*/
+            else {
+                false
+            }
+        });
+        
         self.tiles_in_flight = render_tasks.len();
         render_tasks
     }
@@ -449,7 +429,7 @@ pub struct Mandelbrot {
     space: FractalSpace,
     
     #[rust]
-    had_first_draw:bool,
+    had_first_draw: bool,
     
     // the tilecache holding all the tiles
     #[rust(TileCache::new(cx))]
@@ -490,9 +470,9 @@ impl Mandelbrot {
                 return to_ui.send(ToUI::TileBailed {tile}).unwrap();
             }
             
-            if !is_zooming{
+            if !is_zooming {
                 mandelbrot_f64x2_4xaa(&mut tile, max_iter);
-            } 
+            }
             else if fractal_zoom >2e-5 {
                 // we can use a f32x4 path when we aren't zoomed in far (2x faster)
                 // as f32 has limited zoom-depth it can support
@@ -551,7 +531,7 @@ impl Mandelbrot {
         }
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event,_: &mut dyn FnMut(&mut Cx, MandelbrotAction)){
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, _: &mut dyn FnMut(&mut Cx, MandelbrotAction)) {
         //self.state_handle_event(cx, event);
         if let Event::Signal(_) = event {
             // this batches up all the input signals into a single animation frame
@@ -610,7 +590,7 @@ impl Mandelbrot {
         // check if we click/touch the mandelbrot view in multitouch mode
         // in this mode we get fingerdown events for each finger.
         match event.hits_with_options(cx, self.view.area(), HitOptions {use_multi_touch: true, margin: None}) {
-            HitEvent::FingerDown(fe) => {
+            Hit::FingerDown(fe) => {
                 self.is_zooming = true;
                 if !fe.input_type.is_touch() || fe.digit == 0 {
                     self.finger_abs = fe.abs;
@@ -626,12 +606,12 @@ impl Mandelbrot {
                 
                 self.next_frame = cx.new_next_frame();
             },
-            HitEvent::FingerMove(fe) => {
+            Hit::FingerMove(fe) => {
                 if !fe.input_type.is_touch() || fe.digit == 0 {
                     self.finger_abs = fe.abs;
                 }
             }
-            HitEvent::FingerUp(fe) => {
+            Hit::FingerUp(fe) => {
                 if fe.input_type.is_touch() && fe.digit == 1 {
                     self.is_zoom_in = true;
                 }
@@ -666,7 +646,7 @@ impl Mandelbrot {
         // iterate the current and next tile caches and draw the fractal tile
         for tile in self.tile_cache.current.iter().chain(self.tile_cache.next.iter()) {
             let rect = self.space.fractal_to_screen_rect(tile.fractal);
-            // set texture by index. 
+            // set texture by index.
             self.draw_tile.draw_vars.set_texture(0, &tile.texture);
             
             // this emits the drawcall onto the drawlists that go to the renderbackend

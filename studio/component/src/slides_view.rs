@@ -98,18 +98,18 @@ impl SlidesView {
             _=>()
         }
         match event.hits(cx, self.frame.area()) {
-            HitEvent::KeyDown(KeyEvent{key_code: KeyCode::ArrowRight,..})=>{
+            Hit::KeyDown(KeyEvent{key_code: KeyCode::ArrowRight,..})=>{
                 self.goal_pos += 1.0;
                 self.next_frame(cx);
             }
-            HitEvent::KeyDown(KeyEvent{key_code: KeyCode::ArrowLeft,..})=>{
+            Hit::KeyDown(KeyEvent{key_code: KeyCode::ArrowLeft,..})=>{
                 self.goal_pos -= 1.0;
                 if self.goal_pos < 0.0{
                     self.goal_pos = 0.0;
                 }
                 self.next_frame(cx);
             }
-            HitEvent::FingerDown(_fe) => {
+            Hit::FingerDown(_fe) => {
                 cx.set_key_focus(self.frame.area());
             },
             _=>()

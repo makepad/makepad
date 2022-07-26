@@ -1,5 +1,5 @@
 use {
-    crate::{
+        crate::{
         event::{
             finger::KeyModifiers,
         },
@@ -14,6 +14,128 @@ pub struct KeyEvent {
     pub is_repeat: bool,
     pub modifiers: KeyModifiers,
     pub time: f64
+}
+
+// shortcuts to check for keypresses
+impl KeyEvent{
+    pub fn backtick(&self)->bool{if let KeyCode::Backtick= self.key_code{true}else{false}}
+    pub fn key_0(&self)->bool{if let KeyCode::Key0= self.key_code{true}else{false}}
+    pub fn key_1(&self)->bool{if let KeyCode::Key1= self.key_code{true}else{false}}
+    pub fn key_2(&self)->bool{if let KeyCode::Key2= self.key_code{true}else{false}}
+    pub fn key_3(&self)->bool{if let KeyCode::Key3= self.key_code{true}else{false}}
+    pub fn key_4(&self)->bool{if let KeyCode::Key4= self.key_code{true}else{false}}
+    pub fn key_5(&self)->bool{if let KeyCode::Key5= self.key_code{true}else{false}}
+    pub fn key_6(&self)->bool{if let KeyCode::Key6= self.key_code{true}else{false}}
+    pub fn key_7(&self)->bool{if let KeyCode::Key7= self.key_code{true}else{false}}
+    pub fn key_8(&self)->bool{if let KeyCode::Key8= self.key_code{true}else{false}}
+    pub fn key_9(&self)->bool{if let KeyCode::Key9= self.key_code{true}else{false}}
+    pub fn minus(&self)->bool{if let KeyCode::Minus= self.key_code{true}else{false}}
+    pub fn equals(&self)->bool{if let KeyCode::Equals= self.key_code{true}else{false}}
+    
+    pub fn backspace(&self)->bool{if let KeyCode::Backspace= self.key_code{true}else{false}}
+    pub fn tab(&self)->bool{if let KeyCode::Tab= self.key_code{true}else{false}}
+    
+    pub fn key_q(&self)->bool{if let KeyCode::KeyQ= self.key_code{true}else{false}}
+    pub fn key_w(&self)->bool{if let KeyCode::KeyW= self.key_code{true}else{false}}
+    pub fn key_e(&self)->bool{if let KeyCode::KeyE= self.key_code{true}else{false}}
+    pub fn key_r(&self)->bool{if let KeyCode::KeyR= self.key_code{true}else{false}}
+    pub fn key_t(&self)->bool{if let KeyCode::KeyT= self.key_code{true}else{false}}
+    pub fn key_y(&self)->bool{if let KeyCode::KeyY= self.key_code{true}else{false}}
+    pub fn key_u(&self)->bool{if let KeyCode::KeyU= self.key_code{true}else{false}}
+    pub fn key_i(&self)->bool{if let KeyCode::KeyI= self.key_code{true}else{false}}
+    pub fn key_o(&self)->bool{if let KeyCode::KeyO= self.key_code{true}else{false}}
+    pub fn key_p(&self)->bool{if let KeyCode::KeyP= self.key_code{true}else{false}}
+    pub fn l_bracket(&self)->bool{if let KeyCode::LBracket= self.key_code{true}else{false}}
+    pub fn r_bracket(&self)->bool{if let KeyCode::RBracket= self.key_code{true}else{false}}
+    pub fn return_key(&self)->bool{if let KeyCode::ReturnKey= self.key_code{true}else{false}}
+    
+    pub fn key_a(&self)->bool{if let KeyCode::KeyA= self.key_code{true}else{false}}
+    pub fn key_s(&self)->bool{if let KeyCode::KeyS= self.key_code{true}else{false}}
+    pub fn key_d(&self)->bool{if let KeyCode::KeyD= self.key_code{true}else{false}}
+    pub fn key_f(&self)->bool{if let KeyCode::KeyF= self.key_code{true}else{false}}
+    pub fn key_g(&self)->bool{if let KeyCode::KeyG= self.key_code{true}else{false}}
+    pub fn key_h(&self)->bool{if let KeyCode::KeyH= self.key_code{true}else{false}}
+    pub fn key_j(&self)->bool{if let KeyCode::KeyJ= self.key_code{true}else{false}}
+    pub fn key_k(&self)->bool{if let KeyCode::KeyK= self.key_code{true}else{false}}
+    pub fn key_l(&self)->bool{if let KeyCode::KeyL= self.key_code{true}else{false}}
+    pub fn semicolon(&self)->bool{if let KeyCode::Semicolon= self.key_code{true}else{false}}
+    pub fn quote(&self)->bool{if let KeyCode::Quote= self.key_code{true}else{false}}
+    pub fn backslash(&self)->bool{if let KeyCode::Backslash= self.key_code{true}else{false}}
+    
+    pub fn key_z(&self)->bool{if let KeyCode::KeyZ= self.key_code{true}else{false}}
+    pub fn key_x(&self)->bool{if let KeyCode::KeyX= self.key_code{true}else{false}}
+    pub fn key_c(&self)->bool{if let KeyCode::KeyC= self.key_code{true}else{false}}
+    pub fn key_v(&self)->bool{if let KeyCode::KeyV= self.key_code{true}else{false}}
+    pub fn key_b(&self)->bool{if let KeyCode::KeyB= self.key_code{true}else{false}}
+    pub fn key_n(&self)->bool{if let KeyCode::KeyN= self.key_code{true}else{false}}
+    pub fn key_m(&self)->bool{if let KeyCode::KeyM= self.key_code{true}else{false}}
+    pub fn comma(&self)->bool{if let KeyCode::Comma= self.key_code{true}else{false}}
+    pub fn period(&self)->bool{if let KeyCode::Period= self.key_code{true}else{false}}
+    pub fn slash(&self)->bool{if let KeyCode::Slash= self.key_code{true}else{false}}
+    
+    pub fn control(&self)->bool{if let KeyCode::Control= self.key_code{true}else{false}}
+    pub fn alt(&self)->bool{if let KeyCode::Alt= self.key_code{true}else{false}}
+    pub fn shift(&self)->bool{if let KeyCode::Shift= self.key_code{true}else{false}}
+    pub fn logo(&self)->bool{if let KeyCode::Logo= self.key_code{true}else{false}}
+    
+    pub fn mod_control(&self)->bool{self.modifiers.control}
+    pub fn mod_alt(&self)->bool{self.modifiers.alt}
+    pub fn mod_shift(&self)->bool{self.modifiers.shift}
+    pub fn mod_logo(&self)->bool{self.modifiers.logo}
+    
+    pub fn space(&self)->bool{if let KeyCode::Space= self.key_code{true}else{false}}
+    pub fn capslock(&self)->bool{if let KeyCode::Capslock= self.key_code{true}else{false}}
+    pub fn f1(&self)->bool{if let KeyCode::F1= self.key_code{true}else{false}}
+    pub fn f2(&self)->bool{if let KeyCode::F2= self.key_code{true}else{false}}
+    pub fn f3(&self)->bool{if let KeyCode::F3= self.key_code{true}else{false}}
+    pub fn f4(&self)->bool{if let KeyCode::F4= self.key_code{true}else{false}}
+    pub fn f5(&self)->bool{if let KeyCode::F5= self.key_code{true}else{false}}
+    pub fn f6(&self)->bool{if let KeyCode::F6= self.key_code{true}else{false}}
+    pub fn f7(&self)->bool{if let KeyCode::F7= self.key_code{true}else{false}}
+    pub fn f8(&self)->bool{if let KeyCode::F8= self.key_code{true}else{false}}
+    pub fn f9(&self)->bool{if let KeyCode::F9= self.key_code{true}else{false}}
+    pub fn f10(&self)->bool{if let KeyCode::F10= self.key_code{true}else{false}}
+    pub fn f11(&self)->bool{if let KeyCode::F11= self.key_code{true}else{false}}
+    pub fn f12(&self)->bool{if let KeyCode::F12= self.key_code{true}else{false}}
+    
+    pub fn print_screen(&self)->bool{if let KeyCode::PrintScreen= self.key_code{true}else{false}}
+    pub fn scroll_lock(&self)->bool{if let KeyCode::ScrollLock= self.key_code{true}else{false}}
+    pub fn pause(&self)->bool{if let KeyCode::Pause= self.key_code{true}else{false}}
+    
+    pub fn insert(&self)->bool{if let KeyCode::Insert= self.key_code{true}else{false}}
+    pub fn delete(&self)->bool{if let KeyCode::Delete= self.key_code{true}else{false}}
+    pub fn home(&self)->bool{if let KeyCode::Home= self.key_code{true}else{false}}
+    pub fn end(&self)->bool{if let KeyCode::End= self.key_code{true}else{false}}
+    pub fn page_up(&self)->bool{if let KeyCode::PageUp= self.key_code{true}else{false}}
+    pub fn page_down(&self)->bool{if let KeyCode::PageDown= self.key_code{true}else{false}}
+    
+    pub fn numpad_0(&self)->bool{if let KeyCode::Numpad0= self.key_code{true}else{false}}
+    pub fn numpad_1(&self)->bool{if let KeyCode::Numpad1= self.key_code{true}else{false}}
+    pub fn numpad_2(&self)->bool{if let KeyCode::Numpad2= self.key_code{true}else{false}}
+    pub fn numpad_3(&self)->bool{if let KeyCode::Numpad3= self.key_code{true}else{false}}
+    pub fn numpad_4(&self)->bool{if let KeyCode::Numpad4= self.key_code{true}else{false}}
+    pub fn numpad_5(&self)->bool{if let KeyCode::Numpad5= self.key_code{true}else{false}}
+    pub fn numpad_6(&self)->bool{if let KeyCode::Numpad6= self.key_code{true}else{false}}
+    pub fn numpad_7(&self)->bool{if let KeyCode::Numpad7= self.key_code{true}else{false}}
+    pub fn numpad_8(&self)->bool{if let KeyCode::Numpad8= self.key_code{true}else{false}}
+    pub fn numpad_9(&self)->bool{if let KeyCode::Numpad9= self.key_code{true}else{false}}
+    
+    pub fn numpad_equals(&self)->bool{if let KeyCode::NumpadEquals= self.key_code{true}else{false}}
+    pub fn numpad_subtract(&self)->bool{if let KeyCode::NumpadSubtract= self.key_code{true}else{false}}
+    pub fn numpad_add(&self)->bool{if let KeyCode::NumpadAdd= self.key_code{true}else{false}}
+    pub fn numpad_decimal(&self)->bool{if let KeyCode::NumpadDecimal= self.key_code{true}else{false}}
+    pub fn numpad_multiply(&self)->bool{if let KeyCode::NumpadMultiply= self.key_code{true}else{false}}
+    pub fn numpad_divide(&self)->bool{if let KeyCode::NumpadDivide= self.key_code{true}else{false}}
+    pub fn numpad_lock(&self)->bool{if let KeyCode::Numlock= self.key_code{true}else{false}}
+    pub fn numpad_enter(&self)->bool{if let KeyCode::NumpadEnter= self.key_code{true}else{false}}
+    
+    pub fn arrow_up(&self)->bool{if let KeyCode::ArrowUp= self.key_code{true}else{false}}
+    pub fn arrow_down(&self)->bool{if let KeyCode::ArrowDown= self.key_code{true}else{false}}
+    pub fn arrow_left(&self)->bool{if let KeyCode::ArrowLeft= self.key_code{true}else{false}}
+    pub fn arrow_right(&self)->bool{if let KeyCode::ArrowRight= self.key_code{true}else{false}}
+    
+    pub fn unknown(&self)->bool{if let KeyCode::Unknown = self.key_code{true}else{false}}
+    
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -73,7 +195,7 @@ pub enum KeyCode {
     KeyP,
     LBracket,
     RBracket,
-    Return,
+    ReturnKey,
     
     KeyA,
     KeyS,
@@ -120,7 +242,7 @@ pub enum KeyCode {
     F12,
     
     PrintScreen,
-    Scrolllock,
+    ScrollLock,
     Pause,
     
     Insert,
@@ -157,4 +279,4 @@ pub enum KeyCode {
     
     Unknown
 }
-
+    

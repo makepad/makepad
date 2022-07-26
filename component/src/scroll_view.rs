@@ -46,24 +46,19 @@ impl ScrollView{
         match ret_h {
             ScrollBarEvent::None => (),
             ScrollBarEvent::Scroll {scroll_pos, ..} => {
-                cx.set_view_scroll_x(self.view.draw_list_id, scroll_pos);
+                cx.set_view_scroll_x(self.view.draw_list_id(), scroll_pos);
             },
             _ => ()
         };
         match ret_v {
             ScrollBarEvent::None => (),
             ScrollBarEvent::Scroll {scroll_pos, ..} => {
-                cx.set_view_scroll_y(self.view.draw_list_id, scroll_pos);
+                cx.set_view_scroll_y(self.view.draw_list_id(), scroll_pos);
             },
             _ => ()
         };
         ret_h != ScrollBarEvent::None || ret_v != ScrollBarEvent::None
     }
-    /*
-    pub fn get_scroll_pos(&self, cx: &Cx) -> Vec2 {
-        let draw_list = &cx.draw_lists[self.view.draw_list_id];
-        draw_list.unsnapped_scroll
-    }*/
     
     pub fn set_scroll_pos(&mut self, cx: &mut Cx, pos: Vec2) -> bool {
         //let view_area = Area::DrawList(DrawListArea{draw_list_id:draw_list_id, redraw_id:cx.redraw_id});
@@ -73,14 +68,14 @@ impl ScrollView{
                 changed = true;
             }
             let scroll_pos = self.h_scroll.get_scroll_pos();
-            cx.set_view_scroll_x(self.view.draw_list_id, scroll_pos);
+            cx.set_view_scroll_x(self.view.draw_list_id(), scroll_pos);
         }
         if self.v_show {
             if self.v_scroll.set_scroll_pos(cx, pos.y) {
                 changed = true;
             }
             let scroll_pos = self.v_scroll.get_scroll_pos();
-            cx.set_view_scroll_y(self.view.draw_list_id, scroll_pos);
+            cx.set_view_scroll_y(self.view.draw_list_id(), scroll_pos);
         } 
         changed
     }
@@ -91,13 +86,13 @@ impl ScrollView{
             if self.h_scroll.set_scroll_pos_no_clip(cx, pos.x) {
                 changed = true;
             }
-            cx.set_view_scroll_x(self.view.draw_list_id, pos.x);
+            cx.set_view_scroll_x(self.view.draw_list_id(), pos.x);
         }
         if self.v_show {
             if self.v_scroll.set_scroll_pos_no_clip(cx, pos.y) {
                 changed = true;
             }
-            cx.set_view_scroll_y(self.view.draw_list_id, pos.y);
+            cx.set_view_scroll_y(self.view.draw_list_id(), pos.y);
         } 
         changed
     }
@@ -169,8 +164,8 @@ impl ScrollView{
     
     pub fn end(&mut self, cx: &mut Cx2d) -> Area {
 
-        let draw_list_id = self.view.draw_list_id;
-        let view_area = Area::DrawList(DrawListArea {draw_list_id, redraw_id: cx.redraw_id});
+        let draw_list_id = self.view.draw_list_id();
+        let view_area = Area::DrawList(DrawListArea {draw_list_id, redraw_id: cx.redraw_id()});
         
         // lets ask the turtle our actual bounds
         let view_total = cx.turtle().used();
@@ -193,8 +188,9 @@ impl ScrollView{
         }
         
         let rect = cx.end_turtle_with_guard(view_area);
-        let draw_list = &mut cx.draw_lists[draw_list_id];
-        draw_list.rect = rect;
+        
+        cx.set_view_rect(draw_list_id, rect);
+        
         cx.draw_list_stack.pop();
         
         return view_area

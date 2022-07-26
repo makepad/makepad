@@ -69,7 +69,7 @@ impl LiveHook for DesktopWindow {
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.window.set_pass(cx, &self.pass);
         self.pass.set_depth_texture(cx, &self.depth_texture, PassClearDepth::ClearWith(1.0));
-        if cx.platform_type.is_desktop(){
+        if cx.platform_type().is_desktop(){
             self.frame.template(cx, ids!(windows_buttons), id!(my_instrument), live!{});
         }
     }
@@ -108,21 +108,21 @@ impl DesktopWindow {
         }
         
         let is_for_other_window = match event {
-            Event::WindowCloseRequested(ev) => ev.window_id != self.window.window_id,
+            Event::WindowCloseRequested(ev) => ev.window_id != self.window.window_id(),
             Event::WindowClosed(ev) => {
-                if ev.window_id == self.window.window_id {
+                if ev.window_id == self.window.window_id() {
                     return DesktopWindowEvent::WindowClosed
                 }
                 true
             }
             Event::WindowGeomChange(ev) => {
-                if ev.window_id == self.window.window_id {
+                if ev.window_id == self.window.window_id() {
                     return DesktopWindowEvent::WindowGeomChange(ev.clone())
                 }
                 true
             },
             Event::WindowDragQuery(dq) => {
-                if dq.window_id == self.window.window_id {
+                if dq.window_id == self.window.window_id() {
                     // alright we should query the caption area.
                     // we should build an api for that
                     if dq.abs.x < self.caption_size.x && dq.abs.y < self.caption_size.y {
@@ -136,11 +136,11 @@ impl DesktopWindow {
                 }
                 true
             }
-            Event::FingerDown(ev) => ev.window_id != self.window.window_id,
-            Event::FingerMove(ev) => ev.window_id != self.window.window_id,
-            Event::FingerHover(ev) => ev.window_id != self.window.window_id,
-            Event::FingerUp(ev) => ev.window_id != self.window.window_id,
-            Event::FingerScroll(ev) => ev.window_id != self.window.window_id,
+            Event::FingerDown(ev) => ev.window_id != self.window.window_id(),
+            Event::FingerMove(ev) => ev.window_id != self.window.window_id(),
+            Event::FingerHover(ev) => ev.window_id != self.window.window_id(),
+            Event::FingerUp(ev) => ev.window_id != self.window.window_id(),
+            Event::FingerScroll(ev) => ev.window_id != self.window.window_id(),
             _ => false
         };
         if is_for_other_window {

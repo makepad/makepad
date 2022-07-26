@@ -30,7 +30,7 @@ live_register!{
             }
         }
         header: BoxY {
-            mouse_cursor: Default,
+            cursor: Default,
             bg: {color: #6},
             width: Fill
             layout: {flow: Right, padding: 8, spacing: 5}
@@ -39,7 +39,7 @@ live_register!{
     
     InstrumentHeader: FoldHeader {
         header: Rect {
-            mouse_cursor: Default,
+            cursor: Default,
             bg: {color: #5},
             width: Fill
             height: Fit
@@ -100,8 +100,8 @@ live_register!{
       InstrumentSlider2: Rect {
         bg: {color: #4}
         width: Fill
-        height: Fit
-        layout: {flow: Right, padding: 8, spacing: 5, align: {y: 0.5}}
+        height: 40
+        layout: {flow: Right, padding: 8}
         TextInput{
             text:"Hello WOrld"
         }
@@ -234,16 +234,21 @@ live_register!{
                 a: Frame {
                     layout: {flow: Down}
                     FoldablePiano {}
+                    /*Image{
+                        bg:{shape:Box, radius:30,color:#ff0, image_scale:vec2(1.0,0.2)},
+                        height:Fill,
+                        width:Fill
+                    }*/
                 }
                 b: Box {
                     clip: true,
-                    mouse_cursor: Default,
+                    cursor: Default,
                     bg: {color: #4, radius: 3.0, border_width: 0.5, border_color: #3}
                     height: Fill
                     layout: {padding: 0.5}
                     MainHeader {
                         header: {
-                            mouse_cursor: Hand,
+                            cursor: Hand,
                             label = Label {text: "Instruments"}
                         }
                         body: Frame {

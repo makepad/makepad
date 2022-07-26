@@ -244,7 +244,6 @@ export class WasmWebGL extends WasmWebBrowser {
     
     FromWasmBeginRenderTexture(args){
         let gl = this.gl
-
         var gl_framebuffer = this.framebuffers[args.pass_id] || (this.framebuffers[args.pass_id] = gl.createFramebuffer());
         gl.bindFramebuffer(gl.FRAMEBUFFER, gl_framebuffer);
         
@@ -257,11 +256,11 @@ export class WasmWebGL extends WasmWebBrowser {
             
             var gl_tex = this.textures[tgt.texture_id] || (this.textures[tgt.texture_id] = gl.createTexture());
             // resize or create texture
+            clear_color = tgt.clear_color;
             if (gl_tex._width != args.width || gl_tex._height != args.height) {
                 gl.bindTexture(gl.TEXTURE_2D, gl_tex)
                 
                 clear_flags |= gl.COLOR_BUFFER_BIT;
-                clear_color = tgt.clear_color;
                 
                 gl_tex._width = args.width
                 gl_tex._height = args.height
