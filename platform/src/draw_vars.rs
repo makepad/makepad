@@ -28,11 +28,11 @@ pub const DRAW_CALL_VAR_INSTANCES: usize = 16;
 #[repr(C)]
 pub struct DrawVars {
     pub area: Area,
-    pub var_instance_start: usize,
-    pub var_instance_slots: usize,
-    pub options: CxDrawShaderOptions,
-    pub draw_shader: Option<DrawShader>,
-    pub geometry_id: Option<usize>,
+    pub(crate) var_instance_start: usize,
+    pub(crate) var_instance_slots: usize,
+    pub(crate) options: CxDrawShaderOptions,
+    pub(crate) draw_shader: Option<DrawShader>,
+    pub(crate) geometry_id: Option<usize>,
     pub user_uniforms: [f32; DRAW_CALL_USER_UNIFORMS],
     pub texture_slots: [Option<usize>; DRAW_CALL_TEXTURE_SLOTS],
     pub var_instances: [f32; DRAW_CALL_VAR_INSTANCES]

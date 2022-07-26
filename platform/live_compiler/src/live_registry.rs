@@ -19,13 +19,13 @@ use {
 
 #[derive(Default)]
 pub struct LiveFile {
-    pub reexpand: bool,
+    pub(crate) reexpand: bool,
     
-    pub module_id: LiveModuleId,
-    pub start_pos: TextPos,
-    pub file_name: String,
-    pub source: String,
-    pub deps: BTreeSet<LiveModuleId>,
+    pub(crate) module_id: LiveModuleId,
+    pub(crate) start_pos: TextPos,
+    pub(crate) file_name: String,
+    pub(crate) source: String,
+    pub(crate) deps: BTreeSet<LiveModuleId>,
     
     pub generation: LiveFileGeneration,
     
@@ -37,7 +37,7 @@ pub struct LiveFile {
 }
 
 pub struct LiveRegistry {
-    pub file_ids: HashMap<String, LiveFileId>,
+    pub(crate) file_ids: HashMap<String, LiveFileId>,
     pub module_id_to_file_id: HashMap<LiveModuleId, LiveFileId>,
     pub live_files: Vec<LiveFile>,
     pub live_type_infos: HashMap<LiveType, LiveTypeInfo>,
@@ -84,12 +84,7 @@ pub enum LiveEditEvent {
 }
 
 impl LiveRegistry {
-   // pub fn add_ignore_no_dsl(&mut self, live_ids: &[LiveId]) {
-   //     for id in live_ids {
-   //         self.ignore_no_dsl.insert(*id);
-   //     }
-   // }
-    
+
     pub fn generation_valid(&self, live_ptr: LivePtr) -> bool {
         let doc = &self.live_files[live_ptr.file_id.to_index()];
         doc.generation == live_ptr.generation

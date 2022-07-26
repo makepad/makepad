@@ -43,20 +43,13 @@ use {
 
 impl Cx {
     pub fn handle_repaint(&mut self, metal_windows: &mut Vec<MetalWindow>, metal_cx: &mut MetalCx) {
-        let mut windows_need_repaint = 0;
-        
+
         let mut passes_todo = Vec::new();
-        self.compute_passes_to_repaint(&mut passes_todo, &mut windows_need_repaint);
-        if passes_todo.len() == 0 {
-            return
-        }
+        self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for pass_id in &passes_todo {
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(window_id) => {
-                    // find the accompanying render window
-                    // its a render window
-                    windows_need_repaint -= 1;
                     if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
                         let dpi_factor = metal_window.window_geom.dpi_factor;
                         metal_window.resize_core_animation_layer(&metal_cx);

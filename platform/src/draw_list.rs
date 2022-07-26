@@ -205,7 +205,7 @@ impl DrawList {
         ret.uniform_view_transform(&Mat4::identity());
         ret
     }
-    
+    /*
     pub fn initialize(&mut self, pass_id: usize, is_clipped: bool, redraw_id: u64) {
         self.is_clipped = is_clipped;
         self.redraw_id = redraw_id;
@@ -225,7 +225,7 @@ impl DrawList {
             pos: self.rect.pos - self.parent_scroll,
             size: self.rect.size
         }
-    }
+    }*/
     
     pub fn intersect_clip(&mut self, clip: (Vec2, Vec2)) -> (Vec2, Vec2) {
         if self.is_clipped {

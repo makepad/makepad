@@ -103,8 +103,8 @@ pub use {
         event::{
             KeyCode,
             Event,
-            HitEvent,
-            DragEvent,
+            Hit,
+            DragHit,
             Signal,
             WebSocket,
             WebSocketAutoReconnect,
@@ -213,7 +213,7 @@ pub use {
             GpuPerformance
         },
         draw_2d::{
-            draw_shape::{DrawShape, Shape},
+            draw_shape::{DrawShape, Shape, Fill},
             draw_quad::DrawQuad,
             draw_text::{
                 DrawText,

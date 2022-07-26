@@ -300,7 +300,7 @@ impl CodeEditorImpl {
         false
     }
     
-    pub fn get_state<'a>(&mut self, cx: &mut Cx2d, state: &'a EditorState) -> (&'a Document, &'a DocumentInner, &'a Session) {
+    pub fn get_state<'a>(&mut self, _cx: &mut Cx2d, state: &'a EditorState) -> (&'a Document, &'a DocumentInner, &'a Session) {
         let session_id = self.session_id.unwrap();
         let session = &state.sessions[session_id];
         let document = &state.documents[session.document_id];
@@ -859,15 +859,15 @@ impl CodeEditorImpl {
         }
         
         match event.hits(cx, self.scroll_view.area()) {
-            HitEvent::Trigger(_) => { //
+            Hit::Trigger(_) => { //
                 self.handle_select_scroll_in_trigger(cx, state, lines_layout);
             },
-            HitEvent::FingerDown(f) => {
+            Hit::FingerDown(f) => {
                 self.last_move_position = None;
                 self.reset_caret_blink(cx);
                 // TODO: How to handle key focus?
                 cx.set_key_focus(self.scroll_view.area());
-                cx.set_down_mouse_cursor(MouseCursor::Text);
+                cx.set_down_cursor(MouseCursor::Text);
                 if let Some(session_id) = self.session_id {
                     let session = &state.sessions[session_id];
                     let document = &state.documents[session.document_id];
@@ -884,13 +884,13 @@ impl CodeEditorImpl {
                     self.scroll_view.redraw(cx);
                 }
             }
-            HitEvent::FingerUp(_) => {
+            Hit::FingerUp(_) => {
                 self.select_scroll = None;
             }
-            HitEvent::FingerHover(_) => {
-                cx.set_hover_mouse_cursor(MouseCursor::Text);
+            Hit::FingerHoverIn(_) => {
+                cx.set_hover_cursor(MouseCursor::Text);
             }
-            HitEvent::FingerMove(fe) => {
+            Hit::FingerMove(fe) => {
                 self.reset_caret_blink(cx);
                 if let Some(session_id) = self.session_id {
                     let session = &state.sessions[session_id];
@@ -905,7 +905,7 @@ impl CodeEditorImpl {
                     }
                 }
             }
-            HitEvent::KeyDown(KeyEvent {
+            Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowLeft,
                 modifiers: KeyModifiers {shift, ..},
                 ..
@@ -917,7 +917,7 @@ impl CodeEditorImpl {
                     self.scroll_view.redraw(cx);
                 }
             }
-            HitEvent::KeyDown(KeyEvent {
+            Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowRight,
                 modifiers: KeyModifiers {shift, ..},
                 ..
@@ -929,7 +929,7 @@ impl CodeEditorImpl {
                     self.scroll_view.redraw(cx);
                 }
             }
-            HitEvent::KeyDown(KeyEvent {
+            Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowUp,
                 modifiers: KeyModifiers {shift, ..},
                 ..
@@ -941,7 +941,7 @@ impl CodeEditorImpl {
                     self.scroll_view.redraw(cx);
                 }
             }
-            HitEvent::KeyDown(KeyEvent {
+            Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::ArrowDown,
                 modifiers: KeyModifiers {shift, ..},
                 ..
@@ -953,7 +953,7 @@ impl CodeEditorImpl {
                     self.scroll_view.redraw(cx);
                 }
             }
-            HitEvent::KeyDown(KeyEvent {
+            Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Backspace,
                 ..
             }) => {
@@ -965,7 +965,7 @@ impl CodeEditorImpl {
                     dispatch_action(cx, CodeEditorAction::RedrawViewsForDocument(session.document_id))
                 }
             }
-            HitEvent::KeyDown(KeyEvent {
+            Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyZ,
                 modifiers,
                 ..
@@ -981,7 +981,7 @@ impl CodeEditorImpl {
                     dispatch_action(cx, CodeEditorAction::RedrawViewsForDocument(session.document_id))
                 }
             }
-            HitEvent::KeyDown(KeyEvent {
+            Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Delete,
                 ..
             }) => {
@@ -992,20 +992,20 @@ impl CodeEditorImpl {
                     dispatch_action(cx, CodeEditorAction::RedrawViewsForDocument(session.document_id))
                 }
             }
-            HitEvent::KeyDown(KeyEvent {
+            Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::Alt,
                 ..
             }) => {
                 self.start_zoom_anim(cx, state, lines_layout, ids!(zoom.off));
             }
-            HitEvent::KeyUp(KeyEvent {
+            Hit::KeyUp(KeyEvent {
                 key_code: KeyCode::Alt,
                 ..
             }) => {
                 self.start_zoom_anim(cx, state, lines_layout, ids!(zoom.on));
             }
-            HitEvent::KeyDown(KeyEvent {
-                key_code: KeyCode::Return,
+            Hit::KeyDown(KeyEvent {
+                key_code: KeyCode::ReturnKey,
                 ..
             }) => {
                 self.reset_caret_blink(cx);
@@ -1016,7 +1016,7 @@ impl CodeEditorImpl {
                     dispatch_action(cx, CodeEditorAction::RedrawViewsForDocument(session.document_id))
                 }
             }
-            HitEvent::KeyDown(KeyEvent {
+            Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyX,
                 modifiers,
                 ..
@@ -1028,7 +1028,7 @@ impl CodeEditorImpl {
                     dispatch_action(cx, CodeEditorAction::RedrawViewsForDocument(session.document_id))
                 }
             }
-            HitEvent::KeyDown(KeyEvent {
+            Hit::KeyDown(KeyEvent {
                 key_code: KeyCode::KeyA,
                 modifiers,
                 ..
@@ -1040,7 +1040,7 @@ impl CodeEditorImpl {
                 }
             }
             
-            HitEvent::TextCopy(ke) => {
+            Hit::TextCopy(ke) => {
                 if let Some(session_id) = self.session_id {
                     // TODO: The code below belongs in a function on EditorState
                     let mut string = String::new();
@@ -1063,7 +1063,7 @@ impl CodeEditorImpl {
                     ke.response = None;
                 }
             },
-            HitEvent::TextInput(TextInputEvent {input, ..}) => {
+            Hit::TextInput(TextInputEvent {input, ..}) => {
                 self.reset_caret_blink(cx);
                 if let Some(session_id) = self.session_id {
                     state.insert_text(

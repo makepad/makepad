@@ -20,6 +20,7 @@ live_register!{
     Hexagon: Frame {bg: {shape: Hexagon}}
     GradientX: Frame {bg: {shape: Solid, fill: GradientX}}
     GradientY: Frame {bg: {shape: Solid, fill: GradientY}}
+    Image: Frame {bg: {shape: Solid, fill: Image}}
     UserDraw: Frame {user_draw: true}
     Clip: Frame {clip: true,}
     Scroll: Frame {clip: true,}
@@ -44,7 +45,7 @@ pub struct Frame { // draw info per UI element
     clip: bool,
     hidden: bool,
     user_draw: bool,
-    mouse_cursor: Option<MouseCursor>,
+    cursor: Option<MouseCursor>,
     #[live(false)] design_mode: bool,
     #[rust] pub view: Option<View>,
     
@@ -119,18 +120,12 @@ impl FrameComponent for Frame {
             }
         }
         
-        if let Some(cursor) = &self.mouse_cursor {
-            match event.hits(cx, self.bg.area()) {
-                HitEvent::FingerHover(f) => {
-                    match f.hover_state {
-                        HoverState::In => {
-                            cx.set_hover_mouse_cursor(*cursor);
-                        }
-                        _ => {}
-                    }
-                }
-                _ => ()
+        
+        match event.hits(cx, self.bg.area()) {
+            Hit::FingerHoverIn(_) => if let Some(cursor) = &self.cursor {
+                cx.set_hover_cursor(*cursor);
             }
+            _ => ()
         }
     }
     
@@ -340,6 +335,9 @@ impl Frame {
             
             // ok so.. we have to keep calling draw till we return LiveId(0)
             if self.bg.shape != Shape::None {
+                if self.bg.fill == Fill::Image{
+                    self.bg.draw_vars.texture_slots[0] = Some(cx.get_internal_font_atlas_texture_id());
+                }
                 self.bg.begin(cx, walk, self.layout);
             }
             else {

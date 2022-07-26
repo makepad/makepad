@@ -59,9 +59,9 @@ pub struct FromWasmSetMouseCursor {
 }
 
 impl FromWasmSetMouseCursor {
-    pub fn new(mouse_cursor: MouseCursor) -> Self {
+    pub fn new(cursor: MouseCursor) -> Self {
         Self {
-            web_cursor: match mouse_cursor {
+            web_cursor: match cursor {
                 MouseCursor::Hidden => 0,
                 MouseCursor::Default => 1,
                 MouseCursor::Crosshair => 2,

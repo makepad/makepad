@@ -21,7 +21,6 @@ use {
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Event {
-    None,
     Construct,
     Destruct,
     Paint,
@@ -68,7 +67,7 @@ pub enum Event {
     MidiInputList(MidiInputListEvent),
 }
 
-pub enum HitEvent<'a>{
+pub enum Hit<'a>{
     KeyFocus(KeyFocusEvent),
     KeyFocusLost(KeyFocusEvent),
     KeyDown(KeyEvent),
@@ -79,16 +78,18 @@ pub enum HitEvent<'a>{
     FingerScroll(FingerScrollHitEvent),
     FingerDown(FingerDownHitEvent),
     FingerMove(FingerMoveHitEvent),
-    FingerHover(FingerHoverHitEvent),
+    FingerHoverIn(FingerHoverHitEvent),
+    FingerHoverOver(FingerHoverHitEvent),
+    FingerHoverOut(FingerHoverHitEvent),
     FingerUp(FingerUpHitEvent),
-    None
+    Nothing
 }
 
-pub enum DragEvent<'a>{
+pub enum DragHit<'a>{
     FingerDrag(FingerDragHitEvent<'a>),
     FingerDrop(FingerDropHitEvent<'a>),
     DragEnd,
-    None
+    NoHit
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -196,12 +197,12 @@ pub struct WebSocketMessageEvent {
 pub struct SignalEvent {
     pub signals: HashSet<Signal>
 }
-
+/*
 impl Default for Event {
     fn default() -> Event {
         Event::None
     }
-}
+}*/
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Copy, Hash)]
 pub struct NextFrame(pub u64);

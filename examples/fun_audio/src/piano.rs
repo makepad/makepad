@@ -199,25 +199,18 @@ impl PianoKey {
             self.draw_key.area().redraw(cx);
         }
         match event.hits(cx, self.draw_key.area()) {
-            HitEvent::FingerHover(f) => {
-                cx.set_hover_mouse_cursor(MouseCursor::Hand);
-                match f.hover_state {
-                    HoverState::In => {
-                        self.animate_state(cx, ids!(hover.on));
-                    }
-                    HoverState::Out => {
-                        self.animate_state(cx, ids!(hover.off));
-                    }
-                    _ => {}
-                }
+            Hit::FingerHoverIn(_) => {
+                cx.set_hover_cursor(MouseCursor::Hand);
+                self.animate_state(cx, ids!(hover.on));
             }
-            HitEvent::FingerMove(_) => {
+            Hit::FingerHoverOut(_) => {
+                self.animate_state(cx, ids!(hover.off));
             }
-            HitEvent::FingerDown(fd) => {
+            Hit::FingerDown(fd) => {
                 self.animate_state(cx, ids!(pressed.on));
                 dispatch_action(cx, PianoKeyAction::Pressed(((fd.rel.y / fd.rect.size.y) * 127.0) as u8));
             }
-            HitEvent::FingerUp(_) => {
+            Hit::FingerUp(_) => {
                 self.animate_state(cx, ids!(pressed.off));
                 dispatch_action(cx, PianoKeyAction::Up);
             }
@@ -399,12 +392,12 @@ impl Piano {
             _=>()
         }
         match event.hits(cx, self.view.area()) {
-            HitEvent::KeyFocus(_) => {
+            Hit::KeyFocus(_) => {
                 for piano_key in self.white_keys.values_mut().chain(self.black_keys.values_mut()) {
                     piano_key.set_is_focussed(cx, true, Animate::Yes)
                 }
             }
-            HitEvent::KeyFocusLost(_) => {
+            Hit::KeyFocusLost(_) => {
                 for piano_key in self.white_keys.values_mut().chain(self.black_keys.values_mut()) {
                     piano_key.set_is_focussed(cx, true, Animate::No)
                 }

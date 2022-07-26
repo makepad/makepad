@@ -3,6 +3,7 @@ use {
         makepad_derive_live::*,
         makepad_shader_compiler::ShaderEnum,
         makepad_math::*,
+        area::Area,
         cx::Cx,
         live_traits::*,
         draw_2d::draw_quad::DrawQuad
@@ -12,19 +13,21 @@ use {
 live_register!{
     use makepad_platform::shader::std::*;
     DrawShape: {{DrawShape}} {
+        
         varying vertex_color: vec4
-
+        texture image: texture2d
+        
         fn vertex(self) -> vec4 {
             //return vec4(self.geom_pos.x,self.geom_pos.y,0.5,1.0);
-            let ret =  self.scroll_and_clip_quad();
+            let ret = self.scroll_and_clip_quad();
             match self.fill {
-                Fill::Color=>{
+                Fill::Color => {
                     self.vertex_color = self.color
                 }
-                Fill::GradientX=>{
+                Fill::GradientX => {
                     self.vertex_color = mix(self.color, self.color2, self.pos.x)
                 }
-                Fill::GradientY=>{
+                Fill::GradientY => {
                     self.vertex_color = mix(self.color, self.color2, self.pos.y)
                 }
             }
@@ -33,6 +36,11 @@ live_register!{
         
         fn pixel(self) -> vec4 {
             let color = self.vertex_color;
+            match self.fill {
+                Fill::Image => {
+                    color = vec4(sample2d(self.image, self.pos * self.image_scale + self.image_pan).xyz,1.0)
+                }
+            }
             match self.shape {
                 Shape::None => {
                     return #000
@@ -43,10 +51,10 @@ live_register!{
                 Shape::Rect => {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                     sdf.rect(
-                        self.inset.x+self.border_width,
-                        self.inset.y+self.border_width,
-                        self.rect_size.x - (self.inset.x + self.inset.z+self.border_width*2.0),
-                        self.rect_size.y - (self.inset.y + self.inset.w+self.border_width*2.0)
+                        self.inset.x + self.border_width,
+                        self.inset.y + self.border_width,
+                        self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
+                        self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0)
                     )
                     sdf.fill_keep(self.color)
                     if self.border_width > 0.0 {
@@ -57,11 +65,11 @@ live_register!{
                 Shape::Box => {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                     sdf.box(
-                        self.inset.x+self.border_width,
-                        self.inset.y+self.border_width,
-                        self.rect_size.x - (self.inset.x + self.inset.z+self.border_width*2.0),
-                        self.rect_size.y - (self.inset.y + self.inset.w+self.border_width*2.0),
-                        max(1.0,self.radius.x)
+                        self.inset.x + self.border_width,
+                        self.inset.y + self.border_width,
+                        self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
+                        self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
+                        max(1.0, self.radius.x)
                     )
                     sdf.fill_keep(color)
                     if self.border_width > 0.0 {
@@ -72,10 +80,10 @@ live_register!{
                 Shape::BoxX => {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                     sdf.box_x(
-                        self.inset.x+self.border_width,
-                        self.inset.y+self.border_width,
-                        self.rect_size.x - (self.inset.x + self.inset.z+self.border_width*2.0),
-                        self.rect_size.y - (self.inset.y + self.inset.w+self.border_width*2.0),
+                        self.inset.x + self.border_width,
+                        self.inset.y + self.border_width,
+                        self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
+                        self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
                         self.radius.x,
                         self.radius.y
                     )
@@ -88,10 +96,10 @@ live_register!{
                 Shape::BoxY => {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                     sdf.box_y(
-                        self.inset.x+self.border_width,
-                        self.inset.y+self.border_width,
-                        self.rect_size.x - (self.inset.x + self.inset.z+self.border_width*2.0),
-                        self.rect_size.y - (self.inset.y + self.inset.w+self.border_width*2.0),
+                        self.inset.x + self.border_width,
+                        self.inset.y + self.border_width,
+                        self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
+                        self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
                         self.radius.x,
                         self.radius.y
                     )
@@ -104,10 +112,10 @@ live_register!{
                 Shape::BoxAll => {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                     sdf.box_all(
-                        self.inset.x+self.border_width,
-                        self.inset.y+self.border_width,
-                        self.rect_size.x - (self.inset.x + self.inset.z+self.border_width*2.0),
-                        self.rect_size.y - (self.inset.y + self.inset.w+self.border_width*2.0),
+                        self.inset.x + self.border_width,
+                        self.inset.y + self.border_width,
+                        self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
+                        self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
                         self.radius.x,
                         self.radius.y,
                         self.radius.z,
@@ -118,7 +126,7 @@ live_register!{
                         sdf.stroke(self.border_color, self.border_width)
                     }
                     return sdf.result;
-                }              
+                }
                 Shape::Circle => {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                     if self.radius.x > 0.0 {
@@ -133,8 +141,8 @@ live_register!{
                             self.rect_size.x * 0.5,
                             self.rect_size.y * 0.5,
                             min(
-                                (self.rect_size.x - (self.inset.x + self.inset.z+ 2.0*self.border_width)) * 0.5,
-                                (self.rect_size.y -  (self.inset.y + self.inset.w+ 2.0*self.border_width)) * 0.5
+                                (self.rect_size.x - (self.inset.x + self.inset.z + 2.0 * self.border_width)) * 0.5,
+                                (self.rect_size.y - (self.inset.y + self.inset.w + 2.0 * self.border_width)) * 0.5
                             )
                         )
                     }
@@ -158,8 +166,8 @@ live_register!{
                             self.rect_size.x * 0.5,
                             self.rect_size.y * 0.5,
                             min(
-                                (self.rect_size.x - (self.inset.x + self.inset.z + 2.0*self.border_width)) * 0.5,
-                                (self.rect_size.y -  (self.inset.y + self.inset.w + 2.0*self.border_width)) * 0.5
+                                (self.rect_size.x - (self.inset.x + self.inset.z + 2.0 * self.border_width)) * 0.5,
+                                (self.rect_size.y - (self.inset.y + self.inset.w + 2.0 * self.border_width)) * 0.5
                             )
                         )
                     }
@@ -179,7 +187,7 @@ live_register!{
 #[derive(Live, LiveHook, PartialEq)]
 #[repr(u32)]
 pub enum Shape {
-   #[pick] None,
+    #[pick] None,
     Solid,
     Rect,
     Box,
@@ -193,9 +201,10 @@ pub enum Shape {
 #[derive(Live, LiveHook, PartialEq)]
 #[repr(u32)]
 pub enum Fill {
-   #[pick] Color,
+    #[pick] Color,
     GradientX,
-    GradientY
+    GradientY,
+    Image
 }
 
 #[derive(Live, LiveHook)]
@@ -204,10 +213,12 @@ pub struct DrawShape {
     #[live] pub draw_super: DrawQuad,
     #[live] pub shape: Shape,
     #[live] pub fill: Fill,
-    #[live(vec4(0.0,1.0,0.0,1.0))] pub color: Vec4,
-    #[live(vec4(0.0,1.0,0.0,1.0))] pub color2: Vec4,
+    #[live(vec4(0.0, 1.0, 0.0, 1.0))] pub color: Vec4,
+    #[live(vec4(0.0, 1.0, 0.0, 1.0))] pub color2: Vec4,
     #[live] pub border_width: f32,
     #[live] pub border_color: Vec4,
     #[live] pub inset: Vec4,
-    #[live(vec4(0.0,1.0,1.0,1.0))] pub radius: Vec4,
+    #[live(vec4(0.0, 1.0, 1.0, 1.0))] pub radius: Vec4,
+    #[live(vec2(1.0,1.0))] pub image_scale: Vec2,
+    #[live(vec2(0.0,0.0))] pub image_pan: Vec2,
 }

@@ -16,7 +16,7 @@ pub use {
 
 #[derive(PartialEq)]
 pub struct Texture {
-    pub texture_id: usize,
+    pub(crate) texture_id: usize,
 }
 
 #[derive(Clone, Copy, PartialEq)]
