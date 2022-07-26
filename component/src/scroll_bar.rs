@@ -347,13 +347,13 @@ impl ScrollBar {
             }
             
             match event.hits(cx, self.bar.area()) {
-                HitEvent::FingerDown(fe) => {
+                Hit::FingerDown(fe) => {
                     self.animate_state(cx, ids!(hover.pressed));
                     let rel = match self.axis {
                         Axis::Horizontal => fe.rel.x,
                         Axis::Vertical => fe.rel.y
                     };
-                    cx.set_down_mouse_cursor(MouseCursor::Default);
+                    cx.set_down_cursor(MouseCursor::Default);
                     let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
                     let bar_start = norm_scroll * self.scroll_size;
                     let bar_size = norm_handle * self.scroll_size;
@@ -365,21 +365,14 @@ impl ScrollBar {
                         self.drag_point = Some(rel - bar_start); // store the drag delta
                     }
                 },
-                HitEvent::FingerHover(fe) => {
-                    if self.drag_point.is_none() {
-                        cx.set_hover_mouse_cursor(MouseCursor::Default);
-                        match fe.hover_state {
-                            HoverState::In => {
-                                self.animate_state(cx, ids!(hover.on));
-                            },
-                            HoverState::Out => {
-                                self.animate_state(cx, ids!(hover.off));
-                            },
-                            _ => ()
-                        }
-                    }
+                Hit::FingerHoverIn(_) => {
+                    cx.set_hover_cursor(MouseCursor::Default);
+                    self.animate_state(cx, ids!(hover.on));
                 },
-                HitEvent::FingerUp(fe) => {
+                Hit::FingerHoverOut(_)=>{
+                    self.animate_state(cx, ids!(hover.off));
+                },
+                Hit::FingerUp(fe) => {
                     self.drag_point = None;
                     if fe.is_over && fe.input_type.has_hovers() {
                         self.animate_state(cx, ids!(hover.on));
@@ -389,7 +382,7 @@ impl ScrollBar {
                     }
                     return ScrollBarEvent::ScrollDone;
                 },
-                HitEvent::FingerMove(fe) => {
+                Hit::FingerMove(fe) => {
                     // helper called by event code to scroll from a finger
                     if self.drag_point.is_none() {
                         // state should never occur.

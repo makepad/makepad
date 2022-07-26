@@ -159,11 +159,11 @@ impl FrameComponent for Splitter {
     }
     
     fn frame_query(&mut self, query: &FrameQuery, callback: &mut Option<FrameQueryCb>) -> FrameResult {
-        self.a.frame_query(query, callback)?;
+        self.a.frame_query(query, callback) ?;
         self.b.frame_query(query, callback)
     }
     
-    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk, _self_uid: FrameUid) ->FrameDraw{
+    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk, _self_uid: FrameUid) -> FrameDraw {
         if self.draw_state.begin(cx, DrawState::DrawA) {
             self.begin(cx, walk);
         }
@@ -249,100 +249,88 @@ impl Splitter {
         dispatch_action: &mut dyn FnMut(&mut Cx, SplitterAction),
     ) {
         self.state_handle_event(cx, event);
-        match event.hits_with_options(
-            cx,
-            self.bar.area(),
-            HitOptions {
-                margin: Some(self.margin()),
-                ..HitOptions::default()
-            },
-        ) {
-            HitEvent::FingerHover(f) => {
-                match self.axis {
-                    Axis::Horizontal => cx.set_hover_mouse_cursor(MouseCursor::ColResize),
-                    Axis::Vertical => cx.set_hover_mouse_cursor(MouseCursor::RowResize),
-                }
-                match f.hover_state {
-                    HoverState::In => if !f.any_down {
-                        self.animate_state(cx, ids!(hover.on));
-                    },
-                    HoverState::Out => if !f.any_down {
-                        self.animate_state(cx, ids!(hover.off));
-                    },
-                    _ => ()
-                }
-            },
-            HitEvent::FingerDown(_) => {
-                match self.axis {
-                    Axis::Horizontal => cx.set_down_mouse_cursor(MouseCursor::ColResize),
-                    Axis::Vertical => cx.set_down_mouse_cursor(MouseCursor::RowResize),
-                }
-                self.animate_state(cx, ids!(hover.pressed));
-                self.drag_start_align = Some(self.align);
+        match event.hits_with_options(cx, self.bar.area(), HitOptions::margin(self.margin())) {
+        Hit::FingerHoverIn(_) => {
+            match self.axis {
+                Axis::Horizontal => cx.set_hover_cursor(MouseCursor::ColResize),
+                Axis::Vertical => cx.set_hover_cursor(MouseCursor::RowResize),
             }
-            HitEvent::FingerUp(f) => {
-                self.drag_start_align = None;
-                if f.is_over && f.input_type.has_hovers() {
-                    self.animate_state(cx, ids!(hover.on));
-                }
-                else {
-                    self.animate_state(cx, ids!(hover.off));
-                }
-            }
-            HitEvent::FingerMove(f) => {
-                if let Some(drag_start_align) = self.drag_start_align {
-                    let delta = match self.axis {
-                        Axis::Horizontal => f.abs.x - f.abs_start.x,
-                        Axis::Vertical => f.abs.y - f.abs_start.y,
-                    };
-                    let new_position =
-                    drag_start_align.to_position(self.axis, self.rect) + delta;
-                    self.align = match self.axis {
-                        Axis::Horizontal => {
-                            let center = self.rect.size.x / 2.0;
-                            if new_position < center - 30.0 {
-                                SplitterAlign::FromStart(new_position.max(self.min_vertical))
-                            } else if new_position > center + 30.0 {
-                                SplitterAlign::FromEnd((self.rect.size.x - new_position).max(self.max_vertical))
-                            } else {
-                                SplitterAlign::Weighted(new_position / self.rect.size.x)
-                            }
-                        }
-                        Axis::Vertical => {
-                            let center = self.rect.size.y / 2.0;
-                            if new_position < center - 30.0 {
-                                SplitterAlign::FromStart(new_position.max(self.min_horizontal))
-                            } else if new_position > center + 30.0 {
-                                SplitterAlign::FromEnd((self.rect.size.y - new_position).max(self.max_horizontal))
-                            } else {
-                                SplitterAlign::Weighted(new_position / self.rect.size.y)
-                            }
-                        }
-                    };
-                    self.bar.area().redraw(cx);
-                    dispatch_action(cx, SplitterAction::Changed {axis: self.axis, align: self.align});
-                }
-            }
-            _ => {}
+            self.animate_state(cx, ids!(hover.on));
         }
-    }
-    
-    fn margin(&self) -> Margin {
-        match self.axis {
-            Axis::Horizontal => Margin {
-                left: 3.0,
-                top: 0.0,
-                right: 3.0,
-                bottom: 0.0,
-            },
-            Axis::Vertical => Margin {
-                left: 0.0,
-                top: 3.0,
-                right: 0.0,
-                bottom: 3.0,
-            },
+        Hit::FingerHoverOut(fe) => if !fe.any_down {
+            self.animate_state(cx, ids!(hover.off));
+        },
+        Hit::FingerDown(_) => {
+            match self.axis {
+                Axis::Horizontal => cx.set_down_cursor(MouseCursor::ColResize),
+                Axis::Vertical => cx.set_down_cursor(MouseCursor::RowResize),
+            }
+            self.animate_state(cx, ids!(hover.pressed));
+            self.drag_start_align = Some(self.align);
         }
+        Hit::FingerUp(f) => {
+            self.drag_start_align = None;
+            if f.is_over && f.input_type.has_hovers() {
+                self.animate_state(cx, ids!(hover.on));
+            }
+            else {
+                self.animate_state(cx, ids!(hover.off));
+            }
+        }
+        Hit::FingerMove(f) => {
+            if let Some(drag_start_align) = self.drag_start_align {
+                let delta = match self.axis {
+                    Axis::Horizontal => f.abs.x - f.abs_start.x,
+                    Axis::Vertical => f.abs.y - f.abs_start.y,
+                };
+                let new_position =
+                drag_start_align.to_position(self.axis, self.rect) + delta;
+                self.align = match self.axis {
+                    Axis::Horizontal => {
+                        let center = self.rect.size.x / 2.0;
+                        if new_position < center - 30.0 {
+                            SplitterAlign::FromStart(new_position.max(self.min_vertical))
+                        } else if new_position > center + 30.0 {
+                            SplitterAlign::FromEnd((self.rect.size.x - new_position).max(self.max_vertical))
+                        } else {
+                            SplitterAlign::Weighted(new_position / self.rect.size.x)
+                        }
+                    }
+                    Axis::Vertical => {
+                        let center = self.rect.size.y / 2.0;
+                        if new_position < center - 30.0 {
+                            SplitterAlign::FromStart(new_position.max(self.min_horizontal))
+                        } else if new_position > center + 30.0 {
+                            SplitterAlign::FromEnd((self.rect.size.y - new_position).max(self.max_horizontal))
+                        } else {
+                            SplitterAlign::Weighted(new_position / self.rect.size.y)
+                        }
+                    }
+                };
+                self.bar.redraw(cx);
+                dispatch_action(cx, SplitterAction::Changed {axis: self.axis, align: self.align});
+            }
+        }
+        _ => {}
     }
+}
+
+fn margin(&self) -> Margin {
+    match self.axis {
+        Axis::Horizontal => Margin {
+            left: 3.0,
+            top: 0.0,
+            right: 3.0,
+            bottom: 0.0,
+        },
+        Axis::Vertical => Margin {
+            left: 0.0,
+            top: 3.0,
+            right: 0.0,
+            bottom: 3.0,
+        },
+    }
+}
 }
 
 #[derive(Clone, Copy, Debug, Live, LiveHook)]

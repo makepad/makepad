@@ -3,7 +3,7 @@ use {
     crate::{
         makepad_math::*,
         event::{
-            event::{Event, HitEvent, DragEvent}
+            event::{Event, Hit, DragHit}
         },
         cx::Cx,
         draw_2d::turtle::{Margin},
@@ -171,7 +171,6 @@ pub struct FingerHoverHitEvent {
     pub rel: Vec2,
     pub rect: Rect,
     pub any_down: bool,
-    pub hover_state: HoverState,
     pub event: FingerHoverEvent
 }
 
@@ -281,7 +280,22 @@ pub struct HitOptions {
     pub margin: Option<Margin>,
 }
 
-pub fn rect_contains_with_margin(rect: &Rect, pos: Vec2, margin: &Option<Margin>) -> bool {
+impl HitOptions{
+    pub fn margin(margin:Margin)->Self{
+        Self{
+            use_multi_touch: false,
+            margin: Some(margin)
+        }
+    }
+    pub fn use_multi_touch()->Self{
+        Self{
+            use_multi_touch: true,
+            margin: None
+        }
+    }
+}
+
+fn rect_contains_with_margin(rect: &Rect, pos: Vec2, margin: &Option<Margin>) -> bool {
     if let Some(margin) = margin {
         return
         pos.x >= rect.pos.x - margin.left
@@ -296,48 +310,48 @@ pub fn rect_contains_with_margin(rect: &Rect, pos: Vec2, margin: &Option<Margin>
 
 impl Event {
     
-    pub fn hits(&mut self, cx: &mut Cx, area: Area) -> HitEvent {
+    pub fn hits(&mut self, cx: &mut Cx, area: Area) -> Hit {
         self.hits_with_options(cx, area, HitOptions::default())
     }
     
-    pub fn hits_with_options(&mut self, cx: &mut Cx, area: Area, options: HitOptions) -> HitEvent {
+    pub fn hits_with_options(&mut self, cx: &mut Cx, area: Area, options: HitOptions) -> Hit {
         if !area.is_valid(cx){
-            return HitEvent::None
+            return Hit::Nothing
         }
         match self {
             Event::KeyFocus(kf) => {
                 if area == kf.prev {
-                    return HitEvent::KeyFocusLost(kf.clone())
+                    return Hit::KeyFocusLost(kf.clone())
                 }
                 else if area == kf.focus {
-                    return HitEvent::KeyFocus(kf.clone())
+                    return Hit::KeyFocus(kf.clone())
                 }
             },
             Event::KeyDown(kd) => {
                 if area == cx.key_focus {
-                    return HitEvent::KeyDown(kd.clone())
+                    return Hit::KeyDown(kd.clone())
                 }
             },
             Event::KeyUp(ku) => {
                 if area == cx.key_focus {
-                    return HitEvent::KeyUp(ku.clone())
+                    return Hit::KeyUp(ku.clone())
                 }
             },
             Event::TextInput(ti) => {
                 if area == cx.key_focus {
-                    return HitEvent::TextInput(ti.clone())
+                    return Hit::TextInput(ti.clone())
                 }
             },
             Event::TextCopy(tc) => {
                 if area == cx.key_focus {
-                    return HitEvent::TextCopy(tc);
+                    return Hit::TextCopy(tc);
                 }
             },
             Event::FingerScroll(fe) => {
                 let rect = area.get_rect(&cx);
                 if rect_contains_with_margin(&rect, fe.abs, &options.margin) {
                     //fe.handled = true;
-                    return HitEvent::FingerScroll(FingerScrollHitEvent {
+                    return Hit::FingerScroll(FingerScrollHitEvent {
                         rel: fe.abs - rect.pos,
                         rect: rect,
                         event: fe.clone()
@@ -363,21 +377,19 @@ impl Event {
                         //else {
                         cx.fingers[fe.digit].over_last = area;
                         // }
-                        return HitEvent::FingerHover(FingerHoverHitEvent {
+                        return Hit::FingerHoverOver(FingerHoverHitEvent {
                             rel: area.abs_to_rel(cx, fe.abs),
                             rect: rect,
                             any_down: any_down,
-                            hover_state: HoverState::Over,
                             event: fe.clone()
                         })
                     }
                     else {
                         //self.was_over_last_call = false;
-                        return HitEvent::FingerHover(FingerHoverHitEvent {
+                        return Hit::FingerHoverOut(FingerHoverHitEvent {
                             rel: area.abs_to_rel(cx, fe.abs),
                             rect: rect,
                             any_down: any_down,
-                            hover_state: HoverState::Out,
                             event: fe.clone()
                         })
                     }
@@ -394,11 +406,10 @@ impl Event {
                         cx.fingers[fe.digit].over_last = area;
                         fe.handled = true;
                         //self.was_over_last_call = true;
-                        return HitEvent::FingerHover(FingerHoverHitEvent {
+                        return Hit::FingerHoverIn(FingerHoverHitEvent {
                             rel: area.abs_to_rel(cx, fe.abs),
                             rect: rect,
                             any_down: any_down,
-                            hover_state: HoverState::In,
                             event: fe.clone()
                         })
                     }
@@ -410,7 +421,7 @@ impl Event {
                     let abs_start = cx.fingers[fe.digit].down_abs_start;
                     let rel_start = cx.fingers[fe.digit].down_rel_start;
                     let rect = area.get_rect(&cx);
-                    return HitEvent::FingerMove(FingerMoveHitEvent {
+                    return Hit::FingerMove(FingerMoveHitEvent {
                         abs_start: abs_start,
                         rel: area.abs_to_rel(cx, fe.abs),
                         rel_start: rel_start,
@@ -428,7 +439,7 @@ impl Event {
                         if !options.use_multi_touch {
                             for finger in &cx.fingers {
                                 if finger.captured == area {
-                                    return HitEvent::None;
+                                    return Hit::Nothing;
                                 }
                             }
                         }
@@ -437,7 +448,7 @@ impl Event {
                         cx.fingers[fe.digit].down_abs_start = fe.abs;
                         cx.fingers[fe.digit].down_rel_start = rel;
                         fe.handled = true;
-                        return HitEvent::FingerDown(FingerDownHitEvent {
+                        return Hit::FingerDown(FingerDownHitEvent {
                             rel: rel,
                             rect: rect,
                             deref_target: fe.clone()
@@ -451,7 +462,7 @@ impl Event {
                     let abs_start = cx.fingers[fe.digit].down_abs_start;
                     let rel_start = cx.fingers[fe.digit].down_rel_start;
                     let rect = area.get_rect(&cx);
-                    return HitEvent::FingerUp(FingerUpHitEvent {
+                    return Hit::FingerUp(FingerUpHitEvent {
                         is_over: rect.contains(fe.abs),
                         abs_start: abs_start,
                         rel_start: rel_start,
@@ -463,14 +474,14 @@ impl Event {
             },
             _ => ()
         };
-        HitEvent::None
+        Hit::Nothing
     }
     
-    pub fn drag_hits(&mut self, cx: &mut Cx, area: Area) -> DragEvent {
+    pub fn drag_hits(&mut self, cx: &mut Cx, area: Area) -> DragHit {
         self.drag_hits_with_options(cx, area, HitOptions::default())
     }
     
-    pub fn drag_hits_with_options(&mut self, cx: &mut Cx, area: Area, options: HitOptions) -> DragEvent {
+    pub fn drag_hits_with_options(&mut self, cx: &mut Cx, area: Area, options: HitOptions) -> DragHit {
         match self {
             Event::FingerDrag(event) => {
                 let rect = area.get_rect(cx);
@@ -478,7 +489,7 @@ impl Event {
                     if !event.handled && rect_contains_with_margin(&rect, event.abs, &options.margin) {
                         cx.new_drag_area = area;
                         event.handled = true;
-                        DragEvent::FingerDrag(FingerDragHitEvent {
+                        DragHit::FingerDrag(FingerDragHitEvent {
                             rel: area.abs_to_rel(cx, event.abs),
                             rect,
                             abs: event.abs,
@@ -486,7 +497,7 @@ impl Event {
                             action: &mut event.action
                         })
                     } else {
-                        DragEvent::FingerDrag(FingerDragHitEvent {
+                        DragHit::FingerDrag(FingerDragHitEvent {
                             rel: area.abs_to_rel(cx, event.abs),
                             rect,
                             state: DragState::Out,
@@ -498,7 +509,7 @@ impl Event {
                     if !event.handled && rect_contains_with_margin(&rect, event.abs, &options.margin) {
                         cx.new_drag_area = area;
                         event.handled = true;
-                        DragEvent::FingerDrag(FingerDragHitEvent {
+                        DragHit::FingerDrag(FingerDragHitEvent {
                             rel: area.abs_to_rel(cx, event.abs),
                             rect,
                             state: DragState::In,
@@ -506,7 +517,7 @@ impl Event {
                             action: &mut event.action
                         })
                     } else {
-                        DragEvent::None
+                        DragHit::NoHit
                     }
                 }
             }
@@ -515,17 +526,17 @@ impl Event {
                 if !event.handled && rect_contains_with_margin(&rect, event.abs, &options.margin) {
                     cx.new_drag_area = Area::default();
                     event.handled = true;
-                    DragEvent::FingerDrop(FingerDropHitEvent {
+                    DragHit::FingerDrop(FingerDropHitEvent {
                         rel: area.abs_to_rel(cx, event.abs),
                         rect,
                         abs: event.abs,
                         dragged_item: &mut event.dragged_item
                     })
                 } else {
-                    DragEvent::None
+                    DragHit::NoHit
                 }
             }
-            _ => DragEvent::None,
+            _ => DragHit::NoHit,
         }
     }
     

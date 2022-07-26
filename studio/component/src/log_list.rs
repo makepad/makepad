@@ -259,24 +259,19 @@ impl LogListNode {
         self.link_button.handle_event(cx, event, &mut |_,_|{});
         
         match event.hits(cx, self.bg_quad.area()) {
-            HitEvent::FingerHover(f) => {
-                cx.set_hover_mouse_cursor(MouseCursor::Hand);
-                match f.hover_state {
-                    HoverState::In => {
-                        self.animate_state(cx, ids!(hover.on));
-                    }
-                    HoverState::Out => {
-                        self.animate_state(cx, ids!(hover.off));
-                    }
-                    _ => {}
-                }
+            Hit::FingerHoverIn(_) => {
+                cx.set_hover_cursor(MouseCursor::Hand);
+                self.animate_state(cx, ids!(hover.on));
             }
-            HitEvent::FingerMove(f) => {
+            Hit::FingerHoverOut(_) => {
+                self.animate_state(cx, ids!(hover.off));
+            }
+            Hit::FingerMove(f) => {
                 if f.abs.distance(&f.abs_start) >= self.min_drag_distance {
                     dispatch_action(cx, LogNodeAction::ShouldStartDragging);
                 }
             }
-            HitEvent::FingerDown(_) => {
+            Hit::FingerDown(_) => {
                 self.animate_state(cx, ids!(select.on));
                 /*
                 if self.opened > 0.2 {

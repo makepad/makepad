@@ -470,8 +470,8 @@ impl<T: Clone> Default for DrawStateWrap<T> {
 
 impl<T: Clone> DrawStateWrap<T> {
     pub fn begin(&mut self, cx: &Cx2d, init: T) -> bool {
-        if self.redraw_id != cx.redraw_id {
-            self.redraw_id = cx.redraw_id;
+        if self.redraw_id != cx.redraw_id() {
+            self.redraw_id = cx.redraw_id();
             self.state = Some(init);
             true
         }

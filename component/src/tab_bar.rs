@@ -201,7 +201,7 @@ impl TabBar {
             });
         }
         match event.drag_hits(cx, self.scroll_view.area()) {
-            DragEvent::FingerDrag(f) => match f.state {
+            DragHit::FingerDrag(f) => match f.state {
                 DragState::In => {
                     self.is_dragged = true;
                     self.redraw(cx);
@@ -218,7 +218,7 @@ impl TabBar {
                     _ => panic!(),
                 },
             },
-            DragEvent::FingerDrop(f) => {
+            DragHit::FingerDrop(f) => {
                 self.is_dragged = false;
                 self.redraw(cx);
                 dispatch_action(cx, TabBarAction::ReceivedDraggedItem(f.dragged_item.clone()))

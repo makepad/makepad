@@ -44,16 +44,25 @@ impl Cx {
                 CxPassParent::Window(_) => {
                     cxpass.paint_dirty = true;
                 },
-                _=>()
+                _ => ()
             }
         }
     }
     
-    pub (crate) fn compute_passes_to_repaint(&mut self, passes_todo: &mut Vec<usize>, windows_need_repaint: &mut usize) {
+    pub (crate) fn any_passes_dirty(&self) -> bool {
+        for pass_id in 0..self.passes.len() {
+            if self.passes[pass_id].paint_dirty {
+                return true
+            }
+        }
+        false
+    }
+    
+    pub (crate) fn compute_pass_repaint_order(&mut self, passes_todo: &mut Vec<usize>) {
         passes_todo.clear();
         
         // we need this because we don't mark the entire deptree of passes dirty every small paint
-        loop {  // loop untill we don't propagate anymore
+        loop { // loop untill we don't propagate anymore
             let mut altered = false;
             for pass_id in 0..self.passes.len() {
                 if self.passes[pass_id].paint_dirty {
@@ -81,8 +90,7 @@ impl Cx {
                 let mut inserted = false;
                 match cxpass.parent {
                     CxPassParent::Window(_) => {
-                        *windows_need_repaint += 1;
-                    }, 
+                    },
                     CxPassParent::Pass(dep_of_pass_id) => {
                         if pass_id == dep_of_pass_id {
                             panic!()
@@ -112,6 +120,7 @@ impl Cx {
         self.new_draw_event.will_redraw()
     }
     
+    
     pub (crate) fn process_key_down(&mut self, key_event: KeyEvent) {
         if let Some(_) = self.keys_down.iter().position( | k | k.key_code == key_event.key_code) {
             return;
@@ -126,36 +135,28 @@ impl Cx {
     }
     
     
-    
     // event handler wrappers
     
     
-    pub (crate) fn call_event_handler(&mut self, event: &mut Event)
-    {
+    pub (crate) fn call_event_handler_inner(&mut self, event: &mut Event) {
         self.event_id += 1;
         let event_handler = self.event_handler.unwrap();
         unsafe {(*event_handler)(self, event);}
+    }
+    
+    pub (crate) fn call_event_handler(&mut self, event: &mut Event) {
+        self.call_event_handler_inner(event);
         
+        // post op events like signals, triggers and key-focus
         if self.next_key_focus != self.key_focus {
             self.prev_key_focus = self.key_focus;
             self.key_focus = self.next_key_focus;
-            self.event_id += 1;
-            unsafe {(*event_handler)(self, &mut Event::KeyFocus(KeyFocusEvent {
+            self.call_event_handler_inner(&mut Event::KeyFocus(KeyFocusEvent {
                 prev: self.prev_key_focus,
                 focus: self.key_focus
-            }));}
+            }));
         }
-    }
-    
-    pub (crate) fn call_live_edit(&mut self) {
-        if self.live_edit_event.is_some() {
-            let ev = self.live_edit_event.take().unwrap();
-            self.call_event_handler(&mut Event::LiveEdit(ev));
-        }
-    }
-    
-    pub (crate) fn call_signals_and_triggers(&mut self)
-    {
+          
         let mut counter = 0;
         while self.signals.len() != 0 {
             counter += 1;
@@ -189,8 +190,7 @@ impl Cx {
         }
     }
     
-    pub (crate) fn call_all_keys_up(&mut self)
-    {
+    pub (crate) fn call_all_keys_up(&mut self){
         let mut keys_down = Vec::new();
         std::mem::swap(&mut keys_down, &mut self.keys_down);
         for key_event in keys_down {
@@ -198,26 +198,23 @@ impl Cx {
         }
     }
     
-    pub (crate) fn call_draw_event(&mut self)
-    {
+    pub (crate) fn call_draw_event(&mut self){
         let mut draw_event = DrawEvent::default();
         std::mem::swap(&mut draw_event, &mut self.new_draw_event);
-
         self.call_event_handler(&mut Event::Draw(draw_event));
     }
     
-    pub (crate) fn call_next_frame_event(&mut self, time: f64)
-    {
+    pub (crate) fn call_next_frame_event(&mut self, time: f64){
         let mut set = HashSet::default();
         std::mem::swap(&mut set, &mut self.new_next_frames);
         self.call_event_handler(&mut Event::NextFrame(NextFrameEvent {set, time: time, frame: self.repaint_id}));
     }
     
-    pub fn terminate_thread_pools(&mut self){
-        for pool in &self.thread_pool_senders{
+    pub fn terminate_thread_pools(&mut self) {
+        for pool in &self.thread_pool_senders {
             pool.borrow_mut().take();
         }
     }
     
-
+    
 }

@@ -175,7 +175,7 @@ pub fn get_event_keycode(event: ObjcId) -> Option<KeyCode> {
         0x21 => KeyCode::LBracket,
         0x22 => KeyCode::KeyI,
         0x23 => KeyCode::KeyP,
-        0x24 => KeyCode::Return,
+        0x24 => KeyCode::ReturnKey,
         0x25 => KeyCode::KeyL,
         0x26 => KeyCode::KeyJ,
         0x27 => KeyCode::Quote,

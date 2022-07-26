@@ -29,24 +29,23 @@ pub fn button_logic_handle_event(
 ) -> Option<ButtonState>
 {
     match event.hits(cx, area) {
-        HitEvent::FingerDown(_fe) => {
+        Hit::FingerDown(_fe) => {
             dispatch_action(cx, ButtonAction::IsPressed);
             return Some(ButtonState::Pressed);
         },
-        HitEvent::FingerHover(fe) => {
-            cx.set_hover_mouse_cursor(MouseCursor::Hand);
-            match fe.hover_state {
-                HoverState::In => if fe.any_down {
-                    return Some(ButtonState::Pressed);
-                }
-                else {
-                    return Some(ButtonState::Hover);
-                },
-                HoverState::Out => return Some(ButtonState::Default),
-                _ => ()
+        Hit::FingerHoverIn(fe) => {
+            cx.set_hover_cursor(MouseCursor::Hand);
+            if fe.any_down {
+                return Some(ButtonState::Pressed);
             }
-        },
-        HitEvent::FingerUp(fe) => if fe.is_over {
+            else {
+                return Some(ButtonState::Hover);
+            }
+        }
+        Hit::FingerHoverOut(_) => {
+            return Some(ButtonState::Default)
+        }
+        Hit::FingerUp(fe) => if fe.is_over {
             dispatch_action(cx, ButtonAction::WasClicked);
             if fe.input_type.has_hovers() {
                 return Some(ButtonState::Hover);

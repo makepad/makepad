@@ -6,7 +6,6 @@ use {
         platform::{
             core_midi::CoreMidiAccess,
             cocoa_app::{CocoaApp, get_cocoa_app_global, init_cocoa_globals},
-            cx_desktop::CxDesktop,
             metal::{MetalCx, MetalWindow},
             audio_unit::*,
         },
@@ -25,7 +24,6 @@ use {
             Event,
             MidiInputListEvent,
         },
-        cursor::MouseCursor,
         cx_api::{CxPlatformApi, CxPlatformOp},
         cx::{Cx, PlatformType},
     }
@@ -61,6 +59,8 @@ impl Cx {
         get_cocoa_app_global().start_timer(0, 0.2, true);
         
         get_cocoa_app_global().event_loop( | cocoa_app, events | {
+            
+            self.handle_platform_ops(&mut metal_windows, &mut metal_cx, cocoa_app);
             
             let mut paint_dirty = false;
             for mut event in events {
@@ -125,8 +125,6 @@ impl Cx {
                     Event::WindowClosed(wc) => {
                         // lets remove the window from the set
                         self.windows[wc.window_id].is_created = false;
-                        //self.windows_free.push(wc.window_id);
-                        // remove the d3d11/win32 window
                         if let Some(index) = metal_windows.iter().position( | w | w.window_id == wc.window_id) {
                             metal_windows.remove(index);
                             if metal_windows.len() == 0 {
@@ -136,32 +134,29 @@ impl Cx {
                         self.call_event_handler(&mut event);
                     },
                     Event::Paint => {
-                        self.handle_platform_ops(&mut metal_windows, &mut metal_cx, cocoa_app);
-                        let _vsync = self.process_desktop_paint_callbacks(cocoa_app.time_now());
-                        self.mtl_compile_shaders(&metal_cx);
+                        if self.new_next_frames.len() != 0 {
+                            self.call_next_frame_event(cocoa_app.time_now());
+                        }
+                        if self.need_redrawing() {
+                            self.call_draw_event();
+                            self.mtl_compile_shaders(&metal_cx);
+                        }
                         self.handle_repaint(&mut metal_windows, &mut metal_cx);
-                        
-                    },
-                    Event::None => {
                     },
                     Event::Signal(se) => {
                         self.handle_core_midi_signals(se);
                         self.call_event_handler(&mut event);
-                        self.call_signals_and_triggers();
                     },
                     _ => {
                         self.call_event_handler(&mut event);
-                        self.call_live_edit();
-                        self.call_signals_and_triggers();
                     }
                 }
-                
                 if self.process_desktop_post_event(event) {
                     cocoa_app.terminate_event_loop();
                 }
             }
             
-            if self.need_redrawing() || self.new_next_frames.len() != 0 || paint_dirty {
+            if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 || paint_dirty {
                 false
             } else {
                 true
@@ -170,7 +165,6 @@ impl Cx {
     }
     
     fn handle_platform_ops(&mut self, metal_windows: &mut Vec<MetalWindow>, metal_cx: &MetalCx, cocoa_app: &mut CocoaApp) {
-        let mut set_cursor = false;
         while let Some(op) = self.platform_ops.pop() {
             match op {
                 CxPlatformOp::CreateWindow(window_id) => {
@@ -212,10 +206,10 @@ impl Cx {
                 CxPlatformOp::FullscreenWindow(_window_id) => {
                     todo!()
                 },
-                CxPlatformOp::NormalizeWindow(_window_id)=>{
+                CxPlatformOp::NormalizeWindow(_window_id) => {
                     todo!()
                 }
-                CxPlatformOp::SetTopmost(_window_id, _is_topmost)=>{
+                CxPlatformOp::SetTopmost(_window_id, _is_topmost) => {
                     todo!()
                 }
                 CxPlatformOp::XrStartPresenting(_) => {
@@ -225,20 +219,17 @@ impl Cx {
                     todo!()
                 },
                 CxPlatformOp::ShowTextIME(pos) => {
-                    metal_windows.iter_mut().for_each(|w|{
+                    metal_windows.iter_mut().for_each( | w | {
                         w.cocoa_window.set_ime_spot(pos);
                     });
                 },
                 CxPlatformOp::HideTextIME => {
                     todo!()
                 },
-                
                 CxPlatformOp::SetHoverCursor(cursor) => {
-                    set_cursor = true;
                     cocoa_app.set_mouse_cursor(cursor);
                 },
                 CxPlatformOp::SetDownCursor(cursor) => {
-                    set_cursor = true;
                     cocoa_app.set_mouse_cursor(cursor);
                 },
                 CxPlatformOp::StartTimer {timer_id, interval, repeats} => {
@@ -250,7 +241,7 @@ impl Cx {
                 CxPlatformOp::StartDragging(dragged_item) => {
                     cocoa_app.start_dragging(dragged_item);
                 }
-                CxPlatformOp::UpdateMenu(menu)=>{
+                CxPlatformOp::UpdateMenu(menu) => {
                     cocoa_app.update_app_menu(&menu, &self.command_settings)
                 }
             }
@@ -357,5 +348,4 @@ pub struct CxPlatform {
     pub bytes_written: usize,
     pub draw_calls_done: usize,
     pub text_clipboard_response: Option<String>,
-    pub desktop: CxDesktop,
 }

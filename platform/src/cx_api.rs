@@ -7,7 +7,8 @@ use {
     crate::{
         console_log,
         makepad_math::Vec2,
-        cx::Cx,
+        gpu_info::GpuInfo,
+        cx::{Cx,PlatformType},
         event::{
             DraggedItem,
             Timer,
@@ -80,6 +81,12 @@ pub enum CxPlatformOp {
 }
 
 impl Cx {
+    pub fn redraw_id(&self)->u64{self.redraw_id}
+    
+    pub fn platform_type(&self)->&PlatformType{&self.platform_type}
+    
+    pub fn gpu_info(&self)->&GpuInfo{&self.gpu_info}
+    
     pub fn update_menu(&mut self, menu: Menu) {
         self.platform_ops.push(CxPlatformOp::UpdateMenu(menu));
     }
@@ -107,7 +114,7 @@ impl Cx {
         self.platform_ops.push(CxPlatformOp::StartDragging(dragged_item));
     }
     
-    pub fn set_down_mouse_cursor(&mut self, cursor: MouseCursor) {
+    pub fn set_down_cursor(&mut self, cursor: MouseCursor) {
         // down cursor overrides the hover cursor
         if let Some(p) = self.platform_ops.iter_mut().find( | p | match p {
             CxPlatformOp::SetHoverCursor(_) |
@@ -121,7 +128,7 @@ impl Cx {
         }
     }
     
-    pub fn set_hover_mouse_cursor(&mut self, cursor: MouseCursor) {
+    pub fn set_hover_cursor(&mut self, cursor: MouseCursor) {
         let mut was_hover = false;
         // if we already have a downcursor, skip
         if let Some(p) = self.platform_ops.iter_mut().find( | p | match p {

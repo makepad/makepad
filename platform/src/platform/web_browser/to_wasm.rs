@@ -294,7 +294,7 @@ fn web_to_key_code(key_code: u32) -> KeyCode {
         80 => KeyCode::KeyP,
         219 => KeyCode::LBracket,
         221 => KeyCode::RBracket,
-        13 => KeyCode::Return,
+        13 => KeyCode::ReturnKey,
         
         65 => KeyCode::KeyA,
         83 => KeyCode::KeyS,

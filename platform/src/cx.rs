@@ -4,7 +4,6 @@ use {
             HashMap,
             HashSet,
         },
-        time::Instant,
         sync::Arc,
         rc::Rc,
         rc::Weak,
@@ -12,12 +11,11 @@ use {
     },
     crate::{
         makepad_live_compiler::{
-            LiveEditEvent,
             LiveRegistry
         },
         makepad_shader_compiler::{
             ShaderRegistry
-        },  
+        },
         cx_draw_shaders::{
             CxDrawShaders
         },
@@ -73,79 +71,76 @@ pub use makepad_shader_compiler::makepad_derive_live::*;
 pub use makepad_shader_compiler::makepad_math::*;
 
 pub struct Cx {
-    pub platform_type: PlatformType,
-    pub gpu_info: GpuInfo,
+    pub (crate) platform_type: PlatformType,
+    pub (crate) gpu_info: GpuInfo,
     
-    pub windows: Vec<CxWindow>,
-    pub windows_free: Rc<RefCell<Vec<usize >> >,
+    pub (crate) windows: Vec<CxWindow>,
+    pub (crate) windows_free: Rc<RefCell<Vec<usize >> >,
     
-    pub passes: Vec<CxPass>,
-    pub passes_free: Rc<RefCell<Vec<usize >> >,
+    pub (crate) passes: Vec<CxPass>,
+    pub (crate) passes_free: Rc<RefCell<Vec<usize >> >,
     
-    pub draw_lists: Vec<DrawList>,
-    pub draw_lists_free: Rc<RefCell<Vec<usize >> >,
+    pub (crate) draw_lists: Vec<DrawList>,
+    pub (crate) draw_lists_free: Rc<RefCell<Vec<usize >> >,
     
-    pub textures: Vec<CxTexture>,
-    pub textures_free: Arc<RefCell<Vec<usize >> >,
+    pub (crate) textures: Vec<CxTexture>,
+    // pub (crate) textures_free: Arc<RefCell<Vec<usize >> >,
     
-    pub geometries: Vec<CxGeometry>,
-    pub geometries_free: Rc<RefCell<Vec<usize >> >,
-    pub geometries_refs: HashMap<GeometryFingerprint, Weak<Geometry >>,
+    pub (crate) geometries: Vec<CxGeometry>,
+    pub (crate) geometries_free: Rc<RefCell<Vec<usize >> >,
+    pub (crate) geometries_refs: HashMap<GeometryFingerprint, Weak<Geometry >>,
     
-    pub draw_shaders: CxDrawShaders,
+    pub (crate) draw_shaders: CxDrawShaders,
     
-    pub fonts: Vec<Option<CxFont >>,
-    pub fonts_atlas: CxFontsAtlas,
-    pub path_to_font_id: HashMap<String, usize>,
-    pub draw_font_atlas: Option<Box<CxDrawFontAtlas >>,
+    pub (crate) fonts: Vec<Option<CxFont >>,
+    pub (crate) fonts_atlas: CxFontsAtlas,
+    pub (crate) path_to_font_id: HashMap<String, usize>,
+    pub (crate) draw_font_atlas: Option<Box<CxDrawFontAtlas >>,
     
-    pub new_draw_event: DrawEvent,
+    pub (crate) new_draw_event: DrawEvent,
     
-    pub redraw_id: u64,
-    pub repaint_id: u64,
-    pub event_id: u64,
-    pub timer_id: u64,
-    pub next_frame_id: u64,
-    pub web_socket_id: u64,
+    pub (crate) redraw_id: u64,
+    pub (crate) repaint_id: u64,
+    pub (crate) event_id: u64,
+    pub (crate) timer_id: u64,
+    pub (crate) next_frame_id: u64,
     
-    pub prev_key_focus: Area,
-    pub next_key_focus: Area,
-    pub key_focus: Area,
-    pub keys_down: Vec<KeyEvent>,
+    #[allow(dead_code)]
+    pub (crate) web_socket_id: u64,
     
-    pub platform_ops: Vec<CxPlatformOp>,
-    //pub down_mouse_cursor: Option<MouseCursor>,
-    //pub hover_mouse_cursor: Option<MouseCursor>,
-    pub fingers: Vec<CxPerFinger>,
+    pub (crate) prev_key_focus: Area,
+    pub (crate) next_key_focus: Area,
+    pub (crate) key_focus: Area,
+    pub (crate) keys_down: Vec<KeyEvent>,
     
-    pub drag_area: Area,
-    pub new_drag_area: Area,
+    pub (crate) platform_ops: Vec<CxPlatformOp>,
     
-    pub new_next_frames: HashSet<NextFrame>,
+    pub (crate) fingers: Vec<CxPerFinger>,
     
-    pub dependencies: HashMap<String, CxDependency>,
+    pub (crate) drag_area: Area,
+    pub (crate) new_drag_area: Area,
     
-    pub signals: HashSet<Signal>,
-    pub triggers: HashMap<Area,HashSet<Trigger>>,
+    pub (crate) new_next_frames: HashSet<NextFrame>,
     
-    pub profiles: HashMap<u64, Instant>,
+    pub (crate) dependencies: HashMap<String, CxDependency>,
+    
+    pub (crate) signals: HashSet<Signal>,
+    pub (crate) triggers: HashMap<Area, HashSet<Trigger >>,
     
     pub live_registry: Rc<RefCell<LiveRegistry >>,
     pub shader_registry: ShaderRegistry,
     
-    pub live_edit_event: Option<LiveEditEvent>,
+    pub (crate) command_settings: HashMap<Command, CxCommandSetting>,
     
-    pub command_settings: HashMap<Command, CxCommandSetting>,
+    pub (crate) thread_pool_senders: Vec<Arc<RefCell<Option<std::sync::mpsc::Sender<() >> >> >,
     
-    pub thread_pool_senders: Vec<Arc<RefCell<Option<std::sync::mpsc::Sender<()>>>>>,
-    
-    pub platform: CxPlatform,
-    // this cuts the compiletime of an end-user application in half
-    pub event_handler: Option<*mut dyn FnMut(&mut Cx, &mut Event)>,
+    pub (crate) platform: CxPlatform,
+    // (cratethis cuts the compiletime of an end-user application in half
+    pub (crate) event_handler: Option<*mut dyn FnMut(&mut Cx, &mut Event)>,
 }
 
-pub struct CxDependency{
-    pub data: Option<Result<Vec<u8>, String>>
+pub struct CxDependency {
+    pub data: Option<Result<Vec<u8>, String >>
 }
 
 
@@ -155,7 +150,7 @@ pub enum PlatformType {
     MsWindows,
     OSX,
     Linux {custom_window_chrome: bool},
-    WebBrowser {protocol: String, host:String, hostname: String, pathname: String, search: String, hash: String}
+    WebBrowser {protocol: String, host: String, hostname: String, pathname: String, search: String, hash: String}
 }
 
 impl PlatformType {
@@ -203,7 +198,7 @@ impl Default for Cx {
             draw_lists_free: Rc::new(RefCell::new(Vec::new())),
             
             textures: textures,
-            textures_free: Arc::new(RefCell::new(Vec::new())),
+            //textures_free: Arc::new(RefCell::new(Vec::new())),
             
             geometries: Vec::new(),
             geometries_free: Rc::new(RefCell::new(Vec::new())),
@@ -244,8 +239,6 @@ impl Default for Cx {
             signals: HashSet::new(),
             triggers: HashMap::new(),
             
-            profiles: HashMap::new(),
-            
             live_registry: Rc::new(RefCell::new(LiveRegistry::default())),
             shader_registry: ShaderRegistry::new(),
             
@@ -254,8 +247,6 @@ impl Default for Cx {
             platform: CxPlatform {..Default::default()},
             
             thread_pool_senders: Vec::new(),
-            
-            live_edit_event: None,
             
             event_handler: None
         }
