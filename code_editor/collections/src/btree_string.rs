@@ -1,6 +1,6 @@
 use {
     crate::{btree, btree::Measure, BTree},
-    std::ops::{AddAssign, RangeBounds, SubAssign},
+    std::ops::{Add, AddAssign, RangeBounds, Sub, SubAssign},
 };
 
 #[derive(Clone, Debug)]
@@ -24,18 +24,11 @@ impl BTreeString {
     }
 
     pub fn char_count(&self) -> usize {
-        self.btree.info().char_count
+        self.btree.measure::<CharMeasure>()
     }
 
     pub fn char_count_at(&self, position: usize) -> usize {
-        if position == 0 {
-            return 0;
-        }
-        if position == self.len() {
-            return self.char_count();
-        }
-        let (chunk, summed_len, summed_char_count) = self.btree.chunk_at::<CharMeasure>(position);
-        summed_char_count + chunk[..position - summed_len].count_chars()
+        self.btree.measure_at::<CharMeasure>(position)
     }
 
     pub fn slice<R: RangeBounds<usize>>(&self, range: R) -> Slice<'_> {
@@ -127,7 +120,7 @@ impl BTreeString {
 impl From<String> for BTreeString {
     fn from(string: String) -> Self {
         Self::from(string.as_str())
-    } 
+    }
 }
 
 impl From<&String> for BTreeString {
@@ -194,6 +187,14 @@ impl<'a> Slice<'a> {
 
     pub fn len(self) -> usize {
         self.slice.len()
+    }
+
+    pub fn char_count(self) -> usize {
+        self.slice.measure::<CharMeasure>()
+    }
+
+    pub fn char_count_at(&self, position: usize) -> usize {
+        self.slice.measure_at::<CharMeasure>(position)
     }
 
     pub fn cursor_front(self) -> Cursor<'a> {
@@ -467,9 +468,9 @@ impl btree::Chunk for String {
         self.len()
     }
 
-    fn info(&self) -> Self::Info {
+    fn info_at(&self, index: usize) -> Self::Info {
         Info {
-            char_count: self.count_chars(),
+            char_count: self[..index].count_chars(),
         }
     }
 
@@ -507,22 +508,46 @@ impl btree::Info for Info {
     }
 }
 
+impl Add for Info {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self::Output {
+        Self {
+            char_count: self.char_count + other.char_count
+        }
+    }
+}
+
 impl AddAssign for Info {
     fn add_assign(&mut self, other: Self) {
-        self.char_count += other.char_count;
+        *self = *self + other;
+    }
+}
+
+impl Sub for Info {
+    type Output = Self;
+    
+    fn sub(self, other: Self) -> Self::Output {
+        Self {
+            char_count: self.char_count - other.char_count
+        }
     }
 }
 
 impl SubAssign for Info {
     fn sub_assign(&mut self, other: Self) {
-        self.char_count -= other.char_count;
+        *self = *self - other;
     }
 }
 
 struct CharMeasure;
 
-impl Measure<Info> for CharMeasure {
-    fn measure(info: Info) -> usize {
+impl Measure<String> for CharMeasure {
+    fn measure_chunk_at(chunk: &String, index: usize) -> usize {
+        chunk[..index].count_chars()
+    }
+
+    fn measure_info(info: Info) -> usize {
         info.char_count
     }
 }
@@ -603,6 +628,20 @@ mod tests {
                 }
                 (string, start..end)
             })
+    }
+    
+    fn string_and_range_and_index() -> impl Strategy<Value = (String, Range<usize>, usize)> {
+        string_and_range().prop_flat_map(|(string, range)| {
+            let range_len = range.len();
+            (Just(string), Just(range), 0..=range_len)
+        })
+        .prop_map(|(string, range, mut index)| {
+            let slice = &string[range.clone()];
+            while !slice.is_char_boundary(index) {
+                index -= 1;
+            }
+            (string, range, index)
+        })
     }
 
     proptest! {
@@ -739,6 +778,22 @@ mod tests {
             let slice = &string[range.clone()];
             let btree_slice = btree_string.slice(range);
             assert_eq!(btree_slice.len(), slice.len());
+        }
+
+        #[test]
+        fn test_slice_char_count((string, range) in string_and_range()) {
+            let btree_string = BTreeString::from(&string);
+            let slice = &string[range.clone()];
+            let btree_slice = btree_string.slice(range);
+            assert_eq!(btree_slice.char_count(), slice.count_chars());
+        }
+
+        #[test]
+        fn test_slice_char_count_at((string, range, index) in string_and_range_and_index()) {
+            let btree_string = BTreeString::from(&string);
+            let slice = &string[range.clone()];
+            let btree_slice = btree_string.slice(range);
+            assert_eq!(btree_slice.char_count_at(index), slice[..index].count_chars());
         }
 
         #[test]
