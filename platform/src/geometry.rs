@@ -17,8 +17,8 @@ pub struct GeometryRef(pub Rc<Geometry>);
 
 #[derive(Debug, PartialEq)]
 pub struct Geometry {
-    pub geometry_id: usize,
-    pub geometries_free: Rc<RefCell<Vec<usize >> >,
+    pub(crate) geometry_id: usize,
+    pub(crate) geometries_free: Rc<RefCell<Vec<usize >> >,
 }
 
 impl Drop for Geometry {

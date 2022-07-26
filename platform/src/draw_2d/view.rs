@@ -92,13 +92,11 @@ impl Try for ViewRedrawing {
 
 #[derive(Debug)]
 pub struct View { // draw info per UI element
-    pub draw_list_id: usize, //Option<usize>,
-    //pub layout: Layout,
-    //pub walk: Walk,
-    pub is_overlay: bool,
-    pub always_redraw: bool,
-    pub redraw_id: u64,
-    pub draw_lists_free: Rc<RefCell<Vec<usize >> >,
+    pub(crate) draw_list_id: usize, //Option<usize>,
+    pub(crate) is_overlay: bool,
+    pub(crate) always_redraw: bool,
+    pub(crate) redraw_id: u64,
+    pub(crate) draw_lists_free: Rc<RefCell<Vec<usize >> >,
 }
 
 impl Drop for View {
@@ -176,6 +174,8 @@ impl LiveApply for View {
 }
 
 impl View {
+    
+    pub fn draw_list_id(&self)->usize{self.draw_list_id}
     
     pub fn set_is_clipped(&self, cx: &mut Cx, is_clipped: bool) {cx.draw_lists[self.draw_list_id].is_clipped = is_clipped;}
     //pub fn set_is_overlay(&self, cx: &mut Cx, is_overlay: bool) {cx.draw_lists[self.draw_list_id].is_overlay = is_overlay;}
@@ -553,6 +553,13 @@ impl<'a> Cx2d<'a> {
             self.cx.passes[draw_list.pass_id].paint_dirty = true;
         }
     }
+    
+    pub fn set_view_rect(&mut self, draw_list_id: usize, rect: Rect) {
+        let draw_list = &mut self.cx.draw_lists[draw_list_id];
+        draw_list.rect = rect;
+    }
+
+
 }
 
 #[derive(Debug)]

@@ -20,8 +20,8 @@ pub use {
 };
 
 pub struct Window {
-    pub window_id: usize,
-    pub windows_free: Rc<RefCell<Vec<usize>>>,
+    pub(crate) window_id: usize,
+    pub(crate) windows_free: Rc<RefCell<Vec<usize>>>,
 }
 
 impl Drop for Window{
@@ -105,6 +105,7 @@ impl LiveApply for Window {
 
 
 impl Window {
+    pub fn window_id(&self)->usize{self.window_id}
     
     pub fn set_pass(&self, cx:&mut Cx, pass:&Pass){
         cx.windows[self.window_id].main_pass_id = Some(pass.pass_id);
@@ -205,7 +206,7 @@ impl CxWindow {
             self.window_geom.position
         }
     }
-    
+    /*
     pub fn get_dpi_factor(&mut self) -> Option<f32> {
         if self.is_created {
             Some(self.window_geom.dpi_factor)
@@ -213,5 +214,5 @@ impl CxWindow {
         else{
             None
         }
-    }
+    }*/
 }

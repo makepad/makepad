@@ -29,7 +29,6 @@ use {
             WindowGeom,
             WindowGeomChangeEvent
         },
-        cursor::MouseCursor,
         cx_api::{CxPlatformApi, CxPlatformOp},
         cx::{Cx},
     }
@@ -309,20 +308,17 @@ impl Cx {
         
         self.call_signals_and_triggers();
         
-        if self.need_redrawing() {
-            self.call_draw_event();
-            self.platform.from_wasm(FromWasmRequestAnimationFrame {});
+        if is_animation_frame {
+            if self.need_redrawing(){
+                self.call_draw_event();
+                self.webgl_compile_shaders();
+            }
+            self.handle_repaint();
         }
-        self.call_signals_and_triggers();
-        
+    
         self.handle_platform_ops();
         
-        
-        self.webgl_compile_shaders();
-        
-        let has_passes = self.handle_repaint(is_animation_frame);
-        
-        if has_passes || self.new_next_frames.len() != 0 {
+        if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {
             self.platform.from_wasm(FromWasmRequestAnimationFrame {});
         }
         
@@ -336,7 +332,6 @@ impl Cx {
     }
     
     fn handle_platform_ops(&mut self) {
-        let mut set_cursor = false;
         while let Some(op) = self.platform_ops.pop() {
             match op {
                 CxPlatformOp::CreateWindow(window_id) => {
@@ -378,11 +373,9 @@ impl Cx {
                 },
                 
                 CxPlatformOp::SetHoverCursor(cursor) => {
-                    set_cursor = true;
                     self.platform.from_wasm(FromWasmSetMouseCursor::new(cursor));
                 },
                 CxPlatformOp::SetDownCursor(cursor) => {
-                    set_cursor = true;
                     self.platform.from_wasm(FromWasmSetMouseCursor::new(cursor));
                 },
                 CxPlatformOp::StartTimer {timer_id, interval, repeats} => {

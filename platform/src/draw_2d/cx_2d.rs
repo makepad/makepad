@@ -27,13 +27,13 @@ use {
 
 pub struct Cx2d<'a> {
     pub cx: &'a mut Cx,
-    pub draw_event: &'a DrawEvent,
-    pub pass_id: Option<usize>,
+    pub(crate) draw_event: &'a DrawEvent,
+    pub(crate) pass_id: Option<usize>,
     pub draw_list_stack: Vec<usize>,
-    pub turtles: Vec<Turtle>,
-    pub turtle_walks: Vec<TurtleWalk>,
-    pub align_list: Vec<Area>,
-    pub current_dpi_factor: f32,
+    pub(crate) turtles: Vec<Turtle>,
+    pub(crate) turtle_walks: Vec<TurtleWalk>,
+    pub(crate) align_list: Vec<Area>,
+    pub(crate) current_dpi_factor: f32,
 }
 
 impl<'a> Deref for Cx2d<'a> {type Target = Cx; fn deref(&self) -> &Self::Target {self.cx}}

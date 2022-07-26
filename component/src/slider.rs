@@ -202,33 +202,27 @@ impl Slider {
         self.state_handle_event(cx, event);
         self.text_input.handle_event(cx, event, &mut | _, _ | {});
         match event.hits(cx, self.slider.area()) {
-            HitEvent::KeyFocusLost(_) => {
+            Hit::KeyFocusLost(_) => {
                 self.animate_state(cx, ids!(focus.off));
             }
-            HitEvent::KeyFocus(_) => {
+            Hit::KeyFocus(_) => {
                 self.animate_state(cx, ids!(focus.on));
             }
-            HitEvent::FingerHover(fe) => {
-                cx.set_hover_mouse_cursor(MouseCursor::Arrow);
-                match fe.hover_state {
-                    HoverState::In => {
-                        self.animate_state(cx, ids!(hover.on));
-                    },
-                    HoverState::Out => {
-                        //self.animate_state(cx, id!(defocus));
-                        self.animate_state(cx, ids!(hover.off));
-                    },
-                    _ => ()
-                }
+            Hit::FingerHoverIn(_) => {
+                cx.set_hover_cursor(MouseCursor::Arrow);
+                self.animate_state(cx, ids!(hover.on));
+            }
+            Hit::FingerHoverOut(_) => {
+                self.animate_state(cx, ids!(hover.off));
             },
-            HitEvent::FingerDown(_fe) => {
+            Hit::FingerDown(_fe) => {
                 cx.set_key_focus(self.slider.area());
-                cx.set_down_mouse_cursor(MouseCursor::Arrow);
+                cx.set_down_cursor(MouseCursor::Arrow);
                 self.animate_state(cx, ids!(drag.on));
                 self.dragging = Some(self.value);
                 dispatch_action(cx, self, SliderAction::StartSlide);
             },
-            HitEvent::FingerUp(fe) => {
+            Hit::FingerUp(fe) => {
                 // if the finger hasn't moved further than X we jump to edit-all on the text thing
                 
                 self.animate_state(cx, ids!(drag.off));
@@ -241,10 +235,10 @@ impl Slider {
                 self.dragging = None;
                 dispatch_action(cx, self, SliderAction::EndSlide);
             }
-            HitEvent::FingerMove(fe) => {
+            Hit::FingerMove(fe) => {
                 if let Some(start_pos) = self.dragging {
                     self.value = (start_pos + (fe.rel.x - fe.rel_start.x) / fe.rect.size.x).max(0.0).min(1.0);
-                    self.slider.area().redraw(cx);
+                    self.slider.redraw(cx);
                     dispatch_action(cx, self, SliderAction::Slide(self.to_external()));
                 }
             }

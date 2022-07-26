@@ -100,9 +100,9 @@ live_register!{
                     from: {all: Play::Forward {duration: 0.2}}
                     apply: {
                         hover: 0.0,
-                        bg_quad: {hover: (hover)}
-                        name_text: {hover: (hover)}
-                        icon_quad: {hover: (hover)}
+                        bg: {hover: (hover)}
+                        name: {hover: (hover)}
+                        icon: {hover: (hover)}
                     }
                 }
                 
@@ -131,9 +131,9 @@ live_register!{
                     from: {all: Play::Forward {duration: 0.1}}
                     apply: {
                         selected: 0.0,
-                        bg_quad: {selected: (selected)}
-                        name_text: {selected: (selected)}
-                        icon_quad: {selected: (selected)}
+                        bg: {selected: (selected)}
+                        name: {selected: (selected)}
+                        icon: {selected: (selected)}
                     }
                 }
                 on = {
@@ -152,9 +152,9 @@ live_register!{
                     //ease: Ease::OutExp
                     apply: {
                         opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
-                        bg_quad: {opened: (opened)}
-                        name_text: {opened: (opened)}
-                        icon_quad: {opened: (opened)}
+                        bg: {opened: (opened)}
+                        name: {opened: (opened)}
+                        icon: {opened: (opened)}
                     }
                 }
                 
@@ -176,13 +176,13 @@ live_register!{
         node_height: (DIM_DATA_ITEM_HEIGHT),
         file_node: FileTreeNode {
             is_folder: false,
-            bg_quad: {is_folder: 0.0}
-            name_text: {is_folder: 0.0}
+            bg: {is_folder: 0.0}
+            name: {is_folder: 0.0}
         }
         folder_node: FileTreeNode {
             is_folder: true,
-            bg_quad: {is_folder: 1.0}
-            name_text: {is_folder: 1.0}
+            bg: {is_folder: 1.0}
+            name: {is_folder: 1.0}
         }
         layout: {flow: Flow::Down},
         scroll_view: {
@@ -232,9 +232,9 @@ struct DrawIconQuad {
 
 #[derive(Live, LiveHook)]
 pub struct FileTreeNode {
-    bg_quad: DrawBgQuad,
-    icon_quad: DrawIconQuad,
-    name_text: DrawNameText,
+    bg: DrawBgQuad,
+    icon: DrawIconQuad,
+    name: DrawNameText,
     layout: Layout,
     
     state: State,
@@ -258,7 +258,7 @@ pub struct FileTree {
     file_node: Option<LivePtr>,
     folder_node: Option<LivePtr>,
     layout: Layout,
-    filler_quad: DrawBgQuad,
+    filler: DrawBgQuad,
     
     node_height: f32,
     
@@ -300,37 +300,37 @@ pub enum FileTreeNodeAction {
 
 impl FileTreeNode {
     pub fn set_draw_state(&mut self, is_even: f32, scale: f32) {
-        self.bg_quad.scale = scale;
-        self.bg_quad.is_even = is_even;
-        self.name_text.scale = scale;
-        self.name_text.is_even = is_even;
-        self.icon_quad.scale = scale;
-        self.icon_quad.is_even = is_even;
-        self.name_text.font_scale = scale;
+        self.bg.scale = scale;
+        self.bg.is_even = is_even;
+        self.name.scale = scale;
+        self.name.is_even = is_even;
+        self.icon.scale = scale;
+        self.icon.is_even = is_even;
+        self.name.font_scale = scale;
     }
     
     pub fn draw_folder(&mut self, cx: &mut Cx2d, name: &str, is_even: f32, node_height: f32, depth: usize, scale: f32) {
         self.set_draw_state(is_even, scale);
         
-        self.bg_quad.begin(cx, Walk::size(Size::Fill, Size::Fixed(scale * node_height)), self.layout);
+        self.bg.begin(cx, Walk::size(Size::Fill, Size::Fixed(scale * node_height)), self.layout);
         
         cx.walk_turtle(self.indent_walk(depth));
         
-        self.icon_quad.draw_walk(cx, self.icon_walk);
+        self.icon.draw_walk(cx, self.icon_walk);
          
-        self.name_text.draw_walk(cx, Walk::fit(), Align::default(), name);
-        self.bg_quad.end(cx);
+        self.name.draw_walk(cx, Walk::fit(), Align::default(), name);
+        self.bg.end(cx);
     }
     
     pub fn draw_file(&mut self, cx: &mut Cx2d, name: &str, is_even: f32, node_height: f32, depth: usize, scale: f32) {
         self.set_draw_state(is_even, scale);
         
-        self.bg_quad.begin(cx, Walk::size(Size::Fill, Size::Fixed(scale * node_height)), self.layout);
+        self.bg.begin(cx, Walk::size(Size::Fill, Size::Fixed(scale * node_height)), self.layout);
         
         cx.walk_turtle(self.indent_walk(depth));
         
-        self.name_text.draw_walk(cx, Walk::fit(), Align::default(), name);
-        self.bg_quad.end(cx);
+        self.name.draw_walk(cx, Walk::fit(), Align::default(), name);
+        self.bg.end(cx);
     }
     
     fn indent_walk(&self, depth: usize) -> Walk {
@@ -366,27 +366,22 @@ impl FileTreeNode {
         dispatch_action: &mut dyn FnMut(&mut Cx, FileTreeNodeAction),
     ) {
         if self.state_handle_event(cx, event).must_redraw() {
-            self.bg_quad.area().redraw(cx);
+            self.bg.redraw(cx);
         }
-        match event.hits(cx, self.bg_quad.area()) {
-            HitEvent::FingerHover(f) => {
-                cx.set_hover_mouse_cursor(MouseCursor::Hand);
-                match f.hover_state {
-                    HoverState::In => {
-                        self.animate_state(cx, ids!(hover.on));
-                    }
-                    HoverState::Out => {
-                        self.animate_state(cx, ids!(hover.off));
-                    }
-                    _ => {}
-                }
+        match event.hits(cx, self.bg.area()) {
+            Hit::FingerHoverIn(_)=> {
+                cx.set_hover_cursor(MouseCursor::Hand);
+                self.animate_state(cx, ids!(hover.on));
             }
-            HitEvent::FingerMove(f) => {
+            Hit::FingerHoverOut(_) => {
+                self.animate_state(cx, ids!(hover.off));
+            }
+            Hit::FingerMove(f) => {
                 if f.abs.distance(&f.abs_start) >= self.min_drag_distance {
                     dispatch_action(cx, FileTreeNodeAction::ShouldStartDragging);
                 }
             }
-            HitEvent::FingerDown(_) => {
+            Hit::FingerDown(_) => {
                 self.animate_state(cx, ids!(select.on));
                 if self.is_folder {
                     if self.state.is_in_state(cx, ids!(open.on)) {
@@ -421,8 +416,8 @@ impl FileTree {
         let mut walk = 0.0;
         while walk < height_left {
             self.count += 1;
-            self.filler_quad.is_even = Self::is_even(self.count);
-            self.filler_quad.draw_walk(cx, Walk::size(Size::Fill, Size::Fixed(self.node_height.min(height_left - walk))));
+            self.filler.is_even = Self::is_even(self.count);
+            self.filler.draw_walk(cx, Walk::size(Size::Fill, Size::Fixed(self.node_height.min(height_left - walk))));
             walk += self.node_height.max(1.0);
         }
         
@@ -605,12 +600,12 @@ impl FileTree {
         }
         
         match event.hits(cx, self.scroll_view.area()) {
-            HitEvent::KeyFocus(_) => {
+            Hit::KeyFocus(_) => {
                 if let Some(node_id) = self.selected_node_id {
                     self.tree_nodes.get_mut(&node_id).unwrap().0.set_is_focussed(cx, true, Animate::Yes);
                 }
             }
-            HitEvent::KeyFocusLost(_) => {
+            Hit::KeyFocusLost(_) => {
                 if let Some(node_id) = self.selected_node_id {
                     self.tree_nodes.get_mut(&node_id).unwrap().0.set_is_focussed(cx, false, Animate::Yes);
                 }

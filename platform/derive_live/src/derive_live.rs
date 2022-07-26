@@ -68,15 +68,6 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         let draw_super = fields.iter().find( | field | field.name == "draw_super");
         let draw_vars = fields.iter().find( | field | field.name == "draw_vars");
         let geometry = fields.iter().find( | field | field.name == "geometry");
-
-        if draw_vars.is_some(){
-            tb.add("impl ").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-            tb.add("    pub fn area(&self)->Area {");
-            tb.add("        self.draw_vars.area");
-            tb.add("    }");
-            tb.add("}");
-        }
-
         
         //let animator = fields.iter().find( | field | field.name == "animator");
         let state = fields.iter().find( | field | field.name == "state");
@@ -104,7 +95,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add("         self.state.cut_to_live(cx, state);");
             tb.add("         self.apply_animating_state(cx);");
             tb.add("    }");
-
+            
             tb.add("    fn after_apply_state_changed(&mut self, cx:&mut Cx, apply_from:ApplyFrom, index:usize, nodes:&[LiveNode]){");
             tb.add("        let mut index = index + 1;");
             tb.add("        match apply_from{"); // if apply from is file, run defaults
@@ -163,12 +154,6 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add("}");
         }
         
-        if draw_vars.is_some() { // we have draw vars, make sure we are repr(C)6
-            if main_attribs.iter().find( | attr | attr.name == "repr" && attr.args.as_ref().unwrap().to_string().to_lowercase() == "c").is_none() {
-                return error_result("Any struct with draw_vars needs to be repr(c)")
-            }
-        }
-        
         if let Some(draw_super) = draw_super {
             tb.add("impl").stream(generic.clone());
             tb.add("std::ops::Deref for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
@@ -190,7 +175,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("            match nodes[index].id {");
         
         for field in &fields {
-            if field.attrs[0].name == "live"{
+            if field.attrs[0].name == "live" {
                 tb.add("        LiveId(").suf_u64(LiveId::from_str(&field.name).unwrap().0).add(")=>self.").ident(&field.name).add(".apply(cx, apply_from, index, nodes),");
             }
         }
@@ -217,7 +202,31 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         
         // forward a potential deref_target
         if draw_vars.is_some() || draw_super.is_some() {
+
+            if main_attribs.iter().find( | attr | attr.name == "repr" && attr.args.as_ref().unwrap().to_string().to_lowercase() == "c").is_none() {
+                return error_result("Any struct with draw_vars or draw_super needs to be repr(c)")
+            }
+            
             tb.add("impl").stream(generic.clone()).ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+            
+            tb.add("    pub fn area(&self)->Area {");
+            if draw_vars.is_some() {
+                tb.add("    self.draw_vars.area");
+            }
+            else if draw_super.is_some() {
+                tb.add("    self.draw_super.area()");
+            }
+            tb.add("    }");
+            
+            tb.add("    pub fn redraw(&self, cx:&mut Cx){");
+            if draw_vars.is_some() {
+                tb.add("    self.draw_vars.area.redraw(cx)");
+            }
+            else if draw_super.is_some() {
+                tb.add("    self.draw_super.area().redraw(cx)");
+            }
+            tb.add("    }");
+            
             tb.add("    pub fn draw_super_before_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]){");
             tb.add("        self.before_apply(cx, apply_from, index, nodes);");
             if draw_vars.is_some() {
@@ -227,6 +236,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
                 tb.add("    self.draw_super.draw_super_before_apply(cx, apply_from, index, nodes);");
             }
             tb.add("    }");
+            
             tb.add("    pub fn draw_super_after_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]){");
             if draw_vars.is_some() {
                 tb.add("    self.draw_vars.after_apply(cx, apply_from, index, nodes, &self.geometry);");
@@ -236,6 +246,8 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             }
             tb.add("        self.after_apply(cx, apply_from, index, nodes);");
             tb.add("    }");
+            
+            
             tb.add("}");
         }
         
@@ -283,19 +295,6 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         else if let Some(_) = draw_super {
             tb.add("    self.draw_super.draw_super_after_apply(cx, apply_from, start_index, nodes);");
         }
-        /*
-        if let Some(_) = animator { // apply the default states
-            tb.add("    if let Some(file_id) = apply_from.file_id() {");
-            for def in &animator_kv.unwrap() {
-                tb.add("    if let Some(index) = nodes.child_by_path(start_index, &[");
-                tb.add("        self.animator.get_state_id_of(cx, self.").ident(def).add(",LiveId(").suf_u64(LiveId::from_str(def).unwrap().0).add(")).as_field(),");
-                tb.add("        id!(apply).as_field()");
-                tb.add("        ]) {");
-                tb.add("            self.apply(cx, ApplyFrom::Animate, index, nodes);");
-                tb.add("    }");
-            }
-            tb.add("    }");
-        }*/
         
         if state.is_some() { // apply the default states
             tb.add("    if let Some(state_index) = state_index{self.after_apply_state_changed(cx, apply_from, state_index, nodes);}");
@@ -332,10 +331,10 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
                     }
                     Err(not_option) => {
                         tb.add("live_type_info:").add("<").stream(Some(not_option)).add("as LiveNew>::live_type_info(cx),");
-                        if attr.name == "live"{
+                        if attr.name == "live" {
                             tb.add("live_field_kind: LiveFieldKind::Live");
                         }
-                        else{
+                        else {
                             tb.add("live_field_kind: LiveFieldKind::Calc");
                         }
                     }
@@ -347,7 +346,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("            module_id: LiveModuleId::from_str(&module_path!()).unwrap(),");
         tb.add("            live_type: LiveType::of::<Self>(),");
         let live_ignore = main_attribs.iter().any( | attr | attr.name == "live_ignore");
-        tb.add("            live_ignore: ").ident(if live_ignore{"true"} else{"false"}).add(",");
+        tb.add("            live_ignore: ").ident(if live_ignore {"true"} else {"false"}).add(",");
         tb.add("            fields,");
         
         tb.add("            type_name: LiveId::from_str(").string(&struct_name).add(").unwrap()");
@@ -495,7 +494,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("            live_type: LiveType::of::<Self>(),");
         tb.add("            fields: Vec::new(),");
         let live_ignore = main_attribs.iter().any( | attr | attr.name == "live_ignore");
-        tb.add("            live_ignore: ").ident(if live_ignore{"true"} else{"false"}).add(",");
+        tb.add("            live_ignore: ").ident(if live_ignore {"true"} else {"false"}).add(",");
         tb.add("            type_name: LiveId::from_str(").string(&enum_name).add(").unwrap(),");
         /*tb.add("            kind: LiveTypeKind::Enum,");*/
         tb.add("        }");

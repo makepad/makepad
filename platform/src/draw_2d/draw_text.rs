@@ -446,7 +446,7 @@ impl DrawText {
         }
     }
     
-    pub fn compute_geom(&self, cx: &Cx2d, walk: Walk, text: &str) -> Option<TextGeom> {
+    pub fn compute_geom(&self, cx: &Cx2d, walk: Walk, text: &str) -> Option<TextGeom>{
         // we include the align factor and the width/height
         let font_id = self.text_style.font.font_id.unwrap();
         
@@ -489,6 +489,7 @@ impl DrawText {
             let mut measured_width = 0.0;
             let mut ellip_pt = None;
             for (i, c) in text.chars().enumerate() {
+                
                 if measured_width + ellip_width * 3.0 < eval_width {
                     ellip_pt = Some((i, measured_width, 3));
                 }
@@ -525,6 +526,7 @@ impl DrawText {
             })
         }
     }
+    
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk, align: Align, text: &str) {
         
@@ -632,6 +634,28 @@ impl DrawText {
             i += 1;
         }
         return Some(char_offset.buffer[(base.repeat - 1) * base.stride] as usize);
+    }
+    
+    pub fn character_rect(&self, cx: &Cx, index:usize) -> Option<Rect> {
+        let area = &self.draw_vars.area;
+        
+        if !area.is_valid(cx) {
+            return None
+        }
+        
+        let base = area.get_read_ref(cx, id!(base), ShaderTy::Vec2).unwrap();
+        let rect_size = area.get_read_ref(cx, id!(rect_size), ShaderTy::Vec2).unwrap();
+        
+        if index >= base.repeat{
+            return None
+        }
+        let index = index * base.stride;
+        let x = base.buffer[index + 0];
+        let y = base.buffer[index + 1];
+        let w = rect_size.buffer[index + 0];
+        let h = rect_size.buffer[index + 1];
+        
+        return Some(Rect{pos:vec2(x,y), size:vec2(w,h)})
     }
     
     pub fn get_monospace_base(&self, cx: &Cx) -> Vec2 {

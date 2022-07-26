@@ -21,7 +21,7 @@ pub struct CollabClient {
     path: String,
     #[rust] web_socket: Option<WebSocket>,
     #[rust] requests: Rc<RefCell<Vec<CollabRequest >> >,
-    #[rust(LiveId::unique().into())] signal: Signal
+    #[rust(LiveId::unique())] signal: Signal
 }
 
 impl LiveHook for CollabClient {

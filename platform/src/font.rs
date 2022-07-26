@@ -12,6 +12,7 @@ pub use {
     makepad_path::PathIterator,
     makepad_math::*,
     crate::{
+        console_log,
         makepad_derive_live::*,
         makepad_live_compiler::*,
         makepad_live_id::*,
@@ -205,6 +206,10 @@ impl Cx {
         self.fonts_atlas.alloc_hmax = 0.;
         self.fonts_atlas.clear_buffer = true;
         self.redraw_all();
+    }
+    
+    pub fn get_internal_font_atlas_texture_id(&self)->usize{
+        self.fonts_atlas.texture_id
     }
 }
 
@@ -403,6 +408,7 @@ impl CxDrawFontAtlas {
             cx.begin_pass(&self.atlas_pass);
             let texture_size = cx.fonts_atlas.texture_size;
             self.atlas_pass.set_size(cx, texture_size);
+            
             let clear = if cx.fonts_atlas.clear_buffer {
                 cx.fonts_atlas.clear_buffer = false;
                 PassClearColor::ClearWith(Vec4::default())
@@ -410,6 +416,7 @@ impl CxDrawFontAtlas {
             else {
                 PassClearColor::InitWith(Vec4::default())
             };
+            
             self.atlas_pass.clear_color_textures(cx);
             self.atlas_pass.add_color_texture(cx, &self.atlas_texture, clear);
             self.atlas_view.always_redraw = true;

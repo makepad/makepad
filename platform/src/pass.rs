@@ -19,8 +19,8 @@ pub use {
 };
 
 pub struct Pass {
-    pub pass_id: usize,
-    pub passes_free: Rc<RefCell<Vec<usize>>>,
+    pub(crate) pass_id: usize,
+    pub(crate) passes_free: Rc<RefCell<Vec<usize>>>,
 }
 
 impl Drop for Pass{
@@ -87,6 +87,11 @@ impl LiveApply for Pass {
 }
 
 impl Pass {
+
+    pub fn set_pass_parent(&self, cx:&mut Cx, pass:&Pass){
+        let cxpass = &mut cx.passes[self.pass_id];
+        cxpass.parent = CxPassParent::Pass(pass.pass_id);
+    }
     
     pub fn set_size(&mut self, cx: &mut Cx, pass_size: Vec2) {
         let mut pass_size = pass_size;

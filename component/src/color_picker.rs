@@ -199,22 +199,16 @@ impl ColorPicker {
         self.state_handle_event(cx, event);
         
         match event.hits(cx, self.wheel.area()) {
-            HitEvent::FingerHover(fe) => {
-                cx.set_hover_mouse_cursor(MouseCursor::Arrow);
-                
-                match fe.hover_state {
-                    HoverState::In => {
-                        self.animate_state(cx, ids!(hover.on));
-                    },
-                    HoverState::Out => {
-                        self.animate_state(cx, ids!(hover.off));
-                    },
-                    _ => ()
-                }
+            Hit::FingerHoverIn(_) => {
+                cx.set_hover_cursor(MouseCursor::Arrow);
+                self.animate_state(cx, ids!(hover.on));
+            }
+            Hit::FingerHoverOut(_)=>{
+                self.animate_state(cx, ids!(hover.off));
             },
-            HitEvent::FingerDown(fe) => {
+            Hit::FingerDown(fe) => {
                 self.animate_state(cx, ids!(hover.pressed));
-                cx.set_down_mouse_cursor(MouseCursor::Arrow);
+                cx.set_down_cursor(MouseCursor::Arrow);
                 let rsize = (self.size * 0.28) / 2.0f32.sqrt();
                 let vx = fe.rel.x - 0.5 * self.size;
                 let vy = fe.rel.y - 0.5 * self.size;
@@ -230,7 +224,7 @@ impl ColorPicker {
                 return self.handle_finger(cx, fe.rel);
                 // lets check where we clicked!
             },
-            HitEvent::FingerUp(fe) => {
+            Hit::FingerUp(fe) => {
                 if fe.is_over && fe.input_type.has_hovers() {
                     self.animate_state(cx, ids!(hover.on));
                 }
@@ -240,7 +234,7 @@ impl ColorPicker {
                 self.drag_mode = ColorPickerDragMode::None;
                 return ColorPickerAction::DoneChanging;
             }
-            HitEvent::FingerMove(fe) => {
+            Hit::FingerMove(fe) => {
                 return self.handle_finger(cx, fe.rel)
                 
             },
