@@ -1,6 +1,6 @@
 use std::{
     fmt,
-    ops::{AddAssign, Deref, Index, Range, RangeBounds, SubAssign},
+    ops::{Add, AddAssign, Deref, Index, Range, RangeBounds, Sub, SubAssign},
     slice::SliceIndex,
     sync::Arc,
 };
@@ -27,12 +27,18 @@ impl<T: Chunk> BTree<T> {
         self.root.summed_len()
     }
 
-    pub(crate) fn info(&self) -> T::Info {
-        self.root.summed_info()
+    pub(crate) fn measure<M: Measure<T>>(&self) -> usize {
+        M::measure_info(self.info())
     }
 
-    pub(crate) fn chunk_at<M: Measure<T::Info>>(&self, position: usize) -> (&T, usize, usize) {
-        self.root.chunk_at::<M>(position)
+    pub(crate) fn measure_at<M: Measure<T>>(&self, position: usize) -> usize {
+        if position == 0 {
+            return M::measure_info(Info::new());
+        }
+        if position == self.len() {
+            return M::measure_info(self.info());
+        }
+        self.root.measure_at::<M>(position)
     }
 
     pub(crate) fn slice<R: RangeBounds<usize>>(&self, range: R) -> Slice<'_, T> {
@@ -54,6 +60,8 @@ impl<T: Chunk> BTree<T> {
             root: &self.root,
             start,
             end,
+            start_info: self.info_at(start),
+            end_info: self.info_at(end),
         }
     }
 
@@ -164,6 +172,20 @@ impl<T: Chunk> BTree<T> {
         self.root.truncate_back(start);
         self.height -= self.root.pull_up_singular_nodes();
     }
+
+    fn info(&self) -> T::Info {
+        self.root.summed_info()
+    }
+
+    fn info_at(&self, position: usize) -> T::Info {
+        if position == 0 {
+            return Info::new();
+        }
+        if position == self.len() {
+            return self.info();
+        }
+        self.root.info_at(position)
+    }
 }
 
 impl<T: Chunk + fmt::Debug> fmt::Debug for BTree<T>
@@ -225,19 +247,35 @@ impl<T: Chunk> Builder<T> {
 pub(crate) struct Slice<'a, T: Chunk> {
     root: &'a Node<T>,
     start: usize,
+    start_info: T::Info,
     end: usize,
+    end_info: T::Info,
 }
 
 impl<'a, T: Chunk> Slice<'a, T> {
-    pub fn is_empty(self) -> bool {
+    pub(crate) fn is_empty(self) -> bool {
         self.start == self.end
     }
 
-    pub fn len(self) -> usize {
+    pub(crate) fn len(self) -> usize {
         self.end - self.start
     }
 
-    pub fn cursor_front(self) -> Cursor<'a, T> {
+    pub(crate) fn measure<M: Measure<T>>(&self) -> usize {
+        M::measure_info(self.info())
+    }
+
+    pub(crate) fn measure_at<M: Measure<T>>(&self, position: usize) -> usize {
+        if position == 0 {
+            return M::measure_info(Info::new());
+        }
+        if position == self.len() {
+            return M::measure_info(self.info());
+        }
+        self.root.measure_at::<M>(self.start + position) -  M::measure_info(self.start_info)
+    }
+
+    pub(crate) fn cursor_front(self) -> Cursor<'a, T> {
         let mut cursor = Cursor::new(self.root, self.start, self.end);
         if self.start == 0 {
             cursor.descend_left();
@@ -249,7 +287,7 @@ impl<'a, T: Chunk> Slice<'a, T> {
         cursor
     }
 
-    pub fn cursor_back(self) -> Cursor<'a, T> {
+    pub(crate) fn cursor_back(self) -> Cursor<'a, T> {
         let mut cursor = Cursor::new(self.root, self.start, self.end);
         if self.end == 0 {
             cursor.descend_left();
@@ -259,6 +297,10 @@ impl<'a, T: Chunk> Slice<'a, T> {
             cursor.descend_to(self.end);
         }
         cursor
+    }
+
+    fn info(&self) -> T::Info {
+        self.end_info - self.start_info
     }
 }
 
@@ -370,7 +412,7 @@ impl<'a, T: Chunk> Cursor<'a, T> {
             match node {
                 Node::Leaf(_) => break,
                 Node::Branch(branch) => {
-                    let (index, summed_len) = branch.search_by_position(position - self.position);
+                    let (index, summed_len) = branch.search(position - self.position);
                     self.position += summed_len;
                     self.path.push((branch, index));
                     node = &branch[index];
@@ -390,7 +432,7 @@ pub(crate) trait Chunk: Clone {
 
     fn new() -> Self;
     fn len(&self) -> usize;
-    fn info(&self) -> Self::Info;
+    fn info_at(&self, index: usize) -> Self::Info;
     fn is_boundary(&self, index: usize) -> bool;
     fn move_left(&mut self, other: &mut Self, end: usize);
     fn move_right(&mut self, other: &mut Self, start: usize);
@@ -398,12 +440,13 @@ pub(crate) trait Chunk: Clone {
     fn truncate_front(&mut self, end: usize);
 }
 
-pub(crate) trait Info: Copy + AddAssign + SubAssign {
+pub(crate) trait Info: Copy + Add<Output = Self> + AddAssign + Sub<Output = Self> + SubAssign {
     fn new() -> Self;
 }
 
-pub(crate) trait Measure<I: Info> {
-    fn measure(info: I) -> usize;
+pub(crate) trait Measure<T: Chunk> {
+    fn measure_chunk_at(chunk: &T, index: usize) -> usize;
+    fn measure_info(info: T::Info) -> usize;
 }
 
 #[derive(Clone)]
@@ -443,20 +486,38 @@ impl<T: Chunk> Node<T> {
 
     fn summed_info(&self) -> T::Info {
         match self {
-            Self::Leaf(leaf) => leaf.info(),
+            Self::Leaf(leaf) => leaf.info_at(leaf.len()),
             Self::Branch(branch) => branch.summed_info(),
         }
     }
 
-    fn chunk_at<M: Measure<T::Info>>(&self, position: usize) -> (&T, usize, usize) {
+    fn info_at(&self, position: usize) -> T::Info {
+        let mut node = self;
+        let mut summed_len = 0;
+        let mut summed_info = T::Info::new();
+        loop {
+            match node {
+                Node::Leaf(leaf) => break summed_info + leaf.info_at(position - summed_len),
+                Node::Branch(branch) => {
+                    let (index, len, info) = branch.search_with_info(position - summed_len);
+                    node = &branch[index];
+                    summed_len += len;
+                    summed_info += info;
+                }
+            }
+        }
+    }
+
+    fn measure_at<M: Measure<T>>(&self, position: usize) -> usize {
         let mut node = self;
         let mut summed_len = 0;
         let mut summed_measure = 0;
         loop {
             match node {
-                Node::Leaf(leaf) => break (leaf.as_chunk(), summed_len, summed_measure),
+                Node::Leaf(leaf) => break summed_measure + M::measure_chunk_at(leaf, position - summed_len),
                 Node::Branch(branch) => {
-                    let (index, len, measure) = branch.search_by_position_with_measure::<M>(position - summed_len);
+                    let (index, len, measure) =
+                        branch.search_with_measure::<M>(position - summed_len);
                     node = &branch[index];
                     summed_len += len;
                     summed_measure += measure;
@@ -476,7 +537,7 @@ impl<T: Chunk> Node<T> {
         match self {
             Self::Leaf(leaf) => Node::Leaf(leaf.split_off(at)),
             Self::Branch(branch) => {
-                let (index, summed_len) = branch.search_by_position(at);
+                let (index, summed_len) = branch.search(at);
                 if at == summed_len {
                     return Node::Branch(branch.split_off(index));
                 }
@@ -506,7 +567,7 @@ impl<T: Chunk> Node<T> {
         match self {
             Self::Leaf(leaf) => leaf.truncate_front(end),
             Self::Branch(branch) => {
-                let (index, summed_len) = branch.search_by_position(end);
+                let (index, summed_len) = branch.search(end);
                 if end == summed_len {
                     branch.truncate_front(index);
                 } else {
@@ -528,7 +589,7 @@ impl<T: Chunk> Node<T> {
         match self {
             Self::Leaf(leaf) => leaf.truncate_back(start),
             Self::Branch(branch) => {
-                let (index, summed_len) = branch.search_by_position(start);
+                let (index, summed_len) = branch.search(start);
                 if start == summed_len {
                     branch.truncate_back(index);
                 } else {
@@ -907,11 +968,9 @@ impl<T: Chunk, I: SliceIndex<[Node<T>]>> Index<I> for Branch<T> {
 trait NodeSliceExt<T: Chunk> {
     fn sum_lens(&self) -> usize;
     fn sum_infos(&self) -> T::Info;
-    fn search_by_position(&self, position: usize) -> (usize, usize);
-    fn search_by_position_with_measure<M: Measure<T::Info>>(
-        &self,
-        position: usize,
-    ) -> (usize, usize, usize);
+    fn search(&self, position: usize) -> (usize, usize);
+    fn search_with_info(&self, position: usize) -> (usize, usize, T::Info);
+    fn search_with_measure<M: Measure<T>>(&self, position: usize) -> (usize, usize, usize);
 }
 
 impl<T: Chunk> NodeSliceExt<T> for [Node<T>] {
@@ -931,7 +990,7 @@ impl<T: Chunk> NodeSliceExt<T> for [Node<T>] {
         summed_info
     }
 
-    fn search_by_position(&self, position: usize) -> (usize, usize) {
+    fn search(&self, position: usize) -> (usize, usize) {
         let mut index = 0;
         let mut summed_len = 0;
         for node in self {
@@ -945,10 +1004,23 @@ impl<T: Chunk> NodeSliceExt<T> for [Node<T>] {
         (index, summed_len)
     }
 
-    fn search_by_position_with_measure<M: Measure<T::Info>>(
-        &self,
-        position: usize,
-    ) -> (usize, usize, usize) {
+    fn search_with_info(&self, position: usize) -> (usize, usize, T::Info) {
+        let mut index = 0;
+        let mut summed_len = 0;
+        let mut summed_info = Info::new();
+        for node in self {
+            let new_summed_len = summed_len + node.summed_len();
+            if position < new_summed_len {
+                break;
+            }
+            index += 1;
+            summed_len = new_summed_len;
+            summed_info += node.summed_info();
+        }
+        (index, summed_len, summed_info)
+    }
+
+    fn search_with_measure<M: Measure<T>>(&self, position: usize) -> (usize, usize, usize) {
         let mut index = 0;
         let mut summed_len = 0;
         let mut summed_measure = 0;
@@ -959,7 +1031,7 @@ impl<T: Chunk> NodeSliceExt<T> for [Node<T>] {
             }
             index += 1;
             summed_len = new_summed_len;
-            summed_measure += M::measure(node.summed_info());
+            summed_measure += M::measure_info(node.summed_info());
         }
         (index, summed_len, summed_measure)
     }
