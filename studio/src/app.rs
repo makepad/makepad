@@ -25,6 +25,8 @@ live_register!{
     }
 }
 
+main_app!(App); 
+
 #[derive(Live, LiveHook)]
 pub struct App {
     inner: AppInner,
@@ -32,13 +34,7 @@ pub struct App {
 }
 
 impl App {
-    
     pub fn live_register(cx: &mut Cx) {
-        //let regex = Regex::new("\\d(\\d{2})\\d");
-        //let mut slots = vec![None; 4];
-        //println!("{:?}", regex.run("xxx1234yyy", &mut slots));
-        //println!("{:?}", slots);
-        
         makepad_studio_component::live_register(cx);
         crate::builder::builder_client::live_register(cx);
         crate::collab_client::live_register(cx);
@@ -47,11 +43,6 @@ impl App {
         crate::code_editor::code_editor_impl::live_register(cx);
         crate::editors::live_register(cx);
         crate::app_inner::live_register(cx);
-    }
-    
-    pub fn new_app(cx: &mut Cx) -> Self {
-        let ret = Self::new_as_main_module(cx, &module_path!(), id!(App)).unwrap();
-        ret
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {

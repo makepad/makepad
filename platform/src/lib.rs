@@ -89,8 +89,6 @@ pub use {
     crate::{
         cx_api::{
             CxPlatformApi,
-            profile_start,
-            profile_end
         },
         cx_draw_shaders::{
         },
