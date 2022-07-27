@@ -8,7 +8,7 @@ use {
 };
 
 live_register!{
-    use makepad_component::theme::*;
+    import makepad_component::theme::*;
     App: {{App}} {
         const FS_ROOT: ""
         inner: {

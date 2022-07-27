@@ -14,11 +14,11 @@ use crate::audio::*;
 use crate::audio::iron_fish::*;
 
 live_register!{
-    use AudioComponent::*;
-    use FrameComponent::*;
-    use makepad_component::theme::*;
-    use makepad_component::frame::*;
-    use makepad_platform::shader::std::*;
+    registry AudioComponent::*;
+    registry FrameComponent::*;
+    import makepad_component::theme::*;
+    import makepad_component::frame::*;
+    import makepad_platform::shader::std::*;
     
     MainHeader: FoldHeader {
         walk: {

@@ -8,7 +8,7 @@ use {
 };
 
 live_register!{
-    use makepad_platform::shader::std::*;
+   import makepad_platform::shader::std::*;
    DrawSlider: {{DrawSlider}} {
         instance hover: float
         instance focus: float
@@ -71,7 +71,7 @@ live_register!{
                     from: {all: Play::Forward {duration: 0.1}}
                     apply: {
                         slider: {hover: 0.0}
-                        text_input: {state: {hover = off}}
+                        //text_input: {state: {hover = off}}
                     }
                 }
                 on = {
@@ -79,7 +79,7 @@ live_register!{
                     from: {all: Play::Snap}
                     apply: {
                         slider: {hover: 1.0}
-                        text_input: {state: {hover = on}}
+                        //text_input: {state: {hover = on}}
                     }
                 }
             }
@@ -211,6 +211,7 @@ impl Slider {
                 self.animate_state(cx, ids!(focus.on));
             }
             Hit::FingerHoverIn(_) => {
+                log!("SLIDER HOVER IN");
                 self.animate_state(cx, ids!(hover.on));
             }
             Hit::FingerHoverOut(_) => {

@@ -1,8 +1,8 @@
 use crate::makepad_platform::*;
 
 live_register!{
-    use makepad_platform::shader::std::*;
-    use crate::theme::*;
+    import makepad_platform::shader::std::*;
+    import crate::theme::*;
     
     DrawScrollBar: {{DrawScrollBar}} {
         draw_depth: 5.0

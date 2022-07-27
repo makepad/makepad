@@ -8,10 +8,10 @@ use {
 };
 
 live_register!{
-    use makepad_platform::shader::std::*;
-    use crate::tab_bar::TabBar
-    use makepad_component::splitter::Splitter
-    use makepad_component::theme::*;
+    import makepad_platform::shader::std::*;
+    import crate::tab_bar::TabBar
+    import makepad_component::splitter::Splitter
+    import makepad_component::theme::*;
     
     DrawRoundCorner: {{DrawRoundCorner}} {
         draw_depth: 6.0

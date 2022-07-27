@@ -7,9 +7,9 @@ use crate::{
 };
 
 live_register!{
-    use crate::theme::*;
-    use FrameComponent::*;
-    use makepad_component::frame::*;
+    import crate::theme::*;
+    registry FrameComponent::*;
+    import makepad_component::frame::*;
     
     DesktopWindow: {{DesktopWindow}} {
         pass: {clear_color: (COLOR_CLEAR)}
