@@ -35,6 +35,10 @@ impl BTreeString {
         self.btree.measure_at::<CharMeasure>(position)
     }
 
+    pub fn line_count_at(&self, position: usize) -> usize {
+        self.btree.measure_at::<LineBreakMeasure>(position) + 1
+    }
+
     pub fn slice<R: RangeBounds<usize>>(&self, range: R) -> Slice<'_> {
         Slice {
             slice: self.btree.slice(range),
@@ -195,6 +199,10 @@ impl<'a> Slice<'a> {
 
     pub fn char_count_at(&self, position: usize) -> usize {
         self.slice.measure_at::<CharMeasure>(position)
+    }
+
+    pub fn line_count_at(&self, position: usize) -> usize {
+        self.slice.measure_at::<LineBreakMeasure>(position) + 1
     }
 
     pub fn cursor_front(self) -> Cursor<'a> {
@@ -691,7 +699,6 @@ mod tests {
         #[test]
         fn test_line_count(string in "(.|[\r\n])*") {
             let btree_string = BTreeString::from(&string);
-            println!("{:#?}", btree_string);
             assert_eq!(btree_string.line_count(), string.count_line_breaks() + 1);
         }
 
@@ -699,6 +706,12 @@ mod tests {
         fn test_char_count_at((string, index) in string_and_index()) {
             let btree_string = BTreeString::from(&string);
             assert_eq!(btree_string.char_count_at(index), string[..index].chars().count());
+        }
+
+        #[test]
+        fn test_line_count_at((string, index) in string_and_index()) {
+            let btree_string = BTreeString::from(&string);
+            assert_eq!(btree_string.line_count_at(index), string[..index].count_line_breaks() + 1);
         }
 
         #[test]
@@ -835,6 +848,14 @@ mod tests {
             let slice = &string[range.clone()];
             let btree_slice = btree_string.slice(range);
             assert_eq!(btree_slice.char_count_at(index), slice[..index].count_chars());
+        }
+
+        #[test]
+        fn test_slice_line_count_at((string, range, index) in string_and_range_and_index()) {
+            let btree_string = BTreeString::from(&string);
+            let slice = &string[range.clone()];
+            let btree_slice = btree_string.slice(range);
+            assert_eq!(btree_slice.line_count_at(index), slice[..index].count_line_breaks() + 1);
         }
 
         #[test]
