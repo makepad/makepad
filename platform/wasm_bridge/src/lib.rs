@@ -1,6 +1,7 @@
 pub use makepad_live_id;
 pub use makepad_live_id::*;
 pub use makepad_derive_wasm_bridge::*;
+pub use makepad_error_log;
 
 #[macro_use]
 #[cfg(target_arch = "wasm32")]

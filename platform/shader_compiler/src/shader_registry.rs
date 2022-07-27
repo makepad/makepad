@@ -4,6 +4,7 @@ use {
         cell::{Cell, RefCell},
     },
     crate::{
+        makepad_error_log::*,
         makepad_live_compiler::*,
         makepad_live_id::*,
         shader_ast::*,
@@ -208,7 +209,7 @@ impl ShaderRegistry {
                             );
                         }
                         Err(err)=>{
-                            println!("HERE ERROR");
+                            error!("Cannot find node in expression");
                             return LiveNodeFindResult::Error(err)
                         }
                     }

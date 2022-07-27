@@ -123,7 +123,7 @@ impl FrameComponent for Frame {
         
         match event.hits(cx, self.bg.area()) {
             Hit::FingerHoverIn(_) => if let Some(cursor) = &self.cursor {
-                cx.set_hover_cursor(*cursor);
+                cx.set_cursor(*cursor);
             }
             _ => ()
         }

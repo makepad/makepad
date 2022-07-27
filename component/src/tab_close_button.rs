@@ -39,6 +39,7 @@ live_register!{
                 }
                 
                 on =  {
+                    cursor: Hand,
                     from: {all: Play::Snap}
                     apply: {
                         button: {hover:1.0}
@@ -80,7 +81,6 @@ impl TabCloseButton {
         self.state_handle_event(cx, event);
         match event.hits(cx, self.button.area()) {
             Hit::FingerHoverIn(_) => {
-                cx.set_hover_cursor(MouseCursor::Hand);
                 self.animate_state(cx, ids!(hover.on));
                 return TabCloseButtonAction::HoverIn;
             }

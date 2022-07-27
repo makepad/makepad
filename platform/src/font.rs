@@ -12,7 +12,7 @@ pub use {
     makepad_path::PathIterator,
     makepad_math::*,
     crate::{
-        console_log,
+        makepad_error_log::*,
         makepad_derive_live::*,
         makepad_live_compiler::*,
         makepad_live_id::*,
@@ -151,7 +151,7 @@ impl Cx {
                 if let Ok(data) = data {
                     match CxFont::load_from_ttf_bytes(&data) {
                         Err(_) => {
-                            println!("Error loading font {} ", path);
+                            error!("Error loading font {} ", path);
                         }
                         Ok(mut cxfont) => {
                             if path == "resources/IBMPlexSans-Text.ttf" {
@@ -165,15 +165,15 @@ impl Cx {
                     }
                 }
                 else{ // it failed to load
-                    println!("Error loading font {} ", path);
+                    error!("Error loading font {} ", path);
                 }
             }
             else{
-                println!("get_font_by_path - dep load not attempted {}", path)
+                error!("get_font_by_path - dep load not attempted {}", path)
             }
         }
         else{
-            println!("get_font_by_path - dep not registered {}", path)
+            error!("get_font_by_path - dep not registered {}", path)
         }
         font_id
     }

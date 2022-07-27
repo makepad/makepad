@@ -74,14 +74,14 @@ impl AudioUnitEffect {
                     Ok(audio_unit) => {
                         sender.send(ToUI::NewAudioUnit(audio_unit)).unwrap()
                     }
-                    Err(err) => println!("Error {:?}", err)
+                    Err(err) => error!("Error {:?}", err)
                 }
             })
         }
         else {
-            println!("Cannot find effect {}", self.plugin);
+            error!("Cannot find effect {}", self.plugin);
             for item in &list {
-                println!("Effects: {}", item.name);
+                error!("Effects: {}", item.name);
             }
         }
     }
