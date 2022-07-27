@@ -107,6 +107,7 @@ live_register!{
                 }
                 
                 on = {
+                    cursor: Hand
                     from: {all: Play::Snap}
                     apply: {hover: 1.0},
                 }
@@ -370,7 +371,6 @@ impl FileTreeNode {
         }
         match event.hits(cx, self.bg.area()) {
             Hit::FingerHoverIn(_)=> {
-                cx.set_hover_cursor(MouseCursor::Hand);
                 self.animate_state(cx, ids!(hover.on));
             }
             Hit::FingerHoverOut(_) => {

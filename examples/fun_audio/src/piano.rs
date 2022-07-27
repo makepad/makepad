@@ -200,7 +200,7 @@ impl PianoKey {
         }
         match event.hits(cx, self.draw_key.area()) {
             Hit::FingerHoverIn(_) => {
-                cx.set_hover_cursor(MouseCursor::Hand);
+                cx.set_cursor(MouseCursor::Hand);
                 self.animate_state(cx, ids!(hover.on));
             }
             Hit::FingerHoverOut(_) => {

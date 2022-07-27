@@ -125,10 +125,10 @@ impl CollabClientInner {
 
 fn spawn_connection_listener(listener: TcpListener, mut server: CollabServer) {
     thread::spawn(move || {
-        println!("Server listening on {}", listener.local_addr().unwrap());
+        log!("Server listening on {}", listener.local_addr().unwrap());
         for stream in listener.incoming() {
             let stream = stream.unwrap();
-            println!("Incoming connection from {}", stream.peer_addr().unwrap());
+            log!("Incoming connection from {}", stream.peer_addr().unwrap());
             let (action_sender, action_receiver) = mpsc::channel();
             let connection = server.connect(Box::new({
                 let action_sender = action_sender.clone();

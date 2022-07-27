@@ -5,7 +5,7 @@ use {
         makepad_math::*,
         cx::Cx,
         texture::Texture,
-        console_log,
+        makepad_error_log::*,
         area::Area,
         geometry::{GeometryFields},
         live_traits::*,
@@ -208,7 +208,7 @@ impl DrawVars {
                     cx.draw_shaders.error_fingerprints.push(fingerprint);
                     // ok so. lets get the source for this file id
                     let err = live_registry.live_error_to_live_file_error(e);
-                    console_log!("Error {}", err);
+                    log!("Error {}", err);
                 }
                 Ok(()) => {
                     // OK! SO the shader parsed

@@ -3,6 +3,7 @@ pub use {
         any::TypeId,
     },
     crate::{
+        makepad_error_log::*,
         makepad_math::*,
         cx::Cx,
         cx::CxDependency,
@@ -112,7 +113,7 @@ impl Cx {
     
     pub fn apply_error_eval(&mut self, err:LiveError) {
         let live_registry = self.live_registry.borrow();
-        println!("{}", live_registry.live_error_to_live_file_error(err));
+        error!("{}", live_registry.live_error_to_live_file_error(err));
     }
     
     pub fn apply_error(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], message: String) {
@@ -123,10 +124,10 @@ impl Cx {
                 message,
                 span: (*token_id).into()
             };
-            println!("Apply error: {} {:?}", live_registry.live_error_to_live_file_error(err), nodes[index].value);
+            error!("Apply error: {} {:?}", live_registry.live_error_to_live_file_error(err), nodes[index].value);
         }
         else {
-            println!("Apply without file, at index {} {} origin: {}", index, message, origin);
+            error!("Apply without file, at index {} {} origin: {}", index, message, origin);
         }
     }
     
@@ -137,7 +138,7 @@ impl Cx {
         let mut live_registry = self.live_registry.borrow_mut();
         live_registry.expand_all_documents(&mut errs);
         for err in errs {
-            println!("Error expanding live file {}", live_registry.live_error_to_live_file_error(err));
+            error!("Error expanding live file {}", live_registry.live_error_to_live_file_error(err));
         }
         // ok now we scan for all dependencies and store them on Cx.
     }
@@ -175,7 +176,7 @@ impl Cx {
         );
         //println!("END");
         if let Err(err) = result {
-            println!("Error parsing live file {}", err);
+            error!("Error parsing live file {}", err);
         }
     }
     
@@ -261,7 +262,7 @@ impl Cx {
         let live_registry_rc = self.live_registry.clone();
         let live_registry = live_registry_rc.borrow();
         if !live_registry.generation_valid(live_ptr){
-            println!("Generation invalid in get_nodes_from_live_ptr");
+            error!("Generation invalid in get_nodes_from_live_ptr");
             return
         }
         let doc = live_registry.ptr_to_doc(live_ptr);

@@ -2,6 +2,7 @@ use {
     std::cell::RefCell,
     std::sync::{Arc, Mutex},
     crate::{
+        makepad_error_log::*,
         makepad_live_id::*,
         platform::{
             core_midi::CoreMidiAccess,
@@ -226,10 +227,7 @@ impl Cx {
                 CxPlatformOp::HideTextIME => {
                     todo!()
                 },
-                CxPlatformOp::SetHoverCursor(cursor) => {
-                    cocoa_app.set_mouse_cursor(cursor);
-                },
-                CxPlatformOp::SetDownCursor(cursor) => {
+                CxPlatformOp::SetCursor(cursor) => {
                     cocoa_app.set_mouse_cursor(cursor);
                 },
                 CxPlatformOp::StartTimer {timer_id, interval, repeats} => {
@@ -334,7 +332,7 @@ impl CxPlatformApi for Cx {
                             std::thread::sleep(std::time::Duration::from_millis(100));
                         }
                     }
-                    Err(err) => println!("Error {:?}", err)
+                    Err(err) => error!("spawn_audio_output Error {:?}", err)
                 }
             });
         });

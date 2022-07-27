@@ -78,6 +78,7 @@ live_register!{
                 }
                 
                 on = {
+                    cursor: Hand,
                     from: {all: Play::Forward {duration: 0.1}}
                     apply: {
                         hover: [{time: 0.0, value: 1.0}],
@@ -197,7 +198,6 @@ impl Tab {
         
         match event.hits(cx, self.bg.area()) {
             Hit::FingerHoverIn(_) => {
-                cx.set_hover_cursor(MouseCursor::Hand);
                 self.animate_state(cx, ids!(hover.on));
             }
             Hit::FingerHoverOut(_) => if !block_hover_out {
