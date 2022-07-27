@@ -407,14 +407,9 @@ impl CocoaWindow {
             }
         };
         events.push(Event::FingerHover(FingerHoverEvent {
-            digit: 0,
             window_id: self.window_id,
             abs: pos,
-            //rel: pos,
-            //any_down: false,
-            //rect: Rect::default(),
             handled: false,
-            //hover_state: HoverState::Over,
             modifiers: modifiers,
             time: self.time_now()
         }));

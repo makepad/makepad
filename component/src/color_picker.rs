@@ -83,6 +83,7 @@ live_register!{
                 }
                 
                 on = {
+                    cursor: Arrow,
                     from: {
                         all: Play::Forward {duration: 0.1}
                         pressed: Play::Forward {duration: 0.01}
@@ -96,6 +97,7 @@ live_register!{
                 }
                 
                 pressed = {
+                    cursor: Arrow,
                     from: {all: Play::Forward {duration: 0.2}}
                     apply: {
                         wheel: {
@@ -200,7 +202,6 @@ impl ColorPicker {
         
         match event.hits(cx, self.wheel.area()) {
             Hit::FingerHoverIn(_) => {
-                cx.set_hover_cursor(MouseCursor::Arrow);
                 self.animate_state(cx, ids!(hover.on));
             }
             Hit::FingerHoverOut(_)=>{
@@ -208,7 +209,6 @@ impl ColorPicker {
             },
             Hit::FingerDown(fe) => {
                 self.animate_state(cx, ids!(hover.pressed));
-                cx.set_down_cursor(MouseCursor::Arrow);
                 let rsize = (self.size * 0.28) / 2.0f32.sqrt();
                 let vx = fe.rel.x - 0.5 * self.size;
                 let vy = fe.rel.y - 0.5 * self.size;

@@ -158,7 +158,7 @@ file3: 5 12 - Cannot find item on scope: ERR - origin: render/live_parser/src/li
         for (name_id, _, check) in &sources {
             if module_path.1 == Id::from_str(name_id).unwrap() {
                 if let Some(err) = compare_no_ws(&out, check) {
-                    println!("Output Unequal {}\n{}", name_id, err);
+                    error!("Output Unequal {}\n{}", name_id, err);
                     assert_eq!(true, false);
                 }
             }
@@ -174,7 +174,7 @@ file3: 5 12 - Cannot find item on scope: ERR - origin: render/live_parser/src/li
     }
     
     if let Some(err) = compare_no_ws(&err_cmp, error_check) {
-        println!("Errors Unequal\n{}", err);
+        error!("Errors Unequal\n{}", err);
         assert_eq!(true, false);
     }
     //        assert_eq!(true, false);

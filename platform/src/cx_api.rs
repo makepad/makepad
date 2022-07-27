@@ -5,7 +5,7 @@ use {
         collections::HashSet,
     },
     crate::{
-        console_log,
+        makepad_error_log::*,
         makepad_math::Vec2,
         gpu_info::GpuInfo,
         cx::{Cx,PlatformType},
@@ -43,7 +43,7 @@ pub fn profile_start() -> Instant {
 }
 
 pub fn profile_end(instant: Instant) {
-    console_log!("Profile time {} ms", (instant.elapsed().as_nanos() as f64) / 1000000f64);
+    log!("Profile time {} ms", (instant.elapsed().as_nanos() as f64) / 1000000f64);
 }
 
 pub trait CxPlatformApi {
@@ -72,8 +72,7 @@ pub enum CxPlatformOp {
     
     ShowTextIME(Vec2),
     HideTextIME,
-    SetHoverCursor(MouseCursor),
-    SetDownCursor(MouseCursor),
+    SetCursor(MouseCursor),
     StartTimer {timer_id: u64, interval: f64, repeats: bool},
     StopTimer(u64),
     StartDragging(DraggedItem),
@@ -114,34 +113,16 @@ impl Cx {
         self.platform_ops.push(CxPlatformOp::StartDragging(dragged_item));
     }
     
-    pub fn set_down_cursor(&mut self, cursor: MouseCursor) {
+    pub fn set_cursor(&mut self, cursor: MouseCursor) {
         // down cursor overrides the hover cursor
         if let Some(p) = self.platform_ops.iter_mut().find( | p | match p {
-            CxPlatformOp::SetHoverCursor(_) |
-            CxPlatformOp::SetDownCursor(_) => true,
+            CxPlatformOp::SetCursor(_) => true,
             _ => false
         }) {
-            *p = CxPlatformOp::SetDownCursor(cursor)
+            *p = CxPlatformOp::SetCursor(cursor)
         }
         else {
-            self.platform_ops.push(CxPlatformOp::SetDownCursor(cursor))
-        }
-    }
-    
-    pub fn set_hover_cursor(&mut self, cursor: MouseCursor) {
-        let mut was_hover = false;
-        // if we already have a downcursor, skip
-        if let Some(p) = self.platform_ops.iter_mut().find( | p | match p {
-            CxPlatformOp::SetHoverCursor(_) => {was_hover = true; true}
-            CxPlatformOp::SetDownCursor(_) => true,
-            _ => false
-        }) {
-            if was_hover{
-                *p = CxPlatformOp::SetHoverCursor(cursor)
-            }
-        }
-        else{
-            self.platform_ops.push(CxPlatformOp::SetHoverCursor(cursor))
+            self.platform_ops.push(CxPlatformOp::SetCursor(cursor))
         }
     }
     
@@ -295,46 +276,24 @@ impl Cx {
         if old_area == Area::Empty {
             return new_area
         }
-        
-        for finger in &mut self.fingers {
-            if finger.captured == old_area {
-                finger.captured = new_area.clone();
-            }
-            if finger._over_last == old_area {
-                finger._over_last = new_area.clone();
-            }
-        }
-        
-        if self.drag_area == old_area {
-            self.drag_area = new_area.clone();
-        }
-        
-        // update capture keyboard
-        if self.key_focus == old_area {
-            self.key_focus = new_area.clone()
-        }
-        
-        // update capture keyboard
-        if self.prev_key_focus == old_area {
-            self.prev_key_focus = new_area.clone()
-        }
-        if self.next_key_focus == old_area {
-            self.next_key_focus = new_area.clone()
-        }
-        
+
+        self.fingers.update_area(old_area, new_area);
+        self.finger_drag.update_area(old_area, new_area);
+        self.keyboard.update_area(old_area, new_area);
+
         new_area
     }
     
     pub fn set_key_focus(&mut self, focus_area: Area) {
-        self.next_key_focus = focus_area;
+        self.keyboard.set_key_focus(focus_area);
     }
     
     pub fn revert_key_focus(&mut self) {
-        self.next_key_focus = self.prev_key_focus;
+        self.keyboard.revert_key_focus();
     }
     
     pub fn has_key_focus(&self, focus_area: Area) -> bool {
-        self.key_focus == focus_area
+        self.keyboard.has_key_focus(focus_area)
     }
     
     pub fn new_next_frame(&mut self) -> NextFrame {
@@ -442,7 +401,7 @@ impl Cx {
         
         let mut s = String::new();
         debug_draw_tree_recur(self, dump_instances, &mut s, draw_list_id, 0);
-        println!("{}", s);
+        log!("{}", s);
     }
 }
 
@@ -524,18 +483,3 @@ macro_rules!register_component_factory {
         );
     }
 }
-
-/*
-#[macro_export]
-macro_rules!define_component_ref{
-    ($componetref: ident, $component: ident) => {
-        $cx.live_registry.borrow().components.get_or_create::<$registry>().map.insert(
-            LiveType::of::< $ ty>(),
-            (LiveComponentInfo {
-                name: LiveId::from_str(stringify!( $ ty)).unwrap(),
-                module_id: LiveModuleId::from_str(&module_path!()).unwrap()
-            }, Box::new($factory()))
-        );
-    }
-}
-*/

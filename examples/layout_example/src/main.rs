@@ -42,8 +42,6 @@ pub enum FromUI {
 pub struct App {
     frame: Frame,
     window: DesktopWindow,
-    #[rust] to_ui: ToUIReceiver<ToUI>,
-    #[rust] from_ui: FromUISender<FromUI>,
 }
 
 impl App {
@@ -58,25 +56,10 @@ impl App {
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
         self.window.handle_event(cx, event);
         
-        if let Ok(data) = self.to_ui.try_recv(event){
-            console_log!("GOT DATA {:?}", data);
-            self.from_ui.send(FromUI::TestMessage(vec![4,5,6])).unwrap();
-        }
-        
         match event {
             Event::Construct => {
-                // lets spawn up a thread
-                let to_ui = self.to_ui.sender();
-                let from_ui = self.from_ui.receiver();
-                cx.spawn_thread(move ||{
-                    to_ui.send(ToUI::TestMessage(vec![1,2,3])).unwrap();
-                    while let Ok(data) = from_ui.recv(){
-                        console_log!("GOT FROM UI {:?}", data);
-                    }
-                        //console_log!("Hi from wasm worker");
-                    // lets post to our main thread
-                    //Cx::post_signal(Signal{signal_id:1}, 0);
-                });
+                // lets draw the animation curve we use everywhere
+                
             }
             Event::Draw(draw_event) => {
                 self.draw(&mut Cx2d::new(cx, draw_event));
@@ -86,10 +69,10 @@ impl App {
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
-        if self.window.begin(cx, None).is_err() {
+        if self.window.begin(cx, None).not_redrawing() {
             return;
         }
-        while let Err(_child) = self.frame.draw(cx){
+        while self.frame.draw(cx).not_done(){
             
         };
         self.window.end(cx);

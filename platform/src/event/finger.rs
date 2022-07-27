@@ -13,15 +13,95 @@ use {
 
 pub const NUM_FINGERS: usize = 10;
 
+#[derive(Default, Clone)]
+pub struct CxDigit {
+    captured: Area,
+    tap_count: (Vec2, f64, u32),
+    down_abs_start: Vec2,
+    down_rel_start: Vec2,
+}
 
 #[derive(Default, Clone)]
-pub struct CxPerFinger {
-    pub captured: Area,
-    pub tap_count: (Vec2, f64, u32),
-    pub down_abs_start: Vec2,
-    pub down_rel_start: Vec2,
-    pub over_last: Area,
-    pub _over_last: Area
+pub struct CxFingers {
+    next_over_last: Area,
+    over_last: Area,
+    captured_mask: u32,
+    digits: [CxDigit;NUM_FINGERS]
+}
+
+impl CxFingers{
+    
+    pub(crate) fn any_digits_captured_area(&self, area:Area)->bool{
+        for digit in &self.digits {
+            if digit.captured == area {
+                return true
+            }
+        }
+        false
+    }
+    
+    pub(crate) fn update_area(&mut self, old_area:Area, new_area:Area){
+        if self.over_last == old_area{
+            self.over_last = new_area;
+        }
+        if self.captured_mask != 0{
+            for digit in &mut self.digits {
+                if digit.captured == old_area {
+                    digit.captured = new_area
+                }
+            }
+        }
+    }
+    
+    pub(crate) fn cycle_over_last(&mut self){
+        self.over_last = self.next_over_last;
+        self.next_over_last = Area::Empty;
+    }
+    
+    pub(crate) fn capture_digit(&mut self, digit:usize, area:Area){
+        self.captured_mask |= 1<<digit;
+        self.digits[digit].captured = area;
+    }
+    
+    pub(crate) fn release_digit(&mut self, digit:usize, ){
+        self.captured_mask &= !(1<<digit);
+        self.digits[digit].captured = Area::Empty;
+    }
+
+    pub (crate) fn process_tap_count(&mut self, digit: usize, pos: Vec2, time: f64) -> u32 {
+        if digit >= self.digits.len() {
+            return 0
+        };
+        let (last_pos, last_time, count) = self.digits[digit].tap_count;
+        
+        if (time - last_time) < 0.5 && pos.distance(&last_pos) < 10. {
+            self.digits[digit].tap_count = (pos, time, count + 1);
+            count + 1
+        }
+        else {
+            self.digits[digit].tap_count = (pos, time, 1);
+            1
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct CxFingerDrag{
+    drag_area: Area,
+    next_drag_area: Area,
+}
+
+impl CxFingerDrag{
+    pub(crate) fn cycle_drag(&mut self){
+        self.drag_area = self.next_drag_area;
+        self.next_drag_area = Area::Empty;
+    }
+
+    pub(crate) fn update_area(&mut self, old_area:Area, new_area:Area){
+        if self.drag_area == old_area {
+            self.drag_area = new_area;
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Default)]
@@ -159,7 +239,6 @@ impl Default for HoverState {
 #[derive(Clone, Default, Debug, PartialEq)]
 pub struct FingerHoverEvent {
     pub window_id: usize,
-    pub digit: usize,
     pub abs: Vec2,
     pub handled: bool,
     pub modifiers: KeyModifiers,
@@ -328,22 +407,22 @@ impl Event {
                 }
             },
             Event::KeyDown(kd) => {
-                if area == cx.key_focus {
+                if cx.keyboard.has_key_focus(area){
                     return Hit::KeyDown(kd.clone())
                 }
             },
             Event::KeyUp(ku) => {
-                if area == cx.key_focus {
+                if cx.keyboard.has_key_focus(area){
                     return Hit::KeyUp(ku.clone())
                 }
             },
             Event::TextInput(ti) => {
-                if area == cx.key_focus {
+                if cx.keyboard.has_key_focus(area){
                     return Hit::TextInput(ti.clone())
                 }
             },
             Event::TextCopy(tc) => {
-                if area == cx.key_focus {
+                if cx.keyboard.has_key_focus(area){
                     return Hit::TextCopy(tc);
                 }
             },
@@ -360,23 +439,11 @@ impl Event {
             },
             Event::FingerHover(fe) => {
                 let rect = area.get_rect(&cx);
-                
-                if  cx.fingers[fe.digit]._over_last == area {
-                    let mut any_down = false;
-                    for finger in &cx.fingers {
-                        if finger.captured == area {
-                            any_down = true;
-                            break;
-                        }
-                    }
+                if  cx.fingers.over_last == area {
+                    let any_down = cx.fingers.any_digits_captured_area(area);
                     if !fe.handled && rect_contains_with_margin(&rect, fe.abs, &options.margin) {
                         fe.handled = true;
-                        //if let HoverState::Out = fe.hover_state {
-                        //    cx.finger_over_last_area = Area::Empty;
-                        //}
-                        //else {
-                        cx.fingers[fe.digit].over_last = area;
-                        // }
+                        cx.fingers.next_over_last = area;
                         return Hit::FingerHoverOver(FingerHoverHitEvent {
                             rel: area.abs_to_rel(cx, fe.abs),
                             rect: rect,
@@ -396,14 +463,8 @@ impl Event {
                 }
                 else {
                     if !fe.handled && rect_contains_with_margin(&rect, fe.abs, &options.margin) {
-                        let mut any_down = false;
-                        for finger in &cx.fingers {
-                            if finger.captured == area {
-                                any_down = true;
-                                break;
-                            }
-                        }
-                        cx.fingers[fe.digit].over_last = area;
+                        let any_down = cx.fingers.any_digits_captured_area(area);
+                        cx.fingers.next_over_last = area;
                         fe.handled = true;
                         //self.was_over_last_call = true;
                         return Hit::FingerHoverIn(FingerHoverHitEvent {
@@ -417,9 +478,9 @@ impl Event {
             },
             Event::FingerMove(fe) => {
                 // check wether our digit is captured, otherwise don't send
-                if cx.fingers[fe.digit].captured == area {
-                    let abs_start = cx.fingers[fe.digit].down_abs_start;
-                    let rel_start = cx.fingers[fe.digit].down_rel_start;
+                if cx.fingers.digits[fe.digit].captured == area  {
+                    let abs_start = cx.fingers.digits[fe.digit].down_abs_start;
+                    let rel_start = cx.fingers.digits[fe.digit].down_rel_start;
                     let rect = area.get_rect(&cx);
                     return Hit::FingerMove(FingerMoveHitEvent {
                         abs_start: abs_start,
@@ -436,17 +497,13 @@ impl Event {
                     let rect = area.get_rect(&cx);
                     if rect_contains_with_margin(&rect, fe.abs, &options.margin) {
                         // scan if any of the fingers already captured this area
-                        if !options.use_multi_touch {
-                            for finger in &cx.fingers {
-                                if finger.captured == area {
-                                    return Hit::Nothing;
-                                }
-                            }
+                        if !options.use_multi_touch && cx.fingers.any_digits_captured_area(area){
+                            return Hit::Nothing;
                         }
-                        cx.fingers[fe.digit].captured = area;
+                        cx.fingers.capture_digit(fe.digit, area);
                         let rel = area.abs_to_rel(cx, fe.abs);
-                        cx.fingers[fe.digit].down_abs_start = fe.abs;
-                        cx.fingers[fe.digit].down_rel_start = rel;
+                        cx.fingers.digits[fe.digit].down_abs_start = fe.abs;
+                        cx.fingers.digits[fe.digit].down_rel_start = rel;
                         fe.handled = true;
                         return Hit::FingerDown(FingerDownHitEvent {
                             rel: rel,
@@ -457,10 +514,10 @@ impl Event {
                 }
             },
             Event::FingerUp(fe) => {
-                if cx.fingers[fe.digit].captured == area {
-                    cx.fingers[fe.digit].captured = Area::Empty;
-                    let abs_start = cx.fingers[fe.digit].down_abs_start;
-                    let rel_start = cx.fingers[fe.digit].down_rel_start;
+                if cx.fingers.digits[fe.digit].captured == area {
+                    cx.fingers.release_digit(fe.digit);
+                    let abs_start = cx.fingers.digits[fe.digit].down_abs_start;
+                    let rel_start = cx.fingers.digits[fe.digit].down_rel_start;
                     let rect = area.get_rect(&cx);
                     return Hit::FingerUp(FingerUpHitEvent {
                         is_over: rect.contains(fe.abs),
@@ -485,9 +542,9 @@ impl Event {
         match self {
             Event::FingerDrag(event) => {
                 let rect = area.get_rect(cx);
-                if area == cx.drag_area {
+                if area == cx.finger_drag.drag_area {
                     if !event.handled && rect_contains_with_margin(&rect, event.abs, &options.margin) {
-                        cx.new_drag_area = area;
+                        cx.finger_drag.next_drag_area = area;
                         event.handled = true;
                         DragHit::FingerDrag(FingerDragHitEvent {
                             rel: area.abs_to_rel(cx, event.abs),
@@ -507,7 +564,7 @@ impl Event {
                     }
                 } else {
                     if !event.handled && rect_contains_with_margin(&rect, event.abs, &options.margin) {
-                        cx.new_drag_area = area;
+                        cx.finger_drag.next_drag_area = area;
                         event.handled = true;
                         DragHit::FingerDrag(FingerDragHitEvent {
                             rel: area.abs_to_rel(cx, event.abs),
@@ -524,7 +581,7 @@ impl Event {
             Event::FingerDrop(event) => {
                 let rect = area.get_rect(cx);
                 if !event.handled && rect_contains_with_margin(&rect, event.abs, &options.margin) {
-                    cx.new_drag_area = Area::default();
+                    cx.finger_drag.next_drag_area = Area::default();
                     event.handled = true;
                     DragHit::FingerDrop(FingerDropHitEvent {
                         rel: area.abs_to_rel(cx, event.abs),

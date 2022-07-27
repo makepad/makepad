@@ -867,7 +867,7 @@ impl CodeEditorImpl {
                 self.reset_caret_blink(cx);
                 // TODO: How to handle key focus?
                 cx.set_key_focus(self.scroll_view.area());
-                cx.set_down_cursor(MouseCursor::Text);
+                cx.set_cursor(MouseCursor::Text);
                 if let Some(session_id) = self.session_id {
                     let session = &state.sessions[session_id];
                     let document = &state.documents[session.document_id];
@@ -888,7 +888,7 @@ impl CodeEditorImpl {
                 self.select_scroll = None;
             }
             Hit::FingerHoverIn(_) => {
-                cx.set_hover_cursor(MouseCursor::Text);
+                cx.set_cursor(MouseCursor::Text);
             }
             Hit::FingerMove(fe) => {
                 self.reset_caret_blink(cx);

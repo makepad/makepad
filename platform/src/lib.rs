@@ -35,7 +35,7 @@ pub mod audio;
 pub mod midi;
 
 #[cfg(target_arch = "wasm32")]
-pub use makepad_wasm_bridge::{self, console_log};
+pub use makepad_wasm_bridge;
 
 pub use {
     makepad_shader_compiler,
@@ -45,7 +45,9 @@ pub use {
     makepad_shader_compiler::makepad_micro_serde,
     makepad_shader_compiler::makepad_live_compiler,
     makepad_shader_compiler::makepad_live_id,
+    makepad_shader_compiler::makepad_error_log,
     makepad_derive_live::*,
+    makepad_error_log::*,
     makepad_math::*,
     makepad_live_id::*,
     makepad_live_compiler::{

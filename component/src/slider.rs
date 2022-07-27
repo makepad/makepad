@@ -75,6 +75,7 @@ live_register!{
                     }
                 }
                 on = {
+                    cursor: Arrow,
                     from: {all: Play::Snap}
                     apply: {
                         slider: {hover: 1.0}
@@ -106,6 +107,7 @@ live_register!{
                     apply: {slider: {drag: 0.0}}
                 }
                 on = {
+                    cursor: Arrow,
                     from: {all: Play::Snap}
                     apply: {slider: {drag: 1.0}}
                 }
@@ -209,7 +211,6 @@ impl Slider {
                 self.animate_state(cx, ids!(focus.on));
             }
             Hit::FingerHoverIn(_) => {
-                cx.set_hover_cursor(MouseCursor::Arrow);
                 self.animate_state(cx, ids!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
@@ -217,7 +218,6 @@ impl Slider {
             },
             Hit::FingerDown(_fe) => {
                 cx.set_key_focus(self.slider.area());
-                cx.set_down_cursor(MouseCursor::Arrow);
                 self.animate_state(cx, ids!(drag.on));
                 self.dragging = Some(self.value);
                 dispatch_action(cx, self, SliderAction::StartSlide);

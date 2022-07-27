@@ -3,7 +3,8 @@ use {
     crate::{
         makepad_live_id::*,
         makepad_math::Vec2,
-        makepad_wasm_bridge::{console_log, WasmDataU8, FromWasmMsg, ToWasmMsg, FromWasm, ToWasm},
+        makepad_error_log::*,
+        makepad_wasm_bridge::{WasmDataU8, FromWasmMsg, ToWasmMsg, FromWasm, ToWasm},
         platform::{
             web_browser::{
                 from_wasm::*,
@@ -298,15 +299,13 @@ impl Cx {
                 }
                 
                 _ => {
-                    console_log!("Message not handled in wasm {}", block_id);
+                    log!("Message not handled in wasm {}", block_id);
                     
                     //panic!("Message unknown")
                 }
             };
             to_wasm.block_skip(skip);
         };
-        
-        self.call_signals_and_triggers();
         
         if is_animation_frame {
             if self.need_redrawing(){

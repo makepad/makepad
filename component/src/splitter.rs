@@ -252,8 +252,8 @@ impl Splitter {
         match event.hits_with_options(cx, self.bar.area(), HitOptions::margin(self.margin())) {
         Hit::FingerHoverIn(_) => {
             match self.axis {
-                Axis::Horizontal => cx.set_hover_cursor(MouseCursor::ColResize),
-                Axis::Vertical => cx.set_hover_cursor(MouseCursor::RowResize),
+                Axis::Horizontal => cx.set_cursor(MouseCursor::ColResize),
+                Axis::Vertical => cx.set_cursor(MouseCursor::RowResize),
             }
             self.animate_state(cx, ids!(hover.on));
         }
@@ -262,8 +262,8 @@ impl Splitter {
         },
         Hit::FingerDown(_) => {
             match self.axis {
-                Axis::Horizontal => cx.set_down_cursor(MouseCursor::ColResize),
-                Axis::Vertical => cx.set_down_cursor(MouseCursor::RowResize),
+                Axis::Horizontal => cx.set_cursor(MouseCursor::ColResize),
+                Axis::Vertical => cx.set_cursor(MouseCursor::RowResize),
             }
             self.animate_state(cx, ids!(hover.pressed));
             self.drag_start_align = Some(self.align);
