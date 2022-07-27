@@ -365,7 +365,7 @@ impl CxDrawFontAtlas {
         let atlas_texture = Texture::new(cx);
         cx.fonts_atlas.texture_id = Some(atlas_texture.texture_id());
         
-        let draw_trapezoid_text = DrawTrapezoidText::new_from_module(cx, &module_path!(), id!(DrawTrapezoidText)).unwrap();
+        let draw_trapezoid_text = DrawTrapezoidText::new_local(cx);
         
         // ok we need to initialize drawtrapezoidtext from a live pointer.
         Self {

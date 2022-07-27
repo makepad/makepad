@@ -1,7 +1,6 @@
 use {
     std::{
         fmt::Write,
-        time::Instant,
         collections::HashSet,
     },
     crate::{
@@ -45,13 +44,6 @@ use {
     }
 };
 
-pub fn profile_start() -> Instant {
-    Instant::now()
-}
-
-pub fn profile_end(instant: Instant) {
-    log!("Profile time {} ms", (instant.elapsed().as_nanos() as f64) / 1000000f64);
-}
 
 pub trait CxPlatformApi {
     fn post_signal(signal: Signal);
@@ -430,7 +422,7 @@ macro_rules!main_app {
             let mut app = None;
             cx.event_loop( | cx, mut event | {
                 if let Event::Construct = event {
-                    app = Some( $ app::new_app(cx));
+                    app = Some( $app::new_main(cx));
                 }
                 app.as_mut().unwrap().handle_event(cx, &mut event);
                 cx.after_handle_event(&mut event);
@@ -468,7 +460,7 @@ macro_rules!main_app {
             let body = appcx as *mut WasmAppCx;
             (*body).cx.process_to_wasm(msg_ptr, | cx, mut event | {
                 if let Event::Construct = event {
-                    (*body).app = Some( $ app::new_app(cx));
+                    (*body).app = Some( $ app::new_main(cx));
                 }
                 (*body).app.as_mut().unwrap().handle_event(cx, &mut event);
                 cx.after_handle_event(&mut event);
