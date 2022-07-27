@@ -1177,7 +1177,7 @@ pub struct CxPlatformShader {
 #[derive(Clone)]
 pub struct OpenglWindow {
     pub first_draw: bool,
-    pub window_id: usize,
+    pub window_id: WindowId,
     pub window_geom: WindowGeom,
     pub opening_repaint_count: u32,
     pub cal_size: Vec2,

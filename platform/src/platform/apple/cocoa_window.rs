@@ -8,6 +8,7 @@ use {
         makepad_math::{
             Vec2,
         },
+        window::WindowId,
         platform::{
             apple::frameworks::*,
             apple::apple_util::{
@@ -41,7 +42,7 @@ use {
 
 #[derive(Clone)]
 pub struct CocoaWindow {
-    pub window_id: usize,
+    pub window_id: WindowId,
     pub window_delegate: ObjcId,
     //pub layer_delegate: id,
     pub view: ObjcId,
@@ -58,7 +59,7 @@ pub struct CocoaWindow {
 
 impl CocoaWindow {
     
-    pub fn new(cocoa_app: &mut CocoaApp, window_id: usize) -> CocoaWindow {
+    pub fn new(cocoa_app: &mut CocoaApp, window_id: WindowId) -> CocoaWindow {
         unsafe {
             let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
             
@@ -161,6 +162,7 @@ impl CocoaWindow {
             if position.is_none() {
                 let () = msg_send![self.window, center];
             }
+            
             let input_context: ObjcId = msg_send![self.view, inputContext];
             let () = msg_send![input_context, invalidateCharacterCoordinates];
             

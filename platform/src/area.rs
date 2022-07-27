@@ -13,6 +13,7 @@ pub use {
         makepad_live_compiler::{
             LiveId,
         },
+        draw_list::DrawListId,
         makepad_math::{
             Vec2,
             Rect
@@ -21,18 +22,18 @@ pub use {
     }
 };
 
-#[derive(Clone, Default, Hash, Ord, PartialOrd, Eq, Debug, PartialEq, Copy)]
+#[derive(Clone, Hash, Ord, PartialOrd, Eq, Debug, PartialEq, Copy)]
 pub struct InstanceArea {
-    pub draw_list_id: usize,
+    pub draw_list_id: DrawListId,
     pub draw_item_id: usize,
     pub instance_offset: usize,
     pub instance_count: usize,
     pub redraw_id: u64
 }
 
-#[derive(Clone, Default, Hash, Ord, PartialOrd, Eq, Debug, PartialEq, Copy)]
+#[derive(Clone, Hash, Ord, PartialOrd, Eq, Debug, PartialEq, Copy)]
 pub struct DrawListArea {
-    pub draw_list_id: usize,
+    pub draw_list_id: DrawListId,
     pub redraw_id: u64
 }
 
@@ -90,7 +91,7 @@ impl Area {
         false
     }
     
-    pub fn draw_list_id(&self) -> Option<usize> {
+    pub fn draw_list_id(&self) -> Option<DrawListId> {
         return match self {
             Area::Instance(inst) => {
                 Some(inst.draw_list_id)
@@ -388,7 +389,7 @@ impl Area {
                         panic!("get_write_ref {} wrong uniform type, expected {:?} got: {:?}!", name, input.ty, ty);
                     }
                     
-                    cx.passes[draw_list.pass_id].paint_dirty = true;
+                    cx.passes[draw_list.pass_id.unwrap()].paint_dirty = true;
                     draw_call.uniforms_dirty = true;
                     
                     return Some(
@@ -404,7 +405,7 @@ impl Area {
                         panic!("get_write_ref {} wrong instance type, expected {:?} got: {:?}!", name, input.ty, ty);
                     }
                     
-                    cx.passes[draw_list.pass_id].paint_dirty = true;
+                    cx.passes[draw_list.pass_id.unwrap()].paint_dirty = true;
                     draw_call.instance_dirty = true;
                     if inst.instance_count == 0 {
                         return None

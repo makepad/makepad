@@ -97,22 +97,24 @@ live_register!{
             height: 22
         }
     }
-      InstrumentSlider2: Rect {
+    
+    InstrumentSlider2: Rect {
         bg: {color: #4}
         width: Fill
         height: 40
         layout: {flow: Right, padding: 8}
-        TextInput{
-            text:"Hello WOrld"
+        TextInput {
+            text: "Hello WOrld"
         }
     }
+    
     IronFishUI: InstrumentHeader {
         header: {
             layout: {align: {y: 0.5}}
             fold_button = FoldButton {}
             swatch = Circle {
-                width: 10 
-                height: 10 
+                width: 10
+                height: 10
                 bg: {color: #f00}
             }
             label = Label {text: "IronFish"}
@@ -169,7 +171,7 @@ live_register!{
                             label: "Osc2 detune"
                         }
                     }
-                    InstrumentSlider2{}
+                    InstrumentSlider2 {}
                     
                 }
             }
