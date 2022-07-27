@@ -25,12 +25,12 @@ use {
         },
         event::{
             DrawEvent,
-            CxPerFinger,
-            NUM_FINGERS,
+            CxFingers,
+            CxFingerDrag,
             Event,
             Signal,
             Trigger,
-            KeyEvent,
+            CxKeyboard,
             NextFrame,
         },
         menu::{
@@ -108,17 +108,11 @@ pub struct Cx {
     #[allow(dead_code)]
     pub (crate) web_socket_id: u64,
     
-    pub (crate) prev_key_focus: Area,
-    pub (crate) next_key_focus: Area,
-    pub (crate) key_focus: Area,
-    pub (crate) keys_down: Vec<KeyEvent>,
+    pub (crate) keyboard: CxKeyboard,
+    pub (crate) fingers: CxFingers,
+    pub (crate) finger_drag: CxFingerDrag,
     
     pub (crate) platform_ops: Vec<CxPlatformOp>,
-    
-    pub (crate) fingers: Vec<CxPerFinger>,
-    
-    pub (crate) drag_area: Area,
-    pub (crate) new_drag_area: Area,
     
     pub (crate) new_next_frames: HashSet<NextFrame>,
     
@@ -130,6 +124,7 @@ pub struct Cx {
     pub live_registry: Rc<RefCell<LiveRegistry >>,
     pub shader_registry: ShaderRegistry,
     
+    #[allow(dead_code)]
     pub (crate) command_settings: HashMap<Command, CxCommandSetting>,
     
     pub (crate) thread_pool_senders: Vec<Arc<RefCell<Option<std::sync::mpsc::Sender<() >> >> >,
@@ -167,9 +162,6 @@ impl PlatformType {
 
 impl Default for Cx {
     fn default() -> Self {
-        let mut fingers = Vec::new();
-        fingers.resize(NUM_FINGERS, CxPerFinger::default());
-        
         // the null texture
         let textures = vec![CxTexture {
             desc: TextureDesc {
@@ -220,17 +212,12 @@ impl Default for Cx {
             next_frame_id: 1,
             web_socket_id: 1,
             
-            next_key_focus: Area::Empty,
-            prev_key_focus: Area::Empty,
-            key_focus: Area::Empty,
-            keys_down: Vec::new(),
+            keyboard: CxKeyboard::default(),
+            fingers: CxFingers::default(),
+            finger_drag: CxFingerDrag::default(),
             
             platform_ops: Vec::new(),
             
-            fingers: fingers,
-            
-            drag_area: Area::Empty,
-            new_drag_area: Area::Empty,
             
             new_next_frames: HashSet::new(),
             

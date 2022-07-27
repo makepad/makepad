@@ -2,7 +2,7 @@
 use {
     std::collections::{HashSet, HashMap},
     crate::{
-        makepad_math::Vec2,
+        makepad_error_log::*,
         cx::Cx,
         pass::{
             CxPassParent
@@ -12,7 +12,6 @@ use {
             SignalEvent,
             TriggerEvent,
             Event,
-            KeyEvent,
             KeyFocusEvent,
             NextFrameEvent,
         },
@@ -21,24 +20,8 @@ use {
 
 impl Cx {
     
-    pub (crate) fn process_tap_count(&mut self, digit: usize, pos: Vec2, time: f64) -> u32 {
-        if digit >= self.fingers.len() {
-            return 0
-        };
-        let (last_pos, last_time, count) = self.fingers[digit].tap_count;
-        
-        if (time - last_time) < 0.5 && pos.distance(&last_pos) < 10. {
-            self.fingers[digit].tap_count = (pos, time, count + 1);
-            count + 1
-        }
-        else {
-            self.fingers[digit].tap_count = (pos, time, 1);
-            1
-        }
-    }
     
     pub (crate) fn repaint_windows(&mut self) {
-        
         for cxpass in self.passes.iter_mut() {
             match cxpass.parent {
                 CxPassParent::Window(_) => {
@@ -121,54 +104,39 @@ impl Cx {
     }
     
     
-    pub (crate) fn process_key_down(&mut self, key_event: KeyEvent) {
-        if let Some(_) = self.keys_down.iter().position( | k | k.key_code == key_event.key_code) {
-            return;
-        }
-        self.keys_down.push(key_event);
-    }
-    
-    pub (crate) fn process_key_up(&mut self, key_event: KeyEvent) {
-        if let Some(pos) = self.keys_down.iter().position( | k | k.key_code == key_event.key_code) {
-            self.keys_down.remove(pos);
-        }
-    }
     
     
     // event handler wrappers
     
     
-    pub (crate) fn call_event_handler_inner(&mut self, event: &mut Event) {
+    pub (crate) fn inner_call_event_handler(&mut self, event: &mut Event) {
         self.event_id += 1;
         let event_handler = self.event_handler.unwrap();
         unsafe {(*event_handler)(self, event);}
     }
     
-    pub (crate) fn call_event_handler(&mut self, event: &mut Event) {
-        self.call_event_handler_inner(event);
-        
-        // post op events like signals, triggers and key-focus
-        if self.next_key_focus != self.key_focus {
-            self.prev_key_focus = self.key_focus;
-            self.key_focus = self.next_key_focus;
-            self.call_event_handler_inner(&mut Event::KeyFocus(KeyFocusEvent {
-                prev: self.prev_key_focus,
-                focus: self.key_focus
+    fn inner_key_focus_change(&mut self) {
+        if let Some((prev, focus)) = self.keyboard.cycle_key_focus_changed(){
+            self.inner_call_event_handler(&mut Event::KeyFocus(KeyFocusEvent {
+                prev,
+                focus
             }));
         }
-          
+    }
+    
+    fn inner_triggers_and_signals(&mut self) {
+        // post op events like signals, triggers and key-focus
         let mut counter = 0;
         while self.signals.len() != 0 {
             counter += 1;
             let mut signals = HashSet::new();
             std::mem::swap(&mut self.signals, &mut signals);
-            
-            self.call_event_handler(&mut Event::Signal(SignalEvent {
+            self.inner_call_event_handler(&mut Event::Signal(SignalEvent {
                 signals: signals,
             }));
-            
+            self.inner_key_focus_change();
             if counter > 100 {
-                println!("Signal feedback loop detected");
+                error!("Signal feedback loop detected");
                 break
             }
         }
@@ -178,33 +146,41 @@ impl Cx {
             counter += 1;
             let mut triggers = HashMap::new();
             std::mem::swap(&mut self.triggers, &mut triggers);
-            
-            self.call_event_handler(&mut Event::Trigger(TriggerEvent {
+            self.inner_call_event_handler(&mut Event::Trigger(TriggerEvent {
                 triggers: triggers,
             }));
-            
+            self.inner_key_focus_change();
             if counter > 100 {
-                println!("Trigger feedback loop detected");
+                error!("Trigger feedback loop detected");
                 break
             }
         }
     }
     
-    pub (crate) fn call_all_keys_up(&mut self){
-        let mut keys_down = Vec::new();
-        std::mem::swap(&mut keys_down, &mut self.keys_down);
+    pub (crate) fn call_event_handler(&mut self, event: &mut Event) {
+        self.inner_call_event_handler(event);
+        self.inner_key_focus_change();
+        self.inner_triggers_and_signals();
+    }
+    
+    
+    // helpers
+    
+    
+    pub (crate) fn call_all_keys_up(&mut self) {
+        let keys_down = self.keyboard.all_keys_up();
         for key_event in keys_down {
             self.call_event_handler(&mut Event::KeyUp(key_event))
         }
     }
     
-    pub (crate) fn call_draw_event(&mut self){
+    pub (crate) fn call_draw_event(&mut self) {
         let mut draw_event = DrawEvent::default();
         std::mem::swap(&mut draw_event, &mut self.new_draw_event);
         self.call_event_handler(&mut Event::Draw(draw_event));
     }
     
-    pub (crate) fn call_next_frame_event(&mut self, time: f64){
+    pub (crate) fn call_next_frame_event(&mut self, time: f64) {
         let mut set = HashSet::default();
         std::mem::swap(&mut set, &mut self.new_next_frames);
         self.call_event_handler(&mut Event::NextFrame(NextFrameEvent {set, time: time, frame: self.repaint_id}));
@@ -215,6 +191,4 @@ impl Cx {
             pool.borrow_mut().take();
         }
     }
-    
-    
 }

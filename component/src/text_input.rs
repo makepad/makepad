@@ -167,7 +167,6 @@ impl TextInput {
                  self.cursor_pos -= 1;
             }
             Hit::FingerHoverIn(_) => {
-                cx.set_hover_cursor(MouseCursor::Text);
                 self.animate_state(cx, ids!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
@@ -175,7 +174,6 @@ impl TextInput {
             },
             Hit::FingerDown(fe) => {
                 cx.set_key_focus(self.bg.area());
-                cx.set_down_cursor(MouseCursor::Text);
                 // ok so we need to calculate where we put the cursor down.
                 //elf.
                 if let Some(pos) = self.label.closest_offset(cx, fe.abs){

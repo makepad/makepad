@@ -58,6 +58,7 @@ live_register!{
                 }
                 
                 on = {
+                    cursor: Arrow,
                     from: {all: Play::Snap}
                     apply: {bg_quad: {pressed: 0.0, hover: 1.0}}
                 }
@@ -90,7 +91,6 @@ impl ShaderView {
         
         match event.hits(cx, self.bg_quad.area()) {
             Hit::FingerHoverIn(_) => {
-                cx.set_hover_cursor(MouseCursor::Arrow);
                 self.animate_state(cx, ids!(hover.on));
             }
             Hit::FingerHoverOut(_) => {

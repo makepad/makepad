@@ -132,10 +132,10 @@ impl BuilderClientInner {
 
 fn spawn_connection_listener(listener: TcpListener, mut server: BuilderServer) {
     thread::spawn(move || {
-        println!("Builder Server listening on {}", listener.local_addr().unwrap());
+        log!("Builder Server listening on {}", listener.local_addr().unwrap());
         for stream in listener.incoming() {
             let stream = stream.unwrap();
-            println!("Builder Incoming connection from {}", stream.peer_addr().unwrap());
+            log!("Builder Incoming connection from {}", stream.peer_addr().unwrap());
             let (msg_sender, msg_receiver) = mpsc::channel();
             let connection = server.connect(Box::new({
                 let msg_sender = msg_sender.clone();

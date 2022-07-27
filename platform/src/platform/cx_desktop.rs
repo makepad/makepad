@@ -10,17 +10,9 @@ use {
             Event,
             //KeyCode,
         },
-        area::Area,
         cx::Cx,
     }
 };
-
-#[macro_export]
-macro_rules!console_log {
-    ( $ ( $t: tt) *) => {
-        println!("{}:{} - {}",file!(),line!(),format!($($t)*))
-    }
-}
 
 impl Cx {
     
@@ -48,24 +40,14 @@ impl Cx {
     pub(crate) fn process_desktop_pre_event(&mut self, event: &mut Event)
     {
         match event {
-            Event::FingerHover(fe) => {
-                self.fingers[fe.digit].over_last = Area::Empty;
-                //self.hover_mouse_cursor = None;
-            },
-            Event::FingerUp(_fe) => {
-                //self.down_mouse_cursor = None;
-            },
-            Event::WindowCloseRequested(_cr) => {
-            },
             Event::FingerDown(fe) => {
-                // lets set the finger tap count
-                fe.tap_count = self.process_tap_count(fe.digit, fe.abs, fe.time);
+                fe.tap_count = self.fingers.process_tap_count(fe.digit, fe.abs, fe.time);
             },
             Event::KeyDown(ke) => {
-                self.process_key_down(ke.clone());
+                self.keyboard.process_key_down(ke.clone());
             },
             Event::KeyUp(ke) => {
-                self.process_key_up(ke.clone());
+                self.keyboard.process_key_up(ke.clone());
             },
             Event::AppLostFocus => {
                 self.call_all_keys_up();
@@ -77,23 +59,16 @@ impl Cx {
     pub(crate) fn process_desktop_post_event(&mut self, event: &mut Event) -> bool {
         match event {
             Event::FingerUp(fe) => { // decapture automatically
-                self.fingers[fe.digit].captured = Area::Empty;
+                self.fingers.release_digit(fe.digit);
             },
-            Event::FingerHover(fe) => { // new last area finger over
-                self.fingers[fe.digit]._over_last = self.fingers[fe.digit].over_last;
+            Event::FingerHover(_) => { // new last area finger over
+                self.fingers.cycle_over_last();
             },
-            Event::FingerScroll(_) => {
-            }
             Event::FingerDrag(_) => {
-                self.drag_area = self.new_drag_area;
+                self.finger_drag.cycle_drag();
             },
             _ => {}
         }
         false
-    }
-    
-    pub fn write_log(data: &str) {
-        let _ = io::stdout().write(data.as_bytes());
-        let _ = io::stdout().flush();
     }
 }

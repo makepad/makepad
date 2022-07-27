@@ -13,6 +13,7 @@ use {
         },
         makepad_math::*,
         makepad_live_id::*,
+        makepad_error_log::*,
         platform::{
             apple::frameworks::*,
             apple::apple_util::{
@@ -184,7 +185,7 @@ impl Cx {
                         atIndex: 0
                     ]}
                 }
-                else {println!("Drawing error: vertex_buffer None")}
+                else {error!("Drawing error: vertex_buffer None")}
                 
                 if let Some(inner) = draw_call.platform.instance_buffer.get().cpu_read().inner.as_ref() {
                     unsafe {msg_send![
@@ -194,7 +195,7 @@ impl Cx {
                         atIndex: 1
                     ]}
                 }
-                else {println!("Drawing error: instance_buffer None")}
+                else {error!("Drawing error: instance_buffer None")}
                 
                 let pass_uniforms = self.passes[pass_id].pass_uniforms.as_slice();
                 let draw_list_uniforms = draw_list.draw_list_uniforms.as_slice();
@@ -272,7 +273,7 @@ impl Cx {
                         instanceCount: instances
                     ]};
                 }
-                else {println!("Drawing error: index_buffer None")}
+                else {error!("Drawing error: index_buffer None")}
                 
                 gpu_read_guards.push(draw_call.platform.instance_buffer.get().gpu_read());
                 gpu_read_guards.push(geometry.platform.vertex_buffer.get().gpu_read());
@@ -330,7 +331,7 @@ impl Cx {
                     ]};
                 }
                 else {
-                    println!("draw_pass_to_texture invalid render target");
+                    error!("draw_pass_to_texture invalid render target");
                 }
                 
                 unsafe {msg_send![color_attachment, setStoreAction: MTLStoreAction::Store]}
@@ -377,7 +378,7 @@ impl Cx {
                 unsafe {msg_send![depth_attachment, setTexture: inner.texture.as_id()]}
             }
             else {
-                println!("draw_pass_to_texture invalid render target");
+                error!("draw_pass_to_texture invalid render target");
             }
             let () = unsafe {msg_send![depth_attachment, setStoreAction: MTLStoreAction::Store]};
             
@@ -652,7 +653,7 @@ impl Cx {
                 );
                 
                 if cx_shader.mapping.flags.debug {
-                    println!("{}", gen.mtlsl);
+                    log!("{}", gen.mtlsl);
                 }
                 // lets see if we have the shader already
                 for (index, ds) in self.draw_shaders.platform.iter().enumerate() {
@@ -732,10 +733,11 @@ impl CxPlatformDrawShader {
             None => {
                 let description: ObjcId = unsafe {msg_send![error, localizedDescription]};
                 let string = nsstring_to_string(description);
-                println!("{}", string);
+                let mut out = format!("{}\n", string);
                 for (index, line) in shader.mtlsl.split("\n").enumerate() {
-                    println!("{}: {}", index + 1, line);
+                    out.push_str(&format!("{}: {}\n", index + 1, line));
                 }
+                error!("{}", out);
                 panic!("{}", string);
             }
         });
@@ -901,7 +903,7 @@ impl CxPlatformTexture {
     ) {
         // we need a width/height for this one.
         if desc.width.is_none() || desc.height.is_none(){
-            println!("Normal texture width/height is undefined, cannot allocate it");
+            log!("Normal texture width/height is undefined, cannot allocate it");
             return
         }
         

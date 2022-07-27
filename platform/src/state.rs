@@ -2,9 +2,11 @@
 use {
     std::f64::consts::PI,
     crate::{
+        makepad_error_log::*,
         makepad_live_id::*,
         makepad_derive_live::*,
         makepad_math::*,
+        cursor::MouseCursor,
         event::NextFrame,
         cx::Cx,
         live_traits::*,
@@ -833,35 +835,6 @@ impl State {
         }
         return 1.0
     }
-    /*
-    pub fn get_track_of(&self, cx: &mut Cx, state_id: LiveId) -> Option<LiveId> {
-        if let Some(live_ptr) = self.live_ptr {
-            let live_registry = cx.live_registry.borrow();
-            if !live_registry.generation_valid(live_ptr) {
-                return None
-            }
-            let (nodes, index) = live_registry.ptr_to_nodes_index(live_ptr);
-            if let Some(index) = nodes.child_by_name(index, state_id.as_instance()){
-                return Some(if let Some(LiveValue::Id(id)) = nodes.child_value_by_path(index, &[id!(track).as_field()]) {
-                    *id
-                } else {
-                    LiveId(1)
-                })
-            }
-        }
-        None
-    }*/
-    /*
-    pub fn get_state_id_of(&self, cx: &mut Cx, live_ptr: Option<LivePtr>, default: LiveId) -> LiveId {
-        if let Some((track_id, _)) = self.get_track_of(cx, live_ptr) {
-            if let Some(state) = self.state.as_ref() {
-                if let Some(LiveValue::Id(id)) = &state.child_value_by_path(0, &[LivePath::prop(id!(tracks)), LivePath::prop(track_id), LivePath::prop(id!(state_id))]) {
-                    return *id
-                }
-            }
-        }
-        default
-    }*/
     
     pub fn is_track_animating(&self, cx: &mut Cx, track_id: LiveId) -> bool {
         if let Some(state) = self.state.as_ref() {
@@ -911,17 +884,22 @@ impl State {
                     self.cut_to(cx, state_id, index, nodes);
                 }
                 else{
-                    println!("cut_to_live {}.{} not found", state_id[0],state_id[1]);
+                    error!("cut_to_live {}.{} not found", state_id[0],state_id[1]);
                 }
             }
             else {
-                println!("cut_to_live generaiton invalid")
+                error!("cut_to_live generaiton invalid")
             }
         }
     }
     
     // hard cut / initialisate the state to a certain state
     pub fn cut_to(&mut self, cx: &mut Cx, state_pair: &StatePair, index: usize, nodes: &[LiveNode]) {
+
+        if let Some(index) = nodes.child_by_name(index, id!(cursor).as_field()) {
+            let cursor = MouseCursor::new_apply(cx, ApplyFrom::New, index, nodes);
+            cx.set_cursor(cursor);
+        }
         // if we dont have a state object, lets create a template
         let mut state = self.swap_out_state();
         // ok lets fetch the track
@@ -937,6 +915,7 @@ impl State {
         state.replace_or_insert_last_node_by_path(0, &[id!(tracks).as_field(), track.as_field()], live_object!{
             [track]: {state_id: (state_pair[1]), ended: 1}
         });
+        
         
         let mut reader = if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(apply).as_field()) {
             reader
@@ -1022,16 +1001,21 @@ impl State {
                     self.animate_to(cx, state_pair, index, nodes)
                 }
                 else{
-                    println!("animate_to_live {}.{} not found", state_pair[0],state_pair[1])
+                    error!("animate_to_live {}.{} not found", state_pair[0],state_pair[1])
                 }
             }
             else {
-                println!("animate_to_live generation invalid");
+                error!("animate_to_live generation invalid");
             }
         }
     }
         
     pub fn animate_to(&mut self, cx: &mut Cx, state_pair: &StatePair, index: usize, nodes: &[LiveNode]) {
+       
+        if let Some(index) = nodes.child_by_name(index, id!(cursor).as_field()) {
+            let cursor = MouseCursor::new_apply(cx, ApplyFrom::New, index, nodes);
+            cx.set_cursor(cursor);
+        }
        
         let mut reader = if let Some(reader) = LiveNodeReader::new(index, nodes).child_by_name(id!(apply).as_field()) {
             reader

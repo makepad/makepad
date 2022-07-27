@@ -4,6 +4,7 @@ pub use {
         cell::RefCell
     },
     crate::{
+        makepad_error_log::*,
         makepad_math::*,
         draw_list::DrawUniforms,
         makepad_shader_compiler::{
@@ -204,7 +205,7 @@ impl Area {
             Area::Instance(inst) => {
                 if inst.instance_count == 0 {
                     //panic!();
-                    println!("get_rect called on instance_count ==0 area pointer, use mark/sweep correctly!");
+                    error!("get_rect called on instance_count ==0 area pointer, use mark/sweep correctly!");
                     return Rect::default()
                 }
                 let draw_list = &cx.draw_lists[inst.draw_list_id];
@@ -214,11 +215,11 @@ impl Area {
                 let draw_call = &draw_list.draw_items[inst.draw_item_id].draw_call.as_ref().unwrap();
                 
                 if draw_call.instances.as_ref().unwrap().len() == 0 {
-                    println!("No instances but everything else valid?");
+                    error!("No instances but everything else valid?");
                     return Rect::default()
                 }
                 if cx.draw_shaders.generation != draw_call.draw_shader.draw_shader_generation {
-                    println!("Generation invalid get_rect {} {:?} {} {}", draw_list.debug_id, inst, cx.draw_shaders.generation, draw_call.draw_shader.draw_shader_generation);
+                    error!("Generation invalid get_rect {} {:?} {} {}", draw_list.debug_id, inst, cx.draw_shaders.generation, draw_call.draw_shader.draw_shader_generation);
                     return Rect::default()
                 }
                 let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
@@ -254,7 +255,7 @@ impl Area {
         return match self {
             Area::Instance(inst) => {
                 if inst.instance_count == 0 {
-                    println!("abs_to_rel_scroll called on instance_count ==0 area pointer, use mark/sweep correctly!");
+                    error!("abs_to_rel_scroll called on instance_count ==0 area pointer, use mark/sweep correctly!");
                     return abs
                 }
                 let draw_list = &cx.draw_lists[inst.draw_list_id];
@@ -263,7 +264,7 @@ impl Area {
                 }
                 let draw_call = &draw_list.draw_items[inst.draw_item_id].draw_call.as_ref().unwrap();
                 if cx.draw_shaders.generation != draw_call.draw_shader.draw_shader_generation {
-                    println!("Generation invalid abs_to_rel {} {:?} {} {}", draw_list.debug_id, inst, cx.draw_shaders.generation, draw_call.draw_shader.draw_shader_generation);
+                    error!("Generation invalid abs_to_rel {} {:?} {} {}", draw_list.debug_id, inst, cx.draw_shaders.generation, draw_call.draw_shader.draw_shader_generation);
                     return abs;
                 }
                 
@@ -328,7 +329,7 @@ impl Area {
                 let draw_list = &cx.draw_lists[inst.draw_list_id];
                 let draw_call = &draw_list.draw_items[inst.draw_item_id].draw_call.as_ref().unwrap();
                 if draw_list.redraw_id != inst.redraw_id {
-                    println!("get_instance_read_ref called on invalid area pointer, use mark/sweep correctly!");
+                    error!("get_instance_read_ref called on invalid area pointer, use mark/sweep correctly!");
                     return None;
                 }
                 if cx.draw_shaders.generation != draw_call.draw_shader.draw_shader_generation {

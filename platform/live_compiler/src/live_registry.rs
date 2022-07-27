@@ -3,6 +3,7 @@ use {
     std::collections::{HashMap, BTreeSet},
     crate::{
         makepad_live_id::*,
+        makepad_error_log::*,
         makepad_live_tokenizer::{Delim, TokenPos, TokenRange, TokenWithLen, FullToken, LiveId, State, Cursor, live_error_origin, LiveErrorOrigin},
         live_error::{LiveError, LiveErrorSpan, LiveFileError},
         live_parser::LiveParser,
@@ -213,7 +214,7 @@ impl LiveRegistry {
             let doc = &self.live_files[file_id.to_index()].expanded;
             if name != LiveId::empty() {
                 if doc.nodes.len() == 0 {
-                    println!("module_path_id_to_doc zero nodelen {}", self.file_id_to_file_name(*file_id));
+                    error!("module_path_id_to_doc zero nodelen {}", self.file_id_to_file_name(*file_id));
                     return None
                 }
                 if let Some(index) = doc.nodes.child_by_name(0, name.as_field()) {
@@ -236,7 +237,7 @@ impl LiveRegistry {
             let doc = &live.expanded;
             if name != LiveId::empty() {
                 if doc.nodes.len() == 0 {
-                    println!("module_path_id_to_doc zero nodelen {}", self.file_id_to_file_name(*file_id));
+                    error!("module_path_id_to_doc zero nodelen {}", self.file_id_to_file_name(*file_id));
                     return None
                 }
                 if let Some(index) = doc.nodes.child_by_name(0, name.as_field()) {
@@ -680,7 +681,7 @@ impl LiveRegistry {
                         else if is_prop_assign && reader.origin.token_id() == Some(token_id) {
                             let live_ptr = LivePtr {file_id, index: reader.index() as u32, generation: self.live_files[file_id.to_index()].generation};
                             if !reader.update_from_live_token(&live_tokens[token_index].token) {
-                                println!("update_from_live_token returns false investigate! {:?}", reader.node());
+                                error!("update_from_live_token returns false investigate! {:?}", reader.node());
                             }
                             live_ptrs.push(live_ptr);
                             if is_main {

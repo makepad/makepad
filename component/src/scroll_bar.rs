@@ -59,6 +59,7 @@ live_register!{
                 }
                 
                 on = {
+                    cursor:Default,
                     from: {
                         all: Play::Forward {duration: 0.1}
                         pressed: Play::Forward {duration: 0.01}
@@ -72,6 +73,7 @@ live_register!{
                 }
                 
                 pressed = {
+                    cursor: Default,
                     from: {all: Play::Snap}
                     apply: {
                         bar: {
@@ -353,7 +355,6 @@ impl ScrollBar {
                         Axis::Horizontal => fe.rel.x,
                         Axis::Vertical => fe.rel.y
                     };
-                    cx.set_down_cursor(MouseCursor::Default);
                     let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
                     let bar_start = norm_scroll * self.scroll_size;
                     let bar_size = norm_handle * self.scroll_size;
@@ -366,7 +367,6 @@ impl ScrollBar {
                     }
                 },
                 Hit::FingerHoverIn(_) => {
-                    cx.set_hover_cursor(MouseCursor::Default);
                     self.animate_state(cx, ids!(hover.on));
                 },
                 Hit::FingerHoverOut(_)=>{

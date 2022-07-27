@@ -2,35 +2,7 @@ use crate::from_wasm::*;
 use crate::to_wasm::*;
 use crate::wasm_types::*;
 use std::panic;
-
-extern "C" {
-    pub fn js_console_log(chars: u32, len: u32);
-}
-
-pub fn console_log_impl(val: &str) {
-    unsafe {
-        let chars = val.chars().collect::<Vec<char >> ();
-        js_console_log(chars.as_ptr() as u32, chars.len() as u32);
-    }
-}
-
-extern "C" { 
-    pub fn js_console_error(chars: u32, len: u32);
-}
-
-pub fn console_error_impl(val: &str) {
-    unsafe {
-        let chars = val.chars().collect::<Vec<char >> ();
-        js_console_error(chars.as_ptr() as u32, chars.len() as u32);
-    }
-}
-
-#[macro_export]
-macro_rules!console_log {
-    ( $ ( $ t: tt) *) => {
-        crate::makepad_wasm_bridge::console_log_impl(&format!("{}:{} - {}", file!(), line!(), format!( $ ( $ t) *)))
-    }
-}
+use crate::makepad_error_log::*;
 
 #[export_name = "wasm_new_msg_with_u64_capacity"]
 #[cfg(target_arch = "wasm32")]
@@ -63,7 +35,7 @@ pub unsafe extern "C" fn wasm_free_data_u8(ptr: u32, len:u32, cap:u32) {
 }
 
 pub fn panic_hook(info: &panic::PanicInfo) {
-    console_error_impl(&format!("{}", info))
+    error!("{}", info)
 }
 
 #[export_name = "wasm_init_panic_hook"]

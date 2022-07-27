@@ -82,14 +82,14 @@ impl AudioUnitInstrument{
                         });
                         sender.send(ToUI::NewAudioUnit(audio_unit)).unwrap();
                     }
-                    Err(err) => println!("Error {:?}", err)
+                    Err(err) => error!("Error {:?}", err)
                 }
             })
         }
         else{
-            println!("Cannot find music device {}", self.plugin);
+            error!("Cannot find music device {}", self.plugin);
             for item in &list{
-                println!("MusicDevices: {}", item.name);
+                error!("MusicDevices: {}", item.name);
             }
         }
     }

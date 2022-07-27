@@ -3,6 +3,7 @@ use {
     std::mem,
     std::sync::{Arc, Mutex},
     crate::{
+        makepad_error_log::*,
         audio::*,
         midi::*,
         platform::apple::cocoa_delegate::*,
@@ -193,20 +194,20 @@ impl AudioUnitClone {
                         let buffers = &*buffers;
                         let input_bus = input_bus as usize;
                         if input_bus >= inputs.len() {
-                            println!("render_to_audio_buffer - input bus number > input len {} {}", input_bus, inputs.len());
+                            error!("render_to_audio_buffer - input bus number > input len {} {}", input_bus, inputs.len());
                             return 0
                         }
                         // ok now..
                         if buffers.mNumberBuffers as usize != inputs[input_bus].channel_count {
-                            println!("render_to_audio_buffer - input channel count doesnt match {} {}", buffers.mNumberBuffers, inputs[input_bus].channel_count);
+                            error!("render_to_audio_buffer - input channel count doesnt match {} {}", buffers.mNumberBuffers, inputs[input_bus].channel_count);
                             return 0
                         }
                         if buffers.mNumberBuffers as usize > MAX_AUDIO_BUFFERS {
-                            println!("render_to_audio_buffer - number of channels requested > MAX_AUDIO_BUFFER_LIST_SIZE");
+                            error!("render_to_audio_buffer - number of channels requested > MAX_AUDIO_BUFFER_LIST_SIZE");
                             return 0
                         }
                         if frame_count as usize != inputs[input_bus].frame_count {
-                            println!("render_to_audio_buffer - frame count doesnt match {} {}", inputs[input_bus].frame_count, frame_count);
+                            error!("render_to_audio_buffer - frame count doesnt match {} {}", inputs[input_bus].frame_count, frame_count);
                             return 0
                         }
                         for i in 0..inputs[input_bus].channel_count {
@@ -296,7 +297,7 @@ impl AudioUnit {
                         let min: f32 = msg_send![node, minValue];
                         let max: f32 = msg_send![node, maxValue];
                         let value: f32 = msg_send![node, value];
-                        println!("{} : min:{} max:{} value:{}", nsstring_to_string(display), min, max, value);
+                        log!("{} : min:{} max:{} value:{}", nsstring_to_string(display), min, max, value);
                     }
                 }
             }
@@ -337,7 +338,7 @@ impl AudioUnit {
                         if len > 0 {
                             let bytes: *const u8 = msg_send![obj, bytes];
                             out_state.vstdata.extend_from_slice(std::slice::from_raw_parts(bytes, len));
-                            println!("{}", out_state.vstdata.len());
+                            log!("{}", out_state.vstdata.len());
                         }
                     }
                     _ => {
@@ -455,7 +456,7 @@ impl AudioUnit {
     pub fn send_mouse_down(&self) {
         if let Some(_view_controller) = self.view_controller.lock().unwrap().as_ref() {
             unsafe {
-                println!("Posting a doubleclick");
+                log!("Posting a doubleclick");
                 let source = CGEventSourceCreate(1);
                 /*
                 let pos = NSPoint {x: 600.0, y: 720.0};
@@ -488,7 +489,7 @@ impl AudioUnit {
             let null_rect: NSRect = NSRect {origin: NSPoint {x: f64::INFINITY, y: f64::INFINITY}, size: NSSize {width: 0.0, height: 0.0}};
             let cg_image: ObjcId = CGWindowListCreateImage(null_rect, win_opt, win_num, 1);
             if cg_image == nil {
-                println!("Please add 'screen capture' privileges to the compiled binary in the macos settings");
+                error!("Please add 'screen capture' privileges to the compiled binary in the macos settings");
                 return
             }
             let handler: ObjcId = msg_send![class!(VNImageRequestHandler), alloc];
@@ -496,10 +497,10 @@ impl AudioUnit {
             let start_time = std::time::Instant::now();
             let completion = objc_block!(move | request: ObjcId, error: ObjcId | {
                 
-                println!("Profile time {}", (start_time.elapsed().as_nanos() as f64) / 1000000f64);
+                log!("Profile time {}", (start_time.elapsed().as_nanos() as f64) / 1000000f64);
                 
                 if error != nil {
-                    println!("text recognition failed")
+                    error!("text recognition failed")
                 }
                 let results: ObjcId = msg_send![request, results];
                 let count: usize = msg_send![results, count];
@@ -518,7 +519,7 @@ impl AudioUnit {
             let error: ObjcId = nil;
             let () = msg_send![handler, performRequests: array error: &error];
             if error != nil {
-                println!("performRequests failed")
+                error!("performRequests failed")
             }
         };
     }
