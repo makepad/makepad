@@ -67,8 +67,8 @@ pub enum LiveValue {
         token_count: u32,
         expand_index: Option<u32>
     },
-    Use (LiveModuleId),
-    UseComponent(LiveId)
+    Import (LiveModuleId),
+    Registry(LiveId)
 }
 
 impl LiveValue {
@@ -714,8 +714,8 @@ impl LiveValue {
             Self::Close => 26,
             
             Self::DSL {..} => 27,
-            Self::Use {..} => 28,
-            Self::UseComponent {..} => 29
+            Self::Import {..} => 28,
+            Self::Registry {..} => 29
         }
     }
 }

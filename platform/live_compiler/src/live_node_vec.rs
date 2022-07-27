@@ -778,11 +778,11 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
                 } => {
                     writeln!(f, "<DSL> {} :token_start:{}, token_count:{} expand_index:{:?}", node.id, token_start, token_count, expand_index).unwrap();
                 },
-                LiveValue::Use(module_path) => {
-                    writeln!(f, "<Use> {}::{}", module_path, node.id).unwrap();
+                LiveValue::Import(module_path) => {
+                    writeln!(f, "<Import> {}::{}", module_path, node.id).unwrap();
                 }
-                LiveValue::UseComponent(component_id) => {
-                    writeln!(f, "<UseComponent> {}::{}", component_id, node.id).unwrap();
+                LiveValue::Registry(component_id) => {
+                    writeln!(f, "<Registry> {}::{}", component_id, node.id).unwrap();
                 }
             }
             index += 1;

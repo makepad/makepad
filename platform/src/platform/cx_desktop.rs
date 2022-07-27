@@ -2,7 +2,6 @@ use {
     std::{
         io::prelude::*,
         fs::File,
-        io,
     },
     crate::{
         makepad_math::Vec2,

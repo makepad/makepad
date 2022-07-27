@@ -541,20 +541,16 @@ impl ShaderRegistry {
                         LiveValue::Vec4(_) | 
                         LiveValue::Expr{..} => {
                             
-                            if let LiveValue::Id(id) = prop.value{
-                                if id.is_capitalised(){
-                                    node_iter = doc.nodes.next_child(node_index);
-                                    continue;
-                                }
-                            }
-                            
                             let first_def = prop.origin.first_def().unwrap();
                             let before = live_registry.get_node_prefix(prop.origin);
                            
                             let ty = match ShaderTy::from_live_node(live_registry, node_index, &doc.nodes){
                                 Ok(ty)=>ty,
-                                Err(err)=>{
-                                    return Err(err)
+                                Err(_)=>{
+                                    // just ignore it
+                                    node_iter = doc.nodes.next_child(node_index);
+                                    continue;
+                                    //return Err(err)
                                 }
                             };
                             let ty_expr = ty.to_ty_expr();
