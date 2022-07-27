@@ -152,7 +152,14 @@ impl Builder {
             let (left_chunk, right_chunk) = chunk.split_at(index);
             self.chunk.push_str(left_chunk);
             chunk = right_chunk;
-            self.builder.push_chunk(self.chunk.split_off(0));
+            let mut end = self.chunk.len();
+            if *self.chunk.as_bytes().last().unwrap() == 0x0D
+                && *chunk.as_bytes().first().unwrap() == 0x0A
+            {
+                end -= 1;
+            }
+            self.builder
+                .push_chunk(self.chunk.drain(..end).collect::<String>());
         }
     }
 
@@ -180,6 +187,10 @@ impl<'a> Slice<'a> {
 
     pub fn char_count(self) -> usize {
         self.slice.measure::<CharMeasure>()
+    }
+
+    pub fn line_count(self) -> usize {
+        self.slice.measure::<LineBreakMeasure>() + 1
     }
 
     pub fn char_count_at(&self, position: usize) -> usize {
@@ -438,6 +449,10 @@ impl btree::Chunk for String {
         }
     }
 
+    fn merge(&self, start: usize, other: &Self, end: usize) -> Self {
+        [&self[start..], &other[..end]].join("")
+    }
+
     fn move_left(&mut self, other: &mut Self, end: usize) {
         self.push_str(&other[..end]);
         other.replace_range(..end, "");
@@ -674,7 +689,7 @@ mod tests {
         }
 
         #[test]
-        fn test_line_count(string in "[.\r\n]*") {
+        fn test_line_count(string in "(.|[\r\n])*") {
             let btree_string = BTreeString::from(&string);
             println!("{:#?}", btree_string);
             assert_eq!(btree_string.line_count(), string.count_line_breaks() + 1);
@@ -804,6 +819,14 @@ mod tests {
             let slice = &string[range.clone()];
             let btree_slice = btree_string.slice(range);
             assert_eq!(btree_slice.char_count(), slice.count_chars());
+        }
+
+        #[test]
+        fn test_slice_line_count((string, range) in string_and_range()) {
+            let btree_string = BTreeString::from(&string);
+            let slice = &string[range.clone()];
+            let btree_slice = btree_string.slice(range);
+            assert_eq!(btree_slice.line_count(), slice.count_line_breaks() + 1);
         }
 
         #[test]
