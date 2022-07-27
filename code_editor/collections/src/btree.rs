@@ -78,57 +78,63 @@ impl<T: Chunk> BTree<T> {
     }
 
     pub(crate) fn prepend(&mut self, mut other: Self) {
-        if self.height < other.height {
-            if let Some(node) = other
-                .root
-                .append_at_depth(self.root.clone(), other.height - self.height)
-            {
-                let mut branch = Branch::new();
-                branch.push_back(other.root);
-                branch.push_back(node);
-                other.height += 1;
-                other.root = Node::Branch(branch);
-            }
+        if self.is_empty() {
             *self = other;
-        } else {
-            if let Some(node) = self
-                .root
-                .prepend_at_depth(other.root, self.height - other.height)
-            {
-                let mut branch = Branch::new();
-                branch.push_front(self.root.clone());
-                branch.push_front(node);
-                self.height += 1;
-                self.root = Node::Branch(branch);
-            }
+            return;
         }
+        if other.is_empty() {
+            return;
+        }
+        let chunk_0 = other.cursor_back().chunk();
+        let mut start = chunk_0.len() - 1;
+        while !chunk_0.is_boundary(start) {
+            start -= 1;
+        }
+        let chunk_1 = self.cursor_front().chunk();
+        let mut end = 1;
+        while !chunk_1.is_boundary(end) {
+            end += 1;
+        }
+        let btree = BTree {
+            height: 0,
+            root: Node::Leaf(Leaf::from_chunk(Arc::new(
+                chunk_0.merge(start, chunk_1, end),
+            ))),
+        };
+        other.truncate_back(other.len() - (chunk_0.len() - start));
+        self.truncate_front(end);
+        self.prepend_internal(btree);
+        self.prepend_internal(other);
     }
 
     pub(crate) fn append(&mut self, mut other: Self) {
-        if self.height < other.height {
-            if let Some(node) = other
-                .root
-                .prepend_at_depth(self.root.clone(), other.height - self.height)
-            {
-                let mut branch = Branch::new();
-                branch.push_front(other.root);
-                branch.push_front(node);
-                other.height += 1;
-                other.root = Node::Branch(branch);
-            }
+        if self.is_empty() {
             *self = other;
-        } else {
-            if let Some(node) = self
-                .root
-                .append_at_depth(other.root, self.height - other.height)
-            {
-                let mut branch = Branch::new();
-                branch.push_back(self.root.clone());
-                branch.push_back(node);
-                self.height += 1;
-                self.root = Node::Branch(branch);
-            }
+            return;
         }
+        if other.is_empty() {
+            return;
+        }
+        let chunk_0 = self.cursor_back().chunk();
+        let mut start = chunk_0.len() - 1;
+        while !chunk_0.is_boundary(start) {
+            start -= 1;
+        }
+        let chunk_1 = other.cursor_front().chunk();
+        let mut end = 1;
+        while !chunk_1.is_boundary(end) {
+            end += 1;
+        }
+        let btree = BTree {
+            height: 0,
+            root: Node::Leaf(Leaf::from_chunk(Arc::new(
+                chunk_0.merge(start, chunk_1, end),
+            ))),
+        };
+        other.truncate_front(end);
+        self.truncate_back(self.len() - (chunk_0.len() - start));
+        self.append_internal(btree);
+        self.append_internal(other);
     }
 
     pub(crate) fn split_off(&mut self, at: usize) -> Self {
@@ -186,6 +192,61 @@ impl<T: Chunk> BTree<T> {
         }
         self.root.info_at(position)
     }
+
+    fn prepend_internal(&mut self, mut other: Self) {
+        if self.height < other.height {
+            if let Some(node) = other
+                .root
+                .append_at_depth(self.root.clone(), other.height - self.height)
+            {
+                let mut branch = Branch::new();
+                branch.push_back(other.root);
+                branch.push_back(node);
+                other.height += 1;
+                other.root = Node::Branch(branch);
+            }
+            *self = other;
+        } else {
+            if let Some(node) = self
+                .root
+                .prepend_at_depth(other.root, self.height - other.height)
+            {
+                let mut branch = Branch::new();
+                branch.push_front(self.root.clone());
+                branch.push_front(node);
+                self.height += 1;
+                self.root = Node::Branch(branch);
+            }
+        }
+    }
+
+    fn append_internal(&mut self, mut other: Self) {
+        if self.height < other.height {
+            if let Some(node) = other
+                .root
+                .prepend_at_depth(self.root.clone(), other.height - self.height)
+            {
+                let mut branch = Branch::new();
+                branch.push_front(other.root);
+                branch.push_front(node);
+                other.height += 1;
+                other.root = Node::Branch(branch);
+            }
+            *self = other;
+        } else {
+            if let Some(node) = self
+                .root
+                .append_at_depth(other.root, self.height - other.height)
+            {
+                let mut branch = Branch::new();
+                branch.push_back(self.root.clone());
+                branch.push_back(node);
+                self.height += 1;
+                self.root = Node::Branch(branch);
+            }
+        }
+    }
+
 }
 
 impl<T: Chunk + fmt::Debug> fmt::Debug for BTree<T>
@@ -236,7 +297,7 @@ impl<T: Chunk> Builder<T> {
         while let Some((height, nodes)) = self.stack.pop() {
             for root in nodes.into_iter().rev() {
                 let other = BTree { height, root };
-                btree.prepend(other);
+                btree.prepend_internal(other);
             }
         }
         btree
@@ -444,6 +505,7 @@ pub(crate) trait Chunk: Clone {
     fn len(&self) -> usize;
     fn is_boundary(&self, index: usize) -> bool;
     fn info_at(&self, index: usize) -> Self::Info;
+    fn merge(&self, start: usize, other: &Self, end: usize) -> Self;
     fn move_left(&mut self, other: &mut Self, end: usize);
     fn move_right(&mut self, other: &mut Self, start: usize);
     fn truncate_back(&mut self, start: usize);
