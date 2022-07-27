@@ -6,6 +6,7 @@ pub use {
     },
     crate::{
         id_pool::*,
+        makepad_error_log::*,
         makepad_shader_compiler::ShaderTy,
         platform::CxPlatformGeometry,
         cx::Cx,
@@ -18,10 +19,10 @@ pub use {
 pub struct Geometry(PoolId);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct GeometryId(usize);
+pub struct GeometryId(usize, u64);
 
 impl Geometry{
-    pub fn geometry_id(&self)->GeometryId{GeometryId(self.0.id)}
+    pub fn geometry_id(&self)->GeometryId{GeometryId(self.0.id, self.0.generation)}
 }
 
 #[derive(Default)]
@@ -36,13 +37,21 @@ impl CxGeometryPool{
 impl std::ops::Index<GeometryId> for CxGeometryPool{
     type Output = CxGeometry;
     fn index(&self, index: GeometryId) -> &Self::Output{
-        &self.0.pool[index.0].item
+        let d = &self.0.pool[index.0];
+        if d.generation != index.1{
+            error!("Drawlist id generation wrong {} {} {}", index.0, d.generation, index.1)
+        }
+        &d.item
     }
 }
 
 impl std::ops::IndexMut<GeometryId> for CxGeometryPool{
     fn index_mut(&mut self, index: GeometryId) -> &mut Self::Output{
-        &mut self.0.pool[index.0].item
+        let d = &mut self.0.pool[index.0];
+        if d.generation != index.1{
+            error!("Drawlist id generation wrong {} {} {}", index.0, d.generation, index.1)
+        }
+        &mut d.item
     }
 }
 
