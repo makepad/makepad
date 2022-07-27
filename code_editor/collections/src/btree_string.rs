@@ -32,10 +32,22 @@ impl BTreeString {
     }
 
     pub fn char_count_at(&self, position: usize) -> usize {
+        if position == 0 {
+            return 0;
+        }
+        if position == self.len() {
+            return self.char_count();
+        }
         self.btree.measure_at::<CharMeasure>(position)
     }
 
     pub fn line_count_at(&self, position: usize) -> usize {
+        if position == 0 {
+            return 1;
+        }
+        if position == self.len() {
+            return self.line_count();
+        }
         self.btree.measure_at::<LineBreakMeasure>(position) + 1
     }
 
@@ -87,25 +99,90 @@ impl BTreeString {
         }
     }
 
-    pub fn prepend(&mut self, other: Self) {
+    pub fn prepend(&mut self, mut other: Self) {
+        if self.is_empty() {
+            *self = other;
+            return;
+        }
+        if other.is_empty() {
+            return;
+        }
+        let chunk_0 = other.cursor_back().chunk();
+        let mut start = chunk_0.len() - 1;
+        while !chunk_0.is_boundary(start) {
+            start -= 1;
+        }
+        let chunk_1 = self.cursor_front().chunk();
+        let mut end = 1;
+        while !chunk_1.is_boundary(end) {
+            end += 1;
+        }
+        let btree = BTree::from([&chunk_0[start..], &chunk_1[..end]].join(""));
+        other.btree.truncate_back(other.len() - (chunk_0.len() - start));
+        self.btree.truncate_front(end);
+        self.btree.prepend(btree);
         self.btree.prepend(other.btree);
     }
 
-    pub fn append(&mut self, other: Self) {
+    pub fn append(&mut self, mut other: Self) {
+        if self.is_empty() {
+            *self = other;
+            return;
+        }
+        if other.is_empty() {
+            return;
+        }
+        let chunk_0 = self.cursor_back().chunk();
+        let mut start = chunk_0.len() - 1;
+        while !chunk_0.is_boundary(start) {
+            start -= 1;
+        }
+        let chunk_1 = other.cursor_front().chunk();
+        let mut end = 1;
+        while !chunk_1.is_boundary(end) {
+            end += 1;
+        }
+        let btree = BTree::from([&chunk_0[start..], &chunk_1[..end]].join(""));
+        other.btree.truncate_front(end);
+        self.btree.truncate_back(self.len() - (chunk_0.len() - start));
+        self.btree.append(btree);
         self.btree.append(other.btree);
     }
 
     pub fn split_off(&mut self, at: usize) -> Self {
+        use std::mem;
+
+        if at == 0 {
+            return mem::replace(self, Self::new());
+        }
+        if at == self.len() {
+            return Self::new();
+        }
+
         Self {
             btree: self.btree.split_off(at),
         }
     }
 
     pub fn truncate_front(&mut self, end: usize) {
+        if end == 0 {
+            return;
+        }
+        if end == self.len() {
+            *self = Self::new();
+            return;
+        }
         self.btree.truncate_front(end);
     }
 
     pub fn truncate_back(&mut self, start: usize) {
+        if start == 0 {
+            *self = Self::new();
+            return;
+        }
+        if start == self.len() {
+            return;
+        }
         self.btree.truncate_back(start);
     }
 }
@@ -198,10 +275,22 @@ impl<'a> Slice<'a> {
     }
 
     pub fn char_count_at(&self, position: usize) -> usize {
+        if position == 0 {
+            return 0;
+        }
+        if position == self.len() {
+            return self.char_count();
+        }
         self.slice.measure_at::<CharMeasure>(position)
     }
 
     pub fn line_count_at(&self, position: usize) -> usize {
+        if position == 0 {
+            return 1;
+        }
+        if position == self.len() {
+            return self.line_count();
+        }
         self.slice.measure_at::<LineBreakMeasure>(position) + 1
     }
 
