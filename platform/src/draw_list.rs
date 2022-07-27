@@ -13,6 +13,8 @@ pub use {
         cx::{
             Cx,
         },
+        pass::PassId,
+        id_pool::*,
         area::{Area, DrawListArea, InstanceArea},
         live_traits::*,
         draw_2d::turtle::{Layout, Size, Walk},
@@ -27,9 +29,42 @@ pub use {
             DRAW_CALL_USER_UNIFORMS,
             DRAW_CALL_TEXTURE_SLOTS
         },
-        geometry::Geometry
+        texture::TextureId,
+        geometry::{Geometry, GeometryId}
     }
 };
+
+
+#[derive(Debug)]
+pub struct DrawList(PoolId);
+
+#[derive(Clone, Debug, PartialEq, Copy, Hash, Ord, PartialOrd, Eq)]
+pub struct DrawListId(usize);
+
+impl DrawList{
+    pub fn id(&self)->DrawListId{DrawListId(self.0.id)}
+}
+
+#[derive(Default)]
+pub struct CxDrawListPool(IdPool<CxDrawList>);
+impl CxDrawListPool{
+    pub fn alloc(&mut self)->DrawList{
+        DrawList(self.0.alloc())
+    }
+}
+
+impl std::ops::Index<DrawListId> for CxDrawListPool{
+    type Output = CxDrawList;
+    fn index(&self, index: DrawListId) -> &Self::Output{
+        &self.0.pool[index.0].item
+    }
+}
+
+impl std::ops::IndexMut<DrawListId> for CxDrawListPool{
+    fn index_mut(&mut self, index: DrawListId) -> &mut Self::Output{
+        &mut self.0.pool[index.0].item
+    }
+}
 
 
 #[derive(Default, Clone)]
@@ -80,16 +115,16 @@ impl DrawUniforms {
     }
 }
 
-pub struct DrawItem {
+pub struct CxDrawItem {
     pub draw_item_id: usize,
-    pub draw_list_id: usize,
+    pub draw_list_id: DrawListId,
     pub redraw_id: u64,
     
-    pub sub_view_id: Option<usize>,
-    pub draw_call: Option<DrawCall>,
+    pub sub_view_id: Option<DrawListId>,
+    pub draw_call: Option<CxDrawCall>,
 }
 
-pub struct DrawCall {
+pub struct CxDrawCall {
     pub draw_shader: DrawShader, // if shader_id changed, delete gl vao
     
     pub options: CxDrawShaderOptions,
@@ -98,19 +133,19 @@ pub struct DrawCall {
     pub total_instance_slots: usize,
     
     pub draw_uniforms: DrawUniforms, // draw uniforms
-    pub geometry_id: Option<usize>,
+    pub geometry_id: Option<GeometryId>,
     pub user_uniforms: [f32; DRAW_CALL_USER_UNIFORMS], // user uniforms
     
-    pub texture_slots: [Option<usize>; DRAW_CALL_TEXTURE_SLOTS],
+    pub texture_slots: [Option<TextureId>; DRAW_CALL_TEXTURE_SLOTS],
     pub instance_dirty: bool,
     pub uniforms_dirty: bool,
     pub platform: CxPlatformDrawCall
 }
 
-impl DrawCall {
+impl CxDrawCall {
     
     pub fn new(mapping: &CxDrawShaderMapping, draw_vars: &DrawVars) -> Self {
-        DrawCall {
+        CxDrawCall {
             geometry_id: draw_vars.geometry_id,
             options: draw_vars.options.clone(),
             draw_shader: draw_vars.draw_shader.unwrap(),
@@ -146,12 +181,12 @@ impl DrawCall {
 
 #[derive(Default, Clone)]
 #[repr(C)]
-pub struct DrawListUniforms {
+pub struct CxDrawListUniforms {
     pub view_transform: [f32; 16],
 }
 
-impl DrawListUniforms {
-    pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawListUniforms>()] {
+impl CxDrawListUniforms {
+    pub fn as_slice(&self) -> &[f32; std::mem::size_of::<CxDrawListUniforms>()] {
         unsafe {std::mem::transmute(self)}
     }
 }
@@ -163,16 +198,14 @@ pub enum DrawListDebug {
 }
 
 #[derive(Default)]
-pub struct DrawList {
+pub struct CxDrawList {
     pub debug_id: LiveId,
     
-    pub alloc_generation: u64,
-    
-    pub codeflow_parent_id: Option<usize>, // the id of the parent we nest in, codeflow wise
+    pub codeflow_parent_id: Option<DrawListId>, // the id of the parent we nest in, codeflow wise
     
     pub redraw_id: u64,
     
-    pub pass_id: usize,
+    pub pass_id: Option<PassId>,
     
     pub locked_view_transform: bool,
     pub no_v_scroll: bool, // this means we
@@ -181,10 +214,10 @@ pub struct DrawList {
     pub unsnapped_scroll: Vec2,
     pub snapped_scroll: Vec2,
     
-    pub draw_items: Vec<DrawItem>,
+    pub draw_items: Vec<CxDrawItem>,
     pub draw_items_len: usize,
     
-    pub draw_list_uniforms: DrawListUniforms,
+    pub draw_list_uniforms: CxDrawListUniforms,
     pub platform: CxPlatformView,
     
     pub rect: Rect,
@@ -194,8 +227,8 @@ pub struct DrawList {
     pub debug: Option<DrawListDebug>
 }
 
-impl DrawList {
-    pub fn new() -> Self {
+impl CxDrawList {
+    /*pub fn new() -> Self {
         let mut ret = Self {
             is_clipped: true,
             no_v_scroll: false,
@@ -204,27 +237,6 @@ impl DrawList {
         };
         ret.uniform_view_transform(&Mat4::identity());
         ret
-    }
-    /*
-    pub fn initialize(&mut self, pass_id: usize, is_clipped: bool, redraw_id: u64) {
-        self.is_clipped = is_clipped;
-        self.redraw_id = redraw_id;
-        self.pass_id = pass_id;
-        self.uniform_view_transform(&Mat4::identity());
-    }
-    
-    pub fn get_scrolled_rect(&self) -> Rect {
-        Rect {
-            pos: self.rect.pos + self.parent_scroll,
-            size: self.rect.size
-        }
-    }
-    
-    pub fn get_inverse_scrolled_rect(&self) -> Rect {
-        Rect {
-            pos: self.rect.pos - self.parent_scroll,
-            size: self.rect.size
-        }
     }*/
     
     pub fn intersect_clip(&mut self, clip: (Vec2, Vec2)) -> (Vec2, Vec2) {

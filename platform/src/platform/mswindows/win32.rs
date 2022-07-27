@@ -41,7 +41,7 @@ pub struct Win32App {
 
 #[derive(Clone)]
 pub struct Win32Window {
-    pub window_id: usize,
+    pub window_id: WindowId,
     pub win32_app: *mut Win32App,
     pub last_window_geom: WindowGeom,
     
