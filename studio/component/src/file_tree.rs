@@ -13,8 +13,8 @@ use {
 };
 
 live_register!{
-    use makepad_platform::shader::std::*;
-    use makepad_component::theme::*;
+    import makepad_platform::shader::std::*;
+    import makepad_component::theme::*;
     
     DrawBgQuad: {{DrawBgQuad}} {
         fn pixel(self) -> vec4 {
@@ -147,9 +147,13 @@ live_register!{
             open = {
                 default: off
                 off = {
-                    from: {all: Play::Exp {speed1: 0.80, speed2: 0.97}}
+                    //from: {all: Play::Exp {speed1: 0.80, speed2: 0.97}}
                     //duration: 0.2
                     redraw: true
+                    
+                    from: {all: Play::Forward{duration:0.2}}
+                    ease: Ease::ExpDecay{d1:0.80,d2:0.97}
+                    
                     //ease: Ease::OutExp
                     apply: {
                         opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
@@ -160,7 +164,12 @@ live_register!{
                 }
                 
                 on = {
-                    from: {all: Play::Exp {speed1: 0.82, speed2: 0.95}}
+                    //from: {all: Play::Exp {speed1: 0.82, speed2: 0.95}}
+                    
+                    from: {all: Play::Forward{duration:0.2}}
+                    ease: Ease::ExpDecay{d1:0.82,d2:0.95}
+                    
+                    //from: {all: Play::Exp {speed1: 0.82, speed2: 0.95}}
                     redraw: true
                     apply: {
                         opened: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]

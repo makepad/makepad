@@ -5,8 +5,9 @@ live_register!{
     use makepad_component::frame::*;
     use FrameComponent::*;
     App: {{App}} {
+        shape: {shape: Solid}
         frame: {
-            width: Fill
+            /*width: Fill
             height: Fill
             layout:{align: {x: 0.0, y: 0.5}, padding: 30,spacing: 30.}
             Solid {bg:{color: #0f0}, width: Fill, height: 40}
@@ -21,7 +22,7 @@ live_register!{
             }
             Solid {bg:{color: #f00}, width: 40, height: 40}
             Solid {bg:{color: #f0f}, width: Fill, height: 60}
-            Solid {bg:{color: #f00}, width: 40, height: 40}
+            Solid {bg:{color: #f00}, width: 40, height: 40}*/
         }
     }
 }
@@ -41,6 +42,7 @@ pub enum FromUI {
 #[derive(Live, LiveHook)]
 pub struct App {
     frame: Frame,
+    shape: DrawShape,
     window: DesktopWindow,
 }
 
@@ -69,12 +71,40 @@ impl App {
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
+        use std::f64::consts::E;
+        
         if self.window.begin(cx, None).not_redrawing() {
             return;
         }
-        while self.frame.draw(cx).not_done(){
+        while self.frame.draw(cx).not_done() {};
+        
+        let speed1 = 0.82f64;
+        let speed2 = 0.95f64;
+        
+        let mut exp = 1.0;
+        let mut exp_speed = speed1;
+        
+        let mut xpos = 30.0f64;
+        let y_start = 100.0;
+        let y_size = 400.0;
+        while exp >0.001 {
+            let t = (xpos - 30.0) / 15.0;
             
-        };
+            let speed_exp = speed1*E.powf(speed2.ln() * t);
+            let map = E.powf((speed1).ln() * t); // + 1.;
+            
+            self.shape.color = vec4(0.0, 1.0, 0.0, 0.5);
+            self.shape.draw_abs(cx, Rect {pos: vec2(xpos as f32, y_start + (1.0 - map as f32) * y_size), size: vec2(10.0, 10.0)});
+            
+            self.shape.color = vec4(1.0, 0.0, 0.0, 0.5);
+            self.shape.draw_abs(cx, Rect {pos: vec2(xpos as f32, y_start + (1.0 - exp as f32) * y_size), size: vec2(10.0, 10.0)});
+            log!("{:.03} {:.03}", 1.0 - exp, map);
+            exp = exp * exp_speed;
+            exp_speed *= speed2;
+            xpos += 15.0;
+        }
+        
+        
         self.window.end(cx);
     }
 }

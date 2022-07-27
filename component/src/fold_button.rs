@@ -7,7 +7,7 @@ use crate::{
 };
 
 live_register!{
-    use makepad_platform::shader::std::*;
+    import makepad_platform::shader::std::*;
     
     FoldButton: {{FoldButton}} {
         bg: {

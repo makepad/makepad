@@ -5,8 +5,8 @@ use crate::{
 };
 
 live_register!{
-    use makepad_platform::shader::std::*;
-    use makepad_component::theme::*;
+    import makepad_platform::shader::std::*;
+    import makepad_component::theme::*;
     
     DrawSplitter: {{DrawSplitter}} {
         const BORDER_RADIUS: 1.0
