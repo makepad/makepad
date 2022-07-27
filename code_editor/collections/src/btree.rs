@@ -750,8 +750,8 @@ where
 {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Leaf(leaf) => write!(f, "Node::Leaf({:?})", leaf),
-            Self::Branch(branch) => write!(f, "Node::Branch({:?})", branch),
+            Self::Leaf(leaf) => leaf.fmt(f),
+            Self::Branch(branch) => branch.fmt(f),
         }
     }
 }
