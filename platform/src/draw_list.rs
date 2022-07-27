@@ -6,6 +6,7 @@ pub use {
     crate::{
         makepad_live_compiler::*,
         makepad_math::*,
+        makepad_error_log::*,
         platform::{
             CxPlatformDrawCall,
             CxPlatformView,
@@ -39,10 +40,10 @@ pub use {
 pub struct DrawList(PoolId);
 
 #[derive(Clone, Debug, PartialEq, Copy, Hash, Ord, PartialOrd, Eq)]
-pub struct DrawListId(usize);
+pub struct DrawListId(usize, u64);
 
 impl DrawList{
-    pub fn id(&self)->DrawListId{DrawListId(self.0.id)}
+    pub fn id(&self)->DrawListId{DrawListId(self.0.id, self.0.generation)}
 }
 
 #[derive(Default)]
@@ -56,13 +57,22 @@ impl CxDrawListPool{
 impl std::ops::Index<DrawListId> for CxDrawListPool{
     type Output = CxDrawList;
     fn index(&self, index: DrawListId) -> &Self::Output{
-        &self.0.pool[index.0].item
+        let d = &self.0.pool[index.0];
+        if d.generation != index.1{
+            error!("Drawlist id generation wrong {} {} {}", index.0, d.generation, index.1)
+        }
+        &d.item
     }
 }
 
 impl std::ops::IndexMut<DrawListId> for CxDrawListPool{
     fn index_mut(&mut self, index: DrawListId) -> &mut Self::Output{
-        &mut self.0.pool[index.0].item
+        let d = &mut self.0.pool[index.0];
+        if d.generation != index.1{
+            error!("Drawlist id generation wrong {} {} {}", index.0, d.generation, index.1)
+        }
+        &mut d.item
+
     }
 }
 

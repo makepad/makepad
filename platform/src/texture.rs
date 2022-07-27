@@ -6,6 +6,7 @@ pub use {
     },
     crate::{
         id_pool::*,
+        makepad_error_log::*,
         makepad_live_compiler::*,
         makepad_live_id::*,
         cx::Cx,
@@ -18,10 +19,10 @@ pub use {
 pub struct Texture(PoolId);
 
 #[derive(Clone, Debug, PartialEq, Copy)]
-pub struct TextureId(usize);
+pub struct TextureId(usize,u64);
 
 impl Texture{
-    pub fn texture_id(&self)->TextureId{TextureId(self.0.id)}
+    pub fn texture_id(&self)->TextureId{TextureId(self.0.id, self.0.generation)}
 }
 
 #[derive(Default)]
@@ -30,21 +31,26 @@ impl CxTexturePool{
     pub fn alloc(&mut self)->Texture{
         Texture(self.0.alloc())
     }
-    /*pub fn alloc_new(&mut self, t:CxTexture)->Texture{
-        Texture(self.0.alloc_new(t))
-    }*/
 }
 
 impl std::ops::Index<TextureId> for CxTexturePool{
     type Output = CxTexture;
     fn index(&self, index: TextureId) -> &Self::Output{
-        &self.0.pool[index.0].item
+        let d = &self.0.pool[index.0];
+        if d.generation != index.1{
+            error!("Texture id generation wrong {} {} {}", index.0, d.generation, index.1)
+        }
+        &d.item
     }
 }
 
 impl std::ops::IndexMut<TextureId> for CxTexturePool{
     fn index_mut(&mut self, index: TextureId) -> &mut Self::Output{
-        &mut self.0.pool[index.0].item
+        let d = &mut self.0.pool[index.0];
+        if d.generation != index.1{
+            error!("Texture id generation wrong {} {} {}", index.0, d.generation, index.1)
+        }
+        &mut d.item
     }
 }
 
