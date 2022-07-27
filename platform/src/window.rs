@@ -8,6 +8,7 @@ pub use {
         makepad_live_compiler::*,
         makepad_live_id::*,
         makepad_math::*,
+        makepad_error_log::*,
         id_pool::*,
         event::{
             WindowGeom
@@ -23,10 +24,10 @@ pub use {
 pub struct Window(PoolId);
 
 #[derive(Clone, Debug, PartialEq, Copy)]
-pub struct WindowId(usize);
+pub struct WindowId(usize, u64);
 
 impl Window {
-    pub fn window_id(&self) -> WindowId {WindowId(self.0.id)}
+    pub fn window_id(&self) -> WindowId {WindowId(self.0.id, self.0.generation)}
 }
 
 #[derive(Default)]
@@ -40,13 +41,21 @@ impl CxWindowPool {
 impl std::ops::Index<WindowId> for CxWindowPool {
     type Output = CxWindow;
     fn index(&self, index: WindowId) -> &Self::Output {
-        &self.0.pool[index.0].item
+        let d = &self.0.pool[index.0];
+        if d.generation != index.1{
+            error!("Window id generation wrong {} {} {}", index.0, d.generation, index.1)
+        }
+        &d.item
     }
 }
 
 impl std::ops::IndexMut<WindowId> for CxWindowPool {
     fn index_mut(&mut self, index: WindowId) -> &mut Self::Output {
-        &mut self.0.pool[index.0].item
+        let d = &mut self.0.pool[index.0];
+        if d.generation != index.1{
+            error!("Window id generation wrong {} {} {}", index.0, d.generation, index.1)
+        }
+        &mut d.item
     }
 }
 
