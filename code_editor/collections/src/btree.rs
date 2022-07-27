@@ -65,14 +65,6 @@ impl<T: Chunk> BTree<T> {
         }
     }
 
-    pub(crate) fn front_chunk(&self) -> &T {
-        self.root.front_chunk()
-    }
-
-    pub(crate) fn back_chunk(&self) -> &T {
-        self.root.back_chunk()
-    }
-
     pub(crate) fn cursor_front(&self) -> Cursor<'_, T> {
         let mut cursor = Cursor::new(&self.root, 0, self.len());
         cursor.descend_left();
@@ -320,7 +312,8 @@ pub(crate) struct Cursor<'a, T: Chunk> {
     start: usize,
     end: usize,
     position: usize,
-    path: Vec<(&'a Branch<T>, usize)>,
+    path: [(Option<&'a Branch<T>>, usize); 8],
+    path_len: usize,
 }
 
 impl<'a, T: Chunk> Cursor<'a, T> {
@@ -349,24 +342,26 @@ impl<'a, T: Chunk> Cursor<'a, T> {
 
     pub(crate) fn move_next_chunk(&mut self) {
         self.position += self.chunk().len();
-        while let Some((branch, index)) = self.path.last_mut() {
-            if *index < branch.len() - 1 {
+        while self.path_len > 0 {
+            let (branch, index) = &mut self.path[self.path_len - 1];
+            if *index < branch.unwrap().len() - 1 {
                 *index += 1;
                 break;
             }
-            self.path.pop();
+            self.path_len -= 1;
         }
         self.descend_left();
     }
 
     pub(crate) fn move_prev_chunk(&mut self) {
-        while let Some((branch, index)) = self.path.last_mut() {
+        while self.path_len > 0 {
+            let (branch, index) = &mut self.path[self.path_len - 1];
             if *index > 0 {
                 *index -= 1;
-                self.position -= branch[*index].summed_len();
+                self.position -= branch.unwrap()[*index].summed_len();
                 break;
             }
-            self.path.pop();
+            self.path_len -= 1;
         }
         self.descend_right();
     }
@@ -377,14 +372,18 @@ impl<'a, T: Chunk> Cursor<'a, T> {
             start,
             end,
             position: 0,
-            path: Vec::new(),
+            path: [(None, 0); 8],
+            path_len: 0,
         }
     }
 
     fn node(&self) -> &'a Node<T> {
-        self.path
-            .last()
-            .map_or(self.root, |(branch, index)| &branch[*index])
+        if self.path_len == 0 {
+            self.root
+        } else {
+            let (branch, index) = self.path[self.path_len - 1];
+            &branch.unwrap()[index]
+        }
     }
 
     fn descend_left(&mut self) {
@@ -393,7 +392,8 @@ impl<'a, T: Chunk> Cursor<'a, T> {
             match node {
                 Node::Leaf(_) => break,
                 Node::Branch(branch) => {
-                    self.path.push((branch, 0));
+                    self.path[self.path_len] = (Some(branch), 0);
+                    self.path_len += 1;
                     node = branch.first().unwrap();
                 }
             }
@@ -408,7 +408,8 @@ impl<'a, T: Chunk> Cursor<'a, T> {
                 Node::Branch(branch) => {
                     node = branch.last().unwrap();
                     self.position += branch.summed_len() - node.summed_len();
-                    self.path.push((branch, branch.len() - 1));
+                    self.path[self.path_len] = (Some(branch), branch.len() - 1);
+                    self.path_len += 1;
                 }
             }
         }
@@ -422,7 +423,8 @@ impl<'a, T: Chunk> Cursor<'a, T> {
                 Node::Branch(branch) => {
                     let (index, summed_len) = branch.search(position - self.position);
                     self.position += summed_len;
-                    self.path.push((branch, index));
+                    self.path[self.path_len] = (Some(branch), index);
+                    self.path_len += 1;
                     node = &branch[index];
                 }
             }
@@ -440,7 +442,7 @@ pub(crate) trait Chunk: Clone {
 
     fn new() -> Self;
     fn len(&self) -> usize;
-    fn can_split_at(&self, index: usize) -> bool;
+    fn is_boundary(&self, index: usize) -> bool;
     fn info_at(&self, index: usize) -> Self::Info;
     fn move_left(&mut self, other: &mut Self, end: usize);
     fn move_right(&mut self, other: &mut Self, start: usize);
@@ -534,26 +536,6 @@ impl<T: Chunk> Node<T> {
                     summed_len += len;
                     summed_measure += measure;
                 }
-            }
-        }
-    }
-
-    fn front_chunk(&self) -> &T {
-        let mut node = self;
-        loop {
-            match node {
-                Node::Leaf(leaf) => break leaf.as_chunk(),
-                Node::Branch(branch) => node = branch.first().unwrap(),
-            }
-        }
-    }
-
-    fn back_chunk(&self) -> &T {
-        let mut node = self;
-        loop {
-            match node {
-                Node::Leaf(leaf) => break leaf.as_chunk(),
-                Node::Branch(branch) => node = branch.last().unwrap(),
             }
         }
     }
@@ -757,14 +739,14 @@ impl<T: Chunk> Leaf<T> {
         match self.len().cmp(&other.len()) {
             Ordering::Less => {
                 let mut end = (other.len() - self.len()) / 2;
-                while !other.can_split_at(end) {
+                while !other.is_boundary(end) {
                     end -= 1;
                 }
                 self.move_left(other, end);
             }
             Ordering::Greater => {
                 let mut start = (self.len() + other.len()) / 2;
-                while !self.can_split_at(start) {
+                while !self.is_boundary(start) {
                     start += 1;
                 }
                 self.move_right(other, start);
