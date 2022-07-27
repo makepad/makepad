@@ -17,7 +17,7 @@ pub struct IdPool<T> where T: Default {
 #[derive(Debug)]
 pub struct IdPoolItem<T> {
     pub item: T,
-    generation: u64,
+    pub generation: u64,
 }
 
 impl<T> Deref for IdPoolItem<T> {
@@ -32,6 +32,7 @@ impl<T> DerefMut for IdPoolItem<T> {
 #[derive(Debug)]
 pub struct PoolId {
     pub id: usize,
+    pub generation: u64,
     pub free: IdPoolFree
 }
 
@@ -48,6 +49,7 @@ impl<T> IdPool<T> where T: Default {
             self.pool[id].generation += 1;
             PoolId {
                 id,
+                generation: self.pool[id].generation,
                 free: self.free.clone()
             }
         }
@@ -59,6 +61,7 @@ impl<T> IdPool<T> where T: Default {
             });
             PoolId {
                 id,
+                generation: 0,
                 free: self.free.clone()
             }
             
