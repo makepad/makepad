@@ -1,62 +1,123 @@
-# Introducing Makepad Framework and Makepad Studio
+# Makepad
 
-Makepad Framework is a new web and native-rendering UI framework for Rust.
-Makepad Studio is an IDE with an integrated designtool to develop applications with Makepad Framework.
+This is Makepad, a new way to do UIs in Rust for native and web. 
+Makepad consists of the following parts:
+- Makepad Framework
+- Makepad Examples
+- Makepad Studio
+- Makepad Designer
 
-All code in this repository EXCEPT the files in studio/src/design_editor are licensed as MIT/Apache2.
+What these are is explained further down.
 
-This means the code editing part of Makepad Studio is licensed MIT/Apache2, and the visual designtooling is not.
-For our commercial offering we are building a visual designer, we hope the value this creates is worth paying for.
+We also maintain online versions of the builds below:\
+Fractal zoomer:\
+[http://makepad.nl/makepad/examples/fractal_zoom/src/index.html](http://makepad.nl/makepad/examples/fractal_zoom/src/index.html)\
+Fun audio:\
+[http://makepad.nl/makepad/examples/fun_audio/src/index.html](http://makepad.nl/makepad/examples/fun_audio/src/index.html)
 
-During the alpha/beta phase of the product development we keep the files for the visual designer inside the OSS repository,
-however after product launch we will distribute these in a different manner.
+### Prerequisites
 
-For the first build of our editor / UI you can look at the following URL in your browser,
+Note: Our Linux and Windows platform layers are currently WIP and don't run. Build on MacOS for now.
 
-https://makepad.dev
+In order to compile makepad applications you need to first install Rust.\
+[https://www.rust-lang.org/tools/install](https://www.rust-lang.org/tools/install)
 
-# How to install the native version
+Note that since we use new nightly features, makepad needs to compile with a specific nightly beacuse these API's break all the time.
 
-On all platforms first install Rust. 
-We are currently relying on nightly because of the procmacro span information needed. Hopefully this will stabilise soon.
+After installing rust, install the nightly toolchain\
+```rustup toolchain install nightly-2022-07-09```
 
-https://www.rust-lang.org/tools/install
+Then to build the webassembly versions you need to install the wasm32 toolchain\
+```rustup target add wasm32-unknown-unknown --toolchain nightly-2022-07-09```\
 
-# MacOS
+Then add the rust std library source for compiling the threads and wasm features\
+```rustup component add rust-src --toolchain nightly-2022-07-09```
 
-```
-git clone https://github.com/makepad/makepad
-cd makepad
-tools/macos_rustup.sh
-cargo run -p makepad_studio --release
-```
+## Makepad Framework 
+Open source UI framework that you can use to build UI's for web and native applications. 
 
-# Windows
+Makepad framework applications are built straight onto the platform layer, and are small and lightweight.
+We have platform layers for Web, MacOS, Linux and Windows. All rendering is GPU based and we use a shader DSL for all visual styling
 
-Clone this repo using either gitub desktop or commandline: https://github.com/makepad/makepad
-Open a cmd.exe in the directory you just cloned. Gh desktop makes: Documents\\Github\\makepad
+## Makepad Examples 
+Open source example applications to learn how to build makepad framework applications
 
-```
-tools/windows_rustup.bat
-cargo run -p makepad_studio --release
-```
+### The fractal zoomer example:
+To run natively use the following command (MacOS only for now):\
+```cargo +nightly-2022-07-09 run -p fractal_zoom --release```
 
-# Linux
-```
-git clone https://github.com/makepad/makepad
-cd makepad
-tools/linux_rustup.sh
-cargo run -p makepad_studio --release
-```
+To run the webassembly version build with this command:\
+```./tools/build_wasm_simd.sh fractal_zoom```
 
-# Troubleshooting
-```
-Delete old settings unix: rm *.ron
-Delete old settings windows: del *.ron
-Make sure you are on master: git checkout master
-Update rust: rustup update
-Make sure you have wasm: rustup target add wasm32-unknown-unknown
-Pull the latest: git pull
-```
+Start the webserver with:\
+```cargo +nightly-2022-07-09 run -p webserver --release```
 
-Still have a problem? Report here: https://github.com/makepad/makepad/issues
+Then you can open this url in Chrome:\
+[http://127.0.0.1:8080/makepad/examples/fractal_zoom/src/index.html](http://127.0.0.1:8080/makepad/examples/fractal_zoom/src/index.html)
+
+### The fun audio example:
+To run natively use the following command (MacOS only for now):\
+```cargo +nightly-2022-07-09 run -p fun_audio --release```
+
+To run the webassembly version build with this command:\
+```./tools/build_wasm_simd.sh fun_audio```
+
+Start the webserver with:\
+```cargo +nightly-2022-07-09 run -p webserver --release```
+
+Then you can open this url in Chrome:\
+[http://127.0.0.1:8080/makepad/examples/fun_audio/src/index.html](http://127.0.0.1:8080/makepad/examples/fun_audio/src/index.html)
+
+## Makepad Studio 
+
+### What Makepad Studio Is
+
+Makepad Studio is a prototype of a code editor written in Makepad. For now, it is primarily intended to show off how one could write their own code editor in Makepad. Our eventual goal is to evolve this into a feature complete, fully extendable Rust IDE.
+
+At the moment of this writing, the following features are supported by Makepad Studio:
+
+-   File tree
+-   Basic edit operations
+-   Undo/redo
+-   Basic syntax highlighting (Rust only)
+-   Basic collaborative editing
+
+### What Makepad Studio Is Not
+
+Makepad Studio is not intended to compete with existing IDEs, such as Visual Studio Code. There won't be an extension store. It's primary purpose is to serve as the open source foundation for our own commercial offering, as well as offer an extendible framework for others to build their own solutions with.
+
+At the moment of this writing, the following features are not yet supported by Makepad Studio:
+
+-   Unicode support
+-   Search/replace
+-   Regular expressions
+-   Internationalization
+-   Accessibility
+-   Extensibility
+    
+### Build Instructions
+
+To run natively use the following command (MacOS only for now):\
+```cargo +nightly-2022-07-09 run -p makepad_studio --release```
+
+To run the webassembly version build with this command:\
+```./tools/build_wasm_normal.sh makepad_studio```
+
+Start the webserver with:\
+```cargo +nightly-2022-07-09 run -p webserver --release```
+
+Then you can open this url in Chrome:\
+[http://127.0.0.1:8080/makepad/studio/src/index.html](http://127.0.0.1:8080/makepad/makepad_studio/src/index.html)
+
+## Makepad Designer 
+
+Makepad Designer will be our commercially licensed designtool built as extension of Makepad Studio.
+The designer will have a visual UI designer to allow creating makepad applications visually and unify the workflow of Designers and programmers in a new way.
+
+## Contact
+
+If you have any problems/questions, or want to reach out for some other reason, you can find our discord channel at:\
+[https://discord.com/invite/urEMqtMcSd](https://discord.com/invite/urEMqtMcSd)
+
+Keep in mind that we are a small team, so we might not always be able to respond immediately.
+
