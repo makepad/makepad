@@ -46,14 +46,14 @@ impl ScrollView{
         match ret_h {
             ScrollBarEvent::None => (),
             ScrollBarEvent::Scroll {scroll_pos, ..} => {
-                cx.set_view_scroll_x(self.view.draw_list_id(), scroll_pos);
+                cx.set_scroll_x(self.view.draw_list_id(), scroll_pos);
             },
             _ => ()
         };
         match ret_v {
             ScrollBarEvent::None => (),
             ScrollBarEvent::Scroll {scroll_pos, ..} => {
-                cx.set_view_scroll_y(self.view.draw_list_id(), scroll_pos);
+                cx.set_scroll_y(self.view.draw_list_id(), scroll_pos);
             },
             _ => ()
         };
@@ -68,14 +68,14 @@ impl ScrollView{
                 changed = true;
             }
             let scroll_pos = self.h_scroll.get_scroll_pos();
-            cx.set_view_scroll_x(self.view.draw_list_id(), scroll_pos);
+            cx.set_scroll_x(self.view.draw_list_id(), scroll_pos);
         }
         if self.v_show {
             if self.v_scroll.set_scroll_pos(cx, pos.y) {
                 changed = true;
             }
             let scroll_pos = self.v_scroll.get_scroll_pos();
-            cx.set_view_scroll_y(self.view.draw_list_id(), scroll_pos);
+            cx.set_scroll_y(self.view.draw_list_id(), scroll_pos);
         } 
         changed
     }
@@ -86,13 +86,13 @@ impl ScrollView{
             if self.h_scroll.set_scroll_pos_no_clip(cx, pos.x) {
                 changed = true;
             }
-            cx.set_view_scroll_x(self.view.draw_list_id(), pos.x);
+            cx.set_scroll_x(self.view.draw_list_id(), pos.x);
         }
         if self.v_show {
             if self.v_scroll.set_scroll_pos_no_clip(cx, pos.y) {
                 changed = true;
             }
-            cx.set_view_scroll_y(self.view.draw_list_id(), pos.y);
+            cx.set_scroll_y(self.view.draw_list_id(), pos.y);
         } 
         changed
     }
@@ -179,12 +179,12 @@ impl ScrollView{
         
         if self.h_show {
             let scroll_pos = self.h_scroll.draw_scroll_bar(cx, Axis::Horizontal, view_area, rect_now, view_total);
-            cx.set_view_scroll_x(draw_list_id, scroll_pos);
+            cx.set_scroll_x(draw_list_id, scroll_pos);
         }
         if self.v_show {
             //println!("SET SCROLLBAR {} {}", rect_now.h, view_total.y);
             let scroll_pos = self.v_scroll.draw_scroll_bar(cx, Axis::Vertical, view_area, rect_now, view_total);
-            cx.set_view_scroll_y(draw_list_id, scroll_pos);
+            cx.set_scroll_y(draw_list_id, scroll_pos);
         }
         
         let rect = cx.end_turtle_with_guard(view_area);

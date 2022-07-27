@@ -15,6 +15,7 @@ pub mod live_cx;
 pub mod live_atomic;
 
 pub mod thread;
+mod id_pool;
 mod event;
 mod area;
 mod font;

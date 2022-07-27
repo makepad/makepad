@@ -27,7 +27,7 @@ pub use {
         draw_2d::turtle::{Walk, Layout},
         draw_2d::view::View,
         draw_2d::cx_2d::Cx2d,
-        texture::Texture,
+        texture::{Texture,TextureId}
     }
 };
 
@@ -208,8 +208,8 @@ impl Cx {
         self.redraw_all();
     }
     
-    pub fn get_internal_font_atlas_texture_id(&self)->usize{
-        self.fonts_atlas.texture_id
+    pub fn get_internal_font_atlas_texture_id(&self)->TextureId{
+        self.fonts_atlas.texture_id.unwrap()
     }
 }
 
@@ -363,7 +363,7 @@ impl CxDrawFontAtlas {
     pub fn new(cx: &mut Cx) -> Self {
         
         let atlas_texture = Texture::new(cx);
-        cx.fonts_atlas.texture_id = atlas_texture.texture_id;
+        cx.fonts_atlas.texture_id = Some(atlas_texture.texture_id());
         
         let draw_trapezoid_text = DrawTrapezoidText::new_from_module(cx, &module_path!(), id!(DrawTrapezoidText)).unwrap();
         
@@ -474,7 +474,7 @@ pub struct CxFontsAtlasTodo {
 }
 
 pub struct CxFontsAtlas {
-    pub texture_id: usize,
+    pub texture_id: Option<TextureId>,
     pub texture_size: Vec2,
     pub clear_buffer: bool,
     pub alloc_xpos: f32,
@@ -486,7 +486,7 @@ pub struct CxFontsAtlas {
 impl CxFontsAtlas {
     pub fn new() -> Self {
         Self {
-            texture_id: 0,
+            texture_id: None,
             texture_size: Vec2 {x: 2048.0, y: 2048.0},
             clear_buffer: false,
             alloc_xpos: 0.0,
