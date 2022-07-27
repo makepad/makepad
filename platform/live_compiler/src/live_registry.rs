@@ -302,12 +302,12 @@ impl LiveRegistry {
     pub fn find_scope_target_via_start(&self, item: LiveId, index: usize, nodes: &[LiveNode]) -> Option<LiveScopeTarget> {
         if let Some(index) = nodes.scope_up_down_by_name(index, item.as_field()) {
             match &nodes[index].value {
-                LiveValue::Use(module_id) => {
+                LiveValue::Import(module_id) => {
                     if let Some(ret) = self.find_module_id_name(item, *module_id) {
                         return Some(ret)
                     }
                 }
-                LiveValue::UseComponent(component_type) => {
+                LiveValue::Registry(component_type) => {
                     if let Some(info) = self.components.find_component(*component_type, item) {
                         if let Some(ret) = self.find_module_id_name(item, info.module_id) {
                             return Some(ret)
@@ -324,12 +324,12 @@ impl LiveRegistry {
         while let Some(index) = node_iter {
             if nodes[index].id == LiveId::empty() {
                 match &nodes[index].value {
-                    LiveValue::Use(module_id) => {
+                    LiveValue::Import(module_id) => {
                         if let Some(ret) = self.find_module_id_name(item, *module_id) {
                             return Some(ret)
                         }
                     }
-                    LiveValue::UseComponent(component_type) => {
+                    LiveValue::Registry(component_type) => {
                         if let Some(info) = self.components.find_component(*component_type, item) {
                             if let Some(ret) = self.find_module_id_name(item, info.module_id) {
                                 return Some(ret)
@@ -756,13 +756,13 @@ impl LiveRegistry {
         
         for node in &mut original.nodes {
             match &mut node.value {
-                LiveValue::Use(module_id) => {
+                LiveValue::Import(module_id) => {
                     if module_id.0 == id!(crate) { // patch up crate refs
                         module_id.0 = own_module_id.0
                     };
                     deps.insert(*module_id);
                 }, // import
-                LiveValue::UseComponent(component_id) => {
+                LiveValue::Registry(component_id) => {
                     let reg = self.components.0.borrow();
                     if let Some(entry) = reg.values().find(|entry| entry.component_type() == *component_id){
                         entry.get_module_set(&mut deps);

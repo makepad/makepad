@@ -9,8 +9,8 @@ use {
 };
 
 live_register!{
-    use makepad_platform::shader::std::*;
-    use crate::theme::*;
+    import makepad_platform::shader::std::*;
+    import crate::theme::*;
     
     TextInput: {{TextInput}} {
         
@@ -167,6 +167,7 @@ impl TextInput {
                  self.cursor_pos -= 1;
             }
             Hit::FingerHoverIn(_) => {
+                log!("TEXT HOVER IN");
                 self.animate_state(cx, ids!(hover.on));
             }
             Hit::FingerHoverOut(_) => {

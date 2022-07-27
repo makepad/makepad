@@ -22,8 +22,6 @@ use {
 };
 
 live_register!{
-    use makepad_platform::shader::std::*;
-    
     LogView: {{LogView}} {
     }
 }

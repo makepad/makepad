@@ -7,8 +7,8 @@ use {
 };
 
 live_register!{
-    use makepad_platform::shader::std::*;
-    use makepad_component::theme::*;
+    import makepad_platform::shader::std::*;
+    import makepad_component::theme::*;
     Label: {{Label}} {
         walk:{
             width:Fit

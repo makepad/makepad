@@ -11,7 +11,7 @@ use {
 };
 
 live_register!{
-    use AudioComponent::*;
+    registry AudioComponent::*;
     AudioGraph: {{AudioGraph}} {
         root: BasicSynth {
         }

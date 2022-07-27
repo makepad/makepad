@@ -10,8 +10,8 @@ use {
 };
 
 live_register!{
-    use makepad_platform::shader::std::*;
-    use crate::theme::*;
+    import makepad_platform::shader::std::*;
+    import crate::theme::*;
     
     LinkButton: {{LinkButton}} {
         button: {

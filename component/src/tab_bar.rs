@@ -9,8 +9,8 @@ use {
 };
 
 live_register!{
-    use crate::tab::Tab;
-    use makepad_component::theme::*;
+    import crate::tab::Tab;
+    import makepad_component::theme::*;
     
     TabBar: {{TabBar}} {
         tab: Tab {}
