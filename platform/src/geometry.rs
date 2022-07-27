@@ -5,6 +5,7 @@ pub use {
         hash::{Hash, Hasher},
     },
     crate::{
+        id_pool::*,
         makepad_shader_compiler::ShaderTy,
         platform::CxPlatformGeometry,
         cx::Cx,
@@ -12,20 +13,42 @@ pub use {
     }
 };
 
+
+#[derive(Debug)]
+pub struct Geometry(PoolId);
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct GeometryId(usize);
+
+impl Geometry{
+    pub fn geometry_id(&self)->GeometryId{GeometryId(self.0.id)}
+}
+
+#[derive(Default)]
+pub struct CxGeometryPool(IdPool<CxGeometry>);
+
+impl CxGeometryPool{
+    pub fn alloc(&mut self)->Geometry{
+        Geometry(self.0.alloc())
+    }
+}
+
+impl std::ops::Index<GeometryId> for CxGeometryPool{
+    type Output = CxGeometry;
+    fn index(&self, index: GeometryId) -> &Self::Output{
+        &self.0.pool[index.0].item
+    }
+}
+
+impl std::ops::IndexMut<GeometryId> for CxGeometryPool{
+    fn index_mut(&mut self, index: GeometryId) -> &mut Self::Output{
+        &mut self.0.pool[index.0].item
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct GeometryRef(pub Rc<Geometry>);
 
-#[derive(Debug, PartialEq)]
-pub struct Geometry {
-    pub(crate) geometry_id: usize,
-    pub(crate) geometries_free: Rc<RefCell<Vec<usize >> >,
-}
-
-impl Drop for Geometry {
-    fn drop(&mut self) {
-        self.geometries_free.borrow_mut().push(self.geometry_id)
-    }
-}
 
 const MAX_GEOM_FINGERPRINT:usize = 16;
 #[derive(Clone, Debug)]
@@ -82,29 +105,15 @@ impl Cx{
 
 impl Geometry{
     pub fn new(cx: &mut Cx) -> Self {
-        let geometries_free = cx.geometries_free.clone();
-        let geometry_id = if let Some(geometry_id) = geometries_free.borrow_mut().pop() {
-            cx.geometries[geometry_id].dirty = true;
-            geometry_id
-        }
-        else {
-            let geometry_id = cx.geometries.len();
-            cx.geometries.push(CxGeometry{
-                indices: Vec::new(),
-                vertices: Vec::new(),
-                dirty: true,
-                platform: CxPlatformGeometry::default()
-            });
-            geometry_id
-        };
-        
-        Self {
-            geometry_id,
-            geometries_free
-        }
+        let geometry = cx.geometries.alloc();
+        cx.geometries[geometry.geometry_id()].indices.clear();
+        cx.geometries[geometry.geometry_id()].vertices.clear();
+        cx.geometries[geometry.geometry_id()].dirty = true;
+        geometry
     }
 }
 
+#[derive(Default)]
 pub struct CxGeometry{
     pub indices: Vec<u32>,
     pub vertices: Vec<f32>,
@@ -122,7 +131,7 @@ pub struct GeometryField {
 pub trait GeometryFields{
     fn geometry_fields(&self, fields: &mut Vec<GeometryField>);
     fn live_type_check(&self)->LiveType;
-    fn get_geometry_id(&self)->Option<usize>;
+    fn get_geometry_id(&self)->Option<GeometryId>;
 }
 
 

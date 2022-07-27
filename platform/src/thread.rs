@@ -133,9 +133,12 @@ impl<T> FromUIReceiver<T> {
     }
 }
 
+
+pub struct ThreadPoolSender(Sender<()>);
+
 pub struct ThreadPool {
     task_queue: Arc<Mutex<RefCell<Vec<Box<dyn FnOnce() + Send + 'static>>>>>,
-    sender: Arc<RefCell<Option<Sender<()>>>>,
+    sender: Arc<RefCell<Option<ThreadPoolSender>>>,
 }
 
 impl Drop for ThreadPool{
@@ -172,7 +175,7 @@ impl ThreadPool {
                 task();
             })
         }
-        let sender = Arc::new(RefCell::new(Some(sender)));
+        let sender = Arc::new(RefCell::new(Some(ThreadPoolSender(sender.clone()))));
         cx.thread_pool_senders.push(sender.clone());
         Self{
             task_queue,
@@ -188,7 +191,7 @@ impl ThreadPool {
         let sender = self.sender.borrow_mut();
         if let Some(tps) = sender.as_ref(){
             self.task_queue.lock().unwrap().borrow_mut().insert(0,Box::new(task));
-            tps.send(()).unwrap();
+            tps.0.send(()).unwrap();
         }
     }
 
@@ -196,7 +199,7 @@ impl ThreadPool {
         let sender = self.sender.borrow_mut();
         if let Some(tps) = sender.as_ref(){
             self.task_queue.lock().unwrap().borrow_mut().push(Box::new(task));
-            tps.send(()).unwrap();
+            tps.0.send(()).unwrap();
         }
     }
 }

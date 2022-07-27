@@ -14,6 +14,7 @@ use {
             window::*,
             xr::*,
         },
+        draw_list::DrawListId,
         cursor::MouseCursor,
         menu::Command,
     },
@@ -102,10 +103,10 @@ pub struct MidiInputListEvent {
     pub inputs: Vec<MidiInputInfo>,
 }
 
-#[derive(Clone, Default, Debug, PartialEq)]
+#[derive(Clone, Debug, Default, PartialEq)]
 pub struct DrawEvent {
-    pub draw_lists: Vec<usize>,
-    pub draw_lists_and_children: Vec<usize>,
+    pub draw_lists: Vec<DrawListId>,
+    pub draw_lists_and_children: Vec<DrawListId>,
     pub redraw_all: bool,
 }
 
@@ -116,7 +117,7 @@ impl DrawEvent{
             || self.draw_lists_and_children.len() != 0
     }
     
-    pub fn draw_list_will_redraw(&self, cx:&Cx, draw_list_id:usize)->bool{
+    pub fn draw_list_will_redraw(&self, cx:&Cx, draw_list_id:DrawListId)->bool{
          if self.redraw_all {
             return true;
         }
