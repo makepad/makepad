@@ -58,6 +58,10 @@ impl<'a> Cx2d<'a> {
         }
     }
     
+    pub fn current_dpi_factor(&self)->f32{
+        self.current_dpi_factor
+    }
+    
     pub fn begin_pass(&mut self, pass: &Pass) {
         if self.pass_id.is_some() {panic!()}
         

@@ -19,7 +19,7 @@ pub use {
 pub struct Texture(PoolId);
 
 #[derive(Clone, Debug, PartialEq, Copy)]
-pub struct TextureId(usize,u64);
+pub struct TextureId(pub(crate) usize,u64);
 
 impl Texture{
     pub fn texture_id(&self)->TextureId{TextureId(self.0.id, self.0.generation)}

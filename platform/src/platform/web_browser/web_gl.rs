@@ -10,8 +10,10 @@ use {
                 from_wasm::*
             }
         },
+        draw_vars::DRAW_CALL_TEXTURE_SLOTS,
         cx::Cx,
-        pass::{CxPassParent, PassClearColor, PassClearDepth},
+        draw_list::DrawListId,
+        pass::{PassId, CxPassParent, PassClearColor, PassClearDepth},
     },
 };
 
@@ -41,8 +43,8 @@ impl Cx {
     
     pub fn render_view(
         &mut self,
-        pass_id: usize,
-        draw_list_id: usize,
+        pass_id: PassId,
+        draw_list_id: DrawListId,
         scroll: Vec2,
         clip: (Vec2, Vec2),
         zbias: &mut f32,
@@ -117,13 +119,15 @@ impl Cx {
                 for i in 0..sh.mapping.textures.len() {
                     let texture_id = if let Some(texture_id) = draw_call.texture_slots[i] {
                         texture_id
-                    }else {0};
+                    }else {
+                        continue
+                    };
                     
-                    let cxtexture = &mut self.textures[texture_id as usize];
+                    let cxtexture = &mut self.textures[texture_id];
                     if cxtexture.update_image {
                         cxtexture.update_image = false;
                         self.platform.from_wasm(FromWasmAllocTextureImage2D {
-                            texture_id,
+                            texture_id: texture_id.0,
                             width: cxtexture.desc.width.unwrap(),
                             height: cxtexture.desc.height.unwrap(),
                             data: WasmDataU32::new(&cxtexture.image_u32)
@@ -195,6 +199,12 @@ impl Cx {
                 
                 let pass_uniforms = &self.passes[pass_id].pass_uniforms;
                 
+                let mut textures = [None;DRAW_CALL_TEXTURE_SLOTS];
+                for (index, texture_slot) in draw_call.texture_slots.iter().enumerate(){
+                    if let Some(texture_id) = texture_slot{
+                        textures[index] = Some(texture_id.0)
+                    }
+                }
                 self.platform.from_wasm(FromWasmDrawCall {
                     shader_id: draw_call.draw_shader.draw_shader_id,
                     vao_id: draw_call.platform.vao.as_ref().unwrap().vao_id,
@@ -204,7 +214,7 @@ impl Cx {
                     user_uniforms: WasmDataF32::new(draw_call.user_uniforms.as_slice()),
                     live_uniforms: WasmDataF32::new(&sh.mapping.live_uniforms_buf),
                     const_table: WasmDataF32::new(&sh.mapping.const_table.table),
-                    textures: draw_call.texture_slots.clone()
+                    textures
                 });
             }
         }
@@ -216,7 +226,7 @@ impl Cx {
         }*/
     }
     
-    pub fn setup_render_pass(&mut self, pass_id: usize, inherit_dpi_factor: f32) {
+    pub fn setup_render_pass(&mut self, pass_id: PassId, inherit_dpi_factor: f32) {
         let pass_size = self.passes[pass_id].pass_size;
         self.passes[pass_id].set_matrix(Vec2::default(), pass_size);
         self.passes[pass_id].paint_dirty = false;
@@ -232,7 +242,7 @@ impl Cx {
     
     pub fn draw_pass_to_canvas(
         &mut self,
-        pass_id: usize,
+        pass_id: PassId,
         dpi_factor: f32
     ) {
         let view_id = self.passes[pass_id].main_draw_list_id.unwrap();
@@ -274,7 +284,7 @@ impl Cx {
         );
     }
     
-    pub fn draw_pass_to_texture(&mut self, pass_id: usize, dpi_factor: f32) {
+    pub fn draw_pass_to_texture(&mut self, pass_id: PassId, dpi_factor: f32) {
         let pass_size = self.passes[pass_id].pass_size;
         let view_id = self.passes[pass_id].main_draw_list_id.unwrap();
         
@@ -294,14 +304,14 @@ impl Cx {
             match color_texture.clear_color {
                 PassClearColor::InitWith(clear_color) => {
                     color_targets[index] = WColorTarget{
-                        texture_id: color_texture.texture_id,
+                        texture_id: color_texture.texture_id.0,
                         init_only: true,
                         clear_color: clear_color.into()
                     };
                 },
                 PassClearColor::ClearWith(clear_color) => {
                     color_targets[index] = WColorTarget{
-                        texture_id: color_texture.texture_id,
+                        texture_id: color_texture.texture_id.0,
                         init_only: false,
                         clear_color: clear_color.into()
                     };
@@ -314,14 +324,14 @@ impl Cx {
             match self.passes[pass_id].clear_depth {
                 PassClearDepth::InitWith(clear_depth) => {
                     depth_target = WDepthTarget{
-                        texture_id: depth_texture_id,
+                        texture_id: depth_texture_id.0,
                         init_only: true,
                         clear_depth
                     };
                 },
                 PassClearDepth::ClearWith(clear_depth) => {
                     depth_target = WDepthTarget{
-                        texture_id: depth_texture_id,
+                        texture_id: depth_texture_id.0,
                         init_only: false,
                         clear_depth
                     };
@@ -330,7 +340,7 @@ impl Cx {
         }
         
         self.platform.from_wasm(FromWasmBeginRenderTexture {
-            pass_id,
+            pass_id: pass_id.0,
             width: (pass_size.x * dpi_factor) as usize,
             height: (pass_size.y * dpi_factor) as usize,
             color_targets,

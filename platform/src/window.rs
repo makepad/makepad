@@ -36,6 +36,11 @@ impl CxWindowPool {
     fn alloc(&mut self) -> Window {
         Window(self.0.alloc())
     }
+    
+    #[allow(dead_code)]
+    pub fn id_zero()->WindowId{
+        WindowId(0, 0)
+    }
 }
 
 impl std::ops::Index<WindowId> for CxWindowPool {

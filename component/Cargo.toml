@@ -16,3 +16,6 @@ version = "0.1"
 path = "./derive_frame"
 version = "0.1"
 
+[features]
+nightly = ["makepad-platform/nightly"]
+

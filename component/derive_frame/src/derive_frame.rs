@@ -49,7 +49,7 @@ pub fn derive_frame_component_impl(input: TokenStream) -> TokenStream {
             tb.add("        self.walk");
             tb.add("    }");
             tb.add("    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk, _self_uid:FrameUid) -> FrameDraw {");
-            tb.add("        self.draw_walk(cx, walk);");
+            tb.add("        let _= self.draw_walk(cx, walk);");
             tb.add("        FrameDraw::done()");
             tb.add("    }");
             tb.add("}");

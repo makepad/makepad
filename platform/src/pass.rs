@@ -31,7 +31,7 @@ pub use {
 pub struct Pass(PoolId);
 
 #[derive(Clone, Copy, Debug, PartialEq)]
-pub struct PassId(usize);
+pub struct PassId(pub(crate) usize);
 
 impl Pass{
 }
