@@ -23,14 +23,16 @@ live_register!{
             open = {
                 default: on
                 off = {
-                    from: {all: Play::Exp {speed1: 0.96, speed2: 0.97}}
+                    from: {all: Play::Forward{duration:0.2}}
+                    ease: Ease::ExpDecay{d1:0.96,d2:0.97}
                     redraw: true
                     apply: {
                         opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
                     }
                 }
                 on = {
-                    from: {all: Play::Exp {speed1: 0.98, speed2: 0.95}}
+                    from: {all: Play::Forward{duration:0.2}}
+                    ease: Ease::ExpDecay{d1:0.98,d2:0.95}
                     redraw: true
                     apply: {
                         opened: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]
@@ -119,7 +121,7 @@ impl FrameComponent for FoldHeader {
                 self.reverse_walk_opened(cx);
                 cx.end_turtle();
                 self.draw_state.end();
-                return FrameDraw::Done
+                return FrameDraw::done()
             };
             self.draw_state.set(DrawState::DrawBody);
         }
@@ -131,7 +133,7 @@ impl FrameComponent for FoldHeader {
             cx.end_turtle();
             self.draw_state.end();
         }
-        FrameDraw::Done
+        FrameDraw::done()
     }
 }
 

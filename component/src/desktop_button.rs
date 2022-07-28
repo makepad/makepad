@@ -8,7 +8,7 @@ use {
 };
 
 live_register!{
-    use makepad_platform::shader::std::*;
+    import makepad_platform::shader::std::*;
     
     DrawDesktopButton: {{DrawDesktopButton}} {
         fn pixel(self) -> vec4 {

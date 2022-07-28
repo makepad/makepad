@@ -1,6 +1,5 @@
 use {
     std::collections::BTreeMap,
-    std::ops::{ControlFlow, Try, FromResidual},
     crate::{
         makepad_platform::*,
         makepad_platform::audio::*,
@@ -75,7 +74,7 @@ impl AudioComponentRef {
                             callback.call(inner)
                         }
                         else {
-                            return AudioResult::Found(inner)
+                            return AudioResult::found(inner)
                         }
                     }
                 },
@@ -83,7 +82,7 @@ impl AudioComponentRef {
             inner.audio_query(query, callback)
         }
         else {
-            AudioResult::NotFound
+            AudioResult::not_found()
         }
     }
 }
@@ -133,6 +132,38 @@ pub enum AudioQuery {
     TypeId(std::any::TypeId),
 }
 
+pub type AudioResult<'a> = Result<(),&'a mut Box<dyn AudioComponent>>;
+
+pub trait AudioResultApi<'a>{
+    fn not_found()->AudioResult<'a>{AudioResult::Ok(())}
+    fn found(arg:&'a mut Box<dyn AudioComponent>)->AudioResult{AudioResult::Err(arg)}
+    fn is_not_found(&self)->bool;
+    fn is_found(&self)->bool;
+    fn into_found(self)->Option<&'a mut Box<dyn AudioComponent>>;
+}
+impl<'a> AudioResultApi<'a> for AudioResult<'a> {
+
+    fn is_not_found(&self) -> bool {
+        match *self {
+            Result::Ok(_) => true,
+            Result::Err(_) => false
+        }
+    }
+    fn is_found(&self) -> bool {
+        match *self {
+            Result::Ok(_) => false,
+            Result::Err(_) => true
+        }
+    }
+    fn into_found(self)->Option<&'a mut Box<dyn AudioComponent>>{
+        match self {
+            Result::Ok(_) => None,
+            Result::Err(arg) => Some(arg)
+        }
+    }
+}
+
+/*
 pub enum AudioResult<'a> {
     NotFound,
     Found(&'a mut Box<dyn AudioComponent>)
@@ -159,7 +190,7 @@ impl<'a> Try for AudioResult<'a> {
             Self::Found(c) => ControlFlow::Break(c)
         }
     }
-}
+}*/
 
 #[macro_export]
 macro_rules!audio_component {

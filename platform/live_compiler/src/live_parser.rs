@@ -148,34 +148,19 @@ impl<'a> LiveParser<'a> {
         Ok(())
     }
     
-    fn expect_use(&mut self, ld: &mut LiveOriginal) -> Result<(), LiveError> {
+    fn expect_import(&mut self, ld: &mut LiveOriginal) -> Result<(), LiveError> {
         let token_id = self.get_token_id();
         let crate_id = self.expect_ident() ?;
         // if crate_id is capitalized, its a component.
         // so we should make a LiveValue::UseComponent
         self.expect_token(LiveToken::Punct(id!(::))) ?;
         
-        if crate_id.is_capitalised() {
-            let component_id = if self.accept_token(LiveToken::Punct(id!(*))) {
-                LiveId(0)
-            }
-            else {
-                self.expect_ident() ?
-            };
-            
-            ld.nodes.push(LiveNode {
-                origin: LiveNodeOrigin::from_token_id(token_id),
-                id: component_id,
-                value: LiveValue::UseComponent(crate_id)
-            });
-            return Ok(())
-        }
-        
         // ok so. we need to collect everything 'upto' the last id
         let first_module_id = self.expect_ident() ?;
         self.expect_token(LiveToken::Punct(id!(::))) ?;
         let mut module = String::new();
         let mut last_id = LiveId(0);
+        
         module.push_str(&format!("{}", first_module_id));
         loop {
             match self.peek_token() {
@@ -201,9 +186,31 @@ impl<'a> LiveParser<'a> {
         ld.nodes.push(LiveNode {
             origin: LiveNodeOrigin::from_token_id(token_id),
             id: last_id,
-            value: LiveValue::Use(LiveModuleId(crate_id, LiveId::from_str(&module).unwrap()))
+            value: LiveValue::Import(LiveModuleId(crate_id, LiveId::from_str(&module).unwrap()))
         });
         
+        Ok(())
+    }
+    
+   fn expect_registry(&mut self, ld: &mut LiveOriginal) -> Result<(), LiveError> {
+        let token_id = self.get_token_id();
+        let crate_id = self.expect_ident() ?;
+        // if crate_id is capitalized, its a component.
+        // so we should make a LiveValue::UseComponent
+        self.expect_token(LiveToken::Punct(id!(::))) ?;
+    
+        let component_id = if self.accept_token(LiveToken::Punct(id!(*))) {
+            LiveId(0)
+        }
+        else {
+            self.expect_ident() ?
+        };
+        
+        ld.nodes.push(LiveNode {
+            origin: LiveNodeOrigin::from_token_id(token_id),
+            id: component_id,
+            value: LiveValue::Registry(crate_id)
+        });
         Ok(())
     }
     
@@ -715,8 +722,12 @@ impl<'a> LiveParser<'a> {
                                 self.expect_fn(ld) ?;
                                 self.accept_optional_delim();
                             }
-                            id!(use) => {
-                                self.expect_use(ld) ?;
+                            id!(import) => {
+                                self.expect_import(ld) ?;
+                                self.accept_optional_delim();
+                            }
+                            id!(registry) => {
+                                self.expect_registry(ld) ?;
                                 self.accept_optional_delim();
                             }
                             _ => {
@@ -739,7 +750,7 @@ impl<'a> LiveParser<'a> {
                         // if we get a . metadata follows
                         let edit_info = self.possible_edit_info(ld) ?;
                         
-                        if prop_id.is_capitalised() && self.accept_token(LiveToken::Open(Delim::Brace)) {
+                        if /*prop_id.is_capitalised() &&*/ self.accept_token(LiveToken::Open(Delim::Brace)) {
                             let origin = LiveNodeOrigin::from_token_id(token_id)
                                 .with_edit_info(edit_info)
                                 .with_prop_type(LivePropType::Instance);

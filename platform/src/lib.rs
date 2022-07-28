@@ -1,5 +1,3 @@
-#![feature(try_trait_v2)]
-
 pub mod platform;
 
 #[macro_use]
@@ -15,6 +13,7 @@ pub mod live_cx;
 pub mod live_atomic;
 
 pub mod thread;
+mod id_pool;
 mod event;
 mod area;
 mod font;
@@ -88,8 +87,6 @@ pub use {
     crate::{
         cx_api::{
             CxPlatformApi,
-            profile_start,
-            profile_end
         },
         cx_draw_shaders::{
         },
@@ -169,7 +166,8 @@ pub use {
             view::{
                 View,
                 ManyInstances,
-                ViewRedrawing
+                ViewRedrawing,
+                ViewRedrawingApi,
             },
             cx_2d::{
                 Cx2d

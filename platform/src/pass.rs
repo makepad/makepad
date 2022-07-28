@@ -7,44 +7,85 @@ pub use {
         makepad_live_compiler::*,
         makepad_live_id::*,
         makepad_math::*,
+        id_pool::*,
+        window::{
+            WindowId,
+        },
         platform::{
             CxPlatformPass,
         },
         cx::{
             Cx,
         },
+        draw_list::{
+            DrawListId
+        },
         live_traits::*,
-        texture::Texture,
+        texture::{
+            Texture,
+            TextureId
+        }
     }
 };
 
-pub struct Pass {
-    pub(crate) pass_id: usize,
-    pub(crate) passes_free: Rc<RefCell<Vec<usize>>>,
+pub struct Pass(PoolId);
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct PassId(pub(crate) usize);
+
+impl Pass{
 }
 
-impl Drop for Pass{
-    fn drop(&mut self){
-        self.passes_free.borrow_mut().push(self.pass_id)
+#[derive(Default)]
+pub struct CxPassPool(IdPool<CxPass>);
+impl CxPassPool{
+    fn alloc(&mut self)->Pass{
+        Pass(self.0.alloc())
+    }
+    
+    pub fn id_iter(&self) -> PassIterator {
+        PassIterator{
+            cur:0,
+            len: self.0.pool.len()
+        }
+    }
+}
+
+pub struct PassIterator {
+    cur: usize,
+    len: usize
+}
+
+impl Iterator for PassIterator {
+    type Item = PassId;
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.cur >= self.len{
+            return None;
+        }
+        let cur = self.cur;
+        self.cur += 1;
+        Some(PassId(cur))
+    }
+}
+
+impl std::ops::Index<PassId> for CxPassPool{
+    type Output = CxPass;
+    fn index(&self, index: PassId) -> &Self::Output{
+        &self.0.pool[index.0].item
+    }
+}
+
+impl std::ops::IndexMut<PassId> for CxPassPool{
+    fn index_mut(&mut self, index: PassId) -> &mut Self::Output{
+        &mut self.0.pool[index.0].item
     }
 }
 
 impl LiveHook for Pass{}
 impl LiveNew for Pass {
     fn new(cx: &mut Cx)->Self{
-        let passes_free = cx.passes_free.clone();
-        let pass_id =  if let Some(pass_id) = passes_free.borrow_mut().pop(  ){
-            pass_id 
-        }
-        else{
-            let pass_id = cx.passes.len();
-            cx.passes.push(CxPass::default());
-            pass_id
-        };        
-        Self{
-            pass_id,
-            passes_free
-        }
+        let pass = cx.passes.alloc();
+        pass
     }
     
     fn live_type_info(_cx:&mut Cx) -> LiveTypeInfo{
@@ -75,7 +116,7 @@ impl LiveApply for Pass {
                 break;
             }
             match nodes[index].id {
-                id!(clear_color) => cx.passes[self.pass_id].clear_color = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
+                id!(clear_color) => cx.passes[self.pass_id()].clear_color = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
                 _=> {
                     cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
                     index = nodes.skip_node(index);
@@ -87,52 +128,53 @@ impl LiveApply for Pass {
 }
 
 impl Pass {
+    pub fn pass_id(&self)->PassId{PassId(self.0.id)}
 
     pub fn set_pass_parent(&self, cx:&mut Cx, pass:&Pass){
-        let cxpass = &mut cx.passes[self.pass_id];
-        cxpass.parent = CxPassParent::Pass(pass.pass_id);
+        let cxpass = &mut cx.passes[self.pass_id()];
+        cxpass.parent = CxPassParent::Pass(pass.pass_id());
     }
     
     pub fn set_size(&mut self, cx: &mut Cx, pass_size: Vec2) {
         let mut pass_size = pass_size;
         if pass_size.x < 1.0{pass_size.x = 1.0};
         if pass_size.y < 1.0{pass_size.y = 1.0};
-        let cxpass = &mut cx.passes[self.pass_id];
+        let cxpass = &mut cx.passes[self.pass_id()];
         cxpass.pass_size = pass_size;
     }
     
     pub fn set_window_clear_color(&mut self, cx: &mut Cx, clear_color: Vec4) {
-        let cxpass = &mut cx.passes[self.pass_id];
+        let cxpass = &mut cx.passes[self.pass_id()];
         cxpass.clear_color = clear_color;
     }
     
     pub fn clear_color_textures(&mut self, cx: &mut Cx) {
-        let cxpass = &mut cx.passes[self.pass_id];
+        let cxpass = &mut cx.passes[self.pass_id()];
         cxpass.color_textures.truncate(0);
     }
     
     pub fn add_color_texture(&mut self, cx: &mut Cx, texture: &Texture, clear_color: PassClearColor) {
-        let cxpass = &mut cx.passes[self.pass_id];
+        let cxpass = &mut cx.passes[self.pass_id()];
         cxpass.color_textures.push(CxPassColorTexture {
-            texture_id: texture.texture_id,
+            texture_id: texture.texture_id(),
             clear_color: clear_color
         })
     }
     
     pub fn set_depth_texture(&mut self, cx: &mut Cx, texture: &Texture, clear_depth: PassClearDepth) {
-        let cxpass = &mut cx.passes[self.pass_id];
-        cxpass.depth_texture = Some(texture.texture_id);
+        let cxpass = &mut cx.passes[self.pass_id()];
+        cxpass.depth_texture = Some(texture.texture_id());
         cxpass.clear_depth = clear_depth;
     }
     
     pub fn set_matrix_mode(&mut self, cx: &mut Cx, pmm: PassMatrixMode){
-        let cxpass = &mut cx.passes[self.pass_id];
+        let cxpass = &mut cx.passes[self.pass_id()];
         cxpass.paint_dirty = true;
         cxpass.matrix_mode = pmm;
     }
 
     pub fn set_debug(&mut self, cx: &mut Cx, debug:bool){
-        let cxpass = &mut cx.passes[self.pass_id];
+        let cxpass = &mut cx.passes[self.pass_id()];
         cxpass.debug = debug;
     }
 
@@ -156,10 +198,10 @@ pub enum PassClearDepth {
     ClearWith(f32)
 }
 
-#[derive(Default, Clone)]
+#[derive(Clone)]
 pub struct CxPassColorTexture {
     pub clear_color: PassClearColor,
-    pub texture_id: usize
+    pub texture_id: TextureId
 }
 
 #[derive(Default, Clone)]
@@ -191,12 +233,12 @@ pub struct CxPass {
     pub debug: bool,
     pub matrix_mode: PassMatrixMode,
     pub color_textures: Vec<CxPassColorTexture>,
-    pub depth_texture: Option<usize>,
+    pub depth_texture: Option<TextureId>,
     pub clear_depth: PassClearDepth,
     pub depth_init: f64,
     pub clear_color: Vec4,
     pub override_dpi_factor: Option<f32>,
-    pub main_draw_list_id: Option<usize>,
+    pub main_draw_list_id: Option<DrawListId>,
     pub parent: CxPassParent,
     pub paint_dirty: bool,
     pub pass_size: Vec2,
@@ -229,8 +271,8 @@ impl Default for CxPass {
 
 #[derive(Clone, Debug)]
 pub enum CxPassParent {
-    Window(usize),
-    Pass(usize),
+    Window(WindowId),
+    Pass(PassId),
     None
 }
 

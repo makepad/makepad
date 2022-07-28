@@ -12,10 +12,12 @@ use {
             },
             web_audio::*,
         },
-        area::Area,
         audio::{
             AudioTime,
             AudioOutputBuffer
+        },
+        window::{
+            CxWindowPool
         },
         event::{
             WebSocket,
@@ -110,11 +112,10 @@ impl Cx {
                     let new_geom = tw.window_info.into();
                     if old_geom != new_geom {
                         self.platform.window_geom = new_geom.clone();
-                        if self.windows.len()>0 {
-                            self.windows[0].window_geom = new_geom.clone();
-                        }
+                        let id_zero = CxWindowPool::id_zero();
+                        self.windows[id_zero].window_geom = new_geom.clone();
                         self.call_event_handler(&mut Event::WindowGeomChange(WindowGeomChangeEvent {
-                            window_id: 0,
+                            window_id: id_zero,
                             old_geom: old_geom,
                             new_geom: new_geom
                         }));
@@ -133,7 +134,7 @@ impl Cx {
                 id!(ToWasmFingerDown) => {
                     let tw = ToWasmFingerDown::read_to_wasm(&mut to_wasm);
                     
-                    let tap_count = self.process_tap_count(
+                    let tap_count = self.fingers.process_tap_count(
                         tw.finger.digit,
                         Vec2 {x: tw.finger.x, y: tw.finger.y},
                         tw.finger.time
@@ -157,8 +158,7 @@ impl Cx {
                     //}
                     
                     self.call_event_handler(&mut Event::FingerUp(tw.into()));
-                    
-                    self.fingers[digit].captured = Area::Empty;
+                    self.fingers.release_digit(digit);
                     //self.down_mouse_cursor = None;
                 }
                 
@@ -169,19 +169,16 @@ impl Cx {
                 
                 id!(ToWasmFingerHover) => {
                     let tw = ToWasmFingerHover::read_to_wasm(&mut to_wasm);
-                    self.fingers[0].over_last = Area::Empty;
-                    //self.hover_mouse_cursor = None;
                     self.call_event_handler(&mut Event::FingerHover(tw.into()));
-                    self.fingers[0]._over_last = self.fingers[0].over_last;
+                    self.fingers.cycle_over_last();
                 }
                 
                 id!(ToWasmFingerOut) => {
                     // what was this for again?
                     let tw = ToWasmFingerOut::read_to_wasm(&mut to_wasm);
-                    self.fingers[0].over_last = Area::Empty;
                     //self.hover_mouse_cursor = None;
                     self.call_event_handler(&mut Event::FingerHover(tw.into()));
-                    self.fingers[0]._over_last = self.fingers[0].over_last;
+                    self.fingers.cycle_over_last();
                 }
                 
                 id!(ToWasmFingerScroll) => {
@@ -191,13 +188,13 @@ impl Cx {
                 
                 id!(ToWasmKeyDown) => {
                     let tw = ToWasmKeyDown::read_to_wasm(&mut to_wasm);
-                    self.process_key_down(tw.key.clone().into());
+                    self.keyboard.process_key_down(tw.key.clone().into());
                     self.call_event_handler(&mut Event::KeyDown(tw.key.into()));
                 }
                 
                 id!(ToWasmKeyUp) => {
                     let tw = ToWasmKeyUp::read_to_wasm(&mut to_wasm);
-                    self.process_key_up(tw.key.clone().into());
+                    self.keyboard.process_key_up(tw.key.clone().into());
                     self.call_event_handler(&mut Event::KeyUp(tw.key.into()));
                 }
                 
@@ -247,7 +244,8 @@ impl Cx {
                 }
                 
                 id!(ToWasmPaintDirty) => {
-                    self.passes[self.windows[0].main_pass_id.unwrap()].paint_dirty = true;
+                    let main_pass_id = self.windows[CxWindowPool::id_zero()].main_pass_id.unwrap();
+                    self.passes[main_pass_id].paint_dirty = true;
                 }
                 
                 id!(ToWasmSignal) => {
@@ -371,10 +369,7 @@ impl Cx {
                     self.platform.from_wasm(FromWasmHideTextIME {});
                 },
                 
-                CxPlatformOp::SetHoverCursor(cursor) => {
-                    self.platform.from_wasm(FromWasmSetMouseCursor::new(cursor));
-                },
-                CxPlatformOp::SetDownCursor(cursor) => {
+                CxPlatformOp::SetCursor(cursor) => {
                     self.platform.from_wasm(FromWasmSetMouseCursor::new(cursor));
                 },
                 CxPlatformOp::StartTimer {timer_id, interval, repeats} => {

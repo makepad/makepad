@@ -1,8 +1,10 @@
+#![allow(unstable_name_collisions)]
+
 use {
     proc_macro::{
         TokenStream,
         Span,
-        Delimiter
+        Delimiter,
     },
     makepad_macro_lib::{TokenBuilder, TokenParser},
     std::fmt::Write
@@ -100,8 +102,12 @@ fn token_parser_to_whitespace_matching_string(parser: &mut TokenParser, span: Sp
             }
         }
         
+        #[cfg(not(feature = "nightly"))]
+        fn delta_whitespace(_now: Lc, _needed: Lc, _out: &mut String) {
+        }
+        
+        #[cfg(feature = "nightly")]
         fn delta_whitespace(now: Lc, needed: Lc, out: &mut String) {
-            
             if now.line == needed.line {
                 for _ in now.column..needed.column {
                     out.push(' ');
@@ -121,6 +127,9 @@ fn token_parser_to_whitespace_matching_string(parser: &mut TokenParser, span: Sp
             *last_end = Some(lc_from_start(span));
         }
         
+        #[cfg(not(feature = "nightly"))]
+        let mut last_tt = None;
+        
         while !parser.eat_eot() {
             let span = parser.span().unwrap();
             if let Some(delim) = parser.open_group() {
@@ -137,15 +146,52 @@ fn token_parser_to_whitespace_matching_string(parser: &mut TokenParser, span: Sp
                 out.push(gs);
                 *last_end = Some(start._next_char());
                 tp_to_str(parser, span, out, live_types, last_end);
-                delta_whitespace(last_end.unwrap(), Lc{line:end.line, column:end.column-1}, out);
+                delta_whitespace(last_end.unwrap(), Lc {line: end.line, column: end.column - 1}, out);
                 *last_end = Some(end);
                 out.push(ge);
             }
             else {
                 if let Some(tt) = &parser.current {
-                    let start = lc_from_start(span);
-                    delta_whitespace(last_end.unwrap(), start, out);
+                    #[cfg(not(feature = "nightly"))]
+                    {
+                        fn is_ident(tt: &TokenTree) -> bool {
+                            if let TokenTree::Ident(_) = tt {
+                                return true
+                            }
+                            false
+                        }
+                        
+                        fn is_string_lit(tt: &TokenTree) -> bool {
+                            if let TokenTree::Literal(lit) = tt {
+                                if let Some('"') = lit.to_string().chars().next() {
+                                    return true
+                                }
+                            }
+                            false
+                        }
+                        
+                        fn is_punct(tt: &TokenTree) -> bool {
+                            if let TokenTree::Punct(_) = tt {
+                                return true
+                            }
+                            false
+                        }
+                        if let Some(last_tt) = &last_tt {
+                            if is_ident(last_tt) && is_string_lit(tt) {}
+                            else if is_punct(last_tt) {}
+                            else {
+                                out.push(' ');
+                            }
+                        }
+                        last_tt = Some(tt.clone());
+                    };
+                    #[cfg(feature = "nightly")]
+                    {
+                        let start = lc_from_start(span);
+                        delta_whitespace(last_end.unwrap(), start, out);
+                    }
                     out.push_str(&tt.to_string());
+                    
                     *last_end = Some(lc_from_end(span));
                 }
                 parser.advance();
@@ -153,25 +199,27 @@ fn token_parser_to_whitespace_matching_string(parser: &mut TokenParser, span: Sp
         }
     }
 }
-/*
+
+// Span fallback API
+
 #[cfg(not(feature = "nightly"))]
-fn tokenparser_to_string(parser: &mut TokenParser, _span:Span, out: &mut String, live_types:&mut Vec<TokenStream>, last_end:&mut Option<Lc>){
-    while !parser.eat_eot(){
-        let span = parser.span().unwrap();
-        if let Some(delim) = parser.open_group(){
-            // if delim is { and the next one is also { write out a type index
-            parse_type_ident(parser, out, live_types);
-            let (s,e) = delim_to_pair(delim);
-            out.push(s);
-            tokenparser_to_string(parser, span, out, live_types, last_end);
-            out.push(e);
-        }
-        else{
-            if let Some(tt) = &parser.current{
-                out.push_str(&tt.to_string());
-            }
-            parser.advance();
-        }
+use proc_macro::TokenTree;
+
+#[cfg(not(feature = "nightly"))]
+struct SpanFallbackApiInfo {
+    line: usize,
+    column: usize
+}
+
+#[cfg(not(feature = "nightly"))]
+trait SpanFallbackApi {
+    fn start(&self) -> SpanFallbackApiInfo {
+        SpanFallbackApiInfo {line: 1, column: 1}
+    }
+    fn end(&self) -> SpanFallbackApiInfo {
+        SpanFallbackApiInfo {line: 1, column: 1}
     }
 }
-*/
+
+#[cfg(not(feature = "nightly"))]
+impl SpanFallbackApi for Span {}
