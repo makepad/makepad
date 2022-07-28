@@ -59,7 +59,8 @@ live_register!{
             open = {
                 default: yes
                 no ={
-                    from: {all: Play::Exp {speed1: 0.96, speed2: 0.97}}
+                    from: {all: Play::Forward{duration:0.2}}
+                    ease: Ease::ExpDecay{d1:0.96,d2:0.97}
                     redraw: true
                     apply: {
                         opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
@@ -67,7 +68,8 @@ live_register!{
                     }
                 }
                 yes = {
-                    from: {all: Play::Exp {speed1: 0.98, speed2: 0.95}}
+                    from: {all: Play::Forward{duration:0.2}}
+                    ease: Ease::ExpDecay{d1:0.98,d2:0.95}
                     redraw: true
                     apply: {
                         opened: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]
