@@ -613,7 +613,7 @@ impl AudioComponent for IronFish {
     }
     // we dont have inputs
     fn audio_query(&mut self, _query: &AudioQuery, _callback: &mut Option<AudioQueryCb>) -> AudioResult{
-        AudioResult::NotFound
+        AudioResult::not_found()
     }
 }
 

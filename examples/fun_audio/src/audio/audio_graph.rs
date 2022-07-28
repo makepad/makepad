@@ -58,7 +58,7 @@ struct Node {
 impl AudioGraph {
     
      pub fn by_type<T: 'static + AudioComponent>(&mut self) -> Option<&mut T> {
-        if let AudioResult::Found(child) = self.root.audio_query(&AudioQuery::TypeId(TypeId::of::<T>()), &mut None) {
+        if let Some(child) = self.root.audio_query(&AudioQuery::TypeId(TypeId::of::<T>()), &mut None).into_found() {
             return child.cast_mut::<T>()
         }
         None

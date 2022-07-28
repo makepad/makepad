@@ -81,7 +81,7 @@ impl TabBar {
         self.scroll_view.begin(cx, self.walk, Layout::flow_right()) ?;
         self.tab_order.clear();
 
-        ViewRedrawing::Yes
+        ViewRedrawing::yes()
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {

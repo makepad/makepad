@@ -1,11 +1,9 @@
 use {
-    std::ops::{ControlFlow, Try, FromResidual},
     crate::makepad_platform::*,
     std::collections::BTreeMap,
     std::any::TypeId
 };
 pub use crate::frame_component;
-
 
 pub trait FrameComponent: LiveApply {
     fn handle_component_event(
@@ -28,7 +26,7 @@ pub trait FrameComponent: LiveApply {
         _query: &FrameQuery,
         _callback: &mut Option<FrameQueryCb>
     ) -> FrameResult {
-        return FrameResult::NotFound
+        return FrameResult::not_found()
     }
     
     fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk, self_uid: FrameUid) -> FrameDraw;
@@ -65,8 +63,8 @@ pub trait FrameComponent: LiveApply {
                 return self.create_child(cx, live_ptr, CreateAt::Template, new_id, nodes)
             }
         }
-        if let FrameResult::Found(FrameFound::Template(child, live_ptr)) =
-        self.frame_query(&FrameQuery::Path(path), &mut None) {
+        if let Some(FrameFound::Template(child, live_ptr)) = 
+        self.frame_query(&FrameQuery::Path(path), &mut None).into_found() {
             child.create_child(cx, live_ptr, CreateAt::Template, new_id, nodes)
         }
         else {
@@ -117,6 +115,45 @@ pub enum FrameFound<'a> {
     Template(&'a mut Box<dyn FrameComponent >, LivePtr)
 }
 
+pub type FrameResult<'a> = Result<(),FrameFound<'a>>;
+
+pub trait FrameResultApi<'a>{
+    fn child(value: &'a mut Box<dyn FrameComponent >) -> FrameResult<'a> {
+       Result::Err(FrameFound::Child(value))
+    }
+    fn template(value: &'a mut Box<dyn FrameComponent >, live_ptr: LivePtr) -> FrameResult<'a> {
+        Result::Err(FrameFound::Template(value, live_ptr))
+    }    
+    fn not_found()->FrameResult<'a>{FrameResult::Ok(())}
+    fn found(arg:FrameFound)->FrameResult{FrameResult::Err(arg)}
+    fn is_not_found(&self)->bool;
+    fn is_found(&self)->bool;
+    fn into_found(self)->Option<FrameFound<'a>>;
+}
+
+impl<'a> FrameResultApi<'a> for FrameResult<'a> {
+
+    fn is_not_found(&self) -> bool {
+        match *self {
+            Result::Ok(_) => true,
+            Result::Err(_) => false
+        }
+    }
+    fn is_found(&self) -> bool {
+        match *self {
+            Result::Ok(_) => false,
+            Result::Err(_) => true
+        }
+    }
+    fn into_found(self)->Option<FrameFound<'a>>{
+        match self {
+            Result::Ok(_) => None,
+            Result::Err(arg) => Some(arg)
+        }
+    }
+}
+
+/*
 pub enum FrameResult<'a> {
     NotFound,
     Found(FrameFound<'a>)
@@ -152,8 +189,40 @@ impl<'a> Try for FrameResult<'a> {
             Self::Found(c) => ControlFlow::Break(c)
         }
     }
+}*/
+
+pub type FrameDraw = Result<(),FrameUid>;
+
+pub trait FrameDrawApi{
+    fn done()->FrameDraw{Result::Ok(())}
+    fn not_done(arg:FrameUid)->FrameDraw{Result::Err(arg)}
+    fn is_done(&self)->bool;
+    fn is_not_done(&self)->bool;
+    fn get_not_done(&self)->Option<FrameUid>;
 }
 
+impl FrameDrawApi for FrameDraw {
+    fn is_done(&self) -> bool {
+        match *self {
+            Result::Ok(_) => true,
+            Result::Err(_) => false
+        }
+    }
+    fn is_not_done(&self) -> bool {
+        match *self {
+            Result::Ok(_) => false,
+            Result::Err(_) => true
+        }
+    }
+    fn get_not_done(&self)->Option<FrameUid>{
+        match *self {
+            Result::Ok(_) => None,
+            Result::Err(uid) => Some(uid)
+        }
+    }
+}
+
+/*
 pub enum FrameDraw {
     Done,
     FrameUid(FrameUid)
@@ -196,6 +265,7 @@ impl Try for FrameDraw {
         }
     }
 }
+*/
 
 
 generate_ref_cast_api!(FrameComponent);
@@ -311,7 +381,7 @@ impl FrameRef {
             inner.frame_query(query, callback)
         }
         else {
-            FrameResult::NotFound
+            FrameResult::not_found()
         }
     }
     
@@ -334,7 +404,7 @@ impl FrameRef {
         if let Some(inner) = &mut self.0 {
             return inner.draw_component(cx, walk, FrameUid(&*inner as *const _ as u64))
         }
-        FrameDraw::Done
+        FrameDraw::done()
     }
     
     pub fn get_walk(&mut self) -> Walk {
@@ -355,7 +425,7 @@ impl FrameRef {
         if let Some(inner) = &mut self.0 {
             return inner.draw_walk_component(cx, FrameUid(&*inner as *const _ as u64))
         }
-        FrameDraw::Done
+        FrameDraw::done()
     }
 }
 

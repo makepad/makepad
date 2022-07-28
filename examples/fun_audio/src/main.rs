@@ -1,4 +1,3 @@
-#![feature(try_trait_v2)]
 pub use makepad_component::{self, *};
 pub use makepad_platform::{
     *,
@@ -285,10 +284,6 @@ impl App {
         crate::piano::live_register(cx);
     }
     
-    pub fn new_app(cx: &mut Cx) -> Self {
-        Self::new_as_main_module(cx, &module_path!(), id!(App)).unwrap()
-    }
-    
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
         
         //self.window.handle_event(cx, event);
@@ -348,7 +343,7 @@ impl App {
             return;
         }
         
-        while self.frame.draw(cx).not_done() {
+        while self.frame.draw(cx).is_not_done() {
         };
         
         self.window.end(cx);

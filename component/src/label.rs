@@ -43,6 +43,6 @@ impl FrameComponent for Label {
         for line in lines{
             self.label.draw_walk(cx, walk, self.align, line);
         }
-        FrameDraw::Done
+        FrameDraw::done()
     }
 }
