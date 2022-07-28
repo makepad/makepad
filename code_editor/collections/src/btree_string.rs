@@ -641,7 +641,7 @@ impl Measure<String> for CharMeasure {
     }
 
     fn from_measured_index(chunk: &String, measured_index: usize) -> usize {
-        chunk.char_indices().nth(measured_index).map_or(chunk.len(), |(index, _)| index)
+        chunk.from_char_index(measured_index)
     }
 
     fn from_info(info: Info) -> usize {
@@ -692,6 +692,7 @@ trait StrExt {
     fn count_chars(&self) -> usize;
     fn count_line_breaks(&self) -> usize;
     fn is_boundary(&self, index: usize) -> bool;
+    fn from_char_index(&self, index: usize) -> usize;
 }
 
 impl StrExt for str {
@@ -741,6 +742,10 @@ impl StrExt for str {
         }
         let bytes = self.as_bytes();
         bytes[index].is_utf8_char_start() && bytes[index - 1] != 0x0D && bytes[index] != 0x0F
+    }
+
+    fn from_char_index(&self, char_index: usize) -> usize {
+        self.char_indices().nth(char_index).map_or(self.len(), |(index, _)| index)
     }
 }
 
@@ -844,10 +849,7 @@ mod tests {
         #[test]
         fn test_from_char_index((string, char_index) in string_and_char_index()) {
             let btree_string = BTreeString::from(&string);
-            assert_eq!(
-                btree_string.from_char_index(char_index),
-                string.char_indices().nth(char_index).map_or(string.len(), |(index, _)| index),
-            );
+            assert_eq!(btree_string.from_char_index(char_index), string.from_char_index(char_index));
         }
 
         #[test]
@@ -999,10 +1001,7 @@ mod tests {
             let btree_string = BTreeString::from(&string);
             let slice = &string[range.clone()];
             let btree_slice = btree_string.slice(range);
-            assert_eq!(
-                btree_slice.from_char_index(char_index),
-                slice.char_indices().nth(char_index).map_or(slice.len(), |(index, _)| index),
-            )
+            assert_eq!(btree_slice.from_char_index(char_index), slice.from_char_index(char_index));
         }
 
         #[test]
