@@ -90,7 +90,6 @@ live_register!{
                     }
                 }
                 on = {
-                    cursor: Text,
                     from: {all: Play::Snap}
                     apply: {
                         select: {hover: 1.0}
@@ -108,7 +107,6 @@ live_register!{
                     }
                 }
                 on = {
-                    cursor: Text,
                     from: {all: Play::Snap}
                     apply: {
                         select: {focus: 1.0}
@@ -167,23 +165,24 @@ impl TextInput {
                  self.cursor_pos -= 1;
             }
             Hit::FingerHoverIn(_) => {
-                log!("TEXT HOVER IN");
+                cx.set_cursor(MouseCursor::Text);
                 self.animate_state(cx, ids!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
                 self.animate_state(cx, ids!(hover.off));
             },
             Hit::FingerDown(fe) => {
+                cx.set_cursor(MouseCursor::Text);
                 cx.set_key_focus(self.bg.area());
                 // ok so we need to calculate where we put the cursor down.
                 //elf.
                 if let Some(pos) = self.label.closest_offset(cx, fe.abs){
+                    log!("{}", pos);
                     self.cursor_pos = pos;
-                    self.label.redraw(cx);
+                    self.bg.redraw(cx);
                 }
             },
             Hit::FingerUp(fe) => {
-                self.animate_state(cx, ids!(drag.off));
                 if fe.is_over && fe.input_type.has_hovers() {
                     self.animate_state(cx, ids!(hover.on));
                 }
@@ -205,7 +204,10 @@ impl TextInput {
         // ok now we can query the geometry of the text we output
         if let Some(rect) = self.label.character_rect(cx, self.cursor_pos){
             // draw the cursor
-            
+            self.cursor.draw_abs(cx, Rect{
+                pos:rect.pos,
+                size:vec2(100.0,100.0)
+            });
         }
         
         self.bg.end(cx);

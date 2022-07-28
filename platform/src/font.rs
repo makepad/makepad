@@ -25,7 +25,7 @@ pub use {
         draw_2d::view::ManyInstances,
         pass::{Pass, PassClearColor},
         draw_2d::turtle::{Walk, Layout},
-        draw_2d::view::View,
+        draw_2d::view::{View,ViewRedrawingApi},
         draw_2d::cx_2d::Cx2d,
         texture::{Texture,TextureId}
     }

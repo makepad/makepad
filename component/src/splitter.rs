@@ -180,7 +180,7 @@ impl FrameComponent for Splitter {
             self.end(cx);
             self.draw_state.end();
         }
-        FrameDraw::Done
+        FrameDraw::done()
     }
 }
 
