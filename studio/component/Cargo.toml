@@ -12,4 +12,6 @@ license = "MIT"
 path = "../../component"
 version = "0.1"
 
+[features]
+nightly = ["makepad-component/nightly"]
 

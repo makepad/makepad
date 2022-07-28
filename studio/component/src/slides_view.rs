@@ -122,7 +122,7 @@ impl SlidesView {
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
-        while self.frame.draw(cx).not_done() {
+        while self.frame.draw(cx).is_not_done() {
         }
     }
 }
