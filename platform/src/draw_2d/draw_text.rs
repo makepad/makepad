@@ -633,7 +633,7 @@ impl DrawText {
             }
             i += 1;
         }
-        return Some(char_offset.buffer[(base.repeat - 1) * base.stride] as usize);
+        return Some(char_offset.buffer[(base.repeat - 1) * base.stride] as usize + 1);
     }
     
     pub fn character_rect(&self, cx: &Cx, index:usize) -> Option<Rect> {
