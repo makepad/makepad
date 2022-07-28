@@ -144,6 +144,13 @@ pub struct FingerDownEvent {
     pub time: f64
 }
 
+impl FingerDownEvent{
+    pub fn mod_control(&self) -> bool {self.modifiers.control}
+    pub fn mod_alt(&self) -> bool {self.modifiers.alt}
+    pub fn mod_shift(&self) -> bool {self.modifiers.shift}
+    pub fn mod_logo(&self) -> bool {self.modifiers.logo}
+}
+
 #[derive(Clone, Debug, PartialEq)]
 pub struct FingerDownHitEvent {
     pub rel: Vec2,

@@ -219,14 +219,12 @@ export class WasmWebBrowser extends WasmBridge {
     }
     
     FromWasmShowTextIME(args) {
-        self.text_area_pos = args;
-        this.update_text_area_pos();
+        this.update_text_area_pos(args);
     }
     
     FromWasmHideTextIME() {
-        console.error("IMPLEMENTR!")
+        console.error("implement FromWasmHideTextIME!")
     }
-    
     
     FromWasmWebSocketOpen(args) {
         let auto_reconnect = args.auto_reconnect;
@@ -909,7 +907,7 @@ export class WasmWebBrowser extends WasmBridge {
                 if (was_paste) {
                     was_paste = false;
                     
-                    this.to_wasm.text_input({
+                    this.to_wasm.ToWasmTextInput({
                         was_paste: true,
                         input: ta.value.substring(last_len),
                         replace_last: false,
@@ -1029,22 +1027,17 @@ export class WasmWebBrowser extends WasmBridge {
     // internal helper api
     
     
-    update_text_area_pos() {
-        if (!this.text_area)return;
-        var pos = this.text_area_pos;
-        var ta = this.text_area;
-        if (ta && pos) {
-            ta.style.left = (Math.round(pos.x) - 4) + "px";
-            ta.style.top = Math.round(pos.y) + "px"
+    update_text_area_pos(pos) {
+        if (this.text_area && pos) {
+            this.text_area.style.left = (Math.round(pos.x) - 2) + "px";
+            this.text_area.style.top = (Math.round(pos.y) + 4) + "px"
         }
     }
-    
     
     focus_keyboard_input() {
         if (!this.text_area)return;
         this.text_area.focus();
     }
-    
 }
 
 function can_fullscreen() {

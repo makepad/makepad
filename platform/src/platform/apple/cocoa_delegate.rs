@@ -623,9 +623,11 @@ pub fn define_cocoa_view_class() -> *const Class {
         let window_rect: NSRect = unsafe {msg_send![cw.window, frame]};
         
         let origin = cw.get_ime_origin();
-        let bar = (window_rect.size.height - view_rect.size.height) as f32 - 5.;
+        //let shift_y = 20.0;
+        //let shift_x = 4.0;
+        //let bar = 0.0;// (window_rect.size.height - view_rect.size.height) as f32 - 5.;
         NSRect {
-            origin: NSPoint {x: (origin.x + cw.ime_spot.x) as f64, y: (origin.y + (view_rect.size.height as f32 - cw.ime_spot.y - bar)) as f64},
+            origin: NSPoint {x: (origin.x + cw.ime_spot.x) as f64, y: (origin.y + (view_rect.size.height as f32 - cw.ime_spot.y)) as f64},
             // as _, y as _),
             size: NSSize {width: 0.0, height: 0.0},
         }
