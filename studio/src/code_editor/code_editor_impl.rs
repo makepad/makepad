@@ -292,7 +292,7 @@ impl CodeEditorImpl {
         self.text_glyph_size = self.code_text.text_style.font_size * self.code_text.get_monospace_base(cx);
         self.handle_select_scroll_in_draw(cx);
         self.begin_instances(cx);
-        ViewRedrawing::Yes
+        ViewRedrawing::yes()
     }
     
     pub fn state_has_document_inner<'a>(&mut self,state: &'a EditorState) -> bool {

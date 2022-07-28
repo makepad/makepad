@@ -10,13 +10,13 @@ use {
     }
 };
 // include the SIMD path if we support it
-#[cfg(any(not(target_arch = "wasm32"), target_feature = "simd128"))]
+#[cfg(feature = "nightly")]
 use crate::mandelbrot_simd::*;
 
 // Our live DSL to define the shader and UI def
 live_register!{
     // include shader standard library with the Pal object
-    use makepad_platform::shader::std::*;
+    import makepad_platform::shader::std::*;
     
     // the shader to draw the texture tiles
     DrawTile: {{DrawTile}} {
@@ -48,7 +48,7 @@ live_register!{
 pub const TILE_SIZE_X: usize = 256;
 pub const TILE_SIZE_Y: usize = 256;
 pub const TILE_CACHE_SIZE: usize = 500;
-pub const POOL_THREAD_COUNT: usize =;
+pub const POOL_THREAD_COUNT: usize = 4;
 
 // the shader struct used to draw
 
@@ -107,26 +107,18 @@ pub struct Tile {
     // the memory buffer thats used when a tile is rendered
     pub buffer: Vec<u32>,
     // the makepad system texture backing the tile, when ready for drawing 'buffer' is swapped onto it
-    pub texture: Texture,
+    pub texture_index: usize,
     // the fractal space rectangle that this tile represents
     pub fractal: RectF64,
 }
 
 impl Tile {
-    fn new(cx: &mut Cx) -> Self {
-        let texture = Texture::new(cx);
-        texture.set_desc(cx, TextureDesc {
-            format: TextureFormat::ImageBGRA,
-            width: Some(TILE_SIZE_X),
-            height: Some(TILE_SIZE_Y),
-            multisample: None
-        });
-        // preallocate buffers otherwise safari barfs in the worker
+    fn new(texture_index:usize) -> Self {
         let mut buffer = Vec::new();
         buffer.resize(TILE_SIZE_X * TILE_SIZE_Y, 0);
         Self {
             buffer,
-            texture,
+            texture_index,
             fractal: RectF64::default()
         }
     }
@@ -143,6 +135,7 @@ pub struct BailTest {
 }
 
 pub struct TileCache {
+    textures: Vec<Texture>,
     // the current layer of tiles
     current: Vec<Tile>,
     // next layer of tiles
@@ -162,10 +155,24 @@ pub struct TileCache {
 impl TileCache {
     fn new(cx: &mut Cx) -> Self {
         let mut empty = Vec::new();
-        for _ in 0..TILE_CACHE_SIZE {
-            empty.push(Tile::new(cx));
+        let mut textures = Vec::new();
+        for i in 0..TILE_CACHE_SIZE {
+            empty.push(Tile::new(i));
+            
+            let texture = Texture::new(cx);
+            texture.set_desc(cx, TextureDesc {
+                format: TextureFormat::ImageBGRA,
+                width: Some(TILE_SIZE_X),
+                height: Some(TILE_SIZE_Y),
+                multisample: None
+            });
+            textures.push(texture);
         }
+
+        // preallocate buffers otherwise safari barfs in the worker
+        
         Self {
+            textures,
             current: Vec::new(),
             next: Vec::new(),
             empty,
@@ -179,7 +186,7 @@ impl TileCache {
     
     fn tile_completed(&mut self, cx: &mut Cx, mut tile: Tile) {
         self.tiles_in_flight -= 1;
-        tile.texture.swap_image_u32(cx, &mut tile.buffer);
+        self.textures[tile.texture_index].swap_image_u32(cx, &mut tile.buffer);
         self.next.push(tile)
     }
     
@@ -213,14 +220,14 @@ impl TileCache {
     
     fn discard_next_layer(&mut self, cx: &mut Cx) {
         while let Some(mut tile) = self.next.pop() {
-            tile.texture.swap_image_u32(cx, &mut tile.buffer);
+            self.textures[tile.texture_index].swap_image_u32(cx, &mut tile.buffer);
             self.empty.push(tile);
         }
     }
     
     fn discard_current_layer(&mut self, cx: &mut Cx) {
         while let Some(mut tile) = self.current.pop() {
-            tile.texture.swap_image_u32(cx, &mut tile.buffer);
+            self.textures[tile.texture_index].swap_image_u32(cx, &mut tile.buffer);
             self.empty.push(tile);
         }
         self.current_zoom = self.next_zoom;
@@ -455,7 +462,7 @@ impl Mandelbrot {
     
     // the SIMD tile rendering, uses the threadpool to draw the tile
     
-    #[cfg(any(not(target_arch = "wasm32"), target_feature = "simd128"))]
+    #[cfg(feature = "nightly")]
     pub fn render_tile(&mut self, mut tile: Tile, fractal_zoom: f64) {
         let max_iter = self.max_iter;
         // we pull a cloneable sender from the to_ui message channel for the worker
@@ -487,7 +494,7 @@ impl Mandelbrot {
     }
     
     // Normal tile rendering, uses the threadpool to draw the tile
-    #[cfg(all(target_arch = "wasm32", not(target_feature = "simd128")))]
+    #[cfg(not(feature = "nightly"))]
     pub fn render_tile(&mut self, mut tile: Tile, _fractal_zoom: f64) {
         let max_iter = self.max_iter;
         // we pull a cloneable sender from the to_ui message channel for the worker
@@ -631,7 +638,7 @@ impl Mandelbrot {
         
         self.had_first_draw = true;
         // store the view information here as its the only place it's known in the codeflow
-        self.space.tile_size = vec2f64(TILE_SIZE_X as f64, TILE_SIZE_Y as f64) / cx.current_dpi_factor as f64;
+        self.space.tile_size = vec2f64(TILE_SIZE_X as f64, TILE_SIZE_Y as f64) / cx.current_dpi_factor() as f64;
         self.space.view_rect = cx.turtle().rect();
         
         // update bail window the workers check to skip tiles that are no longer in view
@@ -647,7 +654,7 @@ impl Mandelbrot {
         for tile in self.tile_cache.current.iter().chain(self.tile_cache.next.iter()) {
             let rect = self.space.fractal_to_screen_rect(tile.fractal);
             // set texture by index.
-            self.draw_tile.draw_vars.set_texture(0, &tile.texture);
+            self.draw_tile.draw_vars.set_texture(0, &self.tile_cache.textures[tile.texture_index]);
             
             // this emits the drawcall onto the drawlists that go to the renderbackend
             // By changing the texture every time we cause to emit multiple drawcalls.
@@ -657,6 +664,6 @@ impl Mandelbrot {
         
         self.view.end(cx);
         
-        ViewRedrawing::Yes
+        ViewRedrawing::yes()
     }
 }

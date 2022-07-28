@@ -67,7 +67,7 @@ fn mandelbrot_pixel_f32x4(max_iter: u32, c_x: f32x4, c_y: f32x4) -> (u32x4, f32x
         // this compares the magsq to > 4.0 and stores the result in a mask
         // masks are vectors of bools you can use to select values
         // in simd types by lane
-        let if_exit = magsq.lanes_gt(f32x4s(4.0));
+        let if_exit = magsq.simd_gt(f32x4s(4.0));
 
         // this boolean logic is only 1 when the value 'changed to 1'
         // and 0 otherwise. so it stores if we have a new exit on our lanes
@@ -119,7 +119,7 @@ pub fn mandelbrot_f32x4(tile: &mut Tile, max_iter: usize) {
             // scale and clamp the magnitude squared so that it can become a 
             // fixed point 16 bit value we can pack into 2x8bit components of the texture 
             let magsq = (magsq + f32x4s(127.0)) * f32x4s(256.0);
-            let magsq = magsq.clamp(f32x4s(0.0), f32x4s(65535.0));
+            let magsq = magsq.simd_clamp(f32x4s(0.0), f32x4s(65535.0));
             // cast our float magnitude squared into an integer simd vector
             let magsq: u32x4 = magsq.cast();
             
@@ -146,7 +146,7 @@ fn mandelbrot_pixel_f64x2(max_iter: u64, c_x: f64x2, c_y: f64x2) -> (u64x2, f64x
         let yy = y * y;
         let magsq = xx + yy;
         
-        let if_exit = magsq.lanes_gt(f64x2s(4.0));
+        let if_exit = magsq.simd_gt(f64x2s(4.0));
         let new_exit = (if_exit ^ exitted) & if_exit;
         exitted = exitted | new_exit;
         magsq_out = new_exit.select(magsq, magsq_out);
@@ -173,7 +173,7 @@ pub fn mandelbrot_f64x2(tile: &mut Tile, max_iter: usize) {
             let fp_y = fractal_pos.1 + fractal_size.1 * pixel_pos.1 / tile_size.1;
             let (iter, magsq) = mandelbrot_pixel_f64x2(max_iter as u64, fp_x, fp_y);
             let magsq = (magsq + f64x2s(127.0)) * f64x2s(256.0);
-            let magsq = magsq.clamp(f64x2s(0.0), f64x2s(65535.0));
+            let magsq = magsq.simd_clamp(f64x2s(0.0), f64x2s(65535.0));
             let magsq: u64x2 = magsq.cast();
             for i in 0..2 {
                 tile.buffer[y * TILE_SIZE_X + x + i] = iter[i] as u32 | ((magsq[i]) << 16) as u32;

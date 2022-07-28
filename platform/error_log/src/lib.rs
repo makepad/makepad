@@ -12,6 +12,8 @@ pub use error_log_desktop::*;
 
 #[cfg(target_arch = "wasm32")]
 pub use error_log_wasm::*;
+#[cfg(target_arch = "wasm32")]
+pub use error_log_wasm as makepad_error_log;
 
 use std::time::Instant;
 

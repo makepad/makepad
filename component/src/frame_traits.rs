@@ -198,7 +198,7 @@ pub trait FrameDrawApi{
     fn not_done(arg:FrameUid)->FrameDraw{Result::Err(arg)}
     fn is_done(&self)->bool;
     fn is_not_done(&self)->bool;
-    fn get_not_done(&self)->Option<FrameUid>;
+    fn into_not_done(&self)->Option<FrameUid>;
 }
 
 impl FrameDrawApi for FrameDraw {
@@ -214,7 +214,7 @@ impl FrameDrawApi for FrameDraw {
             Result::Err(_) => true
         }
     }
-    fn get_not_done(&self)->Option<FrameUid>{
+    fn into_not_done(&self)->Option<FrameUid>{
         match *self {
             Result::Ok(_) => None,
             Result::Err(uid) => Some(uid)
