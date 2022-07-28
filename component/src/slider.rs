@@ -186,7 +186,7 @@ impl FrameComponent for Slider {
     
     fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk, _self_uid: FrameUid) -> FrameDraw {
         self.draw_walk(cx, walk);
-        FrameDraw::Done
+        FrameDraw::done()
     }
 }
 
@@ -211,7 +211,6 @@ impl Slider {
                 self.animate_state(cx, ids!(focus.on));
             }
             Hit::FingerHoverIn(_) => {
-                log!("SLIDER HOVER IN");
                 self.animate_state(cx, ids!(hover.on));
             }
             Hit::FingerHoverOut(_) => {

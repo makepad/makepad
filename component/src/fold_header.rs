@@ -119,7 +119,7 @@ impl FrameComponent for FoldHeader {
                 self.reverse_walk_opened(cx);
                 cx.end_turtle();
                 self.draw_state.end();
-                return FrameDraw::Done
+                return FrameDraw::done()
             };
             self.draw_state.set(DrawState::DrawBody);
         }
@@ -131,7 +131,7 @@ impl FrameComponent for FoldHeader {
             cx.end_turtle();
             self.draw_state.end();
         }
-        FrameDraw::Done
+        FrameDraw::done()
     }
 }
 

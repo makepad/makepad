@@ -102,7 +102,7 @@ impl AudioComponent for Mixer {
         for input in self.inputs.values_mut(){
             input.audio_query(query, callback)?;
         }
-        AudioResult::NotFound
+        AudioResult::not_found()
     }
 
 }

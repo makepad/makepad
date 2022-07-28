@@ -1,6 +1,5 @@
 pub use {
     std::{
-        ops::{ControlFlow, Try, FromResidual},
         rc::Rc,
         cell::RefCell
     },
@@ -45,6 +44,37 @@ pub use {
     }
 };
 
+pub type ViewRedrawing = Result<(),()>;
+
+pub trait ViewRedrawingApi{
+    fn no()->ViewRedrawing{Result::Err(())}
+    fn yes()->ViewRedrawing{Result::Ok(())}
+    fn is_redrawing(&self)->bool;
+    fn not_redrawing(&self)->bool;
+    fn assume_redrawing(&self);
+}
+
+impl ViewRedrawingApi for ViewRedrawing {
+    fn is_redrawing(&self) -> bool {
+        match *self {
+            Result::Ok(_) => true,
+            Result::Err(_) => false
+        }
+    }
+    fn not_redrawing(&self) -> bool {
+        match *self {
+            Result::Ok(_) => false,
+            Result::Err(_) => true
+        }
+    }
+    fn assume_redrawing(&self){
+        if !self.is_redrawing(){
+            panic!("assume_redraw_yes it should redraw")
+        }
+    }
+}
+
+/*
 pub enum ViewRedrawing {
     Yes,
     No
@@ -91,6 +121,7 @@ impl Try for ViewRedrawing {
         }
     }
 }
+*/
 
 #[derive(Debug)]
 pub struct View { // draw info per UI element
@@ -260,7 +291,7 @@ impl View {
             let pos = cx.peek_walk_pos(walk);
             if pos == cx.cx.draw_lists[self.draw_list.id()].rect.pos {
                 cx.walk_turtle(walk);
-                return ViewRedrawing::No;
+                return ViewRedrawing::no();
             }
         }
         
@@ -287,7 +318,7 @@ impl View {
         
         cx.align_list.push(new_area);
         
-        ViewRedrawing::Yes
+        ViewRedrawing::yes()
     }
     
     

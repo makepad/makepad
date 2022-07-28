@@ -153,7 +153,7 @@ impl DesktopWindow {
     
     pub fn begin(&mut self, cx: &mut Cx2d, _menu: Option<&Menu>) -> ViewRedrawing {
         if !cx.view_will_redraw(&self.main_view) {
-            return ViewRedrawing::No
+            return ViewRedrawing::no()
         }
         
         cx.begin_pass(&self.pass);
@@ -164,14 +164,14 @@ impl DesktopWindow {
         if self.frame.draw(cx).is_done() {
             self.main_view.end(cx);
             cx.end_pass(&self.pass);
-            return ViewRedrawing::No
+            return ViewRedrawing::no()
         }
         
-        ViewRedrawing::Yes
+        ViewRedrawing::yes()
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
-        while self.frame.draw(cx).not_done() {}
+        while self.frame.draw(cx).is_not_done() {}
         self.main_view.end(cx);
         cx.end_pass(&self.pass);
     }

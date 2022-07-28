@@ -104,7 +104,7 @@ impl Dock {
     
     pub fn begin(&mut self, cx: &mut Cx2d) -> ViewRedrawing  {
         self.view.begin(cx, Walk::default(), self.layout) ?;
-        ViewRedrawing::Yes
+        ViewRedrawing::yes()
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
@@ -194,10 +194,10 @@ impl Dock {
         
         if panel.tab_bar.begin(cx, selected_tab).not_redrawing() {
             self.contents(cx);
-            return ViewRedrawing::No
+            return ViewRedrawing::no()
         }
         
-        ViewRedrawing::Yes
+        ViewRedrawing::yes()
     }
     
     pub fn end_tab_bar(&mut self, cx: &mut Cx2d) {
