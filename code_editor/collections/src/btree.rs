@@ -27,11 +27,11 @@ impl<T: Chunk> BTree<T> {
         self.root.summed_len()
     }
 
-    pub(crate) fn measure<M: Measure<T>>(&self) -> usize {
+    pub(crate) fn measured_len<M: Measure<T>>(&self) -> usize {
         M::measure_info(self.info())
     }
 
-    pub(crate) fn measure_at<M: Measure<T>>(&self, position: usize) -> usize {
+    pub(crate) fn to_measured_index<M: Measure<T>>(&self, position: usize) -> usize {
         self.root.measure_at::<M>(position)
     }
 
@@ -256,11 +256,11 @@ impl<'a, T: Chunk> Slice<'a, T> {
         self.end - self.start
     }
 
-    pub(crate) fn measure<M: Measure<T>>(&self) -> usize {
+    pub(crate) fn measured_len<M: Measure<T>>(&self) -> usize {
         M::measure_info(self.info())
     }
 
-    pub(crate) fn measure_at<M: Measure<T>>(&self, position: usize) -> usize {
+    pub(crate) fn to_measured_index<M: Measure<T>>(&self, position: usize) -> usize {
         self.root.measure_at::<M>(self.start + position) - M::measure_info(self.start_info)
     }
 
@@ -421,7 +421,6 @@ pub(crate) trait Chunk: Clone {
     fn len(&self) -> usize;
     fn is_boundary(&self, index: usize) -> bool;
     fn info_at(&self, index: usize) -> Self::Info;
-    fn merge(&self, start: usize, other: &Self, end: usize) -> Self;
     fn move_left(&mut self, other: &mut Self, end: usize);
     fn move_right(&mut self, other: &mut Self, start: usize);
     fn truncate_back(&mut self, start: usize);
