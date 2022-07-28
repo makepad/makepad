@@ -62,7 +62,7 @@ impl<'a> LiveExpander<'a> {
                     in_index += 1;
                     continue;
                 }
-                LiveValue::UseComponent(component_type) => {
+                LiveValue::Registry(component_type) => {
                     let registries = self.live_registry.components.0.borrow();
                     if let Some(registry) = registries.values().find( | v | v.component_type() == *component_type) {
                         if in_node.id != LiveId(0) && registry.get_component_info(in_node.id).is_none() {
@@ -87,7 +87,7 @@ impl<'a> LiveExpander<'a> {
                     in_index += 1;
                     continue;
                 }
-                LiveValue::Use(module_id) => {
+                LiveValue::Import(module_id) => {
                     // lets verify it points anywhere
                     if self.live_registry.module_id_and_name_to_doc(*module_id, in_node.id).is_none() {
                         self.errors.push(LiveError {

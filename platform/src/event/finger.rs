@@ -5,6 +5,7 @@ use {
         event::{
             event::{Event, Hit, DragHit}
         },
+        window::WindowId,
         cx::Cx,
         draw_2d::turtle::{Margin},
         area::Area,
@@ -92,6 +93,7 @@ pub struct CxFingerDrag{
 }
 
 impl CxFingerDrag{
+    #[allow(dead_code)]
     pub(crate) fn cycle_drag(&mut self){
         self.drag_area = self.next_drag_area;
         self.next_drag_area = Area::Empty;
@@ -130,9 +132,9 @@ impl Default for FingerInputType {
     fn default() -> Self {Self::Mouse}
 }
 
-#[derive(Clone, Default, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FingerDownEvent {
-    pub window_id: usize,
+    pub window_id: WindowId,
     pub abs: Vec2,
     pub digit: usize,
     pub tap_count: u32,
@@ -142,7 +144,7 @@ pub struct FingerDownEvent {
     pub time: f64
 }
 
-#[derive(Clone, Default, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FingerDownHitEvent {
     pub rel: Vec2,
     pub rect: Rect,
@@ -158,9 +160,9 @@ impl std::ops::DerefMut for FingerDownHitEvent {
     fn deref_mut(&mut self) -> &mut Self::Target {&mut self.deref_target}
 }
 
-#[derive(Clone, Default, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FingerMoveEvent {
-    pub window_id: usize,
+    pub window_id: WindowId,
     pub abs: Vec2,
     pub digit: usize,
     pub input_type: FingerInputType,
@@ -168,7 +170,7 @@ pub struct FingerMoveEvent {
     pub time: f64
 }
 
-#[derive(Clone, Default, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FingerMoveHitEvent {
     pub abs_start: Vec2,
     pub rel: Vec2,
@@ -194,9 +196,9 @@ impl FingerMoveHitEvent {
     }
 }
 
-#[derive(Clone, Default, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FingerUpEvent {
-    pub window_id: usize,
+    pub window_id: WindowId,
     pub abs: Vec2,
     pub digit: usize,
     pub input_type: FingerInputType,
@@ -204,7 +206,7 @@ pub struct FingerUpEvent {
     pub time: f64
 }
 
-#[derive(Clone, Default, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FingerUpHitEvent {
     pub rel: Vec2,
     pub abs_start: Vec2,
@@ -236,16 +238,16 @@ impl Default for HoverState {
     }
 }
 
-#[derive(Clone, Default, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FingerHoverEvent {
-    pub window_id: usize,
+    pub window_id: WindowId,
     pub abs: Vec2,
     pub handled: bool,
     pub modifiers: KeyModifiers,
     pub time: f64
 }
 
-#[derive(Clone, Default, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FingerHoverHitEvent {
     pub rel: Vec2,
     pub rect: Rect,
@@ -262,9 +264,9 @@ impl std::ops::DerefMut for FingerHoverHitEvent {
     fn deref_mut(&mut self) -> &mut Self::Target {&mut self.event}
 }
 
-#[derive(Clone, Default, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FingerScrollEvent {
-    pub window_id: usize,
+    pub window_id: WindowId,
     pub digit: usize,
     pub abs: Vec2,
     pub scroll: Vec2,
@@ -275,7 +277,7 @@ pub struct FingerScrollEvent {
     pub time: f64
 }
 
-#[derive(Clone, Default, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FingerScrollHitEvent {
     pub rel: Vec2,
     pub rect: Rect,

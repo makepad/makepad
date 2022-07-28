@@ -1,14 +1,13 @@
 use {
     std::{
         fmt::Write,
-        time::Instant,
         collections::HashSet,
     },
     crate::{
         makepad_error_log::*,
         makepad_math::Vec2,
         gpu_info::GpuInfo,
-        cx::{Cx,PlatformType},
+        cx::{Cx, PlatformType},
         event::{
             DraggedItem,
             Timer,
@@ -17,6 +16,12 @@ use {
             WebSocketAutoReconnect,
             WebSocket,
             NextFrame,
+        },
+        draw_list::{
+            DrawListId
+        },
+        window::{
+            WindowId
         },
         audio::{
             AudioTime,
@@ -33,18 +38,12 @@ use {
             Menu,
         },
         pass::{
+            PassId,
             CxPassParent
         },
     }
 };
 
-pub fn profile_start() -> Instant {
-    Instant::now()
-}
-
-pub fn profile_end(instant: Instant) {
-    log!("Profile time {} ms", (instant.elapsed().as_nanos() as f64) / 1000000f64);
-}
 
 pub trait CxPlatformApi {
     fn post_signal(signal: Signal);
@@ -59,16 +58,16 @@ pub trait CxPlatformApi {
 
 #[derive(PartialEq)]
 pub enum CxPlatformOp {
-    CreateWindow(usize),
-    CloseWindow(usize),
-    MinimizeWindow(usize),
-    MaximizeWindow(usize),
-    FullscreenWindow(usize),
-    NormalizeWindow(usize),
-    RestoreWindow(usize),
-    SetTopmost(usize, bool),
-    XrStartPresenting(usize),
-    XrStopPresenting(usize),
+    CreateWindow(WindowId),
+    CloseWindow(WindowId),
+    MinimizeWindow(WindowId),
+    MaximizeWindow(WindowId),
+    FullscreenWindow(WindowId),
+    NormalizeWindow(WindowId),
+    RestoreWindow(WindowId),
+    SetTopmost(WindowId, bool),
+    XrStartPresenting(WindowId),
+    XrStopPresenting(WindowId),
     
     ShowTextIME(Vec2),
     HideTextIME,
@@ -80,18 +79,18 @@ pub enum CxPlatformOp {
 }
 
 impl Cx {
-    pub fn redraw_id(&self)->u64{self.redraw_id}
+    pub fn redraw_id(&self) -> u64 {self.redraw_id}
     
-    pub fn platform_type(&self)->&PlatformType{&self.platform_type}
+    pub fn platform_type(&self) -> &PlatformType {&self.platform_type}
     
-    pub fn gpu_info(&self)->&GpuInfo{&self.gpu_info}
+    pub fn gpu_info(&self) -> &GpuInfo {&self.gpu_info}
     
     pub fn update_menu(&mut self, menu: Menu) {
         self.platform_ops.push(CxPlatformOp::UpdateMenu(menu));
     }
     
-    pub fn push_unique_platform_op(&mut self, op:CxPlatformOp){
-        if self.platform_ops.iter().find(|o| **o == op).is_none(){
+    pub fn push_unique_platform_op(&mut self, op: CxPlatformOp) {
+        if self.platform_ops.iter().find( | o | **o == op).is_none() {
             self.platform_ops.push(op);
         }
     }
@@ -145,11 +144,11 @@ impl Cx {
     pub fn get_dpi_factor_of(&mut self, area: &Area) -> f32 {
         match area {
             Area::Instance(ia) => {
-                let pass_id = self.draw_lists[ia.draw_list_id].pass_id;
+                let pass_id = self.draw_lists[ia.draw_list_id].pass_id.unwrap();
                 return self.get_delegated_dpi_factor(pass_id)
             },
             Area::DrawList(va) => {
-                let pass_id = self.draw_lists[va.draw_list_id].pass_id;
+                let pass_id = self.draw_lists[va.draw_list_id].pass_id.unwrap();
                 return self.get_delegated_dpi_factor(pass_id)
             },
             _ => ()
@@ -157,12 +156,12 @@ impl Cx {
         return 1.0;
     }
     
-    pub fn get_delegated_dpi_factor(&mut self, pass_id: usize) -> f32 {
+    pub fn get_delegated_dpi_factor(&mut self, pass_id: PassId) -> f32 {
         let mut pass_id_walk = pass_id;
         for _ in 0..25 {
             match self.passes[pass_id_walk].parent {
                 CxPassParent::Window(window_id) => {
-                    if !self.windows[window_id].is_created{
+                    if !self.windows[window_id].is_created {
                         panic!();
                     }
                     return self.windows[window_id].window_geom.dpi_factor;
@@ -181,15 +180,15 @@ impl Cx {
         match area {
             Area::Empty => (),
             Area::Instance(instance) => {
-                self.redraw_pass_and_parent_passes(self.draw_lists[instance.draw_list_id].pass_id);
+                self.redraw_pass_and_parent_passes(self.draw_lists[instance.draw_list_id].pass_id.unwrap());
             },
             Area::DrawList(listarea) => {
-                self.redraw_pass_and_parent_passes(self.draw_lists[listarea.draw_list_id].pass_id);
+                self.redraw_pass_and_parent_passes(self.draw_lists[listarea.draw_list_id].pass_id.unwrap());
             }
         }
     }
     
-    pub fn redraw_pass_and_parent_passes(&mut self, pass_id: usize) {
+    pub fn redraw_pass_and_parent_passes(&mut self, pass_id: PassId) {
         let mut walk_pass_id = pass_id;
         loop {
             if let Some(main_view_id) = self.passes[walk_pass_id].main_draw_list_id {
@@ -206,18 +205,18 @@ impl Cx {
         }
     }
     
-    pub fn repaint_pass(&mut self, pass_id: usize) {
+    pub fn repaint_pass(&mut self, pass_id: PassId) {
         let cxpass = &mut self.passes[pass_id];
         cxpass.paint_dirty = true;
     }
     
-    pub fn redraw_pass_and_child_passes(&mut self, pass_id: usize) {
+    pub fn redraw_pass_and_child_passes(&mut self, pass_id: PassId) {
         let cxpass = &self.passes[pass_id];
         if let Some(main_list) = cxpass.main_draw_list_id {
             self.redraw_area_and_children(Area::DrawList(DrawListArea {redraw_id: 0, draw_list_id: main_list}));
         }
         // lets redraw all subpasses as well
-        for sub_pass_id in 0..self.passes.len() {
+        for sub_pass_id in self.passes.id_iter() {
             if let CxPassParent::Pass(dep_pass_id) = self.passes[sub_pass_id].parent.clone() {
                 if dep_pass_id == pass_id {
                     self.redraw_pass_and_child_passes(sub_pass_id);
@@ -249,26 +248,30 @@ impl Cx {
     }
     
     
-    pub fn set_view_scroll_x(&mut self, draw_list_id: usize, scroll_pos: f32) {
-        let fac = self.get_delegated_dpi_factor(self.draw_lists[draw_list_id].pass_id);
-        let cxview = &mut self.draw_lists[draw_list_id];
-        cxview.unsnapped_scroll.x = scroll_pos;
-        let snapped = scroll_pos - scroll_pos % (1.0 / fac);
-        if cxview.snapped_scroll.x != snapped {
-            cxview.snapped_scroll.x = snapped;
-            self.passes[cxview.pass_id].paint_dirty = true;
+    pub fn set_scroll_x(&mut self, draw_list_id: DrawListId, scroll_pos: f32) {
+        if let Some(pass_id) = self.draw_lists[draw_list_id].pass_id {
+            let fac = self.get_delegated_dpi_factor(pass_id);
+            let cxview = &mut self.draw_lists[draw_list_id];
+            cxview.unsnapped_scroll.x = scroll_pos;
+            let snapped = scroll_pos - scroll_pos % (1.0 / fac);
+            if cxview.snapped_scroll.x != snapped {
+                cxview.snapped_scroll.x = snapped;
+                self.passes[cxview.pass_id.unwrap()].paint_dirty = true;
+            }
         }
     }
     
     
-    pub fn set_view_scroll_y(&mut self, draw_list_id: usize, scroll_pos: f32) {
-        let fac = self.get_delegated_dpi_factor(self.draw_lists[draw_list_id].pass_id);
-        let cxview = &mut self.draw_lists[draw_list_id];
-        cxview.unsnapped_scroll.y = scroll_pos;
-        let snapped = scroll_pos - scroll_pos % (1.0 / fac);
-        if cxview.snapped_scroll.y != snapped {
-            cxview.snapped_scroll.y = snapped;
-            self.passes[cxview.pass_id].paint_dirty = true;
+    pub fn set_scroll_y(&mut self, draw_list_id: DrawListId, scroll_pos: f32) {
+        if let Some(pass_id) = self.draw_lists[draw_list_id].pass_id {
+            let fac = self.get_delegated_dpi_factor(pass_id);
+            let cxview = &mut self.draw_lists[draw_list_id];
+            cxview.unsnapped_scroll.y = scroll_pos;
+            let snapped = scroll_pos - scroll_pos % (1.0 / fac);
+            if cxview.snapped_scroll.y != snapped {
+                cxview.snapped_scroll.y = snapped;
+                self.passes[cxview.pass_id.unwrap()].paint_dirty = true;
+            }
         }
     }
     
@@ -276,11 +279,11 @@ impl Cx {
         if old_area == Area::Empty {
             return new_area
         }
-
+        
         self.fingers.update_area(old_area, new_area);
         self.finger_drag.update_area(old_area, new_area);
         self.keyboard.update_area(old_area, new_area);
-
+        
         new_area
     }
     
@@ -318,25 +321,25 @@ impl Cx {
         }
     }
     
-    pub fn debug_draw_tree(&self, dump_instances: bool, draw_list_id: usize) {
-        fn debug_draw_tree_recur(cx: &Cx, dump_instances: bool, s: &mut String, draw_list_id: usize, depth: usize) {
-            if draw_list_id >= cx.draw_lists.len() {
-                writeln!(s, "---------- Drawlist still empty ---------").unwrap();
-                return
-            }
+    pub fn debug_draw_tree(&self, dump_instances: bool, draw_list_id: DrawListId) {
+        fn debug_draw_tree_recur(cx: &Cx, dump_instances: bool, s: &mut String, draw_list_id: DrawListId, depth: usize) {
+            //if draw_list_id >= cx.draw_lists.len() {
+            //    writeln!(s, "---------- Drawlist still empty ---------").unwrap();
+            //    return
+            //}
             let mut indent = String::new();
             for _i in 0..depth {
                 indent.push_str("|   ");
             }
             let draw_items_len = cx.draw_lists[draw_list_id].draw_items_len;
-            if draw_list_id == 0 {
-                writeln!(s, "---------- Begin Debug draw tree for redraw_id: {} ---------", cx.redraw_id).unwrap();
-            }
+            //if draw_list_id == 0 {
+            //    writeln!(s, "---------- Begin Debug draw tree for redraw_id: {} ---------", cx.redraw_id).unwrap();
+            // }
             let rect = cx.draw_lists[draw_list_id].rect;
             let scroll = cx.draw_lists[draw_list_id].get_local_scroll();
             writeln!(
                 s,
-                "{}{} {}: len:{} rect:({}, {}, {}, {}) scroll:({}, {})",
+                "{}{} {:?}: len:{} rect:({}, {}, {}, {}) scroll:({}, {})",
                 indent,
                 cx.draw_lists[draw_list_id].debug_id,
                 draw_list_id,
@@ -394,9 +397,9 @@ impl Cx {
                     }
                 }
             }
-            if draw_list_id == 0 {
-                writeln!(s, "---------- End Debug draw tree for redraw_id: {} ---------", cx.redraw_id).unwrap();
-            }
+            //if draw_list_id == 0 {
+            //    writeln!(s, "---------- End Debug draw tree for redraw_id: {} ---------", cx.redraw_id).unwrap();
+            //}
         }
         
         let mut s = String::new();
@@ -404,6 +407,7 @@ impl Cx {
         log!("{}", s);
     }
 }
+
 
 #[macro_export]
 macro_rules!main_app {
@@ -418,7 +422,7 @@ macro_rules!main_app {
             let mut app = None;
             cx.event_loop( | cx, mut event | {
                 if let Event::Construct = event {
-                    app = Some( $ app::new_app(cx));
+                    app = Some( $app::new_main(cx));
                 }
                 app.as_mut().unwrap().handle_event(cx, &mut event);
                 cx.after_handle_event(&mut event);
@@ -456,7 +460,7 @@ macro_rules!main_app {
             let body = appcx as *mut WasmAppCx;
             (*body).cx.process_to_wasm(msg_ptr, | cx, mut event | {
                 if let Event::Construct = event {
-                    (*body).app = Some( $ app::new_app(cx));
+                    (*body).app = Some( $ app::new_main(cx));
                 }
                 (*body).app.as_mut().unwrap().handle_event(cx, &mut event);
                 cx.after_handle_event(&mut event);

@@ -1,15 +1,16 @@
-#![feature(portable_simd)]
+#![cfg_attr(feature = "nightly", feature(portable_simd))]
+
+pub use makepad_component;
 use makepad_component::*;
 use makepad_platform::*;
-pub use makepad_component;
 mod mandelbrot;
 
-#[cfg(any(not(target_arch = "wasm32"), target_feature = "simd128"))]
+#[cfg(feature = "nightly")]
 mod mandelbrot_simd;
 
 live_register!{
-    use makepad_component::frame::*;
-    use FrameComponent::*;
+    import makepad_component::frame::*;
+    registry FrameComponent::*;
     App: {{App}} {
         frame: {
             width: Fill
@@ -42,10 +43,6 @@ impl App {
         mandelbrot::live_register(cx);
     }
     
-    pub fn new_app(cx: &mut Cx) -> Self {
-        Self::new_as_main_module(cx, &module_path!(), id!(App)).unwrap()
-    }
-    
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
         self.window.handle_event(cx, event);
         
@@ -64,7 +61,7 @@ impl App {
         if self.window.begin(cx, None).not_redrawing() {
             return;
         }
-        while self.frame.draw(cx).not_done(){
+        while self.frame.draw(cx).is_not_done(){
         };
         self.window.end(cx);
     }

@@ -86,7 +86,7 @@ impl EditorView {
 }
 
 live_register!{
-    use crate::rust_editor::rust_editor::RustEditor;
+    import crate::rust_editor::rust_editor::RustEditor;
     
     Editors: {{Editors}} {
         rust_editor: RustEditor {},

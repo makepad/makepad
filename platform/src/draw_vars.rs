@@ -4,8 +4,9 @@ use {
         makepad_live_id::*,
         makepad_math::*,
         cx::Cx,
-        texture::Texture,
+        texture::{Texture,TextureId},
         makepad_error_log::*,
+        geometry::GeometryId,
         area::Area,
         geometry::{GeometryFields},
         live_traits::*,
@@ -32,9 +33,9 @@ pub struct DrawVars {
     pub(crate) var_instance_slots: usize,
     pub(crate) options: CxDrawShaderOptions,
     pub(crate) draw_shader: Option<DrawShader>,
-    pub(crate) geometry_id: Option<usize>,
+    pub(crate) geometry_id: Option<GeometryId>,
     pub user_uniforms: [f32; DRAW_CALL_USER_UNIFORMS],
-    pub texture_slots: [Option<usize>; DRAW_CALL_TEXTURE_SLOTS],
+    pub texture_slots: [Option<TextureId>; DRAW_CALL_TEXTURE_SLOTS],
     pub var_instances: [f32; DRAW_CALL_VAR_INSTANCES]
 }
 
@@ -66,7 +67,7 @@ impl LiveHook for DrawVars{}
 impl DrawVars {
     
     pub fn set_texture(&mut self, slot:usize, texture:&Texture){
-        self.texture_slots[slot] = Some(texture.texture_id);
+        self.texture_slots[slot] = Some(texture.texture_id());
     }
     
     pub fn can_instance(&self) -> bool {
@@ -312,7 +313,7 @@ impl DrawVars {
                 }
                 // DONE!
                 
-                cx.passes[draw_list.pass_id].paint_dirty = true;
+                cx.passes[draw_list.pass_id.unwrap()].paint_dirty = true;
                 draw_call.instance_dirty = true;
                 draw_call.uniforms_dirty = true;
             }
@@ -333,7 +334,7 @@ impl DrawVars {
                 let stride = sh.mapping.instances.total_slots;
                 let instances = &mut draw_call.instances.as_mut().unwrap()[inst.instance_offset..];
 
-                cx.passes[draw_list.pass_id].paint_dirty = true;
+                cx.passes[draw_list.pass_id.unwrap()].paint_dirty = true;
                 
                 // lets iterate the /*
                 for input in &sh.mapping.live_instances.inputs {

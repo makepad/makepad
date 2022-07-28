@@ -120,6 +120,6 @@ impl AudioComponent for Instrument {
         for input in self.steps.values_mut(){
             input.audio_query(query, callback)?;
         }
-        AudioResult::NotFound
+        AudioResult::not_found()
     }
 }

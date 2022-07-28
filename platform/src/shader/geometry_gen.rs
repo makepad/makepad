@@ -9,6 +9,7 @@ use {
         live_traits::*,
         geometry::{
             Geometry,
+            GeometryId,
             GeometryFingerprint,
             GeometryRef,
             GeometryField,
@@ -49,10 +50,10 @@ impl GeometryFields for GeometryQuad2D {
         fields.push(GeometryField {id: id!(geom_pos), ty: ShaderTy::Vec2});
     }
     
-    fn get_geometry_id(&self) -> Option<usize> {
+    fn get_geometry_id(&self) -> Option<GeometryId> {
         // ok so what about doing a Rc<Geometry> based on input and class type
         if let Some(gr) = &self.geometry_ref{
-            Some(gr.0.geometry_id)
+            Some(gr.0.geometry_id())
         }
         else{
             None
@@ -89,7 +90,7 @@ pub enum GeometryAxis {
 impl GeometryGen {
     
     pub fn to_geometry(self, cx:&mut Cx, geometry:&Geometry){
-        let cxgeom = &mut cx.geometries[geometry.geometry_id];
+        let cxgeom = &mut cx.geometries[geometry.geometry_id()];
         cxgeom.indices = self.indices;
         cxgeom.vertices = self.vertices;
         cxgeom.dirty = true;
