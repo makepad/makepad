@@ -44,84 +44,7 @@ pub use {
     }
 };
 
-pub type ViewRedrawing = Result<(),()>;
 
-pub trait ViewRedrawingApi{
-    fn no()->ViewRedrawing{Result::Err(())}
-    fn yes()->ViewRedrawing{Result::Ok(())}
-    fn is_redrawing(&self)->bool;
-    fn not_redrawing(&self)->bool;
-    fn assume_redrawing(&self);
-}
-
-impl ViewRedrawingApi for ViewRedrawing {
-    fn is_redrawing(&self) -> bool {
-        match *self {
-            Result::Ok(_) => true,
-            Result::Err(_) => false
-        }
-    }
-    fn not_redrawing(&self) -> bool {
-        match *self {
-            Result::Ok(_) => false,
-            Result::Err(_) => true
-        }
-    }
-    fn assume_redrawing(&self){
-        if !self.is_redrawing(){
-            panic!("assume_redraw_yes it should redraw")
-        }
-    }
-}
-
-/*
-pub enum ViewRedrawing {
-    Yes,
-    No
-}
-
-impl ViewRedrawing {
-    pub fn assume_redrawing(&self){
-        if !self.is_redrawing(){
-            panic!("assume_redraw_yes it should redraw")
-        }
-    }
-    
-    pub fn not_redrawing(&self)->bool{
-        !self.is_redrawing()
-    }
-    
-    pub fn is_redrawing(&self) -> bool {
-        match self {
-            Self::Yes => true,
-            _ => false
-        }
-    }
-}
-
-impl FromResidual for ViewRedrawing {
-    fn from_residual(_: ()) -> Self {
-        Self::No
-    }
-}
-
-impl Try for ViewRedrawing {
-    type Output = ();
-    type Residual = ();
-    
-    fn from_output(_: Self::Output) -> Self {
-        Self::Yes
-    }
-    
-    fn branch(self) -> ControlFlow<Self::Residual,
-    Self::Output> {
-        match self {
-            Self::Yes => ControlFlow::Continue(()),
-            Self::No => ControlFlow::Break(())
-        }
-    }
-}
-*/
 
 #[derive(Debug)]
 pub struct View { // draw info per UI element
@@ -219,6 +142,7 @@ impl View {
         
         // check if we have a pass id parent
         let pass_id = cx.pass_id.expect("No pass found when begin_view");
+        
         cx.draw_lists[self.draw_list.id()].pass_id = Some(pass_id);
         
         let codeflow_parent_id = cx.draw_list_stack.last().cloned();
@@ -575,3 +499,82 @@ pub struct AlignedInstance {
     pub inst: InstanceArea,
     pub index: usize
 }
+
+pub type ViewRedrawing = Result<(),()>;
+
+pub trait ViewRedrawingApi{
+    fn no()->ViewRedrawing{Result::Err(())}
+    fn yes()->ViewRedrawing{Result::Ok(())}
+    fn is_redrawing(&self)->bool;
+    fn not_redrawing(&self)->bool;
+    fn assume_redrawing(&self);
+}
+
+impl ViewRedrawingApi for ViewRedrawing {
+    fn is_redrawing(&self) -> bool {
+        match *self {
+            Result::Ok(_) => true,
+            Result::Err(_) => false
+        }
+    }
+    fn not_redrawing(&self) -> bool {
+        match *self {
+            Result::Ok(_) => false,
+            Result::Err(_) => true
+        }
+    }
+    fn assume_redrawing(&self){
+        if !self.is_redrawing(){
+            panic!("assume_redraw_yes it should redraw")
+        }
+    }
+}
+
+/*
+pub enum ViewRedrawing {
+    Yes,
+    No
+}
+
+impl ViewRedrawing {
+    pub fn assume_redrawing(&self){
+        if !self.is_redrawing(){
+            panic!("assume_redraw_yes it should redraw")
+        }
+    }
+    
+    pub fn not_redrawing(&self)->bool{
+        !self.is_redrawing()
+    }
+    
+    pub fn is_redrawing(&self) -> bool {
+        match self {
+            Self::Yes => true,
+            _ => false
+        }
+    }
+}
+
+impl FromResidual for ViewRedrawing {
+    fn from_residual(_: ()) -> Self {
+        Self::No
+    }
+}
+
+impl Try for ViewRedrawing {
+    type Output = ();
+    type Residual = ();
+    
+    fn from_output(_: Self::Output) -> Self {
+        Self::Yes
+    }
+    
+    fn branch(self) -> ControlFlow<Self::Residual,
+    Self::Output> {
+        match self {
+            Self::Yes => ControlFlow::Continue(()),
+            Self::No => ControlFlow::Break(())
+        }
+    }
+}
+*/
