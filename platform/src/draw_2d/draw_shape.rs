@@ -11,7 +11,7 @@ use {
 };
 
 live_register!{
-    use makepad_platform::shader::std::*;
+    import makepad_platform::shader::std::*;
     DrawShape: {{DrawShape}} {
         
         varying vertex_color: vec4
@@ -43,7 +43,7 @@ live_register!{
             }
             match self.shape {
                 Shape::None => {
-                    return #000
+                    return #0000
                 }
                 Shape::Solid => {
                     return Pal::premul(color)

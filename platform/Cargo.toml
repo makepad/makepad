@@ -7,6 +7,7 @@ description = "Makepad renderer"
 license = "MIT"
 
 [features]
+nightly = ["makepad-shader-compiler/nightly"]
 
 [dependencies]
 makepad-font = { path = "./vector/font", version = "0.1" }

@@ -5,6 +5,8 @@ pub use {
         cell::RefCell
     },
     crate::{
+        id_pool::*,
+        makepad_error_log::*,
         makepad_live_compiler::*,
         makepad_live_id::*,
         cx::Cx,
@@ -14,12 +16,45 @@ pub use {
 };
 
 
-#[derive(PartialEq)]
-pub struct Texture {
-    pub(crate) texture_id: usize,
+pub struct Texture(PoolId);
+
+#[derive(Clone, Debug, PartialEq, Copy)]
+pub struct TextureId(pub(crate) usize,u64);
+
+impl Texture{
+    pub fn texture_id(&self)->TextureId{TextureId(self.0.id, self.0.generation)}
 }
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Default)]
+pub struct CxTexturePool(IdPool<CxTexture>);
+impl CxTexturePool{
+    pub fn alloc(&mut self)->Texture{
+        Texture(self.0.alloc())
+    }
+}
+
+impl std::ops::Index<TextureId> for CxTexturePool{
+    type Output = CxTexture;
+    fn index(&self, index: TextureId) -> &Self::Output{
+        let d = &self.0.pool[index.0];
+        if d.generation != index.1{
+            error!("Texture id generation wrong {} {} {}", index.0, d.generation, index.1)
+        }
+        &d.item
+    }
+}
+
+impl std::ops::IndexMut<TextureId> for CxTexturePool{
+    fn index_mut(&mut self, index: TextureId) -> &mut Self::Output{
+        let d = &mut self.0.pool[index.0];
+        if d.generation != index.1{
+            error!("Texture id generation wrong {} {} {}", index.0, d.generation, index.1)
+        }
+        &mut d.item
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub enum TextureFormat {
     Default,
     ImageBGRA,
@@ -58,19 +93,8 @@ impl Default for TextureDesc {
 impl LiveHook for Texture{}
 impl LiveNew for Texture {
     fn new(cx: &mut Cx)->Self{
-        /*let textures_free = cx.textures_free.clone();
-        let texture_id =  if let Some(texture_id) = textures_free.borrow_mut().pop(  ){
-            texture_id 
-        }
-        else{*/
-            let texture_id = cx.textures.len();
-            cx.textures.push(CxTexture::default());
-            //texture_id
-        //};        
-        Self{
-            texture_id,
-        //    textures_free
-        }
+        let texture = cx.textures.alloc();
+        texture
     }
     
     fn live_type_info(_cx:&mut Cx) -> LiveTypeInfo{
@@ -112,16 +136,16 @@ impl LiveApply for Texture {
 
 impl Texture{
     pub fn set_desc(&self, cx:&mut Cx, desc:TextureDesc){
-        let cxtexture = &mut cx.textures[self.texture_id as usize];
+        let cxtexture = &mut cx.textures[self.texture_id()];
         cxtexture.desc = desc;
     }
 
     pub fn get_desc(&self, cx:&mut Cx) -> TextureDesc {
-        cx.textures[self.texture_id as usize].desc.clone()
+        cx.textures[self.texture_id()].desc.clone()
     }
     
     pub fn swap_image_u32(&self, cx: &mut Cx, image_u32:&mut Vec<u32>){
-        let cxtexture = &mut cx.textures[self.texture_id as usize];
+        let cxtexture = &mut cx.textures[self.texture_id()];
         std::mem::swap(&mut cxtexture.image_u32, image_u32);
         cxtexture.update_image = true;
     }

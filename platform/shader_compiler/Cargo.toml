@@ -6,3 +6,6 @@ edition = "2018"
 
 [dependencies]
 makepad-live-compiler = { path = "../live_compiler", version = "0.1" }
+
+[features]
+nightly = ["makepad-live-compiler/nightly"]

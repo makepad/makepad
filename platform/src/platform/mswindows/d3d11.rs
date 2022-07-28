@@ -580,7 +580,7 @@ impl D3d11RenderTarget {
 }
 */
 pub struct D3d11Window {
-    pub window_id: usize,
+    pub window_id: WindowId,
     pub is_in_resize: bool,
     pub window_geom: WindowGeom,
     pub win32_window: Win32Window,

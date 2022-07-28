@@ -28,8 +28,8 @@ use {
 };
 
 live_register!{
-    use makepad_platform::shader::std::*;
-    use makepad_component::fold_button::FoldButton;
+    import makepad_platform::shader::std::*;
+    import makepad_component::fold_button::FoldButton;
     
     RustEditor: {{RustEditor}} {
         
@@ -319,14 +319,6 @@ impl RustEditor {
     fn text_color(&self, text: &[char], token: FullToken, next_token: Option<FullToken>) -> Vec4 {
         match (token, next_token) {
             (FullToken::Comment, _) => self.text_color_comment,
-            (FullToken::Ident(id), _) if id.is_capitalised() => {
-                if text.len() > 1 && text[1].is_uppercase() {
-                    self.text_color_string
-                }
-                else {
-                    self.text_color_type_name
-                }
-            },
             (FullToken::Ident(_), Some(FullToken::Open(Delim::Paren))) => self.text_color_function_identifier,
             (FullToken::Ident(_), Some(FullToken::Punct(id!(!)))) => self.text_color_macro_identifier,
             
@@ -413,7 +405,19 @@ impl RustEditor {
             (FullToken::Ident(id!(bvec2)), _) |
             (FullToken::Ident(id!(bvec3)), _) |
             (FullToken::Ident(id!(bvec4)), _) => self.text_color_other_keyword,
-            (FullToken::Ident(_), _) => self.text_color_identifier,
+            (FullToken::Ident(_), _) => {
+                if text[0].is_uppercase(){
+                    if text.len() > 1 && text[1].is_uppercase() {
+                        self.text_color_string
+                    }
+                    else {
+                        self.text_color_type_name
+                    }
+                }
+                else{
+                    self.text_color_identifier
+                }
+            },
             (FullToken::Bool(_), _) => self.text_color_bool,
             
             (FullToken::Float(_), _) |

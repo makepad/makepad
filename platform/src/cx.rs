@@ -21,7 +21,9 @@ use {
         },
         platform::{
             CxPlatform,
-            CxPlatformTexture,
+        },
+        thread::{
+            ThreadPoolSender
         },
         event::{
             DrawEvent,
@@ -43,11 +45,13 @@ use {
         },
         gpu_info::GpuInfo,
         window::{
-            CxWindow,
+            CxWindowPool,
         },
-        draw_list::DrawList,
+        draw_list::{
+            CxDrawListPool
+        },
         pass::{
-            CxPass,
+            CxPassPool,
         },
         font::{
             CxFont,
@@ -55,13 +59,11 @@ use {
             CxDrawFontAtlas
         },
         texture::{
-            CxTexture,
-            TextureDesc,
-            TextureFormat
+            CxTexturePool
         },
         geometry::{
             Geometry,
-            CxGeometry,
+            CxGeometryPool,
             GeometryFingerprint
         },
     }
@@ -74,20 +76,12 @@ pub struct Cx {
     pub (crate) platform_type: PlatformType,
     pub (crate) gpu_info: GpuInfo,
     
-    pub (crate) windows: Vec<CxWindow>,
-    pub (crate) windows_free: Rc<RefCell<Vec<usize >> >,
+    pub (crate) windows: CxWindowPool,
+    pub (crate) passes: CxPassPool,
+    pub (crate) draw_lists: CxDrawListPool,
+    pub (crate) textures: CxTexturePool,
+    pub (crate) geometries: CxGeometryPool,
     
-    pub (crate) passes: Vec<CxPass>,
-    pub (crate) passes_free: Rc<RefCell<Vec<usize >> >,
-    
-    pub (crate) draw_lists: Vec<DrawList>,
-    pub (crate) draw_lists_free: Rc<RefCell<Vec<usize >> >,
-    
-    pub (crate) textures: Vec<CxTexture>,
-    // pub (crate) textures_free: Arc<RefCell<Vec<usize >> >,
-    
-    pub (crate) geometries: Vec<CxGeometry>,
-    pub (crate) geometries_free: Rc<RefCell<Vec<usize >> >,
     pub (crate) geometries_refs: HashMap<GeometryFingerprint, Weak<Geometry >>,
     
     pub (crate) draw_shaders: CxDrawShaders,
@@ -127,7 +121,7 @@ pub struct Cx {
     #[allow(dead_code)]
     pub (crate) command_settings: HashMap<Command, CxCommandSetting>,
     
-    pub (crate) thread_pool_senders: Vec<Arc<RefCell<Option<std::sync::mpsc::Sender<() >> >> >,
+    pub (crate) thread_pool_senders: Vec<Arc<RefCell<Option<ThreadPoolSender> >> >,
     
     pub (crate) platform: CxPlatform,
     // (cratethis cuts the compiletime of an end-user application in half
@@ -163,7 +157,8 @@ impl PlatformType {
 impl Default for Cx {
     fn default() -> Self {
         // the null texture
-        let textures = vec![CxTexture {
+        /*let mut textures = CxTexturePool::default();
+        textures.alloc_new(CxTexture {
             desc: TextureDesc {
                 format: TextureFormat::ImageBGRA,
                 width: Some(4),
@@ -174,26 +169,18 @@ impl Default for Cx {
             //image_f32: Vec::new(),
             update_image: true,
             platform: CxPlatformTexture::default()
-        }];
+        });*/
         
         Self {
             platform_type: PlatformType::Unknown,
             gpu_info: GpuInfo::default(),
             
-            windows: Vec::new(),
-            windows_free: Rc::new(RefCell::new(Vec::new())),
+            windows: Default::default(),
+            passes: Default::default(),
+            draw_lists: Default::default(),
+            geometries: Default::default(),
+            textures:CxTexturePool::default(),
             
-            passes: Vec::new(),
-            passes_free: Rc::new(RefCell::new(Vec::new())),
-            
-            draw_lists: Vec::new(),
-            draw_lists_free: Rc::new(RefCell::new(Vec::new())),
-            
-            textures: textures,
-            //textures_free: Arc::new(RefCell::new(Vec::new())),
-            
-            geometries: Vec::new(),
-            geometries_free: Rc::new(RefCell::new(Vec::new())),
             geometries_refs: HashMap::new(),
             
             draw_shaders: CxDrawShaders::default(),
@@ -239,3 +226,5 @@ impl Default for Cx {
         }
     }
 }
+
+

@@ -16,8 +16,8 @@ use {
 };
 
 live_register!{
-    use makepad_platform::shader::std::*;
-    use makepad_component::theme::*;
+    import makepad_platform::shader::std::*;
+    import makepad_component::theme::*;
     
     DrawBgQuad: {{DrawBgQuad}} {
         fn pixel(self) -> vec4 {
@@ -295,7 +295,7 @@ impl LogList {
     pub fn begin(&mut self, cx: &mut Cx2d) -> ViewRedrawing {
         self.scroll_view.begin(cx, Walk::default(), self.layout) ?;
         self.count = 0;
-        ViewRedrawing::Yes
+        ViewRedrawing::yes()
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {

@@ -2,11 +2,12 @@ use makepad_component::*;
 use makepad_platform::*;
 
 live_register!{
-    use makepad_component::frame::*;
-    use FrameComponent::*;
+    import makepad_component::frame::*;
+    registry FrameComponent::*;
     App: {{App}} {
+        shape: {shape: Solid}
         frame: {
-            width: Fill
+            /*width: Fill
             height: Fill
             layout:{align: {x: 0.0, y: 0.5}, padding: 30,spacing: 30.}
             Solid {bg:{color: #0f0}, width: Fill, height: 40}
@@ -21,7 +22,7 @@ live_register!{
             }
             Solid {bg:{color: #f00}, width: 40, height: 40}
             Solid {bg:{color: #f0f}, width: Fill, height: 60}
-            Solid {bg:{color: #f00}, width: 40, height: 40}
+            Solid {bg:{color: #f00}, width: 40, height: 40}*/
         }
     }
 }
@@ -41,16 +42,13 @@ pub enum FromUI {
 #[derive(Live, LiveHook)]
 pub struct App {
     frame: Frame,
+    shape: DrawShape,
     window: DesktopWindow,
 }
 
 impl App {
     pub fn live_register(cx: &mut Cx) {
         makepad_component::live_register(cx);
-    }
-    
-    pub fn new_app(cx: &mut Cx) -> Self {
-        Self::new_as_main_module(cx, &module_path!(), id!(App)).unwrap()
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
@@ -69,12 +67,12 @@ impl App {
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
+        
         if self.window.begin(cx, None).not_redrawing() {
             return;
         }
-        while self.frame.draw(cx).not_done(){
-            
-        };
+        while self.frame.draw(cx).is_not_done() {};
+        
         self.window.end(cx);
     }
 }

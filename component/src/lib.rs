@@ -1,4 +1,3 @@
-#![feature(try_trait_v2)]
 use makepad_platform::*;
 
 pub mod button_logic;
@@ -52,6 +51,7 @@ pub use crate::{
     frame::{Frame},
     frame_traits::{
         FrameDraw,
+        FrameDrawApi,
         FrameUid,
         CreateAt,
         FrameActionItem,

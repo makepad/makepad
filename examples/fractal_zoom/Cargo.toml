@@ -6,3 +6,7 @@ edition = "2018"
 
 [dependencies]
 makepad-component = {path="../../component", version="0.1"}
+
+[features]
+nightly = ["makepad-component/nightly"]
+

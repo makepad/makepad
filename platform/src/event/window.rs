@@ -1,6 +1,7 @@
 use {
     crate::{
         makepad_math::*,
+        window::WindowId,
     }
     //makepad_microserde::*,
 };
@@ -19,35 +20,35 @@ pub struct WindowGeom {
 }
  
 
-#[derive(Clone, Default, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct WindowGeomChangeEvent {
-    pub window_id: usize,
+    pub window_id: WindowId,
     pub old_geom: WindowGeom,
     pub new_geom: WindowGeom,
 }
 
-#[derive(Clone, Default, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct WindowMovedEvent {
-    pub window_id: usize,
+    pub window_id: WindowId,
     pub old_pos: Vec2,
     pub new_pos: Vec2,
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct WindowCloseRequestedEvent {
-    pub window_id: usize,
+    pub window_id: WindowId,
     pub accept_close: bool
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct WindowClosedEvent {
-    pub window_id: usize
+    pub window_id: WindowId
 }
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct WindowResizeLoopEvent {
     pub was_started: bool,
-    pub window_id: usize
+    pub window_id: WindowId
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -60,7 +61,7 @@ pub enum WindowDragQueryResponse {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct WindowDragQueryEvent {
-    pub window_id: usize,
+    pub window_id: WindowId,
     pub abs: Vec2,
     pub response: WindowDragQueryResponse,
 }
