@@ -9,3 +9,7 @@ makepad-studio-component = {path="./component" , version="0.1"}
 makepad-editor-core = {path="./editor_core", version="0.1"}
 makepad-collab-protocol = {path="./collab_protocol", version="0.1"}
 makepad-collab-server = {path="./collab_server", version="0.1"}
+
+[features]
+nightly = ["makepad-studio-component/nightly"]
+

@@ -43,7 +43,6 @@ impl Drop for PoolId {
 }
 
 impl<T> IdPool<T> where T: Default {
-    
     pub fn alloc(&mut self) -> PoolId {
         if let Some(id) = self.free.0.borrow_mut().pop() {
             self.pool[id].generation += 1;
@@ -67,16 +66,4 @@ impl<T> IdPool<T> where T: Default {
             
         }
     }
-    /*
-    pub fn alloc_new(&mut self, t:T) -> PoolId {
-        let id = self.pool.len();
-        self.pool.push(IdPoolItem {
-            generation: 0,
-            item: t
-        });
-        PoolId {
-            id,
-            free: self.free.clone()
-        }
-    }*/
 }

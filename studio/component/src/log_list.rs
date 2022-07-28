@@ -295,7 +295,7 @@ impl LogList {
     pub fn begin(&mut self, cx: &mut Cx2d) -> ViewRedrawing {
         self.scroll_view.begin(cx, Walk::default(), self.layout) ?;
         self.count = 0;
-        ViewRedrawing::Yes
+        ViewRedrawing::yes()
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {

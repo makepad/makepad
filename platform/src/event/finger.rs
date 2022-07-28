@@ -93,6 +93,7 @@ pub struct CxFingerDrag{
 }
 
 impl CxFingerDrag{
+    #[allow(dead_code)]
     pub(crate) fn cycle_drag(&mut self){
         self.drag_area = self.next_drag_area;
         self.next_drag_area = Area::Empty;
