@@ -232,7 +232,7 @@ pub struct CxDrawList {
     
     pub rect: Rect,
     pub clip_points: (Vec2,Vec2),
-    pub is_clipped: bool,
+    pub unclipped: bool,
     
     pub debug: Option<DrawListDebug>
 }
@@ -250,7 +250,7 @@ impl CxDrawList {
     }*/
     
     pub fn intersect_clip(&mut self, clip: (Vec2, Vec2)) -> (Vec2, Vec2) {
-        if self.is_clipped {
+        if !self.unclipped {
             let min_x = self.rect.pos.x - self.parent_scroll.x;
             let min_y = self.rect.pos.y - self.parent_scroll.y;
             let max_x = self.rect.pos.x + self.rect.size.x - self.parent_scroll.x;
