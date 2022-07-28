@@ -93,7 +93,7 @@ impl LiveApply for View {
             }
             match nodes[index].id {
                 id!(debug_id) => cx.draw_lists[self.draw_list.id()].debug_id = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
-                id!(is_clipped) => cx.draw_lists[self.draw_list.id()].is_clipped = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
+                id!(unclipped) => cx.draw_lists[self.draw_list.id()].unclipped = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
                 id!(is_overlay) => self.is_overlay = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
                 id!(always_redraw) => self.always_redraw = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
                 //id!(layout) => self.layout = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
@@ -112,7 +112,7 @@ impl View {
     
     pub fn draw_list_id(&self)->DrawListId{self.draw_list.id()}
     
-    pub fn set_is_clipped(&self, cx: &mut Cx, is_clipped: bool) {cx.draw_lists[self.draw_list.id()].is_clipped = is_clipped;}
+    pub fn set_unclipped(&self, cx: &mut Cx, unclipped: bool) {cx.draw_lists[self.draw_list.id()].unclipped = unclipped;}
     
     pub fn lock_view_transform(&self, cx: &mut Cx, mat: &Mat4) {
         let draw_list = &mut cx.draw_lists[self.draw_list.id()];
