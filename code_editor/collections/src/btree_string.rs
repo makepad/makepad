@@ -531,21 +531,21 @@ impl btree::Chunk for String {
         String::new()
     }
 
-    fn is_boundary(&self, index: usize) -> bool {
-        self.as_str().is_boundary(index)
-    }
-
     fn len(&self) -> usize {
         self.len()
     }
 
-    fn info_at(&self, index: usize) -> Self::Info {
+    fn summed_info_at(&self, index: usize) -> Self::Info {
         Info {
             char_count: self[..index].count_chars(),
             line_break_count: self[..index].count_line_breaks(),
         }
     }
 
+    fn is_boundary(&self, index: usize) -> bool {
+        self.as_str().is_boundary(index)
+    }
+    
     fn move_left(&mut self, other: &mut Self, end: usize) {
         self.push_str(&other[..end]);
         other.replace_range(..end, "");
