@@ -38,8 +38,8 @@ use {
 };
 
 live_register!{
-    use makepad_platform::shader::std::*;
-    use makepad_component::theme::*;
+    import makepad_platform::shader::std::*;
+    import makepad_component::theme::*;
     
     DrawSelection: {{DrawSelection}} {
         const GLOOPINESS: 8.
@@ -171,12 +171,16 @@ live_register!{
             zoom = {
                 default: on
                 on = {
-                    from: {all: Play::Exp {speed1: 0.96, speed2: 0.97}}
+                    from: {all: Play::Forward{duration:0.4}}
+                    ease: Ease::ExpDecay{d1:0.96,d2:0.97}
+                    //from: {all: Play::Exp {speed1: 0.96, speed2: 0.97}}
                     redraw: true
                     apply: {zoom_out: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
                 }
                 off = {
-                    from: {all: Play::Exp {speed1: 0.98, speed2: 0.95}}
+                    from: {all: Play::Forward{duration:0.2}}
+                    ease: Ease::ExpDecay{d1:0.98,d2:0.95}
+                    //from: {all: Play::Exp {speed1: 0.98, speed2: 0.95}}
                     redraw: true
                     apply: {zoom_out: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]}
                 }
@@ -288,7 +292,7 @@ impl CodeEditorImpl {
         self.text_glyph_size = self.code_text.text_style.font_size * self.code_text.get_monospace_base(cx);
         self.handle_select_scroll_in_draw(cx);
         self.begin_instances(cx);
-        ViewRedrawing::Yes
+        ViewRedrawing::yes()
     }
     
     pub fn state_has_document_inner<'a>(&mut self,state: &'a EditorState) -> bool {

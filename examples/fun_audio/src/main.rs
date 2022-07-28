@@ -1,4 +1,3 @@
-#![feature(try_trait_v2)]
 pub use makepad_component::{self, *};
 pub use makepad_platform::{
     *,
@@ -14,11 +13,11 @@ use crate::audio::*;
 use crate::audio::iron_fish::*;
 
 live_register!{
-    use AudioComponent::*;
-    use FrameComponent::*;
-    use makepad_component::theme::*;
-    use makepad_component::frame::*;
-    use makepad_platform::shader::std::*;
+    registry AudioComponent::*;
+    registry FrameComponent::*;
+    import makepad_component::theme::*;
+    import makepad_component::frame::*;
+    import makepad_platform::shader::std::*;
     
     MainHeader: FoldHeader {
         walk: {
@@ -97,22 +96,24 @@ live_register!{
             height: 22
         }
     }
-      InstrumentSlider2: Rect {
+    
+    InstrumentSlider2: Rect {
         bg: {color: #4}
         width: Fill
         height: 40
         layout: {flow: Right, padding: 8}
-        TextInput{
-            text:"Hello WOrld"
+        TextInput {
+            text: "Hello WOrld"
         }
     }
+    
     IronFishUI: InstrumentHeader {
         header: {
             layout: {align: {y: 0.5}}
             fold_button = FoldButton {}
             swatch = Circle {
-                width: 10 
-                height: 10 
+                width: 10
+                height: 10
                 bg: {color: #f00}
             }
             label = Label {text: "IronFish"}
@@ -169,7 +170,7 @@ live_register!{
                             label: "Osc2 detune"
                         }
                     }
-                    InstrumentSlider2{}
+                    InstrumentSlider2 {}
                     
                 }
             }
@@ -283,10 +284,6 @@ impl App {
         crate::piano::live_register(cx);
     }
     
-    pub fn new_app(cx: &mut Cx) -> Self {
-        Self::new_as_main_module(cx, &module_path!(), id!(App)).unwrap()
-    }
-    
     pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
         
         //self.window.handle_event(cx, event);
@@ -346,7 +343,7 @@ impl App {
             return;
         }
         
-        while self.frame.draw(cx).not_done() {
+        while self.frame.draw(cx).is_not_done() {
         };
         
         self.window.end(cx);

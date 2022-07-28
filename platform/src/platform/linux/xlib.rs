@@ -69,7 +69,7 @@ pub struct XlibWindow {
     pub child_windows: Vec<XlibChildWindow>,
     
     pub last_nc_mode: Option<c_long>,
-    pub window_id: usize,
+    pub window_id: WindowId,
     pub xlib_app: *mut XlibApp,
     pub last_window_geom: WindowGeom,
     pub time_start: u64,

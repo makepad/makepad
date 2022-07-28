@@ -23,9 +23,11 @@ use {
             cocoa_app::CocoaApp,
             cocoa_window::CocoaWindow,
         },
+        draw_list::DrawListId,
         event::WindowGeom,
         cx::Cx,
-        pass::{CxPassParent, PassClearColor, PassClearDepth},
+        pass::{CxPassParent, PassClearColor, PassClearDepth, PassId},
+        window::WindowId,
         texture::{
             TextureFormat,
             TextureDesc,
@@ -87,8 +89,8 @@ impl Cx {
     
     fn render_view(
         &mut self,
-        pass_id: usize,
-        draw_list_id: usize,
+        pass_id: PassId,
+        draw_list_id: DrawListId,
         scroll: Vec2,
         clip: (Vec2, Vec2),
         zbias: &mut f32,
@@ -234,9 +236,11 @@ impl Cx {
                     
                     let texture_id = if let Some(texture_id) = draw_call.texture_slots[i] {
                         texture_id
-                    }else {0};
+                    }else {
+                        continue;
+                    };
                     
-                    let cxtexture = &mut self.textures[texture_id as usize];
+                    let cxtexture = &mut self.textures[texture_id];
                     
                     if cxtexture.update_image {
                         cxtexture.update_image = false;
@@ -282,7 +286,7 @@ impl Cx {
         }
     }
     
-    pub fn setup_render_pass_descriptor(&mut self, render_pass_descriptor: ObjcId, pass_id: usize, inherit_dpi_factor: f32, first_texture: Option<ObjcId>, metal_cx: &MetalCx) {
+    pub fn setup_render_pass_descriptor(&mut self, render_pass_descriptor: ObjcId, pass_id: PassId, inherit_dpi_factor: f32, first_texture: Option<ObjcId>, metal_cx: &MetalCx) {
         let pass_size = self.passes[pass_id].pass_size;
         
         self.passes[pass_id].set_matrix(Vec2::default(), pass_size);
@@ -319,7 +323,7 @@ impl Cx {
                 let color_attachments: ObjcId = unsafe {msg_send![render_pass_descriptor, colorAttachments]};
                 let color_attachment: ObjcId = unsafe {msg_send![color_attachments, objectAtIndexedSubscript: index as u64]};
                 
-                let cxtexture = &mut self.textures[color_texture.texture_id as usize];
+                let cxtexture = &mut self.textures[color_texture.texture_id];
                 cxtexture.platform.update_render_target(metal_cx, AttachmentKind::Color, &cxtexture.desc, dpi_factor * pass_size);
                 
                 let is_initial = cxtexture.platform.inner.as_mut().unwrap().initial();
@@ -368,7 +372,7 @@ impl Cx {
         }
         // attach depth texture
         if let Some(depth_texture_id) = self.passes[pass_id].depth_texture {
-            let cxtexture = &mut self.textures[depth_texture_id as usize];
+            let cxtexture = &mut self.textures[depth_texture_id];
             cxtexture.platform.update_render_target(metal_cx, AttachmentKind::Depth, &cxtexture.desc, dpi_factor * pass_size);
             let is_initial = cxtexture.platform.inner.as_mut().unwrap().initial();
             
@@ -411,7 +415,7 @@ impl Cx {
     
     pub fn draw_pass_to_layer(
         &mut self,
-        pass_id: usize,
+        pass_id: PassId,
         dpi_factor: f32,
         layer: ObjcId,
         metal_cx: &mut MetalCx,
@@ -477,7 +481,7 @@ impl Cx {
     
     pub fn draw_pass_to_texture(
         &mut self,
-        pass_id: usize,
+        pass_id: PassId,
         dpi_factor: f32,
         metal_cx: &MetalCx,
     ) {
@@ -536,7 +540,7 @@ pub struct MetalCx {
 
 #[derive(Clone)]
 pub struct MetalWindow {
-    pub window_id: usize,
+    pub window_id: WindowId,
     pub first_draw: bool,
     pub window_geom: WindowGeom,
     pub cal_size: Vec2,
@@ -546,7 +550,7 @@ pub struct MetalWindow {
 }
 
 impl MetalWindow {
-    pub fn new(window_id: usize, metal_cx: &MetalCx, cocoa_app: &mut CocoaApp, inner_size: Vec2, position: Option<Vec2>, title: &str) -> MetalWindow {
+    pub fn new(window_id: WindowId, metal_cx: &MetalCx, cocoa_app: &mut CocoaApp, inner_size: Vec2, position: Option<Vec2>, title: &str) -> MetalWindow {
         
         let ca_layer: ObjcId = unsafe {msg_send![class!(CAMetalLayer), new]};
         
@@ -1015,7 +1019,7 @@ impl CxPlatformTexture {
                                 setPixelFormat: MTLPixelFormat::Depth32Float_Stencil8
                             ];
                         }
-                        _ => panic!(),
+                        _ => panic!("{:?}", desc.format),
                     }
                 }
             }

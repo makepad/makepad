@@ -5,6 +5,7 @@ use {
         makepad_error_log::*,
         cx::Cx,
         pass::{
+            PassId,
             CxPassParent
         },
         event::{
@@ -22,10 +23,10 @@ impl Cx {
     
     
     pub (crate) fn repaint_windows(&mut self) {
-        for cxpass in self.passes.iter_mut() {
-            match cxpass.parent {
+        for pass_id in self.passes.id_iter() {
+            match self.passes[pass_id].parent {
                 CxPassParent::Window(_) => {
-                    cxpass.paint_dirty = true;
+                    self.passes[pass_id].paint_dirty = true;
                 },
                 _ => ()
             }
@@ -33,7 +34,7 @@ impl Cx {
     }
     
     pub (crate) fn any_passes_dirty(&self) -> bool {
-        for pass_id in 0..self.passes.len() {
+        for pass_id in self.passes.id_iter() {
             if self.passes[pass_id].paint_dirty {
                 return true
             }
@@ -41,13 +42,13 @@ impl Cx {
         false
     }
     
-    pub (crate) fn compute_pass_repaint_order(&mut self, passes_todo: &mut Vec<usize>) {
+    pub (crate) fn compute_pass_repaint_order(&mut self, passes_todo: &mut Vec<PassId>) {
         passes_todo.clear();
         
         // we need this because we don't mark the entire deptree of passes dirty every small paint
         loop { // loop untill we don't propagate anymore
             let mut altered = false;
-            for pass_id in 0..self.passes.len() {
+            for pass_id in self.passes.id_iter(){
                 if self.passes[pass_id].paint_dirty {
                     let other = match self.passes[pass_id].parent {
                         CxPassParent::Pass(parent_pass_id) => {
@@ -68,10 +69,10 @@ impl Cx {
             }
         }
         
-        for (pass_id, cxpass) in self.passes.iter().enumerate() {
-            if cxpass.paint_dirty {
+        for pass_id in self.passes.id_iter(){
+            if self.passes[pass_id].paint_dirty {
                 let mut inserted = false;
-                match cxpass.parent {
+                match self.passes[pass_id].parent {
                     CxPassParent::Window(_) => {
                     },
                     CxPassParent::Pass(dep_of_pass_id) => {

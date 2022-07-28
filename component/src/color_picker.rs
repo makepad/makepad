@@ -2,7 +2,7 @@ use crate::makepad_platform::*;
 
 
 live_register!{
-    use makepad_platform::shader::std::*;
+    import makepad_platform::shader::std::*;
     
     DrawColorWheel: {{DrawColorWheel}} {
         instance hover: float

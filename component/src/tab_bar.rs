@@ -9,8 +9,8 @@ use {
 };
 
 live_register!{
-    use crate::tab::Tab;
-    use makepad_component::theme::*;
+    import crate::tab::Tab;
+    import makepad_component::theme::*;
     
     TabBar: {{TabBar}} {
         tab: Tab {}
@@ -81,7 +81,7 @@ impl TabBar {
         self.scroll_view.begin(cx, self.walk, Layout::flow_right()) ?;
         self.tab_order.clear();
 
-        ViewRedrawing::Yes
+        ViewRedrawing::yes()
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {

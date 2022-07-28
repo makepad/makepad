@@ -5,6 +5,7 @@ use crate::{
     makepad_math::{Vec2, Vec3, Quat, Transform},
     midi::{MidiInputInfo, Midi1Data, Midi1InputData},
     cx::{PlatformType},
+    window::CxWindowPool,
     event::{
         XRButton,
         XRInput,
@@ -152,7 +153,7 @@ fn unpack_key_modifier(modifiers: u32) -> KeyModifiers {
 impl ToWasmFingerDown {
     pub fn into_finger_down_event(self, tap_count: u32) -> FingerDownEvent {
         FingerDownEvent {
-            window_id: 0,
+            window_id: CxWindowPool::id_zero(),
             abs: Vec2 {x: self.finger.x, y: self.finger.y},
             handled: false,
             digit: self.finger.digit,
@@ -172,7 +173,7 @@ pub struct ToWasmFingerUp {
 impl Into<FingerUpEvent> for ToWasmFingerUp {
     fn into(self) -> FingerUpEvent {
         FingerUpEvent {
-            window_id: 0,
+            window_id: CxWindowPool::id_zero(),
             abs: Vec2 {x: self.finger.x, y: self.finger.y},
             digit: self.finger.digit,
             input_type: if self.finger.is_touch {FingerInputType::Touch} else {FingerInputType::Mouse},
@@ -190,7 +191,7 @@ pub struct ToWasmFingerMove {
 impl Into<FingerMoveEvent> for ToWasmFingerMove {
     fn into(self) -> FingerMoveEvent {
         FingerMoveEvent {
-            window_id: 0,
+            window_id: CxWindowPool::id_zero(),
             abs: Vec2 {x: self.finger.x, y: self.finger.y},
             digit: self.finger.digit,
             input_type: if self.finger.is_touch {FingerInputType::Touch} else {FingerInputType::Mouse},
@@ -208,9 +209,8 @@ pub struct ToWasmFingerHover {
 impl Into<FingerHoverEvent> for ToWasmFingerHover {
     fn into(self) -> FingerHoverEvent {
         FingerHoverEvent {
-            window_id: 0,
+            window_id: CxWindowPool::id_zero(),
             abs: Vec2 {x: self.finger.x, y: self.finger.y},
-            digit: self.finger.digit,
             handled: false,
             modifiers: unpack_key_modifier(self.finger.modifiers),
             time: self.finger.time,
@@ -227,9 +227,8 @@ pub struct ToWasmFingerOut {
 impl Into<FingerHoverEvent> for ToWasmFingerOut {
     fn into(self) -> FingerHoverEvent {
         FingerHoverEvent {
-            window_id: 0,
+            window_id: CxWindowPool::id_zero(),
             abs: Vec2 {x: self.finger.x, y: self.finger.y},
-            digit: self.finger.digit,
             handled: false,
             modifiers: unpack_key_modifier(self.finger.modifiers),
             time: self.finger.time,
@@ -247,7 +246,7 @@ pub struct ToWasmFingerScroll {
 impl Into<FingerScrollEvent> for ToWasmFingerScroll {
     fn into(self) -> FingerScrollEvent {
         FingerScrollEvent {
-            window_id: 0,
+            window_id: CxWindowPool::id_zero(),
             digit: self.finger.digit,
             abs: Vec2 {x: self.finger.x, y: self.finger.y},
             scroll: Vec2 {x: self.scroll_x, y: self.scroll_y},

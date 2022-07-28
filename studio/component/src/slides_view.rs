@@ -2,8 +2,8 @@ use crate::makepad_platform::*;
 use crate::makepad_component::*;
 
 live_register!{
-    use makepad_platform::shader::std::*;
-    use FrameComponent::*;
+    import makepad_platform::shader::std::*;
+    registry FrameComponent::*;
     
     const SLIDE_WIDTH: 800
     
@@ -122,7 +122,7 @@ impl SlidesView {
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
-        while self.frame.draw(cx).not_done() {
+        while self.frame.draw(cx).is_not_done() {
         }
     }
 }

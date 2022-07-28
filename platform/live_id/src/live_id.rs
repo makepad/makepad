@@ -117,10 +117,6 @@ impl LiveId {
         self.0 == 0
     }
     
-    pub fn is_capitalised(&self) -> bool {
-        self.0 & 0x4000_0000_0000_0000 != 0
-    }
-    
     // from https://nullprogram.com/blog/2018/07/31/
     // i have no idea what im doing with start value and finalisation.
     pub const fn from_bytes(id_bytes: &[u8], start: usize, end: usize) -> Self {
@@ -136,12 +132,7 @@ impl LiveId {
             i += 1;
         }
         // use second to high bit to mark id as capitalised
-        if id_bytes[0] >= 'A' as u8 && id_bytes[0] <= 'Z' as u8 {
-            return Self ((x & 0x3fff_ffff_ffff_fff) | 0xC000_0000_0000_0000)
-        }
-        else {
-            return Self ((x & 0x3fff_ffff_ffff_ffff) | 0x8000_0000_0000_0000)
-        }
+        return Self ((x & 0x7fff_ffff_ffff_ffff) | 0x8000_0000_0000_0000)
     }
     
     // merges 2 ids in a nonsymmetric fashion
