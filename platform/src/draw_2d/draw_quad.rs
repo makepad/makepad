@@ -108,7 +108,11 @@ impl DrawQuad {
     pub fn new_draw_call(&self, cx:&mut Cx2d){
         cx.new_draw_call(&self.draw_vars);
     }
-
+    
+    pub fn append_to_draw_call(&self, cx:&mut Cx2d){
+        cx.new_draw_call(&self.draw_vars);
+    }
+    
     pub fn begin_many_instances(&mut self, cx: &mut Cx2d){
         let mi = cx.begin_many_aligned_instances(&self.draw_vars);
         self.many_instances = mi;   
