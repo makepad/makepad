@@ -16,9 +16,9 @@ use {
 
 pub trait LiveState {
     
-    fn cut_state(&mut self, cx: &mut Cx, state: &[LiveId; 2]);
-    fn animate_state(&mut self, cx: &mut Cx, state: &[LiveId; 2]);
-    fn toggle_state(&mut self, cx: &mut Cx, is_state_1: bool, animate: Animate, state1: &[LiveId; 2], state2: &[LiveId; 2]) {
+    fn cut_state(&mut self, cx: &mut Cx, state: &StatePair);
+    fn animate_state(&mut self, cx: &mut Cx, state: &StatePair);
+    fn toggle_state(&mut self, cx: &mut Cx, is_state_1: bool, animate: Animate, state1: &StatePair, state2: &StatePair) {
         if is_state_1 {
             if let Animate::Yes = animate {
                 self.animate_state(cx, state1)

@@ -33,14 +33,9 @@ pub fn button_logic_handle_event(
             dispatch_action(cx, ButtonAction::IsPressed);
             return Some(ButtonState::Pressed);
         },
-        Hit::FingerHoverIn(fe) => {
+        Hit::FingerHoverIn(_) => {
             cx.set_cursor(MouseCursor::Hand);
-            if fe.any_down {
-                return Some(ButtonState::Pressed);
-            }
-            else {
-                return Some(ButtonState::Hover);
-            }
+            return Some(ButtonState::Hover);
         }
         Hit::FingerHoverOut(_) => {
             return Some(ButtonState::Default)
