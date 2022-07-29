@@ -110,7 +110,7 @@ pub use {
             Timer,
             NextFrame,
             KeyModifiers,
-            FingerType,
+            DigitDevice,
             FingerDownEvent,
             FingerMoveEvent,
             FingerUpEvent,

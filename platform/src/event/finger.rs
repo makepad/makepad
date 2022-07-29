@@ -1,6 +1,7 @@
 use {
     std::cell::{Cell},
     std::rc::Rc,
+    std::ops::Deref,
     crate::{
         makepad_error_log::*,
         makepad_math::*,
@@ -234,36 +235,44 @@ pub struct KeyModifiers {
 }
 
 #[derive(Clone, Debug)]
-pub enum FingerType {
+pub enum DigitDevice {
     Mouse(usize),
     Touch(u64),
     XR(usize)
 }
 
-impl FingerType {
-    pub fn is_touch(&self) -> bool {if let FingerType::Touch(_) = self {true}else {false}}
-    pub fn is_mouse(&self) -> bool {if let FingerType::Mouse(_) = self {true}else {false}}
-    pub fn is_xr(&self) -> bool {if let FingerType::XR(_) = self {true}else {false}}
+impl DigitDevice{
+    pub fn is_touch(&self) -> bool {if let DigitDevice::Touch(_) = self {true}else {false}}
+    pub fn is_mouse(&self) -> bool {if let DigitDevice::Mouse(_) = self {true}else {false}}
+    pub fn is_xr(&self) -> bool {if let DigitDevice::XR(_) = self {true}else {false}}
     pub fn has_hovers(&self) -> bool {self.is_mouse() || self.is_xr()}
-    pub fn mouse_button(&self) -> Option<usize> {if let FingerType::Mouse(button) = self {Some(*button)}else {None}}
-    pub fn touch_uid(&self) -> Option<u64> {if let FingerType::Touch(uid) = self {Some(*uid)}else {None}}
-    pub fn xr_input(&self) -> Option<usize> {if let FingerType::XR(input) = self {Some(*input)}else {None}}
+    pub fn mouse_button(&self) -> Option<usize> {if let DigitDevice::Mouse(button) = self {Some(*button)}else {None}}
+    pub fn touch_uid(&self) -> Option<u64> {if let DigitDevice::Touch(uid) = self {Some(*uid)}else {None}}
+    pub fn xr_input(&self) -> Option<usize> {if let DigitDevice::XR(input) = self {Some(*input)}else {None}}
 }
 
-impl Default for FingerType {
-    fn default() -> Self {Self::Mouse(0)}
+#[derive(Clone, Debug)]
+pub struct DigitInfo{
+    pub id: DigitId,
+    pub index: usize,
+    pub count: usize, 
+    pub device: DigitDevice,
+}
+
+impl Deref for DigitInfo {
+    type Target = DigitDevice;
+    fn deref(&self) -> &Self::Target {
+        &self.device
+    }
 }
 
 #[derive(Clone, Debug)]
 pub struct FingerDownEvent {
     pub window_id: WindowId,
     pub abs: Vec2,
-    pub digit_id: DigitId,
-    pub digit_index: usize, 
-    pub digit_count: usize, 
+    pub digit: DigitInfo,
     pub tap_count: u32,
     pub handled: Cell<bool>,
-    pub finger_type: FingerType,
     pub modifiers: KeyModifiers,
     pub time: f64
 }
@@ -296,10 +305,7 @@ pub struct FingerMoveEvent {
     pub window_id: WindowId,
     pub abs: Vec2,
     pub captured: Area,
-    pub digit_id: DigitId,
-    pub digit_index: usize,
-    pub digit_count: usize, 
-    pub finger_type: FingerType,
+    pub digit: DigitInfo,
     pub modifiers: KeyModifiers,
     pub time: f64
 }
@@ -330,15 +336,14 @@ impl FingerMoveHitEvent {
     }
 }
 
+
+
 #[derive(Clone, Debug)]
 pub struct FingerUpEvent {
     pub window_id: WindowId,
     pub abs: Vec2,
     pub captured: Area,
-    pub digit_id: DigitId,
-    pub digit_index: usize,
-    pub digit_count: usize, 
-    pub finger_type: FingerType,
+    pub digit: DigitInfo,
     pub modifiers: KeyModifiers,
     pub time: f64
 }
@@ -382,7 +387,7 @@ pub struct FingerHoverEvent {
     pub digit_id: DigitId,
     pub hover_last: Area,
     pub handled: Cell<bool>,
-    pub finger_type: FingerType,
+    pub device: DigitDevice,
     pub modifiers: KeyModifiers,
     pub time: f64
 }
@@ -410,7 +415,7 @@ pub struct FingerScrollEvent {
     pub digit_id: DigitId,
     pub abs: Vec2,
     pub scroll: Vec2,
-    pub finger_type: FingerType,
+    pub device: DigitDevice,
     pub handled_x: Cell<bool>,
     pub handled_y: Cell<bool>,
     pub modifiers: KeyModifiers,
@@ -618,7 +623,7 @@ impl Event {
             },
             Event::FingerMove(fe) => {
                 // check wether our digit is captured, otherwise don't send
-                if let Some(digit) = cx.fingers.get_digit(fe.digit_id) {
+                if let Some(digit) = cx.fingers.get_digit(fe.digit.id) {
                     if digit.captured == area {
                         let rect = area.get_rect(&cx);
                         return Hit::FingerMove(FingerMoveHitEvent {
@@ -637,9 +642,9 @@ impl Event {
                     let rect = area.get_rect(&cx);
                     if rect_contains_with_margin(&rect, fe.abs, &options.margin) {
                         // scan if any of the fingers already captured this area
-                        if cx.fingers.capture_digit(fe.digit_id, area){
+                        if cx.fingers.capture_digit(fe.digit.id, area){
                             let rel = area.abs_to_rel(cx, fe.abs);
-                            let digit = cx.fingers.get_digit_mut(fe.digit_id).unwrap();
+                            let digit = cx.fingers.get_digit_mut(fe.digit.id).unwrap();
                             digit.down_abs_start = fe.abs;
                             digit.down_rel_start = rel;
                             fe.handled.set(true);
@@ -653,11 +658,11 @@ impl Event {
                 }
             },
             Event::FingerUp(fe) => {
-                if let Some(digit) = cx.fingers.get_digit(fe.digit_id) {
+                if let Some(digit) = cx.fingers.get_digit(fe.digit.id) {
                     if digit.captured == area {
                         let abs_start = digit.down_abs_start;
                         let rel_start = digit.down_rel_start;
-                        cx.fingers.release_digit(fe.digit_id);
+                        cx.fingers.release_digit(fe.digit.id);
                         let rect = area.get_rect(&cx);
                         return Hit::FingerUp(FingerUpHitEvent {
                             is_over: rect.contains(fe.abs),

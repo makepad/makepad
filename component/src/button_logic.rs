@@ -42,7 +42,7 @@ pub fn button_logic_handle_event(
         }
         Hit::FingerUp(fe) => if fe.is_over {
             dispatch_action(cx, ButtonAction::WasClicked);
-            if fe.finger_type.has_hovers() {
+            if fe.digit.has_hovers() {
                 return Some(ButtonState::Hover);
             }
             return Some(ButtonState::Default)
