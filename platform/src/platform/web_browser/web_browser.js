@@ -633,7 +633,7 @@ export class WasmWebBrowser extends WasmBridge {
         this.handlers.on_mouse_down = e => {
             e.preventDefault();
             this.focus_keyboard_input();
-            if (current_mouse_down === null){
+            if (current_mouse_down === null || current_mouse_down === e.button){
                 current_mouse_down = e.button;
                 this.to_wasm.ToWasmMouseDown({mouse: mouse_to_wasm_wmouse(e)});
                 this.do_wasm_pump();
