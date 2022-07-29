@@ -178,7 +178,7 @@ impl TabBar {
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
-        event: &mut Event,
+        event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, TabBarAction),
     ) {
         if self.scroll_view.handle_event(cx, event) {
@@ -201,24 +201,24 @@ impl TabBar {
             });
         }
         match event.drag_hits(cx, self.scroll_view.area()) {
-            DragHit::FingerDrag(f) => match f.state {
+            DragHit::Drag(f) => match f.state {
                 DragState::In => {
                     self.is_dragged = true;
                     self.redraw(cx);
-                    *f.action = DragAction::Copy;
+                    f.action.set(DragAction::Copy);
                 }
                 DragState::Out => {
                     self.is_dragged = false;
                     self.redraw(cx);
                 }
                 DragState::Over => match event {
-                    Event::FingerDrag(event) => {
-                        event.action = DragAction::Copy;
+                    Event::Drag(event) => {
+                        event.action.set(DragAction::Copy);
                     }
                     _ => panic!(),
                 },
             },
-            DragHit::FingerDrop(f) => {
+            DragHit::Drop(f) => {
                 self.is_dragged = false;
                 self.redraw(cx);
                 dispatch_action(cx, TabBarAction::ReceivedDraggedItem(f.dragged_item.clone()))

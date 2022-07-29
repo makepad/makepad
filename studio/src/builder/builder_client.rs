@@ -54,13 +54,13 @@ impl BuilderClient{
     pub fn send_cmd(&mut self, _cmd: BuilderCmd) {
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> Vec<BuilderMsgWrap> {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Vec<BuilderMsgWrap> {
         let mut a = Vec::new();
         self.handle_event_with_fn(cx, event, &mut | _, v | a.push(v));
         a
     }
     
-    pub fn handle_event_with_fn(&mut self, cx: &mut Cx, event: &mut Event, dispatch_msg: &mut dyn FnMut(&mut Cx, BuilderMsgWrap)) {
+    pub fn handle_event_with_fn(&mut self, cx: &mut Cx, event: &Event, dispatch_msg: &mut dyn FnMut(&mut Cx, BuilderMsgWrap)) {
         let inner = self.inner.as_ref().unwrap();
         match event {
             Event::Signal(event)

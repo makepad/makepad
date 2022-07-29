@@ -420,12 +420,12 @@ macro_rules!main_app {
             cx.live_scan_dependencies();
             cx.desktop_load_dependencies();
             let mut app = None;
-            cx.event_loop( | cx, mut event | {
+            cx.event_loop( | cx, event | {
                 if let Event::Construct = event {
                     app = Some( $app::new_main(cx));
                 }
-                app.as_mut().unwrap().handle_event(cx, &mut event);
-                cx.after_handle_event(&mut event);
+                app.as_mut().unwrap().handle_event(cx, event);
+                cx.after_handle_event(event);
             });
         }
         
@@ -458,12 +458,12 @@ macro_rules!main_app {
         #[cfg(target_arch = "wasm32")]
         pub unsafe extern "C" fn wasm_process_msg(msg_ptr: u32, appcx: u32) -> u32 {
             let body = appcx as *mut WasmAppCx;
-            (*body).cx.process_to_wasm(msg_ptr, | cx, mut event | {
+            (*body).cx.process_to_wasm(msg_ptr, | cx, event | {
                 if let Event::Construct = event {
                     (*body).app = Some( $ app::new_main(cx));
                 }
-                (*body).app.as_mut().unwrap().handle_event(cx, &mut event);
-                cx.after_handle_event(&mut event);
+                (*body).app.as_mut().unwrap().handle_event(cx, event);
+                cx.after_handle_event(event);
             })
         }
     }

@@ -80,7 +80,7 @@ impl SlidesView {
         self.next_frame = cx.new_next_frame();
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         // lets handle mousedown, setfocus
         match event{
             Event::Construct=>{

@@ -248,7 +248,7 @@ impl LogListNode {
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
-        event: &mut Event,
+        event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, LogNodeAction),
     ) {
         if self.state_handle_event(cx, event).must_redraw() {
@@ -472,7 +472,7 @@ impl LogList {
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
-        event: &mut Event,
+        event: &Event,
         _dispatch_action: &mut dyn FnMut(&mut Cx, LogListAction),
     ) {
         if self.scroll_view.handle_event(cx, event) {

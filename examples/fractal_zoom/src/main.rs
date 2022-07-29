@@ -43,7 +43,7 @@ impl App {
         mandelbrot::live_register(cx);
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.window.handle_event(cx, event);
         
         for _ in self.frame.handle_event_iter(cx, event) {

@@ -169,6 +169,16 @@ impl FromWasm for String {
     }
 }
 
+impl FromWasm for &str {
+    fn from_wasm_js_body(out: &mut WasmJSOutput, slot: usize, _is_recur: bool, prop: &str, _temp: usize) {
+        out.push_ln(slot, &format!("{} = this.read_str();", prop));
+    }
+    
+    fn from_wasm_inner(self, out: &mut FromWasmMsg) {
+        out.push_str(&self);
+    }
+}
+
 impl ToWasm for String {
     fn read_to_wasm(inp: &mut ToWasmMsg) -> Self {
         inp.read_string()

@@ -75,7 +75,7 @@ impl LiveHook for DesktopWindow {
     }
 }
 
-#[derive(Clone, PartialEq)]
+#[derive(Clone)]
 pub enum DesktopWindowEvent {
     EventForOtherWindow,
     WindowClosed,
@@ -85,7 +85,7 @@ pub enum DesktopWindowEvent {
 
 impl DesktopWindow {
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> DesktopWindowEvent {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> DesktopWindowEvent {
         
         for item in self.frame.handle_event_iter(cx, event) {
             if let ButtonAction::WasClicked = item.action.cast() {match item.id() {
@@ -127,10 +127,10 @@ impl DesktopWindow {
                     // we should build an api for that
                     if dq.abs.x < self.caption_size.x && dq.abs.y < self.caption_size.y {
                         if dq.abs.x < 50. {
-                            dq.response = WindowDragQueryResponse::SysMenu;
+                            dq.response.set(WindowDragQueryResponse::SysMenu);
                         }
                         else {
-                            dq.response = WindowDragQueryResponse::Caption;
+                            dq.response.set(WindowDragQueryResponse::Caption);
                         }
                     }
                 }

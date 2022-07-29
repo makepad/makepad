@@ -23,25 +23,6 @@ pub fn error_result(err: &str) -> Result<(), TokenStream> {
     Err(tb.end())
 }
 
-pub fn type_to_static_callable2(input: TokenStream) -> TokenStream {
-    let mut ty_parser = TokenParser::new(input.clone());
-    let mut tb = TokenBuilder::new();
-    if let Some(ident) = ty_parser.eat_any_ident() {
-        
-        if !ty_parser.eat_punct_alone('<') {
-            return input
-        }
-        tb.ident(&ident);
-        tb.add("::<");
-        tb.stream(Some(type_to_static_callable2(ty_parser.eat_level_or_punct('>'))));
-        tb.add(">");
-        tb.end()
-    }
-    else {
-        input
-    }
-}
-
 pub fn unwrap_option(input: TokenStream) -> Result<TokenStream, TokenStream> {
     let mut ty_parser = TokenParser::new(input.clone());
     if ty_parser.eat_ident("Option") {
@@ -563,6 +544,13 @@ impl TokenParser {
         false
     }
     
+    pub fn eat_punct_any(&mut self, what: char) -> bool {
+        if self.is_punct_any(what) {
+            self.advance();
+            return true
+        }
+        false
+    }
     
     pub fn eat_any_punct(&mut self) -> Option<String> {
         let mut out = String::new();
@@ -820,6 +808,15 @@ impl TokenParser {
     
     pub fn eat_type(&mut self) -> Option<TokenStream> {
         let mut tb = TokenBuilder::new();
+        if self.eat_punct_alone('&'){
+            tb.add("&");
+            if self.eat_punct_any('\''){
+                tb.lifetime_mark();
+                if let Some((ty, span)) = self.eat_any_ident_with_span() {
+                    tb.ident_with_span(&ty, span);
+                }
+            }
+        }
         if self.open_bracket() { // array type
             tb.add("[");
             while !self.eat_eot() {

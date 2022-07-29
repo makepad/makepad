@@ -43,7 +43,7 @@ impl App {
         crate::app_inner::live_register(cx);
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.handle_live_edit_event(cx, event, id!(App));
         self.inner.handle_event(cx, event, &mut self.app_state);
     }

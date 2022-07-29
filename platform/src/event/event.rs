@@ -16,15 +16,15 @@ use {
         },
         draw_list::DrawListId,
         cursor::MouseCursor,
-        menu::Command,
+        menu::MenuCommand,
     },
 };
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum Event {
     Construct,
     Destruct,
-    Paint,
+    //Paint,
     Draw(DrawEvent),
     LiveEdit(LiveEditEvent),
     AppGotFocus,
@@ -37,7 +37,7 @@ pub enum Event {
     WindowCloseRequested(WindowCloseRequestedEvent),
     WindowClosed(WindowClosedEvent),
     WindowGeomChange(WindowGeomChangeEvent),
-    WindowResizeLoop(WindowResizeLoopEvent),
+    //WindowResizeLoop(WindowResizeLoopEvent),
     
     FingerDown(FingerDownEvent),
     FingerMove(FingerMoveEvent),
@@ -48,15 +48,16 @@ pub enum Event {
     
     Signal(SignalEvent),
     Trigger(TriggerEvent),
-    Command(Command),
+    MenuCommand(MenuCommand),
     KeyFocus(KeyFocusEvent),
     KeyFocusLost(KeyFocusEvent),
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),
     TextInput(TextInputEvent),
     TextCopy(TextCopyEvent),
-    FingerDrag(FingerDragEvent),
-    FingerDrop(FingerDropEvent),
+    
+    Drag(DragEvent),
+    Drop(DropEvent),
     DragEnd,
     
     WebSocketClose(WebSocket),
@@ -75,7 +76,7 @@ pub enum Hit<'a>{
     KeyUp(KeyEvent),
     Trigger(TriggerHitEvent<'a>),
     TextInput(TextInputEvent),
-    TextCopy(&'a mut TextCopyEvent),
+    TextCopy(&'a TextCopyEvent),
     FingerScroll(FingerScrollHitEvent),
     FingerDown(FingerDownHitEvent),
     FingerMove(FingerMoveHitEvent),
@@ -87,23 +88,23 @@ pub enum Hit<'a>{
 }
 
 pub enum DragHit<'a>{
-    FingerDrag(FingerDragHitEvent<'a>),
-    FingerDrop(FingerDropHitEvent<'a>),
+    Drag(DragHitEvent<'a>),
+    Drop(DropHitEvent<'a>),
     DragEnd,
     NoHit
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct TriggerEvent {
     pub triggers: HashMap<Area, HashSet<Trigger>>
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct MidiInputListEvent {
     pub inputs: Vec<MidiInputInfo>,
 }
 
-#[derive(Clone, Debug, Default, PartialEq)]
+#[derive(Clone, Debug, Default)]
 pub struct DrawEvent {
     pub draw_lists: Vec<DrawListId>,
     pub draw_lists_and_children: Vec<DrawListId>,
@@ -145,14 +146,14 @@ impl DrawEvent{
     }
 }
 
-#[derive(Clone, Default, Debug, PartialEq)]
+#[derive(Clone, Default, Debug)]
 pub struct NextFrameEvent {
     pub frame: u64,
     pub time: f64,
     pub set: HashSet<NextFrame>
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct TimerEvent {
     pub timer_id: u64
 }
@@ -182,19 +183,19 @@ pub enum WebSocketAutoReconnect{
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq)]
 pub struct WebSocket(pub u64);
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct WebSocketErrorEvent {
     pub web_socket: WebSocket,
     pub error: String
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct WebSocketMessageEvent {
     pub web_socket: WebSocket,
     pub data: Vec<u8>
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct SignalEvent {
     pub signals: HashSet<Signal>
 }
@@ -237,13 +238,14 @@ impl Timer {
 }
 
 impl Event {
+    /*
     pub fn set_handled(&mut self, set: bool) {
         match self {
             Event::FingerHover(fe) => {
-                fe.handled = set;
+                fe.handled.set(set);
             },
             Event::FingerDown(fe) => {
-                fe.handled = set;
+                fe.handled.set(set);
             },
             _ => ()
         }
@@ -252,15 +254,15 @@ impl Event {
     pub fn handled(&self) -> bool {
         match self {
             Event::FingerHover(fe) => {
-                fe.handled
+                fe.handled.get()
             },
             Event::FingerDown(fe) => {
-                fe.handled
+                fe.handled.get()
             },
             
             _ => false
         }
-    }
+    }*/
     
     pub fn is_next_frame<'a>(&'a self, next_frame: NextFrame) -> Option<&'a NextFrameEvent> {
         match self {

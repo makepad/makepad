@@ -1,4 +1,6 @@
 use {
+    std::rc::Rc,
+    std::cell::Cell,
     crate::{
         makepad_math::*,
         window::WindowId,
@@ -20,38 +22,38 @@ pub struct WindowGeom {
 }
  
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct WindowGeomChangeEvent {
     pub window_id: WindowId,
     pub old_geom: WindowGeom,
     pub new_geom: WindowGeom,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct WindowMovedEvent {
     pub window_id: WindowId,
     pub old_pos: Vec2,
     pub new_pos: Vec2,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct WindowCloseRequestedEvent {
     pub window_id: WindowId,
-    pub accept_close: bool
+    pub accept_close: Rc<Cell<bool>>
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct WindowClosedEvent {
     pub window_id: WindowId
 }
-
-#[derive(Clone, Debug, PartialEq)]
+/*
+#[derive(Clone, Debug)]
 pub struct WindowResizeLoopEvent {
     pub was_started: bool,
     pub window_id: WindowId
-}
+}*/
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, Copy)]
 pub enum WindowDragQueryResponse {
     NoAnswer,
     Client,
@@ -59,9 +61,9 @@ pub enum WindowDragQueryResponse {
     SysMenu, // windows only
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct WindowDragQueryEvent {
     pub window_id: WindowId,
     pub abs: Vec2,
-    pub response: WindowDragQueryResponse,
+    pub response: Rc<Cell<WindowDragQueryResponse>>,
 }

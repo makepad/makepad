@@ -167,7 +167,7 @@ impl FrameComponent for Slider {
         }
     }
     
-    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, FrameActionItem)) {
+    fn handle_component_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, FrameActionItem)) {
         self.handle_event(cx, event, &mut | cx, slider, action | {
             let mut apply = Vec::new();
             match &action {
@@ -200,7 +200,7 @@ impl Slider {
         self.value = (external - self.min) / (self.max - self.min)
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, &mut Self, SliderAction)) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, &mut Self, SliderAction)) {
         self.state_handle_event(cx, event);
         self.text_input.handle_event(cx, event, &mut | _, _ | {});
         match event.hits(cx, self.slider.area()) {
@@ -226,7 +226,7 @@ impl Slider {
                 // if the finger hasn't moved further than X we jump to edit-all on the text thing
                 
                 self.animate_state(cx, ids!(drag.off));
-                if fe.is_over && fe.input_type.has_hovers() {
+                if fe.is_over && fe.finger_type.has_hovers() {
                     self.animate_state(cx, ids!(hover.on));
                 }
                 else {

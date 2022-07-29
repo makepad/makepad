@@ -101,11 +101,11 @@ impl AudioGraph {
         });
     }
     
-    pub fn handle_event_iter(&mut self, cx: &mut Cx, event: &mut Event)->Vec<AudioGraphAction> {
+    pub fn handle_event_iter(&mut self, cx: &mut Cx, event: &Event)->Vec<AudioGraphAction> {
         let mut a = Vec::new(); self.handle_event(cx, event, &mut |_,ac| a.push(ac)); a
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioGraphAction)) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioGraphAction)) {
         if let Some(root) = self.root.as_mut() {
             root.handle_event(cx, event, &mut | _cx, _action | {
             });

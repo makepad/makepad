@@ -1,6 +1,8 @@
 
 use {
     std::{
+        rc::Rc,
+        cell::RefCell,
         ptr,
         time::Instant,
         collections::{HashMap,HashSet},
@@ -13,6 +15,10 @@ use {
         platform::{
             apple::frameworks::*,
             cocoa_delegate::*,
+            cocoa_event::{
+                CocoaEvent,
+                CocoaScrollEvent
+            },
             cocoa_window::CocoaWindow,
             apple_util::{
                 nsstring_to_string,
@@ -29,13 +35,10 @@ use {
         //    Rect
         //},
         event::{
-            Event,
             KeyCode,
             KeyEvent,
             TextInputEvent,
             TextCopyEvent,
-            FingerInputType,
-            FingerScrollEvent,
             TimerEvent,
             Signal,
             SignalEvent,
@@ -45,7 +48,7 @@ use {
         cursor::MouseCursor,
         menu::{
             Menu,
-            Command
+            MenuCommand
         }
     }
 };
@@ -125,7 +128,7 @@ pub struct CocoaApp {
     pub last_key_mod: KeyModifiers,
     pub pasteboard: ObjcId,
     pub startup_focus_hack_ran: bool,
-    pub event_callback: Option<*mut dyn FnMut(&mut CocoaApp, &mut Vec<Event>) -> bool>,
+    pub event_callback: Option<*mut dyn FnMut(&mut CocoaApp, Vec<CocoaEvent>) -> bool>,
     pub event_recur_block: bool,
     pub event_loop_running: bool,
     pub loop_block: bool,
@@ -171,13 +174,13 @@ impl CocoaApp {
         }
     }
     
-    pub fn update_app_menu(&mut self, menu: &Menu, command_settings: &HashMap<Command, CxCommandSetting>,) {
+    pub fn update_app_menu(&mut self, menu: &Menu, command_settings: &HashMap<MenuCommand, CxCommandSetting>,) {
         unsafe fn make_menu(
             parent_menu: ObjcId,
             delegate: ObjcId,
             menu_target_class: *const Class,
             menu: &Menu,
-            command_settings: &HashMap<Command, CxCommandSetting>
+            command_settings: &HashMap<MenuCommand, CxCommandSetting>
         ) {
             match menu {
                 Menu::Main {items} => {
@@ -389,8 +392,8 @@ impl CocoaApp {
                     let modifiers = get_event_key_modifier(ns_event);
                     //let key_char = get_event_char(ns_event);
                     let is_repeat: bool = msg_send![ns_event, isARepeat];
-                    self.do_callback(&mut vec![
-                        Event::KeyUp(KeyEvent {
+                    self.do_callback(vec![
+                        CocoaEvent::KeyUp(KeyEvent {
                             key_code: key_code,
                             //key_char: key_char,
                             is_repeat: is_repeat,
@@ -413,8 +416,8 @@ impl CocoaApp {
                             // was a paste
                             let nsstring: ObjcId = msg_send![self.pasteboard, stringForType: NSStringPboardType];
                             let string = nsstring_to_string(nsstring);
-                            self.do_callback(&mut vec![
-                                Event::TextInput(TextInputEvent {
+                            self.do_callback(vec![
+                                CocoaEvent::TextInput(TextInputEvent {
                                     input: string,
                                     was_paste: true,
                                     replace_last: false
@@ -423,30 +426,26 @@ impl CocoaApp {
                         },
                         KeyCode::KeyX | KeyCode::KeyC => if modifiers.logo || modifiers.control {
                             // cut or copy.
-                            let mut events = vec![
-                                Event::TextCopy(TextCopyEvent {
-                                    response: None
+                            let response = Rc::new(RefCell::new(None));
+                            self.do_callback(vec![
+                                CocoaEvent::TextCopy(TextCopyEvent {
+                                    response: response.clone()
                                 })
-                            ];
-                            self.do_callback(&mut events);
-                            match &events[0] {
-                                Event::TextCopy(req) => if let Some(response) = &req.response {
-                                    // plug it into the apple clipboard
-                                    let nsstring = str_to_nsstring(&response);
-                                    let array: ObjcId = msg_send![class!(NSArray), arrayWithObject: NSStringPboardType];
-                                    let () = msg_send![self.pasteboard, declareTypes: array owner: nil];
-                                    let () = msg_send![self.pasteboard, setString: nsstring forType: NSStringPboardType];
-                                },
-                                _ => ()
-                            };
+                            ]);
+                            let response = response.borrow();
+                            if let Some(response) = response.as_ref(){
+                                let nsstring = str_to_nsstring(&response);
+                                let array: ObjcId = msg_send![class!(NSArray), arrayWithObject: NSStringPboardType];
+                                let () = msg_send![self.pasteboard, declareTypes: array owner: nil];
+                                let () = msg_send![self.pasteboard, setString: nsstring forType: NSStringPboardType];
+                            }
                         },
                         _ => {}
                     }
                     
-                    self.do_callback(&mut vec![
-                        Event::KeyDown(KeyEvent {
+                    self.do_callback(vec![
+                        CocoaEvent::KeyDown(KeyEvent {
                             key_code: key_code,
-                            //key_char: key_char,
                             is_repeat: is_repeat,
                             modifiers: modifiers,
                             time: self.time_now()
@@ -472,7 +471,7 @@ impl CocoaApp {
                 let last_key_mod = self.last_key_mod.clone();
                 self.last_key_mod = modifiers.clone();
                 let mut events = Vec::new();
-                fn add_event(time: f64, old: bool, new: bool, modifiers: KeyModifiers, events: &mut Vec<Event>, key_code: KeyCode) {
+                fn add_event(time: f64, old: bool, new: bool, modifiers: KeyModifiers, events: &mut Vec<CocoaEvent>, key_code: KeyCode) {
                     if old != new {
                         let event = KeyEvent {
                             key_code: key_code,
@@ -482,10 +481,10 @@ impl CocoaApp {
                             time: time
                         };
                         if new {
-                            events.push(Event::KeyDown(event));
+                            events.push(CocoaEvent::KeyDown(event));
                         }
                         else {
-                            events.push(Event::KeyUp(event));
+                            events.push(CocoaEvent::KeyUp(event));
                         }
                     }
                 }
@@ -495,7 +494,7 @@ impl CocoaApp {
                 add_event(time, last_key_mod.logo, modifiers.logo, modifiers.clone(), &mut events, KeyCode::Logo);
                 add_event(time, last_key_mod.control, modifiers.control, modifiers.clone(), &mut events, KeyCode::Control);
                 if events.len() >0 {
-                    self.do_callback(&mut events);
+                    self.do_callback(events);
                 }
             },
             NSEventType::NSMouseEntered => {},
@@ -538,30 +537,22 @@ impl CocoaApp {
                 let dy: f64 = msg_send![ns_event, scrollingDeltaY];
                 let has_prec: BOOL = msg_send![ns_event, hasPreciseScrollingDeltas];
                 return if has_prec == YES {
-                    self.do_callback(&mut vec![
-                        Event::FingerScroll(FingerScrollEvent {
-                            digit: 0,
+                    self.do_callback(vec![
+                        CocoaEvent::Scroll(CocoaScrollEvent {
                             window_id: cocoa_window.window_id,
                             scroll: Vec2 {x: -dx as f32, y: -dy as f32},
                             abs: cocoa_window.last_mouse_pos,
-                            input_type: FingerInputType::Touch,
                             modifiers: get_event_key_modifier(ns_event),
-                            handled_x: false,
-                            handled_y: false,
                             time: self.time_now()
                         })
                     ]);
                 } else {
-                    self.do_callback(&mut vec![
-                        Event::FingerScroll(FingerScrollEvent {
-                            digit: 0,
+                    self.do_callback(vec![
+                        CocoaEvent::Scroll(CocoaScrollEvent {
                             window_id: cocoa_window.window_id,
                             scroll: Vec2 {x: -dx as f32 * 32., y: -dy as f32 * 32.},
                             abs: cocoa_window.last_mouse_pos,
-                            input_type: FingerInputType::Mouse,
                             modifiers: get_event_key_modifier(ns_event),
-                            handled_x: false,
-                            handled_y: false,
                             time: self.time_now()
                         })
                     ]);
@@ -580,13 +571,13 @@ impl CocoaApp {
     }
     
     pub fn event_loop<F>(&mut self, mut event_handler: F)
-    where F: FnMut(&mut CocoaApp, &mut Vec<Event>) -> bool,
+    where F: FnMut(&mut CocoaApp, Vec<CocoaEvent>) -> bool,
     {
         unsafe {
             let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
             let () = msg_send![ns_app, finishLaunching];
             
-            self.event_callback = Some(&mut event_handler as *const dyn FnMut(&mut CocoaApp, &mut Vec<Event>) -> bool as *mut dyn FnMut(&mut CocoaApp, &mut Vec<Event>) -> bool);
+            self.event_callback = Some(&mut event_handler as *const dyn FnMut(&mut CocoaApp, Vec<CocoaEvent>) -> bool as *mut dyn FnMut(&mut CocoaApp, Vec<CocoaEvent>) -> bool);
             
             while self.event_loop_running {
                 let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
@@ -609,7 +600,7 @@ impl CocoaApp {
                 }
                 
                 if ns_event == nil || self.loop_block {
-                    self.do_callback(&mut vec![Event::Paint]);
+                    self.do_callback(vec![CocoaEvent::Paint]);
                 }
                 
                 let () = msg_send![pool, release];
@@ -618,7 +609,7 @@ impl CocoaApp {
         }
     }
     
-    pub fn do_callback(&mut self, events: &mut Vec<Event>) {
+    pub fn do_callback(&mut self, events: Vec<CocoaEvent>) {
         unsafe {
             if self.event_callback.is_none() || self.event_recur_block {
                 return
@@ -728,7 +719,7 @@ impl CocoaApp {
                 if !self.timers[i].repeats {
                     self.timers.remove(i);
                 }
-                self.do_callback(&mut vec![Event::Timer(TimerEvent {timer_id: timer_id})]);
+                self.do_callback(vec![CocoaEvent::Timer(TimerEvent {timer_id: timer_id})]);
                 // break the eventloop if its in blocked mode
                 unsafe {
                     let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
@@ -756,23 +747,23 @@ impl CocoaApp {
     pub fn send_signal_event(&mut self, signal: Signal) {
         let mut signals = HashSet::new();
         signals.insert(signal);
-        self.do_callback(&mut vec![
-            Event::Signal(SignalEvent {
+        self.do_callback(vec![
+            CocoaEvent::Signal(SignalEvent {
                 signals: signals,
             })
         ]);
-        self.do_callback(&mut vec![Event::Paint]);
+        self.do_callback(vec![CocoaEvent::Paint]);
     }
     
-    pub fn send_command_event(&mut self, command: Command) {
-        self.do_callback(&mut vec![
-            Event::Command(command)
+    pub fn send_command_event(&mut self, command: MenuCommand) {
+        self.do_callback(vec![
+            CocoaEvent::MenuCommand(command)
         ]);
-        self.do_callback(&mut vec![Event::Paint]);
+        self.do_callback(vec![CocoaEvent::Paint]);
     }
     
     pub fn send_paint_event(&mut self) {
-        self.do_callback(&mut vec![Event::Paint]);
+        self.do_callback(vec![CocoaEvent::Paint]);
     }
     
     pub fn start_dragging(&mut self, dragged_item: DraggedItem) {

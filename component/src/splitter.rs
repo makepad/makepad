@@ -138,7 +138,7 @@ impl FrameComponent for Splitter {
     fn handle_component_event(
         &mut self,
         cx: &mut Cx,
-        event: &mut Event,
+        event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, FrameActionItem)
     ) {
         let mut redraw = false;
@@ -245,7 +245,7 @@ impl Splitter {
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
-        event: &mut Event,
+        event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, SplitterAction),
     ) {
         self.state_handle_event(cx, event);
@@ -270,7 +270,7 @@ impl Splitter {
         }
         Hit::FingerUp(f) => {
             self.drag_start_align = None;
-            if f.is_over && f.input_type.has_hovers() {
+            if f.is_over && f.finger_type.has_hovers() {
                 self.animate_state(cx, ids!(hover.on));
             }
             else {

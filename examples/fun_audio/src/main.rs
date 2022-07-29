@@ -275,6 +275,7 @@ pub struct App {
     audio_graph: AudioGraph,
     window: BareWindow,
     scroll_view: ScrollView,
+    data: f32,
 }
 
 impl App {
@@ -284,7 +285,7 @@ impl App {
         crate::piano::live_register(cx);
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         
         //self.window.handle_event(cx, event);
         self.scroll_view.handle_event(cx, event);

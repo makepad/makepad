@@ -270,7 +270,7 @@ impl Dock {
         panel.tab_bar.redraw(cx);
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> Vec<DockAction> {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> Vec<DockAction> {
         let mut a = Vec::new();
         self.handle_event_with_fn(cx, event, &mut | _, v | a.push(v));
         a
@@ -279,7 +279,7 @@ impl Dock {
     pub fn handle_event_with_fn(
         &mut self,
         cx: &mut Cx,
-        event: &mut Event,
+        event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, DockAction),
     ) {
         for (panel_id, panel) in self.panels.iter_mut() {
@@ -319,7 +319,7 @@ impl Dock {
             }
         }
         match event {
-            Event::FingerDrag(event) => {
+            Event::Drag(event) => {
                 self.drag = None;
                 for (panel_id, panel) in self.panels.iter_mut() {
                     if let Panel::Tab(panel) = panel {
@@ -328,13 +328,13 @@ impl Dock {
                                 panel_id: *panel_id,
                                 position: compute_drag_position(panel.contents_rect, event.abs),
                             });
-                            event.action = DragAction::Copy;
+                            event.action.set(DragAction::Copy);
                         }
                     }
                 }
                 self.overlay_view.redraw(cx);
             }
-            Event::FingerDrop(event) => {
+            Event::Drop(event) => {
                 self.drag = None;
                 for (panel_id, panel) in self.panels.iter_mut() {
                     if let Panel::Tab(panel) = panel {
