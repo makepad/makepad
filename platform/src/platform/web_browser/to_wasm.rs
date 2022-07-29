@@ -6,7 +6,9 @@ use crate::{
     midi::{MidiInputInfo, Midi1Data, Midi1InputData},
     cx::{PlatformType},
     window::CxWindowPool,
+    area::Area,
     event::{
+        DigitId,
         XRButton,
         XRInput,
         XRUpdateEvent,
@@ -126,19 +128,24 @@ pub struct ToWasmAnimationFrame {
     pub time: f64
 }
 
+
+
+// Finger API
+
+
+
 #[derive(ToWasm)]
-pub struct WFinger {
+pub struct WTouch {
     pub x: f32,
     pub y: f32,
-    pub digit: usize,
-    pub is_touch: bool,
+    pub uid: u32,
     pub modifiers: u32,
     pub time: f64,
 }
 
 #[derive(ToWasm)]
-pub struct ToWasmFingerDown {
-    pub finger: WFinger,
+pub struct ToWasmTouchStart {
+    pub touch: WTouch,
 }
 
 fn unpack_key_modifier(modifiers: u32) -> KeyModifiers {
@@ -150,114 +157,195 @@ fn unpack_key_modifier(modifiers: u32) -> KeyModifiers {
     }
 }
 
-impl ToWasmFingerDown {
-    pub fn into_finger_down_event(self, tap_count: u32) -> FingerDownEvent {
+impl ToWasmTouchStart {
+    pub fn into_finger_down_event(self, digit_id:DigitId, tap_count: u32) -> FingerDownEvent {
         FingerDownEvent {
             window_id: CxWindowPool::id_zero(),
-            abs: Vec2 {x: self.finger.x, y: self.finger.y},
+            abs: Vec2 {x: self.touch.x, y: self.touch.y},
             handled: false,
-            digit: self.finger.digit,
-            input_type: if self.finger.is_touch {FingerInputType::Touch} else {FingerInputType::Mouse},
-            modifiers: unpack_key_modifier(self.finger.modifiers),
-            time: self.finger.time,
+            digit_id,
+            input_type: FingerInputType::Touch(self.touch.uid as usize),
+            modifiers: KeyModifiers::default(),
+            time: self.touch.time,
             tap_count: tap_count
         }
     }
 }
 
 #[derive(ToWasm)]
-pub struct ToWasmFingerUp {
-    pub finger: WFinger,
+pub struct ToWasmTouchMove {
+    pub touch: WTouch,
 }
 
-impl Into<FingerUpEvent> for ToWasmFingerUp {
-    fn into(self) -> FingerUpEvent {
-        FingerUpEvent {
-            window_id: CxWindowPool::id_zero(),
-            abs: Vec2 {x: self.finger.x, y: self.finger.y},
-            digit: self.finger.digit,
-            input_type: if self.finger.is_touch {FingerInputType::Touch} else {FingerInputType::Mouse},
-            modifiers: unpack_key_modifier(self.finger.modifiers),
-            time: self.finger.time,
-        }
-    }
-}
-
-#[derive(ToWasm)]
-pub struct ToWasmFingerMove {
-    pub finger: WFinger,
-}
-
-impl Into<FingerMoveEvent> for ToWasmFingerMove {
-    fn into(self) -> FingerMoveEvent {
+impl ToWasmTouchMove {
+    pub fn into_finger_move_event(self, digit_id:DigitId, captured:Area ) -> FingerMoveEvent {
         FingerMoveEvent {
             window_id: CxWindowPool::id_zero(),
-            abs: Vec2 {x: self.finger.x, y: self.finger.y},
-            digit: self.finger.digit,
-            input_type: if self.finger.is_touch {FingerInputType::Touch} else {FingerInputType::Mouse},
-            modifiers: unpack_key_modifier(self.finger.modifiers),
-            time: self.finger.time,
+            abs: Vec2 {x: self.touch.x, y: self.touch.y},
+            digit_id,
+            captured,
+            input_type: FingerInputType::Touch(self.touch.uid as usize),
+            modifiers: KeyModifiers::default(),
+            time: self.touch.time,
         }
     }
 }
 
 #[derive(ToWasm)]
-pub struct ToWasmFingerHover {
-    pub finger: WFinger,
+pub struct ToWasmTouchEnd {
+    pub touch: WTouch,
 }
 
-impl Into<FingerHoverEvent> for ToWasmFingerHover {
-    fn into(self) -> FingerHoverEvent {
+impl ToWasmTouchEnd {
+    pub fn into_finger_up_event(self, digit_id:DigitId, captured:Area ) -> FingerUpEvent {
+        FingerUpEvent {
+            window_id: CxWindowPool::id_zero(),
+            abs: Vec2 {x: self.touch.x, y: self.touch.y},
+            digit_id,
+            captured,
+            input_type: FingerInputType::Touch(self.touch.uid as usize),
+            modifiers: KeyModifiers::default(),
+            time: self.touch.time,
+        }
+    }
+}
+
+
+// Mouse API
+
+
+#[derive(ToWasm)]
+pub struct WMouse {
+    pub x: f32,
+    pub y: f32,
+    pub modifiers: u32,
+    pub button: u32,
+    pub time: f64,
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmMouseDown {
+    pub mouse: WMouse,
+}
+impl ToWasmMouseDown {
+    pub fn into_finger_down_event(self, digit_id:DigitId, tap_count: u32) -> FingerDownEvent {
+        FingerDownEvent {
+            window_id: CxWindowPool::id_zero(),
+            abs: Vec2 {x: self.mouse.x, y: self.mouse.y},
+            handled: false,
+            digit_id,
+            input_type: FingerInputType::Mouse(self.mouse.button as usize),
+            modifiers: unpack_key_modifier(self.mouse.modifiers),
+            time: self.mouse.time,
+            tap_count: tap_count
+        }
+    }
+}
+
+#[derive(ToWasm)]
+pub struct ToWasmMouseMove {
+    pub was_out: bool,
+    pub mouse: WMouse,
+}
+
+impl ToWasmMouseMove {
+    pub fn into_finger_move_event(self, digit_id:DigitId, captured:Area) -> FingerMoveEvent {
+        FingerMoveEvent {
+            window_id: CxWindowPool::id_zero(),
+            abs: Vec2 {x: self.mouse.x, y: self.mouse.y},
+            digit_id,
+            captured,
+            input_type: FingerInputType::Mouse(self.mouse.button as usize),
+            modifiers: unpack_key_modifier(self.mouse.modifiers),
+            time: self.mouse.time,
+        }
+    }
+}
+
+impl ToWasmMouseMove {
+    pub fn into_finger_hover_event(self, digit_id:DigitId, hover_last:Area) -> FingerHoverEvent {
         FingerHoverEvent {
             window_id: CxWindowPool::id_zero(),
-            abs: Vec2 {x: self.finger.x, y: self.finger.y},
+            abs: Vec2 {x: self.mouse.x, y: self.mouse.y},
             handled: false,
-            modifiers: unpack_key_modifier(self.finger.modifiers),
-            time: self.finger.time,
+            hover_last,
+            digit_id,
+            input_type: FingerInputType::Mouse(self.mouse.button as usize),
+            modifiers: unpack_key_modifier(self.mouse.modifiers),
+            time: self.mouse.time,
         }
     }
 }
 
-
 #[derive(ToWasm)]
-pub struct ToWasmFingerOut {
-    pub finger: WFinger,
+pub struct ToWasmMouseUp {
+    pub mouse: WMouse,
 }
 
-impl Into<FingerHoverEvent> for ToWasmFingerOut {
-    fn into(self) -> FingerHoverEvent {
-        FingerHoverEvent {
+impl ToWasmMouseUp {
+    pub fn into_finger_up_event(self, digit_id:DigitId, captured:Area) -> FingerUpEvent {
+        FingerUpEvent {
             window_id: CxWindowPool::id_zero(),
-            abs: Vec2 {x: self.finger.x, y: self.finger.y},
-            handled: false,
-            modifiers: unpack_key_modifier(self.finger.modifiers),
-            time: self.finger.time,
+            abs: Vec2 {x: self.mouse.x, y: self.mouse.y},
+            captured,
+            digit_id,
+            input_type: FingerInputType::Mouse(self.mouse.button as usize),
+            modifiers: unpack_key_modifier(self.mouse.modifiers),
+            time: self.mouse.time,
         }
     }
 }
 
+// scroll
+
 #[derive(ToWasm)]
-pub struct ToWasmFingerScroll {
-    pub finger: WFinger,
+pub struct ToWasmScroll {
+    pub x: f32,
+    pub y: f32,
+    pub modifiers: u32,
+    pub is_touch: bool,
     pub scroll_x: f32,
-    pub scroll_y: f32
+    pub scroll_y: f32,
+    pub time: f64
 }
 
-impl Into<FingerScrollEvent> for ToWasmFingerScroll {
-    fn into(self) -> FingerScrollEvent {
-        FingerScrollEvent {
+impl ToWasmScroll {
+    pub fn into_finger_scroll_event(self, digit_id:DigitId) -> FingerScrollEvent {
+        FingerScrollEvent{
             window_id: CxWindowPool::id_zero(),
-            digit: self.finger.digit,
-            abs: Vec2 {x: self.finger.x, y: self.finger.y},
+            digit_id,
+            abs: Vec2 {x: self.x, y: self.y},
             scroll: Vec2 {x: self.scroll_x, y: self.scroll_y},
-            input_type: if self.finger.is_touch {FingerInputType::Touch} else {FingerInputType::Mouse},
+            input_type: if self.is_touch {FingerInputType::Touch(0)} else {FingerInputType::Mouse(0)},
             handled_x: false,
             handled_y: false,
-            modifiers: unpack_key_modifier(self.finger.modifiers),
-            time: self.finger.time,
+            modifiers: unpack_key_modifier(self.modifiers),
+            time: self.time,
         }
     }
 }
+
+/*
+#[derive(ToWasm)]
+pub struct ToWasmMouseOut {
+    pub mouse: WMouse,
+}
+
+impl Into<FingerHoverEvent> for ToWasmMouseOut {
+    fn into(self) -> FingerHoverEvent {
+        FingerHoverEvent {
+            window_id: CxWindowPool::id_zero(),
+            abs: Vec2 {x: self.mouse.x, y: self.mouse.y},
+            handled: false,
+            digit: 0,
+            input_type: FingerInputType::Mouse(self.mouse.button),
+            modifiers: unpack_key_modifier(self.mouse.modifiers),
+            time: self.mouse.time,
+        }
+    }
+}*/
+
+
 
 fn web_to_key_code(key_code: u32) -> KeyCode {
     match key_code {

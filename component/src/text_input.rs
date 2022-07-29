@@ -135,7 +135,7 @@ live_register!{
 }
 
 #[derive(Clone)]
-struct UndoItem{
+struct UndoItem {
     text: String,
     undo_group: UndoGroup,
     cursor_head: usize,
@@ -143,7 +143,7 @@ struct UndoItem{
 }
 
 #[derive(PartialEq, Copy, Clone)]
-pub enum UndoGroup{
+pub enum UndoGroup {
     TextInput(u64),
     Backspace(u64),
     Delete(u64),
@@ -190,7 +190,7 @@ pub enum TextInputAction {
 
 impl TextInput {
     
-    pub fn sorted_cursor(&self)->(usize, usize){
+    pub fn sorted_cursor(&self) -> (usize, usize) {
         if self.cursor_head < self.cursor_tail {
             (self.cursor_head, self.cursor_tail)
         }
@@ -199,64 +199,64 @@ impl TextInput {
         }
     }
     
-    pub fn selected_text(&mut self)->String{
+    pub fn selected_text(&mut self) -> String {
         let mut ret = String::new();
         let (left, right) = self.sorted_cursor();
         for (i, c) in self.text.chars().enumerate() {
-            if i >= left && i< right{
+            if i >= left && i< right {
                 ret.push(c);
             }
-            if i>=right{
+            if i >= right {
                 break;
             }
         }
         ret
     }
     
-    fn consume_undo_item(&mut self, item:UndoItem){
+    fn consume_undo_item(&mut self, item: UndoItem) {
         self.text = item.text;
         self.cursor_head = item.cursor_head;
         self.cursor_tail = item.cursor_tail;
     }
     
-    pub fn undo(&mut self){
-        if let Some(item) = self.undo_stack.pop(){
+    pub fn undo(&mut self) {
+        if let Some(item) = self.undo_stack.pop() {
             let redo_item = self.create_undo_item(item.undo_group);
             self.consume_undo_item(item.clone());
             self.redo_stack.push(redo_item);
         }
     }
     
-     pub fn redo(&mut self){
-        if let Some(item) = self.redo_stack.pop(){
+    pub fn redo(&mut self) {
+        if let Some(item) = self.redo_stack.pop() {
             let undo_item = self.create_undo_item(item.undo_group);
             self.consume_undo_item(item.clone());
             self.undo_stack.push(undo_item);
         }
     }
-
-    fn create_undo_item(&mut self, undo_group:UndoGroup)->UndoItem{
-        UndoItem{
+    
+    fn create_undo_item(&mut self, undo_group: UndoGroup) -> UndoItem {
+        UndoItem {
             undo_group: undo_group,
-            text: self.text.clone(), 
-            cursor_head: self.cursor_head, 
+            text: self.text.clone(),
+            cursor_head: self.cursor_head,
             cursor_tail: self.cursor_tail
         }
     }
     
-    pub fn create_undo(&mut self, undo_group:UndoGroup){
+    pub fn create_undo(&mut self, undo_group: UndoGroup) {
         self.redo_stack.clear();
         let new_item = self.create_undo_item(undo_group);
-        if let Some(item) = self.undo_stack.last_mut(){
-            if item.undo_group != undo_group{
+        if let Some(item) = self.undo_stack.last_mut() {
+            if item.undo_group != undo_group {
                 self.last_undo = Some(new_item.clone());
                 self.undo_stack.push(new_item);
             }
-            else{
+            else {
                 self.last_undo = Some(new_item);
             }
         }
-        else{
+        else {
             self.last_undo = Some(new_item.clone());
             self.undo_stack.push(new_item);
         }
@@ -304,15 +304,15 @@ impl TextInput {
             }
             Hit::TextInput(te) => {
                 let last_undo = self.last_undo.take();
-                if te.replace_last{
+                if te.replace_last {
                     self.undo_id += 1;
                     self.create_undo(UndoGroup::TextInput(self.undo_id));
-                    if let Some(item) = last_undo{
+                    if let Some(item) = last_undo {
                         self.consume_undo_item(item);
                     }
                 }
-                else{
-                    if te.input == " "{
+                else {
+                    if te.input == " " {
                         self.undo_id += 1;
                     }
                     // if this one follows a space, it still needs to eat it
@@ -325,73 +325,71 @@ impl TextInput {
                 self.undo_id += 1;
                 ce.response = Some(self.selected_text())
             }
-            Hit::KeyDown(ke) => {
-                match ke.key_code { 
-                    KeyCode::KeyZ if ke.mod_logo() || ke.mod_control() => {
-                        self.undo_id += 1;
-                        if ke.mod_shift(){
-                            self.redo();
-                        }
-                        else{
-                            self.undo();
-                        }
+            Hit::KeyDown(ke) => match ke.key_code {
+                KeyCode::KeyZ if ke.mod_logo() || ke.mod_control() => {
+                    self.undo_id += 1;
+                    if ke.mod_shift() {
+                        self.redo();
+                    }
+                    else {
+                        self.undo();
+                    }
+                    self.bg.redraw(cx);
+                }
+                KeyCode::KeyA if ke.mod_logo() || ke.mod_control() => {
+                    self.undo_id += 1;
+                    self.cursor_tail = 0;
+                    self.cursor_head = self.text.chars().count();
+                    self.bg.redraw(cx);
+                }
+                KeyCode::KeyX if ke.mod_logo() || ke.mod_control() => {
+                    self.undo_id += 1;
+                    if self.cursor_head != self.cursor_tail {
+                        self.create_undo(UndoGroup::Cut(self.undo_id));
                         self.bg.redraw(cx);
                     }
-                    KeyCode::KeyA if ke.mod_logo() || ke.mod_control() => {
-                        self.undo_id += 1;
-                        self.cursor_tail = 0;
-                        self.cursor_head = self.text.chars().count();
-                        self.bg.redraw(cx);
+                }
+                KeyCode::ArrowLeft => {
+                    self.undo_id += 1;
+                    if self.cursor_head>0 {
+                        self.cursor_head -= 1;
                     }
-                    KeyCode::KeyX if ke.mod_logo() || ke.mod_control() => {
-                        self.undo_id += 1;
-                        if self.cursor_head != self.cursor_tail {
-                            self.create_undo(UndoGroup::Cut(self.undo_id));
-                            self.bg.redraw(cx);
+                    if !ke.mod_shift() {
+                        self.cursor_tail = self.cursor_head;
+                    }
+                    self.bg.redraw(cx);
+                },
+                KeyCode::ArrowRight => {
+                    self.undo_id += 1;
+                    if self.cursor_head < self.text.chars().count() {
+                        self.cursor_head += 1;
+                    }
+                    if !ke.mod_shift() {
+                        self.cursor_tail = self.cursor_head;
+                    }
+                    self.bg.redraw(cx);
+                }
+                KeyCode::Backspace => {
+                    self.create_undo(UndoGroup::Backspace(self.undo_id));
+                    if self.cursor_head == self.cursor_tail {
+                        if self.cursor_tail > 0 {
+                            self.cursor_tail -= 1;
                         }
                     }
-                    KeyCode::ArrowLeft => {
-                        self.undo_id += 1;
-                        if self.cursor_head>0 {
-                            self.cursor_head -= 1;
-                        }
-                        if !ke.mod_shift() {
-                            self.cursor_tail = self.cursor_head;
-                        }
-                        self.bg.redraw(cx);
-                    },
-                    KeyCode::ArrowRight => {
-                        self.undo_id += 1;
+                    self.replace_text("");
+                    self.bg.redraw(cx);
+                }
+                KeyCode::Delete => {
+                    self.create_undo(UndoGroup::Delete(self.undo_id));
+                    if self.cursor_head == self.cursor_tail {
                         if self.cursor_head < self.text.chars().count() {
                             self.cursor_head += 1;
                         }
-                        if !ke.mod_shift() {
-                            self.cursor_tail = self.cursor_head;
-                        }
-                        self.bg.redraw(cx);
                     }
-                    KeyCode::Backspace => {
-                        self.create_undo(UndoGroup::Backspace(self.undo_id));
-                        if self.cursor_head == self.cursor_tail {
-                            if self.cursor_tail > 0 {
-                                self.cursor_tail -= 1;
-                            }
-                        }
-                        self.replace_text("");
-                        self.bg.redraw(cx);
-                    }
-                    KeyCode::Delete => {
-                        self.create_undo(UndoGroup::Backspace(self.undo_id));
-                        if self.cursor_head == self.cursor_tail {
-                            if self.cursor_head < self.text.chars().count() {
-                                self.cursor_head += 1;
-                            }
-                        }
-                        self.replace_text("");
-                        self.bg.redraw(cx);
-                    }
-                    _ => ()
+                    self.replace_text("");
+                    self.bg.redraw(cx);
                 }
+                _ => ()
             }
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Text);
@@ -469,11 +467,11 @@ impl TextInput {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.bg.begin(cx, walk, self.layout);
         
-        self.label.draw_walk(cx, self.label_walk, self.align, &self.text);
-        
+        // this makes sure selection goes behind the text
         self.select.append_to_draw_call(cx);
         
-        // fetch the x position of the cursor
+        self.label.draw_walk(cx, self.label_walk, self.align, &self.text);
+        
         let turtle = cx.turtle().rect();
         
         // move the IME

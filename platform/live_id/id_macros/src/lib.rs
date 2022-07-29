@@ -1,6 +1,6 @@
 use proc_macro::{TokenStream};
 
-use makepad_macro_lib::{TokenBuilder, TokenParser};
+use makepad_macro_lib::{TokenBuilder, TokenParser, error};
 
 use crate::live_id::*;
 #[path = "../../src/live_id.rs"]
@@ -60,7 +60,7 @@ pub fn ids(item: TokenStream) -> TokenStream {
     };
     tb.end()
 }
-/*
+
 // absolutely a very bad idea but lets see if we can do this.
 #[proc_macro]
 pub fn id_num(item: TokenStream) -> TokenStream {
@@ -71,27 +71,16 @@ pub fn id_num(item: TokenStream) -> TokenStream {
         if !parser.eat_punct_alone(','){
             return error("please add a number")
         }
-        if let Some(v) = parser.eat_literal(){
-            if let Ok(v) = v.to_string().parse::<u64>(){
-                let id = LiveId::from_str_unchecked(&name);
-                tb.add("LiveId (").suf_u64(id.0&0xffff_ffff_0000_0000 | (v&0xffff_ffff)).add(")");
-                return tb.end()
-            }
-            else{
-                return error("please add a number")
-            }
-        }
-        else{
-            let arg = parser.eat_level();
-            let id = LiveId::from_str_unchecked(&name);
-            tb.add("LiveId (").suf_u64(id.0&0xffff_ffff_0000_0000).add("|((").stream(Some(arg)).add(")&0xffff_ffff)").add(")");
-            tb.end()
-        }
+        // then eat the next bit
+        let arg = parser.eat_level();
+        let id = LiveId::from_str_unchecked(&name);
+        tb.add("LiveId::from_num_unchecked(").suf_u64(id.0).add(",").stream(Some(arg)).add(")");
+        tb.end()
     }
     else{
         parser.unexpected()
     }
-}*/
+}
 
 
 #[proc_macro]
