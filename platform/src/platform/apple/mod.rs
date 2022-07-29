@@ -8,6 +8,7 @@ pub mod metal;
 pub mod macos;
 pub mod audio_unit;
 pub mod core_midi;
+pub mod cocoa_event;
 
 pub use crate::platform::apple::metal::*;
 pub use crate::platform::apple::macos::*;

@@ -282,7 +282,7 @@ impl RustEditor {
         &mut self,
         cx: &mut Cx,
         state: &mut EditorState,
-        event: &mut Event,
+        event: &Event,
         send_request: &mut dyn FnMut(CollabRequest),
         dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
     ) {

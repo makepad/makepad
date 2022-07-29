@@ -629,24 +629,24 @@ export class WasmWebBrowser extends WasmBridge {
                 modifiers: pack_key_modifier(e)
             }
         }
-        let current_mouse_down = null;
+        //let current_mouse_down = null;
         this.handlers.on_mouse_down = e => {
             e.preventDefault();
             this.focus_keyboard_input();
-            if (current_mouse_down === null || current_mouse_down === e.button){
-                current_mouse_down = e.button;
-                this.to_wasm.ToWasmMouseDown({mouse: mouse_to_wasm_wmouse(e)});
-                this.do_wasm_pump();
-            }
+            //if (current_mouse_down === null || current_mouse_down === e.button){
+            //    current_mouse_down = e.button;
+            this.to_wasm.ToWasmMouseDown({mouse: mouse_to_wasm_wmouse(e)});
+            this.do_wasm_pump();
+            //}
         }
         
         this.handlers.on_mouse_up = e => {
             e.preventDefault();
-            if (current_mouse_down == e.button){
-                current_mouse_down = null;
-                this.to_wasm.ToWasmMouseUp({mouse: mouse_to_wasm_wmouse(e)});
-                this.do_wasm_pump();
-            }
+            //if (current_mouse_down == e.button){
+            //    current_mouse_down = null;
+            this.to_wasm.ToWasmMouseUp({mouse: mouse_to_wasm_wmouse(e)});
+            this.do_wasm_pump();
+            //}
         }
         
         this.handlers.on_mouse_move = e => {
@@ -753,7 +753,7 @@ export class WasmWebBrowser extends WasmBridge {
             this.to_wasm.ToWasmFingerScroll({
                 x: e.pageX,
                 y: e.pageY,
-                modifiers: pack_key_modifiers(e),
+                modifiers: pack_key_modifier(e),
                 is_touch: !last_was_wheel,
                 scroll_x: e.deltaX * fac,
                 scroll_y: e.deltaY * fac,

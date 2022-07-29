@@ -110,7 +110,7 @@ impl Cx {
     // event handler wrappers
     
     
-    pub (crate) fn inner_call_event_handler(&mut self, event: &mut Event) {
+    pub (crate) fn inner_call_event_handler(&mut self, event: &Event) {
         self.event_id += 1;
         let event_handler = self.event_handler.unwrap();
         unsafe {(*event_handler)(self, event);}
@@ -118,7 +118,7 @@ impl Cx {
     
     fn inner_key_focus_change(&mut self) {
         if let Some((prev, focus)) = self.keyboard.cycle_key_focus_changed(){
-            self.inner_call_event_handler(&mut Event::KeyFocus(KeyFocusEvent {
+            self.inner_call_event_handler(&Event::KeyFocus(KeyFocusEvent {
                 prev,
                 focus
             }));
@@ -132,7 +132,8 @@ impl Cx {
             counter += 1;
             let mut signals = HashSet::new();
             std::mem::swap(&mut self.signals, &mut signals);
-            self.inner_call_event_handler(&mut Event::Signal(SignalEvent {
+            
+            self.inner_call_event_handler(&Event::Signal(SignalEvent {
                 signals: signals,
             }));
             self.inner_key_focus_change();
@@ -147,7 +148,7 @@ impl Cx {
             counter += 1;
             let mut triggers = HashMap::new();
             std::mem::swap(&mut self.triggers, &mut triggers);
-            self.inner_call_event_handler(&mut Event::Trigger(TriggerEvent {
+            self.inner_call_event_handler(&Event::Trigger(TriggerEvent {
                 triggers: triggers,
             }));
             self.inner_key_focus_change();
@@ -158,7 +159,7 @@ impl Cx {
         }
     }
     
-    pub (crate) fn call_event_handler(&mut self, event: &mut Event) {
+    pub (crate) fn call_event_handler(&mut self, event: &Event) {
         self.inner_call_event_handler(event);
         self.inner_key_focus_change();
         self.inner_triggers_and_signals();
@@ -171,20 +172,20 @@ impl Cx {
     pub (crate) fn call_all_keys_up(&mut self) {
         let keys_down = self.keyboard.all_keys_up();
         for key_event in keys_down {
-            self.call_event_handler(&mut Event::KeyUp(key_event))
+            self.call_event_handler(&Event::KeyUp(key_event))
         }
     }
     
     pub (crate) fn call_draw_event(&mut self) {
         let mut draw_event = DrawEvent::default();
         std::mem::swap(&mut draw_event, &mut self.new_draw_event);
-        self.call_event_handler(&mut Event::Draw(draw_event));
+        self.call_event_handler(&Event::Draw(draw_event));
     }
     
     pub (crate) fn call_next_frame_event(&mut self, time: f64) {
         let mut set = HashSet::default();
         std::mem::swap(&mut set, &mut self.new_next_frames);
-        self.call_event_handler(&mut Event::NextFrame(NextFrameEvent {set, time: time, frame: self.repaint_id}));
+        self.call_event_handler(&Event::NextFrame(NextFrameEvent {set, time: time, frame: self.repaint_id}));
     }
     
     pub fn terminate_thread_pools(&mut self) {

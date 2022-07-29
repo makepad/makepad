@@ -133,7 +133,7 @@ impl AppInner {
         }
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, state: &mut AppState) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, state: &mut AppState) {
         self.window.handle_event(cx, event);
         
         match event {
@@ -217,7 +217,7 @@ impl AppInner {
             }
         }
         
-        for action in self.file_tree.handle_event(cx, event) {
+        for action in self.file_tree.handle_event_iter(cx, event) {
             match action {
                 FileTreeAction::WasClicked(file_node_id) => {
                     let node = &state.file_nodes[file_node_id];

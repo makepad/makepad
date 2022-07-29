@@ -76,7 +76,7 @@ impl LogView {
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
-        event: &mut Event,
+        event: &Event,
         _dispatch_action: &mut dyn FnMut(&mut Cx, LogListAction),
     ) {
         self.log_list.handle_event(cx, event, &mut |_,_|{})

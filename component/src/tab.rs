@@ -183,7 +183,7 @@ impl Tab {
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
-        event: &mut Event,
+        event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, TabAction),
     ) {
         self.state_handle_event(cx, event);
@@ -209,24 +209,24 @@ impl Tab {
             _ => {}
         }
         match event.drag_hits(cx, self.bg.area()) {
-            DragHit::FingerDrag(f) => match f.state {
+            DragHit::Drag(f) => match f.state {
                 DragState::In => {
                     self.is_dragged = true;
                     self.bg.redraw(cx);
-                    *f.action = DragAction::Copy;
+                    f.action.set(DragAction::Copy);
                 }
                 DragState::Out => {
                     self.is_dragged = false;
                     self.bg.redraw(cx);
                 }
                 DragState::Over => match event {
-                    Event::FingerDrag(event) => {
-                        event.action = DragAction::Copy;
+                    Event::Drag(event) => {
+                        event.action.set(DragAction::Copy);
                     }
                     _ => panic!(),
                 },
             },
-            DragHit::FingerDrop(f) => {
+            DragHit::Drop(f) => {
                 self.is_dragged = false;
                 self.bg.area().redraw(cx);
                 dispatch_action(cx, TabAction::ReceivedDraggedItem(f.dragged_item.clone()))

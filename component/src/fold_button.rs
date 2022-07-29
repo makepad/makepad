@@ -108,7 +108,7 @@ impl FoldButton {
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
-        event: &mut Event,
+        event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, FoldButtonAction),
     ) {
         if self.state_handle_event(cx, event).is_animating() {

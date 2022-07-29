@@ -1,10 +1,11 @@
 use {
-    std::cell::RefCell,
+    std::cell::{RefCell},
     std::sync::{Arc, Mutex},
     crate::{
         makepad_error_log::*,
         makepad_live_id::*,
         platform::{
+            cocoa_event::{CocoaEvent},
             core_midi::CoreMidiAccess,
             cocoa_app::{CocoaApp, get_cocoa_app_global, init_cocoa_globals},
             metal::{MetalCx, MetalWindow},
@@ -33,9 +34,9 @@ use {
 impl Cx {
     
     pub fn event_loop<F>(&mut self, mut event_handler: F)
-    where F: FnMut(&mut Cx, &mut Event),
+    where F: FnMut(&mut Cx, &Event),
     {
-        self.event_handler = Some(&mut event_handler as *const dyn FnMut(&mut Cx, &mut Event) as *mut dyn FnMut(&mut Cx, &mut Event));
+        self.event_handler = Some(&mut event_handler as *const dyn FnMut(&mut Cx, &Event) as *mut dyn FnMut(&mut Cx, &Event));
         self.event_loop_core();
         self.event_handler = None;
     }
@@ -64,19 +65,19 @@ impl Cx {
             self.handle_platform_ops(&mut metal_windows, &mut metal_cx, cocoa_app);
             
             let mut paint_dirty = false;
-            for mut event in events {
+            for event in events {
+                // keepalive check
                 match &event {
-                    Event::FingerDown(_) |
-                    Event::FingerMove(_) |
-                    Event::FingerHover(_) |
-                    Event::FingerUp(_) |
-                    Event::FingerScroll(_) |
-                    Event::KeyDown(_) |
-                    Event::KeyUp(_) |
-                    Event::TextInput(_) => {
+                    CocoaEvent::MouseDown(_) |
+                    CocoaEvent::MouseMove(_) |
+                    CocoaEvent::MouseUp(_) |
+                    CocoaEvent::Scroll(_) |
+                    CocoaEvent::KeyDown(_) |
+                    CocoaEvent::KeyUp(_) |
+                    CocoaEvent::TextInput(_) => {
                         keep_alive_counter = KEEP_ALIVE_COUNT;
                     }
-                    Event::Timer(te) => {
+                    CocoaEvent::Timer(te) => {
                         if te.timer_id == 0 {
                             if keep_alive_counter>0 {
                                 keep_alive_counter -= 1;
@@ -88,28 +89,32 @@ impl Cx {
                     }
                     _ => ()
                 }
-                self.process_desktop_pre_event(&mut event);
-                match &event {
-                    Event::AppGotFocus => { // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
+                
+                //self.process_desktop_pre_event(&mut event);
+                match event {
+                    CocoaEvent::AppGotFocus => { // repaint all window passes. Metal sometimes doesnt flip buffers when hidden/no focus
                         for mw in metal_windows.iter_mut() {
                             if let Some(main_pass_id) = self.windows[mw.window_id].main_pass_id {
                                 self.repaint_pass(main_pass_id);
                             }
                         }
                         paint_dirty = true;
-                        self.call_event_handler(&mut event);
+                        self.call_event_handler(&Event::AppGotFocus);
                     }
-                    Event::WindowResizeLoop(wr) => {
-                        if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == wr.window_id) {
-                            if wr.was_started {
-                                metal_window.start_resize();
-                            }
-                            else {
-                                metal_window.stop_resize();
-                            }
+                    CocoaEvent::AppLostFocus => {
+                        self.call_event_handler(&Event::AppLostFocus);
+                    }
+                    CocoaEvent::WindowResizeLoopStart(window_id) => {
+                        if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
+                            metal_window.start_resize();
                         }
-                    },
-                    Event::WindowGeomChange(re) => { // do this here because mac
+                    }
+                    CocoaEvent::WindowResizeLoopStop(window_id) => {
+                        if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
+                            metal_window.stop_resize();
+                        }
+                    }
+                    CocoaEvent::WindowGeomChange(re) => { // do this here because mac
                         if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == re.window_id) {
                             metal_window.window_geom = re.new_geom.clone();
                             self.windows[re.window_id].window_geom = re.new_geom.clone();
@@ -121,9 +126,9 @@ impl Cx {
                             }
                         }
                         // ok lets not redraw all, just this window
-                        self.call_event_handler(&mut event);
-                    },
-                    Event::WindowClosed(wc) => {
+                        self.call_event_handler(&Event::WindowGeomChange(re));
+                    }
+                    CocoaEvent::WindowClosed(wc) => {
                         // lets remove the window from the set
                         self.windows[wc.window_id].is_created = false;
                         if let Some(index) = metal_windows.iter().position( | w | w.window_id == wc.window_id) {
@@ -132,9 +137,9 @@ impl Cx {
                                 cocoa_app.terminate_event_loop();
                             }
                         }
-                        self.call_event_handler(&mut event);
-                    },
-                    Event::Paint => {
+                        self.call_event_handler(&Event::WindowClosed(wc));
+                    }
+                    CocoaEvent::Paint => {
                         if self.new_next_frames.len() != 0 {
                             self.call_next_frame_event(cocoa_app.time_now());
                         }
@@ -143,17 +148,121 @@ impl Cx {
                             self.mtl_compile_shaders(&metal_cx);
                         }
                         self.handle_repaint(&mut metal_windows, &mut metal_cx);
-                    },
-                    Event::Signal(se) => {
-                        self.handle_core_midi_signals(se);
-                        self.call_event_handler(&mut event);
-                    },
-                    _ => {
-                        self.call_event_handler(&mut event);
                     }
-                }
-                if self.process_desktop_post_event(event) {
-                    cocoa_app.terminate_event_loop();
+                    CocoaEvent::MouseDown(md) => {
+                        if self.platform.last_mouse_button == None ||
+                        self.platform.last_mouse_button == Some(md.button) {
+                            self.platform.last_mouse_button = Some(md.button);
+                            let digit_id = id!(mouse).into();
+                            self.fingers.alloc_digit(digit_id);
+                            let digit_index = self.fingers.get_digit_index(digit_id);
+                            let digit_count = self.fingers.get_digit_count();
+                            let tap_count = self.fingers.process_tap_count(
+                                digit_id,
+                                md.abs,
+                                md.time
+                            );
+                            self.call_event_handler(&Event::FingerDown(
+                                md.into_finger_down_event(
+                                    digit_id,
+                                    digit_index,
+                                    digit_count,
+                                    tap_count
+                                )
+                            ));
+                        }
+                    }
+                    CocoaEvent::MouseMove(mm) => {
+                        let digit_id = id!(mouse).into();
+                        
+                        if !self.fingers.is_digit_allocated(digit_id) {
+                            let area = self.fingers.get_hover_area(digit_id);
+                            self.call_event_handler(&Event::FingerHover(
+                                mm.into_finger_hover_event(
+                                    digit_id,
+                                    area,
+                                    self.platform.last_mouse_button.unwrap_or(0)
+                                )
+                            ));
+                            self.fingers.cycle_hover_area(digit_id);
+                        }
+                        else {
+                            let captured = self.fingers.get_captured_area(digit_id);
+                            let digit_index = self.fingers.get_digit_index(digit_id);
+                            let digit_count = self.fingers.get_digit_count();
+                            self.call_event_handler(&mut Event::FingerMove(
+                                mm.into_finger_move_event(
+                                    digit_id,
+                                    digit_index,
+                                    digit_count,
+                                    captured,
+                                    self.platform.last_mouse_button.unwrap_or(0)
+                                )
+                            ));
+                        }
+                    }
+                    CocoaEvent::MouseUp(md) => {
+                        if self.platform.last_mouse_button == Some(md.button) {
+                            self.platform.last_mouse_button = None;
+                            let digit_id = id!(mouse).into();
+                            let captured = self.fingers.get_captured_area(digit_id);
+                            let digit_index = self.fingers.get_digit_index(digit_id);
+                            let digit_count = self.fingers.get_digit_count();
+                            self.call_event_handler(&Event::FingerUp(
+                                md.into_finger_up_event(
+                                    digit_id,
+                                    digit_index,
+                                    digit_count,
+                                    captured
+                                )
+                            ));
+                            self.fingers.free_digit(digit_id);
+                        }
+                    }
+                    CocoaEvent::Scroll(e) => {
+                        self.call_event_handler(&Event::FingerScroll(
+                            e.into_finger_scroll_event(id!(mouse).into())
+                        ))
+                    }
+                    CocoaEvent::WindowDragQuery(e) => {
+                        self.call_event_handler(&Event::WindowDragQuery(e))
+                    }
+                    CocoaEvent::WindowCloseRequested(e) => {
+                        self.call_event_handler(&Event::WindowCloseRequested(e))
+                    }
+                    CocoaEvent::TextInput(e) => {
+                        self.call_event_handler(&Event::TextInput(e))
+                    }
+                    CocoaEvent::Drag(e) => {
+                        self.call_event_handler(&Event::Drag(e))
+                    }
+                    CocoaEvent::Drop(e) => {
+                        self.call_event_handler(&Event::Drop(e))
+                    }
+                    CocoaEvent::DragEnd => {
+                        self.call_event_handler(&Event::DragEnd)
+                    }
+                    CocoaEvent::KeyDown(e) => {
+                        self.keyboard.process_key_down(e.clone());
+                        self.call_event_handler(&Event::KeyDown(e))
+                    }
+                    CocoaEvent::KeyUp(e) => {
+                        self.keyboard.process_key_up(e.clone());
+                        self.call_event_handler(&Event::KeyDown(e))
+                    }
+                    CocoaEvent::TextCopy(e) => {
+                        self.call_event_handler(&Event::TextCopy(e))
+                    }
+                    CocoaEvent::Timer(e) => {
+                        self.call_event_handler(&Event::Timer(e))
+                    }
+                    CocoaEvent::Signal(se) => {
+                        self.handle_core_midi_signals(&se);
+                        self.call_event_handler(&Event::Signal(se));
+                    }
+                    CocoaEvent::MenuCommand(e) => {
+                        self.call_event_handler(&Event::MenuCommand(e))
+                    }
                 }
             }
             
@@ -346,4 +455,5 @@ pub struct CxPlatform {
     pub bytes_written: usize,
     pub draw_calls_done: usize,
     pub text_clipboard_response: Option<String>,
+    pub last_mouse_button: Option<usize>
 }

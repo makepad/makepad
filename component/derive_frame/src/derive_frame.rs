@@ -40,7 +40,7 @@ pub fn derive_frame_component_impl(input: TokenStream) -> TokenStream {
             let where_clause = parser.eat_where_clause(None); //Some("LiveUpdateHooks"));
             tb.add("impl").stream(generic.clone());
             tb.add("FrameComponent for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-            tb.add("    fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, FrameActionItem)) {");
+            tb.add("    fn handle_component_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, FrameActionItem)) {");
             tb.add("        self.handle_event(cx, event, &mut |cx, action|{");
             tb.add("            dispatch_action(cx, FrameActionItem::from_action(action.into()))");
             tb.add("        });");

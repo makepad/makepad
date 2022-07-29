@@ -1,5 +1,7 @@
 use {
     std::{
+        rc::Rc,
+        cell::Cell,
         ptr,
         time::Instant,
         os::raw::{c_void}
@@ -14,22 +16,20 @@ use {
             apple::apple_util::{
                 str_to_nsstring,
             },
+            cocoa_event::{
+                CocoaMouseUpEvent,
+                CocoaMouseDownEvent,
+                CocoaMouseMoveEvent,
+                CocoaEvent,
+            },
             cocoa_app::{CocoaApp,get_cocoa_class_global},
         },
         event::{
             WindowGeom,
-            NUM_FINGERS,
-            Event,
-            FingerInputType,
             WindowDragQueryResponse,
-            WindowResizeLoopEvent,
             WindowGeomChangeEvent,
             WindowDragQueryEvent,
             KeyModifiers,
-            FingerDownEvent,
-            FingerUpEvent,
-            FingerMoveEvent,
-            FingerHoverEvent,
             WindowCloseRequestedEvent,
             WindowClosedEvent,
             TextInputEvent,
@@ -53,7 +53,6 @@ pub struct CocoaWindow {
     pub ime_spot: Vec2,
     pub time_start: Instant,
     pub is_fullscreen: bool,
-    pub fingers_down: Vec<bool>,
     pub last_mouse_pos: Vec2,
 }
 
@@ -81,7 +80,6 @@ impl CocoaWindow {
                 view: view,
                 last_window_geom: None,
                 ime_spot: Vec2::default(),
-                fingers_down: Vec::new(),
                 last_mouse_pos: Vec2::default(),
             }
         }
@@ -91,7 +89,7 @@ impl CocoaWindow {
     pub fn init(&mut self, title: &str, size: Vec2, position: Option<Vec2>) {
         unsafe {
             //(*self.cocoa_app).init_app_after_first_window();
-            self.fingers_down.resize(NUM_FINGERS, false);
+           // self.fingers_down.resize(NUM_FINGERS, false);
             
             let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
             
@@ -192,13 +190,9 @@ impl CocoaWindow {
             let () = msg_send![pool, release];
         }
         
-        let mut events = vec![
-            Event::WindowResizeLoop(WindowResizeLoopEvent {
-                window_id: self.window_id,
-                was_started: true
-            })
-        ];
-        self.do_callback(&mut events);
+        self.do_callback(vec![
+            CocoaEvent::WindowResizeLoopStart(self.window_id)
+        ]);
     }
     
     pub fn end_live_resize(&mut self) {
@@ -206,13 +200,9 @@ impl CocoaWindow {
             let () = msg_send![self.live_resize_timer, invalidate];
             self.live_resize_timer = nil;
         }
-        let mut events = vec![
-            Event::WindowResizeLoop(WindowResizeLoopEvent {
-                window_id: self.window_id,
-                was_started: false
-            })
-        ];
-        self.do_callback(&mut events);
+        self.do_callback(vec![
+            CocoaEvent::WindowResizeLoopStop(self.window_id)
+        ]);
     }
     
     pub fn close_window(&mut self) {
@@ -259,7 +249,7 @@ impl CocoaWindow {
         }
     }
     
-    pub fn do_callback(&mut self, events: &mut Vec<Event>) {
+    pub fn do_callback(&mut self, events: Vec<CocoaEvent>) {
         unsafe {
             (*self.cocoa_app).do_callback(events);
         }
@@ -322,127 +312,104 @@ impl CocoaWindow {
             new_geom.clone()
         };
         self.last_window_geom = Some(new_geom.clone());
-        self.do_callback(&mut vec![
-            Event::WindowGeomChange(WindowGeomChangeEvent {
+        self.do_callback(vec![
+            CocoaEvent::WindowGeomChange(WindowGeomChangeEvent {
                 window_id: self.window_id,
                 old_geom: old_geom,
                 new_geom: new_geom
             }),
-            Event::Paint
+            CocoaEvent::Paint
         ]);
         // we should schedule a timer for +16ms another Paint
         
     }
     
     pub fn send_got_focus_event(&mut self) {
-        self.do_callback(&mut vec![Event::AppGotFocus]);
+        self.do_callback(vec![CocoaEvent::AppGotFocus]);
     }
     
     pub fn send_lost_focus_event(&mut self) {
-        self.do_callback(&mut vec![Event::AppLostFocus]);
+        self.do_callback(vec![CocoaEvent::AppLostFocus]);
     }
     
     pub fn mouse_down_can_drag_window(&mut self) -> bool {
-        let mut events = vec![
-            Event::WindowDragQuery(WindowDragQueryEvent {
+        let response = Rc::new(Cell::new(WindowDragQueryResponse::NoAnswer));
+        self.do_callback(vec![
+            CocoaEvent::WindowDragQuery(WindowDragQueryEvent {
                 window_id: self.window_id,
                 abs: self.last_mouse_pos,
-                response: WindowDragQueryResponse::NoAnswer
+                response: response.clone()
             })
-        ];
-        self.do_callback(&mut events);
-        match &events[0] {
-            Event::WindowDragQuery(wd) => match &wd.response {
-                WindowDragQueryResponse::Client => (),
-                WindowDragQueryResponse::Caption | WindowDragQueryResponse::SysMenu => {
-                    // we start a window drag
-                    return true
-                },
-                _ => ()
+        ]);
+        match response.get() {
+            WindowDragQueryResponse::Caption | WindowDragQueryResponse::SysMenu => {
+                true
             },
-            _ => ()
+            WindowDragQueryResponse::Client  | WindowDragQueryResponse::NoAnswer=>{
+                false
+            }
         }
-        return false
     }
     
-    pub fn send_finger_down(&mut self, digit: usize, modifiers: KeyModifiers) {
+    pub fn send_mouse_down(&mut self, button: usize, modifiers: KeyModifiers) {
         let () = unsafe{msg_send![self.window, makeFirstResponder: self.view]};
-        self.fingers_down[digit] = true;
-        self.do_callback(&mut vec![Event::FingerDown(FingerDownEvent {
+        self.do_callback(vec![CocoaEvent::MouseDown(CocoaMouseDownEvent {
+            button,
+            modifiers,
             window_id: self.window_id,
             abs: self.last_mouse_pos,
-            digit: digit,
-            handled: false,
-            input_type: FingerInputType::Mouse,
-            modifiers: modifiers,
-            tap_count: 0,
             time: self.time_now()
         })]);
     }
     
-    pub fn send_finger_up(&mut self, digit: usize, modifiers: KeyModifiers) {
-        self.fingers_down[digit] = false;
-        self.do_callback(&mut vec![Event::FingerUp(FingerUpEvent {
+    pub fn send_mouse_up(&mut self, button: usize, modifiers: KeyModifiers) {
+        self.do_callback(vec![CocoaEvent::MouseUp(CocoaMouseUpEvent {
+            button,
+            modifiers,
             window_id: self.window_id,
             abs: self.last_mouse_pos,
-            digit: digit,
-            input_type: FingerInputType::Mouse,
-            modifiers: modifiers,
             time: self.time_now()
         })]);
     }
     
-    pub fn send_finger_hover_and_move(&mut self, event: ObjcId, pos: Vec2, modifiers: KeyModifiers) {
+    pub fn send_mouse_move(&mut self, event: ObjcId, pos: Vec2, modifiers: KeyModifiers) {
         self.last_mouse_pos = pos;
         let mut events = Vec::new();
         
         unsafe {(*self.cocoa_app).startup_focus_hack();}
         
-        for (digit, down) in self.fingers_down.iter().enumerate() {
-            if *down {
-                events.push(Event::FingerMove(FingerMoveEvent {
-                    window_id: self.window_id,
-                    abs: pos,
-                    digit: digit,
-                    input_type: FingerInputType::Mouse,
-                    modifiers: modifiers.clone(),
-                    time: self.time_now()
-                }));
-            }
-        };
-        events.push(Event::FingerHover(FingerHoverEvent {
+        events.push(CocoaEvent::MouseMove(CocoaMouseMoveEvent {
             window_id: self.window_id,
             abs: pos,
-            handled: false,
             modifiers: modifiers,
             time: self.time_now()
         }));
         
         unsafe {(*self.cocoa_app).ns_event = event};
-        self.do_callback(&mut events);
+        self.do_callback(events);
         unsafe {(*self.cocoa_app).ns_event = ptr::null_mut()};
     }
     
     pub fn send_window_close_requested_event(&mut self) -> bool {
-        let mut events = vec![Event::WindowCloseRequested(WindowCloseRequestedEvent {
+        let accept_close = Rc::new(Cell::new(true));
+        self.do_callback(vec![CocoaEvent::WindowCloseRequested(WindowCloseRequestedEvent {
             window_id: self.window_id,
-            accept_close: true
-        })];
-        self.do_callback(&mut events);
-        if let Event::WindowCloseRequested(cre) = &events[0] {
-            return cre.accept_close
+            accept_close: accept_close.clone()
+        })]);
+        if !accept_close.get() {
+            return false
         }
         true
     }
     
     pub fn send_window_closed_event(&mut self) {
-        self.do_callback(&mut vec![Event::WindowClosed(WindowClosedEvent {
+        self.do_callback(vec![CocoaEvent::WindowClosed(WindowClosedEvent {
             window_id: self.window_id
         })])
     }
     
     pub fn send_text_input(&mut self, input: String, replace_last: bool) {
-        self.do_callback(&mut vec![Event::TextInput(TextInputEvent {
+        self.do_callback(vec![CocoaEvent::TextInput(TextInputEvent {
             input: input,
             was_paste: false,
             replace_last: replace_last
@@ -504,3 +471,4 @@ pub fn get_cocoa_window(this: &Object) -> &mut CocoaWindow {
         &mut *(ptr as *mut CocoaWindow)
     }
 }
+

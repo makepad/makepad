@@ -75,7 +75,7 @@ impl EditorView {
         &mut self,
         cx: &mut Cx,
         state: &mut EditorState,
-        event: &mut Event,
+        event: &Event,
         send_request: &mut dyn FnMut(CollabRequest),
         dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
     ) {
@@ -167,7 +167,7 @@ impl Editors {
         cx: &mut Cx,
         state: &mut EditorState,
         view_id: EditorViewId,
-        event: &mut Event,
+        event: &Event,
         send_request: &mut dyn FnMut(CollabRequest),
     ) {
         let view = &mut self.editor_views[view_id];

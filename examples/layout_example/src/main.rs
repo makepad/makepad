@@ -51,7 +51,7 @@ impl App {
         makepad_component::live_register(cx);
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.window.handle_event(cx, event);
         
         match event {

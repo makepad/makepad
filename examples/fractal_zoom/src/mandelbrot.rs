@@ -538,7 +538,7 @@ impl Mandelbrot {
         }
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, _: &mut dyn FnMut(&mut Cx, MandelbrotAction)) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: & Event, _: &mut dyn FnMut(&mut Cx, MandelbrotAction)) {
         //self.state_handle_event(cx, event);
         if let Event::Signal(_) = event {
             // this batches up all the input signals into a single animation frame
@@ -598,15 +598,25 @@ impl Mandelbrot {
         // in this mode we get fingerdown events for each finger.
         match event.hits_with_options(cx, self.view.area(), HitOptions {use_multi_touch: true, margin: None}) {
             Hit::FingerDown(fe) => {
+                // ok so we get multiple finger downs
                 self.is_zooming = true;
-                if !fe.input_type.is_touch() || fe.digit == 0 {
-                    self.finger_abs = fe.abs;
-                }
-                if fe.digit == 0 {
-                    self.is_zoom_in = true;
+                // in case of a mouse we check which mousebutton is down
+                if let Some(button) = fe.finger_type.mouse_button(){
+                    if button == 0{
+                        self.is_zoom_in = true;
+                    }
+                    else{
+                        self.is_zoom_in = false;
+                    }
                 }
                 else {
-                    self.is_zoom_in = false;
+                    if fe.digit_count == 1{
+                        self.finger_abs = fe.abs;
+                        self.is_zoom_in = true;
+                    }
+                    else if fe.digit_count >= 2{
+                        self.is_zoom_in = false;
+                    }
                 }
                 
                 self.view.redraw(cx);
@@ -614,12 +624,12 @@ impl Mandelbrot {
                 self.next_frame = cx.new_next_frame();
             },
             Hit::FingerMove(fe) => {
-                if !fe.input_type.is_touch() || fe.digit == 0 {
+                if fe.digit_index == 0 { // only respond to digit 0
                     self.finger_abs = fe.abs;
                 }
             }
             Hit::FingerUp(fe) => {
-                if fe.input_type.is_touch() && fe.digit == 1 {
+                if fe.digit_count >= 1 {
                     self.is_zoom_in = true;
                 }
                 else {

@@ -5,10 +5,6 @@ use {
     },
     crate::{
         makepad_math::Vec2,
-        event::{
-            Event,
-            //KeyCode,
-        },
         cx::Cx,
     }
 };
@@ -35,12 +31,12 @@ impl Cx {
     pub fn get_default_window_size(&self) -> Vec2 {
         return Vec2 {x: 800., y: 600.}
     }
-    
+    /*
     pub(crate) fn process_desktop_pre_event(&mut self, event: &mut Event)
     {
         match event {
             Event::FingerDown(fe) => {
-                fe.tap_count = self.fingers.process_tap_count(fe.digit, fe.abs, fe.time);
+                fe.tap_count = self.fingers.process_tap_count(fe.digit_id, fe.abs, fe.time);
             },
             Event::KeyDown(ke) => {
                 self.keyboard.process_key_down(ke.clone());
@@ -69,5 +65,5 @@ impl Cx {
             _ => {}
         }
         false
-    }
+    }*/
 }

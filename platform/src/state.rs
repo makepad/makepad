@@ -39,7 +39,7 @@ pub trait LiveState {
     
     fn apply_animating_state(&mut self, cx: &mut Cx);
     fn after_apply_state_changed(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]);
-    fn state_handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> StateAction;
+    fn state_handle_event(&mut self, cx: &mut Cx, event: &Event) -> StateAction;
 }
 
 
@@ -586,7 +586,7 @@ impl State {
         self.state.is_none()
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> StateAction {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> StateAction {
         
         if let Some(nf) = event.is_next_frame(self.next_frame) {
             

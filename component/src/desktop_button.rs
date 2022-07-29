@@ -171,7 +171,7 @@ impl DrawDesktopButton{
 }
 
 impl DesktopButton {
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction),) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction),) {
         self.state_handle_event(cx, event);
 
         let state = button_logic_handle_event(cx, event, self.bg.area(), dispatch_action);
