@@ -257,7 +257,7 @@ impl Splitter {
             }
             self.animate_state(cx, ids!(hover.on));
         }
-        Hit::FingerHoverOut(fe) => if !fe.any_down {
+        Hit::FingerHoverOut(_) => {
             self.animate_state(cx, ids!(hover.off));
         },
         Hit::FingerDown(_) => {
