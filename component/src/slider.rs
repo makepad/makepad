@@ -226,7 +226,7 @@ impl Slider {
                 // if the finger hasn't moved further than X we jump to edit-all on the text thing
                 
                 self.animate_state(cx, ids!(drag.off));
-                if fe.is_over && fe.finger_type.has_hovers() {
+                if fe.is_over && fe.digit.has_hovers() {
                     self.animate_state(cx, ids!(hover.on));
                 }
                 else {

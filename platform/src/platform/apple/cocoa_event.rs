@@ -7,7 +7,8 @@ use {
         menu::MenuCommand,
         event::{
             DigitId,
-            FingerType,
+            DigitDevice,
+            DigitInfo,
             FingerDownEvent,
             FingerUpEvent,
             FingerHoverEvent,
@@ -70,12 +71,14 @@ impl CocoaMouseDownEvent {
         FingerDownEvent {
             window_id: self.window_id,
             abs: self.abs,
-            digit_id,
-            digit_index,
-            digit_count,
+            digit: DigitInfo{
+                id:digit_id,
+                index:digit_index,
+                count:digit_count,
+                device: DigitDevice::Mouse(self.button),
+            },
             tap_count,
             handled: Cell::new(false),
-            finger_type: FingerType::Mouse(self.button),
             modifiers: self.modifiers,
             time: self.time
         }
@@ -97,7 +100,7 @@ impl CocoaMouseMoveEvent {
             digit_id,
             hover_last,
             handled: Cell::new(false),
-            finger_type: FingerType::Mouse(button),
+            device: DigitDevice::Mouse(button),
             modifiers: self.modifiers,
             time: self.time
         }
@@ -107,10 +110,12 @@ impl CocoaMouseMoveEvent {
             window_id: self.window_id,
             captured,
             abs: self.abs,
-            digit_id,
-            digit_index,
-            digit_count,
-            finger_type: FingerType::Mouse(button),
+            digit: DigitInfo{
+                id:digit_id,
+                index:digit_index,
+                count:digit_count,
+                device: DigitDevice::Mouse(button),
+            },
             modifiers: self.modifiers,
             time: self.time
         }
@@ -131,11 +136,13 @@ impl CocoaMouseUpEvent {
         FingerUpEvent {
             window_id: self.window_id,
             abs: self.abs,
-            digit_id,
-            digit_index,
-            digit_count,
+            digit: DigitInfo{
+                id:digit_id,
+                index:digit_index,
+                count:digit_count,
+                device: DigitDevice::Mouse(self.button),
+            },
             captured,
-            finger_type: FingerType::Mouse(self.button),
             modifiers: self.modifiers,
             time: self.time
         }
@@ -160,7 +167,7 @@ impl CocoaScrollEvent {
             scroll: self.scroll,
             handled_x: Cell::new(false),
             handled_y: Cell::new(false),
-            finger_type: FingerType::Mouse(0),
+            device: DigitDevice::Mouse(0),
             modifiers: self.modifiers,
             time: self.time
         }

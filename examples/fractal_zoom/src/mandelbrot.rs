@@ -601,7 +601,7 @@ impl Mandelbrot {
                 // ok so we get multiple finger downs
                 self.is_zooming = true;
                 // in case of a mouse we check which mousebutton is down
-                if let Some(button) = fe.finger_type.mouse_button(){
+                if let Some(button) = fe.digit.mouse_button(){
                     if button == 0{
                         self.is_zoom_in = true;
                     }
@@ -610,11 +610,11 @@ impl Mandelbrot {
                     }
                 }
                 else {
-                    if fe.digit_count == 1{
+                    if fe.digit.count == 1{
                         self.finger_abs = fe.abs;
                         self.is_zoom_in = true;
                     }
-                    else if fe.digit_count >= 2{
+                    else if fe.digit.count >= 2{
                         self.is_zoom_in = false;
                     }
                 }
@@ -624,15 +624,15 @@ impl Mandelbrot {
                 self.next_frame = cx.new_next_frame();
             },
             Hit::FingerMove(fe) => {
-                if fe.digit_index == 0 { // only respond to digit 0
+                if fe.digit.index == 0 { // only respond to digit 0
                     self.finger_abs = fe.abs;
                 }
             }
             Hit::FingerUp(fe) => {
-                if fe.digit_count >= 1 {
+                if fe.digit.count == 2 {
                     self.is_zoom_in = true;
                 }
-                else {
+                else if fe.digit.count == 1{
                     self.is_zoom_in = true;
                     self.is_zooming = false;
                 }
