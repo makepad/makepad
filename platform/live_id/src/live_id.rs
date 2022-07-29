@@ -104,6 +104,8 @@ impl LiveIdInterner {
 #[derive(Clone, Default, Eq, Hash, Copy, PartialEq)]
 pub struct LiveId(pub u64);
 
+pub const LIVE_ID_SEED:u64 = 0xd6e8_feb8_6659_fd93;
+
 impl LiveId {
     pub fn empty() -> Self {
         Self (0)
@@ -119,8 +121,8 @@ impl LiveId {
     
     // from https://nullprogram.com/blog/2018/07/31/
     // i have no idea what im doing with start value and finalisation.
-    pub const fn from_bytes(id_bytes: &[u8], start: usize, end: usize) -> Self {
-        let mut x = 0xd6e8_feb8_6659_fd93u64;
+    pub const fn from_bytes(seed:u64, id_bytes: &[u8], start: usize, end: usize) -> Self {
+        let mut x = seed;
         let mut i = start;
         while i < end {
             x = x.overflowing_add(id_bytes[i] as u64).0;
@@ -131,27 +133,23 @@ impl LiveId {
             x ^= x >> 32;
             i += 1;
         }
-        // use second to high bit to mark id as capitalised
+        // mark high bit as meaning that this is a hash id
         return Self ((x & 0x7fff_ffff_ffff_ffff) | 0x8000_0000_0000_0000)
     }
     
-    // merges 2 ids in a nonsymmetric fashion
-    /*
-    pub const fn add_id(&self, id: LiveId) -> Self {
-        //let id_len = id_bytes.len();
-        let mut x = id.0;
-        x = x.overflowing_add(self.0).0;
-        x ^= x >> 32;
-        x = x.overflowing_mul(0xd6e8_feb8_6659_fd93).0;
-        x ^= x >> 32;
-        x = x.overflowing_mul(0xd6e8_feb8_6659_fd93).0;
-        x ^= x >> 32;
-        return Self (x) // leave the first bit
-    }*/
-    
     pub const fn from_str_unchecked(id_str: &str) -> Self {
         let bytes = id_str.as_bytes();
-        Self::from_bytes(bytes, 0, bytes.len())
+        Self::from_bytes(LIVE_ID_SEED, bytes, 0, bytes.len())
+    }
+    
+    pub const fn from_str_num_unchecked(id_str: &str, num:u64) -> Self {
+        let bytes = id_str.as_bytes();
+        let id = Self::from_bytes(LIVE_ID_SEED, bytes, 0, bytes.len());
+        Self::from_bytes(id.0, &num.to_be_bytes(), 0, 8)
+    }
+    
+    pub const fn from_num_unchecked(seed:u64, num:u64) -> Self {
+        Self::from_bytes(seed, &num.to_be_bytes(), 0, 8)
     }
     
     pub fn from_str(id_str: &str) -> Result<Self,
@@ -166,6 +164,15 @@ impl LiveId {
             else {
                 idmap.id_to_string.insert(id, id_str.to_string());
             }
+            return Ok(id)
+        })
+    }
+    
+    pub fn from_str_num(id_str: &str, num:u64) -> Result<Self,
+    String> {
+        let id = Self::from_str_num_unchecked(id_str, num);
+        LiveIdInterner::with( | idmap | {
+            idmap.id_to_string.insert(id, format!("{}{}",id_str, num));
             return Ok(id)
         })
     }
