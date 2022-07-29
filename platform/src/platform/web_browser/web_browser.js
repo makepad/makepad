@@ -4,10 +4,10 @@ export class WasmWebBrowser extends WasmBridge {
     constructor(wasm, dispatch, canvas) {
         super (wasm, dispatch);
         
-        window.onbeforeunload = _=>{
+        window.onbeforeunload = _ => {
             this.wasm_terminate_thread_pools();
             this.clear_memory_refs();
-            for(let worker of this.workers){
+            for (let worker of this.workers) {
                 worker.terminate();
             }
         }
@@ -68,7 +68,7 @@ export class WasmWebBrowser extends WasmBridge {
                 this.focus_keyboard_input();
                 this.to_wasm.ToWasmRedrawAll();
                 this.do_wasm_pump();
-
+                
                 var loaders = document.getElementsByClassName('canvas_loader');
                 for (var i = 0; i < loaders.length; i ++) {
                     loaders[i].parentNode.removeChild(loaders[i])
@@ -82,12 +82,12 @@ export class WasmWebBrowser extends WasmBridge {
     
     // from_wasm dispatch_on_app interface
     
-    post_signal_to_wasm(signal_hi, signal_lo){
+    post_signal_to_wasm(signal_hi, signal_lo) {
         this.signals.push({signal_hi, signal_lo});
         if (this.signal_timeout === null) {
             this.signal_timeout = setTimeout(_ => {
                 this.signal_timeout = null;
-                this.to_wasm.ToWasmSignal({signals:this.signals});
+                this.to_wasm.ToWasmSignal({signals: this.signals});
                 this.signals.length = 0
                 this.do_wasm_pump();
             }, 0)
@@ -191,7 +191,7 @@ export class WasmWebBrowser extends WasmBridge {
             return;
         }
         this.req_anim_frame_id = window.requestAnimationFrame(time => {
-            if(this.wasm == null){
+            if (this.wasm == null) {
                 return
             }
             this.req_anim_frame_id = 0;
@@ -376,7 +376,7 @@ export class WasmWebBrowser extends WasmBridge {
     }
     
     FromWasmStartMidiInput() {
-        if(!navigator.requestMIDIAccess){
+        if (!navigator.requestMIDIAccess) {
             console.log("Browser does not support midi access");
             return
         }
@@ -534,7 +534,9 @@ export class WasmWebBrowser extends WasmBridge {
     bind_mouse_and_touch() {
         
         var canvas = this.canvas
-        let last_mouse_finger;
+        /*
+        TODO fix/test this
+        let overlay_scroll_pointer;
         if (this.detect.use_touch_scroll_overlay) {
             var ts = this.touch_scroll_overlay = document.createElement('div')
             ts.className = "makepad_webgl_scroll_overlay"
@@ -587,21 +589,25 @@ export class WasmWebBrowser extends WasmBridge {
                     last_scroll_left = ts.scrollLeft;
                 }, 200);
                 
-                let finger = last_mouse_finger;
-                if (finger) {
-                    finger.is_touch = false;
-                    this.to_wasm.ToWasmFingerScroll({
-                        finger: finger,
+                let finger = overlay_scroll_pointer;
+                if (overlay_scroll_pointer) {
+                    this.to_wasm.ToWasmScroll({
+                        x: overlay_scroll_pointer.x,
+                        y: overlay_scroll_pointer.y,
+                        modifiers: overlay_scroll_pointer.modifiers,
+                        is_touch: overlay_scroll_pointer.is_touch,
                         scroll_x: dx,
-                        scroll_y: dy
+                        scroll_y: dy,
+                        time: e.timeStamp / 1000.0;
                     });
                     this.do_wasm_pump();
                 }
             }
             
             ts.addEventListener('scroll', e => this.handlers.on_overlay_scroll(e))
-        }
+        }*/
         
+        /*
         var mouse_fingers = [];
         function mouse_to_finger(e) {
             let mf = mouse_fingers[e.button] || (mouse_fingers[e.button] = {});
@@ -612,126 +618,46 @@ export class WasmWebBrowser extends WasmBridge {
             mf.modifiers = pack_key_modifier(e);
             mf.touch = false;
             return mf
-        }
+        }*/
         
-        var digit_map = {}
-        var digit_alloc = 0;
-        
-        function touch_to_finger_alloc(e) {
-            var f = []
-            for (let i = 0; i < e.changedTouches.length; i ++) {
-                var t = e.changedTouches[i]
-                // find an unused digit
-                var digit = undefined;
-                for (digit in digit_map) {
-                    if (!digit_map[digit]) break
-                }
-                // we need to alloc a new one
-                if (digit === undefined || digit_map[digit]) digit = digit_alloc ++;
-                // store it
-                digit_map[digit] = {identifier: t.identifier};
-                // return allocated digit
-                digit = parseInt(digit);
-                
-                f.push({
-                    x: t.pageX,
-                    y: t.pageY,
-                    digit: digit,
-                    time: e.timeStamp / 1000.0,
-                    modifiers: 0,
-                    touch: true,
-                })
-            }
-            return f
-        }
-        
-        function lookup_digit(identifier) {
-            for (let digit in digit_map) {
-                var digit_id = digit_map[digit]
-                if (!digit_id) continue
-                if (digit_id.identifier == identifier) {
-                    return digit
-                }
+        function mouse_to_wasm_wmouse(e) {
+            return {
+                x: e.pageX,
+                y: e.pageY,
+                button: e.button,
+                time: e.timeStamp / 1000.0,
+                modifiers: pack_key_modifier(e)
             }
         }
-        
-        function touch_to_finger_lookup(e) {
-            var f = []
-            for (let i = 0; i < e.changedTouches.length; i ++) {
-                var t = e.changedTouches[i]
-                f.push({
-                    x: t.pageX,
-                    y: t.pageY,
-                    digit: lookup_digit(t.identifier),
-                    time: e.timeStamp / 1000.0,
-                    modifiers: {},
-                    touch: true,
-                })
-            }
-            return f
-        }
-        
-        function touch_to_finger_free(e) {
-            var f = []
-            for (let i = 0; i < e.changedTouches.length; i ++) {
-                var t = e.changedTouches[i]
-                var digit = lookup_digit(t.identifier)
-                if (!digit) {
-                    console.log("Undefined state in free_digit");
-                    digit = 0
-                }
-                else {
-                    digit_map[digit] = undefined
-                }
-                
-                f.push({
-                    x: t.pageX,
-                    y: t.pageY,
-                    time: e.timeStamp / 1000.0,
-                    digit: digit,
-                    modifiers: 0,
-                    touch: true,
-                })
-            }
-            return f
-        }
-        
-        var mouse_buttons_down = [];
-        
+        let current_mouse_down = null;
         this.handlers.on_mouse_down = e => {
             e.preventDefault();
             this.focus_keyboard_input();
-            mouse_buttons_down[e.button] = true;
-            this.to_wasm.ToWasmFingerDown({finger: mouse_to_finger(e)});
-            this.do_wasm_pump();
+            if (current_mouse_down === null){
+                current_mouse_down = e.button;
+                this.to_wasm.ToWasmMouseDown({mouse: mouse_to_wasm_wmouse(e)});
+                this.do_wasm_pump();
+            }
         }
         
         this.handlers.on_mouse_up = e => {
             e.preventDefault();
-            mouse_buttons_down[e.button] = false;
-            this.to_wasm.ToWasmFingerUp({finger: mouse_to_finger(e)});
-            this.do_wasm_pump();
+            if (current_mouse_down == e.button){
+                current_mouse_down = null;
+                this.to_wasm.ToWasmMouseUp({mouse: mouse_to_wasm_wmouse(e)});
+                this.do_wasm_pump();
+            }
         }
         
         this.handlers.on_mouse_move = e => {
             document.body.scrollTop = 0;
             document.body.scrollLeft = 0;
-            
-            for (var i = 0; i < mouse_buttons_down.length; i ++) {
-                if (mouse_buttons_down[i]) {
-                    let mf = mouse_to_finger(e);
-                    mf.digit = i;
-                    this.to_wasm.ToWasmFingerMove({finger: mf});
-                }
-            }
-            last_mouse_finger = mouse_to_finger(e);
-            this.to_wasm.ToWasmFingerHover({finger: last_mouse_finger});
+            this.to_wasm.ToWasmMouseMove({was_out: false, mouse:mouse_to_wasm_wmouse(e)});
             this.do_wasm_pump();
-            //console.log("Redraw cycle "+(end-begin)+" ms");
         }
         
         this.handlers.on_mouse_out = e => {
-            this.to_wasm.ToWasmFingerOut({finger: mouse_to_finger(e)});
+            this.to_wasm.ToWasmMouseMove({was_out: true, mouse:mouse_to_wasm_wmouse(e)});
             this.do_wasm_pump();
         }
         
@@ -746,13 +672,28 @@ export class WasmWebBrowser extends WasmBridge {
         }
         
         canvas.addEventListener('contextmenu', e => this.handlers.on_contextmenu(e))
+
+        function touches_to_wasm_wtouches(e) {
+            var f = []
+            for (let i = 0; i < e.changedTouches.length; i ++) {
+                var t = e.changedTouches[i]
+                f.push({
+                    x: t.pageX,
+                    y: t.pageY,
+                    uid: t.identifier === undefined? i: t.identifier,
+                    time: e.timeStamp / 1000.0,
+                    modifiers: 0,
+                    touch: true,
+                })
+            }
+            return f
+        }
         
         this.handlers.on_touchstart = e => {
             e.preventDefault()
-            
-            let fingers = touch_to_finger_alloc(e);
-            for (let i = 0; i < fingers.length; i ++) {
-                this.to_wasm.ToWasmFingerDown({finger: fingers[i]});
+            let touches = touches_to_wasm_wtouches(e);
+            for (let i = 0; i < touches.length; i ++) {
+                this.to_wasm.ToWasmTouchStart({touch: touches[i]});
             }
             this.do_wasm_pump();
             return false
@@ -760,9 +701,9 @@ export class WasmWebBrowser extends WasmBridge {
         
         this.handlers.on_touchmove = e => {
             //e.preventDefault();
-            var fingers = touch_to_finger_lookup(e);
-            for (let i = 0; i < fingers.length; i ++) {
-                this.to_wasm.ToWasmFingerMove({finger: fingers[i]});
+            let touches = touches_to_wasm_wtouches(e);
+            for (let i = 0; i < touches.length; i ++) {
+                this.to_wasm.ToWasmTouchMove({touch: touches[i]});
             }
             this.do_wasm_pump();
             return false
@@ -770,9 +711,9 @@ export class WasmWebBrowser extends WasmBridge {
         
         this.handlers.on_touch_end_cancel_leave = e => {
             e.preventDefault();
-            var fingers = touch_to_finger_free(e);
-            for (let i = 0; i < fingers.length; i ++) {
-                this.to_wasm.ToWasmFingerUp({finger: fingers[i]});
+            let touches = touches_to_wasm_wtouches(e);
+            for (let i = 0; i < touches.length; i ++) {
+                this.to_wasm.ToWasmTouchEnd({touch: touches[i]});
             }
             this.do_wasm_pump();
             return false
@@ -787,7 +728,7 @@ export class WasmWebBrowser extends WasmBridge {
         var last_wheel_time;
         var last_was_wheel;
         this.handlers.on_mouse_wheel = e => {
-            var finger = mouse_to_finger(e)
+            //var finger = mouse_to_finger(e)
             e.preventDefault()
             let delta = e.timeStamp - last_wheel_time;
             last_wheel_time = e.timeStamp;
@@ -809,11 +750,14 @@ export class WasmWebBrowser extends WasmBridge {
             if (e.deltaMode === 1) fac = 40
             else if (e.deltaMode === 2) fac = window.offsetHeight
             
-            finger.is_touch = !last_was_wheel;
             this.to_wasm.ToWasmFingerScroll({
-                finger: finger,
+                x: e.pageX,
+                y: e.pageY,
+                modifiers: pack_key_modifiers(e),
+                is_touch: !last_was_wheel,
                 scroll_x: e.deltaX * fac,
-                scroll_y: e.deltaY * fac
+                scroll_y: e.deltaY * fac,
+                time: e.timeStamp / 1000.0,
             });
             this.do_wasm_pump();
         };
