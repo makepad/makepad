@@ -225,7 +225,7 @@ impl ColorPicker {
                 // lets check where we clicked!
             },
             Hit::FingerUp(fe) => {
-                if fe.is_over && fe.finger_type.has_hovers() {
+                if fe.is_over && fe.digit.has_hovers() {
                     self.animate_state(cx, ids!(hover.on));
                 }
                 else {

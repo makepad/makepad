@@ -270,7 +270,7 @@ impl Splitter {
         }
         Hit::FingerUp(f) => {
             self.drag_start_align = None;
-            if f.is_over && f.finger_type.has_hovers() {
+            if f.is_over && f.digit.has_hovers() {
                 self.animate_state(cx, ids!(hover.on));
             }
             else {

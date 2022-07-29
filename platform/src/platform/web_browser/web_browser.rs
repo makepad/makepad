@@ -265,7 +265,6 @@ impl Cx {
                                 captured
                             )
                         ));
-                        
                         self.fingers.free_digit(digit_id);
                     }
                 }
