@@ -55,13 +55,6 @@ impl Cx {
     // incoming to_wasm. There is absolutely no other entrypoint
     // to general rust codeflow than this function. Only the allocators and init
     pub fn event_loop_core(&mut self, mut to_wasm: ToWasmMsg) -> u32 {
-        // store our view root somewhere
-        if self.platform.is_initialized == false {
-            self.platform.is_initialized = true;
-            for _i in 0..10 {
-                self.platform.fingers_down.push(false);
-            }
-        }
         
         self.platform.from_wasm = Some(FromWasmMsg::new());
         
@@ -131,59 +124,103 @@ impl Cx {
                     }
                 }
                 
-                id!(ToWasmFingerDown) => {
-                    let tw = ToWasmFingerDown::read_to_wasm(&mut to_wasm);
+                id!(ToWasmTouchStart) => {
+                    let tw = ToWasmTouchStart::read_to_wasm(&mut to_wasm);
+                    
+                    // lets get a unique digit
+                    let digit_id = id_num!(touch, tw.touch.uid as u64).into();
+                    self.fingers.alloc_digit(digit_id);
                     
                     let tap_count = self.fingers.process_tap_count(
-                        tw.finger.digit,
-                        Vec2 {x: tw.finger.x, y: tw.finger.y},
-                        tw.finger.time
+                        digit_id,
+                        Vec2 {x: tw.touch.x, y: tw.touch.y},
+                        tw.touch.time
                     );
                     
-                    self.platform.fingers_down[tw.finger.digit] = true;
-                    
                     self.call_event_handler(&mut Event::FingerDown(
-                        tw.into_finger_down_event(tap_count)
+                        tw.into_finger_down_event(digit_id, tap_count)
                     ));
                 }
                 
-                id!(ToWasmFingerUp) => {
-                    let tw = ToWasmFingerUp::read_to_wasm(&mut to_wasm);
+                id!(ToWasmTouchMove) => {
+                    let tw = ToWasmTouchMove::read_to_wasm(&mut to_wasm);
+                    let digit_id = id_num!(touch, tw.touch.uid as u64).into();
+                    // lets grab the captured area
+                    let area = self.fingers.get_captured_area(digit_id);
+                    self.call_event_handler(&mut Event::FingerMove(
+                        tw.into_finger_move_event(digit_id, area)
+                    ));
                     
-                    let digit = tw.finger.digit;
-                    self.platform.fingers_down[digit] = false;
+                }
+                
+                id!(ToWasmTouchEnd) => {
+                    let tw = ToWasmTouchEnd::read_to_wasm(&mut to_wasm);
                     
-                    //if !self.platform.fingers_down.iter().any( | down | *down) {
-                    //    self.down_mouse_cursor = None;
-                    //}
+                    let digit_id = id_num!(touch, tw.touch.uid as u64).into();
+                    let area = self.fingers.get_captured_area(digit_id);
+                    self.call_event_handler(&mut Event::FingerUp(
+                        tw.into_finger_up_event(digit_id, area)
+                    ));
                     
-                    self.call_event_handler(&mut Event::FingerUp(tw.into()));
-                    self.fingers.release_digit(digit);
-                    //self.down_mouse_cursor = None;
+                    self.fingers.free_digit(digit_id);
                 }
                 
-                id!(ToWasmFingerMove) => {
-                    let tw = ToWasmFingerMove::read_to_wasm(&mut to_wasm);
-                    self.call_event_handler(&mut Event::FingerMove(tw.into()));
+                id!(ToWasmMouseDown) => {
+                    let tw = ToWasmMouseDown::read_to_wasm(&mut to_wasm);
+                    
+                    // lets get a unique digit
+                    let digit_id = id!(mouse).into();
+                    self.fingers.alloc_digit(digit_id);
+                    
+                    let tap_count = self.fingers.process_tap_count(
+                        digit_id,
+                        Vec2 {x: tw.mouse.x, y: tw.mouse.y},
+                        tw.mouse.time
+                    );
+                    
+                    self.call_event_handler(&mut Event::FingerDown(
+                        tw.into_finger_down_event(digit_id, tap_count)
+                    ));
                 }
                 
-                id!(ToWasmFingerHover) => {
-                    let tw = ToWasmFingerHover::read_to_wasm(&mut to_wasm);
-                    self.call_event_handler(&mut Event::FingerHover(tw.into()));
-                    self.fingers.cycle_over_last();
+                id!(ToWasmMouseMove) => {
+                    let digit_id = id!(mouse).into();
+                    let tw = ToWasmMouseMove::read_to_wasm(&mut to_wasm);
+                    // ok so. what do we do without a captured area
+                    // if our digit is NOT down we send hovers.
+                    if !self.fingers.is_digit_allocated(digit_id) {
+                        let area = self.fingers.get_hover_area(digit_id);
+                        self.call_event_handler(&mut Event::FingerHover(
+                            tw.into_finger_hover_event(digit_id, area)
+                        ));
+                        self.fingers.cycle_hover_area(digit_id);
+                    }
+                    else {
+                        let area = self.fingers.get_captured_area(digit_id);
+                        self.call_event_handler(&mut Event::FingerMove(
+                            tw.into_finger_move_event(digit_id, area)
+                        ));
+                    }
                 }
                 
-                id!(ToWasmFingerOut) => {
-                    // what was this for again?
-                    let tw = ToWasmFingerOut::read_to_wasm(&mut to_wasm);
-                    //self.hover_mouse_cursor = None;
-                    self.call_event_handler(&mut Event::FingerHover(tw.into()));
-                    self.fingers.cycle_over_last();
+                id!(ToWasmMouseUp) => {
+                    let tw = ToWasmMouseUp::read_to_wasm(&mut to_wasm);
+                    
+                    let digit_id = id!(mouse).into();
+                    let area = self.fingers.get_captured_area(digit_id);
+                    self.call_event_handler(&mut Event::FingerUp(
+                        tw.into_finger_up_event(digit_id, area)
+                    ));
+                    
+                    self.fingers.free_digit(digit_id);
                 }
                 
-                id!(ToWasmFingerScroll) => {
-                    let tw = ToWasmFingerScroll::read_to_wasm(&mut to_wasm);
-                    self.call_event_handler(&mut Event::FingerScroll(tw.into()));
+                id!(ToWasmScroll) => {
+                    let tw = ToWasmScroll::read_to_wasm(&mut to_wasm);
+                    let digit_id = id!(mouse).into();
+                    self.call_event_handler(&mut Event::FingerScroll(
+                        tw.into_finger_scroll_event(digit_id)
+                    ));
                 }
                 
                 id!(ToWasmKeyDown) => {
@@ -306,13 +343,13 @@ impl Cx {
         };
         
         if is_animation_frame {
-            if self.need_redrawing(){
+            if self.need_redrawing() {
                 self.call_draw_event();
                 self.webgl_compile_shaders();
             }
             self.handle_repaint();
         }
-    
+        
         self.handle_platform_ops();
         
         if self.any_passes_dirty() || self.need_redrawing() || self.new_next_frames.len() != 0 {
@@ -461,32 +498,15 @@ pub unsafe extern "C" fn wasm_thread_alloc_tls_and_stack(tls_size: u32) -> u32 {
 }
 
 // storage buffers for graphics API related platform
+#[derive(Default)]
 pub struct CxPlatform {
-    pub is_initialized: bool,
     pub window_geom: WindowGeom,
     pub from_wasm: Option<FromWasmMsg>,
     pub vertex_buffers: usize,
     pub index_buffers: usize,
     pub vaos: usize,
-    pub fingers_down: Vec<bool>,
     pub xr_last_inputs: Option<Vec<XRInput >>,
-    pub file_read_id: u64,
-}
-
-impl Default for CxPlatform {
-    fn default() -> CxPlatform {
-        CxPlatform {
-            is_initialized: false,
-            window_geom: WindowGeom::default(),
-            from_wasm: None,
-            vertex_buffers: 0,
-            index_buffers: 0,
-            vaos: 0,
-            file_read_id: 1,
-            fingers_down: Vec::new(),
-            xr_last_inputs: None,
-        }
-    }
+    pub last_mouse_button: Option<usize>,
 }
 
 impl CxPlatform {
@@ -510,12 +530,15 @@ pub unsafe extern "C" fn wasm_get_js_msg_class() -> u32 {
     ToWasmInit::to_wasm_js(&mut out);
     ToWasmResizeWindow::to_wasm_js(&mut out);
     ToWasmAnimationFrame::to_wasm_js(&mut out);
-    ToWasmFingerDown::to_wasm_js(&mut out);
-    ToWasmFingerUp::to_wasm_js(&mut out);
-    ToWasmFingerMove::to_wasm_js(&mut out);
-    ToWasmFingerHover::to_wasm_js(&mut out);
-    ToWasmFingerOut::to_wasm_js(&mut out);
-    ToWasmFingerScroll::to_wasm_js(&mut out);
+    
+    ToWasmTouchStart::to_wasm_js(&mut out);
+    ToWasmTouchMove::to_wasm_js(&mut out);
+    ToWasmTouchEnd::to_wasm_js(&mut out);
+    ToWasmMouseDown::to_wasm_js(&mut out);
+    ToWasmMouseMove::to_wasm_js(&mut out);
+    ToWasmMouseUp::to_wasm_js(&mut out);
+    ToWasmScroll::to_wasm_js(&mut out);
+    
     ToWasmKeyDown::to_wasm_js(&mut out);
     ToWasmKeyUp::to_wasm_js(&mut out);
     ToWasmTextInput::to_wasm_js(&mut out);
