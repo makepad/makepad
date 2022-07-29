@@ -364,7 +364,7 @@ impl Piano {
         
         for (node_id, action) in actions {
             match action {
-                PianoKeyAction::FingerMove => {},
+                PianoKeyAction::FingerMoved => {},
                 PianoKeyAction::Pressed(velocity) => {
                     self.set_key_focus(cx);
                     dispatch_action(cx, PianoAction::Note {is_on: true, note_number: node_id.0.0 as u8, velocity});
