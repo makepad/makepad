@@ -372,7 +372,7 @@ impl FileTreeNode {
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
-        event: &mut Event,
+        event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, FileTreeNodeAction),
     ) {
         if self.state_handle_event(cx, event).must_redraw() {
@@ -555,16 +555,16 @@ impl FileTree {
         self.scroll_view.redraw(cx);
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> Vec<FileTreeAction> {
+    pub fn handle_event_iter(&mut self, cx: &mut Cx, event: &Event) -> Vec<FileTreeAction> {
         let mut a = Vec::new();
-        self.handle_event_with_fn(cx, event, &mut | _, v | a.push(v));
+        self.handle_event(cx, event, &mut | _, v | a.push(v));
         a
     }
     
-    pub fn handle_event_with_fn(
+    pub fn handle_event(
         &mut self,
         cx: &mut Cx,
-        event: &mut Event,
+        event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, FileTreeAction),
     ) {
         if self.scroll_view.handle_event(cx, event) {

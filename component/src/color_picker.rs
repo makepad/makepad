@@ -197,7 +197,7 @@ impl ColorPicker {
         Vec4::from_hsva(Vec4 {x: self.hue, y: self.sat, z: self.val, w: 1.0})
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> ColorPickerAction {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> ColorPickerAction {
         self.state_handle_event(cx, event);
         
         match event.hits(cx, self.wheel.area()) {
@@ -225,7 +225,7 @@ impl ColorPicker {
                 // lets check where we clicked!
             },
             Hit::FingerUp(fe) => {
-                if fe.is_over && fe.input_type.has_hovers() {
+                if fe.is_over && fe.finger_type.has_hovers() {
                     self.animate_state(cx, ids!(hover.on));
                 }
                 else {

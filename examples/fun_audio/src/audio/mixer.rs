@@ -90,7 +90,7 @@ impl AudioComponent for Mixer {
         })
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
         for input in self.inputs.values_mut() {
             if let Some(input) = input.as_mut() {
                 input.handle_event(cx, event, dispatch_action)

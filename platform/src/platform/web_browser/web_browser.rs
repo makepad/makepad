@@ -1,5 +1,7 @@
 
 use {
+    std::rc::Rc,
+    std::cell::RefCell,
     crate::{
         makepad_live_id::*,
         makepad_math::Vec2,
@@ -44,9 +46,9 @@ impl Cx {
     }
     
     pub fn process_to_wasm<F>(&mut self, msg_ptr: u32, mut event_handler: F) -> u32
-    where F: FnMut(&mut Cx, &mut Event),
+    where F: FnMut(&mut Cx, &Event),
     {
-        self.event_handler = Some(&mut event_handler as *const dyn FnMut(&mut Cx, &mut Event) as *mut dyn FnMut(&mut Cx, &mut Event));
+        self.event_handler = Some(&mut event_handler as *const dyn FnMut(&mut Cx, &Event) as *mut dyn FnMut(&mut Cx, &Event));
         let ret = self.event_loop_core(ToWasmMsg::take_ownership(msg_ptr));
         self.event_handler = None;
         ret
@@ -95,7 +97,7 @@ impl Cx {
                     }
                     self.platform.window_geom = tw.window_info.into();
                     
-                    self.call_event_handler(&mut Event::Construct);
+                    self.call_event_handler(&Event::Construct);
                     //self.platform.from_wasm(FromWasmCreateThread{thread_id:1});
                 },
                 
@@ -107,7 +109,7 @@ impl Cx {
                         self.platform.window_geom = new_geom.clone();
                         let id_zero = CxWindowPool::id_zero();
                         self.windows[id_zero].window_geom = new_geom.clone();
-                        self.call_event_handler(&mut Event::WindowGeomChange(WindowGeomChangeEvent {
+                        self.call_event_handler(&Event::WindowGeomChange(WindowGeomChangeEvent {
                             window_id: id_zero,
                             old_geom: old_geom,
                             new_geom: new_geom
@@ -136,9 +138,15 @@ impl Cx {
                         Vec2 {x: tw.touch.x, y: tw.touch.y},
                         tw.touch.time
                     );
-                    
-                    self.call_event_handler(&mut Event::FingerDown(
-                        tw.into_finger_down_event(digit_id, tap_count)
+                    let digit_index = self.fingers.get_digit_index(digit_id);
+                    let digit_count = self.fingers.get_digit_count();
+                    self.call_event_handler(&Event::FingerDown(
+                        tw.into_finger_down_event(
+                            digit_id,
+                            digit_index,
+                            digit_count,
+                            tap_count
+                        )
                     ));
                 }
                 
@@ -146,9 +154,16 @@ impl Cx {
                     let tw = ToWasmTouchMove::read_to_wasm(&mut to_wasm);
                     let digit_id = id_num!(touch, tw.touch.uid as u64).into();
                     // lets grab the captured area
-                    let area = self.fingers.get_captured_area(digit_id);
-                    self.call_event_handler(&mut Event::FingerMove(
-                        tw.into_finger_move_event(digit_id, area)
+                    let captured = self.fingers.get_captured_area(digit_id);
+                    let digit_index = self.fingers.get_digit_index(digit_id);
+                    let digit_count = self.fingers.get_digit_count();
+                    self.call_event_handler(&Event::FingerMove(
+                        tw.into_finger_move_event(
+                            digit_id,
+                            digit_index,
+                            digit_count,
+                            captured
+                        )
                     ));
                     
                 }
@@ -157,9 +172,16 @@ impl Cx {
                     let tw = ToWasmTouchEnd::read_to_wasm(&mut to_wasm);
                     
                     let digit_id = id_num!(touch, tw.touch.uid as u64).into();
-                    let area = self.fingers.get_captured_area(digit_id);
-                    self.call_event_handler(&mut Event::FingerUp(
-                        tw.into_finger_up_event(digit_id, area)
+                    let captured = self.fingers.get_captured_area(digit_id);
+                    let digit_index = self.fingers.get_digit_index(digit_id);
+                    let digit_count = self.fingers.get_digit_count();
+                    self.call_event_handler(&Event::FingerUp(
+                        tw.into_finger_up_event(
+                            digit_id,
+                            digit_index,
+                            digit_count,
+                            captured
+                        )
                     ));
                     
                     self.fingers.free_digit(digit_id);
@@ -168,19 +190,30 @@ impl Cx {
                 id!(ToWasmMouseDown) => {
                     let tw = ToWasmMouseDown::read_to_wasm(&mut to_wasm);
                     
-                    // lets get a unique digit
-                    let digit_id = id!(mouse).into();
-                    self.fingers.alloc_digit(digit_id);
-                    
-                    let tap_count = self.fingers.process_tap_count(
-                        digit_id,
-                        Vec2 {x: tw.mouse.x, y: tw.mouse.y},
-                        tw.mouse.time
-                    );
-                    
-                    self.call_event_handler(&mut Event::FingerDown(
-                        tw.into_finger_down_event(digit_id, tap_count)
-                    ));
+                    if self.platform.last_mouse_button == None ||
+                    self.platform.last_mouse_button == Some(tw.mouse.button) {
+                        self.platform.last_mouse_button = Some(tw.mouse.button);
+                        // lets get a unique digit
+                        let digit_id = id!(mouse).into();
+                        self.fingers.alloc_digit(digit_id);
+                        let digit_index = self.fingers.get_digit_index(digit_id);
+                        let digit_count = self.fingers.get_digit_count();
+                        
+                        let tap_count = self.fingers.process_tap_count(
+                            digit_id,
+                            Vec2 {x: tw.mouse.x, y: tw.mouse.y},
+                            tw.mouse.time
+                        );
+                        
+                        self.call_event_handler(&Event::FingerDown(
+                            tw.into_finger_down_event(
+                                digit_id,
+                                digit_index,
+                                digit_count,
+                                tap_count
+                            )
+                        ));
+                    }
                 }
                 
                 id!(ToWasmMouseMove) => {
@@ -189,16 +222,28 @@ impl Cx {
                     // ok so. what do we do without a captured area
                     // if our digit is NOT down we send hovers.
                     if !self.fingers.is_digit_allocated(digit_id) {
-                        let area = self.fingers.get_hover_area(digit_id);
-                        self.call_event_handler(&mut Event::FingerHover(
-                            tw.into_finger_hover_event(digit_id, area)
+                        let hover_last = self.fingers.get_hover_area(digit_id);
+                        self.call_event_handler(&Event::FingerHover(
+                            tw.into_finger_hover_event(
+                                digit_id,
+                                hover_last,
+                                self.platform.last_mouse_button.unwrap_or(0) as usize
+                            )
                         ));
                         self.fingers.cycle_hover_area(digit_id);
                     }
                     else {
-                        let area = self.fingers.get_captured_area(digit_id);
-                        self.call_event_handler(&mut Event::FingerMove(
-                            tw.into_finger_move_event(digit_id, area)
+                        let captured = self.fingers.get_captured_area(digit_id);
+                        let digit_index = self.fingers.get_digit_index(digit_id);
+                        let digit_count = self.fingers.get_digit_count();
+                        self.call_event_handler(&Event::FingerMove(
+                            tw.into_finger_move_event(
+                                digit_id,
+                                digit_index,
+                                digit_count,
+                                captured,
+                                self.platform.last_mouse_button.unwrap_or(0) as usize
+                            )
                         ));
                     }
                 }
@@ -206,19 +251,29 @@ impl Cx {
                 id!(ToWasmMouseUp) => {
                     let tw = ToWasmMouseUp::read_to_wasm(&mut to_wasm);
                     
-                    let digit_id = id!(mouse).into();
-                    let area = self.fingers.get_captured_area(digit_id);
-                    self.call_event_handler(&mut Event::FingerUp(
-                        tw.into_finger_up_event(digit_id, area)
-                    ));
-                    
-                    self.fingers.free_digit(digit_id);
+                    if self.platform.last_mouse_button == Some(tw.mouse.button) {
+                        self.platform.last_mouse_button = None;
+                        let digit_id = id!(mouse).into();
+                        let captured = self.fingers.get_captured_area(digit_id);
+                        let digit_index = self.fingers.get_digit_index(digit_id);
+                        let digit_count = self.fingers.get_digit_count();
+                        self.call_event_handler(&Event::FingerUp(
+                            tw.into_finger_up_event(
+                                digit_id,
+                                digit_index,
+                                digit_count,
+                                captured
+                            )
+                        ));
+                        
+                        self.fingers.free_digit(digit_id);
+                    }
                 }
                 
                 id!(ToWasmScroll) => {
                     let tw = ToWasmScroll::read_to_wasm(&mut to_wasm);
                     let digit_id = id!(mouse).into();
-                    self.call_event_handler(&mut Event::FingerScroll(
+                    self.call_event_handler(&Event::FingerScroll(
                         tw.into_finger_scroll_event(digit_id)
                     ));
                 }
@@ -226,51 +281,52 @@ impl Cx {
                 id!(ToWasmKeyDown) => {
                     let tw = ToWasmKeyDown::read_to_wasm(&mut to_wasm);
                     self.keyboard.process_key_down(tw.key.clone().into());
-                    self.call_event_handler(&mut Event::KeyDown(tw.key.into()));
+                    self.call_event_handler(&Event::KeyDown(tw.key.into()));
                 }
                 
                 id!(ToWasmKeyUp) => {
                     let tw = ToWasmKeyUp::read_to_wasm(&mut to_wasm);
                     self.keyboard.process_key_up(tw.key.clone().into());
-                    self.call_event_handler(&mut Event::KeyUp(tw.key.into()));
+                    self.call_event_handler(&Event::KeyUp(tw.key.into()));
                 }
                 
                 id!(ToWasmTextInput) => {
                     let tw = ToWasmTextInput::read_to_wasm(&mut to_wasm);
-                    self.call_event_handler(&mut Event::TextInput(tw.into()));
+                    self.call_event_handler(&Event::TextInput(tw.into()));
                 }
                 
                 id!(ToWasmTextCopy) => {
-                    let mut event = Event::TextCopy(TextCopyEvent {
-                        response: None
-                    });
-                    self.call_event_handler(&mut event);
-                    if let Event::TextCopy(TextCopyEvent {response: Some(response)}) = event {
+                    let response = Rc::new(RefCell::new(None));
+                    self.call_event_handler(&Event::TextCopy(TextCopyEvent {
+                        response: response.clone()
+                    }));
+                    let response = response.borrow_mut().take();
+                    if let Some(response) = response {
                         self.platform.from_wasm(FromWasmTextCopyResponse {response});
                     }
                 }
                 
                 id!(ToWasmTimerFired) => {
                     let tw = ToWasmTimerFired::read_to_wasm(&mut to_wasm);
-                    self.call_event_handler(&mut Event::Timer(TimerEvent {
+                    self.call_event_handler(&Event::Timer(TimerEvent {
                         timer_id: tw.timer_id as u64
                     }));
                 }
                 
                 id!(ToWasmAppGotFocus) => {
-                    self.call_event_handler(&mut Event::AppGotFocus);
+                    self.call_event_handler(&Event::AppGotFocus);
                 }
                 
                 id!(ToWasmAppLostFocus) => {
-                    self.call_event_handler(&mut Event::AppLostFocus);
+                    self.call_event_handler(&Event::AppLostFocus);
                 }
                 
                 id!(ToWasmXRUpdate) => {
                     let tw = ToWasmXRUpdate::read_to_wasm(&mut to_wasm);
-                    let mut event = Event::XRUpdate(
+                    let event = Event::XRUpdate(
                         tw.into_xrupdate_event(self.platform.xr_last_inputs.take())
                     );
-                    self.call_event_handler(&mut event);
+                    self.call_event_handler(&event);
                     if let Event::XRUpdate(event) = event {
                         self.platform.xr_last_inputs = Some(event.inputs);
                     }
@@ -296,19 +352,19 @@ impl Cx {
                 id!(ToWasmWebSocketClose) => {
                     let tw = ToWasmWebSocketClose::read_to_wasm(&mut to_wasm);
                     let web_socket = WebSocket(tw.web_socket_id as u64);
-                    self.call_event_handler(&mut Event::WebSocketClose(web_socket));
+                    self.call_event_handler(&Event::WebSocketClose(web_socket));
                 }
                 
                 id!(ToWasmWebSocketOpen) => {
                     let tw = ToWasmWebSocketOpen::read_to_wasm(&mut to_wasm);
                     let web_socket = WebSocket(tw.web_socket_id as u64);
-                    self.call_event_handler(&mut Event::WebSocketOpen(web_socket));
+                    self.call_event_handler(&Event::WebSocketOpen(web_socket));
                 }
                 
                 id!(ToWasmWebSocketError) => {
                     let tw = ToWasmWebSocketError::read_to_wasm(&mut to_wasm);
                     let web_socket = WebSocket(tw.web_socket_id as u64);
-                    self.call_event_handler(&mut Event::WebSocketError(WebSocketErrorEvent {
+                    self.call_event_handler(&Event::WebSocketError(WebSocketErrorEvent {
                         web_socket,
                         error: tw.error,
                     }));
@@ -317,7 +373,7 @@ impl Cx {
                 id!(ToWasmWebSocketMessage) => {
                     let tw = ToWasmWebSocketMessage::read_to_wasm(&mut to_wasm);
                     let web_socket = WebSocket(tw.web_socket_id as u64);
-                    self.call_event_handler(&mut Event::WebSocketMessage(WebSocketMessageEvent {
+                    self.call_event_handler(&Event::WebSocketMessage(WebSocketMessageEvent {
                         web_socket,
                         data: tw.data.into_vec_u8()
                     }));
@@ -325,12 +381,12 @@ impl Cx {
                 
                 id!(ToWasmMidiInputData) => {
                     let tw = ToWasmMidiInputData::read_to_wasm(&mut to_wasm);
-                    self.call_event_handler(&mut Event::Midi1InputData(vec![tw.into()]));
+                    self.call_event_handler(&Event::Midi1InputData(vec![tw.into()]));
                 }
                 
                 id!(ToWasmMidiInputList) => {
                     let tw = ToWasmMidiInputList::read_to_wasm(&mut to_wasm);
-                    self.call_event_handler(&mut Event::MidiInputList(tw.into()));
+                    self.call_event_handler(&Event::MidiInputList(tw.into()));
                 }
                 
                 _ => {
@@ -501,12 +557,12 @@ pub unsafe extern "C" fn wasm_thread_alloc_tls_and_stack(tls_size: u32) -> u32 {
 #[derive(Default)]
 pub struct CxPlatform {
     pub window_geom: WindowGeom,
+    pub last_mouse_button: Option<u32>,
     pub from_wasm: Option<FromWasmMsg>,
     pub vertex_buffers: usize,
     pub index_buffers: usize,
     pub vaos: usize,
     pub xr_last_inputs: Option<Vec<XRInput >>,
-    pub last_mouse_button: Option<usize>,
 }
 
 impl CxPlatform {

@@ -1,5 +1,7 @@
 use {
     std::{
+        rc::Rc,
+        cell::Cell,
         ffi::CStr,
         os::raw::{c_void}
     },
@@ -14,6 +16,9 @@ use {
                 get_cocoa_class_global,
                 get_cocoa_app_global
             },
+            cocoa_event::{
+                CocoaEvent
+            },
             cocoa_window::{
                 get_cocoa_window
             },
@@ -26,14 +31,13 @@ use {
             },
         },
         menu::{
-            Command
+            MenuCommand
         },
         event::{
             Signal,
-            Event,
             DragState,
-            FingerDragEvent,
-            FingerDropEvent,
+            DragEvent,
+            DropEvent,
             DraggedItem,
             DragAction
         },
@@ -162,7 +166,7 @@ pub fn define_menu_target_class() -> *const Class {
             else {
                 panic!("Cannot lock cmd_map")
             };*/
-            ca.send_command_event(Command(LiveId(command_u64)));
+            ca.send_command_event(MenuCommand(LiveId(command_u64)));
         }
     }
     
@@ -432,37 +436,37 @@ pub fn define_cocoa_view_class() -> *const Class {
             }
         }
         let modifiers = get_event_key_modifier(event);
-        cw.send_finger_down(0, modifiers);
+        cw.send_mouse_down(0, modifiers);
     }
     
     extern fn mouse_up(this: &Object, _sel: Sel, event: ObjcId) {
         let cw = get_cocoa_window(this);
         let modifiers = get_event_key_modifier(event);
-        cw.send_finger_up(0, modifiers);
+        cw.send_mouse_up(0, modifiers);
     }
     
     extern fn right_mouse_down(this: &Object, _sel: Sel, event: ObjcId) {
         let cw = get_cocoa_window(this);
         let modifiers = get_event_key_modifier(event);
-        cw.send_finger_down(1, modifiers);
+        cw.send_mouse_down(1, modifiers);
     }
     
     extern fn right_mouse_up(this: &Object, _sel: Sel, event: ObjcId) {
         let cw = get_cocoa_window(this);
         let modifiers = get_event_key_modifier(event);
-        cw.send_finger_up(1, modifiers);
+        cw.send_mouse_up(1, modifiers);
     }
     
     extern fn other_mouse_down(this: &Object, _sel: Sel, event: ObjcId) {
         let cw = get_cocoa_window(this);
         let modifiers = get_event_key_modifier(event);
-        cw.send_finger_down(2, modifiers);
+        cw.send_mouse_down(2, modifiers);
     }
     
     extern fn other_mouse_up(this: &Object, _sel: Sel, event: ObjcId) {
         let cw = get_cocoa_window(this);
         let modifiers = get_event_key_modifier(event);
-        cw.send_finger_up(2, modifiers);
+        cw.send_mouse_up(2, modifiers);
     }
     
     fn mouse_pos_from_event(view: &Object, event: ObjcId) -> Vec2 {
@@ -491,7 +495,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         let cw = get_cocoa_window(this);
         let pos = mouse_pos_from_event(this, event);
         let modifiers = get_event_key_modifier(event);
-        cw.send_finger_hover_and_move(event, pos, modifiers);
+        cw.send_mouse_move(event, pos, modifiers);
     }
     
     extern fn mouse_moved(this: &Object, _sel: Sel, event: ObjcId) {
@@ -620,7 +624,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         //let window_point = event.locationInWindow();
         //et view_point = view.convertPoint_fromView_(window_point, nil);
         let view_rect: NSRect = unsafe {msg_send![view, frame]};
-        let window_rect: NSRect = unsafe {msg_send![cw.window, frame]};
+        //let window_rect: NSRect = unsafe {msg_send![cw.window, frame]};
         
         let origin = cw.get_ime_origin();
         //let shift_y = 20.0;
@@ -701,9 +705,7 @@ pub fn define_cocoa_view_class() -> *const Class {
     
     extern fn dragging_session_ended_at_point_operation(this: &Object, _: Sel, _session: ObjcId, _point: NSPoint, _operation: NSDragOperation) {
         let window = get_cocoa_window(this);
-        window.fingers_down[0] = false;
-        let mut events = vec![Event::DragEnd];
-        window.do_callback(&mut events);
+        window.do_callback(vec![CocoaEvent::DragEnd]);
     }
     
     extern fn dragging_entered(this: &Object, _: Sel, sender: ObjcId) -> NSDragOperation {
@@ -725,25 +727,20 @@ pub fn define_cocoa_view_class() -> *const Class {
         let pos = ns_point_to_vec2(window_point_to_view_point(this, unsafe {
             msg_send![sender, draggingLocation]
         }));
-        let mut events = vec![Event::FingerDrag(FingerDragEvent {
-            handled: false,
+        let action = Rc::new(Cell::new(DragAction::None));
+        
+        window.do_callback(vec![CocoaEvent::Drag(DragEvent {
+            handled: Cell::new(false),
             abs: pos,
-            //rel: pos,
-            //rect: Rect::default(),
             state: DragState::Over,
-            action: DragAction::None,
-        })];
-        window.do_callback(&mut events);
-        match &events[0] {
-            Event::FingerDrag(event) => {
-                match event.action {
-                    DragAction::None => NSDragOperation::None,
-                    DragAction::Copy => NSDragOperation::Copy,
-                    DragAction::Link => NSDragOperation::Link,
-                    DragAction::Move => NSDragOperation::Move,
-                }
-            },
-            _ => panic!()
+            action: action.clone()
+        })]);
+        
+        match action.get(){
+            DragAction::None => NSDragOperation::None,
+            DragAction::Copy => NSDragOperation::Copy,
+            DragAction::Link => NSDragOperation::Link,
+            DragAction::Move => NSDragOperation::Move,
         }
     }
     
@@ -784,14 +781,14 @@ pub fn define_cocoa_view_class() -> *const Class {
             let string = unsafe {CStr::from_ptr(msg_send![string, UTF8String])};
             file_urls.push(string.to_str().unwrap().to_string());
         }
-        let mut events = vec![Event::FingerDrop(FingerDropEvent {
-            handled: false,
+        let events = vec![CocoaEvent::Drop(DropEvent {
+            handled: Cell::new(false),
             abs: pos,
             dragged_item: DraggedItem {
                 file_urls,
             }
         })];
-        window.do_callback(&mut events);
+        window.do_callback(events);
     }
     
     /*

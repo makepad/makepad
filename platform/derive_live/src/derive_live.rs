@@ -146,7 +146,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add("        self.state.swap_in_state(state);");
             tb.add("    }");
             
-            tb.add("    fn state_handle_event(&mut self, cx: &mut Cx, event: &mut Event)->StateAction{");
+            tb.add("    fn state_handle_event(&mut self, cx: &mut Cx, event: &Event)->StateAction{");
             tb.add("        let ret = self.state.handle_event(cx, event);");
             tb.add("        if ret.is_animating(){self.apply_animating_state(cx);}");
             tb.add("        ret");

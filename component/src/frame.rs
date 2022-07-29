@@ -108,7 +108,7 @@ impl FrameComponent for Frame {
     fn handle_component_event(
         &mut self,
         cx: &mut Cx,
-        event: &mut Event,
+        event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, FrameActionItem)
     ) {
         for id in &self.draw_order {

@@ -64,7 +64,7 @@ pub struct LinkButton {
 
 impl LinkButton {
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction),) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction),) {
         self.button.handle_event(cx, event, dispatch_action)
     }
     

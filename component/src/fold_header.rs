@@ -69,7 +69,7 @@ impl FrameComponent for FoldHeader {
     fn handle_component_event(
         &mut self,
         cx: &mut Cx,
-        event: &mut Event,
+        event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, FrameActionItem)
     ) {
         if self.state_handle_event(cx, event).must_redraw() {

@@ -297,13 +297,13 @@ impl ScrollBar {
         }
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> ScrollBarEvent {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> ScrollBarEvent {
         // lets check if our view-area gets a mouse-scroll.
         match event {
             Event::FingerScroll(fe) => { //if !fe.handled {
                 if !match self.axis {
-                    Axis::Horizontal => fe.handled_x,
-                    Axis::Vertical => fe.handled_y
+                    Axis::Horizontal => fe.handled_x.get(),
+                    Axis::Vertical => fe.handled_y.get()
                 } {
                     let rect = self.view_area.get_rect(cx);
                     if rect.contains(fe.abs) { // handle mousewheel
@@ -312,12 +312,12 @@ impl ScrollBar {
                             Axis::Horizontal => if self.use_vertical_finger_scroll {fe.scroll.y}else {fe.scroll.x},
                             Axis::Vertical => fe.scroll.y
                         };
-                        if !self.smoothing.is_none() && fe.input_type.is_mouse() {
+                        if !self.smoothing.is_none() && fe.finger_type.is_mouse() {
                             let scroll_pos_target = self.get_scroll_target();
                             if self.set_scroll_target(cx, scroll_pos_target + scroll) {
                                 match self.axis {
-                                    Axis::Horizontal => fe.handled_x = true,
-                                    Axis::Vertical => fe.handled_y = true
+                                    Axis::Horizontal => fe.handled_x.set(true),
+                                    Axis::Vertical => fe.handled_y.set(true)
                                 }
                             };
                             self.move_towards_scroll_target(cx); // take the first step now
@@ -327,8 +327,8 @@ impl ScrollBar {
                             let scroll_pos = self.get_scroll_pos();
                             if self.set_scroll_pos(cx, scroll_pos + scroll) {
                                 match self.axis {
-                                    Axis::Horizontal => fe.handled_x = true,
-                                    Axis::Vertical => fe.handled_y = true
+                                    Axis::Horizontal => fe.handled_x.set(true),
+                                    Axis::Vertical => fe.handled_y.set(true)
                                 }
                             }
                             return self.make_scroll_event();
@@ -374,7 +374,7 @@ impl ScrollBar {
                 },
                 Hit::FingerUp(fe) => {
                     self.drag_point = None;
-                    if fe.is_over && fe.input_type.has_hovers() {
+                    if fe.is_over && fe.finger_type.has_hovers() {
                         self.animate_state(cx, ids!(hover.on));
                     }
                     else {

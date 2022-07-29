@@ -108,7 +108,7 @@ impl AudioComponent for Instrument {
         })
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
         for step in self.steps.values_mut(){
             if let Some(step) = step.as_mut(){
                 step.handle_event(cx, event, dispatch_action)

@@ -76,7 +76,7 @@ impl TabCloseButton {
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
-        event: &mut Event,
+        event: &Event,
     ) -> TabCloseButtonAction {
         self.state_handle_event(cx, event);
         match event.hits(cx, self.button.area()) {
