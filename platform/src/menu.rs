@@ -16,12 +16,12 @@ pub struct CxCommandSetting {
 // Command
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq)]
-pub struct Command(pub LiveId);
-impl From<LiveId> for Command {
-    fn from(live_id: LiveId) -> Command {Command(live_id)}
+pub struct MenuCommand(pub LiveId);
+impl From<LiveId> for MenuCommand {
+    fn from(live_id: LiveId) -> MenuCommand {MenuCommand(live_id)}
 }
 
-impl Command{
+impl MenuCommand{
     //pub fn from_id(id:LiveId)->Self{Self(id.0)}
     /*
     pub fn set_enabled(&self, cx:&mut Cx, enabled:bool)->Self{
@@ -51,7 +51,7 @@ impl Command{
 #[derive(PartialEq, Clone)]
 pub enum Menu {
     Main {items:Vec<Menu>},
-    Item {name: String, command:Command},
+    Item {name: String, command:MenuCommand},
     Sub {name: String, items: Vec<Menu>},
     Line
 }
@@ -72,7 +72,7 @@ impl Menu {
         Menu::Line
     }
     
-    pub fn item(name: &str, command: Command) -> Menu {
+    pub fn item(name: &str, command: MenuCommand) -> Menu {
         Menu::Item {
             name: name.to_string(),
             command: command

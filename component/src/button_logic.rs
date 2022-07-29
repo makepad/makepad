@@ -23,7 +23,7 @@ pub enum ButtonAction {
 
 pub fn button_logic_handle_event(
     cx: &mut Cx,
-    event: &mut Event,
+    event: &Event,
     area: Area,
     dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction)
 ) -> Option<ButtonState>
@@ -42,7 +42,7 @@ pub fn button_logic_handle_event(
         }
         Hit::FingerUp(fe) => if fe.is_over {
             dispatch_action(cx, ButtonAction::WasClicked);
-            if fe.input_type.has_hovers() {
+            if fe.finger_type.has_hovers() {
                 return Some(ButtonState::Hover);
             }
             return Some(ButtonState::Default)

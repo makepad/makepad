@@ -9,11 +9,11 @@ pub trait FrameComponent: LiveApply {
     fn handle_component_event(
         &mut self,
         _cx: &mut Cx,
-        _event: &mut Event,
+        _event: &Event,
         _fn_action: &mut dyn FnMut(&mut Cx, FrameActionItem)
     ) {}
     
-    fn handle_event_iter(&mut self, cx: &mut Cx, event: &mut Event) -> Vec<FrameActionItem> {
+    fn handle_event_iter(&mut self, cx: &mut Cx, event: &Event) -> Vec<FrameActionItem> {
         let mut actions = Vec::new();
         self.handle_component_event(cx, event, &mut | _, action | {
             actions.push(action);
@@ -323,13 +323,13 @@ impl FrameRef {
         self.0.as_mut()
     }
     
-    pub fn handle_component_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, FrameActionItem)) {
+    pub fn handle_component_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, FrameActionItem)) {
         if let Some(inner) = &mut self.0 {
             return inner.handle_component_event(cx, event, dispatch_action)
         }
     }
     
-    pub fn handle_event_iter(&mut self, cx: &mut Cx, event: &mut Event) -> Vec<FrameActionItem> {
+    pub fn handle_event_iter(&mut self, cx: &mut Cx, event: &Event) -> Vec<FrameActionItem> {
         if let Some(inner) = &mut self.0 {
             return inner.handle_event_iter(cx, event)
         }

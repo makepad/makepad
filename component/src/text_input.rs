@@ -292,7 +292,7 @@ impl TextInput {
         self.text = new;
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event, dispatch_action: &mut dyn FnMut(&mut Cx, TextInputAction)) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, TextInputAction)) {
         self.state_handle_event(cx, event);
         match event.hits(cx, self.bg.area()) {
             Hit::KeyFocusLost(_) => {
@@ -323,7 +323,7 @@ impl TextInput {
             }
             Hit::TextCopy(ce) => {
                 self.undo_id += 1;
-                ce.response = Some(self.selected_text())
+                *ce.response.borrow_mut() = Some(self.selected_text())
             }
             Hit::KeyDown(ke) => match ke.key_code {
                 KeyCode::KeyZ if ke.mod_logo() || ke.mod_control() => {
@@ -412,7 +412,7 @@ impl TextInput {
                 }
             },
             Hit::FingerUp(fe) => {
-                if fe.is_over && fe.input_type.has_hovers() {
+                if fe.is_over && fe.finger_type.has_hovers() {
                     self.animate_state(cx, ids!(hover.on));
                 }
                 else {

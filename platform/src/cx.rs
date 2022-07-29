@@ -37,7 +37,7 @@ use {
         },
         menu::{
             CxCommandSetting,
-            Command
+            MenuCommand
         },
         cx_api::{CxPlatformOp},
         area::{
@@ -119,13 +119,13 @@ pub struct Cx {
     pub shader_registry: ShaderRegistry,
     
     #[allow(dead_code)]
-    pub (crate) command_settings: HashMap<Command, CxCommandSetting>,
+    pub (crate) command_settings: HashMap<MenuCommand, CxCommandSetting>,
     
     pub (crate) thread_pool_senders: Vec<Arc<RefCell<Option<ThreadPoolSender> >> >,
     
     pub (crate) platform: CxPlatform,
     // (cratethis cuts the compiletime of an end-user application in half
-    pub (crate) event_handler: Option<*mut dyn FnMut(&mut Cx, &mut Event)>,
+    pub (crate) event_handler: Option<*mut dyn FnMut(&mut Cx, &Event)>,
 }
 
 pub struct CxDependency {

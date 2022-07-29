@@ -97,7 +97,7 @@ impl AudioComponent for AudioUnitEffect {
         })
     }
     
-    fn handle_event(&mut self, _cx: &mut Cx, event: &mut Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
+    fn handle_event(&mut self, _cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
         while let Ok(to_ui) = self.to_ui.try_recv(event) {
             match to_ui {
                 ToUI::NewAudioUnit(audio_unit) => {

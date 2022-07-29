@@ -32,7 +32,7 @@ pub struct ScrollView{
 
 impl ScrollView{
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) -> bool {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> bool {
         let mut ret_h = ScrollBarEvent::None;
         let mut ret_v = ScrollBarEvent::None;
         

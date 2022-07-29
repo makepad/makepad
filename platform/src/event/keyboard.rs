@@ -1,4 +1,6 @@
 use {
+    std::rc::Rc,
+    std::cell::RefCell,
     crate::{
         event::{
             finger::KeyModifiers,
@@ -71,7 +73,7 @@ impl CxKeyboard {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct KeyEvent {
     pub key_code: KeyCode,
     pub is_repeat: bool,
@@ -201,22 +203,22 @@ impl KeyEvent {
     
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct KeyFocusEvent {
     pub prev: Area,
     pub focus: Area,
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct TextInputEvent {
     pub input: String,
     pub replace_last: bool,
     pub was_paste: bool
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct TextCopyEvent {
-    pub response: Option<String>
+    pub response: Rc<RefCell<Option<String>>>
 }
 
 impl Default for KeyCode {

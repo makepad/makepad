@@ -843,7 +843,7 @@ impl CodeEditorImpl {
         &mut self,
         cx: &mut Cx,
         state: &mut EditorState,
-        event: &mut Event,
+        event: &Event,
         lines_layout: &LinesLayout,
         send_request: &mut dyn FnMut(CollabRequest),
         dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
@@ -1062,9 +1062,7 @@ impl CodeEditorImpl {
                         start = end;
                     }
                     
-                    ke.response = Some(string);
-                } else {
-                    ke.response = None;
+                    *ke.response.borrow_mut() = Some(string);
                 }
             },
             Hit::TextInput(TextInputEvent {input, ..}) => {

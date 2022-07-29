@@ -1,4 +1,6 @@
 use {
+    std::cell::{Cell},
+    std::rc::Rc,
     crate::{
         makepad_error_log::*,
         makepad_math::*,
@@ -66,11 +68,25 @@ impl CxFingers {
     
     pub (crate) fn free_digit(&mut self, digit_id: DigitId) {
         if let Some(index) = self.digits.iter_mut().position( | v | v.digit_id == digit_id) {
-            self.capture_count -= 1;
+            if self.capture_count > 0{
+                self.capture_count -= 1;
+            }
             self.digits.remove(index);
             return
         }
     }
+    
+    pub (crate) fn get_digit_index(&mut self, digit_id: DigitId)->usize {
+        if let Some(index) = self.digits.iter_mut().position( | v | v.digit_id == digit_id) {
+            return index
+        }
+        0
+    }
+    
+    pub (crate) fn get_digit_count(&mut self)->usize {
+        self.digits.len()
+    }
+    
     
     pub (crate) fn get_digit(&self, digit_id: DigitId) -> Option<&CxDigit> {
         self.digits.iter().find( | v | v.digit_id == digit_id)
@@ -209,7 +225,7 @@ impl CxFingerDrag {
     }
 }
 
-#[derive(Clone, Debug, PartialEq, Default)]
+#[derive(Clone, Debug, Default)]
 pub struct KeyModifiers {
     pub shift: bool,
     pub control: bool,
@@ -217,40 +233,37 @@ pub struct KeyModifiers {
     pub logo: bool
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub enum FingerInputType {
+#[derive(Clone, Debug)]
+pub enum FingerType {
     Mouse(usize),
-    Touch(usize),
+    Touch(u64),
     XR(usize)
 }
 
-impl FingerInputType {
-    pub fn is_touch(&self) -> bool {if let FingerInputType::Touch(_) = self {true}else {false}}
-    pub fn is_mouse(&self) -> bool {if let FingerInputType::Mouse(_) = self {true}else {false}}
-    pub fn is_xr(&self) -> bool {if let FingerInputType::XR(_) = self {true}else {false}}
+impl FingerType {
+    pub fn is_touch(&self) -> bool {if let FingerType::Touch(_) = self {true}else {false}}
+    pub fn is_mouse(&self) -> bool {if let FingerType::Mouse(_) = self {true}else {false}}
+    pub fn is_xr(&self) -> bool {if let FingerType::XR(_) = self {true}else {false}}
     pub fn has_hovers(&self) -> bool {self.is_mouse() || self.is_xr()}
-    pub fn get_down_mutex(&self) -> usize {
-        match self {
-            Self::Mouse(btn) => *btn,
-            Self::Touch(_) => 0,
-            Self::XR(_) => 0
-        }
-    }
-    
+    pub fn mouse_button(&self) -> Option<usize> {if let FingerType::Mouse(button) = self {Some(*button)}else {None}}
+    pub fn touch_uid(&self) -> Option<u64> {if let FingerType::Touch(uid) = self {Some(*uid)}else {None}}
+    pub fn xr_input(&self) -> Option<usize> {if let FingerType::XR(input) = self {Some(*input)}else {None}}
 }
 
-impl Default for FingerInputType {
+impl Default for FingerType {
     fn default() -> Self {Self::Mouse(0)}
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct FingerDownEvent {
     pub window_id: WindowId,
     pub abs: Vec2,
     pub digit_id: DigitId,
+    pub digit_index: usize, 
+    pub digit_count: usize, 
     pub tap_count: u32,
-    pub handled: bool,
-    pub input_type: FingerInputType,
+    pub handled: Cell<bool>,
+    pub finger_type: FingerType,
     pub modifiers: KeyModifiers,
     pub time: f64
 }
@@ -262,7 +275,7 @@ impl FingerDownEvent {
     pub fn mod_logo(&self) -> bool {self.modifiers.logo}
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct FingerDownHitEvent {
     pub rel: Vec2,
     pub rect: Rect,
@@ -278,18 +291,20 @@ impl std::ops::DerefMut for FingerDownHitEvent {
     fn deref_mut(&mut self) -> &mut Self::Target {&mut self.deref_target}
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct FingerMoveEvent {
     pub window_id: WindowId,
     pub abs: Vec2,
     pub captured: Area,
     pub digit_id: DigitId,
-    pub input_type: FingerInputType,
+    pub digit_index: usize,
+    pub digit_count: usize, 
+    pub finger_type: FingerType,
     pub modifiers: KeyModifiers,
     pub time: f64
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct FingerMoveHitEvent {
     pub abs_start: Vec2,
     pub rel: Vec2,
@@ -315,18 +330,20 @@ impl FingerMoveHitEvent {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct FingerUpEvent {
     pub window_id: WindowId,
     pub abs: Vec2,
     pub captured: Area,
     pub digit_id: DigitId,
-    pub input_type: FingerInputType,
+    pub digit_index: usize,
+    pub digit_count: usize, 
+    pub finger_type: FingerType,
     pub modifiers: KeyModifiers,
     pub time: f64
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct FingerUpHitEvent {
     pub rel: Vec2,
     pub abs_start: Vec2,
@@ -358,19 +375,19 @@ impl Default for HoverState {
     }
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct FingerHoverEvent {
     pub window_id: WindowId,
     pub abs: Vec2,
     pub digit_id: DigitId,
     pub hover_last: Area,
-    pub handled: bool,
-    pub input_type: FingerInputType,
+    pub handled: Cell<bool>,
+    pub finger_type: FingerType,
     pub modifiers: KeyModifiers,
     pub time: f64
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct FingerHoverHitEvent {
     pub rel: Vec2,
     pub rect: Rect,
@@ -387,20 +404,20 @@ impl std::ops::DerefMut for FingerHoverHitEvent {
     fn deref_mut(&mut self) -> &mut Self::Target {&mut self.event}
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct FingerScrollEvent {
     pub window_id: WindowId,
     pub digit_id: DigitId,
     pub abs: Vec2,
     pub scroll: Vec2,
-    pub input_type: FingerInputType,
-    pub handled_x: bool,
-    pub handled_y: bool,
+    pub finger_type: FingerType,
+    pub handled_x: Cell<bool>,
+    pub handled_y: Cell<bool>,
     pub modifiers: KeyModifiers,
     pub time: f64
 }
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct FingerScrollHitEvent {
     pub rel: Vec2,
     pub rect: Rect,
@@ -417,36 +434,36 @@ impl std::ops::DerefMut for FingerScrollHitEvent {
 }
 
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct FingerDragEvent {
-    pub handled: bool,
+#[derive(Clone, Debug)]
+pub struct DragEvent {
+    pub handled: Cell<bool>,
     pub abs: Vec2,
     pub state: DragState,
-    pub action: DragAction,
+    pub action: Rc<Cell<DragAction>>,
 }
 
-#[derive(Clone, Debug, PartialEq)]
-pub struct FingerDropEvent {
-    pub handled: bool,
+#[derive(Clone, Debug)]
+pub struct DropEvent {
+    pub handled: Cell<bool>,
     pub abs: Vec2,
     pub dragged_item: DraggedItem,
 }
 
 #[derive(Debug, PartialEq)]
-pub struct FingerDragHitEvent<'a> {
+pub struct DragHitEvent<'a> {
     pub abs: Vec2,
     pub rel: Vec2,
     pub rect: Rect,
     pub state: DragState,
-    pub action: &'a mut DragAction,
+    pub action: &'a Cell<DragAction>,
 }
 
 #[derive(Debug, PartialEq)]
-pub struct FingerDropHitEvent<'a> {
+pub struct DropHitEvent<'a> {
     pub abs: Vec2,
     pub rel: Vec2,
     pub rect: Rect,
-    pub dragged_item: &'a mut DraggedItem,
+    pub dragged_item: &'a DraggedItem,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -514,11 +531,11 @@ fn rect_contains_with_margin(rect: &Rect, pos: Vec2, margin: &Option<Margin>) ->
 
 impl Event {
     
-    pub fn hits(&mut self, cx: &mut Cx, area: Area) -> Hit {
+    pub fn hits(&self, cx: &mut Cx, area: Area) -> Hit {
         self.hits_with_options(cx, area, HitOptions::default())
     }
     
-    pub fn hits_with_options(&mut self, cx: &mut Cx, area: Area, options: HitOptions) -> Hit {
+    pub fn hits_with_options(&self, cx: &mut Cx, area: Area, options: HitOptions) -> Hit {
         if !area.is_valid(cx) {
             return Hit::Nothing
         }
@@ -566,8 +583,8 @@ impl Event {
                 let rect = area.get_rect(&cx);
                 if fe.hover_last == area {
                     let any_captured = cx.fingers.get_captured_area_digit(area);
-                    if !fe.handled && rect_contains_with_margin(&rect, fe.abs, &options.margin) {
-                        fe.handled = true;
+                    if !fe.handled.get() && rect_contains_with_margin(&rect, fe.abs, &options.margin) {
+                        fe.handled.set(true);
                         cx.fingers.new_hover_area(fe.digit_id, area);
                         return Hit::FingerHoverOver(FingerHoverHitEvent {
                             rel: area.abs_to_rel(cx, fe.abs),
@@ -586,10 +603,10 @@ impl Event {
                     }
                 }
                 else {
-                    if !fe.handled && rect_contains_with_margin(&rect, fe.abs, &options.margin) {
+                    if !fe.handled.get() && rect_contains_with_margin(&rect, fe.abs, &options.margin) {
                         let any_captured = cx.fingers.get_captured_area_digit(area);
                         cx.fingers.new_hover_area(fe.digit_id, area);
-                        fe.handled = true;
+                        fe.handled.set(true);
                         return Hit::FingerHoverIn(FingerHoverHitEvent {
                             rel: area.abs_to_rel(cx, fe.abs),
                             rect: rect,
@@ -616,7 +633,7 @@ impl Event {
                 }
             },
             Event::FingerDown(fe) => {
-                if !fe.handled {
+                if !fe.handled.get() {
                     let rect = area.get_rect(&cx);
                     if rect_contains_with_margin(&rect, fe.abs, &options.margin) {
                         // scan if any of the fingers already captured this area
@@ -625,7 +642,7 @@ impl Event {
                             let digit = cx.fingers.get_digit_mut(fe.digit_id).unwrap();
                             digit.down_abs_start = fe.abs;
                             digit.down_rel_start = rel;
-                            fe.handled = true;
+                            fe.handled.set(true);
                             return Hit::FingerDown(FingerDownHitEvent {
                                 rel: rel,
                                 rect: rect,
@@ -658,60 +675,60 @@ impl Event {
         Hit::Nothing
     }
     
-    pub fn drag_hits(&mut self, cx: &mut Cx, area: Area) -> DragHit {
+    pub fn drag_hits(&self, cx: &mut Cx, area: Area) -> DragHit {
         self.drag_hits_with_options(cx, area, HitOptions::default())
     }
     
-    pub fn drag_hits_with_options(&mut self, cx: &mut Cx, area: Area, options: HitOptions) -> DragHit {
+    pub fn drag_hits_with_options(&self, cx: &mut Cx, area: Area, options: HitOptions) -> DragHit {
         match self {
-            Event::FingerDrag(event) => {
+            Event::Drag(event) => {
                 let rect = area.get_rect(cx);
                 if area == cx.finger_drag.drag_area {
-                    if !event.handled && rect_contains_with_margin(&rect, event.abs, &options.margin) {
+                    if !event.handled.get() && rect_contains_with_margin(&rect, event.abs, &options.margin) {
                         cx.finger_drag.next_drag_area = area;
-                        event.handled = true;
-                        DragHit::FingerDrag(FingerDragHitEvent {
+                        event.handled.set(true);
+                        DragHit::Drag(DragHitEvent {
                             rel: area.abs_to_rel(cx, event.abs),
                             rect,
                             abs: event.abs,
                             state: event.state.clone(),
-                            action: &mut event.action
+                            action: &event.action
                         })
                     } else {
-                        DragHit::FingerDrag(FingerDragHitEvent {
+                        DragHit::Drag(DragHitEvent {
                             rel: area.abs_to_rel(cx, event.abs),
                             rect,
                             state: DragState::Out,
                             abs: event.abs,
-                            action: &mut event.action
+                            action: &event.action
                         })
                     }
                 } else {
-                    if !event.handled && rect_contains_with_margin(&rect, event.abs, &options.margin) {
+                    if !event.handled.get() && rect_contains_with_margin(&rect, event.abs, &options.margin) {
                         cx.finger_drag.next_drag_area = area;
-                        event.handled = true;
-                        DragHit::FingerDrag(FingerDragHitEvent {
+                        event.handled.set(true);
+                        DragHit::Drag(DragHitEvent {
                             rel: area.abs_to_rel(cx, event.abs),
                             rect,
                             state: DragState::In,
                             abs: event.abs,
-                            action: &mut event.action
+                            action: &event.action
                         })
                     } else {
                         DragHit::NoHit
                     }
                 }
             }
-            Event::FingerDrop(event) => {
+            Event::Drop(event) => {
                 let rect = area.get_rect(cx);
-                if !event.handled && rect_contains_with_margin(&rect, event.abs, &options.margin) {
+                if !event.handled.get() && rect_contains_with_margin(&rect, event.abs, &options.margin) {
                     cx.finger_drag.next_drag_area = Area::default();
-                    event.handled = true;
-                    DragHit::FingerDrop(FingerDropHitEvent {
+                    event.handled.set(true);
+                    DragHit::Drop(DropHitEvent {
                         rel: area.abs_to_rel(cx, event.abs),
                         rect,
                         abs: event.abs,
-                        dragged_item: &mut event.dragged_item
+                        dragged_item: &event.dragged_item
                     })
                 } else {
                     DragHit::NoHit

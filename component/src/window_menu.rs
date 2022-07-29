@@ -21,7 +21,7 @@ impl WindowMenu {
         }
     }
     
-    pub fn handle_window_menu(&mut self, _cx: &mut Cx, _event: &mut Event, _menu: &Menu) -> WindowMenuEvent {
+    pub fn handle_window_menu(&mut self, _cx: &mut Cx, _event: &Event, _menu: &Menu) -> WindowMenuEvent {
         WindowMenuEvent::None
     }
     

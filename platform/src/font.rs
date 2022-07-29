@@ -189,7 +189,7 @@ impl Cx {
         
     }
     
-    pub fn after_handle_event(&mut self, event: &mut Event) {
+    pub fn after_handle_event(&mut self, event: &Event) {
         self.with_draw_font_atlas( | cx, dfa | {
             dfa.handle_event(cx, event);
         })
@@ -377,7 +377,7 @@ impl CxDrawFontAtlas {
         }
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &mut Event) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         match event {
             Event::LiveEdit(live_edit_event) => {
                 match live_edit_event {

@@ -1,30 +1,33 @@
 #![allow(dead_code)]
-use crate::{
-    makepad_live_id::*,
-    makepad_wasm_bridge::*,
-    makepad_math::{Vec2, Vec3, Quat, Transform},
-    midi::{MidiInputInfo, Midi1Data, Midi1InputData},
-    cx::{PlatformType},
-    window::CxWindowPool,
-    area::Area,
-    event::{
-        DigitId,
-        XRButton,
-        XRInput,
-        XRUpdateEvent,
-        KeyCode,
-        FingerDownEvent,
-        KeyModifiers,
-        FingerInputType,
-        FingerUpEvent,
-        FingerMoveEvent,
-        FingerHoverEvent,
-        FingerScrollEvent,
-        KeyEvent,
-        TextInputEvent,
-        MidiInputListEvent,
-    },
-    window::WindowGeom
+use {
+    std::cell::Cell,
+    crate::{
+        makepad_live_id::*,
+        makepad_wasm_bridge::*,
+        makepad_math::{Vec2, Vec3, Quat, Transform},
+        midi::{MidiInputInfo, Midi1Data, Midi1InputData},
+        cx::{PlatformType},
+        window::CxWindowPool,
+        area::Area,
+        event::{
+            DigitId,
+            XRButton,
+            XRInput,
+            XRUpdateEvent,
+            KeyCode,
+            FingerDownEvent,
+            KeyModifiers,
+            FingerType,
+            FingerUpEvent,
+            FingerMoveEvent,
+            FingerHoverEvent,
+            FingerScrollEvent,
+            KeyEvent,
+            TextInputEvent,
+            MidiInputListEvent,
+        },
+        window::WindowGeom
+    }
 };
 
 
@@ -65,7 +68,7 @@ impl Into<PlatformType> for WBrowserInfo {
         PlatformType::WebBrowser {
             protocol: self.protocol,
             hostname: self.hostname,
-            host:self.host,
+            host: self.host,
             pathname: self.pathname,
             search: self.search,
             hash: self.hash,
@@ -158,13 +161,15 @@ fn unpack_key_modifier(modifiers: u32) -> KeyModifiers {
 }
 
 impl ToWasmTouchStart {
-    pub fn into_finger_down_event(self, digit_id:DigitId, tap_count: u32) -> FingerDownEvent {
+    pub fn into_finger_down_event(self, digit_id: DigitId, digit_index:usize, digit_count:usize, tap_count: u32) -> FingerDownEvent {
         FingerDownEvent {
             window_id: CxWindowPool::id_zero(),
             abs: Vec2 {x: self.touch.x, y: self.touch.y},
-            handled: false,
+            handled: Cell::new(false),
             digit_id,
-            input_type: FingerInputType::Touch(self.touch.uid as usize),
+            digit_index,
+            digit_count,
+            finger_type: FingerType::Touch(self.touch.uid as u64),
             modifiers: KeyModifiers::default(),
             time: self.touch.time,
             tap_count: tap_count
@@ -178,13 +183,15 @@ pub struct ToWasmTouchMove {
 }
 
 impl ToWasmTouchMove {
-    pub fn into_finger_move_event(self, digit_id:DigitId, captured:Area ) -> FingerMoveEvent {
+    pub fn into_finger_move_event(self, digit_id: DigitId,digit_index:usize, digit_count:usize, captured: Area) -> FingerMoveEvent {
         FingerMoveEvent {
             window_id: CxWindowPool::id_zero(),
             abs: Vec2 {x: self.touch.x, y: self.touch.y},
             digit_id,
+            digit_index,
+            digit_count,
             captured,
-            input_type: FingerInputType::Touch(self.touch.uid as usize),
+            finger_type: FingerType::Touch(self.touch.uid as u64),
             modifiers: KeyModifiers::default(),
             time: self.touch.time,
         }
@@ -197,13 +204,15 @@ pub struct ToWasmTouchEnd {
 }
 
 impl ToWasmTouchEnd {
-    pub fn into_finger_up_event(self, digit_id:DigitId, captured:Area ) -> FingerUpEvent {
+    pub fn into_finger_up_event(self, digit_id: DigitId, digit_index:usize, digit_count:usize, captured: Area) -> FingerUpEvent {
         FingerUpEvent {
             window_id: CxWindowPool::id_zero(),
             abs: Vec2 {x: self.touch.x, y: self.touch.y},
             digit_id,
+            digit_index,
+            digit_count,
             captured,
-            input_type: FingerInputType::Touch(self.touch.uid as usize),
+            finger_type: FingerType::Touch(self.touch.uid as u64),
             modifiers: KeyModifiers::default(),
             time: self.touch.time,
         }
@@ -228,13 +237,15 @@ pub struct ToWasmMouseDown {
     pub mouse: WMouse,
 }
 impl ToWasmMouseDown {
-    pub fn into_finger_down_event(self, digit_id:DigitId, tap_count: u32) -> FingerDownEvent {
+    pub fn into_finger_down_event(self, digit_id: DigitId, digit_index:usize, digit_count:usize, tap_count: u32) -> FingerDownEvent {
         FingerDownEvent {
             window_id: CxWindowPool::id_zero(),
             abs: Vec2 {x: self.mouse.x, y: self.mouse.y},
-            handled: false,
+            handled: Cell::new(false),
             digit_id,
-            input_type: FingerInputType::Mouse(self.mouse.button as usize),
+            digit_index,
+            digit_count,
+            finger_type: FingerType::Mouse(self.mouse.button as usize),
             modifiers: unpack_key_modifier(self.mouse.modifiers),
             time: self.mouse.time,
             tap_count: tap_count
@@ -249,13 +260,15 @@ pub struct ToWasmMouseMove {
 }
 
 impl ToWasmMouseMove {
-    pub fn into_finger_move_event(self, digit_id:DigitId, captured:Area) -> FingerMoveEvent {
+    pub fn into_finger_move_event(self, digit_id: DigitId, digit_index:usize, digit_count:usize, captured: Area, button:usize) -> FingerMoveEvent {
         FingerMoveEvent {
             window_id: CxWindowPool::id_zero(),
             abs: Vec2 {x: self.mouse.x, y: self.mouse.y},
             digit_id,
+            digit_index,
+            digit_count,
             captured,
-            input_type: FingerInputType::Mouse(self.mouse.button as usize),
+            finger_type: FingerType::Mouse(button),
             modifiers: unpack_key_modifier(self.mouse.modifiers),
             time: self.mouse.time,
         }
@@ -263,14 +276,14 @@ impl ToWasmMouseMove {
 }
 
 impl ToWasmMouseMove {
-    pub fn into_finger_hover_event(self, digit_id:DigitId, hover_last:Area) -> FingerHoverEvent {
+    pub fn into_finger_hover_event(self, digit_id: DigitId, hover_last: Area, button:usize) -> FingerHoverEvent {
         FingerHoverEvent {
             window_id: CxWindowPool::id_zero(),
             abs: Vec2 {x: self.mouse.x, y: self.mouse.y},
-            handled: false,
+            handled: Cell::new(false),
             hover_last,
             digit_id,
-            input_type: FingerInputType::Mouse(self.mouse.button as usize),
+            finger_type: FingerType::Mouse(button),
             modifiers: unpack_key_modifier(self.mouse.modifiers),
             time: self.mouse.time,
         }
@@ -283,13 +296,15 @@ pub struct ToWasmMouseUp {
 }
 
 impl ToWasmMouseUp {
-    pub fn into_finger_up_event(self, digit_id:DigitId, captured:Area) -> FingerUpEvent {
+    pub fn into_finger_up_event(self, digit_id: DigitId,  digit_index:usize, digit_count:usize, captured: Area) -> FingerUpEvent {
         FingerUpEvent {
             window_id: CxWindowPool::id_zero(),
             abs: Vec2 {x: self.mouse.x, y: self.mouse.y},
             captured,
             digit_id,
-            input_type: FingerInputType::Mouse(self.mouse.button as usize),
+            digit_index,
+            digit_count,
+            finger_type: FingerType::Mouse(self.mouse.button as usize),
             modifiers: unpack_key_modifier(self.mouse.modifiers),
             time: self.mouse.time,
         }
@@ -310,15 +325,15 @@ pub struct ToWasmScroll {
 }
 
 impl ToWasmScroll {
-    pub fn into_finger_scroll_event(self, digit_id:DigitId) -> FingerScrollEvent {
-        FingerScrollEvent{
+    pub fn into_finger_scroll_event(self, digit_id: DigitId) -> FingerScrollEvent {
+        FingerScrollEvent {
             window_id: CxWindowPool::id_zero(),
             digit_id,
             abs: Vec2 {x: self.x, y: self.y},
             scroll: Vec2 {x: self.scroll_x, y: self.scroll_y},
-            input_type: if self.is_touch {FingerInputType::Touch(0)} else {FingerInputType::Mouse(0)},
-            handled_x: false,
-            handled_y: false,
+            finger_type: if self.is_touch {FingerType::Touch(0)} else {FingerType::Mouse(0)},
+            handled_x: Cell::new(false),
+            handled_y: Cell::new(false),
             modifiers: unpack_key_modifier(self.modifiers),
             time: self.time,
         }
@@ -686,10 +701,10 @@ impl Into<Midi1InputData> for ToWasmMidiInputData {
     fn into(self) -> Midi1InputData {
         Midi1InputData {
             input_id: self.input_id as usize,
-            data: Midi1Data{
-                data0: ((self.data>>16)&0xff) as u8,
-                data1: ((self.data>>8)&0xff) as u8 ,
-                data2: ((self.data>>0)&0xff) as u8,
+            data: Midi1Data {
+                data0: ((self.data >> 16) & 0xff) as u8,
+                data1: ((self.data >> 8) & 0xff) as u8,
+                data2: ((self.data >> 0) & 0xff) as u8,
             }
         }
     }
@@ -706,19 +721,19 @@ pub struct WMidiInputInfo {
 
 #[derive(ToWasm)]
 pub struct ToWasmMidiInputList {
-    pub inputs:Vec<WMidiInputInfo>
+    pub inputs: Vec<WMidiInputInfo>
 }
 
 impl Into<MidiInputListEvent> for ToWasmMidiInputList {
     fn into(self) -> MidiInputListEvent {
         let mut out = Vec::new();
-        for input in self.inputs{
+        for input in self.inputs {
             out.push(MidiInputInfo {
                 manufacturer: input.manufacturer,
                 name: input.name,
                 uid: input.uid
             });
         }
-        MidiInputListEvent{inputs:out}
+        MidiInputListEvent {inputs: out}
     }
 }
