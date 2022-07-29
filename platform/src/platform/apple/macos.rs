@@ -248,7 +248,7 @@ impl Cx {
                     }
                     CocoaEvent::KeyUp(e) => {
                         self.keyboard.process_key_up(e.clone());
-                        self.call_event_handler(&Event::KeyDown(e))
+                        self.call_event_handler(&Event::KeyUp(e))
                     }
                     CocoaEvent::TextCopy(e) => {
                         self.call_event_handler(&Event::TextCopy(e))
