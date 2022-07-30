@@ -414,57 +414,54 @@ macro_rules!main_app {
     ( $ app: ident) => {
         #[cfg(not(target_arch = "wasm32"))]
         fn main() {
-            let mut cx = Cx::default();
+            let app = std::rc::Rc::new(std::cell::RefCell::new(None));
+            let mut cx = Cx::new(Box::new(move | cx, event | {
+                if let Event::Construct = event {
+                    *app.borrow_mut() = Some($app::new_main(cx));
+                }
+                app.borrow_mut().as_mut().unwrap().handle_event(cx, event);
+                cx.after_handle_event(event);
+            }));
             live_register(&mut cx);
             cx.live_expand();
             cx.live_scan_dependencies();
             cx.desktop_load_dependencies();
-            let mut app = None;
-            cx.event_loop( | cx, event | {
-                if let Event::Construct = event {
-                    app = Some( $app::new_main(cx));
-                }
-                app.as_mut().unwrap().handle_event(cx, event);
-                cx.after_handle_event(event);
-            });
         }
         
         #[cfg(target_arch = "wasm32")]
         fn main() {}
         
-        struct WasmAppCx {
-            app: Option< $ app>,
-            cx: Cx
-        }
-        
         #[export_name = "wasm_create_app"]
         #[cfg(target_arch = "wasm32")]
         pub extern "C" fn create_wasm_app() -> u32 {
-            let mut appcx = Box::new(WasmAppCx {app: None, cx: Cx::default()});
-            live_register(&mut appcx.cx);
-            appcx.cx.live_expand();
-            appcx.cx.live_scan_dependencies();
-            Box::into_raw(appcx) as u32
+            
+            let app = std::rc::Rc::new(std::cell::RefCell::new(None));
+            let mut cx = Box::new(Cx::new(Box::new(move | cx, event | {
+                if let Event::Construct = event {
+                    *app.borrow_mut() = Some($app::new_main(cx));
+                }
+                app.borrow_mut().as_mut().unwrap().handle_event(cx, event);
+                cx.after_handle_event(event);
+            })));
+            
+            live_register(&mut cx);
+            cx.live_expand();
+            cx.live_scan_dependencies();
+            Box::into_raw(cx) as u32
         }
         
         #[export_name = "wasm_terminate_thread_pools"]
         #[cfg(target_arch = "wasm32")]
-        pub unsafe extern "C" fn wasm_terminate_thread_pools(appcx: u32) {
-            let body = appcx as *mut WasmAppCx;
-            (*body).cx.terminate_thread_pools();
+        pub unsafe extern "C" fn wasm_terminate_thread_pools(cx_ptr: u32) {
+            let cx = cx_ptr as *mut Cx;
+            (*cx).terminate_thread_pools();
         }
         
         #[export_name = "wasm_process_msg"]
         #[cfg(target_arch = "wasm32")]
-        pub unsafe extern "C" fn wasm_process_msg(msg_ptr: u32, appcx: u32) -> u32 {
-            let body = appcx as *mut WasmAppCx;
-            (*body).cx.process_to_wasm(msg_ptr, | cx, event | {
-                if let Event::Construct = event {
-                    (*body).app = Some( $ app::new_main(cx));
-                }
-                (*body).app.as_mut().unwrap().handle_event(cx, event);
-                cx.after_handle_event(event);
-            })
+        pub unsafe extern "C" fn wasm_process_msg(msg_ptr: u32, cx_ptr: u32) -> u32 {
+            let cx = cx_ptr as *mut Cx;
+            (*cx).process_to_wasm(msg_ptr)
         }
     }
 }

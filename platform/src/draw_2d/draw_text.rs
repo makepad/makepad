@@ -2,6 +2,7 @@ use {
     crate::{
         makepad_derive_live::*,
         makepad_math::*,
+        makepad_error_log::*,
         makepad_shader_compiler::{
             ShaderTy,
         },
@@ -89,6 +90,7 @@ live_register!{
         }
         
         fn pixel(self) -> vec4 {
+            
             let dx = dFdx(vec2(self.tex_coord1.x * 2048.0, 0.)).x;
             let dp = 1.0 / 2048.0;
             
@@ -172,21 +174,21 @@ pub struct DrawText {
     #[calc] pub char_depth: f32,
     #[calc] pub base: Vec2,
     #[calc] pub font_size: f32,
-    #[calc] pub char_offset: f32,
+    #[calc] pub advance: f32,
 }
 
 impl DrawText {
     
     pub fn draw(&mut self, cx: &mut Cx2d, pos: Vec2, val: &str) {
-        self.draw_inner(cx, pos, 0, val);
+        self.draw_inner(cx, pos, val);
     }
     
     pub fn draw_rel(&mut self, cx: &mut Cx2d, pos: Vec2, val: &str) {
-        self.draw_inner(cx, pos + cx.turtle().origin(), 0, val);
+        self.draw_inner(cx, pos + cx.turtle().origin(), val);
     }
     
     pub fn draw_abs(&mut self, cx: &mut Cx2d, pos: Vec2, val: &str) {
-        self.draw_inner(cx, pos, 0, val);
+        self.draw_inner(cx, pos,val);
     }
     
     pub fn begin_many_instances(&mut self, cx: &mut Cx2d) {
@@ -212,7 +214,7 @@ impl DrawText {
         self.draw_vars.user_uniforms[1] = self.text_style.curve;
     }
     
-    pub fn draw_inner_fix_later_when_editor_rep_is_not_vec_of_char(&mut self, cx: &mut Cx2d, pos: Vec2, char_offset: usize, chunk: &[char]) {
+    pub fn draw_inner_fix_later_when_editor_rep_is_not_vec_of_char(&mut self, cx: &mut Cx2d, pos: Vec2, chunk: &[char]) {
         if !self.draw_vars.can_instance()
             || pos.x.is_nan()
             || pos.y.is_nan()
@@ -232,7 +234,6 @@ impl DrawText {
         }
         
         let mut walk_x = pos.x;
-        let mut char_offset = char_offset;
         
         let cxfont = cx.cx.fonts[font_id].as_mut().unwrap();
         let dpi_factor = cx.current_dpi_factor;
@@ -317,11 +318,10 @@ impl DrawText {
             self.base.x = walk_x;
             self.base.y = pos.y;
             self.font_size = self.text_style.font_size;
-            self.char_offset = char_offset as f32;
+            self.advance = advance;//char_offset as f32;
             char_depth += zbias_step;
             mi.instances.extend_from_slice(self.draw_vars.as_slice());
             walk_x += advance;
-            char_offset += 1;
         }
         
         if !in_many {
@@ -329,7 +329,7 @@ impl DrawText {
         }
     }
     
-    pub fn draw_inner(&mut self, cx: &mut Cx2d, pos: Vec2, char_offset: usize, chunk: &str) {
+    pub fn draw_inner(&mut self, cx: &mut Cx2d, pos: Vec2, chunk: &str) {
         if !self.draw_vars.can_instance()
             || pos.x.is_nan()
             || pos.y.is_nan()
@@ -349,7 +349,7 @@ impl DrawText {
         }
         
         let mut walk_x = pos.x;
-        let mut char_offset = char_offset;
+        //let mut char_offset = char_offset;
         
         let cxfont = cx.cx.fonts[font_id].as_mut().unwrap();
         let dpi_factor = cx.current_dpi_factor;
@@ -434,11 +434,10 @@ impl DrawText {
             self.base.x = walk_x;
             self.base.y = pos.y;
             self.font_size = self.text_style.font_size;
-            self.char_offset = char_offset as f32;
+            self.advance = advance;//char_offset as f32;
             char_depth += zbias_step;
             mi.instances.extend_from_slice(self.draw_vars.as_slice());
             walk_x += advance;
-            char_offset += 1;
         }
         
         if !in_many {
@@ -551,7 +550,7 @@ impl DrawText {
                     height: Size::Fixed(height)
                 });
                 // lets do our y alignment
-                self.draw_inner(cx, rect.pos + vec2(0.0, y_align), 0, text);
+                self.draw_inner(cx, rect.pos + vec2(0.0, y_align), text);
             }
             else {
                 // otherwise we should check the ellipsis
@@ -563,8 +562,8 @@ impl DrawText {
                         width: Size::Fixed(geom.eval_width),
                         height: Size::Fixed(height)
                     });
-                    self.draw_inner(cx, rect.pos+ vec2(0.0, y_align), 0, &text[0..ellip]);
-                    self.draw_inner(cx, rect.pos + vec2(at_x, y_align), 0, &"..."[0..dots]);
+                    self.draw_inner(cx, rect.pos+ vec2(0.0, y_align), &text[0..ellip]);
+                    self.draw_inner(cx, rect.pos + vec2(at_x, y_align), &"..."[0..dots]);
                 }
                 else { // we might have space to h-align
                     let rect = cx.walk_turtle(Walk {
@@ -580,7 +579,7 @@ impl DrawText {
                         )
                     });
                     let x_align = (geom.eval_width - geom.measured_width) * align.x;
-                    self.draw_inner(cx, rect.pos + vec2(x_align, y_align), 0, text);
+                    self.draw_inner(cx, rect.pos + vec2(x_align, y_align), text);
                 }
             }
         }
@@ -595,15 +594,13 @@ impl DrawText {
         }
         
         let scroll_pos = area.get_scroll_pos(cx);
-        let spos = Vec2 {x: pos.x + scroll_pos.x, y: pos.y + scroll_pos.y};
+        let pos = Vec2 {x: pos.x + scroll_pos.x, y: pos.y + scroll_pos.y};
         
         let base = area.get_read_ref(cx, id!(base), ShaderTy::Vec2).unwrap();
-        let rect_size = area.get_read_ref(cx, id!(rect_size), ShaderTy::Vec2).unwrap();
+        let advance = area.get_read_ref(cx, id!(advance), ShaderTy::Float).unwrap();
         let font_size = area.get_read_ref(cx, id!(font_size), ShaderTy::Float).unwrap();
-        let char_offset = area.get_read_ref(cx, id!(char_offset), ShaderTy::Float).unwrap();
         
-        let text_style = &self.text_style;
-        let line_spacing = text_style.line_spacing;
+        let line_spacing = self.text_style.line_spacing;
         
         let mut i = 0;
         while i < base.repeat {
@@ -612,31 +609,35 @@ impl DrawText {
             let y = base.buffer[index + 1];
             let fs = font_size.buffer[index];
             
-            if y + fs * line_spacing > spos.y { // alright lets find our next x
+            if y + fs * line_spacing > pos.y { // alright lets find our next x
                 while i < base.repeat {
+                    
                     let index = base.stride * i;
                     let x = base.buffer[index + 0];
                     let y = base.buffer[index + 1];
-                    let w = rect_size.buffer[index + 0];
+                    let advance = advance.buffer[index + 0];
                     
-                    if x > spos.x + w * 0.5 || y > spos.y {
-                        let prev_index = if i == 0 {0}else {base.stride * (i - 1)};
-                        let prev_x = base.buffer[prev_index + 0];
-                        let prev_w = rect_size.buffer[prev_index + 0];
-                        if i < base.repeat - 1 && prev_x > spos.x + prev_w { // fix newline jump-back
-                            return Some(char_offset.buffer[index] as usize);
-                        }
-                        return Some(char_offset.buffer[prev_index] as usize);
+                    // alright if our x > 
+                    
+                    if x > pos.x + advance * 0.5 || y > pos.y {
+                        //let prev_i = i.max(1)-1;
+                        //let prev_index = base.stride * prev_i;
+                        //let prev_x = base.buffer[prev_index + 0];
+                        //let prev_w = rect_size.buffer[prev_index + 0];
+                        //if i < base.repeat - 1 && prev_x > spos.x + prev_w { // fix newline jump-back
+                       //     return Some(i);
+                        //}
+                        return Some(i.max(1)-1);
                     }
                     i += 1;
                 }
             }
             i += 1;
         }
-        return Some(char_offset.buffer[(base.repeat - 1) * base.stride] as usize + 1);
+        return Some(base.repeat);
     }
     
-    pub fn character_rect(&self, cx: &Cx, index:usize) -> Option<Rect> {
+    pub fn get_cursor_pos(&self, cx: &Cx, index:usize) -> Option<Vec2> {
         let area = &self.draw_vars.area;
         
         if !area.is_valid(cx) {
@@ -644,18 +645,25 @@ impl DrawText {
         }
         
         let base = area.get_read_ref(cx, id!(base), ShaderTy::Vec2).unwrap();
-        let rect_size = area.get_read_ref(cx, id!(rect_size), ShaderTy::Vec2).unwrap();
+        let advance = area.get_read_ref(cx, id!(advance), ShaderTy::Float).unwrap();
         
-        if index >= base.repeat{
+        if  base.repeat == 0{
             return None
         }
-        let index = index * base.stride;
-        let x = base.buffer[index + 0];
-        let y = base.buffer[index + 1];
-        let w = rect_size.buffer[index + 0];
-        let h = rect_size.buffer[index + 1];
         
-        return Some(Rect{pos:vec2(x,y), size:vec2(w,h)})
+        if index >= base.repeat{
+            // lets get the last one and advance
+            let index = (base.repeat - 1) * base.stride;
+            let x = base.buffer[index + 0] + advance.buffer[index+0];
+            let y = base.buffer[index + 1];
+            Some(vec2(x,y))
+        }
+        else{
+            let index = index * base.stride;
+            let x = base.buffer[index + 0];
+            let y = base.buffer[index + 1];
+            Some(vec2(x,y))
+        }
     }
     
     pub fn get_monospace_base(&self, cx: &Cx) -> Vec2 {
