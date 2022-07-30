@@ -99,6 +99,11 @@ pub use {
             DrawListArea,
             InstanceArea
         },
+        midi::{
+            Midi1Event,
+            Midi1Note,
+            Midi1InputData
+        },
         event::{
             KeyCode,
             Event,
