@@ -36,6 +36,30 @@ const KEEP_ALIVE_COUNT: usize = 5;
 
 impl Cx {
     
+    pub fn event_loop(mut self) {
+        self.platform_type = PlatformType::OSX;
+        
+        let metal_cx:Rc<RefCell<MetalCx>> = Rc::new(RefCell::new(MetalCx::new()));
+        let metal_windows = Rc::new(RefCell::new(Vec::new()));
+        let cx = Rc::new(RefCell::new(self));
+        
+        init_cocoa_globals(Box::new({
+            let cx = cx.clone();
+            move | cocoa_app, events | {
+                let mut cx = cx.borrow_mut();
+                let mut metal_cx = metal_cx.borrow_mut();
+                let mut metal_windows = metal_windows.borrow_mut();
+                cx.cocoa_event_callback(cocoa_app, events, &mut metal_cx, &mut metal_windows)
+            }
+        }));
+            
+        // final bit of initflow
+        get_cocoa_app_global().start_timer(0, 0.2, true);
+        cx.borrow_mut().call_event_handler(&Event::Construct);
+        cx.borrow_mut().redraw_all();
+        get_cocoa_app_global().event_loop();
+    }
+    
     fn cocoa_event_callback(
         &mut self,
         cocoa_app: &mut CocoaApp,
@@ -123,7 +147,6 @@ impl Cx {
                 }
                 CocoaEvent::Paint => {
                     if self.new_next_frames.len() != 0 {
-                        println!("NEXTFRAME");
                         self.call_next_frame_event(cocoa_app.time_now());
                     }
                     if self.need_redrawing() {
@@ -256,30 +279,6 @@ impl Cx {
         }
     }
     
-    pub fn event_loop(mut self) {
-        self.platform_type = PlatformType::OSX;
-        
-        let metal_cx:Rc<RefCell<MetalCx>> = Rc::new(RefCell::new(MetalCx::new()));
-        let metal_windows = Rc::new(RefCell::new(Vec::new()));
-        let cx = Rc::new(RefCell::new(self));
-        
-        init_cocoa_globals(Box::new({
-            let cx = cx.clone();
-            move | cocoa_app, events | {
-                let mut cx = cx.borrow_mut();
-                let mut metal_cx = metal_cx.borrow_mut();
-                let mut metal_windows = metal_windows.borrow_mut();
-                cx.cocoa_event_callback(cocoa_app, events, &mut metal_cx, &mut metal_windows)
-            }
-        }));
-            
-        // final bit of initflow
-        get_cocoa_app_global().start_timer(0, 0.2, true);
-        cx.borrow_mut().call_event_handler(&Event::Construct);
-        cx.borrow_mut().redraw_all();
-        get_cocoa_app_global().event_loop();
-    }
-    
     fn handle_platform_ops(&mut self, metal_windows: &mut Vec<MetalWindow>, metal_cx: &MetalCx, cocoa_app: &mut CocoaApp) {
         while let Some(op) = self.platform_ops.pop() {
             match op {
@@ -359,10 +358,6 @@ impl Cx {
                 }
             }
         }
-        
-        //if !set_cursor {
-        //    cocoa_app.set_mouse_cursor(MouseCursor::Default)
-        //}
     }
     
     fn handle_core_midi_signals(&mut self, se: &SignalEvent) {

@@ -2,7 +2,6 @@ use {
     std::{
         rc::Rc,
         cell::Cell,
-        ptr,
         time::Instant,
         os::raw::{c_void}
     },
@@ -22,7 +21,7 @@ use {
                 CocoaMouseMoveEvent,
                 CocoaEvent,
             },
-            cocoa_app::{CocoaApp,get_cocoa_class_global},
+            cocoa_app::{CocoaApp, get_cocoa_class_global, get_cocoa_app_global},
         },
         event::{
             WindowGeom,
@@ -48,7 +47,6 @@ pub struct CocoaWindow {
     pub view: ObjcId,
     pub window: ObjcId,
     pub live_resize_timer: ObjcId,
-    pub cocoa_app: *mut CocoaApp,
     pub last_window_geom: Option<WindowGeom>,
     pub ime_spot: Vec2,
     pub time_start: Instant,
@@ -72,7 +70,6 @@ impl CocoaWindow {
                 is_fullscreen: false,
                 time_start: cocoa_app.time_start,
                 live_resize_timer: nil,
-                cocoa_app: cocoa_app,
                 window_delegate: window_delegate,
                 //layer_delegate:layer_delegate,
                 window: window,
@@ -89,7 +86,7 @@ impl CocoaWindow {
     pub fn init(&mut self, title: &str, size: Vec2, position: Option<Vec2>) {
         unsafe {
             //(*self.cocoa_app).init_app_after_first_window();
-           // self.fingers_down.resize(NUM_FINGERS, false);
+            // self.fingers_down.resize(NUM_FINGERS, false);
             
             let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
             
@@ -175,7 +172,7 @@ impl CocoaWindow {
     pub fn start_live_resize(&mut self) {
         unsafe {
             let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
-            let cocoa_app = &(*self.cocoa_app);
+            let cocoa_app = get_cocoa_app_global();
             self.live_resize_timer = msg_send![
                 class!(NSTimer),
                 timerWithTimeInterval: 0.01666666
@@ -207,7 +204,7 @@ impl CocoaWindow {
     
     pub fn close_window(&mut self) {
         unsafe {
-            (*self.cocoa_app).event_recur_block = false;
+            //get_cocoa_app_global();
             let () = msg_send![self.window, close];
         }
     }
@@ -250,9 +247,7 @@ impl CocoaWindow {
     }
     
     pub fn do_callback(&mut self, events: Vec<CocoaEvent>) {
-        unsafe {
-            (*self.cocoa_app).do_callback(events);
-        }
+        get_cocoa_app_global().do_callback(events);
     }
     
     pub fn set_position(&mut self, pos: Vec2) {
@@ -345,14 +340,14 @@ impl CocoaWindow {
             WindowDragQueryResponse::Caption | WindowDragQueryResponse::SysMenu => {
                 true
             },
-            WindowDragQueryResponse::Client  | WindowDragQueryResponse::NoAnswer=>{
+            WindowDragQueryResponse::Client | WindowDragQueryResponse::NoAnswer => {
                 false
             }
         }
     }
     
     pub fn send_mouse_down(&mut self, button: usize, modifiers: KeyModifiers) {
-        let () = unsafe{msg_send![self.window, makeFirstResponder: self.view]};
+        let () = unsafe {msg_send![self.window, makeFirstResponder: self.view]};
         self.do_callback(vec![CocoaEvent::MouseDown(CocoaMouseDownEvent {
             button,
             modifiers,
@@ -372,11 +367,11 @@ impl CocoaWindow {
         })]);
     }
     
-    pub fn send_mouse_move(&mut self, event: ObjcId, pos: Vec2, modifiers: KeyModifiers) {
+    pub fn send_mouse_move(&mut self, _event: ObjcId, pos: Vec2, modifiers: KeyModifiers) {
         self.last_mouse_pos = pos;
         let mut events = Vec::new();
         
-        unsafe {(*self.cocoa_app).startup_focus_hack();}
+        get_cocoa_app_global().startup_focus_hack();
         
         events.push(CocoaEvent::MouseMove(CocoaMouseMoveEvent {
             window_id: self.window_id,
@@ -385,9 +380,9 @@ impl CocoaWindow {
             time: self.time_now()
         }));
         
-        unsafe {(*self.cocoa_app).ns_event = event};
+        //get_cocoa_app_global().ns_event = event;
         self.do_callback(events);
-        unsafe {(*self.cocoa_app).ns_event = ptr::null_mut()};
+        //get_cocoa_app_global().ns_event = ptr::null_mut();
     }
     
     pub fn send_window_close_requested_event(&mut self) -> bool {
