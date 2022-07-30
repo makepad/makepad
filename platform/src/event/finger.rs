@@ -77,14 +77,14 @@ impl CxFingers {
         }
     }
     
-    pub (crate) fn get_digit_index(&mut self, digit_id: DigitId)->usize {
-        if let Some(index) = self.digits.iter_mut().position( | v | v.digit_id == digit_id) {
+    pub (crate) fn get_digit_index(&self, digit_id: DigitId)->usize {
+        if let Some(index) = self.digits.iter().position( | v | v.digit_id == digit_id) {
             return index
         }
         0
     }
     
-    pub (crate) fn get_digit_count(&mut self)->usize {
+    pub (crate) fn get_digit_count(&self)->usize {
         self.digits.len()
     }
     
@@ -97,8 +97,8 @@ impl CxFingers {
         self.digits.iter_mut().find( | v | v.digit_id == digit_id)
     }
     
-    pub (crate) fn is_digit_allocated(&mut self, digit_id: DigitId) -> bool {
-        self.digits.iter_mut().position( | v | v.digit_id == digit_id).is_some()
+    pub (crate) fn is_digit_allocated(&self, digit_id: DigitId) -> bool {
+        self.digits.iter().position( | v | v.digit_id == digit_id).is_some()
     }
     
     pub (crate) fn get_captured_area(&self, digit_id: DigitId) -> Area {
@@ -150,8 +150,8 @@ impl CxFingers {
         })
     }
     
-    pub (crate) fn get_hover_area(&mut self, digit: DigitId) -> Area {
-        for hover in &mut self.hovers {
+    pub (crate) fn get_hover_area(&self, digit: DigitId) -> Area {
+        for hover in &self.hovers {
             if hover.digit_id == digit {
                 return hover.area
             }
@@ -179,6 +179,14 @@ impl CxFingers {
         if let Some(cxdigit) = self.digits.iter_mut().find( | v | v.digit_id == digit_id) {
             self.capture_count -= 1;
             cxdigit.captured = Area::Empty;
+        }
+    }
+    pub (crate) fn get_tap_count(&self, digit_id: DigitId) -> u32 {
+        if let Some(tap) = self.taps.iter().find( | v | v.digit_id == digit_id) {
+            tap.count
+        }
+        else{
+            0
         }
     }
     
@@ -306,6 +314,7 @@ pub struct FingerMoveEvent {
     pub abs: Vec2,
     pub captured: Area,
     pub digit: DigitInfo,
+    pub tap_count: u32,
     pub modifiers: KeyModifiers,
     pub time: f64
 }
