@@ -3,9 +3,11 @@ use {
         makepad_derive_frame::*,
         makepad_platform::*,
         button_logic::*,
+        imgui::*,
         frame_traits::*,
     }
 };
+pub use crate::button_logic::ButtonAction;
 
 live_register!{
     import makepad_platform::shader::std::*;
@@ -170,5 +172,45 @@ impl Button {
         self.bg.begin(cx, walk, self.layout);
         self.label.draw_walk(cx, Walk::fit(), Align::default(), &self.text);
         self.bg.end(cx);
+    }
+}
+
+
+// ImGUI API for Button
+
+pub struct ButtonImGUI(ImGUIItem); 
+
+impl ButtonImGUI {
+    pub fn was_clicked(&self) -> bool {
+        if let Some(item) = self.0.find_single_action() {
+            if let ButtonAction::WasClicked = item.action() {
+                return true
+            }
+        }
+        false
+    }
+    pub fn get(&mut self) -> Option<std::cell::RefMut<'_, Button >> {
+        self.0.get()
+    }
+}
+
+pub trait ButtonImGUIExt {
+    fn button(&mut self, label: &str) -> ButtonImGUI;
+}
+
+impl<'a> ButtonImGUIExt for ImGUIRun<'a> {
+    fn button(&mut self, text: &str) -> ButtonImGUI {
+        // what if we look up our id and its not a
+        let new_id = id_num!(button, self.alloc_auto_id());
+        let mut frame = self.imgui.frame();
+        let button = if let Some(button) = frame.component_by_path(&[new_id]) {
+            Some(button)
+        }
+        else {
+            frame.template(self.cx, ids!(button), new_id, live!{
+                text: (text)
+            })
+        };
+        ButtonImGUI(self.checked_item::<Button>(button))
     }
 }

@@ -1,16 +1,7 @@
-pub use {
-    std::{
-        rc::Rc,
-        cell::RefCell
-    },
+use {
     crate::{
-        makepad_live_compiler::*,
         makepad_live_id::*,
         makepad_math::*,
-        platform::{
-            CxPlatformDrawCall,
-            CxPlatformView,
-        },
         cx::{
             Cx,
         },
@@ -20,27 +11,16 @@ pub use {
             cx_2d::Cx2d,
             turtle::{Layout, Size, Walk},
         },
-        cx_draw_shaders::{
-            CxDrawShaderOptions,
-            CxDrawShaderMapping,
-            CxDrawShader,
-            DrawShader,
-        },
         draw_vars::{
             DrawVars,
-            DRAW_CALL_USER_UNIFORMS,
-            DRAW_CALL_TEXTURE_SLOTS
         },
-        
         draw_list::{
             DrawListId,
             DrawList,
             DrawListDebug,
-            CxDrawList,
             CxDrawItem,
             CxDrawCall,
         },
-        geometry::Geometry
     }
 };
 

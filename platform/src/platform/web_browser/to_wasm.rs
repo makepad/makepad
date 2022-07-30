@@ -356,28 +356,6 @@ impl ToWasmScroll {
     }
 }
 
-/*
-#[derive(ToWasm)]
-pub struct ToWasmMouseOut {
-    pub mouse: WMouse,
-}
-
-impl Into<FingerHoverEvent> for ToWasmMouseOut {
-    fn into(self) -> FingerHoverEvent {
-        FingerHoverEvent {
-            window_id: CxWindowPool::id_zero(),
-            abs: Vec2 {x: self.mouse.x, y: self.mouse.y},
-            handled: false,
-            digit: 0,
-            input_type: FingerInputType::Mouse(self.mouse.button),
-            modifiers: unpack_key_modifier(self.mouse.modifiers),
-            time: self.mouse.time,
-        }
-    }
-}*/
-
-
-
 fn web_to_key_code(key_code: u32) -> KeyCode {
     match key_code {
         27 => KeyCode::Escape,
