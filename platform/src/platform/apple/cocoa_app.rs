@@ -62,10 +62,10 @@ pub static mut COCOA_CLASSES: *const CocoaClasses = 0 as *const _;
 // this value should not. Todo: guard this somehow proper
 pub static mut COCOA_APP : *mut CocoaApp = 0 as *mut _;
 
-pub fn init_cocoa_globals(){
+pub fn init_cocoa_globals(event_callback:Box<dyn FnMut(&mut CocoaApp, Vec<CocoaEvent>) -> bool>){
     unsafe{
         COCOA_CLASSES = Box::into_raw(Box::new(CocoaClasses::new()));
-        COCOA_APP = Box::into_raw(Box::new(CocoaApp::new()));
+        COCOA_APP = Box::into_raw(Box::new(CocoaApp::new(event_callback)));
     }
 }
 
@@ -128,7 +128,7 @@ pub struct CocoaApp {
     pub last_key_mod: KeyModifiers,
     pub pasteboard: ObjcId,
     pub startup_focus_hack_ran: bool,
-    pub event_callback: Option<*mut dyn FnMut(&mut CocoaApp, Vec<CocoaEvent>) -> bool>,
+    pub event_callback: Option<Box<dyn FnMut(&mut CocoaApp, Vec<CocoaEvent>) -> bool>>,
     pub event_recur_block: bool,
     pub event_loop_running: bool,
     pub loop_block: bool,
@@ -138,14 +138,22 @@ pub struct CocoaApp {
 }
 
 impl CocoaApp {
-    pub fn new() -> CocoaApp {
+    pub fn new(event_callback:Box<dyn FnMut(&mut CocoaApp, Vec<CocoaEvent>) -> bool>) -> CocoaApp {
         unsafe {
             
             let const_attributes = vec![
                 RcObjcId::from_unowned(NonNull::new(str_to_nsstring("NSMarkedClauseSegment")).unwrap()).forget(),
                 RcObjcId::from_unowned(NonNull::new(str_to_nsstring("NSGlyphInfo")).unwrap()).forget(),
             ];
+            let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
+            //(*self.timer_delegate_instance).set_ivar("cocoa_app_ptr", self as *mut _ as *mut c_void);
+            //(*self.menu_delegate_instance).set_ivar("cocoa_app_ptr", self as *mut _ as *mut c_void);
+            //(*self.app_delegate_instance).set_ivar("cocoa_app_ptr", self as *mut _ as *mut c_void);
+            let app_delegate_instance: ObjcId = msg_send![get_cocoa_class_global().app_delegate, new];
             
+            let () = msg_send![ns_app, setDelegate: app_delegate_instance];
+            let () = msg_send![ns_app, setActivationPolicy: NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular as i64];
+
             // Construct the bits that are shared between windows
             CocoaApp {
                 const_attributes_for_marked_text: msg_send![
@@ -159,12 +167,12 @@ impl CocoaApp {
                 time_start: Instant::now(),
                 timer_delegate_instance:msg_send![get_cocoa_class_global().timer_delegate, new],
                 menu_delegate_instance:msg_send![get_cocoa_class_global().menu_delegate, new],
-                app_delegate_instance:msg_send![get_cocoa_class_global().app_delegate, new],
+                app_delegate_instance,
                 timers: Vec::new(),
                 cocoa_windows: Vec::new(),
                 loop_block: false,
                 last_key_mod: KeyModifiers {..Default::default()},
-                event_callback: None,
+                event_callback: Some(event_callback),
                 event_recur_block: false,
                 event_loop_running: true,
                 cursors: HashMap::new(),
@@ -353,7 +361,7 @@ impl CocoaApp {
             
         }
     }*/
-    
+    /*
     pub fn init(&mut self) {
         unsafe {
             //GLOBAL_COCOA_APP = self;
@@ -367,7 +375,7 @@ impl CocoaApp {
             //let () = msg_send![ns_app, run];
             //let () = msg_send![ns_app, activateIgnoringOtherApps:true];
         }
-    }
+    }*/
     
     pub fn time_now(&self) -> f64 {
         let time_now = Instant::now(); //unsafe {mach_absolute_time()};
@@ -570,14 +578,10 @@ impl CocoaApp {
         self.event_loop_running = false;
     }
     
-    pub fn event_loop<F>(&mut self, mut event_handler: F)
-    where F: FnMut(&mut CocoaApp, Vec<CocoaEvent>) -> bool,
-    {
+    pub fn event_loop(&mut self){
         unsafe {
             let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
             let () = msg_send![ns_app, finishLaunching];
-            
-            self.event_callback = Some(&mut event_handler as *const dyn FnMut(&mut CocoaApp, Vec<CocoaEvent>) -> bool as *mut dyn FnMut(&mut CocoaApp, Vec<CocoaEvent>) -> bool);
             
             while self.event_loop_running {
                 let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
@@ -610,15 +614,12 @@ impl CocoaApp {
     }
     
     pub fn do_callback(&mut self, events: Vec<CocoaEvent>) {
-        unsafe {
-            if self.event_callback.is_none() || self.event_recur_block {
-                return
-            };
-            self.event_recur_block = true;
-            let callback = self.event_callback.unwrap();
-            self.loop_block = (*callback)(self, events);
-            self.event_recur_block = false;
+        if let Some(mut callback) = self.event_callback.take(){
+            self.loop_block = callback(self, events);
+            self.event_callback = Some(callback);
         }
+        //s(*callback)(self, events);
+        //self.event_recur_block = false;
     }
     
     pub fn post_signal(signal_id: u64) {

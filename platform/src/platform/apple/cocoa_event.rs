@@ -30,6 +30,7 @@ use {
     }
 };
 
+#[derive(Debug)]
 pub enum CocoaEvent {
     AppGotFocus,
     AppLostFocus,
@@ -58,6 +59,7 @@ pub enum CocoaEvent {
     MenuCommand(MenuCommand),
 }
 
+#[derive(Debug)]
 pub struct CocoaMouseDownEvent {
     pub abs: Vec2,
     pub button: usize,
@@ -85,6 +87,7 @@ impl CocoaMouseDownEvent {
     }
 }
 
+#[derive(Debug)]
 pub struct CocoaMouseMoveEvent {
     pub abs: Vec2,
     pub window_id: WindowId,
@@ -122,7 +125,7 @@ impl CocoaMouseMoveEvent {
     }
 }
 
-
+#[derive(Debug)]
 pub struct CocoaMouseUpEvent {
     pub abs: Vec2,
     pub button: usize,
@@ -149,7 +152,7 @@ impl CocoaMouseUpEvent {
     }
 }
 
-
+#[derive(Debug)]
 pub struct CocoaScrollEvent {
     pub window_id: WindowId,
     pub scroll: Vec2,

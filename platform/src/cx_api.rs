@@ -416,9 +416,12 @@ macro_rules!main_app {
         fn main() {
             let app = std::rc::Rc::new(std::cell::RefCell::new(None));
             let mut cx = Cx::new(Box::new(move | cx, event | {
+                
                 if let Event::Construct = event {
                     *app.borrow_mut() = Some($app::new_main(cx));
+                    log!("GOT HERE!");
                 }
+                
                 app.borrow_mut().as_mut().unwrap().handle_event(cx, event);
                 cx.after_handle_event(event);
             }));
@@ -426,6 +429,7 @@ macro_rules!main_app {
             cx.live_expand();
             cx.live_scan_dependencies();
             cx.desktop_load_dependencies();
+            cx.event_loop();
         }
         
         #[cfg(target_arch = "wasm32")]
