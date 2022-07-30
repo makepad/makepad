@@ -450,12 +450,11 @@ impl CxPlatformApi for Cx {
 }
 
 #[derive(Default)]
-pub struct CxPlatform {
-    pub keep_alive_counter: usize,
-    pub midi_access: Option<CoreMidiAccess>,
-    pub midi_input_data: Arc<Mutex<RefCell<Vec<Midi1InputData >> >>,
-    pub bytes_written: usize,
-    pub draw_calls_done: usize,
-    pub text_clipboard_response: Option<String>,
-    pub last_mouse_button: Option<usize>
+pub(crate) struct CxPlatform {
+    pub(crate) keep_alive_counter: usize,
+    pub(crate)midi_access: Option<CoreMidiAccess>,
+    pub(crate)midi_input_data: Arc<Mutex<RefCell<Vec<Midi1InputData >> >>,
+    pub(crate)last_mouse_button: Option<usize>,
+    pub(crate) bytes_written: usize,
+    pub(crate) draw_calls_done: usize,
 }
