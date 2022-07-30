@@ -4,9 +4,7 @@ use makepad_platform::*;
 live_register!{
     import makepad_component::frame::*;
     registry FrameComponent::*;
-    
     App: {{App}} {
-        shape: {shape: Solid}
         imgui: {
             // the imgui object contains the DSL templates it spawns
             button =? Button{ 
@@ -19,21 +17,9 @@ live_register!{
 }
 main_app!(App);
 
-#[derive(Clone, Debug)]
-pub enum ToUI {
-    TestMessage(Vec<u32>),
-}
-
-#[derive(Clone, Debug)]
-pub enum FromUI {
-    TestMessage(Vec<u32>),
-}
-
-
 #[derive(Live, LiveHook)]
 pub struct App {
     imgui: ImGUI,
-    shape: DrawShape,
     window: DesktopWindow,
 }
 
@@ -45,6 +31,10 @@ impl App {
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.window.handle_event(cx, event);
         
+        if let Event::Draw(draw_event) = event{
+            return self.draw(&mut Cx2d::new(cx, draw_event))
+        }
+        
         // the ImGUI component exposes an immediate mode component API
         // this runs in the event handling flow
         // this does have (eventual) scalability issues, so its more of a convenience api
@@ -53,26 +43,19 @@ impl App {
         let mut ui = self.imgui.run(cx, event); 
         
         for i in 0..10{
-            if ui.button(&format!("Hello world {}", i)).was_clicked(){
+            if ui.button("Button").was_clicked(){
                 log!("CLicked {}",i);
             }
         }
         ui.end();
         
-        match event {
-            Event::Draw(draw_event) => {
-                self.draw(&mut Cx2d::new(cx, draw_event));
-            }
-            _ => ()
-        }
+        
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
-        
         if self.window.begin(cx, None).not_redrawing() {
             return;
         }
-        
         // here we actually draw the imgui UI tree.
         while self.imgui.draw(cx).is_not_done() {};
         
