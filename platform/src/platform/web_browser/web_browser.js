@@ -750,7 +750,7 @@ export class WasmWebBrowser extends WasmBridge {
             if (e.deltaMode === 1) fac = 40
             else if (e.deltaMode === 2) fac = window.offsetHeight
             
-            this.to_wasm.ToWasmFingerScroll({
+            this.to_wasm.ToWasmScroll({
                 x: e.pageX,
                 y: e.pageY,
                 modifiers: pack_key_modifier(e),

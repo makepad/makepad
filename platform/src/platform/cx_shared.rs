@@ -112,8 +112,9 @@ impl Cx {
     
     pub (crate) fn inner_call_event_handler(&mut self, event: &Event) {
         self.event_id += 1;
-        let event_handler = self.event_handler.unwrap();
-        unsafe {(*event_handler)(self, event);}
+        let mut event_handler = self.event_handler.take().unwrap();
+        event_handler(self, event);
+        self.event_handler = Some(event_handler);
     }
     
     fn inner_key_focus_change(&mut self) {
