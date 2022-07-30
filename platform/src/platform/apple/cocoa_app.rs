@@ -98,10 +98,16 @@ pub struct CocoaClasses {
     pub menu_target: *const Class,
     pub view: *const Class,
     pub key_value_observing_delegate: *const Class,
+    pub const_attributes_for_marked_text: ObjcId,
+    pub const_empty_string: RcObjcId,
 }
 
 impl CocoaClasses{
     pub fn new()->Self{
+        let const_attributes = vec![
+            RcObjcId::from_unowned(NonNull::new(str_to_nsstring("NSMarkedClauseSegment")).unwrap()).forget(),
+            RcObjcId::from_unowned(NonNull::new(str_to_nsstring("NSGlyphInfo")).unwrap()).forget(),
+        ];
         Self{
             window: define_cocoa_window_class(),
             window_delegate: define_cocoa_window_delegate(),
@@ -112,43 +118,38 @@ impl CocoaClasses{
             menu_target: define_menu_target_class(),
             view: define_cocoa_view_class(),
             key_value_observing_delegate: define_key_value_observing_delegate(),
+            const_attributes_for_marked_text: unsafe{msg_send![
+                class!(NSArray),
+                arrayWithObjects: const_attributes.as_ptr()
+                count: const_attributes.len()
+            ]},
+            const_empty_string: RcObjcId::from_unowned(NonNull::new(str_to_nsstring("")).unwrap()),
         }
     }
 }
 
 pub struct CocoaApp {
-    pub menu_delegate_instance: ObjcId,
-    pub app_delegate_instance: ObjcId,
-    pub const_attributes_for_marked_text: ObjcId,
-    pub const_empty_string: RcObjcId,
+    menu_delegate_instance: ObjcId,
+    //app_delegate_instance: ObjcId,
     pub time_start: Instant,
     pub timer_delegate_instance: ObjcId,
-    pub timers: Vec<CocoaTimer>,
+    timers: Vec<CocoaTimer>,
     pub cocoa_windows: Vec<(ObjcId, ObjcId)>,
-    pub last_key_mod: KeyModifiers,
-    pub pasteboard: ObjcId,
-    pub startup_focus_hack_ran: bool,
-    pub event_callback: Option<Box<dyn FnMut(&mut CocoaApp, Vec<CocoaEvent>) -> bool>>,
-    pub event_recur_block: bool,
-    pub event_loop_running: bool,
-    pub loop_block: bool,
+    last_key_mod: KeyModifiers,
+    pasteboard: ObjcId,
+    startup_focus_hack_ran: bool,
+    event_callback: Option<Box<dyn FnMut(&mut CocoaApp, Vec<CocoaEvent>) -> bool>>,
+    event_loop_running: bool,
+    loop_block: bool,
     pub cursors: HashMap<MouseCursor, ObjcId>,
     pub current_cursor: MouseCursor,
-    pub ns_event: ObjcId,
+    ns_event: ObjcId,
 }
 
 impl CocoaApp {
     pub fn new(event_callback:Box<dyn FnMut(&mut CocoaApp, Vec<CocoaEvent>) -> bool>) -> CocoaApp {
         unsafe {
-            
-            let const_attributes = vec![
-                RcObjcId::from_unowned(NonNull::new(str_to_nsstring("NSMarkedClauseSegment")).unwrap()).forget(),
-                RcObjcId::from_unowned(NonNull::new(str_to_nsstring("NSGlyphInfo")).unwrap()).forget(),
-            ];
             let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
-            //(*self.timer_delegate_instance).set_ivar("cocoa_app_ptr", self as *mut _ as *mut c_void);
-            //(*self.menu_delegate_instance).set_ivar("cocoa_app_ptr", self as *mut _ as *mut c_void);
-            //(*self.app_delegate_instance).set_ivar("cocoa_app_ptr", self as *mut _ as *mut c_void);
             let app_delegate_instance: ObjcId = msg_send![get_cocoa_class_global().app_delegate, new];
             
             let () = msg_send![ns_app, setDelegate: app_delegate_instance];
@@ -156,24 +157,17 @@ impl CocoaApp {
 
             // Construct the bits that are shared between windows
             CocoaApp {
-                const_attributes_for_marked_text: msg_send![
-                    class!(NSArray),
-                    arrayWithObjects: const_attributes.as_ptr()
-                    count: const_attributes.len()
-                ],
                 startup_focus_hack_ran: false,
-                const_empty_string: RcObjcId::from_unowned(NonNull::new(str_to_nsstring("")).unwrap()),
                 pasteboard: msg_send![class!(NSPasteboard), generalPasteboard],
                 time_start: Instant::now(),
                 timer_delegate_instance:msg_send![get_cocoa_class_global().timer_delegate, new],
                 menu_delegate_instance:msg_send![get_cocoa_class_global().menu_delegate, new],
-                app_delegate_instance,
+                //app_delegate_instance,
                 timers: Vec::new(),
                 cocoa_windows: Vec::new(),
                 loop_block: false,
                 last_key_mod: KeyModifiers {..Default::default()},
                 event_callback: Some(event_callback),
-                event_recur_block: false,
                 event_loop_running: true,
                 cursors: HashMap::new(),
                 current_cursor: MouseCursor::Default,
