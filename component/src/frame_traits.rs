@@ -309,7 +309,7 @@ impl FrameRef {
     
     pub fn as_uid(&self) -> FrameUid {
         if let Some(inner) = &self.0 {
-            FrameUid(&*inner as *const _ as u64)
+            FrameUid::from_frame_component(inner)
         }
         else {
             FrameUid(0)
@@ -473,6 +473,14 @@ impl LiveNew for FrameRef {
 #[derive(Clone, Copy, PartialEq, Default)]
 pub struct FrameUid(u64);
 
+impl FrameUid{
+    pub fn empty()->Self{Self::default()}
+    pub fn is_empty(&self)->bool{self.0 == 0}
+    pub fn from_frame_component(fc:&Box<dyn FrameComponent>)->Self{
+        FrameUid(&*fc as *const _ as u64)
+    }
+}
+
 pub struct FrameActionItem {
     pub uids: Vec<FrameUid>,
     pub ids: Vec<LiveId>,
@@ -505,6 +513,10 @@ impl FrameActionItem {
     
     pub fn id(&self)->LiveId{
         self.ids[0]
+    }
+    
+    pub fn uid(&self)->FrameUid{
+        self.uids[0]
     }
     
     pub fn has_bind_apply(&self)->bool{

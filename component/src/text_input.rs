@@ -69,7 +69,7 @@ live_register!{
                     self.rect_size.y,
                     BORDER_RADIUS
                 )
-                sdf.fill(mix(#aaa3, #fff7, self.focus));
+                sdf.fill(mix(#fff0, #fff7, self.focus));
                 return sdf.result
             }
         }
@@ -479,6 +479,7 @@ impl TextInput {
             }
             Hit::FingerMove(fe) => {
                 if let Some(pos) = self.label.closest_offset(cx, fe.abs) {
+                    let pos = pos.min(self.text.chars().count());
                     if fe.tap_count == 2{
                         let (head,tail) = self.double_tap_start.unwrap();
                         // ok so. now we do a word select and merge the selection
