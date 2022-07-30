@@ -39,20 +39,21 @@ impl Cx {
     pub fn event_loop(mut self) {
         self.platform_type = PlatformType::OSX;
         
-        let metal_cx:Rc<RefCell<MetalCx>> = Rc::new(RefCell::new(MetalCx::new()));
+        let metal_cx: Rc<RefCell<MetalCx >> = Rc::new(RefCell::new(MetalCx::new()));
         let metal_windows = Rc::new(RefCell::new(Vec::new()));
         let cx = Rc::new(RefCell::new(self));
         
         init_cocoa_globals(Box::new({
             let cx = cx.clone();
-            move | cocoa_app, events | {
+            move | cocoa_app,
+            events | {
                 let mut cx = cx.borrow_mut();
                 let mut metal_cx = metal_cx.borrow_mut();
                 let mut metal_windows = metal_windows.borrow_mut();
                 cx.cocoa_event_callback(cocoa_app, events, &mut metal_cx, &mut metal_windows)
             }
         }));
-            
+        
         // final bit of initflow
         get_cocoa_app_global().start_timer(0, 0.2, true);
         cx.borrow_mut().call_event_handler(&Event::Construct);
@@ -161,20 +162,13 @@ impl Cx {
                         self.platform.last_mouse_button = Some(md.button);
                         let digit_id = id!(mouse).into();
                         self.fingers.alloc_digit(digit_id);
-                        let digit_index = self.fingers.get_digit_index(digit_id);
-                        let digit_count = self.fingers.get_digit_count();
-                        let tap_count = self.fingers.process_tap_count(
+                        self.fingers.process_tap_count(
                             digit_id,
                             md.abs,
                             md.time
                         );
                         self.call_event_handler(&Event::FingerDown(
-                            md.into_finger_down_event(
-                                digit_id,
-                                digit_index,
-                                digit_count,
-                                tap_count
-                            )
+                            md.into_finger_down_event(&self.fingers, digit_id)
                         ));
                     }
                 }
@@ -193,15 +187,10 @@ impl Cx {
                         self.fingers.cycle_hover_area(digit_id);
                     }
                     else {
-                        let captured = self.fingers.get_captured_area(digit_id);
-                        let digit_index = self.fingers.get_digit_index(digit_id);
-                        let digit_count = self.fingers.get_digit_count();
                         self.call_event_handler(&mut Event::FingerMove(
                             mm.into_finger_move_event(
+                                &self.fingers,
                                 digit_id,
-                                digit_index,
-                                digit_count,
-                                captured,
                                 self.platform.last_mouse_button.unwrap_or(0)
                             )
                         ));
@@ -211,15 +200,10 @@ impl Cx {
                     if self.platform.last_mouse_button == Some(md.button) {
                         self.platform.last_mouse_button = None;
                         let digit_id = id!(mouse).into();
-                        let captured = self.fingers.get_captured_area(digit_id);
-                        let digit_index = self.fingers.get_digit_index(digit_id);
-                        let digit_count = self.fingers.get_digit_count();
                         self.call_event_handler(&Event::FingerUp(
                             md.into_finger_up_event(
+                                &self.fingers,
                                 digit_id,
-                                digit_index,
-                                digit_count,
-                                captured
                             )
                         ));
                         self.fingers.free_digit(digit_id);
@@ -450,11 +434,11 @@ impl CxPlatformApi for Cx {
 }
 
 #[derive(Default)]
-pub(crate) struct CxPlatform {
-    pub(crate) keep_alive_counter: usize,
-    pub(crate)midi_access: Option<CoreMidiAccess>,
-    pub(crate)midi_input_data: Arc<Mutex<RefCell<Vec<Midi1InputData >> >>,
-    pub(crate)last_mouse_button: Option<usize>,
-    pub(crate) bytes_written: usize,
-    pub(crate) draw_calls_done: usize,
+pub (crate) struct CxPlatform {
+    pub (crate) keep_alive_counter: usize,
+    pub (crate)midi_access: Option<CoreMidiAccess>,
+    pub (crate)midi_input_data: Arc<Mutex<RefCell<Vec<Midi1InputData >> >>,
+    pub (crate)last_mouse_button: Option<usize>,
+    pub (crate) bytes_written: usize,
+    pub (crate) draw_calls_done: usize,
 }
