@@ -14,6 +14,7 @@ use {
 
 pub struct ImGUIRun<'a> {
     pub cx: &'a mut Cx,
+    pub event: &'a Event,
     pub actions: Rc<Vec<FrameActionItem >>,
     pub auto_id: u64,
     pub new_items: Vec<LiveId>,
@@ -52,6 +53,11 @@ impl<'a> ImGUIRun<'a> {
     
     pub fn end(self) {
     }
+    
+    // create an easy event checker
+    
+    
+    
 }
 
 pub struct ImGUIItem {
@@ -96,6 +102,7 @@ impl ImGUI {
         // fetch actions and wrap
         let actions = Rc::new(self.frame().handle_event_iter(cx, event));
         ImGUIRun {
+            event,
             cx,
             actions,
             auto_id: 0,
