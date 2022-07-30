@@ -4,15 +4,16 @@ use makepad_platform::*;
 live_register!{
     import makepad_component::frame::*;
     registry FrameComponent::*;
+    
     App: {{App}} {
         shape: {shape: Solid}
         imgui: {
-            button =? Button{ // default template
+            // the imgui object contains the DSL templates it spawns
+            button =? Button{ 
             }
             my_red_button =? Button{
                color: #f000 
             }
-            // here is our root frame
         }
     }
 }
@@ -44,29 +45,21 @@ impl App {
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.window.handle_event(cx, event);
         
-        // give frame an immediate mode gui
-        let mut ui = self.imgui.run(cx, event); // run our frame_ui as immediate mode wrapper
-
+        // the ImGUI component exposes an immediate mode component API
+        // this runs in the event handling flow
+        // this does have (eventual) scalability issues, so its more of a convenience api
+        // do note this is not the actual 'drawing' flow. its simply a code based way
+        // to spawn the UI in the retained UI Frame system.
+        let mut ui = self.imgui.run(cx, event); 
+        
         for i in 0..10{
             if ui.button(&format!("Hello world {}", i)).was_clicked(){
                 log!("CLicked {}",i);
             }
         }
-
         ui.end();
-/*
-        if let PianoAction::Note {is_on, note_number, velocity} = ui.piano_id(ids!(piano)).action(){
-            self.audio_graph.send_midi_1_data(Midi1Note {
-                is_on,
-                note_number,
-                channel: 0,
-                velocity
-            }.into());
-        }*/
         
         match event {
-            Event::Construct => {
-            }
             Event::Draw(draw_event) => {
                 self.draw(&mut Cx2d::new(cx, draw_event));
             }
@@ -79,6 +72,8 @@ impl App {
         if self.window.begin(cx, None).not_redrawing() {
             return;
         }
+        
+        // here we actually draw the imgui UI tree.
         while self.imgui.draw(cx).is_not_done() {};
         
         self.window.end(cx);
