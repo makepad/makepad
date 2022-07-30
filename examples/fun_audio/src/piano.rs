@@ -496,8 +496,16 @@ impl PianoImGUI {
         }
         ret
     }
-    pub fn _get(&mut self) -> Option<std::cell::RefMut<'_, Piano >> {
-        self.0.get()
+    
+        
+    pub fn set_note(&self, cx: &mut Cx, is_on: bool, note_number: u8) {
+        if let Some(mut inner) = self.inner(){
+            inner.set_note(cx, is_on, note_number)
+        }
+    }
+    
+    pub fn inner(&self) -> Option<std::cell::RefMut<'_, Piano >> {
+        self.0.inner()
     }
 }
 

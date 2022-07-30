@@ -189,8 +189,8 @@ impl ButtonImGUI {
         }
         false
     }
-    pub fn get(&mut self) -> Option<std::cell::RefMut<'_, Button >> {
-        self.0.get()
+    pub fn inner(&mut self) -> Option<std::cell::RefMut<'_, Button >> {
+        self.0.inner()
     }
 }
 
