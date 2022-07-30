@@ -161,10 +161,16 @@ impl LiveHook for Piano {
     }
 }
 
+#[derive(Clone)]
+pub struct PianoNote {
+    pub is_on: bool,
+    pub note_number: u8,
+    pub velocity: u8
+}
 
 #[derive(Clone, FrameAction)]
 pub enum PianoAction {
-    Note {is_on: bool, note_number: u8, velocity: u8},
+    Note(PianoNote),
     None
 }
 
@@ -367,10 +373,18 @@ impl Piano {
                 PianoKeyAction::FingerMoved => {},
                 PianoKeyAction::Pressed(velocity) => {
                     self.set_key_focus(cx);
-                    dispatch_action(cx, PianoAction::Note {is_on: true, note_number: node_id.0.0 as u8, velocity});
+                    dispatch_action(cx, PianoAction::Note(PianoNote {
+                        is_on: true,
+                        note_number: node_id.0.0 as u8,
+                        velocity
+                    }));
                 }
                 PianoKeyAction::Up => {
-                    dispatch_action(cx, PianoAction::Note {is_on: false, note_number: node_id.0.0 as u8, velocity: 127});
+                    dispatch_action(cx, PianoAction::Note(PianoNote {
+                        is_on: false,
+                        note_number: node_id.0.0 as u8,
+                        velocity: 127
+                    }));
                 }
             }
         }
@@ -407,7 +421,11 @@ impl Piano {
                     let note_number = nn + self.keyboard_octave * 12;
                     self.keyboard_keys_down[nn as usize] = note_number;
                     self.set_note(cx, true, note_number);
-                    dispatch_action(cx, PianoAction::Note {is_on: true, note_number, velocity: self.keyboard_velocity});
+                    dispatch_action(cx, PianoAction::Note(PianoNote {
+                        is_on: true,
+                        note_number,
+                        velocity: self.keyboard_velocity
+                    }));
                 }
                 else {match ke.key_code {
                     KeyCode::KeyZ => {
@@ -433,7 +451,11 @@ impl Piano {
                 let note_number = self.keyboard_keys_down[nn as usize];
                 self.keyboard_keys_down[nn as usize] = 0;
                 self.set_note(cx, false, note_number);
-                dispatch_action(cx, PianoAction::Note {is_on: false, note_number, velocity: self.keyboard_velocity});
+                dispatch_action(cx, PianoAction::Note(PianoNote {
+                    is_on: false,
+                    note_number,
+                    velocity: self.keyboard_velocity
+                }));
             },
             _ => ()
         }
@@ -456,3 +478,36 @@ impl Piano {
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct PianoKeyId(pub LiveId);
 
+
+
+// ImGUI API for Piano
+
+pub struct PianoImGUI(ImGUIItem); 
+
+impl PianoImGUI {
+    pub fn on_notes(&self) -> Vec<PianoNote> {
+        let mut ret = Vec::new();
+        for item in self.0.actions.0.iter(){
+            if item.uid() == self.0.uid{
+                if let PianoAction::Note(note) = item.action() {
+                    ret.push(note)
+                }
+            }
+        }
+        ret
+    }
+    pub fn _get(&mut self) -> Option<std::cell::RefMut<'_, Piano >> {
+        self.0.get()
+    }
+}
+
+pub trait PianoImGUIExt {
+    fn piano(&mut self, path:&[LiveId]) -> PianoImGUI;
+}
+
+impl<'a> PianoImGUIExt for ImGUIRun<'a> {
+    fn piano(&mut self, path:&[LiveId]) -> PianoImGUI {
+        let mut frame = self.imgui.frame();
+        PianoImGUI(self.checked_item::<Piano>(frame.component_by_path(path)))
+    }
+}

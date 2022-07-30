@@ -50,7 +50,7 @@ pub use crate::{
     scroll_shadow::{ScrollShadow},
     scroll_bar::{ScrollBar},
     frame::{Frame},
-    imgui::{ImGUI},
+    imgui::{ImGUI, ImGUIItem, ImGUIRun},
     frame_traits::{
         FrameDraw,
         FrameDrawApi,
