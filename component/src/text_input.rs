@@ -12,6 +12,28 @@ live_register!{
     import makepad_platform::shader::std::*;
     import crate::theme::*;
     
+    DrawLabel: {{DrawLabel}} {
+        instance hover: 0.0
+        instance focus: 0.0
+        text_style: FONT_LABEL {}
+        fn get_color(self) -> vec4 {
+            return
+            mix(
+                mix(
+                    mix(
+                        #9,
+                        #b,
+                        self.hover
+                    ),
+                    #f,
+                    self.focus
+                ),
+                #3,
+                self.is_empty
+            )
+        }
+    }
+    
     TextInput: {{TextInput}} {
         
         cursor: {
@@ -26,33 +48,11 @@ live_register!{
                     self.rect_size.y,
                     BORDER_RADIUS
                 )
-                sdf.fill(mix(#ccc0, #cccf, self.focus));
+                sdf.fill(mix(#ccc0, #f, self.focus));
                 return sdf.result
             }
         }
         
-        label: {
-            instance hover: 0.0
-            instance focus: 0.0
-            instance selected: 1.0
-            
-            text_style: FONT_LABEL {}
-            fn get_color(self) -> vec4 {
-                return mix(
-                    mix(
-                        #9,
-                        #b,
-                        self.hover
-                    ),
-                    mix(
-                        #9,
-                        #f,
-                        self.selected
-                    ),
-                    self.focus
-                )
-            }
-        }
         
         select: {
             instance hover: 0.0
@@ -73,24 +73,30 @@ live_register!{
                 return sdf.result
             }
         }
+        cursor_margin_bottom: 3.0,
+        cursor_margin_top: 3.0,
         cursor_size: 2.0,
         bg: {
             shape: Box
             color: #5
             radius: 2
         },
+        layout: {
+            padding: 10,
+            align: {y: 0.}
+        },
         walk: {
             width: Fit,
-            height: Fill,
-            margin: {left: 1.0, right: 5.0, top: 0.0, bottom: 2.0},
+            height: Fit,
+            //margin: 0// {left: 0.0, right: 5.0, top: 0.0, bottom: 2.0},
         }
         label_walk: {
             width: Fit,
-            height: Fill,
-            margin: {left: 5.0, right: 5.0, top: 2.0, bottom: 2.0},
+            height: Fit,
+            //margin: 0//{left: 5.0, right: 5.0, top: 0.0, bottom: 2.0},
         }
         align: {
-            y: 0.5
+            y: 0.0
         }
         
         state: {
@@ -150,6 +156,15 @@ pub enum UndoGroup {
     Cut(u64),
 }
 
+
+#[derive(Live, LiveHook)]
+#[repr(C)]
+pub struct DrawLabel {
+    draw_super: DrawText,
+    is_empty: f32,
+}
+
+
 #[derive(Live, FrameComponent)]
 #[live_register(frame_component!(TextInput))]
 pub struct TextInput {
@@ -158,13 +173,15 @@ pub struct TextInput {
     bg: DrawShape,
     select: DrawQuad,
     cursor: DrawQuad,
-    label: DrawText,
+    label: DrawLabel,
     
     walk: Walk,
     align: Align,
     layout: Layout,
     
     cursor_size: f32,
+    cursor_margin_bottom: f32,
+    cursor_margin_top: f32,
     
     label_walk: Walk,
     
@@ -404,6 +421,7 @@ impl TextInput {
                 // ok so we need to calculate where we put the cursor down.
                 //elf.
                 if let Some(pos) = self.label.closest_offset(cx, fe.abs) {
+                    let pos = pos.min(self.text.chars().count());
                     self.cursor_head = pos;
                     if !fe.mod_shift() {
                         self.cursor_tail = self.cursor_head;
@@ -432,29 +450,29 @@ impl TextInput {
     }
     
     pub fn cursor_to_screen(&self, cx: &Cx2d, cursor_pos: usize) -> Option<f32> {
-        if cursor_pos >= self.text.len() {
-            if self.text.len() == 0 {
+        let char_count = self.text.chars().count();
+        if char_count == 0 {
+            None
+        }
+        else {
+            if let Some(pos) = self.label.get_cursor_pos(cx, cursor_pos){
+                Some(pos.x)
+            }
+            else{
                 None
             }
-            else {
-                let rect = self.label.character_rect(cx, cursor_pos - 1).unwrap();
-                Some(rect.pos.x + rect.size.x)
-            }
-            
-        } else {
-            let rect = self.label.character_rect(cx, cursor_pos).unwrap();
-            Some(rect.pos.x)
         }
     }
     
-    
+    /*
     pub fn cursor_to_ime_pos(&self, cx: &Cx2d, cursor_pos: usize) -> Option<f32> {
-        if cursor_pos >= self.text.len() {
-            if self.text.len() == 0 {
+        let char_count = self.text.chars().count();
+        if cursor_pos >= char_count {
+            if char_count == 0 {
                 None
             }
             else {
-                let rect = self.label.character_rect(cx, cursor_pos - 1).unwrap();
+                let rect = self.label.character_rect(cx, char_count - 1).unwrap();
                 Some(rect.pos.x + 0.5 * rect.size.x)
             }
             
@@ -462,7 +480,7 @@ impl TextInput {
             let rect = self.label.character_rect(cx, cursor_pos.max(1) - 1).unwrap();
             Some(rect.pos.x + 0.5 * rect.size.x)
         }
-    }
+    }*/
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.bg.begin(cx, walk, self.layout);
@@ -470,15 +488,24 @@ impl TextInput {
         // this makes sure selection goes behind the text
         self.select.append_to_draw_call(cx);
         
-        self.label.draw_walk(cx, self.label_walk, self.align, &self.text);
+        if self.text.len() == 0 {
+            self.label.is_empty = 1.0;
+            self.label.draw_walk(cx, self.label_walk, self.align, "Empty");
+        }
+        else {
+            self.label.is_empty = 0.0;
+            self.label.draw_walk(cx, self.label_walk, self.align, &self.text);
+        }
         
-        let turtle = cx.turtle().rect();
-        
+        let mut turtle = cx.turtle().padded_rect_used();
+        turtle.pos.y -= self.cursor_margin_top;
+        turtle.size.y += self.cursor_margin_top + self.cursor_margin_bottom;
         // move the IME
+        /*
         if cx.has_key_focus(self.bg.area()) {
             let ime_x = self.cursor_to_ime_pos(cx, self.cursor_head).unwrap_or(turtle.pos.x);
             cx.show_text_ime(vec2(ime_x, turtle.pos.y));
-        }
+        }*/
         
         let head_x = self.cursor_to_screen(cx, self.cursor_head).unwrap_or(turtle.pos.x);
         self.cursor.draw_abs(cx, Rect {

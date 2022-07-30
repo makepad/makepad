@@ -33,15 +33,7 @@ use {
 
 impl Cx {
     
-    pub fn event_loop<F>(&mut self, mut event_handler: F)
-    where F: FnMut(&mut Cx, &Event),
-    {
-        self.event_handler = Some(&mut event_handler as *const dyn FnMut(&mut Cx, &Event) as *mut dyn FnMut(&mut Cx, &Event));
-        self.event_loop_core();
-        self.event_handler = None;
-    }
-    
-    pub fn event_loop_core(&mut self) {
+    pub fn event_loop(&mut self){
         self.platform_type = PlatformType::OSX;
         
         init_cocoa_globals();

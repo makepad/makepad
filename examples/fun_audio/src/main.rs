@@ -98,9 +98,9 @@ live_register!{
     }
     
     InstrumentSlider2: Rect {
-        bg: {color: #4}
+        bg: {color: #f00}
         width: Fill
-        height: 40
+        height: 80
         layout: {flow: Right, padding: 8}
         TextInput {
             text: "Hello WOrld"

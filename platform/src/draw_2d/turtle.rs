@@ -562,7 +562,12 @@ impl Turtle {
             size: vec2(self.width, self.height)
         }
     }
-    
+    pub fn padded_rect_used(&self) -> Rect {
+        Rect {
+            pos: self.origin + self.layout.padding.left_top(),
+            size: self.used() - self.layout.padding.left_top()
+        }
+    }
     pub fn rect_left(&self) -> Rect {
         Rect {
             pos: self.pos,
