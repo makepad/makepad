@@ -200,7 +200,6 @@ pub trait ButtonImGUIExt {
 
 impl<'a> ButtonImGUIExt for ImGUIRun<'a> {
     fn button(&mut self, text: &str) -> ButtonImGUI {
-        // what if we look up our id and its not a
         let new_id = id_num!(button, self.alloc_auto_id());
         let mut frame = self.imgui.frame();
         let button = if let Some(button) = frame.component_by_path(&[new_id]) {
