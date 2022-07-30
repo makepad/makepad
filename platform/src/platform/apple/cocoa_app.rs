@@ -339,38 +339,6 @@ impl CocoaApp {
         }       
     }
     
-    /*    pub fn init_app_after_first_window(&mut self) {
-        if self.init_application {
-            return
-        }
-        self.init_app_after_first_window = true;
-        unsafe {
-            let ns_app: id = msg_send![class!(NSApplication), sharedApplication];
-            let () = msg_send![ns_app, setActivationPolicy: NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular as i64];
-            let () = msg_send![ns_app, finishLaunching];
-            let () = msg_send![ns_app, activateIgnoringOtherApps:true];
-            
-            //let current_app: id = msg_send![class!(NSRunningApplication), currentApplication];
-            //let () = msg_send![ns_app, activateWithOptions: NSApplicationActivationOptions::NSApplicationActivateIgnoringOtherApps as u64];
-            
-        }
-    }*/
-    /*
-    pub fn init(&mut self) {
-        unsafe {
-            //GLOBAL_COCOA_APP = self;
-            let ns_app: ObjcId = msg_send![class!(NSApplication), sharedApplication];
-            //(*self.timer_delegate_instance).set_ivar("cocoa_app_ptr", self as *mut _ as *mut c_void);
-            //(*self.menu_delegate_instance).set_ivar("cocoa_app_ptr", self as *mut _ as *mut c_void);
-            //(*self.app_delegate_instance).set_ivar("cocoa_app_ptr", self as *mut _ as *mut c_void);
-            let () = msg_send![ns_app, setDelegate: self.app_delegate_instance];
-            let () = msg_send![ns_app, setActivationPolicy: NSApplicationActivationPolicy::NSApplicationActivationPolicyRegular as i64];
-            //let () = msg_send![ns_app, finishLaunching];
-            //let () = msg_send![ns_app, run];
-            //let () = msg_send![ns_app, activateIgnoringOtherApps:true];
-        }
-    }*/
-    
     pub fn time_now(&self) -> f64 {
         let time_now = Instant::now(); //unsafe {mach_absolute_time()};
         (time_now.duration_since(self.time_start)).as_micros() as f64 / 1_000_000.0

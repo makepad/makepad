@@ -33,25 +33,22 @@ use {
             WindowClosedEvent,
             TextInputEvent,
             DraggedItem,
-            //HoverState
         },
-        //turtle::Rect,
     }
 };
 
 #[derive(Clone)]
 pub struct CocoaWindow {
-    pub window_id: WindowId,
-    pub window_delegate: ObjcId,
-    //pub layer_delegate: id,
-    pub view: ObjcId,
-    pub window: ObjcId,
-    pub live_resize_timer: ObjcId,
-    pub last_window_geom: Option<WindowGeom>,
-    pub ime_spot: Vec2,
-    pub time_start: Instant,
-    pub is_fullscreen: bool,
-    pub last_mouse_pos: Vec2,
+    pub(crate) window_id: WindowId,
+    pub(crate) view: ObjcId,
+    pub(crate) window: ObjcId,
+    pub(crate) ime_spot: Vec2,
+    pub(crate) is_fullscreen: bool,
+    pub(crate) last_mouse_pos: Vec2,
+    window_delegate: ObjcId,
+    live_resize_timer: ObjcId,
+    last_window_geom: Option<WindowGeom>,
+    time_start: Instant,
 }
 
 impl CocoaWindow {
@@ -85,15 +82,10 @@ impl CocoaWindow {
     // complete window initialization with pointers to self
     pub fn init(&mut self, title: &str, size: Vec2, position: Option<Vec2>) {
         unsafe {
-            //(*self.cocoa_app).init_app_after_first_window();
-            // self.fingers_down.resize(NUM_FINGERS, false);
-            
             let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
             
             // set the backpointeers
             (*self.window_delegate).set_ivar("cocoa_window_ptr", self as *mut _ as *mut c_void);
-            //(*self.view).set_ivar("cocoa_window_ptr", self as *mut _ as *mut c_void);
-            //(*self.layer_delegate).set_ivar("cocoa_window_ptr", self as *mut _ as *mut c_void);
             let () = msg_send![self.view, initWithPtr: self as *mut _ as *mut c_void];
             
             let left_top = if let Some(position) = position {
