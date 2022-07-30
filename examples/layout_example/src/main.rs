@@ -6,23 +6,13 @@ live_register!{
     registry FrameComponent::*;
     App: {{App}} {
         shape: {shape: Solid}
-        frame: {
-            /*width: Fill
-            height: Fill
-            layout:{align: {x: 0.0, y: 0.5}, padding: 30,spacing: 30.}
-            Solid {bg:{color: #0f0}, width: Fill, height: 40}
-            Solid {
-                bg:{color: #0ff},
-                layout:{padding: 10, flow: Down, spacing: 10},
-                width: Fit,
-                height: 300
-                Solid {bg:{color: #00f}, width: 40, height: Fill}
-                Solid {bg:{color: #f00}, width: 40, height: 40}
-                Solid {bg:{color: #00f}, width: 40, height: 40}
+        imgui: {
+            button =? Button{ // default template
             }
-            Solid {bg:{color: #f00}, width: 40, height: 40}
-            Solid {bg:{color: #f0f}, width: Fill, height: 60}
-            Solid {bg:{color: #f00}, width: 40, height: 40}*/
+            my_red_button =? Button{
+               color: #f000 
+            }
+            // here is our root frame
         }
     }
 }
@@ -41,7 +31,7 @@ pub enum FromUI {
 
 #[derive(Live, LiveHook)]
 pub struct App {
-    frame: Frame,
+    imgui: ImGUI,
     shape: DrawShape,
     window: DesktopWindow,
 }
@@ -54,10 +44,28 @@ impl App {
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.window.handle_event(cx, event);
         
+        // give frame an immediate mode gui
+        let mut ui = self.imgui.run(cx, event); // run our frame_ui as immediate mode wrapper
+
+        for i in 0..10{
+            if ui.button(&format!("Hello world {}", i)).was_clicked(){
+                log!("CLicked {}",i);
+            }
+        }
+
+        ui.end();
+/*
+        if let PianoAction::Note {is_on, note_number, velocity} = ui.piano_id(ids!(piano)).action(){
+            self.audio_graph.send_midi_1_data(Midi1Note {
+                is_on,
+                note_number,
+                channel: 0,
+                velocity
+            }.into());
+        }*/
+        
         match event {
             Event::Construct => {
-                // lets draw the animation curve we use everywhere
-                
             }
             Event::Draw(draw_event) => {
                 self.draw(&mut Cx2d::new(cx, draw_event));
@@ -71,7 +79,7 @@ impl App {
         if self.window.begin(cx, None).not_redrawing() {
             return;
         }
-        while self.frame.draw(cx).is_not_done() {};
+        while self.imgui.draw(cx).is_not_done() {};
         
         self.window.end(cx);
     }
