@@ -45,7 +45,7 @@ use {
 };
 
 impl Cx {
-    pub fn handle_repaint(&mut self, metal_windows: &mut Vec<MetalWindow>, metal_cx: &mut MetalCx) {
+    pub(crate) fn handle_repaint(&mut self, metal_windows: &mut Vec<MetalWindow>, metal_cx: &mut MetalCx) {
 
         let mut passes_todo = Vec::new();
         self.compute_pass_repaint_order(&mut passes_todo);
@@ -286,7 +286,7 @@ impl Cx {
         }
     }
     
-    pub fn setup_render_pass_descriptor(&mut self, render_pass_descriptor: ObjcId, pass_id: PassId, inherit_dpi_factor: f32, first_texture: Option<ObjcId>, metal_cx: &MetalCx) {
+    fn setup_render_pass_descriptor(&mut self, render_pass_descriptor: ObjcId, pass_id: PassId, inherit_dpi_factor: f32, first_texture: Option<ObjcId>, metal_cx: &MetalCx) {
         let pass_size = self.passes[pass_id].pass_size;
         
         self.passes[pass_id].set_matrix(Vec2::default(), pass_size);
@@ -413,7 +413,7 @@ impl Cx {
         }
     }
     
-    pub fn draw_pass_to_layer(
+    fn draw_pass_to_layer(
         &mut self,
         pass_id: PassId,
         dpi_factor: f32,
@@ -479,7 +479,7 @@ impl Cx {
         let () = unsafe {msg_send![pool, release]};
     }
     
-    pub fn draw_pass_to_texture(
+    fn draw_pass_to_texture(
         &mut self,
         pass_id: PassId,
         dpi_factor: f32,
@@ -533,24 +533,23 @@ impl Cx {
 }
 
 pub struct MetalCx {
-    pub device: ObjcId,
-    pub command_queue: ObjcId
+    device: ObjcId,
+    command_queue: ObjcId
 }
 
 
 #[derive(Clone)]
 pub struct MetalWindow {
     pub window_id: WindowId,
-    pub first_draw: bool,
     pub window_geom: WindowGeom,
-    pub cal_size: Vec2,
-    pub ca_layer: ObjcId,
+    cal_size: Vec2,
+    ca_layer: ObjcId,
     pub cocoa_window: Box<CocoaWindow>,
-    pub is_resizing: bool
+    is_resizing: bool
 }
 
 impl MetalWindow {
-    pub fn new(window_id: WindowId, metal_cx: &MetalCx, cocoa_app: &mut CocoaApp, inner_size: Vec2, position: Option<Vec2>, title: &str) -> MetalWindow {
+    pub(crate) fn new(window_id: WindowId, metal_cx: &MetalCx, cocoa_app: &mut CocoaApp, inner_size: Vec2, position: Option<Vec2>, title: &str) -> MetalWindow {
         
         let ca_layer: ObjcId = unsafe {msg_send![class!(CAMetalLayer), new]};
         
@@ -578,7 +577,6 @@ impl MetalWindow {
         
         MetalWindow {
             is_resizing: false,
-            first_draw: true,
             window_id,
             cal_size: Vec2::default(),
             ca_layer,
@@ -587,25 +585,17 @@ impl MetalWindow {
         }
     }
     
-    pub fn set_vsync_enable(&mut self, _enable: bool) {
-        // let () = unsafe {msg_send![self.ca_layer, setDisplaySyncEnabled: false]};
-    }
-    
-    pub fn start_resize(&mut self) {
+    pub(crate) fn start_resize(&mut self) {
         self.is_resizing = true;
         let () = unsafe {msg_send![self.ca_layer, setPresentsWithTransaction: YES]};
     }
     
-    pub fn stop_resize(&mut self) {
+    pub(crate) fn stop_resize(&mut self) {
         self.is_resizing = false;
         let () = unsafe {msg_send![self.ca_layer, setPresentsWithTransaction: NO]};
     }
     
-    pub fn set_buffer_count(&mut self, _count: u64) {
-        //  let () = unsafe {msg_send![self.ca_layer, setMaximumDrawableCount: 3]};
-    }
-    
-    pub fn resize_core_animation_layer(&mut self, _metal_cx: &MetalCx) -> bool {
+    pub(crate) fn resize_core_animation_layer(&mut self, _metal_cx: &MetalCx) -> bool {
         let cal_size = Vec2 {
             x: self.window_geom.inner_size.x * self.window_geom.dpi_factor,
             y: self.window_geom.inner_size.y * self.window_geom.dpi_factor
@@ -631,7 +621,7 @@ pub struct CxPlatformView {
 
 #[derive(Default, Clone)]
 pub struct CxPlatformPass {
-    pub mtl_depth_state: Option<ObjcId>
+    mtl_depth_state: Option<ObjcId>
 }
 
 pub enum PackType {
@@ -645,7 +635,7 @@ pub struct SlErr {
 
 impl Cx {
     
-    pub fn mtl_compile_shaders(&mut self, metal_cx: &MetalCx) {
+    pub(crate) fn mtl_compile_shaders(&mut self, metal_cx: &MetalCx) {
         for draw_shader_ptr in &self.draw_shaders.compile_set {
             if let Some(item) = self.draw_shaders.ptr_to_item.get(&draw_shader_ptr) {
                 let cx_shader = &mut self.draw_shaders.shaders[item.draw_shader_id];
@@ -680,7 +670,7 @@ impl Cx {
 
 impl MetalCx {
     
-    pub fn new() -> MetalCx {
+    pub(crate) fn new() -> MetalCx {
         /*
         let devices = get_all_metal_devices();
         for device in devices {
@@ -714,7 +704,7 @@ pub struct CxPlatformDrawShader {
 }
 
 impl CxPlatformDrawShader {
-    pub fn new(
+    pub(crate) fn new(
         metal_cx: &MetalCx,
         shader: MetalGeneratedShader,
     ) -> Option<Self> {
