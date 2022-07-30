@@ -169,16 +169,16 @@ impl FrameComponent for Slider {
     
     fn handle_component_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, FrameActionItem)) {
         self.handle_event(cx, event, &mut | cx, slider, action | {
-            let mut apply = Vec::new();
+            let mut delta = Vec::new();
             match &action {
                 SliderAction::Slide(v) => {
                     if slider.bind.len()>0 {
-                        apply.write_path(&slider.bind, LiveValue::Float(*v as f64));
+                        delta.write_path(&slider.bind, LiveValue::Float(*v as f64));
                     }
                 },
                 _ => ()
             };
-            dispatch_action(cx, FrameActionItem::from_bind_apply(apply, action.into()))
+            dispatch_action(cx, FrameActionItem::from_bind_delta(delta, action.into()))
         });
     }
     
