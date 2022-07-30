@@ -45,12 +45,12 @@ impl Cx {
         return self.platform.window_geom.inner_size;
     }
     
-    pub fn process_to_wasm<F>(&mut self, msg_ptr: u32, mut event_handler: F) -> u32
-    where F: FnMut(&mut Cx, &Event),
+    pub fn process_to_wasm(&mut self, msg_ptr: u32) -> u32
+    //where F: FnMut(&mut Cx, &Event),
     {
-        self.event_handler = Some(&mut event_handler as *const dyn FnMut(&mut Cx, &Event) as *mut dyn FnMut(&mut Cx, &Event));
+        //self.event_handler = Some(&mut event_handler as *const dyn FnMut(&mut Cx, &Event) as *mut dyn FnMut(&mut Cx, &Event));
         let ret = self.event_loop_core(ToWasmMsg::take_ownership(msg_ptr));
-        self.event_handler = None;
+        //self.event_handler = None;
         ret
     }
     

@@ -364,7 +364,7 @@ impl Area {
                         }
                     )
                 }
-                panic!("get_read_ref property not found!");
+                panic!("get_read_ref property not found! {}", id);
             }
             _ => (),
         }

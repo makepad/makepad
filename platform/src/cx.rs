@@ -125,7 +125,7 @@ pub struct Cx {
     
     pub (crate) platform: CxPlatform,
     // (cratethis cuts the compiletime of an end-user application in half
-    pub (crate) event_handler: Option<*mut dyn FnMut(&mut Cx, &Event)>,
+    pub (crate) event_handler: Option<Box<dyn FnMut(&mut Cx, &Event)>>,
 }
 
 pub struct CxDependency {
@@ -154,8 +154,8 @@ impl PlatformType {
     }
 }
 
-impl Default for Cx {
-    fn default() -> Self {
+impl Cx {
+    pub fn new(event_handler:Box<dyn FnMut(&mut Cx, &Event)>) -> Self {
         // the null texture
         /*let mut textures = CxTexturePool::default();
         textures.alloc_new(CxTexture {
@@ -222,7 +222,7 @@ impl Default for Cx {
             
             thread_pool_senders: Vec::new(),
             
-            event_handler: None
+            event_handler:Some(event_handler)
         }
     }
 }

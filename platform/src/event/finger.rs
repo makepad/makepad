@@ -110,7 +110,7 @@ impl CxFingers {
         }
     }
     
-    pub (crate) fn get_captured_area_digit(&self, area: Area) -> Option<DigitId> {
+    pub (crate) fn get_digit_for_captured_area(&self, area: Area) -> Option<DigitId> {
         if self.capture_count == 0 {
             return None
         }
@@ -587,7 +587,7 @@ impl Event {
             Event::FingerHover(fe) => {
                 let rect = area.get_rect(&cx);
                 if fe.hover_last == area {
-                    let any_captured = cx.fingers.get_captured_area_digit(area);
+                    let any_captured = cx.fingers.get_digit_for_captured_area(area);
                     if !fe.handled.get() && rect_contains_with_margin(&rect, fe.abs, &options.margin) {
                         fe.handled.set(true);
                         cx.fingers.new_hover_area(fe.digit_id, area);
@@ -609,7 +609,7 @@ impl Event {
                 }
                 else {
                     if !fe.handled.get() && rect_contains_with_margin(&rect, fe.abs, &options.margin) {
-                        let any_captured = cx.fingers.get_captured_area_digit(area);
+                        let any_captured = cx.fingers.get_digit_for_captured_area(area);
                         cx.fingers.new_hover_area(fe.digit_id, area);
                         fe.handled.set(true);
                         return Hit::FingerHoverIn(FingerHoverHitEvent {
