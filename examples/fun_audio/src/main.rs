@@ -298,9 +298,6 @@ impl App {
                 iron_fish.settings.apply_over(cx, &item.bind_apply);
             }
             match item.id() {
-                id!(my_button) => if let ButtonAction::Click = item.action(){
-                     // heres click   
-                }
                 id!(piano) => if let PianoAction::Note {is_on, note_number, velocity} = item.action() {
                     self.audio_graph.send_midi_1_data(Midi1Note {
                         is_on,

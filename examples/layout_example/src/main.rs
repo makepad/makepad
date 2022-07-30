@@ -23,7 +23,7 @@ pub struct App {
     window: DesktopWindow,
 }
 
-impl App {
+impl App {  
     pub fn live_register(cx: &mut Cx) {
         makepad_component::live_register(cx);
     }
@@ -47,7 +47,7 @@ impl App {
                 log!("CLicked {}",i);
             }
         }
-        ui.end();
+        ui.end(); 
         
         
     }
