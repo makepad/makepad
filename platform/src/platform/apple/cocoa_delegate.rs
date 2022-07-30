@@ -523,9 +523,8 @@ pub fn define_cocoa_view_class() -> *const Class {
     }
     
     extern fn reset_cursor_rects(this: &Object, _sel: Sel) {
-        let cw = get_cocoa_window(this);
         unsafe {
-            let cocoa_app = &mut (*cw.cocoa_app);
+            let cocoa_app = get_cocoa_app_global();
             let current_cursor = cocoa_app.current_cursor.clone();
             let cursor_id = *cocoa_app.cursors.entry(current_cursor.clone()).or_insert_with( || {
                 load_mouse_cursor(current_cursor.clone())
@@ -589,23 +588,17 @@ pub fn define_cocoa_view_class() -> *const Class {
     }
     
     extern fn unmark_text(this: &Object, _sel: Sel) {
-        let cw = get_cocoa_window(this);
         unsafe {
-            let cocoa_app = &(*cw.cocoa_app);
             let marked_text: ObjcId = *this.get_ivar("markedText");
             let mutable_string = marked_text.mutable_string();
-            let _: () = msg_send![mutable_string, setString: cocoa_app.const_empty_string.as_id()];
+            let _: () = msg_send![mutable_string, setString: get_cocoa_class_global().const_empty_string.as_id()];
             let input_context: ObjcId = msg_send![this, inputContext];
             let _: () = msg_send![input_context, discardMarkedText];
         }
     }
     
-    extern fn valid_attributes_for_marked_text(this: &Object, _sel: Sel) -> ObjcId {
-        let cw = get_cocoa_window(this);
-        unsafe {
-            let cocoa_app = &(*cw.cocoa_app);
-            cocoa_app.const_attributes_for_marked_text
-        }
+    extern fn valid_attributes_for_marked_text(_this: &Object, _sel: Sel) -> ObjcId {
+        get_cocoa_class_global().const_attributes_for_marked_text
     }
     
     extern fn attributed_substring_for_proposed_range(_this: &Object, _sel: Sel, _range: NSRange, _actual_range: *mut c_void) -> ObjcId {
