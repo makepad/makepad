@@ -307,7 +307,9 @@ impl App {
             iron_fish.settings.apply_over(ui.cx, &delta);
         }
         
-        for note in ui.piano(ids!(piano)).on_notes(){
+        let piano = ui.piano(ids!(piano));
+        
+        for note in piano.on_notes(){
             self.audio_graph.send_midi_1_data(Midi1Note {
                 channel: 0,
                 is_on: note.is_on,
@@ -317,7 +319,6 @@ impl App {
         }
         
         for note in ui.on_midi_1_notes(){
-            let mut piano = self.imgui.by_type::<Piano>().unwrap();
             piano.set_note(ui.cx, note.is_on, note.note_number)
         }
     }

@@ -105,7 +105,7 @@ impl ImGUIItem {
         self.actions.0.iter().find( | v | v.uid() == self.uid)
     }
     
-    pub fn get<T: 'static + FrameComponent>(&mut self) -> Option<std::cell::RefMut<'_, T >> {
+    pub fn inner<T: 'static + FrameComponent>(&self) -> Option<std::cell::RefMut<'_, T >> {
         if self.uid.is_empty() {
             None
         }
