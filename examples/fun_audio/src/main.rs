@@ -290,12 +290,17 @@ impl App {
         //self.window.handle_event(cx, event);
         self.scroll_view.handle_event(cx, event);
         
+        self.frame.template(ids(button), live!{label:"HellWorld"});
+        
         for item in self.frame.handle_event_iter(cx, event) {
             if item.has_bind_apply() {
                 let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
                 iron_fish.settings.apply_over(cx, &item.bind_apply);
             }
             match item.id() {
+                id!(my_button) => if let ButtonAction::Click = item.action(){
+                     // heres click   
+                }
                 id!(piano) => if let PianoAction::Note {is_on, note_number, velocity} = item.action() {
                     self.audio_graph.send_midi_1_data(Midi1Note {
                         is_on,
