@@ -49,7 +49,6 @@ impl App {
         }
         ui.end(); 
         
-        
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
