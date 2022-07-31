@@ -30,6 +30,7 @@ mod draw_2d;
 mod draw_3d;
 mod draw_list;
 mod shader;
+mod debug;
 pub mod audio;
 pub mod midi;
 

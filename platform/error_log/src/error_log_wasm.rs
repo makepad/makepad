@@ -1,14 +1,14 @@
 #[macro_export]
 macro_rules!log {
     ( $ ( $ t: tt) *) => {
-        crate::makepad_error_log::console_log_impl(&format!("{}:{} - {}", file!(), line!(), format!( $ ( $ t) *)))
+        crate::makepad_error_log::console_log_impl(&format!("{}:{}\n   {}", file!(), line!(), format!( $ ( $ t) *)))
     }
 }
 
 #[macro_export]
 macro_rules!error {
     ( $ ( $ t: tt) *) => {
-        crate::makepad_error_log::console_error_impl(&format!("{}:{} - {}", file!(), line!(), format!( $ ( $ t) *)))
+        crate::makepad_error_log::console_error_impl(&format!("{}:{}\n    {}", file!(), line!(), format!( $ ( $ t) *)))
     }
 }
 

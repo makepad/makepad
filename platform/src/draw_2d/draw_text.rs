@@ -18,6 +18,7 @@ use {
     },
 };
 
+
 live_register!{
     
     DrawText: {{DrawText}} {
@@ -171,7 +172,7 @@ pub struct DrawText {
     #[calc] pub rect_pos: Vec2,
     #[calc] pub rect_size: Vec2,
     #[calc] pub char_depth: f32,
-    #[calc] pub base: Vec2,
+    #[calc] pub delta: Vec2,
     #[calc] pub font_size: f32,
     #[calc] pub advance: f32,
 }
@@ -187,7 +188,7 @@ impl DrawText {
     }
     
     pub fn draw_abs(&mut self, cx: &mut Cx2d, pos: Vec2, val: &str) {
-        self.draw_inner(cx, pos,val);
+        self.draw_inner(cx, pos, val);
     }
     
     pub fn begin_many_instances(&mut self, cx: &mut Cx2d) {
@@ -271,8 +272,10 @@ impl DrawText {
             let subpixel_y_fract = min_pos_y - (min_pos_y * dpi_factor).floor() / dpi_factor;
             
             // scale and snap it
-            let scaled_min_pos_x = walk_x + font_size_logical * self.font_scale * glyph.bounds.p_min.x - subpixel_x_fract;
-            let scaled_min_pos_y = pos.y - font_size_logical * self.font_scale * glyph.bounds.p_min.y + self.text_style.font_size * self.font_scale * self.text_style.top_drop - subpixel_y_fract;
+            //let scaled_min_pos_x = walk_x + font_size_logical * self.font_scale * glyph.bounds.p_min.x - subpixel_x_fract;
+            //let scaled_min_pos_y = pos.y - font_size_logical * self.font_scale * glyph.bounds.p_min.y + self.text_style.font_size * self.font_scale * self.text_style.top_drop - subpixel_y_fract;
+            let delta_x = font_size_logical * self.font_scale * glyph.bounds.p_min.x - subpixel_x_fract;
+            let delta_y = -font_size_logical * self.font_scale * glyph.bounds.p_min.y + self.text_style.font_size * self.font_scale * self.text_style.top_drop - subpixel_y_fract;
             
             // only use a subpixel id for small fonts
             let subpixel_id = if self.text_style.font_size>32.0 {
@@ -311,13 +314,13 @@ impl DrawText {
             self.font_t1.y = tc.ty1;
             self.font_t2.x = tc.tx2;
             self.font_t2.y = tc.ty2;
-            self.rect_pos = vec2(scaled_min_pos_x, scaled_min_pos_y);
+            self.rect_pos = vec2(walk_x + delta_x, pos.y + delta_y);
             self.rect_size = vec2(w * self.font_scale / dpi_factor, h * self.font_scale / dpi_factor);
             self.char_depth = char_depth;
-            self.base.x = walk_x;
-            self.base.y = pos.y;
+            self.delta.x = delta_x;
+            self.delta.y = delta_y;
             self.font_size = self.text_style.font_size;
-            self.advance = advance;//char_offset as f32;
+            self.advance = advance; //char_offset as f32;
             char_depth += zbias_step;
             mi.instances.extend_from_slice(self.draw_vars.as_slice());
             walk_x += advance;
@@ -387,8 +390,8 @@ impl DrawText {
             let subpixel_y_fract = min_pos_y - (min_pos_y * dpi_factor).floor() / dpi_factor;
             
             // scale and snap it
-            let scaled_min_pos_x = walk_x + font_size_logical * self.font_scale * glyph.bounds.p_min.x - subpixel_x_fract;
-            let scaled_min_pos_y = pos.y - font_size_logical * self.font_scale * glyph.bounds.p_min.y + self.text_style.font_size * self.font_scale * self.text_style.top_drop - subpixel_y_fract;
+            //let scaled_min_pos_x = walk_x + font_size_logical * self.font_scale * glyph.bounds.p_min.x - subpixel_x_fract;
+            //let scaled_min_pos_y = pos.y - font_size_logical * self.font_scale * glyph.bounds.p_min.y + self.text_style.font_size * self.font_scale * self.text_style.top_drop - subpixel_y_fract;
             
             // only use a subpixel id for small fonts
             let subpixel_id = if self.text_style.font_size>32.0 {
@@ -422,18 +425,22 @@ impl DrawText {
                 atlas_page.atlas_glyphs[glyph_id][subpixel_id].as_ref().unwrap()
             };
             
+            let delta_x = font_size_logical * self.font_scale * glyph.bounds.p_min.x - subpixel_x_fract;
+            let delta_y = -font_size_logical * self.font_scale * glyph.bounds.p_min.y + self.text_style.font_size * self.font_scale * self.text_style.top_drop - subpixel_y_fract;
             // give the callback a chance to do things
+            //et scaled_min_pos_x = walk_x + delta_x;
+            //let scaled_min_pos_y = pos.y - delta_y;
             self.font_t1.x = tc.tx1;
             self.font_t1.y = tc.ty1;
             self.font_t2.x = tc.tx2;
             self.font_t2.y = tc.ty2;
-            self.rect_pos = vec2(scaled_min_pos_x, scaled_min_pos_y);
+            self.rect_pos = vec2(walk_x + delta_x, pos.y + delta_y);
             self.rect_size = vec2(w * self.font_scale / dpi_factor, h * self.font_scale / dpi_factor);
             self.char_depth = char_depth;
-            self.base.x = walk_x;
-            self.base.y = pos.y;
+            self.delta.x = delta_x;
+            self.delta.y = delta_y;
             self.font_size = self.text_style.font_size;
-            self.advance = advance;//char_offset as f32;
+            self.advance = advance; //char_offset as f32;
             char_depth += zbias_step;
             mi.instances.extend_from_slice(self.draw_vars.as_slice());
             walk_x += advance;
@@ -444,7 +451,7 @@ impl DrawText {
         }
     }
     
-    pub fn compute_geom(&self, cx: &Cx2d, walk: Walk, text: &str) -> Option<TextGeom>{
+    pub fn compute_geom(&self, cx: &Cx2d, walk: Walk, text: &str) -> Option<TextGeom> {
         // we include the align factor and the width/height
         let font_id = self.text_style.font.font_id.unwrap();
         
@@ -529,7 +536,7 @@ impl DrawText {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk, align: Align, text: &str) {
         
         // lets compute the geom
-        if text.len() == 0{
+        if text.len() == 0 {
             return
         }
         if let Some(geom) = self.compute_geom(cx, walk, text) {
@@ -539,7 +546,7 @@ impl DrawText {
                 geom.eval_height
             };
             let y_align = (height - geom.measured_height) * align.y;
-
+            
             if walk.width.is_fit() {
                 // lets just output it and walk it
                 let rect = cx.walk_turtle(Walk {
@@ -561,7 +568,7 @@ impl DrawText {
                         width: Size::Fixed(geom.eval_width),
                         height: Size::Fixed(height)
                     });
-                    self.draw_inner(cx, rect.pos+ vec2(0.0, y_align), &text[0..ellip]);
+                    self.draw_inner(cx, rect.pos + vec2(0.0, y_align), &text[0..ellip]);
                     self.draw_inner(cx, rect.pos + vec2(at_x, y_align), &"..."[0..dots]);
                 }
                 else { // we might have space to h-align
@@ -591,64 +598,59 @@ impl DrawText {
         if !area.is_valid(cx) {
             return None
         }
-        
+        //let debug = cx.debug.clone();
         let scroll_pos = area.get_scroll_pos(cx);
         let pos = Vec2 {x: pos.x + scroll_pos.x, y: pos.y + scroll_pos.y};
         
-        let base = area.get_read_ref(cx, id!(base), ShaderTy::Vec2).unwrap();
+        let rect_pos = area.get_read_ref(cx, id!(rect_pos), ShaderTy::Vec2).unwrap();
+        let delta = area.get_read_ref(cx, id!(delta), ShaderTy::Vec2).unwrap();
         let advance = area.get_read_ref(cx, id!(advance), ShaderTy::Float).unwrap();
-        let font_size = area.get_read_ref(cx, id!(font_size), ShaderTy::Float).unwrap();
+        //let font_size = area.get_read_ref(cx, id!(font_size), ShaderTy::Float).unwrap();
         
-        let line_spacing = self.text_style.line_spacing;
+        //let line_spacing = self.text_style.line_spacing;
         
-        let mut i = 0;
-        while i < base.repeat {
-            let index = base.stride * i;
-            let y = base.buffer[index + 1];
-            let fs = font_size.buffer[index];
-            if y + fs * line_spacing > pos.y { // alright lets find our next x
-                while i < base.repeat {
-                    let index = base.stride * i;
-                    let x = base.buffer[index + 0];
-                    let y = base.buffer[index + 1];
-                    let advance = advance.buffer[index + 0];
-                    if pos.x < x + advance * 0.5  || y > pos.y {
-                        return Some(i);
-                    }
-                    i += 1;
-                }
+        // TODO add multiline support
+        for i in 0..rect_pos.repeat {
+            //let index = rect_pos.stride * i;
+            //let fs = font_size.buffer[index];
+            let index = rect_pos.stride * i;
+            let x = rect_pos.buffer[index + 0] - delta.buffer[index + 0];
+            //let y = rect_pos.buffer[index + 1] - delta.buffer[index + 1];
+            let advance = advance.buffer[index + 0];
+            if pos.x < x + advance * 0.5{
+                return Some(i)
             }
-            i += 1;
         }
-        return Some(base.repeat);
+        return Some(rect_pos.repeat);
     }
     
-    pub fn get_cursor_pos(&self, cx: &Cx, pos:f32, index:usize) -> Option<Vec2> {
+    pub fn get_cursor_pos(&self, cx: &Cx, pos: f32, index: usize) -> Option<Vec2> {
         let area = &self.draw_vars.area;
         
         if !area.is_valid(cx) {
             return None
         }
         
-        let base = area.get_read_ref(cx, id!(base), ShaderTy::Vec2).unwrap();
+        let rect_pos = area.get_read_ref(cx, id!(rect_pos), ShaderTy::Vec2).unwrap();
+        let delta = area.get_read_ref(cx, id!(delta), ShaderTy::Vec2).unwrap();
         let advance = area.get_read_ref(cx, id!(advance), ShaderTy::Float).unwrap();
         
-        if  base.repeat == 0{
+        if rect_pos.repeat == 0 {
             return None
         }
         
-        if index >= base.repeat{
+        if index >= rect_pos.repeat {
             // lets get the last one and advance
-            let index = (base.repeat - 1) * base.stride;
-            let x = base.buffer[index + 0] + advance.buffer[index+0];
-            let y = base.buffer[index + 1];
-            Some(vec2(x,y))
+            let index = (rect_pos.repeat - 1) * rect_pos.stride;
+            let x = rect_pos.buffer[index + 0] - delta.buffer[index + 0] + advance.buffer[index + 0];
+            let y = rect_pos.buffer[index + 1] - delta.buffer[index + 1];
+            Some(vec2(x, y))
         }
-        else{
-            let index = index * base.stride;
-            let x = base.buffer[index + 0]+ advance.buffer[index+0]*pos;
-            let y = base.buffer[index + 1];
-            Some(vec2(x,y))
+        else {
+            let index = index * rect_pos.stride;
+            let x = rect_pos.buffer[index + 0] - delta.buffer[index + 0] + advance.buffer[index + 0] * pos;
+            let y = rect_pos.buffer[index + 1] - delta.buffer[index + 1];
+            Some(vec2(x, y))
         }
     }
     

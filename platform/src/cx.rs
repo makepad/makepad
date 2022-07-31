@@ -4,6 +4,7 @@ use {
             HashMap,
             HashSet,
         },
+        any::{Any, TypeId},
         sync::Arc,
         rc::Rc,
         rc::Weak,
@@ -25,6 +26,7 @@ use {
         thread::{
             ThreadPoolSender
         },
+        debug::Debug,
         event::{
             DrawEvent,
             CxFingers,
@@ -126,6 +128,11 @@ pub struct Cx {
     pub (crate) platform: CxPlatform,
     // (cratethis cuts the compiletime of an end-user application in half
     pub (crate) event_handler: Option<Box<dyn FnMut(&mut Cx, &Event)>>,
+
+    pub (crate) globals: Vec<(TypeId, Box<dyn Any>)>,
+
+    pub debug:Debug,
+
 }
 
 pub struct CxDependency {
@@ -222,7 +229,11 @@ impl Cx {
             
             thread_pool_senders: Vec::new(),
             
-            event_handler:Some(event_handler)
+            event_handler:Some(event_handler),
+            
+            debug: Default::default(),
+
+            globals: Vec::new(),
         }
     }
 }

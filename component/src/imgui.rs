@@ -8,10 +8,6 @@ use {
     },
 };
 
-
-
-// lets implement LiveApply for FrameUI to forward to the inner frame
-
 #[derive(Clone)]
 pub struct ImGUIActions(pub Rc<Vec<FrameActionItem >>);
 
@@ -25,7 +21,7 @@ pub struct ImGUIRun<'a> {
 }
 
 impl<'a> ImGUIRun<'a> {
-    pub fn checked_item<T: 'static + FrameComponent>(&self, what: Option<&mut Box<dyn FrameComponent >>) -> ImGUIItem {
+    pub fn safe_ref<T: 'static + FrameComponent>(&self, what: Option<&mut Box<dyn FrameComponent >>) -> ImGUIRef {
         let uid = if let Some(what) = what {
             if what.cast::<T>().is_none() {
                 FrameUid::empty()
@@ -37,7 +33,7 @@ impl<'a> ImGUIRun<'a> {
         else {
             FrameUid::empty()
         };
-        ImGUIItem {
+        ImGUIRef {
             actions: self.actions.clone(),
             imgui: self.imgui.clone(),
             uid
@@ -55,7 +51,6 @@ impl<'a> ImGUIRun<'a> {
     
     pub fn stop(self) {}
     
-    // fetch all the children on this frame and call data_bind_read
     pub fn bind_read(&mut self, nodes: &[LiveNode]) {
         self.imgui.frame().bind_read(self.cx, nodes);
     }
@@ -94,13 +89,13 @@ impl<'a> ImGUIRun<'a> {
     
 }
 
-pub struct ImGUIItem {
+pub struct ImGUIRef {
     pub imgui: ImGUI,
     pub actions: ImGUIActions,
     pub uid: FrameUid,
 }
 
-impl ImGUIItem {
+impl ImGUIRef {
     pub fn find_single_action(&self) -> Option<&FrameActionItem> {
         self.actions.0.iter().find( | v | v.uid() == self.uid)
     }
