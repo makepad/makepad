@@ -1,10 +1,11 @@
 use {
     crate::{btree, BTree},
-    std::ops::RangeBounds,
+    std::ops::{Add, AddAssign, RangeBounds, Sub, SubAssign},
 };
 
+#[derive(Clone)]
 pub struct BTreeString {
-    btree: BTree<String>,
+    btree: BTree<String, Info>,
 }
 
 impl BTreeString {
@@ -20,6 +21,10 @@ impl BTreeString {
 
     pub fn len(&self) -> usize {
         self.btree.len()
+    }
+
+    pub fn char_len(&self) -> usize {
+        self.btree.info().char_count
     }
 
     pub fn slice<R: RangeBounds<usize>>(&self, range: R) -> Slice<'_> {
@@ -48,12 +53,22 @@ impl BTreeString {
         self.slice(..).chars()
     }
 
-    pub fn prepend(&mut self, other: Self) {
-        self.btree.prepend(other.btree);
-    }
-
     pub fn append(&mut self, other: Self) {
         self.btree.append(other.btree);
+    }
+
+    pub fn split_off(&mut self, at: usize) -> Self {
+        Self {
+            btree: self.btree.split_off(at),
+        }
+    }
+
+    pub fn truncate_front(&mut self, start: usize) {
+        self.btree.truncate_front(start)
+    }
+
+    pub fn truncate_back(&mut self, end: usize) {
+        self.btree.truncate_back(end)
     }
 }
 
@@ -78,7 +93,7 @@ impl From<&str> for BTreeString {
 }
 
 pub struct Builder {
-    builder: btree::Builder<String>,
+    builder: btree::Builder<String, Info>,
     chunk: String,
 }
 
@@ -117,7 +132,7 @@ impl Builder {
 
 #[derive(Clone, Copy)]
 pub struct Slice<'a> {
-    slice: btree::Slice<'a, String>,
+    slice: btree::Slice<'a, String, Info>,
 }
 
 impl<'a> Slice<'a> {
@@ -184,7 +199,7 @@ impl<'a> Slice<'a> {
 
 #[derive(Clone)]
 pub struct Cursor<'a> {
-    cursor: btree::Cursor<'a, String>,
+    cursor: btree::Cursor<'a, String, Info>,
     current: &'a str,
     index: usize,
 }
@@ -368,6 +383,7 @@ impl<'a> DoubleEndedIterator for Bytes<'a> {
     }
 }
 
+#[derive(Clone)]
 pub struct Chars<'a> {
     slice: Slice<'a>,
     cursor_front: Option<Cursor<'a>>,
@@ -420,22 +436,87 @@ impl btree::Chunk for String {
         self.is_char_boundary(index)
     }
 
-    fn shift_left(&mut self, other: &mut Self, mid: usize) {
-        other.push_str(&self[..mid]);
-        self.replace_range(..mid, "");
+    fn shift_left(&mut self, other: &mut Self, end: usize) {
+        self.push_str(&other[..end]);
+        other.replace_range(..end, "");
     }
 
-    fn shift_right(&mut self, other: &mut Self, mid: usize) {
-        other.replace_range(..0, &self[mid..]);
-        self.truncate(mid);
+    fn shift_right(&mut self, other: &mut Self, start: usize) {
+        other.replace_range(..0, &self[start..]);
+        self.truncate(start);
+    }
+
+    fn truncate_front(&mut self, start: usize) {
+        self.replace_range(..start, "");
+    }
+
+    fn truncate_back(&mut self, end: usize) {
+        self.truncate(end)
+    }
+}
+
+#[derive(Clone, Copy)]
+pub struct Info {
+    char_count: usize,
+}
+
+impl btree::Info<String> for Info {
+    fn from_chunk(string: &String) -> Self {
+        Self {
+            char_count: string.count_chars(),
+        }
+    }
+}
+
+impl Add for Info {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self::Output {
+        Self {
+            char_count: self.char_count + other.char_count,
+        }
+    }
+}
+
+impl AddAssign for Info {
+    fn add_assign(&mut self, other: Self) {
+        *self = *self + other;
+    }
+}
+
+impl Default for Info {
+    fn default() -> Self {
+        Self { char_count: 0 }
+    }
+}
+
+impl Sub for Info {
+    type Output = Self;
+
+    fn sub(self, other: Self) -> Self::Output {
+        Self {
+            char_count: self.char_count - other.char_count,
+        }
+    }
+}
+
+impl SubAssign for Info {
+    fn sub_assign(&mut self, other: Self) {
+        *self = *self - other;
     }
 }
 
 trait U8Ext {
+    fn is_utf8_char_boundary(self) -> bool;
+
     fn utf8_char_len(self) -> usize;
 }
 
 impl U8Ext for u8 {
+    fn is_utf8_char_boundary(self) -> bool {
+        (self as i8) >= -0x40
+    }
+
     fn utf8_char_len(self) -> usize {
         if self < 0x80 {
             1
@@ -449,31 +530,72 @@ impl U8Ext for u8 {
     }
 }
 
+trait StrExt {
+    fn count_chars(&self) -> usize;
+}
+
+impl StrExt for str {
+    fn count_chars(&self) -> usize {
+        let mut count = 0;
+        for byte in self.bytes() {
+            if byte.is_utf8_char_boundary() {
+                count += 1;
+            }
+        }
+        count
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use {proptest::prelude::*, super::*};
+    use {super::*, proptest::prelude::*};
+
+    fn string() -> impl Strategy<Value = String> {
+        ".*"
+    }
+
+    fn string_and_index() -> impl Strategy<Value = (String, usize)> {
+        string().prop_flat_map(|string| {
+            {
+                let len = string.len();
+                (Just(string), 0..=len)
+            }
+            .prop_map(|(string, mut index)| {
+                while !string.is_char_boundary(index) {
+                    index -= 1;
+                }
+                (string, index)
+            })
+        })
+    }
 
     proptest! {
         #[test]
-        fn is_empty(string in any::<String>()) {
+        fn is_empty(string in string()) {
             let btree_string = BTreeString::from(&string);
             assert_eq!(btree_string.is_empty(), string.is_empty());
         }
 
         #[test]
-        fn len(string in any::<String>()) {
+        fn len(string in string()) {
             let btree_string = BTreeString::from(&string);
             assert_eq!(btree_string.len(), string.len());
         }
 
         #[test]
-        fn chunks(string in any::<String>()) {
+        fn test_char_len(string in any::<String>()) {
+            let btree_string = BTreeString::from(&string);
+            assert_eq!(btree_string.char_len(), string.count_chars());
+        }
+
+        #[test]
+        fn chunks(string in string()) {
             let btree_string = BTreeString::from(&string);
             assert_eq!(btree_string.chunks().collect::<String>(), string);
         }
 
         #[test]
-        fn chunks_rev(string in any::<String>()) {
+        fn chunks_rev(string in string()) {
             let btree_string = BTreeString::from(&string);
             assert_eq!(
                 btree_string
@@ -486,7 +608,7 @@ mod tests {
         }
 
         #[test]
-        fn bytes(string in any::<String>()) {
+        fn bytes(string in string()) {
             let btree_string = BTreeString::from(&string);
             assert_eq!(
                 btree_string.bytes().collect::<Vec<_>>(),
@@ -495,7 +617,7 @@ mod tests {
         }
 
         #[test]
-        fn bytes_rev(string in any::<String>()) {
+        fn bytes_rev(string in string()) {
             let btree_string = BTreeString::from(&string);
             assert_eq!(
                 btree_string.bytes().rev().collect::<Vec<_>>(),
@@ -504,7 +626,7 @@ mod tests {
         }
 
         #[test]
-        fn chars(string in any::<String>()) {
+        fn chars(string in string()) {
             let btree_string = BTreeString::from(&string);
             assert_eq!(
                 btree_string.chars().collect::<Vec<_>>(),
@@ -513,12 +635,45 @@ mod tests {
         }
 
         #[test]
-        fn chars_rev(string in any::<String>()) {
+        fn chars_rev(string in string()) {
             let btree_string = BTreeString::from(&string);
             assert_eq!(
                 btree_string.chars().rev().collect::<Vec<_>>(),
                 string.chars().rev().collect::<Vec<_>>()
             );
+        }
+
+        #[test]
+        fn append(mut string in string(), other_string in string()) {
+            let mut btree_string = BTreeString::from(&string);
+            btree_string.append(BTreeString::from(&other_string));
+            string.push_str(&other_string);
+            assert_eq!(btree_string.chunks().collect::<String>(), string);
+        }
+
+        #[test]
+        fn split_off((mut string, at) in string_and_index()) {
+            let mut btree_string = BTreeString::from(&string);
+            let other_string = string.split_off(at);
+            let other_btree_string = btree_string.split_off(at);
+            assert_eq!(btree_string.chunks().collect::<String>(), string);
+            assert_eq!(other_btree_string.chunks().collect::<String>(), other_string);
+        }
+
+        #[test]
+        fn truncate_front((mut string, start) in string_and_index()) {
+            let mut btree_string = BTreeString::from(&string);
+            string.replace_range(..start, "");
+            btree_string.truncate_front(start);
+            assert_eq!(btree_string.chunks().collect::<String>(), string);
+        }
+
+        #[test]
+        fn truncate_back((mut string, end) in string_and_index()) {
+            let mut btree_string = BTreeString::from(&string);
+            string.truncate(end);
+            btree_string.truncate_back(end);
+            assert_eq!(btree_string.chunks().collect::<String>(), string);
         }
     }
 }
