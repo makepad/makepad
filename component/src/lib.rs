@@ -22,6 +22,7 @@ pub mod slider;
 #[macro_use]
 pub mod frame_traits;
 pub mod frame;
+pub mod imgui;
 pub mod window_menu;
 
 pub use makepad_platform;
@@ -41,7 +42,7 @@ pub use crate::{
     bare_window::BareWindow,
     component_map::ComponentMap,
     button_logic::{button_logic_handle_event, ButtonAction},
-    button::{Button},
+    button::{Button, ButtonImGUIExt},
     text_input::{TextInput},
     link_button::{LinkButton},
     desktop_window::{DesktopWindow},
@@ -49,6 +50,7 @@ pub use crate::{
     scroll_shadow::{ScrollShadow},
     scroll_bar::{ScrollBar},
     frame::{Frame},
+    imgui::{ImGUI, ImGUIItem, ImGUIRun},
     frame_traits::{
         FrameDraw,
         FrameDrawApi,

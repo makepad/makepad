@@ -18,6 +18,7 @@ live_register!{
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
             sdf.clear(COLOR_BG_APP);
+            
             if self.is_vertical > 0.5 {
                 sdf.box(
                     SPLITER_PAD,

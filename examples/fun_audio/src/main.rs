@@ -98,9 +98,9 @@ live_register!{
     }
     
     InstrumentSlider2: Rect {
-        bg: {color: #f00}
+        bg: {color: #4}
         width: Fill
-        height: 80
+        height: Fit
         layout: {flow: Right, padding: 8}
         TextInput {
             text: "Hello WOrld"
@@ -195,7 +195,7 @@ live_register!{
                 }
             }
         }
-        frame: {
+        imgui: {
             design_mode: false,
             bg: {color: (COLOR_BG_APP)},
             walk: {width: Fill, height: Fill}
@@ -271,7 +271,7 @@ main_app!(App);
 
 #[derive(Live, LiveHook)]
 pub struct App {
-    frame: Frame,
+    imgui: ImGUI,
     audio_graph: AudioGraph,
     window: BareWindow,
     scroll_view: ScrollView,
@@ -287,55 +287,39 @@ impl App {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         
-        //self.window.handle_event(cx, event);
-        self.scroll_view.handle_event(cx, event);
-        
-        for item in self.frame.handle_event_iter(cx, event) {
-            if item.has_bind_apply() {
-                let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
-                iron_fish.settings.apply_over(cx, &item.bind_apply);
-            }
-            match item.id() {
-                id!(piano) => if let PianoAction::Note {is_on, note_number, velocity} = item.action() {
-                    self.audio_graph.send_midi_1_data(Midi1Note {
-                        is_on,
-                        note_number,
-                        channel: 0,
-                        velocity
-                    }.into());
-                }
-                _ => ()
-            }
+        if let Event::Draw(de) = event {
+            return self.draw(&mut Cx2d::new(cx, de));
         }
         
-        for action in self.audio_graph.handle_event_iter(cx, event) {
-            match action {
-            }
-        };
+        self.scroll_view.handle_event(cx, event);
+        self.audio_graph.handle_event_iter(cx, event);
         
-        match event {
-            Event::Midi1InputData(inputs) => for input in inputs {
-                if let Midi1Event::Note(note) = input.data.decode() {
-                    let piano = self.frame.by_type::<Piano>().unwrap();
-                    piano.set_note(cx, note.is_on, note.note_number)
-                }
-            }
-            Event::MidiInputList(_inputs) => {
-            }
-            Event::Construct => {
-                let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
-                self.frame.bind_read(cx, &iron_fish.settings.live_read());
-            }
-            Event::KeyDown(ke) => {
-                if let KeyCode::F1 = ke.key_code {
-                }
-                if let KeyCode::Escape = ke.key_code {
-                }
-            }
-            Event::Draw(draw_event) => {
-                self.draw(&mut Cx2d::new(cx, draw_event));
-            }
-            _ => ()
+        let mut ui = self.imgui.run(cx, event); 
+
+        if ui.on_construct(){
+            let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
+            ui.bind_read(&iron_fish.settings.live_read());
+        }
+        
+        // fetch ui binding deltas
+        for delta in ui.on_bind_deltas(){
+            let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
+            iron_fish.settings.apply_over(ui.cx, &delta);
+        }
+        
+        let piano = ui.piano(ids!(piano));
+        
+        for note in piano.on_notes(){
+            self.audio_graph.send_midi_1_data(Midi1Note {
+                channel: 0,
+                is_on: note.is_on,
+                note_number: note.note_number,
+                velocity: note.velocity
+            }.into());
+        }
+        
+        for note in ui.on_midi_1_notes(){
+            piano.set_note(ui.cx, note.is_on, note.note_number)
         }
     }
     
@@ -344,8 +328,7 @@ impl App {
             return;
         }
         
-        while self.frame.draw(cx).is_not_done() {
-        };
+        while self.imgui.draw(cx).is_not_done() {};
         
         self.window.end(cx);
     }

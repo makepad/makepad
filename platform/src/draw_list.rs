@@ -1,24 +1,14 @@
-pub use {
-    std::{
-        rc::Rc,
-        cell::RefCell
-    },
+use {
     crate::{
-        makepad_live_compiler::*,
         makepad_math::*,
         makepad_error_log::*,
         platform::{
             CxPlatformDrawCall,
             CxPlatformView,
         },
-        cx::{
-            Cx,
-        },
         pass::PassId,
         id_pool::*,
-        area::{Area, DrawListArea, InstanceArea},
         live_traits::*,
-        draw_2d::turtle::{Layout, Size, Walk},
         cx_draw_shaders::{
             CxDrawShaderOptions,
             CxDrawShaderMapping,
@@ -31,7 +21,7 @@ pub use {
             DRAW_CALL_TEXTURE_SLOTS
         },
         texture::TextureId,
-        geometry::{Geometry, GeometryId}
+        geometry::{GeometryId}
     }
 };
 
