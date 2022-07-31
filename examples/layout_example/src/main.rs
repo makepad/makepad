@@ -29,7 +29,7 @@ impl App {
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        self.window.handle_event(cx, event);
+        self.window.handle_event(cx, event, &mut |_,_|{});
         
         if let Event::Draw(draw_event) = event{
             return self.draw(&mut Cx2d::new(cx, draw_event))
@@ -47,8 +47,6 @@ impl App {
                 log!("CLicked {}",i);
             }
         }
-        ui.end(); 
-        
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {

@@ -480,24 +480,23 @@ pub struct PianoKeyId(pub LiveId);
 
 
 
-// ImGUI API for Piano
+// ImGUI convenience API for Piano
 
-pub struct PianoImGUI(ImGUIItem); 
+pub struct PianoImGUI(ImGUIRef); 
 
 impl PianoImGUI {
     pub fn on_notes(&self) -> Vec<PianoNote> {
-        let mut ret = Vec::new();
+        let mut notes = Vec::new();
         for item in self.0.actions.0.iter(){
             if item.uid() == self.0.uid{
                 if let PianoAction::Note(note) = item.action() {
-                    ret.push(note)
+                    notes.push(note)
                 }
             }
         }
-        ret
+        notes
     }
     
-        
     pub fn set_note(&self, cx: &mut Cx, is_on: bool, note_number: u8) {
         if let Some(mut inner) = self.inner(){
             inner.set_note(cx, is_on, note_number)
@@ -516,6 +515,6 @@ pub trait PianoImGUIExt {
 impl<'a> PianoImGUIExt for ImGUIRun<'a> {
     fn piano(&mut self, path:&[LiveId]) -> PianoImGUI {
         let mut frame = self.imgui.frame();
-        PianoImGUI(self.checked_item::<Piano>(frame.component_by_path(path)))
+        PianoImGUI(self.safe_ref::<Piano>(frame.component_by_path(path)))
     }
 }

@@ -18,7 +18,9 @@ impl fmt::Display for PrettyPrintedF32 {
     }
 }
 
-
+pub const VF00:Vec4 = Vec4{x:1.0,y:0.0,z:0.0,w:1.0};
+pub const V0F0:Vec4 = Vec4{x:0.0,y:1.0,z:0.0,w:1.0};
+pub const V00F:Vec4 = Vec4{x:0.0,y:0.0,z:1.0,w:1.0};
 
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct Rect {

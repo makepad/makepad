@@ -149,7 +149,7 @@ pub enum ColorPickerDragMode {
 
 impl ColorPicker {
     
-    pub fn handle_finger(&mut self, cx: &mut Cx, rel: Vec2) -> ColorPickerAction {
+    pub fn handle_finger(&mut self, cx: &mut Cx, rel: Vec2, dispatch_action: &mut dyn FnMut(&mut Cx, ColorPickerAction)){
         
         fn clamp(x: f32, mi: f32, ma: f32) -> f32 {if x < mi {mi} else if x > ma {ma} else {x}}
         
@@ -186,10 +186,7 @@ impl ColorPicker {
             changed = true;
         }
         if changed {
-            ColorPickerAction::Change {rgba: self.to_rgba()}
-        }
-        else {
-            ColorPickerAction::None
+            dispatch_action(cx, ColorPickerAction::Change {rgba: self.to_rgba()})
         }
     }
     
@@ -197,7 +194,7 @@ impl ColorPicker {
         Vec4::from_hsva(Vec4 {x: self.hue, y: self.sat, z: self.val, w: 1.0})
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> ColorPickerAction {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ColorPickerAction)) {
         self.state_handle_event(cx, event);
         
         match event.hits(cx, self.wheel.area()) {
@@ -221,7 +218,7 @@ impl ColorPicker {
                 else {
                     self.drag_mode = ColorPickerDragMode::None;
                 }
-                return self.handle_finger(cx, fe.rel);
+                return self.handle_finger(cx, fe.rel, dispatch_action);
                 // lets check where we clicked!
             },
             Hit::FingerUp(fe) => {
@@ -232,15 +229,14 @@ impl ColorPicker {
                     self.animate_state(cx, ids!(hover.off));
                 }
                 self.drag_mode = ColorPickerDragMode::None;
-                return ColorPickerAction::DoneChanging;
+                dispatch_action(cx, ColorPickerAction::DoneChanging)
             }
             Hit::FingerMove(fe) => {
-                return self.handle_finger(cx, fe.rel)
+                return self.handle_finger(cx, fe.rel, dispatch_action)
                 
             },
             _ => ()
         }
-        ColorPickerAction::None
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d, rgba: Vec4, height_scale: f32) {

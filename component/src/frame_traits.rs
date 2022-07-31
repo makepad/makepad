@@ -481,30 +481,38 @@ impl FrameUid{
     }
 }
 
+pub enum TabNav{
+    Next,
+    Prev,
+}
+
 pub struct FrameActionItem {
     pub uids: Vec<FrameUid>,
     pub ids: Vec<LiveId>,
+    pub tab_nav: Option<TabNav>,
     pub bind_delta: Option<Vec<LiveNode>>,
     pub action: Box<dyn FrameAction>
 }
 
 impl FrameActionItem {
-    pub fn from_action(action: Box<dyn FrameAction>) -> Self {
+    pub fn new(action: Box<dyn FrameAction>) -> Self {
         Self{
             uids: Vec::new(),
             ids: Vec::new(),
             bind_delta: None,
+            tab_nav: None,
             action
         }
     }
     
-    pub fn from_bind_delta(bind_delta: Vec<LiveNode>, action: Box<dyn FrameAction>) -> Self {
-        Self{
-            uids: Vec::new(),
-            ids: Vec::new(),
-            bind_delta: Some(bind_delta),
-            action
-        }
+    pub fn bind_delta(mut self, bind_delta: Vec<LiveNode>,) -> Self {
+        if bind_delta.len()>0{self.bind_delta = Some(bind_delta)}
+        self
+    }
+
+    pub fn tab_nav(mut self, tab_nav: Option<TabNav>) -> Self {
+        self.tab_nav = tab_nav;
+        self
     }
     
     pub fn action<T: FrameAction + 'static >(&self)->T where T:Default + Clone{
@@ -526,12 +534,7 @@ impl FrameActionItem {
     pub fn mark(mut self, id: LiveId, uid: FrameUid) -> Self {
         self.uids.push(uid);
         self.ids.push(id);
-        Self {
-            bind_delta: self.bind_delta,
-            uids: self.uids,
-            ids: self.ids,
-            action:self.action
-        }
+        self
     }
 }
 

@@ -809,7 +809,6 @@ impl CodeEditorImpl {
         self.code_text.draw_inner_fix_later_when_editor_rep_is_not_vec_of_char(
             cx,
             pos,
-            0,
             chunk
         );
     }
