@@ -64,6 +64,26 @@ live_register!{
             y: 0.0
         }
         
+        text_input: {
+            cursor_margin_bottom: 3.0,
+            cursor_margin_top: 4.0,
+            select_pad_edges: 3.0
+            cursor_size: 2.0,
+            empty_message: "0",
+            bg: {
+                shape: None
+                color: #5
+                radius: 2
+            },
+            layout: {
+                padding: 0,
+                align: {y: 0.}
+            },
+            walk: {
+                margin: {top: 3, right: 5}
+            }
+        }
+        
         state: {
             hover = {
                 default: off
@@ -235,6 +255,7 @@ impl Slider {
             },
             Hit::FingerDown(_fe) => {
                 // cx.set_key_focus(self.slider.area());
+                self.text_input.read_only = true;
                 self.text_input.set_key_focus(cx);
                 self.text_input.select_all();
                 self.text_input.redraw(cx);
@@ -244,6 +265,7 @@ impl Slider {
                 dispatch_action(cx, self, SliderAction::StartSlide);
             },
             Hit::FingerUp(fe) => {
+                self.text_input.read_only = false;
                 // if the finger hasn't moved further than X we jump to edit-all on the text thing
                 self.text_input.create_external_undo();
                 self.animate_state(cx, ids!(drag.off));
