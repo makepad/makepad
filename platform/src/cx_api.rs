@@ -419,7 +419,6 @@ macro_rules!main_app {
                 
                 if let Event::Construct = event {
                     *app.borrow_mut() = Some($app::new_main(cx));
-                    log!("GOT HERE!");
                 }
                 
                 app.borrow_mut().as_mut().unwrap().handle_event(cx, event);

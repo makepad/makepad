@@ -309,7 +309,7 @@ impl FrameRef {
     
     pub fn as_uid(&self) -> FrameUid {
         if let Some(inner) = &self.0 {
-            FrameUid(&*inner as *const _ as u64)
+            FrameUid::from_frame_component(inner)
         }
         else {
             FrameUid(0)
@@ -473,10 +473,18 @@ impl LiveNew for FrameRef {
 #[derive(Clone, Copy, PartialEq, Default)]
 pub struct FrameUid(u64);
 
+impl FrameUid{
+    pub fn empty()->Self{Self::default()}
+    pub fn is_empty(&self)->bool{self.0 == 0}
+    pub fn from_frame_component(fc:&Box<dyn FrameComponent>)->Self{
+        FrameUid(&*fc as *const _ as u64)
+    }
+}
+
 pub struct FrameActionItem {
     pub uids: Vec<FrameUid>,
     pub ids: Vec<LiveId>,
-    pub bind_apply: Vec<LiveNode>,
+    pub bind_delta: Option<Vec<LiveNode>>,
     pub action: Box<dyn FrameAction>
 }
 
@@ -485,16 +493,16 @@ impl FrameActionItem {
         Self{
             uids: Vec::new(),
             ids: Vec::new(),
-            bind_apply: Vec::new(),
+            bind_delta: None,
             action
         }
     }
     
-    pub fn from_bind_apply(bind_apply: Vec<LiveNode>, action: Box<dyn FrameAction>) -> Self {
+    pub fn from_bind_delta(bind_delta: Vec<LiveNode>, action: Box<dyn FrameAction>) -> Self {
         Self{
             uids: Vec::new(),
             ids: Vec::new(),
-            bind_apply,
+            bind_delta: Some(bind_delta),
             action
         }
     }
@@ -507,15 +515,19 @@ impl FrameActionItem {
         self.ids[0]
     }
     
-    pub fn has_bind_apply(&self)->bool{
-        self.bind_apply.len()>0
+    pub fn uid(&self)->FrameUid{
+        self.uids[0]
+    }
+    
+    pub fn has_bind_delta(&self)->bool{
+        self.bind_delta.is_some()
     }
     
     pub fn mark(mut self, id: LiveId, uid: FrameUid) -> Self {
         self.uids.push(uid);
         self.ids.push(id);
         Self {
-            bind_apply: self.bind_apply,
+            bind_delta: self.bind_delta,
             uids: self.uids,
             ids: self.ids,
             action:self.action
