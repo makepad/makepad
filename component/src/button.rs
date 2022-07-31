@@ -178,7 +178,7 @@ impl Button {
 
 // ImGUI API for Button
 
-pub struct ButtonImGUI(ImGUIItem); 
+pub struct ButtonImGUI(ImGUIRef); 
 
 impl ButtonImGUI {
     pub fn was_clicked(&self) -> bool {
@@ -210,6 +210,6 @@ impl<'a> ButtonImGUIExt for ImGUIRun<'a> {
                 text: (text)
             })
         };
-        ButtonImGUI(self.checked_item::<Button>(button))
+        ButtonImGUI(self.safe_ref::<Button>(button))
     }
 }

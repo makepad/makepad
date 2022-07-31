@@ -36,6 +36,8 @@ pub mod fold_button;
 pub mod splitter;
 pub mod fold_header;
 
+pub mod debug_view;
+
 mod theme;
 
 pub use crate::{
@@ -50,7 +52,7 @@ pub use crate::{
     scroll_shadow::{ScrollShadow},
     scroll_bar::{ScrollBar},
     frame::{Frame},
-    imgui::{ImGUI, ImGUIItem, ImGUIRun},
+    imgui::{ImGUI, ImGUIRef, ImGUIRun},
     frame_traits::{
         FrameDraw,
         FrameDrawApi,
@@ -67,6 +69,7 @@ pub use crate::{
 
 pub fn live_register(cx: &mut Cx) {
     makepad_platform::live_cx::live_register(cx);
+    crate::debug_view::live_register(cx);
     crate::fold_header::live_register(cx);
     crate::splitter::live_register(cx);
     crate::theme::live_register(cx);

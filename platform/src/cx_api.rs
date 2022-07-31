@@ -1,5 +1,6 @@
 use {
     std::{
+        any::{TypeId, Any},
         fmt::Write,
         collections::HashSet,
     },
@@ -405,6 +406,17 @@ impl Cx {
         let mut s = String::new();
         debug_draw_tree_recur(self, dump_instances, &mut s, draw_list_id, 0);
         log!("{}", s);
+    }
+
+    pub fn set_global<T: 'static + Any + Sized>(&mut self, value:T){
+        if !self.globals.iter().any(|v| v.0 == TypeId::of::<T>()){
+            self.globals.push((TypeId::of::<T>(), Box::new(value)));
+        }
+    }
+    
+    pub fn get_global<T: 'static + Any>(&mut self)->&mut T{
+        let item = self.globals.iter_mut().find(|v| v.0 == TypeId::of::<T>()).unwrap();
+        item.1.downcast_mut().unwrap()
     }
 }
 
