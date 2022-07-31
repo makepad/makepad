@@ -77,6 +77,7 @@ pub use makepad_shader_compiler::makepad_math::*;
 pub struct Cx {
     pub (crate) platform_type: PlatformType,
     pub (crate) gpu_info: GpuInfo,
+    pub (crate) cpu_cores: usize,
     
     pub (crate) windows: CxWindowPool,
     pub (crate) passes: CxPassPool,
@@ -179,6 +180,8 @@ impl Cx {
         });*/
         
         Self {
+            cpu_cores: 0,
+            
             platform_type: PlatformType::Unknown,
             gpu_info: GpuInfo::default(),
             
