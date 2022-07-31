@@ -630,10 +630,10 @@ impl Mandelbrot {
                 }
             }
             Hit::FingerUp(fe) => {
-                if fe.digit.count == 2 {
+                if fe.digit.count >= 2 {
                     self.is_zoom_in = true;
                 }
-                else if fe.digit.count == 1{
+                else {
                     self.is_zoom_in = true;
                     self.is_zooming = false;
                 }
