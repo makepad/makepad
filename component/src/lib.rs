@@ -74,6 +74,7 @@ pub fn live_register(cx: &mut Cx) {
     crate::theme::live_register(cx);
     crate::slider::live_register(cx);
     crate::label::live_register(cx);
+    crate::frame::frame::live_register(cx);
     crate::frame::live_register(cx);
     crate::fold_button::live_register(cx);
     crate::text_input::live_register(cx);
