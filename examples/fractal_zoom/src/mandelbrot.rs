@@ -494,11 +494,8 @@ impl Mandelbrot {
         let max_iter = self.max_iter;
         // we pull a cloneable sender from the to_ui message channel for the worker
         let to_ui = self.to_ui.sender();
-        // clone a ref to the bail window for the worker
-        let bail_test = self.tile_cache.bail_test.clone();
-        // create a new task on the threadpool
         // this is run on any one of our worker threads that's free
-        self.tile_cache.thread_pool.execute(move || {
+        self.tile_cache.thread_pool.execute(move |bail_test| {
             if TileCache::tile_needs_to_bail(&tile, bail_test) {
                 return to_ui.send(ToUI::TileBailed {tile}).unwrap();
             }
