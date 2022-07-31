@@ -3,7 +3,7 @@ export class WasmBridge {
         this.wasm = wasm;
         this.wasm._bridge = this;
         this.dispatch = dispatch;
-        this.exports = wasm.instance.exports;
+        this.exports = wasm.exports;
         this.memory = wasm._memory;
         this.wasm_url = wasm._wasm_url;
         this.buffer_ref_len_check = 0;
@@ -139,8 +139,7 @@ export class WasmBridge {
         })
     }
     
-    static instantiate_wasm(bytes, memory, env) {
-
+    static instantiate_wasm(module, memory, env) {
         let _wasm = null;
         function chars_to_string(chars_ptr, len) {
             let out = "";
@@ -159,20 +158,20 @@ export class WasmBridge {
             env.memory = memory;
         }
 
-        return WebAssembly.instantiate(bytes, {env}).then(wasm => {
+        return WebAssembly.instantiate(module, {env}).then(wasm => {
             _wasm = wasm;
             wasm._has_thread_support = env.memory !== undefined;
             wasm._memory = env.memory? env.memory: wasm.instance.exports.memory;
-            wasm._bytes = bytes;
+            wasm._module = module;
             return wasm
         }, error => {
             if (error.name == "LinkError") { // retry as multithreaded
                 env.memory = this.create_shared_memory();
-                return WebAssembly.instantiate(bytes, {env}).then(wasm => {
+                return WebAssembly.instantiate(module, {env}).then(wasm => {
                     _wasm = wasm;
                     wasm._has_thread_support = true;
                     wasm._memory = env.memory;
-                    wasm._bytes = bytes;
+                    wasm._module = module;
                     return wasm
                 }, error => {
                     console.error(error);
@@ -187,9 +186,8 @@ export class WasmBridge {
     }
     
     static fetch_and_instantiate_wasm(wasm_url, memory) {
-        return fetch(wasm_url)
-            .then(response => response.arrayBuffer())
-            .then(bytes => this.instantiate_wasm(bytes, memory, {_post_signal:_=>{}}))
+        return WebAssembly.compileStreaming(fetch(wasm_url))
+          .then((module) => this.instantiate_wasm(module, memory, {_post_signal:_=>{}}))
     }
 }
 
