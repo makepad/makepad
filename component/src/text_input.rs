@@ -4,8 +4,7 @@ use {
         makepad_derive_frame::*,
         makepad_platform::*,
         button_logic::*,
-        frame_traits::*,
-        imgui::*,
+        frame::*,
     }
 };
 
@@ -76,7 +75,7 @@ live_register!{
         cursor_margin_top: 4.0,
         select_pad_edges: 3.0
         cursor_size: 2.0,
-        empty_message:"0",
+        empty_message: "0",
         bg: {
             shape: None
             color: #5
@@ -87,7 +86,7 @@ live_register!{
             align: {y: 0.}
         },
         walk: {
-            margin:{top:3, right:5}
+            margin: {top: 3, right: 5}
             width: Fit,
             height: Fit,
             //margin: 0// {left: 0.0, right: 5.0, top: 0.0, bottom: 2.0},
@@ -217,7 +216,7 @@ impl FrameComponent for TextInput {
         }*/
     }
     
-    fn redraw(&mut self, cx:&mut Cx){
+    fn redraw(&mut self, cx: &mut Cx) {
         self.bg.redraw(cx);
     }
     
@@ -323,7 +322,7 @@ impl TextInput {
     }
     
     pub fn create_undo(&mut self, undo_group: UndoGroup) {
-        if self.read_only{
+        if self.read_only {
             return
         }
         self.redo_stack.clear();
@@ -397,9 +396,9 @@ impl TextInput {
             }
         }
     }
-      
-    pub fn change(&mut self, cx: &mut Cx, s:&str, dispatch_action: &mut dyn FnMut(&mut Cx, TextInputAction)) {
-        if self.read_only{
+    
+    pub fn change(&mut self, cx: &mut Cx, s: &str, dispatch_action: &mut dyn FnMut(&mut Cx, TextInputAction)) {
+        if self.read_only {
             return
         }
         self.replace_text(s);
@@ -411,12 +410,12 @@ impl TextInput {
         cx.set_key_focus(self.bg.area());
     }
     
-    pub fn handle_event_iter(&mut self, cx: &mut Cx, event: &Event)->Vec<TextInputAction>{
+    pub fn handle_event_iter(&mut self, cx: &mut Cx, event: &Event) -> Vec<TextInputAction> {
         let mut actions = Vec::new();
-        self.handle_event(cx, event, &mut |_,a| actions.push(a));
+        self.handle_event(cx, event, &mut | _, a | actions.push(a));
         actions
     }
-   
+    
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, TextInputAction)) {
         self.state_handle_event(cx, event);
         match event.hits(cx, self.bg.area()) {
@@ -453,17 +452,17 @@ impl TextInput {
                 *ce.response.borrow_mut() = Some(self.selected_text())
             }
             Hit::KeyDown(ke) => match ke.key_code {
-                KeyCode::Tab=>{
-                   // dispatch_action(cx, self, TextInputAction::Tab(key.mod_shift));
+                KeyCode::Tab => {
+                    // dispatch_action(cx, self, TextInputAction::Tab(key.mod_shift));
                 }
-                KeyCode::ReturnKey=>{
+                KeyCode::ReturnKey => {
                     dispatch_action(cx, TextInputAction::Return(self.text.clone()));
                 },
-                KeyCode::Escape=>{
+                KeyCode::Escape => {
                     dispatch_action(cx, TextInputAction::Escape);
                 },
                 KeyCode::KeyZ if ke.modifiers.logo || ke.modifiers.shift => {
-                    if self.read_only{
+                    if self.read_only {
                         return
                     }
                     self.undo_id += 1;
@@ -482,11 +481,11 @@ impl TextInput {
                     self.cursor_head = self.text.chars().count();
                     self.bg.redraw(cx);
                 }
-                KeyCode::KeyX if ke.modifiers.logo|| ke.modifiers.control => {
+                KeyCode::KeyX if ke.modifiers.logo || ke.modifiers.control => {
                     self.undo_id += 1;
                     if self.cursor_head != self.cursor_tail {
                         self.create_undo(UndoGroup::Cut(self.undo_id));
-                        self.change(cx, "",  dispatch_action);
+                        self.change(cx, "", dispatch_action);
                     }
                 }
                 KeyCode::ArrowLeft => {
@@ -640,11 +639,11 @@ impl TextInput {
                 (tail_x, head_x, self.cursor_tail, self.cursor_head)
             };
             let char_count = self.label.get_char_count(cx);
-            let pad = if left == 0 && right == char_count{self.select_pad_edges}else{0.0};
+            let pad = if left == 0 && right == char_count {self.select_pad_edges}else {0.0};
             
             self.select.draw_abs(cx, Rect {
                 pos: vec2(left_x - 0.5 * self.cursor_size - pad, turtle.pos.y),
-                size: vec2(right_x - left_x + self.cursor_size + 2.0*pad, turtle.size.y)
+                size: vec2(right_x - left_x + self.cursor_size + 2.0 * pad, turtle.size.y)
             });
         }
         self.bg.end(cx);
