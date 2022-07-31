@@ -614,6 +614,19 @@ live_primitive!(
     }
 );
 
+impl ToLiveValue for &str{
+    fn to_live_value(&self) -> LiveValue {
+        // lets check our byte size and choose a storage mode appropriately.
+        //let bytes = self.as_bytes();
+        if let Some(inline_str) = InlineString::from_str(self) {
+            LiveValue::InlineString(inline_str)
+        }
+        else {
+            LiveValue::FittedString(FittedString::from_string(self.to_string()))
+        }
+    }
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct LiveDependency(String);
 

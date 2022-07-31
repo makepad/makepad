@@ -281,6 +281,20 @@ impl dyn FrameComponent {
 
 impl Frame {
     
+    pub fn component_by_uid(&mut self, uid:FrameUid) -> Option<&mut Box<dyn FrameComponent>> {
+        if let Some(FrameFound::Child(child)) = self.frame_query(&FrameQuery::Uid(uid), &mut None).into_found() {
+            return Some(child)
+        }
+        None
+    }
+    
+    pub fn component_by_path(&mut self, path: &[LiveId]) -> Option<&mut Box<dyn FrameComponent>> {
+        if let Some(FrameFound::Child(child)) = self.frame_query(&FrameQuery::Path(path), &mut None).into_found() {
+            return Some(child)
+        }
+        None
+    }
+    
     pub fn by_path<T: 'static + FrameComponent>(&mut self, path: &[LiveId]) -> Option<&mut T> {
         if let Some(FrameFound::Child(child)) = self.frame_query(&FrameQuery::Path(path), &mut None).into_found() {
             return child.cast_mut::<T>()

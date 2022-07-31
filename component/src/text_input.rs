@@ -63,13 +63,13 @@ live_register!{
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(
-                    1.,
-                    1.,
-                    self.rect_size.x - 2.0,
-                    self.rect_size.y - 2.0,
+                    0.,
+                    0.,
+                    self.rect_size.x,
+                    self.rect_size.y,
                     BORDER_RADIUS
                 )
-                sdf.fill(mix(#aaa3, #fff7, self.focus));
+                sdf.fill(mix(#fff0, #fff7, self.focus));
                 return sdf.result
             }
         }
@@ -186,6 +186,7 @@ pub struct TextInput {
     label_walk: Walk,
     
     pub text: String,
+    #[rust] double_tap_start: Option<(usize,usize)>,
     #[rust] undo_id: u64,
     #[rust] last_undo: Option<UndoItem>,
     #[rust] undo_stack: Vec<UndoItem>,
@@ -252,6 +253,11 @@ impl TextInput {
         }
     }
     
+    pub fn select_all(&mut self){
+        self.cursor_tail = 0;
+        self.cursor_head = self.text.chars().count();
+    }
+    
     fn create_undo_item(&mut self, undo_group: UndoGroup) -> UndoItem {
         UndoItem {
             undo_group: undo_group,
@@ -307,6 +313,31 @@ impl TextInput {
         self.cursor_head = left + chars_inserted;
         self.cursor_tail = self.cursor_head;
         self.text = new;
+    }
+    
+    pub fn select_word(&mut self, around: usize) {
+        let mut first_ws = Some(0);
+        let mut last_ws = None;
+        let mut after_center = false;
+        for (i, c) in self.text.chars().enumerate() {
+            last_ws = Some(i+1);
+            if i >= around {
+                after_center = true;
+            }
+            if c.is_whitespace() {
+                last_ws = Some(i);
+                if after_center {
+                    break;
+                }
+                first_ws = Some(i+1);
+            }
+        }
+        if let Some(first_ws) = first_ws{
+            if let Some(last_ws) = last_ws{
+                self.cursor_tail = first_ws;
+                self.cursor_head = last_ws;
+            }
+        }
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, TextInputAction)) {
@@ -426,10 +457,19 @@ impl TextInput {
                     if !fe.mod_shift() {
                         self.cursor_tail = self.cursor_head;
                     }
+                    if fe.tap_count == 2 {
+                        // lets select the word.
+                        self.select_word(pos);
+                        self.double_tap_start = Some((self.cursor_head, self.cursor_tail));
+                    }
+                    if fe.tap_count == 3{
+                        self.select_all();
+                    }
                     self.bg.redraw(cx);
                 }
             },
             Hit::FingerUp(fe) => {
+                self.double_tap_start = None;
                 if fe.is_over && fe.digit.has_hovers() {
                     self.animate_state(cx, ids!(hover.on));
                 }
@@ -439,7 +479,20 @@ impl TextInput {
             }
             Hit::FingerMove(fe) => {
                 if let Some(pos) = self.label.closest_offset(cx, fe.abs) {
-                    if pos != self.cursor_head {
+                    let pos = pos.min(self.text.chars().count());
+                    if fe.tap_count == 2{
+                        let (head,tail) = self.double_tap_start.unwrap();
+                        // ok so. now we do a word select and merge the selection
+                        self.select_word(pos);
+                        if head > self.cursor_head{
+                            self.cursor_head = head
+                        }
+                        if tail < self.cursor_tail{
+                            self.cursor_tail = tail;
+                        }
+                        self.bg.redraw(cx);
+                    }
+                    else if fe.tap_count == 1 && pos != self.cursor_head {
                         self.cursor_head = pos;
                         self.bg.redraw(cx);
                     }
@@ -448,39 +501,6 @@ impl TextInput {
             _ => ()
         }
     }
-    
-    pub fn cursor_to_screen(&self, cx: &Cx2d, cursor_pos: usize) -> Option<f32> {
-        let char_count = self.text.chars().count();
-        if char_count == 0 {
-            None
-        }
-        else {
-            if let Some(pos) = self.label.get_cursor_pos(cx, cursor_pos){
-                Some(pos.x)
-            }
-            else{
-                None
-            }
-        }
-    }
-    
-    /*
-    pub fn cursor_to_ime_pos(&self, cx: &Cx2d, cursor_pos: usize) -> Option<f32> {
-        let char_count = self.text.chars().count();
-        if cursor_pos >= char_count {
-            if char_count == 0 {
-                None
-            }
-            else {
-                let rect = self.label.character_rect(cx, char_count - 1).unwrap();
-                Some(rect.pos.x + 0.5 * rect.size.x)
-            }
-            
-        } else {
-            let rect = self.label.character_rect(cx, cursor_pos.max(1) - 1).unwrap();
-            Some(rect.pos.x + 0.5 * rect.size.x)
-        }
-    }*/
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.bg.begin(cx, walk, self.layout);
@@ -501,21 +521,28 @@ impl TextInput {
         turtle.pos.y -= self.cursor_margin_top;
         turtle.size.y += self.cursor_margin_top + self.cursor_margin_bottom;
         // move the IME
-        /*
-        if cx.has_key_focus(self.bg.area()) {
-            let ime_x = self.cursor_to_ime_pos(cx, self.cursor_head).unwrap_or(turtle.pos.x);
-            cx.show_text_ime(vec2(ime_x, turtle.pos.y));
-        }*/
         
-        let head_x = self.cursor_to_screen(cx, self.cursor_head).unwrap_or(turtle.pos.x);
-        self.cursor.draw_abs(cx, Rect {
-            pos: vec2(head_x - 0.5 * self.cursor_size, turtle.pos.y),
-            size: vec2(self.cursor_size, turtle.size.y)
-        });
+        if cx.has_key_focus(self.bg.area()) {
+            let ime_x = self.label.get_cursor_pos(cx, 0.5, self.cursor_head)
+                .unwrap_or(vec2(turtle.pos.x, 0.0)).x;
+            cx.show_text_ime(vec2(ime_x, turtle.pos.y));
+        }
+        
+        let head_x = self.label.get_cursor_pos(cx, 0.0, self.cursor_head)
+            .unwrap_or(vec2(turtle.pos.x, 0.0)).x;
+        
+        if self.cursor_head == self.cursor_tail {
+            self.cursor.draw_abs(cx, Rect {
+                pos: vec2(head_x - 0.5 * self.cursor_size, turtle.pos.y),
+                size: vec2(self.cursor_size, turtle.size.y)
+            });
+        }
         
         // draw selection rect
         if self.cursor_head != self.cursor_tail {
-            let tail_x = self.cursor_to_screen(cx, self.cursor_tail).unwrap_or(turtle.pos.x);
+            let tail_x = self.label.get_cursor_pos(cx, 0.0, self.cursor_tail)
+                .unwrap_or(vec2(turtle.pos.x, 0.0)).x;
+            
             let (left_x, right_x) = if self.cursor_head < self.cursor_tail {
                 (head_x, tail_x)
             }

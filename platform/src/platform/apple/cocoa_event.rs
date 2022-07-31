@@ -6,6 +6,7 @@ use {
         window::WindowId,
         menu::MenuCommand,
         event::{
+            CxFingers,
             DigitId,
             DigitDevice,
             DigitInfo,
@@ -69,17 +70,17 @@ pub struct CocoaMouseDownEvent {
 }
 
 impl CocoaMouseDownEvent {
-    pub fn into_finger_down_event(self, digit_id: DigitId, digit_index:usize, digit_count:usize, tap_count: u32) -> FingerDownEvent {
+    pub fn into_finger_down_event(self, fingers: &CxFingers, digit_id: DigitId) -> FingerDownEvent {
         FingerDownEvent {
             window_id: self.window_id,
             abs: self.abs,
-            digit: DigitInfo{
-                id:digit_id,
-                index:digit_index,
-                count:digit_count,
+            digit: DigitInfo {
+                id: digit_id,
+                index: fingers.get_digit_index(digit_id),
+                count: fingers.get_digit_count(),
                 device: DigitDevice::Mouse(self.button),
             },
-            tap_count,
+            tap_count: fingers.get_tap_count(digit_id),
             handled: Cell::new(false),
             modifiers: self.modifiers,
             time: self.time
@@ -96,7 +97,7 @@ pub struct CocoaMouseMoveEvent {
 }
 
 impl CocoaMouseMoveEvent {
-    pub fn into_finger_hover_event(self, digit_id: DigitId,  hover_last: Area, button: usize) -> FingerHoverEvent {
+    pub fn into_finger_hover_event(self, digit_id: DigitId, hover_last: Area, button: usize) -> FingerHoverEvent {
         FingerHoverEvent {
             window_id: self.window_id,
             abs: self.abs,
@@ -108,15 +109,16 @@ impl CocoaMouseMoveEvent {
             time: self.time
         }
     }
-    pub fn into_finger_move_event(self, digit_id: DigitId, digit_index:usize, digit_count:usize, captured: Area, button: usize) -> FingerMoveEvent {
+    pub fn into_finger_move_event(self, fingers: &CxFingers, digit_id: DigitId, button: usize) -> FingerMoveEvent {
         FingerMoveEvent {
             window_id: self.window_id,
-            captured,
+            captured: fingers.get_captured_area(digit_id),
+            tap_count: fingers.get_tap_count(digit_id),
             abs: self.abs,
-            digit: DigitInfo{
-                id:digit_id,
-                index:digit_index,
-                count:digit_count,
+            digit: DigitInfo {
+                id: digit_id,
+                index: fingers.get_digit_index(digit_id),
+                count: fingers.get_digit_count(),
                 device: DigitDevice::Mouse(button),
             },
             modifiers: self.modifiers,
@@ -135,17 +137,17 @@ pub struct CocoaMouseUpEvent {
 }
 
 impl CocoaMouseUpEvent {
-    pub fn into_finger_up_event(self, digit_id: DigitId, digit_index:usize, digit_count:usize, captured: Area) -> FingerUpEvent {
+    pub fn into_finger_up_event(self, fingers: &CxFingers, digit_id: DigitId) -> FingerUpEvent {
         FingerUpEvent {
             window_id: self.window_id,
             abs: self.abs,
-            digit: DigitInfo{
-                id:digit_id,
-                index:digit_index,
-                count:digit_count,
+            digit: DigitInfo {
+                id: digit_id,
+                index: fingers.get_digit_index(digit_id),
+                count: fingers.get_digit_count(),
                 device: DigitDevice::Mouse(self.button),
             },
-            captured,
+            captured: fingers.get_captured_area(digit_id),
             modifiers: self.modifiers,
             time: self.time
         }
