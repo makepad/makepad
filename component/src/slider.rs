@@ -70,6 +70,7 @@ live_register!{
             select_pad_edges: 3.0
             cursor_size: 2.0,
             empty_message: "0",
+            numeric_only: true,
             bg: {
                 shape: None
                 color: #5
