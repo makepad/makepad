@@ -67,13 +67,12 @@ impl Cx {
             match block_id {
                 id!(ToWasmGetDeps) => { // fetch_deps
                     let tw = ToWasmGetDeps::read_to_wasm(&mut to_wasm);
-                    
+                    self.cpu_cores = tw.cpu_cores as usize;
                     self.gpu_info.init_from_info(
                         tw.gpu_info.min_uniform_vectors,
                         tw.gpu_info.vendor,
                         tw.gpu_info.renderer
                     );
-                    
                     self.platform_type = tw.browser_info.into();
                     
                     let mut deps = Vec::<String>::new();

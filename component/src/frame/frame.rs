@@ -2,33 +2,14 @@ use {
     crate::{
         makepad_platform::*,
         component_map::*,
-        frame_traits::*
+        frame::*
     },
     std::any::TypeId
 };
 
 live_register!{
     Frame: {{Frame}} {}
-    Solid: Frame {bg: {shape: Solid}}
-    Rect: Frame {bg: {shape: Rect}}
-    Box: Frame {bg: {shape: Box}}
-    BoxX: Frame {bg: {shape: BoxX}}
-    BoxY: Frame {bg: {shape: BoxY}}
-    BoxAll: Frame {bg: {shape: BoxAll}}
-    GradientY: Frame {bg: {shape: GradientY}}
-    Circle: Frame {bg: {shape: Circle}}
-    Hexagon: Frame {bg: {shape: Hexagon}}
-    GradientX: Frame {bg: {shape: Solid, fill: GradientX}}
-    GradientY: Frame {bg: {shape: Solid, fill: GradientY}}
-    Image: Frame {bg: {shape: Solid, fill: Image}}
-    UserDraw: Frame {user_draw: true}
-    Clip: Frame {clip: true,}
-    Scroll: Frame {clip: true,}
 }
-
-// ClipFrame
-// ScrollFrame
-// Frame
 
 #[derive(Live)]
 #[live_register(frame_component!(Frame))]
@@ -119,7 +100,6 @@ impl FrameComponent for Frame {
                 });
             }
         }
-        
         
         match event.hits(cx, self.bg.area()) {
             Hit::FingerHoverIn(_) => if let Some(cursor) = &self.cursor {

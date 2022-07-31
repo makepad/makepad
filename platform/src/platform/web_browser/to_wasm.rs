@@ -81,6 +81,7 @@ impl Into<PlatformType> for WBrowserInfo {
 #[derive(ToWasm)]
 pub struct ToWasmGetDeps {
     pub gpu_info: WGpuInfo,
+    pub cpu_cores: u32,
     pub browser_info: WBrowserInfo,
 }
 

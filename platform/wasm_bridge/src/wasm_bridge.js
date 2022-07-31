@@ -116,7 +116,7 @@ export class WasmBridge {
     }
         
     js_console_error(chars_ptr, len) {
-        console.error(this.chars_to_string(chars_ptr, len));
+        console.error(this.chars_to_string(chars_ptr, len), '');
     }
     
     static create_shared_memory(){

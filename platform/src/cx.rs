@@ -4,6 +4,7 @@ use {
             HashMap,
             HashSet,
         },
+        any::{Any, TypeId},
         sync::Arc,
         rc::Rc,
         rc::Weak,
@@ -25,6 +26,7 @@ use {
         thread::{
             ThreadPoolSender
         },
+        debug::Debug,
         event::{
             DrawEvent,
             CxFingers,
@@ -75,6 +77,7 @@ pub use makepad_shader_compiler::makepad_math::*;
 pub struct Cx {
     pub (crate) platform_type: PlatformType,
     pub (crate) gpu_info: GpuInfo,
+    pub (crate) cpu_cores: usize,
     
     pub (crate) windows: CxWindowPool,
     pub (crate) passes: CxPassPool,
@@ -126,6 +129,11 @@ pub struct Cx {
     pub (crate) platform: CxPlatform,
     // (cratethis cuts the compiletime of an end-user application in half
     pub (crate) event_handler: Option<Box<dyn FnMut(&mut Cx, &Event)>>,
+
+    pub (crate) globals: Vec<(TypeId, Box<dyn Any>)>,
+
+    pub debug:Debug,
+
 }
 
 pub struct CxDependency {
@@ -172,6 +180,8 @@ impl Cx {
         });*/
         
         Self {
+            cpu_cores: 0,
+            
             platform_type: PlatformType::Unknown,
             gpu_info: GpuInfo::default(),
             
@@ -222,7 +232,11 @@ impl Cx {
             
             thread_pool_senders: Vec::new(),
             
-            event_handler:Some(event_handler)
+            event_handler:Some(event_handler),
+            
+            debug: Default::default(),
+
+            globals: Vec::new(),
         }
     }
 }

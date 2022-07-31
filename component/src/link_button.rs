@@ -3,8 +3,7 @@ use {
     crate::{
         makepad_platform::*,
         button_logic::*,
-        frame_traits::*,
-        frame_traits,
+        frame::*,
         button::Button
     }
 };
