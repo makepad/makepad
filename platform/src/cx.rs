@@ -5,7 +5,6 @@ use {
             HashSet,
         },
         any::{Any, TypeId},
-        sync::Arc,
         rc::Rc,
         rc::Weak,
         cell::RefCell,
@@ -22,9 +21,6 @@ use {
         },
         platform::{
             CxPlatform,
-        },
-        thread::{
-            ThreadPoolSender
         },
         debug::Debug,
         event::{
@@ -123,8 +119,6 @@ pub struct Cx {
     
     #[allow(dead_code)]
     pub (crate) command_settings: HashMap<MenuCommand, CxCommandSetting>,
-    
-    pub (crate) thread_pool_senders: Vec<Arc<RefCell<Option<ThreadPoolSender> >> >,
     
     pub (crate) platform: CxPlatform,
     // (cratethis cuts the compiletime of an end-user application in half
@@ -229,8 +223,6 @@ impl Cx {
             command_settings: HashMap::new(),
             
             platform: CxPlatform {..Default::default()},
-            
-            thread_pool_senders: Vec::new(),
             
             event_handler:Some(event_handler),
             

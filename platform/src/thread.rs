@@ -1,5 +1,4 @@
 use {
-    std::cell::RefCell,
     std::sync::{
         mpsc::{
             channel,
@@ -133,26 +132,20 @@ impl<T> FromUIReceiver<T> {
     }
 }
 
-pub struct ThreadPoolSender {
-    sender: Sender<Box<dyn FnOnce() + Send + 'static>>,
+pub struct ThreadPool<T: Clone + Send + 'static> {
+    sender: Sender<Box<dyn FnOnce(Option<T>) + Send + 'static>>,
+    msg_senders: Vec<Sender<T>>
 }
 
-pub struct ThreadPool {
-    sender: Arc<RefCell<Option<ThreadPoolSender>>>,
-}
-
-impl Drop for ThreadPool{
-    fn drop(&mut self){
-        self.sender.borrow_mut().take();
-    }
-}
-
-impl ThreadPool {
+impl<T> ThreadPool<T> where T : Clone + Send + 'static{
     pub fn new(cx: &mut Cx, num_threads: usize) -> Self {
-        let (sender, receiver) = channel::<Box<dyn FnOnce() + Send + 'static>>();
+        let (sender, receiver) = channel::<Box<dyn FnOnce(Option<T>) + Send + 'static>>();
         let receiver = Arc::new(Mutex::new(receiver));
+        let mut msg_senders = Vec::new();
         for _ in 0..num_threads {
             let receiver = receiver.clone();
+            let (msg_send, msg_recv) = channel::<T>();
+            msg_senders.push(msg_send);
             cx.spawn_thread(move || loop {
                 let task = if let Ok(receiver) = receiver.lock() {
                     match receiver.recv() {
@@ -163,22 +156,26 @@ impl ThreadPool {
                 else {
                     panic!();
                 };
-                task();
+                let mut msg_out = None;
+                while let Ok(msg) = msg_recv.try_recv(){
+                    msg_out = Some(msg);
+                }
+                task(msg_out);
             })
         }
-        let sender = Arc::new(RefCell::new(Some(ThreadPoolSender{
-            sender
-        })));
-        cx.thread_pool_senders.push(sender.clone());
         Self{
-            sender
+            sender,
+            msg_senders
         }
     }
     
-    pub fn execute<F>(&mut self, task: F) where F: FnOnce() + Send + 'static {
-        let sender = self.sender.borrow_mut();
-        if let Some(tps) = sender.as_ref(){
-            tps.sender.send(Box::new(task)).unwrap();
+    pub fn send_msg(&self, msg: T){
+        for sender in &self.msg_senders{
+            sender.send(msg.clone()).unwrap();
         }
+    }
+    
+    pub fn execute<F>(&self, task: F) where F: FnOnce(Option<T>) + Send + 'static {
+        self.sender.send(Box::new(task)).unwrap();
     }
 }
