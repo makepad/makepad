@@ -31,6 +31,7 @@ export class WasmWebBrowser extends WasmBridge {
         
         this.to_wasm.ToWasmGetDeps({
             gpu_info: this.gpu_info,
+            cpu_cores: navigator.hardwareConcurrency,
             browser_info: {
                 protocol: location.protocol + "",
                 host: location.host + "",
