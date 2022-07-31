@@ -4,7 +4,6 @@ use crate::{
     button_logic::*,
     window_menu::*,
     frame::*,
-    frame_traits::*
 };
 
 live_register!{

@@ -2,7 +2,7 @@ use {
     crate::{
         makepad_platform::*,
         component_map::*,
-        frame_traits::*
+        frame::*
     },
     std::any::TypeId
 };
