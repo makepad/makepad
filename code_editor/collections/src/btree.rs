@@ -1,15 +1,15 @@
 use std::{
-    ops::{Deref, Range, RangeBounds},
+    ops::{Add, AddAssign, Deref, Range, RangeBounds, Sub, SubAssign},
     sync::Arc,
 };
 
 #[derive(Clone)]
-pub(crate) struct BTree<T> {
+pub(crate) struct BTree<T, I> {
     height: usize,
-    root: Node<T>,
+    root: Node<T, I>,
 }
 
-impl<T: Chunk> BTree<T> {
+impl<T: Chunk, I: Info<T>> BTree<T, I> {
     pub(crate) fn new() -> Self {
         Self {
             height: 0,
@@ -25,46 +25,16 @@ impl<T: Chunk> BTree<T> {
         self.root.total_len()
     }
 
-    pub(crate) fn slice<R: RangeBounds<usize>>(&self, range: R) -> Slice<'_, T> {
+    pub(crate) fn info(&self) -> I {
+        self.root.total_info()
+    }
+
+    pub(crate) fn slice<R: RangeBounds<usize>>(&self, range: R) -> Slice<'_, T, I> {
         let range = self::range(range, self.len());
         Slice {
             btree: self,
             start: range.start,
             end: range.end,
-        }
-    }
-
-    pub(crate) fn prepend(&mut self, mut other: Self) {
-        if self.is_empty() {
-            *self = other;
-            return;
-        }
-        if other.is_empty() {
-            return;
-        }
-        if self.height < other.height {
-            if let Some(node) = other
-                .root
-                .append_at_depth(self.root.clone(), other.height - self.height)
-            {
-                let mut branch = Branch::new();
-                branch.push_back(other.root);
-                branch.push_back(node);
-                other.height += 1;
-                other.root = Node::Branch(branch);
-            }
-            *self = other;
-        } else {
-            if let Some(node) = self
-                .root
-                .prepend_at_depth(other.root, self.height - other.height)
-            {
-                let mut branch = Branch::new();
-                branch.push_front(self.root.clone());
-                branch.push_front(node);
-                self.height += 1;
-                self.root = Node::Branch(branch);
-            }
         }
     }
 
@@ -101,13 +71,55 @@ impl<T: Chunk> BTree<T> {
             }
         }
     }
+
+    pub(crate) fn split_off(&mut self, at: usize) -> Self {
+        use std::mem;
+
+        if at == 0 {
+            return mem::replace(self, Self::new());
+        }
+        if at == self.len() {
+            return Self::new();
+        }
+        let mut other_root = self.root.split_off(at);
+        let other_height = self.height - other_root.pull_up_singular_nodes();
+        self.height -= self.root.pull_up_singular_nodes();
+        Self {
+            root: other_root,
+            height: other_height,
+        }
+    }
+
+    pub(crate) fn truncate_front(&mut self, start: usize) {
+        if start == 0 {
+            return;
+        }
+        if start == self.len() {
+            *self = Self::new();
+            return;
+        }
+        self.root.truncate_front(start);
+        self.height -= self.root.pull_up_singular_nodes();
+    }
+
+    pub(crate) fn truncate_back(&mut self, end: usize) {
+        if end == 0 {
+            *self = Self::new();
+            return;
+        }
+        if end == self.len() {
+            return;
+        }
+        self.root.truncate_back(end);
+        self.height -= self.root.pull_up_singular_nodes();
+    }
 }
 
-pub(crate) struct Builder<T: Chunk> {
-    stack: Vec<(usize, Vec<Node<T>>)>,
+pub(crate) struct Builder<T, I> {
+    stack: Vec<(usize, Vec<Node<T, I>>)>,
 }
 
-impl<T: Chunk> Builder<T> {
+impl<T: Chunk, I: Info<T>> Builder<T, I> {
     pub(crate) fn new() -> Self {
         Self { stack: Vec::new() }
     }
@@ -125,7 +137,7 @@ impl<T: Chunk> Builder<T> {
             }
             let (_, nodes) = self.stack.last_mut().unwrap();
             nodes.push(node);
-            if nodes.len() < Branch::<T>::MAX_LEN {
+            if nodes.len() < Branch::<T, I>::MAX_LEN {
                 break;
             }
             let (_, nodes) = self.stack.pop().unwrap();
@@ -134,24 +146,26 @@ impl<T: Chunk> Builder<T> {
         }
     }
 
-    pub(crate) fn build(mut self) -> BTree<T> {
+    pub(crate) fn build(mut self) -> BTree<T, I> {
         let mut btree = BTree::new();
         while let Some((height, nodes)) = self.stack.pop() {
             for root in nodes.into_iter().rev() {
-                btree.prepend(BTree { height, root });
+                let mut new_btree = BTree { height, root };
+                new_btree.append(btree);
+                btree = new_btree;
             }
         }
         btree
     }
 }
 
-pub(crate) struct Slice<'a, T> {
-    btree: &'a BTree<T>,
+pub(crate) struct Slice<'a, T, I> {
+    btree: &'a BTree<T, I>,
     start: usize,
     end: usize,
 }
 
-impl<'a, T: Chunk> Slice<'a, T> {
+impl<'a, T: Chunk, I: Info<T>> Slice<'a, T, I> {
     pub(crate) fn is_empty(&self) -> bool {
         self.len() == 0
     }
@@ -160,7 +174,7 @@ impl<'a, T: Chunk> Slice<'a, T> {
         self.end - self.start
     }
 
-    pub(crate) fn slice<R: RangeBounds<usize>>(&self, range: R) -> Slice<'_, T> {
+    pub(crate) fn slice<R: RangeBounds<usize>>(&self, range: R) -> Slice<'_, T, I> {
         let range = self::range(range, self.len());
         Slice {
             btree: self.btree,
@@ -169,7 +183,7 @@ impl<'a, T: Chunk> Slice<'a, T> {
         }
     }
 
-    pub(crate) fn cursor_front(self) -> Cursor<'a, T> {
+    pub(crate) fn cursor_front(self) -> Cursor<'a, T, I> {
         let mut cursor = Cursor::new(self);
         if self.start == 0 {
             cursor.descend_left();
@@ -181,7 +195,7 @@ impl<'a, T: Chunk> Slice<'a, T> {
         cursor
     }
 
-    pub(crate) fn cursor_back(self) -> Cursor<'a, T> {
+    pub(crate) fn cursor_back(self) -> Cursor<'a, T, I> {
         let mut cursor = Cursor::new(self);
         if self.end == 0 {
             cursor.descend_left();
@@ -194,7 +208,7 @@ impl<'a, T: Chunk> Slice<'a, T> {
     }
 }
 
-impl<'a, T> Clone for Slice<'a, T> {
+impl<'a, T, I> Clone for Slice<'a, T, I> {
     fn clone(&self) -> Self {
         Self {
             btree: self.btree,
@@ -204,16 +218,16 @@ impl<'a, T> Clone for Slice<'a, T> {
     }
 }
 
-impl<'a, T> Copy for Slice<'a, T> {}
+impl<'a, T, I> Copy for Slice<'a, T, I> {}
 
 #[derive(Clone)]
-pub(crate) struct Cursor<'a, T> {
-    slice: Slice<'a, T>,
+pub(crate) struct Cursor<'a, T, I> {
+    slice: Slice<'a, T, I>,
     position: usize,
-    path: Vec<(&'a Branch<T>, usize)>,
+    path: Vec<(&'a Branch<T, I>, usize)>,
 }
 
-impl<'a, T: Chunk> Cursor<'a, T> {
+impl<'a, T: Chunk, I: Info<T>> Cursor<'a, T, I> {
     pub(crate) fn is_at_front(&self) -> bool {
         self.position <= self.slice.start
     }
@@ -257,7 +271,7 @@ impl<'a, T: Chunk> Cursor<'a, T> {
         self.descend_right();
     }
 
-    fn new(slice: Slice<'a, T>) -> Self {
+    fn new(slice: Slice<'a, T, I>) -> Self {
         Self {
             slice,
             position: 0,
@@ -265,7 +279,7 @@ impl<'a, T: Chunk> Cursor<'a, T> {
         }
     }
 
-    fn current_node(&self) -> &'a Node<T> {
+    fn current_node(&self) -> &'a Node<T, I> {
         self.path
             .last()
             .map_or(&self.slice.btree.root, |&(branch, index)| &branch[index])
@@ -323,17 +337,25 @@ pub trait Chunk: Clone + Default {
 
     fn len(&self) -> usize;
     fn is_boundary(&self, index: usize) -> bool;
-    fn shift_left(&mut self, other: &mut Self, mid: usize);
-    fn shift_right(&mut self, other: &mut Self, mid: usize);
+    fn shift_left(&mut self, other: &mut Self, end: usize);
+    fn shift_right(&mut self, other: &mut Self, start: usize);
+    fn truncate_front(&mut self, start: usize);
+    fn truncate_back(&mut self, end: usize);
+}
+
+pub trait Info<T>:
+    Add<Output = Self> + AddAssign + Copy + Default + Sub<Output = Self> + SubAssign
+{
+    fn from_chunk(chunk: &T) -> Self;
 }
 
 #[derive(Clone)]
-enum Node<T> {
+enum Node<T, I> {
     Leaf(Leaf<T>),
-    Branch(Branch<T>),
+    Branch(Branch<T, I>),
 }
 
-impl<T: Chunk> Node<T> {
+impl<T: Chunk, I: Info<T>> Node<T, I> {
     fn into_leaf(self) -> Leaf<T> {
         match self {
             Self::Leaf(leaf) => leaf,
@@ -341,7 +363,7 @@ impl<T: Chunk> Node<T> {
         }
     }
 
-    fn into_branch(self) -> Branch<T> {
+    fn into_branch(self) -> Branch<T, I> {
         match self {
             Self::Branch(branch) => branch,
             _ => panic!(),
@@ -357,19 +379,26 @@ impl<T: Chunk> Node<T> {
 
     fn total_len(&self) -> usize {
         match self {
-            Self::Leaf(leaf) => leaf.total_len(),
+            Self::Leaf(leaf) => leaf.len(),
             Self::Branch(branch) => branch.total_len(),
         }
     }
 
-    fn as_mut_branch(&mut self) -> &mut Branch<T> {
+    fn total_info(&self) -> I {
+        match self {
+            Self::Leaf(leaf) => I::from_chunk(leaf),
+            Self::Branch(branch) => branch.total_info(),
+        }
+    }
+
+    fn as_mut_branch(&mut self) -> &mut Branch<T, I> {
         match self {
             Self::Branch(branch) => branch,
             _ => panic!(),
         }
     }
 
-    fn prepend_at_depth(&mut self, other: Node<T>, depth: usize) -> Option<Self> {
+    fn prepend_at_depth(&mut self, other: Node<T, I>, depth: usize) -> Option<Self> {
         if depth == 0 {
             self.prepend_or_distribute(other)
         } else {
@@ -396,7 +425,7 @@ impl<T: Chunk> Node<T> {
         }
     }
 
-    fn append_at_depth(&mut self, other: Node<T>, depth: usize) -> Option<Self> {
+    fn append_at_depth(&mut self, other: Node<T, I>, depth: usize) -> Option<Self> {
         if depth == 0 {
             self.append_or_distribute(other)
         } else {
@@ -422,6 +451,94 @@ impl<T: Chunk> Node<T> {
                 .map(|other_branch| Node::Branch(other_branch)),
         }
     }
+
+    fn split_off(&mut self, at: usize) -> Self {
+        match self {
+            Self::Leaf(leaf) => Node::Leaf(leaf.split_off(at)),
+            Self::Branch(branch) => {
+                let (index, total_len) = branch.search(at);
+                if at == total_len {
+                    return Node::Branch(branch.split_off(index));
+                }
+                let mut other_branch = branch.split_off(index + 1);
+                let mut node = branch.pop_back().unwrap();
+                let mut other_node = node.split_off(at - total_len);
+                if branch.is_empty() {
+                    branch.push_back(node)
+                } else {
+                    let count = node.pull_up_singular_nodes();
+                    self.append_at_depth(node, count + 1);
+                }
+                if other_branch.is_empty() {
+                    other_branch.push_front(other_node);
+                    Node::Branch(other_branch)
+                } else {
+                    let count = other_node.pull_up_singular_nodes();
+                    let mut other = Node::Branch(other_branch);
+                    other.prepend_at_depth(other_node, count + 1);
+                    other
+                }
+            }
+        }
+    }
+
+    fn truncate_front(&mut self, start: usize) {
+        match self {
+            Self::Leaf(leaf) => leaf.truncate_front(start),
+            Self::Branch(branch) => {
+                let (index, total_len) = branch.search(start);
+                if start == total_len {
+                    branch.truncate_front(index);
+                } else {
+                    branch.truncate_front(index);
+                    let mut node = branch.pop_front().unwrap();
+                    node.truncate_front(start - total_len);
+                    if branch.is_empty() {
+                        branch.push_front(node);
+                    } else {
+                        let count = node.pull_up_singular_nodes();
+                        self.prepend_at_depth(node, count + 1);
+                    }
+                }
+            }
+        }
+    }
+
+    fn truncate_back(&mut self, end: usize) {
+        match self {
+            Self::Leaf(leaf) => leaf.truncate_back(end),
+            Self::Branch(branch) => {
+                let (index, total_len) = branch.search(end);
+                if end == total_len {
+                    branch.truncate_back(index);
+                } else {
+                    branch.truncate_back(index + 1);
+                    let mut node = branch.pop_back().unwrap();
+                    node.truncate_back(end - total_len);
+                    if branch.is_empty() {
+                        branch.push_back(node);
+                    } else {
+                        let count = node.pull_up_singular_nodes();
+                        self.append_at_depth(node, count + 1);
+                    }
+                }
+            }
+        }
+    }
+
+    fn pull_up_singular_nodes(&mut self) -> usize {
+        let mut count = 0;
+        loop {
+            match self {
+                Node::Branch(branch) if branch.len() == 1 => {
+                    *self = branch.pop_back().unwrap();
+                    count += 1;
+                }
+                _ => break,
+            }
+        }
+        count
+    }
 }
 
 #[derive(Clone)]
@@ -438,10 +555,6 @@ impl<T: Chunk> Leaf<T> {
 
     fn from_chunk(chunk: Arc<T>) -> Self {
         Self { chunk }
-    }
-
-    fn total_len(&self) -> usize {
-        self.len()
     }
 
     fn as_chunk(&self) -> &T {
@@ -473,7 +586,14 @@ impl<T: Chunk> Leaf<T> {
     }
 
     fn append(&mut self, mut other: Self) {
-        other.shift_left(self, other.len());
+        let other_len = other.len();
+        self.shift_left(&mut other, other_len);
+    }
+
+    fn split_off(&mut self, at: usize) -> Self {
+        let mut other = Self::new();
+        self.shift_right(&mut other, at);
+        other
     }
 
     fn distribute(&mut self, other: &mut Self) {
@@ -481,29 +601,37 @@ impl<T: Chunk> Leaf<T> {
 
         match self.len().cmp(&other.len()) {
             Ordering::Less => {
-                let mut mid = (other.len() - self.len()) / 2;
-                while !other.is_boundary(mid) {
-                    mid -= 1;
+                let mut end = (other.len() - self.len()) / 2;
+                while !other.is_boundary(end) {
+                    end -= 1;
                 }
-                other.shift_left(self, mid);
-            },
+                self.shift_left(other, end);
+            }
             Ordering::Greater => {
-                let mut mid = (self.len() + other.len()) / 2;
-                while !self.is_boundary(mid) {
-                    mid += 1;
+                let mut start = (self.len() + other.len()) / 2;
+                while !self.is_boundary(start) {
+                    start += 1;
                 }
-                self.shift_right(other, mid);
-            },
+                self.shift_right(other, start);
+            }
             _ => {}
         }
     }
 
-    fn shift_left(&mut self, other: &mut Self, mid: usize) {
-        Arc::make_mut(&mut self.chunk).shift_left(Arc::make_mut(&mut other.chunk), mid);
+    fn shift_left(&mut self, other: &mut Self, end: usize) {
+        Arc::make_mut(&mut self.chunk).shift_left(Arc::make_mut(&mut other.chunk), end);
     }
 
-    fn shift_right(&mut self, other: &mut Self, mid: usize) {
-        Arc::make_mut(&mut self.chunk).shift_right(Arc::make_mut(&mut other.chunk), mid);
+    fn shift_right(&mut self, other: &mut Self, start: usize) {
+        Arc::make_mut(&mut self.chunk).shift_right(Arc::make_mut(&mut other.chunk), start);
+    }
+
+    fn truncate_front(&mut self, start: usize) {
+        Arc::make_mut(&mut self.chunk).truncate_front(start);
+    }
+
+    fn truncate_back(&mut self, end: usize) {
+        Arc::make_mut(&mut self.chunk).truncate_back(end);
     }
 }
 
@@ -516,21 +644,23 @@ impl<T> Deref for Leaf<T> {
 }
 
 #[derive(Clone)]
-struct Branch<T> {
+struct Branch<T, I> {
     total_len: usize,
-    nodes: Arc<Vec<Node<T>>>,
+    total_info: I,
+    nodes: Arc<Vec<Node<T, I>>>,
 }
 
-impl<T: Chunk> Branch<T> {
+impl<T: Chunk, I: Info<T>> Branch<T, I> {
     const MAX_LEN: usize = 2;
 
     fn new() -> Self {
         Self::from_nodes(Arc::new(Vec::new()))
     }
 
-    fn from_nodes(nodes: Arc<Vec<Node<T>>>) -> Self {
+    fn from_nodes(nodes: Arc<Vec<Node<T, I>>>) -> Self {
         Self {
             total_len: nodes.compute_total_len(),
+            total_info: nodes.compute_total_info(),
             nodes,
         }
     }
@@ -539,53 +669,64 @@ impl<T: Chunk> Branch<T> {
         self.total_len
     }
 
-    fn push_front_and_maybe_split(&mut self, node: Node<T>) -> Option<Self> {
+    fn total_info(&self) -> I {
+        self.total_info
+    }
+
+    fn push_front_and_maybe_split(&mut self, node: Node<T, I>) -> Option<Self> {
+        use std::mem;
+
         if self.len() < Self::MAX_LEN {
             self.push_front(node);
             None
         } else {
-            let mut other = self.split_front(self.len() / 2);
+            let mut other = self.split_off(self.len() / 2);
+            mem::swap(self, &mut other);
             other.push_front(node);
             Some(other)
         }
     }
 
-    fn push_front(&mut self, node: Node<T>) {
+    fn push_front(&mut self, node: Node<T, I>) {
         self.total_len += node.total_len();
+        self.total_info += node.total_info();
         Arc::make_mut(&mut self.nodes).insert(0, node);
     }
 
-    fn push_back_and_maybe_split(&mut self, node: Node<T>) -> Option<Self> {
+    fn push_back_and_maybe_split(&mut self, node: Node<T, I>) -> Option<Self> {
         if self.len() < Self::MAX_LEN {
             self.push_back(node);
             None
         } else {
-            let mut other = self.split_back(self.len() / 2);
+            let mut other = self.split_off(self.len() / 2);
             other.push_back(node);
             Some(other)
         }
     }
 
-    fn push_back(&mut self, node: Node<T>) {
+    fn push_back(&mut self, node: Node<T, I>) {
         self.total_len += node.total_len();
+        self.total_info += node.total_info();
         Arc::make_mut(&mut self.nodes).push(node);
     }
 
-    fn pop_front(&mut self) -> Option<Node<T>> {
+    fn pop_front(&mut self) -> Option<Node<T, I>> {
         if self.is_empty() {
             return None;
         }
         let node = Arc::make_mut(&mut self.nodes).remove(0);
         self.total_len -= node.total_len();
+        self.total_info -= node.total_info();
         Some(node)
     }
 
-    fn pop_back(&mut self) -> Option<Node<T>> {
+    fn pop_back(&mut self) -> Option<Node<T, I>> {
         if self.is_empty() {
             return None;
         }
         let node = Arc::make_mut(&mut self.nodes).pop().unwrap();
         self.total_len -= node.total_len();
+        self.total_info -= node.total_info();
         Some(node)
     }
 
@@ -614,16 +755,11 @@ impl<T: Chunk> Branch<T> {
     }
 
     fn append(&mut self, mut other: Self) {
-        other.shift_left(self, other.len());
+        let other_len = other.len();
+        self.shift_left(&mut other, other_len);
     }
 
-    fn split_front(&mut self, at: usize) -> Self {
-        let mut other = Self::new();
-        other.shift_left(self, at);
-        other
-    }
-
-    fn split_back(&mut self, at: usize) -> Self {
+    fn split_off(&mut self, at: usize) -> Self {
         let mut other = Self::new();
         self.shift_right(&mut other, at);
         other
@@ -633,39 +769,55 @@ impl<T: Chunk> Branch<T> {
         use std::cmp::Ordering;
 
         match self.len().cmp(&other.len()) {
-            Ordering::Less => other.shift_left(self, (other.len() - self.len()) / 2),
+            Ordering::Less => self.shift_left(other, (other.len() - self.len()) / 2),
             Ordering::Greater => self.shift_right(other, (self.len() + other.len()) / 2),
             _ => {}
         }
     }
 
-    fn shift_left(&mut self, other: &mut Self, mid: usize) {
-        let total_len = self[..mid].compute_total_len();
-        self.total_len -= total_len;
-        other.total_len += total_len;
-        let nodes = Arc::make_mut(&mut self.nodes).drain(..mid);
-        Arc::make_mut(&mut other.nodes).extend(nodes);
+    fn shift_left(&mut self, other: &mut Self, end: usize) {
+        let total_len = other[..end].compute_total_len();
+        let total_info = other[..end].compute_total_info();
+        other.total_len -= total_len;
+        other.total_info -= total_info;
+        self.total_len += total_len;
+        self.total_info += total_info;
+        let nodes = Arc::make_mut(&mut other.nodes).drain(..end);
+        Arc::make_mut(&mut self.nodes).extend(nodes);
     }
 
-    fn shift_right(&mut self, other: &mut Self, mid: usize) {
-        let total_len = self[mid..].compute_total_len();
+    fn shift_right(&mut self, other: &mut Self, start: usize) {
+        let total_len = self[start..].compute_total_len();
+        let total_info = self[start..].compute_total_info();
         self.total_len -= total_len;
+        self.total_info -= total_info;
         other.total_len += total_len;
-        let nodes = Arc::make_mut(&mut self.nodes).drain(mid..);
+        other.total_info += total_info;
+        let nodes = Arc::make_mut(&mut self.nodes).drain(start..);
         Arc::make_mut(&mut other.nodes).splice(..0, nodes);
+    }
+
+    fn truncate_front(&mut self, start: usize) {
+        Arc::make_mut(&mut self.nodes).drain(..start);
+    }
+
+    fn truncate_back(&mut self, end: usize) {
+        Arc::make_mut(&mut self.nodes).truncate(end);
     }
 }
 
-impl<T> Deref for Branch<T> {
-    type Target = [Node<T>];
+impl<T, I> Deref for Branch<T, I> {
+    type Target = [Node<T, I>];
 
     fn deref(&self) -> &Self::Target {
         &self.nodes
     }
 }
 
-trait NodeSliceExt<T> {
+trait NodeSliceExt<T, I> {
     fn compute_total_len(&self) -> usize;
+
+    fn compute_total_info(&self) -> I;
 
     fn search(&self, position: usize) -> (usize, usize);
 
@@ -674,11 +826,17 @@ trait NodeSliceExt<T> {
         P: FnMut(usize) -> bool;
 }
 
-impl<T: Chunk> NodeSliceExt<T> for [Node<T>] {
+impl<T: Chunk, I: Info<T>> NodeSliceExt<T, I> for [Node<T, I>] {
     fn compute_total_len(&self) -> usize {
         self.iter()
             .map(|node| node.total_len())
             .fold(0, |a, b| a + b)
+    }
+
+    fn compute_total_info(&self) -> I {
+        self.iter()
+            .map(|node| node.total_info())
+            .fold(I::default(), |a, b| a + b)
     }
 
     fn search(&self, position: usize) -> (usize, usize) {
@@ -689,15 +847,15 @@ impl<T: Chunk> NodeSliceExt<T> for [Node<T>] {
     where
         P: FnMut(usize) -> bool,
     {
-        let mut start = 0;
+        let mut total_len = 0;
         self.iter()
             .enumerate()
             .find_map(|(index, node)| {
-                let end = start + node.total_len();
-                if predicate(end) {
-                    return Some((index, start));
+                let new_total_len = total_len + node.total_len();
+                if predicate(new_total_len) {
+                    return Some((index, total_len));
                 }
-                start = end;
+                total_len = new_total_len;
                 None
             })
             .unwrap()
