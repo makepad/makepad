@@ -2,6 +2,7 @@ use {
     crate::{
         makepad_platform::*,
         makepad_component::*,
+        makepad_component::imgui::*
     }
 };
 
