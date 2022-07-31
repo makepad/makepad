@@ -76,7 +76,7 @@ live_register!{
         cursor_margin_top: 4.0,
         select_pad_edges: 3.0
         cursor_size: 2.0,
-        numeric_only: true,
+        numeric_only: false,
         empty_message: "0",
         bg: {
             shape: Box
@@ -413,11 +413,32 @@ impl TextInput {
         cx.set_key_focus(self.bg.area());
     }
     
+    pub fn filter_numeric(&self, input:String)->String{
+        if self.numeric_only{
+            let mut output = String::new();
+            for c in input.chars(){
+                if c.is_ascii_digit() ||c == '.'{
+                    output.push(c);
+                }
+                else if c == ','{  
+                    // some day someone is going to search for this for days
+                    output.push('.');
+                }
+                
+            }
+            output
+        }
+        else{
+            input
+        }
+    }
+    
     pub fn handle_event_iter(&mut self, cx: &mut Cx, event: &Event) -> Vec<TextInputAction> {
         let mut actions = Vec::new();
         self.handle_event(cx, event, &mut | _, a | actions.push(a));
         actions
     }
+    
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, TextInputAction)) {
         self.state_handle_event(cx, event);
@@ -433,14 +454,10 @@ impl TextInput {
                 dispatch_action(cx, TextInputAction::KeyFocus);
             }
             Hit::TextInput(te) => {
-                if self.numeric_only{
-                    for c in te.input.chars(){
-                        if !c.is_ascii_digit() && c != '.'{
-                            return
-                        }
-                    }
+                let input = self.filter_numeric(te.input);
+                if input.len() == 0{
+                    return
                 }
-                
                 let last_undo = self.last_undo.take();
                 if te.replace_last {
                     self.undo_id += 1;
@@ -450,13 +467,13 @@ impl TextInput {
                     }
                 }
                 else {
-                    if te.input == " " {
+                    if input == " " {
                         self.undo_id += 1;
                     }
                     // if this one follows a space, it still needs to eat it
                     self.create_undo(UndoGroup::TextInput(self.undo_id));
                 }
-                self.change(cx, &te.input, dispatch_action);
+                self.change(cx, &input, dispatch_action);
             }
             Hit::TextCopy(ce) => {
                 self.undo_id += 1;

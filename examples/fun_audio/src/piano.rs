@@ -1,3 +1,4 @@
+
 use {
     crate::{
         makepad_platform::*,
@@ -520,8 +521,6 @@ impl Piano {
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct PianoKeyId(pub LiveId);
-
-
 
 // ImGUI convenience API for Piano
 
