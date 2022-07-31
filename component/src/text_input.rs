@@ -76,6 +76,7 @@ live_register!{
         cursor_margin_top: 4.0,
         select_pad_edges: 3.0
         cursor_size: 2.0,
+        numeric_only: true,
         empty_message: "0",
         bg: {
             shape: Box
@@ -187,6 +188,7 @@ pub struct TextInput {
     cursor_margin_top: f32,
     select_pad_edges: f32,
     empty_message: String,
+    numeric_only: bool,
     
     pub read_only: bool,
     
@@ -431,6 +433,14 @@ impl TextInput {
                 dispatch_action(cx, TextInputAction::KeyFocus);
             }
             Hit::TextInput(te) => {
+                if self.numeric_only{
+                    for c in te.input.chars(){
+                        if !c.is_ascii_digit() && c != '.'{
+                            return
+                        }
+                    }
+                }
+                
                 let last_undo = self.last_undo.take();
                 if te.replace_last {
                     self.undo_id += 1;
