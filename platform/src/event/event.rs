@@ -24,7 +24,7 @@ use {
 pub enum Event {
     Construct,
     Destruct,
-    //Paint,
+
     Draw(DrawEvent),
     LiveEdit(LiveEditEvent),
     AppGotFocus,
@@ -37,7 +37,6 @@ pub enum Event {
     WindowCloseRequested(WindowCloseRequestedEvent),
     WindowClosed(WindowClosedEvent),
     WindowGeomChange(WindowGeomChangeEvent),
-    //WindowResizeLoop(WindowResizeLoopEvent),
     
     FingerDown(FingerDownEvent),
     FingerMove(FingerMoveEvent),
@@ -69,14 +68,14 @@ pub enum Event {
     MidiInputList(MidiInputListEvent),
 }
 
-pub enum Hit<'a>{
+pub enum Hit{
     KeyFocus(KeyFocusEvent),
     KeyFocusLost(KeyFocusEvent),
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),
-    Trigger(TriggerHitEvent<'a>),
+    Trigger(TriggerHitEvent),
     TextInput(TextInputEvent),
-    TextCopy(&'a TextCopyEvent),
+    TextCopy(TextCopyEvent),
     FingerScroll(FingerScrollHitEvent),
     FingerDown(FingerDownHitEvent),
     FingerMove(FingerMoveHitEvent),
@@ -172,7 +171,7 @@ impl From<LiveId> for Trigger {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct TriggerHitEvent<'a>(pub &'a HashSet<Trigger>);
+pub struct TriggerHitEvent(pub HashSet<Trigger>);
 
 
 pub enum WebSocketAutoReconnect{
