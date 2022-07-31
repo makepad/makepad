@@ -623,6 +623,15 @@ impl DrawText {
         }
         return Some(rect_pos.repeat);
     }
+
+    pub fn get_char_count(&self, cx: &Cx) -> usize {
+        let area = &self.draw_vars.area;
+        if !area.is_valid(cx) {
+            return 0
+        }
+        let rect_pos = area.get_read_ref(cx, id!(rect_pos), ShaderTy::Vec2).unwrap();
+        rect_pos.repeat
+    }
     
     pub fn get_cursor_pos(&self, cx: &Cx, pos: f32, index: usize) -> Option<Vec2> {
         let area = &self.draw_vars.area;

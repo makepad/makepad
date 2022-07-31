@@ -72,8 +72,9 @@ live_register!{
                 return sdf.result
             }
         }
-        cursor_margin_bottom: 2.0,
+        cursor_margin_bottom: 3.0,
         cursor_margin_top: 4.0,
+        select_pad_edges: 3.0
         cursor_size: 2.0,
         empty_message:"0",
         bg: {
@@ -184,7 +185,7 @@ pub struct TextInput {
     cursor_size: f32,
     cursor_margin_bottom: f32,
     cursor_margin_top: f32,
-    
+    select_pad_edges: f32,
     empty_message: String,
     
     read_only: bool,
@@ -632,15 +633,18 @@ impl TextInput {
             let tail_x = self.label.get_cursor_pos(cx, 0.0, self.cursor_tail)
                 .unwrap_or(vec2(turtle.pos.x, 0.0)).x;
             
-            let (left_x, right_x) = if self.cursor_head < self.cursor_tail {
-                (head_x, tail_x)
+            let (left_x, right_x, left, right) = if self.cursor_head < self.cursor_tail {
+                (head_x, tail_x, self.cursor_head, self.cursor_tail)
             }
             else {
-                (tail_x, head_x)
+                (tail_x, head_x, self.cursor_tail, self.cursor_head)
             };
+            let char_count = self.label.get_char_count(cx);
+            let pad = if left == 0 && right == char_count{self.select_pad_edges}else{0.0};
+            
             self.select.draw_abs(cx, Rect {
-                pos: vec2(left_x - 0.5 * self.cursor_size, turtle.pos.y),
-                size: vec2(right_x - left_x + self.cursor_size, turtle.size.y)
+                pos: vec2(left_x - 0.5 * self.cursor_size - pad, turtle.pos.y),
+                size: vec2(right_x - left_x + self.cursor_size + 2.0*pad, turtle.size.y)
             });
         }
         self.bg.end(cx);

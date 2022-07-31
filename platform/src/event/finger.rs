@@ -579,7 +579,7 @@ impl Event {
             },
             Event::TextCopy(tc) => {
                 if cx.keyboard.has_key_focus(area) {
-                    return Hit::TextCopy(tc);
+                    return Hit::TextCopy(tc.clone());
                 }
             },
             Event::FingerScroll(fe) => {
