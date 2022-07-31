@@ -1,8 +1,4 @@
 use {
-    std::{
-        sync::{Arc, Mutex},
-        cell::RefCell,
-    },
     crate::{
         makepad_platform::*,
         makepad_component::*,
@@ -147,9 +143,7 @@ pub struct TileCache {
     tiles_in_flight: usize,
     
     // this holds a Wasm compatible threadpool
-    thread_pool: ThreadPool,
-    // this is accessed from threads to check if a tile is to be discarded
-    bail_test: Arc<Mutex<RefCell<BailTest >> >,
+    thread_pool: ThreadPool<BailTest>,
 }
 
 impl TileCache {
@@ -185,7 +179,6 @@ impl TileCache {
             next_zoom: 0.0,
             tiles_in_flight: 0,
             thread_pool: ThreadPool::new(cx, use_cores),
-            bail_test: Default::default(),
         }
     }
     
@@ -201,20 +194,21 @@ impl TileCache {
     }
     
     fn set_bail_test(&self, bail_test: BailTest) {
-        *self.bail_test.lock().unwrap().borrow_mut() = bail_test;
+        self.thread_pool.send_msg(bail_test);
     }
     
-    fn tile_needs_to_bail(tile: &Tile, bail_window: Arc<Mutex<RefCell<BailTest >> >) -> bool {
-        let bail = bail_window.lock().unwrap().borrow().clone();
-        if bail.is_zoom_in {
-            if !tile.fractal.intersects(bail.space) {
-                return true
+    fn tile_needs_to_bail(tile: &Tile, bail_window: Option<BailTest >) -> bool {
+        if let Some(bail) = bail_window{
+            if bail.is_zoom_in {
+                if !tile.fractal.intersects(bail.space) {
+                    return true
+                }
             }
-        }
-        else { // compare the size of the bail window against the tile
-            //if tile.fractal.size.x * tile.fractal.size.y < bail.space.size.x * bail.space.size.y * 0.007 {
-            //    return true
-            //}
+            else { // compare the size of the bail window against the tile
+                //if tile.fractal.size.x * tile.fractal.size.y < bail.space.size.x * bail.space.size.y * 0.007 {
+                //    return true
+                //}
+            }
         }
         false
     }
@@ -472,12 +466,8 @@ impl Mandelbrot {
         let max_iter = self.max_iter;
         // we pull a cloneable sender from the to_ui message channel for the worker
         let to_ui = self.to_ui.sender();
-        // clone a ref to the bail window for the worker
-        let bail_test = self.tile_cache.bail_test.clone();
-        // create a new task on the threadpool
-        // this is run on any one of our worker threads that's free
-        let is_zooming = self.is_zooming;
-        self.tile_cache.thread_pool.execute(move || {
+
+        self.tile_cache.thread_pool.execute(move |bail_test| {
             if TileCache::tile_needs_to_bail(&tile, bail_test) {
                 return to_ui.send(ToUI::TileBailed {tile}).unwrap();
             }

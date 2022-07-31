@@ -464,14 +464,7 @@ macro_rules!main_app {
             cx.live_scan_dependencies();
             Box::into_raw(cx) as u32
         }
-        
-        #[export_name = "wasm_terminate_thread_pools"]
-        #[cfg(target_arch = "wasm32")]
-        pub unsafe extern "C" fn wasm_terminate_thread_pools(cx_ptr: u32) {
-            let cx = cx_ptr as *mut Cx;
-            (*cx).terminate_thread_pools();
-        }
-        
+
         #[export_name = "wasm_process_msg"]
         #[cfg(target_arch = "wasm32")]
         pub unsafe extern "C" fn wasm_process_msg(msg_ptr: u32, cx_ptr: u32) -> u32 {
