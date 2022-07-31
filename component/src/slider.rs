@@ -2,21 +2,21 @@ use {
     crate::{
         makepad_derive_frame::*,
         makepad_platform::*,
-        frame_traits::*,
-        text_input::{TextInput,TextInputAction}
+        frame::*,
+        text_input::{TextInput, TextInputAction}
     }
 };
 
 live_register!{
-   import makepad_platform::shader::std::*;
-   DrawSlider: {{DrawSlider}} {
+    import makepad_platform::shader::std::*;
+    DrawSlider: {{DrawSlider}} {
         instance hover: float
         instance focus: float
         instance drag: float
         
         fn pixel(self) -> vec4 {
             let slider_height = 3;
-            let nub_size = mix(3,4, self.hover);
+            let nub_size = mix(3, 4, self.hover);
             let nubbg_size = 18
             
             let sdf = Sdf2d::viewport(self.pos * self.rect_size)
@@ -55,7 +55,7 @@ live_register!{
         }
         
         label_walk: {
-            margin: {left: 4.0, top:3.0}
+            margin: {left: 4.0, top: 3.0}
             width: Fill,
             height: Fill
         }
@@ -166,7 +166,7 @@ impl FrameComponent for Slider {
         }
     }
     
-    fn redraw(&mut self, cx:&mut Cx){
+    fn redraw(&mut self, cx: &mut Cx) {
         self.slider.redraw(cx);
     }
     
@@ -205,24 +205,24 @@ impl Slider {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, &mut Self, SliderAction)) {
         self.state_handle_event(cx, event);
-        for action in self.text_input.handle_event_iter(cx, event){
-            match action{
-                TextInputAction::KeyFocus=>{
+        for action in self.text_input.handle_event_iter(cx, event) {
+            match action {
+                TextInputAction::KeyFocus => {
                     self.animate_state(cx, ids!(focus.on));
                 }
-                TextInputAction::KeyFocusLost=>{
+                TextInputAction::KeyFocusLost => {
                     self.animate_state(cx, ids!(focus.off));
                 }
-                TextInputAction::Return(value)=>{
-                    if let Ok(v) = value.parse::<f32>(){
+                TextInputAction::Return(value) => {
+                    if let Ok(v) = value.parse::<f32>() {
                         self.set_internal(v.max(self.min).min(self.max));
                     }
                     self.update_text_input(cx);
                 }
-                TextInputAction::Escape=>{
+                TextInputAction::Escape => {
                     self.update_text_input(cx);
                 }
-                _=>()
+                _ => ()
             }
         };
         match event.hits(cx, self.slider.area()) {
@@ -268,7 +268,7 @@ impl Slider {
         }
     }
     
-    pub fn update_text_input(&mut self, cx:&mut Cx){
+    pub fn update_text_input(&mut self, cx: &mut Cx) {
         self.text_input.text = format!("{:.2}", self.to_external());
         self.text_input.select_all();
         self.text_input.redraw(cx)
@@ -279,7 +279,7 @@ impl Slider {
         self.slider.begin(cx, walk, self.layout);
         
         if let Some(dw) = cx.defer_walk(self.label_walk) {
-             //, (self.value*100.0) as usize);
+            //, (self.value*100.0) as usize);
             self.text_input.draw_walk(cx, self.text_input.get_walk());
             self.label_text.draw_walk(cx, dw.resolve(cx), self.label_align, &self.label);
         }

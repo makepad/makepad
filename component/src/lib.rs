@@ -20,9 +20,6 @@ pub mod text_input;
 pub mod slider;
 
 #[macro_use]
-pub mod frame_traits;
-pub mod frame;
-pub mod imgui;
 pub mod window_menu;
 
 pub use makepad_platform;
@@ -38,22 +35,24 @@ pub mod fold_header;
 
 pub mod debug_view;
 
+pub mod imgui;
+pub mod frame;
+
 mod theme;
 
 pub use crate::{
     bare_window::BareWindow,
     component_map::ComponentMap,
     button_logic::{button_logic_handle_event, ButtonAction},
-    button::{Button, ButtonImGUIExt},
+    button::{Button},
     text_input::{TextInput},
     link_button::{LinkButton},
     desktop_window::{DesktopWindow},
     scroll_view::{ScrollView},
     scroll_shadow::{ScrollShadow},
     scroll_bar::{ScrollBar},
-    frame::{Frame},
-    imgui::{ImGUI, ImGUIRef, ImGUIRun, ImGuiEventExt},
-    frame_traits::{
+    frame::{
+        Frame,
         FrameDraw,
         FrameDrawApi,
         FrameUid,

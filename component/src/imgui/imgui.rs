@@ -6,7 +6,6 @@ use {
     crate::{
         makepad_platform::*,
         frame::*,
-        frame_traits::*
     },
 };
 

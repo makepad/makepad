@@ -1,16 +1,17 @@
-pub use makepad_component::{self, *};
-pub use makepad_platform::{
-    *,
-    audio::*,
-    midi::*,
-    live_atomic::*,
-};
+pub use makepad_component;
+pub use makepad_component::makepad_platform;
+
+use makepad_component::*;
+use makepad_component::imgui::*;
+
+use makepad_platform::*;
+use makepad_platform::live_atomic::*;
 
 mod piano;
 mod audio;
-use crate::piano::*;
 use crate::audio::*;
 use crate::audio::iron_fish::*;
+use crate::piano::*;
 
 live_register!{
     registry AudioComponent::*;

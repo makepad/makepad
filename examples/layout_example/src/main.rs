@@ -1,4 +1,5 @@
 use makepad_component::*;
+use makepad_component::imgui::*;
 use makepad_platform::*;
 
 live_register!{
