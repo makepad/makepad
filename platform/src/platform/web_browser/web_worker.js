@@ -29,12 +29,12 @@ onmessage = async function(e) {
         }
     };
     
-    WebAssembly.instantiate(thread_info.bytes, {env}).then(wasm => {
+    WebAssembly.instantiate(thread_info.module, {env}).then(wasm => {
         
-        wasm.instance.exports.__stack_pointer.value = thread_info.stack_ptr;
-        wasm.instance.exports.__wasm_init_tls(thread_info.tls_ptr);
+        wasm.exports.__stack_pointer.value = thread_info.stack_ptr;
+        wasm.exports.__wasm_init_tls(thread_info.tls_ptr);
         
-        wasm.instance.exports.wasm_thread_entrypoint(thread_info.closure_ptr);
+        wasm.exports.wasm_thread_entrypoint(thread_info.closure_ptr);
         
         close();
     }, error => {

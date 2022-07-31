@@ -5,7 +5,6 @@ export class WasmWebBrowser extends WasmBridge {
         super (wasm, dispatch);
         
         window.onbeforeunload = _ => {
-            this.wasm_terminate_thread_pools();
             this.clear_memory_refs();
             for (let worker of this.workers) {
                 worker.terminate();
@@ -292,7 +291,7 @@ export class WasmWebBrowser extends WasmBridge {
         return {
             tls_ptr,
             stack_ptr,
-            bytes: this.wasm._bytes,
+            module: this.wasm._module,
             memory: this.wasm._memory,
             closure_ptr
         }
