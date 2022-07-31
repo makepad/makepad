@@ -604,29 +604,16 @@ impl DrawText {
         let mut i = 0;
         while i < base.repeat {
             let index = base.stride * i;
-            
             let y = base.buffer[index + 1];
             let fs = font_size.buffer[index];
-            
             if y + fs * line_spacing > pos.y { // alright lets find our next x
                 while i < base.repeat {
-                    
                     let index = base.stride * i;
                     let x = base.buffer[index + 0];
                     let y = base.buffer[index + 1];
                     let advance = advance.buffer[index + 0];
-                    
-                    // alright if our x > 
-                    
-                    if x > pos.x + advance * 0.5 || y > pos.y {
-                        //let prev_i = i.max(1)-1;
-                        //let prev_index = base.stride * prev_i;
-                        //let prev_x = base.buffer[prev_index + 0];
-                        //let prev_w = rect_size.buffer[prev_index + 0];
-                        //if i < base.repeat - 1 && prev_x > spos.x + prev_w { // fix newline jump-back
-                       //     return Some(i);
-                        //}
-                        return Some(i.max(1)-1);
+                    if pos.x < x + advance * 0.5  || y > pos.y {
+                        return Some(i);
                     }
                     i += 1;
                 }
@@ -636,7 +623,7 @@ impl DrawText {
         return Some(base.repeat);
     }
     
-    pub fn get_cursor_pos(&self, cx: &Cx, index:usize) -> Option<Vec2> {
+    pub fn get_cursor_pos(&self, cx: &Cx, pos:f32, index:usize) -> Option<Vec2> {
         let area = &self.draw_vars.area;
         
         if !area.is_valid(cx) {
@@ -659,7 +646,7 @@ impl DrawText {
         }
         else{
             let index = index * base.stride;
-            let x = base.buffer[index + 0];
+            let x = base.buffer[index + 0]+ advance.buffer[index+0]*pos;
             let y = base.buffer[index + 1];
             Some(vec2(x,y))
         }

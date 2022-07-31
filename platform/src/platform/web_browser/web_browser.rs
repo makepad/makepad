@@ -133,20 +133,13 @@ impl Cx {
                     let digit_id = id_num!(touch, tw.touch.uid as u64).into();
                     self.fingers.alloc_digit(digit_id);
                     
-                    let tap_count = self.fingers.process_tap_count(
+                    self.fingers.process_tap_count(
                         digit_id,
                         Vec2 {x: tw.touch.x, y: tw.touch.y},
                         tw.touch.time
                     );
-                    let digit_index = self.fingers.get_digit_index(digit_id);
-                    let digit_count = self.fingers.get_digit_count();
                     self.call_event_handler(&Event::FingerDown(
-                        tw.into_finger_down_event(
-                            digit_id,
-                            digit_index,
-                            digit_count,
-                            tap_count
-                        )
+                        tw.into_finger_down_event(&self.fingers, digit_id,)
                     ));
                 }
                 
@@ -154,34 +147,17 @@ impl Cx {
                     let tw = ToWasmTouchMove::read_to_wasm(&mut to_wasm);
                     let digit_id = id_num!(touch, tw.touch.uid as u64).into();
                     // lets grab the captured area
-                    let captured = self.fingers.get_captured_area(digit_id);
-                    let digit_index = self.fingers.get_digit_index(digit_id);
-                    let digit_count = self.fingers.get_digit_count();
                     self.call_event_handler(&Event::FingerMove(
-                        tw.into_finger_move_event(
-                            digit_id,
-                            digit_index,
-                            digit_count,
-                            captured
-                        )
+                        tw.into_finger_move_event(&self.fingers, digit_id)
                     ));
                     
                 }
                 
                 id!(ToWasmTouchEnd) => {
                     let tw = ToWasmTouchEnd::read_to_wasm(&mut to_wasm);
-                    
                     let digit_id = id_num!(touch, tw.touch.uid as u64).into();
-                    let captured = self.fingers.get_captured_area(digit_id);
-                    let digit_index = self.fingers.get_digit_index(digit_id);
-                    let digit_count = self.fingers.get_digit_count();
                     self.call_event_handler(&Event::FingerUp(
-                        tw.into_finger_up_event(
-                            digit_id,
-                            digit_index,
-                            digit_count,
-                            captured
-                        )
+                        tw.into_finger_up_event(&self.fingers, digit_id)
                     ));
                     
                     self.fingers.free_digit(digit_id);
@@ -196,22 +172,15 @@ impl Cx {
                         // lets get a unique digit
                         let digit_id = id!(mouse).into();
                         self.fingers.alloc_digit(digit_id);
-                        let digit_index = self.fingers.get_digit_index(digit_id);
-                        let digit_count = self.fingers.get_digit_count();
                         
-                        let tap_count = self.fingers.process_tap_count(
+                        self.fingers.process_tap_count(
                             digit_id,
                             Vec2 {x: tw.mouse.x, y: tw.mouse.y},
                             tw.mouse.time
                         );
                         
                         self.call_event_handler(&Event::FingerDown(
-                            tw.into_finger_down_event(
-                                digit_id,
-                                digit_index,
-                                digit_count,
-                                tap_count
-                            )
+                            tw.into_finger_down_event(&self.fingers, digit_id)
                         ));
                     }
                 }
@@ -233,15 +202,10 @@ impl Cx {
                         self.fingers.cycle_hover_area(digit_id);
                     }
                     else {
-                        let captured = self.fingers.get_captured_area(digit_id);
-                        let digit_index = self.fingers.get_digit_index(digit_id);
-                        let digit_count = self.fingers.get_digit_count();
                         self.call_event_handler(&Event::FingerMove(
                             tw.into_finger_move_event(
+                                &self.fingers,
                                 digit_id,
-                                digit_index,
-                                digit_count,
-                                captured,
                                 self.platform.last_mouse_button.unwrap_or(0) as usize
                             )
                         ));
