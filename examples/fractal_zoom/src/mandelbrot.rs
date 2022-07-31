@@ -48,7 +48,7 @@ live_register!{
 pub const TILE_SIZE_X: usize = 256;
 pub const TILE_SIZE_Y: usize = 256;
 pub const TILE_CACHE_SIZE: usize = 500;
-pub const POOL_THREAD_COUNT: usize = 4;
+//pub const POOL_THREAD_COUNT: usize = 4;
 
 // the shader struct used to draw
 
@@ -170,7 +170,12 @@ impl TileCache {
         }
 
         // preallocate buffers otherwise safari barfs in the worker
-        
+        let use_cores = match cx.cpu_cores(){
+            1  | 2 | 3=>1,
+            4=>2,
+            5=>3,
+            _=>4
+        };
         Self {
             textures,
             current: Vec::new(),
@@ -179,7 +184,7 @@ impl TileCache {
             current_zoom: 0.0,
             next_zoom: 0.0,
             tiles_in_flight: 0,
-            thread_pool: ThreadPool::new(cx, POOL_THREAD_COUNT),
+            thread_pool: ThreadPool::new(cx, use_cores),
             bail_test: Default::default(),
         }
     }
@@ -629,14 +634,9 @@ impl Mandelbrot {
                     self.finger_abs = fe.abs;
                 }
             }
-            Hit::FingerUp(fe) => {
-                if fe.digit.count >= 2 {
-                    self.is_zoom_in = true;
-                }
-                else {
-                    self.is_zoom_in = true;
-                    self.is_zooming = false;
-                }
+            Hit::FingerUp(_) => {
+                self.is_zoom_in = true;
+                self.is_zooming = false;
             }
             _ => ()
         }
