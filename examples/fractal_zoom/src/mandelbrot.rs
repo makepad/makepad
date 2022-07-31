@@ -41,7 +41,7 @@ live_register!{
     }
     
     Mandelbrot: {{Mandelbrot}} {
-        max_iter: 3000,
+        max_iter: 320,
     }
 }
 
@@ -477,10 +477,10 @@ impl Mandelbrot {
                 return to_ui.send(ToUI::TileBailed {tile}).unwrap();
             }
             
-            if !is_zooming {
-                mandelbrot_f64x2_4xaa(&mut tile, max_iter);
-            }
-            else if fractal_zoom >2e-5 {
+            //if !is_zooming {
+            //    mandelbrot_f64x2_4xaa(&mut tile, max_iter);
+            //}
+            if fractal_zoom >2e-5 {
                 // we can use a f32x4 path when we aren't zoomed in far (2x faster)
                 // as f32 has limited zoom-depth it can support
                 mandelbrot_f32x4(&mut tile, max_iter);
