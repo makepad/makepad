@@ -1,11 +1,11 @@
 use {
     crate::{btree, BTree},
-    std::ops::RangeBounds,
+    std::ops::{Add, AddAssign, RangeBounds, Sub, SubAssign},
 };
 
 #[derive(Clone)]
 pub struct BTreeString {
-    btree: BTree<String>,
+    btree: BTree<String, Info>,
 }
 
 impl BTreeString {
@@ -21,6 +21,10 @@ impl BTreeString {
 
     pub fn len(&self) -> usize {
         self.btree.len()
+    }
+
+    pub fn char_len(&self) -> usize {
+        self.btree.info().char_count
     }
 
     pub fn slice<R: RangeBounds<usize>>(&self, range: R) -> Slice<'_> {
@@ -89,7 +93,7 @@ impl From<&str> for BTreeString {
 }
 
 pub struct Builder {
-    builder: btree::Builder<String>,
+    builder: btree::Builder<String, Info>,
     chunk: String,
 }
 
@@ -128,7 +132,7 @@ impl Builder {
 
 #[derive(Clone, Copy)]
 pub struct Slice<'a> {
-    slice: btree::Slice<'a, String>,
+    slice: btree::Slice<'a, String, Info>,
 }
 
 impl<'a> Slice<'a> {
@@ -195,7 +199,7 @@ impl<'a> Slice<'a> {
 
 #[derive(Clone)]
 pub struct Cursor<'a> {
-    cursor: btree::Cursor<'a, String>,
+    cursor: btree::Cursor<'a, String, Info>,
     current: &'a str,
     index: usize,
 }
@@ -379,6 +383,7 @@ impl<'a> DoubleEndedIterator for Bytes<'a> {
     }
 }
 
+#[derive(Clone)]
 pub struct Chars<'a> {
     slice: Slice<'a>,
     cursor_front: Option<Cursor<'a>>,
@@ -450,11 +455,68 @@ impl btree::Chunk for String {
     }
 }
 
+#[derive(Clone, Copy)]
+pub struct Info {
+    char_count: usize,
+}
+
+impl btree::Info<String> for Info {
+    fn from_chunk(string: &String) -> Self {
+        Self {
+            char_count: string.count_chars(),
+        }
+    }
+}
+
+impl Add for Info {
+    type Output = Self;
+
+    fn add(self, other: Self) -> Self::Output {
+        Self {
+            char_count: self.char_count + other.char_count,
+        }
+    }
+}
+
+impl AddAssign for Info {
+    fn add_assign(&mut self, other: Self) {
+        *self = *self + other;
+    }
+}
+
+impl Default for Info {
+    fn default() -> Self {
+        Self { char_count: 0 }
+    }
+}
+
+impl Sub for Info {
+    type Output = Self;
+
+    fn sub(self, other: Self) -> Self::Output {
+        Self {
+            char_count: self.char_count - other.char_count,
+        }
+    }
+}
+
+impl SubAssign for Info {
+    fn sub_assign(&mut self, other: Self) {
+        *self = *self - other;
+    }
+}
+
 trait U8Ext {
+    fn is_utf8_char_boundary(self) -> bool;
+
     fn utf8_char_len(self) -> usize;
 }
 
 impl U8Ext for u8 {
+    fn is_utf8_char_boundary(self) -> bool {
+        (self as i8) >= -0x40
+    }
+
     fn utf8_char_len(self) -> usize {
         if self < 0x80 {
             1
@@ -468,9 +530,25 @@ impl U8Ext for u8 {
     }
 }
 
+trait StrExt {
+    fn count_chars(&self) -> usize;
+}
+
+impl StrExt for str {
+    fn count_chars(&self) -> usize {
+        let mut count = 0;
+        for byte in self.bytes() {
+            if byte.is_utf8_char_boundary() {
+                count += 1;
+            }
+        }
+        count
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use {proptest::prelude::*, super::*};
+    use {super::*, proptest::prelude::*};
 
     fn string() -> impl Strategy<Value = String> {
         ".*"
@@ -502,6 +580,12 @@ mod tests {
         fn len(string in string()) {
             let btree_string = BTreeString::from(&string);
             assert_eq!(btree_string.len(), string.len());
+        }
+
+        #[test]
+        fn test_char_len(string in any::<String>()) {
+            let btree_string = BTreeString::from(&string);
+            assert_eq!(btree_string.char_len(), string.count_chars());
         }
 
         #[test]
