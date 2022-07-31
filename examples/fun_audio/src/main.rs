@@ -97,12 +97,12 @@ live_register!{
         }
     }
     
-    InstrumentSlider2: Rect {
+    TextInputTest: Rect {
         bg: {color: #4}
         width: Fill
         height: Fit
-        layout: {flow: Right, padding: 8}
-        TextInput {
+        layout: {flow: Right, padding: 0}
+        textbox = TextInput {
             text: "Hello WOrld"
         }
     }
@@ -170,7 +170,7 @@ live_register!{
                             label: "Osc2 detune"
                         }
                     }
-                    InstrumentSlider2 {}
+                    TextInputTest {}
                     
                 }
             }
@@ -260,11 +260,6 @@ live_register!{
                 }
             }
         }
-        scroll_view: {
-            h_show: true,
-            v_show: true,
-            view: {}
-        }
     }
 }
 main_app!(App);
@@ -274,7 +269,6 @@ pub struct App {
     imgui: ImGUI,
     audio_graph: AudioGraph,
     window: BareWindow,
-    scroll_view: ScrollView,
     data: f32,
 }
 
@@ -286,12 +280,11 @@ impl App {
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        
         if let Event::Draw(de) = event {
             return self.draw(&mut Cx2d::new(cx, de));
         }
         
-        self.scroll_view.handle_event(cx, event);
+        self.window.handle_event(cx, event);
         self.audio_graph.handle_event_iter(cx, event);
         
         let mut ui = self.imgui.run(cx, event); 
@@ -321,6 +314,7 @@ impl App {
         for note in ui.on_midi_1_notes(){
             piano.set_note(ui.cx, note.is_on, note.note_number)
         }
+        
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
