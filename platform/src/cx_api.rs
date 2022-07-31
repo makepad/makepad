@@ -83,7 +83,7 @@ impl Cx {
     pub fn redraw_id(&self) -> u64 {self.redraw_id}
     
     pub fn platform_type(&self) -> &PlatformType {&self.platform_type}
-    
+    pub fn cpu_cores(&self)->usize{self.cpu_cores}
     pub fn gpu_info(&self) -> &GpuInfo {&self.gpu_info}
     
     pub fn update_menu(&mut self, menu: Menu) {
