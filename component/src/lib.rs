@@ -20,9 +20,6 @@ pub mod text_input;
 pub mod slider;
 
 #[macro_use]
-pub mod frame_traits;
-pub mod frame;
-pub mod imgui;
 pub mod window_menu;
 
 pub use makepad_platform;
@@ -36,22 +33,26 @@ pub mod fold_button;
 pub mod splitter;
 pub mod fold_header;
 
+pub mod debug_view;
+
+pub mod imgui;
+pub mod frame;
+
 mod theme;
 
 pub use crate::{
     bare_window::BareWindow,
     component_map::ComponentMap,
     button_logic::{button_logic_handle_event, ButtonAction},
-    button::{Button, ButtonImGUIExt},
+    button::{Button},
     text_input::{TextInput},
     link_button::{LinkButton},
     desktop_window::{DesktopWindow},
     scroll_view::{ScrollView},
     scroll_shadow::{ScrollShadow},
     scroll_bar::{ScrollBar},
-    frame::{Frame},
-    imgui::{ImGUI, ImGUIItem, ImGUIRun},
-    frame_traits::{
+    frame::{
+        Frame,
         FrameDraw,
         FrameDrawApi,
         FrameUid,
@@ -67,11 +68,13 @@ pub use crate::{
 
 pub fn live_register(cx: &mut Cx) {
     makepad_platform::live_cx::live_register(cx);
+    crate::debug_view::live_register(cx);
     crate::fold_header::live_register(cx);
     crate::splitter::live_register(cx);
     crate::theme::live_register(cx);
     crate::slider::live_register(cx);
     crate::label::live_register(cx);
+    crate::frame::frame::live_register(cx);
     crate::frame::live_register(cx);
     crate::fold_button::live_register(cx);
     crate::text_input::live_register(cx);

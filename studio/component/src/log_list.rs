@@ -4,7 +4,7 @@ use {
     },
     crate::{
         makepad_component::{
-            frame_traits::*,
+            frame::*,
             component_map::ComponentMap,
             fold_button::FoldButton,
             scroll_view::ScrollView,

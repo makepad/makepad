@@ -1,16 +1,17 @@
-pub use makepad_component::{self, *};
-pub use makepad_platform::{
-    *,
-    audio::*,
-    midi::*,
-    live_atomic::*,
-};
+pub use makepad_component;
+pub use makepad_component::makepad_platform;
+
+use makepad_component::*;
+use makepad_component::imgui::*;
+
+use makepad_platform::*;
+use makepad_platform::live_atomic::*;
 
 mod piano;
 mod audio;
-use crate::piano::*;
 use crate::audio::*;
 use crate::audio::iron_fish::*;
+use crate::piano::*;
 
 live_register!{
     registry AudioComponent::*;
@@ -97,12 +98,12 @@ live_register!{
         }
     }
     
-    InstrumentSlider2: Rect {
+    TextInputTest: Rect {
         bg: {color: #4}
         width: Fill
         height: Fit
-        layout: {flow: Right, padding: 8}
-        TextInput {
+        layout: {flow: Right, padding:{left:8}}
+        textbox = TextInput {
             text: "Hello WOrld"
         }
     }
@@ -170,7 +171,7 @@ live_register!{
                             label: "Osc2 detune"
                         }
                     }
-                    InstrumentSlider2 {}
+                    TextInputTest {}
                     
                 }
             }
@@ -260,11 +261,6 @@ live_register!{
                 }
             }
         }
-        scroll_view: {
-            h_show: true,
-            v_show: true,
-            view: {}
-        }
     }
 }
 main_app!(App);
@@ -274,7 +270,6 @@ pub struct App {
     imgui: ImGUI,
     audio_graph: AudioGraph,
     window: BareWindow,
-    scroll_view: ScrollView,
     data: f32,
 }
 
@@ -286,12 +281,11 @@ impl App {
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        
         if let Event::Draw(de) = event {
             return self.draw(&mut Cx2d::new(cx, de));
         }
         
-        self.scroll_view.handle_event(cx, event);
+        self.window.handle_event(cx, event);
         self.audio_graph.handle_event_iter(cx, event);
         
         let mut ui = self.imgui.run(cx, event); 
@@ -299,6 +293,7 @@ impl App {
         if ui.on_construct(){
             let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
             ui.bind_read(&iron_fish.settings.live_read());
+            ui.piano(ids!(piano)).set_key_focus(ui.cx);
         }
         
         // fetch ui binding deltas
@@ -321,6 +316,7 @@ impl App {
         for note in ui.on_midi_1_notes(){
             piano.set_note(ui.cx, note.is_on, note.note_number)
         }
+        
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {

@@ -31,6 +31,7 @@ export class WasmWebBrowser extends WasmBridge {
         
         this.to_wasm.ToWasmGetDeps({
             gpu_info: this.gpu_info,
+            cpu_cores: navigator.hardwareConcurrency,
             browser_info: {
                 protocol: location.protocol + "",
                 host: location.host + "",
@@ -810,8 +811,8 @@ export class WasmWebBrowser extends WasmBridge {
         document.body.appendChild(style)
         ta.style.left = -100 + 'px'
         ta.style.top = -100 + 'px'
-        ta.style.height = 1
-        ta.style.width = 1
+        ta.style.height = 1+'px'
+        ta.style.width = 1+'px'
         
         //document.addEventListener('focusout', this.onFocusOut.bind(this))
         var was_paste = false;
@@ -973,7 +974,7 @@ export class WasmWebBrowser extends WasmBridge {
     
     update_text_area_pos(pos) {
         if (this.text_area && pos) {
-            this.text_area.style.left = (Math.round(pos.x) - 2) + "px";
+            this.text_area.style.left = (Math.round(pos.x) -2) + "px";
             this.text_area.style.top = (Math.round(pos.y) + 4) + "px"
         }
     }

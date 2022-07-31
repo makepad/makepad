@@ -30,6 +30,7 @@ mod draw_2d;
 mod draw_3d;
 mod draw_list;
 mod shader;
+mod debug;
 pub mod audio;
 pub mod midi;
 
@@ -102,7 +103,10 @@ pub use {
         midi::{
             Midi1Event,
             Midi1Note,
-            Midi1InputData
+            Midi1InputData,
+        },
+        menu::{
+            MenuCommand,
         },
         event::{
             KeyCode,
@@ -110,11 +114,14 @@ pub use {
             Hit,
             DragHit,
             Signal,
+            Trigger,
+            MidiInputListEvent,
             WebSocket,
             WebSocketAutoReconnect,
             Timer,
             NextFrame,
             KeyModifiers,
+            DrawEvent,
             DigitDevice,
             FingerDownEvent,
             FingerMoveEvent,

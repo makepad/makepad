@@ -1,7 +1,7 @@
 use crate::{
     makepad_derive_frame::*,
     makepad_platform::*,
-    frame_traits::*,
+    frame::*,
 };
 
 live_register!{
@@ -144,7 +144,7 @@ impl FrameComponent for Splitter {
     ) {
         let mut redraw = false;
         self.handle_event(cx, event, &mut | cx, action | {
-            dispatch_action(cx, FrameActionItem::from_action(action.into()));
+            dispatch_action(cx, FrameActionItem::new(action.into()));
             redraw = true;
         });
         self.a.handle_component_event(cx, event, dispatch_action);

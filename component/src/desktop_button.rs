@@ -3,7 +3,7 @@ use {
         makepad_derive_frame::*,
         makepad_platform::*,
         button_logic::*,
-        frame_traits::*
+        frame::*
     }
 };
 

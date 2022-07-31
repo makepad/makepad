@@ -588,8 +588,10 @@ impl State {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> StateAction {
         
-        if let Some(nf) = event.is_next_frame(self.next_frame) {
-            
+        if let Event::NextFrame(nf) = event{
+            if !nf.set.contains(&self.next_frame){
+                return StateAction::None
+            }
             if self.state.is_none() {
                 return StateAction::None
             }

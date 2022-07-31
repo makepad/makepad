@@ -42,7 +42,7 @@ pub fn derive_frame_component_impl(input: TokenStream) -> TokenStream {
             tb.add("FrameComponent for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
             tb.add("    fn handle_component_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, FrameActionItem)) {");
             tb.add("        self.handle_event(cx, event, &mut |cx, action|{");
-            tb.add("            dispatch_action(cx, FrameActionItem::from_action(action.into()))");
+            tb.add("            dispatch_action(cx, FrameActionItem::new(action.into()))");
             tb.add("        });");
             tb.add("    }");
             tb.add("    fn get_walk(&self) -> Walk {");
