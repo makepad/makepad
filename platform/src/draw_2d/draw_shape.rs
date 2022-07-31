@@ -13,30 +13,24 @@ use {
 live_register!{
     import makepad_platform::shader::std::*;
     DrawShape: {{DrawShape}} {
-        
-        varying vertex_color: vec4
         texture image: texture2d
         
-        fn vertex(self) -> vec4 {
-            //return vec4(self.geom_pos.x,self.geom_pos.y,0.5,1.0);
-            let ret = self.scroll_and_clip_quad();
-            match self.fill {
-                Fill::Color => {
-                    self.vertex_color = self.color
-                }
-                Fill::GradientX => {
-                    self.vertex_color = mix(self.color, self.color2, self.pos.x)
-                }
-                Fill::GradientY => {
-                    self.vertex_color = mix(self.color, self.color2, self.pos.y)
-                }
-            }
-            return ret;
+        fn get_color(self)->vec4{
+            return self.color
         }
         
         fn pixel(self) -> vec4 {
-            let color = self.vertex_color;
+            let color = vec4(0.0,1.0,0.0,0.0);
             match self.fill {
+                Fill::Color => {
+                    color = self.get_color()
+                }
+                Fill::GradientX => {
+                    color = mix(self.color, self.color2, self.pos.x)
+                }
+                Fill::GradientY => {
+                    color = mix(self.color, self.color2, self.pos.y)
+                }
                 Fill::Image => {
                     color = vec4(sample2d(self.image, self.pos * self.image_scale + self.image_pan).xyz,1.0)
                 }

@@ -1,5 +1,6 @@
 use {
     std::{
+        any::{TypeId, Any},
         fmt::Write,
         collections::HashSet,
     },
@@ -82,7 +83,7 @@ impl Cx {
     pub fn redraw_id(&self) -> u64 {self.redraw_id}
     
     pub fn platform_type(&self) -> &PlatformType {&self.platform_type}
-    
+    pub fn cpu_cores(&self)->usize{self.cpu_cores}
     pub fn gpu_info(&self) -> &GpuInfo {&self.gpu_info}
     
     pub fn update_menu(&mut self, menu: Menu) {
@@ -405,6 +406,17 @@ impl Cx {
         let mut s = String::new();
         debug_draw_tree_recur(self, dump_instances, &mut s, draw_list_id, 0);
         log!("{}", s);
+    }
+
+    pub fn set_global<T: 'static + Any + Sized>(&mut self, value:T){
+        if !self.globals.iter().any(|v| v.0 == TypeId::of::<T>()){
+            self.globals.push((TypeId::of::<T>(), Box::new(value)));
+        }
+    }
+    
+    pub fn get_global<T: 'static + Any>(&mut self)->&mut T{
+        let item = self.globals.iter_mut().find(|v| v.0 == TypeId::of::<T>()).unwrap();
+        item.1.downcast_mut().unwrap()
     }
 }
 
