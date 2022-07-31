@@ -11,10 +11,6 @@ live_register!{
     Frame: {{Frame}} {}
 }
 
-// ClipFrame
-// ScrollFrame
-// Frame
-
 #[derive(Live)]
 #[live_register(frame_component!(Frame))]
 pub struct Frame { // draw info per UI element

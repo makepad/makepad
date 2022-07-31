@@ -71,22 +71,23 @@ live_register!{
                 return sdf.result
             }
         }
+        
         cursor_margin_bottom: 3.0,
         cursor_margin_top: 4.0,
         select_pad_edges: 3.0
         cursor_size: 2.0,
         empty_message: "0",
         bg: {
-            shape: None
-            color: #5
+            shape: Box
+            color: #3
             radius: 2
         },
         layout: {
-            padding: 0,
+            padding: {left:10,top:11, right:10, bottom:10}
             align: {y: 0.}
         },
         walk: {
-            margin: {top: 3, right: 5}
+            margin: {top: 5, right: 5}
             width: Fit,
             height: Fit,
             //margin: 0// {left: 0.0, right: 5.0, top: 0.0, bottom: 2.0},
@@ -187,7 +188,7 @@ pub struct TextInput {
     select_pad_edges: f32,
     empty_message: String,
     
-    read_only: bool,
+    pub read_only: bool,
     
     label_walk: Walk,
     
