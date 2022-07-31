@@ -602,6 +602,7 @@ impl Mandelbrot {
                 self.is_zooming = true;
                 // in case of a mouse we check which mousebutton is down
                 if let Some(button) = fe.digit.mouse_button(){
+                    self.finger_abs = fe.abs;
                     if button == 0{
                         self.is_zoom_in = true;
                     }
