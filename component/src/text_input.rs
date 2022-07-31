@@ -462,12 +462,12 @@ impl TextInput {
                 KeyCode::Escape=>{
                     dispatch_action(cx, TextInputAction::Escape);
                 },
-                KeyCode::KeyZ if ke.mod_logo() || ke.mod_control() => {
+                KeyCode::KeyZ if ke.modifiers.logo || ke.modifiers.shift => {
                     if self.read_only{
                         return
                     }
                     self.undo_id += 1;
-                    if ke.mod_shift() {
+                    if ke.modifiers.shift {
                         self.redo();
                     }
                     else {
@@ -476,13 +476,13 @@ impl TextInput {
                     dispatch_action(cx, TextInputAction::Change(self.text.clone()));
                     self.bg.redraw(cx);
                 }
-                KeyCode::KeyA if ke.mod_logo() || ke.mod_control() => {
+                KeyCode::KeyA if ke.modifiers.logo || ke.modifiers.control => {
                     self.undo_id += 1;
                     self.cursor_tail = 0;
                     self.cursor_head = self.text.chars().count();
                     self.bg.redraw(cx);
                 }
-                KeyCode::KeyX if ke.mod_logo() || ke.mod_control() => {
+                KeyCode::KeyX if ke.modifiers.logo|| ke.modifiers.control => {
                     self.undo_id += 1;
                     if self.cursor_head != self.cursor_tail {
                         self.create_undo(UndoGroup::Cut(self.undo_id));
@@ -494,7 +494,7 @@ impl TextInput {
                     if self.cursor_head>0 {
                         self.cursor_head -= 1;
                     }
-                    if !ke.mod_shift() {
+                    if !ke.modifiers.shift {
                         self.cursor_tail = self.cursor_head;
                     }
                     self.bg.redraw(cx);
@@ -504,7 +504,7 @@ impl TextInput {
                     if self.cursor_head < self.text.chars().count() {
                         self.cursor_head += 1;
                     }
-                    if !ke.mod_shift() {
+                    if !ke.modifiers.shift {
                         self.cursor_tail = self.cursor_head;
                     }
                     self.bg.redraw(cx);
