@@ -31,9 +31,6 @@ live_register!{
                 ),
                 self.selected
             );
-            // COLOR_BG_HOVER,
-            // self.hover
-            //);
         }
     }
     

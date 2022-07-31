@@ -133,11 +133,11 @@ impl<T> FromUIReceiver<T> {
     }
 }
 
-
-pub struct ThreadPoolSender(Sender<()>);
+pub struct ThreadPoolSender {
+    sender: Sender<Box<dyn FnOnce() + Send + 'static>>,
+}
 
 pub struct ThreadPool {
-    task_queue: Arc<Mutex<RefCell<Vec<Box<dyn FnOnce() + Send + 'static>>>>>,
     sender: Arc<RefCell<Option<ThreadPoolSender>>>,
 }
 
@@ -149,24 +149,15 @@ impl Drop for ThreadPool{
 
 impl ThreadPool {
     pub fn new(cx: &mut Cx, num_threads: usize) -> Self {
-        let (sender, receiver) = channel::<()>();
-        let task_queue = Arc::new(Mutex::new(RefCell::new(Vec::<Box<dyn FnOnce() + Send + 'static>>::new())));
+        let (sender, receiver) = channel::<Box<dyn FnOnce() + Send + 'static>>();
         let receiver = Arc::new(Mutex::new(receiver));
         for _ in 0..num_threads {
             let receiver = receiver.clone();
-            let task_queue = task_queue.clone();
             cx.spawn_thread(move || loop {
                 let task = if let Ok(receiver) = receiver.lock() {
                     match receiver.recv() {
-                        Err(_) => return, // thread closed
-                        Ok(_)=>{
-                            if let Some(task) = task_queue.lock().unwrap().borrow_mut().pop(){
-                                task
-                            }
-                            else{ // the task queue got cleared
-                                continue;
-                            }
-                        }
+                        Ok(task) => task,
+                        Err(_) => return
                     }
                 }
                 else {
@@ -175,31 +166,19 @@ impl ThreadPool {
                 task();
             })
         }
-        let sender = Arc::new(RefCell::new(Some(ThreadPoolSender(sender.clone()))));
+        let sender = Arc::new(RefCell::new(Some(ThreadPoolSender{
+            sender
+        })));
         cx.thread_pool_senders.push(sender.clone());
         Self{
-            task_queue,
             sender
         }
     }
     
-    pub fn clear_queue(&self){
-        self.task_queue.lock().unwrap().borrow_mut().clear();
-    }
-    
-    pub fn execute<F>(&self, task: F) where F: FnOnce() + Send + 'static {
+    pub fn execute<F>(&mut self, task: F) where F: FnOnce() + Send + 'static {
         let sender = self.sender.borrow_mut();
         if let Some(tps) = sender.as_ref(){
-            self.task_queue.lock().unwrap().borrow_mut().insert(0,Box::new(task));
-            tps.0.send(()).unwrap();
-        }
-    }
-
-    pub fn execute_first<F>(&self, task: F) where F: FnOnce() + Send + 'static {
-        let sender = self.sender.borrow_mut();
-        if let Some(tps) = sender.as_ref(){
-            self.task_queue.lock().unwrap().borrow_mut().push(Box::new(task));
-            tps.0.send(()).unwrap();
+            tps.sender.send(Box::new(task)).unwrap();
         }
     }
 }

@@ -1,7 +1,9 @@
+
 use {
     crate::{
         makepad_platform::*,
         makepad_component::*,
+        makepad_component::imgui::*
     }
 };
 
@@ -415,7 +417,7 @@ impl Piano {
             }
         }
         
-        match event {
+         match event{
             Event::KeyDown(ke) => if !ke.is_repeat {
                 if let Some(nn) = key_map(ke.key_code) {
                     let note_number = nn + self.keyboard_octave * 12;
@@ -446,7 +448,7 @@ impl Piano {
                     }
                     _ => ()
                 }}
-            }
+            },
             Event::KeyUp(ke) => if let Some(nn) = key_map(ke.key_code) {
                 let note_number = self.keyboard_keys_down[nn as usize];
                 self.keyboard_keys_down[nn as usize] = 0;
@@ -457,9 +459,51 @@ impl Piano {
                     velocity: self.keyboard_velocity
                 }));
             },
-            _ => ()
+            _=>()
         }
+        
         match event.hits(cx, self.view.area()) {
+            Hit::KeyDown(ke) => if !ke.is_repeat {
+                if let Some(nn) = key_map(ke.key_code) {
+                    let note_number = nn + self.keyboard_octave * 12;
+                    self.keyboard_keys_down[nn as usize] = note_number;
+                    self.set_note(cx, true, note_number);
+                    dispatch_action(cx, PianoAction::Note(PianoNote {
+                        is_on: true,
+                        note_number,
+                        velocity: self.keyboard_velocity
+                    }));
+                }
+                else {match ke.key_code {
+                    KeyCode::KeyZ => {
+                        self.keyboard_octave -= 1;
+                        self.keyboard_octave = self.keyboard_octave.max(1);
+                    }
+                    KeyCode::KeyX => {
+                        self.keyboard_octave += 1;
+                        self.keyboard_octave = self.keyboard_octave.min(7);
+                    }
+                    KeyCode::KeyC => {
+                        self.keyboard_velocity -= 16;
+                        self.keyboard_velocity = self.keyboard_velocity.max(16);
+                    }
+                    KeyCode::KeyV => {
+                        self.keyboard_velocity += 16;
+                        self.keyboard_velocity = self.keyboard_velocity.min(127);
+                    }
+                    _ => ()
+                }}
+            }
+            Hit::KeyUp(ke) => if let Some(nn) = key_map(ke.key_code) {
+                let note_number = self.keyboard_keys_down[nn as usize];
+                self.keyboard_keys_down[nn as usize] = 0;
+                self.set_note(cx, false, note_number);
+                dispatch_action(cx, PianoAction::Note(PianoNote {
+                    is_on: false,
+                    note_number,
+                    velocity: self.keyboard_velocity
+                }));
+            },
             Hit::KeyFocus(_) => {
                 for piano_key in self.white_keys.values_mut().chain(self.black_keys.values_mut()) {
                     piano_key.set_is_focussed(cx, true, Animate::Yes)
@@ -478,29 +522,32 @@ impl Piano {
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct PianoKeyId(pub LiveId);
 
+// ImGUI convenience API for Piano
 
-
-// ImGUI API for Piano
-
-pub struct PianoImGUI(ImGUIItem); 
+pub struct PianoImGUI(ImGUIRef);
 
 impl PianoImGUI {
     pub fn on_notes(&self) -> Vec<PianoNote> {
-        let mut ret = Vec::new();
-        for item in self.0.actions.0.iter(){
-            if item.uid() == self.0.uid{
+        let mut notes = Vec::new();
+        for item in self.0.actions.0.iter() {
+            if item.uid() == self.0.uid {
                 if let PianoAction::Note(note) = item.action() {
-                    ret.push(note)
+                    notes.push(note)
                 }
             }
         }
-        ret
+        notes
     }
     
-        
     pub fn set_note(&self, cx: &mut Cx, is_on: bool, note_number: u8) {
-        if let Some(mut inner) = self.inner(){
+        if let Some(mut inner) = self.inner() {
             inner.set_note(cx, is_on, note_number)
+        }
+    }
+    
+    pub fn set_key_focus(&self, cx: &mut Cx) {
+        if let Some(inner) = self.inner() {
+            inner.set_key_focus(cx)
         }
     }
     
@@ -510,12 +557,12 @@ impl PianoImGUI {
 }
 
 pub trait PianoImGUIExt {
-    fn piano(&mut self, path:&[LiveId]) -> PianoImGUI;
+    fn piano(&mut self, path: &[LiveId]) -> PianoImGUI;
 }
 
 impl<'a> PianoImGUIExt for ImGUIRun<'a> {
-    fn piano(&mut self, path:&[LiveId]) -> PianoImGUI {
+    fn piano(&mut self, path: &[LiveId]) -> PianoImGUI {
         let mut frame = self.imgui.frame();
-        PianoImGUI(self.checked_item::<Piano>(frame.component_by_path(path)))
+        PianoImGUI(self.safe_ref::<Piano>(frame.component_by_path(path)))
     }
 }

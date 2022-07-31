@@ -3,7 +3,7 @@ use crate::{
     makepad_derive_frame::*,
     makepad_platform::*,
     button_logic::*,
-    frame_traits::*,
+    frame::*,
 };
 
 live_register!{
@@ -41,16 +41,16 @@ live_register!{
             height: 12,
         }
         
-        state:{
+        state: {
             
-            hover ={
-                default:off
+            hover = {
+                default: off
                 off = {
-                    from: {all: Play::Forward{duration: 0.1}}
+                    from: {all: Play::Forward {duration: 0.1}}
                     apply: {bg: {hover: 0.0}}
                 }
                 
-                on =  {
+                on = {
                     from: {all: Play::Snap}
                     apply: {bg: {hover: 1.0}}
                 }
@@ -58,9 +58,9 @@ live_register!{
             
             open = {
                 default: yes
-                no ={
-                    from: {all: Play::Forward{duration:0.2}}
-                    ease: Ease::ExpDecay{d1:0.96,d2:0.97}
+                no = {
+                    from: {all: Play::Forward {duration: 0.2}}
+                    ease: Ease::ExpDecay {d1: 0.96, d2: 0.97}
                     redraw: true
                     apply: {
                         opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
@@ -68,8 +68,8 @@ live_register!{
                     }
                 }
                 yes = {
-                    from: {all: Play::Forward{duration:0.2}}
-                    ease: Ease::ExpDecay{d1:0.98,d2:0.95}
+                    from: {all: Play::Forward {duration: 0.2}}
+                    ease: Ease::ExpDecay {d1: 0.98, d2: 0.95}
                     redraw: true
                     apply: {
                         opened: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]
@@ -117,7 +117,7 @@ impl FoldButton {
             }
         };
         
-        let state = button_logic_handle_event(cx, event, self.bg.area(), &mut |_,_|{});
+        let state = button_logic_handle_event(cx, event, self.bg.area(), &mut | _, _ | {});
         if let Some(state) = state {
             match state {
                 ButtonState::Pressed => {

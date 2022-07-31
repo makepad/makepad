@@ -1,9 +1,9 @@
 use crate::{
     makepad_platform::*,
+    debug_view::*,
     button_logic::*,
     window_menu::*,
     frame::*,
-    frame_traits::*
 };
 
 live_register!{
@@ -43,6 +43,7 @@ live_register!{
 pub struct DesktopWindow {
     #[rust] pub caption_size: Vec2,
     
+    debug_view: DebugView,
     window: Window,
     main_view: View,
     pass: Pass,
@@ -85,7 +86,9 @@ pub enum DesktopWindowEvent {
 
 impl DesktopWindow {
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> DesktopWindowEvent {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, DesktopWindowEvent)){
+        
+        self.debug_view.handle_event(cx,event);
         
         for item in self.frame.handle_event_iter(cx, event) {
             if let ButtonAction::WasClicked = item.action.cast() {match item.id() {
@@ -111,13 +114,13 @@ impl DesktopWindow {
             Event::WindowCloseRequested(ev) => ev.window_id != self.window.window_id(),
             Event::WindowClosed(ev) => {
                 if ev.window_id == self.window.window_id() {
-                    return DesktopWindowEvent::WindowClosed
+                    return dispatch_action(cx, DesktopWindowEvent::WindowClosed)
                 }
                 true
             }
             Event::WindowGeomChange(ev) => {
                 if ev.window_id == self.window.window_id() {
-                    return DesktopWindowEvent::WindowGeomChange(ev.clone())
+                    return dispatch_action(cx, DesktopWindowEvent::WindowGeomChange(ev.clone()))
                 }
                 true
             },
@@ -144,10 +147,7 @@ impl DesktopWindow {
             _ => false
         };
         if is_for_other_window {
-            DesktopWindowEvent::EventForOtherWindow
-        }
-        else {
-            DesktopWindowEvent::None
+            return dispatch_action(cx, DesktopWindowEvent::EventForOtherWindow)
         }
     }
     
@@ -172,6 +172,7 @@ impl DesktopWindow {
     
     pub fn end(&mut self, cx: &mut Cx2d) {
         while self.frame.draw(cx).is_not_done() {}
+        self.debug_view.draw(cx);
         self.main_view.end(cx);
         cx.end_pass(&self.pass);
     }

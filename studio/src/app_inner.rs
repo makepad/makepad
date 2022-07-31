@@ -134,7 +134,7 @@ impl AppInner {
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, state: &mut AppState) {
-        self.window.handle_event(cx, event);
+        self.window.handle_event(cx, event, &mut |_,_|{});
         
         match event {
             Event::Construct => {

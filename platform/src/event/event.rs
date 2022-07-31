@@ -15,7 +15,6 @@ use {
             xr::*,
         },
         draw_list::DrawListId,
-        cursor::MouseCursor,
         menu::MenuCommand,
     },
 };
@@ -24,7 +23,7 @@ use {
 pub enum Event {
     Construct,
     Destruct,
-    //Paint,
+
     Draw(DrawEvent),
     LiveEdit(LiveEditEvent),
     AppGotFocus,
@@ -32,12 +31,11 @@ pub enum Event {
     NextFrame(NextFrameEvent),
     XRUpdate(XRUpdateEvent),
     
-    WindowSetHoverCursor(MouseCursor),
+    //WindowSetHoverCursor(MouseCursor),
     WindowDragQuery(WindowDragQueryEvent),
     WindowCloseRequested(WindowCloseRequestedEvent),
     WindowClosed(WindowClosedEvent),
     WindowGeomChange(WindowGeomChangeEvent),
-    //WindowResizeLoop(WindowResizeLoopEvent),
     
     FingerDown(FingerDownEvent),
     FingerMove(FingerMoveEvent),
@@ -69,14 +67,14 @@ pub enum Event {
     MidiInputList(MidiInputListEvent),
 }
 
-pub enum Hit<'a>{
+pub enum Hit{
     KeyFocus(KeyFocusEvent),
     KeyFocusLost(KeyFocusEvent),
     KeyDown(KeyEvent),
     KeyUp(KeyEvent),
-    Trigger(TriggerHitEvent<'a>),
+    Trigger(TriggerHitEvent),
     TextInput(TextInputEvent),
-    TextCopy(&'a TextCopyEvent),
+    TextCopy(TextCopyEvent),
     FingerScroll(FingerScrollHitEvent),
     FingerDown(FingerDownHitEvent),
     FingerMove(FingerMoveHitEvent),
@@ -172,7 +170,7 @@ impl From<LiveId> for Trigger {
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct TriggerHitEvent<'a>(pub &'a HashSet<Trigger>);
+pub struct TriggerHitEvent(pub HashSet<Trigger>);
 
 
 pub enum WebSocketAutoReconnect{
@@ -199,18 +197,12 @@ pub struct WebSocketMessageEvent {
 pub struct SignalEvent {
     pub signals: HashSet<Signal>
 }
-/*
-impl Default for Event {
-    fn default() -> Event {
-        Event::None
-    }
-}*/
 
 #[derive(Clone, Debug, Default, Eq, PartialEq, Copy, Hash)]
 pub struct NextFrame(pub u64);
 
 impl NextFrame{
-    pub fn triggered(&self, event:&Event)->Option<NextFrameEvent>{
+    pub fn is_event(&self, event:&Event)->Option<NextFrameEvent>{
         if let Event::NextFrame(ne) = event{
             if ne.set.contains(&self){
                 return Some(ne.clone())
@@ -224,6 +216,15 @@ impl NextFrame{
 pub struct Timer(pub u64);
 
 impl Timer {
+    pub fn is_event(&self, event:&Event)->bool{
+        if let Event::Timer(te) = event{
+            if te.timer_id == self.0{
+                return true
+            }
+        }
+        false
+    }
+    
     pub fn empty() -> Timer {
         Timer(0)
     }
@@ -231,58 +232,4 @@ impl Timer {
     pub fn is_empty(&self) -> bool {
         self.0 == 0
     }
-    
-    pub fn is_timer(&mut self, te: &TimerEvent) -> bool {
-        te.timer_id == self.0
-    }
-}
-
-impl Event {
-    /*
-    pub fn set_handled(&mut self, set: bool) {
-        match self {
-            Event::FingerHover(fe) => {
-                fe.handled.set(set);
-            },
-            Event::FingerDown(fe) => {
-                fe.handled.set(set);
-            },
-            _ => ()
-        }
-    }
-    
-    pub fn handled(&self) -> bool {
-        match self {
-            Event::FingerHover(fe) => {
-                fe.handled.get()
-            },
-            Event::FingerDown(fe) => {
-                fe.handled.get()
-            },
-            
-            _ => false
-        }
-    }*/
-    
-    pub fn is_next_frame<'a>(&'a self, next_frame: NextFrame) -> Option<&'a NextFrameEvent> {
-        match self {
-            Event::NextFrame(fe) => {
-                if fe.set.contains(&next_frame) {
-                    return Some(&fe)
-                }
-            }
-            _ => ()
-        }
-        None
-    }
-    
-    pub fn is_timer(&self, timer: Timer) -> bool{
-        match self {
-            Event::Timer(te) => {
-                return te.timer_id == timer.0
-            }
-            _ => ()
-        }
-        false
-    }    
 }

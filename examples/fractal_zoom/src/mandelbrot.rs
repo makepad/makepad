@@ -41,14 +41,14 @@ live_register!{
     }
     
     Mandelbrot: {{Mandelbrot}} {
-        max_iter: 3000,
+        max_iter: 320,
     }
 }
 
 pub const TILE_SIZE_X: usize = 256;
 pub const TILE_SIZE_Y: usize = 256;
 pub const TILE_CACHE_SIZE: usize = 500;
-pub const POOL_THREAD_COUNT: usize = 4;
+//pub const POOL_THREAD_COUNT: usize = 4;
 
 // the shader struct used to draw
 
@@ -170,7 +170,12 @@ impl TileCache {
         }
 
         // preallocate buffers otherwise safari barfs in the worker
-        
+        let use_cores = match cx.cpu_cores(){
+            1  | 2 | 3=>1,
+            4=>2,
+            5=>3,
+            _=>4
+        };
         Self {
             textures,
             current: Vec::new(),
@@ -179,7 +184,7 @@ impl TileCache {
             current_zoom: 0.0,
             next_zoom: 0.0,
             tiles_in_flight: 0,
-            thread_pool: ThreadPool::new(cx, POOL_THREAD_COUNT),
+            thread_pool: ThreadPool::new(cx, use_cores),
             bail_test: Default::default(),
         }
     }
@@ -477,10 +482,10 @@ impl Mandelbrot {
                 return to_ui.send(ToUI::TileBailed {tile}).unwrap();
             }
             
-            if !is_zooming {
-                mandelbrot_f64x2_4xaa(&mut tile, max_iter);
-            }
-            else if fractal_zoom >2e-5 {
+            //if !is_zooming {
+            //    mandelbrot_f64x2_4xaa(&mut tile, max_iter);
+            //}
+            if fractal_zoom >2e-5 {
                 // we can use a f32x4 path when we aren't zoomed in far (2x faster)
                 // as f32 has limited zoom-depth it can support
                 mandelbrot_f32x4(&mut tile, max_iter);
@@ -545,7 +550,7 @@ impl Mandelbrot {
             self.next_frame = cx.new_next_frame();
         }
         
-        if let Some(ne) = self.next_frame.triggered(event) {
+        if let Some(ne) = self.next_frame.is_event(event) {
             // If we don't have a current layer, initiate the first tile render on the center of the screen
             if self.had_first_draw && self.tile_cache.generate_completed() && self.tile_cache.current.is_empty() {
                 self.generate_tiles_around_finger(cx, self.space.zoom, self.space.view_rect.center());
@@ -602,6 +607,7 @@ impl Mandelbrot {
                 self.is_zooming = true;
                 // in case of a mouse we check which mousebutton is down
                 if let Some(button) = fe.digit.mouse_button(){
+                    self.finger_abs = fe.abs;
                     if button == 0{
                         self.is_zoom_in = true;
                     }
@@ -628,14 +634,9 @@ impl Mandelbrot {
                     self.finger_abs = fe.abs;
                 }
             }
-            Hit::FingerUp(fe) => {
-                if fe.digit.count == 2 {
-                    self.is_zoom_in = true;
-                }
-                else if fe.digit.count == 1{
-                    self.is_zoom_in = true;
-                    self.is_zooming = false;
-                }
+            Hit::FingerUp(_) => {
+                self.is_zoom_in = true;
+                self.is_zooming = false;
             }
             _ => ()
         }
