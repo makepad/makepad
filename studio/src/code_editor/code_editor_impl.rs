@@ -851,7 +851,7 @@ impl CodeEditorImpl {
             self.scroll_view.redraw(cx);
         }
         
-        if event.is_timer(self.caret_blink_timer) {
+        if self.caret_blink_timer.is_event(event) {
             if self.state.is_in_state(cx, ids!(caret.on)) {
                 self.animate_state(cx, ids!(caret.off));
                 dispatch_action(cx, CodeEditorAction::CursorBlink);

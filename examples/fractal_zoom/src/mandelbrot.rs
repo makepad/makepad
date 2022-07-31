@@ -545,7 +545,7 @@ impl Mandelbrot {
             self.next_frame = cx.new_next_frame();
         }
         
-        if let Some(ne) = self.next_frame.triggered(event) {
+        if let Some(ne) = self.next_frame.is_event(event) {
             // If we don't have a current layer, initiate the first tile render on the center of the screen
             if self.had_first_draw && self.tile_cache.generate_completed() && self.tile_cache.current.is_empty() {
                 self.generate_tiles_around_finger(cx, self.space.zoom, self.space.view_rect.center());
