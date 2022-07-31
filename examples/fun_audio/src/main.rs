@@ -102,7 +102,7 @@ live_register!{
         bg: {color: #4}
         width: Fill
         height: Fit
-        layout: {flow: Right, padding: 0}
+        layout: {flow: Right, padding:{left:8}}
         textbox = TextInput {
             text: "Hello WOrld"
         }
@@ -293,6 +293,7 @@ impl App {
         if ui.on_construct(){
             let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
             ui.bind_read(&iron_fish.settings.live_read());
+            ui.piano(ids!(piano)).set_key_focus(ui.cx);
         }
         
         // fetch ui binding deltas
