@@ -18,7 +18,8 @@ export class WasmWebBrowser extends WasmBridge {
         this.text_copy_response = "";
         this.web_sockets = [];
         this.window_info = {}
-        this.signals = [];
+        this.signals_lo = [];
+        this.signals_hi = [];
         this.signal_timeout = null;
         this.workers = [];
         this.thread_stack_size = 2 * 1024 * 1024;
@@ -83,12 +84,24 @@ export class WasmWebBrowser extends WasmBridge {
     // from_wasm dispatch_on_app interface
     
     post_signal_to_wasm(signal_hi, signal_lo) {
-        this.signals.push({signal_hi, signal_lo});
+        let found = false;
+        for (let i = 0; i < this.signals_lo.length; i++){
+            let sl = this.signals_lo[i];
+            let sh = this.signals_hi[i];
+            if(sh == signal_hi && sl == signal_lo){
+                found = true
+            }
+        }
+        if(!found){
+            this.signals_lo.push(signal_lo);
+            this.signals_hi.push(signal_hi);
+        }
         if (this.signal_timeout === null) {
             this.signal_timeout = setTimeout(_ => {
                 this.signal_timeout = null;
-                this.to_wasm.ToWasmSignal({signals: this.signals});
-                this.signals.length = 0
+                this.to_wasm.ToWasmSignal({signals_lo: this.signals_lo, signals_hi: this.signals_hi});
+                this.signals_lo.length = 0
+                this.signals_hi.length = 0
                 this.do_wasm_pump();
             }, 0)
         }
@@ -354,8 +367,9 @@ export class WasmWebBrowser extends WasmBridge {
                         break;
                         
                         case "signal":
-                        this.to_wasm.ToWasmSignal(data)
-                        this.do_wasm_pump();
+                        for(let i = 0; i < data.signals_lo.length; i++){
+                            this.js_post_signal(data.signals_hi[i], data.signals_lo[i]);
+                        }
                         break;
                     }
                 };
