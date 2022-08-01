@@ -13,7 +13,7 @@ pub trait FrameComponent: LiveApply {
         _fn_action: &mut dyn FnMut(&mut Cx, FrameActionItem)
     ) {}
     
-    fn handle_event_iter(&mut self, cx: &mut Cx, event: &Event) -> Vec<FrameActionItem> {
+    fn handle_component_event_iter(&mut self, cx: &mut Cx, event: &Event) -> Vec<FrameActionItem> {
         let mut actions = Vec::new();
         self.handle_component_event(cx, event, &mut | _, action | {
             actions.push(action);
@@ -329,9 +329,9 @@ impl FrameRef {
         }
     }
     
-    pub fn handle_event_iter(&mut self, cx: &mut Cx, event: &Event) -> Vec<FrameActionItem> {
+    pub fn handle_component_event_iter(&mut self, cx: &mut Cx, event: &Event) -> Vec<FrameActionItem> {
         if let Some(inner) = &mut self.0 {
-            return inner.handle_event_iter(cx, event)
+            return inner.handle_component_event_iter(cx, event)
         }
         Vec::new()
     }
@@ -481,15 +481,10 @@ impl FrameUid{
     }
 }
 
-pub enum TabNav{
-    Next,
-    Prev,
-}
 
 pub struct FrameActionItem {
     pub uids: Vec<FrameUid>,
     pub ids: Vec<LiveId>,
-    pub tab_nav: Option<TabNav>,
     pub bind_delta: Option<Vec<LiveNode>>,
     pub action: Box<dyn FrameAction>
 }
@@ -500,18 +495,12 @@ impl FrameActionItem {
             uids: Vec::new(),
             ids: Vec::new(),
             bind_delta: None,
-            tab_nav: None,
             action
         }
     }
     
     pub fn bind_delta(mut self, bind_delta: Vec<LiveNode>,) -> Self {
         if bind_delta.len()>0{self.bind_delta = Some(bind_delta)}
-        self
-    }
-
-    pub fn tab_nav(mut self, tab_nav: Option<TabNav>) -> Self {
-        self.tab_nav = tab_nav;
         self
     }
     

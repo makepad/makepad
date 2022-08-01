@@ -261,6 +261,18 @@ impl dyn FrameComponent {
 
 impl Frame {
     
+    pub fn handle_event_iter(&mut self, cx: &mut Cx, event: &Event) -> Vec<FrameActionItem> {
+        // ok so. 
+        // if we get a tab key press
+        // we need to do a next_focus or prev_focus
+        
+        let mut actions = Vec::new();
+        self.handle_component_event(cx, event, &mut | _, action | {
+            actions.push(action);
+        });
+        actions
+    }
+    
     pub fn component_by_uid(&mut self, uid:FrameUid) -> Option<&mut Box<dyn FrameComponent>> {
         if let Some(FrameFound::Child(child)) = self.frame_query(&FrameQuery::Uid(uid), &mut None).into_found() {
             return Some(child)
