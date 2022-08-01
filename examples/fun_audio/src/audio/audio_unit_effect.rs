@@ -43,7 +43,13 @@ impl AudioGraphNode for Node {
     fn handle_midi_1_data(&mut self, _data: Midi1Data) {
     }
     
-    fn render_to_audio_buffer(&mut self, time: AudioTime, outputs: &mut [&mut AudioBuffer], inputs: &[&AudioBuffer]) {
+    fn render_to_audio_buffer(
+        &mut self,
+        time: AudioTime,
+        outputs: &mut [&mut AudioBuffer],
+        inputs: &[&AudioBuffer],
+        _display: &mut DisplayAudioGraph
+    ) {
         while let Ok(msg) = self.from_ui.try_recv() {
             match msg {
                 FromUI::NewAudioUnit(audio_unit) => {
