@@ -737,6 +737,15 @@ impl Walk {
         }
     }
     
+    pub fn fill() -> Self {
+        Self {
+            abs_pos: None,
+            margin: Margin::default(),
+            width: Size::Fill,
+            height: Size::Fill,
+        }
+    }
+    
     pub fn with_margin_all(mut self, v: f32) -> Self {
         self.margin = Margin {left: v, right: v, top: v, bottom: v};
         self
