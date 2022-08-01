@@ -1,5 +1,6 @@
 pub use makepad_component;
 pub use makepad_component::makepad_platform;
+pub use makepad_platform::makepad_math;
 
 use makepad_component::*;
 use makepad_component::imgui::*;
@@ -7,11 +8,13 @@ use makepad_component::imgui::*;
 use makepad_platform::*;
 use makepad_platform::live_atomic::*;
 
+mod display_audio;
 mod piano;
 mod audio;
 use crate::audio::*;
 use crate::audio::iron_fish::*;
 use crate::piano::*;
+use crate::display_audio::*;
 
 live_register!{
     registry AudioComponent::*;
@@ -32,7 +35,7 @@ live_register!{
         header: BoxY {
             cursor: Default,
             bg: {color: #6},
-            width: Fill
+            walk:{ width: Fill, height: Fit},
             layout: {flow: Right, padding: 8, spacing: 5}
         }
     }
@@ -41,8 +44,7 @@ live_register!{
         header: Rect {
             cursor: Default,
             bg: {color: #5},
-            width: Fill
-            height: Fit
+            walk:{width: Fill, height: Fit}
             layout: {flow: Right, padding: 8, spacing: 5}
         }
     }
@@ -66,22 +68,18 @@ live_register!{
         }
         body: Frame {
             layout: {flow: Overlay}
-            width: Fit
-            height: Fit
+            walk:{width: Fit, height: Fit}
             Frame {
                 layout: {flow: Down}
-                width: Fit
-                height: Fit
+                walk:{width: Fit,height: Fit},
                 piano = Piano {}
                 GradientY {
-                    width: Fill
-                    height: 10
+                    walk:{width: Fill,height: 10}
                     bg: {color: #000a, color2: #0000}
                 }
             }
             g1 = GradientY {
-                width: Fill
-                height: 2
+                walk:{width: Fill, height: 2}
                 bg: {color: #000a, color2: #0000, no_v_scroll: true}
             }
         }
@@ -89,8 +87,7 @@ live_register!{
     
     InstrumentSlider: Rect {
         bg: {color: #4}
-        width: Fill
-        height: Fit
+        walk:{width: Fill,height: Fit}
         layout: {flow: Right, padding: 8, spacing: 5, align: {y: 0.5}}
         slider = Slider {
             label: "CutOff1"
@@ -100,8 +97,7 @@ live_register!{
     
     TextInputTest: Rect {
         bg: {color: #4}
-        width: Fill
-        height: Fit
+        walk:{width: Fill,height: Fit},
         layout: {flow: Right, padding:{left:8}}
         textbox = TextInput {
             text: "Hello WOrld"
@@ -113,8 +109,7 @@ live_register!{
             layout: {align: {y: 0.5}}
             fold_button = FoldButton {}
             swatch = Circle {
-                width: 10
-                height: 10
+                walk: {width: 10,height: 10}
                 bg: {color: #f00}
             }
             label = Label {text: "IronFish"}
@@ -129,8 +124,7 @@ live_register!{
                 body: Frame {
                     layout: {flow: Down}
                     bg: {color: #f00},
-                    width: Fill
-                    height: Fit
+                    walk:{width: Fill, height: Fit}
                     InstrumentSlider {
                         slider = {
                             bind: "filter1.cutoff"
@@ -213,8 +207,7 @@ live_register!{
                 Button {text: "<"}
                 Button {text: ">"}
                 Solid {
-                    width: Fill
-                    height: 36
+                    walk:{width: Fill,height: 36}
                     bg: {
                         const WAVE_HEIGHT: 0.15
                         const WAVE_FREQ: 0.2
@@ -236,17 +229,15 @@ live_register!{
                 a: Frame {
                     layout: {flow: Down}
                     FoldablePiano {}
-                    /*Image{
-                        bg:{shape:Box, radius:30,color:#ff0, image_scale:vec2(1.0,0.2)},
-                        height:Fill,
-                        width:Fill
-                    }*/
+                    display_audio = DisplayAudio{
+                        walk:{height:Fill,width:Fill}
+                    }
                 }
                 b: Box {
                     clip: true,
                     cursor: Default,
                     bg: {color: #4, radius: 3.0, border_width: 0.5, border_color: #3}
-                    height: Fill
+                    walk:{height: Fill}
                     layout: {padding: 0.5}
                     MainHeader {
                         header: {
@@ -276,6 +267,7 @@ pub struct App {
 impl App {
     pub fn live_register(cx: &mut Cx) {
         makepad_component::live_register(cx);
+        crate::display_audio::live_register(cx);
         crate::audio::live_register(cx);
         crate::piano::live_register(cx);
     }
@@ -286,7 +278,6 @@ impl App {
         }
         
         self.window.handle_event(cx, event);
-        self.audio_graph.handle_event_iter(cx, event);
         
         let mut ui = self.imgui.run(cx, event); 
 
@@ -295,6 +286,18 @@ impl App {
             ui.bind_read(&iron_fish.settings.live_read());
             ui.piano(ids!(piano)).set_key_focus(ui.cx);
         }
+        
+        let display_audio = ui.display_audio(ids!(display_audio));
+        
+        let mut buffers = 0;
+        self.audio_graph.handle_event(ui.cx, ui.event, &mut |cx, action|{
+            match action{
+                AudioGraphAction::DisplayAudio{buffer}=>{
+                    display_audio.process_buffer(cx, buffer);
+                    buffers += 1; 
+                }
+            }
+        });
         
         // fetch ui binding deltas
         for delta in ui.on_bind_deltas(){

@@ -18,9 +18,6 @@ pub struct Frame { // draw info per UI element
     
     layout: Layout,
     
-    #[alias(width, walk.width)]
-    #[alias(height, walk.height)]
-    #[alias(margin, walk.margin)]
     pub walk: Walk,
     
     clip: bool,

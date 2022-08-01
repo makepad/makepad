@@ -1,3 +1,5 @@
+const AUDIO_WORKLET_SIGNAL_BATCHING = 8;
+
 class AudioWorklet extends AudioWorkletProcessor {
     constructor(options) {
         super (options);
@@ -31,11 +33,19 @@ class AudioWorklet extends AudioWorkletProcessor {
             },
             
             js_post_signal: (signal_hi, signal_lo) => {
-                this.port.postMessage({
-                    message_type: "signal",
-                    signal_hi,
-                    signal_lo
-                });
+                // unswamp our messageloop 
+                let found = false;
+                for (let i = 0; i < this._context.signals_lo.length; i++){
+                    let sh = this._context.signals_hi[i];
+                    let sl = this._context.signals_lo[i];
+                    if(sh == signal_hi && sl == signal_lo){
+                        found = true
+                    }
+                }
+                if(!found){
+                    this._context.signals_hi.push(signal_hi);
+                    this._context.signals_lo.push(signal_lo);
+                }
             }
         };
         
@@ -43,10 +53,27 @@ class AudioWorklet extends AudioWorkletProcessor {
             
             wasm.exports.__stack_pointer.value = thread_info.stack_ptr;
             wasm.exports.__wasm_init_tls(thread_info.tls_ptr);
+            
             this._context = {
+                signals_lo: [],
+                signals_hi: [],
+                signal_counter: 0,
                 exports: wasm.exports,
                 memory: env.memory,
                 closure_ptr: thread_info.closure_ptr,
+                flush_signals_in_audio_flow: ()=>{
+                    this._context.signal_counter += 1;
+                    if (this._context.signal_counter >= AUDIO_WORKLET_SIGNAL_BATCHING) {
+                        this.port.postMessage({
+                            message_type: "signal",
+                            signals_hi: this._context.signals_hi,
+                            signals_lo: this._context.signals_lo,
+                        });
+                        this._context.signals_lo.length = 0;
+                        this._context.signals_hi.length = 0;
+                        this._context.signal_counter = 0;
+                    }
+                }
             }
         }, error => {
             this.port.postMessage({
@@ -59,6 +86,9 @@ class AudioWorklet extends AudioWorkletProcessor {
     process(inputs, outputs, parameters) {
         if (this._context !== undefined) {
             let context = this._context;
+            
+            context.flush_signals_in_audio_flow();
+            
             let frames = outputs[0][0].length;
             let channels = outputs[0].length;
             

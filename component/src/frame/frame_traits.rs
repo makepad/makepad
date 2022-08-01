@@ -446,10 +446,14 @@ impl LiveApply for FrameRef {
                 self.0 = Some(component);
                 return self.0.as_mut().unwrap().apply(cx, from, index, nodes);
             }
+            else{
+                cx.apply_error_cant_find_target(live_error_origin!(), index, nodes, nodes[index].id);
+            }
         }
         else if let Some(component) = &mut self.0 {
             return component.apply(cx, from, index, nodes)
         }
+        cx.apply_error_cant_find_target(live_error_origin!(), index, nodes, nodes[index].id);
         nodes.skip_node(index)
     }
 }
