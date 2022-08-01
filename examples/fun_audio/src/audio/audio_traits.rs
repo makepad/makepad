@@ -2,9 +2,10 @@ use {
     std::collections::BTreeMap,
     crate::{
         makepad_platform::*,
+        makepad_platform::thread::*,
         makepad_platform::audio::*,
         makepad_platform::midi::*,
-       //audio_engine::AudioEngine
+        //audio_engine::AudioEngine
     }
 };
 
@@ -13,23 +14,58 @@ use {
 
 
 
-pub enum AudioComponentAction {}
+pub enum AudioComponentAction{
+}
+
 pub trait AudioComponent: LiveApply {
     fn type_id(&self) -> LiveType where Self: 'static {LiveType::of::<Self>()}
-    fn handle_event(&mut self, _cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction));
+    fn handle_event(&mut self, _cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction));
     fn get_graph_node(&mut self, cx: &mut Cx) -> Box<dyn AudioGraphNode + Send>;
     fn audio_query(&mut self, _query: &AudioQuery, _callback: &mut Option<AudioQueryCb>) -> AudioResult;
 }
 
 pub trait AudioGraphNode {
     fn handle_midi_1_data(&mut self, data: Midi1Data);
-    fn render_to_audio_buffer(&mut self, time: AudioTime, outputs: &mut [&mut AudioBuffer], inputs: &[&AudioBuffer]);
+    fn render_to_audio_buffer(
+        &mut self,
+        time: AudioTime,
+        outputs: &mut [&mut AudioBuffer],
+        inputs: &[&AudioBuffer],
+        display: &mut DisplayAudioGraph
+    );
 }
 
 generate_ref_cast_api!(AudioComponent);
 
 
 // Audio component registry
+
+
+pub enum ToUIDisplayMsg{
+    DisplayAudio(AudioBuffer),
+    OutOfBuffers
+}
+
+pub struct DisplayAudioGraph<'a> {
+    pub to_ui: &'a ToUISender<ToUIDisplayMsg>, 
+    pub buffers: &'a mut Vec<AudioBuffer>,
+}
+
+// Audio component registry
+impl<'a> DisplayAudioGraph<'a>{
+    pub fn pop_buffer(&mut self)->Option<AudioBuffer>{
+        if let Some(buf) = self.buffers.pop(){
+            return Some(buf)
+        }
+        else{
+            self.to_ui.send(ToUIDisplayMsg::OutOfBuffers).unwrap();
+            None
+        }
+    }
+    pub fn send_buffer(&self, buffer:AudioBuffer){
+        self.to_ui.send(ToUIDisplayMsg::DisplayAudio(buffer)).unwrap();
+    }
+}
 
 
 #[derive(Default, LiveComponentRegistry)]
@@ -44,12 +80,12 @@ pub trait AudioComponentFactory {
 
 // Live bindings for AudioComponentRef
 
-pub struct AudioQueryCb<'a>{
-    pub cb:&'a mut dyn FnMut(&mut Box<dyn AudioComponent >)
+pub struct AudioQueryCb<'a> {
+    pub cb: &'a mut dyn FnMut(&mut Box<dyn AudioComponent >)
 }
 
-impl<'a> AudioQueryCb<'a>{
-    pub fn call(&mut self, args:&mut Box<dyn AudioComponent >){
+impl<'a> AudioQueryCb<'a> {
+    pub fn call(&mut self, args: &mut Box<dyn AudioComponent >) {
         let cb = &mut self.cb;
         cb(args)
     }
@@ -132,17 +168,17 @@ pub enum AudioQuery {
     TypeId(std::any::TypeId),
 }
 
-pub type AudioResult<'a> = Result<(),&'a mut Box<dyn AudioComponent>>;
+pub type AudioResult<'a> = Result<(), &'a mut Box<dyn AudioComponent >>;
 
-pub trait AudioResultApi<'a>{
-    fn not_found()->AudioResult<'a>{AudioResult::Ok(())}
-    fn found(arg:&'a mut Box<dyn AudioComponent>)->AudioResult{AudioResult::Err(arg)}
-    fn is_not_found(&self)->bool;
-    fn is_found(&self)->bool;
-    fn into_found(self)->Option<&'a mut Box<dyn AudioComponent>>;
+pub trait AudioResultApi<'a> {
+    fn not_found() -> AudioResult<'a> {AudioResult::Ok(())}
+    fn found(arg: &'a mut Box<dyn AudioComponent>) -> AudioResult {AudioResult::Err(arg)}
+    fn is_not_found(&self) -> bool;
+    fn is_found(&self) -> bool;
+    fn into_found(self) -> Option<&'a mut Box<dyn AudioComponent >>;
 }
 impl<'a> AudioResultApi<'a> for AudioResult<'a> {
-
+    
     fn is_not_found(&self) -> bool {
         match *self {
             Result::Ok(_) => true,
@@ -155,7 +191,7 @@ impl<'a> AudioResultApi<'a> for AudioResult<'a> {
             Result::Err(_) => true
         }
     }
-    fn into_found(self)->Option<&'a mut Box<dyn AudioComponent>>{
+    fn into_found(self) -> Option<&'a mut Box<dyn AudioComponent >> {
         match self {
             Result::Ok(_) => None,
             Result::Err(arg) => Some(arg)

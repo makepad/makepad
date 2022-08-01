@@ -493,24 +493,38 @@ impl IronFishVoice {
         return output * 0.006; //* 1000.0;
     }
     
-    pub fn fill_buffer(&mut self, buffer: &mut AudioBuffer, settings: &IronFishSettings) {
+    pub fn fill_buffer(&mut self, mix_buffer: &mut AudioBuffer, display_buffer: Option<&mut AudioBuffer>, settings: &IronFishSettings) {
         
-        // let pf = profile_start();
-        let frame_count = buffer.frame_count();
-        let (left, right) = buffer.stereo_mut();
-        for i in 0..frame_count {
-            let output = self.one(&settings) * 8.0;
-            left[i] += output as f32;
-            right[i] += output as f32;
+        let frame_count = mix_buffer.frame_count();
+        let (left, right) = mix_buffer.stereo_mut();
+        
+       /* if let Some(display_buffer) = display_buffer{
+            let (left_disp, right_disp) = display_buffer.stereo_mut();
+            for i in 0..frame_count {
+                let output = self.one(&settings) * 8.0;
+                left_disp[i] = output as f32;
+                right_disp[i] = output as f32;
+                left[i] += output as f32;
+                right[i] += output as f32;
+            }
         }
-        
+        else{*/
+            for i in 0..frame_count {
+                let output = self.one(&settings) * 8.0;
+                left[i] += output as f32;
+                right[i] += output as f32;
+            }
+        //}
         // profile_end(pf);
     }
     
 }
 pub struct IronFishState {
-    pub settings: Arc<IronFishSettings>,
-    pub voices: [IronFishVoice; 16]
+    from_ui: FromUIReceiver<FromUI>,
+    to_ui: ToUISender<ToUI>,
+    display_buffers: Vec<AudioBuffer>,
+    settings: Arc<IronFishSettings>,
+    voices: [IronFishVoice; 16]
 }
 
 impl IronFishState {
@@ -541,12 +555,16 @@ impl IronFishState {
         return output; //* 1000.0;
     }
     
-    pub fn fill_buffer(&mut self, buffer: &mut AudioBuffer) {
+    pub fn fill_buffer(&mut self, buffer: &mut AudioBuffer, display:&mut DisplayAudioGraph) {
         
         buffer.zero();
         for i in 0..self.voices.len() {
             if self.voices[i].active() > -1 {
-                self.voices[i].fill_buffer(buffer, &self.settings);
+                //let mut display_buffer = display.pop_buffer();
+                self.voices[i].fill_buffer(buffer, None, &self.settings);
+                //if let Some(dp) = display_buffer{
+                //    display.send_buffer(dp);
+                 // }
             }
         }
     }
@@ -570,13 +588,22 @@ live_register!{
     }
 }
 
-//enum ToUI {}
-enum FromUI {}
+enum ToUI {
+    DisplayAudio{
+        voice:usize,
+        buffer:AudioBuffer
+    },
+}
+
+enum FromUI {
+    DisplayAudio(AudioBuffer),
+}
 
 #[derive(Live, LiveHook)]
 #[live_register(audio_component!(IronFish))]
 pub struct IronFish {
     pub settings: Arc<IronFishSettings>,
+    #[rust] to_ui: ToUIReceiver<ToUI>,
     #[rust] from_ui: FromUISender<FromUI>,
 }
  
@@ -595,21 +622,28 @@ impl AudioGraphNode for IronFishState{
         }
     }
     
-    fn render_to_audio_buffer(&mut self, _time: AudioTime, outputs: &mut [&mut AudioBuffer], _inputs: &[&AudioBuffer]){
-        self.fill_buffer(outputs[0])
+    fn render_to_audio_buffer(&mut self, _time: AudioTime, outputs: &mut [&mut AudioBuffer], _inputs: &[&AudioBuffer], display:&mut DisplayAudioGraph){
+        self.fill_buffer(outputs[0], display)
     }
 }
 
 impl AudioComponent for IronFish {
     fn get_graph_node(&mut self, cx:&mut Cx) -> Box<dyn AudioGraphNode + Send>{
         self.from_ui.new_channel();
+        let mut buffers = Vec::new();
+        for i in 0..12*16{ 
+            buffers.push(AudioBuffer::default());
+        }
         Box::new(IronFishState{
+            display_buffers: buffers,
             settings: self.settings.clone(),
-            voices:Default::default()
+            voices:Default::default(),
+            to_ui: self.to_ui.sender(),
+            from_ui: self.from_ui.receiver()
         })
     }
     
-    fn handle_event(&mut self, _cx: &mut Cx, _event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)){
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)){
     }
     // we dont have inputs
     fn audio_query(&mut self, _query: &AudioQuery, _callback: &mut Option<AudioQueryCb>) -> AudioResult{

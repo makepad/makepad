@@ -305,10 +305,11 @@ impl Cx {
                 
                 id!(ToWasmSignal) => {
                     let tw = ToWasmSignal::read_to_wasm(&mut to_wasm);
-                    for sig in tw.signals {
-                        let signal_id = ((sig.signal_hi as u64) << 32) | (sig.signal_lo as u64);
+                    for i in 0..tw.signals_lo.len() {
+                        let signal_id = ((tw.signals_hi[i] as u64) << 32) | (tw.signals_lo[i] as u64);
                         self.send_signal(Signal(LiveId(signal_id)));
                     }
+                    self.handle_triggers_and_signals();
                 }
                 
                 id!(ToWasmWebSocketClose) => {

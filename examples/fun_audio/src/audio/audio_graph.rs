@@ -20,21 +20,21 @@ live_register!{
 
 pub enum FromUI {
     Midi1Data(Midi1Data),
-    NewRoot(Box<dyn AudioGraphNode + Send>)
+    NewRoot(Box<dyn AudioGraphNode + Send>),
+    DisplayAudio(AudioBuffer),
 }
 
-#[derive(Clone)]
-pub enum ToUI {
-}
-
-pub enum AudioGraphAction {
+pub enum AudioGraphAction<'a> {
+    DisplayAudio {
+        buffer: &'a AudioBuffer
+    }
 }
 
 #[derive(Live)]
 pub struct AudioGraph {
     root: AudioComponentRef,
     #[rust] from_ui: FromUISender<FromUI>,
-    #[rust] to_ui: ToUIReceiver<ToUI>,
+    #[rust] to_ui: ToUIReceiver<ToUIDisplayMsg>,
 }
 
 impl LiveHook for AudioGraph {
@@ -46,18 +46,21 @@ impl LiveHook for AudioGraph {
             let graph_node = root.get_graph_node(cx);
             self.from_ui.send(FromUI::NewRoot(graph_node)).unwrap();
         }
+        
     }
 }
 
 struct Node {
     from_ui: FromUIReceiver<FromUI>,
     buffer: AudioBuffer,
+    display_buffers: Vec<AudioBuffer>,
     root: Option<Box<dyn AudioGraphNode + Send >>
 }
 
+
 impl AudioGraph {
     
-     pub fn by_type<T: 'static + AudioComponent>(&mut self) -> Option<&mut T> {
+    pub fn by_type<T: 'static + AudioComponent>(&mut self) -> Option<&mut T> {
         if let Some(child) = self.root.audio_query(&AudioQuery::TypeId(TypeId::of::<T>()), &mut None).into_found() {
             return child.cast_mut::<T>()
         }
@@ -68,10 +71,14 @@ impl AudioGraph {
         self.from_ui.send(FromUI::Midi1Data(data)).unwrap();
     }
     
-    fn render_to_output_buffer(node: &mut Node, time:AudioTime, output:&mut dyn AudioOutputBuffer) {
-
+    fn render_to_output_buffer(node: &mut Node, to_ui: &ToUISender<ToUIDisplayMsg>, time: AudioTime, output: &mut dyn AudioOutputBuffer) {
+        
         while let Ok(msg) = node.from_ui.try_recv() {
             match msg {
+                FromUI::DisplayAudio(buf) => {
+                    node.display_buffers.push(buf);
+                    //log!("{}", node.display_buffers.len())
+                }
                 FromUI::NewRoot(new_root) => {
                     node.root = Some(new_root);
                 }
@@ -80,52 +87,69 @@ impl AudioGraph {
                     if let Some(root) = node.root.as_mut() {
                         root.handle_midi_1_data(data);
                     }
-                   // }
+                    // }
                 }
             }
         }
         if let Some(root) = node.root.as_mut() {
             // we should create a real output buffer
             node.buffer.resize_like_output(output);
-            root.render_to_audio_buffer(time, &mut [&mut node.buffer], &[]);
+            let mut dg = DisplayAudioGraph{
+                to_ui,
+                buffers: &mut node.display_buffers
+            };
+            root.render_to_audio_buffer(time, &mut [&mut node.buffer], &[], &mut dg);
+            // lets output this buffer to the UI
+            if let Some(mut display_buffer) = dg.pop_buffer() {
+                display_buffer.copy_from(&node.buffer);
+                dg.send_buffer(display_buffer);
+            }
             output.copy_from_buffer(&node.buffer);
         }
     }
     
-    fn start_audio_output(cx: &mut Cx, from_ui: FromUIReceiver<FromUI>, to_ui: ToUISender<ToUI>) {
-        let state = Arc::new(Mutex::new(Node {from_ui, buffer:AudioBuffer::default(), root: None}));
-        let _to_ui = Arc::new(Mutex::new(to_ui));
-        cx.spawn_audio_output(move |time, output_buffer|{
+    fn start_audio_output(cx: &mut Cx, from_ui: FromUIReceiver<FromUI>, to_ui: ToUISender<ToUIDisplayMsg>) {
+        let mut buffers = Vec::new();
+        for _ in 0..512{ 
+            buffers.push(AudioBuffer::new_with_size(512,2));
+        }
+        
+        let state = Arc::new(Mutex::new(Node {
+            from_ui,
+            buffer: AudioBuffer::default(),
+            display_buffers: buffers,
+            root: None
+        }));
+        
+        let to_ui = Arc::new(Mutex::new(to_ui));
+        cx.spawn_audio_output(move | time, output_buffer | {
             let mut state = state.lock().unwrap();
-            Self::render_to_output_buffer(&mut state, time, output_buffer);
+            let to_ui = to_ui.lock().unwrap();
+            Self::render_to_output_buffer(&mut state, &to_ui, time, output_buffer);
         });
     }
     
-    pub fn handle_event_iter(&mut self, cx: &mut Cx, event: &Event)->Vec<AudioGraphAction> {
-        let mut a = Vec::new(); self.handle_event(cx, event, &mut |_,ac| a.push(ac)); a
-    }
-    
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioGraphAction)) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, AudioGraphAction)) {
         if let Some(root) = self.root.as_mut() {
-            root.handle_event(cx, event, &mut | _cx, _action | {
-            });
+            root.handle_event(cx, event, &mut |_,_|{});
         }
         
         while let Ok(to_ui) = self.to_ui.try_recv(event) {
             match to_ui {
+                ToUIDisplayMsg::DisplayAudio(buffer)=>{
+                    //log!("GOT DISPLAY AUDIO");
+                    dispatch_action(cx, AudioGraphAction::DisplayAudio{buffer:&buffer});
+                    self.from_ui.send(FromUI::DisplayAudio(buffer)).unwrap();
+                },
+                ToUIDisplayMsg::OutOfBuffers=>{ // inject some new buffers
+                }
             }
         }
-
+        
         match event {
-            Event::Midi1InputData(inputs)=>{
-                for input in inputs{
+            Event::Midi1InputData(inputs) => {
+                for input in inputs {
                     self.from_ui.send(FromUI::Midi1Data(input.data)).unwrap();
-                }
-            }
-            Event::KeyDown(ke) => {
-                if let KeyCode::F1 = ke.key_code {
-                }
-                if let KeyCode::Escape = ke.key_code {
                 }
             }
             _ => ()
