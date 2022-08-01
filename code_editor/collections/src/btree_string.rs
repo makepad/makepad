@@ -1,6 +1,6 @@
 use {
     crate::{btree, BTree},
-    std::ops::{Add, AddAssign, RangeBounds, RangeTo, Sub, SubAssign},
+    std::ops::{Add, AddAssign, Range, RangeBounds, Sub, SubAssign},
 };
 
 #[derive(Clone)]
@@ -43,11 +43,14 @@ impl BTreeString {
         if char_index == 0 {
             return 0;
         }
-        match self.btree.search_by(|_, total_info| char_index < total_info.char_count) {
+        match self
+            .btree
+            .search_by(|_, total_info| char_index < total_info.char_count)
+        {
             Some((chunk, total_len, total_info)) => {
                 total_len + chunk.char_index_to_index(char_index - total_info.char_count)
             }
-            None => self.len()
+            None => self.len(),
         }
     }
 
@@ -55,11 +58,14 @@ impl BTreeString {
         if line_index == 0 {
             return 0;
         }
-        match self.btree.search_by(|_, total_info| line_index <= total_info.line_break_count) {
+        match self
+            .btree
+            .search_by(|_, total_info| line_index <= total_info.line_break_count)
+        {
             Some((chunk, total_len, total_info)) => {
                 total_len + chunk.line_index_to_index(line_index - total_info.line_break_count)
             }
-            None => panic!()
+            None => panic!(),
         }
     }
 
@@ -194,6 +200,38 @@ impl<'a> Slice<'a> {
 
     pub fn index_to_line_index(&self, index: usize) -> usize {
         self.slice.index_to_info(index).line_break_count
+    }
+
+    pub fn char_index_to_index(&self, char_index: usize) -> usize {
+        if char_index == 0 {
+            return 0;
+        }
+        match self
+            .slice
+            .search_by(|_, total_info| char_index < total_info.char_count)
+        {
+            Some((chunk, range, total_len, total_info)) => {
+                let chunk = &chunk[range];
+                total_len + chunk.char_index_to_index(char_index - total_info.char_count)
+            }
+            None => self.len(),
+        }
+    }
+
+    pub fn line_index_to_index(&self, line_index: usize) -> usize {
+        if line_index == 0 {
+            return 0;
+        }
+        match self
+            .slice
+            .search_by(|_, total_info| line_index <= total_info.line_break_count)
+        {
+            Some((chunk, range, total_len, total_info)) => {
+                let chunk = &chunk[range];
+                total_len + chunk.line_index_to_index(line_index - total_info.line_break_count)
+            }
+            None => panic!(),
+        }
     }
 
     pub fn cursor_front(self) -> Cursor<'a> {
@@ -508,10 +546,10 @@ pub struct Info {
 }
 
 impl btree::Info<String> for Info {
-    fn from_prefix(string: &String, to: RangeTo<usize>) -> Self {
+    fn from_chunk(string: &String, range: Range<usize>) -> Self {
         Self {
-            char_count: string[to].count_chars(),
-            line_break_count: string[to].count_line_breaks(),
+            char_count: string[range.clone()].count_chars(),
+            line_break_count: string[range].count_line_breaks(),
         }
     }
 }
@@ -535,7 +573,10 @@ impl AddAssign for Info {
 
 impl Default for Info {
     fn default() -> Self {
-        Self { char_count: 0, line_break_count: 0 }
+        Self {
+            char_count: 0,
+            line_break_count: 0,
+        }
     }
 }
 
@@ -701,6 +742,20 @@ mod tests {
                 }
                 (string, range, index)
             })
+    }
+
+    fn string_and_range_and_char_index() -> impl Strategy<Value = (String, Range<usize>, usize)> {
+        string_and_range().prop_flat_map(|(string, range)| {
+            let char_count = string[range.clone()].count_chars();
+            (Just(string), Just(range), 0..=char_count)
+        })
+    }
+
+    fn string_and_range_and_line_index() -> impl Strategy<Value = (String, Range<usize>, usize)> {
+        string_and_range().prop_flat_map(|(string, range)| {
+            let line_break_count = string[range.clone()].count_line_breaks();
+            (Just(string), Just(range), 0..=line_break_count)
+        })
     }
 
     proptest! {
@@ -886,6 +941,22 @@ mod tests {
             let slice = &string[range.clone()];
             let btree_slice = btree_string.slice(range);
             assert_eq!(btree_slice.index_to_line_index(index), slice[..index].count_line_breaks());
+        }
+
+        #[test]
+        fn slice_char_index_to_index((string, range, char_index) in string_and_range_and_char_index()) {
+            let btree_string = BTreeString::from(&string);
+            let slice = &string[range.clone()];
+            let btree_slice = btree_string.slice(range);
+            assert_eq!(btree_slice.char_index_to_index(char_index), slice.char_index_to_index(char_index));
+        }
+
+        #[test]
+        fn slice_line_index_to_index((string, range, line_index) in string_and_range_and_line_index()) {
+            let btree_string = BTreeString::from(&string);
+            let slice = &string[range.clone()];
+            let btree_slice = btree_string.slice(range);
+            assert_eq!(btree_slice.line_index_to_index(line_index), slice.line_index_to_index(line_index));
         }
 
         #[test]
