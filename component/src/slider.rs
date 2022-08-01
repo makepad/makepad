@@ -301,6 +301,7 @@ impl Slider {
         self.slider.slide_pos = self.value;
         self.slider.begin(cx, walk, self.layout);
         
+        
         if let Some(dw) = cx.defer_walk(self.label_walk) {
             //, (self.value*100.0) as usize);
             self.text_input.draw_walk(cx, self.text_input.get_walk());

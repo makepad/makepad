@@ -43,7 +43,7 @@ impl AudioGraphNode for Node{
         }
     }
     
-    fn render_to_audio_buffer(&mut self, _time: AudioTime, outputs: &mut [&mut AudioBuffer], _inputs: &[&AudioBuffer]){
+    fn render_to_audio_buffer(&mut self, _time: AudioTime, outputs: &mut [&mut AudioBuffer], _inputs: &[&AudioBuffer], _display:&mut DisplayAudioGraph){
         let freq = 440.0 * 2.0f64.powf( (self.note as f64 - 69.0)/12.0);
         // only do one output
         let output = &mut outputs[0];

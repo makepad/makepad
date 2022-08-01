@@ -654,14 +654,9 @@ pub struct ToWasmAppGotFocus {}
 pub struct ToWasmAppLostFocus {}
 
 #[derive(ToWasm)]
-pub struct WSignal {
-    pub signal_hi: u32,
-    pub signal_lo: u32,
-}
-
-#[derive(ToWasm)]
 pub struct ToWasmSignal {
-    pub signals: Vec<WSignal>
+    pub signals_hi: Vec<u32>,
+    pub signals_lo: Vec<u32>,
 }
 
 #[derive(ToWasm)]

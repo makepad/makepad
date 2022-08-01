@@ -11,7 +11,7 @@ use {
 
 live_register!{
     AudioUnitInstrument: {{AudioUnitInstrument}} {
-        plugin:"FM8"
+        plugin: "FM8"
     }
 }
 
@@ -27,8 +27,8 @@ enum FromUI {
 #[derive(Live)]
 #[live_register(audio_component!(AudioUnitInstrument))]
 struct AudioUnitInstrument {
-    plugin:String,
-    preset_data:String,
+    plugin: String,
+    preset_data: String,
     #[rust] audio_unit: Option<AudioUnit>,
     #[rust] from_ui: FromUISender<FromUI>,
     #[rust] to_ui: ToUIReceiver<ToUI>,
@@ -39,22 +39,28 @@ struct Node {
     audio_unit: Option<AudioUnitClone>
 }
 
-impl AudioGraphNode for Node{
-    fn handle_midi_1_data(&mut self, data:Midi1Data){
-        if let Some(audio_unit) = &self.audio_unit{
+impl AudioGraphNode for Node {
+    fn handle_midi_1_data(&mut self, data: Midi1Data) {
+        if let Some(audio_unit) = &self.audio_unit {
             audio_unit.handle_midi_1_data(data);
         }
     }
     
-    fn render_to_audio_buffer(&mut self, time: AudioTime, outputs: &mut [&mut AudioBuffer], inputs: &[&AudioBuffer]){
-        while let Ok(msg) = self.from_ui.try_recv(){
-            match msg{
-                FromUI::NewAudioUnit(audio_unit)=>{
+    fn render_to_audio_buffer(
+        &mut self,
+        time: AudioTime,
+        outputs: &mut [&mut AudioBuffer],
+        inputs: &[&AudioBuffer],
+        _display: &mut DisplayAudioGraph
+    ) {
+        while let Ok(msg) = self.from_ui.try_recv() {
+            match msg {
+                FromUI::NewAudioUnit(audio_unit) => {
                     self.audio_unit = Some(audio_unit);
                 }
             }
         }
-        if let Some(audio_unit) = &self.audio_unit{
+        if let Some(audio_unit) = &self.audio_unit {
             audio_unit.render_to_audio_buffer(time, outputs, inputs);
         }
     }
@@ -66,9 +72,9 @@ impl LiveHook for AudioUnitInstrument {
     }
 }
 
-impl AudioUnitInstrument{
-    fn load_audio_unit(&mut self){
-        // alright lets create an audio device 
+impl AudioUnitInstrument {
+    fn load_audio_unit(&mut self) {
+        // alright lets create an audio device
         
         let list = AudioUnitFactory::query_audio_units(AudioUnitType::MusicDevice);
         let sender = self.to_ui.sender();
@@ -77,7 +83,7 @@ impl AudioUnitInstrument{
                 match result {
                     Ok(audio_unit) => {
                         let sender2 = sender.clone();
-                        audio_unit.request_ui(move ||{
+                        audio_unit.request_ui(move || {
                             sender2.send(ToUI::UIReady).unwrap()
                         });
                         sender.send(ToUI::NewAudioUnit(audio_unit)).unwrap();
@@ -86,9 +92,9 @@ impl AudioUnitInstrument{
                 }
             })
         }
-        else{
+        else {
             error!("Cannot find music device {}", self.plugin);
-            for item in &list{
+            for item in &list {
                 error!("MusicDevices: {}", item.name);
             }
         }
@@ -96,24 +102,24 @@ impl AudioUnitInstrument{
 }
 
 impl AudioComponent for AudioUnitInstrument {
-    fn get_graph_node(&mut self, _cx:&mut Cx) -> Box<dyn AudioGraphNode + Send>{
+    fn get_graph_node(&mut self, _cx: &mut Cx) -> Box<dyn AudioGraphNode + Send> {
         self.from_ui.new_channel();
-        Box::new(Node{
+        Box::new(Node {
             from_ui: self.from_ui.receiver(),
-            audio_unit: if let Some(audio_unit) = &self.audio_unit{Some(audio_unit.clone())}else{None}
+            audio_unit: if let Some(audio_unit) = &self.audio_unit {Some(audio_unit.clone())}else {None}
         })
     }
     
-    fn handle_event(&mut self, _cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)){
+    fn handle_event(&mut self, _cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
         // ui EVENT
         while let Ok(to_ui) = self.to_ui.try_recv(event) {
-            match to_ui{
-                ToUI::UIReady=>{
-                    if let Some(audio_unit) = &self.audio_unit{
+            match to_ui {
+                ToUI::UIReady => {
+                    if let Some(audio_unit) = &self.audio_unit {
                         audio_unit.open_ui();
                     }
                 }
-                ToUI::NewAudioUnit(audio_unit)=>{
+                ToUI::NewAudioUnit(audio_unit) => {
                     self.from_ui.send(FromUI::NewAudioUnit(audio_unit.clone())).unwrap();
                     self.audio_unit = Some(audio_unit);
                 }
@@ -121,7 +127,7 @@ impl AudioComponent for AudioUnitInstrument {
         }
     }
     // we dont have inputs
-    fn audio_query(&mut self, _query: &AudioQuery, _callback: &mut Option<AudioQueryCb>) -> AudioResult{
+    fn audio_query(&mut self, _query: &AudioQuery, _callback: &mut Option<AudioQueryCb>) -> AudioResult {
         AudioResult::not_found()
     }
 }

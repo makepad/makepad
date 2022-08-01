@@ -54,18 +54,24 @@ impl AudioGraphNode for Node {
         }
     }
     
-    fn render_to_audio_buffer(&mut self, time: AudioTime, outputs: &mut [&mut AudioBuffer], _inputs: &[&AudioBuffer]) {
+    fn render_to_audio_buffer(
+        &mut self,
+        time: AudioTime,
+        outputs: &mut [&mut AudioBuffer],
+        _inputs: &[&AudioBuffer],
+        display: &mut DisplayAudioGraph
+    ) {
         let output = &mut outputs[0];
         self.buffer.resize_like(*output);
         output.zero();
         for i in 0..self.inputs.len() {
             let input = &mut self.inputs[i];
-            input.render_to_audio_buffer(time, &mut [&mut self.buffer], &[]);
+            input.render_to_audio_buffer(time, &mut [&mut self.buffer], &[], display);
             for c in 0..output.channel_count() {
                 let out_channel = output.channel_mut(c);
                 let in_channel = self.buffer.channel(c);
                 for j in 0..out_channel.len() {
-                    out_channel[j] += in_channel[j];//*0.1;
+                    out_channel[j] += in_channel[j]; //*0.1;
                 }
             }
         }
@@ -74,7 +80,7 @@ impl AudioGraphNode for Node {
 
 
 impl AudioComponent for Mixer {
-    fn get_graph_node(&mut self, cx:&mut Cx) -> Box<dyn AudioGraphNode + Send> {
+    fn get_graph_node(&mut self, cx: &mut Cx) -> Box<dyn AudioGraphNode + Send> {
         
         self.from_ui.new_channel();
         let mut inputs = Vec::new();
@@ -97,13 +103,13 @@ impl AudioComponent for Mixer {
             }
         }
     }
-
+    
     fn audio_query(&mut self, query: &AudioQuery, callback: &mut Option<AudioQueryCb>) -> AudioResult {
-        for input in self.inputs.values_mut(){
-            input.audio_query(query, callback)?;
+        for input in self.inputs.values_mut() {
+            input.audio_query(query, callback) ?;
         }
         AudioResult::not_found()
     }
-
+    
 }
 

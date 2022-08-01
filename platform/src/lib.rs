@@ -15,6 +15,7 @@ pub mod live_atomic;
 pub mod thread;
 mod id_pool;
 mod event;
+mod nav;
 mod area;
 mod font;
 mod window;
