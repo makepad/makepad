@@ -564,10 +564,14 @@ impl IronFishState {
                 self.voices[i].fill_buffer(buffer, display_buffer.as_mut(), &self.settings);
                 if let Some(dp) = display_buffer{
                     display.send_buffer(i,dp);
-                 }
+                }
             }
             else{
-                display.send_voice_off(i);
+                let mut display_buffer = display.pop_buffer_resize(buffer.frame_count(), buffer.channel_count());
+                if let Some(mut dp) = display_buffer{
+                    dp.zero();
+                    display.send_buffer(i,dp);
+                }
             }
         }
     }
