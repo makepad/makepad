@@ -161,7 +161,7 @@ export class WasmBridge {
         return WebAssembly.instantiate(module, {env}).then(wasm => {
             _wasm = wasm;
             wasm._has_thread_support = env.memory !== undefined;
-            wasm._memory = env.memory? env.memory: wasm.instance.exports.memory;
+            wasm._memory = env.memory? env.memory: wasm.exports.memory;
             wasm._module = module;
             return wasm
         }, error => {
