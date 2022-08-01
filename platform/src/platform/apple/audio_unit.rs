@@ -400,7 +400,7 @@ impl AudioUnit {
                 _input_bus_number: u64,
                 buffers: *mut CAudioBufferList |: i32 {
                     let buffers_ref = &*buffers;
-                    //println!("IN OUTPUT {} {:?}", buffers_ref.mBuffers[0].mData as u64, *timestamp);
+                   // println!("IN OUTPUT {} {:?}", frame_count, *timestamp);
                     let mut output = AudioUnitOutputBuffer {
                         data: [0 as *mut f32; MAX_AUDIO_BUFFERS],
                         frame_count: frame_count as usize,
