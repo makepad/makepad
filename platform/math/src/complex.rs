@@ -7,6 +7,10 @@ pub struct ComplexF32 {pub re: f32, pub im: f32}
 #[derive(Clone, Copy)]
 pub struct ComplexF64 {pub re: f64, pub im: f64}
 
+impl ComplexF32{
+    pub fn magnitude(self)->f32{(self.re*self.re + self.im *self.im).sqrt()}
+}
+
 pub fn cf64(re: f64, im: f64) -> ComplexF64 {ComplexF64 {re, im}}
 pub fn cf32(re: f32, im: f32) -> ComplexF32 {ComplexF32 {re, im}}
 

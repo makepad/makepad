@@ -2,7 +2,7 @@
 use {
     crate::{
         makepad_platform::*,
-        makepad_math::complex::fft_f32_recursive_pow2_forward,
+        makepad_math::complex::*,
         makepad_component::*,
         makepad_platform::audio::*,
         makepad_component::imgui::*
@@ -15,23 +15,55 @@ live_register!{
     
     DrawFFT: {{DrawFFT}} {
         texture wave_texture: texture2d
+        texture fft_texture: texture2d
         fn pixel(self) -> vec4 {
-            let wave = sample2d(self.wave_texture, vec2(self.pos.x, 1.0 / 2.0));
-            let left = wave.y + wave.x / 256.0 - 0.5;
+            let wave = sample2d(self.wave_texture, vec2(self.pos.x, 0.5));
+            
+            
+            
+            let fft = sample2d(
+                self.fft_texture,
+                vec2(mod(0.5 - self.pos.y * 0.5,0.25), fract(self.pos.x + self.shift_fft))
+            );
+            
+            let right = abs(wave.y + wave.x / 256.0 - 0.5) * 2.0;
+            let left = abs(wave.w + wave.z / 256.0 - 0.5) * 2.0;
+            
+            let right_fft = fft.y + fft.x / 256.0;
+            let left_fft = fft.w + fft.z / 256.0;
+            
+            //return
+            
             //let right = (wave.w * 256 + wave.z - 127);
             // lets draw a line in the center
-            let fac = abs(left)*2.;
+            
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-            sdf.clear(#0000);
+            if self.pos.y>0.5{
+                sdf.clear(mix(#fff0, #ffff, left_fft ))
+            }
+            else{
+                sdf.clear(mix(#fff0, #ffff, right_fft ))
+            }
+            //sdf.clear( vec4(Pal::iq1(min(left_fft,0.99)),1.0));
             //return mix(#f00,#0f0,left);;
-            sdf.box(
+            sdf.box( 
                 0.,
-                self.rect_size.y * 0.5 - self.rect_size.y * fac,
+                self.rect_size.y * 0.25 - self.rect_size.y * left,
                 self.rect_size.x,
-                2.0*fac * self.rect_size.y,
+                2.0 * left * self.rect_size.y,
                 2.0
             );
-            sdf.fill(#fff);
+            sdf.fill(#fffa);
+            
+            sdf.box(
+                0.,
+                self.rect_size.y * 0.75 - self.rect_size.y * right,
+                self.rect_size.x,
+                2.0 * right * self.rect_size.y,
+                2.0
+            );
+            sdf.fill(#fffa);
+            
             return sdf.result
         }
     }
@@ -48,6 +80,7 @@ live_register!{
 #[derive(Live, LiveHook)]#[repr(C)]
 struct DrawFFT {
     draw_super: DrawQuad,
+    shift_fft: f32
 }
 
 #[derive(Live, FrameComponent)]
@@ -57,6 +90,10 @@ pub struct DisplayAudio {
     walk: Walk,
     fft: DrawFFT,
     wave_texture: Texture,
+    fft_texture: Texture,
+    #[rust] fft_slot: usize,
+    #[rust] fft_buffer: [Vec<ComplexF32>; 2],
+    #[rust] fft_scratch: Vec<ComplexF32>,
     #[rust] data_offset: usize
 }
 
@@ -64,14 +101,23 @@ pub struct DisplayAudio {
 pub enum DisplayAudioAction {
     None
 }
-const BUFFER_SIZE_X: usize = 1024;
-const BUFFER_SIZE_Y: usize = 2;
+const WAVE_SIZE_X: usize = 1024;
+const WAVE_SIZE_Y: usize = 1;
+const FFT_SIZE_X: usize = 512;
+const FFT_SIZE_Y: usize = 512;
+
 impl LiveHook for DisplayAudio {
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
         self.wave_texture.set_desc(cx, TextureDesc {
             format: TextureFormat::ImageBGRA,
-            width: Some(BUFFER_SIZE_X),
-            height: Some(BUFFER_SIZE_Y),
+            width: Some(WAVE_SIZE_X),
+            height: Some(WAVE_SIZE_Y),
+            multisample: None
+        });
+        self.fft_texture.set_desc(cx, TextureDesc {
+            format: TextureFormat::ImageBGRA,
+            width: Some(FFT_SIZE_X),
+            height: Some(FFT_SIZE_Y),
             multisample: None
         });
     }
@@ -83,7 +129,9 @@ impl DisplayAudio {
         if self.view.begin(cx, walk, Layout::default()).not_redrawing() {
             return
         };
+        self.fft.shift_fft = self.fft_slot as f32 / FFT_SIZE_Y as f32;
         self.fft.draw_vars.set_texture(0, &self.wave_texture);
+        self.fft.draw_vars.set_texture(1, &self.fft_texture);
         self.fft.draw_walk(cx, Walk::fill());
         self.view.end(cx);
     }
@@ -92,23 +140,50 @@ impl DisplayAudio {
         // alright we have a texture. lets write the audio somewhere
         let mut buf = Vec::new();
         self.wave_texture.swap_image_u32(cx, &mut buf);
-        buf.resize(BUFFER_SIZE_X * BUFFER_SIZE_Y, 0);
+        buf.resize(WAVE_SIZE_X * WAVE_SIZE_Y, 0);
+        
         let frames = audio.frame_count();
+        
+        self.fft_buffer[0].resize(512, cf32(0.0, 0.0));
+        self.fft_buffer[1].resize(512, cf32(0.0, 0.0));
+        self.fft_scratch.resize(512, cf32(0.0, 0.0));
+        
         let (left, right) = audio.stereo();
         
+        let wave_off = (self.data_offset) & (WAVE_SIZE_X - 1);
+        let fft_off = (self.data_offset) & (FFT_SIZE_X - 1);
         for i in 0..frames {
-            let off = (i + self.data_offset) & (BUFFER_SIZE_X - 1);
-            // letspack left and right
-            let left = ((left[i] + 0.5)*65535.0).max(0.0).min(65535.0) as u32;
-            //let left = ((left[i] + 127.0) * 256.0).max(0.0).min(65535.0) as u32;
-            //let right = ((right[i] + 127.0) * 256.0).max(0.0).min(65535.0) as u32;
-            buf[off] = left;
-            //buf[off] = (left << 16) | right;
+            let left_u16 = ((left[i] + 0.5) * 65536.0).max(0.0).min(65535.0) as u32;
+            let right_u16 = ((right[i] + 0.5) * 65536.0).max(0.0).min(65535.0) as u32;
+            self.fft_buffer[0][fft_off + i] = cf32(left[i], 0.0);
+            self.fft_buffer[1][fft_off + i] = cf32(right[i], 0.0);
+            buf[wave_off + i] = left_u16 << 16 | right_u16;
         }
-        
-        self.data_offset = (self.data_offset + frames) & (BUFFER_SIZE_X - 1);
+        // every time we wrap around we should feed it to the FFT
         self.wave_texture.swap_image_u32(cx, &mut buf);
         self.view.redraw(cx);
+        
+        if fft_off + frames >= FFT_SIZE_X {
+            let mut buf = Vec::new();
+            self.fft_texture.swap_image_u32(cx, &mut buf);
+            buf.resize(FFT_SIZE_X * FFT_SIZE_Y, 0);
+            fft_f32_recursive_pow2_forward(&mut self.fft_buffer[0], &mut self.fft_scratch);
+            fft_f32_recursive_pow2_forward(&mut self.fft_buffer[1], &mut self.fft_scratch);
+            // lets write fft_buffer[0] to the texture
+            for i in 0..FFT_SIZE_X {
+                let left = self.fft_buffer[0][i].magnitude();
+                let right = self.fft_buffer[0][i].magnitude();
+                let left_u16 = (left * 10000.0).max(0.0).min(65535.0) as u32;
+                let right_u16 = (right * 10000.0).max(0.0).min(65535.0) as u32;
+                buf[self.fft_slot * FFT_SIZE_X + i] = left_u16 << 16 | right_u16;
+            }
+            self.fft_slot = (self.fft_slot + 1) & (FFT_SIZE_Y - 1);
+            self.fft_texture.swap_image_u32(cx, &mut buf);
+        }
+        self.data_offset += frames;
+        if self.data_offset >= WAVE_SIZE_X * FFT_SIZE_X {
+            self.data_offset = 0;
+        }
     }
     
     pub fn handle_event(
