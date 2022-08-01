@@ -103,7 +103,7 @@ export class WasmWebBrowser extends WasmBridge {
                 this.signals_lo.length = 0
                 this.signals_hi.length = 0
                 this.do_wasm_pump();
-            }, 8)
+            }, 0)
         }
     }
     
