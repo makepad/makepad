@@ -22,7 +22,7 @@ live_register!{
             // lets draw a line in the center
             let fac = abs(left)*2.;
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-            sdf.clear(#000);
+            sdf.clear(#0000);
             //return mix(#f00,#0f0,left);;
             sdf.box(
                 0.,
