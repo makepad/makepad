@@ -42,7 +42,8 @@ generate_ref_cast_api!(AudioComponent);
 
 
 pub enum ToUIDisplayMsg{
-    DisplayAudio(AudioBuffer),
+    DisplayAudio{voice: usize, buffer:AudioBuffer},
+    VoiceOff{voice: usize},
     OutOfBuffers
 }
 
@@ -53,8 +54,9 @@ pub struct DisplayAudioGraph<'a> {
 
 // Audio component registry
 impl<'a> DisplayAudioGraph<'a>{
-    pub fn pop_buffer(&mut self)->Option<AudioBuffer>{
-        if let Some(buf) = self.buffers.pop(){
+    pub fn pop_buffer_resize(&mut self, frame_count:usize, channels:usize)->Option<AudioBuffer>{
+        if let Some(mut buf) = self.buffers.pop(){
+            buf.resize(frame_count, channels);
             return Some(buf)
         }
         else{
@@ -62,8 +64,12 @@ impl<'a> DisplayAudioGraph<'a>{
             None
         }
     }
-    pub fn send_buffer(&self, buffer:AudioBuffer){
-        self.to_ui.send(ToUIDisplayMsg::DisplayAudio(buffer)).unwrap();
+    pub fn send_buffer(&self, voice: usize, buffer:AudioBuffer){
+        self.to_ui.send(ToUIDisplayMsg::DisplayAudio{voice, buffer}).unwrap();
+    }
+    
+    pub fn send_voice_off(&self, voice: usize){
+        self.to_ui.send(ToUIDisplayMsg::VoiceOff{voice}).unwrap();
     }
 }
 
