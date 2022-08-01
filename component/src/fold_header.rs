@@ -80,7 +80,7 @@ impl FrameComponent for FoldHeader {
             }
         };
         
-        for item in self.header.handle_event_iter(cx, event) {
+        for item in self.header.handle_component_event_iter(cx, event) {
             if item.id() == id!(fold_button) {
                 match item.action.cast() {
                     FoldButtonAction::Opening => {
