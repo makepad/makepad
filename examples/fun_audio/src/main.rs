@@ -292,9 +292,12 @@ impl App {
         let mut buffers = 0;
         self.audio_graph.handle_event(ui.cx, ui.event, &mut |cx, action|{
             match action{
-                AudioGraphAction::DisplayAudio{buffer}=>{
-                    display_audio.process_buffer(cx, buffer);
+                AudioGraphAction::DisplayAudio{buffer, voice}=>{
+                    display_audio.process_buffer(cx, voice, buffer);
                     buffers += 1; 
+                }
+                AudioGraphAction::VoiceOff{voice}=>{
+                    display_audio.voice_off(cx, voice);
                 }
             }
         });
