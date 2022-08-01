@@ -126,7 +126,7 @@ impl Cx {
         }
     }
     
-    fn inner_triggers_and_signals(&mut self) {
+    pub fn handle_triggers_and_signals(&mut self) {
         // post op events like signals, triggers and key-focus
         let mut counter = 0;
         while self.signals.len() != 0 {
@@ -163,7 +163,7 @@ impl Cx {
     pub (crate) fn call_event_handler(&mut self, event: &Event) {
         self.inner_call_event_handler(event);
         self.inner_key_focus_change();
-        self.inner_triggers_and_signals();
+        self.handle_triggers_and_signals();
     }
     
     
