@@ -792,19 +792,28 @@ mod tests {
         #[test]
         fn index_to_line_index((string, index) in string_and_index()) {
             let btree_string = BTreeString::from(&string);
-            assert_eq!(btree_string.index_to_line_index(index), string[..index].count_line_breaks());
+            assert_eq!(
+                btree_string.index_to_line_index(index),
+                string[..index].count_line_breaks(),
+            );
         }
 
         #[test]
         fn char_index_to_index((string, char_index) in string_and_char_index()) {
             let btree_string = BTreeString::from(&string);
-            assert_eq!(btree_string.char_index_to_index(char_index), string.char_index_to_index(char_index));
+            assert_eq!(
+                btree_string.char_index_to_index(char_index),
+                string.char_index_to_index(char_index),
+            );
         }
 
         #[test]
         fn line_index_to_index((string, line_index) in string_and_line_index()) {
             let btree_string = BTreeString::from(&string);
-            assert_eq!(btree_string.line_index_to_index(line_index), string.line_index_to_index(line_index));
+            assert_eq!(
+                btree_string.line_index_to_index(line_index),
+                string.line_index_to_index(line_index),
+            );
         }
 
         #[test]
@@ -948,7 +957,10 @@ mod tests {
             let btree_string = BTreeString::from(&string);
             let slice = &string[range.clone()];
             let btree_slice = btree_string.slice(range);
-            assert_eq!(btree_slice.char_index_to_index(char_index), slice.char_index_to_index(char_index));
+            assert_eq!(
+                btree_slice.char_index_to_index(char_index),
+                slice.char_index_to_index(char_index),
+            );
         }
 
         #[test]
@@ -956,7 +968,10 @@ mod tests {
             let btree_string = BTreeString::from(&string);
             let slice = &string[range.clone()];
             let btree_slice = btree_string.slice(range);
-            assert_eq!(btree_slice.line_index_to_index(line_index), slice.line_index_to_index(line_index));
+            assert_eq!(
+                btree_slice.line_index_to_index(line_index),
+                slice.line_index_to_index(line_index),
+            );
         }
 
         #[test]
