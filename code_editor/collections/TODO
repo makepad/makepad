@@ -1,0 +1,11 @@
+- Test btrees for equality
+- Update append test to use equality operator
+- Update is_boundary function to not split CR LF pairs
+- Update append function to not split CR LF pairs
+- Update builder to not split CR LF pairs
+- Update count_line_breaks and line_index_to_index function to support Unicode line breaks
+- Implement to_btree_string for btree string slices
+- Implement splice for btree strings
+- Implement validation functions to btree
+- Implement fuzz tests for btree strings
+- Start working on btree vec
