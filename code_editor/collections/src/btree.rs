@@ -1,5 +1,5 @@
 use std::{
-    ops::{Add, AddAssign, Deref, Range, RangeBounds, RangeTo, Sub, SubAssign},
+    ops::{Add, AddAssign, Deref, Range, RangeBounds, Sub, SubAssign},
     sync::Arc,
 };
 
@@ -35,7 +35,7 @@ impl<T: Chunk, I: Info<T>> BTree<T, I> {
         }
         match self.search_by(|total_len, _| index < total_len) {
             Some((chunk, total_len, total_info)) => {
-                total_info + I::from_prefix(chunk, ..index - total_len)
+                total_info + I::from_chunk(chunk, 0..index - total_len)
             }
             None => self.info(),
         }
@@ -205,7 +205,38 @@ impl<'a, T: Chunk, I: Info<T>> Slice<'a, T, I> {
     }
 
     pub(crate) fn index_to_info(&self, index: usize) -> I {
-        self.btree.index_to_info(self.start + index) - self.start_info
+        if index == 0 {
+            return I::default();
+        }
+        match self.search_by(|total_len, _| index < total_len) {
+            Some((chunk, range, total_len, total_info)) => {
+                total_info + I::from_chunk(chunk, range.start..range.start + index - total_len)
+            }
+            None => self.info(),
+        }
+    }
+
+    pub(crate) fn search_by<P>(&self, mut predicate: P) -> Option<(&T, Range<usize>, usize, I)>
+    where
+        P: FnMut(usize, I) -> bool,
+    {
+        self.btree
+            .search_by(|total_len, total_info| {
+                if total_len <= self.start {
+                    return false;
+                }
+                predicate(total_len - self.start, total_info - self.start_info)
+            })
+            .map(|(chunk, total_len, total_info)| {
+                let start = self.start.saturating_sub(total_len);
+                let end = chunk.len() - (total_len + chunk.len()).saturating_sub(self.end);
+                (
+                    chunk,
+                    start..end,
+                    total_len + start - self.start,
+                    total_info + I::from_chunk(chunk, 0..start) - self.start_info,
+                )
+            })
     }
 
     pub(crate) fn cursor_front(self) -> Cursor<'a, T, I> {
@@ -269,11 +300,9 @@ impl<'a, T: Chunk, I: Info<T>> Cursor<'a, T, I> {
 
     pub(crate) fn current(&self) -> (&'a T, Range<usize>) {
         let chunk = self.current_chunk();
-        (
-            chunk,
-            self.slice.start.saturating_sub(self.position)
-                ..chunk.len() - (self.position + chunk.len()).saturating_sub(self.slice.end),
-        )
+        let start = self.slice.start.saturating_sub(self.position);
+        let end = chunk.len() - (self.position + chunk.len()).saturating_sub(self.slice.end);
+        (chunk, start..end)
     }
 
     pub(crate) fn move_next(&mut self) {
@@ -377,7 +406,7 @@ pub trait Chunk: Clone + Default {
 pub trait Info<T>:
     Add<Output = Self> + AddAssign + Copy + Default + Sub<Output = Self> + SubAssign
 {
-    fn from_prefix(chunk: &T, to: RangeTo<usize>) -> Self;
+    fn from_chunk(chunk: &T, range: Range<usize>) -> Self;
 }
 
 #[derive(Clone)]
@@ -417,7 +446,7 @@ impl<T: Chunk, I: Info<T>> Node<T, I> {
 
     fn total_info(&self) -> I {
         match self {
-            Self::Leaf(leaf) => I::from_prefix(leaf, ..leaf.len()),
+            Self::Leaf(leaf) => I::from_chunk(leaf, 0..leaf.len()),
             Self::Branch(branch) => branch.total_info(),
         }
     }
