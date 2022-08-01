@@ -253,7 +253,6 @@ pub enum TextInputAction {
     Change(String),
     Return(String),
     Escape,
-    Tab,
     KeyFocus,
     KeyFocusLost,
     None
