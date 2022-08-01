@@ -19,33 +19,51 @@ live_register!{
         fn pixel(self) -> vec4 {
             let wave = sample2d(self.wave_texture, vec2(self.pos.x, 0.5));
             
-            
-            
             let fft = sample2d(
                 self.fft_texture,
                 vec2(mod (0.5 - self.pos.y * 0.5, 0.25), fract(self.pos.x + self.shift_fft))
             );
             
-            let right = abs(wave.y + wave.x / 256.0 - 0.5) * 2.0;
-            let left = abs(wave.w + wave.z / 256.0 - 0.5) * 2.0;
+            let right = wave.y + wave.x / 256.0 - 0.5;
+            let left = wave.w + wave.z / 256.0 - 0.5;
             
             let right_fft = fft.y + fft.x / 256.0;
             let left_fft = fft.w + fft.z / 256.0;
             
-            //return
-            
-            //let right = (wave.w * 256 + wave.z - 127);
-            // lets draw a line in the center
-            
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+            
             if self.pos.y>0.5 {
                 sdf.clear(mix(#fff0, #ffff, left_fft))
             }
             else {
                 sdf.clear(mix(#fff0, #ffff, right_fft))
             }
+            
+            if left < 0.0 {
+                sdf.rect(0., self.rect_size.y * 0.25, self.rect_size.x, -left * self.rect_size.y + 0.5);
+            }
+            else {
+                sdf.rect(0., self.rect_size.y * 0.25 - self.rect_size.y * left, self.rect_size.x, left * self.rect_size.y + 0.5);
+            }
+            sdf.fill(#fffa);
+            
+            if right < 0.0 {
+                sdf.rect(0., self.rect_size.y * 0.75, self.rect_size.x, -right * self.rect_size.y + 0.5);
+            }
+            else {
+                sdf.rect(0., self.rect_size.y * 0.75 - self.rect_size.y * right, self.rect_size.x, right * self.rect_size.y + 0.5);
+            }
+            sdf.fill(#fffa);
+            
+            // ok so we have a number going from -1 to 1
+            // and i want to turn it into a box either direction
+            
             //sdf.clear( vec4(Pal::iq1(min(left_fft,0.99)),1.0));
             //return mix(#f00,#0f0,left);;
+            /*
+            sdf.move_to(
+                0.
+            )
             sdf.box(
                 0.,
                 self.rect_size.y * 0.25 - self.rect_size.y * left,
@@ -62,7 +80,7 @@ live_register!{
                 2.0 * right * self.rect_size.y,
                 2.0
             );
-            sdf.fill(#fffa);
+            sdf.fill(#fffa);*/
             
             return sdf.result
         }
@@ -157,12 +175,13 @@ impl DisplayAudio {
         for i in 0..frames {
             let left_u16 = ((left[i] + 0.5) * 65536.0).max(0.0).min(65535.0) as u32;
             let right_u16 = ((right[i] + 0.5) * 65536.0).max(0.0).min(65535.0) as u32;
-            buf[(wave_off + i)& (WAVE_SIZE_X - 1)] = left_u16 << 16 | right_u16;
-            let fft_now = (fft_off + i)& (FFT_SIZE_X - 1);
+            buf[(wave_off + i) & (WAVE_SIZE_X - 1)] = left_u16 << 16 | right_u16;
+            let fft_now = (fft_off + i) & (FFT_SIZE_X - 1);
             self.fft_buffer[0][fft_now] = cf32(left[i], 0.0);
             self.fft_buffer[1][fft_now] = cf32(right[i], 0.0);
-            // if the fft buffer is full, emit a new ff tline
-            if fft_now == FFT_SIZE_X-1{
+            
+            // if the fft buffer is full, emit a new fftline
+            if fft_now == FFT_SIZE_X - 1 {
                 let mut buf = Vec::new();
                 self.fft_texture.swap_image_u32(cx, &mut buf);
                 buf.resize(FFT_SIZE_X * FFT_SIZE_Y, 0);
