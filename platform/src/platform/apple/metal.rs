@@ -904,6 +904,16 @@ impl CxPlatformTexture {
         let width = desc.width.unwrap() as u64;
         let height = desc.height.unwrap() as u64;
         
+        match desc.format {
+            TextureFormat::ImageBGRA | TextureFormat::Default => {
+                if (width * height)as usize != data.len(){
+                    error!("Texture buffer not correct size {}*{} != {}", width, height, data.len());
+                    return
+                }
+            }
+            _ => panic!(),
+        }
+        
         let need_alloc = if let Some(inner) = &self.inner{
             CxPlatformTextureInner::need_alloc(width, height, desc, inner)
         }

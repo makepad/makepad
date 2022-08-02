@@ -641,7 +641,12 @@ impl TextInput {
         if cx.has_key_focus(self.bg.area()) {
             let ime_x = self.label.get_cursor_pos(cx, 0.5, self.cursor_head)
                 .unwrap_or(vec2(turtle.pos.x, 0.0)).x;
-            cx.show_text_ime(vec2(ime_x, turtle.pos.y));
+            if self.numeric_only{
+                cx.hide_text_ime();
+            }
+            else{
+                cx.show_text_ime(vec2(ime_x, turtle.pos.y));
+            }
         }
         
         let head_x = self.label.get_cursor_pos(cx, 0.0, self.cursor_head)
