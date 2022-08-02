@@ -1,6 +1,5 @@
-- Test btrees for equality
+- Implement other overloads for comparison
 - Update append test to use equality operator
-- Update is_boundary function to not split CR LF pairs
 - Update builder to not split CR LF pairs
 - Update count_line_breaks and line_index_to_index function to support Unicode line breaks
 - Implement validation functions to btree
@@ -11,3 +10,6 @@
 - Implement fuzzing for btree strings
 - Implement to_btree_string for btree string slices
 - Update append function to not split CR LF pairs
+- Update is_boundary function to not split CR LF pairs
+- Implement comparing btrees
+- Implement comparing slices
