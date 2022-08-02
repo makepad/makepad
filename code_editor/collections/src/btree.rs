@@ -954,7 +954,7 @@ impl<T: Chunk, I: Info<T>> NodeSliceExt<T, I> for [Node<T, I>] {
     }
 }
 
-fn range<R: RangeBounds<usize>>(range: R, len: usize) -> Range<usize> {
+pub(crate) fn range<R: RangeBounds<usize>>(range: R, len: usize) -> Range<usize> {
     use std::ops::Bound;
 
     let start = match range.start_bound() {
