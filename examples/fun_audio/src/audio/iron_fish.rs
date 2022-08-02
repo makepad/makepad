@@ -498,7 +498,7 @@ impl IronFishVoice {
         let frame_count = mix_buffer.frame_count();
         let (left, right) = mix_buffer.stereo_mut();
         
-       /* if let Some(display_buffer) = display_buffer{
+        if let Some(display_buffer) = display_buffer{
             let (left_disp, right_disp) = display_buffer.stereo_mut();
             for i in 0..frame_count {
                 let output = self.one(&settings) * 8.0;
@@ -508,13 +508,13 @@ impl IronFishVoice {
                 right[i] += output as f32;
             }
         }
-        else{*/
+        else{
             for i in 0..frame_count {
                 let output = self.one(&settings) * 8.0;
                 left[i] += output as f32;
                 right[i] += output as f32;
             }
-        //}
+        }
         // profile_end(pf);
     }
     
@@ -560,11 +560,18 @@ impl IronFishState {
         buffer.zero();
         for i in 0..self.voices.len() {
             if self.voices[i].active() > -1 {
-                //let mut display_buffer = display.pop_buffer();
-                self.voices[i].fill_buffer(buffer, None, &self.settings);
-                //if let Some(dp) = display_buffer{
-                //    display.send_buffer(dp);
-                 // }
+                let mut display_buffer = display.pop_buffer_resize(buffer.frame_count(), buffer.channel_count());
+                self.voices[i].fill_buffer(buffer, display_buffer.as_mut(), &self.settings);
+                if let Some(dp) = display_buffer{
+                    display.send_buffer(i,dp);
+                }
+            }
+            else{
+                let mut display_buffer = display.pop_buffer_resize(buffer.frame_count(), buffer.channel_count());
+                if let Some(mut dp) = display_buffer{
+                    dp.zero();
+                    display.send_buffer(i,dp);
+                }
             }
         }
     }

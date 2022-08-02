@@ -26,8 +26,10 @@ pub enum FromUI {
 
 pub enum AudioGraphAction<'a> {
     DisplayAudio {
+        voice: usize,
         buffer: &'a AudioBuffer
-    }
+    },
+    VoiceOff{voice:usize}
 }
 
 #[derive(Live)]
@@ -100,10 +102,10 @@ impl AudioGraph {
             };
             root.render_to_audio_buffer(time, &mut [&mut node.buffer], &[], &mut dg);
             // lets output this buffer to the UI
-            if let Some(mut display_buffer) = dg.pop_buffer() {
-                display_buffer.copy_from(&node.buffer);
-                dg.send_buffer(display_buffer);
-            }
+            //if let Some(mut display_buffer) = dg.pop_buffer() {
+            //    display_buffer.copy_from(&node.buffer);
+            //   dg.send_buffer(0, display_buffer);
+            //}
             output.copy_from_buffer(&node.buffer);
         }
     }
@@ -136,10 +138,14 @@ impl AudioGraph {
         
         while let Ok(to_ui) = self.to_ui.try_recv(event) {
             match to_ui {
-                ToUIDisplayMsg::DisplayAudio(buffer)=>{
+                ToUIDisplayMsg::DisplayAudio{voice, buffer}=>{
                     //log!("GOT DISPLAY AUDIO");
-                    dispatch_action(cx, AudioGraphAction::DisplayAudio{buffer:&buffer});
+                    dispatch_action(cx, AudioGraphAction::DisplayAudio{buffer:&buffer, voice});
                     self.from_ui.send(FromUI::DisplayAudio(buffer)).unwrap();
+                },
+                ToUIDisplayMsg::VoiceOff{voice}=>{
+                    //log!("GOT DISPLAY AUDIO");
+                    dispatch_action(cx, AudioGraphAction::VoiceOff{voice});
                 },
                 ToUIDisplayMsg::OutOfBuffers=>{ // inject some new buffers
                 }
