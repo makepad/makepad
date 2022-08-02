@@ -567,6 +567,7 @@ impl IronFishState {
                 }
             }
             else{
+                display.send_voice_off(i);
                 let mut display_buffer = display.pop_buffer_resize(buffer.frame_count(), buffer.channel_count());
                 if let Some(mut dp) = display_buffer{
                     dp.zero();
