@@ -9,8 +9,9 @@ use {
         live_traits::*,
         draw_2d::{
             cx_2d::Cx2d,
-            turtle::{Layout, Size, Walk},
+            turtle::{Layout, Size, Walk, Margin},
         },
+        nav::{NavItem, NavRole, NavOrder},
         draw_vars::{
             DrawVars,
         },
@@ -28,10 +29,10 @@ use {
 
 #[derive(Debug)]
 pub struct View { // draw info per UI element
-    pub(crate) draw_list: DrawList,
-    pub(crate) is_overlay: bool,
-    pub(crate) always_redraw: bool,
-    pub(crate) redraw_id: u64,
+    pub (crate) draw_list: DrawList,
+    pub (crate) is_overlay: bool,
+    pub (crate) always_redraw: bool,
+    pub (crate) redraw_id: u64,
 }
 
 impl LiveHook for View {}
@@ -90,7 +91,7 @@ impl LiveApply for View {
 
 impl View {
     
-    pub fn draw_list_id(&self)->DrawListId{self.draw_list.id()}
+    pub fn draw_list_id(&self) -> DrawListId {self.draw_list.id()}
     
     pub fn set_unclipped(&self, cx: &mut Cx, unclipped: bool) {cx.draw_lists[self.draw_list.id()].unclipped = unclipped;}
     
@@ -171,6 +172,7 @@ impl View {
                         draw_call: None
                     }
                 });
+                parent.nav_items.push(NavItem::Child(self.draw_list.id()));
                 parent.draw_items_len += 1;
             }
             else { // or reuse a sub list node
@@ -433,6 +435,17 @@ impl<'a> Cx2d<'a> {
         self.align_list.push(ia.clone());
         ia
     }
+    
+    pub fn add_nav_stop(&mut self, area: Area, role: NavRole, margin:Margin) {
+        let current_draw_list_id = *self.draw_list_stack.last().unwrap();
+        let draw_list = &mut self.cx.draw_lists[current_draw_list_id];
+        draw_list.nav_items.push(NavItem::Stop {
+            role,
+            area,
+            order: NavOrder::Default,
+            margin
+        });
+    }
     /*
     pub fn set_view_scroll_x(&mut self, draw_list_id: usize, scroll_pos: f32) {
         let pass_id = self.draw_lists[draw_list_id].pass_id;
@@ -463,8 +476,8 @@ impl<'a> Cx2d<'a> {
         let draw_list = &mut self.cx.draw_lists[draw_list_id];
         draw_list.rect = rect;
     }
-
-
+    
+    
 }
 
 #[derive(Debug)]
@@ -480,13 +493,13 @@ pub struct AlignedInstance {
     pub index: usize
 }
 
-pub type ViewRedrawing = Result<(),()>;
+pub type ViewRedrawing = Result<(), ()>;
 
-pub trait ViewRedrawingApi{
-    fn no()->ViewRedrawing{Result::Err(())}
-    fn yes()->ViewRedrawing{Result::Ok(())}
-    fn is_redrawing(&self)->bool;
-    fn not_redrawing(&self)->bool;
+pub trait ViewRedrawingApi {
+    fn no() -> ViewRedrawing {Result::Err(())}
+    fn yes() -> ViewRedrawing {Result::Ok(())}
+    fn is_redrawing(&self) -> bool;
+    fn not_redrawing(&self) -> bool;
     fn assume_redrawing(&self);
 }
 
@@ -503,8 +516,8 @@ impl ViewRedrawingApi for ViewRedrawing {
             Result::Err(_) => true
         }
     }
-    fn assume_redrawing(&self){
-        if !self.is_redrawing(){
+    fn assume_redrawing(&self) {
+        if !self.is_redrawing() {
             panic!("assume_redraw_yes it should redraw")
         }
     }
