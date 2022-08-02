@@ -148,7 +148,7 @@ impl<T: Chunk, I: Info<T>> From<T> for BTree<T, I> {
 impl<A: Chunk, I: Info<A>> FromIterator<A> for BTree<A, I> {
     fn from_iter<T>(iter: T) -> Self
     where
-        T: IntoIterator<Item = A>
+        T: IntoIterator<Item = A>,
     {
         let mut builder = Builder::new();
         for chunk in iter {
@@ -256,10 +256,9 @@ impl<'a, T: Chunk, I: Info<T>> Slice<'a, T, I> {
             })
             .map(|(chunk, total_len, total_info)| {
                 let start = self.start.saturating_sub(total_len);
-                let end = chunk.len() - (total_len + chunk.len()).saturating_sub(self.end);
                 (
                     chunk,
-                    start..end,
+                    start..chunk.len() - (total_len + chunk.len()).saturating_sub(self.end),
                     total_len + start - self.start,
                     total_info + I::from_chunk_and_range(chunk, 0..start) - self.start_info,
                 )
@@ -339,9 +338,11 @@ impl<'a, T: Chunk, I: Info<T>> Cursor<'a, T, I> {
 
     pub(crate) fn current(&self) -> (&'a T, Range<usize>) {
         let chunk = self.current_chunk();
-        let start = self.slice.start.saturating_sub(self.position);
-        let end = chunk.len() - (self.position + chunk.len()).saturating_sub(self.slice.end);
-        (chunk, start..end)
+        (
+            chunk,
+            self.slice.start.saturating_sub(self.position)
+                ..chunk.len() - (self.position + chunk.len()).saturating_sub(self.slice.end),
+        )
     }
 
     pub(crate) fn move_next(&mut self) {
