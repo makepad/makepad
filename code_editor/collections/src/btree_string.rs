@@ -95,6 +95,21 @@ impl BTreeString {
         self.slice(..).chars()
     }
 
+    pub fn replace_range<R: RangeBounds<usize>>(&mut self, range: R, replace_with: Self) {
+        let range = btree::range(range, self.len());
+        if range.is_empty() {
+            let other = self.split_off(range.start);
+            self.append(replace_with);
+            self.append(other);
+        } else {
+            let mut other = self.clone();
+            self.truncate_back(range.start);
+            other.truncate_front(range.end);
+            self.append(replace_with);
+            self.append(other);
+        }
+    }
+
     pub fn append(&mut self, other: Self) {
         self.btree.append(other.btree);
     }
@@ -869,6 +884,15 @@ mod tests {
                 btree_string.chars().rev().collect::<Vec<_>>(),
                 string.chars().rev().collect::<Vec<_>>()
             );
+        }
+
+        #[test]
+        fn replace_range((mut string, range) in string_and_range(), replace_with in string()) {
+            let mut btree_string = BTreeString::from(&string);
+            let btree_replace_with = BTreeString::from(&replace_with);
+            btree_string.replace_range(range.clone(), btree_replace_with);
+            string.replace_range(range, &replace_with);
+            assert_eq!(btree_string.chunks().collect::<String>(), string);
         }
 
         #[test]
