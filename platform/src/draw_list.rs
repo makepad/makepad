@@ -9,6 +9,7 @@ use {
         pass::PassId,
         id_pool::*,
         live_traits::*,
+        nav::*,
         cx_draw_shaders::{
             CxDrawShaderOptions,
             CxDrawShaderMapping,
@@ -160,7 +161,6 @@ impl CxDrawCall {
         }
     }
     
-    
     pub fn reuse_in_place(&mut self, mapping: &CxDrawShaderMapping, draw_vars: &DrawVars) {
         self.draw_shader = draw_vars.draw_shader.unwrap();
         self.geometry_id = draw_vars.geometry_id;
@@ -224,7 +224,10 @@ pub struct CxDrawList {
     pub clip_points: (Vec2,Vec2),
     pub unclipped: bool,
     
-    pub debug: Option<DrawListDebug>
+    pub debug: Option<DrawListDebug>,
+    
+    pub nav_items: Vec<NavItem>
+    
 }
 
 impl CxDrawList {
