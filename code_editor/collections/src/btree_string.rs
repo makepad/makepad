@@ -121,7 +121,28 @@ impl BTreeString {
         }
     }
 
-    pub fn append(&mut self, other: Self) {
+    pub fn append(&mut self, mut other: Self) {
+        if self.is_empty() {
+            *self = other;
+            return;
+        }
+        if other.is_empty() {
+            return;
+        }
+        let chunk_0 = self.cursor_back().current_chunk();
+        let mut start = chunk_0.len() - 1;
+        while !chunk_0.is_char_boundary(start) {
+            start -= 1;
+        }
+        let chunk_1 = other.cursor_front().current_chunk();
+        let mut end = 1;
+        while !chunk_1.is_char_boundary(end) {
+            end += 1;
+        }
+        let btree = BTree::from([&chunk_0[start..], &chunk_1[..end]].join(""));
+        other.btree.truncate_front(end);
+        self.btree.truncate_back(self.len() - (chunk_0.len() - start));
+        self.btree.append(btree);
         self.btree.append(other.btree);
     }
 

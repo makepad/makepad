@@ -139,6 +139,25 @@ impl<T: Chunk, I: Info<T>> BTree<T, I> {
     }
 }
 
+impl<T: Chunk, I: Info<T>> From<T> for BTree<T, I> {
+    fn from(chunk: T) -> Self {
+        std::iter::once(chunk).collect()
+    }
+}
+
+impl<A: Chunk, I: Info<A>> FromIterator<A> for BTree<A, I> {
+    fn from_iter<T>(iter: T) -> Self
+    where
+        T: IntoIterator<Item = A>
+    {
+        let mut builder = Builder::new();
+        for chunk in iter {
+            builder.push_chunk(chunk);
+        }
+        builder.build()
+    }
+}
+
 pub(crate) struct Builder<T, I> {
     stack: Vec<(usize, Vec<Node<T, I>>)>,
 }
