@@ -1,6 +1,6 @@
 use {
     crate::{btree, BTree},
-    std::ops::{Add, AddAssign, Range, RangeBounds, Sub, SubAssign},
+    std::{cmp::Ordering, ops::{Add, AddAssign, Range, RangeBounds, Sub, SubAssign}},
 };
 
 #[derive(Clone)]
@@ -76,8 +76,8 @@ impl BTreeString {
         }
     }
 
-    pub fn slice<R: RangeBounds<usize>>(&self, range: R) -> Str<'_> {
-        Str {
+    pub fn slice<R: RangeBounds<usize>>(&self, range: R) -> Slice<'_> {
+        Slice {
             slice: self.btree.slice(range),
         }
     }
@@ -122,28 +122,17 @@ impl BTreeString {
     }
 
     pub fn append(&mut self, mut other: Self) {
-        if self.is_empty() {
-            *self = other;
-            return;
-        }
-        if other.is_empty() {
-            return;
-        }
         let chunk_0 = self.cursor_back().current_chunk();
-        let mut start = chunk_0.len() - 1;
-        while !chunk_0.is_char_boundary(start) {
-            start -= 1;
-        }
         let chunk_1 = other.cursor_front().current_chunk();
-        let mut end = 1;
-        while !chunk_1.is_char_boundary(end) {
-            end += 1;
+        match (chunk_0.as_bytes().last(), chunk_1.as_bytes().first()) {
+            (Some(0x0D), Some(0x0A)) => {
+                self.btree.truncate_back(self.len() - 1);
+                other.btree.truncate_front(1);
+                self.btree.append(BTree::from(String::from("\r\n")));
+                self.btree.append(other.btree);
+            }
+            _ => self.btree.append(other.btree),
         }
-        let btree = BTree::from([&chunk_0[start..], &chunk_1[..end]].join(""));
-        other.btree.truncate_front(end);
-        self.btree.truncate_back(self.len() - (chunk_0.len() - start));
-        self.btree.append(btree);
-        self.btree.append(other.btree);
     }
 
     pub fn split_off(&mut self, at: usize) -> Self {
@@ -158,6 +147,26 @@ impl BTreeString {
 
     pub fn truncate_back(&mut self, end: usize) {
         self.btree.truncate_back(end)
+    }
+}
+
+impl Eq for BTreeString {}
+
+impl Ord for BTreeString {
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.slice(..).cmp(&other.slice(..))
+    }
+}
+
+impl PartialEq for BTreeString {
+    fn eq(&self, other: &Self) -> bool {
+        self.slice(..).eq(&other.slice(..))
+    }
+}
+
+impl PartialOrd for BTreeString {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        self.slice(..).partial_cmp(&other.slice(..))
     }
 }
 
@@ -220,14 +229,14 @@ impl Builder {
 }
 
 #[derive(Clone, Copy)]
-pub struct Str<'a> {
+pub struct Slice<'a> {
     slice: btree::Slice<'a, String, Info>,
 }
 
-impl<'a> Str<'a> {
+impl<'a> Slice<'a> {
     pub fn to_btree_string(self) -> BTreeString {
         BTreeString {
-            btree: self.slice.to_btree()
+            btree: self.slice.to_btree(),
         }
     }
 
@@ -353,6 +362,68 @@ impl<'a> Str<'a> {
     }
 }
 
+impl<'a> Eq for Slice<'a> {}
+
+impl<'a> Ord for Slice<'a> {
+    fn cmp(&self, other: &Self) -> Ordering {
+        let mut chunks_0 = self.chunks();
+        let mut chunks_1 = other.chunks();
+        let mut chunk_0 = chunks_0.next().unwrap_or("").as_bytes();
+        let mut chunk_1 = chunks_1.next().unwrap_or("").as_bytes();
+        loop {
+            match chunk_0.len().cmp(&chunk_1.len()) {
+                Ordering::Less => {
+                    let len = chunk_0.len();
+                    if len == 0 {
+                        break Ordering::Less;
+                    }
+                    let cmp = chunk_0.cmp(&chunk_1[..len]);
+                    if cmp != Ordering::Equal {
+                        break cmp;
+                    }
+                    chunk_0 = chunks_0.next().unwrap_or("").as_bytes();
+                    chunk_1 = &chunk_1[len..];
+                }
+                Ordering::Equal => {
+                    if chunk_0.len() == 0 {
+                        break Ordering::Equal;
+                    }
+                    let cmp = chunk_0.cmp(&chunk_1);
+                    if cmp != Ordering::Equal {
+                        break cmp;
+                    }
+                    chunk_0 = chunks_0.next().unwrap_or("").as_bytes();
+                    chunk_1 = chunks_1.next().unwrap_or("").as_bytes();
+                }
+                Ordering::Greater => {
+                    let len = chunk_1.len();
+                    if len == 0 {
+                        break Ordering::Greater;
+                    }
+                    let cmp = chunk_0[..len].cmp(&chunk_1);
+                    if cmp != Ordering::Equal {
+                        break cmp;
+                    }
+                    chunk_0 = &chunk_0[len..];
+                    chunk_1 = chunks_1.next().unwrap_or("").as_bytes();
+                }
+            }
+        }
+    }
+}
+
+impl<'a> PartialEq for Slice<'a> {
+    fn eq(&self, other: &Self) -> bool {
+        self.cmp(other) == Ordering::Equal
+    }
+}
+
+impl<'a> PartialOrd for Slice<'a> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
 #[derive(Clone)]
 pub struct Cursor<'a> {
     cursor: btree::Cursor<'a, String, Info>,
@@ -457,7 +528,7 @@ impl<'a> Cursor<'a> {
 
 #[derive(Clone)]
 pub struct Chunks<'a> {
-    slice: Str<'a>,
+    slice: Slice<'a>,
     cursor_front: Option<Cursor<'a>>,
     cursor_back: Option<Cursor<'a>>,
 }
@@ -499,7 +570,7 @@ impl<'a> DoubleEndedIterator for Chunks<'a> {
 
 #[derive(Clone)]
 pub struct Bytes<'a> {
-    slice: Str<'a>,
+    slice: Slice<'a>,
     cursor_front: Option<Cursor<'a>>,
     cursor_back: Option<Cursor<'a>>,
 }
@@ -541,7 +612,7 @@ impl<'a> DoubleEndedIterator for Bytes<'a> {
 
 #[derive(Clone)]
 pub struct Chars<'a> {
-    slice: Str<'a>,
+    slice: Slice<'a>,
     cursor_front: Option<Cursor<'a>>,
     cursor_back: Option<Cursor<'a>>,
 }
@@ -589,7 +660,11 @@ impl btree::Chunk for String {
     }
 
     fn is_boundary(&self, index: usize) -> bool {
-        self.is_char_boundary(index)
+        if index == 0 || index == self.len() {
+            return true;
+        }
+        let bytes = self.as_bytes();
+        bytes[index].is_utf8_char_boundary() && bytes[index - 1] != 0x0D && bytes[index] != 0x0F
     }
 
     fn shift_left(&mut self, other: &mut Self, end: usize) {
@@ -964,12 +1039,12 @@ mod tests {
         }
 
         #[test]
-        fn append(mut string in string(), other_string in string()) {
-            let mut btree_string = BTreeString::from(&string);
-            let other_btree_string = BTreeString::from(&other_string);
-            btree_string.append(other_btree_string);
-            string.push_str(&other_string);
-            assert_eq!(btree_string.chunks().collect::<String>(), string);
+        fn append(mut string_0 in string(), string_1 in string()) {
+            let mut btree_string_0 = BTreeString::from(&string_0);
+            let btree_string_1 = BTreeString::from(&string_1);
+            btree_string_0.append(btree_string_1);
+            string_0.push_str(&string_1);
+            assert_eq!(btree_string_0.chunks().collect::<String>(), string_0);
         }
 
         #[test]
@@ -995,6 +1070,13 @@ mod tests {
             string.truncate(end);
             btree_string.truncate_back(end);
             assert_eq!(btree_string.chunks().collect::<String>(), string);
+        }
+
+        #[test]
+        fn cmp(string_0 in string(), string_1 in string()) {
+            let btree_string_0 = BTreeString::from(&string_0);
+            let btree_string_1 = BTreeString::from(&string_1);
+            assert_eq!(btree_string_0.cmp(&btree_string_1), string_0.cmp(&string_1));
         }
 
         #[test]
@@ -1159,6 +1241,20 @@ mod tests {
             assert_eq!(
                 btree_string_slice.chars().rev().collect::<Vec<_>>(),
                 string_slice.chars().rev().collect::<Vec<_>>()
+            );
+        }
+
+        #[test]
+        fn slice_cmp((string_0, range_0) in string_and_range(), (string_1, range_1) in string_and_range()) {
+            let string_slice_0 = &string_0[range_0.clone()];
+            let btree_string_0 = BTreeString::from(&string_0);
+            let btree_string_slice_0 = btree_string_0.slice(range_0);
+            let string_slice_1 = &string_1[range_1.clone()];
+            let btree_string_1 = BTreeString::from(&string_1);
+            let btree_string_slice_1 = btree_string_1.slice(range_1);
+            assert_eq!(
+                btree_string_slice_0.cmp(&btree_string_slice_1),
+                string_slice_0.cmp(&string_slice_1)
             );
         }
     }
