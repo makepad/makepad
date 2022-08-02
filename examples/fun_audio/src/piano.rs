@@ -463,47 +463,6 @@ impl Piano {
         }
         
         match event.hits(cx, self.view.area()) {
-            Hit::KeyDown(ke) => if !ke.is_repeat {
-                if let Some(nn) = key_map(ke.key_code) {
-                    let note_number = nn + self.keyboard_octave * 12;
-                    self.keyboard_keys_down[nn as usize] = note_number;
-                    self.set_note(cx, true, note_number);
-                    dispatch_action(cx, PianoAction::Note(PianoNote {
-                        is_on: true,
-                        note_number,
-                        velocity: self.keyboard_velocity
-                    }));
-                }
-                else {match ke.key_code {
-                    KeyCode::KeyZ => {
-                        self.keyboard_octave -= 1;
-                        self.keyboard_octave = self.keyboard_octave.max(1);
-                    }
-                    KeyCode::KeyX => {
-                        self.keyboard_octave += 1;
-                        self.keyboard_octave = self.keyboard_octave.min(7);
-                    }
-                    KeyCode::KeyC => {
-                        self.keyboard_velocity -= 16;
-                        self.keyboard_velocity = self.keyboard_velocity.max(16);
-                    }
-                    KeyCode::KeyV => {
-                        self.keyboard_velocity += 16;
-                        self.keyboard_velocity = self.keyboard_velocity.min(127);
-                    }
-                    _ => ()
-                }}
-            }
-            Hit::KeyUp(ke) => if let Some(nn) = key_map(ke.key_code) {
-                let note_number = self.keyboard_keys_down[nn as usize];
-                self.keyboard_keys_down[nn as usize] = 0;
-                self.set_note(cx, false, note_number);
-                dispatch_action(cx, PianoAction::Note(PianoNote {
-                    is_on: false,
-                    note_number,
-                    velocity: self.keyboard_velocity
-                }));
-            },
             Hit::KeyFocus(_) => {
                 for piano_key in self.white_keys.values_mut().chain(self.black_keys.values_mut()) {
                     piano_key.set_is_focussed(cx, true, Animate::Yes)
