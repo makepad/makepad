@@ -174,7 +174,7 @@ impl Cx {
         });*/
         
         Self {
-            cpu_cores: 0,
+            cpu_cores: 8,
             
             platform_type: PlatformType::Unknown,
             gpu_info: GpuInfo::default(),

@@ -474,7 +474,7 @@ fn make_rgbaf(r: f32, g: f32, b: f32, a: f32, gamma: f32) -> u32 {
     let ug = (clampf(g.powf(gamma), 0.0, 1.0) * 255.0) as u32;
     let ub = (clampf(b.powf(gamma), 0.0, 1.0) * 255.0) as u32;
     let ua = (clampf(a.powf(gamma), 0.0, 1.0) * 255.0) as u32;
-    return (ua << 24) | (ub << 16) | (ug << 8) | ur;
+    return (ua << 24) | (ur << 16) | (ug << 8) | ub;
 }
 
 fn make_c(c: u32, gamma: f32) -> u32 {
