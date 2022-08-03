@@ -1,3 +1,4 @@
+#![cfg_attr(feature = "nightly", feature(portable_simd))]
 // image_formats
 // by Desmond Germans, 2019
 

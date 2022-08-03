@@ -22,8 +22,8 @@ live_register!{
             let fractal = sample2d(self.tex, self.pos)
             
             // unpack iteration and magnitude squared from our u32 buffer
-            let iter = fractal.y * 65535 + fractal.x * 255;
-            let magsq = (fractal.w * 256 + fractal.z - 127);
+            let iter = fractal.y * 65535 + fractal.z * 255;
+            let magsq = (fractal.w * 256 + fractal.x - 127);
             
             // create a nice palette index
             let index = abs((1.0 * iter / self.max_iter * 8.0) - 0.1 * log(magsq));
@@ -37,7 +37,7 @@ live_register!{
     }
     
     Mandelbrot: {{Mandelbrot}} {
-        max_iter: 3200,
+        max_iter: 320,
     }
 }
 

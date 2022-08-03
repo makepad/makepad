@@ -1,8 +1,7 @@
 use {
     crate::{
-        makepad_image_formats::ImageBuffer,
-        //makepad_image_formats::jpeg,
-        //makepad_image_formats::png,
+        makepad_image_formats::jpeg,
+        makepad_image_formats::png,
         makepad_platform::*,
         component_map::*,
         frame::*
@@ -23,7 +22,9 @@ pub struct Frame { // draw info per UI element
     
     pub walk: Walk,
     
-    image: String,
+    image: LiveDependency,
+    
+    image_texture: Texture,
     
     clip: bool,
     hidden: bool,
@@ -35,7 +36,6 @@ pub struct Frame { // draw info per UI element
     scroll_x: FrameRef,
     scroll_y: FrameRef,
     
-    #[rust] image_buffer: ImageBuffer,
     #[rust] defer_walks: Vec<(LiveId, DeferWalk)>,
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust] templates: ComponentMap<LiveId, (LivePtr, usize)>,
@@ -48,15 +48,50 @@ impl LiveHook for Frame {
         if self.clip && self.view.is_none() {
             self.view = Some(View::new(cx));
         }
+        
         // lets load the image resource
-        if self.image.ends_with(".jpg"){
-            //match jpg::
-        }
-        else if self.image.ends_with(".png"){
-            
-        }
-        else{
-            cx.apply_image_type_not_supported(live_error_origin!(), index, nodes, &self.image);
+        let image_path = self.image.as_ref();
+        if image_path.len()>0 {
+            let mut image_buffer = None;
+            match cx.get_dependency(image_path) {
+                Ok(data) => {
+                    if image_path.ends_with(".jpg") {
+                        match jpeg::decode(data) {
+                            Ok(image) => {
+                                image_buffer = Some(image);
+                            }
+                            Err(err) => {
+                                cx.apply_image_decoding_failed(live_error_origin!(), index, nodes, image_path, &err);
+                            }
+                        }
+                    }
+                    else if image_path.ends_with(".png") {
+                        match png::decode(data) {
+                            Ok(image) => {
+                                image_buffer = Some(image);
+                            }
+                            Err(err) => {
+                                cx.apply_image_decoding_failed(live_error_origin!(), index, nodes, image_path, &err);
+                            }
+                        }
+                    }
+                    else {
+                        cx.apply_image_type_not_supported(live_error_origin!(), index, nodes, image_path);
+                    }
+                }
+                Err(err) => {
+                    cx.apply_resource_not_loaded(live_error_origin!(), index, nodes, image_path, &err);
+                }
+            }
+            if let Some(mut image_buffer) = image_buffer.take() {
+                self.image_texture.set_desc(cx, TextureDesc {
+                    format: TextureFormat::ImageBGRA,
+                    width: Some(image_buffer.width),
+                    height: Some(image_buffer.height),
+                    multisample: None
+                });
+                self.image_texture.swap_image_u32(cx, &mut image_buffer.data);
+            }
         }
     }
     
@@ -275,7 +310,7 @@ impl dyn FrameComponent {
 impl Frame {
     
     pub fn handle_event_iter(&mut self, cx: &mut Cx, event: &Event) -> Vec<FrameActionItem> {
-        // ok so. 
+        // ok so.
         // if we get a tab key press
         // we need to do a next_focus or prev_focus
         
@@ -286,14 +321,14 @@ impl Frame {
         actions
     }
     
-    pub fn component_by_uid(&mut self, uid:FrameUid) -> Option<&mut Box<dyn FrameComponent>> {
+    pub fn component_by_uid(&mut self, uid: FrameUid) -> Option<&mut Box<dyn FrameComponent >> {
         if let Some(FrameFound::Child(child)) = self.frame_query(&FrameQuery::Uid(uid), &mut None).into_found() {
             return Some(child)
         }
         None
     }
     
-    pub fn component_by_path(&mut self, path: &[LiveId]) -> Option<&mut Box<dyn FrameComponent>> {
+    pub fn component_by_path(&mut self, path: &[LiveId]) -> Option<&mut Box<dyn FrameComponent >> {
         if let Some(FrameFound::Child(child)) = self.frame_query(&FrameQuery::Path(path), &mut None).into_found() {
             return Some(child)
         }
@@ -354,8 +389,8 @@ impl Frame {
             
             // ok so.. we have to keep calling draw till we return LiveId(0)
             if self.bg.shape != Shape::None {
-                if self.bg.fill == Fill::Image{
-                    self.bg.draw_vars.texture_slots[0] = Some(cx.get_internal_font_atlas_texture_id());
+                if self.bg.fill == Fill::Image {
+                    self.bg.draw_vars.set_texture(0, &self.image_texture);
                 }
                 self.bg.begin(cx, walk, self.layout);
             }

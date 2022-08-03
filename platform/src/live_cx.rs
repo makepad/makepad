@@ -115,9 +115,14 @@ impl Cx {
         self.apply_error(origin, index, nodes, format!("Image type not supported {}", path))
     }
     
-    pub fn apply_image_decoding_failed(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], path: &str) {
-        self.apply_error(origin, index, nodes, format!("Image decoding failed {}", path))
+    pub fn apply_image_decoding_failed(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], path: &str, msg:&str) {
+        self.apply_error(origin, index, nodes, format!("Image decoding failed {} {}", path, msg))
     }
+
+    pub fn apply_resource_not_loaded(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], path:&str, msg: &str) {
+        self.apply_error(origin, index, nodes, format!("Resource not loaded {} {}", path, msg))
+    }
+
     
     pub fn apply_error_eval(&mut self, err:LiveError) {
         let live_registry = self.live_registry.borrow();

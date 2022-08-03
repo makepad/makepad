@@ -14,7 +14,7 @@ live_register!{
                color: #f000 
             }
             Image{
-                image:d"resources/makepad_logo_WIP.png"
+                image:d"test.png"
             }
         }
     }

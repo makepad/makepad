@@ -197,6 +197,9 @@ pub use {
             TextureFormat,
             TextureDesc
         },
+        live_prims::{
+            LiveDependency
+        },
         live_traits::{
             LiveBody,
             LiveNew,
