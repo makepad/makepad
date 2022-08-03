@@ -772,6 +772,9 @@ struct Branch<T, I> {
 }
 
 impl<T: Chunk, I: Info<T>> Branch<T, I> {
+    #[cfg(not(test))]
+    const MAX_LEN: usize = 8;
+    #[cfg(test)]
     const MAX_LEN: usize = 2;
 
     fn new() -> Self {
