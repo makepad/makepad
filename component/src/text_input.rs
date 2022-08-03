@@ -59,6 +59,7 @@ live_register!{
             instance focus: 0.0
             const BORDER_RADIUS: 2.0
             fn pixel(self) -> vec4 {
+                //return mix(#f00,#0f0,self.pos.y)
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                 sdf.box(
                     0.,
