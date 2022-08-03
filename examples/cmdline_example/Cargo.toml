@@ -4,5 +4,10 @@ version = "0.1.0"
 edition = "2018"
 
 [dependencies]
-makepad-procmac-example = { path = "./procmac_example", version = "0.1" }
+#makepad-procmac-example = { path = "./procmac_example", version = "0.1" }
+jpeg-decoder = "0.2"
+png = "0.17"
+
+[features]
+default = ["jpeg-decoder/nightly_aarch64_neon"]
 
