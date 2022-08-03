@@ -77,7 +77,7 @@ pub enum CollabResponse {
 }
 
 /// A type for representing data about a file tree.
-#[derive(Clone, Debug, SerBin, DeBin)]
+#[derive(Clone, SerBin, DeBin)]
 pub struct FileTreeData {
     /// The path to the root of this file tree.
     pub path: UnixPathBuf,
