@@ -937,7 +937,7 @@ impl CxPlatformTexture {
                     TextureFormat::ImageBGRA | TextureFormat::Default => {
                         let _: () = msg_send![
                             descriptor.as_id(),
-                            setPixelFormat: MTLPixelFormat::RGBA8Unorm
+                            setPixelFormat: MTLPixelFormat::BGRA8Unorm
                         ];
                     }
                     _ => panic!(),

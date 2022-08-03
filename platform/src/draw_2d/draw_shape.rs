@@ -32,7 +32,7 @@ live_register!{
                     color = mix(self.color, self.color2, self.pos.y)
                 }
                 Fill::Image => {
-                    color = vec4(sample2d(self.image, self.pos * self.image_scale + self.image_pan).xyz,1.0)
+                    color = sample2d(self.image, self.pos * self.image_scale + self.image_pan).xyzw;
                 }
             }
             match self.shape {
