@@ -144,6 +144,10 @@ fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers
         loop{
             match rx_socket.recv_timeout(Duration::from_millis(2000)){
                 Ok(data)=>{
+                    if data.len() == 0{
+                        println!("Write socket closed");
+                        break
+                    }
                     let header = BinaryMessageHeader::from_len(data.len());
                     write_bytes_to_tcp_stream_no_error(&mut write_tcp_stream, &header.as_slice());
                     write_bytes_to_tcp_stream_no_error(&mut write_tcp_stream, &data);
