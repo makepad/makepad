@@ -1,5 +1,8 @@
 use {
     crate::{
+        makepad_image_formats::ImageBuffer,
+        //makepad_image_formats::jpeg,
+        //makepad_image_formats::png,
         makepad_platform::*,
         component_map::*,
         frame::*
@@ -20,6 +23,8 @@ pub struct Frame { // draw info per UI element
     
     pub walk: Walk,
     
+    image: String,
+    
     clip: bool,
     hidden: bool,
     user_draw: bool,
@@ -30,6 +35,7 @@ pub struct Frame { // draw info per UI element
     scroll_x: FrameRef,
     scroll_y: FrameRef,
     
+    #[rust] image_buffer: ImageBuffer,
     #[rust] defer_walks: Vec<(LiveId, DeferWalk)>,
     #[rust] draw_state: DrawStateWrap<DrawState>,
     #[rust] templates: ComponentMap<LiveId, (LivePtr, usize)>,
@@ -38,9 +44,19 @@ pub struct Frame { // draw info per UI element
 }
 
 impl LiveHook for Frame {
-    fn after_apply(&mut self, cx: &mut Cx, _from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
+    fn after_apply(&mut self, cx: &mut Cx, _from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         if self.clip && self.view.is_none() {
             self.view = Some(View::new(cx));
+        }
+        // lets load the image resource
+        if self.image.ends_with(".jpg"){
+            //match jpg::
+        }
+        else if self.image.ends_with(".png"){
+            
+        }
+        else{
+            cx.apply_image_type_not_supported(live_error_origin!(), index, nodes, &self.image);
         }
     }
     

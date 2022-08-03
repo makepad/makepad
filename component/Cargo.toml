@@ -12,12 +12,12 @@ license = "MIT"
 path = "../platform"
 version = "0.1"
 
-[dependencies.makepad-image]
-path = "../platform/image"
-version = "0.1"
-
 [dependencies.makepad-derive-frame]
 path = "./derive_frame"
+version = "0.1"
+
+[dependencies.makepad-image-formats]
+path = "./image_formats"
 version = "0.1"
 
 [features]
