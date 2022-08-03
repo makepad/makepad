@@ -37,7 +37,7 @@ live_register!{
     }
     
     Mandelbrot: {{Mandelbrot}} {
-        max_iter: 2000,
+        max_iter: 320,
     }
 }
 
@@ -178,7 +178,7 @@ impl TileCache {
             current_zoom: 0.0,
             next_zoom: 0.0,
             tiles_in_flight: 0,
-            thread_pool: ThreadPool::new(cx, 8),
+            thread_pool: ThreadPool::new(cx, use_cores),
         }
     }
     
