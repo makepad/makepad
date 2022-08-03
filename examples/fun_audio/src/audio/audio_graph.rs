@@ -29,7 +29,7 @@ pub enum AudioGraphAction<'a> {
         voice: usize,
         buffer: &'a AudioBuffer
     },
-    VoiceOff{voice:usize}
+    VoiceOff {voice: usize}
 }
 
 #[derive(Live)]
@@ -96,7 +96,7 @@ impl AudioGraph {
         if let Some(root) = node.root.as_mut() {
             // we should create a real output buffer
             node.buffer.resize_like_output(output);
-            let mut dg = DisplayAudioGraph{
+            let mut dg = DisplayAudioGraph {
                 to_ui,
                 buffers: &mut node.display_buffers
             };
@@ -112,8 +112,8 @@ impl AudioGraph {
     
     fn start_audio_output(cx: &mut Cx, from_ui: FromUIReceiver<FromUI>, to_ui: ToUISender<ToUIDisplayMsg>) {
         let mut buffers = Vec::new();
-        for _ in 0..512{ 
-            buffers.push(AudioBuffer::new_with_size(512,2));
+        for _ in 0..512 {
+            buffers.push(AudioBuffer::new_with_size(512, 2));
         }
         
         let state = Arc::new(Mutex::new(Node {
@@ -131,23 +131,28 @@ impl AudioGraph {
         });
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, AudioGraphAction)) {
+    pub fn handle_event(
+        &mut self,
+        cx: &mut Cx,
+        event: &Event,
+        dispatch_action: &mut dyn FnMut(&mut Cx, AudioGraphAction)
+    ) {
         if let Some(root) = self.root.as_mut() {
-            root.handle_event(cx, event, &mut |_,_|{});
+            root.handle_event(cx, event, &mut | _, _ | {});
         }
         
         while let Ok(to_ui) = self.to_ui.try_recv(event) {
             match to_ui {
-                ToUIDisplayMsg::DisplayAudio{voice, buffer}=>{
+                ToUIDisplayMsg::DisplayAudio {voice, buffer} => {
                     //log!("GOT DISPLAY AUDIO");
-                    dispatch_action(cx, AudioGraphAction::DisplayAudio{buffer:&buffer, voice});
+                    dispatch_action(cx, AudioGraphAction::DisplayAudio {buffer: &buffer, voice});
                     self.from_ui.send(FromUI::DisplayAudio(buffer)).unwrap();
                 },
-                ToUIDisplayMsg::VoiceOff{voice}=>{
+                ToUIDisplayMsg::VoiceOff {voice} => {
                     //log!("GOT DISPLAY AUDIO");
-                    dispatch_action(cx, AudioGraphAction::VoiceOff{voice});
+                    dispatch_action(cx, AudioGraphAction::VoiceOff {voice});
                 },
-                ToUIDisplayMsg::OutOfBuffers=>{ // inject some new buffers
+                ToUIDisplayMsg::OutOfBuffers => { // inject some new buffers
                 }
             }
         }
