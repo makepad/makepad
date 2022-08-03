@@ -10,16 +10,7 @@ const TYPE_YUV440: u16 = 0x1390;
 const TYPE_YUV444: u16 = 0x00E4;
 const TYPE_RGB444: u16 = 0x01E4;
 
-const FOLDING: [u8; 64] = [
-    56u8,57,8,40,9,58,59,10,
-    41,0,48,1,42,11,60,61,
-    12,43,2,49,16,32,17,50,
-    3,44,13,62,63,14,45,4,
-    51,18,33,24,25,34,19,52,
-    5,46,15,47,6,53,20,35,
-    26,27,36,21,54,7,55,22,
-    37,28,29,38,23,39,30,31,
-];
+const FOLDING: [u8; 64] = [56u8, 57, 8, 40, 9, 58, 59, 10, 41, 0, 48, 1, 42, 11, 60, 61, 12, 43, 2, 49, 16, 32, 17, 50, 3, 44, 13, 62, 63, 14, 45, 4, 51, 18, 33, 24, 25, 34, 19, 52, 5, 46, 15, 47, 6, 53, 20, 35, 26, 27, 36, 21, 54, 7, 55, 22, 37, 28, 29, 38, 23, 39, 30, 31,];
 const FC0: f32 = 1.0;
 const FC1: f32 = 0.98078528;
 const FC2: f32 = 0.92387953;
@@ -405,7 +396,24 @@ fn unpack_block(reader: &mut Reader, coeffs: &mut [i32], dcht: &Table, acht: &Ta
     }
 }
 
-fn unpack_macroblock(reader: &mut Reader, coeffs: &mut [i32], dcht: &[Table], acht: &[Table], dt: &[usize], at: &[usize], dc: &mut [i32], start: u8, end: u8, shift: u8, refine: bool, eobrun: &mut usize, itype: u16, rescnt: &mut usize, resint: usize, mask: u8) {
+fn unpack_macroblock(
+    reader: &mut Reader,
+    coeffs: &mut [i32],
+    dcht: &[Table],
+    acht: &[Table],
+    dt: &[usize],
+    at: &[usize],
+    dc: &mut [i32],
+    start: u8,
+    end: u8,
+    shift: u8,
+    refine: bool,
+    eobrun: &mut usize,
+    itype: u16,
+    rescnt: &mut usize,
+    resint: usize,
+    mask: u8
+) {
     match itype {
         TYPE_Y => {
             if (mask & 1) != 0 {
@@ -468,6 +476,7 @@ fn unpack_macroblock(reader: &mut Reader, coeffs: &mut [i32], dcht: &[Table], ac
 }
 
 fn partial_idct(out: &mut [i32], inp: &[i32]) {
+    
     for i in 0..8 {
         let x3 = inp[i];
         let x1 = inp[i + 8];
@@ -518,6 +527,69 @@ fn partial_idct(out: &mut [i32], inp: &[i32]) {
         out[i + 56] = y5;
     }
 }
+
+
+//fn m32x4s(a: bool) -> Mask::<i32, 4> {Mask::<i32, 4>::from_array([a; 4])}
+
+// this is not faster :) I think LLVM autovectorises the top version
+/*
+fn i32x4v(a: i32, b: i32, c: i32, d: i32) -> i32x4 {i32x4::from_array([a, b, c, d])}
+fn i32x4s(a: i32) -> i32x4 {i32x4::from_array([a; 4])}
+
+fn _partial_idct_simd(out: &mut [i32], inp: &[i32]) {
+    for i in 0..2 {
+        let i = i * 4;
+        let x3 = i32x4v(inp[i + 0 + 0], inp[i + 1 + 0], inp[i + 2 + 0], inp[i + 3 + 0]);
+        let x1 = i32x4v(inp[i + 0 + 8], inp[i + 1 + 8], inp[i + 2 + 8], inp[i + 3 + 8]);
+        let x5 = i32x4v(inp[i + 0 + 16], inp[i + 1 + 16], inp[i + 2 + 16], inp[i + 3 + 16]);
+        let x7 = i32x4v(inp[i + 0 + 24], inp[i + 1 + 24], inp[i + 2 + 24], inp[i + 3 + 24]);
+        let x6 = i32x4v(inp[i + 0 + 32], inp[i + 1 + 32], inp[i + 2 + 32], inp[i + 3 + 32]);
+        let x2 = i32x4v(inp[i + 0 + 40], inp[i + 1 + 40], inp[i + 2 + 40], inp[i + 3 + 40]);
+        let x4 = i32x4v(inp[i + 0 + 48], inp[i + 1 + 48], inp[i + 2 + 48], inp[i + 3 + 48]);
+        let x0 = i32x4v(inp[i + 0 + 56], inp[i + 1 + 56], inp[i + 2 + 56], inp[i + 3 + 56]);
+        
+        let q17 = i32x4s(C1) * (x1 + x7);
+        let q35 = i32x4s(C3) * (x3 + x5);
+        let r3 = i32x4s(C7PC1) * x1 - q17;
+        let d3 = i32x4s(C5PC3) * x3 - q35;
+        let r0 = i32x4s(C7MC1) * x7 + q17;
+        let d0 = i32x4s(C5MC3) * x5 + q35;
+        let b0 = r0 + d0;
+        let d2 = r3 + d3;
+        let d1 = r0 - d0;
+        let b3 = r3 - d3;
+        let b1 = i32x4s(C4) * ((d1 + d2) >> i32x4s(8));
+        let b2 = i32x4s(C4) * ((d1 - d2) >> i32x4s(8));
+        let q26 = i32x4s(C2) * (x2 + x6);
+        let p04 = i32x4s(C4) * (x0 + x4) + i32x4s(C0S);
+        let n04 = i32x4s(C4) * (x0 - x4) + i32x4s(C0S);
+        let p26 = i32x4s(C6MC2) * x6 + q26;
+        let n62 = i32x4s(C6PC2) * x2 - q26;
+        let a0 = p04 + p26;
+        let a1 = n04 + n62;
+        let a3 = p04 - p26;
+        let a2 = n04 - n62;
+        let y0 = (a0 + b0) >> i32x4s(9);
+        let y1 = (a1 + b1) >> i32x4s(9);
+        let y3 = (a3 + b3) >> i32x4s(9);
+        let y2 = (a2 + b2) >> i32x4s(9);
+        let y7 = (a0 - b0) >> i32x4s(9);
+        let y6 = (a1 - b1) >> i32x4s(9);
+        let y4 = (a3 - b3) >> i32x4s(9);
+        let y5 = (a2 - b2) >> i32x4s(9);
+        
+        for l in 0..4 {
+            out[i + l + 0] = y0[l];
+            out[i + l + 8] = y1[l];
+            out[i + l + 16] = y3[l];
+            out[i + l + 24] = y2[l];
+            out[i + l + 32] = y7[l];
+            out[i + l + 40] = y6[l];
+            out[i + l + 48] = y4[l];
+            out[i + l + 56] = y5[l];
+        }
+    }
+}*/
 
 fn unswizzle_transpose_swizzle(out: &mut [i32], inp: &[i32]) {
     out[0] = inp[3];
@@ -729,7 +801,7 @@ fn draw_macroblock_yuv420(image: &mut ImageBuffer, x0: usize, y0: usize, width: 
     }
 }
 
-fn draw_macroblock_yuv422(image: &mut ImageBuffer, x0: usize, y0: usize, width: usize, height: usize, coeffs: &[i32]) {
+fn draw_macroblock_yuv422_normal(image: &mut ImageBuffer, x0: usize, y0: usize, width: usize, height: usize, coeffs: &[i32]) {
     for i in 0..height {
         for k in 0..width {
             let by = k >> 3;
@@ -739,6 +811,66 @@ fn draw_macroblock_yuv422(image: &mut ImageBuffer, x0: usize, y0: usize, width: 
             let u = coeffs[128 + i * 8 + hk];
             let v = coeffs[192 + i * 8 + hk];
             draw_yuv(image, x0 + k, y0 + i, y as i32, u as i32, v as i32);
+        }
+    }
+}
+
+#[cfg(feature="nightly")]
+fn draw_macroblock_yuv422(image: &mut ImageBuffer, x0: usize, y0: usize, width: usize, height: usize, coeffs: &[i32]) {
+    if width & 3 != 0 {
+        return draw_macroblock_yuv422_normal(image, x0, y0, width, height, coeffs);
+    }
+    return draw_macroblock_yuv422_simd(image, x0, y0, width, height, coeffs);
+}
+
+#[cfg(not(feature="nightly"))]
+fn draw_macroblock_yuv422(image: &mut ImageBuffer, x0: usize, y0: usize, width: usize, height: usize, coeffs: &[i32]) {
+    return draw_macroblock_yuv422_normal(image, x0, y0, width, height, coeffs);
+}
+
+#[cfg(feature="nightly")]
+fn draw_macroblock_yuv422_simd(image: &mut ImageBuffer, x0: usize, y0: usize, width: usize, height: usize, coeffs: &[i32]) {
+    use std::simd::*;
+
+    fn draw_rgb_simd(image: &mut ImageBuffer, px: usize, py: usize, r: i32x4, g: i32x4, b: i32x4) {
+        for i in 0..4 {
+            image.data[py * image.width + px + i] = 0xFF000000 | ((r[i] as u32) << 16) | ((g[i] as u32) << 8) | (b[i] as u32);
+        }
+    }
+
+    fn i32x4v(a: i32, b: i32, c: i32, d: i32) -> i32x4 {i32x4::from_array([a, b, c, d])}
+    fn i32x4s(a: i32) -> i32x4 {i32x4::from_array([a; 4])}
+
+    fn draw_yuv_simd(image: &mut ImageBuffer, px: usize, py: usize, y: i32x4, u: i32x4, v: i32x4) {
+        // ok lets simd this.
+        let r = ((y << i32x4s(8)) + i32x4s(359) * v) >> i32x4s(8);
+        let g = ((y << i32x4s(8)) - i32x4s(88) * u - i32x4s(183) * v) >> i32x4s(8);
+        let b = ((y << i32x4s(8)) + i32x4s(454) * u) >> i32x4s(8);
+        draw_rgb_simd(image, px, py, r.clamp(i32x4s(0), i32x4s(255)), g.clamp(i32x4s(0), i32x4s(255)), b.clamp(i32x4s(0), i32x4s(255)));
+    }
+
+    for i in 0..height {
+        for k in (0..width).step_by(4) {
+            let k0 = k;
+            let hk0 = k0 >> 1;
+            let by0 = k0 >> 3;
+            let sk0 = k0 & 7;
+            let k1 = k + 1;
+            let hk1 = k1 >> 1;
+            let by1 = k1 >> 3;
+            let sk1 = k1 & 7;
+            let k2 = k + 2;
+            let hk2 = k2 >> 1;
+            let by2 = k2 >> 3;
+            let sk2 = k2 & 7;
+            let k3 = k + 3;
+            let hk3 = k3 >> 1;
+            let by3 = k3 >> 3;
+            let sk3 = k3 & 7;
+            let y = i32x4v(coeffs[by0 * 64 + i * 8 + sk0], coeffs[by1 * 64 + i * 8 + sk1], coeffs[by2 * 64 + i * 8 + sk2], coeffs[by3 * 64 + i * 8 + sk3]) + i32x4s(128);
+            let u = i32x4v(coeffs[128 + i * 8 + hk0], coeffs[128 + i * 8 + hk1], coeffs[128 + i * 8 + hk2], coeffs[128 + i * 8 + hk3]);
+            let v = i32x4v(coeffs[192 + i * 8 + hk0], coeffs[192 + i * 8 + hk1], coeffs[192 + i * 8 + hk2], coeffs[192 + i * 8 + hk3]);
+            draw_yuv_simd(image, x0 + k, y0 + i, y, u, v);
         }
     }
 }
@@ -807,7 +939,7 @@ pub fn test(src: &[u8]) -> Option<(usize, usize)> {
 
 pub fn decode(src: &[u8]) -> Result<ImageBuffer, String> {
     if from_be16(&src[0..2]) != 0xFFD8 {
-        return Err("Invalid JPEG".to_string());
+        return Err("Invalid JPEG 1".to_string());
     }
     let mut qtable = [[0i32; 64]; 4];
     let mut dcht = [Table::new_empty(); 4];
@@ -842,20 +974,20 @@ pub fn decode(src: &[u8]) -> Result<ImageBuffer, String> {
             0xFFC0 | 0xFFC1 | 0xFFC2 => { // baseline sequential, extended sequential, progressive
                 //println!("precision {}",src[sp + 4]);
                 if src[sp + 4] != 8 {
-                    return Err("Invalid JPEG".to_string());
+                    return Err("Invalid JPEG 2".to_string());
                 }
                 height = from_be16(&src[sp + 5..sp + 7]) as usize;
                 width = from_be16(&src[sp + 7..sp + 9]) as usize;
                 let components = src[sp + 9];
                 //println!("size {}x{}, components {}",width,height,components);
                 if (components != 1) && (components != 3) {
-                    return Err("Invalid JPEG".to_string());
+                    return Err("Invalid JPEG 3".to_string());
                 }
                 let mut samp = [0u8; 3];
                 let mut tsp = sp + 10;
                 for i in 0..components {
                     if src[tsp] != i + 1 {
-                        return Err("Invalid JPEG".to_string());
+                        return Err("Invalid JPEG 4".to_string());
                     }
                     samp[i as usize] = src[tsp + 1];
                     qt[i as usize] = src[tsp + 2] as usize;
@@ -864,7 +996,7 @@ pub fn decode(src: &[u8]) -> Result<ImageBuffer, String> {
                 }
                 if components == 3 {
                     if (samp[1] != 0x11) || (samp[2] != 0x11) {
-                        return Err("Invalid JPEG".to_string());
+                        return Err("Invalid JPEG 5".to_string());
                     }
                     let sw = ((samp[0] >> 4) * 8) as usize;
                     let sh = ((samp[0] & 15) * 8) as usize;
@@ -879,7 +1011,7 @@ pub fn decode(src: &[u8]) -> Result<ImageBuffer, String> {
                         0x21 => TYPE_YUV422,
                         0x22 => TYPE_YUV420,
                         _ => {
-                            return Err("Invalid JPEG".to_string());
+                            return Err("Invalid JPEG 6".to_string());
                         },
                     };
                 }
@@ -910,7 +1042,7 @@ pub fn decode(src: &[u8]) -> Result<ImageBuffer, String> {
                         total += bits[i] as usize;
                     }
                     if total >= 256 {
-                        return Err("Invalid JPEG".to_string());
+                        return Err("Invalid JPEG 7".to_string());
                     }
                     //println!("total codes: {}",total);
                     let mut huffval = [0u8; 256];
@@ -929,64 +1061,6 @@ pub fn decode(src: &[u8]) -> Result<ImageBuffer, String> {
                 }
             },
             0xFFD8 => { // image start
-            },
-            0xFFD9 => { // image end
-                //println!("end");
-                let mut image = ImageBuffer::new(width, height);
-                match itype {
-                    TYPE_Y => {convert_blocks(&mut coeffs, mbtotal, TYPE_Y, &qtable, &qt);},
-                    TYPE_YUV420 => {convert_blocks(&mut coeffs, mbtotal * 6, TYPE_YUV420, &qtable, &qt);},
-                    TYPE_YUV422 => {convert_blocks(&mut coeffs, mbtotal * 4, TYPE_YUV422, &qtable, &qt);},
-                    TYPE_YUV440 => {convert_blocks(&mut coeffs, mbtotal * 4, TYPE_YUV440, &qtable, &qt);},
-                    TYPE_YUV444 => {convert_blocks(&mut coeffs, mbtotal * 3, TYPE_YUV444, &qtable, &qt);},
-                    TYPE_RGB444 => {convert_blocks(&mut coeffs, mbtotal * 3, TYPE_RGB444, &qtable, &qt);},
-                    _ => {},
-                }
-                #[allow(unused_assignments)]
-                let mut mb = 0;
-                for i in 0..mbheight - 1 {
-                    for k in 0..mbwidth - 1 {
-                        match itype {
-                            TYPE_Y => {draw_macroblock_y(&mut image, k * 8, i * 8, 8, 8, &coeffs[mb..mb + 64]); mb += 64;},
-                            TYPE_YUV420 => {draw_macroblock_yuv420(&mut image, k * 16, i * 16, 16, 16, &coeffs[mb..mb + 384]); mb += 384;},
-                            TYPE_YUV422 => {draw_macroblock_yuv422(&mut image, k * 16, i * 8, 16, 8, &coeffs[mb..mb + 256]); mb += 256;},
-                            TYPE_YUV440 => {draw_macroblock_yuv440(&mut image, k * 8, i * 16, 8, 16, &coeffs[mb..mb + 256]); mb += 256;},
-                            TYPE_YUV444 => {draw_macroblock_yuv444(&mut image, k * 8, i * 8, 8, 8, &coeffs[mb..mb + 192]); mb += 192;},
-                            TYPE_RGB444 => {draw_macroblock_rgb444(&mut image, k * 8, i * 8, 8, 8, &coeffs[mb..mb + 192]); mb += 192;},
-                            _ => {},
-                        }
-                    }
-                    match itype {
-                        TYPE_Y => {draw_macroblock_y(&mut image, mbwidth * 8 - 8, i * 8, width - (mbwidth - 1) * 8, 8, &coeffs[mb..mb + 64]); mb += 64;},
-                        TYPE_YUV420 => {draw_macroblock_yuv420(&mut image, mbwidth * 16 - 16, i * 16, width - (mbwidth - 1) * 16, 16, &coeffs[mb..mb + 384]); mb += 384;},
-                        TYPE_YUV422 => {draw_macroblock_yuv422(&mut image, mbwidth * 16 - 16, i * 8, width - (mbwidth - 1) * 16, 8, &coeffs[mb..mb + 256]); mb += 256;},
-                        TYPE_YUV440 => {draw_macroblock_yuv440(&mut image, mbwidth * 8 - 8, i * 16, width - (mbwidth - 1) * 8, 16, &coeffs[mb..mb + 256]); mb += 256;},
-                        TYPE_YUV444 => {draw_macroblock_yuv444(&mut image, mbwidth * 8 - 8, i * 8, width - (mbwidth - 1) * 8, 8, &coeffs[mb..mb + 192]); mb += 192;},
-                        TYPE_RGB444 => {draw_macroblock_rgb444(&mut image, mbwidth * 8 - 8, i * 8, width - (mbwidth - 1) * 8, 8, &coeffs[mb..mb + 192]); mb += 192;},
-                        _ => {},
-                    }
-                }
-                for k in 0..mbwidth - 1 {
-                    match itype {
-                        TYPE_Y => {draw_macroblock_y(&mut image, k * 8, mbheight * 8 - 8, 8, mbheight * 8 - height, &coeffs[mb..mb + 64]); mb += 64;},
-                        TYPE_YUV420 => {draw_macroblock_yuv420(&mut image, k * 16, mbheight * 16 - 16, 16, height - (mbheight - 1) * 16, &coeffs[mb..mb + 384]); mb += 384;},
-                        TYPE_YUV422 => {draw_macroblock_yuv422(&mut image, k * 16, mbheight * 8 - 8, 16, height - (mbheight - 1) * 8, &coeffs[mb..mb + 256]); mb += 256;},
-                        TYPE_YUV440 => {draw_macroblock_yuv440(&mut image, k * 8, mbheight * 16 - 16, 8, height - (mbheight - 1) * 16, &coeffs[mb..mb + 256]); mb += 256;},
-                        TYPE_YUV444 => {draw_macroblock_yuv444(&mut image, k * 8, mbheight * 8 - 8, 8, height - (mbheight - 1) * 8, &coeffs[mb..mb + 192]); mb += 192;},
-                        TYPE_RGB444 => {draw_macroblock_rgb444(&mut image, k * 8, mbheight * 8 - 8, 8, height - (mbheight - 1) * 8, &coeffs[mb..mb + 192]); mb += 192;},
-                        _ => {},
-                    }
-                }
-                match itype {
-                    TYPE_Y => {draw_macroblock_y(&mut image, mbwidth * 8 - 8, mbheight * 8 - 8, width - (mbwidth - 1) * 8, height - (mbheight - 1) * 8, &coeffs[mb..mb + 64]);},
-                    TYPE_YUV420 => {draw_macroblock_yuv420(&mut image, mbwidth * 16 - 16, mbheight * 16 - 16, width - (mbwidth - 1) * 16, height - (mbheight - 1) * 16, &coeffs[mb..mb + 384]);},
-                    TYPE_YUV422 => {draw_macroblock_yuv422(&mut image, mbwidth * 16 - 16, mbheight * 8 - 8, width - (mbwidth - 1) * 16, height - (mbheight - 1) * 8, &coeffs[mb..mb + 256]);},
-                    TYPE_YUV440 => {draw_macroblock_yuv440(&mut image, mbwidth * 8 - 8, mbheight * 16 - 16, width - (mbwidth - 1) * 8, height - (mbheight - 1) * 16, &coeffs[mb..mb + 256]);},
-                    TYPE_YUV444 => {draw_macroblock_yuv444(&mut image, mbwidth * 8 - 8, mbheight * 8 - 8, width - (mbwidth - 1) * 8, height - (mbheight - 1) * 8, &coeffs[mb..mb + 192]);},
-                    TYPE_RGB444 => {draw_macroblock_rgb444(&mut image, mbwidth * 8 - 8, mbheight * 8 - 8, width - (mbwidth - 1) * 8, height - (mbheight - 1) * 8, &coeffs[mb..mb + 192]);},
-                    _ => {},
-                }
-                return Ok(image);
             },
             0xFFDA => { // scan start
                 //println!("scan start");
@@ -1065,7 +1139,7 @@ pub fn decode(src: &[u8]) -> Result<ImageBuffer, String> {
                         let format = if le {from_le16(&src[tsp..tsp + 2])} else {from_be16(&src[tsp..tsp + 2])};
                         tsp += 2;
                         if format > 12 {
-                            return Err("Invalid JPEG".to_string());
+                            return Err("Invalid JPEG 8".to_string());
                         }
                         let components = if le {from_le32(&src[tsp..tsp + 4])} else {from_be32(&src[tsp..tsp + 4])};
                         tsp += 4;
@@ -1082,7 +1156,7 @@ pub fn decode(src: &[u8]) -> Result<ImageBuffer, String> {
                             0x0106 => { // photometric interpretation
                                 let pe = if le {from_le16(&src[dsp..dsp + 2])} else {from_be16(&src[dsp..dsp + 2])};
                                 if (pe != 2) || (itype != TYPE_YUV444) {
-                                    return Err("Invalid JPEG".to_string());
+                                    return Err("Invalid JPEG 9".to_string());
                                 }
                                 itype = TYPE_RGB444;
                             },
@@ -1096,13 +1170,72 @@ pub fn decode(src: &[u8]) -> Result<ImageBuffer, String> {
             },
             0xFFC8 | 0xFFDC | 0xFFE0 | 0xFFE2..=0xFFEF | 0xFFF0..=0xFFFF => { // other accepted markers
             },
-            _ => {
-                return Err("Invalid JPEG".to_string());
+            _ => { // image end
+                //println!("end");
+                let mut image = ImageBuffer::new(width, height);
+                match itype {
+                    TYPE_Y => {convert_blocks(&mut coeffs, mbtotal, TYPE_Y, &qtable, &qt);},
+                    TYPE_YUV420 => {convert_blocks(&mut coeffs, mbtotal * 6, TYPE_YUV420, &qtable, &qt);},
+                    TYPE_YUV422 => {convert_blocks(&mut coeffs, mbtotal * 4, TYPE_YUV422, &qtable, &qt);},
+                    TYPE_YUV440 => {convert_blocks(&mut coeffs, mbtotal * 4, TYPE_YUV440, &qtable, &qt);},
+                    TYPE_YUV444 => {convert_blocks(&mut coeffs, mbtotal * 3, TYPE_YUV444, &qtable, &qt);},
+                    TYPE_RGB444 => {convert_blocks(&mut coeffs, mbtotal * 3, TYPE_RGB444, &qtable, &qt);},
+                    _ => {},
+                }
+                #[allow(unused_assignments)]
+                let mut mb = 0;
+                for i in 0..mbheight - 1 {
+                    for k in 0..mbwidth - 1 {
+                        match itype {
+                            TYPE_Y => {draw_macroblock_y(&mut image, k * 8, i * 8, 8, 8, &coeffs[mb..mb + 64]); mb += 64;},
+                            TYPE_YUV420 => {draw_macroblock_yuv420(&mut image, k * 16, i * 16, 16, 16, &coeffs[mb..mb + 384]); mb += 384;},
+                            TYPE_YUV422 => {draw_macroblock_yuv422(&mut image, k * 16, i * 8, 16, 8, &coeffs[mb..mb + 256]); mb += 256;},
+                            TYPE_YUV440 => {draw_macroblock_yuv440(&mut image, k * 8, i * 16, 8, 16, &coeffs[mb..mb + 256]); mb += 256;},
+                            TYPE_YUV444 => {draw_macroblock_yuv444(&mut image, k * 8, i * 8, 8, 8, &coeffs[mb..mb + 192]); mb += 192;},
+                            TYPE_RGB444 => {draw_macroblock_rgb444(&mut image, k * 8, i * 8, 8, 8, &coeffs[mb..mb + 192]); mb += 192;},
+                            _ => {},
+                        }
+                    }
+                    match itype {
+                        TYPE_Y => {draw_macroblock_y(&mut image, mbwidth * 8 - 8, i * 8, width - (mbwidth - 1) * 8, 8, &coeffs[mb..mb + 64]); mb += 64;},
+                        TYPE_YUV420 => {draw_macroblock_yuv420(&mut image, mbwidth * 16 - 16, i * 16, width - (mbwidth - 1) * 16, 16, &coeffs[mb..mb + 384]); mb += 384;},
+                        TYPE_YUV422 => {draw_macroblock_yuv422(&mut image, mbwidth * 16 - 16, i * 8, width - (mbwidth - 1) * 16, 8, &coeffs[mb..mb + 256]); mb += 256;},
+                        TYPE_YUV440 => {draw_macroblock_yuv440(&mut image, mbwidth * 8 - 8, i * 16, width - (mbwidth - 1) * 8, 16, &coeffs[mb..mb + 256]); mb += 256;},
+                        TYPE_YUV444 => {draw_macroblock_yuv444(&mut image, mbwidth * 8 - 8, i * 8, width - (mbwidth - 1) * 8, 8, &coeffs[mb..mb + 192]); mb += 192;},
+                        TYPE_RGB444 => {draw_macroblock_rgb444(&mut image, mbwidth * 8 - 8, i * 8, width - (mbwidth - 1) * 8, 8, &coeffs[mb..mb + 192]); mb += 192;},
+                        _ => {},
+                    }
+                }
+                for k in 0..mbwidth - 1 {
+                    match itype {
+                        TYPE_Y => {draw_macroblock_y(&mut image, k * 8, mbheight * 8 - 8, 8, mbheight * 8 - height, &coeffs[mb..mb + 64]); mb += 64;},
+                        TYPE_YUV420 => {draw_macroblock_yuv420(&mut image, k * 16, mbheight * 16 - 16, 16, height - (mbheight - 1) * 16, &coeffs[mb..mb + 384]); mb += 384;},
+                        TYPE_YUV422 => {draw_macroblock_yuv422(&mut image, k * 16, mbheight * 8 - 8, 16, height - (mbheight - 1) * 8, &coeffs[mb..mb + 256]); mb += 256;},
+                        TYPE_YUV440 => {draw_macroblock_yuv440(&mut image, k * 8, mbheight * 16 - 16, 8, height - (mbheight - 1) * 16, &coeffs[mb..mb + 256]); mb += 256;},
+                        TYPE_YUV444 => {draw_macroblock_yuv444(&mut image, k * 8, mbheight * 8 - 8, 8, height - (mbheight - 1) * 8, &coeffs[mb..mb + 192]); mb += 192;},
+                        TYPE_RGB444 => {draw_macroblock_rgb444(&mut image, k * 8, mbheight * 8 - 8, 8, height - (mbheight - 1) * 8, &coeffs[mb..mb + 192]); mb += 192;},
+                        _ => {},
+                    }
+                }
+                match itype {
+                    TYPE_Y => {draw_macroblock_y(&mut image, mbwidth * 8 - 8, mbheight * 8 - 8, width - (mbwidth - 1) * 8, height - (mbheight - 1) * 8, &coeffs[mb..mb + 64]);},
+                    TYPE_YUV420 => {draw_macroblock_yuv420(&mut image, mbwidth * 16 - 16, mbheight * 16 - 16, width - (mbwidth - 1) * 16, height - (mbheight - 1) * 16, &coeffs[mb..mb + 384]);},
+                    TYPE_YUV422 => {draw_macroblock_yuv422(&mut image, mbwidth * 16 - 16, mbheight * 8 - 8, width - (mbwidth - 1) * 16, height - (mbheight - 1) * 8, &coeffs[mb..mb + 256]);},
+                    TYPE_YUV440 => {draw_macroblock_yuv440(&mut image, mbwidth * 8 - 8, mbheight * 16 - 16, width - (mbwidth - 1) * 8, height - (mbheight - 1) * 16, &coeffs[mb..mb + 256]);},
+                    TYPE_YUV444 => {draw_macroblock_yuv444(&mut image, mbwidth * 8 - 8, mbheight * 8 - 8, width - (mbwidth - 1) * 8, height - (mbheight - 1) * 8, &coeffs[mb..mb + 192]);},
+                    TYPE_RGB444 => {draw_macroblock_rgb444(&mut image, mbwidth * 8 - 8, mbheight * 8 - 8, width - (mbwidth - 1) * 8, height - (mbheight - 1) * 8, &coeffs[mb..mb + 192]);},
+                    _ => {},
+                }
+                return Ok(image);
             },
+            
+            /*_ => {
+                return Err("Invalid JPEG 10".to_string());
+            },*/
         }
         sp += length + 2;
     }
-    Err("Invalid JPEG".to_string())
+    Err("Invalid JPEG 11".to_string())
 }
 
 pub fn encode(_image: &ImageBuffer) -> Result<Vec<u8>, String> {

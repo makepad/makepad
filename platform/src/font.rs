@@ -146,34 +146,24 @@ impl Cx {
         self.fonts.push(None);
         self.path_to_font_id.insert(path.to_string(), font_id);
         
-        if let Some(dep) = self.dependencies.get(path){
-            if let Some(data) = &dep.data{
-                if let Ok(data) = data {
-                    match CxFont::load_from_ttf_bytes(&data) {
-                        Err(_) => {
-                            error!("Error loading font {} ", path);
-                        }
-                        Ok(mut cxfont) => {
-                            if path == "resources/IBMPlexSans-Text.ttf" {
-                                cxfont.ttf_font.char_code_to_glyph_index_map['g' as usize] = 11;
-                                cxfont.ttf_font.char_code_to_glyph_index_map['9' as usize] = 70;
-                                cxfont.ttf_font.char_code_to_glyph_index_map['0' as usize] = 60;
-                                cxfont.ttf_font.char_code_to_glyph_index_map['@' as usize] = 72;
-                            }
-                            self.fonts[font_id] = Some(cxfont);
-                        }
-                    }
-                }
-                else{ // it failed to load
+        match self.get_dependency(path){
+            Ok(data)=> match CxFont::load_from_ttf_bytes(&data) {
+                Err(_) => {
                     error!("Error loading font {} ", path);
                 }
+                Ok(mut cxfont) => {
+                    if path == "resources/IBMPlexSans-Text.ttf" {
+                        cxfont.ttf_font.char_code_to_glyph_index_map['g' as usize] = 11;
+                        cxfont.ttf_font.char_code_to_glyph_index_map['9' as usize] = 70;
+                        cxfont.ttf_font.char_code_to_glyph_index_map['0' as usize] = 60;
+                        cxfont.ttf_font.char_code_to_glyph_index_map['@' as usize] = 72;
+                    }
+                    self.fonts[font_id] = Some(cxfont);
+                }
             }
-            else{
-                error!("get_font_by_path - dep load not attempted {}", path)
+            Err(err)=>{
+                error!("get_font_by_path - {}", err)
             }
-        }
-        else{
-            error!("get_font_by_path - dep not registered {}", path)
         }
         font_id
     }
