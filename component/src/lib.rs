@@ -25,6 +25,7 @@ pub mod window_menu;
 
 pub use makepad_platform;
 pub use makepad_derive_frame;
+pub use makepad_image_formats;
 
 pub use makepad_derive_frame::*;
 
@@ -74,6 +75,7 @@ pub fn live_register(cx: &mut Cx) {
     crate::splitter::live_register(cx);
     crate::theme::live_register(cx);
     crate::slider::live_register(cx);
+    crate::nav_control::live_register(cx);
     crate::label::live_register(cx);
     crate::frame::frame::live_register(cx);
     crate::frame::live_register(cx);

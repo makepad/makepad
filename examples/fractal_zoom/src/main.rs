@@ -13,8 +13,7 @@ live_register!{
     registry FrameComponent::*;
     App: {{App}} {
         frame: {
-            width: Fill
-            height: Fill
+            walk:{width: Fill, height: Fill},
             
             Mandelbrot{
                 walk:{width: Fill, height: Fill}

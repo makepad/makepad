@@ -1,0 +1,5 @@
+[package]
+name = "makepad-image-formats"
+version = "0.1.0"
+authors = ["Desmond Germans <desmond@germansmedia.nl>"]
+edition = "2018"
