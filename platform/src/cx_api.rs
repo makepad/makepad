@@ -80,6 +80,19 @@ pub enum CxPlatformOp {
 }
 
 impl Cx {
+    
+    pub fn get_dependency(&self, path:&str)->Result<&Vec<u8>, String>{
+        if let Some(data) = self.dependencies.get(path){
+            if let Some(data) = &data.data{
+                return match data{
+                    Ok(data)=>Ok(data),
+                    Err(s)=>Err(s.clone())
+                }
+            }
+        }
+        Err(format!("Dependency not loaded {}", path))
+    }
+    
     pub fn redraw_id(&self) -> u64 {self.redraw_id}
     
     pub fn platform_type(&self) -> &PlatformType {&self.platform_type}

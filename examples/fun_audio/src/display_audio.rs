@@ -25,11 +25,11 @@ live_register!{
                 //vec2(self.pos.y, fract(self.pos.x + self.shift_fft))
             );
             
-            let right = (wave.y + wave.x / 256.0 - 0.5) * 3.0;
-            let left = (wave.w + wave.z / 256.0 - 0.5) * 3.0;
+            let right = (wave.y + wave.z / 256.0 - 0.5) * 3.0;
+            let left = (wave.w + wave.x / 256.0 - 0.5) * 3.0;
             
-            let right_fft = fft.y + fft.x / 256.0;
-            let left_fft = fft.w + fft.z / 256.0;
+            let right_fft = fft.y + fft.z / 256.0;
+            let left_fft = fft.w + fft.x / 256.0;
             
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
             let color = Pal::iq1(self.layer+0.5) * 0.5;
