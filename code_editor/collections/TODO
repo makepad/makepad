@@ -1,15 +1,40 @@
-- Implement other overloads for comparison
-- Update append test to use equality operator
-- Update builder to not split CR LF pairs
-- Update count_line_breaks and line_index_to_index function to support Unicode line breaks
-- Implement validation functions to btree
-- Start working on btree vec
-
-- Implement is_char_boundary for btree strings
-- Implement replace_range for btree strings
-- Implement fuzzing for btree strings
-- Implement to_btree_string for btree string slices
-- Update append function to not split CR LF pairs
-- Update is_boundary function to not split CR LF pairs
-- Implement comparing btrees
-- Implement comparing slices
+- Test BTreeVec::truncate_back
+- Test BTreeVec::truncate_front
+- Test BTreeVec::replace_range
+- Test BTreeVec::is_empty
+- Test BTreeVec::len
+- Test BTreeVec::slice_chunks
+- Implement btree_vec::Slice::to_btree_vec
+- Test btree_vec::Slice::to_btree_vec
+- Implement a way to zip two chunk iterators
+- Implement PartialEq for btree_vec::Slice
+- Implement Eq for btree_vec::Slice
+- Implement PartialOrd for btree_vec::Slice
+- Implement Ord for btree_vec::Slice
+- Implement PartialEq for BTreeVec
+- Implement Eq for BTreeVec
+- Implement PartialOrd for BTreeVec
+- Implement Ord for BTreeVec
+- Test cmp for BTreeVec
+- Test cmp for btree_vec::Slice
+- Implement current_item/move_next_item/move_prev_item for btree_vec::Cursor
+- Implement btree_vec::Slice::iter
+- Implement btree_vec::Slice::iter_rev
+- Implement BTreeVec::iter
+- Implement BTreeVec::iter_rev
+- Test btree_vec::Slice::iter
+- Test btree_vec::Slice::iter_rev
+- Test BTreeVec::iter
+- Test BTreeVec::iter_rev
+- Update btree_string::Builder to not split CR LF pairs
+- Update count_line_breaks to support Unicode line breaks
+- Update line_index_to_index function to support Unicode line breaks
+- Implement annotations for BTreeVec
+- Implement btree_vec::Slice::search_by
+- Implement BTreeVec::search_by
+- Test btree_vec::Slice::search_by
+- Test BTreeVec::search_by
+- Write fuzz tests for BTreeVec
+- Write benchmarks for BTreeString
+- Write benchmarks for BTreeVec
+- Write comments

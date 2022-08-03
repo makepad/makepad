@@ -164,6 +164,26 @@ impl BTreeString {
 
 impl Eq for BTreeString {}
 
+impl From<String> for BTreeString {
+    fn from(chunk: String) -> Self {
+        Self::from(chunk.as_str())
+    }
+}
+
+impl From<&String> for BTreeString {
+    fn from(chunk: &String) -> Self {
+        Self::from(chunk.as_str())
+    }
+}
+
+impl From<&str> for BTreeString {
+    fn from(chunk: &str) -> Self {
+        let mut builder = Builder::new();
+        builder.push_chunk(chunk);
+        builder.build()
+    }
+}
+
 impl Ord for BTreeString {
     fn cmp(&self, other: &Self) -> Ordering {
         self.slice(..).cmp(&other.slice(..))
@@ -175,42 +195,9 @@ impl PartialEq for BTreeString {
         self.slice(..).eq(&other.slice(..))
     }
 }
-
-impl<'a> PartialEq<Slice<'a>> for BTreeString {
-    fn eq(&self, other: &Slice<'a>) -> bool {
-        self.slice(..).eq(other)
-    }
-}
-
 impl PartialOrd for BTreeString {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         self.slice(..).partial_cmp(&other.slice(..))
-    }
-}
-
-impl<'a> PartialOrd<Slice<'a>> for BTreeString {
-    fn partial_cmp(&self, other: &Slice<'a>) -> Option<Ordering> {
-        self.slice(..).partial_cmp(other)
-    }
-}
-
-impl From<String> for BTreeString {
-    fn from(string: String) -> Self {
-        Self::from(string.as_str())
-    }
-}
-
-impl From<&String> for BTreeString {
-    fn from(string: &String) -> Self {
-        Self::from(string.as_str())
-    }
-}
-
-impl From<&str> for BTreeString {
-    fn from(string: &str) -> Self {
-        let mut builder = Builder::new();
-        builder.push_chunk(string);
-        builder.build()
     }
 }
 
@@ -367,7 +354,7 @@ impl<'a> Slice<'a> {
         }
     }
 
-    pub fn chunks_rev(&self) -> ChunksRev<'a> {
+    pub fn chunks_rev(self) -> ChunksRev<'a> {
         ChunksRev {
             cursor: self.cursor_back(),
         }
@@ -458,21 +445,9 @@ impl<'a> PartialEq for Slice<'a> {
     }
 }
 
-impl<'a> PartialEq<BTreeString> for Slice<'a> {
-    fn eq(&self, other: &BTreeString) -> bool {
-        self.eq(&other.slice(..))
-    }
-}
-
 impl<'a> PartialOrd for Slice<'a> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
-    }
-}
-
-impl<'a> PartialOrd<BTreeString> for Slice<'a> {
-    fn partial_cmp(&self, other: &BTreeString) -> Option<Ordering> {
-        self.partial_cmp(&other.slice(..))
     }
 }
 
@@ -586,6 +561,7 @@ pub struct Chunks<'a> {
 impl<'a> Iterator for Chunks<'a> {
     type Item = &'a str;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if self.cursor.is_at_back() {
             return None;
@@ -604,6 +580,7 @@ pub struct ChunksRev<'a> {
 impl<'a> Iterator for ChunksRev<'a> {
     type Item = &'a str;
 
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         if self.cursor.is_at_front() {
             return None;
@@ -1086,7 +1063,7 @@ mod tests {
             assert_eq!(
                 btree_string
                     .chunks_rev()
-                    .map(|chunk| chunk.chars().rev().collect::<String>())
+                    .flat_map(|chunk| chunk.chars().rev())
                     .collect::<String>(),
                 string.chars().rev().collect::<String>(),
             );
@@ -1149,8 +1126,8 @@ mod tests {
         #[test]
         fn split_off((mut string, at) in string_and_index()) {
             let mut btree_string = BTreeString::from(&string);
-            let other_string = string.split_off(at);
             let other_btree_string = btree_string.split_off(at);
+            let other_string = string.split_off(at);
             assert_eq!(btree_string.chunks().collect::<String>(), string);
             assert_eq!(other_btree_string.chunks().collect::<String>(), other_string);
         }
@@ -1158,16 +1135,16 @@ mod tests {
         #[test]
         fn truncate_front((mut string, start) in string_and_index()) {
             let mut btree_string = BTreeString::from(&string);
-            string.replace_range(..start, "");
             btree_string.truncate_front(start);
+            string.replace_range(..start, "");
             assert_eq!(btree_string.chunks().collect::<String>(), string);
         }
 
         #[test]
         fn truncate_back((mut string, end) in string_and_index()) {
             let mut btree_string = BTreeString::from(&string);
-            string.truncate(end);
             btree_string.truncate_back(end);
+            string.truncate(end);
             assert_eq!(btree_string.chunks().collect::<String>(), string);
         }
 
@@ -1292,7 +1269,7 @@ mod tests {
             assert_eq!(
                 btree_string_slice
                     .chunks_rev()
-                    .map(|chunk| chunk.chars().rev().collect::<String>())
+                    .flat_map(|chunk| chunk.chars().rev())
                     .collect::<String>(),
                 string_slice.chars().rev().collect::<String>(),
             );
