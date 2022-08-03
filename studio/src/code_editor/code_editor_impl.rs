@@ -490,17 +490,17 @@ impl CodeEditorImpl {
         let mut span_slot = span_iter.next();
         
         while let Some(span) = span_slot {
-            if span.len.line >= line_count {
+            if span.len.line as usize >= line_count {
                 span_slot = Some(Span {
                     len: Size {
-                        line: span.len.line - line_count,
+                        line: span.len.line - line_count as u32 ,
                         ..span.len
                     },
                     ..span
                 });
                 break;
             }
-            line_count -= span.len.line;
+            line_count -= span.len.line as usize;
             span_slot = span_iter.next();
         }
         
@@ -531,7 +531,7 @@ impl CodeEditorImpl {
             selected_rects_on_next_line.clear();
             while let Some(span) = span_slot {
                 let end = if span.len.line == 0 {
-                    start + span.len.column
+                    start + span.len.column as usize
                 } else {
                     next_line.len() + 1
                 };
