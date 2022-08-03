@@ -160,6 +160,7 @@ pub use {
             DragHitEvent,
             DropHitEvent,
         },
+        nav::{NavRole,NavOrder},
         cursor::MouseCursor,
         menu::Menu,
         font::Font,

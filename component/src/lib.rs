@@ -10,6 +10,7 @@ pub mod scroll_bar;
 pub mod scroll_view;
 pub mod component_map;
 pub mod link_button;
+pub mod nav_control;
 
 pub mod dock;
 pub mod tab;
