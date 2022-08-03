@@ -806,8 +806,8 @@ fn draw_macroblock_yuv422_normal(image: &mut ImageBuffer, x0: usize, y0: usize, 
         for k in 0..width {
             let by = k >> 3;
             let sk = k & 7;
-            let y = coeffs[by * 64 + i * 8 + sk] + 128;
             let hk = k >> 1;
+            let y = coeffs[by * 64 + i * 8 + sk] + 128;
             let u = coeffs[128 + i * 8 + hk];
             let v = coeffs[192 + i * 8 + hk];
             draw_yuv(image, x0 + k, y0 + i, y as i32, u as i32, v as i32);
