@@ -679,6 +679,7 @@ impl TextInput {
             });
         }
         self.bg.end(cx);
+        cx.add_nav_stop(self.bg.area(), NavRole::TextInput, Margin::default())
     }
 }
 

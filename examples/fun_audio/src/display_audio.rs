@@ -32,11 +32,9 @@ live_register!{
             let left_fft = fft.w + fft.z / 256.0;
             
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-            
             let color = Pal::iq1(self.layer+0.5) * 0.5;
-            //return vec4(Pal::iq1(left_fft),0.3)
+            
             if left < 0.0 {
-                // we compare if
                 sdf.rect(0., self.rect_size.y * 0.25, self.rect_size.x, -left * self.rect_size.y + 0.5);
             }
             else {
@@ -44,9 +42,7 @@ live_register!{
             }
             sdf.fill(vec4(color, 1.0));
             
-            
             if right < 0.0 {
-                // we compare if
                 sdf.rect(0., self.rect_size.y * 0.75, self.rect_size.x, -right * self.rect_size.y + 0.5);
             }
             else {
@@ -63,37 +59,7 @@ live_register!{
                 result += right_fft * color;
             }
             
-            
             return vec4(result, 0.0)
-            
-            
-            /*
-            return mix(vec4(color*0.1, 0.0), vec4(0.0,0.0,0.0,0.0), left_fft);
-            
-            if self.pos.y>0.5 {
-                sdf.clear(mix(#fff0, #ffff, left_fft))
-            }
-            else {
-                sdf.clear(mix(#fff0, #ffff, right_fft))
-            }
-            
-            if left < 0.0 {
-                sdf.rect(0., self.rect_size.y * 0.25, self.rect_size.x, -left * self.rect_size.y + 0.5);
-            }
-            else {
-                sdf.rect(0., self.rect_size.y * 0.25 - self.rect_size.y * left, self.rect_size.x, left * self.rect_size.y + 0.5);
-            }
-            sdf.fill(#fffa);
-            
-            if right < 0.0 {
-                sdf.rect(0., self.rect_size.y * 0.75, self.rect_size.x, -right * self.rect_size.y + 0.5);
-            }
-            else {
-                sdf.rect(0., self.rect_size.y * 0.75 - self.rect_size.y * right, self.rect_size.x, right * self.rect_size.y + 0.5);
-            }
-            sdf.fill(#fffa);
-
-            return sdf.result*/
         }
     }
     
@@ -180,7 +146,6 @@ impl DisplayAudioLayer {
             self.fft_slot = 0;
         }
         self.active = true;
-
         
         let frames = audio.frame_count();
         
@@ -241,7 +206,7 @@ const FFT_SIZE_Y: usize = 512;
 
 impl LiveHook for DisplayAudio {
     fn after_new_from_doc(&mut self, cx: &mut Cx) {
-        for i in 0..16 {
+        for _ in 0..16 {
             self.layers.push(DisplayAudioLayer::new(cx))
         }
     }
@@ -292,10 +257,10 @@ impl DisplayAudioImGUI {
         }
     }
     
-    pub fn voice_off(&self, cx: &mut Cx, voice: usize,) {
-        if let Some(mut inner) = self.inner() {
-            inner.layers[voice].active = false;
-            inner.view.redraw(cx);
+    pub fn voice_off(&self, _cx: &mut Cx, _voice: usize,) {
+        if let Some(mut _inner) = self.inner() {
+            //inner.layers[voice].active = false;
+            //inner.view.redraw(cx);
         }
     }
     
