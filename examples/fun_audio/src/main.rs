@@ -299,7 +299,7 @@ impl App {
                 AudioGraphAction::VoiceOff{voice}=>{
                     display_audio.voice_off(cx, voice);
                 }
-            }
+            } 
         });
         
         // fetch ui binding deltas
