@@ -164,9 +164,21 @@ impl PartialEq for BTreeString {
     }
 }
 
+impl<'a> PartialEq<Slice<'a>> for BTreeString {
+    fn eq(&self, other: &Slice<'a>) -> bool {
+        self.slice(..).eq(other)
+    }
+}
+
 impl PartialOrd for BTreeString {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         self.slice(..).partial_cmp(&other.slice(..))
+    }
+}
+
+impl<'a> PartialOrd<Slice<'a>> for BTreeString {
+    fn partial_cmp(&self, other: &Slice<'a>) -> Option<Ordering> {
+        self.slice(..).partial_cmp(other)
     }
 }
 
@@ -347,9 +359,8 @@ impl<'a> Slice<'a> {
 
     pub fn bytes(self) -> Bytes<'a> {
         Bytes {
-            slice: self,
-            cursor_front: None,
-            cursor_back: None,
+            cursor_front: self.cursor_front(),
+            cursor_back: self.cursor_back(),
         }
     }
 
@@ -418,9 +429,21 @@ impl<'a> PartialEq for Slice<'a> {
     }
 }
 
+impl<'a> PartialEq<BTreeString> for Slice<'a> {
+    fn eq(&self, other: &BTreeString) -> bool {
+        self.eq(&other.slice(..))
+    }
+}
+
 impl<'a> PartialOrd for Slice<'a> {
     fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
+    }
+}
+
+impl<'a> PartialOrd<BTreeString> for Slice<'a> {
+    fn partial_cmp(&self, other: &BTreeString) -> Option<Ordering> {
+        self.partial_cmp(&other.slice(..))
     }
 }
 
@@ -570,43 +593,30 @@ impl<'a> DoubleEndedIterator for Chunks<'a> {
 
 #[derive(Clone)]
 pub struct Bytes<'a> {
-    slice: Slice<'a>,
-    cursor_front: Option<Cursor<'a>>,
-    cursor_back: Option<Cursor<'a>>,
+    cursor_front: Cursor<'a>,
+    cursor_back: Cursor<'a>,
 }
 
 impl<'a> Iterator for Bytes<'a> {
     type Item = u8;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let cursor_front = self
-            .cursor_front
-            .get_or_insert_with(|| self.slice.cursor_front());
-        if self.cursor_back.as_ref().map_or_else(
-            || cursor_front.is_at_back(),
-            |cursor_back| cursor_front.position() == cursor_back.position(),
-        ) {
+        if self.cursor_front.position() == self.cursor_back.position() {
             return None;
         }
-        let byte = cursor_front.current_byte();
-        cursor_front.move_next_byte();
+        let byte = self.cursor_front.current_byte();
+        self.cursor_front.move_next_byte();
         Some(byte)
     }
 }
 
 impl<'a> DoubleEndedIterator for Bytes<'a> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        let cursor_back = self
-            .cursor_back
-            .get_or_insert_with(|| self.slice.cursor_back());
-        if self.cursor_front.as_ref().map_or_else(
-            || cursor_back.is_at_front(),
-            |cursor_front| cursor_front.position() == cursor_back.position(),
-        ) {
+        if self.cursor_front.position() == self.cursor_back.position() {
             return None;
         }
-        cursor_back.move_prev_byte();
-        Some(cursor_back.current_byte())
+        self.cursor_back.move_prev_byte();
+        Some(self.cursor_back.current_byte())
     }
 }
 
@@ -653,6 +663,9 @@ impl<'a> DoubleEndedIterator for Chars<'a> {
 }
 
 impl btree::Chunk for String {
+    #[cfg(not(test))]
+    const MAX_LEN: usize = 1024;
+    #[cfg(test)]
     const MAX_LEN: usize = 8;
 
     fn len(&self) -> usize {
