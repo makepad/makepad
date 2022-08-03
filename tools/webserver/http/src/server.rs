@@ -181,6 +181,7 @@ fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers
                 if n == 0 {
                     println!("Websocket closed");
                     let _ = tcp_stream.shutdown(Shutdown::Both);
+                    let _ = tx_socket.send(Vec::new());
                     break 
                 }
                 web_socket.parse(&data[0..n], | result | {
@@ -200,6 +201,7 @@ fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers
                             }).is_err() {
                                 eprintln!("Websocket message deserialize error");
                                 let _ = tcp_stream.shutdown(Shutdown::Both);
+                                let _ = tx_socket.send(Vec::new());
                             };
                         },
                         Ok(WebSocketMessage::Close) => {
@@ -208,6 +210,7 @@ fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers
                         Err(e) => {
                             eprintln!("Websocket error {:?}", e);
                             let _ = tcp_stream.shutdown(Shutdown::Both);
+                            let _ = tx_socket.send(Vec::new());
                         }
                     }
                 });
