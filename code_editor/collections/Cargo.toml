@@ -4,4 +4,10 @@ version = "0.1.0"
 edition = "2021"
 
 [dev-dependencies]
+criterion = "0.3.6"
 proptest="1.0.0"
+ropey="1.5.0"
+
+[[bench]]
+name = "btree_string"
+harness = false
