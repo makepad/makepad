@@ -48,7 +48,6 @@ fn _u64x2v(a: u64, b: u64) -> u64x2 {u64x2::from_array([a, b])}
 fn mandelbrot_pixel_f32x4(max_iter: u32, c_x: f32x4, c_y: f32x4) -> (u32x4, f32x4) {
     let mut x = c_x;
     let mut y = c_y;  
-    
     // in SIMD mandelbrot the loop has to continue
     // until all the 4 lanes have exitted
     // this means you need to hold onto the magsq/iter 

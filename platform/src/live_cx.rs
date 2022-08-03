@@ -111,6 +111,14 @@ impl Cx {
         self.apply_error(origin, index, nodes, format!("cant find target: {}", id))
     }
     
+    pub fn apply_image_type_not_supported(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], path: &str) {
+        self.apply_error(origin, index, nodes, format!("Image type not supported {}", path))
+    }
+    
+    pub fn apply_image_decoding_failed(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], path: &str) {
+        self.apply_error(origin, index, nodes, format!("Image decoding failed {}", path))
+    }
+    
     pub fn apply_error_eval(&mut self, err:LiveError) {
         let live_registry = self.live_registry.borrow();
         error!("{}", live_registry.live_error_to_live_file_error(err));

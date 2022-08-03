@@ -20,7 +20,7 @@ live_register!{
             },
             windows_buttons =? Solid {
                 bg: {color: (COLOR_BG_APP)}
-                height: 29
+                walk:{height: 29},
                 caption_label = Frame {
                     layout: {align: {x: 0.5, y: 0.5}},
                     Label {text: (caption), walk: {margin: {left: 100}}}
