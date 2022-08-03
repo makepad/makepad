@@ -560,7 +560,7 @@ impl EditorState {
                             );
                             builder_1.delete(Size {
                                 line: 0,
-                                column: cursor.start().column,
+                                column: cursor.start().column as u32,
                             })
                         } else {
                             builder_1.retain(
@@ -572,7 +572,7 @@ impl EditorState {
                             );
                             builder_1.delete(Size {
                                 line: 1,
-                                column: cursor.start().column,
+                                column: cursor.start().column as u32,
                             });
                         }
                     } else {
