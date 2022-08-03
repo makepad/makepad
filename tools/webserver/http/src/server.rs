@@ -141,6 +141,7 @@ fn handle_web_socket(http_server: HttpServer, mut tcp_stream: TcpStream, headers
     let (tx_socket, rx_socket) = mpsc::channel::<Vec<u8 >> ();
     
     let _write_thread = std::thread::spawn(move || {
+        // xx
         loop{
             match rx_socket.recv_timeout(Duration::from_millis(2000)){
                 Ok(data)=>{
