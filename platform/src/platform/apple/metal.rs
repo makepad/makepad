@@ -907,7 +907,9 @@ impl CxPlatformTexture {
         match desc.format {
             TextureFormat::ImageBGRA | TextureFormat::Default => {
                 if (width * height)as usize != data.len(){
-                    error!("Texture buffer not correct size {}*{} != {}", width, height, data.len());
+                    if data.len() != 0{
+                        error!("Texture buffer not correct size {}*{} != {}", width, height, data.len());
+                    }
                     return
                 }
             }
@@ -937,7 +939,7 @@ impl CxPlatformTexture {
                     TextureFormat::ImageBGRA | TextureFormat::Default => {
                         let _: () = msg_send![
                             descriptor.as_id(),
-                            setPixelFormat: MTLPixelFormat::RGBA8Unorm
+                            setPixelFormat: MTLPixelFormat::BGRA8Unorm
                         ];
                     }
                     _ => panic!(),
