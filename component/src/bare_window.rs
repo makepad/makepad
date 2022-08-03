@@ -1,5 +1,6 @@
 use crate::makepad_platform::*;
 use crate::debug_view::DebugView;
+use crate::nav_control::NavControl;
 
 live_register!{
     BareWindow: {{BareWindow}} {
@@ -12,6 +13,7 @@ pub struct BareWindow {
     pass: Pass,
     depth_texture: Texture,
     debug_view: DebugView,
+    nav_control: NavControl,
     window: Window,
     main_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
 }
@@ -26,6 +28,7 @@ impl LiveHook for BareWindow{
 impl BareWindow {
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event){
         self.debug_view.handle_event(cx,event);
+        self.nav_control.handle_event(cx, event);
     }
     
     pub fn begin(&mut self, cx: &mut Cx2d) -> ViewRedrawing {

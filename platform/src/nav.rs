@@ -1,5 +1,7 @@
 #![allow(dead_code)]
 use crate::area::Area;
+use crate::draw_list::DrawListId;
+use crate::draw_2d::turtle::Margin;
 
 #[derive(Debug)]
 pub struct NavList{
@@ -8,6 +10,7 @@ pub struct NavList{
 
 #[derive(Debug)]
 pub enum NavOrder{
+    Default,
     Top(u64),
     Middle(u64),
     Bottom(u64),
@@ -15,15 +18,13 @@ pub enum NavOrder{
 
 #[derive(Debug)]
 pub enum NavItem{
-    Child(usize),
-    Stop(NavStop)
-}
-
-#[derive(Debug)]
-pub struct NavStop{
-    pub role: NavRole,
-    pub order: NavOrder,
-    pub area: Area
+    Child(DrawListId),
+    Stop{
+        role: NavRole,
+        order: NavOrder,
+        margin: Margin,
+        area: Area
+    }
 }
 
 #[derive(Debug)]
