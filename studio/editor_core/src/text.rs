@@ -78,8 +78,8 @@ impl Text {
     /// ```
     pub fn len(&self) -> Size {
         Size {
-            line: self.lines.len() - 1,
-            column: self.lines.last().unwrap().len(),
+            line: self.lines.len() as u32 - 1 ,
+            column: self.lines.last().unwrap().len() as u32,
         }
     }
 
@@ -208,12 +208,12 @@ impl Text {
     /// assert_eq!(text, Text::from("ef"));
     /// ```
     pub fn take(&mut self, len: Size) -> Text {
-        let mut lines = self.lines.drain(..len.line).collect::<Vec<_>>();
+        let mut lines = self.lines.drain(..len.line as usize).collect::<Vec<_>>();
         lines.push(
             self.lines
                 .first_mut()
                 .unwrap()
-                .drain(..len.column)
+                .drain(..len.column as usize)
                 .collect::<Vec<_>>(),
         );
         Text { lines }
@@ -229,8 +229,8 @@ impl Text {
     /// assert_eq!(text, Text::from("ef"));
     /// ```
     pub fn skip(&mut self, len: Size) {
-        self.lines.drain(..len.line);
-        self.lines.first_mut().unwrap().drain(..len.column);
+        self.lines.drain(..len.line as usize);
+        self.lines.first_mut().unwrap().drain(..len.column as usize);
     }
 
     /// Inserts the given text at the given position in this text.
@@ -286,19 +286,19 @@ impl Text {
     pub fn delete(&mut self, position: Position, count: Size) {
         if count.line == 0 {
             self.lines[position.line].splice(
-                position.column..position.column + count.column,
+                position.column..position.column + count.column as usize,
                 iter::empty(),
             );
         } else {
             let mut line = mem::replace(&mut self.lines[position.line], Vec::new());
             line.splice(
                 position.column..,
-                self.lines[position.line + count.line][count.column..]
+                self.lines[position.line + count.line as usize][count.column as usize..]
                     .iter()
                     .cloned(),
             );
             self.lines.splice(
-                position.line..position.line + count.line + 1,
+                position.line..position.line + count.line as usize + 1,
                 iter::once(line),
             );
         }
