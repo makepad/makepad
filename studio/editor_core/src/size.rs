@@ -45,9 +45,9 @@ use crate::makepad_micro_serde::{SerBin, DeBin, DeBinErr};
 #[derive(Clone, Copy, Debug, Default, Eq, Hash, Ord, PartialEq, PartialOrd, SerBin, DeBin)]
 pub struct Size {
     // The number of lines to move down.
-    pub line: usize,
+    pub line: u32,
     // The number of columns to move right.
-    pub column: usize,
+    pub column: u32,
 }
 
 impl Size {
