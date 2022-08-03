@@ -13,6 +13,9 @@ live_register!{
             my_red_button =? Button{
                color: #f000 
             }
+            Image{
+                image:d"resources/makepad_logo_WIP.png"
+            }
         }
     }
 }
