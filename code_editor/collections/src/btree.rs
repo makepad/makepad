@@ -332,6 +332,7 @@ impl<'a, T: Chunk, I: Info<T>> Cursor<'a, T, I> {
         self.position + self.current_chunk().len() >= self.slice.end
     }
 
+    #[inline]
     pub(crate) fn position(&self) -> usize {
         self.position.saturating_sub(self.slice.start)
     }
