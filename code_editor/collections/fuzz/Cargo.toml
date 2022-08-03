@@ -19,7 +19,7 @@ path = ".."
 members = ["."]
 
 [[bin]]
-name = "mutations"
-path = "fuzz_targets/mutations.rs"
+name = "btree_string"
+path = "fuzz_targets/btree_string.rs"
 test = false
 doc = false
