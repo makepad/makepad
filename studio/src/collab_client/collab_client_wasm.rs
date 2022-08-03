@@ -30,18 +30,18 @@ impl LiveHook for CollabClient {
             // connect websocket
             let (host, protocol) = if let PlatformType::WebBrowser{host,protocol,..} = &cx.platform_type(){(host,protocol)}else{panic!()};
             
-            /*self.web_socket = Some(
+            self.web_socket = Some(
                 cx.web_socket_open(
                     format!("{}://{}",if protocol=="https:"{"wss"}else{"ws"}, host),
                     WebSocketAutoReconnect::Yes
                 )
-            )*/
-            self.web_socket = Some(
+            )
+            /*self.web_socket = Some(
                 cx.web_socket_open(
                     format!("wss://makepad.nl/"),
                     WebSocketAutoReconnect::Yes
                 )
-            )
+            )*/
 
             //self.inner = Some(CollabClientInner::new_with_local_server(&self.path))
         }
@@ -76,7 +76,8 @@ impl CollabClient {
                 let action = CollabClientAction::de_bin(&mut 0, &msg.data).unwrap();
                 dispatch_action(cx, action);
             }
-            Event::Signal(event) if event.signals.contains(&self.signal) => {
+            
+            Event::Signal(signal_event) if signal_event.signals.contains(&self.signal) => {
                 let mut requests = self.requests.borrow_mut();
                 for request in requests.iter(){
                     let mut buf = Vec::new();
