@@ -56,32 +56,24 @@ impl LiveHook for Frame {
             match cx.get_dependency(image_path) {
                 Ok(data) => {
                     if image_path.ends_with(".jpg") {
-                       // for i in 0..10 {
-                           // let pt = profile_start();
-                            match jpeg::decode(data) {
-                                Ok(image) => {
-                                    image_buffer = Some(image);
-                                }
-                                Err(err) => {
-                                    //cx.apply_image_decoding_failed(live_error_origin!(), index, nodes, image_path, &err);
-                                }
+                        match jpeg::decode(data) {
+                            Ok(image) => {
+                                image_buffer = Some(image);
                             }
-                          //  profile_end(pt);
-                        //}
+                            Err(err) => {
+                                cx.apply_image_decoding_failed(live_error_origin!(), index, nodes, image_path, &err);
+                            }
+                        }
                     }
                     else if image_path.ends_with(".png") {
-                        //for i in 0..10 {
-                            let pt = profile_start();
                         match png::decode(data) {
                             Ok(image) => {
                                 image_buffer = Some(image);
                             }
                             Err(err) => {
-                                //cx.apply_image_decoding_failed(live_error_origin!(), index, nodes, image_path, &err);
+                                cx.apply_image_decoding_failed(live_error_origin!(), index, nodes, image_path, &err);
                             }
                         }
-                        profile_end(pt);
-                       // }
                     }
                     else {
                         cx.apply_image_type_not_supported(live_error_origin!(), index, nodes, image_path);
