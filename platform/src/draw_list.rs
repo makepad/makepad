@@ -40,12 +40,17 @@ impl DrawList{
 #[derive(Default)]
 pub struct CxDrawListPool(IdPool<CxDrawList>);
 impl CxDrawListPool{
+    pub fn root_id(&self)->DrawListId{
+        DrawListId(0, self.0.pool[0].generation)
+    }
+
     pub fn alloc(&mut self)->DrawList{
         DrawList(self.0.alloc())
     }
 }
 
 impl std::ops::Index<DrawListId> for CxDrawListPool{
+    
     type Output = CxDrawList;
     fn index(&self, index: DrawListId) -> &Self::Output{
         let d = &self.0.pool[index.0];

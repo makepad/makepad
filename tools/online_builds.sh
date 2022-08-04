@@ -6,5 +6,5 @@ echo "----- Building fractal zoom SIMD -----"
 echo "----- Building fractal zoom threaded -----"   
 ./tools/build_wasm_thread.sh fractal_zoom "$NIGHTLY"
 echo "----- Building makepad studio normal -----"
-./tools/build_wasm_normal.sh makepad_studio "$NIGHTLY"
+./tools/build_wasm_normal_nightly.sh makepad_studio "$NIGHTLY"
 
