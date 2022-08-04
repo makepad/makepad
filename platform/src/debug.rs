@@ -1,6 +1,10 @@
 use std::cell::RefCell;
 use std::rc::Rc;
 use crate::makepad_math::{Rect, Vec4, Vec2};
+use crate::cx::Cx;
+use crate::makepad_error_log::*;
+use crate::draw_list::DrawListId;
+use std::fmt::Write;
 
 #[derive(Clone, Default)]
 pub struct DebugInner {
@@ -35,7 +39,6 @@ impl Debug {
     pub fn lg(&self, p: Vec2, label:String) {self.pl(Self::G, p, label)}
     pub fn lb(&self, p: Vec2, label:String) {self.pl(Self::B, p, label)}
 
-    
     pub fn r(&self, color: Vec4, p: Rect) {
         let mut inner = self.0.borrow_mut();
         inner.rects.push((p, color));
@@ -69,4 +72,94 @@ impl Debug {
         std::mem::swap(&mut swap, &mut inner.labels);
         swap
     }
+}
+
+impl Cx{
+    
+    pub fn debug_draw_tree(&self, dump_instances: bool, draw_list_id: DrawListId) {
+        fn debug_draw_tree_recur(cx: &Cx, dump_instances: bool, s: &mut String, draw_list_id: DrawListId, depth: usize) {
+            //if draw_list_id >= cx.draw_lists.len() {
+            //    writeln!(s, "---------- Drawlist still empty ---------").unwrap();
+            //    return
+            //}
+            let mut indent = String::new();
+            for _i in 0..depth {
+                indent.push_str("|   ");
+            }
+            let draw_items_len = cx.draw_lists[draw_list_id].draw_items_len;
+            //if draw_list_id == 0 {
+            //    writeln!(s, "---------- Begin Debug draw tree for redraw_id: {} ---------", cx.redraw_id).unwrap();
+            // }
+            let rect = cx.draw_lists[draw_list_id].rect;
+            let scroll = cx.draw_lists[draw_list_id].get_local_scroll();
+            writeln!(
+                s,
+                "{}{} {:?}: len:{} rect:({}, {}, {}, {}) scroll:({}, {})",
+                indent,
+                cx.draw_lists[draw_list_id].debug_id,
+                draw_list_id,
+                draw_items_len,
+                rect.pos.x,
+                rect.pos.y,
+                rect.size.x,
+                rect.size.y,
+                scroll.x,
+                scroll.y
+            ).unwrap();
+            indent.push_str("  ");
+            let mut indent = String::new();
+            for _i in 0..depth + 1 {
+                indent.push_str("|   ");
+            }
+            for draw_item_id in 0..draw_items_len {
+                if let Some(sub_view_id) = cx.draw_lists[draw_list_id].draw_items[draw_item_id].sub_view_id {
+                    debug_draw_tree_recur(cx, dump_instances, s, sub_view_id, depth + 1);
+                }
+                else {
+                    let cxview = &cx.draw_lists[draw_list_id];
+                    let draw_call = cxview.draw_items[draw_item_id].draw_call.as_ref().unwrap();
+                    let sh = &cx.draw_shaders.shaders[draw_call.draw_shader.draw_shader_id];
+                    let slots = sh.mapping.instances.total_slots;
+                    let instances = draw_call.instances.as_ref().unwrap().len() / slots;
+                    writeln!(
+                        s,
+                        "{}{}({}) sid:{} inst:{} scroll:{}",
+                        indent,
+                        draw_call.options.debug_id.unwrap_or(sh.class_prop),
+                        sh.type_name,
+                        draw_call.draw_shader.draw_shader_id,
+                        instances,
+                        draw_call.draw_uniforms.get_local_scroll()
+                    ).unwrap();
+                    // lets dump the instance geometry
+                    if dump_instances {
+                        for inst in 0..instances.min(1) {
+                            let mut out = String::new();
+                            let mut off = 0;
+                            for input in &sh.mapping.instances.inputs {
+                                let buf = draw_call.instances.as_ref().unwrap();
+                                match input.slots {
+                                    1 => out.push_str(&format!("{}:{} ", input.id, buf[inst * slots + off])),
+                                    2 => out.push_str(&format!("{}:v2({},{}) ", input.id, buf[inst * slots + off], buf[inst * slots + 1 + off])),
+                                    3 => out.push_str(&format!("{}:v3({},{},{}) ", input.id, buf[inst * slots + off], buf[inst * slots + 1 + off], buf[inst * slots + 1 + off])),
+                                    4 => out.push_str(&format!("{}:v4({},{},{},{}) ", input.id, buf[inst * slots + off], buf[inst * slots + 1 + off], buf[inst * slots + 2 + off], buf[inst * slots + 3 + off])),
+                                    _ => {}
+                                }
+                                off += input.slots;
+                            }
+                            writeln!(s, "  {}instance {}: {}", indent, inst, out).unwrap();
+                        }
+                    }
+                }
+            }
+            //if draw_list_id == 0 {
+            //    writeln!(s, "---------- End Debug draw tree for redraw_id: {} ---------", cx.redraw_id).unwrap();
+            //}
+        }
+        
+        let mut s = String::new();
+        debug_draw_tree_recur(self, dump_instances, &mut s, draw_list_id, 0);
+        log!("{}", s);
+    }
+
 }

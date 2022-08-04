@@ -11,7 +11,7 @@ use {
             cx_2d::Cx2d,
             turtle::{Layout, Size, Walk, Margin},
         },
-        nav::{NavItem, NavRole, NavOrder},
+        nav::{NavItem, NavRole, NavOrder, NavStop},
         draw_vars::{
             DrawVars,
         },
@@ -179,6 +179,7 @@ impl View {
                 let draw_item = &mut parent.draw_items[parent.draw_items_len];
                 draw_item.sub_view_id = Some(self.draw_list.id());
                 draw_item.redraw_id = cx.cx.redraw_id;
+                parent.nav_items.push(NavItem::Child(self.draw_list.id()));
                 parent.draw_items_len += 1;
             }
         }
@@ -213,7 +214,7 @@ impl View {
         cxview.redraw_id = cx.cx.redraw_id;
         
         cxview.draw_items_len = 0;
-        
+        cxview.nav_items.clear();
         cx.draw_list_stack.push(self.draw_list.id());
         
         let old_area = Area::DrawList(DrawListArea {draw_list_id: self.draw_list.id(), redraw_id: last_redraw_id});
@@ -439,12 +440,12 @@ impl<'a> Cx2d<'a> {
     pub fn add_nav_stop(&mut self, area: Area, role: NavRole, margin:Margin) {
         let current_draw_list_id = *self.draw_list_stack.last().unwrap();
         let draw_list = &mut self.cx.draw_lists[current_draw_list_id];
-        draw_list.nav_items.push(NavItem::Stop {
+        draw_list.nav_items.push(NavItem::Stop(NavStop{
             role,
             area,
             order: NavOrder::Default,
             margin
-        });
+        }));
     }
     /*
     pub fn set_view_scroll_x(&mut self, draw_list_id: usize, scroll_pos: f32) {
