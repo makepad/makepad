@@ -3,7 +3,7 @@ use {
     std::ops::{Add, AddAssign, Sub, SubAssign},
 };
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub(crate) struct Info {
     pub(crate) byte_count: usize,
     pub(crate) char_count: usize,
