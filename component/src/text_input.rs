@@ -439,7 +439,6 @@ impl TextInput {
         actions
     }
     
-    
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, TextInputAction)) {
         self.state_handle_event(cx, event);
         match event.hits(cx, self.bg.area()) {
