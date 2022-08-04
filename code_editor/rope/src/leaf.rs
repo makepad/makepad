@@ -3,13 +3,13 @@ use {
     std::{ops::Deref, sync::Arc},
 };
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct Leaf {
     string: Arc<String>,
 }
 
 impl Leaf {
-    const MAX_LEN: usize = 1024;
+    pub(crate) const MAX_LEN: usize = 1024;
 
     pub(crate) fn new() -> Self {
         Leaf::from(Arc::new(String::new()))
@@ -17,16 +17,6 @@ impl Leaf {
 
     pub(crate) fn info(&self) -> Info {
         Info::from(self.string.as_str())
-    }
-
-    pub(crate) fn prepend_or_distribute(&mut self, mut other: Self) -> Option<Self> {
-        if self.len() + other.len() <= Self::MAX_LEN {
-            self.prepend(other);
-            None
-        } else {
-            other.distribute(self);
-            Some(other)
-        }
     }
 
     pub(crate) fn append_or_distribute(&mut self, mut other: Self) -> Option<Self> {
@@ -51,10 +41,6 @@ impl Leaf {
 
     pub(crate) fn truncate_back(&mut self, end: usize) {
         Arc::make_mut(&mut self.string).truncate(end);
-    }
-
-    fn prepend(&mut self, mut other: Self) {
-        other.shift_right(self, 0);
     }
 
     fn append(&mut self, mut other: Self) {
