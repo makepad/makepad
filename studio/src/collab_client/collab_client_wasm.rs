@@ -35,8 +35,8 @@ impl LiveHook for CollabClient {
                     format!("{}://{}",if protocol=="https:"{"wss"}else{"ws"}, host),
                     WebSocketAutoReconnect::Yes
                 )
-            )
-            /*self.web_socket = Some(
+            )/*
+            self.web_socket = Some(
                 cx.web_socket_open(
                     format!("wss://makepad.nl/"),
                     WebSocketAutoReconnect::Yes
