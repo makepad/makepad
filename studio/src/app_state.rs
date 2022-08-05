@@ -1,14 +1,12 @@
 use {
     crate::{
-        makepad_studio_component::{
-            file_tree::{FileNodeId},
-        },
         makepad_component::{
+            file_tree::{FileNodeId},
             splitter::{SplitterAlign},
             dock::{PanelId},
             tab_bar::{TabId},
         },
-        makepad_platform::*,
+        makepad_draw_2d::*,
         editor_state::{EditorState, SessionId},
         makepad_collab_protocol::{
             FileNodeData, FileTreeData,

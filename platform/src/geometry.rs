@@ -6,10 +6,13 @@ use {
     crate::{
         id_pool::*,
         makepad_error_log::*,
+        makepad_live_compiler::{
+            LiveType,
+            LiveId,
+        },
         makepad_shader_compiler::ShaderTy,
         platform::CxPlatformGeometry,
         cx::Cx,
-        live_traits::*
     }
 };
 
@@ -109,6 +112,8 @@ impl Cx{
         self.geometries_refs.insert(fingerprint, weak);
         GeometryRef(geometry)
     }
+    
+   
 }
 
 impl Geometry{
@@ -118,6 +123,13 @@ impl Geometry{
         cx.geometries[geometry.geometry_id()].vertices.clear();
         cx.geometries[geometry.geometry_id()].dirty = true;
         geometry
+    }
+    
+    pub fn update(&self, cx:&mut Cx, indices: Vec<u32>, vertices: Vec<f32>){
+        let cxgeom = &mut cx.geometries[self.geometry_id()];
+        cxgeom.indices = indices;
+        cxgeom.vertices = vertices;
+        cxgeom.dirty = true;
     }
 }
 

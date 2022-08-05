@@ -1,15 +1,10 @@
 use {
     crate::{
-        makepad_derive_live::*,
-        makepad_math::*,
-        cx::Cx,
-        area::Area,
-        draw_2d::cx_2d::Cx2d,
-        live_traits::*,
-        shader::geometry_gen::GeometryQuad2D,
-        draw_vars::DrawVars,
-        draw_2d::view::ManyInstances,
-        draw_2d::turtle::{Layout, Walk},
+        makepad_platform::*,
+        view::ManyInstances,
+        geometry::GeometryQuad2D,
+        cx_2d::Cx2d,
+        turtle::{Walk, Layout}
     },
 };
 

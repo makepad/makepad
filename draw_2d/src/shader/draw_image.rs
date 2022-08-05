@@ -1,5 +1,5 @@
-use crate::cx::*;
-use crate::draw_2d::draw_quad::DrawQuad;
+use crate::makepad_platform::*;
+use crate::shader::draw_quad::DrawQuad;
 
 #[derive(Clone, DrawQuad)]
 #[repr(C)]

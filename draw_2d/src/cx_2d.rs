@@ -1,52 +1,67 @@
 use {
     std::{
+        rc::Rc,
+        cell::{RefCell},
         ops::Deref,
         ops::DerefMut
     },
     crate::{
-        makepad_math::{
-            Vec2
-        },
-        event::{
-            DrawEvent
-        },
-        area::{
+        makepad_platform::{
+            Vec2,
+            DrawEvent,
             Area,
-        },
-        draw_list::{
             DrawListId,
-        },
-        draw_2d::{
-            view::View,
-            turtle::{Turtle, TurtleWalk},
-        },
-        pass::{
             PassId,
             Pass,
-            CxPassParent
+            CxPassParent,
+            Cx
         },
-        cx::Cx,
+        font::{
+            CxFontsAtlasRc,
+            CxFontsAtlas,
+            CxDrawFontsAtlas,
+            CxDrawFontsAtlasRc
+        },
+        view::View,
+        turtle::{Turtle, TurtleWalk},
     }
 };
 
 pub struct Cx2d<'a> {
     pub cx: &'a mut Cx,
-    pub(crate) draw_event: &'a DrawEvent,
-    pub(crate) pass_id: Option<PassId>,
+    pub (crate) draw_event: &'a DrawEvent,
+    pub (crate) pass_id: Option<PassId>,
     pub draw_list_stack: Vec<DrawListId>,
-    pub(crate) turtles: Vec<Turtle>,
-    pub(crate) turtle_walks: Vec<TurtleWalk>,
-    pub(crate) align_list: Vec<Area>,
-    pub(crate) current_dpi_factor: f32,
+    pub (crate) turtles: Vec<Turtle>,
+    pub (crate) turtle_walks: Vec<TurtleWalk>,
+    pub (crate) align_list: Vec<Area>,
+    pub (crate) current_dpi_factor: f32,
+    pub fonts_atlas_rc: CxFontsAtlasRc,
 }
 
 impl<'a> Deref for Cx2d<'a> {type Target = Cx; fn deref(&self) -> &Self::Target {self.cx}}
 impl<'a> DerefMut for Cx2d<'a> {fn deref_mut(&mut self) -> &mut Self::Target {self.cx}}
 
 impl<'a> Cx2d<'a> {
-    pub fn new(cx: &'a mut Cx, draw_event: &'a DrawEvent) -> Self {
+    pub fn lazy_construct_font_atlas(cx: &mut Cx){
+        // ok lets fetch/instance our CxFontsAtlasRc
+        if !cx.has_global::<CxFontsAtlasRc>() {
+            let draw_fonts_atlas = CxDrawFontsAtlas::new(cx);
+            let texture_id = draw_fonts_atlas.atlas_texture.texture_id();
+            cx.set_global(CxDrawFontsAtlasRc(Rc::new(RefCell::new(draw_fonts_atlas))));
+            let fonts_atlas = CxFontsAtlas::new(texture_id);
+            cx.set_global(CxFontsAtlasRc(Rc::new(RefCell::new(fonts_atlas))));
+        }
+    }
+    
+    pub fn draw<T, F>(cx: &'a mut Cx, draw_event: &'a DrawEvent, app: &mut T,  mut cb: F) where F: FnMut(&mut Cx2d, &mut T) {
+        Self::lazy_construct_font_atlas(cx);
+        
         cx.redraw_id += 1;
-        Self {
+        let fonts_atlas_rc = cx.get_global::<CxFontsAtlasRc>().clone();
+
+        let mut cx_2d = Cx2d {
+            fonts_atlas_rc,
             current_dpi_factor: 1.0,
             cx: cx,
             draw_event,
@@ -55,10 +70,13 @@ impl<'a> Cx2d<'a> {
             turtle_walks: Vec::new(),
             turtles: Vec::new(),
             align_list: Vec::new(),
-        }
+        };
+        cb(&mut cx_2d, app);
+        // lets render fonts
+        cx_2d.draw_font_atlas();
     }
     
-    pub fn current_dpi_factor(&self)->f32{
+    pub fn current_dpi_factor(&self) -> f32 {
         self.current_dpi_factor
     }
     

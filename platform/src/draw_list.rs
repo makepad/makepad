@@ -1,5 +1,8 @@
 use {
     crate::{
+        makepad_live_compiler::{
+            LiveId,
+        },        
         makepad_math::*,
         makepad_error_log::*,
         platform::{
@@ -8,7 +11,6 @@ use {
         },
         pass::PassId,
         id_pool::*,
-        live_traits::*,
         nav::*,
         cx_draw_shaders::{
             CxDrawShaderOptions,
@@ -40,10 +42,6 @@ impl DrawList{
 #[derive(Default)]
 pub struct CxDrawListPool(IdPool<CxDrawList>);
 impl CxDrawListPool{
-    pub fn root_id(&self)->DrawListId{
-        DrawListId(0, self.0.pool[0].generation)
-    }
-
     pub fn alloc(&mut self)->DrawList{
         DrawList(self.0.alloc())
     }
@@ -195,12 +193,12 @@ impl CxDrawListUniforms {
         unsafe {std::mem::transmute(self)}
     }
 }
-
+/*
 #[derive(Clone)]
 pub enum DrawListDebug {
     DrawTree,
     Instances
-}
+}*/
 
 #[derive(Default)]
 pub struct CxDrawList {
@@ -229,7 +227,7 @@ pub struct CxDrawList {
     pub clip_points: (Vec2,Vec2),
     pub unclipped: bool,
     
-    pub debug: Option<DrawListDebug>,
+    //pub debug: Option<DrawListDebug>,
     
     pub nav_items: Vec<NavItem>
     
@@ -298,7 +296,7 @@ impl CxDrawList {
                             }
                             if diff {continue}
                         }
-                        if !draw_call.options.appendable_drawcall(&draw_vars.options) {
+                        if !draw_call.options._appendable_drawcall(&draw_vars.options) {
                             continue
                         }
                         return Some(i)
