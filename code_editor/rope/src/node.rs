@@ -40,6 +40,26 @@ impl Node {
         start_info.byte_count + chunk.line_to_byte(line_index - start_info.line_break_count)
     }
 
+    pub(crate) fn chunk_front(&self) -> &str {
+        let mut node = self;
+        loop {
+            match node {
+                Node::Leaf(leaf) => break leaf,
+                Node::Branch(branch) => node = branch.first().unwrap(),
+            }
+        }
+    }
+
+    pub(crate) fn chunk_back(&self) -> &str {
+        let mut node = self;
+        loop {
+            match node {
+                Node::Leaf(leaf) => break leaf,
+                Node::Branch(branch) => node = branch.last().unwrap(),
+            }
+        }
+    }
+
     pub(crate) fn chunk_at_byte(&self, byte_index: usize) -> (&str, Info) {
         let mut start_info = Info::new();
         let mut node = self;

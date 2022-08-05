@@ -20,6 +20,10 @@ impl Branch {
         self.info
     }
 
+    pub(crate) fn as_nodes(&self) -> &[Node] {
+        self.nodes.as_slice()
+    }
+
     pub(crate) fn search_by_byte_only(&self, byte_count: &mut usize, byte_index: usize) -> usize {
         let mut index = 0;
         for node in self.iter() {
@@ -214,6 +218,6 @@ impl Deref for Branch {
     type Target = [Node];
 
     fn deref(&self) -> &Self::Target {
-        self.nodes.as_slice()
+        self.as_nodes()
     }
 }
