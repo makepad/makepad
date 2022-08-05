@@ -1,7 +1,7 @@
 use {super::*, proptest::prelude::*};
 
 fn arbitrary_string() -> impl Strategy<Value = String> {
-    "(.|[\n])*"
+    "(.|[\u{000A}-\u{000D}\u{0085}\u{2028}-\u{2029}])*"
 }
 
 fn arbitrary_string_and_byte_index() -> impl Strategy<Value = (String, usize)> {
@@ -133,13 +133,7 @@ proptest! {
     #[test]
     fn chunks_rev(string in arbitrary_string()) {
         let rope = Rope::from(&string);
-        assert_eq!(
-            rope
-                .chunks_rev()
-                .flat_map(|chunk| chunk.chars().rev())
-                .collect::<String>(),
-            string.chars().rev().collect::<String>(),
-        );
+        assert_eq!(rope.chunks_rev().flat_map(|chunk| chunk.chars().rev()).collect::<String>(), string.chars().rev().collect::<String>());
     }
 
     #[test]

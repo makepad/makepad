@@ -115,9 +115,16 @@ impl<'a> Slice<'a> {
     }
 
     pub(crate) fn new(rope: &'a Rope, byte_start: usize, byte_end: usize) -> Self {
+        use crate::StrUtils;
+
+        let (chunk, mut start_info) = rope.root().chunk_at_byte(byte_start);
+        start_info += Info::from(&chunk[..byte_start - start_info.byte_count]);
+        if chunk[..byte_start].last_is_cr() && chunk[byte_start..].first_is_lf() {
+            start_info.line_break_count -= 1;
+        }
         Self {
             rope,
-            start_info: rope.info_at(byte_start),
+            start_info,
             end_info: rope.info_at(byte_end),
         }
     }
