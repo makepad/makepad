@@ -3,7 +3,7 @@ use {
     std::{ops::Deref, sync::Arc},
 };
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct Branch {
     info: Info,
     nodes: Arc<Vec<Node>>,
@@ -18,6 +18,62 @@ impl Branch {
 
     pub(crate) fn info(&self) -> Info {
         self.info
+    }
+
+    pub(crate) fn as_nodes(&self) -> &[Node] {
+        self.nodes.as_slice()
+    }
+
+    pub(crate) fn search_by_byte_only(&self, byte_count: &mut usize, byte_index: usize) -> usize {
+        let mut index = 0;
+        for node in self.iter() {
+            let next_byte_count = *byte_count + node.info().byte_count;
+            if byte_index < next_byte_count {
+                break;
+            }
+            index += 1;
+            *byte_count = next_byte_count;
+        }
+        index
+    }
+
+    pub(crate) fn search_by_byte(&self, info: &mut Info, byte_index: usize) -> usize {
+        let mut index = 0;
+        for node in self.iter() {
+            let next_info = *info + node.info();
+            if byte_index < next_info.byte_count {
+                break;
+            }
+            index += 1;
+            *info = next_info;
+        }
+        index
+    }
+
+    pub(crate) fn search_by_char(&self, info: &mut Info, char_index: usize) -> usize {
+        let mut index = 0;
+        for node in self.iter() {
+            let next_info = *info + node.info();
+            if char_index < next_info.char_count {
+                break;
+            }
+            index += 1;
+            *info = next_info;
+        }
+        index
+    }
+
+    pub(crate) fn search_by_line(&self, info: &mut Info, line_index: usize) -> usize {
+        let mut index = 0;
+        for node in self.iter() {
+            let next_info = *info + node.info();
+            if line_index <= next_info.line_break_count {
+                break;
+            }
+            index += 1;
+            *info = next_info;
+        }
+        index
     }
 
     pub(crate) fn push_front_and_maybe_split(&mut self, node: Node) -> Option<Self> {
@@ -93,16 +149,6 @@ impl Branch {
         output
     }
 
-    pub(crate) fn prepend_or_distribute(&mut self, mut other: Self) -> Option<Self> {
-        if self.len() + other.len() <= Self::MAX_LEN {
-            self.prepend(other);
-            None
-        } else {
-            other.distribute(self);
-            Some(other)
-        }
-    }
-
     pub(crate) fn append_or_distribute(&mut self, mut other: Self) -> Option<Self> {
         if self.len() + other.len() <= Self::MAX_LEN {
             self.append(other);
@@ -125,10 +171,6 @@ impl Branch {
 
     pub(crate) fn truncate_back(&mut self, end: usize) {
         Arc::make_mut(&mut self.nodes).truncate(end);
-    }
-
-    fn prepend(&mut self, mut other: Self) {
-        other.shift_right(self, 0);
     }
 
     fn append(&mut self, mut other: Self) {
@@ -176,6 +218,6 @@ impl Deref for Branch {
     type Target = [Node];
 
     fn deref(&self) -> &Self::Target {
-        self.nodes.as_slice()
+        self.as_nodes()
     }
 }
