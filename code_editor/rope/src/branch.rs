@@ -46,6 +46,32 @@ impl Branch {
         index
     }
 
+    pub(crate) fn search_by_char(&self, info: &mut Info, char_index: usize) -> usize {
+        let mut index = 0;
+        for node in self.iter() {
+            let next_info = *info + node.info();
+            if char_index < next_info.char_count {
+                break;
+            }
+            index += 1;
+            *info = next_info;
+        }
+        index
+    }
+
+    pub(crate) fn search_by_line(&self, info: &mut Info, line_index: usize) -> usize {
+        let mut index = 0;
+        for node in self.iter() {
+            let next_info = *info + node.info();
+            if line_index <= next_info.line_break_count {
+                break;
+            }
+            index += 1;
+            *info = next_info;
+        }
+        index
+    }
+
     pub(crate) fn push_front_and_maybe_split(&mut self, node: Node) -> Option<Self> {
         use std::mem;
 

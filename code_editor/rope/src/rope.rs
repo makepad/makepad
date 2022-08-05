@@ -1,5 +1,8 @@
 use {
-    crate::{Branch, Builder, Bytes, BytesRev, Chars, CharsRev, Chunks, ChunksRev, Cursor, Info, Leaf, Node, Slice},
+    crate::{
+        Branch, Builder, Bytes, BytesRev, Chars, CharsRev, Chunks, ChunksRev, Cursor, Info, Leaf,
+        Node, Slice,
+    },
     std::ops::RangeBounds,
 };
 
@@ -29,8 +32,33 @@ impl Rope {
         self.root.info().char_count
     }
 
-    pub fn char_at_byte(self, byte_index: usize) -> usize {
-        self.info_at_byte(byte_index).char_count
+    pub fn line_len(&self) -> usize {
+        self.root.info().line_break_count + 1
+    }
+
+    pub fn byte_to_char(&self, byte_index: usize) -> usize {
+        self.info_at(byte_index).char_count
+    }
+
+    pub fn byte_to_line(&self, byte_index: usize) -> usize {
+        self.info_at(byte_index).line_break_count + 1
+    }
+
+    pub fn char_to_byte(&self, char_index: usize) -> usize {
+        if char_index == 0 {
+            return 0;
+        }
+        if char_index == self.char_len() {
+            return self.byte_len();
+        }
+        self.root.char_to_byte(char_index)
+    }
+
+    pub fn line_to_byte(&self, line_index: usize) -> usize {
+        if line_index == 0 {
+            return 0;
+        }
+        self.root.line_to_byte(line_index)
     }
 
     pub fn slice<R: RangeBounds<usize>>(&self, byte_range: R) -> Slice<'_> {
@@ -154,14 +182,14 @@ impl Rope {
         Self { height, root }
     }
 
-    pub(crate) fn info_at_byte(&self, byte_index: usize) -> Info {
+    pub(crate) fn info_at(&self, byte_index: usize) -> Info {
         if byte_index == 0 {
             return Info::new();
         }
         if byte_index == self.byte_len() {
             return self.root.info();
         }
-        self.root.info_at_byte(byte_index)
+        self.root.info_at(byte_index)
     }
 
     pub(crate) fn root(&self) -> &Node {
