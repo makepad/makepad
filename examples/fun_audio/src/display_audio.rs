@@ -4,7 +4,7 @@ use {
         makepad_draw_2d::*,
         makepad_math::complex::*,
         makepad_component::*,
-        makepad_platform::audio::*,
+        makepad_media::*,
         makepad_component::imgui::*
     }
 };

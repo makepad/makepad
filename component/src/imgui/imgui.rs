@@ -206,9 +206,9 @@ pub trait ImGuiEventExt{
     fn on_drag(&self) -> Option<DragEvent>;
     fn on_drop(&self) -> Option<DropEvent>;
     fn on_drag_end(&self) -> bool;
-    fn on_midi_1_input_data(&self) -> Vec<Midi1InputData>;
-    fn on_midi_1_notes(&self) -> Vec<Midi1Note> ;
-    fn on_midi_input_list(&self) -> Option<MidiInputListEvent> ;
+    //fn on_midi_1_input_data(&self) -> Vec<Midi1InputData>;
+    //fn on_midi_1_notes(&self) -> Vec<Midi1Note> ;
+    //fn on_midi_input_list(&self) -> Option<MidiInputListEvent> ;
 }
 
 // Event immediate mode API
@@ -354,7 +354,7 @@ impl ImGuiEventExt for Event {
     fn on_drag_end(&self) -> bool {
         if let Self::DragEnd = self {true}else {false}
     }
-
+/*
     fn on_midi_1_input_data(&self) -> Vec<Midi1InputData> {
         if let Event::Midi1InputData(inputs) = self{
             inputs.clone()
@@ -383,7 +383,7 @@ impl ImGuiEventExt for Event {
         else{
             None
         }
-    }
+    }*/
 }
 
 // shortcuts to check for keypresses

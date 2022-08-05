@@ -3,7 +3,6 @@ use {
         makepad_image_formats::jpeg,
         makepad_image_formats::png,
         makepad_draw_2d::*,
-        component_map::*,
         frame::*
     },
     std::any::TypeId

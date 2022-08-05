@@ -1,4 +1,4 @@
-pub mod platform;
+pub mod os;
 
 #[macro_use]
 mod live_prims;
@@ -28,11 +28,15 @@ mod draw_vars;
 mod geometry;
 mod draw_list;
 mod debug;
-pub mod audio;
-pub mod midi;
+mod component_map;
+//pub mod audio;
+//pub mod midi;
 
 #[cfg(target_arch = "wasm32")]
 pub use makepad_wasm_bridge;
+
+#[cfg(target_os = "macos")]
+pub use makepad_objc_sys;
 
 pub use {
     makepad_shader_compiler,
@@ -78,6 +82,9 @@ pub use {
         LiveNodeSlice,
         LiveNodeVec,
     },
+    component_map::{
+        ComponentMap
+    },
     makepad_shader_compiler::{
         ShaderRegistry,
         ShaderEnum,
@@ -86,7 +93,7 @@ pub use {
     },
     crate::{
         cx_api::{
-            CxPlatformApi,
+            CxOsApi,
         },
         draw_list::{
             CxDrawItem,
@@ -97,18 +104,18 @@ pub use {
         },
         cx::{
             Cx,
-            PlatformType
+            OsType
         },
         area::{
             Area,
             DrawListArea,
             InstanceArea
         },
-        midi::{
+        /*midi::{
             Midi1Event,
             Midi1Note,
             Midi1InputData,
-        },
+        },*/
         menu::{
             MenuCommand,
         },
@@ -120,7 +127,7 @@ pub use {
             DragHit,
             Signal,
             Trigger,
-            MidiInputListEvent,
+            //MidiInputListEvent,
             WebSocket,
             WebSocketAutoReconnect,
             Timer,
