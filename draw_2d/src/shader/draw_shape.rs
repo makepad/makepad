@@ -1,17 +1,12 @@
 use {
     crate::{
-        makepad_derive_live::*,
-        makepad_shader_compiler::ShaderEnum,
-        makepad_math::*,
-        area::Area,
-        cx::Cx,
-        live_traits::*,
-        draw_2d::draw_quad::DrawQuad
+        makepad_platform::*,
+        shader::draw_quad::DrawQuad,
     },
 };
 
 live_register!{
-    import makepad_platform::shader::std::*;
+    import makepad_draw_2d::shader::std::*;
     DrawShape: {{DrawShape}} {
         texture image: texture2d
         

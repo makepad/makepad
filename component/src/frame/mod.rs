@@ -2,7 +2,7 @@ pub mod frame;
 pub mod frame_traits;
 pub use frame::*;
 pub use frame_traits::*;
-use makepad_platform::*;
+use crate::makepad_platform::*;
 
 live_register!{
     import crate::frame::frame::*;

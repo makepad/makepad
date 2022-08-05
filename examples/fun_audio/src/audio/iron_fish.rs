@@ -11,7 +11,7 @@ use {
         makepad_platform::thread::*,
         makepad_platform::audio::*,
         makepad_platform::midi::*,
-        makepad_platform::*
+        makepad_draw_2d::*
     },
 };
 

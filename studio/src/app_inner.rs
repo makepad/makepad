@@ -1,17 +1,15 @@
 use {
     crate::{
-        makepad_platform::*,
+        makepad_draw_2d::*,
         makepad_component::{
             splitter::{SplitterAlign},
             DesktopWindow,
             dock::{Dock, DockAction, DragPosition, PanelId},
             tab_bar::TabId,
-        },
-        makepad_studio_component::{
-            shader_view::ShaderView,
             slides_view::SlidesView,
             file_tree::{FileTreeAction, FileNodeId, FileTree},
         },
+        shader_view::ShaderView,
         collab_client::CollabClient,
         makepad_collab_protocol::{
             FileTreeData,
@@ -144,13 +142,13 @@ impl AppInner {
                     state,
                     id!(content).into(),
                     None,
-                    state.file_path_join(&["studio/component/src/shader_view.rs"]),
+                    state.file_path_join(&["studio/src/shader_view.rs"]),
                     false
                 );
                 self.builder_client.send_cmd(BuilderCmd::CargoCheck);
             }
-            Event::Draw(draw_event) => {
-                self.draw(&mut Cx2d::new(cx, draw_event), state);
+            Event::Draw(event) => {
+                return Cx2d::draw(cx, event, self, |cx, s| s.draw(cx, state));
             }
             _ => ()
         }

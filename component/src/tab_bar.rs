@@ -1,7 +1,7 @@
 use {
     
     crate::{
-        makepad_platform::*,
+        makepad_draw_2d::*,
         component_map::ComponentMap,
         scroll_view::ScrollView,
         tab::{TabAction, Tab},

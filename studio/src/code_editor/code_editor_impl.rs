@@ -10,7 +10,7 @@ use {
             position_set::PositionSet,
             range_set::{RangeSet, Span},
         },
-        makepad_platform::*,
+        makepad_draw_2d::*,
         makepad_component::{
             ScrollView,
             ScrollShadow
@@ -38,7 +38,7 @@ use {
 };
 
 live_register!{
-    import makepad_platform::shader::std::*;
+    import makepad_draw_2d::shader::std::*;
     import makepad_component::theme::*;
     
     DrawSelection: {{DrawSelection}} {

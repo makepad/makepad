@@ -1,13 +1,13 @@
 #![allow(unused)]
 use crate::{
     makepad_derive_frame::*,
-    makepad_platform::*,
+    makepad_draw_2d::*,
     button_logic::*,
     frame::*,
 };
 
 live_register!{
-    import makepad_platform::shader::std::*;
+    import makepad_draw_2d::shader::std::*;
     
     FoldButton: {{FoldButton}} {
         bg: {

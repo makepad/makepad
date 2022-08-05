@@ -1,20 +1,7 @@
 use {
     crate::{
         makepad_derive_live::*,
-        makepad_shader_compiler::{
-            ShaderTy,
-        },
-        makepad_live_id::*,
-        cx::Cx,
-        live_traits::*,
-        geometry::{
-            Geometry,
-            GeometryId,
-            GeometryFingerprint,
-            GeometryRef,
-            GeometryField,
-            GeometryFields,
-        }
+        makepad_platform::*,
     },
 };
 
@@ -90,10 +77,7 @@ pub enum GeometryAxis {
 impl GeometryGen {
     
     pub fn to_geometry(self, cx:&mut Cx, geometry:&Geometry){
-        let cxgeom = &mut cx.geometries[geometry.geometry_id()];
-        cxgeom.indices = self.indices;
-        cxgeom.vertices = self.vertices;
-        cxgeom.dirty = true;
+        geometry.update(cx, self.indices, self.vertices);
     }
     
     pub fn from_quad_2d(x1: f32, y1: f32, x2: f32, y2: f32) -> GeometryGen {

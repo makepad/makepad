@@ -1,20 +1,11 @@
 use {
     crate::{
-        makepad_derive_live::*,
-        makepad_math::*,
-        makepad_shader_compiler::{
-            ShaderTy,
-        },
-        makepad_live_id::*,
-        area::Area,
-        cx::Cx,
-        draw_2d::cx_2d::Cx2d,
-        live_traits::*,
-        draw_2d::turtle::{Walk, Size, Flow, Align},
-        font::{CxFontsAtlasTodo, Font},
-        draw_2d::view::ManyInstances,
-        draw_vars::DrawVars,
-        shader::geometry_gen::GeometryQuad2D,
+        makepad_platform::*,
+        turtle::{Walk, Size, Flow, Align},
+        font::{CxFontsAtlasTodo, CxFontsAtlas, Font},
+        view::ManyInstances,
+        geometry::GeometryQuad2D,
+        cx_2d::Cx2d
     },
 };
 
@@ -192,7 +183,13 @@ impl DrawText {
     }
     
     pub fn begin_many_instances(&mut self, cx: &mut Cx2d) {
-        self.update_draw_call_vars(cx);
+        let fonts_atlas_rc  =cx.fonts_atlas_rc.clone();
+        let fonts_atlas = fonts_atlas_rc.0.borrow();
+        self.begin_many_instances_internal(cx, &*fonts_atlas);
+    }
+    
+    fn begin_many_instances_internal(&mut self, cx: &mut Cx2d, fonts_atlas:&CxFontsAtlas) {
+        self.update_draw_call_vars(fonts_atlas);
         let mi = cx.begin_many_aligned_instances(&self.draw_vars);
         self.many_instances = mi;
     }
@@ -208,8 +205,8 @@ impl DrawText {
         cx.new_draw_call(&self.draw_vars);
     }
     
-    pub fn update_draw_call_vars(&mut self, cx: &mut Cx) {
-        self.draw_vars.texture_slots[0] = Some(cx.fonts_atlas.texture_id.unwrap());
+    pub fn update_draw_call_vars(&mut self, font_atlas:&CxFontsAtlas) {
+        self.draw_vars.texture_slots[0] = Some(font_atlas.texture_id);
         self.draw_vars.user_uniforms[0] = self.text_style.brightness;
         self.draw_vars.user_uniforms[1] = self.text_style.curve;
     }
@@ -225,17 +222,21 @@ impl DrawText {
         let in_many = self.many_instances.is_some();
         let font_id = self.text_style.font.font_id.unwrap();
         
-        if cx.fonts[font_id].is_none() {
+        let fonts_atlas_rc  =cx.fonts_atlas_rc.clone();
+        let mut fonts_atlas = fonts_atlas_rc.0.borrow_mut();
+        let fonts_atlas = &mut*fonts_atlas;
+        
+        if fonts_atlas.fonts[font_id].is_none() {
             return
         }
         
         if !in_many {
-            self.begin_many_instances(cx);
+            self.begin_many_instances_internal(cx, fonts_atlas);
         }
         
         let mut walk_x = pos.x;
         
-        let cxfont = cx.cx.fonts[font_id].as_mut().unwrap();
+        let cxfont = fonts_atlas.fonts[font_id].as_mut().unwrap();
         let dpi_factor = cx.current_dpi_factor;
         
         let atlas_page_id = cxfont.get_atlas_page_id(dpi_factor, self.text_style.font_size);
@@ -293,7 +294,7 @@ impl DrawText {
             else {
                 // see if we can fit it
                 // allocate slot
-                cx.cx.fonts_atlas.atlas_todo.push(CxFontsAtlasTodo {
+                fonts_atlas.alloc.todo.push(CxFontsAtlasTodo {
                     subpixel_x_fract,
                     subpixel_y_fract,
                     font_id,
@@ -303,7 +304,7 @@ impl DrawText {
                 });
                 
                 atlas_page.atlas_glyphs[glyph_id][subpixel_id] = Some(
-                    cx.cx.fonts_atlas.alloc_atlas_glyph(w, h)
+                    fonts_atlas.alloc.alloc_atlas_glyph(w, h)
                 );
                 
                 atlas_page.atlas_glyphs[glyph_id][subpixel_id].as_ref().unwrap()
@@ -341,19 +342,23 @@ impl DrawText {
         
         let in_many = self.many_instances.is_some();
         let font_id = self.text_style.font.font_id.unwrap();
+
+        let fonts_atlas_rc  =cx.fonts_atlas_rc.clone();
+        let mut fonts_atlas = fonts_atlas_rc.0.borrow_mut();
+        let fonts_atlas = &mut*fonts_atlas;
         
-        if cx.fonts[font_id].is_none() {
+        if fonts_atlas.fonts[font_id].is_none() {
             return
         }
         
         if !in_many {
-            self.begin_many_instances(cx);
+            self.begin_many_instances_internal(cx, fonts_atlas);
         }
         
         let mut walk_x = pos.x;
         //let mut char_offset = char_offset;
         
-        let cxfont = cx.cx.fonts[font_id].as_mut().unwrap();
+        let cxfont = fonts_atlas.fonts[font_id].as_mut().unwrap();
         let dpi_factor = cx.current_dpi_factor;
         
         let atlas_page_id = cxfont.get_atlas_page_id(dpi_factor, self.text_style.font_size);
@@ -409,7 +414,7 @@ impl DrawText {
             else {
                 // see if we can fit it
                 // allocate slot
-                cx.cx.fonts_atlas.atlas_todo.push(CxFontsAtlasTodo {
+                fonts_atlas.alloc.todo.push(CxFontsAtlasTodo {
                     subpixel_x_fract,
                     subpixel_y_fract,
                     font_id,
@@ -419,7 +424,7 @@ impl DrawText {
                 });
                 
                 atlas_page.atlas_glyphs[glyph_id][subpixel_id] = Some(
-                    cx.cx.fonts_atlas.alloc_atlas_glyph(w, h)
+                    fonts_atlas.alloc.alloc_atlas_glyph(w, h)
                 );
                 
                 atlas_page.atlas_glyphs[glyph_id][subpixel_id].as_ref().unwrap()
@@ -455,11 +460,13 @@ impl DrawText {
         // we include the align factor and the width/height
         let font_id = self.text_style.font.font_id.unwrap();
         
-        if cx.fonts[font_id].is_none() {
+        let fonts_atlas = cx.fonts_atlas_rc.0.borrow_mut();
+        
+        if fonts_atlas.fonts[font_id].is_none() {
             return None
         }
         
-        let font_size_logical = self.text_style.font_size * 96.0 / (72.0 * cx.fonts[font_id].as_ref().unwrap().ttf_font.units_per_em);
+        let font_size_logical = self.text_style.font_size * 96.0 / (72.0 * fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font.units_per_em);
         let measured_height = self.text_style.font_size * self.text_style.height_factor * self.font_scale;
         let eval_width = cx.turtle().eval_width(walk.width, walk.margin, Flow::Right);
         let eval_height = cx.turtle().eval_height(walk.height, walk.margin, Flow::Right);
@@ -469,7 +476,7 @@ impl DrawText {
         if walk.width.is_fit() {
             let mut measured_width = 0.0;
             for c in text.chars() {
-                if let Some(glyph) = cx.fonts[font_id].as_ref().unwrap().ttf_font.get_glyph(c) {
+                if let Some(glyph) = fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font.get_glyph(c) {
                     let adv = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
                     measured_width += adv;
                 }
@@ -484,7 +491,7 @@ impl DrawText {
         }
         else {
             
-            let ellip_width = if let Some(glyph) = cx.fonts[font_id].as_ref().unwrap().ttf_font.get_glyph('.') {
+            let ellip_width = if let Some(glyph) = fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font.get_glyph('.') {
                 glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale
             }
             else {
@@ -498,7 +505,7 @@ impl DrawText {
                 if measured_width + ellip_width * 3.0 < eval_width {
                     ellip_pt = Some((i, measured_width, 3));
                 }
-                if let Some(glyph) = cx.fonts[font_id].as_ref().unwrap().ttf_font.get_glyph(c) {
+                if let Some(glyph) = fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font.get_glyph(c) {
                     let adv = glyph.horizontal_metrics.advance_width * font_size_logical * self.font_scale;
                     // ok so now what.
                     if measured_width + adv >= eval_width { // we have to drop back to ellip_pt
@@ -663,15 +670,16 @@ impl DrawText {
         }
     }
     
-    pub fn get_monospace_base(&self, cx: &Cx) -> Vec2 {
+    pub fn get_monospace_base(&self, cx: &Cx2d) -> Vec2 {
+        let fonts_atlas = cx.fonts_atlas_rc.0.borrow_mut();
         if self.text_style.font.font_id.is_none() {
             return Vec2::default();
         }
         let font_id = self.text_style.font.font_id.unwrap();
-        if cx.fonts[font_id].is_none() {
+        if fonts_atlas.fonts[font_id].is_none() {
             return Vec2::default();
         }
-        let font = &cx.fonts[font_id].as_ref().unwrap().ttf_font;
+        let font = &fonts_atlas.fonts[font_id].as_ref().unwrap().ttf_font;
         let slot = font.char_code_to_glyph_index_map[33];
         let glyph = &font.glyphs[slot];
         

@@ -1,14 +1,14 @@
 
 use {
     crate::{
-        makepad_platform::*,
+        makepad_draw_2d::*,
         makepad_component::*,
         makepad_component::imgui::*
     }
 };
 
 live_register!{
-    import makepad_platform::shader::std::*;
+    import makepad_draw_2d::shader::std::*;
     import makepad_component::theme::*;
     
     DrawKey: {{DrawKey}} {

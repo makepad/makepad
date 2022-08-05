@@ -9,11 +9,11 @@ use {
                 BuilderMsgLevel
             }
         },
-        makepad_studio_component::{
+        makepad_component::{
             log_icon::LogIconType,
             log_list::{LogList, LogListAction}
         },
-        makepad_platform::*,
+        makepad_draw_2d::*,
         editor_state::EditorState,
         //builder::{
         //    builder_protocol::BuilderMsg,

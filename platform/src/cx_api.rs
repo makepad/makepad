@@ -343,6 +343,11 @@ impl Cx {
         let item = self.globals.iter_mut().find(|v| v.0 == TypeId::of::<T>()).unwrap();
         item.1.downcast_mut().unwrap()
     }
+    
+        
+    pub fn has_global<T: 'static + Any>(&mut self)->bool{
+        self.globals.iter_mut().find(|v| v.0 == TypeId::of::<T>()).is_some()
+    }
 }
 
 
@@ -359,7 +364,6 @@ macro_rules!main_app {
                 }
                 
                 app.borrow_mut().as_mut().unwrap().handle_event(cx, event);
-                cx.after_handle_event(event);
             }));
             live_register(&mut cx);
             cx.live_expand();
@@ -381,7 +385,6 @@ macro_rules!main_app {
                     *app.borrow_mut() = Some($app::new_main(cx));
                 }
                 app.borrow_mut().as_mut().unwrap().handle_event(cx, event);
-                cx.after_handle_event(event);
             })));
             
             live_register(&mut cx);

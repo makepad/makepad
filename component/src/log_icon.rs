@@ -1,7 +1,7 @@
-use crate::makepad_platform::*;
+use crate::makepad_draw_2d::*;
 
 live_register!{
-    import makepad_platform::shader::std::*;
+    import makepad_draw_2d::shader::std::*;
     import makepad_component::theme::*;
     
     DrawLogIconQuad: {{DrawLogIconQuad}} {
