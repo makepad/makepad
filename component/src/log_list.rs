@@ -4,7 +4,6 @@ use {
     },
     crate::{
         frame::*,
-        component_map::ComponentMap,
         fold_button::FoldButton,
         scroll_view::ScrollView,
         link_button::LinkButton,
