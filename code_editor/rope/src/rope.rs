@@ -103,6 +103,8 @@ impl Rope {
     }
 
     pub fn append(&mut self, mut other: Self) {
+        use crate::StrUtils;
+
         if self.is_empty() {
             *self = other;
             return;
@@ -110,30 +112,12 @@ impl Rope {
         if other.is_empty() {
             return;
         }
-        if self.height < other.height {
-            if let Some(node) = other
-                .root
-                .prepend_at_depth(self.root.clone(), other.height - self.height)
-            {
-                let mut branch = Branch::new();
-                branch.push_front(other.root);
-                branch.push_front(node);
-                other.height += 1;
-                other.root = Node::Branch(branch);
-            }
-            *self = other;
-        } else {
-            if let Some(node) = self
-                .root
-                .append_at_depth(other.root, self.height - other.height)
-            {
-                let mut branch = Branch::new();
-                branch.push_back(self.root.clone());
-                branch.push_back(node);
-                self.height += 1;
-                self.root = Node::Branch(branch);
-            }
+        if self.root.chunk_back().last_is_cr() && other.root.chunk_front().first_is_lf() {
+            self.truncate_back(self.byte_len() - 1);
+            other.truncate_front(1);
+            self.append_internal(Rope::from("\r\n"));
         }
+        self.append_internal(other)
     }
 
     pub fn split_off(&mut self, byte_index: usize) -> Self {
@@ -194,6 +178,33 @@ impl Rope {
 
     pub(crate) fn root(&self) -> &Node {
         &self.root
+    }
+
+    pub(crate) fn append_internal(&mut self, mut other: Self) {
+        if self.height < other.height {
+            if let Some(node) = other
+                .root
+                .prepend_at_depth(self.root.clone(), other.height - self.height)
+            {
+                let mut branch = Branch::new();
+                branch.push_front(other.root);
+                branch.push_front(node);
+                other.height += 1;
+                other.root = Node::Branch(branch);
+            }
+            *self = other;
+        } else {
+            if let Some(node) = self
+                .root
+                .append_at_depth(other.root, self.height - other.height)
+            {
+                let mut branch = Branch::new();
+                branch.push_back(self.root.clone());
+                branch.push_back(node);
+                self.height += 1;
+                self.root = Node::Branch(branch);
+            }
+        }
     }
 }
 

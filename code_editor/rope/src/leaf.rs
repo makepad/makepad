@@ -19,6 +19,10 @@ impl Leaf {
         Info::from(self.string.as_str())
     }
 
+    pub(crate) fn as_str(&self) -> &str {
+        self.string.as_str()
+    }
+
     pub(crate) fn append_or_distribute(&mut self, mut other: Self) -> Option<Self> {
         if self.len() + other.len() <= Self::MAX_LEN {
             self.append(other);
@@ -49,19 +53,19 @@ impl Leaf {
     }
 
     fn distribute(&mut self, other: &mut Self) {
-        use std::cmp::Ordering;
+        use {crate::StrUtils, std::cmp::Ordering};
 
         match self.len().cmp(&other.len()) {
             Ordering::Less => {
                 let mut end = (other.len() - self.len()) / 2;
-                while !other.string.is_char_boundary(end) {
+                while !other.string.can_split_at(end) {
                     end -= 1;
                 }
                 self.shift_left(other, end);
             }
             Ordering::Greater => {
                 let mut start = (self.len() + other.len()) / 2;
-                while !self.string.is_char_boundary(start) {
+                while !self.string.can_split_at(start) {
                     start += 1;
                 }
                 self.shift_right(other, start);
@@ -91,6 +95,6 @@ impl Deref for Leaf {
     type Target = str;
 
     fn deref(&self) -> &Self::Target {
-        self.string.as_str()
+        self.as_str()
     }
 }

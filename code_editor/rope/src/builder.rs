@@ -18,13 +18,15 @@ impl Builder {
     }
 
     pub fn push_str(&mut self, mut string: &str) {
+        use crate::StrUtils;
+
         while !string.is_empty() {
             if string.len() <= Leaf::MAX_LEN - self.string.len() {
                 self.string.push_str(string);
                 break;
             }
             let mut index = Leaf::MAX_LEN - self.string.len();
-            while !string.is_char_boundary(index) {
+            while !string.can_split_at(index) {
                 index -= 1;
             }
             let (left_string, right_string) = string.split_at(index);
