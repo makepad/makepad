@@ -3,13 +3,13 @@ use {
     std::{ops::Deref, sync::Arc},
 };
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub(crate) struct Leaf {
     string: Arc<String>,
 }
 
 impl Leaf {
-    const MAX_LEN: usize = 1024;
+    pub(crate) const MAX_LEN: usize = 1024;
 
     pub(crate) fn new() -> Self {
         Leaf::from(Arc::new(String::new()))
@@ -19,14 +19,8 @@ impl Leaf {
         Info::from(self.string.as_str())
     }
 
-    pub(crate) fn prepend_or_distribute(&mut self, mut other: Self) -> Option<Self> {
-        if self.len() + other.len() <= Self::MAX_LEN {
-            self.prepend(other);
-            None
-        } else {
-            other.distribute(self);
-            Some(other)
-        }
+    pub(crate) fn as_str(&self) -> &str {
+        self.string.as_str()
     }
 
     pub(crate) fn append_or_distribute(&mut self, mut other: Self) -> Option<Self> {
@@ -53,29 +47,25 @@ impl Leaf {
         Arc::make_mut(&mut self.string).truncate(end);
     }
 
-    fn prepend(&mut self, mut other: Self) {
-        other.shift_right(self, 0);
-    }
-
     fn append(&mut self, mut other: Self) {
         let other_len = other.len();
         self.shift_left(&mut other, other_len);
     }
 
     fn distribute(&mut self, other: &mut Self) {
-        use std::cmp::Ordering;
+        use {crate::StrUtils, std::cmp::Ordering};
 
         match self.len().cmp(&other.len()) {
             Ordering::Less => {
                 let mut end = (other.len() - self.len()) / 2;
-                while !other.string.is_char_boundary(end) {
+                while !other.string.can_split_at(end) {
                     end -= 1;
                 }
                 self.shift_left(other, end);
             }
             Ordering::Greater => {
                 let mut start = (self.len() + other.len()) / 2;
-                while !self.string.is_char_boundary(start) {
+                while !self.string.can_split_at(start) {
                     start += 1;
                 }
                 self.shift_right(other, start);
@@ -105,6 +95,6 @@ impl Deref for Leaf {
     type Target = str;
 
     fn deref(&self) -> &Self::Target {
-        self.string.as_str()
+        self.as_str()
     }
 }
