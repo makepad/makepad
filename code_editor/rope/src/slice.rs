@@ -23,8 +23,37 @@ impl<'a> Slice<'a> {
         self.end_info.char_count - self.start_info.char_count
     }
 
-    pub fn char_at_byte(self, byte_index: usize) -> usize {
-        self.info_at_byte(byte_index).char_count
+    pub fn line_len(self) -> usize {
+        self.end_info.line_break_count - self.start_info.line_break_count + 1
+    }
+
+    pub fn byte_to_char(self, byte_index: usize) -> usize {
+        self.info_at(byte_index).char_count
+    }
+
+    pub fn byte_to_line(self, byte_index: usize) -> usize {
+        self.info_at(byte_index).line_break_count + 1
+    }
+
+    pub fn char_to_byte(self, char_index: usize) -> usize {
+        if char_index == 0 {
+            return 0;
+        }
+        if char_index == self.char_len() {
+            return self.byte_len();
+        }
+        self.rope
+            .char_to_byte(self.start_info.char_count + char_index)
+            - self.start_info.byte_count
+    }
+
+    pub fn line_to_byte(self, line_index: usize) -> usize {
+        if line_index == 0 {
+            return 0;
+        }
+        self.rope
+            .line_to_byte(self.start_info.line_break_count + line_index)
+            - self.start_info.byte_count
     }
 
     pub fn slice<R: RangeBounds<usize>>(&self, byte_range: R) -> Slice<'_> {
@@ -88,18 +117,18 @@ impl<'a> Slice<'a> {
     pub(crate) fn new(rope: &'a Rope, byte_start: usize, byte_end: usize) -> Self {
         Self {
             rope,
-            start_info: rope.info_at_byte(byte_start),
-            end_info: rope.info_at_byte(byte_end),
+            start_info: rope.info_at(byte_start),
+            end_info: rope.info_at(byte_end),
         }
     }
 
-    pub(crate) fn info_at_byte(&self, byte_index: usize) -> Info {
+    pub(crate) fn info_at(&self, byte_index: usize) -> Info {
         if byte_index == 0 {
             return Info::new();
         }
         if byte_index == self.byte_len() {
             return self.end_info - self.start_info;
         }
-        self.rope.info_at_byte(self.start_info.byte_count + byte_index) - self.start_info
+        self.rope.info_at(self.start_info.byte_count + byte_index) - self.start_info
     }
 }

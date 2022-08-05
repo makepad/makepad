@@ -30,16 +30,14 @@ impl<'a> Iterator for CharsRev<'a> {
                         self.chars = None;
                         continue;
                     }
-                }
-                None => {
-                    match self.chunks_rev.next() {
-                        Some(chunk) => {
-                            self.chars = Some(chunk.chars());
-                            continue;
-                        },
-                        None => break None,
+                },
+                None => match self.chunks_rev.next() {
+                    Some(chunk) => {
+                        self.chars = Some(chunk.chars());
+                        continue;
                     }
-                }
+                    None => break None,
+                },
             }
         }
     }
