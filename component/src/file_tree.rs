@@ -5,7 +5,6 @@ use {
     crate::{
         makepad_draw_2d::*,
         scroll_shadow::ScrollShadow,
-        component_map::ComponentMap,
         scroll_view::ScrollView
     }
 };

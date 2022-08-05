@@ -16,8 +16,8 @@ use {
         window::{
             WindowId,
         },
-        platform::{
-            CxPlatformPass,
+        os::{
+            CxOsPass,
         },
         cx::{
             Cx,
@@ -249,7 +249,7 @@ pub struct CxPass {
     pub pass_size: Vec2,
     pub pass_uniforms: PassUniforms,
     pub zbias_step: f32,
-    pub platform: CxPlatformPass,
+    pub platform: CxOsPass,
 }
 
 impl Default for CxPass {
@@ -269,7 +269,7 @@ impl Default for CxPass {
             parent: CxPassParent::None,
             paint_dirty: false,
             pass_size: Vec2::default(),
-            platform: CxPlatformPass::default()
+            platform: CxOsPass::default()
         }
     }
 } 

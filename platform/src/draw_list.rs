@@ -5,9 +5,9 @@ use {
         },        
         makepad_math::*,
         makepad_error_log::*,
-        platform::{
-            CxPlatformDrawCall,
-            CxPlatformView,
+        os::{
+            CxOsDrawCall,
+            CxOsView,
         },
         pass::PassId,
         id_pool::*,
@@ -143,7 +143,7 @@ pub struct CxDrawCall {
     pub texture_slots: [Option<TextureId>; DRAW_CALL_TEXTURE_SLOTS],
     pub instance_dirty: bool,
     pub uniforms_dirty: bool,
-    pub platform: CxPlatformDrawCall
+    pub platform: CxOsDrawCall
 }
 
 impl CxDrawCall {
@@ -160,7 +160,7 @@ impl CxDrawCall {
             texture_slots: draw_vars.texture_slots,
             instance_dirty: true,
             uniforms_dirty: true,
-            platform: CxPlatformDrawCall::default()
+            platform: CxOsDrawCall::default()
         }
     }
     
@@ -221,7 +221,7 @@ pub struct CxDrawList {
     pub draw_items_len: usize,
     
     pub draw_list_uniforms: CxDrawListUniforms,
-    pub platform: CxPlatformView,
+    pub platform: CxOsView,
     
     pub rect: Rect,
     pub clip_points: (Vec2,Vec2),

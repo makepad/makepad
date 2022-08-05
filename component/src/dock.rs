@@ -1,7 +1,6 @@
 use {
     crate::{
         makepad_draw_2d::*,
-        component_map::ComponentMap,
         splitter::{SplitterAction, Splitter, SplitterAlign},
         tab_bar::{TabBarAction, TabBar, TabId},
     },

@@ -11,7 +11,7 @@ use {
             LiveId,
         },
         makepad_shader_compiler::ShaderTy,
-        platform::CxPlatformGeometry,
+        os::CxOsGeometry,
         cx::Cx,
     }
 };
@@ -138,7 +138,7 @@ pub struct CxGeometry{
     pub indices: Vec<u32>,
     pub vertices: Vec<f32>,
     pub dirty: bool,
-    pub platform: CxPlatformGeometry
+    pub platform: CxOsGeometry
 }
 
 
