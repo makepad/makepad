@@ -1,14 +1,14 @@
 use {super::*, proptest::prelude::*};
 
 fn arbitrary_string() -> impl Strategy<Value = String> {
-    ".*"
+    "(.|[\n])*"
 }
 
 fn arbitrary_string_and_byte_index() -> impl Strategy<Value = (String, usize)> {
     arbitrary_string()
         .prop_flat_map(|string| {
-            let string_len = string.len();
-            (Just(string), 0..=string_len)
+            let byte_len = string.len();
+            (Just(string), 0..=byte_len)
         })
         .prop_map(|(string, mut index)| {
             while !string.is_char_boundary(index) {
@@ -16,6 +16,20 @@ fn arbitrary_string_and_byte_index() -> impl Strategy<Value = (String, usize)> {
             }
             (string, index)
         })
+}
+
+fn arbitrary_string_and_char_index() -> impl Strategy<Value = (String, usize)> {
+    arbitrary_string().prop_flat_map(|string| {
+        let char_len = string.count_chars();
+        (Just(string), 0..=char_len)
+    })
+}
+
+fn arbitrary_string_and_line_index() -> impl Strategy<Value = (String, usize)> {
+    arbitrary_string().prop_flat_map(|string| {
+        let line_len = string.count_line_breaks() + 1;
+        (Just(string), 0..line_len)
+    })
 }
 
 fn arbitrary_string_and_byte_range() -> impl Strategy<Value = (String, Range<usize>)> {
@@ -29,18 +43,36 @@ fn arbitrary_string_and_byte_range() -> impl Strategy<Value = (String, Range<usi
         })
 }
 
-fn arbitrary_string_and_byte_range_and_byte_index() -> impl Strategy<Value = (String, Range<usize>, usize)> {
+fn arbitrary_string_and_byte_range_and_byte_index(
+) -> impl Strategy<Value = (String, Range<usize>, usize)> {
     arbitrary_string_and_byte_range()
         .prop_flat_map(|(string, range)| {
-            let range_len = range.len();
-            (Just(string), Just(range), 0..=range_len)
-        }).prop_map(|(string, range, mut index)| {
+            let byte_len = range.len();
+            (Just(string), Just(range), 0..=byte_len)
+        })
+        .prop_map(|(string, range, mut index)| {
             let slice = &string[range.clone()];
             while !slice.is_char_boundary(index) {
                 index -= 1;
             }
             (string, range, index)
         })
+}
+
+fn arbitrary_string_and_byte_range_and_char_index(
+) -> impl Strategy<Value = (String, Range<usize>, usize)> {
+    arbitrary_string_and_byte_range().prop_flat_map(|(string, range)| {
+        let char_len = string[range.clone()].count_chars();
+        (Just(string), Just(range), 0..=char_len)
+    })
+}
+
+fn arbitrary_string_and_byte_range_and_line_index(
+) -> impl Strategy<Value = (String, Range<usize>, usize)> {
+    arbitrary_string_and_byte_range().prop_flat_map(|(string, range)| {
+        let line_len = string[range.clone()].count_line_breaks() + 1;
+        (Just(string), Just(range), 0..line_len)
+    })
 }
 
 proptest! {
@@ -59,13 +91,37 @@ proptest! {
     #[test]
     fn char_len(string in arbitrary_string()) {
         let rope = Rope::from(&string);
-        assert_eq!(rope.char_len(), string.chars().count());
+        assert_eq!(rope.char_len(), string.count_chars());
     }
 
     #[test]
-    fn char_at_byte((string, byte_index) in arbitrary_string_and_byte_index()) {
+    fn line_len(string in arbitrary_string()) {
         let rope = Rope::from(&string);
-        assert_eq!(rope.char_at_byte(byte_index), string[..byte_index].chars().count());
+        assert_eq!(rope.line_len(), string.count_line_breaks() + 1);
+    }
+
+    #[test]
+    fn byte_to_char((string, byte_index) in arbitrary_string_and_byte_index()) {
+        let rope = Rope::from(&string);
+        assert_eq!(rope.byte_to_char(byte_index), string[..byte_index].count_chars());
+    }
+
+    #[test]
+    fn byte_to_line((string, byte_index) in arbitrary_string_and_byte_index()) {
+        let rope = Rope::from(&string);
+        assert_eq!(rope.byte_to_line(byte_index), string[..byte_index].count_line_breaks() + 1);
+    }
+
+    #[test]
+    fn char_to_byte((string, char_index) in arbitrary_string_and_char_index()) {
+        let rope = Rope::from(&string);
+        assert_eq!(rope.char_to_byte(char_index), string.char_to_byte(char_index));
+    }
+
+    #[test]
+    fn line_to_byte((string, line_index) in arbitrary_string_and_line_index()) {
+        let rope = Rope::from(&string);
+        assert_eq!(rope.line_to_byte(line_index), string.line_to_byte(line_index));
     }
 
     #[test]
@@ -171,21 +227,53 @@ proptest! {
         let rope_slice = rope.slice(byte_range);
         assert_eq!(rope_slice.byte_len(), string_slice.len());
     }
-    
+
     #[test]
     fn slice_char_len((string, byte_range) in arbitrary_string_and_byte_range()) {
         let string_slice = &string[byte_range.clone()];
         let rope = Rope::from(&string);
         let rope_slice = rope.slice(byte_range);
-        assert_eq!(rope_slice.char_len(), string_slice.chars().count());
+        assert_eq!(rope_slice.char_len(), string_slice.count_chars());
     }
 
     #[test]
-    fn slice_char_at_byte((string, byte_range, byte_index) in arbitrary_string_and_byte_range_and_byte_index()) {
+    fn slice_line_len((string, byte_range) in arbitrary_string_and_byte_range()) {
         let string_slice = &string[byte_range.clone()];
         let rope = Rope::from(&string);
         let rope_slice = rope.slice(byte_range);
-        assert_eq!(rope_slice.char_at_byte(byte_index), string_slice[..byte_index].chars().count());
+        assert_eq!(rope_slice.line_len(), string_slice.count_line_breaks() + 1);
+    }
+
+    #[test]
+    fn slice_byte_to_char((string, byte_range, byte_index) in arbitrary_string_and_byte_range_and_byte_index()) {
+        let string_slice = &string[byte_range.clone()];
+        let rope = Rope::from(&string);
+        let rope_slice = rope.slice(byte_range);
+        assert_eq!(rope_slice.byte_to_char(byte_index), string_slice[..byte_index].count_chars());
+    }
+
+    #[test]
+    fn slice_byte_to_line((string, byte_range, byte_index) in arbitrary_string_and_byte_range_and_byte_index()) {
+        let string_slice = &string[byte_range.clone()];
+        let rope = Rope::from(&string);
+        let rope_slice = rope.slice(byte_range);
+        assert_eq!(rope_slice.byte_to_line(byte_index), string_slice[..byte_index].count_line_breaks() + 1);
+    }
+
+    #[test]
+    fn slice_char_to_byte((string, byte_range, char_index) in arbitrary_string_and_byte_range_and_char_index()) {
+        let string_slice = &string[byte_range.clone()];
+        let rope = Rope::from(&string);
+        let rope_slice = rope.slice(byte_range);
+        assert_eq!(rope_slice.char_to_byte(char_index), string_slice.char_to_byte(char_index));
+    }
+
+    #[test]
+    fn slice_line_to_byte((string, byte_range, line_index) in arbitrary_string_and_byte_range_and_line_index()) {
+        let string_slice = &string[byte_range.clone()];
+        let rope = Rope::from(&string);
+        let rope_slice = rope.slice(byte_range.clone());
+        assert_eq!(rope_slice.line_to_byte(line_index), string_slice.line_to_byte(line_index));
     }
 
     #[test]
