@@ -8,6 +8,7 @@ use {
         },
     },
     crate::{
+        makepad_live_compiler::{LiveValue, LiveFieldKind, LiveNode, LivePtr, LiveNodeSlice},
         makepad_shader_compiler::*,
         makepad_live_id::*,
         live_traits::*,
@@ -57,7 +58,7 @@ impl CxDrawShaderOptions {
         ret
     }
     
-    pub fn appendable_drawcall(&self, other: &Self) -> bool {
+    pub fn _appendable_drawcall(&self, other: &Self) -> bool {
         self == other
     }
 }
@@ -161,7 +162,9 @@ pub struct DrawShaderInputs {
 pub enum DrawShaderInputPacking {
     Attribute,
     UniformsGLSL,
+    #[allow(dead_code)]
     UniformsHLSL,
+    #[allow(dead_code)]
     UniformsMetal
 }
 

@@ -1,13 +1,13 @@
 #![allow(unused)]
 use {
     crate::{
-        makepad_platform::*,
+        makepad_draw_2d::*,
         frame::*
     }
 };
 
 live_register!{
-    import makepad_platform::shader::std::*;
+    import makepad_draw_2d::shader::std::*;
     import makepad_component::theme::*;
     Label: {{Label}} {
         walk:{

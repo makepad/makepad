@@ -33,11 +33,12 @@ pub struct App {
 
 impl App {
     pub fn live_register(cx: &mut Cx) {
-        makepad_studio_component::live_register(cx);
+        makepad_component::live_register(cx);
         crate::builder::builder_client::live_register(cx);
         crate::collab_client::live_register(cx);
         crate::rust_editor::live_register(cx);
         crate::log_view::live_register(cx);
+        crate::shader_view::live_register(cx);
         crate::code_editor::code_editor_impl::live_register(cx);
         crate::editors::live_register(cx);
         crate::app_inner::live_register(cx);

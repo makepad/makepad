@@ -3,20 +3,18 @@ use {
         collections::{HashSet},
     },
     crate::{
-        makepad_component::{
-            frame::*,
-            component_map::ComponentMap,
-            fold_button::FoldButton,
-            scroll_view::ScrollView,
-            link_button::LinkButton,
-        },
-        makepad_platform::*,
+        frame::*,
+        component_map::ComponentMap,
+        fold_button::FoldButton,
+        scroll_view::ScrollView,
+        link_button::LinkButton,
+        makepad_draw_2d::*,
         log_icon::{DrawLogIconQuad, LogIconType}
     },
 };
 
 live_register!{
-    import makepad_platform::shader::std::*;
+    import makepad_draw_2d::shader::std::*;
     import makepad_component::theme::*;
     
     DrawBgQuad: {{DrawBgQuad}} {
@@ -367,107 +365,10 @@ impl LogList {
             return false
         }
     }
-    
-    /*
-    pub fn begin_folder(
-        &mut self,
-        cx: &mut Cx,
-        node_id: FoldListNodeId,
-        name: &str,
-    ) -> Result<(), ()> {
-        let scale = self.stack.last().cloned().unwrap_or(1.0);
-        
-        if scale > 0.2 {
-            self.count += 1;
-        }
-        
-        let is_open = self.open_nodes.contains(&node_id);
-        
-        if self.should_node_draw(cx) {
-            
-            let (tree_node, _) = self.tree_nodes.get_or_insert_with_ptr(cx, node_id, self.folder_node, | cx, ptr | {
-                let mut tree_node = FileTreeNode::new_from_ptr(cx, ptr);
-                if is_open {
-                    tree_node.set_folder_is_open(cx, true, false)
-                }
-                (tree_node, id!(folder_node))
-            });
-            
-            tree_node.draw_folder(cx, name, Self::is_even(self.count), self.node_height, self.stack.len(), scale);
-            self.stack.push(tree_node.opened * scale);
-            if tree_node.opened == 0.0 {
-                self.end_folder();
-                return Err(());
-            }
-        }
-        else {
-            if is_open {
-                self.stack.push(scale * 1.0);
-            }
-            else {
-                return Err(());
-            }
-        }
-        Ok(())
-    }*/
-    
+   
     pub fn end_folder(&mut self) {
         self.stack.pop();
     }
-    /*
-    pub fn file(&mut self, cx: &mut Cx, node_id: FileNodeId, name: &str) {
-        let scale = self.stack.last().cloned().unwrap_or(1.0);
-        
-        if scale > 0.2 {
-            self.count += 1;
-        }
-        if self.should_node_draw(cx) {
-            let (tree_node, _) = self.tree_nodes.get_or_insert_with_ptr(cx, node_id, self.file_node, | cx, ptr | {
-                (FileTreeNode::new_from_ptr(cx, ptr), id!(file_node))
-            });
-            tree_node.draw_file(cx, name, Self::is_even(self.count), self.node_height, self.stack.len(), scale);
-        }
-    }
-    
-    pub fn forget(&mut self) {
-        self.tree_nodes.clear();
-    }
-    
-    pub fn forget_node(&mut self, file_node_id: FileNodeId) {
-        self.tree_nodes.remove(&file_node_id);
-    }
-    
-    pub fn set_folder_is_open(
-        &mut self,
-        cx: &mut Cx,
-        node_id: FileNodeId,
-        is_open: bool,
-        should_animate: bool,
-    ) {
-        if is_open {
-            self.open_nodes.insert(node_id);
-        }
-        else {
-            self.open_nodes.remove(&node_id);
-        }
-        if let Some((tree_node, _)) = self.tree_nodes.get_mut(&node_id) {
-            tree_node.set_folder_is_open(cx, is_open, should_animate);
-        }
-    }
-    
-    pub fn start_dragging_file_node(
-        &mut self,
-        cx: &mut Cx,
-        node_id: FileNodeId,
-        dragged_item: DraggedItem,
-    ) {
-        self.dragging_node_id = Some(node_id);
-        cx.start_dragging(dragged_item);
-    }
-    
-    pub fn redraw(&mut self, cx: &mut Cx) {
-        self.scroll_view.redraw(cx);
-    }*/
     
     pub fn handle_event(
         &mut self,

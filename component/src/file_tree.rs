@@ -3,17 +3,15 @@ use {
         collections::{HashSet},
     },
     crate::{
-        makepad_platform::*,
-        makepad_component::{
-            scroll_shadow::ScrollShadow,
-            component_map::ComponentMap,
-            scroll_view::ScrollView
-        },
+        makepad_draw_2d::*,
+        scroll_shadow::ScrollShadow,
+        component_map::ComponentMap,
+        scroll_view::ScrollView
     }
 };
 
 live_register!{
-    import makepad_platform::shader::std::*;
+    import makepad_draw_2d::shader::std::*;
     import makepad_component::theme::*;
     
     DrawBgQuad: {{DrawBgQuad}} {

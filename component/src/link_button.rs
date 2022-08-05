@@ -1,7 +1,7 @@
 #![allow(unused)]
 use {
     crate::{
-        makepad_platform::*,
+        makepad_draw_2d::*,
         button_logic::*,
         frame::*,
         button::Button
@@ -9,7 +9,7 @@ use {
 };
 
 live_register!{
-    import makepad_platform::shader::std::*;
+    import makepad_draw_2d::shader::std::*;
     import crate::theme::*;
     
     LinkButton: {{LinkButton}} {

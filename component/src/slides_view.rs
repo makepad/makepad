@@ -1,8 +1,8 @@
-use crate::makepad_platform::*;
-use crate::makepad_component::*;
+use crate::makepad_draw_2d::*;
+use crate::frame::*;
 
 live_register!{
-    import makepad_platform::shader::std::*;
+    import makepad_draw_2d::shader::std::*;
     registry FrameComponent::*;
     
     const SLIDE_WIDTH: 800

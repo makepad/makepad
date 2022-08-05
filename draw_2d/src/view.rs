@@ -1,30 +1,10 @@
 use {
     crate::{
-        makepad_live_id::*,
-        makepad_math::*,
-        cx::{
-            Cx,
-        },
-        area::{Area, DrawListArea, InstanceArea},
-        live_traits::*,
-        draw_2d::{
-            cx_2d::Cx2d,
-            turtle::{Layout, Size, Walk, Margin},
-        },
-        nav::{NavItem, NavRole, NavOrder, NavStop},
-        draw_vars::{
-            DrawVars,
-        },
-        draw_list::{
-            DrawListId,
-            DrawList,
-            DrawListDebug,
-            CxDrawItem,
-            CxDrawCall,
-        },
+        makepad_platform::*,
+        cx_2d::Cx2d,
+        turtle::{Layout, Size, Walk},
     }
 };
-
 
 
 #[derive(Debug)]
@@ -248,12 +228,12 @@ impl View {
         let cxview = &cx.draw_lists[self.draw_list.id()];
         return cxview.get_view_transform()
     }
-    
+    /*
     pub fn set_view_debug(&self, cx: &mut Cx, debug: DrawListDebug) {
         let cxview = &mut cx.draw_lists[self.draw_list.id()];
         cxview.debug = Some(debug);
     }
-    
+    */
     pub fn redraw(&self, cx: &mut Cx) {
         cx.redraw_area(self.area());
     }
@@ -437,47 +417,21 @@ impl<'a> Cx2d<'a> {
         ia
     }
     
-    pub fn add_nav_stop(&mut self, area: Area, role: NavRole, margin:Margin) {
+    pub fn add_nav_stop(&mut self, area: Area, role: NavRole, margin: Margin) {
         let current_draw_list_id = *self.draw_list_stack.last().unwrap();
         let draw_list = &mut self.cx.draw_lists[current_draw_list_id];
-        draw_list.nav_items.push(NavItem::Stop(NavStop{
+        draw_list.nav_items.push(NavItem::Stop(NavStop {
             role,
             area,
             order: NavOrder::Default,
             margin
         }));
     }
-    /*
-    pub fn set_view_scroll_x(&mut self, draw_list_id: usize, scroll_pos: f32) {
-        let pass_id = self.draw_lists[draw_list_id].pass_id;
-        let fac = self.get_delegated_dpi_factor(pass_id);
-        let draw_list = &mut self.cx.draw_lists[draw_list_id];
-        draw_list.unsnapped_scroll.x = scroll_pos;
-        let snapped = scroll_pos - scroll_pos % (1.0 / fac);
-        if draw_list.snapped_scroll.x != snapped {
-            draw_list.snapped_scroll.x = snapped;
-            self.cx.passes[draw_list.pass_id].paint_dirty = true;
-        }
-    }
-    
-    
-    pub fn set_view_scroll_y(&mut self, draw_list_id: usize, scroll_pos: f32) {
-        let pass_id = self.draw_lists[draw_list_id].pass_id;
-        let fac = self.get_delegated_dpi_factor(pass_id);
-        let draw_list = &mut self.cx.draw_lists[draw_list_id];
-        draw_list.unsnapped_scroll.y = scroll_pos;
-        let snapped = scroll_pos - scroll_pos % (1.0 / fac);
-        if draw_list.snapped_scroll.y != snapped {
-            draw_list.snapped_scroll.y = snapped;
-            self.cx.passes[draw_list.pass_id].paint_dirty = true;
-        }
-    }*/
-    
+
     pub fn set_view_rect(&mut self, draw_list_id: DrawListId, rect: Rect) {
         let draw_list = &mut self.cx.draw_lists[draw_list_id];
         draw_list.rect = rect;
     }
-    
     
 }
 

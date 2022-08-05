@@ -1,4 +1,6 @@
-use makepad_platform::*;
+pub use makepad_draw_2d::makepad_platform;
+pub use makepad_draw_2d::makepad_image_formats;
+pub use makepad_draw_2d;
 
 pub mod button_logic;
 pub mod button;
@@ -12,6 +14,11 @@ pub mod component_map;
 pub mod link_button;
 pub mod nav_control;
 
+pub mod file_tree;
+pub mod slides_view;
+pub mod log_list;
+pub mod log_icon;
+
 pub mod dock;
 pub mod tab;
 pub mod tab_bar;
@@ -23,10 +30,8 @@ pub mod slider;
 #[macro_use]
 pub mod window_menu;
 
-pub use makepad_platform;
 pub use makepad_derive_frame;
-pub use makepad_image_formats;
-
+pub use makepad_platform::*;
 pub use makepad_derive_frame::*;
 
 pub mod bare_window;
@@ -69,7 +74,9 @@ pub use crate::{
 };
 
 pub fn live_register(cx: &mut Cx) {
-    makepad_platform::live_cx::live_register(cx);
+    makepad_draw_2d::live_register(cx);
+    crate::log_list::live_register(cx);
+    crate::log_icon::live_register(cx);
     crate::debug_view::live_register(cx);
     crate::fold_header::live_register(cx);
     crate::splitter::live_register(cx);
@@ -95,4 +102,6 @@ pub fn live_register(cx: &mut Cx) {
     crate::tab_bar::live_register(cx);
     crate::dock::live_register(cx);
     crate::color_picker::live_register(cx);
+    crate::file_tree::live_register(cx);
+    crate::slides_view::live_register(cx);
 }

@@ -4,7 +4,7 @@ use {
     std::ops::Deref,
     std::cell::{RefMut, RefCell},
     crate::{
-        makepad_platform::*,
+        makepad_draw_2d::*,
         frame::*,
     },
 };
