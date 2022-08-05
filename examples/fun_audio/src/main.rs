@@ -1,17 +1,19 @@
 pub use makepad_component;
 pub use makepad_component::makepad_platform;
 pub use makepad_platform::makepad_math;
+pub use makepad_media;
 
 use makepad_component::*;
 use makepad_component::imgui::*;
-
 use makepad_draw_2d::*;
+use makepad_media::*;
+use makepad_media::audio_graph::*;
 
 mod display_audio;
 mod piano;
-mod audio;
-use crate::audio::*;
-use crate::audio::iron_fish::*;
+mod iron_fish;
+
+use crate::iron_fish::*;
 use crate::piano::*;
 use crate::display_audio::*;
 
@@ -266,8 +268,9 @@ pub struct App {
 impl App {
     pub fn live_register(cx: &mut Cx) {
         makepad_component::live_register(cx);
+        makepad_media::live_register(cx);
         crate::display_audio::live_register(cx);
-        crate::audio::live_register(cx);
+        crate::iron_fish::live_register(cx);
         crate::piano::live_register(cx);
     }
     
@@ -281,6 +284,7 @@ impl App {
         let mut ui = self.imgui.run(cx, event);
         
         if ui.on_construct() {
+            ui.cx.start_midi_input();
             let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
             ui.bind_read(&iron_fish.settings.live_read());
             ui.piano(ids!(piano)).set_key_focus(ui.cx);
@@ -309,6 +313,13 @@ impl App {
         
         let piano = ui.piano(ids!(piano));
         
+        for inp in ui.cx.on_midi_1_input_data(ui.event){
+            self.audio_graph.send_midi_1_data(inp.data);
+            if let Some(note) = inp.data.decode().on_note(){
+               piano.set_note(ui.cx, note.is_on, note.note_number)
+           }
+        }
+        
         for note in piano.on_notes() {
             self.audio_graph.send_midi_1_data(Midi1Note {
                 channel: 0,
@@ -317,11 +328,6 @@ impl App {
                 velocity: note.velocity
             }.into());
         }
-        
-        for note in ui.on_midi_1_notes() {
-            piano.set_note(ui.cx, note.is_on, note.note_number)
-        }
-        
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {

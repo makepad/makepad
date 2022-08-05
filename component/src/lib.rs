@@ -10,7 +10,6 @@ pub mod desktop_window;
 pub mod scroll_shadow;
 pub mod scroll_bar;
 pub mod scroll_view;
-pub mod component_map;
 pub mod link_button;
 pub mod nav_control;
 
@@ -49,7 +48,6 @@ mod theme;
 
 pub use crate::{
     bare_window::BareWindow,
-    component_map::ComponentMap,
     button_logic::{button_logic_handle_event, ButtonAction},
     button::{Button},
     text_input::{TextInput},

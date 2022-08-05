@@ -6,7 +6,7 @@ use {
     crate::{
         makepad_math::Vec2,
         gpu_info::GpuInfo,
-        cx::{Cx, PlatformType},
+        cx::{Cx, OsType},
         event::{
             DraggedItem,
             Timer,
@@ -21,10 +21,6 @@ use {
         },
         window::{
             WindowId
-        },
-        audio::{
-            AudioTime,
-            AudioOutputBuffer
         },
         cursor::{
             MouseCursor
@@ -44,19 +40,19 @@ use {
 };
 
 
-pub trait CxPlatformApi {
+pub trait CxOsApi {
     fn post_signal(signal: Signal);
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static;
     
     fn web_socket_open(&mut self, url: String, rec: WebSocketAutoReconnect) -> WebSocket;
     fn web_socket_send(&mut self, socket: WebSocket, data: Vec<u8>);
     
-    fn start_midi_input(&mut self);
-    fn spawn_audio_output<F>(&mut self, f: F) where F: FnMut(AudioTime, &mut dyn AudioOutputBuffer) + Send + 'static;
+    //fn start_midi_input(&mut self);
+    //fn spawn_audio_output<F>(&mut self, f: F) where F: FnMut(AudioTime, &mut dyn AudioOutputBuffer) + Send + 'static;
 }
 
 #[derive(PartialEq)]
-pub enum CxPlatformOp {
+pub enum CxOsOp {
     CreateWindow(WindowId),
     CloseWindow(WindowId),
     MinimizeWindow(WindowId),
@@ -93,53 +89,53 @@ impl Cx {
     
     pub fn redraw_id(&self) -> u64 {self.redraw_id}
     
-    pub fn platform_type(&self) -> &PlatformType {&self.platform_type}
+    pub fn platform_type(&self) -> &OsType {&self.platform_type}
     pub fn cpu_cores(&self)->usize{self.cpu_cores}
     pub fn gpu_info(&self) -> &GpuInfo {&self.gpu_info}
     
     pub fn update_menu(&mut self, menu: Menu) {
-        self.platform_ops.push(CxPlatformOp::UpdateMenu(menu));
+        self.platform_ops.push(CxOsOp::UpdateMenu(menu));
     }
     
-    pub fn push_unique_platform_op(&mut self, op: CxPlatformOp) {
+    pub fn push_unique_platform_op(&mut self, op: CxOsOp) {
         if self.platform_ops.iter().find( | o | **o == op).is_none() {
             self.platform_ops.push(op);
         }
     }
     
     pub fn show_text_ime(&mut self, pos: Vec2) {
-        self.platform_ops.push(CxPlatformOp::ShowTextIME(pos));
+        self.platform_ops.push(CxOsOp::ShowTextIME(pos));
     }
     
     pub fn hide_text_ime(&mut self) {
-        self.platform_ops.push(CxPlatformOp::HideTextIME);
+        self.platform_ops.push(CxOsOp::HideTextIME);
     }
     
     pub fn start_dragging(&mut self, dragged_item: DraggedItem) {
         self.platform_ops.iter().for_each( | p | {
-            if let CxPlatformOp::StartDragging(_) = p {
+            if let CxOsOp::StartDragging(_) = p {
                 panic!("start drag twice");
             }
         });
-        self.platform_ops.push(CxPlatformOp::StartDragging(dragged_item));
+        self.platform_ops.push(CxOsOp::StartDragging(dragged_item));
     }
     
     pub fn set_cursor(&mut self, cursor: MouseCursor) {
         // down cursor overrides the hover cursor
         if let Some(p) = self.platform_ops.iter_mut().find( | p | match p {
-            CxPlatformOp::SetCursor(_) => true,
+            CxOsOp::SetCursor(_) => true,
             _ => false
         }) {
-            *p = CxPlatformOp::SetCursor(cursor)
+            *p = CxOsOp::SetCursor(cursor)
         }
         else {
-            self.platform_ops.push(CxPlatformOp::SetCursor(cursor))
+            self.platform_ops.push(CxOsOp::SetCursor(cursor))
         }
     }
     
     pub fn start_timer(&mut self, interval: f64, repeats: bool) -> Timer {
         self.timer_id += 1;
-        self.platform_ops.push(CxPlatformOp::StartTimer {
+        self.platform_ops.push(CxOsOp::StartTimer {
             timer_id: self.timer_id,
             interval,
             repeats
@@ -149,7 +145,7 @@ impl Cx {
     
     pub fn stop_timer(&mut self, timer: Timer) {
         if timer.0 != 0 {
-            self.platform_ops.push(CxPlatformOp::StopTimer(timer.0));
+            self.platform_ops.push(CxOsOp::StopTimer(timer.0));
         }
     }
     

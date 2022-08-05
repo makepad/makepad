@@ -13,8 +13,8 @@ use {
         makepad_live_id::*,
         live_traits::*,
         draw_vars::DrawVars,
-        platform::{
-            CxPlatformDrawShader,
+        os::{
+            CxOsDrawShader,
         },
         cx::Cx
     }
@@ -72,7 +72,7 @@ pub struct CxDrawShaderItem {
 #[derive(Default)]
 pub struct CxDrawShaders {
     pub shaders: Vec<CxDrawShader>,
-    pub platform: Vec<CxPlatformDrawShader>,
+    pub platform: Vec<CxOsDrawShader>,
     pub generation: u64,
     pub ptr_to_item: HashMap<DrawShaderPtr, CxDrawShaderItem>,
     pub compile_set: BTreeSet<DrawShaderPtr>,

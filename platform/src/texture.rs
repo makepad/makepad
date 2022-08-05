@@ -14,7 +14,7 @@ use {
         makepad_error_log::*,
         makepad_live_id::*,
         cx::Cx,
-        platform::{CxPlatformTexture},
+        os::{CxOsTexture},
         live_traits::*
     }
 };
@@ -162,5 +162,5 @@ pub struct CxTexture {
     pub (crate) image_u32: Vec<u32>,
     //pub(crate) _image_f32: Vec<f32>,
     pub (crate) update_image: bool,
-    pub platform: CxPlatformTexture
+    pub platform: CxOsTexture
 }
