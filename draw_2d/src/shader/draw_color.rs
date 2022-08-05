@@ -1,11 +1,7 @@
 use {
     crate::{
-        makepad_derive_live::*,
-        makepad_math::*,
-        cx::Cx,
-        area::Area,
-        live_traits::*,
-        draw_2d::draw_quad::DrawQuad
+        makepad_platform::*,
+        shader::draw_quad::DrawQuad
     },
 };
 

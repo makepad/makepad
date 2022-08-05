@@ -1,11 +1,7 @@
 use {
     crate::{
-        makepad_derive_live::*,
-        makepad_math::*,
-        area::Area,
-        live_traits::*,
-        draw_2d::cx_2d::Cx2d,
-        cx::Cx,
+        makepad_platform::*,
+        cx_2d::Cx2d,
     }
 };
 
@@ -32,15 +28,6 @@ pub struct Walk {
 pub struct Align {
     pub x: f32,
     pub y: f32
-}
-
-#[derive(Clone, Copy, Default, Debug, Live)]
-#[live_ignore]
-pub struct Margin {
-    pub left: f32,
-    pub top: f32,
-    pub right: f32,
-    pub bottom: f32
 }
 
 #[derive(Clone, Copy, Default, Debug, Live)]
@@ -783,39 +770,6 @@ impl Default for Align {
     }
 }
 
-impl LiveHook for Margin {
-    fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Option<usize> {
-        match &nodes[index].value {
-            LiveValue::Float(v) => {
-                *self = Self {left: *v as f32, top: *v as f32, right: *v as f32, bottom: *v as f32};
-                Some(index + 1)
-            }
-            LiveValue::Int(v) => {
-                *self = Self {left: *v as f32, top: *v as f32, right: *v as f32, bottom: *v as f32};
-                Some(index + 1)
-            }
-            _ => None
-        }
-    }
-}
-
-impl Margin {
-    pub fn left_top(&self) -> Vec2 {
-        vec2(self.left, self.top)
-    }
-    pub fn right_bottom(&self) -> Vec2 {
-        vec2(self.right, self.bottom)
-    }
-    pub fn size(&self) -> Vec2 {
-        vec2(self.left + self.right, self.top + self.bottom)
-    }
-    pub fn width(&self) -> f32 {
-        self.left + self.right
-    }
-    pub fn height(&self) -> f32 {
-        self.top + self.bottom
-    }
-}
 
 impl Padding {
     pub fn left_top(&self) -> Vec2 {

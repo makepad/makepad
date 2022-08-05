@@ -6,20 +6,11 @@ edition = "2018"
 description = "Makepad components"
 license = "MIT"
 
+
 [dependencies]
-
-[dependencies.makepad-platform]
-path = "../platform"
-version = "0.1"
-
-[dependencies.makepad-derive-frame]
-path = "./derive_frame"
-version = "0.1"
-
-[dependencies.makepad-image-formats]
-path = "./image_formats"
-version = "0.1"
+makepad-draw-2d = { path = "../draw_2d", version = "0.1" }
+makepad-derive-frame = {path = "./derive_frame", version="0.1"}
 
 [features]
-nightly = ["makepad-platform/nightly", "makepad-image-formats/nightly"]
+nightly = ["makepad-draw-2d/nightly"]
 

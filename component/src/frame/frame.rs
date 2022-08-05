@@ -2,7 +2,7 @@ use {
     crate::{
         makepad_image_formats::jpeg,
         makepad_image_formats::png,
-        makepad_platform::*,
+        makepad_draw_2d::*,
         component_map::*,
         frame::*
     },

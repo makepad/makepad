@@ -1,6 +1,6 @@
 use makepad_component::*;
 use makepad_component::imgui::*;
-use makepad_platform::*;
+use makepad_draw_2d::*;
 
 live_register!{
     import makepad_component::frame::*;
@@ -35,8 +35,8 @@ impl App {
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.window.handle_event(cx, event, &mut |_,_|{});
         
-        if let Event::Draw(draw_event) = event{
-            return self.draw(&mut Cx2d::new(cx, draw_event))
+        if let Event::Draw(event) = event{
+            return Cx2d::draw(cx, event, self, | cx, s | s.draw(cx));
         }
         
         // the ImGUI component exposes an immediate mode component API

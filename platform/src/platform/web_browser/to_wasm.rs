@@ -27,8 +27,8 @@ use {
             KeyEvent,
             TextInputEvent,
             MidiInputListEvent,
+            WindowGeom
         },
-        window::WindowGeom
     }
 };
 

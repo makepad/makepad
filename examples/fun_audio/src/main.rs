@@ -5,8 +5,7 @@ pub use makepad_platform::makepad_math;
 use makepad_component::*;
 use makepad_component::imgui::*;
 
-use makepad_platform::*;
-use makepad_platform::live_atomic::*;
+use makepad_draw_2d::*;
 
 mod display_audio;
 mod piano;
@@ -21,7 +20,7 @@ live_register!{
     registry FrameComponent::*;
     import makepad_component::theme::*;
     import makepad_component::frame::*;
-    import makepad_platform::shader::std::*;
+    import makepad_draw_2d::shader::std::*;
     
     MainHeader: FoldHeader {
         walk: {
@@ -35,7 +34,7 @@ live_register!{
         header: BoxY {
             cursor: Default,
             bg: {color: #6},
-            walk:{ width: Fill, height: Fit},
+            walk: {width: Fill, height: Fit},
             layout: {flow: Right, padding: 8, spacing: 5}
         }
     }
@@ -44,7 +43,7 @@ live_register!{
         header: Rect {
             cursor: Default,
             bg: {color: #5},
-            walk:{width: Fill, height: Fit}
+            walk: {width: Fill, height: Fit}
             layout: {flow: Right, padding: 8, spacing: 5}
         }
     }
@@ -68,18 +67,18 @@ live_register!{
         }
         body: Frame {
             layout: {flow: Overlay}
-            walk:{width: Fit, height: Fit}
+            walk: {width: Fit, height: Fit}
             Frame {
                 layout: {flow: Down}
-                walk:{width: Fit,height: Fit},
+                walk: {width: Fit, height: Fit},
                 piano = Piano {}
                 GradientY {
-                    walk:{width: Fill,height: 10}
+                    walk: {width: Fill, height: 10}
                     bg: {color: #000a, color2: #0000}
                 }
             }
             g1 = GradientY {
-                walk:{width: Fill, height: 2}
+                walk: {width: Fill, height: 2}
                 bg: {color: #000a, color2: #0000, no_v_scroll: true}
             }
         }
@@ -87,7 +86,7 @@ live_register!{
     
     InstrumentSlider: Rect {
         bg: {color: #4}
-        walk:{width: Fill,height: Fit}
+        walk: {width: Fill, height: Fit}
         layout: {flow: Right, padding: 8, spacing: 5, align: {y: 0.5}}
         slider = Slider {
             label: "CutOff1"
@@ -97,8 +96,8 @@ live_register!{
     
     TextInputTest: Rect {
         bg: {color: #4}
-        walk:{width: Fill,height: Fit},
-        layout: {flow: Right, padding:{left:8}}
+        walk: {width: Fill, height: Fit},
+        layout: {flow: Right, padding: {left: 8}}
         textbox = TextInput {
             text: "Hello WOrld"
         }
@@ -109,7 +108,7 @@ live_register!{
             layout: {align: {y: 0.5}}
             fold_button = FoldButton {}
             swatch = Circle {
-                walk: {width: 10,height: 10}
+                walk: {width: 10, height: 10}
                 bg: {color: #f00}
             }
             label = Label {text: "IronFish"}
@@ -124,7 +123,7 @@ live_register!{
                 body: Frame {
                     layout: {flow: Down}
                     bg: {color: #f00},
-                    walk:{width: Fill, height: Fit}
+                    walk: {width: Fill, height: Fit}
                     InstrumentSlider {
                         slider = {
                             bind: "filter1.cutoff"
@@ -207,7 +206,7 @@ live_register!{
                 Button {text: "<"}
                 Button {text: ">"}
                 Solid {
-                    walk:{width: Fill,height: 36}
+                    walk: {width: Fill, height: 36}
                     bg: {
                         const WAVE_HEIGHT: 0.15
                         const WAVE_FREQ: 0.2
@@ -229,15 +228,15 @@ live_register!{
                 a: Frame {
                     layout: {flow: Down}
                     FoldablePiano {}
-                    display_audio = DisplayAudio{
-                        walk:{height:Fill,width:Fill}
+                    display_audio = DisplayAudio {
+                        walk: {height: Fill, width: Fill}
                     }
                 }
                 b: Box {
                     clip: true,
                     cursor: Default,
                     bg: {color: #4, radius: 3.0, border_width: 0.5, border_color: #3}
-                    walk:{height: Fill}
+                    walk: {height: Fill}
                     layout: {padding: 0.5}
                     MainHeader {
                         header: {
@@ -273,15 +272,15 @@ impl App {
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        if let Event::Draw(de) = event {
-            return self.draw(&mut Cx2d::new(cx, de));
+        if let Event::Draw(event) = event {
+            return Cx2d::draw(cx, event, self, | cx, s | s.draw(cx));
         }
         
         self.window.handle_event(cx, event);
         
-        let mut ui = self.imgui.run(cx, event); 
-
-        if ui.on_construct(){
+        let mut ui = self.imgui.run(cx, event);
+        
+        if ui.on_construct() {
             let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
             ui.bind_read(&iron_fish.settings.live_read());
             ui.piano(ids!(piano)).set_key_focus(ui.cx);
@@ -290,27 +289,27 @@ impl App {
         let display_audio = ui.display_audio(ids!(display_audio));
         
         let mut buffers = 0;
-        self.audio_graph.handle_event(ui.cx, ui.event, &mut |cx, action|{
-            match action{
-                AudioGraphAction::DisplayAudio{buffer, voice}=>{
+        self.audio_graph.handle_event(ui.cx, ui.event, &mut | cx, action | {
+            match action {
+                AudioGraphAction::DisplayAudio {buffer, voice} => {
                     display_audio.process_buffer(cx, voice, buffer);
-                    buffers += 1; 
+                    buffers += 1;
                 }
-                AudioGraphAction::VoiceOff{voice}=>{
+                AudioGraphAction::VoiceOff {voice} => {
                     display_audio.voice_off(cx, voice);
                 }
-            } 
+            }
         });
         
         // fetch ui binding deltas
-        for delta in ui.on_bind_deltas(){
+        for delta in ui.on_bind_deltas() {
             let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
             iron_fish.settings.apply_over(ui.cx, &delta);
         }
         
         let piano = ui.piano(ids!(piano));
         
-        for note in piano.on_notes(){
+        for note in piano.on_notes() {
             self.audio_graph.send_midi_1_data(Midi1Note {
                 channel: 0,
                 is_on: note.is_on,
@@ -319,7 +318,7 @@ impl App {
             }.into());
         }
         
-        for note in ui.on_midi_1_notes(){
+        for note in ui.on_midi_1_notes() {
             piano.set_note(ui.cx, note.is_on, note.note_number)
         }
         

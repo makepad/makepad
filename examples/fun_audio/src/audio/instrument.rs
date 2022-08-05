@@ -5,7 +5,6 @@ use {
         makepad_platform::audio::*,
         makepad_platform::midi::*,
         makepad_component::*,
-        makepad_platform::*
     },
 };
 

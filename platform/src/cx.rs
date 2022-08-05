@@ -51,11 +51,6 @@ use {
         pass::{
             CxPassPool,
         },
-        font::{
-            CxFont,
-            CxFontsAtlas,
-            CxDrawFontAtlas
-        },
         texture::{
             CxTexturePool
         },
@@ -75,24 +70,19 @@ pub struct Cx {
     pub (crate) gpu_info: GpuInfo,
     pub (crate) cpu_cores: usize,
     
-    pub (crate) windows: CxWindowPool,
-    pub (crate) passes: CxPassPool,
-    pub (crate) draw_lists: CxDrawListPool,
+    pub windows: CxWindowPool,
+    pub passes: CxPassPool,
+    pub draw_lists: CxDrawListPool,
     pub (crate) textures: CxTexturePool,
     pub (crate) geometries: CxGeometryPool,
     
     pub (crate) geometries_refs: HashMap<GeometryFingerprint, Weak<Geometry >>,
     
-    pub (crate) draw_shaders: CxDrawShaders,
-    
-    pub (crate) fonts: Vec<Option<CxFont >>,
-    pub (crate) fonts_atlas: CxFontsAtlas,
-    pub (crate) path_to_font_id: HashMap<String, usize>,
-    pub (crate) draw_font_atlas: Option<Box<CxDrawFontAtlas >>,
+    pub draw_shaders: CxDrawShaders,
     
     pub (crate) new_draw_event: DrawEvent,
     
-    pub (crate) redraw_id: u64,
+    pub redraw_id: u64,
     pub (crate) repaint_id: u64,
     pub (crate) event_id: u64,
     pub (crate) timer_id: u64,
@@ -188,11 +178,6 @@ impl Cx {
             geometries_refs: HashMap::new(),
             
             draw_shaders: CxDrawShaders::default(),
-            
-            fonts: Vec::new(),
-            fonts_atlas: CxFontsAtlas::new(),
-            path_to_font_id: HashMap::new(),
-            draw_font_atlas: None,
             
             new_draw_event: DrawEvent::default(),
             
