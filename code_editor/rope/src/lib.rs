@@ -12,14 +12,15 @@ mod leaf;
 mod node;
 mod rope;
 mod slice;
+mod str_utils;
 
 pub use self::{
-    builder::Builder, bytes::Bytes, bytes_rev::BytesRev, chars::Chars, chars_rev::CharsRev, chunks::Chunks, chunks_rev::ChunksRev,
-    cursor::Cursor, rope::Rope, slice::Slice,
+    builder::Builder, bytes::Bytes, bytes_rev::BytesRev, chars::Chars, chars_rev::CharsRev,
+    chunks::Chunks, chunks_rev::ChunksRev, cursor::Cursor, rope::Rope, slice::Slice,
 };
 
 use {
-    self::{branch::Branch, info::Info, leaf::Leaf, node::Node},
+    self::{branch::Branch, info::Info, leaf::Leaf, node::Node, str_utils::StrUtils},
     std::ops::{Range, RangeBounds},
 };
 

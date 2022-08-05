@@ -21,9 +21,23 @@ impl Node {
         }
     }
 
-    pub(crate) fn info_at_byte(&self, byte_index: usize) -> Info {
+    pub(crate) fn info_at(&self, byte_index: usize) -> Info {
         let (chunk, start_info) = self.chunk_at_byte(byte_index);
         start_info + Info::from(&chunk[..byte_index - start_info.byte_count])
+    }
+
+    pub(crate) fn char_to_byte(&self, char_index: usize) -> usize {
+        use crate::StrUtils;
+
+        let (chunk, start_info) = self.chunk_at_char(char_index);
+        start_info.byte_count + chunk.char_to_byte(char_index - start_info.char_count)
+    }
+
+    pub(crate) fn line_to_byte(&self, line_index: usize) -> usize {
+        use crate::StrUtils;
+
+        let (chunk, start_info) = self.chunk_at_line(line_index);
+        start_info.byte_count + chunk.line_to_byte(line_index - start_info.line_break_count)
     }
 
     pub(crate) fn chunk_at_byte(&self, byte_index: usize) -> (&str, Info) {
@@ -34,6 +48,32 @@ impl Node {
                 Node::Leaf(leaf) => break (leaf, start_info),
                 Node::Branch(branch) => {
                     node = &branch[branch.search_by_byte(&mut start_info, byte_index)]
+                }
+            }
+        }
+    }
+
+    pub(crate) fn chunk_at_char(&self, char_index: usize) -> (&str, Info) {
+        let mut start_info = Info::new();
+        let mut node = self;
+        loop {
+            match node {
+                Node::Leaf(leaf) => break (leaf, start_info),
+                Node::Branch(branch) => {
+                    node = &branch[branch.search_by_char(&mut start_info, char_index)]
+                }
+            }
+        }
+    }
+
+    pub(crate) fn chunk_at_line(&self, line_index: usize) -> (&str, Info) {
+        let mut start_info = Info::new();
+        let mut node = self;
+        loop {
+            match node {
+                Node::Leaf(leaf) => break (leaf, start_info),
+                Node::Branch(branch) => {
+                    node = &branch[branch.search_by_line(&mut start_info, line_index)]
                 }
             }
         }
