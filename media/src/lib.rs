@@ -17,4 +17,5 @@ pub use makepad_platform::makepad_error_log;
 
 pub fn live_register(cx:&mut Cx){
     self::audio_graph::live_register(cx);
+    self::os::live_register(cx);
 }

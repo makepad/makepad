@@ -41,6 +41,8 @@ use {
 
 
 pub trait CxOsApi {
+    fn init(&mut self);
+    
     fn post_signal(signal: Signal);
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static;
     
@@ -362,9 +364,7 @@ macro_rules!main_app {
                 app.borrow_mut().as_mut().unwrap().handle_event(cx, event);
             }));
             live_register(&mut cx);
-            cx.live_expand();
-            cx.live_scan_dependencies();
-            cx.desktop_load_dependencies();
+            cx.init();
             cx.event_loop();
         }
         
@@ -384,16 +384,15 @@ macro_rules!main_app {
             })));
             
             live_register(&mut cx);
-            cx.live_expand();
-            cx.live_scan_dependencies();
+            cx.init();
             Box::into_raw(cx) as u32
         }
 
         #[export_name = "wasm_process_msg"]
         #[cfg(target_arch = "wasm32")]
         pub unsafe extern "C" fn wasm_process_msg(msg_ptr: u32, cx_ptr: u32) -> u32 {
-            let cx = cx_ptr as *mut Cx;
-            (*cx).process_to_wasm(msg_ptr)
+            let cx = &mut *(cx_ptr as *mut Cx);
+            cx.process_to_wasm(msg_ptr)
         }
     }
 }

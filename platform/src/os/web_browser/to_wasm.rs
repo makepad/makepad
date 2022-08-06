@@ -5,7 +5,6 @@ use {
         makepad_live_id::*,
         makepad_wasm_bridge::*,
         makepad_math::{Vec2, Vec3, Quat, Transform},
-        midi::{MidiInputInfo, Midi1Data, Midi1InputData},
         cx::{OsType},
         window::CxWindowPool,
         area::Area,
@@ -26,7 +25,6 @@ use {
             FingerScrollEvent,
             KeyEvent,
             TextInputEvent,
-            MidiInputListEvent,
             WindowGeom
         },
     }
@@ -681,49 +679,3 @@ pub struct ToWasmWebSocketMessage {
     pub data: WasmDataU8
 }
 
-#[derive(ToWasm)]
-pub struct ToWasmMidiInputData {
-    pub input_id: u32,
-    pub data: u32,
-}
-
-impl Into<Midi1InputData> for ToWasmMidiInputData {
-    fn into(self) -> Midi1InputData {
-        Midi1InputData {
-            input_id: self.input_id as usize,
-            data: Midi1Data {
-                data0: ((self.data >> 16) & 0xff) as u8,
-                data1: ((self.data >> 8) & 0xff) as u8,
-                data2: ((self.data >> 0) & 0xff) as u8,
-            }
-        }
-    }
-}
-
-#[derive(ToWasm)]
-pub struct WMidiInputInfo {
-    pub manufacturer: String,
-    pub name: String,
-    pub uid: String,
-}
-
-
-
-#[derive(ToWasm)]
-pub struct ToWasmMidiInputList {
-    pub inputs: Vec<WMidiInputInfo>
-}
-
-impl Into<MidiInputListEvent> for ToWasmMidiInputList {
-    fn into(self) -> MidiInputListEvent {
-        let mut out = Vec::new();
-        for input in self.inputs {
-            out.push(MidiInputInfo {
-                manufacturer: input.manufacturer,
-                name: input.name,
-                uid: input.uid
-            });
-        }
-        MidiInputListEvent {inputs: out}
-    }
-}

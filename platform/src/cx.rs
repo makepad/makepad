@@ -110,7 +110,7 @@ pub struct Cx {
     #[allow(dead_code)]
     pub (crate) command_settings: HashMap<MenuCommand, CxCommandSetting>,
     
-    pub (crate) platform: CxOs,
+    pub os: CxOs,
     // (cratethis cuts the compiletime of an end-user application in half
     pub (crate) event_handler: Option<Box<dyn FnMut(&mut Cx, &Event)>>,
 
@@ -207,7 +207,7 @@ impl Cx {
             
             command_settings: HashMap::new(),
             
-            platform: CxOs {..Default::default()},
+            os: CxOs {..Default::default()},
             
             event_handler:Some(event_handler),
             
