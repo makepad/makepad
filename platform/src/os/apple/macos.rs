@@ -69,12 +69,12 @@ impl Cx {
                 CocoaEvent::KeyDown(_) |
                 CocoaEvent::KeyUp(_) |
                 CocoaEvent::TextInput(_) => {
-                    self.platform.keep_alive_counter = KEEP_ALIVE_COUNT;
+                    self.os.keep_alive_counter = KEEP_ALIVE_COUNT;
                 }
                 CocoaEvent::Timer(te) => {
                     if te.timer_id == 0 {
-                        if self.platform.keep_alive_counter>0 {
-                            self.platform.keep_alive_counter -= 1;
+                        if self.os.keep_alive_counter>0 {
+                            self.os.keep_alive_counter -= 1;
                             self.repaint_windows();
                             paint_dirty = true;
                         }
@@ -144,9 +144,9 @@ impl Cx {
                     self.handle_repaint(metal_windows, metal_cx);
                 }
                 CocoaEvent::MouseDown(md) => {
-                    if self.platform.last_mouse_button == None ||
-                    self.platform.last_mouse_button == Some(md.button) {
-                        self.platform.last_mouse_button = Some(md.button);
+                    if self.os.last_mouse_button == None ||
+                    self.os.last_mouse_button == Some(md.button) {
+                        self.os.last_mouse_button = Some(md.button);
                         let digit_id = id!(mouse).into();
                         self.fingers.alloc_digit(digit_id);
                         self.fingers.process_tap_count(
@@ -168,7 +168,7 @@ impl Cx {
                             mm.into_finger_hover_event(
                                 digit_id,
                                 area,
-                                self.platform.last_mouse_button.unwrap_or(0)
+                                self.os.last_mouse_button.unwrap_or(0)
                             )
                         ));
                         self.fingers.cycle_hover_area(digit_id);
@@ -178,14 +178,14 @@ impl Cx {
                             mm.into_finger_move_event(
                                 &self.fingers,
                                 digit_id,
-                                self.platform.last_mouse_button.unwrap_or(0)
+                                self.os.last_mouse_button.unwrap_or(0)
                             )
                         ));
                     }
                 }
                 CocoaEvent::MouseUp(md) => {
-                    if self.platform.last_mouse_button == Some(md.button) {
-                        self.platform.last_mouse_button = None;
+                    if self.os.last_mouse_button == Some(md.button) {
+                        self.os.last_mouse_button = None;
                         let digit_id = id!(mouse).into();
                         self.call_event_handler(&Event::FingerUp(
                             md.into_finger_up_event(
@@ -356,6 +356,11 @@ impl Cx {
 }
 
 impl CxOsApi for Cx {
+    fn init(&mut self){
+        self.live_expand();
+        self.live_scan_dependencies();
+        self.desktop_load_dependencies();        
+    }
     
     fn post_signal(signal: Signal) {
         CocoaApp::post_signal(signal.0.0);

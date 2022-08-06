@@ -5,7 +5,7 @@ use {
         },
         makepad_wasm_bridge::*,
         makepad_math::*,
-        platform::{
+        os::{
             web_browser::{
                 from_wasm::*
             }
@@ -27,7 +27,7 @@ impl Cx {
         for pass_id in &passes_todo {
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_) => {
-                    let dpi_factor = self.platform.window_geom.dpi_factor;
+                    let dpi_factor = self.os.window_geom.dpi_factor;
                     self.draw_pass_to_canvas(*pass_id, dpi_factor);
                 }
                 CxPassParent::Pass(parent_pass_id) => {
@@ -82,8 +82,8 @@ impl Cx {
                 if draw_call.instance_dirty || draw_call.platform.inst_vb_id.is_none() {
                     draw_call.instance_dirty = false;
                     if draw_call.platform.inst_vb_id.is_none() {
-                        draw_call.platform.inst_vb_id = Some(self.platform.vertex_buffers);
-                        self.platform.vertex_buffers += 1;
+                        draw_call.platform.inst_vb_id = Some(self.os.vertex_buffers);
+                        self.os.vertex_buffers += 1;
                     }
                     
                     let slots = sh.mapping.instances.total_slots;
@@ -99,7 +99,7 @@ impl Cx {
                         }
                     }
                     
-                    self.platform.from_wasm(FromWasmAllocArrayBuffer {
+                    self.os.from_wasm(FromWasmAllocArrayBuffer {
                         buffer_id: draw_call.platform.inst_vb_id.unwrap(),
                         data: WasmDataF32::new(draw_call.instances.as_ref().unwrap())
                     });
@@ -126,7 +126,7 @@ impl Cx {
                     let cxtexture = &mut self.textures[texture_id];
                     if cxtexture.update_image {
                         cxtexture.update_image = false;
-                        self.platform.from_wasm(FromWasmAllocTextureImage2D {
+                        self.os.from_wasm(FromWasmAllocTextureImage2D {
                             texture_id: texture_id.0,
                             width: cxtexture.desc.width.unwrap(),
                             height: cxtexture.desc.height.unwrap(),
@@ -144,19 +144,19 @@ impl Cx {
                 
                 if geometry.dirty || geometry.platform.vb_id.is_none() || geometry.platform.ib_id.is_none() {
                     if geometry.platform.vb_id.is_none() {
-                        geometry.platform.vb_id = Some(self.platform.vertex_buffers);
-                        self.platform.vertex_buffers += 1;
+                        geometry.platform.vb_id = Some(self.os.vertex_buffers);
+                        self.os.vertex_buffers += 1;
                     }
                     if geometry.platform.ib_id.is_none() {
-                        geometry.platform.ib_id = Some(self.platform.index_buffers);
-                        self.platform.index_buffers += 1;
+                        geometry.platform.ib_id = Some(self.os.index_buffers);
+                        self.os.index_buffers += 1;
                     }
-                    self.platform.from_wasm(FromWasmAllocArrayBuffer {
+                    self.os.from_wasm(FromWasmAllocArrayBuffer {
                         buffer_id: geometry.platform.vb_id.unwrap(),
                         data: WasmDataF32::new(&geometry.vertices)
                     });
                     
-                    self.platform.from_wasm(FromWasmAllocIndexBuffer {
+                    self.os.from_wasm(FromWasmAllocIndexBuffer {
                         buffer_id: geometry.platform.ib_id.unwrap(),
                         data: WasmDataU32::new(&geometry.indices)
                     });
@@ -167,13 +167,13 @@ impl Cx {
                 // lets check if our vao is still valid
                 if draw_call.platform.vao.is_none() {
                     draw_call.platform.vao = Some(CxOsDrawCallVao {
-                        vao_id: self.platform.vaos,
+                        vao_id: self.os.vaos,
                         shader_id: None,
                         inst_vb_id: None,
                         geom_vb_id: None,
                         geom_ib_id: None,
                     });
-                    self.platform.vaos += 1;
+                    self.os.vaos += 1;
                 }
                 
                 let vao = draw_call.platform.vao.as_mut().unwrap();
@@ -188,7 +188,7 @@ impl Cx {
                     vao.geom_vb_id = geometry.platform.vb_id;
                     vao.geom_ib_id = geometry.platform.ib_id;
                     
-                    self.platform.from_wasm(FromWasmAllocVao {
+                    self.os.from_wasm(FromWasmAllocVao {
                         vao_id: vao.vao_id,
                         shader_id: vao.shader_id.unwrap(),
                         geom_ib_id: vao.geom_ib_id.unwrap(),
@@ -205,7 +205,7 @@ impl Cx {
                         textures[index] = Some(texture_id.0)
                     }
                 }
-                self.platform.from_wasm(FromWasmDrawCall {
+                self.os.from_wasm(FromWasmDrawCall {
                     shader_id: draw_call.draw_shader.draw_shader_id,
                     vao_id: draw_call.platform.vao.as_ref().unwrap().vao_id,
                     pass_uniforms: WasmDataF32::new(pass_uniforms.as_slice()),
@@ -262,14 +262,14 @@ impl Cx {
             PassClearDepth::ClearWith(depth) => depth
         };
         
-        self.platform.from_wasm(FromWasmBeginRenderCanvas {
+        self.os.from_wasm(FromWasmBeginRenderCanvas {
             clear_color: clear_color.into(),
             clear_depth,
         });
         
         self.setup_render_pass(pass_id, dpi_factor);
         
-        self.platform.from_wasm(FromWasmSetDefaultDepthAndBlendMode {});
+        self.os.from_wasm(FromWasmSetDefaultDepthAndBlendMode {});
         
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
@@ -339,7 +339,7 @@ impl Cx {
             }
         }
         
-        self.platform.from_wasm(FromWasmBeginRenderTexture {
+        self.os.from_wasm(FromWasmBeginRenderTexture {
             pass_id: pass_id.0,
             width: (pass_size.x * dpi_factor) as usize,
             height: (pass_size.y * dpi_factor) as usize,
@@ -348,7 +348,7 @@ impl Cx {
         });
         
         // set the default depth and blendmode
-        self.platform.from_wasm(FromWasmSetDefaultDepthAndBlendMode {});
+        self.os.from_wasm(FromWasmSetDefaultDepthAndBlendMode {});
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
         
@@ -391,7 +391,7 @@ impl Cx {
                 }
                 if cx_shader.platform.is_none() {
                     let shp = CxOsDrawShader::new(vertex.clone(), pixel.clone());
-                    self.platform.from_wasm(FromWasmCompileWebGLShader{
+                    self.os.from_wasm(FromWasmCompileWebGLShader{
                         shader_id: item.draw_shader_id,
                         vertex: shp.vertex.clone(), 
                         pixel: shp.pixel.clone(),

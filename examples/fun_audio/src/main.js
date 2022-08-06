@@ -1,6 +1,6 @@
-import {WasmWebGL} from "/makepad/platform/src/os/web_browser/web_gl.js"
+import {WasmMediaGL} from "/makepad/media/src/os/web_browser/media_gl.js"
 
-const wasm = await WasmWebGL.fetch_and_instantiate_wasm(
+const wasm = await WasmMediaGL.fetch_and_instantiate_wasm(
     location.hostname=="127.0.0.1"?
     "/makepad/target/wasm32-thread/wasm32-unknown-unknown/release/fun_audio.wasm":
     location.hostname=="localhost"?
@@ -11,8 +11,9 @@ const wasm = await WasmWebGL.fetch_and_instantiate_wasm(
 class MyWasmApp {
     constructor(wasm) {
         let canvas = document.getElementsByClassName('full_canvas')[0];
-        this.webgl = new WasmWebGL (wasm, this, canvas);
+        this.webgl = new WasmMediaGL (wasm, this, canvas);
     }
+
 } 
 
 let app = new MyWasmApp(wasm);
