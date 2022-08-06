@@ -47,11 +47,12 @@ pub trait ToWasm {
     fn type_name()->&'static str{panic!()}
     fn live_id()->LiveId{panic!()}
 
-    fn read_to_wasm(inp: &mut ToWasmMsg) -> Self;
+    fn read_to_wasm(inp: &mut ToWasmMsgRef) -> Self;
     
     fn to_wasm_js_body(out: &mut WasmJSOutput, slot:usize, is_recur: bool, prop:&str, temp:usize);
-
-    fn to_wasm_js(wrapper: &mut String) {
+    
+    fn to_string()->String{
+        let mut wrapper = String::new();
         let id = Self::live_id();
         wrapper.push_str(&format!("{}(t0){{\n", Self::type_name()));
         wrapper.push_str("let app = this.app;\n");
@@ -79,17 +80,24 @@ pub trait ToWasm {
         wrapper.push_str("app.u32[block_len_offset] = new_len - app.u32[this.u32_ptr + 1];\n");
         wrapper.push_str("app.u32[this.u32_ptr + 1] = new_len;\n");
         wrapper.push_str("}\n");
+        wrapper
     }
 }
 
+#[derive(Clone, Default, Debug)]
 pub struct ToWasmMsg {
     data: Vec<u64>,
-    pub u32_offset: usize
 }
 
 pub struct ToWasmBlockSkip{
     len:usize,
     base:usize
+}
+
+#[derive(Clone, Default, Debug)]
+pub struct ToWasmMsgRef<'a> {
+    data: &'a[u64],
+    pub u32_offset: usize
 }
 
 impl ToWasmMsg {
@@ -103,7 +111,7 @@ impl ToWasmMsg {
             
             Self {
                 data: Vec::from_raw_parts(ptr, len, cap),
-                u32_offset: 2,
+                //u32_offset: 2,
             }
         }
     }
@@ -115,6 +123,23 @@ impl ToWasmMsg {
         }
     }
     
+    pub fn as_ref(&self) ->ToWasmMsgRef{
+        ToWasmMsgRef{
+            data: &self.data,
+            u32_offset: 2
+        }
+    }
+    
+    pub fn as_ref_at(&self, offset:usize) ->ToWasmMsgRef{
+        ToWasmMsgRef{
+            data: &self.data,
+            u32_offset: offset
+        }
+    }
+}
+
+impl<'a> ToWasmMsgRef<'a> {
+
     pub fn read_u32(&mut self) -> u32 {
         let ret = if self.u32_offset & 1 != 0 {
             (self.data[self.u32_offset >> 1] >> 32) as u32

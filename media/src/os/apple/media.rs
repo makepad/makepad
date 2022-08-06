@@ -12,6 +12,9 @@ use{
     }
 };
 
+pub fn live_register(cx:&Cx){
+}
+
 #[derive(Default)]
 struct CxMediaApple{
     pub midi_access: Option<CoreMidiAccess>,

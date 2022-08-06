@@ -19,6 +19,7 @@ use {
     },
 };
 
+
 #[derive(Clone, Debug)]
 pub enum Event {
     Construct,
@@ -63,6 +64,8 @@ pub enum Event {
     WebSocketError(WebSocketErrorEvent),
     WebSocketMessage(WebSocketMessageEvent),
     
+    #[cfg(target_arch = "wasm32")]
+    ToWasmMsg(ToWasmMsgEvent),
     //Midi1InputData(Vec<Midi1InputData>),
     //MidiInputList(MidiInputListEvent),
 }
@@ -96,6 +99,7 @@ pub enum DragHit<'a>{
 pub struct TriggerEvent {
     pub triggers: HashMap<Area, HashSet<Trigger>>
 }
+
 /*
 #[derive(Clone, Debug)]
 pub struct MidiInputListEvent {
@@ -232,4 +236,23 @@ impl Timer {
     pub fn is_empty(&self) -> bool {
         self.0 == 0
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+use crate::makepad_wasm_bridge::ToWasmMsg;
+
+#[cfg(target_arch = "wasm32")]
+use crate::makepad_wasm_bridge::ToWasmMsgRef;
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Debug)]
+pub struct ToWasmMsgEvent{
+    pub id: LiveId,
+    pub msg: ToWasmMsg,
+    pub offset: usize
+}
+
+#[cfg(target_arch = "wasm32")]
+impl ToWasmMsgEvent{
+    pub fn as_ref(&self)->ToWasmMsgRef{self.msg.as_ref_at(self.offset)}
 }
