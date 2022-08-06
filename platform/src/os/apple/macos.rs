@@ -427,7 +427,7 @@ impl CxOsApi for Cx {
 }
 
 #[derive(Default)]
-pub (crate) struct CxOs {
+pub struct CxOs {
     pub (crate) keep_alive_counter: usize,
     //pub (crate)midi_access: Option<CoreMidiAccess>,
     //pub (crate)midi_input_data: Arc<Mutex<RefCell<Vec<Midi1InputData >> >>,

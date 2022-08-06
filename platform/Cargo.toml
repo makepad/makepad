@@ -11,6 +11,8 @@ nightly = ["makepad-shader-compiler/nightly"]
 
 [dependencies]
 makepad-shader-compiler = { path = "./shader_compiler", version = "0.1" }
+
+[target.wasm32-unknown-unknown.dependencies]
 makepad-wasm-bridge = { path = "./wasm_bridge", version = "0.1" }
 
 [target.aarch64-apple-darwin.dependencies]
