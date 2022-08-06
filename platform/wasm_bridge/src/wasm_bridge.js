@@ -13,8 +13,10 @@ export class WasmBridge {
         this.update_array_buffer_refs();
         
         this.wasm_init_panic_hook();
-        
-        let msg = new FromWasmMsg(this, this.wasm_get_js_msg_class());
+    }
+    
+    create_js_message_bridge(wasm_app){
+        let msg = new FromWasmMsg(this, this.wasm_get_js_message_bridge(wasm_app));
         let code = msg.read_str();
         msg.free();
         // this class can also be loaded from file.
@@ -63,8 +65,8 @@ export class WasmBridge {
         this.wasm_free_data_u8(obj.ptr, obj.len, obj.capacity);
     }
     
-    wasm_get_js_msg_class() {
-        let new_ptr = this.exports.wasm_get_js_msg_class();
+    wasm_get_js_message_bridge(wasm_app) {
+        let new_ptr = this.exports.wasm_get_js_message_bridge(wasm_app);
         this.update_array_buffer_refs();
         return new_ptr
     }

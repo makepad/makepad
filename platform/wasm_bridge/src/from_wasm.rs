@@ -22,8 +22,10 @@ pub trait FromWasm {
         Self::from_wasm_js_inner(wrapper, true);
     }
     
-    fn from_wasm_js(wrapper: &mut String) {
-        Self::from_wasm_js_inner(wrapper, false);
+    fn to_string()->String {
+        let mut wrapper = String::new();
+        Self::from_wasm_js_inner(&mut wrapper, false);
+        wrapper
     }
     
     fn from_wasm_js_inner(wrapper:&mut String, reuse_arg:bool){

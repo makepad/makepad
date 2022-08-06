@@ -10,7 +10,11 @@ export class WasmWebBrowser extends WasmBridge {
                 worker.terminate();
             }
         }
+        
         this.wasm_app = this.wasm_create_app();
+        
+        this.create_js_message_bridge(this.wasm_app);
+        
         this.dispatch = dispatch;
         this.canvas = canvas;
         this.handlers = {};
@@ -318,7 +322,7 @@ export class WasmWebBrowser extends WasmBridge {
     // RUSTFLAGS="-C target-feature=+atomics,+bulk-memory,+mutable-globals -C link-arg=--export=__stack_pointer" cargo build -p thing_to_compile --target=wasm32-unknown-unknown -Z build-std=panic_abort,std
     FromWasmCreateThread(args) {
         let worker = new Worker(
-            '/makepad/platform/src/platform/web_browser/web_worker.js',
+            '/makepad/platform/src/os/web_browser/web_worker.js',
             {type: 'module'}
         );
         

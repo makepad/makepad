@@ -258,21 +258,5 @@ pub struct FromWasmXrStopPresenting {
 
 
 
-// WebAudio API
-
-
-
-#[derive(FromWasm)]
-pub struct FromWasmStartMidiInput{
-}
-
-#[derive(FromWasm)]
-pub struct FromWasmSpawnAudioOutput{
-    pub closure_ptr: u32,
-}
-
-
-
-
 
 

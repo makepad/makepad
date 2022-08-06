@@ -136,7 +136,7 @@ impl Cx {
                 if draw_call.instance_dirty {
                     draw_call.instance_dirty = false;
                     // update the instance buffer data
-                    self.platform.bytes_written += draw_call.instances.as_ref().unwrap().len() * 4;
+                    self.os.bytes_written += draw_call.instances.as_ref().unwrap().len() * 4;
                     draw_call.platform.instance_buffer.next();
                     draw_call.platform.instance_buffer.get_mut().cpu_write().update(metal_cx, &draw_call.instances.as_ref().unwrap());
                 }
@@ -264,7 +264,7 @@ impl Cx {
                         ]};
                     }
                 }
-                self.platform.draw_calls_done += 1;
+                self.os.draw_calls_done += 1;
                 if let Some(inner) = geometry.platform.index_buffer.get().cpu_read().inner.as_ref() {
                     
                     let () = unsafe {msg_send![
@@ -421,8 +421,8 @@ impl Cx {
         metal_cx: &mut MetalCx,
         is_resizing: bool
     ) {
-        self.platform.bytes_written = 0;
-        self.platform.draw_calls_done = 0;
+        self.os.bytes_written = 0;
+        self.os.draw_calls_done = 0;
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
         
         let pool: ObjcId = unsafe {msg_send![class!(NSAutoreleasePool), new]};
