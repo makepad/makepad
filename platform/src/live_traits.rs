@@ -226,3 +226,45 @@ impl<T> LiveNew for Option<T> where T: LiveApply + LiveNew + 'static{
 }
 
 
+impl<T> LiveHook for Vec<T> where T: LiveApply + LiveNew + 'static {}
+impl<T> LiveApply for Vec<T> where T: LiveApply + LiveNew + 'static {
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        // we can only apply from an Array
+        self.clear();
+        if nodes[index].is_array(){
+            let mut index = index + 1;
+            loop{
+                if nodes[index].is_close(){
+                    index += 1;
+                    break;
+                }
+                let mut inner = T::new(cx);
+                index = inner.apply(cx, from, index, nodes);
+                self.push(inner);
+            }
+            index
+        }
+        else{
+            cx.apply_error_expected_array(live_error_origin!(), index, nodes);
+            nodes.skip_node(index)
+        }
+    }
+} 
+
+impl<T> LiveNew for Vec<T> where T: LiveApply + LiveNew + 'static{
+    fn new(_cx: &mut Cx) -> Self {
+        Vec::new()
+    }
+    fn new_apply(cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Self {
+        let mut ret = Vec::new();
+        ret.apply(cx, from, index, nodes);
+        ret
+    }
+    
+    fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
+        T::live_type_info(_cx)
+    }
+}
+
+
+

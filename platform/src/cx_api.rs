@@ -341,10 +341,16 @@ impl Cx {
         let item = self.globals.iter_mut().find(|v| v.0 == TypeId::of::<T>()).unwrap();
         item.1.downcast_mut().unwrap()
     }
-    
         
     pub fn has_global<T: 'static + Any>(&mut self)->bool{
         self.globals.iter_mut().find(|v| v.0 == TypeId::of::<T>()).is_some()
+    }
+    
+    pub fn global<T: 'static + Any + Default>(&mut self)->&mut T{
+        if !self.has_global::<T>(){
+            self.set_global(T::default());
+        }
+        self.get_global::<T>()
     }
 }
 

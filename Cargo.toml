@@ -5,7 +5,7 @@ members = [
     "code_editor/rope",
     "code_editor/segment",
     "code_editor/ucd",
-    "examples/layout_example", 
+    "examples/video_example", 
     "examples/fractal_zoom", 
     "examples/cmdline_example",
     "platform/wasm_bridge/test",

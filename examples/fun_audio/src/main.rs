@@ -86,22 +86,35 @@ live_register!{
         }
     }
     
-    InstrumentSlider: Rect {
+    ElementBox: Rect {
         bg: {color: #4}
         walk: {width: Fill, height: Fit}
-        layout: {flow: Right, padding: 8, spacing: 5, align: {y: 0.5}}
+        layout: {flow: Down, padding: 8, spacing: 5, align: {y: 0.5}}
+    }
+    
+    InstrumentSlider: ElementBox {
         slider = Slider {
             label: "CutOff1"
             height: 22
         }
     }
     
-    TextInputTest: Rect {
-        bg: {color: #4}
-        walk: {width: Fill, height: Fit},
-        layout: {flow: Right, padding: {left: 8}}
+    TextInputTest: ElementBox {
+        layout: {padding: {left: 8}}
         textbox = TextInput {
             text: "Hello WOrld"
+        }
+    }
+    
+    ListBoxTest: ElementBox {
+        listbox = ListBox {
+            items: ["One", "Two", "Three", "Four", "Five", "Six"]
+        }
+    }
+
+    DropDownTest: ElementBox {
+        listbox = DropDown {
+            items: ["One", "Two", "Three", "Four", "Five", "Six"]
         }
     }
     
@@ -124,7 +137,6 @@ live_register!{
                 }
                 body: Frame {
                     layout: {flow: Down}
-                    bg: {color: #f00},
                     walk: {width: Fill, height: Fit}
                     InstrumentSlider {
                         slider = {
@@ -167,7 +179,8 @@ live_register!{
                         }
                     }
                     TextInputTest {}
-                    
+                    ListBoxTest {}
+                    DropDownTest {}
                 }
             }
         }
@@ -246,6 +259,7 @@ live_register!{
                             label = Label {text: "Instruments"}
                         }
                         body: Frame {
+                            walk: {width: Fill, height: Fit}
                             layout: {flow: Down}
                             instrument = IronFishUI {}
                         }
@@ -313,11 +327,11 @@ impl App {
         
         let piano = ui.piano(ids!(piano));
         
-        for inp in ui.cx.on_midi_1_input_data(ui.event){
+        for inp in ui.cx.on_midi_1_input_data(ui.event) {
             self.audio_graph.send_midi_1_data(inp.data);
-            if let Some(note) = inp.data.decode().on_note(){
-               piano.set_note(ui.cx, note.is_on, note.note_number)
-           }
+            if let Some(note) = inp.data.decode().on_note() {
+                piano.set_note(ui.cx, note.is_on, note.note_number)
+            }
         }
         
         for note in piano.on_notes() {
