@@ -5,32 +5,47 @@ pub struct Cursor<'a> {
     root: &'a Node,
     byte_start: usize,
     byte_end: usize,
-    byte_index: usize,
+    byte_position: usize,
     path: Vec<(&'a Branch, usize)>,
 }
 
 impl<'a> Cursor<'a> {
+    /// Returns `true` if `self` is pointing to the front chunk of the `Rope`.
+    ///
+    /// Runs in O(1) time.
     pub fn is_at_front(&self) -> bool {
-        self.byte_index <= self.byte_start
+        self.byte_position <= self.byte_start
     }
 
+    /// Returns `true` if `self` is pointing to the back chunk of the `Rope`.
+    ///
+    /// Runs in O(1) time.
     pub fn is_at_back(&self) -> bool {
-        self.byte_index + self.current_node().as_leaf().len() >= self.byte_end
+        self.byte_position + self.current_node().as_leaf().len() >= self.byte_end
     }
 
-    pub fn byte_index(&self) -> usize {
-        self.byte_index.saturating_sub(self.byte_start)
+    /// Returns the byte position of `self` within the `Rope`.
+    ///
+    /// Runs in O(1) time.
+    pub fn byte_position(&self) -> usize {
+        self.byte_position.saturating_sub(self.byte_start)
     }
 
+    /// Returns a reference to the chunk that `self` is currently pointing to.
+    ///
+    /// Runs in O(1) time.
     pub fn current(&self) -> &'a str {
         let leaf = self.current_node().as_leaf();
-        let start = self.byte_start.saturating_sub(self.byte_index);
-        let end = leaf.len() - (self.byte_index + leaf.len()).saturating_sub(self.byte_end);
+        let start = self.byte_start.saturating_sub(self.byte_position);
+        let end = leaf.len() - (self.byte_position + leaf.len()).saturating_sub(self.byte_end);
         &leaf[start..end]
     }
 
+    /// Moves `self` to the next chunk of the `Rope`.
+    ///
+    /// Runs in amortized O(1) time and worst-case O(log n) time.
     pub fn move_next(&mut self) {
-        self.byte_index += self.current_node().as_leaf().len();
+        self.byte_position += self.current_node().as_leaf().len();
         while let Some((branch, index)) = self.path.last_mut() {
             if *index < branch.len() - 1 {
                 *index += 1;
@@ -41,11 +56,14 @@ impl<'a> Cursor<'a> {
         self.descend_left();
     }
 
+    /// Moves `self` to the previous chunk of the `Rope`.
+    ///
+    /// Runs in amortized O(1) and worst-case O(log n) time.
     pub fn move_prev(&mut self) {
         while let Some((branch, index)) = self.path.last_mut() {
             if *index > 0 {
-                self.byte_index -= branch[*index].info().byte_count;
                 *index -= 1;
+                self.byte_position -= branch[*index].info().byte_count;
                 break;
             }
             self.path.pop();
@@ -59,7 +77,7 @@ impl<'a> Cursor<'a> {
             cursor.descend_left();
         } else if byte_start == root.info().byte_count {
             cursor.descend_right();
-            cursor.byte_index = root.info().byte_count;
+            cursor.byte_position = root.info().byte_count;
         } else {
             cursor.descend_to(byte_start);
         }
@@ -82,16 +100,16 @@ impl<'a> Cursor<'a> {
         root: &'a Node,
         byte_start: usize,
         byte_end: usize,
-        byte_index: usize,
+        byte_position: usize,
     ) -> Self {
         let mut cursor = Cursor::new(root, byte_start, byte_end);
-        if byte_index == 0 {
+        if byte_position == 0 {
             cursor.descend_left();
         }
-        if byte_index == root.info().byte_count {
+        if byte_position == root.info().byte_count {
             cursor.descend_right();
         } else {
-            cursor.descend_to(byte_index);
+            cursor.descend_to(byte_position);
         }
         cursor
     }
@@ -101,7 +119,7 @@ impl<'a> Cursor<'a> {
             root,
             byte_start: start,
             byte_end: end,
-            byte_index: 0,
+            byte_position: 0,
             path: Vec::new(),
         }
     }
@@ -132,7 +150,7 @@ impl<'a> Cursor<'a> {
                 Node::Leaf(_) => break,
                 Node::Branch(branch) => {
                     let last = branch.last().unwrap();
-                    self.byte_index += branch.info().byte_count - last.info().byte_count;
+                    self.byte_position += branch.info().byte_count - last.info().byte_count;
                     self.path.push((branch, branch.len() - 1));
                     node = last;
                 }
@@ -140,13 +158,13 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    fn descend_to(&mut self, byte_index: usize) {
+    fn descend_to(&mut self, byte_position: usize) {
         let mut node = self.current_node();
         loop {
             match node {
                 Node::Leaf(_) => break,
                 Node::Branch(branch) => {
-                    let index = branch.search_by_byte_only(&mut self.byte_index, byte_index);
+                    let index = branch.search_by_byte_only(&mut self.byte_position, byte_position);
                     self.path.push((branch, index));
                     node = &branch[index];
                 }
