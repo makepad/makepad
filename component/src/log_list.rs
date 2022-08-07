@@ -6,7 +6,7 @@ use {
         frame::*,
         fold_button::FoldButton,
         scroll_view::ScrollView,
-        link_button::LinkButton,
+        link_label::LinkLabel,
         makepad_draw_2d::*,
         log_icon::{DrawLogIconQuad, LogIconType}
     },
@@ -145,7 +145,7 @@ pub struct LogListNode {
     indent_width: f32,
     
     fold_button: FoldButton,
-    link_button: LinkButton,
+    link_label: LinkLabel,
     
     icon_walk: Walk,
     
@@ -228,7 +228,7 @@ impl LogListNode {
         // lets draw a fold button
         self.icon_quad.icon_type = icon_type;
         self.icon_quad.draw_walk(cx, self.icon_walk);
-        self.link_button.draw_label(cx, link);
+        self.link_label.draw_label(cx, link);
         
         self.name_text.draw_walk(cx, Walk::fit(), Align::default(), body);
         self.bg_quad.end(cx);
@@ -254,7 +254,7 @@ impl LogListNode {
         
         self.fold_button.handle_event(cx, event, &mut |_,_|{});
         
-        self.link_button.handle_event(cx, event, &mut |_,_|{});
+        self.link_label.handle_event(cx, event, &mut |_,_|{});
         
         match event.hits(cx, self.bg_quad.area()) {
             Hit::FingerHoverIn(_) => {
