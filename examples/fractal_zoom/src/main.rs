@@ -2,7 +2,7 @@
 
 pub use makepad_component;
 use makepad_component::*;
-use makepad_platform::*;
+use makepad_draw_2d::*;
 mod mandelbrot;
 
 #[cfg(feature = "nightly")]
@@ -49,8 +49,8 @@ impl App {
         }
         
         match event {
-            Event::Draw(draw_event) => {
-                self.draw(&mut Cx2d::new(cx, draw_event));
+            Event::Draw(event) => {
+                return Cx2d::draw(cx, event, self, | cx, s | s.draw(cx));
             }
             _ => ()
         }

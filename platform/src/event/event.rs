@@ -7,7 +7,7 @@ use {
         makepad_live_id::LiveId,
         cx::Cx,
         area::Area,
-        midi::{Midi1InputData, MidiInputInfo},
+        //midi::{Midi1InputData, MidiInputInfo},
         event::{
             finger::*,
             keyboard::*,
@@ -18,6 +18,7 @@ use {
         menu::MenuCommand,
     },
 };
+
 
 #[derive(Clone, Debug)]
 pub enum Event {
@@ -63,8 +64,10 @@ pub enum Event {
     WebSocketError(WebSocketErrorEvent),
     WebSocketMessage(WebSocketMessageEvent),
     
-    Midi1InputData(Vec<Midi1InputData>),
-    MidiInputList(MidiInputListEvent),
+    #[cfg(target_arch = "wasm32")]
+    ToWasmMsg(ToWasmMsgEvent),
+    //Midi1InputData(Vec<Midi1InputData>),
+    //MidiInputList(MidiInputListEvent),
 }
 
 pub enum Hit{
@@ -97,10 +100,11 @@ pub struct TriggerEvent {
     pub triggers: HashMap<Area, HashSet<Trigger>>
 }
 
+/*
 #[derive(Clone, Debug)]
 pub struct MidiInputListEvent {
     pub inputs: Vec<MidiInputInfo>,
-}
+}*/
 
 #[derive(Clone, Debug, Default)]
 pub struct DrawEvent {
@@ -232,4 +236,23 @@ impl Timer {
     pub fn is_empty(&self) -> bool {
         self.0 == 0
     }
+}
+
+#[cfg(target_arch = "wasm32")]
+use crate::makepad_wasm_bridge::ToWasmMsg;
+
+#[cfg(target_arch = "wasm32")]
+use crate::makepad_wasm_bridge::ToWasmMsgRef;
+
+#[cfg(target_arch = "wasm32")]
+#[derive(Clone, Debug)]
+pub struct ToWasmMsgEvent{
+    pub id: LiveId,
+    pub msg: ToWasmMsg,
+    pub offset: usize
+}
+
+#[cfg(target_arch = "wasm32")]
+impl ToWasmMsgEvent{
+    pub fn as_ref(&self)->ToWasmMsgRef{self.msg.as_ref_at(self.offset)}
 }

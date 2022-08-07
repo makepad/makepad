@@ -1,14 +1,14 @@
 use {
     crate::{
         makepad_derive_frame::*,
-        makepad_platform::*,
+        makepad_draw_2d::*,
         frame::*,
         text_input::{TextInput, TextInputAction}
     }
 };
 
 live_register!{
-    import makepad_platform::shader::std::*;
+    import makepad_draw_2d::shader::std::*;
     DrawSlider: {{DrawSlider}} {
         instance hover: float
         instance focus: float

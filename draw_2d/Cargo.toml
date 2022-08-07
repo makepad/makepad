@@ -1,0 +1,21 @@
+[package]
+name = "makepad-draw-2d"
+version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
+edition = "2018"
+description = "Makepad Draw 2d"
+license = "MIT"
+
+[dependencies]
+makepad-platform = { path = "../platform", version = "0.1" }
+makepad-image-formats = { path = "./image_formats", version = "0.1" }
+makepad-font = { path = "./vector/font", version = "0.1" }
+makepad-geometry = { path = "./vector/geometry", version = "0.1" }
+makepad-internal-iter = { path = "./vector/internal_iter", version = "0.1" }
+makepad-trapezoidator = { path = "./vector/trapezoidator", version = "0.1" }
+makepad-ttf-parser = { path = "./vector/ttf_parser", version = "0.1" }
+makepad-path = { path = "./vector/path", version = "0.1" }
+
+[features] 
+nightly = ["makepad-platform/nightly", "makepad-image-formats/nightly"]
+

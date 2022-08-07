@@ -1,9 +1,4 @@
-pub use {
-    std::{
-        rc::Rc,
-        cell::RefCell
-    },
-    
+use {
     crate::{
         makepad_live_compiler::*,
         makepad_live_id::*,
@@ -13,10 +8,9 @@ pub use {
         event::{
             WindowGeom
         },
-        area::Area,
         pass::{Pass, PassId, CxPassParent},
         cx::Cx,
-        cx_api::CxPlatformOp,
+        cx_api::CxOsOp,
         live_traits::*,
     }
 };
@@ -74,7 +68,7 @@ impl LiveNew for Window {
         cxwindow.create_title = "Makepad".to_string();
         cxwindow.create_inner_size = inner_size;
         cxwindow.create_position = None;
-        cx.platform_ops.push(CxPlatformOp::CreateWindow(window.window_id()));
+        cx.platform_ops.push(CxOsOp::CreateWindow(window.window_id()));
         window
     }
     
@@ -142,19 +136,19 @@ impl Window {
     }
     
     pub fn minimize(&mut self, cx: &mut Cx) {
-        cx.push_unique_platform_op(CxPlatformOp::MinimizeWindow(self.window_id()));
+        cx.push_unique_platform_op(CxOsOp::MinimizeWindow(self.window_id()));
     }
     
     pub fn maximize(&mut self, cx: &mut Cx) {
-        cx.push_unique_platform_op(CxPlatformOp::MaximizeWindow(self.window_id()));
+        cx.push_unique_platform_op(CxOsOp::MaximizeWindow(self.window_id()));
     }
     
     pub fn fullscreen(&mut self, cx: &mut Cx) {
-        cx.push_unique_platform_op(CxPlatformOp::FullscreenWindow(self.window_id()));
+        cx.push_unique_platform_op(CxOsOp::FullscreenWindow(self.window_id()));
     }
     
     pub fn normal(&mut self, cx: &mut Cx) {
-        cx.push_unique_platform_op(CxPlatformOp::NormalizeWindow(self.window_id()));
+        cx.push_unique_platform_op(CxOsOp::NormalizeWindow(self.window_id()));
     }
     
     pub fn can_fullscreen(&mut self, cx: &mut Cx) -> bool {
@@ -174,11 +168,11 @@ impl Window {
     }
     
     pub fn xr_start_presenting(&mut self, cx: &mut Cx) {
-        cx.push_unique_platform_op(CxPlatformOp::XrStartPresenting(self.window_id()));
+        cx.push_unique_platform_op(CxOsOp::XrStartPresenting(self.window_id()));
     }
     
     pub fn xr_stop_presenting(&mut self, cx: &mut Cx) {
-        cx.push_unique_platform_op(CxPlatformOp::XrStopPresenting(self.window_id()));
+        cx.push_unique_platform_op(CxOsOp::XrStopPresenting(self.window_id()));
     }
     
     pub fn is_topmost(&mut self, cx: &mut Cx) -> bool {
@@ -186,15 +180,15 @@ impl Window {
     }
     
     pub fn set_topmost(&mut self, cx: &mut Cx, set_topmost: bool) {
-        cx.push_unique_platform_op(CxPlatformOp::SetTopmost(self.window_id(), set_topmost));
+        cx.push_unique_platform_op(CxOsOp::SetTopmost(self.window_id(), set_topmost));
     }
     
     pub fn restore(&mut self, cx: &mut Cx) {
-        cx.push_unique_platform_op(CxPlatformOp::RestoreWindow(self.window_id()));
+        cx.push_unique_platform_op(CxOsOp::RestoreWindow(self.window_id()));
     }
     
     pub fn close(&mut self, cx: &mut Cx) {
-        cx.push_unique_platform_op(CxPlatformOp::CloseWindow(self.window_id()));
+        cx.push_unique_platform_op(CxOsOp::CloseWindow(self.window_id()));
     }
 }
 

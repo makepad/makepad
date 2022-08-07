@@ -1,14 +1,13 @@
 use {
     crate::{
-        makepad_platform::*,
-        component_map::ComponentMap,
+        makepad_draw_2d::*,
         splitter::{SplitterAction, Splitter, SplitterAlign},
         tab_bar::{TabBarAction, TabBar, TabId},
     },
 };
 
 live_register!{
-    import makepad_platform::shader::std::*;
+    import makepad_draw_2d::shader::std::*;
     import crate::tab_bar::TabBar
     import makepad_component::splitter::Splitter
     import makepad_component::theme::*;
