@@ -1,10 +1,20 @@
 use {
     crate::{
+        makepad_live_compiler::{
+            LiveType,
+            LiveNode,
+            LiveId,
+            LiveModuleId,
+            LiveTypeInfo,
+            LiveNodeSlice
+        },
+        live_traits::{LiveNew, LiveApply, ApplyFrom},
+        makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},
         id_pool::*,
         makepad_error_log::*,
         makepad_live_id::*,
         cx::Cx,
-        platform::{CxPlatformTexture},
+        os::{CxOsTexture},
         live_traits::*
     }
 };
@@ -13,35 +23,35 @@ use {
 pub struct Texture(PoolId);
 
 #[derive(Clone, Debug, PartialEq, Copy)]
-pub struct TextureId(pub(crate) usize,u64);
+pub struct TextureId(pub (crate) usize, u64);
 
-impl Texture{
-    pub fn texture_id(&self)->TextureId{TextureId(self.0.id, self.0.generation)}
+impl Texture {
+    pub fn texture_id(&self) -> TextureId {TextureId(self.0.id, self.0.generation)}
 }
 
 #[derive(Default)]
 pub struct CxTexturePool(IdPool<CxTexture>);
-impl CxTexturePool{
-    pub fn alloc(&mut self)->Texture{
+impl CxTexturePool {
+    pub fn alloc(&mut self) -> Texture {
         Texture(self.0.alloc())
     }
 }
 
-impl std::ops::Index<TextureId> for CxTexturePool{
+impl std::ops::Index<TextureId> for CxTexturePool {
     type Output = CxTexture;
-    fn index(&self, index: TextureId) -> &Self::Output{
+    fn index(&self, index: TextureId) -> &Self::Output {
         let d = &self.0.pool[index.0];
-        if d.generation != index.1{
+        if d.generation != index.1 {
             error!("Texture id generation wrong {} {} {}", index.0, d.generation, index.1)
         }
         &d.item
     }
 }
 
-impl std::ops::IndexMut<TextureId> for CxTexturePool{
-    fn index_mut(&mut self, index: TextureId) -> &mut Self::Output{
+impl std::ops::IndexMut<TextureId> for CxTexturePool {
+    fn index_mut(&mut self, index: TextureId) -> &mut Self::Output {
         let d = &mut self.0.pool[index.0];
-        if d.generation != index.1{
+        if d.generation != index.1 {
             error!("Texture id generation wrong {} {} {}", index.0, d.generation, index.1)
         }
         &mut d.item
@@ -84,14 +94,14 @@ impl Default for TextureDesc {
     }
 }
 
-impl LiveHook for Texture{}
+impl LiveHook for Texture {}
 impl LiveNew for Texture {
-    fn new(cx: &mut Cx)->Self{
+    fn new(cx: &mut Cx) -> Self {
         let texture = cx.textures.alloc();
         texture
     }
     
-    fn live_type_info(_cx:&mut Cx) -> LiveTypeInfo{
+    fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
         LiveTypeInfo {
             module_id: LiveModuleId::from_str(&module_path!()).unwrap(),
             live_type: LiveType::of::<Self>(),
@@ -117,7 +127,7 @@ impl LiveApply for Texture {
                 break;
             }
             match nodes[index].id {
-                _=> {
+                _ => {
                     cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
                     index = nodes.skip_node(index);
                 }
@@ -128,17 +138,17 @@ impl LiveApply for Texture {
 }
 
 
-impl Texture{
-    pub fn set_desc(&self, cx:&mut Cx, desc:TextureDesc){
+impl Texture {
+    pub fn set_desc(&self, cx: &mut Cx, desc: TextureDesc) {
         let cxtexture = &mut cx.textures[self.texture_id()];
         cxtexture.desc = desc;
     }
-
-    pub fn get_desc(&self, cx:&mut Cx) -> TextureDesc {
+    
+    pub fn get_desc(&self, cx: &mut Cx) -> TextureDesc {
         cx.textures[self.texture_id()].desc.clone()
     }
     
-    pub fn swap_image_u32(&self, cx: &mut Cx, image_u32:&mut Vec<u32>){
+    pub fn swap_image_u32(&self, cx: &mut Cx, image_u32: &mut Vec<u32>) {
         let cxtexture = &mut cx.textures[self.texture_id()];
         std::mem::swap(&mut cxtexture.image_u32, image_u32);
         cxtexture.update_image = true;
@@ -148,9 +158,9 @@ impl Texture{
 
 #[derive(Default)]
 pub struct CxTexture {
-    pub(crate) desc: TextureDesc,
-    pub(crate) image_u32: Vec<u32>,
+    pub (crate) desc: TextureDesc,
+    pub (crate) image_u32: Vec<u32>,
     //pub(crate) _image_f32: Vec<f32>,
-    pub(crate) update_image: bool,
-    pub platform: CxPlatformTexture
+    pub (crate) update_image: bool,
+    pub platform: CxOsTexture
 }

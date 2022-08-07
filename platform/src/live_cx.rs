@@ -1,28 +1,27 @@
-pub use {
-    std::{
-        any::TypeId,
-    },
+use {
     crate::{
+        makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},
+        makepad_live_compiler::{
+            TextPos,
+            LiveValue,
+            LiveNode,
+            LiveId,
+            LiveEval,
+            LiveProp,
+            LiveError,
+            LiveModuleId,
+            LiveToken,
+            LivePtr,
+            LiveTokenId,
+            LiveFileId
+        },
         makepad_error_log::*,
+        makepad_live_compiler::LiveTypeInfo,
         makepad_math::*,
         cx::Cx,
         cx::CxDependency,
-        event::Event,
-        live_traits::*,
-        draw_vars::DrawVars,
-        state::State
     }
 };
-
-pub fn live_register(cx:&mut Cx) {
-    crate::draw_2d::draw_quad::live_register(cx);
-    crate::draw_2d::draw_color::live_register(cx);
-    crate::draw_2d::draw_shape::live_register(cx);
-    crate::draw_2d::draw_text::live_register(cx);
-    crate::shader::geometry_gen::live_register(cx);
-    crate::shader::std::live_register(cx);
-    crate::font::live_register(cx);
-}
 
 pub struct LiveBody {
     pub file: String,
@@ -115,16 +114,16 @@ impl Cx {
         self.apply_error(origin, index, nodes, format!("Image type not supported {}", path))
     }
     
-    pub fn apply_image_decoding_failed(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], path: &str, msg:&str) {
+    pub fn apply_image_decoding_failed(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], path: &str, msg: &str) {
         self.apply_error(origin, index, nodes, format!("Image decoding failed {} {}", path, msg))
     }
-
-    pub fn apply_resource_not_loaded(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], path:&str, msg: &str) {
+    
+    pub fn apply_resource_not_loaded(&mut self, origin: LiveErrorOrigin, index: usize, nodes: &[LiveNode], path: &str, msg: &str) {
         self.apply_error(origin, index, nodes, format!("Resource not loaded {} {}", path, msg))
     }
-
     
-    pub fn apply_error_eval(&mut self, err:LiveError) {
+    
+    pub fn apply_error_eval(&mut self, err: LiveError) {
         let live_registry = self.live_registry.borrow();
         error!("{}", live_registry.live_error_to_live_file_error(err));
     }
@@ -155,20 +154,20 @@ impl Cx {
         }
         // ok now we scan for all dependencies and store them on Cx.
     }
-
-    pub fn live_scan_dependencies(&mut self){
+    
+    pub fn live_scan_dependencies(&mut self) {
         let live_registry = self.live_registry.borrow();
-
-        for file in &live_registry.live_files{
+        
+        for file in &live_registry.live_files {
             for node in &file.original.nodes {
                 match &node.value {
-                    LiveValue::Dependency{string_start, string_count}=> {
+                    LiveValue::Dependency {string_start, string_count} => {
                         let mut path = String::new();
                         file.original.get_string(*string_start, *string_count, &mut path);
-                        self.dependencies.insert(path,CxDependency{
+                        self.dependencies.insert(path, CxDependency {
                             data: None
                         });
-                    }, 
+                    },
                     _ => {
                     }
                 }
@@ -176,8 +175,8 @@ impl Cx {
         }
     }
     
-
-
+    
+    
     pub fn register_live_body(&mut self, live_body: LiveBody) {
         //println!("START");
         let result = self.live_registry.borrow_mut().register_live_file(
@@ -274,12 +273,12 @@ impl Cx {
     where CB: FnOnce(&mut Cx, LiveFileId, usize, &[LiveNode]) -> usize {
         let live_registry_rc = self.live_registry.clone();
         let live_registry = live_registry_rc.borrow();
-        if !live_registry.generation_valid(live_ptr){
+        if !live_registry.generation_valid(live_ptr) {
             error!("Generation invalid in get_nodes_from_live_ptr");
             return
         }
         let doc = live_registry.ptr_to_doc(live_ptr);
-    
+        
         let next_index = cb(self, live_ptr.file_id, live_ptr.index as usize, &doc.nodes);
         if next_index <= live_ptr.index as usize + 2 {
             self.apply_error_empty_object(live_error_origin!(), live_ptr.index as usize, &doc.nodes);

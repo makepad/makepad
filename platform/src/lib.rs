@@ -1,4 +1,4 @@
-pub mod platform;
+pub mod os;
 
 #[macro_use]
 mod live_prims;
@@ -17,7 +17,6 @@ mod id_pool;
 mod event;
 mod nav;
 mod area;
-mod font;
 mod window;
 mod pass;
 mod texture;
@@ -27,16 +26,17 @@ mod state;
 mod gpu_info;
 mod draw_vars;
 mod geometry;
-mod draw_2d;
-mod draw_3d;
 mod draw_list;
-mod shader;
 mod debug;
-pub mod audio;
-pub mod midi;
+mod component_map;
+//pub mod audio;
+//pub mod midi;
 
 #[cfg(target_arch = "wasm32")]
 pub use makepad_wasm_bridge;
+
+#[cfg(target_os = "macos")]
+pub use makepad_objc_sys;
 
 pub use {
     makepad_shader_compiler,
@@ -54,6 +54,8 @@ pub use {
     makepad_live_compiler::{
         vec4_ext::*,
         live_error_origin,
+        live_eval,
+        LiveEval,
         LiveErrorOrigin,
         LiveNodeOrigin,
         LiveRegistry,
@@ -80,6 +82,9 @@ pub use {
         LiveNodeSlice,
         LiveNodeVec,
     },
+    component_map::{
+        ComponentMap
+    },
     makepad_shader_compiler::{
         ShaderRegistry,
         ShaderEnum,
@@ -88,34 +93,41 @@ pub use {
     },
     crate::{
         cx_api::{
-            CxPlatformApi,
+            CxOsApi,
         },
-        draw_list::DrawListId,
+        draw_list::{
+            CxDrawItem,
+            CxDrawCall,
+            DrawList,
+            DrawListId,
+            CxDrawListPool
+        },
         cx::{
             Cx,
-            PlatformType
+            OsType
         },
         area::{
             Area,
             DrawListArea,
             InstanceArea
         },
-        midi::{
+        /*midi::{
             Midi1Event,
             Midi1Note,
             Midi1InputData,
-        },
+        },*/
         menu::{
             MenuCommand,
         },
         event::{
+            Margin,
             KeyCode,
             Event,
             Hit,
             DragHit,
             Signal,
             Trigger,
-            MidiInputListEvent,
+            //MidiInputListEvent,
             WebSocket,
             WebSocketAutoReconnect,
             Timer,
@@ -159,40 +171,26 @@ pub use {
             DragHitEvent,
             DropHitEvent,
         },
-        nav::{NavRole,NavOrder},
+        nav::{
+            NavRole,
+            NavOrder,
+            NavStop,
+            NavItem
+        },
         cursor::MouseCursor,
         menu::Menu,
-        font::Font,
-        draw_2d::{
-            turtle::{
-                Axis,
-                Layout,
-                Walk,
-                Align,
-                Margin,
-                Padding,
-                Flow,
-                Size,
-                DeferWalk
-            },
-            view::{
-                View,
-                ManyInstances,
-                ViewRedrawing,
-                ViewRedrawingApi,
-            },
-            cx_2d::{
-                Cx2d
-            },
-        },
+        
         window::Window,
         pass::{
+            PassId,
+            CxPassParent,
             Pass,
             PassClearColor,
             PassClearDepth
         },
         texture::{
             Texture,
+            TextureId,
             TextureFormat,
             TextureDesc
         },
@@ -205,6 +203,7 @@ pub use {
             LiveApply,
             LiveHook,
             LiveApplyValue,
+            LiveRead,
             ToLiveValue,
             ApplyFrom,
         },
@@ -221,26 +220,17 @@ pub use {
             DrawVars
         },
         geometry::{
+            GeometryFingerprint,
             GeometryField,
+            GeometryFields,
+            GeometryId,
+            GeometryRef,
             Geometry,
         },
         gpu_info::{
             GpuPerformance
         },
-        draw_2d::{
-            draw_shape::{DrawShape, Shape, Fill},
-            draw_quad::DrawQuad,
-            draw_text::{
-                DrawText,
-            },
-            draw_color::DrawColor,
-        },
-        shader::{
-            geometry_gen::{
-                GeometryGen,
-                GeometryQuad2D,
-            },
-        },
+        
     },
 };
 

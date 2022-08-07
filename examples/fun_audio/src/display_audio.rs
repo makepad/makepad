@@ -1,16 +1,16 @@
 
 use {
     crate::{
-        makepad_platform::*,
+        makepad_draw_2d::*,
         makepad_math::complex::*,
         makepad_component::*,
-        makepad_platform::audio::*,
+        makepad_media::*,
         makepad_component::imgui::*
     }
 };
 
 live_register!{
-    import makepad_platform::shader::std::*;
+    import makepad_draw_2d::shader::std::*;
     import makepad_component::theme::*;
     
     DrawFFT: {{DrawFFT}} {

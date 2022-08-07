@@ -1,8 +1,8 @@
-use crate::makepad_platform::*;
+use crate::makepad_draw_2d::*;
 
 
 live_register!{
-    import makepad_platform::shader::std::*;
+    import makepad_draw_2d::shader::std::*;
     
     DrawFocusRect: {{DrawFocusRect}} {
         fn pixel(self) -> vec4 {
@@ -69,7 +69,6 @@ impl NavControl {
                             }
                             None
                         }) {
-                            log!("HERE");
                             cx.set_key_focus(next_area);
                         }
                     }
