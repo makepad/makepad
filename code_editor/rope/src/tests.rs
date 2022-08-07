@@ -1,5 +1,15 @@
 use {super::*, proptest::prelude::*};
 
+#[test]
+fn test_builder() {
+    let mut builder = Builder::new();
+    builder.push_str("abcdefg\r");
+    builder.push_str("\nabcdefg");
+    let rope = builder.build();
+    println!("{:?}", rope);
+    assert_eq!(rope.line_len(), 2);
+}
+
 fn arbitrary_string() -> impl Strategy<Value = String> {
     "(.|[\u{000A}-\u{000D}\u{0085}\u{2028}-\u{2029}])*"
 }
@@ -148,6 +158,7 @@ proptest! {
     #[test]
     fn bytes_rev(string in arbitrary_string()) {
         let rope = Rope::from(&string);
+        println!("{:?} {:#?}", string, rope);
         assert_eq!(
             rope.bytes_rev().collect::<Vec<_>>(),
             string.bytes().rev().collect::<Vec<_>>()
@@ -219,6 +230,7 @@ proptest! {
         let string_slice = &string[byte_range.clone()];
         let rope = Rope::from(&string);
         let rope_slice = rope.slice(byte_range);
+        println!("{:?} {:#?}", string_slice, rope_slice);
         assert_eq!(rope_slice.byte_len(), string_slice.len());
     }
 
