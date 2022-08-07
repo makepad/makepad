@@ -197,6 +197,7 @@ impl Ease {
                 let mut dt = 1.0;
                 let max_steps = (*max).min(1000);
                 let mut steps = 0;
+                // for most of the settings we use this takes max 15 steps or so
                 while dt > 0.001 && steps < max_steps {
                     steps = steps + 1;
                     dt = dt * di;

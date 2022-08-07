@@ -37,13 +37,15 @@ impl BareWindow {
         }
         cx.begin_pass(&self.pass);
         
-        self.main_view.begin(cx, Walk::default(), Layout::flow_right()).assume_redrawing();
+        self.main_view.begin(cx, Walk::default(), Layout::flow_down()).assume_redrawing();
         
         ViewRedrawing::yes()
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
         self.debug_view.draw(cx);
+        // we need an overlay view here
+        // however this overlay view works 
         self.main_view.end(cx);
         cx.end_pass(&self.pass);
     }
