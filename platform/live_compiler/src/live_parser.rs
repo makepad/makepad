@@ -357,6 +357,7 @@ impl<'a> LiveParser<'a> {
             id: prop_id,
             value: LiveValue::Array
         });
+        let mut counter = 1;
         while self.peek_token() != LiveToken::Eof {
             if self.accept_token(LiveToken::Close(Delim::Bracket)) {
                 ld.nodes.push(LiveNode {
@@ -367,11 +368,12 @@ impl<'a> LiveParser<'a> {
                 return Ok(())
             }
             self.expect_live_value(
-                LiveId::empty(),
+                LiveId(counter),
                 LiveNodeOrigin::from_token_id(self.get_token_id()).with_prop_type(LivePropType::Nameless),
                 ld
             ) ?;
             self.accept_token(LiveToken::Punct(id!(,)));
+            counter += 1;
         }
         return Err(self.error(format!("Eof in array body"), live_error_origin!()))
     }
