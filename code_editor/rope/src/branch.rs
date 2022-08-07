@@ -10,7 +10,7 @@ pub(crate) struct Branch {
 }
 
 impl Branch {
-    pub(crate) const MAX_LEN: usize = 2;
+    pub(crate) const MAX_LEN: usize = 4;
 
     pub(crate) fn new() -> Self {
         Branch::from(Arc::new(Vec::new()))
@@ -166,10 +166,12 @@ impl Branch {
     }
 
     pub(crate) fn truncate_front(&mut self, start: usize) {
+        self.info -= Info::from(&self[..start]);
         Arc::make_mut(&mut self.nodes).drain(..start);
     }
 
     pub(crate) fn truncate_back(&mut self, end: usize) {
+        self.info -= Info::from(&self[end..]);
         Arc::make_mut(&mut self.nodes).truncate(end);
     }
 
@@ -202,6 +204,21 @@ impl Branch {
         other.info += info;
         let nodes = Arc::make_mut(&mut self.nodes).drain(start..);
         Arc::make_mut(&mut other.nodes).splice(..0, nodes);
+    }
+}
+
+#[cfg(fuzzing)]
+impl Branch {
+    pub(crate) fn assert_valid(&self, height: usize) {
+        assert!(self.len() >= 2);
+        for node in self.iter() {
+            assert!(node.is_at_least_half_full());
+            node.assert_valid(height - 1);
+        }
+    }
+
+    pub(crate) fn is_at_least_half_full(&self) -> bool {
+        self.len() >= Self::MAX_LEN / 2
     }
 }
 

@@ -44,9 +44,7 @@ impl Builder {
     pub(crate) fn build(mut self) -> Rope {
         use std::mem;
 
-        let chunk = self.chunk.split_off(0);
-        self.push_chunk(chunk);
-        let mut btree = Rope::new();
+        let mut btree = Rope::from_raw_parts(0, Node::Leaf(Leaf::from(Arc::new(self.chunk))));
         while let Some((height, nodes)) = self.stack.pop() {
             for root in nodes.into_iter().rev() {
                 let mut other_btree = Rope::from_raw_parts(height, root);

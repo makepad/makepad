@@ -21,6 +21,11 @@ impl Node {
         }
     }
 
+    pub(crate) fn is_char_boundary(&self, byte_index: usize) -> bool {
+        let (chunk, start_info) = self.chunk_at_byte(byte_index);
+        chunk.is_char_boundary(byte_index - start_info.byte_count)
+    }
+
     pub(crate) fn info_at(&self, byte_index: usize) -> Info {
         let (chunk, start_info) = self.chunk_at_byte(byte_index);
         start_info + Info::from(&chunk[..byte_index - start_info.byte_count])
@@ -248,6 +253,23 @@ impl Node {
             Self::Branch(branch) => branch
                 .append_or_distribute(other.into_branch())
                 .map(|other_branch| Node::Branch(other_branch)),
+        }
+    }
+}
+
+#[cfg(fuzzing)]
+impl Node {
+    pub(crate) fn assert_valid(&self, height: usize) {
+        match self {
+            Self::Leaf(leaf) => leaf.assert_valid(height),
+            Self::Branch(branch) => branch.assert_valid(height),
+        }
+    }
+
+    pub(crate) fn is_at_least_half_full(&self) -> bool {
+        match self {
+            Self::Leaf(leaf) => leaf.is_at_least_half_full(),
+            Self::Branch(branch) => branch.is_at_least_half_full(),
         }
     }
 }
