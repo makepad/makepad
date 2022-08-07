@@ -1,4 +1,4 @@
-use crate::makepad_platform::*;
+use crate::makepad_draw_2d::*;
 use crate::debug_view::DebugView;
 use crate::nav_control::NavControl;
 

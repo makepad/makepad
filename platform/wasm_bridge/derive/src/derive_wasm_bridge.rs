@@ -190,7 +190,7 @@ pub fn derive_to_wasm_impl(input: TokenStream) -> TokenStream {
             js.add("    fn to_wasm_js_body(out: &mut WasmJSOutput, slot:usize, is_recur: bool, prop:&str, temp:usize){");
             js.add("        let slot = out.check_slot(slot, is_recur, prop, temp, ").string(&name).add(");if slot.is_none(){return}; let slot = slot.unwrap();");
 
-            tb.add("    fn read_to_wasm(inp:&mut ToWasmMsg)->Self{");
+            tb.add("    fn read_to_wasm(inp:&mut ToWasmMsgRef)->Self{");
             sz.add("    fn u32_size()->usize{0");
             
             if let Some(types) = &types {

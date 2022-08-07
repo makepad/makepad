@@ -1,11 +1,11 @@
 use crate::{
     makepad_derive_frame::*,
-    makepad_platform::*,
+    makepad_draw_2d::*,
     frame::*,
 };
 
 live_register!{
-    import makepad_platform::shader::std::*;
+    import makepad_draw_2d::shader::std::*;
     import makepad_component::theme::*;
     
     DrawSplitter: {{DrawSplitter}} {

@@ -1,5 +1,5 @@
 use {
-    crate::makepad_platform::*,
+    crate::makepad_draw_2d::*,
     std::collections::BTreeMap,
     std::any::TypeId
 };

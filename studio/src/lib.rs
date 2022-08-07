@@ -10,12 +10,13 @@ pub mod editors;
 pub mod editor_state;
 pub mod log_view;
 pub mod rust_editor;
+pub mod shader_view;
 
 pub use makepad_collab_protocol;
 pub use makepad_collab_server;
-pub use makepad_studio_component;
-pub use makepad_studio_component::makepad_component;
-pub use makepad_component::makepad_platform;
+pub use makepad_component;
+pub use makepad_component::makepad_draw_2d;
+pub use makepad_draw_2d::makepad_platform;
 pub use makepad_platform::makepad_micro_serde;
 pub use makepad_platform::makepad_live_id;
 pub use makepad_platform::makepad_error_log;

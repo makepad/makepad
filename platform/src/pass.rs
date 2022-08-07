@@ -1,13 +1,23 @@
 use {
     crate::{
+        makepad_live_compiler::{
+            LiveType,
+            LiveNode,
+            LiveId,
+            LiveModuleId,
+            LiveTypeInfo,
+            LiveNodeSlice
+        },
+        live_traits::{LiveNew, LiveApply, ApplyFrom},
+        makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},
         makepad_live_id::*,
         makepad_math::*,
         id_pool::*,
         window::{
             WindowId,
         },
-        platform::{
-            CxPlatformPass,
+        os::{
+            CxOsPass,
         },
         cx::{
             Cx,
@@ -130,7 +140,7 @@ impl Pass {
         cxpass.parent = CxPassParent::Pass(pass.pass_id());
     }
     
-    pub fn set_size(&mut self, cx: &mut Cx, pass_size: Vec2) {
+    pub fn set_size(&self, cx: &mut Cx, pass_size: Vec2) {
         let mut pass_size = pass_size;
         if pass_size.x < 1.0{pass_size.x = 1.0};
         if pass_size.y < 1.0{pass_size.y = 1.0};
@@ -138,17 +148,17 @@ impl Pass {
         cxpass.pass_size = pass_size;
     }
     
-    pub fn set_window_clear_color(&mut self, cx: &mut Cx, clear_color: Vec4) {
+    pub fn set_window_clear_color(&self, cx: &mut Cx, clear_color: Vec4) {
         let cxpass = &mut cx.passes[self.pass_id()];
         cxpass.clear_color = clear_color;
     }
     
-    pub fn clear_color_textures(&mut self, cx: &mut Cx) {
+    pub fn clear_color_textures(&self, cx: &mut Cx) {
         let cxpass = &mut cx.passes[self.pass_id()];
         cxpass.color_textures.truncate(0);
     }
     
-    pub fn add_color_texture(&mut self, cx: &mut Cx, texture: &Texture, clear_color: PassClearColor) {
+    pub fn add_color_texture(&self, cx: &mut Cx, texture: &Texture, clear_color: PassClearColor) {
         let cxpass = &mut cx.passes[self.pass_id()];
         cxpass.color_textures.push(CxPassColorTexture {
             texture_id: texture.texture_id(),
@@ -156,13 +166,13 @@ impl Pass {
         })
     }
     
-    pub fn set_depth_texture(&mut self, cx: &mut Cx, texture: &Texture, clear_depth: PassClearDepth) {
+    pub fn set_depth_texture(&self, cx: &mut Cx, texture: &Texture, clear_depth: PassClearDepth) {
         let cxpass = &mut cx.passes[self.pass_id()];
         cxpass.depth_texture = Some(texture.texture_id());
         cxpass.clear_depth = clear_depth;
     }
     
-    pub fn set_matrix_mode(&mut self, cx: &mut Cx, pmm: PassMatrixMode){
+    pub fn set_matrix_mode(&self, cx: &mut Cx, pmm: PassMatrixMode){
         let cxpass = &mut cx.passes[self.pass_id()];
         cxpass.paint_dirty = true;
         cxpass.matrix_mode = pmm;
@@ -239,7 +249,7 @@ pub struct CxPass {
     pub pass_size: Vec2,
     pub pass_uniforms: PassUniforms,
     pub zbias_step: f32,
-    pub platform: CxPlatformPass,
+    pub platform: CxOsPass,
 }
 
 impl Default for CxPass {
@@ -259,7 +269,7 @@ impl Default for CxPass {
             parent: CxPassParent::None,
             paint_dirty: false,
             pass_size: Vec2::default(),
-            platform: CxPlatformPass::default()
+            platform: CxOsPass::default()
         }
     }
 } 

@@ -290,6 +290,10 @@ impl LiveRegistry {
         // ok lets find it in that other doc
         if let Some(file_id) = self.module_id_to_file_id(module_id) {
             let file = self.file_id_to_file(file_id);
+            if file.expanded.nodes.is_empty(){
+                log!("Looking for {} but its not expanded yet, dependency order bug", file.file_name);
+                return None
+            }
             if let Some(index) = file.expanded.nodes.child_by_name(0, item.as_field()) {
                 return Some(LiveScopeTarget::LivePtr(
                     LivePtr {file_id: file_id, index: index as u32, generation: file.generation}
@@ -892,6 +896,7 @@ impl LiveRegistry {
                 in_file_id: *file_id,
                 errors
             };
+            
             live_document_expander.expand(in_doc, &mut out_doc, self.live_files[file_id.to_index()].generation);
             
             self.live_files[file_id.to_index()].reexpand = false;

@@ -1,14 +1,16 @@
 use {
     crate::{
+        makepad_live_compiler::{
+            LiveId,
+        },        
         makepad_math::*,
         makepad_error_log::*,
-        platform::{
-            CxPlatformDrawCall,
-            CxPlatformView,
+        os::{
+            CxOsDrawCall,
+            CxOsView,
         },
         pass::PassId,
         id_pool::*,
-        live_traits::*,
         nav::*,
         cx_draw_shaders::{
             CxDrawShaderOptions,
@@ -40,10 +42,6 @@ impl DrawList{
 #[derive(Default)]
 pub struct CxDrawListPool(IdPool<CxDrawList>);
 impl CxDrawListPool{
-    pub fn root_id(&self)->DrawListId{
-        DrawListId(0, self.0.pool[0].generation)
-    }
-
     pub fn alloc(&mut self)->DrawList{
         DrawList(self.0.alloc())
     }
@@ -145,7 +143,7 @@ pub struct CxDrawCall {
     pub texture_slots: [Option<TextureId>; DRAW_CALL_TEXTURE_SLOTS],
     pub instance_dirty: bool,
     pub uniforms_dirty: bool,
-    pub platform: CxPlatformDrawCall
+    pub platform: CxOsDrawCall
 }
 
 impl CxDrawCall {
@@ -162,7 +160,7 @@ impl CxDrawCall {
             texture_slots: draw_vars.texture_slots,
             instance_dirty: true,
             uniforms_dirty: true,
-            platform: CxPlatformDrawCall::default()
+            platform: CxOsDrawCall::default()
         }
     }
     
@@ -195,12 +193,12 @@ impl CxDrawListUniforms {
         unsafe {std::mem::transmute(self)}
     }
 }
-
+/*
 #[derive(Clone)]
 pub enum DrawListDebug {
     DrawTree,
     Instances
-}
+}*/
 
 #[derive(Default)]
 pub struct CxDrawList {
@@ -223,13 +221,13 @@ pub struct CxDrawList {
     pub draw_items_len: usize,
     
     pub draw_list_uniforms: CxDrawListUniforms,
-    pub platform: CxPlatformView,
+    pub platform: CxOsView,
     
     pub rect: Rect,
     pub clip_points: (Vec2,Vec2),
     pub unclipped: bool,
     
-    pub debug: Option<DrawListDebug>,
+    //pub debug: Option<DrawListDebug>,
     
     pub nav_items: Vec<NavItem>
     
@@ -298,7 +296,7 @@ impl CxDrawList {
                             }
                             if diff {continue}
                         }
-                        if !draw_call.options.appendable_drawcall(&draw_vars.options) {
+                        if !draw_call.options._appendable_drawcall(&draw_vars.options) {
                             continue
                         }
                         return Some(i)
