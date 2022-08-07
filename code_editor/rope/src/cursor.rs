@@ -10,10 +10,16 @@ pub struct Cursor<'a> {
 }
 
 impl<'a> Cursor<'a> {
+    /// Returns `true` if `self` is at the front.
+    /// 
+    /// Runs in O(1) time.
     pub fn is_at_front(&self) -> bool {
         self.byte_index <= self.byte_start
     }
 
+    /// Returns `true` if `self` is at the back.
+    /// 
+    /// Runs in O(1) time.
     pub fn is_at_back(&self) -> bool {
         self.byte_index + self.current_node().as_leaf().len() >= self.byte_end
     }
@@ -44,8 +50,8 @@ impl<'a> Cursor<'a> {
     pub fn move_prev(&mut self) {
         while let Some((branch, index)) = self.path.last_mut() {
             if *index > 0 {
-                self.byte_index -= branch[*index].info().byte_count;
                 *index -= 1;
+                self.byte_index -= branch[*index].info().byte_count;
                 break;
             }
             self.path.pop();

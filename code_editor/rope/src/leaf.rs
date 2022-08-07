@@ -9,7 +9,7 @@ pub(crate) struct Leaf {
 }
 
 impl Leaf {
-    pub(crate) const MAX_LEN: usize = 1024;
+    pub(crate) const MAX_LEN: usize = 8;
 
     pub(crate) fn new() -> Self {
         Leaf::from(Arc::new(String::new()))
