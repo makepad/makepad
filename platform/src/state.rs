@@ -2,12 +2,31 @@
 use {
     std::f64::consts::PI,
     crate::{
+        makepad_live_compiler::{
+            LiveRef,
+            LiveNodeReader,
+            LiveNodeOrigin,
+            LiveValue,
+            LiveTypeInfo,
+            LiveTypeField,
+            LivePropType,
+            LiveFieldKind,
+            LiveModuleId,
+            LiveType,
+            LiveId,
+            LiveNode,
+            LiveIdAsProp,
+            LiveNodeSlice,
+            LiveNodeVec
+         },
+        live_traits::{LiveNew},
+        makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},
         makepad_error_log::*,
         makepad_live_id::*,
         makepad_derive_live::*,
         makepad_math::*,
         cursor::MouseCursor,
-        event::NextFrame,
+        event::{Event, NextFrame},
         cx::Cx,
         live_traits::*,
     },
@@ -163,8 +182,8 @@ pub enum Ease {
     #[live] InBounce,
     #[live] OutBounce,
     #[live] InOutBounce,
-    #[live{d1: 0.82, d2: 0.97, max:100}] ExpDecay{d1:f64, d2:f64, max:usize},
-
+    #[live {d1: 0.82, d2: 0.97, max: 100}] ExpDecay {d1: f64, d2: f64, max: usize},
+    
     #[live {begin: 0.0, end: 1.0}] Pow {begin: f64, end: f64},
     #[live {cp0: 0.0, cp1: 0.0, cp2: 1.0, cp3: 1.0}] Bezier {cp0: f64, cp1: f64, cp2: f64, cp3: f64}
 }
@@ -172,13 +191,13 @@ pub enum Ease {
 impl Ease {
     pub fn map(&self, t: f64) -> f64 {
         match self {
-            Self::ExpDecay{d1, d2, max}=>{ // there must be a closed form for this
+            Self::ExpDecay {d1, d2, max} => { // there must be a closed form for this
                 // first we count the number of steps we'd need to decay
                 let mut di = *d1;
                 let mut dt = 1.0;
                 let max_steps = (*max).min(1000);
                 let mut steps = 0;
-                while dt > 0.001 && steps < max_steps{
+                while dt > 0.001 && steps < max_steps {
                     steps = steps + 1;
                     dt = dt * di;
                     di *= d2;
@@ -189,11 +208,11 @@ impl Ease {
                 let mut dt = 1.0;
                 let max_steps = max_steps as f64;
                 let mut steps = 0.0;
-                while dt > 0.001 && steps < max_steps{
+                while dt > 0.001 && steps < max_steps {
                     steps += 1.0;
-                    if steps >= step{ // right step
+                    if steps >= step { // right step
                         let fac = steps - step;
-                        return 1.0 - (dt * fac + (dt*di) * (1.0-fac) )
+                        return 1.0 - (dt * fac + (dt * di) * (1.0 - fac))
                     }
                     dt = dt * di;
                     di *= d2;
@@ -588,8 +607,8 @@ impl State {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> StateAction {
         
-        if let Event::NextFrame(nf) = event{
-            if !nf.set.contains(&self.next_frame){
+        if let Event::NextFrame(nf) = event {
+            if !nf.set.contains(&self.next_frame) {
                 return StateAction::None
             }
             if self.state.is_none() {

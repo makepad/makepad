@@ -1,6 +1,6 @@
 use crate::{
     makepad_derive_frame::*,
-    makepad_platform::*,
+    makepad_draw_2d::*,
     frame::*,
     fold_button::*
 };

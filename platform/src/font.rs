@@ -464,7 +464,7 @@ pub struct CxFontsAtlasTodo {
 }
 
 pub struct CxFontsAtlas {
-    pub texture_id: Option<TextureId>,
+    pub texture_id: TextureId,
     pub texture_size: Vec2,
     pub clear_buffer: bool,
     pub alloc_xpos: f32,
@@ -474,9 +474,9 @@ pub struct CxFontsAtlas {
 }
 
 impl CxFontsAtlas {
-    pub fn new() -> Self {
+    pub fn new(texture_id:TextureId) -> Self {
         Self {
-            texture_id: None,
+            texture_id,
             texture_size: Vec2 {x: 2048.0, y: 2048.0},
             clear_buffer: false,
             alloc_xpos: 0.0,

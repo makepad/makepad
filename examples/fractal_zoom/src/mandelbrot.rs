@@ -1,6 +1,6 @@
 use {
     crate::{
-        makepad_platform::*,
+        makepad_draw_2d::*,
         makepad_component::*,
         makepad_platform::thread::*
     }
@@ -12,7 +12,7 @@ use crate::mandelbrot_simd::*;
 // Our live DSL to define the shader and UI def
 live_register!{
     // include shader standard library with the Pal object
-    import makepad_platform::shader::std::*;
+    import makepad_draw_2d::shader::std::*;
     
     // the shader to draw the texture tiles
     DrawTile: {{DrawTile}} {

@@ -1,9 +1,8 @@
 #![allow(dead_code)]
 use crate::area::Area;
 use crate::draw_list::DrawListId;
-use crate::draw_2d::turtle::Margin;
+use crate::event::Margin;
 use crate::cx::Cx;
-use crate::makepad_error_log::*;
 
 #[derive(Debug)]
 pub struct NavList{

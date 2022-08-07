@@ -3,18 +3,77 @@ use {
     std::rc::Rc,
     std::ops::Deref,
     crate::{
+        makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},
+        makepad_live_compiler::{
+            LiveValue,
+            LivePropType,
+            LiveType,
+            LiveTypeField,
+            LiveFieldKind,
+            LiveNode,
+            LiveId,
+            LiveModuleId,
+            LiveTypeInfo,
+            LiveNodeSlice
+        },
+        live_traits::{LiveNew, LiveHook, LiveApplyValue, LiveApply, ApplyFrom},
+        makepad_derive_live::*,
         makepad_error_log::*,
         makepad_math::*,
-        makepad_live_id::{LiveId, FromLiveId},
+        makepad_live_id::{FromLiveId},
         event::{
             event::{Event, Hit, DragHit}
         },
         window::WindowId,
         cx::Cx,
-        draw_2d::turtle::{Margin},
         area::Area,
     },
 };
+
+
+#[derive(Clone, Copy, Default, Debug, Live)]
+#[live_ignore]
+pub struct Margin {
+    pub left: f32,
+    pub top: f32,
+    pub right: f32,
+    pub bottom: f32
+}
+
+
+impl LiveHook for Margin {
+    fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Option<usize> {
+        match &nodes[index].value {
+            LiveValue::Float(v) => {
+                *self = Self {left: *v as f32, top: *v as f32, right: *v as f32, bottom: *v as f32};
+                Some(index + 1)
+            }
+            LiveValue::Int(v) => {
+                *self = Self {left: *v as f32, top: *v as f32, right: *v as f32, bottom: *v as f32};
+                Some(index + 1)
+            }
+            _ => None
+        }
+    }
+}
+
+impl Margin {
+    pub fn left_top(&self) -> Vec2 {
+        vec2(self.left, self.top)
+    }
+    pub fn right_bottom(&self) -> Vec2 {
+        vec2(self.right, self.bottom)
+    }
+    pub fn size(&self) -> Vec2 {
+        vec2(self.left + self.right, self.top + self.bottom)
+    }
+    pub fn width(&self) -> f32 {
+        self.left + self.right
+    }
+    pub fn height(&self) -> f32 {
+        self.top + self.bottom
+    }
+}
 
 pub const TAP_COUNT_TIME: f64 = 0.5;
 pub const TAP_COUNT_DISTANCE: f32 = 10.0;
@@ -69,7 +128,7 @@ impl CxFingers {
     
     pub (crate) fn free_digit(&mut self, digit_id: DigitId) {
         if let Some(index) = self.digits.iter_mut().position( | v | v.digit_id == digit_id) {
-            if self.capture_count > 0{
+            if self.capture_count > 0 {
                 self.capture_count -= 1;
             }
             self.digits.remove(index);
@@ -77,14 +136,14 @@ impl CxFingers {
         }
     }
     
-    pub (crate) fn get_digit_index(&self, digit_id: DigitId)->usize {
+    pub (crate) fn get_digit_index(&self, digit_id: DigitId) -> usize {
         if let Some(index) = self.digits.iter().position( | v | v.digit_id == digit_id) {
             return index
         }
         0
     }
     
-    pub (crate) fn get_digit_count(&self)->usize {
+    pub (crate) fn get_digit_count(&self) -> usize {
         self.digits.len()
     }
     
@@ -166,7 +225,7 @@ impl CxFingers {
         }
     }
     
-    pub (crate) fn capture_digit(&mut self, digit_id: DigitId, area: Area)->bool{
+    pub (crate) fn capture_digit(&mut self, digit_id: DigitId, area: Area) -> bool {
         if let Some(cxdigit) = self.digits.iter_mut().find( | v | v.digit_id == digit_id) {
             self.capture_count += 1;
             cxdigit.captured = area;
@@ -185,7 +244,7 @@ impl CxFingers {
         if let Some(tap) = self.taps.iter().find( | v | v.digit_id == digit_id) {
             tap.count
         }
-        else{
+        else {
             0
         }
     }
@@ -249,7 +308,7 @@ pub enum DigitDevice {
     XR(usize)
 }
 
-impl DigitDevice{
+impl DigitDevice {
     pub fn is_touch(&self) -> bool {if let DigitDevice::Touch(_) = self {true}else {false}}
     pub fn is_mouse(&self) -> bool {if let DigitDevice::Mouse(_) = self {true}else {false}}
     pub fn is_xr(&self) -> bool {if let DigitDevice::XR(_) = self {true}else {false}}
@@ -260,10 +319,10 @@ impl DigitDevice{
 }
 
 #[derive(Clone, Debug)]
-pub struct DigitInfo{
+pub struct DigitInfo {
     pub id: DigitId,
     pub index: usize,
-    pub count: usize, 
+    pub count: usize,
     pub device: DigitDevice,
 }
 
@@ -453,7 +512,7 @@ pub struct DragEvent {
     pub handled: Cell<bool>,
     pub abs: Vec2,
     pub state: DragState,
-    pub action: Rc<Cell<DragAction>>,
+    pub action: Rc<Cell<DragAction >>,
 }
 
 #[derive(Clone, Debug)]
@@ -651,7 +710,7 @@ impl Event {
                     let rect = area.get_rect(&cx);
                     if rect_contains_with_margin(&rect, fe.abs, &options.margin) {
                         // scan if any of the fingers already captured this area
-                        if cx.fingers.capture_digit(fe.digit.id, area){
+                        if cx.fingers.capture_digit(fe.digit.id, area) {
                             let rel = area.abs_to_rel(cx, fe.abs);
                             let digit = cx.fingers.get_digit_mut(fe.digit.id).unwrap();
                             digit.down_abs_start = fe.abs;

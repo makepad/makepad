@@ -19,8 +19,8 @@ use {
         cx_draw_shaders::{
             CxDrawShaders
         },
-        platform::{
-            CxPlatform,
+        os::{
+            CxOs,
         },
         debug::Debug,
         event::{
@@ -37,7 +37,7 @@ use {
             CxCommandSetting,
             MenuCommand
         },
-        cx_api::{CxPlatformOp},
+        cx_api::{CxOsOp},
         area::{
             Area,
         },
@@ -50,11 +50,6 @@ use {
         },
         pass::{
             CxPassPool,
-        },
-        font::{
-            CxFont,
-            CxFontsAtlas,
-            CxDrawFontAtlas
         },
         texture::{
             CxTexturePool
@@ -71,28 +66,23 @@ pub use makepad_shader_compiler::makepad_derive_live::*;
 pub use makepad_shader_compiler::makepad_math::*;
 
 pub struct Cx {
-    pub (crate) platform_type: PlatformType,
+    pub (crate) platform_type: OsType,
     pub (crate) gpu_info: GpuInfo,
     pub (crate) cpu_cores: usize,
     
-    pub (crate) windows: CxWindowPool,
-    pub (crate) passes: CxPassPool,
-    pub (crate) draw_lists: CxDrawListPool,
+    pub windows: CxWindowPool,
+    pub passes: CxPassPool,
+    pub draw_lists: CxDrawListPool,
     pub (crate) textures: CxTexturePool,
     pub (crate) geometries: CxGeometryPool,
     
     pub (crate) geometries_refs: HashMap<GeometryFingerprint, Weak<Geometry >>,
     
-    pub (crate) draw_shaders: CxDrawShaders,
-    
-    pub (crate) fonts: Vec<Option<CxFont >>,
-    pub (crate) fonts_atlas: CxFontsAtlas,
-    pub (crate) path_to_font_id: HashMap<String, usize>,
-    pub (crate) draw_font_atlas: Option<Box<CxDrawFontAtlas >>,
+    pub draw_shaders: CxDrawShaders,
     
     pub (crate) new_draw_event: DrawEvent,
     
-    pub (crate) redraw_id: u64,
+    pub redraw_id: u64,
     pub (crate) repaint_id: u64,
     pub (crate) event_id: u64,
     pub (crate) timer_id: u64,
@@ -105,7 +95,7 @@ pub struct Cx {
     pub (crate) fingers: CxFingers,
     pub (crate) finger_drag: CxFingerDrag,
     
-    pub (crate) platform_ops: Vec<CxPlatformOp>,
+    pub (crate) platform_ops: Vec<CxOsOp>,
     
     pub (crate) new_next_frames: HashSet<NextFrame>,
     
@@ -120,7 +110,7 @@ pub struct Cx {
     #[allow(dead_code)]
     pub (crate) command_settings: HashMap<MenuCommand, CxCommandSetting>,
     
-    pub (crate) platform: CxPlatform,
+    pub os: CxOs,
     // (cratethis cuts the compiletime of an end-user application in half
     pub (crate) event_handler: Option<Box<dyn FnMut(&mut Cx, &Event)>>,
 
@@ -136,7 +126,7 @@ pub struct CxDependency {
 
 
 #[derive(Clone)]
-pub enum PlatformType {
+pub enum OsType {
     Unknown,
     MsWindows,
     OSX,
@@ -144,14 +134,14 @@ pub enum PlatformType {
     WebBrowser {protocol: String, host: String, hostname: String, pathname: String, search: String, hash: String}
 }
 
-impl PlatformType {
+impl OsType {
     pub fn is_desktop(&self) -> bool {
         match self {
-            PlatformType::Unknown => true,
-            PlatformType::MsWindows => true,
-            PlatformType::OSX => true,
-            PlatformType::Linux {..} => true,
-            PlatformType::WebBrowser {..} => false
+            OsType::Unknown => true,
+            OsType::MsWindows => true,
+            OsType::OSX => true,
+            OsType::Linux {..} => true,
+            OsType::WebBrowser {..} => false
         }
     }
 }
@@ -170,13 +160,13 @@ impl Cx {
             image_u32: vec![0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0],
             //image_f32: Vec::new(),
             update_image: true,
-            platform: CxPlatformTexture::default()
+            platform: CxOsTexture::default()
         });*/
         
         Self {
             cpu_cores: 8,
             
-            platform_type: PlatformType::Unknown,
+            platform_type: OsType::Unknown,
             gpu_info: GpuInfo::default(),
             
             windows: Default::default(),
@@ -188,11 +178,6 @@ impl Cx {
             geometries_refs: HashMap::new(),
             
             draw_shaders: CxDrawShaders::default(),
-            
-            fonts: Vec::new(),
-            fonts_atlas: CxFontsAtlas::new(),
-            path_to_font_id: HashMap::new(),
-            draw_font_atlas: None,
             
             new_draw_event: DrawEvent::default(),
             
@@ -222,7 +207,7 @@ impl Cx {
             
             command_settings: HashMap::new(),
             
-            platform: CxPlatform {..Default::default()},
+            os: CxOs {..Default::default()},
             
             event_handler:Some(event_handler),
             
