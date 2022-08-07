@@ -9,7 +9,7 @@ pub(crate) struct Leaf {
 }
 
 impl Leaf {
-    pub(crate) const MAX_LEN: usize = 8;
+    pub(crate) const MAX_LEN: usize = 16;
 
     pub(crate) fn new() -> Self {
         Leaf::from(Arc::new(String::new()))
@@ -82,6 +82,17 @@ impl Leaf {
     fn shift_right(&mut self, other: &mut Self, start: usize) {
         Arc::make_mut(&mut other.string).replace_range(..0, &self[start..]);
         Arc::make_mut(&mut self.string).truncate(start);
+    }
+}
+
+#[cfg(fuzzing)]
+impl Leaf {
+    pub(crate) fn assert_valid(&self, height: usize) {
+        assert!(height == 0);
+    }
+
+    pub(crate) fn is_at_least_half_full(&self) -> bool {
+        self.len() >= Self::MAX_LEN / 2 - 4
     }
 }
 
