@@ -50,6 +50,7 @@ pub struct DrawVars {
     pub (crate) geometry_id: Option<GeometryId>,
     pub user_uniforms: [f32; DRAW_CALL_USER_UNIFORMS],
     pub texture_slots: [Option<TextureId>; DRAW_CALL_TEXTURE_SLOTS],
+
     pub var_instances: [f32; DRAW_CALL_VAR_INSTANCES]
 }
 
@@ -295,11 +296,12 @@ impl DrawVars {
                 }
                 let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
-                let draw_call = draw_list.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
+                let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
+                let draw_call = draw_item.kind.draw_call_mut().unwrap();
                 
                 let repeat = inst.instance_count;
                 let stride = sh.mapping.instances.total_slots;
-                let instances = &mut draw_call.instances.as_mut().unwrap()[inst.instance_offset..];
+                let instances = &mut draw_item.instances.as_mut().unwrap()[inst.instance_offset..];
                 let inst_slice = self.as_slice();
                 
                 let mut node_iter = nodes.first_child(index);
@@ -342,11 +344,12 @@ impl DrawVars {
                 }
                 let sh = &cx.draw_shaders[draw_shader.draw_shader_id];
                 let draw_list = &mut cx.draw_lists[inst.draw_list_id];
-                let draw_call = draw_list.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
+                let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
+                let draw_call = draw_item.kind.draw_call_mut().unwrap();
                 
                 let repeat = inst.instance_count.min(count);
                 let stride = sh.mapping.instances.total_slots;
-                let instances = &mut draw_call.instances.as_mut().unwrap()[inst.instance_offset..];
+                let instances = &mut draw_item.instances.as_mut().unwrap()[inst.instance_offset..];
                 
                 cx.passes[draw_list.pass_id.unwrap()].paint_dirty = true;
                 

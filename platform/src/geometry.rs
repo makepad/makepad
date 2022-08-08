@@ -138,7 +138,7 @@ pub struct CxGeometry{
     pub indices: Vec<u32>,
     pub vertices: Vec<f32>,
     pub dirty: bool,
-    pub platform: CxOsGeometry
+    pub os: CxOsGeometry
 }
 
 

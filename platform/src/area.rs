@@ -157,7 +157,7 @@ impl Area {
                     Vec2::default()
                 }
                 else {
-                    let draw_call = &draw_list.draw_items[inst.draw_item_id].draw_call.as_ref().unwrap();
+                    let draw_call = &draw_list.draw_items[inst.draw_item_id].draw_call().unwrap();
                     Vec2 {
                         x: draw_call.draw_uniforms.draw_scroll.x,
                         y: draw_call.draw_uniforms.draw_scroll.y
@@ -180,7 +180,7 @@ impl Area {
                     return
                 }
                 else {
-                    let draw_call = draw_list.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
+                    let draw_call = draw_list.draw_items[inst.draw_item_id].kind.draw_call_mut().unwrap();
                     draw_call.options.no_h_scroll = hor;
                     draw_call.options.no_v_scroll = ver;
                 }
@@ -208,9 +208,10 @@ impl Area {
                 if draw_list.redraw_id != inst.redraw_id {
                     return Rect::default();
                 }
-                let draw_call = &draw_list.draw_items[inst.draw_item_id].draw_call.as_ref().unwrap();
+                let draw_item = &draw_list.draw_items[inst.draw_item_id];
+                let draw_call = draw_item.draw_call().unwrap();
                 
-                if draw_call.instances.as_ref().unwrap().len() == 0 {
+                if draw_item.instances.as_ref().unwrap().len() == 0 {
                     error!("No instances but everything else valid?");
                     return Rect::default()
                 }
@@ -220,7 +221,7 @@ impl Area {
                 }
                 let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
                 // ok now we have to patch x/y/w/h into it
-                let buf = draw_call.instances.as_ref().unwrap();
+                let buf = draw_item.instances.as_ref().unwrap();
                 if let Some(rect_pos) = sh.mapping.rect_pos {
                     let pos = vec2(buf[inst.instance_offset + rect_pos + 0], buf[inst.instance_offset + rect_pos + 1]);
                     if let Some(rect_size) = sh.mapping.rect_size {
@@ -258,7 +259,8 @@ impl Area {
                 if draw_list.redraw_id != inst.redraw_id {
                     return abs;
                 }
-                let draw_call = &draw_list.draw_items[inst.draw_item_id].draw_call.as_ref().unwrap();
+                let draw_item = &draw_list.draw_items[inst.draw_item_id];
+                let draw_call = draw_item.draw_call().unwrap();
                 if cx.draw_shaders.generation != draw_call.draw_shader.draw_shader_generation {
                     error!("Generation invalid abs_to_rel {} {:?} {} {}", draw_list.debug_id, inst, cx.draw_shaders.generation, draw_call.draw_shader.draw_shader_generation);
                     return abs;
@@ -267,7 +269,7 @@ impl Area {
                 let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
                 // ok now we have to patch x/y/w/h into it
                 if let Some(rect_pos) = sh.mapping.rect_pos {
-                    let buf = draw_call.instances.as_ref().unwrap();
+                    let buf = draw_item.instances.as_ref().unwrap();
                     let x = buf[inst.instance_offset + rect_pos + 0];
                     let y = buf[inst.instance_offset + rect_pos + 1];
                     return Vec2 {
@@ -296,12 +298,13 @@ impl Area {
                     //println!("set_rect called on invalid area pointer, use mark/sweep correctly!");
                     return;
                 }
-                let draw_call = cxview.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
+                let draw_item = &mut cxview.draw_items[inst.draw_item_id];
+                let draw_call = draw_item.kind.draw_call().unwrap();
                 if cx.draw_shaders.generation != draw_call.draw_shader.draw_shader_generation {
                     return;
                 }
                 let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id]; // ok now we have to patch x/y/w/h into it
-                let buf = draw_call.instances.as_mut().unwrap();
+                let buf = draw_item.instances.as_mut().unwrap();
                 if let Some(rect_pos) = sh.mapping.rect_pos {
                     buf[inst.instance_offset + rect_pos + 0] = rect.pos.x;
                     buf[inst.instance_offset + rect_pos + 1] = rect.pos.y;
@@ -323,7 +326,8 @@ impl Area {
         match self {
             Area::Instance(inst) => {
                 let draw_list = &cx.draw_lists[inst.draw_list_id];
-                let draw_call = &draw_list.draw_items[inst.draw_item_id].draw_call.as_ref().unwrap();
+                let draw_item = &draw_list.draw_items[inst.draw_item_id];
+                let draw_call = draw_item.draw_call().unwrap();
                 if draw_list.redraw_id != inst.redraw_id {
                     error!("get_instance_read_ref called on invalid area pointer, use mark/sweep correctly!");
                     return None;
@@ -355,7 +359,7 @@ impl Area {
                         DrawReadRef {
                             repeat: inst.instance_count,
                             stride: sh.mapping.instances.total_slots,
-                            buffer: &draw_call.instances.as_ref().unwrap()[(inst.instance_offset + input.offset)..],
+                            buffer: &draw_item.instances.as_ref().unwrap()[(inst.instance_offset + input.offset)..],
                         }
                     )
                 }
@@ -373,7 +377,8 @@ impl Area {
                 if draw_list.redraw_id != inst.redraw_id {
                     return None;
                 }
-                let draw_call = draw_list.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
+                let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
+                let draw_call = draw_item.kind.draw_call_mut().unwrap();
                 if cx.draw_shaders.generation != draw_call.draw_shader.draw_shader_generation {
                     return None;
                 }
@@ -409,7 +414,7 @@ impl Area {
                         DrawWriteRef {
                             repeat: inst.instance_count,
                             stride: sh.mapping.instances.total_slots,
-                            buffer: &mut draw_call.instances.as_mut().unwrap()[(inst.instance_offset + input.offset)..]
+                            buffer: &mut draw_item.instances.as_mut().unwrap()[(inst.instance_offset + input.offset)..]
                         }
                     )
                 }
