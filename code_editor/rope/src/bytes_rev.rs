@@ -3,6 +3,7 @@ use {
     std::str,
 };
 
+/// A reverse iterator over the bytes of a `Rope` or `Slice`.
 #[derive(Clone, Debug)]
 pub struct BytesRev<'a> {
     bytes: Option<str::Bytes<'a>>,
@@ -21,6 +22,12 @@ impl<'a> BytesRev<'a> {
 impl<'a> Iterator for BytesRev<'a> {
     type Item = u8;
 
+    /// Advances the iterator and returns the next byte.
+    ///
+    /// # Performance
+    /// 
+    /// Runs in amortized O(1) and worst-case O(log n) time.
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             match &mut self.bytes {

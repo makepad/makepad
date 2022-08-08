@@ -7,6 +7,7 @@ use {
     },
 };
 
+/// A view into a a `Rope`.
 #[derive(Clone, Copy, Debug)]
 pub struct Slice<'a> {
     rope: &'a Rope,
@@ -17,6 +18,8 @@ pub struct Slice<'a> {
 impl<'a> Slice<'a> {
     /// Converts `self` to a `Rope`.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(log n) time.
     pub fn to_rope(self) -> Rope {
         let mut rope = self.rope.clone();
@@ -27,6 +30,8 @@ impl<'a> Slice<'a> {
 
     /// Returns `true` if `self` is empty.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(1) time.
     pub fn is_empty(self) -> bool {
         self.byte_len() == 0
@@ -34,6 +39,8 @@ impl<'a> Slice<'a> {
 
     /// Returns the length of `self` in bytes.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(1) time.
     pub fn byte_len(self) -> usize {
         self.end_info.byte_count - self.start_info.byte_count
@@ -41,6 +48,8 @@ impl<'a> Slice<'a> {
 
     /// Returns the length of `self` in `char`s.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(1) time.
     pub fn char_len(self) -> usize {
         self.end_info.char_count - self.start_info.char_count
@@ -48,11 +57,18 @@ impl<'a> Slice<'a> {
 
     /// Returns the length of `self` in lines.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(1) time.
     pub fn line_len(self) -> usize {
         self.end_info.line_break_count - self.start_info.line_break_count + 1
     }
 
+    /// Returns `true` if `byte_index` is at a `char` boundary.
+    /// 
+    /// # Performance
+    /// 
+    /// Runs in O(log n) time.
     pub fn is_char_boundary(self, byte_index: usize) -> bool {
         assert!(byte_index <= self.byte_len());
         self.rope
@@ -61,14 +77,28 @@ impl<'a> Slice<'a> {
 
     /// Converts the given `byte_index` to a `char` index.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(log n) time.
+    /// 
+    /// # Panics
+    /// 
+    /// Panics if `byte_index` is greater than the length of `self` in bytes, or if it does not lie
+    /// on a `char` boundary.
     pub fn byte_to_char(self, byte_index: usize) -> usize {
         self.info_at(byte_index).char_count
     }
 
     /// Converts the given `byte_index` to a line index.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(log n) time.
+    ///
+    /// # Panics
+    /// 
+    /// Panics if `byte_index` is greater than the length of `self` in bytes, or if it does not lie
+    /// on a `char` boundary.
     pub fn byte_to_line(self, byte_index: usize) -> usize {
         assert!(byte_index <= self.byte_len());
         self.info_at(byte_index).line_break_count + 1
@@ -76,7 +106,13 @@ impl<'a> Slice<'a> {
 
     /// Converts the given `char_index` to a byte index.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(log n) time.
+    /// 
+    /// # Panics
+    ///
+    /// Panics if `char_index` is greater than the length of `self` in chars.
     pub fn char_to_byte(self, char_index: usize) -> usize {
         assert!(char_index <= self.char_len());
         if char_index == 0 {
@@ -92,22 +128,34 @@ impl<'a> Slice<'a> {
 
     /// Converts the given `line_index` to a byte index.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(log n) time.
+    ///
+    /// # Panics
+    /// 
+    /// Panics if `line_index` is greater than or equal to the length of `self` in lines.
     pub fn line_to_byte(self, line_index: usize) -> usize {
         assert!(line_index < self.line_len());
         if line_index == 0 {
             return 0;
         }
-        (self
+        let byte_index = self
             .rope
-            .line_to_byte(self.start_info.line_break_count + line_index))
-        .min(self.end_info.byte_count)
-            - self.start_info.byte_count
+            .line_to_byte(self.start_info.line_break_count + line_index)
+            - self.start_info.byte_count;
+        byte_index.min(self.byte_len())
     }
 
     /// Returns the slice of `self` corresponding to the given `byte_range`.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(log n) time.
+    /// 
+    /// # Panics
+    /// 
+    /// Panics if `byte_range` is out of bounds.
     pub fn slice<R: RangeBounds<usize>>(self, byte_range: R) -> Slice<'a> {
         let byte_range = crate::range_bounds_to_range(byte_range, self.byte_len());
         Slice::new(
@@ -119,6 +167,8 @@ impl<'a> Slice<'a> {
 
     /// Returns a `Cursor` at the front of `self`.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(n) time.
     pub fn cursor_front(self) -> Cursor<'a> {
         Cursor::front(
@@ -130,6 +180,8 @@ impl<'a> Slice<'a> {
 
     /// Returns a `Cursor` at the back of `self`.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(log n) time.
     pub fn cursor_back(self) -> Cursor<'a> {
         Cursor::back(
@@ -141,6 +193,8 @@ impl<'a> Slice<'a> {
 
     /// Returns a `Cursor` at the given `byte_position` of `self`.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(log n) time.
     pub fn cursor_at(self, byte_position: usize) -> Cursor<'a> {
         assert!(byte_position <= self.byte_len());
@@ -154,6 +208,8 @@ impl<'a> Slice<'a> {
 
     /// Returns an iterator over the chunks of `self`.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(log n) time.
     pub fn chunks(self) -> Chunks<'a> {
         Chunks::new(self)
@@ -161,6 +217,8 @@ impl<'a> Slice<'a> {
 
     /// Returns a reverse iterator over the chunks of `self`.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(log n) time.
     pub fn chunks_rev(self) -> ChunksRev<'a> {
         ChunksRev::new(self)
@@ -168,6 +226,8 @@ impl<'a> Slice<'a> {
 
     /// Returns an iterator over the bytes of `self`.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(log n) time.
     pub fn bytes(self) -> Bytes<'a> {
         Bytes::new(self)
@@ -175,6 +235,8 @@ impl<'a> Slice<'a> {
 
     /// Returns a reverse iterator over the bytes of `self`.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(log n) time.
     pub fn bytes_rev(self) -> BytesRev<'a> {
         BytesRev::new(self)
@@ -182,12 +244,18 @@ impl<'a> Slice<'a> {
 
     /// Returns an iterator over the `char`s of `self`.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(log n) time.
     pub fn chars(self) -> Chars<'a> {
         Chars::new(self)
     }
 
     /// Returns an iterator over the `char`s of `self.
+    /// 
+    /// # Performance
+    /// 
+    /// Runs in O(log n) time.
     pub fn chars_rev(self) -> CharsRev<'a> {
         CharsRev::new(self)
     }
