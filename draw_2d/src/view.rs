@@ -88,10 +88,10 @@ impl View {
                 return
             }
             cx.draw_lists[draw_list_id].uniform_view_transform(mat);
-            let draw_items_len = cx.draw_lists[draw_list_id].draw_items_len;
+            let draw_items_len = cx.draw_lists[draw_list_id].draw_items.len();
             for draw_item_id in 0..draw_items_len {
-                if let Some(sub_view_id) = cx.draw_lists[draw_list_id].draw_items[draw_item_id].sub_view_id {
-                    set_view_transform_recur(sub_view_id, cx, mat);
+                if let Some(sub_list_id) = cx.draw_lists[draw_list_id].draw_items[draw_item_id].sub_list() {
+                    set_view_transform_recur(sub_list_id, cx, mat);
                 }
             }
         }
@@ -117,52 +117,25 @@ impl View {
         }
         
         // find the parent draw list id
-        let parent_id = if self.is_overlay {
-            if cx.passes[pass_id].main_draw_list_id.is_none() {
-                panic!("Cannot make overlay inside window without root view")
-            };
-            let main_view_id = cx.cx.passes[pass_id].main_draw_list_id.unwrap();
-            Some(main_view_id)
+        if self.is_overlay {
+            let overlay_id = cx.overlay_id.unwrap();
+            // views are already cached
+            // however we should create a drawcall pool
+            // and get rid of the re-use of drawslots
+            // i mean it already is a pool on the view
+            // why is instances an option vec?
         }
-        else {
-            cx.draw_list_stack.last().cloned()
-        };
-        
-        // push ourselves up the parent draw_stack
-        if let Some(parent_id) = parent_id {
+        else if let Some(parent_id) = cx.draw_list_stack.last().cloned() {
             // copy the view transform
-            
-            
+            // TODO this whole idea will go away
             if !cx.draw_lists[self.draw_list.id()].locked_view_transform {
                 for i in 0..16 {
                     cx.draw_lists[self.draw_list.id()].draw_list_uniforms.view_transform[i] =
                     cx.draw_lists[parent_id].draw_list_uniforms.view_transform[i];
                 }
             }
-            
             let parent = &mut cx.cx.draw_lists[parent_id];
-            
-            // see if we need to add a new one
-            if parent.draw_items_len >= parent.draw_items.len() {
-                parent.draw_items.push({
-                    CxDrawItem {
-                        draw_list_id: parent_id,
-                        draw_item_id: parent.draw_items.len(),
-                        redraw_id: cx.cx.redraw_id,
-                        sub_view_id: Some(self.draw_list.id()),
-                        draw_call: None
-                    }
-                });
-                parent.nav_items.push(NavItem::Child(self.draw_list.id()));
-                parent.draw_items_len += 1;
-            }
-            else { // or reuse a sub list node
-                let draw_item = &mut parent.draw_items[parent.draw_items_len];
-                draw_item.sub_view_id = Some(self.draw_list.id());
-                draw_item.redraw_id = cx.cx.redraw_id;
-                parent.nav_items.push(NavItem::Child(self.draw_list.id()));
-                parent.draw_items_len += 1;
-            }
+            parent.append_sub_view(cx.cx.redraw_id, self.draw_list.id());
         }
         
         // set nesting draw list id for incremental repaint scanning
@@ -170,7 +143,7 @@ impl View {
         
         // check redraw status
         if !self.always_redraw
-            && cx.cx.draw_lists[self.draw_list.id()].draw_items_len != 0
+            && cx.cx.draw_lists[self.draw_list.id()].draw_items.len() != 0
             && !view_will_redraw {
             
             let w = Size::Fixed(cx.cx.draw_lists[self.draw_list.id()].rect.size.x);
@@ -189,13 +162,12 @@ impl View {
         
         let cxview = &mut cx.cx.draw_lists[self.draw_list.id()];
         
-        // update redarw id
+        // update redraw id
         let last_redraw_id = cxview.redraw_id;
         self.redraw_id = cx.cx.redraw_id;
-        cxview.redraw_id = cx.cx.redraw_id;
         
-        cxview.draw_items_len = 0;
-        cxview.nav_items.clear();
+        cxview.clear_draw_items(cx.cx.redraw_id);
+        
         cx.draw_list_stack.push(self.draw_list.id());
         
         let old_area = Area::DrawList(DrawListArea {draw_list_id: self.draw_list.id(), redraw_id: last_redraw_id});
@@ -269,6 +241,10 @@ impl<'a> Cx2d<'a> {
         return self.get_draw_call(true, draw_vars);
     }
     
+    pub fn get_current_draw_list_id(&self)->Option<DrawListId>{
+        self.draw_list_stack.last().cloned()
+    }
+    
     pub fn get_draw_call(&mut self, append: bool, draw_vars: &DrawVars) -> Option<&mut CxDrawItem> {
         
         if draw_vars.draw_shader.is_none() {
@@ -284,7 +260,6 @@ impl<'a> Cx2d<'a> {
         
         let current_draw_list_id = *self.draw_list_stack.last().unwrap();
         let draw_list = &mut self.cx.draw_lists[current_draw_list_id];
-        let draw_item_id = draw_list.draw_items_len;
         
         if append && !sh.mapping.flags.draw_call_always {
             if let Some(index) = draw_list.find_appendable_drawcall(sh, draw_vars) {
@@ -292,47 +267,24 @@ impl<'a> Cx2d<'a> {
             }
         }
         
-        // add one
-        draw_list.draw_items_len += 1;
-        
-        // see if we need to add a new one
-        if draw_item_id >= draw_list.draw_items.len() {
-            draw_list.draw_items.push(CxDrawItem {
-                draw_item_id: draw_item_id,
-                draw_list_id: current_draw_list_id,
-                redraw_id: self.cx.redraw_id,
-                sub_view_id: None,
-                draw_call: Some(CxDrawCall::new(&sh.mapping, draw_vars))
-            });
-            return Some(&mut draw_list.draw_items[draw_item_id]);
-        }
-        // reuse an older one, keeping all GPU resources attached
-        let mut draw_item = &mut draw_list.draw_items[draw_item_id];
-        draw_item.sub_view_id = None;
-        draw_item.redraw_id = self.cx.redraw_id;
-        if let Some(dc) = &mut draw_item.draw_call {
-            dc.reuse_in_place(&sh.mapping, draw_vars);
-        }
-        else {
-            draw_item.draw_call = Some(CxDrawCall::new(&sh.mapping, draw_vars))
-        }
-        return Some(draw_item);
+        Some(draw_list.append_draw_call(self.cx.redraw_id, sh, draw_vars))
     }
     
     pub fn begin_many_instances(&mut self, draw_vars: &DrawVars) -> Option<ManyInstances> {
         
+        let draw_list_id = self.get_current_draw_list_id().unwrap();
         let draw_item = self.append_to_draw_call(draw_vars);
         if draw_item.is_none() {
             return None
         }
         let draw_item = draw_item.unwrap();
-        let draw_call = draw_item.draw_call.as_mut().unwrap();
+        //let draw_call = draw_item.kind.draw_call().unwrap();
         let mut instances = None;
         
-        std::mem::swap(&mut instances, &mut draw_call.instances);
+        std::mem::swap(&mut instances, &mut draw_item.instances);
         Some(ManyInstances {
             instance_area: InstanceArea {
-                draw_list_id: draw_item.draw_list_id,
+                draw_list_id,
                 draw_item_id: draw_item.draw_item_id,
                 instance_count: 0,
                 instance_offset: instances.as_ref().unwrap().len(),
@@ -357,11 +309,11 @@ impl<'a> Cx2d<'a> {
         let mut ia = many_instances.instance_area;
         let draw_list = &mut self.draw_lists[ia.draw_list_id];
         let draw_item = &mut draw_list.draw_items[ia.draw_item_id];
-        let draw_call = draw_item.draw_call.as_mut().unwrap();
+        let draw_call = draw_item.kind.draw_call().unwrap();
         
         let mut instances = Some(many_instances.instances);
-        std::mem::swap(&mut instances, &mut draw_call.instances);
-        ia.instance_count = (draw_call.instances.as_ref().unwrap().len() - ia.instance_offset) / draw_call.total_instance_slots;
+        std::mem::swap(&mut instances, &mut draw_item.instances);
+        ia.instance_count = (draw_item.instances.as_ref().unwrap().len() - ia.instance_offset) / draw_call.total_instance_slots;
         if let Some(aligned) = many_instances.aligned {
             self.align_list[aligned] = ia.clone().into();
         }
@@ -370,36 +322,38 @@ impl<'a> Cx2d<'a> {
     
     pub fn add_instance(&mut self, draw_vars: &DrawVars) -> Area {
         let data = draw_vars.as_slice();
+        let draw_list_id = self.get_current_draw_list_id().unwrap();
         let draw_item = self.append_to_draw_call(draw_vars);
         if draw_item.is_none() {
             return Area::Empty
         }
         let draw_item = draw_item.unwrap();
-        let draw_call = draw_item.draw_call.as_mut().unwrap();
+        let draw_call = draw_item.draw_call().unwrap();
         let instance_count = data.len() / draw_call.total_instance_slots;
         let check = data.len() % draw_call.total_instance_slots;
         if check > 0 {
             panic!("Data not multiple of total slots");
         }
         let ia = InstanceArea {
-            draw_list_id: draw_item.draw_list_id,
+            draw_list_id,
             draw_item_id: draw_item.draw_item_id,
             instance_count: instance_count,
-            instance_offset: draw_call.instances.as_ref().unwrap().len(),
+            instance_offset: draw_item.instances.as_ref().unwrap().len(),
             redraw_id: draw_item.redraw_id
         };
-        draw_call.instances.as_mut().unwrap().extend_from_slice(data);
+        draw_item.instances.as_mut().unwrap().extend_from_slice(data);
         ia.into()
     }
     
     pub fn add_aligned_instance(&mut self, draw_vars: &DrawVars) -> Area {
         let data = draw_vars.as_slice();
+        let draw_list_id = self.get_current_draw_list_id().unwrap();
         let draw_item = self.append_to_draw_call(draw_vars);
         if draw_item.is_none() {
             return Area::Empty
         }
         let draw_item = draw_item.unwrap();
-        let draw_call = draw_item.draw_call.as_mut().unwrap();
+        let draw_call = draw_item.draw_call().unwrap();
         let instance_count = data.len() / draw_call.total_instance_slots;
         let check = data.len() % draw_call.total_instance_slots;
         if check > 0 {
@@ -407,13 +361,13 @@ impl<'a> Cx2d<'a> {
             return Area::Empty
         }
         let ia: Area = (InstanceArea {
-            draw_list_id: draw_item.draw_list_id,
+            draw_list_id,
             draw_item_id: draw_item.draw_item_id,
             instance_count: instance_count,
-            instance_offset: draw_call.instances.as_ref().unwrap().len(),
+            instance_offset: draw_item.instances.as_ref().unwrap().len(),
             redraw_id: draw_item.redraw_id
         }).into();
-        draw_call.instances.as_mut().unwrap().extend_from_slice(data);
+        draw_item.instances.as_mut().unwrap().extend_from_slice(data);
         self.align_list.push(ia.clone());
         ia
     }

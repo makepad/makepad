@@ -5,7 +5,6 @@ use {
     }
 };
 
-
 #[derive(Debug)]
 pub struct Overlay { // draw info per UI element
     pub (crate) draw_list: DrawList,
@@ -45,6 +44,7 @@ impl Overlay {
     
     pub fn end(&self, cx:&mut Cx2d){
         cx.overlay_id = None;
+        
         // simply append us to the drawlist
         // but dont flush our internal view
         // we should 'gc' our drawlist here

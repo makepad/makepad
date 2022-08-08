@@ -101,7 +101,7 @@ impl Cx {
         metal_cx: &MetalCx,
     ) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
-        let draw_items_len = self.draw_lists[draw_list_id].draw_items_len;
+        let draw_items_len = self.draw_lists[draw_list_id].draw_items.len();
         //self.views[view_id].set_clipping_uniforms();
         self.draw_lists[draw_list_id].uniform_view_transform(&Mat4::identity());
         self.draw_lists[draw_list_id].parent_scroll = scroll;
@@ -109,10 +109,10 @@ impl Cx {
         let clip = self.draw_lists[draw_list_id].intersect_clip(clip);
         
         for draw_item_id in 0..draw_items_len {
-            if let Some(sub_view_id) = self.draw_lists[draw_list_id].draw_items[draw_item_id].sub_view_id {
+            if let Some(sub_list_id) = self.draw_lists[draw_list_id].draw_items[draw_item_id].kind.sub_list() {
                 self.render_view(
                     pass_id,
-                    sub_view_id,
+                    sub_list_id,
                     Vec2 {x: local_scroll.x + scroll.x, y: local_scroll.y + scroll.y},
                     clip,
                     zbias,
@@ -125,8 +125,12 @@ impl Cx {
             }
             else {
                 let draw_list = &mut self.draw_lists[draw_list_id];
-                //view.platform.uni_vw.update_with_f32_data(device, &view.uniforms);
-                let draw_call = draw_list.draw_items[draw_item_id].draw_call.as_mut().unwrap();
+                let draw_item = &mut draw_list.draw_items[draw_item_id];
+                let draw_call = if let Some(draw_call) = draw_item.kind.draw_call_mut(){
+                    draw_call
+                }else{
+                    continue;
+                };
                 let sh = &self.draw_shaders[draw_call.draw_shader.draw_shader_id];
                 if sh.platform.is_none() { // shader didnt compile somehow
                     continue;
@@ -136,9 +140,9 @@ impl Cx {
                 if draw_call.instance_dirty {
                     draw_call.instance_dirty = false;
                     // update the instance buffer data
-                    self.os.bytes_written += draw_call.instances.as_ref().unwrap().len() * 4;
-                    draw_call.platform.instance_buffer.next();
-                    draw_call.platform.instance_buffer.get_mut().cpu_write().update(metal_cx, &draw_call.instances.as_ref().unwrap());
+                    self.os.bytes_written += draw_item.instances.as_ref().unwrap().len() * 4;
+                    draw_item.os.instance_buffer.next();
+                    draw_item.os.instance_buffer.get_mut().cpu_write().update(metal_cx, &draw_item.instances.as_ref().unwrap());
                 }
                 
                 // update the zbias uniform if we have it.
@@ -156,7 +160,7 @@ impl Cx {
                 }
                 
                 // lets verify our instance_offset is not disaligned
-                let instances = (draw_call.instances.as_ref().unwrap().len() / sh.mapping.instances.total_slots) as u64;
+                let instances = (draw_item.instances.as_ref().unwrap().len() / sh.mapping.instances.total_slots) as u64;
                 
                 if instances == 0 {
                     continue;
@@ -172,14 +176,14 @@ impl Cx {
                 let geometry = &mut self.geometries[geometry_id];
                 
                 if geometry.dirty {
-                    geometry.platform.index_buffer.next();
-                    geometry.platform.index_buffer.get_mut().cpu_write().update(metal_cx, &geometry.indices);
-                    geometry.platform.vertex_buffer.next();
-                    geometry.platform.vertex_buffer.get_mut().cpu_write().update(metal_cx, &geometry.vertices);
+                    geometry.os.index_buffer.next();
+                    geometry.os.index_buffer.get_mut().cpu_write().update(metal_cx, &geometry.indices);
+                    geometry.os.vertex_buffer.next();
+                    geometry.os.vertex_buffer.get_mut().cpu_write().update(metal_cx, &geometry.vertices);
                     geometry.dirty = false;
                 }
                 
-                if let Some(inner) = geometry.platform.vertex_buffer.get().cpu_read().inner.as_ref() {
+                if let Some(inner) = geometry.os.vertex_buffer.get().cpu_read().inner.as_ref() {
                     unsafe {msg_send![
                         encoder,
                         setVertexBuffer: inner.buffer.as_id()
@@ -189,7 +193,7 @@ impl Cx {
                 }
                 else {error!("Drawing error: vertex_buffer None")}
                 
-                if let Some(inner) = draw_call.platform.instance_buffer.get().cpu_read().inner.as_ref() {
+                if let Some(inner) = draw_item.os.instance_buffer.get().cpu_read().inner.as_ref() {
                     unsafe {msg_send![
                         encoder,
                         setVertexBuffer: inner.buffer.as_id()
@@ -265,7 +269,7 @@ impl Cx {
                     }
                 }
                 self.os.draw_calls_done += 1;
-                if let Some(inner) = geometry.platform.index_buffer.get().cpu_read().inner.as_ref() {
+                if let Some(inner) = geometry.os.index_buffer.get().cpu_read().inner.as_ref() {
                     
                     let () = unsafe {msg_send![
                         encoder,
@@ -279,9 +283,9 @@ impl Cx {
                 }
                 else {error!("Drawing error: index_buffer None")}
                 
-                gpu_read_guards.push(draw_call.platform.instance_buffer.get().gpu_read());
-                gpu_read_guards.push(geometry.platform.vertex_buffer.get().gpu_read());
-                gpu_read_guards.push(geometry.platform.index_buffer.get().gpu_read());
+                gpu_read_guards.push(draw_item.os.instance_buffer.get().gpu_read());
+                gpu_read_guards.push(geometry.os.vertex_buffer.get().gpu_read());
+                gpu_read_guards.push(geometry.os.index_buffer.get().gpu_read());
             }
         }
     }
