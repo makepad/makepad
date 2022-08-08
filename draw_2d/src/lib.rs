@@ -7,6 +7,7 @@ pub use makepad_geometry;
 pub use makepad_internal_iter;
 pub use makepad_path;
 
+pub mod overlay;
 pub mod cx_2d;
 pub mod view;
 pub mod shader;
@@ -25,6 +26,9 @@ pub use crate::{
         Flow,
         Size,
         DeferWalk
+    },
+    overlay::{
+        Overlay
     },
     view::{
         View,
