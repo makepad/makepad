@@ -1,88 +1,33 @@
-use crate::{
-    input::Cursor,
-    program::{Inst, InstPtr},
-    Program, SparseSet,
-};
-
 pub struct Nfa {
     current_threads: Threads,
     new_threads: Threads,
-    add_thread_stack: Vec<InstPtr>,
 }
 
 impl Nfa {
-    pub fn new(program: &Program) -> Self {
-        Self {
-            current_threads: Threads::new(program.insts.len()),
-            new_threads: Threads::new(program.insts.len()),
-            add_thread_stack: Vec::new(),
-        }
-    }
+    fn run(program: &Program) {
 
-    pub fn run<C: Cursor>(&mut self, program: &Program, mut cursor: C) -> bool {
-        use std::mem;
-
-        let mut matched = false;
-        loop {
-            if !matched {
-                self.new_threads.add_thread(
-                    program.start,
-                    &program.insts,
-                    &mut self.add_thread_stack,
-                );
-            }
-            mem::swap(&mut self.current_threads, &mut self.new_threads);
-            self.new_threads.inst.clear();
-            if self.current_threads.inst.is_empty() {
-                break;
-            }
-            let c0 = cursor.peek_next_char();
-            cursor.skip_next_char();
-            for &inst in &self.current_threads.inst {
-                match program.insts[inst] {
-                    Inst::Match => {
-                        matched = true;
-                        break;
-                    }
-                    Inst::Char(next, c1) if c0.map_or(false, |c0| c0 == c1) => {
-                        self.new_threads.add_thread(
-                            next,
-                            &program.insts,
-                            &mut self.add_thread_stack,
-                        );
-                    }
-                    _ => {}
-                }
-            }
-            if c0.is_none() {
-                break;
-            }
-        }
-        matched
     }
 }
 
 struct Threads {
-    inst: SparseSet,
+    instr: SparseSet
 }
 
 impl Threads {
-    fn new(count: usize) -> Self {
-        Self {
-            inst: SparseSet::new(count),
-        }
-    }
-
-    fn add_thread(&mut self, inst: InstPtr, insts: &[Inst], stack: &mut Vec<InstPtr>) {
-        stack.push(inst);
-        while let Some(mut inst) = stack.pop() {
-            while self.inst.insert(inst) {
-                match insts[inst] {
-                    Inst::Split(next_0, next_1) => {
+    fn add_thread(&mut self, instr: InstrPtr, stack: &mut Vec<InstPtr>) {
+        stack.push(instr);
+        while let Some(mut instr) = stack.pop() {
+            loop {
+                if self.instr.contains(instr) {
+                    break;
+                }
+                self.instr.insert(instr);
+                match instrs[instr] {
+                    Instr::Split(next_0, next_1) => {
                         stack.push(next_1);
-                        inst = next_0;
+                        instr = next_0;
                     }
-                    _ => break,
+                    _ => {}
                 }
             }
         }
