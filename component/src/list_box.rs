@@ -3,13 +3,10 @@ use {
         collections::{HashSet},
     },
     crate::{
-        frame::*,
-        component_map::ComponentMap,
-        fold_button::FoldButton,
+        makepad_derive_frame::*,
         scroll_view::ScrollView,
-        link_button::LinkButton,
-        makepad_platform::*,
-        log_icon::{DrawLogIconQuad, LogIconType}
+        makepad_draw_2d::*,
+        frame::*,
     },
 };
 
@@ -34,30 +31,22 @@ live_register!{
     DrawNameText: {{DrawNameText}} {
         fn get_color(self) -> vec4 {
             return mix(
-                COLOR_TEXT_DEFAULT,
-                COLOR_TEXT_SELECTED,
-                self.selected
-            );
+                mix(
+                    COLOR_TEXT_DEFAULT,
+                    COLOR_TEXT_SELECTED,
+                    self.selected
+                ),
+                COLOR_TEXT_HOVER,
+                self.hover
+            )
         }
         text_style: FONT_DATA {top_drop: 1.15},
     }
     
-    LogListNode: {{LogListNode}} {
-        link_button: {
-        }
-        
+    ListBoxNode: {{ListBoxNode}} {
         layout: {
             align: {y: 0.5},
             padding: {left: 5},
-        }
-        
-        icon_walk: {
-            width: Size::Fixed((DIM_DATA_ICON_WIDTH)),
-            height: Size::Fixed((DIM_DATA_ICON_WIDTH)),
-            margin: {
-                left: 1,
-                right: 0,
-            },
         }
         
         state: {
@@ -69,7 +58,6 @@ live_register!{
                         hover: 0.0,
                         bg_quad: {hover: (hover)}
                         name_text: {hover: (hover)}
-                        icon_quad: {hover: (hover)}
                     }
                 }
                 on = {
@@ -87,7 +75,6 @@ live_register!{
                         selected: 0.0,
                         bg_quad: {selected: (selected)}
                         name_text: {selected: (selected)}
-                        icon_quad: {selected: (selected)}
                     }
                 }
                 on = {
@@ -95,17 +82,16 @@ live_register!{
                     apply: {selected: 1.0}
                 }
             }
-            
-            
         }
         
         indent_width: 10.0
         min_drag_distance: 10.0
     }
     
-    LogList: {{LogList}} {
+    ListBox: {{ListBox}} {
         node_height: (DIM_DATA_ITEM_HEIGHT),
-        fold_node: LogListNode {}
+        list_node: ListBoxNode {}
+        walk: {width:Fill, height:Fit}
         layout: {flow: Flow::Down}
         scroll_view: {
             view: {
@@ -122,7 +108,6 @@ struct DrawBgQuad {
     is_even: f32,
     selected: f32,
     hover: f32,
-    opened: f32,
 }
 
 #[derive(Live, LiveHook)]#[repr(C)]
@@ -131,54 +116,52 @@ struct DrawNameText {
     is_even: f32,
     selected: f32,
     hover: f32,
-    opened: f32,
 }
 
 #[derive(Live, LiveHook)]
-pub struct LogListNode {
+pub struct ListBoxNode {
+
     bg_quad: DrawBgQuad,
-    icon_quad: DrawLogIconQuad,
     name_text: DrawNameText,
+
     layout: Layout,
-    
     state: State,
     
     indent_width: f32,
-    
-    fold_button: FoldButton,
-    link_button: LinkButton,
-    
     icon_walk: Walk,
     
     min_drag_distance: f32,
-    
     opened: f32,
     hover: f32,
     selected: f32,
 }
 
 #[derive(Live)]
-pub struct LogList {
+#[live_register(frame_component!(ListBox))]
+pub struct ListBox {
     scroll_view: ScrollView,
-    fold_node: Option<LivePtr>,
+    list_node: Option<LivePtr>,
     
     filler_quad: DrawBgQuad,
     layout: Layout,
     node_height: f32,
+    multi_select: bool,
     
-    #[rust] selected_node_ids: HashSet<LogListNodeId>,
-    #[rust] open_nodes: HashSet<LogListNodeId>,
+    walk: Walk,
     
-    #[rust] fold_nodes: ComponentMap<LogListNodeId, LogListNode>,
+    items: Vec<String>,
+    
+    #[rust] selected_node_ids: HashSet<ListBoxNodeId>,
+    
+    #[rust] list_nodes: ComponentMap<ListBoxNodeId, ListBoxNode>,
     
     #[rust] count: usize,
-    #[rust] stack: Vec<f32>,
 }
 
-impl LiveHook for LogList {
+impl LiveHook for ListBox {
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        if let Some(index) = nodes.child_by_name(index, id!(log_node).as_field()) {
-            for (_, node) in self.fold_nodes.iter_mut() {
+        if let Some(index) = nodes.child_by_name(index, id!(list_node).as_field()) {
+            for (_, node) in self.list_nodes.iter_mut() {
                 node.apply(cx, from, index, nodes);
             }
         }
@@ -186,52 +169,37 @@ impl LiveHook for LogList {
     }
 }
 
-pub enum LogNodeAction {
-    Opening,
-    Closing,
+pub enum ListBoxNodeAction {
     WasClicked,
     ShouldStartDragging,
     None
 }
 
-pub enum LogListAction {
-    WasClicked(LogListNodeId),
+#[derive(Clone, FrameAction)]
+pub enum ListBoxAction {
+    WasClicked(ListBoxNodeId),
     None,
 }
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
-pub struct LogListNodeId(pub LiveId);
+pub struct ListBoxNodeId(pub LiveId);
 
-impl LogListNode {
+impl ListBoxNode {
     pub fn set_draw_state(&mut self, is_even: f32) {
         self.bg_quad.is_even = is_even;
         self.name_text.is_even = is_even;
     }
     
-    
     pub fn draw_node(
         &mut self,
         cx: &mut Cx2d,
-        icon_type: LogIconType,
-        link: &str,
-        body: &str,
+        label: &str,
         is_even: f32,
         node_height: f32,
-        _depth: usize
     ) {
         self.set_draw_state(is_even);
-        
         self.bg_quad.begin(cx, Walk::size(Size::Fill, Size::Fixed(node_height)), self.layout);
-        
-        // lets draw a fold button
-        self.fold_button.draw_walk(cx, self.fold_button.get_walk());
-        
-        // lets draw a fold button
-        self.icon_quad.icon_type = icon_type;
-        self.icon_quad.draw_walk(cx, self.icon_walk);
-        self.link_button.draw_label(cx, link);
-        
-        self.name_text.draw_walk(cx, Walk::fit(), Align::default(), body);
+        self.name_text.draw_walk(cx, Walk::fit(), Align::default(), label);
         self.bg_quad.end(cx);
     }
     
@@ -239,23 +207,15 @@ impl LogListNode {
         self.toggle_state(cx, is_selected, animate, ids!(select.on), ids!(select.off))
     }
     
-    pub fn set_is_open(&mut self, cx: &mut Cx, is_open: bool, animate: Animate) {
-        self.fold_button.set_is_open(cx, is_open, animate);
-    }
-    
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
         event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, LogNodeAction),
+        dispatch_action: &mut dyn FnMut(&mut Cx, ListBoxNodeAction),
     ) {
         if self.state_handle_event(cx, event).must_redraw() {
             self.bg_quad.area().redraw(cx);
         }
-        
-        self.fold_button.handle_event(cx, event, &mut |_,_|{});
-        
-        self.link_button.handle_event(cx, event, &mut |_,_|{});
         
         match event.hits(cx, self.bg_quad.area()) {
             Hit::FingerHoverIn(_) => {
@@ -266,21 +226,12 @@ impl LogListNode {
             }
             Hit::FingerMove(f) => {
                 if f.abs.distance(&f.abs_start) >= self.min_drag_distance {
-                    dispatch_action(cx, LogNodeAction::ShouldStartDragging);
+                    dispatch_action(cx, ListBoxNodeAction::ShouldStartDragging);
                 }
             }
             Hit::FingerDown(_) => {
                 self.animate_state(cx, ids!(select.on));
-                /*
-                if self.opened > 0.2 {
-                    self.animate_to(cx, self.closed_state);
-                    dispatch_action(cx, FoldNodeAction::Closing);
-                }
-                else {
-                    self.animate_to(cx, self.opened_state);
-                    dispatch_action(cx, FoldNodeAction::Opening);
-                }*/
-                dispatch_action(cx, LogNodeAction::WasClicked);
+                dispatch_action(cx, ListBoxNodeAction::WasClicked);
             }
             _ => {}
         }
@@ -288,10 +239,10 @@ impl LogListNode {
 }
 
 
-impl LogList {
+impl ListBox {
     
-    pub fn begin(&mut self, cx: &mut Cx2d) -> ViewRedrawing {
-        self.scroll_view.begin(cx, Walk::default(), self.layout) ?;
+    pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk) -> ViewRedrawing {
+        self.scroll_view.begin(cx, walk, self.layout) ?;
         self.count = 0;
         ViewRedrawing::yes()
     }
@@ -309,7 +260,7 @@ impl LogList {
         self.scroll_view.end(cx);
         
         let selected_node_ids = &self.selected_node_ids;
-        self.fold_nodes.retain_visible_and( | node_id, _ | selected_node_ids.contains(node_id));
+        self.list_nodes.retain_visible_and( | node_id, _ | selected_node_ids.contains(node_id));
     }
     
     pub fn is_even(count: usize) -> f32 {
@@ -323,36 +274,18 @@ impl LogList {
     pub fn draw_node(
         &mut self,
         cx: &mut Cx2d,
-        log_icon: LogIconType,
-        node_id: LogListNodeId,
-        file: &str,
-        body: &str,
-        _has_open: bool
-    ) -> f32 {
+        node_id: ListBoxNodeId,
+        label: &str,
+    ){
         self.count += 1;
         
-        let is_open = self.open_nodes.contains(&node_id);
-        
-        // if self.should_node_draw(cx) {
-        let fold_node = self.fold_node;
-        let node = self.fold_nodes.get_or_insert(cx, node_id, | cx | {
-            let mut node = LogListNode::new_from_ptr(cx, fold_node);
-            if is_open {
-                node.set_is_open(cx, true, Animate::No)
-            }
-            node
+        let list_node = self.list_node;
+        let node = self.list_nodes.get_or_insert(cx, node_id, | cx | {
+            ListBoxNode::new_from_ptr(cx, list_node)
         });
         
-        node.draw_node(cx, log_icon, file, body, Self::is_even(self.count), self.node_height, self.stack.len());
-        
-        if node.opened == 0.0 {
-            return 0.0;
-        }
-        return node.opened;
-        //}
-        //return 0.0;
+        node.draw_node(cx, label, Self::is_even(self.count), self.node_height);
     }
-    
     
     pub fn should_node_draw(&mut self, cx: &mut Cx2d) -> bool {
         let height = self.node_height;
@@ -365,53 +298,91 @@ impl LogList {
             return false
         }
     }
-   
-    pub fn end_folder(&mut self) {
-        self.stack.pop();
-    }
     
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
         event: &Event,
-        _dispatch_action: &mut dyn FnMut(&mut Cx, LogListAction),
+        _dispatch_action: &mut dyn FnMut(&mut Cx, ListBoxAction),
     ) {
         if self.scroll_view.handle_event(cx, event) {
             self.scroll_view.redraw(cx);
         }
         
         let mut actions = Vec::new();
-        for (node_id, node) in self.fold_nodes.iter_mut() {
+        for (node_id, node) in self.list_nodes.iter_mut() {
             node.handle_event(cx, event, &mut | _, e | actions.push((*node_id, e)));
         }
         
         for (node_id, action) in actions {
             match action {
-                LogNodeAction::Opening => {
-                    self.open_nodes.insert(node_id);
-                }
-                LogNodeAction::Closing => {
-                    self.open_nodes.remove(&node_id);
-                }
-                LogNodeAction::WasClicked => {
+                ListBoxNodeAction::WasClicked => {
                     // deselect everything but us
                     for id in &self.selected_node_ids {
                         if *id != node_id {
-                            self.fold_nodes.get_mut(id).unwrap().set_is_selected(cx, false, Animate::Yes);
+                            self.list_nodes.get_mut(id).unwrap().set_is_selected(cx, false, Animate::Yes);
                         }
                     }
                     self.selected_node_ids.clear();
                     self.selected_node_ids.insert(node_id);
                     //dispatch_action(cx, FileTreeAction::WasClicked(node_id));
                 }
-                LogNodeAction::ShouldStartDragging => {
-                    //if self.dragging_node_id.is_none() {
-                    //    dispatch_action(cx, FileTreeAction::ShouldStartDragging(node_id));
-                    // }
+                ListBoxNodeAction::ShouldStartDragging => {
                 }
                 _ => ()
             }
         }
+    }
+}
+
+
+impl FrameComponent for ListBox {
+    fn bind_read(&mut self, _cx: &mut Cx, _nodes: &[LiveNode]) {
+        // lets use enum name to find a selected item here
+        /*
+        if let Some(LiveValue::Float(v)) = nodes.read_path(&self.bind) {
+            self.set_internal(*v as f32);
+            self.update_text_input(cx);
+        }*/
+    }
+    
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.scroll_view.redraw(cx);
+    }
+    
+    fn handle_component_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, FrameActionItem)) {
+        self.handle_event(cx, event, &mut | cx, action | {
+            let delta = Vec::new();
+            match &action {
+                ListBoxAction::WasClicked(_v) => {
+                    //if slider.bind.len()>0 {
+                    //    delta.write_path(&slider.bind, LiveValue::Float(*v as f64));
+                    //}
+                },
+                _ => ()
+            };
+            dispatch_action(cx, FrameActionItem::new(action.into()).bind_delta(delta))
+        });
+    }
+    
+    fn get_walk(&self) -> Walk {self.walk}
+    
+    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk, _self_uid: FrameUid) -> FrameDraw {
+        if self.begin(cx, walk).not_redrawing(){
+            return FrameDraw::done();
+        };
+        for (i, item) in self.items.iter().enumerate(){
+            let node_id = id_num!(listbox,i as u64).into();
+            self.count += 1;
+            let list_node = self.list_node;
+            let node = self.list_nodes.get_or_insert(cx, node_id, | cx | {
+                ListBoxNode::new_from_ptr(cx, list_node)
+            });
+            
+            node.draw_node(cx, &item, Self::is_even(self.count), self.node_height);
+        }
+        self.end(cx);
+        FrameDraw::done()
     }
 }
 
