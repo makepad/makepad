@@ -460,7 +460,7 @@ impl Mandelbrot {
     // the SIMD tile rendering, uses the threadpool to draw the tile
     
     #[cfg(feature = "nightly")]
-    pub fn render_tile(&mut self, mut tile: Tile, fractal_zoom: f64, is_zooming:bool) {
+    pub fn render_tile(&mut self, mut tile: Tile, fractal_zoom: f64, _is_zooming:bool) {
         let max_iter = self.max_iter;
         // we pull a cloneable sender from the to_ui message channel for the worker
         let to_ui = self.to_ui.sender();
@@ -470,9 +470,10 @@ impl Mandelbrot {
                 return to_ui.send(ToUI::TileBailed {tile}).unwrap();
             }
             
-            if !is_zooming {
-                mandelbrot_f64x2_4xaa(&mut tile, max_iter);
-            }
+            //if !is_zooming {
+            //    mandelbrot_f64x2_4xaa(&mut tile, max_iter);
+           // }
+            //else 
             if fractal_zoom >2e-5 {
                 // we can use a f32x4 path when we aren't zoomed in far (2x faster)
                 // as f32 has limited zoom-depth it can support
@@ -488,7 +489,7 @@ impl Mandelbrot {
     
     // Normal tile rendering, uses the threadpool to draw the tile
     #[cfg(not(feature = "nightly"))]
-    pub fn render_tile(&mut self, mut tile: Tile, _fractal_zoom: f64, is_zooming:bool) {
+    pub fn render_tile(&mut self, mut tile: Tile, _fractal_zoom: f64, _is_zooming:bool) {
         let max_iter = self.max_iter;
         // we pull a cloneable sender from the to_ui message channel for the worker
         let to_ui = self.to_ui.sender();

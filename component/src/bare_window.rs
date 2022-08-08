@@ -15,6 +15,7 @@ pub struct BareWindow {
     debug_view: DebugView,
     nav_control: NavControl,
     window: Window,
+    overlay: Overlay,
     main_view: View, // we have a root view otherwise is_overlay subviews can't attach topmost
 }
 
@@ -39,6 +40,8 @@ impl BareWindow {
         
         self.main_view.begin(cx, Walk::default(), Layout::flow_down()).assume_redrawing();
         
+        self.overlay.begin(cx);
+        
         ViewRedrawing::yes()
     }
     
@@ -46,6 +49,7 @@ impl BareWindow {
         self.debug_view.draw(cx);
         // we need an overlay view here
         // however this overlay view works 
+        self.overlay.end(cx);
         self.main_view.end(cx);
         cx.end_pass(&self.pass);
     }
