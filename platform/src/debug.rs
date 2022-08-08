@@ -86,7 +86,7 @@ impl Cx{
             for _i in 0..depth {
                 indent.push_str("|   ");
             }
-            let draw_items_len = cx.draw_lists[draw_list_id].draw_items_len;
+            let draw_items_len = cx.draw_lists[draw_list_id].draw_items.len();
             //if draw_list_id == 0 {
             //    writeln!(s, "---------- Begin Debug draw tree for redraw_id: {} ---------", cx.redraw_id).unwrap();
             // }
@@ -112,15 +112,16 @@ impl Cx{
                 indent.push_str("|   ");
             }
             for draw_item_id in 0..draw_items_len {
-                if let Some(sub_view_id) = cx.draw_lists[draw_list_id].draw_items[draw_item_id].sub_view_id {
-                    debug_draw_tree_recur(cx, dump_instances, s, sub_view_id, depth + 1);
+                if let Some(sub_list_id) = cx.draw_lists[draw_list_id].draw_items[draw_item_id].sub_list() {
+                    debug_draw_tree_recur(cx, dump_instances, s, sub_list_id, depth + 1);
                 }
                 else {
                     let cxview = &cx.draw_lists[draw_list_id];
-                    let draw_call = cxview.draw_items[draw_item_id].draw_call.as_ref().unwrap();
+                    let darw_item = &cxview.draw_items[draw_item_id];
+                    let draw_call = darw_item.draw_call().unwrap();
                     let sh = &cx.draw_shaders.shaders[draw_call.draw_shader.draw_shader_id];
                     let slots = sh.mapping.instances.total_slots;
-                    let instances = draw_call.instances.as_ref().unwrap().len() / slots;
+                    let instances = darw_item.instances.as_ref().unwrap().len() / slots;
                     writeln!(
                         s,
                         "{}{}({}) sid:{} inst:{} scroll:{}",
@@ -137,7 +138,7 @@ impl Cx{
                             let mut out = String::new();
                             let mut off = 0;
                             for input in &sh.mapping.instances.inputs {
-                                let buf = draw_call.instances.as_ref().unwrap();
+                                let buf = darw_item.instances.as_ref().unwrap();
                                 match input.slots {
                                     1 => out.push_str(&format!("{}:{} ", input.id, buf[inst * slots + off])),
                                     2 => out.push_str(&format!("{}:v2({},{}) ", input.id, buf[inst * slots + off], buf[inst * slots + 1 + off])),
