@@ -3,5 +3,10 @@ name = "makepad-rope"
 version = "0.1.0"
 edition = "2021"
 
+[[bench]]
+name = "bench"
+harness = false
+
 [dev-dependencies]
+criterion = "0.3.6"
 proptest = "1.0.0"
