@@ -31,6 +31,7 @@ pub struct Cx2d<'a> {
     pub cx: &'a mut Cx,
     pub (crate) draw_event: &'a DrawEvent,
     pub (crate) pass_id: Option<PassId>,
+    pub (crate) overlay_id: Option<DrawListId>,
     pub draw_list_stack: Vec<DrawListId>,
     pub (crate) turtles: Vec<Turtle>,
     pub (crate) turtle_walks: Vec<TurtleWalk>,
@@ -61,6 +62,7 @@ impl<'a> Cx2d<'a> {
         let fonts_atlas_rc = cx.get_global::<CxFontsAtlasRc>().clone();
 
         let mut cx_2d = Cx2d {
+            overlay_id: None,
             fonts_atlas_rc,
             current_dpi_factor: 1.0,
             cx: cx,
