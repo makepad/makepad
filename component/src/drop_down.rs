@@ -172,6 +172,7 @@ impl DropDown {
                 }
                 ButtonAction::IsUp => {
                     self.is_open = false;
+                    // remove view from overlay stack
                     self.bg.redraw(cx);
                 }
                 _ => ()
@@ -202,11 +203,10 @@ impl DropDown {
         self.bg.end(cx);
         if self.is_open && self.list_box.is_some(){
             // ok so how will we solve this one
-            
             let lbg = cx.global::<ListBoxGlobal>().clone();
             let mut map = lbg.map.borrow_mut();
             let lb = map.get_mut(&self.list_box.unwrap()).unwrap();
-            
+            // redraw should always happen
             if lb.begin(cx, lb.get_walk()).not_redrawing(){
                 return;
             };
