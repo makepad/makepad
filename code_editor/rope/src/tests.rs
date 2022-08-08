@@ -392,6 +392,6 @@ proptest! {
         let string_slice_1 = &string_1[byte_range_1.clone()];
         let rope_1 = Rope::from(&string_1);
         let rope_slice_1 = rope_1.slice(byte_range_1);
-        assert_eq!(rope_slice_0.cmp(&rope_slice_1), string_slice_0.cmp(&string_slice_1));
+        assert_eq!(rope_slice_0.cmp(&rope_slice_1), string_slice_0.cmp(string_slice_1));
     }
 }

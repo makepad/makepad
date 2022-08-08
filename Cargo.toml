@@ -1,7 +1,6 @@
 [workspace]
 
 members = [
-    "code_editor/collections",
     "code_editor/rope",
     "code_editor/segment",
     "code_editor/ucd",
