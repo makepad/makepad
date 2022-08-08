@@ -13,7 +13,6 @@ class MyWasmApp {
         let canvas = document.getElementsByClassName('full_canvas')[0];
         this.webgl = new WasmMediaGL (wasm, this, canvas);
     }
-
 } 
 
 let app = new MyWasmApp(wasm);
