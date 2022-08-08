@@ -208,6 +208,7 @@ export class WasmWebBrowser extends WasmBridge {
             return;
         }
         this.req_anim_frame_id = window.requestAnimationFrame(time => {
+            //console.log("drawing")
             if (this.wasm == null) {
                 return
             }
@@ -342,95 +343,6 @@ export class WasmWebBrowser extends WasmBridge {
         })
         
         this.workers.push(worker);
-    }
-    
-    FromWasmSpawnAudioOutput(args) {
-        
-        if (!this.audio_context) {
-            const start_audio = async () => {
-                let context = this.audio_context = new AudioContext();
-                
-                await context.audioWorklet.addModule("/makepad/platform/src/platform/web_browser/audio_worklet.js", {credentials: 'omit'});
-                
-                const audio_worklet = new AudioWorkletNode(context, 'audio-worklet', {
-                    numberOfInputs: 0,
-                    numberOfOutputs: 1,
-                    outputChannelCount: [2],
-                    processorOptions: {thread_info: this.alloc_thread_stack(args.closure_ptr)}
-                });
-                
-                audio_worklet.port.onmessage = (e) => {
-                    let data = e.data;
-                    switch (data.message_type) {
-                        case "console_log":
-                        console.log(data.value);
-                        break;
-                        
-                        case "console_error":
-                        console.error(data.value);
-                        break;
-                        
-                        case "signal":
-                        for(let i = 0; i < data.signals_lo.length; i++){
-                            this.js_post_signal(data.signals_hi[i], data.signals_lo[i]);
-                        }
-                        break;
-                    }
-                };
-                audio_worklet.onprocessorerror = (err) => {
-                    console.error(err);
-                }
-                audio_worklet.connect(context.destination);
-                return audio_worklet;
-            };
-            
-            start_audio();
-            let user_interact_hook = () => {
-                this.audio_context.resume();
-            }
-            window.addEventListener('click', user_interact_hook)
-            window.addEventListener('touchstart', user_interact_hook)
-        }
-    }
-    
-    FromWasmStartMidiInput() {
-        if (!navigator.requestMIDIAccess) {
-            console.log("Browser does not support midi access");
-            return
-        }
-        navigator.requestMIDIAccess().then((midi) => {
-            
-            let reload_midi_ports = () => {
-                
-                let inputs = [];
-                let input_id = 0;
-                for (let input_pair of midi.inputs) {
-                    let input = input_pair[1];
-                    inputs.push({
-                        uid: "" + input.id,
-                        name: input.name,
-                        manufacturer: input.manufacturer,
-                    });
-                    input.onmidimessage = (e) => {
-                        let data = e.data;
-                        this.to_wasm.ToWasmMidiInputData({
-                            input_id: input_id,
-                            data: (data[0] << 16) | (data[1] << 8) | data[2],
-                        });
-                        this.do_wasm_pump();
-                    }
-                    input_id += 1;
-                }
-                this.to_wasm.ToWasmMidiInputList({inputs});
-                this.do_wasm_pump();
-            }
-            midi.onstatechange = (e) => {
-                reload_midi_ports();
-            }
-            reload_midi_ports();
-        }, () => {
-            console.error("Cannot open midi");
-        });
     }
     
     // calling into wasm

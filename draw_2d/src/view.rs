@@ -132,6 +132,7 @@ impl View {
         if let Some(parent_id) = parent_id {
             // copy the view transform
             
+            
             if !cx.draw_lists[self.draw_list.id()].locked_view_transform {
                 for i in 0..16 {
                     cx.draw_lists[self.draw_list.id()].draw_list_uniforms.view_transform[i] =

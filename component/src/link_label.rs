@@ -12,7 +12,7 @@ live_register!{
     import makepad_draw_2d::shader::std::*;
     import crate::theme::*;
     
-    LinkButton: {{LinkButton}} {
+    LinkLabel: {{LinkLabel}} {
         button: {
             bg: {
                 const THICKNESS: 0.8
@@ -57,11 +57,11 @@ live_register!{
 }
 
 #[derive(Live, LiveHook)]
-pub struct LinkButton {
+pub struct LinkLabel {
     button: Button
 }
 
-impl LinkButton {
+impl LinkLabel {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction),) {
         self.button.handle_event(cx, event, dispatch_action)
