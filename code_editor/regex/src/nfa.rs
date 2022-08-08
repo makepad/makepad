@@ -1,11 +1,17 @@
+use crate::{program::{Instr, InstrPtr}, Program, SparseSet};
+
 pub struct Nfa {
     current_threads: Threads,
     new_threads: Threads,
 }
 
 impl Nfa {
-    fn run(program: &Program) {
+    fn run(&mut self, program: &Program) {
+        loop {
+            for instr in &self.current_threads.instr {
 
+            }
+        }
     }
 }
 
@@ -14,7 +20,7 @@ struct Threads {
 }
 
 impl Threads {
-    fn add_thread(&mut self, instr: InstrPtr, stack: &mut Vec<InstPtr>) {
+    fn add_thread(&mut self, instrs: &[Instr], instr: InstrPtr, stack: &mut Vec<InstrPtr>) {
         stack.push(instr);
         while let Some(mut instr) = stack.pop() {
             loop {
