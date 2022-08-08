@@ -10,7 +10,10 @@ pub(crate) struct Branch {
 }
 
 impl Branch {
-    pub(crate) const MAX_LEN: usize = 4;
+    #[cfg(not(test))]
+    pub(crate) const MAX_LEN: usize = 8;
+    #[cfg(test)]
+    pub(crate) const MAX_LEN: usize = 2;
 
     pub(crate) fn new() -> Self {
         Branch::from(Arc::new(Vec::new()))
@@ -210,7 +213,6 @@ impl Branch {
 #[cfg(fuzzing)]
 impl Branch {
     pub(crate) fn assert_valid(&self, height: usize) {
-        assert!(self.len() >= 2);
         for node in self.iter() {
             assert!(node.is_at_least_half_full());
             node.assert_valid(height - 1);
