@@ -3,6 +3,7 @@ use {
     std::str,
 };
 
+/// A reverse iterator over the `char`s of a `Rope` or `Slice`.
 #[derive(Clone, Debug)]
 pub struct CharsRev<'a> {
     chars: Option<str::Chars<'a>>,
@@ -21,6 +22,12 @@ impl<'a> CharsRev<'a> {
 impl<'a> Iterator for CharsRev<'a> {
     type Item = char;
 
+    /// Advances the iterator and returns the next `char`.
+    ///
+    /// # Performance
+    /// 
+    /// Runs in amortized O(1) and worst-case O(log n) time.
+    #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         loop {
             match &mut self.chars {

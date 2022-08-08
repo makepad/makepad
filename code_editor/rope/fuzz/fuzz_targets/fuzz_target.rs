@@ -2,7 +2,7 @@
 
 use {
     libfuzzer_sys::{arbitrary, arbitrary::Arbitrary, fuzz_target},
-    makepad_collections::BTreeString,
+    makepad_rope::Rope,
 };
 
 #[derive(Arbitrary, Debug)]
@@ -15,29 +15,33 @@ enum Operation<'a> {
 
 fuzz_target!(|data: (&str, Vec<Operation<'_>>)| {
     let (string, operations) = data;
-    let mut string = BTreeString::from(string);
+    let mut rope = Rope::from(string);
     for operation in operations {
         match operation {
             Operation::Append(other_string) => {
-                string.append(BTreeString::from(other_string));
+                rope.append(Rope::from(other_string));
+                rope.assert_valid();
             }
             Operation::SplitOff(at) => {
-                if !string.is_char_boundary(at) {
+                if !rope.is_char_boundary(at) {
                     continue;
                 }
-                string.split_off(at);
+                rope.split_off(at);
+                rope.assert_valid();
             }
             Operation::TruncateFront(start) => {
-                if !string.is_char_boundary(start) {
+                if !rope.is_char_boundary(start) {
                     continue;
                 }
-                string.truncate_front(start);
+                rope.truncate_front(start);
+                rope.assert_valid();
             }
             Operation::TruncateBack(end) => {
-                if !string.is_char_boundary(end) {
+                if !rope.is_char_boundary(end) {
                     continue;
                 }
-                string.truncate_back(end);
+                rope.truncate_back(end);
+                rope.assert_valid();
             }
         }
     }

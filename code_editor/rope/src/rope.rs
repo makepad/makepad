@@ -19,6 +19,8 @@ pub struct Rope {
 impl Rope {
     /// Creates a new empty `Rope`.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(1) time.
     pub fn new() -> Self {
         Self {
@@ -29,6 +31,8 @@ impl Rope {
 
     /// Returns `true` is `self` is empty.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(1) time.
     pub fn is_empty(&self) -> bool {
         self.byte_len() == 0
@@ -36,6 +40,8 @@ impl Rope {
 
     /// Returns the length of `self` in bytes.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(1) time.
     pub fn byte_len(&self) -> usize {
         self.root.info().byte_count
@@ -43,6 +49,8 @@ impl Rope {
 
     /// Returns the length of `self` in `char`s.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(1) time.
     pub fn char_len(&self) -> usize {
         self.root.info().char_count
@@ -50,11 +58,18 @@ impl Rope {
 
     /// Returns the length of `self` in lines.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(1) time.
     pub fn line_len(&self) -> usize {
         self.root.info().line_break_count + 1
     }
 
+    /// Returns `true` if `byte_index` is a `char` boundary.
+    /// 
+    /// # Performance
+    /// 
+    /// Runs in O(log n) time.
     pub fn is_char_boundary(&self, byte_index: usize) -> bool {
         if byte_index > self.byte_len() {
             return false;
@@ -67,21 +82,41 @@ impl Rope {
 
     /// Converts the given `byte_index` to a `char` index.
     ///
+    /// # Performance 
+    /// 
     /// Runs in O(log n) time.
+    /// 
+    /// # Panics
+    /// 
+    /// Panics if `byte_index` is greater than the length of `self` in bytes, or if it does not lie
+    /// on a `char` boundary.
     pub fn byte_to_char(&self, byte_index: usize) -> usize {
         self.info_at(byte_index).char_count
     }
 
     /// Converts the given `byte_index` to a line index.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(log n) time.
+    ///
+    /// # Panics
+    /// 
+    /// Panics if `byte_index` is greater than the length of `self` in bytes, or if it does not lie
+    /// on a `char` boundary.
     pub fn byte_to_line(&self, byte_index: usize) -> usize {
         self.info_at(byte_index).line_break_count + 1
     }
 
     /// Converts the given `char_index` to a byte index.
     ///
+    /// # Performance
+    ///  
     /// Runs in O(log n) time.
+    /// 
+    /// # Panics
+    ///
+    /// Panics if `char_index` is greater than the length of `self` in chars.
     pub fn char_to_byte(&self, char_index: usize) -> usize {
         if char_index == 0 {
             return 0;
@@ -94,7 +129,13 @@ impl Rope {
 
     /// Converts the given `line_index` to a byte index.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(log n) time.
+    /// 
+    /// # Panics
+    /// 
+    /// Panics if `line_index` is greater than or equal to the length of `self` in lines.
     pub fn line_to_byte(&self, line_index: usize) -> usize {
         if line_index == 0 {
             return 0;
@@ -104,7 +145,13 @@ impl Rope {
 
     /// Returns the slice of `self` corresponding to the given `byte_range`.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(log n) time.
+    /// 
+    /// # Panics
+    /// 
+    /// Panics if `byte_range` is out of bounds.
     pub fn slice<R: RangeBounds<usize>>(&self, byte_range: R) -> Slice<'_> {
         let byte_range = crate::range_bounds_to_range(byte_range, self.byte_len());
         Slice::new(self, byte_range.start, byte_range.end)
@@ -112,6 +159,8 @@ impl Rope {
 
     /// Returns a `Cursor` at the front of `self`.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(log n) time.
     pub fn cursor_front(&self) -> Cursor<'_> {
         self.slice(..).cursor_front()
@@ -119,6 +168,8 @@ impl Rope {
 
     /// Returns a `Cursor` at the back of `self`.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(log n) time.
     pub fn cursor_back(&self) -> Cursor<'_> {
         self.slice(..).cursor_back()
@@ -126,6 +177,8 @@ impl Rope {
 
     /// Returns a `Cursor` at the given `byte_position` of `self`.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(log n) time.
     pub fn cursor_at(&self, byte_position: usize) -> Cursor<'_> {
         self.slice(..).cursor_at(byte_position)
@@ -133,6 +186,8 @@ impl Rope {
 
     /// Returns an iterator over the chunks of `self`.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(log n) time.
     pub fn chunks(&self) -> Chunks<'_> {
         self.slice(..).chunks()
@@ -140,6 +195,8 @@ impl Rope {
 
     /// Returns a reverse iterator over the chunks of `self`.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(log n) time.
     pub fn chunks_rev(&self) -> ChunksRev<'_> {
         self.slice(..).chunks_rev()
@@ -147,6 +204,8 @@ impl Rope {
 
     /// Returns an iterator over the bytes of `self`.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(log n) time.
     pub fn bytes(&self) -> Bytes<'_> {
         self.slice(..).bytes()
@@ -154,6 +213,8 @@ impl Rope {
 
     /// Returns a reverse iterator over the bytes of `self`.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(log n) time.
     pub fn bytes_rev(&self) -> BytesRev<'_> {
         self.slice(..).bytes_rev()
@@ -161,6 +222,8 @@ impl Rope {
 
     /// Returns an iterator over the `char`s of `self`.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(log n) time.
     pub fn chars(&self) -> Chars<'_> {
         self.slice(..).chars()
@@ -168,6 +231,8 @@ impl Rope {
 
     /// Returns a reverse iterator over the `char`s of `self`.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(log n) time.
     pub fn chars_rev(&self) -> CharsRev<'_> {
         self.slice(..).chars_rev()
@@ -175,6 +240,8 @@ impl Rope {
 
     /// Appends `other` to `self`,
     ///
+    /// # Performance
+    /// 
     /// Runs in O(log n) time.
     pub fn append(&mut self, mut other: Self) {
         use crate::StrUtils;
@@ -196,7 +263,14 @@ impl Rope {
 
     /// Splits `self` at the given `byte_index`.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(log n) time.
+    /// 
+    /// # Panics
+    /// 
+    /// Panics if `byte_index` is greater than the length of `self` in bytes, or if it does not lie
+    /// on a `char` boundary.
     pub fn split_off(&mut self, byte_index: usize) -> Self {
         use std::mem;
 
@@ -217,7 +291,14 @@ impl Rope {
 
     /// Truncates `self` at the front, keeping the byte range `byte_start..`.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(log n) time.
+    /// 
+    /// # Panics
+    /// 
+    /// Panics if `byte_start` is greater than the length of `self` in bytes, or if it does not lie
+    /// on a `char` boundary.
     pub fn truncate_front(&mut self, byte_start: usize) {
         if byte_start == 0 {
             return;
@@ -232,7 +313,14 @@ impl Rope {
 
     /// Truncates `self` at the back, keeping the byte range `..byte_end`.
     ///
+    /// # Performance
+    /// 
     /// Runs in O(log n) time.
+    /// 
+    /// # Panics
+    /// 
+    /// Panics if `byte_end` is greater than the length of `self` in bytes, or if it does not lie
+    /// on a `char` boundary.
     pub fn truncate_back(&mut self, byte_end: usize) {
         if byte_end == 0 {
             *self = Self::new();
@@ -294,6 +382,10 @@ impl Rope {
 #[cfg(fuzzing)]
 impl Rope {
     pub fn assert_valid(&self) {
+        match &self.root {
+            Node::Branch(branch) => assert!(branch.len() >= 2),
+            _ => {}
+        }
         self.root.assert_valid(self.height);
     }
 }
@@ -319,9 +411,42 @@ impl<'a> From<&'a String> for Rope {
 }
 
 impl<'a> From<&'a str> for Rope {
-    fn from(string: &str) -> Self {
+    fn from(string: &'a str) -> Self {
+        use std::iter;
+
+        iter::once(string).collect()
+    }
+}
+
+impl<'a> From<&'a mut str> for Rope {
+    fn from(string: &'a mut str) -> Self {
+        Self::from(&*string)
+    }
+}
+
+impl<'a> FromIterator<char> for Rope {
+    fn from_iter<I>(iter: I) -> Self
+    where
+        I: IntoIterator<Item = char>,
+    {
         let mut builder = Builder::new();
-        builder.push_str(string);
+        for ch in iter.into_iter() {
+            let mut buffer = [0; 4];
+            builder.push_str(ch.encode_utf8(&mut buffer));
+        }
+        builder.build()
+    }
+}
+
+impl<'a> FromIterator<&'a str> for Rope {
+    fn from_iter<I>(iter: I) -> Self
+    where
+        I: IntoIterator<Item = &'a str>,
+    {
+        let mut builder = Builder::new();
+        for string in iter.into_iter() {
+            builder.push_str(string);
+        }
         builder.build()
     }
 }
