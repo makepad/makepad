@@ -1,11 +1,11 @@
 #[derive(Clone)]
-pub struct Program {
-    pub instrs: Vec<Instr>,
+pub(crate) struct Program {
+    pub(crate) instrs: Vec<Instr>,
 }
 
 #[derive(Clone, Copy)]
-pub enum Instr {
+pub(crate) enum Instr {
     Split(InstrPtr, InstrPtr)
 }
 
-pub type InstrPtr = u32;
+pub(crate) type InstrPtr = usize;
