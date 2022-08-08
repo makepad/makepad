@@ -391,9 +391,10 @@ impl<'a> Cx2d<'a> {
             match align_item {
                 Area::Instance(inst) => {
                     let draw_list = &mut self.cx.draw_lists[inst.draw_list_id];
-                    let draw_call = draw_list.draw_items[inst.draw_item_id].draw_call.as_mut().unwrap();
+                    let draw_item = &mut draw_list.draw_items[inst.draw_item_id];
+                    let draw_call = draw_item.draw_call().unwrap();
                     let sh = &self.cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
-                    let inst_buf = draw_call.instances.as_mut().unwrap();
+                    let inst_buf = draw_item.instances.as_mut().unwrap();
                     for i in 0..inst.instance_count {
                         if let Some(rect_pos) = sh.mapping.rect_pos {
                             inst_buf[inst.instance_offset + rect_pos + i * sh.mapping.instances.total_slots] += dx;

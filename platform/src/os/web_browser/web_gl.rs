@@ -51,7 +51,7 @@ impl Cx {
         zbias_step: f32
     ) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
-        let draw_items_len = self.draw_lists[draw_list_id].draw_items_len;
+        let draw_items_len = self.draw_lists[draw_list_id].draw_items.len();
         //self.views[view_id].set_clipping_uniforms();
         self.draw_lists[draw_list_id].uniform_view_transform(&Mat4::identity());
         self.draw_lists[draw_list_id].parent_scroll = scroll;
@@ -59,10 +59,10 @@ impl Cx {
         let clip = self.draw_lists[draw_list_id].intersect_clip(clip);
         
         for draw_item_id in 0..draw_items_len {
-            if let Some(sub_view_id) = self.draw_lists[draw_list_id].draw_items[draw_item_id].sub_view_id {
+            if let Some(sub_list_id) = self.draw_lists[draw_list_id].draw_items[draw_item_id].sub_list() {
                 self.render_view(
                     pass_id,
-                    sub_view_id,
+                    sub_list_id,
                     Vec2 {x: local_scroll.x + scroll.x, y: local_scroll.y + scroll.y},
                     clip,
                     zbias,
@@ -72,27 +72,33 @@ impl Cx {
             else {
                 let draw_list = &mut self.draw_lists[draw_list_id];
                 //view.platform.uni_vw.update_with_f32_data(device, &view.uniforms);
-                let draw_call = draw_list.draw_items[draw_item_id].draw_call.as_mut().unwrap();
+                let draw_item = &mut draw_list.draw_items[draw_item_id];
+                let draw_call = if let Some(draw_call) = draw_item.kind.draw_call_mut(){
+                    draw_call
+                }else{
+                    continue;
+                };
+                
                 let sh = &self.draw_shaders[draw_call.draw_shader.draw_shader_id];
                 if sh.platform.is_none() { // shader didnt compile somehow
                     continue;
                 }
                 //let shp = &self.draw_shaders.platform[sh.platform.unwrap()];
                 
-                if draw_call.instance_dirty || draw_call.platform.inst_vb_id.is_none() {
+                if draw_call.instance_dirty || draw_item.os.inst_vb_id.is_none() {
                     draw_call.instance_dirty = false;
-                    if draw_call.platform.inst_vb_id.is_none() {
-                        draw_call.platform.inst_vb_id = Some(self.os.vertex_buffers);
+                    if draw_item.os.inst_vb_id.is_none() {
+                        draw_item.os.inst_vb_id = Some(self.os.vertex_buffers);
                         self.os.vertex_buffers += 1;
                     }
                     
                     let slots = sh.mapping.instances.total_slots;
-                    let instances = draw_call.instances.as_ref().unwrap().len() / slots;
+                    let instances = draw_item.instances.as_ref().unwrap().len() / slots;
                     
                     // lets patch up integer enums to floats because we dont support integers in attributes
                     for offset in &sh.mapping.instance_enums{
                         for i in 0..instances{
-                            let instances = draw_call.instances.as_mut().unwrap();
+                            let instances = draw_item.instances.as_mut().unwrap();
                             let float = instances[i * sh.mapping.instances.total_slots + offset];
                             let integer : u32 = unsafe{std::mem::transmute(float)};
                             instances[i * sh.mapping.instances.total_slots + offset] = integer as f32;
@@ -100,8 +106,8 @@ impl Cx {
                     }
                     
                     self.os.from_wasm(FromWasmAllocArrayBuffer {
-                        buffer_id: draw_call.platform.inst_vb_id.unwrap(),
-                        data: WasmDataF32::new(draw_call.instances.as_ref().unwrap())
+                        buffer_id: draw_item.os.inst_vb_id.unwrap(),
+                        data: WasmDataF32::new(draw_item.instances.as_ref().unwrap())
                     });
                     draw_call.instance_dirty = false;
                 }
@@ -142,22 +148,22 @@ impl Cx {
                 
                 let geometry = &mut self.geometries[geometry_id];
                 
-                if geometry.dirty || geometry.platform.vb_id.is_none() || geometry.platform.ib_id.is_none() {
-                    if geometry.platform.vb_id.is_none() {
-                        geometry.platform.vb_id = Some(self.os.vertex_buffers);
+                if geometry.dirty || geometry.os.vb_id.is_none() || geometry.os.ib_id.is_none() {
+                    if geometry.os.vb_id.is_none() {
+                        geometry.os.vb_id = Some(self.os.vertex_buffers);
                         self.os.vertex_buffers += 1;
                     }
-                    if geometry.platform.ib_id.is_none() {
-                        geometry.platform.ib_id = Some(self.os.index_buffers);
+                    if geometry.os.ib_id.is_none() {
+                        geometry.os.ib_id = Some(self.os.index_buffers);
                         self.os.index_buffers += 1;
                     }
                     self.os.from_wasm(FromWasmAllocArrayBuffer {
-                        buffer_id: geometry.platform.vb_id.unwrap(),
+                        buffer_id: geometry.os.vb_id.unwrap(),
                         data: WasmDataF32::new(&geometry.vertices)
                     });
                     
                     self.os.from_wasm(FromWasmAllocIndexBuffer {
-                        buffer_id: geometry.platform.ib_id.unwrap(),
+                        buffer_id: geometry.os.ib_id.unwrap(),
                         data: WasmDataU32::new(&geometry.indices)
                     });
                     
@@ -165,8 +171,8 @@ impl Cx {
                 }
                 
                 // lets check if our vao is still valid
-                if draw_call.platform.vao.is_none() {
-                    draw_call.platform.vao = Some(CxOsDrawCallVao {
+                if draw_item.os.vao.is_none() {
+                    draw_item.os.vao = Some(CxOsDrawCallVao {
                         vao_id: self.os.vaos,
                         shader_id: None,
                         inst_vb_id: None,
@@ -176,24 +182,24 @@ impl Cx {
                     self.os.vaos += 1;
                 }
                 
-                let vao = draw_call.platform.vao.as_mut().unwrap();
+                let vao = draw_item.os.vao.as_mut().unwrap();
                 
-                if vao.inst_vb_id != draw_call.platform.inst_vb_id
-                    || vao.geom_vb_id != geometry.platform.vb_id
-                    || vao.geom_ib_id != geometry.platform.ib_id
+                if vao.inst_vb_id != draw_item.os.inst_vb_id
+                    || vao.geom_vb_id != geometry.os.vb_id
+                    || vao.geom_ib_id != geometry.os.ib_id
                     || vao.shader_id != Some(draw_call.draw_shader.draw_shader_id) {
                     
                     vao.shader_id = Some(draw_call.draw_shader.draw_shader_id);
-                    vao.inst_vb_id = draw_call.platform.inst_vb_id;
-                    vao.geom_vb_id = geometry.platform.vb_id;
-                    vao.geom_ib_id = geometry.platform.ib_id;
+                    vao.inst_vb_id = draw_item.os.inst_vb_id;
+                    vao.geom_vb_id = geometry.os.vb_id;
+                    vao.geom_ib_id = geometry.os.ib_id;
                     
                     self.os.from_wasm(FromWasmAllocVao {
                         vao_id: vao.vao_id,
                         shader_id: vao.shader_id.unwrap(),
                         geom_ib_id: vao.geom_ib_id.unwrap(),
                         geom_vb_id: vao.geom_vb_id.unwrap(),
-                        inst_vb_id: draw_call.platform.inst_vb_id.unwrap()
+                        inst_vb_id: draw_item.os.inst_vb_id.unwrap()
                     });
                 }
                 
@@ -207,7 +213,7 @@ impl Cx {
                 }
                 self.os.from_wasm(FromWasmDrawCall {
                     shader_id: draw_call.draw_shader.draw_shader_id,
-                    vao_id: draw_call.platform.vao.as_ref().unwrap().vao_id,
+                    vao_id: draw_item.os.vao.as_ref().unwrap().vao_id,
                     pass_uniforms: WasmDataF32::new(pass_uniforms.as_slice()),
                     view_uniforms: WasmDataF32::new(draw_list.draw_list_uniforms.as_slice()),
                     draw_uniforms: WasmDataF32::new(draw_call.draw_uniforms.as_slice()),
