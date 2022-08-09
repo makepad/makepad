@@ -29,6 +29,8 @@ pub mod color_picker;
 pub mod text_input;
 pub mod slider;
 
+pub mod popup_menu;
+
 #[macro_use]
 pub mod window_menu;
 
@@ -106,5 +108,6 @@ pub fn live_register(cx: &mut Cx) {
     crate::file_tree::live_register(cx);
     crate::slides_view::live_register(cx);
     crate::list_box::live_register(cx);
+    crate::popup_menu::live_register(cx);
     crate::drop_down::live_register(cx);
 }

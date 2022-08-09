@@ -299,6 +299,7 @@ impl Area {
                     return;
                 }
                 let draw_item = &mut cxview.draw_items[inst.draw_item_id];
+                //log!("{:?}", draw_item.kind.sub_list().is_some());
                 let draw_call = draw_item.kind.draw_call().unwrap();
                 if cx.draw_shaders.generation != draw_call.draw_shader.draw_shader_generation {
                     return;
