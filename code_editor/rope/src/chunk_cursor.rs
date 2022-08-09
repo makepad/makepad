@@ -28,7 +28,7 @@ impl<'a> ChunkCursor<'a> {
     /// Runs in O(1) time.
     #[inline]
     pub fn is_at_back(&self) -> bool {
-        self.byte_position + self.current_node().as_leaf().len() >= self.byte_end
+        self.byte_position >= self.byte_end
     }
 
     /// Returns the byte position of `self` within the `Rope`.
@@ -66,14 +66,18 @@ impl<'a> ChunkCursor<'a> {
     pub fn move_next(&mut self) {
         assert!(!self.is_at_back());
         self.byte_position += self.current_node().as_leaf().len();
-        while let Some((branch, index)) = self.path.last_mut() {
-            if *index < branch.len() - 1 {
-                *index += 1;
-                break;
+        if self.byte_position == self.root.info().byte_count {
+            self.path.clear();
+        } else {
+            while let Some((branch, index)) = self.path.last_mut() {
+                if *index < branch.len() - 1 {
+                    *index += 1;
+                    break;
+                }
+                self.path.pop();
             }
-            self.path.pop();
+            self.descend_left();
         }
-        self.descend_left();
     }
 
     /// Moves `self` to the previous chunk of the `Rope`.
@@ -87,13 +91,17 @@ impl<'a> ChunkCursor<'a> {
     /// Panics if `self` is currently pointing to the front of the `Rope`.
     pub fn move_prev(&mut self) {
         assert!(!self.is_at_front());
-        while let Some((branch, index)) = self.path.last_mut() {
-            if *index > 0 {
-                *index -= 1;
-                self.byte_position -= branch[*index].info().byte_count;
-                break;
+        if self.byte_position == self.root.info().byte_count {
+            self.byte_position = 0;
+        } else {
+            while let Some((branch, index)) = self.path.last_mut() {
+                if *index > 0 {
+                    *index -= 1;
+                    self.byte_position -= branch[*index].info().byte_count;
+                    break;
+                }
+                self.path.pop();
             }
-            self.path.pop();
         }
         self.descend_right();
     }
@@ -103,7 +111,6 @@ impl<'a> ChunkCursor<'a> {
         if byte_start == 0 {
             cursor.descend_left();
         } else if byte_start == root.info().byte_count {
-            cursor.descend_right();
             cursor.byte_position = root.info().byte_count;
         } else {
             cursor.descend_to(byte_start);
@@ -116,9 +123,12 @@ impl<'a> ChunkCursor<'a> {
         if byte_end == 0 {
             cursor.descend_left();
         } else if byte_end == root.info().byte_count {
-            cursor.descend_right();
+            cursor.byte_position = root.info().byte_count;
         } else {
             cursor.descend_to(byte_end);
+            if !cursor.is_at_back() {
+                cursor.move_next();
+            }
         }
         cursor
     }
@@ -132,9 +142,8 @@ impl<'a> ChunkCursor<'a> {
         let mut cursor = ChunkCursor::new(root, byte_start, byte_end);
         if byte_position == 0 {
             cursor.descend_left();
-        }
-        if byte_position == root.info().byte_count {
-            cursor.descend_right();
+        } else if byte_position == root.info().byte_count {
+            cursor.byte_position = root.info().byte_count;
         } else {
             cursor.descend_to(byte_position);
         }

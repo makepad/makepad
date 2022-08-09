@@ -1,7 +1,7 @@
 use {
     crate::{
-        Branch, Builder, Bytes, BytesRev, Chars, CharsRev, ChunkCursor, Chunks, ChunksRev, CharCursor, Info, Leaf,
-        Node, Slice,
+        Branch, Builder, ByteCursor, Bytes, BytesRev, CharCursor, Chars, CharsRev, ChunkCursor,
+        Chunks, ChunksRev, Info, Leaf, Node, Slice,
     },
     std::{
         cmp::Ordering,
@@ -158,24 +158,55 @@ impl Rope {
     }
 
     /// Returns a `ChunkCursor` at the front of `self`.
-    /// 
+    ///
     /// # Performance
-    /// 
+    ///
     /// Runs in O(log n) time.
     pub fn chunk_cursor_front(&self) -> ChunkCursor<'_> {
         self.slice(..).chunk_cursor_front()
     }
 
     /// Returns a `ChunkCursor` at the back of `self`.
-    /// 
+    ///
     /// # Performance
-    /// 
+    ///
     /// Runs in O(log n) time.
     pub fn chunk_cursor_back(&self) -> ChunkCursor<'_> {
         self.slice(..).chunk_cursor_back()
     }
 
-    /// Returns a `Cursor` at the front of `self`.
+    /// Returns a `ByteCursor` at the front of `self`.
+    ///
+    /// # Performance
+    ///
+    /// Runs in O(log n) time.
+    pub fn byte_cursor_front(&self) -> ByteCursor<'_> {
+        self.slice(..).byte_cursor_front()
+    }
+
+    /// Returns a `ByteCursor` at the back of `self`.
+    ///
+    /// # Performance
+    ///
+    /// Runs in O(log n) time.
+    pub fn byte_cursor_back(&self) -> ByteCursor<'_> {
+        self.slice(..).byte_cursor_back()
+    }
+
+    /// Returns a `ByteCursor` at the given `byte_position` of `self`.
+    ///
+    /// # Performance
+    ///
+    /// Runs in O(log n) time.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `byte_index` is greater than the length of `self` in bytes.
+    pub fn byte_cursor_at(&self, byte_position: usize) -> ByteCursor<'_> {
+        self.slice(..).byte_cursor_at(byte_position)
+    }
+
+    /// Returns a `CharCursor` at the front of `self`.
     ///
     /// # Performance
     ///
@@ -198,7 +229,7 @@ impl Rope {
     /// # Performance
     ///
     /// Runs in O(log n) time.
-    /// 
+    ///
     /// # Panics
     ///
     /// Panics if `byte_index` is greater than the length of `self` in bytes, or if it is not at a
