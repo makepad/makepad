@@ -85,6 +85,10 @@ pub enum Hit{
     FingerHoverOver(FingerHoverHitEvent),
     FingerHoverOut(FingerHoverHitEvent),
     FingerUp(FingerUpHitEvent),
+    
+    FingerSweep(FingerSweepEvent),
+    FingerSweepIn(FingerSweepEvent),
+    FingerSweepOut(FingerSweepEvent),
     Nothing
 }
 

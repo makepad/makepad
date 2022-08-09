@@ -52,6 +52,7 @@ impl BareWindow {
         self.overlay.end(cx);
         self.main_view.end(cx);
         cx.end_pass(&self.pass);
+        //cx.debug_draw_tree(false, self.main_view.draw_list_id());
     }
 }
 

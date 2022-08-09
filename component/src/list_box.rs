@@ -43,7 +43,7 @@ live_register!{
         text_style: FONT_DATA {top_drop: 1.15},
     }
     
-    ListBoxNode: {{ListBoxNode}} {
+    ListBoxItem: {{ListBoxItem}} {
         layout: {
             align: {y: 0.5},
             padding: {left: 5},
@@ -90,7 +90,7 @@ live_register!{
     
     ListBox: {{ListBox}} {
         node_height: (DIM_DATA_ITEM_HEIGHT),
-        list_node: ListBoxNode {}
+        list_item: ListBoxItem {}
         walk: {width:Fill, height:Fit}
         layout: {flow: Flow::Down}
         scroll_view: {
@@ -119,7 +119,7 @@ struct DrawNameText {
 }
 
 #[derive(Live, LiveHook)]
-pub struct ListBoxNode {
+pub struct ListBoxItem {
 
     bg_quad: DrawBgQuad,
     name_text: DrawNameText,
@@ -140,7 +140,7 @@ pub struct ListBoxNode {
 #[live_register(frame_component!(ListBox))]
 pub struct ListBox {
     scroll_view: ScrollView,
-    list_node: Option<LivePtr>,
+    list_item: Option<LivePtr>,
     
     filler_quad: DrawBgQuad,
     layout: Layout,
@@ -151,18 +151,18 @@ pub struct ListBox {
     
     items: Vec<String>,
     
-    #[rust] selected_node_ids: HashSet<ListBoxNodeId>,
+    #[rust] selected_item_ids: HashSet<ListBoxItemId>,
     
-    #[rust] list_nodes: ComponentMap<ListBoxNodeId, ListBoxNode>,
+    #[rust] list_items: ComponentMap<ListBoxItemId, ListBoxItem>,
     
     #[rust] count: usize,
 }
 
 impl LiveHook for ListBox {
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        if let Some(index) = nodes.child_by_name(index, id!(list_node).as_field()) {
-            for (_, node) in self.list_nodes.iter_mut() {
-                node.apply(cx, from, index, nodes);
+        if let Some(index) = nodes.child_by_name(index, id!(list_item).as_field()) {
+            for (_, item) in self.list_items.iter_mut() {
+                item.apply(cx, from, index, nodes);
             }
         }
         self.scroll_view.redraw(cx);
@@ -177,20 +177,20 @@ pub enum ListBoxNodeAction {
 
 #[derive(Clone, FrameAction)]
 pub enum ListBoxAction {
-    WasClicked(ListBoxNodeId),
+    WasClicked(ListBoxItemId),
     None,
 }
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
-pub struct ListBoxNodeId(pub LiveId);
+pub struct ListBoxItemId(pub LiveId);
 
-impl ListBoxNode {
+impl ListBoxItem{
     pub fn set_draw_state(&mut self, is_even: f32) {
         self.bg_quad.is_even = is_even;
         self.name_text.is_even = is_even;
     }
     
-    pub fn draw_node(
+    pub fn draw_item(
         &mut self,
         cx: &mut Cx2d,
         label: &str,
@@ -259,8 +259,8 @@ impl ListBox {
         }
         self.scroll_view.end(cx);
         
-        let selected_node_ids = &self.selected_node_ids;
-        self.list_nodes.retain_visible_and( | node_id, _ | selected_node_ids.contains(node_id));
+        let selected_item_ids = &self.selected_item_ids;
+        self.list_items.retain_visible_and( | item_id, _ | selected_item_ids.contains(item_id));
     }
     
     pub fn is_even(count: usize) -> f32 {
@@ -274,17 +274,17 @@ impl ListBox {
     pub fn draw_node(
         &mut self,
         cx: &mut Cx2d,
-        node_id: ListBoxNodeId,
+        item_id: ListBoxItemId,
         label: &str,
     ){
         self.count += 1;
         
-        let list_node = self.list_node;
-        let node = self.list_nodes.get_or_insert(cx, node_id, | cx | {
-            ListBoxNode::new_from_ptr(cx, list_node)
+        let list_item = self.list_item;
+        let node = self.list_items.get_or_insert(cx, item_id, | cx | {
+            ListBoxItem::new_from_ptr(cx, list_item)
         });
         
-        node.draw_node(cx, label, Self::is_even(self.count), self.node_height);
+        node.draw_item(cx, label, Self::is_even(self.count), self.node_height);
     }
     
     pub fn should_node_draw(&mut self, cx: &mut Cx2d) -> bool {
@@ -310,7 +310,7 @@ impl ListBox {
         }
         
         let mut actions = Vec::new();
-        for (node_id, node) in self.list_nodes.iter_mut() {
+        for (node_id, node) in self.list_items.iter_mut() {
             node.handle_event(cx, event, &mut | _, e | actions.push((*node_id, e)));
         }
         
@@ -318,13 +318,13 @@ impl ListBox {
             match action {
                 ListBoxNodeAction::WasClicked => {
                     // deselect everything but us
-                    for id in &self.selected_node_ids {
+                    for id in &self.selected_item_ids {
                         if *id != node_id {
-                            self.list_nodes.get_mut(id).unwrap().set_is_selected(cx, false, Animate::Yes);
+                            self.list_items.get_mut(id).unwrap().set_is_selected(cx, false, Animate::Yes);
                         }
                     }
-                    self.selected_node_ids.clear();
-                    self.selected_node_ids.insert(node_id);
+                    self.selected_item_ids.clear();
+                    self.selected_item_ids.insert(node_id);
                     //dispatch_action(cx, FileTreeAction::WasClicked(node_id));
                 }
                 ListBoxNodeAction::ShouldStartDragging => {
@@ -371,15 +371,15 @@ impl FrameComponent for ListBox {
         if self.begin(cx, walk).not_redrawing(){
             return FrameDraw::done();
         };
-        for (i, item) in self.items.iter().enumerate(){
+        for (i, item_str) in self.items.iter().enumerate(){
             let node_id = id_num!(listbox,i as u64).into();
             self.count += 1;
-            let list_node = self.list_node;
-            let node = self.list_nodes.get_or_insert(cx, node_id, | cx | {
-                ListBoxNode::new_from_ptr(cx, list_node)
+            let list_item = self.list_item;
+            let item = self.list_items.get_or_insert(cx, node_id, | cx | {
+                ListBoxItem::new_from_ptr(cx, list_item)
             });
             
-            node.draw_node(cx, &item, Self::is_even(self.count), self.node_height);
+            item.draw_item(cx, &item_str, Self::is_even(self.count), self.node_height);
         }
         self.end(cx);
         FrameDraw::done()
