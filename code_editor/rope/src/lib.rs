@@ -2,11 +2,12 @@ mod branch;
 mod builder;
 mod bytes;
 mod bytes_rev;
+mod char_cursor;
 mod chars;
 mod chars_rev;
 mod chunks;
 mod chunks_rev;
-mod cursor;
+mod chunk_cursor;
 mod info;
 mod leaf;
 mod node;
@@ -15,8 +16,9 @@ mod slice;
 mod str_utils;
 
 pub use self::{
-    builder::Builder, bytes::Bytes, bytes_rev::BytesRev, chars::Chars, chars_rev::CharsRev,
-    chunks::Chunks, chunks_rev::ChunksRev, cursor::Cursor, rope::Rope, slice::Slice,
+    builder::Builder, bytes::Bytes, bytes_rev::BytesRev, char_cursor::CharCursor, chars::Chars,
+    chars_rev::CharsRev, chunks::Chunks, chunks_rev::ChunksRev, chunk_cursor::ChunkCursor, rope::Rope,
+    slice::Slice,
 };
 
 use {

@@ -1,7 +1,8 @@
 use crate::{Branch, Node};
 
+/// A cursor over the chunks of a `Rope`.
 #[derive(Clone, Debug)]
-pub struct Cursor<'a> {
+pub struct ChunkCursor<'a> {
     root: &'a Node,
     byte_start: usize,
     byte_end: usize,
@@ -9,21 +10,21 @@ pub struct Cursor<'a> {
     path: Vec<(&'a Branch, usize)>,
 }
 
-impl<'a> Cursor<'a> {
-    /// Returns `true` if `self` is currently pointing to the front chunk of the `Rope`.
+impl<'a> ChunkCursor<'a> {
+    /// Returns `true` if `self` is currently pointing to the front of the `Rope`.
     ///
     /// # Performance
-    /// 
+    ///
     /// Runs in O(1) time.
     #[inline]
     pub fn is_at_front(&self) -> bool {
         self.byte_position <= self.byte_start
     }
 
-    /// Returns `true` if `self` is currently pointing to the back chunk of the `Rope`.
+    /// Returns `true` if `self` is currently pointing to the back of the `Rope`.
     ///
     /// # Performance
-    /// 
+    ///
     /// Runs in O(1) time.
     #[inline]
     pub fn is_at_back(&self) -> bool {
@@ -33,8 +34,9 @@ impl<'a> Cursor<'a> {
     /// Returns the byte position of `self` within the `Rope`.
     ///
     /// # Performance
-    /// 
+    ///
     /// Runs in O(1) time.
+    #[inline]
     pub fn byte_position(&self) -> usize {
         self.byte_position.saturating_sub(self.byte_start)
     }
@@ -42,8 +44,9 @@ impl<'a> Cursor<'a> {
     /// Returns a reference to the chunk that `self` is currently pointing to.
     ///
     /// # Performance
-    /// 
+    ///
     /// Runs in O(1) time.
+    #[inline]
     pub fn current(&self) -> &'a str {
         let leaf = self.current_node().as_leaf();
         let start = self.byte_start.saturating_sub(self.byte_position);
@@ -54,12 +57,12 @@ impl<'a> Cursor<'a> {
     /// Moves `self` to the next chunk of the `Rope`.
     ///
     /// # Performance
-    /// 
+    ///
     /// Runs in amortized O(1) and worst-case O(log n) time.
-    /// 
+    ///
     /// # Panics
-    /// 
-    /// Panics if `self` is currently pointing to the back chunk of the `Rope`.
+    ///
+    /// Panics if `self` is currently pointing to the back of the `Rope`.
     pub fn move_next(&mut self) {
         assert!(!self.is_at_back());
         self.byte_position += self.current_node().as_leaf().len();
@@ -76,12 +79,12 @@ impl<'a> Cursor<'a> {
     /// Moves `self` to the previous chunk of the `Rope`.
     ///
     /// # Performance
-    /// 
+    ///
     /// Runs in amortized O(1) and worst-case O(log n) time.
     ///
     /// # Panics
-    /// 
-    /// Panics if `self` is currently pointing to the front chunk of the `Rope`.
+    ///
+    /// Panics if `self` is currently pointing to the front of the `Rope`.
     pub fn move_prev(&mut self) {
         assert!(!self.is_at_front());
         while let Some((branch, index)) = self.path.last_mut() {
@@ -96,7 +99,7 @@ impl<'a> Cursor<'a> {
     }
 
     pub(crate) fn front(root: &'a Node, byte_start: usize, byte_end: usize) -> Self {
-        let mut cursor = Cursor::new(root, byte_start, byte_end);
+        let mut cursor = ChunkCursor::new(root, byte_start, byte_end);
         if byte_start == 0 {
             cursor.descend_left();
         } else if byte_start == root.info().byte_count {
@@ -109,7 +112,7 @@ impl<'a> Cursor<'a> {
     }
 
     pub(crate) fn back(root: &'a Node, byte_start: usize, byte_end: usize) -> Self {
-        let mut cursor = Cursor::new(root, byte_start, byte_end);
+        let mut cursor = ChunkCursor::new(root, byte_start, byte_end);
         if byte_end == 0 {
             cursor.descend_left();
         } else if byte_end == root.info().byte_count {
@@ -126,7 +129,7 @@ impl<'a> Cursor<'a> {
         byte_end: usize,
         byte_position: usize,
     ) -> Self {
-        let mut cursor = Cursor::new(root, byte_start, byte_end);
+        let mut cursor = ChunkCursor::new(root, byte_start, byte_end);
         if byte_position == 0 {
             cursor.descend_left();
         }
