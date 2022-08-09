@@ -185,15 +185,13 @@ impl Cx {
                     // ok so. what do we do without a captured area
                     // if our digit is NOT down we send hovers.
                     if !self.fingers.is_digit_allocated(digit_id) {
-                        let hover_last = self.fingers.get_hover_area(digit_id);
                         self.call_event_handler(&Event::FingerHover(
                             tw.into_finger_hover_event(
+                                &self.fingers,
                                 digit_id,
-                                hover_last,
                                 self.os.last_mouse_button.unwrap_or(0) as usize
                             )
                         ));
-                        self.fingers.cycle_hover_area(digit_id);
                     }
                     else {
                         self.call_event_handler(&Event::FingerMove(
@@ -204,6 +202,7 @@ impl Cx {
                             )
                         ));
                     }
+                    self.fingers.cycle_hover_area(digit_id);
                 }
                 
                 id!(ToWasmMouseUp) => {
@@ -213,13 +212,10 @@ impl Cx {
                         self.os.last_mouse_button = None;
                         let digit_id = id!(mouse).into();
                         let captured = self.fingers.get_captured_area(digit_id);
-                        let digit_index = self.fingers.get_digit_index(digit_id);
-                        let digit_count = self.fingers.get_digit_count();
                         self.call_event_handler(&Event::FingerUp(
                             tw.into_finger_up_event(
+                                &self.fingers,
                                 digit_id,
-                                digit_index,
-                                digit_count,
                                 captured
                             )
                         ));
