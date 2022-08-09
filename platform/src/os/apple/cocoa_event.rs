@@ -112,7 +112,8 @@ impl CocoaMouseMoveEvent {
     pub fn into_finger_move_event(self, fingers: &CxFingers, digit_id: DigitId, button: usize) -> FingerMoveEvent {
         FingerMoveEvent {
             window_id: self.window_id,
-            captured: fingers.get_captured_area(digit_id),
+            handled: Cell::new(false),
+            hover_last: fingers.get_hover_area(digit_id), 
             tap_count: fingers.get_tap_count(digit_id),
             abs: self.abs,
             digit: DigitInfo {
@@ -147,6 +148,7 @@ impl CocoaMouseUpEvent {
                 count: fingers.get_digit_count(),
                 device: DigitDevice::Mouse(self.button),
             },
+            tap_count: fingers.get_tap_count(digit_id), 
             captured: fingers.get_captured_area(digit_id),
             modifiers: self.modifiers,
             time: self.time

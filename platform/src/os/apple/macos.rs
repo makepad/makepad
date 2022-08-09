@@ -171,7 +171,6 @@ impl Cx {
                                 self.os.last_mouse_button.unwrap_or(0)
                             )
                         ));
-                        self.fingers.cycle_hover_area(digit_id);
                     }
                     else {
                         self.call_event_handler(&mut Event::FingerMove(
@@ -182,6 +181,7 @@ impl Cx {
                             )
                         ));
                     }
+                    self.fingers.cycle_hover_area(digit_id);
                 }
                 CocoaEvent::MouseUp(md) => {
                     if self.os.last_mouse_button == Some(md.button) {
