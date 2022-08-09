@@ -8,19 +8,19 @@ pub struct Nfa {
 impl Nfa {
     fn run(&mut self, program: &Program) {
         loop {
-            for instr in &self.current_threads.instr {
-
-            }
+            mem::swap(&mut self.current_threads, &mut self.new_threads);
+            self.new_threads.clear();
         }
     }
 }
 
 struct Threads {
-    instr: SparseSet
+    instr: SparseSet,
+    slots: Vec<usize>,
 }
 
 impl Threads {
-    fn add_thread(&mut self, instrs: &[Instr], instr: InstrPtr, stack: &mut Vec<InstrPtr>) {
+    fn insert(&mut self, instr: InstrPtr) {
         stack.push(instr);
         while let Some(mut instr) = stack.pop() {
             loop {
@@ -37,5 +37,9 @@ impl Threads {
                 }
             }
         }
+    }
+
+    fn clear(&mut self) {
+        self.instr.clear();
     }
 }
