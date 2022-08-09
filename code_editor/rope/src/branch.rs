@@ -1,6 +1,6 @@
 use {
     crate::{Info, Node},
-    std::{ops::Deref, sync::Arc},
+    std::{ops::Deref, slice, sync::Arc},
 };
 
 #[derive(Clone, Debug)]
@@ -29,7 +29,7 @@ impl Branch {
 
     pub(crate) fn search_by_byte_only(&self, byte_count: &mut usize, byte_index: usize) -> usize {
         let mut index = 0;
-        for node in self.iter() {
+        for node in self {
             let next_byte_count = *byte_count + node.info().byte_count;
             if byte_index < next_byte_count {
                 break;
@@ -42,7 +42,7 @@ impl Branch {
 
     pub(crate) fn search_by_byte(&self, info: &mut Info, byte_index: usize) -> usize {
         let mut index = 0;
-        for node in self.iter() {
+        for node in self {
             let next_info = *info + node.info();
             if byte_index < next_info.byte_count {
                 break;
@@ -55,7 +55,7 @@ impl Branch {
 
     pub(crate) fn search_by_char(&self, info: &mut Info, char_index: usize) -> usize {
         let mut index = 0;
-        for node in self.iter() {
+        for node in self {
             let next_info = *info + node.info();
             if char_index < next_info.char_count {
                 break;
@@ -68,7 +68,7 @@ impl Branch {
 
     pub(crate) fn search_by_line(&self, info: &mut Info, line_index: usize) -> usize {
         let mut index = 0;
-        for node in self.iter() {
+        for node in self {
             let next_info = *info + node.info();
             if line_index <= next_info.line_break_count {
                 break;
@@ -213,7 +213,7 @@ impl Branch {
 #[cfg(fuzzing)]
 impl Branch {
     pub(crate) fn assert_valid(&self, height: usize) {
-        for node in self.iter() {
+        for node in self {
             assert!(node.is_at_least_half_full());
             node.assert_valid(height - 1);
         }
@@ -238,5 +238,14 @@ impl Deref for Branch {
 
     fn deref(&self) -> &Self::Target {
         self.as_nodes()
+    }
+}
+
+impl<'a> IntoIterator for &'a Branch {
+    type Item = &'a Node;
+    type IntoIter = slice::Iter<'a, Node>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.iter()
     }
 }

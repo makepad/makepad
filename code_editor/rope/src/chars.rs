@@ -25,7 +25,7 @@ impl<'a> Iterator for Chars<'a> {
     /// Advances the iterator and returns the next `char`.
     ///
     /// # Performance
-    /// 
+    ///
     /// Runs in amortized O(1) and worst-case O(log n) time.
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {

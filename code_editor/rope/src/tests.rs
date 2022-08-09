@@ -148,6 +148,17 @@ proptest! {
     }
 
     #[test]
+    fn cursor_chars_rev(string in arbitrary_string()) {
+        let rope = Rope::from(&string);
+        let mut cursor = rope.char_cursor_back();
+        let mut chars_rev = string.chars().rev();
+        while !cursor.is_at_front() {
+            cursor.move_prev();
+            assert_eq!(cursor.current(), chars_rev.next().unwrap());
+        }
+    }
+
+    #[test]
     fn chunks(string in arbitrary_string()) {
         let rope = Rope::from(&string);
         assert_eq!(rope.chunks().collect::<String>(), string);
