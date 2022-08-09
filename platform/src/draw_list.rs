@@ -243,9 +243,11 @@ impl CxDrawItems{
         else{
             // reuse an older one, keeping all GPU resources attached
             let mut draw_item = &mut self.buffer[draw_item_id];
+            draw_item.instances.as_mut().unwrap().clear();
             draw_item.kind = kind;
             draw_item.redraw_id = redraw_id;
         }
+        self.used += 1;
         &mut self.buffer[draw_item_id]
     }
 }
@@ -355,21 +357,30 @@ impl CxDrawList {
         self.nav_items.clear();
     }
     
-    pub fn append_sub_view(&mut self, redraw_id: u64, child_list_id: DrawListId) {
+    pub fn append_sub_list(&mut self, redraw_id: u64, sub_list_id: DrawListId) {
         // see if we need to add a new one
-        self.draw_items.push_item(redraw_id, CxDrawKind::SubList(child_list_id));
-        self.nav_items.push(NavItem::Child(child_list_id));
+        self.draw_items.push_item(redraw_id, CxDrawKind::SubList(sub_list_id));
     }
 
     pub fn insert_sub_list(&mut self, redraw_id: u64, sub_list_id: DrawListId) {
         // use an empty slot if we have them to insert our subview
         for i in 0..self.draw_items.len(){
             let item = &mut self.draw_items[i];
+            if let Some(id) = item.kind.sub_list(){
+                if id == sub_list_id{
+                    return
+                }
+            }
+        }
+        for i in 0..self.draw_items.len(){
+            let item = &mut self.draw_items[i];
             if item.kind.is_empty(){
                 item.redraw_id = redraw_id;
                 item.kind = CxDrawKind::SubList(sub_list_id);
+                return
             }
         }
+        self.append_sub_list(redraw_id, sub_list_id);
     }
     
     pub fn remove_sub_list(&mut self, sub_list_id: DrawListId) {
@@ -378,7 +389,7 @@ impl CxDrawList {
             let item = &mut self.draw_items[i];
             if let Some(check_id) = item.kind.sub_list(){
                 if check_id == sub_list_id{
-                    item.kind = CxDrawKind::Empty
+                    item.kind = CxDrawKind::Empty;
                 }
             }
         }

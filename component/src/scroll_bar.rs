@@ -383,6 +383,7 @@ impl ScrollBar {
                     return ScrollBarEvent::ScrollDone;
                 },
                 Hit::FingerMove(fe) => {
+                    let rel = fe.abs - fe.rect.pos;
                     // helper called by event code to scroll from a finger
                     if self.drag_point.is_none() {
                         // state should never occur.
@@ -391,10 +392,10 @@ impl ScrollBar {
                     else {
                         match self.axis {
                             Axis::Horizontal => {
-                                return self.set_scroll_pos_from_finger(cx, fe.rel.x - self.drag_point.unwrap());
+                                return self.set_scroll_pos_from_finger(cx, rel.x - self.drag_point.unwrap());
                             },
                             Axis::Vertical => {
-                                return self.set_scroll_pos_from_finger(cx, fe.rel.y - self.drag_point.unwrap());
+                                return self.set_scroll_pos_from_finger(cx, rel.y - self.drag_point.unwrap());
                             }
                         }
                     }

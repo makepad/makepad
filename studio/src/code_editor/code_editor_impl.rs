@@ -899,7 +899,8 @@ impl CodeEditorImpl {
                     let session = &state.sessions[session_id];
                     let document = &state.documents[session.document_id];
                     let document_inner = document.inner.as_ref().unwrap();
-                    let position = self.vec2_to_position(&document_inner.text, fe.rel, lines_layout);
+                    let rel = fe.abs - fe.rect.pos;
+                    let position = self.vec2_to_position(&document_inner.text, rel, lines_layout);
                     if self.last_move_position != Some(position) {
                         self.last_move_position = Some(position);
                         state.move_cursors_to(session_id, position, true);
@@ -1112,7 +1113,7 @@ impl CodeEditorImpl {
         };
         if delta.x != 0. || delta.y != 0. {
             self.select_scroll = Some(SelectScroll {
-                rel: fe.rel,
+                rel: fe.abs - fe.rect.pos,
                 delta: delta,
                 at_end: false
             });

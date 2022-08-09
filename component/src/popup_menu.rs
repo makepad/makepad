@@ -1,7 +1,4 @@
 use {
-    std::{
-        collections::{HashSet},
-    },
     crate::{
         makepad_derive_frame::*,
         scroll_view::ScrollView,
@@ -17,11 +14,7 @@ live_register!{
     DrawBgQuad: {{DrawBgQuad}} {
         fn pixel(self) -> vec4 {
             return mix(
-                mix(
-                    COLOR_BG_EDITOR,
-                    COLOR_BG_ODD,
-                    self.is_even
-                ),
+                COLOR_BG_EDITOR,
                 COLOR_BG_SELECTED,
                 self.selected
             );
@@ -43,7 +36,7 @@ live_register!{
         text_style: FONT_DATA {top_drop: 1.15},
     }
     
-    ListBoxItem: {{ListBoxItem}} {
+    PopupMenuItem: {{PopupMenuItem}} {
         layout: {
             align: {y: 0.5},
             padding: {left: 5},
@@ -88,10 +81,9 @@ live_register!{
         min_drag_distance: 10.0
     }
     
-    ListBox: {{ListBox}} {
+    PopupMenu: {{PopupMenu}} {
         node_height: (DIM_DATA_ITEM_HEIGHT),
-        list_item: ListBoxItem {}
-        walk: {width:Fill, height:Fit}
+        menu_item: PopupMenuItem {}
         layout: {flow: Flow::Down}
         scroll_view: {
             view: {
@@ -105,7 +97,6 @@ live_register!{
 #[derive(Live, LiveHook)]#[repr(C)]
 struct DrawBgQuad {
     draw_super: DrawQuad,
-    is_even: f32,
     selected: f32,
     hover: f32,
 }
@@ -113,17 +104,16 @@ struct DrawBgQuad {
 #[derive(Live, LiveHook)]#[repr(C)]
 struct DrawNameText {
     draw_super: DrawText,
-    is_even: f32,
     selected: f32,
     hover: f32,
 }
 
 #[derive(Live, LiveHook)]
-pub struct ListBoxItem {
-
+pub struct PopupMenuItem {
+    
     bg_quad: DrawBgQuad,
     name_text: DrawNameText,
-
+    
     layout: Layout,
     state: State,
     
@@ -137,32 +127,26 @@ pub struct ListBoxItem {
 }
 
 #[derive(Live)]
-#[live_register(frame_component!(ListBox))]
-pub struct ListBox {
+pub struct PopupMenu {
     scroll_view: ScrollView,
-    list_item: Option<LivePtr>,
+    menu_item: Option<LivePtr>,
     
     filler_quad: DrawBgQuad,
     layout: Layout,
     node_height: f32,
-    multi_select: bool,
-    
-    walk: Walk,
     
     items: Vec<String>,
     
-    #[rust] selected_item_ids: HashSet<ListBoxItemId>,
-    
-    #[rust] list_items: ComponentMap<ListBoxItemId, ListBoxItem>,
+    #[rust] menu_items: ComponentMap<PopupMenuItemId, PopupMenuItem>,
     
     #[rust] count: usize,
 }
 
-impl LiveHook for ListBox {
+impl LiveHook for PopupMenu {
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        if let Some(index) = nodes.child_by_name(index, id!(list_item).as_field()) {
-            for (_, item) in self.list_items.iter_mut() {
-                item.apply(cx, from, index, nodes);
+        if let Some(index) = nodes.child_by_name(index, id!(list_node).as_field()) {
+            for (_, node) in self.menu_items.iter_mut() {
+                node.apply(cx, from, index, nodes);
             }
         }
         self.scroll_view.redraw(cx);
@@ -177,27 +161,21 @@ pub enum ListBoxNodeAction {
 
 #[derive(Clone, FrameAction)]
 pub enum ListBoxAction {
-    WasClicked(ListBoxItemId),
+    WasClicked(PopupMenuItemId),
     None,
 }
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
-pub struct ListBoxItemId(pub LiveId);
+pub struct PopupMenuItemId(pub LiveId);
 
-impl ListBoxItem{
-    pub fn set_draw_state(&mut self, is_even: f32) {
-        self.bg_quad.is_even = is_even;
-        self.name_text.is_even = is_even;
-    }
+impl PopupMenuItem {
     
     pub fn draw_item(
         &mut self,
         cx: &mut Cx2d,
         label: &str,
-        is_even: f32,
         node_height: f32,
     ) {
-        self.set_draw_state(is_even);
         self.bg_quad.begin(cx, Walk::size(Size::Fill, Size::Fixed(node_height)), self.layout);
         self.name_text.draw_walk(cx, Walk::fit(), Align::default(), label);
         self.bg_quad.end(cx);
@@ -211,27 +189,34 @@ impl ListBoxItem{
         &mut self,
         cx: &mut Cx,
         event: &Event,
+        sweep_area: Area,
         dispatch_action: &mut dyn FnMut(&mut Cx, ListBoxNodeAction),
     ) {
         if self.state_handle_event(cx, event).must_redraw() {
             self.bg_quad.area().redraw(cx);
         }
         
-        match event.hits(cx, self.bg_quad.area()) {
+        match event.hits_with_options(
+            cx,
+            self.bg_quad.area(),
+            HitOptions::with_sweep_area(sweep_area)
+        ) {
             Hit::FingerHoverIn(_) => {
                 self.animate_state(cx, ids!(hover.on));
             }
             Hit::FingerHoverOut(_) => {
                 self.animate_state(cx, ids!(hover.off));
             }
-            Hit::FingerMove(f) => {
-                if f.abs.distance(&f.abs_start) >= self.min_drag_distance {
-                    dispatch_action(cx, ListBoxNodeAction::ShouldStartDragging);
-                }
-            }
-            Hit::FingerDown(_) => {
+            Hit::FingerSweepIn(_) => {
                 self.animate_state(cx, ids!(select.on));
-                dispatch_action(cx, ListBoxNodeAction::WasClicked);
+            }
+            Hit::FingerSweepOut(se) => {
+                if se.is_up{
+                    dispatch_action(cx, ListBoxNodeAction::WasClicked);
+                }
+                else{
+                    self.animate_state(cx, ids!(select.off));
+                }
             }
             _ => {}
         }
@@ -239,7 +224,7 @@ impl ListBoxItem{
 }
 
 
-impl ListBox {
+impl PopupMenu {
     
     pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk) -> ViewRedrawing {
         self.scroll_view.begin(cx, walk, self.layout) ?;
@@ -253,38 +238,31 @@ impl ListBox {
         let mut walk = 0.0;
         while walk < height_left {
             self.count += 1;
-            self.filler_quad.is_even = Self::is_even(self.count);
             self.filler_quad.draw_walk(cx, Walk::size(Size::Fill, Size::Fixed(self.node_height.min(height_left - walk))));
             walk += self.node_height.max(1.0);
         }
         self.scroll_view.end(cx);
-        
-        let selected_item_ids = &self.selected_item_ids;
-        self.list_items.retain_visible_and( | item_id, _ | selected_item_ids.contains(item_id));
-    }
-    
-    pub fn is_even(count: usize) -> f32 {
-        if count % 2 == 1 {0.0}else {1.0}
+        self.menu_items.retain_visible();
     }
     
     pub fn redraw(&mut self, cx: &mut Cx) {
         self.scroll_view.redraw(cx);
     }
     
-    pub fn draw_node(
+    pub fn draw_item(
         &mut self,
         cx: &mut Cx2d,
-        item_id: ListBoxItemId,
+        item_id: PopupMenuItemId,
         label: &str,
-    ){
+    ) {
         self.count += 1;
         
-        let list_item = self.list_item;
-        let node = self.list_items.get_or_insert(cx, item_id, | cx | {
-            ListBoxItem::new_from_ptr(cx, list_item)
+        let menu_item = self.menu_item;
+        let menu_item = self.menu_items.get_or_insert(cx, item_id, | cx | {
+            PopupMenuItem::new_from_ptr(cx, menu_item)
         });
         
-        node.draw_item(cx, label, Self::is_even(self.count), self.node_height);
+        menu_item.draw_item(cx, label, self.node_height);
     }
     
     pub fn should_node_draw(&mut self, cx: &mut Cx2d) -> bool {
@@ -303,6 +281,7 @@ impl ListBox {
         &mut self,
         cx: &mut Cx,
         event: &Event,
+        sweep_area: Area,
         _dispatch_action: &mut dyn FnMut(&mut Cx, ListBoxAction),
     ) {
         if self.scroll_view.handle_event(cx, event) {
@@ -310,79 +289,25 @@ impl ListBox {
         }
         
         let mut actions = Vec::new();
-        for (node_id, node) in self.list_items.iter_mut() {
-            node.handle_event(cx, event, &mut | _, e | actions.push((*node_id, e)));
+        for (item_id, node) in self.menu_items.iter_mut() {
+            node.handle_event(cx, event, sweep_area, &mut | _, e | actions.push((*item_id, e)));
         }
         
         for (node_id, action) in actions {
             match action {
                 ListBoxNodeAction::WasClicked => {
-                    // deselect everything but us
-                    for id in &self.selected_item_ids {
+                    // ok so. lets unselect the other items
+                    for (id, item) in &mut *self.menu_items {
                         if *id != node_id {
-                            self.list_items.get_mut(id).unwrap().set_is_selected(cx, false, Animate::Yes);
+                            item.set_is_selected(cx, false, Animate::Yes);
                         }
                     }
-                    self.selected_item_ids.clear();
-                    self.selected_item_ids.insert(node_id);
-                    //dispatch_action(cx, FileTreeAction::WasClicked(node_id));
                 }
                 ListBoxNodeAction::ShouldStartDragging => {
                 }
                 _ => ()
             }
         }
-    }
-}
-
-
-impl FrameComponent for ListBox {
-    fn bind_read(&mut self, _cx: &mut Cx, _nodes: &[LiveNode]) {
-        // lets use enum name to find a selected item here
-        /*
-        if let Some(LiveValue::Float(v)) = nodes.read_path(&self.bind) {
-            self.set_internal(*v as f32);
-            self.update_text_input(cx);
-        }*/
-    }
-    
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.scroll_view.redraw(cx);
-    }
-    
-    fn handle_component_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, FrameActionItem)) {
-        self.handle_event(cx, event, &mut | cx, action | {
-            let delta = Vec::new();
-            match &action {
-                ListBoxAction::WasClicked(_v) => {
-                    //if slider.bind.len()>0 {
-                    //    delta.write_path(&slider.bind, LiveValue::Float(*v as f64));
-                    //}
-                },
-                _ => ()
-            };
-            dispatch_action(cx, FrameActionItem::new(action.into()).bind_delta(delta))
-        });
-    }
-    
-    fn get_walk(&self) -> Walk {self.walk}
-    
-    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk, _self_uid: FrameUid) -> FrameDraw {
-        if self.begin(cx, walk).not_redrawing(){
-            return FrameDraw::done();
-        };
-        for (i, item_str) in self.items.iter().enumerate(){
-            let node_id = id_num!(listbox,i as u64).into();
-            self.count += 1;
-            let list_item = self.list_item;
-            let item = self.list_items.get_or_insert(cx, node_id, | cx | {
-                ListBoxItem::new_from_ptr(cx, list_item)
-            });
-            
-            item.draw_item(cx, &item_str, Self::is_even(self.count), self.node_height);
-        }
-        self.end(cx);
-        FrameDraw::done()
     }
 }
 
