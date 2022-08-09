@@ -51,7 +51,7 @@ live_register!{
         }
         overlay_view: {
             //walk: {abs_pos: vec2(0.0, 0.0)}
-            is_overlay: true
+            //is_overlay: true
         }
         tab_bar: TabBar {}
         splitter: Splitter {}

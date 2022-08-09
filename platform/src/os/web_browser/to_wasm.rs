@@ -191,13 +191,15 @@ impl ToWasmTouchMove {
             window_id: CxWindowPool::id_zero(),
             abs: Vec2 {x: self.touch.x, y: self.touch.y},
             tap_count: fingers.get_tap_count(digit_id),
+            handled: Cell::new(false),
             digit: DigitInfo {
                 id: digit_id,
                 index: fingers.get_digit_index(digit_id),
                 count: fingers.get_digit_count(),
                 device: DigitDevice::Touch(self.touch.uid as u64),
             },
-            captured: fingers.get_captured_area(digit_id),
+            hover_last: fingers.get_hover_area(digit_id),
+            //captured: fingers.get_captured_area(digit_id),
             modifiers: KeyModifiers::default(),
             time: self.touch.time,
         }
@@ -214,6 +216,7 @@ impl ToWasmTouchEnd {
         FingerUpEvent {
             window_id: CxWindowPool::id_zero(),
             abs: Vec2 {x: self.touch.x, y: self.touch.y},
+            tap_count: fingers.get_tap_count(digit_id),
             digit: DigitInfo {
                 id: digit_id,
                 index: fingers.get_digit_index(digit_id),
@@ -280,8 +283,10 @@ impl ToWasmMouseMove {
                 count: fingers.get_digit_count(),
                 device: DigitDevice::Mouse(button),
             },
+            handled: Cell::new(false),
+            hover_last: fingers.get_hover_area(digit_id),
             tap_count: fingers.get_tap_count(digit_id),
-            captured: fingers.get_captured_area(digit_id),
+            //captured: fingers.get_captured_area(digit_id),
             modifiers: unpack_key_modifier(self.mouse.modifiers),
             time: self.mouse.time,
         }
@@ -289,12 +294,12 @@ impl ToWasmMouseMove {
 }
 
 impl ToWasmMouseMove {
-    pub fn into_finger_hover_event(self, digit_id: DigitId, hover_last: Area, button: usize) -> FingerHoverEvent {
+    pub fn into_finger_hover_event(self, fingers: &CxFingers, digit_id: DigitId,  button: usize) -> FingerHoverEvent {
         FingerHoverEvent {
             window_id: CxWindowPool::id_zero(),
             abs: Vec2 {x: self.mouse.x, y: self.mouse.y},
             handled: Cell::new(false),
-            hover_last,
+            hover_last: fingers.get_hover_area(digit_id),
             digit_id,
             device: DigitDevice::Mouse(button),
             modifiers: unpack_key_modifier(self.mouse.modifiers),
@@ -309,15 +314,16 @@ pub struct ToWasmMouseUp {
 }
 
 impl ToWasmMouseUp {
-    pub fn into_finger_up_event(self, digit_id: DigitId, digit_index: usize, digit_count: usize, captured: Area) -> FingerUpEvent {
+    pub fn into_finger_up_event(self, fingers: &CxFingers, digit_id: DigitId, captured: Area) -> FingerUpEvent {
         FingerUpEvent {
             window_id: CxWindowPool::id_zero(),
             abs: Vec2 {x: self.mouse.x, y: self.mouse.y},
+            tap_count: fingers.get_tap_count(digit_id),
             captured,
             digit: DigitInfo {
                 id: digit_id,
-                index: digit_index,
-                count: digit_count,
+                index: fingers.get_digit_index(digit_id),
+                count: fingers.get_digit_count(),
                 device: DigitDevice::Mouse(self.mouse.button as usize),
             },
             modifiers: unpack_key_modifier(self.mouse.modifiers),

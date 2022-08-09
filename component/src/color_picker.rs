@@ -232,7 +232,8 @@ impl ColorPicker {
                 dispatch_action(cx, ColorPickerAction::DoneChanging)
             }
             Hit::FingerMove(fe) => {
-                return self.handle_finger(cx, fe.rel, dispatch_action)
+                let rel = fe.abs - fe.rect.pos;
+                return self.handle_finger(cx, rel, dispatch_action)
                 
             },
             _ => ()

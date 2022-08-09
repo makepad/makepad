@@ -2,7 +2,7 @@ use {
     std::rc::Rc,
     std::cell::RefCell,
     crate::{
-        list_box::ListBox,
+        popup_menu::PopupMenu,
         makepad_draw_2d::*,
         button_logic::*,
         frame::*
@@ -12,7 +12,7 @@ pub use crate::button_logic::ButtonAction;
 
 live_register!{
     import makepad_draw_2d::shader::std::*;
-    import makepad_component::list_box::ListBox;
+    import makepad_component::popup_menu::PopupMenu;
     
     DrawLabelText: {{DrawLabelText}} {
         text_style: {
@@ -73,7 +73,7 @@ live_register!{
             padding: {left: 4.0, top: 4.0, right: 4.0, bottom: 4.0}
         }
         
-        list_box: ListBox {
+        popup_menu: PopupMenu {
             scroll_view: {view: {is_overlay: true, always_redraw:true}}
         }
         
@@ -121,7 +121,7 @@ pub struct DropDown {
     
     walk: Walk,
     
-    list_box: Option<LivePtr>,
+    popup_menu: Option<LivePtr>,
     
     items: Vec<String>,
     
@@ -132,8 +132,8 @@ pub struct DropDown {
 }
 
 #[derive(Default, Clone)]
-struct ListBoxGlobal {
-    map: Rc<RefCell<ComponentMap<LivePtr, ListBox >> >
+struct PopupMenuGlobal {
+    map: Rc<RefCell<ComponentMap<LivePtr, PopupMenu >> >
 }
 
 #[derive(Live, LiveHook)]#[repr(C)]
@@ -145,18 +145,18 @@ struct DrawLabelText {
 
 impl LiveHook for DropDown {
     fn after_apply(&mut self, cx: &mut Cx, from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
-        if self.list_box.is_none() || !from.is_from_doc() {
+        if self.popup_menu.is_none() || !from.is_from_doc() {
             return
         }
-        let lbg = cx.global::<ListBoxGlobal>().clone();
-        let mut map = lbg.map.borrow_mut();
+        let global = cx.global::<PopupMenuGlobal>().clone();
+        let mut map = global.map.borrow_mut();
         
         // when live styling clean up old style references
         map.retain( | k, _ | cx.live_registry.borrow().generation_valid(*k));
         
-        let list_box = self.list_box.unwrap();
+        let list_box = self.popup_menu.unwrap();
         map.get_or_insert(cx, list_box, | cx | {
-            ListBox::new_from_ptr(cx, Some(list_box))
+            PopupMenu::new_from_ptr(cx, Some(list_box))
         });
     }
 }
@@ -164,10 +164,25 @@ impl DropDown {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction)) {
         self.state_handle_event(cx, event);
+        
+        if self.is_open && self.popup_menu.is_some(){
+            // ok so how will we solve this one
+            let global = cx.global::<PopupMenuGlobal>().clone();
+            let mut map = global.map.borrow_mut();
+            let menu = map.get_mut(&self.popup_menu.unwrap()).unwrap();
+            menu.handle_event(cx, event, self.bg.area(), &mut |_cx, _action|{
+                
+            });
+        }
+        
         let state = button_logic_handle_event(cx, event, self.bg.area(), &mut | cx, action | {
             match action {
                 ButtonAction::IsPressed => {
                     self.is_open = true;
+                    // ok so now we're captured by the button
+                    // so how do we now do mouse-over-is-select
+                    // on our popup menu items
+                    
                     self.bg.redraw(cx);
                 }
                 ButtonAction::IsUp => {
@@ -201,19 +216,19 @@ impl DropDown {
             self.label.draw_walk(cx, Walk::fit(), Align::default(), val);
         }
         self.bg.end(cx);
-        if self.is_open && self.list_box.is_some(){
+        if self.is_open && self.popup_menu.is_some(){
             // ok so how will we solve this one
-            let lbg = cx.global::<ListBoxGlobal>().clone();
-            let mut map = lbg.map.borrow_mut();
-            let lb = map.get_mut(&self.list_box.unwrap()).unwrap();
+            let global = cx.global::<PopupMenuGlobal>().clone();
+            let mut map = global.map.borrow_mut();
+            let lb = map.get_mut(&self.popup_menu.unwrap()).unwrap();
             // redraw should always happen
-            if lb.begin(cx, lb.get_walk()).not_redrawing(){
-                return;
-            };
+            lb.begin(cx, Walk{abs_pos:None, width:Size::Fill, height:Size::Fit, margin:Margin::default()}).assume_redrawing();
+            
             for (i, item) in self.items.iter().enumerate(){
                 let node_id = id_num!(listbox,i as u64).into();
-                lb.draw_node(cx, node_id, item);
+                lb.draw_item(cx, node_id, item);
             }
+            
             lb.end(cx);
         }
     }

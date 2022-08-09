@@ -179,7 +179,6 @@ pub enum PianoAction {
 pub enum PianoKeyAction {
     Pressed(u8),
     Up,
-    FingerMoved
 }
 
 impl PianoKey {
@@ -197,56 +196,21 @@ impl PianoKey {
         self.toggle_state(cx, is, animate, ids!(focus.on), ids!(focus.off))
     }
     
-    pub fn handle_finger_moved(
-        &mut self,
-        cx: &mut Cx,
-        event: &Event,
-        dispatch_action: &mut dyn FnMut(&mut Cx, PianoKeyAction),
-    ) {
-        let rect = self.draw_key.area().get_rect(cx);
-        match event {
-            Event::FingerDown(FingerDownEvent {abs, ..}) |
-            Event::FingerMove(FingerMoveEvent {abs, ..}) => {
-                if rect.contains(*abs) {
-                    if !self.state.is_in_state(cx, ids!(pressed.on)) {
-                        self.animate_state(cx, ids!(pressed.on));
-                        dispatch_action(cx, PianoKeyAction::Pressed(127));
-                    }
-                }
-                else {
-                    if !self.state.is_in_state(cx, ids!(pressed.off)) {
-                        self.animate_state(cx, ids!(pressed.off));
-                        dispatch_action(cx, PianoKeyAction::Up);
-                    }
-                    if !self.state.is_in_state(cx, ids!(hover.off)) {
-                        self.animate_state(cx, ids!(hover.off))
-                    }
-                }
-            }
-            Event::FingerUp(fe) => {
-                self.animate_state(cx, ids!(pressed.off));
-                dispatch_action(cx, PianoKeyAction::Up);
-                if rect.contains(fe.abs) {
-                    self.animate_state(cx, ids!(hover.on))
-                }
-                else {
-                    self.animate_state(cx, ids!(hover.off))
-                }
-            }
-            _ => ()
-        }
-    }
-    
     pub fn handle_event(
         &mut self,
         cx: &mut Cx,
         event: &Event,
+        sweep_area: Area,
         dispatch_action: &mut dyn FnMut(&mut Cx, PianoKeyAction),
     ) {
         if self.state_handle_event(cx, event).must_redraw() {
             self.draw_key.area().redraw(cx);
         }
-        match event.hits(cx, self.draw_key.area()) {
+        match event.hits_with_options(
+            cx,
+            self.draw_key.area(),
+            HitOptions::with_sweep_area(sweep_area)
+        ) {
             Hit::FingerHoverIn(_) => {
                 cx.set_cursor(MouseCursor::Hand);
                 self.animate_state(cx, ids!(hover.on));
@@ -254,8 +218,20 @@ impl PianoKey {
             Hit::FingerHoverOut(_) => {
                 self.animate_state(cx, ids!(hover.off));
             }
-            Hit::FingerMove(_) | Hit::FingerDown(_) | Hit::FingerUp(_) => {
-                dispatch_action(cx, PianoKeyAction::FingerMoved);
+            Hit::FingerSweepIn(_) => {
+                self.animate_state(cx, ids!(hover.on));
+                self.animate_state(cx, ids!(pressed.on));
+                dispatch_action(cx, PianoKeyAction::Pressed(127));
+            }
+            Hit::FingerSweepOut(se) => {
+                if se.is_up{
+                    self.animate_state(cx, ids!(hover.on));
+                }
+                else{
+                    self.animate_state(cx, ids!(hover.off));
+                }
+                self.animate_state(cx, ids!(pressed.off));
+                dispatch_action(cx, PianoKeyAction::Up);
             }
             _ => {}
         }
@@ -351,28 +327,15 @@ impl Piano {
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, PianoAction),
     ) {
-        let mut finger_moved = false;
         let mut actions = Vec::new();
         for (key_id, piano_key) in self.black_keys.iter_mut().chain(self.white_keys.iter_mut()) {
-            piano_key.handle_event(cx, event, &mut | _, action | {
-                if let PianoKeyAction::FingerMoved = action {
-                    finger_moved = true;
-                }
-                else {
-                    actions.push((*key_id, action))
-                }
+            piano_key.handle_event(cx, event, self.view.area(), &mut | _, action | {
+                actions.push((*key_id, action))
             });
-        }
-        
-        if finger_moved {
-            for (key_id, piano_key) in self.black_keys.iter_mut().chain(self.white_keys.iter_mut()) {
-                piano_key.handle_finger_moved(cx, event, &mut | _, action | {actions.push((*key_id, action))})
-            }
         }
         
         for (node_id, action) in actions {
             match action {
-                PianoKeyAction::FingerMoved => {},
                 PianoKeyAction::Pressed(velocity) => {
                     self.set_key_focus(cx);
                     dispatch_action(cx, PianoAction::Note(PianoNote {
@@ -417,7 +380,7 @@ impl Piano {
             }
         }
         
-         match event{
+        match event {
             Event::KeyDown(ke) => if !ke.is_repeat {
                 if let Some(nn) = key_map(ke.key_code) {
                     let note_number = nn + self.keyboard_octave * 12;
@@ -459,7 +422,7 @@ impl Piano {
                     velocity: self.keyboard_velocity
                 }));
             },
-            _=>()
+            _ => ()
         }
         
         match event.hits(cx, self.view.area()) {
