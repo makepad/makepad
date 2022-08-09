@@ -280,8 +280,9 @@ impl Slider {
                 dispatch_action(cx, self, SliderAction::EndSlide);
             }
             Hit::FingerMove(fe) => {
+                let rel = fe.abs - fe.abs_start;
                 if let Some(start_pos) = self.dragging {
-                    self.value = (start_pos + (fe.rel.x - fe.rel_start.x) / fe.rect.size.x).max(0.0).min(1.0);
+                    self.value = (start_pos + rel.x / fe.rect.size.x).max(0.0).min(1.0);
                     self.slider.redraw(cx);
                     self.update_text_input(cx);
                     dispatch_action(cx, self, SliderAction::Slide(self.to_external()));

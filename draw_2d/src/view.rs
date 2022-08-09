@@ -103,6 +103,7 @@ impl View {
         
         // check if we have a pass id parent
         let pass_id = cx.pass_id.expect("No pass found when begin_view");
+        let redraw_id = cx.cx.redraw_id;
         
         cx.draw_lists[self.draw_list.id()].pass_id = Some(pass_id);
         
@@ -117,32 +118,33 @@ impl View {
         }
         
         // find the parent draw list id
-        if self.is_overlay {
-            let overlay_id = cx.overlay_id.unwrap();
-            // views are already cached
-            // however we should create a drawcall pool
-            // and get rid of the re-use of drawslots
-            // i mean it already is a pool on the view
-            // why is instances an option vec?
-        }
-        else if let Some(parent_id) = cx.draw_list_stack.last().cloned() {
-            // copy the view transform
-            // TODO this whole idea will go away
-            if !cx.draw_lists[self.draw_list.id()].locked_view_transform {
-                for i in 0..16 {
-                    cx.draw_lists[self.draw_list.id()].draw_list_uniforms.view_transform[i] =
-                    cx.draw_lists[parent_id].draw_list_uniforms.view_transform[i];
-                }
+        if let Some(parent_id) = codeflow_parent_id {
+            if self.is_overlay {
+                let overlay_id = cx.overlay_id.unwrap();
+                cx.draw_lists[overlay_id].insert_sub_list(redraw_id, self.draw_list.id());
+                let parent = &mut cx.cx.draw_lists[parent_id];
+                parent.nav_items.push(NavItem::Child(self.draw_list.id()));
             }
-            let parent = &mut cx.cx.draw_lists[parent_id];
-            parent.append_sub_view(cx.cx.redraw_id, self.draw_list.id());
+            else {
+                // copy the view transform
+                // TODO this whole idea will go away
+                /*if !cx.draw_lists[self.draw_list.id()].locked_view_transform {
+                    for i in 0..16 {
+                        cx.draw_lists[self.draw_list.id()].draw_list_uniforms.view_transform[i] =
+                        cx.draw_lists[parent_id].draw_list_uniforms.view_transform[i];
+                    }
+                }*/
+                let parent = &mut cx.cx.draw_lists[parent_id];
+                parent.append_sub_list(redraw_id, self.draw_list.id());
+                parent.nav_items.push(NavItem::Child(self.draw_list.id()));
+            }
         }
         
         // set nesting draw list id for incremental repaint scanning
         cx.cx.draw_lists[self.draw_list.id()].codeflow_parent_id = codeflow_parent_id;
         
         // check redraw status
-        if !self.always_redraw
+        if !self.is_overlay && !self.always_redraw
             && cx.cx.draw_lists[self.draw_list.id()].draw_items.len() != 0
             && !view_will_redraw {
             
@@ -164,14 +166,13 @@ impl View {
         
         // update redraw id
         let last_redraw_id = cxview.redraw_id;
-        self.redraw_id = cx.cx.redraw_id;
-        
-        cxview.clear_draw_items(cx.cx.redraw_id);
+        self.redraw_id = redraw_id;
+        cxview.clear_draw_items(redraw_id);
         
         cx.draw_list_stack.push(self.draw_list.id());
         
         let old_area = Area::DrawList(DrawListArea {draw_list_id: self.draw_list.id(), redraw_id: last_redraw_id});
-        let new_area = Area::DrawList(DrawListArea {draw_list_id: self.draw_list.id(), redraw_id: cx.redraw_id});
+        let new_area = Area::DrawList(DrawListArea {draw_list_id: self.draw_list.id(), redraw_id});
         
         cx.update_area_refs(old_area, new_area);
         cx.begin_turtle_with_guard(walk, layout, new_area);
