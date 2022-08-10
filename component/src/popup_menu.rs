@@ -65,8 +65,8 @@ live_register!{
                     from: {all: Play::Snap}
                     apply: {
                         hover: 0.0,
-                        bg_quad: {hover: (hover)}
-                        name_text: {hover: (hover)}
+                        bg: {hover: (hover)}
+                        name: {hover: (hover)}
                     }
                 }
                 on = {
@@ -82,8 +82,8 @@ live_register!{
                     from: {all: Play::Snap}
                     apply: {
                         selected: 0.0,
-                        bg_quad: {selected: (selected)}
-                        name_text: {selected: (selected)}
+                        bg: {selected: (selected)}
+                        name: {selected: (selected)}
                     }
                 }
                 on = {
@@ -99,7 +99,8 @@ live_register!{
     
     PopupMenu: {{PopupMenu}} {
         menu_item: PopupMenuItem {}
-        layout: {flow: Flow::Down}
+        layout: {flow: Flow::Down, padding:5}
+        bg:{shape: ShadowBox, radius:4, color:#0}
         scroll_view: {
             view: {
                 debug_id: file_tree_view
@@ -126,8 +127,8 @@ struct DrawNameText {
 #[derive(Live, LiveHook)]
 pub struct PopupMenuItem {
     
-    bg_quad: DrawBgQuad,
-    name_text: DrawNameText,
+    bg: DrawBgQuad,
+    name: DrawNameText,
     
     layout: Layout,
     state: State,
@@ -148,12 +149,10 @@ pub struct PopupMenu {
     scroll_view: ScrollView,
     menu_item: Option<LivePtr>,
     
-    filler_quad: DrawBgQuad,
+    bg: DrawShape,
     layout: Layout,
     
     items: Vec<String>,
-    
-    #[rust] selected_item: PopupMenuItemId,
     
     #[rust] first_tap: bool,
     #[rust] menu_items: ComponentMap<PopupMenuItemId, PopupMenuItem>,
@@ -197,9 +196,9 @@ impl PopupMenuItem {
         cx: &mut Cx2d,
         label: &str,
     ) {
-        self.bg_quad.begin(cx, self.walk, self.layout);
-        self.name_text.draw_walk(cx, Walk::fit(), Align::default(), label);
-        self.bg_quad.end(cx);
+        self.bg.begin(cx, self.walk, self.layout);
+        self.name.draw_walk(cx, Walk::fit(), Align::default(), label);
+        self.bg.end(cx);
     }
     
     pub fn handle_event(
@@ -210,12 +209,12 @@ impl PopupMenuItem {
         dispatch_action: &mut dyn FnMut(&mut Cx, PopupMenuItemAction),
     ) {
         if self.state_handle_event(cx, event).must_redraw() {
-            self.bg_quad.area().redraw(cx);
+            self.bg.area().redraw(cx);
         }
         
         match event.hits_with_options(
             cx,
-            self.bg_quad.area(),
+            self.bg.area(),
             HitOptions::with_sweep_area(sweep_area)
         ) {
             Hit::FingerHoverIn(_) => {
@@ -255,9 +254,17 @@ impl PopupMenu {
     }
     
     pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk) -> ViewRedrawing {
-        self.scroll_view.begin(cx, walk, self.layout) ?;
+        self.scroll_view.begin(cx, walk, Layout::flow_down()) ?;
         self.count = 0;
         ViewRedrawing::yes()
+    }
+    
+    pub fn begin_bg(&mut self, cx: &mut Cx2d){
+        self.bg.begin(cx, Walk::fill_fit(), self.layout);
+    }
+
+    pub fn end_bg(&mut self, cx: &mut Cx2d){
+        self.bg.end(cx);
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {

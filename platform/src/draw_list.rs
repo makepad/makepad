@@ -12,6 +12,7 @@ use {
         pass::PassId,
         id_pool::*,
         nav::*,
+        area::Area,
         cx_draw_shaders::{
             CxDrawShaderOptions,
             CxDrawShaderMapping,
@@ -264,6 +265,8 @@ pub struct CxDrawList {
     pub pass_id: Option<PassId>,
     
     pub locked_view_transform: bool,
+
+    // scrolling
     pub no_v_scroll: bool, // this means we
     pub no_h_scroll: bool,
     pub parent_scroll: Vec2,
