@@ -144,7 +144,7 @@ impl Cx {
                     self.call_event_handler(&Event::FingerMove(
                         tw.into_finger_move_event(&self.fingers, digit_id)
                     ));
-                    
+                    self.fingers.cycle_hover_area(digit_id);
                 }
                 
                 id!(ToWasmTouchEnd) => {
