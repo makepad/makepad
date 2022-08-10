@@ -148,6 +148,27 @@ proptest! {
     }
 
     #[test]
+    fn char_cursor_front(string in arbitrary_string()) {
+        let rope = Rope::from(&string);
+        let char_cursor = rope.char_cursor_front();
+        assert_eq!(char_cursor.current(), string.chars().next())
+    }
+
+    #[test]
+    fn char_cursor_back(string in arbitrary_string()) {
+        let rope = Rope::from(&string);
+        let char_cursor = rope.char_cursor_back();
+        assert_eq!(char_cursor.current(), None)
+    }
+
+    #[test]
+    fn char_cursor_at((string, byte_index) in arbitrary_string_and_byte_index()) {
+        let rope = Rope::from(&string);
+        let char_cursor = rope.char_cursor_at(byte_index);
+        assert_eq!(char_cursor.current(), string[byte_index..].chars().next());
+    }
+
+    #[test]
     fn chunks(string in arbitrary_string()) {
         let rope = Rope::from(&string);
         assert_eq!(rope.chunks().collect::<String>(), string);
@@ -156,43 +177,35 @@ proptest! {
     #[test]
     fn chunks_rev(string in arbitrary_string()) {
         let rope = Rope::from(&string);
-        assert_eq!(rope.chunks_rev().flat_map(|chunk| chunk.chars().rev()).collect::<String>(), string.chars().rev().collect::<String>());
+        assert_eq!(
+            rope.chunks_rev().flat_map(|chunk| chunk.chars().rev()).collect::<String>(),
+            string.chars().rev().collect::<String>()
+        );
     }
 
     #[test]
     fn bytes(string in arbitrary_string()) {
         let rope = Rope::from(&string);
-        assert_eq!(
-            rope.bytes().collect::<Vec<_>>(),
-            string.bytes().collect::<Vec<_>>()
-        );
+        assert_eq!(rope.bytes().collect::<Vec<_>>(), string.bytes().collect::<Vec<_>>());
     }
 
     #[test]
     fn bytes_rev(string in arbitrary_string()) {
         let rope = Rope::from(&string);
-        assert_eq!(
-            rope.bytes_rev().collect::<Vec<_>>(),
-            string.bytes().rev().collect::<Vec<_>>()
-        );
+        println!("{:?} {:#?}", string, rope);
+        assert_eq!(rope.bytes_rev().collect::<Vec<_>>(), string.bytes().rev().collect::<Vec<_>>());
     }
 
     #[test]
     fn chars(string in arbitrary_string()) {
         let rope = Rope::from(&string);
-        assert_eq!(
-            rope.chars().collect::<Vec<_>>(),
-            string.chars().collect::<Vec<_>>()
-        );
+        assert_eq!(rope.chars().collect::<Vec<_>>(), string.chars().collect::<Vec<_>>());
     }
 
     #[test]
     fn chars_rev(string in arbitrary_string()) {
         let rope = Rope::from(&string);
-        assert_eq!(
-            rope.chars_rev().collect::<Vec<_>>(),
-            string.chars().rev().collect::<Vec<_>>()
-        );
+        assert_eq!(rope.chars_rev().collect::<Vec<_>>(), string.chars().rev().collect::<Vec<_>>());
     }
 
     #[test]
@@ -282,7 +295,10 @@ proptest! {
         let string_slice = &string[byte_range.clone()];
         let rope = Rope::from(&string);
         let rope_slice = rope.slice(byte_range);
-        assert_eq!(rope_slice.is_char_boundary(byte_index), string_slice.is_char_boundary(byte_index));
+        assert_eq!(
+            rope_slice.is_char_boundary(byte_index),
+            string_slice.is_char_boundary(byte_index),
+        );
     }
 
     #[test]
@@ -298,7 +314,10 @@ proptest! {
         let string_slice = &string[byte_range.clone()];
         let rope = Rope::from(&string);
         let rope_slice = rope.slice(byte_range);
-        assert_eq!(rope_slice.byte_to_line(byte_index), string_slice[..byte_index].count_line_breaks() + 1);
+        assert_eq!(
+            rope_slice.byte_to_line(byte_index),
+            string_slice[..byte_index].count_line_breaks() + 1,
+        );
     }
 
     #[test]
@@ -331,10 +350,7 @@ proptest! {
         let rope = Rope::from(&string);
         let rope_slice = rope.slice(byte_range);
         assert_eq!(
-            rope_slice
-                .chunks_rev()
-                .flat_map(|chunk| chunk.chars().rev())
-                .collect::<String>(),
+            rope_slice.chunks_rev().flat_map(|chunk| chunk.chars().rev()).collect::<String>(),
             string_slice.chars().rev().collect::<String>(),
         );
     }
