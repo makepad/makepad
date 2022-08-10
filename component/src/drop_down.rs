@@ -238,6 +238,7 @@ impl DropDown {
             Hit::KeyFocusLost(_) => {
                 self.animate_state(cx, ids!(focus.off));
                 self.set_closed(cx);
+                self.bg.redraw(cx);
             }
             Hit::KeyFocus(_) => {
                 self.animate_state(cx, ids!(focus.on));
@@ -290,8 +291,10 @@ impl DropDown {
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
+        cx.clear_sweep_lock(self.bg.area());
+        
         self.bg.begin(cx, walk, self.layout);
-        let start_pos = cx.turtle().pos();
+        let start_pos = cx.turtle().rect().pos;
         if let Some(val) = self.items.get(self.selected_item) {
             self.label.draw_walk(cx, Walk::fit(), Align::default(), val);
         }
@@ -300,6 +303,7 @@ impl DropDown {
         cx.add_nav_stop(self.bg.area(), NavRole::DropDown, Margin::default());
         
         if self.is_open && self.popup_menu.is_some() {
+            cx.set_sweep_lock(self.bg.area());
             // ok so if self was not open, we need to
             // ok so how will we solve this one
             let global = cx.global::<PopupMenuGlobal>().clone();
@@ -309,6 +313,7 @@ impl DropDown {
             // so all we need is to position it at our current abspos.
             let mut item_pos = None;
             lb.begin(cx, Walk {abs_pos: Some(start_pos), width: Size::Fill, height: Size::Fit, margin: Margin::default()}).assume_redrawing();
+            lb.begin_bg(cx);
             for (i, item) in self.items.iter().enumerate() {
                 let node_id = LiveId(i as u64).into();
                 
@@ -318,9 +323,9 @@ impl DropDown {
                 
                 lb.draw_item(cx, node_id, item);
             }
+            lb.end_bg(cx);
             cx.turtle_mut().set_shift(start_pos - item_pos.unwrap());
             lb.end(cx);
-            
         }
         self.is_open;
     }
