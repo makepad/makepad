@@ -21,13 +21,35 @@ fn arbitrary_string_and_unaligned_byte_index() -> impl Strategy<Value = (String,
     })
 }
 
-fn arbitrary_string_and_byte_index() -> impl Strategy<Value = (String, usize)> {
-    arbitrary_string_and_unaligned_byte_index().prop_map(|(string, mut index)| {
-        while !string.is_char_boundary(index) {
-            index -= 1;
-        }
-        (string, index)
+fn arbitrary_string_and_two_unaligned_byte_indices() -> impl Strategy<Value = (String, usize, usize)>
+{
+    arbitrary_string().prop_flat_map(|string| {
+        let byte_len = string.len();
+        (Just(string), 0..=byte_len, 0..=byte_len)
     })
+}
+
+fn arbitrary_string_and_byte_index() -> impl Strategy<Value = (String, usize)> {
+    arbitrary_string_and_unaligned_byte_index().prop_map(|(string, mut byte_index)| {
+        while !string.is_char_boundary(byte_index) {
+            byte_index -= 1;
+        }
+        (string, byte_index)
+    })
+}
+
+fn arbitrary_string_and_two_byte_indices() -> impl Strategy<Value = (String, usize, usize)> {
+    arbitrary_string_and_two_unaligned_byte_indices().prop_map(
+        |(string, mut byte_index_0, mut byte_index_1)| {
+            while !string.is_char_boundary(byte_index_0) {
+                byte_index_0 -= 1;
+            }
+            while !string.is_char_boundary(byte_index_1) {
+                byte_index_1 -= 1;
+            }
+            (string, byte_index_0, byte_index_1)
+        },
+    )
 }
 
 fn arbitrary_string_and_char_index() -> impl Strategy<Value = (String, usize)> {
@@ -63,15 +85,39 @@ fn arbitrary_string_and_byte_range_and_unaligned_byte_index(
     })
 }
 
+fn arbitrary_string_and_byte_range_and_two_unaligned_byte_indices(
+) -> impl Strategy<Value = (String, Range<usize>, usize, usize)> {
+    arbitrary_string_and_byte_range().prop_flat_map(|(string, range)| {
+        let byte_len = range.len();
+        (Just(string), Just(range), 0..=byte_len, 0..=byte_len)
+    })
+}
+
 fn arbitrary_string_and_byte_range_and_byte_index(
 ) -> impl Strategy<Value = (String, Range<usize>, usize)> {
     arbitrary_string_and_byte_range_and_unaligned_byte_index().prop_map(
-        |(string, range, mut index)| {
+        |(string, range, mut byte_index)| {
             let slice = &string[range.clone()];
-            while !slice.is_char_boundary(index) {
-                index -= 1;
+            while !slice.is_char_boundary(byte_index) {
+                byte_index -= 1;
             }
-            (string, range, index)
+            (string, range, byte_index)
+        },
+    )
+}
+
+fn arbitrary_string_and_byte_range_and_two_byte_indices(
+) -> impl Strategy<Value = (String, Range<usize>, usize, usize)> {
+    arbitrary_string_and_byte_range_and_two_unaligned_byte_indices().prop_map(
+        |(string, range, mut byte_index_0, mut byte_index_1)| {
+            let slice = &string[range.clone()];
+            while !slice.is_char_boundary(byte_index_0) {
+                byte_index_0 -= 1;
+            }
+            while !slice.is_char_boundary(byte_index_1) {
+                byte_index_1 -= 1;
+            }
+            (string, range, byte_index_0, byte_index_1)
         },
     )
 }
@@ -170,7 +216,7 @@ proptest! {
     }
 
     #[test]
-    fn chunk_cursor_at((string, byte_index) in arbitrary_string_and_byte_index()) {
+    fn chunk_cursor_at((string, byte_index) in arbitrary_string_and_unaligned_byte_index()) {
         let rope = Rope::from(&string);
         let chunk_cursor = rope.chunk_cursor_at(byte_index);
         assert!(
@@ -184,45 +230,47 @@ proptest! {
     }
 
     #[test]
-    fn byte_cursor_front(string in arbitrary_string()) {
+    fn chunk_cursor_move_to((string, byte_index_0, byte_index_1) in arbitrary_string_and_two_unaligned_byte_indices()) {
         let rope = Rope::from(&string);
-        let byte_cursor = rope.byte_cursor_front();
-        assert_eq!(byte_cursor.current(), string.as_bytes().first().cloned());
+        let mut chunk_cursor = rope.chunk_cursor_at(byte_index_0);
+        chunk_cursor.move_to(byte_index_1);
+        assert!(
+            chunk_cursor.byte_position() <= byte_index_1
+                && chunk_cursor.byte_position() + chunk_cursor.current().len() >= byte_index_1
+        );
+        assert_eq!(
+            chunk_cursor.current(),
+            &string[chunk_cursor.byte_position()..][..chunk_cursor.current().len()]
+        );
     }
 
     #[test]
-    fn byte_cursor_back(string in arbitrary_string()) {
+    fn cursor_front(string in arbitrary_string()) {
         let rope = Rope::from(&string);
-        let byte_cursor = rope.byte_cursor_back();
-        assert_eq!(byte_cursor.current(), None);
+        let byte_cursor = rope.cursor_front();
+        assert_eq!(byte_cursor.current_char(), string.chars().next())
     }
 
     #[test]
-    fn byte_cursor_at((string, byte_index) in arbitrary_string_and_unaligned_byte_index()) {
+    fn cursor_back(string in arbitrary_string()) {
         let rope = Rope::from(&string);
-        let byte_cursor = rope.byte_cursor_at(byte_index);
-        assert_eq!(byte_cursor.current(), string.as_bytes().get(byte_index).cloned());
+        let char_cursor = rope.cursor_back();
+        assert_eq!(char_cursor.current_char(), None);
     }
 
     #[test]
-    fn char_cursor_front(string in arbitrary_string()) {
+    fn cursor_at((string, byte_index) in arbitrary_string_and_byte_index()) {
         let rope = Rope::from(&string);
-        let byte_cursor = rope.char_cursor_front();
-        assert_eq!(byte_cursor.current(), string.chars().next())
+        let char_cursor = rope.cursor_at(byte_index);
+        assert_eq!(char_cursor.current_char(), string[byte_index..].chars().next());
     }
 
     #[test]
-    fn char_cursor_back(string in arbitrary_string()) {
+    fn cursor_move_to((string, byte_index_0, byte_index_1) in arbitrary_string_and_two_byte_indices()) {
         let rope = Rope::from(&string);
-        let char_cursor = rope.char_cursor_back();
-        assert_eq!(char_cursor.current(), None);
-    }
-
-    #[test]
-    fn char_cursor_at((string, byte_index) in arbitrary_string_and_byte_index()) {
-        let rope = Rope::from(&string);
-        let char_cursor = rope.char_cursor_at(byte_index);
-        assert_eq!(char_cursor.current(), string[byte_index..].chars().next());
+        let mut char_cursor = rope.cursor_at(byte_index_0);
+        char_cursor.move_to(byte_index_1);
+        assert_eq!(char_cursor.current_char(), string[char_cursor.byte_position()..].chars().next());
     }
 
     #[test]
@@ -420,7 +468,7 @@ proptest! {
     }
 
     #[test]
-    fn slice_chunk_cursor_at((string, byte_range, byte_index) in arbitrary_string_and_byte_range_and_byte_index()) {
+    fn slice_chunk_cursor_at((string, byte_range, byte_index) in arbitrary_string_and_byte_range_and_unaligned_byte_index()) {
         let string_slice = &string[byte_range.clone()];
         let rope = Rope::from(&string);
         let rope_slice = rope.slice(byte_range.clone());
@@ -436,55 +484,56 @@ proptest! {
     }
 
     #[test]
-    fn slice_byte_cursor_front((string, byte_range) in arbitrary_string_and_byte_range()) {
+    fn slice_chunk_cursor_move_to((string, byte_range, byte_index_0, byte_index_1) in arbitrary_string_and_byte_range_and_two_unaligned_byte_indices()) {
         let string_slice = &string[byte_range.clone()];
         let rope = Rope::from(&string);
         let rope_slice = rope.slice(byte_range.clone());
-        let byte_cursor = rope_slice.byte_cursor_front();
-        assert_eq!(byte_cursor.current(), string_slice.as_bytes().first().cloned());
+        let mut chunk_cursor = rope_slice.chunk_cursor_at(byte_index_0);
+        chunk_cursor.move_to(byte_index_1);
+        assert!(
+            chunk_cursor.byte_position() <= byte_index_1
+                && chunk_cursor.byte_position() + chunk_cursor.current().len() >= byte_index_1
+        );
+        assert_eq!(
+            chunk_cursor.current(),
+            &string_slice[chunk_cursor.byte_position()..][..chunk_cursor.current().len()]
+        );
     }
 
     #[test]
-    fn slice_byte_cursor_back((string, byte_range) in arbitrary_string_and_byte_range()) {
-        let rope = Rope::from(&string);
-        let rope_slice = rope.slice(byte_range.clone());
-        let byte_cursor = rope_slice.byte_cursor_back();
-        assert_eq!(byte_cursor.current(), None);
-    }
-
-    #[test]
-    fn slice_byte_cursor_at((string, byte_range, byte_index) in arbitrary_string_and_byte_range_and_unaligned_byte_index()) {
+    fn slice_cursor_front((string, byte_range) in arbitrary_string_and_byte_range()) {
         let string_slice = &string[byte_range.clone()];
         let rope = Rope::from(&string);
         let rope_slice = rope.slice(byte_range.clone());
-        let byte_cursor = rope_slice.byte_cursor_at(byte_index);
-        assert_eq!(byte_cursor.current(), string_slice.as_bytes().get(byte_index).cloned());
+        let char_cursor = rope_slice.cursor_front();
+        assert_eq!(char_cursor.current_char(), string_slice.chars().next())
     }
 
     #[test]
-    fn slice_char_cursor_front((string, byte_range) in arbitrary_string_and_byte_range()) {
+    fn slice_cursor_back((string, byte_range) in arbitrary_string_and_byte_range()) {
+        let rope = Rope::from(&string);
+        let rope_slice = rope.slice(byte_range.clone());
+        let char_cursor = rope_slice.cursor_back();
+        assert_eq!(char_cursor.current_char(), None);
+    }
+
+    #[test]
+    fn slice_cursor_at((string, byte_range, byte_index) in arbitrary_string_and_byte_range_and_byte_index()) {
         let string_slice = &string[byte_range.clone()];
         let rope = Rope::from(&string);
         let rope_slice = rope.slice(byte_range.clone());
-        let char_cursor = rope_slice.char_cursor_front();
-        assert_eq!(char_cursor.current(), string_slice.chars().next())
+        let char_cursor = rope_slice.cursor_at(byte_index);
+        assert_eq!(char_cursor.current_char(), string_slice[byte_index..].chars().next());
     }
 
     #[test]
-    fn slice_char_cursor_back((string, byte_range) in arbitrary_string_and_byte_range()) {
-        let rope = Rope::from(&string);
-        let rope_slice = rope.slice(byte_range.clone());
-        let char_cursor = rope_slice.char_cursor_back();
-        assert_eq!(char_cursor.current(), None);
-    }
-
-    #[test]
-    fn slice_char_cursor_at((string, byte_range, byte_index) in arbitrary_string_and_byte_range_and_byte_index()) {
+    fn slice_cursor_move_to((string, byte_range, byte_index_0, byte_index_1) in arbitrary_string_and_byte_range_and_two_byte_indices()) {
         let string_slice = &string[byte_range.clone()];
         let rope = Rope::from(&string);
         let rope_slice = rope.slice(byte_range.clone());
-        let char_cursor = rope_slice.char_cursor_at(byte_index);
-        assert_eq!(char_cursor.current(), string_slice[byte_index..].chars().next());
+        let mut char_cursor = rope_slice.cursor_at(byte_index_0);
+        char_cursor.move_to(byte_index_1);
+        assert_eq!(char_cursor.current_char(), string_slice[char_cursor.byte_position()..].chars().next());
     }
 
     #[test]
@@ -551,7 +600,7 @@ proptest! {
     }
 
     #[test]
-    fn test_slice_cmp(((string_0, byte_range_0), (string_1, byte_range_1)) in (arbitrary_string_and_byte_range(), arbitrary_string_and_byte_range())) {
+    fn slice_cmp(((string_0, byte_range_0), (string_1, byte_range_1)) in (arbitrary_string_and_byte_range(), arbitrary_string_and_byte_range())) {
         let string_slice_0 = &string_0[byte_range_0.clone()];
         let rope_0 = Rope::from(&string_0);
         let rope_slice_0 = rope_0.slice(byte_range_0);

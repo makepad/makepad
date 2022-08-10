@@ -11,7 +11,7 @@ pub struct ChunkCursor<'a> {
 }
 
 impl<'a> ChunkCursor<'a> {
-    /// Returns `true` if `self` is currently pointing to the front of the `Rope`.
+    /// Returns `true` if `self` is currently pointing to the front chunk of the `Rope`.
     ///
     /// # Performance
     ///
@@ -21,7 +21,7 @@ impl<'a> ChunkCursor<'a> {
         self.byte_position <= self.byte_start
     }
 
-    /// Returns `true` if `self` is currently pointing to the back of the `Rope`.
+    /// Returns `true` if `self` is currently pointing to the back chunk of the `Rope`.
     ///
     /// # Performance
     ///
@@ -98,6 +98,40 @@ impl<'a> ChunkCursor<'a> {
         self.descend_right();
     }
 
+    /// Moves `self` to the chunk containing the given `byte_position` within the `Rope`.
+    ///
+    /// # Performance
+    ///
+    /// Runs in O(log n) time.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `byte_position` is greater than the length of the `Rope` in bytes.
+    #[inline]
+    pub fn move_to(&mut self, byte_position: usize) {
+        let byte_position = self.byte_start + byte_position;
+        assert!(byte_position <= self.byte_end);
+        if byte_position == 0 {
+            self.byte_position = 0;
+            self.path.clear();
+            self.descend_left();
+        } else if byte_position == self.root.info().byte_count {
+            self.byte_position = 0;
+            self.path.clear();
+            self.descend_right();
+        } else {
+            while self.byte_position > byte_position
+                || self.byte_position + self.current_node().info().byte_count <= byte_position
+            {
+                let (branch, index) = self.path.pop().unwrap();
+                for node in &branch[..index] {
+                    self.byte_position -= node.info().byte_count;
+                }
+            }
+            self.descend_to(byte_position);
+        }
+    }
+
     pub(crate) fn front(root: &'a Node, byte_start: usize, byte_end: usize) -> Self {
         let mut cursor = ChunkCursor::new(root, byte_start, byte_end);
         if byte_start == 0 {
@@ -132,8 +166,7 @@ impl<'a> ChunkCursor<'a> {
         let mut cursor = ChunkCursor::new(root, byte_start, byte_end);
         if byte_position == 0 {
             cursor.descend_left();
-        }
-        if byte_position == root.info().byte_count {
+        } else if byte_position == root.info().byte_count {
             cursor.descend_right();
         } else {
             cursor.descend_to(byte_position);
