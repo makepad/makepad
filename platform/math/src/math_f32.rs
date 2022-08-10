@@ -180,6 +180,10 @@ impl Vec2 {
         let dy = self.y - other.y;
         (dx * dx + dy * dy).sqrt()
     }
+    
+    pub fn length(&self) -> f32 {
+        (self.x * self.x + self.y * self.y).sqrt()
+    }
 
     pub fn to_vec3(&self) -> Vec3 {
         Vec3 {x: self.x, y: self.y, z: 0.0}
