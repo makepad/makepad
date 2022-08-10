@@ -637,7 +637,7 @@ impl HitOptions {
             margin: Some(margin)
         }
     }
-    pub fn use_multi_touch() -> Self {
+    pub fn with_multi_touch() -> Self {
         Self {
             use_multi_touch: true,
             sweep_area: Area::Empty,
