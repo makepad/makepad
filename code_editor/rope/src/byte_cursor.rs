@@ -1,14 +1,14 @@
 use crate::{ChunkCursor, Slice};
 
-/// A cursor over the `char`s of a `Rope`.
+/// A cursor over the bytes of a `Rope`.
 #[derive(Clone, Debug)]
-pub struct CharCursor<'a> {
+pub struct ByteCursor<'a> {
     chunk_cursor: ChunkCursor<'a>,
     chunk: &'a str,
     byte_index: usize,
 }
 
-impl<'a> CharCursor<'a> {
+impl<'a> ByteCursor<'a> {
     /// Returns `true` if `self` is currently pointing to the front of the `Rope`.
     ///
     /// # Performance
@@ -39,18 +39,18 @@ impl<'a> CharCursor<'a> {
         self.chunk_cursor.byte_position() + self.byte_index
     }
 
-    /// Returns the char that `self` is currently pointing to, or `None` if `self` is currently
+    /// Returns the byte that `self` is currently pointing to, or `None` if `self` is currently
     /// pointing to the back of the `Rope`.
     ///
     /// # Performance
     ///
     /// Runs in O(1) time.
     #[inline]
-    pub fn current(&self) -> Option<char> {
-        self.chunk[self.byte_index..].chars().next()
+    pub fn current(&self) -> Option<u8> {
+        self.chunk.as_bytes().get(self.byte_index).cloned()
     }
 
-    /// Moves `self` to the next `char` of the `Rope`.
+    /// Moves `self` to the next byte of the `Rope`.
     ///
     /// # Performance
     ///
@@ -62,7 +62,7 @@ impl<'a> CharCursor<'a> {
     #[inline]
     pub fn move_next(&mut self) {
         assert!(!self.is_at_back());
-        self.byte_index += utf8_char_width(self.chunk.as_bytes()[self.byte_index]);
+        self.byte_index += 1;
         if self.byte_index == self.chunk.len() && !self.chunk_cursor.is_at_back() {
             self.chunk_cursor.move_next();
             self.chunk = self.chunk_cursor.current();
@@ -70,7 +70,7 @@ impl<'a> CharCursor<'a> {
         }
     }
 
-    /// Moves `self` to the previous `char` of the `Rope`.
+    /// Moves `self` to the previous byte of the `Rope`.
     ///
     /// # Performance
     ///
@@ -87,12 +87,7 @@ impl<'a> CharCursor<'a> {
             self.chunk = self.chunk_cursor.current();
             self.byte_index = self.chunk.len();
         }
-        loop {
-            self.byte_index -= 1;
-            if self.chunk.is_char_boundary(self.byte_index) {
-                break;
-            }
-        }
+        self.byte_index -= 1;
     }
 
     pub(crate) fn front(slice: Slice<'a>) -> Self {
@@ -119,21 +114,10 @@ impl<'a> CharCursor<'a> {
         let chunk_cursor = slice.chunk_cursor_at(byte_position);
         let chunk = chunk_cursor.current();
         let byte_index = byte_position - chunk_cursor.byte_position();
-        assert!(chunk.is_char_boundary(byte_index));
         Self {
             chunk_cursor,
             chunk,
             byte_index,
         }
-    }
-}
-
-#[inline]
-fn utf8_char_width(byte: u8) -> usize {
-    match byte {
-        byte if byte < 0x80 => 1,
-        byte if byte < 0xe0 => 2,
-        byte if byte < 0xf0 => 3,
-        _ => 4,
     }
 }
