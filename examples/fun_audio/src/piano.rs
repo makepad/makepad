@@ -30,7 +30,7 @@ live_register!{
             let light = normalize(vec3(0.75, 0.5, 0.5))
             let light_hover = normalize(vec3(0.75, 0.5, 1.5))
             let diff = pow(max(dot(mix(light, light_hover, self.hover * (1 - self.pressed)), normal), 0), 3)
-            return mix(#00, #ff, diff)
+            return mix(#00, #cc, diff)
         }
         
         fn white_key(self) -> vec4 {

@@ -12,7 +12,6 @@ use {
         pass::PassId,
         id_pool::*,
         nav::*,
-        area::Area,
         cx_draw_shaders::{
             CxDrawShaderOptions,
             CxDrawShaderMapping,

@@ -59,6 +59,14 @@ live_register!{
     }
     
     FoldablePiano: MainHeader {
+        walk: {
+            width: Size::Fill,
+            height: Size::Fit
+        }
+        body_walk: {
+            width: Size::Fill,
+            height: Size::Fit
+        }
         header: {
             fold_button = FoldButton {}
             label = Label {text: "Keys"}
