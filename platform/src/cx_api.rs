@@ -66,7 +66,7 @@ pub enum CxOsOp {
     XrStartPresenting(WindowId),
     XrStopPresenting(WindowId),
     
-    ShowTextIME(Vec2),
+    ShowTextIME(Area, Vec2),
     HideTextIME,
     SetCursor(MouseCursor),
     StartTimer {timer_id: u64, interval: f64, repeats: bool},
@@ -105,8 +105,8 @@ impl Cx {
         }
     }
     
-    pub fn show_text_ime(&mut self, pos: Vec2) {
-        self.platform_ops.push(CxOsOp::ShowTextIME(pos));
+    pub fn show_text_ime(&mut self, area: Area, pos: Vec2) {
+        self.platform_ops.push(CxOsOp::ShowTextIME(area, pos));
     }
     
     pub fn hide_text_ime(&mut self) {

@@ -146,6 +146,7 @@ impl Cx {
                 }
                 
                 // update the zbias uniform if we have it.
+                draw_call.was_painted = true;
                 draw_call.draw_uniforms.set_zbias(*zbias);
                 draw_call.draw_uniforms.set_local_scroll(
                     scroll,

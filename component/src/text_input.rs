@@ -620,7 +620,10 @@ impl TextInput {
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
+        
         self.bg.begin(cx, walk, self.layout);
+        let turtle_rect = cx.turtle().rect();
+        
         // this makes sure selection goes behind the text
         self.select.append_to_draw_call(cx);
         
@@ -637,17 +640,6 @@ impl TextInput {
         turtle.pos.y -= self.cursor_margin_top;
         turtle.size.y += self.cursor_margin_top + self.cursor_margin_bottom;
         // move the IME
-        
-        if cx.has_key_focus(self.bg.area()) {
-            let ime_x = self.label.get_cursor_pos(cx, 0.5, self.cursor_head)
-                .unwrap_or(vec2(turtle.pos.x, 0.0)).x;
-            if self.numeric_only{
-                cx.hide_text_ime();
-            }
-            else{
-                cx.show_text_ime(vec2(ime_x, turtle.pos.y));
-            }
-        }
         
         let head_x = self.label.get_cursor_pos(cx, 0.0, self.cursor_head)
             .unwrap_or(vec2(turtle.pos.x, 0.0)).x;
@@ -679,6 +671,21 @@ impl TextInput {
             });
         }
         self.bg.end(cx);
+        
+        if cx.has_key_focus(self.bg.area()) {
+            // ok so. if we have the IME we should inject a tracking point
+            let ime_x = self.label.get_cursor_pos(cx, 0.5, self.cursor_head)
+                .unwrap_or(vec2(turtle.pos.x, 0.0)).x;
+            
+            if self.numeric_only{
+                cx.hide_text_ime();
+            }
+            else{
+                let ime_abs = vec2(ime_x, turtle.pos.y);
+                cx.show_text_ime(self.bg.area(), ime_abs - turtle_rect.pos);
+            }
+        }
+        
         cx.add_nav_stop(self.bg.area(), NavRole::TextInput, Margin::default())
     }
 }
