@@ -223,6 +223,7 @@ impl ToWasmTouchEnd {
                 count: fingers.get_digit_count(),
                 device: DigitDevice::Touch(self.touch.uid as u64),
             },
+            capture_time: fingers.get_capture_time(digit_id),
             captured: fingers.get_captured_area(digit_id),
             modifiers: KeyModifiers::default(),
             time: self.touch.time,
@@ -326,6 +327,7 @@ impl ToWasmMouseUp {
                 count: fingers.get_digit_count(),
                 device: DigitDevice::Mouse(self.mouse.button as usize),
             },
+            capture_time: fingers.get_capture_time(digit_id),
             modifiers: unpack_key_modifier(self.mouse.modifiers),
             time: self.mouse.time,
         }

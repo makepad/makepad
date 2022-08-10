@@ -25,8 +25,8 @@ live_register!{
     import makepad_draw_2d::shader::std::*;
     
     MainHeader: FoldHeader {
-        walk: {
-        }
+        walk: {width: Fill, height: Fill}
+        body_walk: {width: Fill, height: Fill}
         state: {
             open = {
                 off = {apply: {header: {bg: {radius: vec2(3.0, 3.0)}}}}
@@ -42,6 +42,8 @@ live_register!{
     }
     
     InstrumentHeader: FoldHeader {
+        walk: {width: Fill, height: Fill}
+        body_walk: {width: Fill, height: Fill}
         header: Rect {
             cursor: Default,
             bg: {color: #5},
@@ -111,7 +113,7 @@ live_register!{
             items: ["One", "Two", "Three", "Four", "Five", "Six"]
         }
     }
-
+    
     DropDownTest: ElementBox {
         listbox = DropDown {
             items: ["One", "Two", "Three", "Four", "Five", "Six"]
@@ -130,14 +132,16 @@ live_register!{
         }
         body: Frame {
             layout: {flow: Down}
+            walk: {width: Fill, height: Fill}
             stack = LayerHeader {
                 header: {
                     fold_button = FoldButton {}
                     label = Label {text: "Stack item", walk: {width: Fill}}
                 }
                 body: Frame {
+                    
                     layout: {flow: Down}
-                    walk: {width: Fill, height: Fit}
+                    walk: {width: Fill, height: Fill}
                     InstrumentSlider {
                         slider = {
                             bind: "filter1.cutoff"
@@ -178,9 +182,12 @@ live_register!{
                             label: "Osc2 detune"
                         }
                     }
+                    Solid {
+                        walk: {height: Fill, width: Fit}
+                    }
+                    DropDownTest {}
                     TextInputTest {}
                     ListBoxTest {}
-                    DropDownTest {}
                 }
             }
         }
@@ -259,7 +266,7 @@ live_register!{
                             label = Label {text: "Instruments"}
                         }
                         body: Frame {
-                            walk: {width: Fill, height: Fit}
+                            walk: {width: Fill, height: Fill}
                             layout: {flow: Down}
                             instrument = IronFishUI {}
                         }
