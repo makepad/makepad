@@ -450,6 +450,9 @@ impl TextInput {
             Hit::KeyFocus(_) => {
                 self.undo_id += 1;
                 self.animate_state(cx, ids!(focus.on));
+                // select all
+                self.select_all();
+                self.bg.redraw(cx);
                 dispatch_action(cx, TextInputAction::KeyFocus);
             }
             Hit::TextInput(te) => {
