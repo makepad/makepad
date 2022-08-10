@@ -1,7 +1,7 @@
 use crate::{ChunkCursor, Slice};
 
 /// A cursor over the `char`s of a `Rope`.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct CharCursor<'a> {
     chunk_cursor: ChunkCursor<'a>,
     chunk: &'a str,
@@ -39,14 +39,15 @@ impl<'a> CharCursor<'a> {
         self.chunk_cursor.byte_position() + self.byte_index
     }
 
-    /// Returns the char that `self` is currently pointing to.
+    /// Returns the char that `self` is currently pointing to, or `None` if `self` is currently
+    /// pointing to the back of the `Rope`.
     ///
     /// # Performance
     ///
     /// Runs in O(1) time.
     #[inline]
-    pub fn current(&self) -> char {
-        self.chunk[self.byte_index..].chars().next().unwrap()
+    pub fn current(&self) -> Option<char> {
+        self.chunk[self.byte_index..].chars().next()
     }
 
     /// Moves `self` to the next `char` of the `Rope`.
@@ -117,8 +118,7 @@ impl<'a> CharCursor<'a> {
     pub(crate) fn at(slice: Slice<'a>, byte_position: usize) -> Self {
         let chunk_cursor = slice.chunk_cursor_at(byte_position);
         let chunk = chunk_cursor.current();
-        let byte_index = chunk_cursor.byte_position() - byte_position;
-        assert!(chunk.is_char_boundary(byte_index));
+        let byte_index = byte_position - chunk_cursor.byte_position();
         Self {
             chunk_cursor,
             chunk,
