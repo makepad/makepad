@@ -91,6 +91,7 @@ pub struct Turtle {
     align_start: usize,
     turtle_walks_start: usize,
     defer_count: usize,
+    shift: Option<Vec2>,
     pos: Vec2,
     origin: Vec2,
     width: f32,
@@ -185,6 +186,7 @@ impl<'a> Cx2d<'a> {
             origin,
             width,
             height,
+            shift: None,
             width_used: layout.padding.left,
             height_used: layout.padding.top,
             guard_area,
@@ -277,6 +279,14 @@ impl<'a> Cx2d<'a> {
                 }
             }
         }
+        if let Some(shift) = turtle.shift{
+            for i in turtle.turtle_walks_start..self.turtle_walks.len() {
+                let walk = &self.turtle_walks[i];
+                let align_start = walk.align_start;
+                let align_end = self.get_turtle_walk_align_end(i);
+                self.move_align_list(shift.x, shift.y, align_start, align_end);
+            }
+        }
         
         self.turtle_walks.truncate(turtle.turtle_walks_start);
         
@@ -286,7 +296,11 @@ impl<'a> Cx2d<'a> {
                 size: vec2(w.fixed_or_zero(), h.fixed_or_zero())
             }
         }
-        return self.walk_turtle_internal(Walk {width: w, height: h, ..turtle.walk}, turtle.align_start, true)
+        let mut rect = self.walk_turtle_internal(Walk {width: w, height: h, ..turtle.walk}, turtle.align_start, true);
+        if let Some(shift) = turtle.shift{
+            rect.pos += shift;
+        }
+        rect
     }
     
     pub fn walk_turtle(&mut self, walk: Walk) -> Rect {
@@ -439,6 +453,10 @@ impl Turtle {
     
     pub fn update_height_min(&mut self, dy: f32) {
         self.height_used = self.height_used.min((self.pos.y + dy) - self.origin.y);
+    }
+
+    pub fn set_shift(&mut self, shift: Vec2) {
+        self.shift = Some(shift);
     }
 
     pub fn used(&self) -> Vec2 {

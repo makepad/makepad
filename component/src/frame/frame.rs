@@ -149,6 +149,9 @@ impl FrameComponent for Frame {
         }
         
         match event.hits(cx, self.bg.area()) {
+            Hit::FingerDown(_) => {
+                cx.set_key_focus(Area::Empty);
+            }
             Hit::FingerHoverIn(_) => if let Some(cursor) = &self.cursor {
                 cx.set_cursor(*cursor);
             }
