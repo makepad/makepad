@@ -13,11 +13,24 @@ live_register!{
     
     DrawBgQuad: {{DrawBgQuad}} {
         fn pixel(self) -> vec4 {
-            return mix(
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+            
+            sdf.clear(mix(
                 COLOR_BG_EDITOR,
                 COLOR_BG_SELECTED,
-                self.selected
-            );
+                self.hover
+            ));
+            
+            // we have 3 points, and need to rotate around its center
+            let sz = 3.;
+            let dx = 2.0;
+            let c = vec2(8.0, 0.5 * self.rect_size.y);
+            sdf.move_to(c.x - sz+dx*0.5, c.y - sz+dx);
+            sdf.line_to(c.x, c.y + sz);
+            sdf.line_to(c.x + sz, c.y - sz);
+            sdf.stroke(mix(#fff0,#f, self.selected), 1.0);
+            
+            return sdf.result;
         }
     }
     
@@ -33,20 +46,23 @@ live_register!{
                 self.hover
             )
         }
-        text_style: FONT_DATA {top_drop: 1.15},
+        //text_style: FONT_DATA {top_drop: 1.15},
     }
     
     PopupMenuItem: {{PopupMenuItem}} {
         layout: {
             align: {y: 0.5},
-            padding: {left: 5},
+            padding: {left: 15, top: 5, bottom: 5},
         }
-        
+        walk:{
+            width: Fill,
+            height: Fit
+        }
         state: {
             hover = {
                 default: off
                 off = {
-                    from: {all: Play::Forward {duration: 0.1}}
+                    from: {all: Play::Snap}
                     apply: {
                         hover: 0.0,
                         bg_quad: {hover: (hover)}
@@ -63,7 +79,7 @@ live_register!{
             select = {
                 default: off
                 off = {
-                    from: {all: Play::Forward {duration: 0.1}}
+                    from: {all: Play::Snap}
                     apply: {
                         selected: 0.0,
                         bg_quad: {selected: (selected)}
@@ -82,7 +98,6 @@ live_register!{
     }
     
     PopupMenu: {{PopupMenu}} {
-        node_height: (DIM_DATA_ITEM_HEIGHT),
         menu_item: PopupMenuItem {}
         layout: {flow: Flow::Down}
         scroll_view: {
@@ -117,6 +132,8 @@ pub struct PopupMenuItem {
     layout: Layout,
     state: State,
     
+    walk: Walk,
+    
     indent_width: f32,
     icon_walk: Walk,
     
@@ -133,11 +150,14 @@ pub struct PopupMenu {
     
     filler_quad: DrawBgQuad,
     layout: Layout,
-    node_height: f32,
     
     items: Vec<String>,
     
+    #[rust] selected_item: PopupMenuItemId,
+    
+    #[rust] first_tap: bool,
     #[rust] menu_items: ComponentMap<PopupMenuItemId, PopupMenuItem>,
+    #[rust] init_select_item: Option<PopupMenuItemId>,
     
     #[rust] count: usize,
 }
@@ -153,15 +173,17 @@ impl LiveHook for PopupMenu {
     }
 }
 
-pub enum ListBoxNodeAction {
-    WasClicked,
-    ShouldStartDragging,
+pub enum PopupMenuItemAction {
+    WasSweeped,
+    WasSelected,
+    MightBeSelected,
     None
 }
 
 #[derive(Clone, FrameAction)]
-pub enum ListBoxAction {
-    WasClicked(PopupMenuItemId),
+pub enum PopupMenuAction {
+    WasSweeped(PopupMenuItemId),
+    WasSelected(PopupMenuItemId),
     None,
 }
 
@@ -174,15 +196,10 @@ impl PopupMenuItem {
         &mut self,
         cx: &mut Cx2d,
         label: &str,
-        node_height: f32,
     ) {
-        self.bg_quad.begin(cx, Walk::size(Size::Fill, Size::Fixed(node_height)), self.layout);
+        self.bg_quad.begin(cx, self.walk, self.layout);
         self.name_text.draw_walk(cx, Walk::fit(), Align::default(), label);
         self.bg_quad.end(cx);
-    }
-    
-    pub fn set_is_selected(&mut self, cx: &mut Cx, is_selected: bool, animate: Animate) {
-        self.toggle_state(cx, is_selected, animate, ids!(select.on), ids!(select.off))
     }
     
     pub fn handle_event(
@@ -190,7 +207,7 @@ impl PopupMenuItem {
         cx: &mut Cx,
         event: &Event,
         sweep_area: Area,
-        dispatch_action: &mut dyn FnMut(&mut Cx, ListBoxNodeAction),
+        dispatch_action: &mut dyn FnMut(&mut Cx, PopupMenuItemAction),
     ) {
         if self.state_handle_event(cx, event).must_redraw() {
             self.bg_quad.area().redraw(cx);
@@ -208,13 +225,21 @@ impl PopupMenuItem {
                 self.animate_state(cx, ids!(hover.off));
             }
             Hit::FingerSweepIn(_) => {
+                dispatch_action(cx, PopupMenuItemAction::WasSweeped);
+                self.animate_state(cx, ids!(hover.on));
                 self.animate_state(cx, ids!(select.on));
             }
             Hit::FingerSweepOut(se) => {
-                if se.is_up{
-                    dispatch_action(cx, ListBoxNodeAction::WasClicked);
+                if se.is_finger_up(){
+                    if se.was_tap(){// ok this only goes for the first time
+                        dispatch_action(cx, PopupMenuItemAction::MightBeSelected);
+                    }
+                    else{
+                        dispatch_action(cx, PopupMenuItemAction::WasSelected);
+                    }
                 }
                 else{
+                    self.animate_state(cx, ids!(hover.off));
                     self.animate_state(cx, ids!(select.off));
                 }
             }
@@ -223,8 +248,11 @@ impl PopupMenuItem {
     }
 }
 
-
 impl PopupMenu {
+    
+    pub fn menu_contains_pos(&self, cx:&mut Cx, pos:Vec2)->bool{
+        self.scroll_view.area().get_rect(cx).contains(pos)
+    }
     
     pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk) -> ViewRedrawing {
         self.scroll_view.begin(cx, walk, self.layout) ?;
@@ -233,16 +261,11 @@ impl PopupMenu {
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
-        // lets fill the space left with blanks
-        let height_left = cx.turtle().height_left();
-        let mut walk = 0.0;
-        while walk < height_left {
-            self.count += 1;
-            self.filler_quad.draw_walk(cx, Walk::size(Size::Fill, Size::Fixed(self.node_height.min(height_left - walk))));
-            walk += self.node_height.max(1.0);
-        }
         self.scroll_view.end(cx);
         self.menu_items.retain_visible();
+        if let Some(init_select_item) = self.init_select_item.take(){
+            self.select_item_state(cx, init_select_item);
+        }
     }
     
     pub fn redraw(&mut self, cx: &mut Cx) {
@@ -262,18 +285,24 @@ impl PopupMenu {
             PopupMenuItem::new_from_ptr(cx, menu_item)
         });
         
-        menu_item.draw_item(cx, label, self.node_height);
+        menu_item.draw_item(cx, label);
     }
     
-    pub fn should_node_draw(&mut self, cx: &mut Cx2d) -> bool {
-        let height = self.node_height;
-        let walk = Walk::size(Size::Fill, Size::Fixed(height));
-        if cx.walk_turtle_would_be_visible(walk, self.scroll_view.get_scroll_pos(cx)) {
-            return true
-        }
-        else {
-            cx.walk_turtle(walk);
-            return false
+    pub fn init_select_item(&mut self, which_id:PopupMenuItemId){
+        self.init_select_item = Some(which_id);
+        self.first_tap = true;
+    }
+    
+    fn select_item_state(&mut self, cx:&mut Cx, which_id:PopupMenuItemId){
+        for (id, item) in &mut *self.menu_items {
+            if *id == which_id{
+                item.cut_state(cx, ids!(select.on));
+                item.cut_state(cx, ids!(hover.on));
+            }
+            else{
+                item.cut_state(cx, ids!(select.off));
+                item.cut_state(cx, ids!(hover.off));
+            }
         }
     }
     
@@ -282,7 +311,7 @@ impl PopupMenu {
         cx: &mut Cx,
         event: &Event,
         sweep_area: Area,
-        _dispatch_action: &mut dyn FnMut(&mut Cx, ListBoxAction),
+        dispatch_action: &mut dyn FnMut(&mut Cx, PopupMenuAction),
     ) {
         if self.scroll_view.handle_event(cx, event) {
             self.scroll_view.redraw(cx);
@@ -295,15 +324,25 @@ impl PopupMenu {
         
         for (node_id, action) in actions {
             match action {
-                ListBoxNodeAction::WasClicked => {
-                    // ok so. lets unselect the other items
-                    for (id, item) in &mut *self.menu_items {
-                        if *id != node_id {
-                            item.set_is_selected(cx, false, Animate::Yes);
-                        }
+                PopupMenuItemAction::MightBeSelected=>{
+                    // ok so. the first time we encounter this after open its sweep
+                    // next time its selection
+                    self.select_item_state(cx, node_id);
+                    if self.first_tap{
+                        self.first_tap = false;
+                        dispatch_action(cx, PopupMenuAction::WasSweeped(node_id));
+                    }
+                    else{
+                        dispatch_action(cx, PopupMenuAction::WasSelected(node_id));
                     }
                 }
-                ListBoxNodeAction::ShouldStartDragging => {
+                PopupMenuItemAction::WasSweeped=>{
+                    self.select_item_state(cx, node_id);
+                    dispatch_action(cx, PopupMenuAction::WasSweeped(node_id));
+                }
+                PopupMenuItemAction::WasSelected => {
+                    self.select_item_state(cx, node_id);
+                    dispatch_action(cx, PopupMenuAction::WasSelected(node_id));
                 }
                 _ => ()
             }
