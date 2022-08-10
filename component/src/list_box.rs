@@ -40,7 +40,6 @@ live_register!{
                 self.hover
             )
         }
-        text_style: FONT_DATA {top_drop: 1.15},
     }
     
     ListBoxItem: {{ListBoxItem}} {
