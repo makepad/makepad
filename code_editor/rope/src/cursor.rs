@@ -76,6 +76,7 @@ impl<'a> Cursor<'a> {
     /// # Performance
     ///
     /// Runs in amortized O(1) and worst-case O(log n) time.
+    #[inline]
     pub fn move_next_byte(&mut self) {
         assert!(!self.is_at_back());
         self.byte_index += 1;
@@ -89,6 +90,7 @@ impl<'a> Cursor<'a> {
     /// # Performance
     ///
     /// Runs in amortized O(1) and worst-case O(log n) time.
+    #[inline]
     pub fn move_prev_byte(&mut self) {
         assert!(!self.is_at_front());
         if self.byte_index == 0 {
