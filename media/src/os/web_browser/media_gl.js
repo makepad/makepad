@@ -54,38 +54,40 @@ export class WasmMediaGL extends WasmWebGL {
     }
     
     FromWasmStartMidiInput() {
-        navigator.requestMIDIAccess().then((midi) => {
-            
-            let reload_midi_ports = () => {
+        if(navigator.requestMidiAccess){
+            navigator.requestMIDIAccess().then((midi) => {
                 
-                let inputs = [];
-                let input_id = 0;
-                for (let input_pair of midi.inputs) {
-                    let input = input_pair[1];
-                    inputs.push({
-                        uid: "" + input.id,
-                        name: input.name,
-                        manufacturer: input.manufacturer,
-                    });
-                    input.onmidimessage = (e) => {
-                        let data = e.data;
-                        this.to_wasm.ToWasmMidiInputData({
-                            input_id: input_id,
-                            data: (data[0] << 16) | (data[1] << 8) | data[2],
+                let reload_midi_ports = () => {
+                    
+                    let inputs = [];
+                    let input_id = 0;
+                    for (let input_pair of midi.inputs) {
+                        let input = input_pair[1];
+                        inputs.push({
+                            uid: "" + input.id,
+                            name: input.name,
+                            manufacturer: input.manufacturer,
                         });
-                        this.do_wasm_pump();
+                        input.onmidimessage = (e) => {
+                            let data = e.data;
+                            this.to_wasm.ToWasmMidiInputData({
+                                input_id: input_id,
+                                data: (data[0] << 16) | (data[1] << 8) | data[2],
+                            });
+                            this.do_wasm_pump();
+                        }
+                        input_id += 1;
                     }
-                    input_id += 1;
+                    this.to_wasm.ToWasmMidiInputList({inputs});
+                    this.do_wasm_pump();
                 }
-                this.to_wasm.ToWasmMidiInputList({inputs});
-                this.do_wasm_pump();
-            }
-            midi.onstatechange = (e) => {
+                midi.onstatechange = (e) => {
+                    reload_midi_ports();
+                }
                 reload_midi_ports();
-            }
-            reload_midi_ports();
-        }, () => {
-            console.error("Cannot open midi");
-        });
+            }, () => {
+                console.error("Cannot open midi");
+            });
+        }
     }
 }
