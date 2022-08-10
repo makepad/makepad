@@ -1,7 +1,5 @@
 use {
-    crate::{
-        Bytes, BytesRev, ByteCursor, CharCursor, Chars, CharsRev, ChunkCursor, Chunks, ChunksRev, Info, Rope,
-    },
+    crate::{Bytes, BytesRev, Chars, CharsRev, ChunkCursor, Chunks, ChunksRev, Cursor, Info, Rope},
     std::{
         cmp::Ordering,
         hash::{Hash, Hasher},
@@ -66,7 +64,7 @@ impl<'a> Slice<'a> {
         self.end_info.line_break_count - self.start_info.line_break_count + 1
     }
 
-    /// Returns `true` if `byte_index` is at a `char` boundary.
+    /// Returns `true` if `byte_index` lies on a `char` boundary.
     ///
     /// # Performance
     ///
@@ -85,8 +83,8 @@ impl<'a> Slice<'a> {
     ///
     /// # Panics
     ///
-    /// Panics if `byte_index` is greater than the length of `self` in bytes, or if it is not at a
-    /// `char` boundary.
+    /// Panics if `byte_index` is greater than the length of `self` in bytes, or if it does not lie
+    /// on a `char` boundary.
     pub fn byte_to_char(self, byte_index: usize) -> usize {
         self.info_at(byte_index).char_count
     }
@@ -99,8 +97,8 @@ impl<'a> Slice<'a> {
     ///
     /// # Panics
     ///
-    /// Panics if `byte_index` is greater than the length of `self` in bytes, or if it is not at a
-    /// `char` boundary.
+    /// Panics if `byte_index` is greater than the length of `self` in bytes, or if it does not lie
+    /// on a `char` boundary.
     pub fn byte_to_line(self, byte_index: usize) -> usize {
         assert!(byte_index <= self.byte_len());
         self.info_at(byte_index).line_break_count + 1
@@ -167,7 +165,7 @@ impl<'a> Slice<'a> {
         )
     }
 
-    /// Returns a `ChunkCursor` at the front of `self`.
+    /// Returns a `ChunkCursor` at the front chunk of `self`.
     ///
     /// # Performance
     ///
@@ -180,7 +178,7 @@ impl<'a> Slice<'a> {
         )
     }
 
-    /// Returns a `ChunkCursor` at the back of `self`.
+    /// Returns a `ChunkCursor` at the back chunk of `self`.
     ///
     /// # Performance
     ///
@@ -193,7 +191,7 @@ impl<'a> Slice<'a> {
         )
     }
 
-    /// Returns a `ChunkCursor` at the given `byte_position` of `self`.
+    /// Returns a `ChunkCursor` at the chunk containing the given `byte_position` within `self`.
     ///
     /// # Performance
     ///
@@ -212,25 +210,25 @@ impl<'a> Slice<'a> {
         )
     }
 
-    /// Returns a `ByteCursor` at the front of `self`.
+    /// Returns a `Cursor` at the front of `self`.
     ///
     /// # Performance
     ///
     /// Runs in O(log n) time.
-    pub fn byte_cursor_front(self) -> ByteCursor<'a> {
-        ByteCursor::front(self)
+    pub fn cursor_front(self) -> Cursor<'a> {
+        Cursor::front(self)
     }
 
-    /// Returns a `ByteCursor` at the back of `self`.
+    /// Returns a `Cursor` at the back of `self`.
     ///
     /// # Performance
     ///
     /// Runs in O(log n) time.
-    pub fn byte_cursor_back(self) -> ByteCursor<'a> {
-        ByteCursor::back(self)
+    pub fn cursor_back(self) -> Cursor<'a> {
+        Cursor::back(self)
     }
 
-    /// Returns a `ByteCursor` at the given `byte_position` of `self`.
+    /// Returns a `Cursor` at the given `byte_position` within `self`.
     ///
     /// # Performance
     ///
@@ -239,40 +237,8 @@ impl<'a> Slice<'a> {
     /// # Panics
     ///
     /// Panics if `byte_index` is greater than the length of `self` in bytes.
-    pub fn byte_cursor_at(self, byte_position: usize) -> ByteCursor<'a> {
-        ByteCursor::at(self, byte_position)
-    }
-
-    /// Returns a `CharCursor` at the front of `self`.
-    ///
-    /// # Performance
-    ///
-    /// Runs in O(log n) time.
-    pub fn char_cursor_front(self) -> CharCursor<'a> {
-        CharCursor::front(self)
-    }
-
-    /// Returns a `CharCursor` at the back of `self`.
-    ///
-    /// # Performance
-    ///
-    /// Runs in O(log n) time.
-    pub fn char_cursor_back(self) -> CharCursor<'a> {
-        CharCursor::back(self)
-    }
-
-    /// Returns a `CharCursor` at the given `byte_position` of `self`.
-    ///
-    /// # Performance
-    ///
-    /// Runs in O(log n) time.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `byte_index` is greater than the length of `self` in bytes, or if it is not at a
-    /// `char` boundary.
-    pub fn char_cursor_at(self, byte_position: usize) -> CharCursor<'a> {
-        CharCursor::at(self, byte_position)
+    pub fn cursor_at(self, byte_position: usize) -> Cursor<'a> {
+        Cursor::at(self, byte_position)
     }
 
     /// Returns an iterator over the chunks of `self`.
