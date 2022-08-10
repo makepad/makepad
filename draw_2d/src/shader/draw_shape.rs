@@ -66,6 +66,19 @@ live_register!{
                     }
                     return sdf.result;
                 }
+                Shape::ShadowBox => {
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                    sdf.blur = 30.0;
+                    sdf.box(
+                        self.inset.x + self.border_width,
+                        self.inset.y + self.border_width,
+                        self.rect_size.x - (self.inset.x + self.inset.z + self.border_width * 2.0),
+                        self.rect_size.y - (self.inset.y + self.inset.w + self.border_width * 2.0),
+                        max(1.0, self.radius.x)
+                    )
+                    sdf.fill_keep(color)
+                    return sdf.result;
+                }
                 Shape::BoxX => {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                     sdf.box_x(
@@ -185,6 +198,7 @@ pub enum Shape {
     BoxAll,
     Circle,
     Hexagon,
+    ShadowBox,
 }
 
 #[derive(Live, LiveHook, PartialEq)]
