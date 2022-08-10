@@ -206,7 +206,7 @@ impl DropDown {
             let mut close = false;
             menu.handle_event(cx, event, self.bg.area(), &mut | cx, action | {
                 match action {
-                    PopupMenuAction::WasSweeped(node_id) => {
+                    PopupMenuAction::WasSweeped(_node_id) => {
                         //dispatch_action(cx, PopupMenuAction::WasSweeped(node_id));
                     }
                     PopupMenuAction::WasSelected(node_id) => {

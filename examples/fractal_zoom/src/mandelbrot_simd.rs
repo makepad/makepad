@@ -67,7 +67,7 @@ fn mandelbrot_pixel_f32x4(max_iter: u32, c_x: f32x4, c_y: f32x4) -> (u32x4, f32x
         // masks are vectors of bools you can use to select values
         // in simd types by lane
         //let if_exit = magsq.simd_gt(f32x4s(4.0));
-        let if_exit = magsq.lanes_gt(f32x4s(4.0));
+        let if_exit = magsq.simd_gt(f32x4s(4.0));
 
         // this boolean logic is only 1 when the value 'changed to 1'
         // and 0 otherwise. so it stores if we have a new exit on our lanes
@@ -120,7 +120,7 @@ pub fn mandelbrot_f32x4(tile: &mut Tile, max_iter: usize) {
             // fixed point 16 bit value we can pack into 2x8bit components of the texture 
             let magsq = (magsq + f32x4s(127.0)) * f32x4s(256.0);
             
-            let magsq = magsq.clamp(f32x4s(0.0), f32x4s(65535.0));
+            let magsq = magsq.simd_clamp(f32x4s(0.0), f32x4s(65535.0));
             
             //let magsq = magsq.simd_clamp(f32x4s(0.0), f32x4s(65535.0));
             
@@ -151,7 +151,7 @@ fn mandelbrot_pixel_f64x2(max_iter: u64, c_x: f64x2, c_y: f64x2) -> (u64x2, f64x
         let magsq = xx + yy;
         
         //let if_exit = magsq.simd_gt(f64x2s(4.0));
-        let if_exit = magsq.lanes_gt(f64x2s(4.0));
+        let if_exit = magsq.simd_gt(f64x2s(4.0));
         
         let new_exit = (if_exit ^ exitted) & if_exit;
         exitted = exitted | new_exit;
@@ -181,7 +181,7 @@ pub fn mandelbrot_f64x2(tile: &mut Tile, max_iter: usize) {
             let magsq = (magsq + f64x2s(127.0)) * f64x2s(256.0);
             
             //let magsq = magsq.simd_clamp(f64x2s(0.0), f64x2s(65535.0));
-            let magsq = magsq.clamp(f64x2s(0.0), f64x2s(65535.0));
+            let magsq = magsq.simd_clamp(f64x2s(0.0), f64x2s(65535.0));
            
             let magsq: u64x2 = magsq.cast();
             for i in 0..2 {

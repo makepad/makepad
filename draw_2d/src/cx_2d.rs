@@ -6,7 +6,6 @@ use {
         ops::DerefMut
     },
     crate::{
-        makepad_error_log::*,
         makepad_platform::{
             Vec2,
             DrawEvent,
