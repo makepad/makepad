@@ -1,7 +1,7 @@
 use crate::{ChunkCursor, Slice};
 
 /// A cursor over the `char`s of a `Rope`.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct CharCursor<'a> {
     chunk_cursor: ChunkCursor<'a>,
     chunk: &'a str,
@@ -119,6 +119,7 @@ impl<'a> CharCursor<'a> {
         let chunk_cursor = slice.chunk_cursor_at(byte_position);
         let chunk = chunk_cursor.current();
         let byte_index = byte_position - chunk_cursor.byte_position();
+        assert!(chunk.is_char_boundary(byte_index));
         Self {
             chunk_cursor,
             chunk,

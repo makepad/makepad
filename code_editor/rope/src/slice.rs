@@ -1,5 +1,7 @@
 use {
-    crate::{Bytes, BytesRev, Chars, CharsRev, Chunks, ChunksRev, ChunkCursor, CharCursor, Info, Rope},
+    crate::{
+        Bytes, BytesRev, ByteCursor, CharCursor, Chars, CharsRev, ChunkCursor, Chunks, ChunksRev, Info, Rope,
+    },
     std::{
         cmp::Ordering,
         hash::{Hash, Hasher},
@@ -166,9 +168,9 @@ impl<'a> Slice<'a> {
     }
 
     /// Returns a `ChunkCursor` at the front of `self`.
-    /// 
+    ///
     /// # Performance
-    /// 
+    ///
     /// Runs in O(log n) time.
     pub fn chunk_cursor_front(self) -> ChunkCursor<'a> {
         ChunkCursor::front(
@@ -179,9 +181,9 @@ impl<'a> Slice<'a> {
     }
 
     /// Returns a `ChunkCursor` at the back of `self`.
-    /// 
+    ///
     /// # Performance
-    /// 
+    ///
     /// Runs in O(log n) time.
     pub fn chunk_cursor_back(self) -> ChunkCursor<'a> {
         ChunkCursor::back(
@@ -196,33 +198,64 @@ impl<'a> Slice<'a> {
     /// # Performance
     ///
     /// Runs in O(log n) time.
-    /// 
+    ///
     /// # Panics
     ///
-    /// Panics if `byte_index` is greater than the length of `self` in bytes,
+    /// Panics if `byte_index` is greater than the length of `self` in bytes.
     pub fn chunk_cursor_at(self, byte_position: usize) -> ChunkCursor<'a> {
         assert!(byte_position <= self.byte_len());
         ChunkCursor::at(
             self.rope.root(),
             self.start_info.byte_count,
             self.end_info.byte_count,
-            byte_position,
+            self.start_info.byte_count + byte_position,
         )
     }
 
-    /// Returns a `CharCursor` at the front of `self`.
-    /// 
+    /// Returns a `ByteCursor` at the front of `self`.
+    ///
     /// # Performance
-    /// 
+    ///
+    /// Runs in O(log n) time.
+    pub fn byte_cursor_front(self) -> ByteCursor<'a> {
+        ByteCursor::front(self)
+    }
+
+    /// Returns a `ByteCursor` at the back of `self`.
+    ///
+    /// # Performance
+    ///
+    /// Runs in O(log n) time.
+    pub fn byte_cursor_back(self) -> ByteCursor<'a> {
+        ByteCursor::back(self)
+    }
+
+    /// Returns a `ByteCursor` at the given `byte_position` of `self`.
+    ///
+    /// # Performance
+    ///
+    /// Runs in O(log n) time.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `byte_index` is greater than the length of `self` in bytes.
+    pub fn byte_cursor_at(self, byte_position: usize) -> ByteCursor<'a> {
+        ByteCursor::at(self, byte_position)
+    }
+
+    /// Returns a `CharCursor` at the front of `self`.
+    ///
+    /// # Performance
+    ///
     /// Runs in O(log n) time.
     pub fn char_cursor_front(self) -> CharCursor<'a> {
         CharCursor::front(self)
     }
 
     /// Returns a `CharCursor` at the back of `self`.
-    /// 
+    ///
     /// # Performance
-    /// 
+    ///
     /// Runs in O(log n) time.
     pub fn char_cursor_back(self) -> CharCursor<'a> {
         CharCursor::back(self)
@@ -233,7 +266,7 @@ impl<'a> Slice<'a> {
     /// # Performance
     ///
     /// Runs in O(log n) time.
-    /// 
+    ///
     /// # Panics
     ///
     /// Panics if `byte_index` is greater than the length of `self` in bytes, or if it is not at a
