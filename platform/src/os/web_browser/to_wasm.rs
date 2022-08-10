@@ -173,6 +173,7 @@ impl ToWasmTouchStart {
                 count: fingers.get_digit_count(),
                 device: DigitDevice::Touch(self.touch.uid as u64),
             },
+            sweep_lock: Cell::new(Area::Empty),
             modifiers: KeyModifiers::default(),
             time: self.touch.time,
             tap_count: fingers.get_tap_count(digit_id)
@@ -192,6 +193,7 @@ impl ToWasmTouchMove {
             abs: Vec2 {x: self.touch.x, y: self.touch.y},
             tap_count: fingers.get_tap_count(digit_id),
             handled: Cell::new(false),
+            sweep_lock: Cell::new(Area::Empty),
             digit: DigitInfo {
                 id: digit_id,
                 index: fingers.get_digit_index(digit_id),
@@ -254,6 +256,7 @@ impl ToWasmMouseDown {
             window_id: CxWindowPool::id_zero(),
             abs: Vec2 {x: self.mouse.x, y: self.mouse.y},
             handled: Cell::new(false),
+            sweep_lock: Cell::new(Area::Empty),
             digit: DigitInfo {
                 id: digit_id,
                 index: fingers.get_digit_index(digit_id),
@@ -278,6 +281,7 @@ impl ToWasmMouseMove {
         FingerMoveEvent {
             window_id: CxWindowPool::id_zero(),
             abs: Vec2 {x: self.mouse.x, y: self.mouse.y},
+            sweep_lock: Cell::new(Area::Empty),
             digit: DigitInfo {
                 id: digit_id,
                 index: fingers.get_digit_index(digit_id),
@@ -302,6 +306,7 @@ impl ToWasmMouseMove {
             handled: Cell::new(false),
             hover_last: fingers.get_hover_area(digit_id),
             digit_id,
+            sweep_lock: Cell::new(Area::Empty),
             device: DigitDevice::Mouse(button),
             modifiers: unpack_key_modifier(self.mouse.modifiers),
             time: self.mouse.time,

@@ -6,6 +6,7 @@ use {
         ops::DerefMut
     },
     crate::{
+        makepad_error_log::*,
         makepad_platform::{
             Vec2,
             DrawEvent,
@@ -32,6 +33,7 @@ pub struct Cx2d<'a> {
     pub (crate) draw_event: &'a DrawEvent,
     pub (crate) pass_id: Option<PassId>,
     pub (crate) overlay_id: Option<DrawListId>,
+    pub (crate) overlay_sweep_lock: Option<Rc<RefCell<Area>>>,
     pub draw_list_stack: Vec<DrawListId>,
     pub (crate) turtles: Vec<Turtle>,
     pub (crate) turtle_walks: Vec<TurtleWalk>,
@@ -55,6 +57,17 @@ impl<'a> Cx2d<'a> {
         }
     }
     
+    pub fn set_sweep_lock(&mut self, lock:Area){
+        *self.overlay_sweep_lock.as_ref().unwrap().borrow_mut() = lock;
+    }
+    
+    pub fn clear_sweep_lock(&mut self, lock:Area){
+        let mut sweep_lock = self.overlay_sweep_lock.as_ref().unwrap().borrow_mut();
+        if *sweep_lock == lock{
+            *sweep_lock = Area::Empty
+        }
+    }
+    
     pub fn draw<T, F>(cx: &'a mut Cx, draw_event: &'a DrawEvent, app: &mut T,  mut cb: F) where F: FnMut(&mut Cx2d, &mut T) {
         Self::lazy_construct_font_atlas(cx);
         
@@ -67,6 +80,7 @@ impl<'a> Cx2d<'a> {
             current_dpi_factor: 1.0,
             cx: cx,
             draw_event,
+            overlay_sweep_lock: None,
             pass_id: None,
             draw_list_stack: Vec::new(),
             turtle_walks: Vec::new(),

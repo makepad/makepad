@@ -174,6 +174,7 @@ pub struct Slider {
 #[derive(Clone, FrameAction)]
 pub enum SliderAction {
     StartSlide,
+    TextSlide(f32),
     Slide(f32),
     EndSlide,
     None
@@ -195,7 +196,7 @@ impl FrameComponent for Slider {
         self.handle_event(cx, event, &mut | cx, slider, action | {
             let mut delta = Vec::new();
             match &action {
-                SliderAction::Slide(v) => {
+                SliderAction::TextSlide(v) | SliderAction::Slide(v) => {
                     if slider.bind.len()>0 {
                         delta.write_path(&slider.bind, LiveValue::Float(*v as f64));
                     }
@@ -239,6 +240,7 @@ impl Slider {
                         self.set_internal(v.max(self.min).min(self.max));
                     }
                     self.update_text_input(cx);
+                    dispatch_action(cx, self, SliderAction::TextSlide(self.to_external()));
                 }
                 TextInputAction::Escape => {
                     self.update_text_input(cx);
