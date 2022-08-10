@@ -235,7 +235,7 @@ impl CxFingers {
         }
     }
     
-    pub (crate) fn capture_digit(&mut self, digit_id: DigitId, area: Area, time:f64) -> bool {
+    pub (crate) fn capture_digit(&mut self, digit_id: DigitId, area: Area, time: f64) -> bool {
         if let Some(cxdigit) = self.digits.iter_mut().find( | v | v.digit_id == digit_id) {
             self.capture_count += 1;
             cxdigit.captured = area;
@@ -351,6 +351,7 @@ pub struct FingerDownEvent {
     pub digit: DigitInfo,
     pub tap_count: u32,
     pub handled: Cell<bool>,
+    pub sweep_lock: Cell<Area>,
     pub modifiers: KeyModifiers,
     pub time: f64
 }
@@ -384,6 +385,7 @@ pub struct FingerMoveEvent {
     pub window_id: WindowId,
     pub abs: Vec2,
     pub handled: Cell<bool>,
+    pub sweep_lock: Cell<Area>,
     pub hover_last: Area,
     //pub captured: Area,
     pub digit: DigitInfo,
@@ -405,26 +407,26 @@ pub struct FingerSweepEvent {
     pub abs: Vec2,
     pub abs_start: Vec2,
     pub rect: Rect,
-
+    
     pub window_id: WindowId,
-
+    
     pub digit: DigitInfo,
     pub tap_count: u32,
     pub modifiers: KeyModifiers,
     pub time: f64,
-
+    
     pub capture_time: Option<f64>,
 }
 
-impl FingerSweepEvent{
-    pub fn was_tap(&self)->bool{
-        if self.capture_time.is_none(){
+impl FingerSweepEvent {
+    pub fn was_tap(&self) -> bool {
+        if self.capture_time.is_none() {
             return false
         }
-        self.time - self.capture_time.unwrap()  < TAP_COUNT_TIME && 
-           (self.abs_start - self.abs).length() < TAP_COUNT_DISTANCE
+        self.time - self.capture_time.unwrap() < TAP_COUNT_TIME &&
+        (self.abs_start - self.abs).length() < TAP_COUNT_DISTANCE
     }
-    pub fn is_finger_up(&self)->bool{
+    pub fn is_finger_up(&self) -> bool {
         self.capture_time.is_some()
     }
 }
@@ -459,10 +461,10 @@ pub struct FingerUpEvent {
     pub time: f64
 }
 
-impl FingerUpHitEvent{
-    pub fn was_tap(&self)->bool{
-        self.time - self.capture_time  < TAP_COUNT_TIME && 
-           (self.abs_start - self.abs).length() < TAP_COUNT_DISTANCE
+impl FingerUpHitEvent {
+    pub fn was_tap(&self) -> bool {
+        self.time - self.capture_time < TAP_COUNT_TIME &&
+        (self.abs_start - self.abs).length() < TAP_COUNT_DISTANCE
     }
 }
 
@@ -503,6 +505,7 @@ pub struct FingerHoverEvent {
     pub digit_id: DigitId,
     pub hover_last: Area,
     pub handled: Cell<bool>,
+    pub sweep_lock: Cell<Area>,
     pub device: DigitDevice,
     pub modifiers: KeyModifiers,
     pub time: f64
@@ -620,11 +623,11 @@ pub struct HitOptions {
 }
 
 impl HitOptions {
-    pub fn with_sweep_area(sweep_area:Area)->Self{
-        Self{
+    pub fn with_sweep_area(sweep_area: Area) -> Self {
+        Self {
             use_multi_touch: false,
             sweep_area,
-            margin: None            
+            margin: None
         }
     }
     pub fn margin(margin: Margin) -> Self {
@@ -706,6 +709,10 @@ impl Event {
                 }
             },
             Event::FingerHover(fe) => {
+                let sweep_lock = fe.sweep_lock.get();
+                if !sweep_lock.is_empty() && sweep_lock != options.sweep_area {
+                    return Hit::Nothing
+                }
                 let rect = area.get_rect(&cx);
                 if fe.hover_last == area {
                     let any_captured = cx.fingers.get_digit_for_captured_area(area);
@@ -739,10 +746,14 @@ impl Event {
                     }
                 }
             },
-            Event::FingerMove(fe) => {// ok so we dont get hovers
+            Event::FingerMove(fe) => { // ok so we dont get hovers
+                let sweep_lock = fe.sweep_lock.get();
+                if !sweep_lock.is_empty() && sweep_lock != options.sweep_area {
+                    return Hit::Nothing
+                }
                 // check wether our digit is captured, otherwise don't send
                 if let Some(digit) = cx.fingers.get_digit(fe.digit.id) {
-                    if digit.captured == options.sweep_area{
+                    if digit.captured == options.sweep_area {
                         let abs_start = digit.down_abs_start;
                         let rect = area.get_rect(&cx);
                         if fe.hover_last == area {
@@ -805,17 +816,21 @@ impl Event {
                 }
             },
             Event::FingerDown(fe) => {
+                let sweep_lock = fe.sweep_lock.get();
+                if !sweep_lock.is_empty() && sweep_lock != options.sweep_area {
+                    return Hit::Nothing
+                }
                 if !fe.handled.get() {
                     let rect = area.get_rect(&cx);
                     if rect_contains_with_margin(&rect, fe.abs, &options.margin) {
                         // if we have a parent area, capture that one
-                        if !options.sweep_area.is_empty(){
+                        if !options.sweep_area.is_empty() {
                             if cx.fingers.capture_digit(fe.digit.id, options.sweep_area, fe.time) {
                                 
                                 cx.fingers.new_hover_area(fe.digit.id, area);
                                 let digit = cx.fingers.get_digit_mut(fe.digit.id).unwrap();
                                 digit.down_abs_start = fe.abs;
-                                digit.down_rel_start = vec2(0.0,0.0);
+                                digit.down_rel_start = vec2(0.0, 0.0);
                                 fe.handled.set(true);
                                 
                                 return Hit::FingerSweepIn(FingerSweepEvent {
@@ -831,7 +846,7 @@ impl Event {
                                 })
                             }
                         }
-                        else{
+                        else {
                             if cx.fingers.capture_digit(fe.digit.id, area, fe.time) {
                                 let rel = area.abs_to_rel(cx, fe.abs);
                                 let digit = cx.fingers.get_digit_mut(fe.digit.id).unwrap();
@@ -850,10 +865,10 @@ impl Event {
             },
             Event::FingerUp(fe) => {
                 if let Some(digit) = cx.fingers.get_digit(fe.digit.id) {
-                    if digit.captured == options.sweep_area{
+                    if digit.captured == options.sweep_area {
                         let abs_start = digit.down_abs_start;
                         let rect = area.get_rect(&cx);
-                        if rect.contains(fe.abs){
+                        if rect.contains(fe.abs) {
                             return Hit::FingerSweepOut(FingerSweepEvent {
                                 abs_start,
                                 rect: rect,
