@@ -81,7 +81,7 @@ live_register!{
             select = {
                 default: off
                 off = {
-                    from: {all: Play::Forward {duration: 0.1}}
+                    from: {all: Play::Snap}
                     apply: {
                         selected: 0.0,
                         bg_quad: {selected: (selected)}
