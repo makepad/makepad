@@ -1,6 +1,6 @@
 use crate::{ChunkCursor, Slice};
 
-/// An iterator over the chunks of a `Rope` or `Slice`.
+/// An iterator over the chunks in a `Rope` or `Slice`.
 #[derive(Clone, Debug)]
 pub struct Chunks<'a> {
     is_at_end: bool,
