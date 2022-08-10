@@ -29,7 +29,7 @@ impl<'a> Cursor<'a> {
         self.chunk_cursor.is_at_back() && self.byte_index == self.chunk.len()
     }
 
-    /// Returns `true` if `self` lies on a `char` boundary.
+    /// Returns `true` if `self` is pointing to a `char` boundary.
     #[inline]
     pub fn is_at_char_boundary(&self) -> bool {
         self.chunk.is_char_boundary(self.byte_index)
@@ -65,7 +65,7 @@ impl<'a> Cursor<'a> {
     ///
     /// # Panics
     ///
-    /// Panics if `self` does not lie on a `char` boundary.
+    /// Panics if `self` is not pointing to a `char` boundary.
     #[inline]
     pub fn current_char(&self) -> Option<char> {
         self.chunk[self.byte_index..].chars().next()
