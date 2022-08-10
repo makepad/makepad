@@ -1,7 +1,7 @@
 use {
     crate::{
-        Branch, Builder, Bytes, ByteCursor, BytesRev, CharCursor, Chars, CharsRev, ChunkCursor, Chunks,
-        ChunksRev, Info, Leaf, Node, Slice,
+        Branch, Builder, Bytes, BytesRev, Chars, CharsRev, ChunkCursor, Chunks, ChunksRev, Cursor,
+        Info, Leaf, Node, Slice,
     },
     std::{
         cmp::Ordering,
@@ -65,7 +65,7 @@ impl Rope {
         self.root.info().line_break_count + 1
     }
 
-    /// Returns `true` if `byte_index` is at a `char` boundary.
+    /// Returns `true` if `byte_index` lies on a `char` boundary.
     ///
     /// # Performance
     ///
@@ -88,8 +88,8 @@ impl Rope {
     ///
     /// # Panics
     ///
-    /// Panics if `byte_index` is greater than the length of `self` in bytes, or if it is not at a
-    /// `char` boundary.
+    /// Panics if `byte_index` is greater than the length of `self` in bytes, or if it is does not
+    /// lie on a `char` boundary.
     pub fn byte_to_char(&self, byte_index: usize) -> usize {
         self.info_at(byte_index).char_count
     }
@@ -102,8 +102,8 @@ impl Rope {
     ///
     /// # Panics
     ///
-    /// Panics if `byte_index` is greater than the length of `self` in bytes, or if it is not at a
-    /// `char` boundary.
+    /// Panics if `byte_index` is greater than the length of `self` in bytes, or if it is does not
+    /// lie on a `char` boundary.
     pub fn byte_to_line(&self, byte_index: usize) -> usize {
         self.info_at(byte_index).line_break_count + 1
     }
@@ -157,7 +157,7 @@ impl Rope {
         Slice::new(self, byte_range.start, byte_range.end)
     }
 
-    /// Returns a `ChunkCursor` at the front of `self`.
+    /// Returns a `ChunkCursor` at the front chunk of `self`.
     ///
     /// # Performance
     ///
@@ -166,7 +166,7 @@ impl Rope {
         self.slice(..).chunk_cursor_front()
     }
 
-    /// Returns a `ChunkCursor` at the back of `self`.
+    /// Returns a `ChunkCursor` at the back chunk of `self`.
     ///
     /// # Performance
     ///
@@ -175,7 +175,7 @@ impl Rope {
         self.slice(..).chunk_cursor_back()
     }
 
-    /// Returns a `ChunkCursor` at the given `byte_position` of `self`.
+    /// Returns a `ChunkCursor` at chunk containing the given `byte_position` within `self`.
     ///
     /// # Performance
     ///
@@ -188,56 +188,25 @@ impl Rope {
         self.slice(..).chunk_cursor_at(byte_position)
     }
 
-    /// Returns a `ByteCursor` at the front of `self`.
-    ///
-    /// # Performance
-    ///
-    /// Runs in O(log n) time.
-    pub fn byte_cursor_front(&self) -> ByteCursor<'_> {
-        self.slice(..).byte_cursor_front()
-    }
-
-    /// Returns a `ByteCursor` at the back of `self`.
-    ///
-    /// # Performance
-    ///
-    /// Runs in O(log n) time.
-    pub fn byte_cursor_back(&self) -> ByteCursor<'_> {
-        self.slice(..).byte_cursor_back()
-    }
-
-    /// Returns a `ByteCursor` at the the given `byte_position` of `self`.
-    ///
-    /// # Performance
-    ///
-    /// Runs in O(log n) time.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `byte_index` is greater than the length of `self` in bytes.
-    pub fn byte_cursor_at(&self, byte_position: usize) -> ByteCursor<'_> {
-        self.slice(..).byte_cursor_at(byte_position)
-    }
-
     /// Returns a `Cursor` at the front of `self`.
     ///
     /// # Performance
     ///
     /// Runs in O(log n) time.
-    pub fn char_cursor_front(&self) -> CharCursor<'_> {
-        self.slice(..).char_cursor_front()
+    pub fn cursor_front(&self) -> Cursor<'_> {
+        self.slice(..).cursor_front()
     }
 
-    /// Returns a `CharCursor` at the back of `self`.
+    /// Returns a `Cursor` at the back of `self`.
     ///
     /// # Performance
     ///
     /// Runs in O(log n) time.
-    pub fn char_cursor_back(&self) -> CharCursor<'_> {
-        self.slice(..).char_cursor_back()
+    pub fn cursor_back(&self) -> Cursor<'_> {
+        self.slice(..).cursor_back()
     }
 
-    /// Returns a `CharCursor` at the the given `byte_position` of `self`.
+    /// Returns a `Cursor` at the the given `byte_position` within `self`.
     ///
     /// # Performance
     ///
@@ -245,10 +214,10 @@ impl Rope {
     ///
     /// # Panics
     ///
-    /// Panics if `byte_index` is greater than the length of `self` in bytes, or if it is not at a
-    /// `char` boundary.
-    pub fn char_cursor_at(&self, byte_position: usize) -> CharCursor<'_> {
-        self.slice(..).char_cursor_at(byte_position)
+    /// Panics if `byte_index` is greater than the length of `self` in bytes, or if it does not lie
+    /// on a `char` boundary.
+    pub fn cursor_at(&self, byte_position: usize) -> Cursor<'_> {
+        self.slice(..).cursor_at(byte_position)
     }
 
     /// Returns an iterator over the chunks of `self`.
@@ -336,8 +305,8 @@ impl Rope {
     ///
     /// # Panics
     ///
-    /// Panics if `byte_index` is greater than the length of `self` in bytes, or if it is not at a
-    /// `char` boundary.
+    /// Panics if `byte_index` is greater than the length of `self` in bytes, or if it does not lie
+    /// on a `char` boundary.
     pub fn split_off(&mut self, byte_index: usize) -> Self {
         use std::mem;
 
@@ -364,8 +333,8 @@ impl Rope {
     ///
     /// # Panics
     ///
-    /// Panics if `byte_index` is greater than the length of `self` in bytes, or if it is not at a
-    /// `char` boundary.
+    /// Panics if `byte_index` is greater than the length of `self` in bytes, or if it does not lie
+    /// on a `char` boundary.
     pub fn truncate_front(&mut self, byte_start: usize) {
         if byte_start == 0 {
             return;
@@ -386,8 +355,8 @@ impl Rope {
     ///
     /// # Panics
     ///
-    /// Panics if `byte_index` is greater than the length of `self` in bytes, or if it is not at a
-    /// `char` boundary.
+    /// Panics if `byte_index` is greater than the length of `self` in bytes, or if it dies not lie
+    /// on a `char` boundary.
     pub fn truncate_back(&mut self, byte_end: usize) {
         if byte_end == 0 {
             *self = Self::new();
