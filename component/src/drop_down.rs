@@ -2,9 +2,8 @@ use {
     std::rc::Rc,
     std::cell::RefCell,
     crate::{
-        popup_menu::PopupMenu,
+        popup_menu::{PopupMenu, PopupMenuAction},
         makepad_draw_2d::*,
-        button_logic::*,
         frame::*
     }
 };
@@ -15,13 +14,14 @@ live_register!{
     import makepad_component::popup_menu::PopupMenu;
     
     DrawLabelText: {{DrawLabelText}} {
-        text_style: {
-            //font_size: 11.0
-        }
         fn get_color(self) -> vec4 {
             return mix(
                 mix(
-                    #9,
+                    mix(
+                        #9,
+                        #b,
+                        self.focus
+                    ),
                     #f,
                     self.hover
                 ),
@@ -35,7 +35,7 @@ live_register!{
         bg: {
             instance hover: 0.0
             instance pressed: 0.0
-            
+            instance focus: 0.0,
             const BORDER_RADIUS: 0.5
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
@@ -70,13 +70,13 @@ live_register!{
         
         layout: {
             align: {x: 0., y: 0.},
-            padding: {left: 4.0, top: 4.0, right: 4.0, bottom: 4.0}
+            padding: {left: 5.0, top: 5.0, right: 4.0, bottom: 5.0}
         }
         
         popup_menu: PopupMenu {
-            scroll_view: {view: {is_overlay: true, always_redraw:true}}
+            scroll_view: {view: {is_overlay: true, always_redraw: true}}
         }
-        
+        selected_item: 2
         state: {
             hover = {
                 default: off,
@@ -107,6 +107,23 @@ live_register!{
                     }
                 }
             }
+            focus = {
+                default: off
+                off = {
+                    from: {all: Play::Snap}
+                    apply: {
+                        bg: {focus: 0.0},
+                        label: {focus: 0.0}
+                    }
+                }
+                on = {
+                    from: {all: Play::Snap}
+                    apply: {
+                        bg: {focus: 1.0},
+                        label: {focus: 1.0}
+                    }
+                }
+            }
         }
     }
 }
@@ -125,7 +142,7 @@ pub struct DropDown {
     
     items: Vec<String>,
     
-    is_open: bool,
+    #[rust] is_open: bool,
     selected_item: usize,
     
     layout: Layout,
@@ -139,6 +156,7 @@ struct PopupMenuGlobal {
 #[derive(Live, LiveHook)]#[repr(C)]
 struct DrawLabelText {
     draw_super: DrawText,
+    focus: f32,
     hover: f32,
     pressed: f32,
 }
@@ -162,45 +180,106 @@ impl LiveHook for DropDown {
 }
 impl DropDown {
     
+    pub fn set_open(&mut self, cx: &mut Cx) {
+        self.is_open = true;
+        self.bg.redraw(cx);
+        let global = cx.global::<PopupMenuGlobal>().clone();
+        let mut map = global.map.borrow_mut();
+        let lb = map.get_mut(&self.popup_menu.unwrap()).unwrap();
+        let node_id = LiveId(self.selected_item as u64).into();
+        lb.init_select_item(node_id);
+    }
+    
+    pub fn set_closed(&mut self, cx: &mut Cx) {
+        self.is_open = false;
+        self.bg.redraw(cx);
+    }
+    
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction)) {
         self.state_handle_event(cx, event);
         
-        if self.is_open && self.popup_menu.is_some(){
+        if self.is_open && self.popup_menu.is_some() {
             // ok so how will we solve this one
             let global = cx.global::<PopupMenuGlobal>().clone();
             let mut map = global.map.borrow_mut();
             let menu = map.get_mut(&self.popup_menu.unwrap()).unwrap();
-            menu.handle_event(cx, event, self.bg.area(), &mut |_cx, _action|{
-                
+            let mut close = false;
+            menu.handle_event(cx, event, self.bg.area(), &mut | cx, action | {
+                match action {
+                    PopupMenuAction::WasSweeped(node_id) => {
+                        //dispatch_action(cx, PopupMenuAction::WasSweeped(node_id));
+                    }
+                    PopupMenuAction::WasSelected(node_id) => {
+                        //dispatch_action(cx, PopupMenuAction::WasSelected(node_id));
+                        self.selected_item = node_id.0.0 as usize;
+                        self.bg.redraw(cx);
+                        close = true;
+                    }
+                    _ => ()
+                }
             });
+            if close {
+                self.set_closed(cx);
+            }
+            // check if we clicked outside of the popup menu
+            if let Event::FingerDown(fd) = event {
+                if !menu.menu_contains_pos(cx, fd.abs) {
+                    self.set_closed(cx);
+                }
+            }
+            if let Event::FingerUp(fd) = event {
+                if !menu.menu_contains_pos(cx, fd.abs) {
+                    self.set_closed(cx);
+                }
+            }
         }
         
-        let state = button_logic_handle_event(cx, event, self.bg.area(), &mut | cx, action | {
-            match action {
-                ButtonAction::IsPressed => {
-                    self.is_open = true;
-                    // ok so now we're captured by the button
-                    // so how do we now do mouse-over-is-select
-                    // on our popup menu items
-                    
-                    self.bg.redraw(cx);
+        match event.hits(cx, self.bg.area()) {
+            Hit::KeyFocusLost(_) => {
+                self.animate_state(cx, ids!(focus.off));
+                self.set_closed(cx);
+            }
+            Hit::KeyFocus(_) => {
+                self.animate_state(cx, ids!(focus.on));
+            }
+            Hit::KeyDown(ke) => match ke.key_code {
+                KeyCode::ArrowUp => {
+                    if self.selected_item > 0 {
+                        self.selected_item -= 1;
+                        self.bg.redraw(cx);
+                    }
                 }
-                ButtonAction::IsUp => {
-                    self.is_open = false;
-                    // remove view from overlay stack
-                    self.bg.redraw(cx);
-                }
+                KeyCode::ArrowDown => {
+                    if self.items.len() > 0 && self.selected_item < self.items.len() - 1 {
+                        self.selected_item += 1;
+                        self.bg.redraw(cx);
+                    }
+                },
                 _ => ()
             }
-        });
-        if let Some(state) = state {
-            match state {
-                ButtonState::Pressed => {
-                    self.animate_state(cx, ids!(hover.pressed));
-                }
-                ButtonState::Default => self.animate_state(cx, ids!(hover.off)),
-                ButtonState::Hover => self.animate_state(cx, ids!(hover.on)),
+            Hit::FingerDown(_fe) => {
+                cx.set_key_focus(self.bg.area());
+                self.set_open(cx);
+                self.animate_state(cx, ids!(hover.pressed));
+            },
+            Hit::FingerHoverIn(_) => {
+                cx.set_cursor(MouseCursor::Hand);
+                self.animate_state(cx, ids!(hover.on));
             }
+            Hit::FingerHoverOut(_) => {
+                self.animate_state(cx, ids!(hover.off));
+            }
+            Hit::FingerUp(fe) => {
+                if fe.is_over {
+                    if fe.digit.has_hovers() {
+                        self.animate_state(cx, ids!(hover.on));
+                    }
+                }
+                else {
+                    self.animate_state(cx, ids!(hover.off));
+                }
+            }
+            _ => ()
         };
     }
     
@@ -212,25 +291,38 @@ impl DropDown {
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         self.bg.begin(cx, walk, self.layout);
+        let start_pos = cx.turtle().pos();
         if let Some(val) = self.items.get(self.selected_item) {
             self.label.draw_walk(cx, Walk::fit(), Align::default(), val);
         }
         self.bg.end(cx);
-        if self.is_open && self.popup_menu.is_some(){
+        
+        cx.add_nav_stop(self.bg.area(), NavRole::DropDown, Margin::default());
+        
+        if self.is_open && self.popup_menu.is_some() {
+            // ok so if self was not open, we need to
             // ok so how will we solve this one
             let global = cx.global::<PopupMenuGlobal>().clone();
             let mut map = global.map.borrow_mut();
             let lb = map.get_mut(&self.popup_menu.unwrap()).unwrap();
-            // redraw should always happen
-            lb.begin(cx, Walk{abs_pos:None, width:Size::Fill, height:Size::Fit, margin:Margin::default()}).assume_redrawing();
-            
-            for (i, item) in self.items.iter().enumerate(){
-                let node_id = id_num!(listbox,i as u64).into();
+            // ok so this thing moves with the align.
+            // so all we need is to position it at our current abspos.
+            let mut item_pos = None;
+            lb.begin(cx, Walk {abs_pos: Some(start_pos), width: Size::Fill, height: Size::Fit, margin: Margin::default()}).assume_redrawing();
+            for (i, item) in self.items.iter().enumerate() {
+                let node_id = LiveId(i as u64).into();
+                
+                if i == self.selected_item {
+                    item_pos = Some(cx.turtle().pos());
+                }
+                
                 lb.draw_item(cx, node_id, item);
             }
-            
+            cx.turtle_mut().set_shift(start_pos - item_pos.unwrap());
             lb.end(cx);
+            
         }
+        self.is_open;
     }
 }
 

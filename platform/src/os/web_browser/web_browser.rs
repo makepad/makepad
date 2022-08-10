@@ -414,7 +414,8 @@ impl Cx {
                 CxOsOp::XrStopPresenting(_) => {
                     self.os.from_wasm(FromWasmXrStopPresenting {});
                 },
-                CxOsOp::ShowTextIME(pos) => {
+                CxOsOp::ShowTextIME(area, pos) => {
+                    let pos = area.get_rect(self).pos + pos;
                     self.os.from_wasm(FromWasmShowTextIME {x: pos.x, y: pos.y});
                 },
                 CxOsOp::HideTextIME => {

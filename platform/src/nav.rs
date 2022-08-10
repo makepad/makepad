@@ -34,21 +34,9 @@ pub enum NavItem{
 
 #[derive(Debug)]
 pub enum NavRole{
-    ScrollBar,
-    Slider,
-    SpinButton,
-    Switch,
-    Tab,
-    TabPanel,
-    TreeItem,
     TextInput,
-    Label,
-    ComboBox,
-    Menu,
-    MenuBar,
-    TabList,
-    Tree,
-    TreeGrid
+    DropDown,
+    Slider
 }
 
 impl Cx{
