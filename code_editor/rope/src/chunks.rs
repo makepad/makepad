@@ -3,12 +3,14 @@ use crate::{ChunkCursor, Slice};
 /// An iterator over the chunks of a `Rope` or `Slice`.
 #[derive(Clone, Debug)]
 pub struct Chunks<'a> {
+    is_at_end: bool,
     chunk_cursor: ChunkCursor<'a>,
 }
 
 impl<'a> Chunks<'a> {
     pub(crate) fn new(slice: Slice<'a>) -> Self {
         Self {
+            is_at_end: false,
             chunk_cursor: slice.chunk_cursor_front(),
         }
     }
@@ -23,11 +25,15 @@ impl<'a> Iterator for Chunks<'a> {
     ///
     /// Runs in amortized O(1) and worst-case O(log n) time.
     fn next(&mut self) -> Option<Self::Item> {
-        if self.chunk_cursor.is_at_back() {
+        if self.is_at_end {
             return None;
         }
         let chunk = self.chunk_cursor.current();
-        self.chunk_cursor.move_next();
+        if self.chunk_cursor.is_at_back() {
+            self.is_at_end = true;
+        } else {
+            self.chunk_cursor.move_next();
+        }
         Some(chunk)
     }
 }
