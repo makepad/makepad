@@ -91,10 +91,10 @@ impl Cx{
             //    writeln!(s, "---------- Begin Debug draw tree for redraw_id: {} ---------", cx.redraw_id).unwrap();
             // }
             let rect = cx.draw_lists[draw_list_id].rect;
-            let scroll = cx.draw_lists[draw_list_id].get_local_scroll();
+            //let scroll = cx.draw_lists[draw_list_id].get_local_scroll();
             writeln!(
                 s,
-                "{}{} {:?}: len:{} rect:({}, {}, {}, {}) scroll:({}, {})",
+                "{}{} {:?}: len:{} rect:({}, {}, {}, {})",
                 indent,
                 cx.draw_lists[draw_list_id].debug_id,
                 draw_list_id,
@@ -103,8 +103,6 @@ impl Cx{
                 rect.pos.y,
                 rect.size.x,
                 rect.size.y,
-                scroll.x,
-                scroll.y
             ).unwrap();
             indent.push_str("  ");
             let mut indent = String::new();
@@ -124,13 +122,12 @@ impl Cx{
                     let instances = darw_item.instances.as_ref().unwrap().len() / slots;
                     writeln!(
                         s,
-                        "{}{}({}) sid:{} inst:{} scroll:{}",
+                        "{}{}({}) sid:{} inst:{}",
                         indent,
                         draw_call.options.debug_id.unwrap_or(sh.class_prop),
                         sh.type_name,
                         draw_call.draw_shader.draw_shader_id,
                         instances,
-                        draw_call.draw_uniforms.get_local_scroll()
                     ).unwrap();
                     // lets dump the instance geometry
                     if dump_instances {

@@ -225,7 +225,6 @@ impl PianoKey {
             }
             Hit::FingerSweepOut(se) => {
                 if se.is_finger_up() && se.digit.has_hovers(){
-                    // if it has hovers turn this off
                     self.animate_state(cx, ids!(hover.on));
                 }
                 else{
@@ -242,7 +241,6 @@ impl PianoKey {
 
 impl Piano {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        // alright lets draw em fuckers
         if self.view.begin(cx, walk, Layout::default()).not_redrawing() {
             return
         };

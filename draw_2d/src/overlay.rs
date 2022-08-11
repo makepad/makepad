@@ -19,7 +19,7 @@ impl LiveHook for Overlay {}
 impl LiveNew for Overlay {
     fn new(cx: &mut Cx) -> Self {
         let draw_list = cx.draw_lists.alloc();
-        cx.draw_lists[draw_list.id()].unclipped = true;
+        //cx.draw_lists[draw_list.id()].unclipped = true;
         Self {
             sweep_lock: Rc::new(RefCell::new(Area::Empty)),
             draw_list,

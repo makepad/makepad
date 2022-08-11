@@ -189,10 +189,6 @@ live_register!{
                             label: "Osc2 detune"
                         }
                     }
-                    Box{
-                        bg:{color:#2}
-                        walk:{height:Fill}
-                    }
                     InstrumentDropdown{
                         dropdown = {
                             items: ["One", "Two", "Three", "Four", "Five", "Six"]

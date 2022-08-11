@@ -45,8 +45,8 @@ impl Cx {
         &mut self,
         pass_id: PassId,
         draw_list_id: DrawListId,
-        scroll: Vec2,
-        clip: (Vec2, Vec2),
+        //scroll: Vec2,
+        //clip: (Vec2, Vec2),
         zbias: &mut f32,
         zbias_step: f32
     ) {
@@ -54,17 +54,15 @@ impl Cx {
         let draw_items_len = self.draw_lists[draw_list_id].draw_items.len();
         //self.views[view_id].set_clipping_uniforms();
         self.draw_lists[draw_list_id].uniform_view_transform(&Mat4::identity());
-        self.draw_lists[draw_list_id].parent_scroll = scroll;
-        let local_scroll = self.draw_lists[draw_list_id].get_local_scroll();
-        let clip = self.draw_lists[draw_list_id].intersect_clip(clip);
+        //self.draw_lists[draw_list_id].parent_scroll = scroll;
+        //let local_scroll = self.draw_lists[draw_list_id].get_local_scroll();
+        //let clip = self.draw_lists[draw_list_id].intersect_clip(clip);
         
         for draw_item_id in 0..draw_items_len {
             if let Some(sub_list_id) = self.draw_lists[draw_list_id].draw_items[draw_item_id].sub_list() {
                 self.render_view(
                     pass_id,
                     sub_list_id,
-                    Vec2 {x: local_scroll.x + scroll.x, y: local_scroll.y + scroll.y},
-                    clip,
                     zbias,
                     zbias_step,
                 );
@@ -113,12 +111,12 @@ impl Cx {
                 }
                 draw_call.was_painted = true;
                 draw_call.draw_uniforms.set_zbias(*zbias);
-                draw_call.draw_uniforms.set_local_scroll(
+                /*draw_call.draw_uniforms.set_local_scroll(
                     scroll,
                     local_scroll,
                     &draw_call.options
                 );
-                draw_call.draw_uniforms.set_clip(clip);
+                draw_call.draw_uniforms.set_clip(clip);*/
                 *zbias += zbias_step;
                 
                 // update/alloc textures?
@@ -283,8 +281,6 @@ impl Cx {
         self.render_view(
             pass_id,
             view_id,
-            Vec2::default(),
-            (Vec2 {x: -50000., y: -50000.}, Vec2 {x: 50000., y: 50000.}),
             &mut zbias,
             zbias_step
         );
@@ -361,8 +357,6 @@ impl Cx {
         self.render_view(
             pass_id,
             view_id,
-            Vec2::default(),
-            (Vec2 {x: -50000., y: -50000.}, Vec2 {x: 50000., y: 50000.}),
             &mut zbias,
             zbias_step
         );
