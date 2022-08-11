@@ -305,7 +305,7 @@ impl ScrollBar {
                     Axis::Horizontal => fe.handled_x.get(),
                     Axis::Vertical => fe.handled_y.get()
                 } {
-                    let rect = self.view_area.get_rect(cx);
+                    let rect = self.view_area.get_clipped_rect(cx);
                     if rect.contains(fe.abs) { // handle mousewheel
                         // we should scroll in either x or y
                         let scroll = match self.axis {

@@ -141,7 +141,7 @@ pub struct DropDown {
     popup_menu: Option<LivePtr>,
     
     items: Vec<String>,
-    
+    #[rust] last_rect: Option<Rect>,
     #[rust] is_open: bool,
     selected_item: usize,
     
@@ -188,6 +188,7 @@ impl DropDown {
         let lb = map.get_mut(&self.popup_menu.unwrap()).unwrap();
         let node_id = LiveId(self.selected_item as u64).into();
         lb.init_select_item(node_id);
+        self.last_rect = Some(self.bg.area().get_clipped_rect(cx));
     }
     
     pub fn set_closed(&mut self, cx: &mut Cx) {
@@ -298,6 +299,9 @@ impl DropDown {
         if let Some(val) = self.items.get(self.selected_item) {
             self.label.draw_walk(cx, Walk::fit(), Align::default(), val);
         }
+        else{
+            self.label.draw_walk(cx, Walk::fit(), Align::default(), " ");
+        }
         self.bg.end(cx);
         
         cx.add_nav_stop(self.bg.area(), NavRole::DropDown, Margin::default());
@@ -309,8 +313,6 @@ impl DropDown {
             let global = cx.global::<PopupMenuGlobal>().clone();
             let mut map = global.map.borrow_mut();
             let lb = map.get_mut(&self.popup_menu.unwrap()).unwrap();
-            // ok so this thing moves with the align.
-            // so all we need is to position it at our current abspos.
             let mut item_pos = None;
             lb.begin(cx, Walk {abs_pos: Some(start_pos), width: Size::Fill, height: Size::Fit, margin: Margin::default()}).assume_redrawing();
             lb.begin_bg(cx);
@@ -326,6 +328,13 @@ impl DropDown {
             lb.end_bg(cx);
             cx.turtle_mut().set_shift(start_pos - item_pos.unwrap());
             lb.end(cx);
+            // ok so we know our current pos, and our last pos.
+            // this is how much it will shift down.
+            // we also know how much we want to shift
+            // we also know our viewport rect
+            
+            // ok so. we know our rect size and our shift?
+            
         }
         self.is_open;
     }
