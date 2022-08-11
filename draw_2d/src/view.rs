@@ -54,7 +54,7 @@ impl LiveApply for View {
             }
             match nodes[index].id {
                 id!(debug_id) => cx.draw_lists[self.draw_list.id()].debug_id = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
-                id!(unclipped) => cx.draw_lists[self.draw_list.id()].unclipped = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
+                //id!(unclipped) => cx.draw_lists[self.draw_list.id()].unclipped = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
                 id!(is_overlay) => self.is_overlay = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
                 id!(always_redraw) => self.always_redraw = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
                 //id!(layout) => self.layout = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
@@ -73,7 +73,7 @@ impl View {
     
     pub fn draw_list_id(&self) -> DrawListId {self.draw_list.id()}
     
-    pub fn set_unclipped(&self, cx: &mut Cx, unclipped: bool) {cx.draw_lists[self.draw_list.id()].unclipped = unclipped;}
+    //pub fn set_unclipped(&self, cx: &mut Cx, unclipped: bool) {cx.draw_lists[self.draw_list.id()].unclipped = unclipped;}
     
     pub fn lock_view_transform(&self, cx: &mut Cx, mat: &Mat4) {
         let draw_list = &mut cx.draw_lists[self.draw_list.id()];
@@ -219,7 +219,7 @@ impl View {
     pub fn area(&self) -> Area {
         Area::DrawList(DrawListArea {draw_list_id: self.draw_list.id(), redraw_id: self.redraw_id})
     }
-    
+    /*
     pub fn set_scroll_pos(&mut self, cx: &mut Cx, scroll_pos: Vec2) {
         cx.set_scroll_x(self.draw_list.id(), scroll_pos.x);
         cx.set_scroll_y(self.draw_list.id(), scroll_pos.y);
@@ -228,7 +228,7 @@ impl View {
     pub fn get_scroll_pos(&self, cx: &Cx) -> Vec2 {
         let draw_list = &cx.draw_lists[self.draw_list.id()];
         draw_list.unsnapped_scroll
-    }
+    }*/
 }
 
 

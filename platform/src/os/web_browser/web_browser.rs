@@ -3,7 +3,6 @@ use {
     std::rc::Rc,
     std::cell::RefCell,
     crate::{
-        makepad_error_log::*,
         makepad_live_id::*,
         makepad_math::Vec2,
         makepad_wasm_bridge::{WasmDataU8, FromWasmMsg, ToWasmMsg, FromWasm, ToWasm},

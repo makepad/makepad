@@ -126,7 +126,7 @@ impl DisplayAudioLayer {
         }
     }
     
-    pub fn process_buffer(&mut self, cx: &mut Cx, audio: &AudioBuffer) {
+    pub fn process_buffer(&mut self, cx: &mut Cx, audio: &AudioBuffer)->bool{
         // alright we have a texture. lets write the audio somewhere
         //return;
         let mut buf = Vec::new();
@@ -197,6 +197,7 @@ impl DisplayAudioLayer {
         // every time we wrap around we should feed it to the FFT
         self.wave_texture.swap_image_u32(cx, &mut buf);
         self.data_offset = (self.data_offset + frames) & (WAVE_SIZE_X - 1);
+        self.fft_empty_count < FFT_SIZE_T * FFT_SIZE_Y
     }
 }
 
@@ -259,8 +260,9 @@ pub struct DisplayAudioImGUI(ImGUIRef);
 impl DisplayAudioImGUI {
     pub fn process_buffer(&self, cx: &mut Cx, voice: usize, buffer: &AudioBuffer) {
         if let Some(mut inner) = self.inner() {
-            inner.layers[voice].process_buffer(cx, buffer);
-            inner.view.redraw(cx);
+            if inner.layers[voice].process_buffer(cx, buffer){
+                inner.view.redraw(cx);
+            }
         }
     }
     
