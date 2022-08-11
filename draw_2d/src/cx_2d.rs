@@ -7,7 +7,6 @@ use {
     },
     crate::{
         makepad_platform::{
-            Vec2,
             DrawEvent,
             Area,
             DrawListId,
@@ -131,11 +130,11 @@ impl<'a> Cx2d<'a> {
             panic!("Turtle stack disaligned, forgot an end_turtle()");
         }
     }
-    
+    /*
     pub fn get_scroll_pos(&self) -> Vec2 {
         let draw_list = &self.draw_lists[*self.draw_list_stack.last().unwrap()];
         draw_list.unsnapped_scroll
-    }
+    }*/
     
     pub fn view_will_redraw(&self, view: &View) -> bool {
         self.draw_event.draw_list_will_redraw(self, view.draw_list.id())

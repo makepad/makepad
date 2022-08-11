@@ -46,7 +46,7 @@ live_register!{
             Slide {title = {text: "What was wrong"}, Body {text: "Not stable after 30+ mins"}}
             Slide {title = {text: "The real problem"}, Body {text: "No CPU perf left over\nNo VR + HiFPS"}}
             Slide {title = {text: "JS was wrong"}, Body {text: "GC limits complex use\nNot enough perf\nDynamic typing doesnt scale"}}
-            Slide {title = {text: "The end?"},  Body {text: "Your life has no purpose"}}
+            Slide {title = {text: "The end?"}, Body {text: "Your life has no purpose"}}
             Slide {title = {text: "Hi Rust"}, Body {text: "Static typed\nCompiled native +wasm\nHigh and low level"}}
             Slide {title = {text: "A new chance"}, Body {text: "Eddy Bruël - code\nSebastian Michaelidis - design"}}
             Slide {title = {text: "Could this be it?"}, Body {text: "Run code native and on web"}}
@@ -76,35 +76,36 @@ pub struct SlidesView {
 
 impl SlidesView {
     
-    fn next_frame(&mut self, cx:&mut Cx){
+    fn next_frame(&mut self, cx: &mut Cx) {
         self.next_frame = cx.new_next_frame();
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         // lets handle mousedown, setfocus
-        match event{
-            Event::Construct=>{
+        match event {
+            Event::Construct => {
                 self.next_frame(cx);
             }
-            Event::NextFrame(ne) if ne.set.contains(&self.next_frame) =>{
-                self.current_pos = self.current_pos*self.anim_speed + self.goal_pos*(1.0-self.anim_speed);
-                if (self.current_pos - self.goal_pos).abs()>0.00001{
+            Event::NextFrame(ne) if ne.set.contains(&self.next_frame) => {
+                self.current_pos = self.current_pos * self.anim_speed + self.goal_pos * (1.0 - self.anim_speed);
+                if (self.current_pos - self.goal_pos).abs()>0.00001 {
                     self.next_frame(cx);
                 }
-                if let Some(view) = &mut self.frame.view{
-                    view.set_scroll_pos(cx, vec2(self.current_pos * self.slide_width, 0.0));
+                if let Some(view) = &mut self.frame.view {
+                    // view.set_scroll_pos(cx, vec2(self.current_pos * self.slide_width, 0.0));
+                    
                 }
             }
-            _=>()
+            _ => ()
         }
         match event.hits(cx, self.frame.area()) {
-            Hit::KeyDown(KeyEvent{key_code: KeyCode::ArrowRight,..})=>{
+            Hit::KeyDown(KeyEvent {key_code: KeyCode::ArrowRight, ..}) => {
                 self.goal_pos += 1.0;
                 self.next_frame(cx);
             }
-            Hit::KeyDown(KeyEvent{key_code: KeyCode::ArrowLeft,..})=>{
+            Hit::KeyDown(KeyEvent {key_code: KeyCode::ArrowLeft, ..}) => {
                 self.goal_pos -= 1.0;
-                if self.goal_pos < 0.0{
+                if self.goal_pos < 0.0 {
                     self.goal_pos = 0.0;
                 }
                 self.next_frame(cx);
@@ -112,7 +113,7 @@ impl SlidesView {
             Hit::FingerDown(_fe) => {
                 cx.set_key_focus(self.frame.area());
             },
-            _=>()
+            _ => ()
         }
         self.frame.handle_event_iter(cx, event);
     }

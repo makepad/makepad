@@ -12,20 +12,14 @@ live_register!{
     
     DrawQuad: {{DrawQuad}} {
         varying pos: vec2
-
-        fn scroll(self) -> vec2 {
-            return self.draw_scroll.xy
-        }
         
         fn scroll_and_clip_quad(self)->vec4{
-            let scr = self.scroll()
-            
             let clipped: vec2 = clamp(
-                self.geom_pos * self.rect_size + self.rect_pos - scr,
+                self.geom_pos * self.rect_size + self.rect_pos,
                 self.draw_clip.xy,
                 self.draw_clip.zw
             )
-            self.pos = (clipped + scr - self.rect_pos) / self.rect_size
+            self.pos = (clipped - self.rect_pos) / self.rect_size
             // only pass the clipped position forward
             return self.camera_projection * (self.camera_view * (self.view_transform * vec4(
                 clipped.x,
@@ -53,11 +47,13 @@ pub struct DrawQuad {
     #[calc] pub draw_vars: DrawVars,
     #[calc] pub rect_pos: Vec2,
     #[calc] pub rect_size: Vec2,
+    #[calc] pub draw_clip: Vec4,
     #[live(1.0)] pub draw_depth: f32,
 }
 
 impl DrawQuad {
     pub fn begin(&mut self, cx: &mut Cx2d, walk:Walk, layout: Layout) {
+        self.draw_clip = cx.turtle().draw_clip().into();
         cx.begin_turtle(walk, layout);
         if self.draw_vars.draw_shader.is_some() {
             let new_area = cx.add_aligned_instance(&self.draw_vars);
@@ -72,6 +68,7 @@ impl DrawQuad {
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         let rect = cx.walk_turtle(walk);
+        self.draw_clip = cx.turtle().draw_clip().into();
         self.rect_pos = rect.pos;
         self.rect_size = rect.size;
         self.draw(cx);
@@ -88,6 +85,7 @@ impl DrawQuad {
     }
     
     pub fn draw_abs(&mut self, cx: &mut Cx2d, rect: Rect) {
+        self.draw_clip = cx.turtle().draw_clip().into();
         self.rect_pos = rect.pos;
         self.rect_size = rect.size;  
         self.draw(cx);
@@ -95,6 +93,7 @@ impl DrawQuad {
     
     pub fn draw_rel(&mut self, cx: &mut Cx2d, rect: Rect) {
         let rect = rect.translate(cx.turtle().origin());
+        self.draw_clip = cx.turtle().draw_clip().into();
         self.rect_pos = rect.pos;
         self.rect_size = rect.size;
         self.draw(cx);

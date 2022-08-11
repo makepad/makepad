@@ -439,7 +439,7 @@ impl FileTree {
         let scale = self.stack.last().cloned().unwrap_or(1.0);
         let height = self.node_height * scale;
         let walk = Walk::size(Size::Fill, Size::Fixed(height));
-        if scale > 0.01 && cx.walk_turtle_would_be_visible(walk, self.scroll_view.get_scroll_pos(cx)) {
+        if scale > 0.01 && cx.walk_turtle_would_be_visible(walk) {
             return true
         }
         else {

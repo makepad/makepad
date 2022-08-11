@@ -74,11 +74,11 @@ impl std::ops::IndexMut<DrawListId> for CxDrawListPool {
 #[derive(Default, Clone)]
 #[repr(C)]
 pub struct DrawUniforms {
-    pub draw_clip_x1: f32,
-    pub draw_clip_y1: f32,
-    pub draw_clip_x2: f32,
-    pub draw_clip_y2: f32,
-    pub draw_scroll: Vec4,
+    //pub draw_clip_x1: f32,
+    //pub draw_clip_y1: f32,
+    //pub draw_clip_x2: f32,
+    //pub draw_clip_y2: f32,
+    //pub draw_scroll: Vec4,
     pub draw_zbias: f32,
     pub pad1: f32,
     pub pad2: f32,
@@ -89,15 +89,15 @@ impl DrawUniforms {
     pub fn as_slice(&self) -> &[f32; std::mem::size_of::<DrawUniforms>()] {
         unsafe {std::mem::transmute(self)}
     }
-    
+    /*
     pub fn get_local_scroll(&self) -> Vec4 {
         self.draw_scroll
-    }
+    }*/
     
     pub fn set_zbias(&mut self, zbias: f32) {
         self.draw_zbias = zbias;
     }
-    
+    /*
     pub fn set_clip(&mut self, clip: (Vec2, Vec2)) {
         self.draw_clip_x1 = clip.0.x;
         self.draw_clip_y1 = clip.0.y;
@@ -116,7 +116,7 @@ impl DrawUniforms {
         }
         self.draw_scroll.z = local_scroll.x;
         self.draw_scroll.w = local_scroll.y;
-    }
+    }*/
 }
 
 pub enum CxDrawKind{
@@ -266,11 +266,11 @@ pub struct CxDrawList {
     pub locked_view_transform: bool,
 
     // scrolling
-    pub no_v_scroll: bool, // this means we
-    pub no_h_scroll: bool,
-    pub parent_scroll: Vec2,
-    pub unsnapped_scroll: Vec2,
-    pub snapped_scroll: Vec2,
+    //pub no_v_scroll: bool, // this means we
+    //pub no_h_scroll: bool,
+    //pub parent_scroll: Vec2,
+    //pub unsnapped_scroll: Vec2,
+    //pub snapped_scroll: Vec2,
     
     pub draw_items: CxDrawItems,
     
@@ -278,14 +278,14 @@ pub struct CxDrawList {
     pub platform: CxOsView,
     
     pub rect: Rect,
-    pub clip_points: (Vec2, Vec2),
-    pub unclipped: bool,
+    pub draw_clip: (Vec2,Vec2),
+    //pub unclipped: bool,
     
     pub nav_items: Vec<NavItem>
 }
 
 impl CxDrawList {
-
+/*
     pub fn intersect_clip(&mut self, clip: (Vec2, Vec2)) -> (Vec2, Vec2) {
         if !self.unclipped {
             let min_x = self.rect.pos.x - self.parent_scroll.x;
@@ -307,7 +307,7 @@ impl CxDrawList {
             self.clip_points = clip;
             clip
         }
-    }
+    }*/
     
     pub fn find_appendable_drawcall(&mut self, sh: &CxDrawShader, draw_vars: &DrawVars) -> Option<usize> {
         // find our drawcall to append to the current layer
@@ -398,12 +398,12 @@ impl CxDrawList {
             }
         }
     }
-    
+    /*
     pub fn get_local_scroll(&self) -> Vec2 {
         let xs = if self.no_v_scroll {0.} else {self.snapped_scroll.x};
         let ys = if self.no_h_scroll {0.} else {self.snapped_scroll.y};
         Vec2 {x: xs, y: ys}
-    }
+    }*/
     
     pub fn uniform_view_transform(&mut self, v: &Mat4) {
         //dump in uniforms

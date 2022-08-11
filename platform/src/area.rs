@@ -129,7 +129,7 @@ impl Area {
             _ => false,
         }
     }
-    
+    /*
     pub fn get_local_scroll_pos(&self, cx: &Cx) -> Vec2 {
         return match self {
             Area::Instance(inst) => {
@@ -170,8 +170,8 @@ impl Area {
             },
             _ => Vec2::default(),
         }
-    }
-    
+    }*/
+    /*
     pub fn set_no_scroll(&self, cx: &mut Cx, hor: bool, ver: bool) {
         return match self {
             Area::Instance(inst) => {
@@ -192,7 +192,7 @@ impl Area {
             },
             _ => (),
         }
-    }
+    }*/
     
     // returns the final screen rect
     pub fn get_clipped_rect(&self, cx: &Cx) -> Rect {
@@ -230,12 +230,17 @@ impl Area {
                     let pos = vec2(buf[inst.instance_offset + rect_pos + 0], buf[inst.instance_offset + rect_pos + 1]);
                     if let Some(rect_size) = sh.mapping.rect_size {
                         let size = vec2(buf[inst.instance_offset + rect_size + 0], buf[inst.instance_offset + rect_size + 1]);
-                        let du = &draw_call.draw_uniforms;
-                        return Rect{pos,size}.scroll_and_clip(
-                            vec2(du.draw_scroll.x, du.draw_scroll.y),
-                            (vec2(du.draw_clip_x1,du.draw_clip_y1),vec2(du.draw_clip_x2,du.draw_clip_y2)),
-                        );
-                        //return draw_call.draw_uniforms.clip_and_scroll_rect(x, y, w, h);
+                        if let Some(draw_clip) = sh.mapping.draw_clip {
+                            let p1= vec2(
+                                buf[inst.instance_offset + draw_clip + 0],
+                                buf[inst.instance_offset + draw_clip + 1],
+                            );
+                            let p2 = vec2(
+                                buf[inst.instance_offset + draw_clip + 2],
+                                buf[inst.instance_offset + draw_clip + 3]
+                            );
+                            return Rect{pos,size}.clip((p1,p2));
+                        }
                     }
                 }
                 Rect::default()
@@ -243,10 +248,7 @@ impl Area {
             Area::DrawList(list) => {
                 // we need to clip this drawlist too
                 let draw_list = &cx.draw_lists[list.draw_list_id];
-                return draw_list.rect.scroll_and_clip(
-                    draw_list.parent_scroll,
-                    draw_list.clip_points,
-                );                
+                return draw_list.rect.clip(draw_list.draw_clip);                
             },
             _ => Rect::default(),
         }
@@ -277,8 +279,8 @@ impl Area {
                     let x = buf[inst.instance_offset + rect_pos + 0];
                     let y = buf[inst.instance_offset + rect_pos + 1];
                     return Vec2 {
-                        x: abs.x - x + draw_call.draw_uniforms.draw_scroll.x,
-                        y: abs.y - y + draw_call.draw_uniforms.draw_scroll.y
+                        x: abs.x - x,
+                        y: abs.y - y
                     }
                 }
                 abs
@@ -286,8 +288,8 @@ impl Area {
             Area::DrawList(list) => {
                 let draw_list = &cx.draw_lists[list.draw_list_id];
                 Vec2 {
-                    x: abs.x - draw_list.rect.pos.x + draw_list.parent_scroll.x + draw_list.unsnapped_scroll.x,
-                    y: abs.y - draw_list.rect.pos.y - draw_list.parent_scroll.y + draw_list.unsnapped_scroll.y
+                    x: abs.x - draw_list.rect.pos.x,
+                    y: abs.y - draw_list.rect.pos.y
                 }
             },
             _ => abs,
