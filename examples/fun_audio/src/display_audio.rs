@@ -27,7 +27,6 @@ live_register!{
             
             let right = (wave.y + wave.z / 256.0 - 0.5) * 3.0;
             let left = (wave.w + wave.x / 256.0 - 0.5) * 3.0;
-            
             let right_fft = fft.y + fft.z / 256.0;
             let left_fft = fft.w + fft.x / 256.0;
             
@@ -94,6 +93,7 @@ pub struct DisplayAudioLayer {
     fft_texture: Texture,
     fft_slot: usize,
     fft_buffer: [Vec<ComplexF32>; 2],
+    fft_empty_count: usize,
     fft_scratch: Vec<ComplexF32>,
     data_offset: usize
 }
@@ -115,6 +115,7 @@ impl DisplayAudioLayer {
             multisample: None
         });
         Self {
+            fft_empty_count: FFT_SIZE_X*FFT_SIZE_Y+1,
             active: false,
             wave_texture,
             fft_texture,
@@ -165,15 +166,21 @@ impl DisplayAudioLayer {
             let fft_now = (fft_off + i) & (FFT_SIZE_T - 1);
             self.fft_buffer[0][fft_now] = cf32(left[i], 0.0);
             self.fft_buffer[1][fft_now] = cf32(right[i], 0.0);
-            
+            if left[i] != 0.0 || right[i] != 0.0{
+                self.fft_empty_count = 0;
+            }
+            else{
+                self.fft_empty_count += 1;
+            }
             // if the fft buffer is full, emit a new fftline
             if fft_now == FFT_SIZE_T - 1 {
                 let mut buf = Vec::new();
                 self.fft_texture.swap_image_u32(cx, &mut buf);
                 buf.resize(FFT_SIZE_X * FFT_SIZE_Y, 0);
-                
-                fft_f32_recursive_pow2_forward(&mut self.fft_buffer[0], &mut self.fft_scratch);
-                fft_f32_recursive_pow2_forward(&mut self.fft_buffer[1], &mut self.fft_scratch);
+                if self.fft_empty_count < FFT_SIZE_T{
+                    fft_f32_recursive_pow2_forward(&mut self.fft_buffer[0], &mut self.fft_scratch);
+                    fft_f32_recursive_pow2_forward(&mut self.fft_buffer[1], &mut self.fft_scratch);
+                }
                 
                 // lets write fft_buffer[0] to the texture
                 for i in 0..FFT_SIZE_X {
@@ -222,7 +229,7 @@ impl DisplayAudio {
         let rect = cx.walk_turtle(Walk::fill());
         
         for (index, layer) in self.layers.iter().enumerate() {
-            if !layer.active {
+            if !layer.active || layer.fft_empty_count >= FFT_SIZE_T * FFT_SIZE_Y{
                 continue
             }
             self.fft.layer = index as f32 / self.layers.len() as f32;

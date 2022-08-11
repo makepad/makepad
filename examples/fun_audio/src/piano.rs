@@ -225,6 +225,7 @@ impl PianoKey {
             }
             Hit::FingerSweepOut(se) => {
                 if se.is_finger_up(){
+                    // if it has hovers turn this off
                     self.animate_state(cx, ids!(hover.on));
                 }
                 else{

@@ -3,6 +3,7 @@ use {
     std::rc::Rc,
     std::cell::RefCell,
     crate::{
+        makepad_error_log::*,
         makepad_live_id::*,
         makepad_math::Vec2,
         makepad_wasm_bridge::{WasmDataU8, FromWasmMsg, ToWasmMsg, FromWasm, ToWasm},
@@ -122,7 +123,7 @@ impl Cx {
                 
                 id!(ToWasmTouchStart) => {
                     let tw = ToWasmTouchStart::read_to_wasm(&mut to_wasm);
-                    
+                    log!("{:?}", tw);
                     // lets get a unique digit
                     let digit_id = id_num!(touch, tw.touch.uid as u64).into();
                     self.fingers.alloc_digit(digit_id);
@@ -139,6 +140,7 @@ impl Cx {
                 
                 id!(ToWasmTouchMove) => {
                     let tw = ToWasmTouchMove::read_to_wasm(&mut to_wasm);
+                    log!("{:?}", tw);
                     let digit_id = id_num!(touch, tw.touch.uid as u64).into();
                     // lets grab the captured area
                     self.call_event_handler(&Event::FingerMove(
@@ -149,6 +151,7 @@ impl Cx {
                 
                 id!(ToWasmTouchEnd) => {
                     let tw = ToWasmTouchEnd::read_to_wasm(&mut to_wasm);
+                    log!("{:?}", tw);
                     let digit_id = id_num!(touch, tw.touch.uid as u64).into();
                     self.call_event_handler(&Event::FingerUp(
                         tw.into_finger_up_event(&self.fingers, digit_id)
@@ -211,12 +214,10 @@ impl Cx {
                     if self.os.last_mouse_button == Some(tw.mouse.button) {
                         self.os.last_mouse_button = None;
                         let digit_id = id!(mouse).into();
-                        let captured = self.fingers.get_captured_area(digit_id);
                         self.call_event_handler(&Event::FingerUp(
                             tw.into_finger_up_event(
                                 &self.fingers,
                                 digit_id,
-                                captured
                             )
                         ));
                         self.fingers.free_digit(digit_id);
@@ -415,7 +416,7 @@ impl Cx {
                     self.os.from_wasm(FromWasmXrStopPresenting {});
                 },
                 CxOsOp::ShowTextIME(area, pos) => {
-                    let pos = area.get_rect(self).pos + pos;
+                    let pos = area.get_clipped_rect(self).pos + pos;
                     self.os.from_wasm(FromWasmShowTextIME {x: pos.x, y: pos.y});
                 },
                 CxOsOp::HideTextIME => {

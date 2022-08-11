@@ -159,7 +159,7 @@ impl Tab {
         self.bg.end(cx);
         
         if self.is_dragged {
-            self.drag.draw_abs(cx, self.bg.area().get_rect(cx));
+            self.drag.draw_abs(cx, self.bg.area().get_clipped_rect(cx));
         }
     }
     
