@@ -122,9 +122,8 @@ live_register!{
         }
     }
     
-    DropDownTest: ElementBox {
-        listbox = DropDown {
-            items: ["One", "Two", "Three", "Four", "Five", "Six"]
+    InstrumentDropdown: ElementBox {
+        dropdown = DropDown {
         }
     }
     
@@ -190,12 +189,20 @@ live_register!{
                             label: "Osc2 detune"
                         }
                     }
-                    Solid {
-                        walk: {height: Fill, width: Fit}
+                    Box{
+                        bg:{color:#2}
+                        walk:{height:Fill}
                     }
-                    DropDownTest {}
-                    TextInputTest {}
-                    ListBoxTest {}
+                    InstrumentDropdown{
+                        dropdown = {
+                            items: ["One", "Two", "Three", "Four", "Five", "Six"]
+                        }
+                    }
+                    InstrumentDropdown{
+                        dropdown = {
+                            items: ["1", "2", "3", "4", "5", "6"]
+                        }
+                    }
                 }
             }
         }

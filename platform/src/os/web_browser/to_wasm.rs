@@ -138,7 +138,7 @@ pub struct ToWasmAnimationFrame {
 
 
 
-#[derive(ToWasm)]
+#[derive(ToWasm, Debug)]
 pub struct WTouch {
     pub x: f32,
     pub y: f32,
@@ -147,7 +147,7 @@ pub struct WTouch {
     pub time: f64,
 }
 
-#[derive(ToWasm)]
+#[derive(ToWasm, Debug)]
 pub struct ToWasmTouchStart {
     pub touch: WTouch,
 }
@@ -181,7 +181,7 @@ impl ToWasmTouchStart {
     }
 }
 
-#[derive(ToWasm)]
+#[derive(ToWasm, Debug)]
 pub struct ToWasmTouchMove {
     pub touch: WTouch,
 }
@@ -208,7 +208,7 @@ impl ToWasmTouchMove {
     }
 }
 
-#[derive(ToWasm)]
+#[derive(ToWasm, Debug)]
 pub struct ToWasmTouchEnd {
     pub touch: WTouch,
 }
@@ -320,12 +320,12 @@ pub struct ToWasmMouseUp {
 }
 
 impl ToWasmMouseUp {
-    pub fn into_finger_up_event(self, fingers: &CxFingers, digit_id: DigitId, captured: Area) -> FingerUpEvent {
+    pub fn into_finger_up_event(self, fingers: &CxFingers, digit_id: DigitId) -> FingerUpEvent {
         FingerUpEvent {
             window_id: CxWindowPool::id_zero(),
             abs: Vec2 {x: self.mouse.x, y: self.mouse.y},
             tap_count: fingers.get_tap_count(digit_id),
-            captured,
+            captured: fingers.get_captured_area(digit_id),
             digit: DigitInfo {
                 id: digit_id,
                 index: fingers.get_digit_index(digit_id),

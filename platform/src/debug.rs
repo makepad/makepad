@@ -21,31 +21,31 @@ impl Debug {
     const G: Vec4 = Vec4 {x: 0.0, y: 1.0, z: 0.0, w: 1.0};
     const B: Vec4 = Vec4 {x: 0.0, y: 0.0, z: 1.0, w: 1.0};
     
-    pub fn p(&self, color: Vec4, p: Vec2) {
+    pub fn point(&self, color: Vec4, p: Vec2) {
         let mut inner = self.0.borrow_mut();
         inner.points.push((p, color));
     }
     
-    pub fn pr(&self, p: Vec2) {self.p(Self::R, p)}
-    pub fn pg(&self, p: Vec2) {self.p(Self::G, p)}
-    pub fn pb(&self, p: Vec2) {self.p(Self::B, p)}
+    pub fn point_r(&self, p: Vec2) {self.point(Self::R, p)}
+    pub fn point_g(&self, p: Vec2) {self.point(Self::G, p)}
+    pub fn point_b(&self, p: Vec2) {self.point(Self::B, p)}
 
-    pub fn pl(&self, color: Vec4, p: Vec2, label:String) {
+    pub fn label(&self, color: Vec4, p: Vec2, label:String) {
         let mut inner = self.0.borrow_mut();
         inner.labels.push((p, color,label));
     }
     
-    pub fn lr(&self, p: Vec2, label:String) {self.pl(Self::R, p, label)}
-    pub fn lg(&self, p: Vec2, label:String) {self.pl(Self::G, p, label)}
-    pub fn lb(&self, p: Vec2, label:String) {self.pl(Self::B, p, label)}
+    pub fn label_r(&self, p: Vec2, label:String) {self.label(Self::R, p, label)}
+    pub fn label_g(&self, p: Vec2, label:String) {self.label(Self::G, p, label)}
+    pub fn label_b(&self, p: Vec2, label:String) {self.label(Self::B, p, label)}
 
-    pub fn r(&self, color: Vec4, p: Rect) {
+    pub fn rect(&self, color: Vec4, p: Rect) {
         let mut inner = self.0.borrow_mut();
         inner.rects.push((p, color));
     }
-    pub fn rr(&self, r: Rect) {self.r(Self::R, r)}
-    pub fn rg(&self, r: Rect) {self.r(Self::G, r)}
-    pub fn rb(&self, r: Rect) {self.r(Self::B, r)}
+    pub fn rect_r(&self, r: Rect) {self.rect(Self::R, r)}
+    pub fn rect_g(&self, r: Rect) {self.rect(Self::G, r)}
+    pub fn rect_b(&self, r: Rect) {self.rect(Self::B, r)}
     
     pub fn has_data(&self)->bool{
         let inner = self.0.borrow();
