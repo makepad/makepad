@@ -123,7 +123,7 @@ impl Cx {
                 
                 id!(ToWasmTouchStart) => {
                     let tw = ToWasmTouchStart::read_to_wasm(&mut to_wasm);
-                    log!("{:?}", tw);
+                    //log!("{:?}", tw);
                     // lets get a unique digit
                     let digit_id = id_num!(touch, tw.touch.uid as u64).into();
                     self.fingers.alloc_digit(digit_id);
@@ -136,11 +136,12 @@ impl Cx {
                     self.call_event_handler(&Event::FingerDown(
                         tw.into_finger_down_event(&self.fingers, digit_id,)
                     ));
+                    self.fingers.cycle_hover_area(digit_id);
                 }
                 
                 id!(ToWasmTouchMove) => {
                     let tw = ToWasmTouchMove::read_to_wasm(&mut to_wasm);
-                    log!("{:?}", tw);
+                    //log!("{:?}", tw);
                     let digit_id = id_num!(touch, tw.touch.uid as u64).into();
                     // lets grab the captured area
                     self.call_event_handler(&Event::FingerMove(
@@ -151,7 +152,7 @@ impl Cx {
                 
                 id!(ToWasmTouchEnd) => {
                     let tw = ToWasmTouchEnd::read_to_wasm(&mut to_wasm);
-                    log!("{:?}", tw);
+                    //log!("{:?}", tw);
                     let digit_id = id_num!(touch, tw.touch.uid as u64).into();
                     self.call_event_handler(&Event::FingerUp(
                         tw.into_finger_up_event(&self.fingers, digit_id)
