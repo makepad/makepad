@@ -329,7 +329,11 @@ impl DropDown {
             cx.turtle_mut().set_shift(start_pos - item_pos.unwrap());
             lb.end(cx);
             // ok so we know our current pos, and our last pos.
-            // this is how much it will shift down.
+            // this is how much it will shift down due to layout
+            // so if we take our lb viewrect
+            // and shift that we have our final viewrect without-shift
+            // owshit scrollbars
+            
             // we also know how much we want to shift
             // we also know our viewport rect
             
