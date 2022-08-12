@@ -239,8 +239,14 @@ impl LiveTokenId {
         (self.0 & 0x3ffff) as usize
     }
     
-    pub fn file_id(&self) -> LiveFileId {
-        LiveFileId((((self.0 >> 18) & 0x3ff) - 1) as u16)
+    pub fn file_id(&self) -> Option<LiveFileId> {
+        let id = (self.0 >> 18) & 0x3ff;
+        if id == 0{
+            None
+        }
+        else{
+            Some(LiveFileId((id - 1) as u16))
+        }
     }
     
     pub fn to_bits(&self) -> u32 {self.0}
@@ -260,7 +266,7 @@ pub struct LiveTokenId(u32);
 
 impl fmt::Debug for LiveTokenId {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f, "TokenId(token_index:{}, file_id:{})", self.token_index(), self.file_id().to_index())
+        write!(f, "TokenId(token_index:{}, file_id:{})", self.token_index(), self.file_id().unwrap().to_index())
     }
 }
 

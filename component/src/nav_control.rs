@@ -17,9 +17,7 @@ live_register!{
             },
             color: #a
         }
-        view: {
-            unclipped: true
-        }
+        view: {}
     }
 }
 

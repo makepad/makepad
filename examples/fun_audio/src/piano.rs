@@ -30,7 +30,7 @@ live_register!{
             let light = normalize(vec3(0.75, 0.5, 0.5))
             let light_hover = normalize(vec3(0.75, 0.5, 1.5))
             let diff = pow(max(dot(mix(light, light_hover, self.hover * (1 - self.pressed)), normal), 0), 3)
-            return mix(#00, #ff, diff)
+            return mix(#00, #cc, diff)
         }
         
         fn white_key(self) -> vec4 {
@@ -224,7 +224,7 @@ impl PianoKey {
                 dispatch_action(cx, PianoKeyAction::Pressed(127));
             }
             Hit::FingerSweepOut(se) => {
-                if se.is_finger_up(){
+                if se.is_finger_up() && se.digit.has_hovers(){
                     self.animate_state(cx, ids!(hover.on));
                 }
                 else{
@@ -241,7 +241,6 @@ impl PianoKey {
 
 impl Piano {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        // alright lets draw em fuckers
         if self.view.begin(cx, walk, Layout::default()).not_redrawing() {
             return
         };

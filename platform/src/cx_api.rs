@@ -16,9 +16,6 @@ use {
             WebSocket,
             NextFrame,
         },
-        draw_list::{
-            DrawListId
-        },
         window::{
             WindowId
         },
@@ -257,7 +254,7 @@ impl Cx {
         }
     }
     
-    
+    /*
     pub fn set_scroll_x(&mut self, draw_list_id: DrawListId, scroll_pos: f32) {
         if let Some(pass_id) = self.draw_lists[draw_list_id].pass_id {
             let fac = self.get_delegated_dpi_factor(pass_id);
@@ -283,7 +280,7 @@ impl Cx {
                 self.passes[cxview.pass_id.unwrap()].paint_dirty = true;
             }
         }
-    }
+    }*/
     
     pub fn update_area_refs(&mut self, old_area: Area, new_area: Area) -> Area {
         if old_area == Area::Empty {

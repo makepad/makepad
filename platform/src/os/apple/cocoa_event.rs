@@ -80,6 +80,7 @@ impl CocoaMouseDownEvent {
                 count: fingers.get_digit_count(),
                 device: DigitDevice::Mouse(self.button),
             },
+            sweep_lock: Cell::new(Area::Empty),
             tap_count: fingers.get_tap_count(digit_id),
             handled: Cell::new(false),
             modifiers: self.modifiers,
@@ -104,6 +105,7 @@ impl CocoaMouseMoveEvent {
             digit_id,
             hover_last,
             handled: Cell::new(false),
+            sweep_lock: Cell::new(Area::Empty),
             device: DigitDevice::Mouse(button),
             modifiers: self.modifiers,
             time: self.time
@@ -113,6 +115,7 @@ impl CocoaMouseMoveEvent {
         FingerMoveEvent {
             window_id: self.window_id,
             handled: Cell::new(false),
+            sweep_lock: Cell::new(Area::Empty),
             hover_last: fingers.get_hover_area(digit_id), 
             tap_count: fingers.get_tap_count(digit_id),
             abs: self.abs,
@@ -148,6 +151,7 @@ impl CocoaMouseUpEvent {
                 count: fingers.get_digit_count(),
                 device: DigitDevice::Mouse(self.button),
             },
+            capture_time: fingers.get_capture_time(digit_id),
             tap_count: fingers.get_tap_count(digit_id), 
             captured: fingers.get_captured_area(digit_id),
             modifiers: self.modifiers,

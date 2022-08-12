@@ -59,6 +59,14 @@ live_register!{
     }
     
     FoldablePiano: MainHeader {
+        walk: {
+            width: Size::Fill,
+            height: Size::Fit
+        }
+        body_walk: {
+            width: Size::Fill,
+            height: Size::Fit
+        }
         header: {
             fold_button = FoldButton {}
             label = Label {text: "Keys"}
@@ -114,9 +122,8 @@ live_register!{
         }
     }
     
-    DropDownTest: ElementBox {
-        listbox = DropDown {
-            items: ["One", "Two", "Three", "Four", "Five", "Six"]
+    InstrumentDropdown: ElementBox {
+        dropdown = DropDown {
         }
     }
     
@@ -182,12 +189,16 @@ live_register!{
                             label: "Osc2 detune"
                         }
                     }
-                    Solid {
-                        walk: {height: Fill, width: Fit}
+                    InstrumentDropdown{
+                        dropdown = {
+                            items: ["One", "Two", "Three", "Four", "Five", "Six"]
+                        }
                     }
-                    DropDownTest {}
-                    TextInputTest {}
-                    ListBoxTest {}
+                    InstrumentDropdown{
+                        dropdown = {
+                            items: ["1", "2", "3", "4", "5", "6"]
+                        }
+                    }
                 }
             }
         }

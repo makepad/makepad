@@ -11,7 +11,24 @@ use {
 live_register!{
     Frame: {{Frame}} {}
 }
+/*
+#[derive(Clone, Copy, Debug, Live, LiveHook)]
+#[live_ignore]
+pub enum Overflow {
+    #[pick] Visible,
+    Hidden,
+    Scroll
+}
 
+impl Overflow{
+    fn is_viewless(&self)->bool{
+        match self{
+            Self::Viewless=>true,
+            _=>false
+        }
+    }
+}
+*/
 #[derive(Live)]
 #[live_register(frame_component!(Frame))]
 pub struct Frame { // draw info per UI element
@@ -25,15 +42,16 @@ pub struct Frame { // draw info per UI element
     
     image_texture: Texture,
     
+    has_view: bool,
+    
+    //overflow_x: Overflow,
+    //overflow_y: Overflow,
     clip: bool,
     hidden: bool,
     user_draw: bool,
     cursor: Option<MouseCursor>,
     #[live(false)] design_mode: bool,
     #[rust] pub view: Option<View>,
-    
-    scroll_x: FrameRef,
-    scroll_y: FrameRef,
     
     #[rust] defer_walks: Vec<(LiveId, DeferWalk)>,
     #[rust] draw_state: DrawStateWrap<DrawState>,
@@ -43,6 +61,7 @@ pub struct Frame { // draw info per UI element
 }
 
 impl LiveHook for Frame {
+    
     fn after_apply(&mut self, cx: &mut Cx, _from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
         if self.clip && self.view.is_none() {
             self.view = Some(View::new(cx));
@@ -310,6 +329,24 @@ impl dyn FrameComponent {
 }
 
 impl Frame {
+    /*
+    fn overflow_h(&self)->Overflow{
+        if !self.overflow_h.is_visible(){
+            self.overflow_h
+        }
+        else{
+            self.overflow
+        }
+    }
+    fn overflow_v(&self)->Overflow{
+        if !self.overflow_v.is_visible(){
+            self.overflow_v
+        }
+        else{
+            self.overflow
+        }
+    }
+*/
     
     pub fn handle_event_iter(&mut self, cx: &mut Cx, event: &Event) -> Vec<FrameActionItem> {
         // ok so.
