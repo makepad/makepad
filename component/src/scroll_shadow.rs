@@ -49,19 +49,19 @@ impl ScrollShadow {
     pub fn draw(&mut self, cx: &mut Cx2d, view: &View, offset: Vec2) {
         let shadow_size = self.shadow_size;
         let rect = cx.turtle().rect();
+        let scroll = cx.turtle().scroll();
         
         self.shadow_is_top = 0.0;
         self.draw_abs(cx, Rect {
-            pos: rect.pos + vec2(offset.x, 0.0),
+            pos: rect.pos + vec2(offset.x, 0.0) - scroll,
             size: vec2(shadow_size, rect.size.y)
         });
         
         
         self.shadow_is_top = 1.0;
         self.draw_abs(cx, Rect {
-            pos: rect.pos + vec2(0., offset.y),
+            pos: rect.pos + vec2(0., offset.y) - scroll,
             size: vec2(rect.size.x, shadow_size)
         });
-        self.area().set_no_scroll(cx, true, true);
     }
 }

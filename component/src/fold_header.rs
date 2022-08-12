@@ -75,7 +75,7 @@ impl FrameComponent for FoldHeader {
         if self.state_handle_event(cx, event).must_redraw() {
             if self.state.is_track_animating(cx, id!(open)) {
                 let rect = self.view.get_rect(cx);
-                self.view.set_scroll_pos(cx, vec2(0.0, rect.size.y * (1.0 - self.opened)));
+                //self.view.set_scroll_pos(cx, vec2(0.0, rect.size.y * (1.0 - self.opened)));
                 self.view.redraw(cx);
             }
         };

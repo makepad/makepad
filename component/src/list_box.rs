@@ -237,7 +237,6 @@ impl ListBoxItem{
     }
 }
 
-
 impl ListBox {
     
     pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk) -> ViewRedrawing {
@@ -289,7 +288,7 @@ impl ListBox {
     pub fn should_node_draw(&mut self, cx: &mut Cx2d) -> bool {
         let height = self.node_height;
         let walk = Walk::size(Size::Fill, Size::Fixed(height));
-        if cx.walk_turtle_would_be_visible(walk, self.scroll_view.get_scroll_pos(cx)) {
+        if cx.walk_turtle_would_be_visible(walk) {
             return true
         }
         else {

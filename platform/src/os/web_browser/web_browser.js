@@ -32,7 +32,7 @@ export class WasmWebBrowser extends WasmBridge {
     
     load_deps() {
         this.to_wasm = this.new_to_wasm();
-        
+         
         this.to_wasm.ToWasmGetDeps({
             gpu_info: this.gpu_info,
             cpu_cores: navigator.hardwareConcurrency,
@@ -48,7 +48,7 @@ export class WasmWebBrowser extends WasmBridge {
         });
         
         this.do_wasm_pump();
-        
+       
         this.load_deps_promise.then(
             results => {
                 let deps = [];
@@ -64,7 +64,6 @@ export class WasmWebBrowser extends WasmBridge {
                     deps: deps
                 });
                 this.do_wasm_pump();
-                
                 // only bind the event handlers now
                 // to stop them firing into wasm early
                 this.bind_mouse_and_touch();
@@ -72,8 +71,10 @@ export class WasmWebBrowser extends WasmBridge {
                 this.bind_screen_resize();
                 this.focus_keyboard_input();
                 this.to_wasm.ToWasmRedrawAll();
-                this.do_wasm_pump();
                 
+                this.do_wasm_pump();
+                                 
+
                 var loaders = document.getElementsByClassName('canvas_loader');
                 for (var i = 0; i < loaders.length; i ++) {
                     loaders[i].parentNode.removeChild(loaders[i])

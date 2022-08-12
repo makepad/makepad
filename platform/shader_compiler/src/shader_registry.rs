@@ -323,7 +323,7 @@ impl ShaderRegistry {
                     &mut parser_deps,
                     if let Some(struct_ptr) = struct_ptr {Some(FnSelfKind::Struct(struct_ptr))}else {None},
                     expand_index.unwrap() as usize,
-                    fn_node.origin.token_id().unwrap().file_id(),
+                    fn_node.origin.token_id().unwrap().file_id().unwrap(),
                     token_start as usize
                     //Some(struct_full_ptr)
                 );
@@ -399,7 +399,7 @@ impl ShaderRegistry {
                                 &mut parser_deps,
                                 Some(FnSelfKind::Struct(struct_ptr)),
                                 expand_index.unwrap() as usize,
-                                prop.origin.token_id().unwrap().file_id(),
+                                prop.origin.token_id().unwrap().file_id().unwrap(),
                                 token_start as usize
                                 //Some(struct_full_ptr)
                             );
@@ -501,8 +501,8 @@ impl ShaderRegistry {
         draw_shader_def.add_uniform(id_from_str!(dpi_factor).unwrap(), id_from_str!(pass).unwrap(), Ty::Float, TokenSpan::default());
         draw_shader_def.add_uniform(id_from_str!(dpi_dilate).unwrap(), id_from_str!(pass).unwrap(), Ty::Float, TokenSpan::default());
         draw_shader_def.add_uniform(id_from_str!(view_transform).unwrap(), id_from_str!(view).unwrap(), Ty::Mat4, TokenSpan::default());
-        draw_shader_def.add_uniform(id_from_str!(draw_clip).unwrap(), id_from_str!(draw).unwrap(), Ty::Vec4, TokenSpan::default());
-        draw_shader_def.add_uniform(id_from_str!(draw_scroll).unwrap(), id_from_str!(draw).unwrap(), Ty::Vec4, TokenSpan::default());
+        //draw_shader_def.add_uniform(id_from_str!(draw_clip).unwrap(), id_from_str!(draw).unwrap(), Ty::Vec4, TokenSpan::default());
+        //raw_shader_def.add_uniform(id_from_str!(draw_scroll).unwrap(), id_from_str!(draw).unwrap(), Ty::Vec4, TokenSpan::default());
         draw_shader_def.add_uniform(id_from_str!(draw_zbias).unwrap(), id_from_str!(draw).unwrap(), Ty::Float, TokenSpan::default());
         
         let (doc, class_node) = live_registry.ptr_to_doc_node(draw_shader_ptr.0);
@@ -674,7 +674,7 @@ impl ShaderRegistry {
                                 &mut parser_deps,
                                 Some(FnSelfKind::DrawShader(draw_shader_ptr)),
                                 expand_index.unwrap() as usize,
-                                prop.origin.token_id().unwrap().file_id(),
+                                prop.origin.token_id().unwrap().file_id().unwrap(),
                                 token_start as usize
                                 //None
                             );

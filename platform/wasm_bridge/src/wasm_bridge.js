@@ -15,7 +15,7 @@ export class WasmBridge {
         this.wasm_init_panic_hook();
     }
     
-    create_js_message_bridge(wasm_app){
+    create_js_message_bridge(wasm_app) {
         let msg = new FromWasmMsg(this, this.wasm_get_js_message_bridge(wasm_app));
         let code = msg.read_str();
         msg.free();
@@ -23,7 +23,7 @@ export class WasmBridge {
         this.msg_class = new Function("ToWasmMsg", "FromWasmMsg", code)(ToWasmMsg, FromWasmMsg);
     }
     
-    clear_memory_refs(){
+    clear_memory_refs() {
         this.exports = null;
         this.memory = null;
         this.wasm._memory = null;
@@ -49,19 +49,19 @@ export class WasmBridge {
     new_from_wasm(ptr) {
         return new this.msg_class.FromWasmMsg(this, ptr);
     }
-
-    clone_data_u8(obj){
+    
+    clone_data_u8(obj) {
         var dst = new ArrayBuffer(obj.len);
         let u8 = new Uint8Array(dst);
-        u8.set(this.view_data_u8(obj));
+        u8.set (this.view_data_u8(obj));
         return u8;
     }
-
-    view_data_u8(obj){
+    
+    view_data_u8(obj) {
         return new Uint8Array(this.memory.buffer, obj.ptr, obj.len)
     }
     
-    free_data_u8(obj){
+    free_data_u8(obj) {
         this.wasm_free_data_u8(obj.ptr, obj.len, obj.capacity);
     }
     
@@ -93,7 +93,7 @@ export class WasmBridge {
         this.update_array_buffer_refs();
         return new_ptr
     }
-
+    
     wasm_free_data_u8(ptr, len, cap) {
         this.exports.wasm_free_data_u8(ptr, len, cap);
         this.update_array_buffer_refs();
@@ -116,27 +116,25 @@ export class WasmBridge {
     js_console_log(chars_ptr, len) {
         console.log(this.chars_to_string(chars_ptr, len));
     }
-        
+    
     js_console_error(chars_ptr, len) {
         console.error(this.chars_to_string(chars_ptr, len), '');
     }
     
-    static create_shared_memory(){
-        let timeout = setTimeout(_=>{
+    static create_shared_memory() {
+        let timeout = setTimeout(_ => {
             document.body.innerHTML = "<div style='margin-top:30px;margin-left:30px; color:white;'>Please close and re-open the browsertab - Shared memory allocation failed, this is a bug of iOS safari and apple needs to fix it.</div>"
         }, 1000)
-        let mem =new WebAssembly.Memory({initial: 64, maximum: 8192, shared: true});
+        let mem = new WebAssembly.Memory({initial: 64, maximum: 8192, shared: true});
         clearTimeout(timeout);
         return mem;
     }
     
-
-    static async supports_simd(){
-        let bytes = Uint8Array.from([0,97,115,109,1,0,0,0,1,5,1,96,0,1,123,3,2,1,0,10,10,1,8,0,65,0,253,15,253,98,11,0,10,4,110,97,109,101,2,3,1,0,0]);
-        return WebAssembly.instantiate(bytes).then(_=>{
+    static async supports_simd() {
+        let bytes = Uint8Array.from([0, 97, 115, 109, 1, 0, 0, 0, 1, 5, 1, 96, 0, 1, 123, 3, 2, 1, 0, 10, 10, 1, 8, 0, 65, 0, 253, 15, 253, 98, 11, 0, 10, 4, 110, 97, 109, 101, 2, 3, 1, 0, 0]);
+        return WebAssembly.instantiate(bytes).then(_ => {
             return true
-        },
-        _=>{
+        }, _ => {
             return false
         })
     }
@@ -156,10 +154,10 @@ export class WasmBridge {
         env.js_console_error = (chars_ptr, len) => _wasm._bridge.js_console_error(chars_ptr, len);
         env.js_post_signal = (hi, lo) => _wasm._bridge.js_post_signal(hi, lo);
         
-        if(memory !== undefined){
+        if (memory !== undefined) {
             env.memory = memory;
         }
-
+        
         return WebAssembly.instantiate(module, {env}).then(wasm => {
             _wasm = wasm;
             wasm._has_thread_support = env.memory !== undefined;
@@ -189,7 +187,9 @@ export class WasmBridge {
     
     static fetch_and_instantiate_wasm(wasm_url, memory) {
         return WebAssembly.compileStreaming(fetch(wasm_url))
-          .then((module) => this.instantiate_wasm(module, memory, {_post_signal:_=>{}}))
+            .then((module) => this.instantiate_wasm(module, memory, {_post_signal: _ => {}}), error => {
+            console.error(error)
+        })
     }
 }
 
@@ -328,7 +328,7 @@ export class FromWasmMsg {
 function base64_to_array_buffer(base64) {
     var bin = window.atob(base64);
     var u8 = new Uint8Array(bin.length);
-    for (var i = 0; i < bin.length; i++) {
+    for (var i = 0; i < bin.length; i ++) {
         u8[i] = bin.charCodeAt(i);
         console.log(u8[i]);
     }

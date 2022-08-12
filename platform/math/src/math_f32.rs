@@ -62,10 +62,22 @@ impl Rect {
             r.pos.y + r.size.y < self.pos.y
         )
     }
-
+/*
     pub fn scroll_and_clip(&self, scroll:Vec2, clip:(Vec2,Vec2)) -> Rect {
         let mut x1 = self.pos.x - scroll.x;
         let mut y1 = self.pos.y - scroll.y;
+        let mut x2 = x1 + self.size.x;
+        let mut y2 = y1 + self.size.y;
+        x1 = x1.max(clip.0.x).min(clip.1.x);
+        y1 = y1.max(clip.0.y).min(clip.1.y);
+        x2 = x2.max(clip.0.x).min(clip.1.x);
+        y2 = y2.max(clip.0.y).min(clip.1.y);
+        return Rect {pos: vec2(x1, y1), size: vec2(x2 - x1, y2 - y1)};
+    }*/
+    
+    pub fn clip(&self, clip:(Vec2,Vec2)) -> Rect {
+        let mut x1 = self.pos.x;
+        let mut y1 = self.pos.y;
         let mut x2 = x1 + self.size.x;
         let mut y2 = y1 + self.size.y;
         x1 = x1.max(clip.0.x).min(clip.1.x);
@@ -421,7 +433,12 @@ impl Vec4 {
         let a = (self.w * 255.0) as u8 as u32;
         return (r<<24)|(g<<16)|(b<<8)|a;
     }
+}
 
+impl From<(Vec2,Vec2)> for Vec4{
+    fn from(other:(Vec2,Vec2))->Vec4{
+        vec4(other.0.x, other.0.y, other.1.x, other.1.y)
+    }
 }
 
 

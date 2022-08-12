@@ -305,7 +305,7 @@ impl ScrollBar {
                     Axis::Horizontal => fe.handled_x.get(),
                     Axis::Vertical => fe.handled_y.get()
                 } {
-                    let rect = self.view_area.get_rect(cx);
+                    let rect = self.view_area.get_clipped_rect(cx);
                     if rect.contains(fe.abs) { // handle mousewheel
                         // we should scroll in either x or y
                         let scroll = match self.axis {
@@ -430,14 +430,14 @@ impl ScrollBar {
                     self.bar.is_vertical = 0.0;
                     self.bar.norm_scroll = norm_scroll;
                     self.bar.norm_handle = norm_handle;
+                    let scroll = cx.turtle().scroll();
                     self.bar.draw_rel(
                         cx,
                         Rect {
-                            pos: vec2(self.bar_side_margin, view_rect.size.y - self.bar_size),
+                            pos: vec2(self.bar_side_margin, view_rect.size.y - self.bar_size) - scroll,
                             size: vec2(self.scroll_size, self.bar_size),
                         }
                     );
-                    self.bar.area().set_no_scroll(cx, true, true);
                 }
             },
             Axis::Vertical => {
@@ -457,14 +457,14 @@ impl ScrollBar {
                     self.bar.is_vertical = 1.0;
                     self.bar.norm_scroll = norm_scroll;
                     self.bar.norm_handle = norm_handle;
+                    let scroll = cx.turtle().scroll();
                     self.bar.draw_rel(
                         cx,
                         Rect {
-                            pos: vec2(view_rect.size.x - self.bar_size, self.bar_side_margin),
+                            pos: vec2(view_rect.size.x - self.bar_size, self.bar_side_margin) - scroll,
                             size: vec2(self.bar_size, self.scroll_size)
                         }
                     );
-                    self.bar.area().set_no_scroll(cx, true, true);
                 }
             }
         }
