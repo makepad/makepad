@@ -149,15 +149,15 @@ impl LiveRegistry {
     }
     
     pub fn token_id_to_origin_doc(&self, token_id: LiveTokenId) -> &LiveOriginal {
-        &self.live_files[token_id.file_id().to_index()].original
+        &self.live_files[token_id.file_id().unwrap().to_index()].original
     }
     
     pub fn token_id_to_token(&self, token_id: LiveTokenId) -> &TokenWithSpan {
-        &self.live_files[token_id.file_id().to_index()].original.tokens[token_id.token_index()]
+        &self.live_files[token_id.file_id().unwrap().to_index()].original.tokens[token_id.token_index()]
     }
     
     pub fn token_id_to_expanded_doc(&self, token_id: LiveTokenId) -> &LiveExpanded {
-        &self.live_files[token_id.file_id().to_index()].expanded
+        &self.live_files[token_id.file_id().unwrap().to_index()].expanded
     }
     
     pub fn module_id_to_file_id(&self, module_id: LiveModuleId) -> Option<LiveFileId> {
@@ -201,7 +201,7 @@ impl LiveRegistry {
         if token_index == 0 {
             return None;
         }
-        let doc = &self.live_files[first_def.file_id().to_index()].original;
+        let doc = &self.live_files[first_def.file_id().unwrap().to_index()].original;
         let token = doc.tokens[token_index - 1];
         if let LiveToken::Ident(id) = token.token {
             return Some(id)
@@ -373,12 +373,17 @@ impl LiveRegistry {
                 }
             }
             LiveErrorSpan::Token(token_span) => {
-                let live_file = &self.live_files[token_span.token_id.file_id().to_index()];
-                let token = live_file.original.tokens[token_span.token_id.token_index()];
+                let (file_name, span) = if let Some(file_id) = token_span.token_id.file_id(){
+                    let live_file= &self.live_files[file_id.to_index()];
+                    (live_file.file_name.as_str(),live_file.original.tokens[token_span.token_id.token_index()].span)
+                }
+                else{
+                    ("<file id is not defined>", TextSpan::default())
+                };
                 LiveFileError {
                     origin: live_error.origin,
-                    file: live_file.file_name.clone(),
-                    span: token.span,
+                    file: file_name.to_string(),
+                    span,
                     message: live_error.message
                 }
             }
@@ -386,7 +391,7 @@ impl LiveRegistry {
     }
     
     pub fn token_id_to_span(&self, token_id: LiveTokenId) -> TextSpan {
-        self.live_files[token_id.file_id().to_index()].original.token_id_to_span(token_id)
+        self.live_files[token_id.file_id().unwrap().to_index()].original.token_id_to_span(token_id)
     }
     
     pub fn tokenize_from_str(source: &str, start_pos: TextPos, file_id: LiveFileId) -> Result<(Vec<TokenWithSpan>, Vec<char>), LiveError> {
@@ -647,7 +652,7 @@ impl LiveRegistry {
         diff.open();
         for token_id in mutated_tokens {
             let token_index = token_id.token_index();
-            let file_id = token_id.file_id();
+            let file_id = token_id.file_id().unwrap();
             // ok this becomes the patch-map for shader constants
             
             //let live_file = &self.live_files[file_id.to_index()];

@@ -33,21 +33,18 @@ live_register!{
         varying tex_coord3: vec2
         varying clipped: vec2
         
-        fn scroll(self) -> vec2 {
-            return self.draw_scroll.xy
-        }
         
         fn vertex(self) -> vec4 {
             let min_pos = vec2(self.rect_pos.x, self.rect_pos.y)
             let max_pos = vec2(self.rect_pos.x + self.rect_size.x, self.rect_pos.y - self.rect_size.y)
             
             self.clipped = clamp(
-                mix(min_pos, max_pos, self.geom_pos) - self.draw_scroll.xy,
+                mix(min_pos, max_pos, self.geom_pos),
                 self.draw_clip.xy,
                 self.draw_clip.zw
             )
             
-            let normalized: vec2 = (self.clipped - min_pos + self.draw_scroll.xy) / vec2(self.rect_size.x, -self.rect_size.y)
+            let normalized: vec2 = (self.clipped - min_pos) / vec2(self.rect_size.x, -self.rect_size.y)
             //rect = vec4(min_pos.x, min_pos.y, max_pos.x, max_pos.y) - draw_scroll.xyxy;
             
             self.tex_coord1 = mix(
@@ -162,6 +159,7 @@ pub struct DrawText {
     #[calc] pub font_t2: Vec2,
     #[calc] pub rect_pos: Vec2,
     #[calc] pub rect_size: Vec2,
+    #[calc] pub draw_clip: Vec4,
     #[calc] pub char_depth: f32,
     #[calc] pub delta: Vec2,
     #[calc] pub font_size: f32,
@@ -339,7 +337,7 @@ impl DrawText {
             || self.text_style.font.font_id.is_none() {
             return
         }
-        
+        self.draw_clip = cx.turtle().draw_clip().into();
         let in_many = self.many_instances.is_some();
         let font_id = self.text_style.font.font_id.unwrap();
 
@@ -606,8 +604,8 @@ impl DrawText {
             return None
         }
         //let debug = cx.debug.clone();
-        let scroll_pos = area.get_scroll_pos(cx);
-        let pos = Vec2 {x: pos.x + scroll_pos.x, y: pos.y + scroll_pos.y};
+        //let scroll_pos = area.get_scroll_pos(cx);
+        //let pos = Vec2 {x: pos.x + scroll_pos.x, y: pos.y + scroll_pos.y};
         
         let rect_pos = area.get_read_ref(cx, id!(rect_pos), ShaderTy::Vec2).unwrap();
         let delta = area.get_read_ref(cx, id!(delta), ShaderTy::Vec2).unwrap();

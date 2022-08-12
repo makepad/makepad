@@ -8,6 +8,9 @@ use {
 #[derive(Copy, Clone, Default, Debug, Live, LiveHook)]
 #[live_ignore]
 pub struct Layout {
+    pub scroll: Vec2,
+    pub clip_x: bool,
+    pub clip_y: bool,
     pub padding: Padding,
     pub align: Align,
     pub flow: Flow,
@@ -98,6 +101,7 @@ pub struct Turtle {
     height: f32,
     width_used: f32,
     height_used: f32,
+    draw_clip: (Vec2,Vec2),
     guard_area: Area
 }
 
@@ -158,24 +162,39 @@ impl<'a> Cx2d<'a> {
     
     pub fn begin_turtle_with_guard(&mut self, walk: Walk, layout: Layout, guard_area: Area) {
         
-        let (origin, width, height) = if let Some(parent) = self.turtles.last() {
+        let (origin, width, height, draw_clip) = if let Some(parent) = self.turtles.last() {
             let o = walk.margin.left_top() + if let Some(pos) = walk.abs_pos {pos} else {
-                parent.pos + parent.child_spacing(self.turtle_walks.len())
+                parent.pos + parent.child_spacing(self.turtle_walks.len()) + layout.scroll
             };
             let w = parent.eval_width(walk.width, walk.margin, parent.layout.flow);
             let h = parent.eval_height(walk.height, walk.margin, parent.layout.flow);
-            (o, w, h)
+            // ok so lets eval width/height
+            let (x0,x1) = if layout.clip_x && !w.is_nan(){
+                (parent.draw_clip.0.x.max(o.x), parent.draw_clip.1.x.min(o.x + w))
+            }
+            else{
+                (parent.draw_clip.0.x, parent.draw_clip.1.x)
+            };
+            let (y0,y1) = if layout.clip_y && !h.is_nan(){
+                (parent.draw_clip.0.y.max(o.y), parent.draw_clip.1.y.min(o.y + h))
+            }
+            else{
+                (parent.draw_clip.0.y, parent.draw_clip.1.y)
+            };
+            (o, w, h, (vec2(x0,y0),vec2(x1,y1)))
         }
         else {
             let o = Vec2 {x: walk.margin.left, y: walk.margin.top};
             let w = walk.width.fixed_or_nan();
             let h = walk.height.fixed_or_nan();
-            (o, w, h)
+            
+            (o, w, h, (vec2(o.x,o.y),vec2(o.x+w, o.y+h)))
         };
         
         let turtle = Turtle {
             walk,
             layout,
+            draw_clip,
             align_start: self.align_list.len(),
             turtle_walks_start: self.turtle_walks.len(),
             defer_count: 0,
@@ -315,9 +334,9 @@ impl<'a> Cx2d<'a> {
         self.walk_turtle_internal(walk, self.align_list.len(), false)
     }
     
-    pub fn walk_turtle_would_be_visible(&mut self, walk: Walk, scroll:Vec2)->bool{
+    pub fn walk_turtle_would_be_visible(&mut self, walk: Walk)->bool{
         let rect = self.walk_turtle_internal(walk, self.align_list.len(), false);
-        self.turtle().rect_is_visible(rect, scroll)
+        self.turtle().rect_is_visible(rect)
     }
     
     pub fn peek_walk_pos(&mut self, walk: Walk) -> Vec2 {
@@ -439,6 +458,10 @@ impl<'a> Cx2d<'a> {
 }
 
 impl Turtle {
+    pub fn draw_clip(&self)->(Vec2,Vec2){
+        self.draw_clip
+    }
+    
     pub fn update_width_max(&mut self, dx: f32) {
         self.width_used = self.width_used.max((self.pos.x + dx) - self.origin.x);
     }
@@ -498,8 +521,8 @@ impl Turtle {
         }
     }
     
-    pub fn rect_is_visible(&self, geom: Rect, scroll: Vec2) -> bool {
-        let view = Rect {pos: self.origin + scroll, size: vec2(self.width, self.height)};
+    pub fn rect_is_visible(&self, geom: Rect) -> bool {
+        let view = Rect {pos: self.origin, size: vec2(self.width, self.height)};
         return view.intersects(geom)
     }
     
@@ -516,6 +539,11 @@ impl Turtle {
     
     pub fn pos(&self) -> Vec2 {
         self.pos
+    }
+    
+    
+    pub fn scroll(&self) -> Vec2 {
+        self.layout.scroll
     }
     
     pub fn eval_width(&self, width: Size, margin: Margin, flow: Flow) -> f32 {
@@ -665,6 +693,11 @@ impl Layout {
         }
     }
     
+    pub fn with_scroll(mut self, v: Vec2) -> Self {
+        self.scroll = v;
+        self
+    }
+
     pub fn with_align_x(mut self, v: f32) -> Self {
         self.align.x = v;
         self

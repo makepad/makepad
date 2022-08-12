@@ -304,7 +304,8 @@ impl Cx {
                 CxOsOp::XrStopPresenting(_) => {
                     todo!()
                 },
-                CxOsOp::ShowTextIME(pos) => {
+                CxOsOp::ShowTextIME(area, pos) => {
+                    let pos = area.get_clipped_rect(self).pos + pos;
                     metal_windows.iter_mut().for_each( | w | {
                         w.cocoa_window.set_ime_spot(pos);
                     });
