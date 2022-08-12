@@ -637,7 +637,7 @@ impl HitOptions {
             margin: Some(margin)
         }
     }
-    pub fn use_multi_touch() -> Self {
+    pub fn with_multi_touch() -> Self {
         Self {
             use_multi_touch: true,
             sweep_area: Area::Empty,
@@ -699,7 +699,7 @@ impl Event {
                 }
             },
             Event::FingerScroll(fe) => {
-                let rect = area.get_rect(&cx);
+                let rect = area.get_clipped_rect(&cx);
                 if rect_contains_with_margin(&rect, fe.abs, &options.margin) {
                     //fe.handled = true;
                     return Hit::FingerScroll(FingerScrollHitEvent {
@@ -713,7 +713,7 @@ impl Event {
                 if !sweep_lock.is_empty() && sweep_lock != options.sweep_area {
                     return Hit::Nothing
                 }
-                let rect = area.get_rect(&cx);
+                let rect = area.get_clipped_rect(&cx);
                 if fe.hover_last == area {
                     let any_captured = cx.fingers.get_digit_for_captured_area(area);
                     if !fe.handled.get() && rect_contains_with_margin(&rect, fe.abs, &options.margin) {
@@ -755,7 +755,7 @@ impl Event {
                 if let Some(digit) = cx.fingers.get_digit(fe.digit.id) {
                     if digit.captured == options.sweep_area {
                         let abs_start = digit.down_abs_start;
-                        let rect = area.get_rect(&cx);
+                        let rect = area.get_clipped_rect(&cx);
                         if fe.hover_last == area {
                             if !fe.handled.get() && rect_contains_with_margin(&rect, fe.abs, &options.margin) {
                                 fe.handled.set(true);
@@ -805,7 +805,7 @@ impl Event {
                         }
                     }
                     else if digit.captured == area {
-                        let rect = area.get_rect(&cx);
+                        let rect = area.get_clipped_rect(&cx);
                         return Hit::FingerMove(FingerMoveHitEvent {
                             abs_start: digit.down_abs_start,
                             rect: rect,
@@ -821,7 +821,7 @@ impl Event {
                     return Hit::Nothing
                 }
                 if !fe.handled.get() {
-                    let rect = area.get_rect(&cx);
+                    let rect = area.get_clipped_rect(&cx);
                     if rect_contains_with_margin(&rect, fe.abs, &options.margin) {
                         // if we have a parent area, capture that one
                         if !options.sweep_area.is_empty() {
@@ -867,7 +867,7 @@ impl Event {
                 if let Some(digit) = cx.fingers.get_digit(fe.digit.id) {
                     if digit.captured == options.sweep_area {
                         let abs_start = digit.down_abs_start;
-                        let rect = area.get_rect(&cx);
+                        let rect = area.get_clipped_rect(&cx);
                         if rect.contains(fe.abs) {
                             return Hit::FingerSweepOut(FingerSweepEvent {
                                 abs_start,
@@ -885,7 +885,7 @@ impl Event {
                     else if digit.captured == area {
                         let abs_start = digit.down_abs_start;
                         cx.fingers.release_digit(fe.digit.id);
-                        let rect = area.get_rect(&cx);
+                        let rect = area.get_clipped_rect(&cx);
                         return Hit::FingerUp(FingerUpHitEvent {
                             is_over: rect.contains(fe.abs),
                             abs_start,
@@ -907,7 +907,7 @@ impl Event {
     pub fn drag_hits_with_options(&self, cx: &mut Cx, area: Area, options: HitOptions) -> DragHit {
         match self {
             Event::Drag(event) => {
-                let rect = area.get_rect(cx);
+                let rect = area.get_clipped_rect(cx);
                 if area == cx.finger_drag.drag_area {
                     if !event.handled.get() && rect_contains_with_margin(&rect, event.abs, &options.margin) {
                         cx.finger_drag.next_drag_area = area;
@@ -942,7 +942,7 @@ impl Event {
                 }
             }
             Event::Drop(event) => {
-                let rect = area.get_rect(cx);
+                let rect = area.get_clipped_rect(cx);
                 if !event.handled.get() && rect_contains_with_margin(&rect, event.abs, &options.margin) {
                     cx.finger_drag.next_drag_area = Area::default();
                     event.handled.set(true);

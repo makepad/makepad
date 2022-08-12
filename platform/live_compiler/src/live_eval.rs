@@ -149,7 +149,7 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
             }
             else if let Some(token_id) = nodes[start].origin.token_id() { // lets find it on live registry via origin
                 
-                let origin_file_id = token_id.file_id();
+                let origin_file_id = token_id.file_id().unwrap();
                 let expand_index = nodes[start].get_expr_expand_index().unwrap();
                 
                 if let Some(ptr) = live_registry.find_scope_ptr_via_expand_index(origin_file_id, expand_index as usize, *id) {

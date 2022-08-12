@@ -14,6 +14,7 @@ export class WasmWebGL extends WasmWebBrowser {
         this.init_webgl_context();
         
         this.load_deps();
+        
     }
     
     
@@ -21,6 +22,7 @@ export class WasmWebGL extends WasmWebBrowser {
     
     
     FromWasmCompileWebGLShader(args) {
+       
         function get_attrib_locations(gl, program, base, slots) {
             let attrib_locs = [];
             let attribs = slots >> 2;
@@ -366,6 +368,7 @@ export class WasmWebGL extends WasmWebBrowser {
             this.gpu_info.vendor = gl.getParameter(debug_info.UNMASKED_VENDOR_WEBGL);
             this.gpu_info.renderer = gl.getParameter(debug_info.UNMASKED_RENDERER_WEBGL);
         }
+        
         
         //gl.EXT_blend_minmax = gl.getExtension('EXT_blend_minmax')
         //gl.OES_texture_half_float_linear = gl.getExtension('OES_texture_half_float_linear')

@@ -286,6 +286,7 @@ pub struct CxDrawShaderMapping {
     pub instance_enums: Vec<usize>,
     pub rect_pos: Option<usize>,
     pub rect_size: Option<usize>,
+    pub draw_clip: Option<usize>,
     pub live_uniforms_buf: Vec<f32>
 }
 
@@ -306,6 +307,7 @@ impl CxDrawShaderMapping {
         let mut instance_enums = Vec::new();
         let mut rect_pos = None;
         let mut rect_size = None;
+        let mut draw_clip = None;
         
         for field in &draw_shader_def.fields {
             let ty = field.ty_expr.ty.borrow().as_ref().unwrap().clone();
@@ -319,6 +321,9 @@ impl CxDrawShaderMapping {
                     }
                     if field.ident.0 == id!(rect_size) {
                         rect_size = Some(instances.total_slots);
+                    }
+                    if field.ident.0 == id!(draw_clip) {
+                        draw_clip = Some(instances.total_slots);
                     }
                     if var_def_ptr.is_some() {
                         var_instances.push(field.ident.0, ty.clone(), None,);
@@ -389,6 +394,7 @@ impl CxDrawShaderMapping {
             textures,
             rect_pos,
             rect_size,
+            draw_clip
         }
     }
     

@@ -26,7 +26,6 @@ use {
         live_traits::*,
         cx_draw_shaders::*
     },
-    
 };
 
 /*
@@ -50,12 +49,10 @@ pub struct DrawVars {
     pub (crate) geometry_id: Option<GeometryId>,
     pub user_uniforms: [f32; DRAW_CALL_USER_UNIFORMS],
     pub texture_slots: [Option<TextureId>; DRAW_CALL_TEXTURE_SLOTS],
-
     pub var_instances: [f32; DRAW_CALL_VAR_INSTANCES]
 }
 
 impl LiveNew for DrawVars {
-    
     fn new(_cx: &mut Cx) -> Self {
         Self::default()
     }
