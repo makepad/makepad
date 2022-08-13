@@ -259,9 +259,13 @@ impl PopupMenu {
     }
     
     pub fn end(&mut self, cx: &mut Cx2d, shift: DVec2) {
-        cx.turtle_mut().set_shift(shift);
+        // ok so. 
+        let menu_rect1 = cx.turtle().padded_rect_used().translate(shift);
+        let pass_rect = Rect{pos:dvec2(0.0,0.0), size:cx.current_pass_size()};
+        let menu_rect2 = pass_rect.contain(menu_rect1);
+        cx.turtle_mut().set_shift(shift + (menu_rect2.pos - menu_rect1.pos));
         self.bg.end(cx);
-        // end the overlay turtle
+        
         cx.end_overlay_turtle();
         //cx.debug.rect_r(self.bg.area().get_rect(cx));
         self.view.end(cx);
@@ -324,14 +328,11 @@ impl PopupMenu {
         for (node_id, action) in actions {
             match action {
                 PopupMenuItemAction::MightBeSelected => {
-                    // ok so. the first time we encounter this after open its sweep
-                    // next time its selection
-                    self.select_item_state(cx, node_id);
                     if self.first_tap {
                         self.first_tap = false;
-                        dispatch_action(cx, PopupMenuAction::WasSweeped(node_id));
                     }
                     else {
+                        self.select_item_state(cx, node_id);
                         dispatch_action(cx, PopupMenuAction::WasSelected(node_id));
                     }
                 }
