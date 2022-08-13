@@ -54,10 +54,9 @@ impl AppInner {
     
     pub fn draw(&mut self, cx: &mut Cx2d, state: &AppState) {
         if self.window.begin(cx, None).is_redrawing() {
-            if self.dock.begin(cx).is_redrawing() {
-                self.draw_panel(cx, state, id!(root).into());
-                self.dock.end(cx);
-            }
+            self.dock.begin(cx);
+            self.draw_panel(cx, state, id!(root).into());
+            self.dock.end(cx);
             self.window.end(cx);
         }
     }
@@ -74,39 +73,40 @@ impl AppInner {
             }
             Panel::Tab(TabPanel {tab_ids, selected_tab}) => {
                 self.dock.begin_tab_panel(cx, panel_id);
-                if self.dock.begin_tab_bar(cx, *selected_tab).is_redrawing() {
-                    for tab_id in tab_ids {
-                        let tab = &state.tabs[*tab_id];
-                        self.dock.draw_tab(cx, *tab_id, &tab.name);
-                    }
-                    self.dock.end_tab_bar(cx);
+                self.dock.begin_tab_bar(cx, *selected_tab);
+                for tab_id in tab_ids {
+                    let tab = &state.tabs[*tab_id];
+                    self.dock.draw_tab(cx, *tab_id, &tab.name);
                 }
-                if let Some(tab_id) = self.dock.selected_tab_id(cx, panel_id) {
-                    let tab = &state.tabs[tab_id];
-                    match tab.kind {
-                        TabKind::ShaderView => {
-                            self.shader_view.draw(cx)
-                        }
-                        TabKind::SlidesView => {
-                            self.slides_view.draw(cx)
-                        }
-                        TabKind::LogView => {
-                            self.log_view.draw(cx, &state.editor_state)
-                        }
-                        TabKind::FileTree => {
-                            if self.file_tree.begin(cx).is_redrawing() {
+                self.dock.end_tab_bar(cx);
+                if self.dock.begin_contents(cx).is_redrawing(){
+                    if let Some(tab_id) = self.dock.selected_tab_id(cx, panel_id) {
+                        let tab = &state.tabs[tab_id];
+                        match tab.kind {
+                            TabKind::ShaderView => {
+                                self.shader_view.draw(cx)
+                            }
+                            TabKind::SlidesView => {
+                                self.slides_view.draw(cx)
+                            }
+                            TabKind::LogView => {
+                                self.log_view.draw(cx, &state.editor_state)
+                            }
+                            TabKind::FileTree => {
+                                self.file_tree.begin(cx);
                                 self.draw_file_node(cx, state, id!(root).into());
                                 self.file_tree.end(cx);
                             }
-                        }
-                        TabKind::CodeEditor {..} => {
-                            self.editors.draw(
-                                cx,
-                                &state.editor_state,
-                                tab_id.into(),
-                            );
+                            TabKind::CodeEditor {..} => {
+                                self.editors.draw(
+                                    cx,
+                                    &state.editor_state,
+                                    tab_id.into(),
+                                );
+                            }
                         }
                     }
+                    self.dock.end_contents(cx);
                 }
                 self.dock.end_tab_panel(cx);
             }
@@ -143,7 +143,7 @@ impl AppInner {
                     id!(content).into(),
                     None,
                     state.file_path_join(&["studio/src/shader_view.rs"]),
-                    false
+                    true
                 );
                 self.builder_client.send_cmd(BuilderCmd::CargoCheck);
             }

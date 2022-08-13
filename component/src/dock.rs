@@ -69,7 +69,6 @@ pub struct DrawRoundCorner {
 #[derive(Live)]
 pub struct Dock {
     layout: Layout,
-    view: View,
     overlay_view: View,
     round_corner: DrawRoundCorner,
     padding_fill: DrawColor,
@@ -77,7 +76,7 @@ pub struct Dock {
     drag_quad: DrawColor,
     tab_bar: Option<LivePtr>,
     splitter: Option<LivePtr>,
-    
+    #[rust] area: Area,
     #[rust] panels: ComponentMap<PanelId, Panel>,
     #[rust] panel_id_stack: Vec<PanelId>,
     #[rust] drag: Option<Drag>,
@@ -95,19 +94,18 @@ impl LiveHook for Dock {
                 }
             }
         }
-        self.view.redraw(cx);
+        self.area.redraw(cx);
     }
 }
 
 impl Dock {
     
-    pub fn begin(&mut self, cx: &mut Cx2d) -> ViewRedrawing  {
-        self.view.begin(cx, Walk::default(), self.layout) ?;
-        ViewRedrawing::yes()
+    pub fn begin(&mut self, cx: &mut Cx2d) {
+        cx.begin_turtle(Walk::default(), self.layout);
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
-        if self.overlay_view.begin(cx, Walk::default(), Layout::flow_right()).is_redrawing() {
+        if self.overlay_view.begin(cx).is_redrawing() {
             if let Some(drag) = self.drag.as_ref() {
                 let panel = self.panels[drag.panel_id].as_tab_panel();
                 let rect = compute_drag_rect(panel.contents_rect, drag.position);
@@ -153,8 +151,7 @@ impl Dock {
             pos: rect.pos + vec2(0., rect.size.y - self.border_size),
             size: vec2(rect.size.x, self.border_size)
         });
-        
-        self.view.end(cx);
+        cx.end_turtle_with_area(&mut self.area);
     }
     
     pub fn begin_split_panel(&mut self, cx: &mut Cx2d, panel_id: PanelId, axis: Axis, align: SplitterAlign) {
@@ -186,24 +183,18 @@ impl Dock {
         let _ = self.panel_id_stack.pop().unwrap();
     }
     
-    pub fn begin_tab_bar(&mut self, cx: &mut Cx2d, selected_tab: Option<usize>) -> ViewRedrawing {
+    pub fn begin_tab_bar(&mut self, cx: &mut Cx2d, selected_tab: Option<usize>) {
         let panel_id = *self.panel_id_stack.last().unwrap();
         let panel = self.panels[panel_id].as_tab_panel_mut();
         panel.full_rect = cx.turtle().rect();
-        
-        if panel.tab_bar.begin(cx, selected_tab).not_redrawing() {
-            self.contents(cx);
-            return ViewRedrawing::no()
-        }
-        
-        ViewRedrawing::yes()
+        panel.tab_bar.begin(cx, selected_tab);
     }
     
     pub fn end_tab_bar(&mut self, cx: &mut Cx2d) {
         let panel_id = *self.panel_id_stack.last().unwrap();
         let panel = self.panels[panel_id].as_tab_panel_mut();
         panel.tab_bar.end(cx);
-        self.contents(cx);
+        //self.contents(cx);
     }
     
     pub fn draw_tab(&mut self, cx: &mut Cx2d, tab_id: TabId, name: &str) {
@@ -218,10 +209,16 @@ impl Dock {
         self.redraw(cx);
     }
     
-    fn contents(&mut self, cx: &mut Cx2d) {
+    pub fn begin_contents(&mut self, cx: &mut Cx2d)->ViewRedrawing {
         let panel_id = *self.panel_id_stack.last().unwrap();
         let panel = self.panels[panel_id].as_tab_panel_mut();
-        panel.contents_rect = cx.turtle().rect_left();
+        panel.contents_view.begin(cx)
+    } 
+    
+    pub fn end_contents(&mut self, cx: &mut Cx2d){
+        let panel_id = *self.panel_id_stack.last().unwrap();
+        let panel = self.panels[panel_id].as_tab_panel_mut();
+        panel.contents_view.end(cx);
     } 
     
     fn get_or_create_split_panel(&mut self, cx: &mut Cx, panel_id: PanelId) -> &mut SplitPanel {
@@ -238,6 +235,7 @@ impl Dock {
         self.panels.get_or_insert(cx, panel_id, | cx | {
             Panel::Tab(TabPanel {
                 tab_bar: TabBar::new_from_ptr(cx, tab_bar),
+                contents_view: View::new(cx),
                 contents_rect: Rect::default(),
                 full_rect: Rect::default(),
             })
@@ -260,8 +258,8 @@ impl Dock {
         panel.tab_bar.set_next_selected_tab(cx, tab_id, animate);
     }
     
-    pub fn redraw(&mut self, cx: &mut Cx) {
-        self.view.redraw(cx);
+    pub fn redraw(&self, cx: &mut Cx) {
+        self.area.redraw(cx);
     }
     
     pub fn redraw_tab_bar(&mut self, cx: &mut Cx, panel_id: PanelId) {
@@ -294,6 +292,7 @@ impl Dock {
                     });
                 }
                 Panel::Tab(panel) => {
+                    let mut redraw = false;
                     panel
                         .tab_bar
                         .handle_event(cx, event, &mut | cx, action | match action {
@@ -302,9 +301,11 @@ impl Dock {
                             DockAction::TabBarReceivedDraggedItem(*panel_id, item),
                         ),
                         TabBarAction::TabWasPressed(tab_id) => {
+                            redraw = true;
                             dispatch_action(cx, DockAction::TabWasPressed(*panel_id, tab_id))
                         }
                         TabBarAction::TabCloseWasPressed(tab_id) => {
+                            redraw = true;
                             dispatch_action(cx, DockAction::TabCloseWasPressed(*panel_id, tab_id))
                         }
                         TabBarAction::TabReceivedDraggedItem(tab_id, item) => {
@@ -314,6 +315,9 @@ impl Dock {
                             )
                         }
                     });
+                    if redraw{
+                        panel.contents_view.redraw(cx);
+                    }
                 }
             }
         }
@@ -393,6 +397,7 @@ struct SplitPanel {
 
 struct TabPanel {
     tab_bar: TabBar,
+    contents_view: View,
     contents_rect: Rect,
     full_rect: Rect
 }

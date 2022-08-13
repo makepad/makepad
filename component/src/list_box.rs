@@ -4,7 +4,7 @@ use {
     },
     crate::{
         makepad_derive_frame::*,
-        scroll_view::ScrollView,
+        scroll_bars::ScrollBars,
         makepad_draw_2d::*,
         frame::*,
     },
@@ -92,11 +92,7 @@ live_register!{
         list_item: ListBoxItem {}
         walk: {width:Fill, height:Fit}
         layout: {flow: Flow::Down}
-        scroll_view: {
-            view: {
-                debug_id: file_tree_view
-            }
-        }
+        scroll_bars: {}
     }
 }
 
@@ -138,7 +134,7 @@ pub struct ListBoxItem {
 #[derive(Live)]
 #[live_register(frame_component!(ListBox))]
 pub struct ListBox {
-    scroll_view: ScrollView,
+    scroll_bars: ScrollBars,
     list_item: Option<LivePtr>,
     
     filler_quad: DrawBgQuad,
@@ -164,7 +160,7 @@ impl LiveHook for ListBox {
                 item.apply(cx, from, index, nodes);
             }
         }
-        self.scroll_view.redraw(cx);
+        self.scroll_bars.redraw(cx);
     }
 }
 
@@ -239,10 +235,9 @@ impl ListBoxItem{
 
 impl ListBox {
     
-    pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk) -> ViewRedrawing {
-        self.scroll_view.begin(cx, walk, self.layout) ?;
+    pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk) {
+        self.scroll_bars.begin(cx, walk, self.layout);
         self.count = 0;
-        ViewRedrawing::yes()
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
@@ -255,7 +250,8 @@ impl ListBox {
             self.filler_quad.draw_walk(cx, Walk::size(Size::Fill, Size::Fixed(self.node_height.min(height_left - walk))));
             walk += self.node_height.max(1.0);
         }
-        self.scroll_view.end(cx);
+        
+        self.scroll_bars.end(cx);
         
         let selected_item_ids = &self.selected_item_ids;
         self.list_items.retain_visible_and( | item_id, _ | selected_item_ids.contains(item_id));
@@ -266,7 +262,7 @@ impl ListBox {
     }
     
     pub fn redraw(&mut self, cx: &mut Cx) {
-        self.scroll_view.redraw(cx);
+        self.scroll_bars.redraw(cx);
     }
     
     pub fn draw_node(
@@ -303,9 +299,7 @@ impl ListBox {
         event: &Event,
         _dispatch_action: &mut dyn FnMut(&mut Cx, ListBoxAction),
     ) {
-        if self.scroll_view.handle_event(cx, event) {
-            self.scroll_view.redraw(cx);
-        }
+        self.scroll_bars.handle_event(cx, event, &mut |_,_|{});
         
         let mut actions = Vec::new();
         for (node_id, node) in self.list_items.iter_mut() {
@@ -345,7 +339,7 @@ impl FrameComponent for ListBox {
     }
     
     fn redraw(&mut self, cx: &mut Cx) {
-        self.scroll_view.redraw(cx);
+        self.scroll_bars.redraw(cx);
     }
     
     fn handle_component_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, FrameActionItem)) {
@@ -366,9 +360,7 @@ impl FrameComponent for ListBox {
     fn get_walk(&self) -> Walk {self.walk}
     
     fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk, _self_uid: FrameUid) -> FrameDraw {
-        if self.begin(cx, walk).not_redrawing(){
-            return FrameDraw::done();
-        };
+        self.begin(cx, walk);
         for (i, item_str) in self.items.iter().enumerate(){
             let node_id = id_num!(listbox,i as u64).into();
             self.count += 1;

@@ -37,7 +37,7 @@ live_register!{
         goal_pos: 0.0
         anim_speed: 0.9
         frame: {
-            clip: true,
+            layout:{clip_x:true,clip_y:true},
             walk: {width: Fill, height: Fill}
             Slide {title = {text: "Makepad"}, Body {text: "A new way to build UI\nFor web and native"}}
             Slide {title = {text: "Long long ago"}, Body {text: "Founded cloud 9 IDE\nHTML based code editor ACE"}}
@@ -91,10 +91,8 @@ impl SlidesView {
                 if (self.current_pos - self.goal_pos).abs()>0.00001 {
                     self.next_frame(cx);
                 }
-                if let Some(view) = &mut self.frame.view {
-                    // view.set_scroll_pos(cx, vec2(self.current_pos * self.slide_width, 0.0));
-                    
-                }
+                self.frame.set_scroll_pos(vec2(self.current_pos * self.slide_width, 0.0));
+                self.frame.redraw(cx);
             }
             _ => ()
         }

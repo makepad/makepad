@@ -97,6 +97,7 @@ pub use {
         },
         draw_list::{
             CxDrawItem,
+            CxRectArea,
             CxDrawCall,
             DrawList,
             DrawListId,
@@ -108,7 +109,7 @@ pub use {
         },
         area::{
             Area,
-            DrawListArea,
+            RectArea,
             InstanceArea
         },
         /*midi::{
