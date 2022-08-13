@@ -18,7 +18,6 @@ live_register!{
         layout: {
             flow: Flow::Down,
         }
-        
         state: {
             open = {
                 default: on
@@ -116,8 +115,7 @@ impl FrameComponent for FoldHeader {
             cx.begin_turtle(
                 self.body_walk,
                 Layout::flow_down()
-                .with_scroll(dvec2(0.0, -self.rect_size * (1.0 - self.opened)))
-                .with_clip(true,true)
+                .with_scroll(dvec2(0.0, self.rect_size * (1.0 - self.opened)))
             );
             self.draw_state.set(DrawState::DrawBody);
         }

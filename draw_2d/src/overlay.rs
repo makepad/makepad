@@ -51,6 +51,7 @@ impl Overlay {
                 Event::FingerMove(fe)=>fe.sweep_lock.set(area),
                 Event::FingerDown(fe)=>fe.sweep_lock.set(area),
                 Event::FingerHover(fe)=>fe.sweep_lock.set(area),
+                Event::FingerScroll(fe)=>fe.sweep_lock.set(area),
                 _=>()
             }
         }

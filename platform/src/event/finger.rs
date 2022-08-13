@@ -444,13 +444,11 @@ impl std::ops::DerefMut for FingerMoveHitEvent {
     fn deref_mut(&mut self) -> &mut Self::Target {&mut self.deref_target}
 }
 
-
 impl FingerMoveHitEvent {
     pub fn move_distance(&self) -> f64 {
         ((self.abs_start.x - self.abs.x).powf(2.) + (self.abs_start.y - self.abs.y).powf(2.)).sqrt()
     }
 }
-
 
 #[derive(Clone, Debug)]
 pub struct FingerUpEvent {
@@ -537,6 +535,7 @@ pub struct FingerScrollEvent {
     pub abs: DVec2,
     pub scroll: DVec2,
     pub device: DigitDevice,
+    pub sweep_lock: Cell<Area>,
     pub handled_x: Cell<bool>,
     pub handled_y: Cell<bool>,
     pub modifiers: KeyModifiers,
@@ -702,6 +701,10 @@ impl Event {
                 }
             },
             Event::FingerScroll(fe) => {
+                let sweep_lock = fe.sweep_lock.get();
+                if !sweep_lock.is_empty() && sweep_lock != options.sweep_area {
+                    return Hit::Nothing
+                }
                 let rect = area.get_clipped_rect(&cx);
                 if rect_contains_with_margin(&rect, fe.abs, &options.margin) {
                     //fe.handled = true;

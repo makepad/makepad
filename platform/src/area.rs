@@ -226,10 +226,6 @@ impl Area {
                     error!("Generation invalid get_rect {} {:?} {} {}", draw_list.debug_id, inst, cx.draw_shaders.generation, draw_call.draw_shader.draw_shader_generation);
                     return Rect::default()
                 }
-                if !draw_call.was_painted{
-                    error!("Calling get rect on an area before it was painted doesn't work");
-                    return Rect::default()
-                }
                 let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
                 // ok now we have to patch x/y/w/h into it
                 let buf = draw_item.instances.as_ref().unwrap();
@@ -284,10 +280,6 @@ impl Area {
                 }
                 if cx.draw_shaders.generation != draw_call.draw_shader.draw_shader_generation {
                     error!("Generation invalid get_rect {} {:?} {} {}", draw_list.debug_id, inst, cx.draw_shaders.generation, draw_call.draw_shader.draw_shader_generation);
-                    return Rect::default()
-                }
-                if !draw_call.was_painted{
-                    error!("Calling get rect on an area before it was painted doesn't work");
                     return Rect::default()
                 }
                 let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
