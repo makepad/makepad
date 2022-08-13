@@ -1,14 +1,14 @@
-use{
-    std::{fmt,ops},
+use {
+    std::{fmt, ops},
     crate::math_f32::*,
-//    makepad_microserde::*,
-//    crate::colorhex::*
+    //    makepad_microserde::*,
+    //    crate::colorhex::*
 };
 
 
 pub struct PrettyPrintedF64(pub f64);
 
-impl fmt::Display for PrettyPrintedF64 { 
+impl fmt::Display for PrettyPrintedF64 {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         if self.0.abs().fract() < 0.00000001 {
             write!(f, "{}.0", self.0)
@@ -20,17 +20,86 @@ impl fmt::Display for PrettyPrintedF64 {
 
 
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
+pub struct Rect {
+    pub pos: DVec2,
+    pub size: DVec2,
+}
+
+impl Rect {
+    
+    pub fn translate(self, pos: DVec2) -> Rect {
+        Rect {pos: self.pos + pos, size: self.size}
+    }
+    
+    pub fn contains(&self, pos: DVec2) -> bool {
+        return pos.x >= self.pos.x && pos.x <= self.pos.x + self.size.x &&
+        pos.y >= self.pos.y && pos.y <= self.pos.y + self.size.y;
+    }
+    
+    pub fn center(&self) -> DVec2 {
+        DVec2 {
+            x: self.pos.x + self.size.x * 0.5,
+            y: self.pos.y + self.size.y * 0.5,
+        }
+    }
+    
+    pub fn scale_and_shift(&self, center: DVec2, scale: f64, shift: DVec2) -> Rect {
+        Rect {
+            pos: (self.pos - center) * scale + center + shift,
+            size: self.size * scale
+        }
+    }
+    
+    pub fn intersects(&self, r: Rect) -> bool {
+        !(
+            r.pos.x > self.pos.x + self.size.x ||
+            r.pos.x + r.size.x < self.pos.x ||
+            r.pos.y > self.pos.y + self.size.y ||
+            r.pos.y + r.size.y < self.pos.y
+        )
+    }
+    
+    pub fn add_margin(self, size: DVec2) -> Rect {
+        Rect {pos: self.pos - size, size: self.size + 2.0 * size}
+    }
+    
+    pub fn clip(&self, clip: (DVec2, DVec2)) -> Rect {
+        let mut x1 = self.pos.x;
+        let mut y1 = self.pos.y;
+        let mut x2 = x1 + self.size.x;
+        let mut y2 = y1 + self.size.y;
+        x1 = x1.max(clip.0.x).min(clip.1.x);
+        y1 = y1.max(clip.0.y).min(clip.1.y);
+        x2 = x2.max(clip.0.x).min(clip.1.x);
+        y2 = y2.max(clip.0.y).min(clip.1.y);
+        return Rect {pos: dvec2(x1, y1), size: dvec2(x2 - x1, y2 - y1)};
+    }
+    
+    pub fn from_lerp(a: Rect, b: Rect, f: f64) -> Rect {
+        Rect {
+            pos: (b.pos - a.pos) * f + a.pos,
+            size: (b.size - a.size) * f + a.size
+        }
+    }
+}
+
+
+#[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct DVec2 {
     pub x: f64,
     pub y: f64,
 }
 
-impl std::convert::From<Vec2> for DVec2{
-    fn from(other:Vec2)->DVec2{DVec2{x:other.x as f64, y:other.y as f64}}
+impl std::convert::From<Vec2> for DVec2 {
+    fn from(other: Vec2) -> DVec2 {DVec2 {x: other.x as f64, y: other.y as f64}}
 }
 
-impl std::convert::From<DVec2> for Vec2{
-    fn from(other:DVec2)->Vec2{Vec2{x:other.x as f32, y:other.y as f32}}
+impl std::convert::From<DVec2> for Vec2 {
+    fn from(other: DVec2) -> Vec2 {Vec2 {x: other.x as f32, y: other.y as f32}}
+}
+
+impl std::convert::From<(DVec2, DVec2)> for Rect {
+    fn from(o: (DVec2, DVec2)) -> Rect {Rect {pos: dvec2(o.0.x, o.0.y), size: dvec2(o.1.x - o.0.x, o.1.y - o.0.y)}}
 }
 
 impl DVec2 {
@@ -42,13 +111,13 @@ impl DVec2 {
         DVec2 {x: x, y: x}
     }
     
-    pub fn into_vec2(self)->Vec2{
-        Vec2{x:self.x as f32, y:self.y as f32}
+    pub fn into_vec2(self) -> Vec2 {
+        Vec2 {x: self.x as f32, y: self.y as f32}
     }
     
     pub fn from_lerp(a: DVec2, b: DVec2, f: f64) -> DVec2 {
         let nf = 1.0 - f;
-        return DVec2{
+        return DVec2 {
             x: nf * a.x + f * b.x,
             y: nf * a.y + f * b.y,
         };
@@ -62,13 +131,13 @@ impl DVec2 {
     
     pub fn length(&self) -> f64 {
         (self.x * self.x + self.y * self.y).sqrt()
-    }    
+    }
 }
 
 impl fmt::Display for DVec2 {
     // This trait requires `fmt` with this exact signature.
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        write!(f,"vec2f64({},{})",self.x, self.y)
+        write!(f, "vec2f64({},{})", self.x, self.y)
     }
 }
 
@@ -221,5 +290,6 @@ impl ops::DivAssign<f64> for DVec2 {
 
 impl ops::Neg for DVec2 {
     type Output = DVec2;
-    fn neg(self) -> Self { DVec2{x:-self.x, y:-self.y}}
+    fn neg(self) -> Self {DVec2 {x: -self.x, y: -self.y}}
 }
+

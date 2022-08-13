@@ -4,71 +4,78 @@ use crate::{
 };
 
 live_register!{
-    ScrollBars:{{ScrollBars}}{
-        show_scroll_x:true,
-        show_scroll_y:true,
+    ScrollBars: {{ScrollBars}} {
+        show_scroll_x: true,
+        show_scroll_y: true,
     }
 }
 
 #[derive(Live, LiveHook)]
-pub struct ScrollBars{
-    scroll: DVec2,
-    show_scroll_x:bool,
-    show_scroll_y:bool,
-    scroll_bar_x:ScrollBar,
-    scroll_bar_y:ScrollBar,
+pub struct ScrollBars {
+    show_scroll_x: bool,
+    show_scroll_y: bool,
+    scroll_bar_x: ScrollBar,
+    scroll_bar_y: ScrollBar,
+    #[rust] scroll: DVec2,
     #[rust] area: Area,
 }
 
-pub enum ScrollBarsAction{
+pub enum ScrollBarsAction {
     ScrollX(f64),
     ScrollY(f64),
     None
 }
 
-impl ScrollBars{
+impl ScrollBars {
     
-    pub fn set_scroll_x(&mut self, _cx: &mut Cx, value:f64){
+    pub fn set_scroll_x(&mut self, _cx: &mut Cx, value: f64) {
         self.scroll.x = value;
     }
-
-    pub fn set_scroll_y(&mut self, _cx: &mut Cx, value:f64){
+    
+    pub fn set_scroll_y(&mut self, _cx: &mut Cx, value: f64) {
         self.scroll.y = value;
     }
     
-    pub fn get_scroll_pos(&self)->DVec2{
+    pub fn get_scroll_pos(&self) -> DVec2 {
         self.scroll
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarsAction)) {
+    fn handle_internal(&mut self, cx: &mut Cx, event: &Event, is_scroll: bool, dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarsAction)) {
         let mut ret_x = None;
         let mut ret_y = None;
-        let rect = self.area.get_rect(cx); 
+        let area = if is_scroll {Some(self.area)}else {None};
         if self.show_scroll_x {
-            self.scroll_bar_x.handle_event(cx, event, rect, &mut |cx, action|{
-                match action{
+            self.scroll_bar_x.handle_event(cx, event, area, &mut | cx, action | {
+                match action {
                     ScrollBarAction::Scroll {scroll_pos, ..} => {
                         ret_x = Some(scroll_pos);
                         dispatch_action(cx, ScrollBarsAction::ScrollX(scroll_pos))
                     }
-                    _=>()
+                    _ => ()
                 }
             });
+            if let Some(x) = ret_x {self.scroll.x = x; self.redraw(cx);}
         }
         if self.show_scroll_y {
-            self.scroll_bar_y.handle_event(cx, event, rect, &mut |cx, action|{
-                match action{
+            self.scroll_bar_y.handle_event(cx, event, area, &mut | cx, action | {
+                match action {
                     ScrollBarAction::Scroll {scroll_pos, ..} => {
                         ret_y = Some(scroll_pos);
                         dispatch_action(cx, ScrollBarsAction::ScrollY(scroll_pos))
                     }
-                    _=>()
+                    _ => ()
                 }
             });
+            if let Some(y) = ret_y {self.scroll.y = y; self.redraw(cx);}
         }
-
-        if let Some(x) = ret_x{self.scroll.x = x; self.redraw(cx);}
-        if let Some(y) = ret_y{self.scroll.y = y; self.redraw(cx);}
+    }
+    
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarsAction)) {
+        self.handle_internal(cx, event, false, dispatch_action);
+    }
+    
+    pub fn handle_scroll(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarsAction)) {
+        self.handle_internal(cx, event, true, dispatch_action);
     }
     
     pub fn set_scroll_pos(&mut self, cx: &mut Cx, pos: DVec2) -> bool {
@@ -79,19 +86,19 @@ impl ScrollBars{
                 changed = true;
             }
             let scroll_pos = self.scroll_bar_x.get_scroll_pos();
-            self.set_scroll_x(cx,  scroll_pos);
+            self.set_scroll_x(cx, scroll_pos);
         }
         if self.show_scroll_y {
             if self.scroll_bar_y.set_scroll_pos(cx, pos.y) {
                 changed = true;
             }
             let scroll_pos = self.scroll_bar_y.get_scroll_pos();
-            self.set_scroll_y(cx,  scroll_pos);
-        } 
+            self.set_scroll_y(cx, scroll_pos);
+        }
         changed
     }
     
-    pub fn set_scroll_pos_no_clip(&mut self, cx: &mut Cx, pos: DVec2)->bool {
+    pub fn set_scroll_pos_no_clip(&mut self, cx: &mut Cx, pos: DVec2) -> bool {
         let mut changed = false;
         if self.show_scroll_x {
             if self.scroll_bar_x.set_scroll_pos_no_clip(cx, pos.x) {
@@ -104,7 +111,7 @@ impl ScrollBars{
                 changed = true;
             }
             self.set_scroll_y(cx, pos.y);
-        } 
+        }
         changed
     }
     
@@ -129,18 +136,18 @@ impl ScrollBars{
             }else {0.}
         }
     }
-
-    pub fn get_viewport_rect(&mut self, _cx: &mut Cx)->Rect {
+    
+    pub fn get_viewport_rect(&mut self, _cx: &mut Cx) -> Rect {
         let pos = self.get_scroll_pos();
         let size = self.get_scroll_view_visible();
-        Rect{pos, size}
+        Rect {pos, size}
     }
     
     pub fn scroll_into_view(&mut self, cx: &mut Cx, rect: Rect) {
         if self.show_scroll_x {
             self.scroll_bar_x.scroll_into_view(cx, rect.pos.x, rect.size.x, true);
         }
-        if self.show_scroll_y{
+        if self.show_scroll_y {
             self.scroll_bar_y.scroll_into_view(cx, rect.pos.y, rect.size.y, true);
         }
     }
@@ -155,12 +162,12 @@ impl ScrollBars{
     }
     
     pub fn scroll_into_view_abs(&mut self, cx: &mut Cx, rect: Rect) {
-        let self_rect = self.area.get_rect(cx); 
+        let self_rect = self.area.get_rect(cx);
         if self.show_scroll_x {
             self.scroll_bar_x.scroll_into_view(cx, rect.pos.x - self_rect.pos.x, rect.size.x, true);
         }
         if self.show_scroll_y {
-            self.scroll_bar_y.scroll_into_view(cx, rect.pos.y  - self_rect.pos.y, rect.size.y, true);
+            self.scroll_bar_y.scroll_into_view(cx, rect.pos.y - self_rect.pos.y, rect.size.y, true);
         }
     }
     
@@ -169,15 +176,15 @@ impl ScrollBars{
             self.scroll_bar_x.set_scroll_target(cx, pos.x);
         }
         if self.show_scroll_y {
-           self.scroll_bar_y.set_scroll_target(cx, pos.y);
+            self.scroll_bar_y.set_scroll_target(cx, pos.y);
         }
     }
     
-    pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk, layout: Layout){
-        cx.begin_turtle(walk, layout.with_scroll(self.scroll).with_clip(true,true));
+    pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk, layout: Layout) {
+        cx.begin_turtle(walk, layout.with_scroll(self.scroll));
     }
     
-    pub fn end(&mut self, cx: &mut Cx2d) {
+    pub fn draw_scroll_bars(&mut self, cx: &mut Cx2d) {
         // lets ask the turtle our actual bounds
         let view_total = cx.turtle().used();
         let mut rect_now = cx.turtle().rect();
@@ -198,16 +205,23 @@ impl ScrollBars{
             let scroll_pos = self.scroll_bar_y.draw_scroll_bar(cx, Axis::Vertical, rect_now, view_total);
             self.set_scroll_y(cx, scroll_pos);
         }
-        
+    }
+    
+    pub fn end(&mut self, cx: &mut Cx2d) {
+        self.draw_scroll_bars(cx);
         // this needs to be a rect_area
         cx.end_turtle_with_area(&mut self.area);
     }
-
-    pub fn area(&self)->Area{
+    
+    pub fn set_area(&mut self, area: Area) {
+        self.area = area;
+    }
+    
+    pub fn area(&self) -> Area {
         self.area
     }
     
-    pub fn redraw(&self, cx:&mut Cx){
+    pub fn redraw(&self, cx: &mut Cx) {
         self.area.redraw(cx);
     }
 }

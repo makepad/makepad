@@ -5,7 +5,7 @@ use {
     }
 };
 
-#[derive(Copy, Clone, Default, Debug, Live, LiveHook)]
+#[derive(Copy, Clone, Debug, Live, LiveHook)]
 #[live_ignore]
 pub struct Layout {
     pub scroll: DVec2,
@@ -15,6 +15,20 @@ pub struct Layout {
     pub align: Align,
     pub flow: Flow,
     pub spacing: f64
+}
+
+impl Default for Layout{
+    fn default()->Self{
+        Self{
+            scroll: dvec2(0.0,0.0),
+            clip_x: true,
+            clip_y: true,
+            padding: Padding::default(),
+            align: Align{x:0.0,y:0.0},
+            flow: Flow::Down,
+            spacing: 0.0
+        }
+    }
 }
 
 #[derive(Copy, Clone, Default, Debug, Live, LiveHook)]
@@ -159,14 +173,44 @@ impl<'a> Cx2d<'a> {
         }
     }
     
+    pub fn begin_overlay_turtle(&mut self, layout: Layout) {
+        let pass_size = self.current_pass_size();
+        let turtle = Turtle {
+            walk: Walk::fill(),
+            layout,
+            draw_clip: (dvec2(0.0,0.0),pass_size),
+            align_start: self.align_list.len(),
+            turtle_walks_start: self.turtle_walks.len(),
+            defer_count: 0,
+            pos: DVec2 {
+                x: layout.padding.left,
+                y: layout.padding.top
+            },
+            origin: dvec2(0.0,0.0),
+            width: pass_size.x,
+            height: pass_size.y,
+            shift: None,
+            width_used: layout.padding.left,
+            height_used: layout.padding.top,
+            guard_area: Area::Empty,
+        };
+        self.turtles.push(turtle);
+    }
+    
+    pub fn end_overlay_turtle(&mut self){
+        self.turtles.pop();
+    }
+    
     pub fn begin_turtle_with_guard(&mut self, walk: Walk, layout: Layout, guard_area: Area) {
-        
         let (origin, width, height, draw_clip) = if let Some(parent) = self.turtles.last() {
+            
             let o = walk.margin.left_top() + if let Some(pos) = walk.abs_pos {pos} else {
                 parent.pos + parent.child_spacing(self.turtle_walks.len())
             };
+            
             let w = parent.eval_width(walk.width, walk.margin, parent.layout.flow);
             let h = parent.eval_height(walk.height, walk.margin, parent.layout.flow);
+            
             // figure out new clipping rect
             let (x0, x1) = if layout.clip_x {
                 (parent.draw_clip.0.x.max(o.x), if w.is_nan() {
@@ -174,8 +218,7 @@ impl<'a> Cx2d<'a> {
                 } else {
                     parent.draw_clip.1.x.min(o.x + w)
                 })
-            }
-            else {
+            } else {
                 (parent.draw_clip.0.x, parent.draw_clip.1.x)
             };
             
@@ -185,10 +228,8 @@ impl<'a> Cx2d<'a> {
                 } else {
                     parent.draw_clip.1.y.min(o.y + h)
                 })
-            }
-            else {
-                (parent.draw_clip.0.y, parent.draw_clip.1.y)
-            };
+            }else {(parent.draw_clip.0.y, parent.draw_clip.1.y)};
+            
             (o - layout.scroll, w, h, (dvec2(x0, y0), dvec2(x1, y1)))
         }
         else {
@@ -239,14 +280,14 @@ impl<'a> Cx2d<'a> {
         
         // computed height
         let w = if turtle.width.is_nan() {
-            Size::Fixed(turtle.width_used + turtle.layout.padding.right + turtle.layout.scroll.x)
+            Size::Fixed(turtle.width_used + turtle.layout.padding.right - turtle.layout.scroll.x)
         }
         else {
             Size::Fixed(turtle.width)
         };
         
         let h = if turtle.height.is_nan() {
-            Size::Fixed(turtle.height_used + turtle.layout.padding.bottom + turtle.layout.scroll.y)
+            Size::Fixed(turtle.height_used + turtle.layout.padding.bottom - turtle.layout.scroll.y)
         }
         else {
             Size::Fixed(turtle.height)
@@ -574,7 +615,6 @@ impl Turtle {
         self.pos
     }
     
-    
     pub fn scroll(&self) -> DVec2 {
         self.layout.scroll
     }
@@ -728,11 +768,7 @@ impl Layout {
         self.scroll = v;
         self
     }
-    pub fn with_clip(mut self, x: bool, y: bool) -> Self {
-        self.clip_x = x;
-        self.clip_y = y;
-        self
-    }
+    
     pub fn with_align_x(mut self, v: f64) -> Self {
         self.align.x = v;
         self
@@ -829,7 +865,10 @@ impl Walk {
         }
     }
     
-    
+    pub fn with_abs_pos(mut self, v: DVec2) -> Self {
+        self.abs_pos = Some(v);
+        self
+    }
     pub fn with_margin_all(mut self, v: f64) -> Self {
         self.margin = Margin {left: v, right: v, top: v, bottom: v};
         self

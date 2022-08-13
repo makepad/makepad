@@ -13,7 +13,7 @@ live_register!{
     DrawQuad: {{DrawQuad}} {
         varying pos: vec2
         
-        fn scroll_and_clip_quad(self)->vec4{
+        fn clip_and_transform_vertex(self)->vec4{
             let clipped: vec2 = clamp(
                 self.geom_pos * self.rect_size + self.rect_pos,
                 self.draw_clip.xy,
@@ -29,8 +29,21 @@ live_register!{
             )))
         }
         
+        fn transform_vertex(self)->vec4{
+            let clipped: vec2 = self.geom_pos * self.rect_size + self.rect_pos;
+            
+            self.pos = (clipped - self.rect_pos) / self.rect_size
+            // only pass the clipped position forward
+            return self.camera_projection * (self.camera_view * (self.view_transform * vec4(
+                clipped.x,
+                clipped.y,
+                self.draw_depth + self.draw_zbias,
+                1.
+            )))
+        }
+        
         fn vertex(self) -> vec4 {
-            return self.scroll_and_clip_quad()
+            return self.clip_and_transform_vertex()
         }
         
         fn pixel(self) -> vec4 {
