@@ -69,6 +69,7 @@ live_register!{
         }
         
         layout: {
+            clip_x: true,
             align: {x: 0., y: 0.},
             padding: {left: 5.0, top: 5.0, right: 4.0, bottom: 5.0}
         }
@@ -315,6 +316,7 @@ impl DropDown {
             let mut map = global.map.borrow_mut();
             let lb = map.get_mut(&self.popup_menu.unwrap()).unwrap();
             let mut item_pos = None;
+            
             lb.begin(cx, width);
             for (i, item) in self.items.iter().enumerate() {
                 let node_id = LiveId(i as u64).into();
@@ -323,6 +325,7 @@ impl DropDown {
                 }
                 lb.draw_item(cx, node_id, item);
             }
+            // ok we shift the entire menu. however we shouldnt go outside the screen area
             lb.end(cx,start_pos - item_pos.unwrap());
         }
         self.is_open;
