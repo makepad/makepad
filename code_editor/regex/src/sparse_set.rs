@@ -1,38 +1,46 @@
 use std::slice;
 
-#[derive(Clone)]
-pub struct SparseSet {
+#[derive(Clone, Debug)]
+pub(crate) struct SparseSet {
     dense: Vec<usize>,
     sparse: Box<[usize]>,
 }
 
 impl SparseSet {
-    pub fn new(max: usize) -> Self {
+    pub(crate) fn new() -> Self {
+        Self::with_capacity(0)
+    }
+
+    pub(crate) fn with_capacity(capacity: usize) -> Self {
         Self {
-            dense: Vec::with_capacity(max),
-            sparse: vec![0; max].into_boxed_slice(),
+            dense: Vec::with_capacity(capacity),
+            sparse: vec![0; capacity].into_boxed_slice(),
         }
     }
 
-    pub fn is_empty(&self) -> bool {
+    pub(crate) fn is_empty(&self) -> bool {
         self.dense.is_empty()
     }
 
-    pub fn as_slice(&self) -> &[usize] {
+    pub(crate) fn capacity(&self) -> usize {
+        self.sparse.len()
+    }
+
+    pub(crate) fn as_slice(&self) -> &[usize] {
         self.dense.as_slice()
     }
 
-    pub fn contains(&self, value: usize) -> bool {
+    pub(crate) fn contains(&self, value: usize) -> bool {
         self.dense.get(self.sparse[value]) == Some(&value)
     }
 
-    pub fn iter(&self) -> Iter {
+    pub(crate) fn iter(&self) -> Iter {
         Iter {
             iter: self.dense.iter(),
         }
     }
 
-    pub fn insert(&mut self, value: usize) -> bool {
+    pub(crate) fn insert(&mut self, value: usize) -> bool {
         if self.contains(value) {
             return false;
         }
@@ -42,7 +50,7 @@ impl SparseSet {
         true
     }
 
-    pub fn clear(&mut self) {
+    pub(crate) fn clear(&mut self) {
         self.dense.clear();
     }
 }
@@ -56,7 +64,7 @@ impl<'a> IntoIterator for &'a SparseSet {
     }
 }
 
-pub struct Iter<'a> {
+pub(crate) struct Iter<'a> {
     iter: slice::Iter<'a, usize>,
 }
 
