@@ -177,20 +177,7 @@ impl Cx {
         }
         1.0
     }
-    /*
-    pub fn redraw_pass_of(&mut self, area: Area) {
-        // we walk up the stack of area
-        match area {
-            Area::Empty => (),
-            Area::Instance(area) => {
-                self.redraw_pass_and_parent_passes(self.draw_lists[area.draw_list_id].pass_id.unwrap());
-            },
-            Area::Rect(area) => {
-                self.redraw_pass_and_parent_passes(self.draw_lists[area.draw_list_id].pass_id.unwrap());
-            }
-        }
-    }*/
-    
+
     pub fn redraw_pass_and_parent_passes(&mut self, pass_id: PassId) {
         let mut walk_pass_id = pass_id;
         loop {
@@ -258,33 +245,6 @@ impl Cx {
         self.new_draw_event.draw_lists_and_children.push(draw_list_id);
     }
     
-    /*
-    pub fn set_scroll_x(&mut self, draw_list_id: DrawListId, scroll_pos: f32) {
-        if let Some(pass_id) = self.draw_lists[draw_list_id].pass_id {
-            let fac = self.get_delegated_dpi_factor(pass_id);
-            let cxview = &mut self.draw_lists[draw_list_id];
-            cxview.unsnapped_scroll.x = scroll_pos;
-            let snapped = scroll_pos - scroll_pos % (1.0 / fac);
-            if cxview.snapped_scroll.x != snapped {
-                cxview.snapped_scroll.x = snapped;
-                self.passes[cxview.pass_id.unwrap()].paint_dirty = true;
-            }
-        }
-    }
-    
-    
-    pub fn set_scroll_y(&mut self, draw_list_id: DrawListId, scroll_pos: f32) {
-        if let Some(pass_id) = self.draw_lists[draw_list_id].pass_id {
-            let fac = self.get_delegated_dpi_factor(pass_id);
-            let cxview = &mut self.draw_lists[draw_list_id];
-            cxview.unsnapped_scroll.y = scroll_pos;
-            let snapped = scroll_pos - scroll_pos % (1.0 / fac);
-            if cxview.snapped_scroll.y != snapped {
-                cxview.snapped_scroll.y = snapped;
-                self.passes[cxview.pass_id.unwrap()].paint_dirty = true;
-            }
-        }
-    }*/
     
     pub fn update_area_refs(&mut self, old_area: Area, new_area: Area) -> Area {
         if old_area == Area::Empty {

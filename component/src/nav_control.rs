@@ -56,7 +56,6 @@ impl NavControl {
                         }
                     }
                     else {
-                        // ok lets walk and dump the nav item tree
                         let mut next_stop = false;
                         if let Some(next_area) = cx.iterate_nav_stops(root, | cx, stop | {
                             if next_stop {

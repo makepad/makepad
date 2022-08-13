@@ -244,6 +244,8 @@ impl DropDown {
             }
             Hit::KeyFocus(_) => {
                 self.animate_state(cx, ids!(focus.on));
+                // how do we scroll this thing into view.
+                
             }
             Hit::KeyDown(ke) => match ke.key_code {
                 KeyCode::ArrowUp => {
@@ -304,6 +306,7 @@ impl DropDown {
             self.label.draw_walk(cx, Walk::fit(), Align::default(), " ");
         }
         self.bg.end(cx);
+        
         let width = self.bg.area().get_rect(cx).size.x;
         
         cx.add_nav_stop(self.bg.area(), NavRole::DropDown, Margin::default());

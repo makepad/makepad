@@ -74,7 +74,7 @@ impl DrawQuad {
         }
     }
     
-    pub fn end(&mut self, cx: &mut Cx2d) {
+    pub fn end(&mut self, cx: &mut Cx2d){
         let rect = cx.end_turtle();
         self.draw_vars.area.set_rect(cx, &rect);
     }
