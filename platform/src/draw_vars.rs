@@ -82,10 +82,17 @@ impl DrawVars {
         self.texture_slots[slot] = Some(texture.texture_id());
     }
     
+    pub fn redraw(&self, cx:&mut Cx) {
+        self.area.redraw(cx);
+    }
+    
+    pub fn area(&self)->Area {
+        self.area
+    }
+    
     pub fn can_instance(&self) -> bool {
         self.draw_shader.is_some()
     }
-    
     
     pub fn live_register(_cx: &mut Cx) {}
     

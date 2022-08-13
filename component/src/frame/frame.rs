@@ -34,7 +34,7 @@ impl Overflow{
 pub struct Frame { // draw info per UI element
     bg: DrawShape,
     
-    layout: Layout,
+    pub layout: Layout,
     
     pub walk: Walk,
     
@@ -43,14 +43,13 @@ pub struct Frame { // draw info per UI element
     image_texture: Texture,
     
     has_view: bool,
-    
-    //overflow_x: Overflow,
-    //overflow_y: Overflow,
-    clip: bool,
     hidden: bool,
     user_draw: bool,
+    
     cursor: Option<MouseCursor>,
+
     #[live(false)] design_mode: bool,
+    #[rust] area: Area,
     #[rust] pub view: Option<View>,
     
     #[rust] defer_walks: Vec<(LiveId, DeferWalk)>,
@@ -63,7 +62,7 @@ pub struct Frame { // draw info per UI element
 impl LiveHook for Frame {
     
     fn after_apply(&mut self, cx: &mut Cx, _from: ApplyFrom, index: usize, nodes: &[LiveNode]) {
-        if self.clip && self.view.is_none() {
+        if self.has_view && self.view.is_none() {
             self.view = Some(View::new(cx));
         }
         
@@ -186,10 +185,9 @@ impl FrameComponent for Frame {
         self.draw_walk(cx, walk, self_uid)
     }
     
+    
     fn redraw(&mut self, cx: &mut Cx) {
-        if let Some(view) = &mut self.view {
-            view.redraw(cx);
-        }
+        self.area.redraw(cx);
         for child in self.children.values_mut() {
             child.as_mut().unwrap().redraw(cx);
         }
@@ -329,6 +327,10 @@ impl dyn FrameComponent {
 }
 
 impl Frame {
+
+    pub fn set_scroll_pos(&mut self, v:Vec2){
+        self.layout.scroll = v;
+    }
     /*
     fn overflow_h(&self)->Overflow{
         if !self.overflow_h.is_visible(){
@@ -347,6 +349,9 @@ impl Frame {
         }
     }
 */
+    pub fn area(&self)->Area{
+        self.area
+    }
     
     pub fn handle_event_iter(&mut self, cx: &mut Cx, event: &Event) -> Vec<FrameActionItem> {
         // ok so.
@@ -389,15 +394,6 @@ impl Frame {
         None
     }
     
-    pub fn area(&self) -> Area {
-        if let Some(view) = &self.view {
-            view.area()
-        }
-        else {
-            self.bg.draw_vars.area
-        }
-    }
-    
     pub fn draw(&mut self, cx: &mut Cx2d,) -> FrameDraw {
         self.draw_walk(cx, self.get_walk(), FrameUid::default())
     }
@@ -419,8 +415,8 @@ impl Frame {
         if self.draw_state.begin(cx, DrawState::Drawing(0)) {
             self.defer_walks.clear();
             
-            if self.clip {
-                if self.view.as_mut().unwrap().begin(cx, walk, self.layout).not_redrawing() {
+            if self.has_view {
+                if self.view.as_mut().unwrap().begin(cx).not_redrawing() {
                     return FrameDraw::done()
                 };
                 walk = Walk::default();
@@ -473,11 +469,13 @@ impl Frame {
             else {
                 if self.bg.shape != Shape::None {
                     self.bg.end(cx);
+                    self.area = self.bg.area();
                 }
                 else {
-                    cx.end_turtle();
+                    cx.end_turtle_with_area(&mut self.area);
                 }
-                if self.clip {
+                
+                if self.has_view {
                     self.view.as_mut().unwrap().end(cx);
                 }
                 self.draw_state.end();

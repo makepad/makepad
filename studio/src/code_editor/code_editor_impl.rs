@@ -12,7 +12,7 @@ use {
         },
         makepad_draw_2d::*,
         makepad_component::{
-            ScrollView,
+            ScrollBars,
             ScrollShadow
         },
         editor_state::{
@@ -46,13 +46,12 @@ live_register!{
         const BORDER_RADIUS: 2.
         
         fn vertex(self) -> vec4 { // custom vertex shader because we widen the draweable area a bit for the gloopiness
-            let shift: vec2 = -self.draw_scroll.xy;
             let clipped: vec2 = clamp(
-                self.geom_pos * vec2(self.rect_size.x + 16., self.rect_size.y) + self.rect_pos + shift - vec2(8., 0.),
+                self.geom_pos * vec2(self.rect_size.x + 16., self.rect_size.y) + self.rect_pos - vec2(8., 0.),
                 self.draw_clip.xy,
                 self.draw_clip.zw
             );
-            self.pos = (clipped - shift - self.rect_pos) / self.rect_size;
+            self.pos = (clipped - self.rect_pos) / self.rect_size;
             return self.camera_projection * (self.camera_view * (
                 self.view_transform * vec4(clipped.x, clipped.y, self.draw_depth + self.draw_zbias, 1.)
             ));
@@ -111,11 +110,8 @@ live_register!{
     }
     
     CodeEditorImpl: {{CodeEditorImpl}} {
-        scroll_view: {
-            v_scroll: {smoothing: 0.15},
-            view: {
-                debug_id: code_editor_view
-            }
+        scroll_bars: {
+            scroll_bar_y: {smoothing: 0.15},
         }
         
         code_text: {
@@ -171,15 +167,15 @@ live_register!{
             zoom = {
                 default: on
                 on = {
-                    from: {all: Play::Forward{duration:0.4}}
-                    ease: Ease::ExpDecay{d1:0.96,d2:0.97}
+                    from: {all: Play::Forward {duration: 0.4}}
+                    ease: Ease::ExpDecay {d1: 0.96, d2: 0.97}
                     //from: {all: Play::Exp {speed1: 0.96, speed2: 0.97}}
                     redraw: true
                     apply: {zoom_out: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]}
                 }
                 off = {
-                    from: {all: Play::Forward{duration:0.2}}
-                    ease: Ease::ExpDecay{d1:0.98,d2:0.95}
+                    from: {all: Play::Forward {duration: 0.2}}
+                    ease: Ease::ExpDecay {d1: 0.98, d2: 0.95}
                     //from: {all: Play::Exp {speed1: 0.98, speed2: 0.95}}
                     redraw: true
                     apply: {zoom_out: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]}
@@ -204,7 +200,7 @@ pub struct CodeEditorImpl {
     #[rust] zoom_anim_center: Option<Position>,
     #[rust] zoom_last_pos: Option<Vec2>,
     
-    pub scroll_view: ScrollView,
+    pub scroll_bars: ScrollBars,
     
     pub zoom_out: f32,
     pub max_zoom_out: f32,
@@ -284,18 +280,16 @@ pub enum CodeEditorAction {
 impl CodeEditorImpl {
     
     pub fn redraw(&self, cx: &mut Cx) {
-        self.scroll_view.redraw(cx);
+        self.scroll_bars.redraw(cx);
     }
     
-    pub fn begin(&mut self, cx: &mut Cx2d) -> ViewRedrawing {
-        self.scroll_view.begin(cx, Walk::default(), Layout::flow_right()) ?;
-        self.text_glyph_size = self.code_text.text_style.font_size * self.code_text.get_monospace_base(cx);
+    pub fn begin(&mut self, cx: &mut Cx2d) {
+        self.scroll_bars.begin(cx, Walk::default(), Layout::flow_down());
         self.handle_select_scroll_in_draw(cx);
         self.begin_instances(cx);
-        ViewRedrawing::yes()
     }
     
-    pub fn state_has_document_inner<'a>(&mut self,state: &'a EditorState) -> bool {
+    pub fn state_has_document_inner<'a>(&mut self, state: &'a EditorState) -> bool {
         if let Some(session_id) = self.session_id {
             let session = &state.sessions[session_id];
             let document = &state.documents[session.document_id];
@@ -315,14 +309,14 @@ impl CodeEditorImpl {
     pub fn end(&mut self, cx: &mut Cx2d, lines_layout: &LinesLayout) {
         self.end_instances(cx);
         
-        let visible = self.scroll_view.get_scroll_view_visible();
+        let visible = self.scroll_bars.get_scroll_view_visible();
         cx.turtle_mut().set_used(
             lines_layout.max_line_width + self.line_num_width + self.text_glyph_size.x * 4.0,
             lines_layout.total_height + visible.y - self.text_glyph_size.y,
         );
         
-        self.scroll_shadow.draw(cx, &self.scroll_view, vec2(self.line_num_width, 0.));
-        self.scroll_view.end(cx);
+        self.scroll_shadow.draw(cx, vec2(self.line_num_width, 0.));
+        self.scroll_bars.end(cx);
     }
     
     // lets calculate visible lines
@@ -335,14 +329,15 @@ impl CodeEditorImpl {
     )
     where T: FnMut(&mut Cx, LineLayoutInput) -> LineLayoutOutput
     {
+        self.text_glyph_size = self.code_text.text_style.font_size * self.code_text.get_monospace_base(cx);
         self.calc_lines_layout_inner(cx, document_inner, lines_layout, &mut compute_height);
         // this keeps the animation zooming properly focussed around a cursor/line
         if let Some(center_line) = self.zoom_anim_center {
             if self.state.is_track_animating(cx, id!(zoom)) {
                 let next_pos = self.position_to_vec2(center_line, lines_layout);
                 let last_pos = self.zoom_last_pos.unwrap();
-                let pos = self.scroll_view.get_scroll_pos(cx);
-                self.scroll_view.set_scroll_pos_no_clip(cx, vec2(pos.x, pos.y + (next_pos.y - last_pos.y)));
+                let pos = self.scroll_bars.get_scroll_pos();
+                self.scroll_bars.set_scroll_pos_no_clip(cx, vec2(pos.x, pos.y + (next_pos.y - last_pos.y)));
                 self.calc_lines_layout_inner(cx, document_inner, lines_layout, &mut compute_height);
                 self.zoom_last_pos = Some(next_pos);
             }
@@ -359,8 +354,9 @@ impl CodeEditorImpl {
     )
     where T: FnMut(&mut Cx, LineLayoutInput) -> LineLayoutOutput
     {
-        let viewport_size = cx.turtle().size();
-        let viewport_start = cx.get_scroll_pos();
+        let viewport = self.scroll_bars.get_viewport_rect(cx);
+        let viewport_size = cx.turtle().rect().size;
+        let viewport_start = viewport.pos; //vec2(0.0,0.0);//cx.get_scroll_pos();
         
         let viewport_end = viewport_start + viewport_size;
         
@@ -454,7 +450,7 @@ impl CodeEditorImpl {
             let last_cursor = session.cursors.last_inserted();
             let last_pos = self.position_to_vec2(last_cursor.head, lines_layout);
             
-            let view_rect = self.scroll_view.get_viewport_rect(cx);
+            let view_rect = self.scroll_bars.get_viewport_rect(cx);
             // check if our last_pos is visible
             let center_line = if !view_rect.contains(last_pos) {
                 let start = view_rect.pos + view_rect.size * 0.5;
@@ -493,7 +489,7 @@ impl CodeEditorImpl {
             if span.len.line as usize >= line_count {
                 span_slot = Some(Span {
                     len: Size {
-                        line: span.len.line - line_count as u32 ,
+                        line: span.len.line - line_count as u32,
                         ..span.len
                     },
                     ..span
@@ -838,7 +834,7 @@ impl CodeEditorImpl {
         }
     }
     
-    pub fn handle_event_with_fn(
+    pub fn handle_event(
         &mut self,
         cx: &mut Cx,
         state: &mut EditorState,
@@ -847,8 +843,10 @@ impl CodeEditorImpl {
         send_request: &mut dyn FnMut(CollabRequest),
         dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
     ) {
+        self.scroll_bars.handle_event(cx, event, &mut | _, _ | {});
+        
         if self.state_handle_event(cx, event).must_redraw() {
-            self.scroll_view.redraw(cx);
+            self.scroll_bars.redraw(cx);
         }
         
         if self.caret_blink_timer.is_event(event) {
@@ -861,22 +859,28 @@ impl CodeEditorImpl {
             }
         }
         
-        match event.hits(cx, self.scroll_view.area()) {
+        match event.hits(cx, self.scroll_bars.area()) {
             Hit::Trigger(_) => { //
                 self.handle_select_scroll_in_trigger(cx, state, lines_layout);
             },
-            Hit::FingerDown(f) => {
+            Hit::FingerDown(fe) => {
                 self.last_move_position = None;
                 self.reset_caret_blink(cx);
                 // TODO: How to handle key focus?
-                cx.set_key_focus(self.scroll_view.area());
+                cx.set_key_focus(self.scroll_bars.area());
                 cx.set_cursor(MouseCursor::Text);
                 if let Some(session_id) = self.session_id {
                     let session = &state.sessions[session_id];
                     let document = &state.documents[session.document_id];
                     let document_inner = document.inner.as_ref().unwrap();
-                    let position = self.vec2_to_position(&document_inner.text, f.rel, lines_layout);
-                    match f.modifiers {
+                    // lets convert this one
+                    let rel = fe.abs - fe.rect.pos;
+                    let position = self.vec2_to_position(
+                        &document_inner.text,
+                        rel + self.scroll_bars.get_scroll_pos(),
+                        lines_layout
+                    );
+                    match fe.modifiers {
                         KeyModifiers {control: true, ..} => {
                             state.add_cursor(session_id, position);
                         }
@@ -884,7 +888,7 @@ impl CodeEditorImpl {
                             state.move_cursors_to(session_id, position, shift);
                         }
                     }
-                    self.scroll_view.redraw(cx);
+                    self.scroll_bars.redraw(cx);
                 }
             }
             Hit::FingerUp(_) => {
@@ -900,12 +904,16 @@ impl CodeEditorImpl {
                     let document = &state.documents[session.document_id];
                     let document_inner = document.inner.as_ref().unwrap();
                     let rel = fe.abs - fe.rect.pos;
-                    let position = self.vec2_to_position(&document_inner.text, rel, lines_layout);
+                    let position = self.vec2_to_position(
+                        &document_inner.text,
+                        rel + self.scroll_bars.get_scroll_pos(),
+                        lines_layout
+                    );
                     if self.last_move_position != Some(position) {
                         self.last_move_position = Some(position);
                         state.move_cursors_to(session_id, position, true);
                         self.handle_select_scroll_in_finger_move(&fe);
-                        self.scroll_view.redraw(cx);
+                        self.scroll_bars.redraw(cx);
                     }
                 }
             }
@@ -918,7 +926,7 @@ impl CodeEditorImpl {
                 if let Some(session_id) = self.session_id {
                     state.move_cursors_left(session_id, shift);
                     self.keep_last_cursor_in_view(cx, state, lines_layout);
-                    self.scroll_view.redraw(cx);
+                    self.scroll_bars.redraw(cx);
                 }
             }
             Hit::KeyDown(KeyEvent {
@@ -930,7 +938,7 @@ impl CodeEditorImpl {
                 if let Some(session_id) = self.session_id {
                     state.move_cursors_right(session_id, shift);
                     self.keep_last_cursor_in_view(cx, state, lines_layout);
-                    self.scroll_view.redraw(cx);
+                    self.scroll_bars.redraw(cx);
                 }
             }
             Hit::KeyDown(KeyEvent {
@@ -942,7 +950,7 @@ impl CodeEditorImpl {
                 if let Some(session_id) = self.session_id {
                     state.move_cursors_up(session_id, shift);
                     self.keep_last_cursor_in_view(cx, state, lines_layout);
-                    self.scroll_view.redraw(cx);
+                    self.scroll_bars.redraw(cx);
                 }
             }
             Hit::KeyDown(KeyEvent {
@@ -954,7 +962,7 @@ impl CodeEditorImpl {
                 if let Some(session_id) = self.session_id {
                     state.move_cursors_down(session_id, shift);
                     self.keep_last_cursor_in_view(cx, state, lines_layout);
-                    self.scroll_view.redraw(cx);
+                    self.scroll_bars.redraw(cx);
                 }
             }
             Hit::KeyDown(KeyEvent {
@@ -1040,7 +1048,7 @@ impl CodeEditorImpl {
                 self.reset_caret_blink(cx);
                 if let Some(session_id) = self.session_id {
                     state.select_all(session_id);
-                    self.scroll_view.redraw(cx);
+                    self.scroll_bars.redraw(cx);
                 }
             }
             
@@ -1125,19 +1133,19 @@ impl CodeEditorImpl {
     
     fn handle_select_scroll_in_draw(&mut self, cx: &mut Cx) {
         if let Some(select_scroll) = &mut self.select_scroll {
-            let old_pos = self.scroll_view.get_scroll_pos(cx);
+            let old_pos = self.scroll_bars.get_scroll_pos();
             let new_pos = Vec2 {
                 x: old_pos.x + select_scroll.delta.x,
                 y: old_pos.y + select_scroll.delta.y
             };
-            if self.scroll_view.set_scroll_pos(cx, new_pos) {
+            if self.scroll_bars.set_scroll_pos(cx, new_pos) {
                 select_scroll.rel += select_scroll.delta;
-                self.scroll_view.redraw(cx);
+                self.scroll_bars.redraw(cx);
             }
             else {
                 select_scroll.at_end = true;
             }
-            cx.send_trigger(self.scroll_view.area(), id!(scroll).into());
+            cx.send_trigger(self.scroll_bars.area(), id!(scroll).into());
         }
     }
     
@@ -1152,7 +1160,7 @@ impl CodeEditorImpl {
             let document_inner = document.inner.as_ref().unwrap();
             let position = self.vec2_to_position(&document_inner.text, rel, lines_layout);
             state.move_cursors_to(self.session_id.unwrap(), position, true);
-            self.scroll_view.redraw(cx);
+            self.scroll_bars.redraw(cx);
         }
     }
     
@@ -1169,7 +1177,7 @@ impl CodeEditorImpl {
                 pos: pos + self.text_glyph_size * vec2(-2.0, -1.0) - vec2(self.line_num_width, 0.),
                 size: self.text_glyph_size * vec2(4.0, 3.0) + vec2(self.line_num_width, 0.)
             };
-            self.scroll_view.scroll_into_view(cx, rect);
+            self.scroll_bars.scroll_into_view(cx, rect);
         }
     }
     

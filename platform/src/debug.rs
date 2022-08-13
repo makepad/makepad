@@ -90,19 +90,15 @@ impl Cx{
             //if draw_list_id == 0 {
             //    writeln!(s, "---------- Begin Debug draw tree for redraw_id: {} ---------", cx.redraw_id).unwrap();
             // }
-            let rect = cx.draw_lists[draw_list_id].rect;
+            //let rect = cx.draw_lists[draw_list_id].rect;
             //let scroll = cx.draw_lists[draw_list_id].get_local_scroll();
             writeln!(
                 s,
-                "{}{} {:?}: len:{} rect:({}, {}, {}, {})",
+                "{}{} {:?}: len:{}",
                 indent,
                 cx.draw_lists[draw_list_id].debug_id,
                 draw_list_id,
                 draw_items_len,
-                rect.pos.x,
-                rect.pos.y,
-                rect.size.x,
-                rect.size.y,
             ).unwrap();
             indent.push_str("  ");
             let mut indent = String::new();

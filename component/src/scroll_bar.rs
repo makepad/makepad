@@ -102,7 +102,6 @@ pub struct ScrollBar {
     
     #[rust] next_frame: NextFrame,
     #[rust(false)] visible: bool,
-    #[rust] view_area: Area,
     #[rust] view_total: f32, // the total view area
     #[rust] view_visible: f32, // the visible view area
     #[rust] scroll_size: f32, // the size of the scrollbar
@@ -123,7 +122,7 @@ pub struct DrawScrollBar {
 }
 
 #[derive(Clone, PartialEq, Debug)]
-pub enum ScrollBarEvent {
+pub enum ScrollBarAction {
     None,
     Scroll {scroll_pos: f32, view_total: f32, view_visible: f32},
     ScrollDone
@@ -148,7 +147,7 @@ impl ScrollBar {
     }
     
     // sets the scroll pos from finger position
-    pub fn set_scroll_pos_from_finger(&mut self, cx: &mut Cx, finger: f32) -> ScrollBarEvent {
+    pub fn set_scroll_pos_from_finger(&mut self, cx: &mut Cx, finger: f32) -> ScrollBarAction {
         let vy = self.view_visible / self.view_total;
         let norm_handle = vy.max(self.min_handle_size / self.scroll_size);
         
@@ -162,9 +161,9 @@ impl ScrollBar {
         self.scroll_target = new_scroll_pos;
         if changed {
             self.update_shader_scroll_pos(cx);
-            return self.make_scroll_event();
+            return self.make_scroll_action();
         }
-        return ScrollBarEvent::None;
+        return ScrollBarAction::None;
     }
     
     // writes the norm_scroll value into the shader
@@ -177,8 +176,8 @@ impl ScrollBar {
     }
     
     // turns scroll_pos into an event on this.event
-    pub fn make_scroll_event(&mut self) -> ScrollBarEvent {
-        ScrollBarEvent::Scroll {
+    pub fn make_scroll_action(&mut self) -> ScrollBarAction {
+        ScrollBarAction::Scroll {
             scroll_pos: self.scroll_pos,
             view_total: self.view_total,
             view_visible: self.view_visible
@@ -297,7 +296,7 @@ impl ScrollBar {
         }
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) -> ScrollBarEvent {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, rect:Rect, dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarAction)) {
         // lets check if our view-area gets a mouse-scroll.
         match event {
             Event::FingerScroll(fe) => { //if !fe.handled {
@@ -305,7 +304,6 @@ impl ScrollBar {
                     Axis::Horizontal => fe.handled_x.get(),
                     Axis::Vertical => fe.handled_y.get()
                 } {
-                    let rect = self.view_area.get_clipped_rect(cx);
                     if rect.contains(fe.abs) { // handle mousewheel
                         // we should scroll in either x or y
                         let scroll = match self.axis {
@@ -321,7 +319,7 @@ impl ScrollBar {
                                 }
                             };
                             self.move_towards_scroll_target(cx); // take the first step now
-                            return self.make_scroll_event();
+                            return dispatch_action(cx, self.make_scroll_action());
                         }
                         else {
                             let scroll_pos = self.get_scroll_pos();
@@ -331,7 +329,7 @@ impl ScrollBar {
                                     Axis::Vertical => fe.handled_y.set(true)
                                 }
                             }
-                            return self.make_scroll_event();
+                             return dispatch_action(cx, self.make_scroll_action());
                         }
                     }
                 }
@@ -345,22 +343,24 @@ impl ScrollBar {
                 if self.move_towards_scroll_target(cx) {
                     self.next_frame = cx.new_next_frame();
                 }
-                return self.make_scroll_event()
+                return dispatch_action(cx, self.make_scroll_action());
             }
             
             match event.hits(cx, self.bar.area()) {
                 Hit::FingerDown(fe) => {
                     self.animate_state(cx, ids!(hover.pressed));
+                    let rel= fe.abs - fe.rect.pos;
                     let rel = match self.axis {
-                        Axis::Horizontal => fe.rel.x,
-                        Axis::Vertical => fe.rel.y
+                        Axis::Horizontal => rel.x,
+                        Axis::Vertical => rel.y
                     };
                     let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
                     let bar_start = norm_scroll * self.scroll_size;
                     let bar_size = norm_handle * self.scroll_size;
                     if rel < bar_start || rel > bar_start + bar_size { // clicked outside
                         self.drag_point = Some(bar_size * 0.5);
-                        return self.set_scroll_pos_from_finger(cx, rel - self.drag_point.unwrap());
+                        let action = self.set_scroll_pos_from_finger(cx, rel - self.drag_point.unwrap());
+                        return dispatch_action(cx,action);
                     }
                     else { // clicked on
                         self.drag_point = Some(rel - bar_start); // store the drag delta
@@ -380,7 +380,7 @@ impl ScrollBar {
                     else {
                         self.animate_state(cx, ids!(hover.off));
                     }
-                    return ScrollBarEvent::ScrollDone;
+                    return;
                 },
                 Hit::FingerMove(fe) => {
                     let rel = fe.abs - fe.rect.pos;
@@ -392,10 +392,12 @@ impl ScrollBar {
                     else {
                         match self.axis {
                             Axis::Horizontal => {
-                                return self.set_scroll_pos_from_finger(cx, rel.x - self.drag_point.unwrap());
+                                let action =  self.set_scroll_pos_from_finger(cx, rel.x - self.drag_point.unwrap());
+                                return dispatch_action(cx,action);
                             },
                             Axis::Vertical => {
-                                return self.set_scroll_pos_from_finger(cx, rel.y - self.drag_point.unwrap());
+                                let action =  self.set_scroll_pos_from_finger(cx, rel.y - self.drag_point.unwrap());
+                                return dispatch_action(cx,action);
                             }
                         }
                     }
@@ -403,13 +405,10 @@ impl ScrollBar {
                 _ => ()
             };
         }
-        
-        ScrollBarEvent::None
     }
     
-    pub fn draw_scroll_bar(&mut self, cx: &mut Cx2d, axis: Axis, view_area: Area, view_rect: Rect, view_total: Vec2) -> f32 {
+    pub fn draw_scroll_bar(&mut self, cx: &mut Cx2d, axis: Axis,  view_rect: Rect, view_total: Vec2) -> f32 {
         
-        self.view_area = view_area;
         self.axis = axis;
         
         match self.axis {
@@ -434,7 +433,7 @@ impl ScrollBar {
                     self.bar.draw_rel(
                         cx,
                         Rect {
-                            pos: vec2(self.bar_side_margin, view_rect.size.y - self.bar_size) - scroll,
+                            pos: vec2(self.bar_side_margin, view_rect.size.y - self.bar_size) + scroll,
                             size: vec2(self.scroll_size, self.bar_size),
                         }
                     );
@@ -461,7 +460,7 @@ impl ScrollBar {
                     self.bar.draw_rel(
                         cx,
                         Rect {
-                            pos: vec2(view_rect.size.x - self.bar_size, self.bar_side_margin) - scroll,
+                            pos: vec2(view_rect.size.x - self.bar_size, self.bar_side_margin) + scroll,
                             size: vec2(self.bar_size, self.scroll_size)
                         }
                     );

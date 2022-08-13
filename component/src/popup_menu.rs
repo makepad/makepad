@@ -1,7 +1,6 @@
 use {
     crate::{
         makepad_derive_frame::*,
-        scroll_view::ScrollView,
         makepad_draw_2d::*,
         frame::*,
     },
@@ -101,11 +100,6 @@ live_register!{
         menu_item: PopupMenuItem {}
         layout: {flow: Flow::Down, padding:5}
         bg:{shape: ShadowBox, radius:4, color:#0}
-        scroll_view: {
-            view: {
-                debug_id: file_tree_view
-            }
-        }
     }
 }
 
@@ -146,14 +140,12 @@ pub struct PopupMenuItem {
 
 #[derive(Live)]
 pub struct PopupMenu {
-    scroll_view: ScrollView,
+    view: View,
     menu_item: Option<LivePtr>,
     
     bg: DrawShape,
     layout: Layout,
-    
     items: Vec<String>,
-    
     #[rust] first_tap: bool,
     #[rust] menu_items: ComponentMap<PopupMenuItemId, PopupMenuItem>,
     #[rust] init_select_item: Option<PopupMenuItemId>,
@@ -168,7 +160,7 @@ impl LiveHook for PopupMenu {
                 node.apply(cx, from, index, nodes);
             }
         }
-        self.scroll_view.redraw(cx);
+        self.view.redraw(cx);
     }
 }
 
@@ -250,25 +242,19 @@ impl PopupMenuItem {
 impl PopupMenu {
     
     pub fn menu_contains_pos(&self, cx:&mut Cx, pos:Vec2)->bool{
-        self.scroll_view.area().get_clipped_rect(cx).contains(pos)
+        self.bg.area().get_clipped_rect(cx).contains(pos)
     }
     
-    pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk) -> ViewRedrawing {
-        self.scroll_view.begin(cx, walk, Layout::flow_down()) ?;
+    pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk){
+        self.view.begin_overlay(cx);
+        self.bg.begin(cx, walk, self.layout);
         self.count = 0;
-        ViewRedrawing::yes()
     }
     
-    pub fn begin_bg(&mut self, cx: &mut Cx2d){
-        self.bg.begin(cx, Walk::fill_fit(), self.layout);
-    }
-
-    pub fn end_bg(&mut self, cx: &mut Cx2d){
+    pub fn end(&mut self, cx: &mut Cx2d, shift:Vec2) {
+        cx.turtle_mut().set_shift(shift);
         self.bg.end(cx);
-    }
-    
-    pub fn end(&mut self, cx: &mut Cx2d) {
-        self.scroll_view.end(cx);
+        self.view.end(cx);
         self.menu_items.retain_visible();
         if let Some(init_select_item) = self.init_select_item.take(){
             self.select_item_state(cx, init_select_item);
@@ -276,7 +262,7 @@ impl PopupMenu {
     }
     
     pub fn redraw(&mut self, cx: &mut Cx) {
-        self.scroll_view.redraw(cx);
+        self.view.redraw(cx);
     }
     
     pub fn draw_item(
@@ -320,10 +306,6 @@ impl PopupMenu {
         sweep_area: Area,
         dispatch_action: &mut dyn FnMut(&mut Cx, PopupMenuAction),
     ) {
-        if self.scroll_view.handle_event(cx, event) {
-            self.scroll_view.redraw(cx);
-        }
-        
         let mut actions = Vec::new();
         for (item_id, node) in self.menu_items.iter_mut() {
             node.handle_event(cx, event, sweep_area, &mut | _, e | actions.push((*item_id, e)));
@@ -336,6 +318,7 @@ impl PopupMenu {
                     // next time its selection
                     self.select_item_state(cx, node_id);
                     if self.first_tap{
+                        log!("FIRST TAP");
                         self.first_tap = false;
                         dispatch_action(cx, PopupMenuAction::WasSweeped(node_id));
                     }

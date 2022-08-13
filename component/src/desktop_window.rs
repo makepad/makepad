@@ -1,6 +1,7 @@
 use crate::{
+    debug_view::DebugView,
+    nav_control::NavControl,
     makepad_draw_2d::*,
-    debug_view::*,
     button_logic::*,
     window_menu::*,
     frame::*,
@@ -44,7 +45,9 @@ pub struct DesktopWindow {
     #[rust] pub caption_size: Vec2,
     
     debug_view: DebugView,
+    nav_control: NavControl,
     window: Window,
+    overlay: Overlay,
     main_view: View,
     pass: Pass,
     depth_texture: Texture,
@@ -89,6 +92,8 @@ impl DesktopWindow {
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, DesktopWindowEvent)){
         
         self.debug_view.handle_event(cx,event);
+        self.nav_control.handle_event(cx, event, self.main_view.draw_list_id());
+        self.overlay.handle_event(cx, event);
         
         for item in self.frame.handle_event_iter(cx, event) {
             if let ButtonAction::WasClicked = item.action.cast() {match item.id() {
@@ -158,21 +163,26 @@ impl DesktopWindow {
         
         cx.begin_pass(&self.pass);
         
-        self.main_view.begin(cx, Walk::default(), Layout::flow_right()).assume_redrawing();
+        self.main_view.begin_always(cx);
+
+        let pass_size = cx.current_pass_size();
+
+        cx.begin_turtle(Walk::fixed_size(pass_size), Layout::flow_down());
         
+        self.overlay.begin(cx);
+
         //while self.frame.draw(cx).is_ok(){}
         if self.frame.draw(cx).is_done() {
-            self.main_view.end(cx);
-            cx.end_pass(&self.pass);
+            self.end(cx);
             return ViewRedrawing::no()
         }
-        
-        ViewRedrawing::yes()
+        ViewRedrawing::yes() 
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
         while self.frame.draw(cx).is_not_done() {}
         self.debug_view.draw(cx);
+        cx.end_turtle();
         self.main_view.end(cx);
         cx.end_pass(&self.pass);
     }

@@ -44,7 +44,7 @@ impl DebugView {
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
-        if !self.view.begin(cx, Walk::default(), Layout::default()).is_redrawing(){
+        if !self.view.begin(cx).is_redrawing(){
             return
         }
         let debug = cx.debug.clone();
