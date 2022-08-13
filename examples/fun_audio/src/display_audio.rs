@@ -64,8 +64,8 @@ live_register!{
     
     DisplayAudio: {{DisplayAudio}} {
         walk: {
-            width: Size::Fit,
-            height: Size::Fit
+            width: Fill,
+            height: Fill
         }
     }
 }
@@ -81,9 +81,10 @@ struct DrawFFT {
 #[derive(Live, FrameComponent)]
 #[live_register(frame_component!(DisplayAudio))]
 pub struct DisplayAudio {
-    view: View,
+    //view: View,
     walk: Walk,
     fft: DrawFFT,
+    #[rust] area: Area,
     #[rust] layers: Vec<DisplayAudioLayer>
 }
 
@@ -223,11 +224,12 @@ impl LiveHook for DisplayAudio {
 impl DisplayAudio {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         // alright lets draw em fuckers
-        if self.view.begin(cx, walk, Layout::default()).not_redrawing() {
-            return
-        };
+        //if self.view.begin(cx, walk, Layout::default()).not_redrawing() {
+        //    return
+        //};
         // ok so we walk and get a rect
-        let rect = cx.walk_turtle(Walk::fill());
+        
+        let rect = cx.walk_turtle_with_area(&mut self.area, walk);
         
         for (index, layer) in self.layers.iter().enumerate() {
             if !layer.active || layer.fft_empty_count >= FFT_SIZE_T * FFT_SIZE_Y{
@@ -239,10 +241,8 @@ impl DisplayAudio {
             self.fft.draw_vars.set_texture(1, &layer.fft_texture);
             self.fft.draw_abs(cx, rect);
         }
-        self.view.end(cx);
+        //self.view.end(cx);
     }
-    
-    
     
     pub fn handle_event(
         &mut self,
@@ -261,7 +261,7 @@ impl DisplayAudioImGUI {
     pub fn process_buffer(&self, cx: &mut Cx, voice: usize, buffer: &AudioBuffer) {
         if let Some(mut inner) = self.inner() {
             if inner.layers[voice].process_buffer(cx, buffer){
-                inner.view.redraw(cx);
+                inner.area.redraw(cx);
             }
         }
     }

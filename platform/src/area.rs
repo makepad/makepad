@@ -25,10 +25,17 @@ pub struct InstanceArea {
     pub instance_count: usize,
     pub redraw_id: u64
 }
-
+/*
 #[derive(Clone, Hash, Ord, PartialOrd, Eq, Debug, PartialEq, Copy)]
 pub struct DrawListArea {
     pub draw_list_id: DrawListId,
+    pub redraw_id: u64
+}*/
+
+#[derive(Clone, Hash, Ord, PartialOrd, Eq, Debug, PartialEq, Copy)]
+pub struct RectArea {
+    pub draw_list_id: DrawListId,
+    pub rect_id: usize,
     pub redraw_id: u64
 }
 
@@ -36,7 +43,8 @@ pub struct DrawListArea {
 pub enum Area {
     Empty,
     Instance(InstanceArea),
-    DrawList(DrawListArea)
+    //DrawList(DrawListArea),
+    Rect(RectArea)
 }
 
 impl Default for Area {
@@ -91,7 +99,7 @@ impl Area {
             Area::Instance(inst) => {
                 Some(inst.draw_list_id)
             },
-            Area::DrawList(list) => {
+            Area::Rect(list) => {
                 Some(list.draw_list_id)
             }
             _ => None
@@ -119,7 +127,7 @@ impl Area {
                 }
                 return true
             },
-            Area::DrawList(list) => {
+            Area::Rect(list) => {
                 let draw_list = &cx.draw_lists[list.draw_list_id];
                 if draw_list.redraw_id != list.redraw_id {
                     return false
@@ -245,10 +253,60 @@ impl Area {
                 }
                 Rect::default()
             },
-            Area::DrawList(list) => {
+            Area::Rect(ra) => {
                 // we need to clip this drawlist too
-                let draw_list = &cx.draw_lists[list.draw_list_id];
-                return draw_list.rect.clip(draw_list.draw_clip);                
+                let draw_list = &cx.draw_lists[ra.draw_list_id];
+                let rect_area = &draw_list.rect_areas[ra.rect_id];
+                return rect_area.rect.clip(rect_area.draw_clip);                
+            },
+            _ => Rect::default(),
+        }
+    }
+    
+    pub fn get_rect(&self, cx: &Cx) -> Rect {
+        
+        return match self {
+            Area::Instance(inst) => {
+                if inst.instance_count == 0 {
+                    //panic!();
+                    error!("get_rect called on instance_count ==0 area pointer, use mark/sweep correctly!");
+                    return Rect::default()
+                }
+                let draw_list = &cx.draw_lists[inst.draw_list_id];
+                if draw_list.redraw_id != inst.redraw_id {
+                    return Rect::default();
+                }
+                let draw_item = &draw_list.draw_items[inst.draw_item_id];
+                let draw_call = draw_item.draw_call().unwrap();
+                
+                if draw_item.instances.as_ref().unwrap().len() == 0 {
+                    error!("No instances but everything else valid?");
+                    return Rect::default()
+                }
+                if cx.draw_shaders.generation != draw_call.draw_shader.draw_shader_generation {
+                    error!("Generation invalid get_rect {} {:?} {} {}", draw_list.debug_id, inst, cx.draw_shaders.generation, draw_call.draw_shader.draw_shader_generation);
+                    return Rect::default()
+                }
+                if !draw_call.was_painted{
+                    error!("Calling get rect on an area before it was painted doesn't work");
+                    return Rect::default()
+                }
+                let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id];
+                // ok now we have to patch x/y/w/h into it
+                let buf = draw_item.instances.as_ref().unwrap();
+                if let Some(rect_pos) = sh.mapping.rect_pos {
+                    let pos = vec2(buf[inst.instance_offset + rect_pos + 0], buf[inst.instance_offset + rect_pos + 1]);
+                    if let Some(rect_size) = sh.mapping.rect_size {
+                        let size = vec2(buf[inst.instance_offset + rect_size + 0], buf[inst.instance_offset + rect_size + 1]);
+                        return Rect{pos,size};
+                    }
+                }
+                Rect::default()
+            },
+            Area::Rect(ra) => {
+                let draw_list = &cx.draw_lists[ra.draw_list_id];
+                let rect_area = &draw_list.rect_areas[ra.rect_id];
+                return rect_area.rect;                
             },
             _ => Rect::default(),
         }
@@ -285,11 +343,12 @@ impl Area {
                 }
                 abs
             },
-            Area::DrawList(list) => {
-                let draw_list = &cx.draw_lists[list.draw_list_id];
+            Area::Rect(ra) => {
+                let draw_list = &cx.draw_lists[ra.draw_list_id];
+                let rect_area = &draw_list.rect_areas[ra.rect_id];
                 Vec2 {
-                    x: abs.x - draw_list.rect.pos.x,
-                    y: abs.y - draw_list.rect.pos.y
+                    x: abs.x - rect_area.rect.pos.x,
+                    y: abs.y - rect_area.rect.pos.y
                 }
             },
             _ => abs,
@@ -321,9 +380,10 @@ impl Area {
                     buf[inst.instance_offset + rect_size + 1] = rect.size.y;
                 }
             },
-            Area::DrawList(list) => {
-                let draw_list = &mut cx.draw_lists[list.draw_list_id];
-                draw_list.rect = rect.clone()
+            Area::Rect(ra) => {
+                let draw_list = &mut cx.draw_lists[ra.draw_list_id];
+                let rect_area = &mut draw_list.rect_areas[ra.rect_id];
+                rect_area.rect = *rect
             },
             _ => ()
         }

@@ -410,11 +410,11 @@ pub struct Mandelbrot {
     // DSL accessible
     draw_tile: DrawTile,
     max_iter: usize,
-    // thew view container that contains our mandelbrot UI
-    view: View,
-    // the 'walk' of the mandelbrot view, used in layouting
-    walk: Walk,
     
+    // thew view container that contains our mandelbrot UI
+    #[rust] view_area: Area,
+    
+    walk: Walk,
     // prepending #[rust] makes derive(Live) ignore these fields
     // and they dont get DSL accessors
     #[rust] next_frame: NextFrame,
@@ -582,13 +582,13 @@ impl Mandelbrot {
             // animate color cycle
             self.draw_tile.color_cycle = (ne.time * 0.1).fract() as f32;
             // this triggers a draw_walk call and another 'next frame' event
-            self.view.redraw(cx);
+            self.view_area.redraw(cx);
             self.next_frame = cx.new_next_frame();
         }
         
         // check if we click/touch the mandelbrot view in multitouch mode
         // in this mode we get fingerdown events for each finger.
-        match event.hits_with_options(cx, self.view.area(), HitOptions::with_multi_touch()) {
+        match event.hits_with_options(cx, self.view_area, HitOptions::with_multi_touch()) {
             Hit::FingerDown(fe) => {
                 // ok so we get multiple finger downs
                 self.is_zooming = true;
@@ -612,7 +612,7 @@ impl Mandelbrot {
                     }
                 }
                 
-                self.view.redraw(cx);
+                self.view_area.redraw(cx);
                 
                 self.next_frame = cx.new_next_frame();
             },
@@ -630,9 +630,9 @@ impl Mandelbrot {
     }
     
     // draw the mandelbrot view
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) -> ViewRedrawing {
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk)  {
         // checks if our view is dirty, exits here if its clean
-        self.view.begin(cx, walk, Layout::flow_right()) ?;
+        cx.begin_turtle(walk, Layout::flow_right());
         
         self.had_first_draw = true;
         // store the view information here as its the only place it's known in the codeflow
@@ -660,8 +660,6 @@ impl Mandelbrot {
             self.draw_tile.draw_abs(cx, rect);
         }
         
-        self.view.end(cx);
-        
-        ViewRedrawing::yes()
+        cx.end_turtle_with_area(&mut self.view_area);
     }
 }

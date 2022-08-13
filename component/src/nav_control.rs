@@ -78,12 +78,11 @@ impl NavControl {
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
-        if !self.view.begin(cx, Walk::default(), Layout::default()).is_redrawing() {
+        if !self.view.begin(cx).is_redrawing() {
             return
         }
         
         self.view.end(cx);
-        
     }
 }
 

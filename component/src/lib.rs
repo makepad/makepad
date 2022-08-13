@@ -9,7 +9,7 @@ pub mod desktop_button;
 pub mod desktop_window;
 pub mod scroll_shadow;
 pub mod scroll_bar;
-pub mod scroll_view;
+pub mod scroll_bars;
 pub mod link_label;
 pub mod nav_control;
 pub mod list_box;
@@ -58,7 +58,7 @@ pub use crate::{
     text_input::{TextInput},
     link_label::{LinkLabel},
     desktop_window::{DesktopWindow},
-    scroll_view::{ScrollView},
+    scroll_bars::{ScrollBars},
     scroll_shadow::{ScrollShadow},
     scroll_bar::{ScrollBar},
     frame::{
@@ -98,8 +98,8 @@ pub fn live_register(cx: &mut Cx) {
     crate::desktop_window::live_register(cx);
     crate::bare_window::live_register(cx);
     crate::window_menu::live_register(cx);
-    crate::scroll_view::live_register(cx);
     crate::scroll_bar::live_register(cx);
+    crate::scroll_bars::live_register(cx);
     crate::tab_close_button::live_register(cx);
     crate::tab::live_register(cx);
     crate::tab_bar::live_register(cx);

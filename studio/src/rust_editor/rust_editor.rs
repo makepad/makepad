@@ -168,67 +168,65 @@ impl RustEditor {
             return
         }
         
-        if self.editor_impl.begin(cx).is_redrawing(){
-            
-            let (document, document_inner, session) = self.editor_impl.get_state(cx, state);
-            
-            let path = document.path.clone();
-            
-            // if we are folding we need to store the last lead cursor y pos
-            // then we calc layout and get a new one, then we scroll, and calc again
-            self.calc_layout_with_widgets(
-                cx,
-                &path,
-                document_inner,
-            );
-            
-            self.editor_impl.draw_selections(
-                cx,
-                &session.selections,
-                &document_inner.text,
-                &self.lines_layout,
-            );
-            
-            self.editor_impl.draw_indent_guides(
-                cx,
-                &document_inner.indent_cache,
-                &self.lines_layout,
-            );
-            
-            self.editor_impl.draw_carets(
-                cx,
-                &session.selections,
-                &session.carets,
-                &self.lines_layout
-            );
-            
-            self.draw_text(
-                cx,
-                &document_inner.text,
-                &document_inner.token_cache,
-            );
-            
-            self.editor_impl.draw_current_line(
-                cx,
-                &self.lines_layout,
-                *session.cursors.last_inserted()
-            );
-            
-            self.editor_impl.draw_message_lines(
-                cx,
-                &document_inner.msg_cache,
-                state,
-                &self.lines_layout,
-            );
-            
-            self.editor_impl.draw_linenums(
-                cx,
-                &self.lines_layout,
-                *session.cursors.last_inserted()
-            );
-            
-            self.editor_impl.end(cx, &self.lines_layout);
-        }
+        let (document, document_inner, session) = self.editor_impl.get_state(cx, state);
+        
+        let path = document.path.clone();
+        // if we are folding we need to store the last lead cursor y pos
+        // then we calc layout and get a new one, then we scroll, and calc again
+        self.calc_layout_with_widgets(
+            cx,
+            &path,
+            document_inner,
+        );
+        
+        self.editor_impl.begin(cx);
+        
+        self.editor_impl.draw_selections(
+            cx,
+            &session.selections,
+            &document_inner.text,
+            &self.lines_layout,
+        );
+        
+        self.editor_impl.draw_indent_guides(
+            cx,
+            &document_inner.indent_cache,
+            &self.lines_layout,
+        );
+        
+        self.editor_impl.draw_carets(
+            cx,
+            &session.selections,
+            &session.carets,
+            &self.lines_layout
+        );
+        
+        self.draw_text(
+            cx,
+            &document_inner.text,
+            &document_inner.token_cache,
+        );
+        
+        self.editor_impl.draw_current_line(
+            cx,
+            &self.lines_layout,
+            *session.cursors.last_inserted()
+        );
+        
+        self.editor_impl.draw_message_lines(
+            cx,
+            &document_inner.msg_cache,
+            state,
+            &self.lines_layout,
+        );
+        
+        self.editor_impl.draw_linenums(
+            cx,
+            &self.lines_layout,
+            *session.cursors.last_inserted()
+        );
+        
+        self.editor_impl.end(cx, &self.lines_layout);
     }
     
     pub fn draw_text(
@@ -286,9 +284,7 @@ impl RustEditor {
         send_request: &mut dyn FnMut(CollabRequest),
         dispatch_action: &mut dyn FnMut(&mut Cx, CodeEditorAction),
     ) {
-        if self.editor_impl.scroll_view.handle_event(cx, event) {
-            self.editor_impl.scroll_view.redraw(cx);
-        }
+        self.editor_impl.scroll_bars.handle_event(cx, event, &mut |_,_|{});
         
         if self.editor_impl.session_id.is_none() {
             return
@@ -296,7 +292,7 @@ impl RustEditor {
         //let session_id = self.editor_impl.session_id.unwrap();
         
         // what if the code editor changes something?
-        self.editor_impl.handle_event_with_fn(
+        self.editor_impl.handle_event(
             cx,
             state,
             event,

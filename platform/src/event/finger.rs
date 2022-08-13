@@ -87,7 +87,6 @@ pub struct CxDigit {
     pub captured: Area,
     pub capture_time: f64,
     pub down_abs_start: Vec2,
-    pub down_rel_start: Vec2,
 }
 
 #[derive(Default, Clone)]
@@ -365,7 +364,6 @@ impl FingerDownEvent {
 
 #[derive(Clone, Debug)]
 pub struct FingerDownHitEvent {
-    pub rel: Vec2,
     pub rect: Rect,
     pub deref_target: FingerDownEvent
 }
@@ -830,7 +828,6 @@ impl Event {
                                 cx.fingers.new_hover_area(fe.digit.id, area);
                                 let digit = cx.fingers.get_digit_mut(fe.digit.id).unwrap();
                                 digit.down_abs_start = fe.abs;
-                                digit.down_rel_start = vec2(0.0, 0.0);
                                 fe.handled.set(true);
                                 
                                 return Hit::FingerSweepIn(FingerSweepEvent {
@@ -848,13 +845,10 @@ impl Event {
                         }
                         else {
                             if cx.fingers.capture_digit(fe.digit.id, area, fe.time) {
-                                let rel = area.abs_to_rel(cx, fe.abs);
                                 let digit = cx.fingers.get_digit_mut(fe.digit.id).unwrap();
                                 digit.down_abs_start = fe.abs;
-                                digit.down_rel_start = rel;
                                 fe.handled.set(true);
                                 return Hit::FingerDown(FingerDownHitEvent {
-                                    rel: rel,
                                     rect: rect,
                                     deref_target: fe.clone()
                                 })

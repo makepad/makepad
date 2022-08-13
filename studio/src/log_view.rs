@@ -53,24 +53,23 @@ impl LogView {
     pub fn draw(&mut self, cx: &mut Cx2d, state: &EditorState) {
         let mut file = String::new();
         let mut body = String::new();
-        if self.log_list.begin(cx).is_redrawing(){
-            for (index, msg) in state.messages.iter().enumerate(){
-                if self.log_list.should_node_draw(cx){
-                    file.clear();
-                    body.clear();
-                    let id = LiveId(index as  u64).into();
-                    match msg{
-                        BuilderMsg::Bare(_msg)=>{
-                        }
-                        BuilderMsg::Location(msg)=>{
-                            write!(file, "{}:{}", msg.file_name, msg.range.start.line).unwrap();
-                            self.log_list.draw_node(cx, msg.level.into(), id, &file, &msg.msg, true);
-                        }
+        self.log_list.begin(cx);
+        for (index, msg) in state.messages.iter().enumerate(){
+            if self.log_list.should_node_draw(cx){
+                file.clear();
+                body.clear();
+                let id = LiveId(index as  u64).into();
+                match msg{
+                    BuilderMsg::Bare(_msg)=>{
+                    }
+                    BuilderMsg::Location(msg)=>{
+                        write!(file, "{}:{}", msg.file_name, msg.range.start.line).unwrap();
+                        self.log_list.draw_node(cx, msg.level.into(), id, &file, &msg.msg, true);
                     }
                 }
             }
-            self.log_list.end(cx);
         }
+        self.log_list.end(cx);
     }
     
     pub fn handle_event(

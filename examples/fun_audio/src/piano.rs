@@ -135,7 +135,7 @@ pub struct PianoKey {
 #[derive(Live, FrameComponent)]
 #[live_register(frame_component!(Piano))]
 pub struct Piano {
-    view: View,
+    #[rust] area: Area,
     walk: Walk,
     piano_key: Option<LivePtr>,
     
@@ -159,7 +159,7 @@ impl LiveHook for Piano {
                 piano_key.apply(cx, from, index, nodes);
             }
         }
-        self.view.redraw(cx);
+        self.area.redraw(cx);
     }
 }
 
@@ -241,9 +241,8 @@ impl PianoKey {
 
 impl Piano {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        if self.view.begin(cx, walk, Layout::default()).not_redrawing() {
-            return
-        };
+        cx.begin_turtle(walk, Layout::default());
+
         let start_pos = cx.turtle().pos(); //+ vec2(10., 10.);
         let mut pos = start_pos;
         
@@ -301,13 +300,13 @@ impl Piano {
             }
         }
         cx.turtle_mut().set_used(white_size.x * (midi_c8 - midi_a0) as f32, white_size.y);
-        self.view.end(cx);
+        cx.end_turtle_with_area(&mut self.area);
         self.white_keys.retain_visible();
         self.black_keys.retain_visible();
     }
     
     pub fn set_key_focus(&self, cx: &mut Cx) {
-        cx.set_key_focus(self.view.area());
+        cx.set_key_focus(self.area);
     }
     
     pub fn set_note(&mut self, cx: &mut Cx, is_on: bool, note_number: u8) {
@@ -328,7 +327,7 @@ impl Piano {
     ) {
         let mut actions = Vec::new();
         for (key_id, piano_key) in self.black_keys.iter_mut().chain(self.white_keys.iter_mut()) {
-            piano_key.handle_event(cx, event, self.view.area(), &mut | _, action | {
+            piano_key.handle_event(cx, event, self.area, &mut | _, action | {
                 actions.push((*key_id, action))
             });
         }
@@ -424,7 +423,7 @@ impl Piano {
             _ => ()
         }
         
-        match event.hits(cx, self.view.area()) {
+        match event.hits(cx, self.area) {
             Hit::KeyFocus(_) => {
                 for piano_key in self.white_keys.values_mut().chain(self.black_keys.values_mut()) {
                     piano_key.set_is_focussed(cx, true, Animate::Yes)

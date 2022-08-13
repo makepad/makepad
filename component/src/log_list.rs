@@ -5,7 +5,7 @@ use {
     crate::{
         frame::*,
         fold_button::FoldButton,
-        scroll_view::ScrollView,
+        scroll_bars::ScrollBars,
         link_label::LinkLabel,
         makepad_draw_2d::*,
         log_icon::{DrawLogIconQuad, LogIconType}
@@ -42,7 +42,7 @@ live_register!{
     }
     
     LogListNode: {{LogListNode}} {
-        link_button: {
+        link_label: {
         }
         
         layout: {
@@ -66,9 +66,9 @@ live_register!{
                     from: {all: Play::Forward {duration: 0.1}}
                     apply: {
                         hover: 0.0,
-                        bg_quad: {hover: (hover)}
-                        name_text: {hover: (hover)}
-                        icon_quad: {hover: (hover)}
+                        bg: {hover: (hover)}
+                        name: {hover: (hover)}
+                        icon: {hover: (hover)}
                     }
                 }
                 on = {
@@ -84,9 +84,9 @@ live_register!{
                     from: {all: Play::Snap}
                     apply: {
                         selected: 0.0,
-                        bg_quad: {selected: (selected)}
-                        name_text: {selected: (selected)}
-                        icon_quad: {selected: (selected)}
+                        bg: {selected: (selected)}
+                        name: {selected: (selected)}
+                        icon: {selected: (selected)}
                     }
                 }
                 on = {
@@ -106,11 +106,6 @@ live_register!{
         node_height: (DIM_DATA_ITEM_HEIGHT),
         fold_node: LogListNode {}
         layout: {flow: Flow::Down}
-        scroll_view: {
-            view: {
-                debug_id: file_tree_view
-            }
-        }
     }
 }
 
@@ -135,9 +130,9 @@ struct DrawNameText {
 
 #[derive(Live, LiveHook)]
 pub struct LogListNode {
-    bg_quad: DrawBgQuad,
-    icon_quad: DrawLogIconQuad,
-    name_text: DrawNameText,
+    bg: DrawBgQuad,
+    icon: DrawLogIconQuad,
+    name: DrawNameText,
     layout: Layout,
     
     state: State,
@@ -158,7 +153,7 @@ pub struct LogListNode {
 
 #[derive(Live)]
 pub struct LogList {
-    scroll_view: ScrollView,
+    scroll_bars: ScrollBars,
     fold_node: Option<LivePtr>,
     
     filler_quad: DrawBgQuad,
@@ -181,7 +176,7 @@ impl LiveHook for LogList {
                 node.apply(cx, from, index, nodes);
             }
         }
-        self.scroll_view.redraw(cx);
+        self.scroll_bars.redraw(cx);
     }
 }
 
@@ -203,8 +198,8 @@ pub struct LogListNodeId(pub LiveId);
 
 impl LogListNode {
     pub fn set_draw_state(&mut self, is_even: f32) {
-        self.bg_quad.is_even = is_even;
-        self.name_text.is_even = is_even;
+        self.bg.is_even = is_even;
+        self.name.is_even = is_even;
     }
     
     
@@ -220,18 +215,18 @@ impl LogListNode {
     ) {
         self.set_draw_state(is_even);
         
-        self.bg_quad.begin(cx, Walk::size(Size::Fill, Size::Fixed(node_height)), self.layout);
+        self.bg.begin(cx, Walk::size(Size::Fill, Size::Fixed(node_height)), self.layout);
         
         // lets draw a fold button
         self.fold_button.draw_walk(cx, self.fold_button.get_walk());
         
         // lets draw a fold button
-        self.icon_quad.icon_type = icon_type;
-        self.icon_quad.draw_walk(cx, self.icon_walk);
+        self.icon.icon_type = icon_type;
+        self.icon.draw_walk(cx, self.icon_walk);
         self.link_label.draw_label(cx, link);
         
-        self.name_text.draw_walk(cx, Walk::fit(), Align::default(), body);
-        self.bg_quad.end(cx);
+        self.name.draw_walk(cx, Walk::fit(), Align::default(), body);
+        self.bg.end(cx);
     }
     
     pub fn set_is_selected(&mut self, cx: &mut Cx, is_selected: bool, animate: Animate) {
@@ -249,14 +244,14 @@ impl LogListNode {
         dispatch_action: &mut dyn FnMut(&mut Cx, LogNodeAction),
     ) {
         if self.state_handle_event(cx, event).must_redraw() {
-            self.bg_quad.area().redraw(cx);
+            self.bg.area().redraw(cx);
         }
         
         self.fold_button.handle_event(cx, event, &mut |_,_|{});
         
         self.link_label.handle_event(cx, event, &mut |_,_|{});
         
-        match event.hits(cx, self.bg_quad.area()) {
+        match event.hits(cx, self.bg.area()) {
             Hit::FingerHoverIn(_) => {
                 self.animate_state(cx, ids!(hover.on));
             }
@@ -289,10 +284,9 @@ impl LogListNode {
 
 impl LogList {
     
-    pub fn begin(&mut self, cx: &mut Cx2d) -> ViewRedrawing {
-        self.scroll_view.begin(cx, Walk::default(), self.layout) ?;
+    pub fn begin(&mut self, cx: &mut Cx2d) {
+        self.scroll_bars.begin(cx, Walk::default(), self.layout);
         self.count = 0;
-        ViewRedrawing::yes()
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
@@ -305,7 +299,7 @@ impl LogList {
             self.filler_quad.draw_walk(cx, Walk::size(Size::Fill, Size::Fixed(self.node_height.min(height_left - walk))));
             walk += self.node_height.max(1.0);
         }
-        self.scroll_view.end(cx);
+        self.scroll_bars.end(cx);
         
         let selected_node_ids = &self.selected_node_ids;
         self.fold_nodes.retain_visible_and( | node_id, _ | selected_node_ids.contains(node_id));
@@ -316,7 +310,7 @@ impl LogList {
     }
     
     pub fn redraw(&mut self, cx: &mut Cx) {
-        self.scroll_view.redraw(cx);
+        self.scroll_bars.redraw(cx);
     }
     
     pub fn draw_node(
@@ -375,9 +369,8 @@ impl LogList {
         event: &Event,
         _dispatch_action: &mut dyn FnMut(&mut Cx, LogListAction),
     ) {
-        if self.scroll_view.handle_event(cx, event) {
-            self.scroll_view.redraw(cx);
-        }
+        //let view_area = self.view_area;
+        self.scroll_bars.handle_event(cx, event, &mut |_,_|{});
         
         let mut actions = Vec::new();
         for (node_id, node) in self.fold_nodes.iter_mut() {

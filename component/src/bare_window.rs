@@ -39,7 +39,11 @@ impl BareWindow {
         }
         cx.begin_pass(&self.pass);
         
-        self.main_view.begin(cx, Walk::default(), Layout::flow_down()).assume_redrawing();
+        self.main_view.begin_always(cx);
+
+        let pass_size = cx.current_pass_size();
+
+        cx.begin_turtle(Walk::fixed_size(pass_size), Layout::flow_down());
         
         self.overlay.begin(cx);
         
@@ -51,6 +55,9 @@ impl BareWindow {
         // we need an overlay view here
         // however this overlay view works 
         self.overlay.end(cx);
+
+        cx.end_turtle();
+
         self.main_view.end(cx);
         cx.end_pass(&self.pass);
         //cx.debug_draw_tree(false, self.main_view.draw_list_id());

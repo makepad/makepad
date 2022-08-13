@@ -167,6 +167,19 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add("}");
         }
         
+        if let Some(_) = draw_vars {
+            tb.add("impl").stream(generic.clone());
+            tb.add("std::ops::Deref for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+            tb.add("    type Target = DrawVars;");
+            tb.add("    fn deref(&self) -> &Self::Target {&self.draw_vars}");
+            tb.add("}");
+            tb.add("impl").stream(generic.clone());
+            
+            tb.add("std::ops::DerefMut for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
+            tb.add("    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.draw_vars}");
+            tb.add("}");
+        }
+        
         tb.add("impl").stream(generic.clone());
         tb.add("LiveApplyValue for").ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
         
@@ -208,24 +221,6 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             }
             
             tb.add("impl").stream(generic.clone()).ident(&struct_name).stream(generic.clone()).stream(where_clause.clone()).add("{");
-            
-            tb.add("    pub fn area(&self)->Area {");
-            if draw_vars.is_some() {
-                tb.add("    self.draw_vars.area");
-            }
-            else if draw_super.is_some() {
-                tb.add("    self.draw_super.area()");
-            }
-            tb.add("    }");
-            
-            tb.add("    pub fn redraw(&self, cx:&mut Cx){");
-            if draw_vars.is_some() {
-                tb.add("    self.draw_vars.area.redraw(cx)");
-            }
-            else if draw_super.is_some() {
-                tb.add("    self.draw_super.area().redraw(cx)");
-            }
-            tb.add("    }");
             
             tb.add("    pub fn draw_super_before_apply(&mut self, cx: &mut Cx, apply_from:ApplyFrom, index: usize, nodes: &[LiveNode]){");
             tb.add("        self.before_apply(cx, apply_from, index, nodes);");

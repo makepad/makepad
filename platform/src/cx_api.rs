@@ -16,6 +16,9 @@ use {
             WebSocket,
             NextFrame,
         },
+        draw_list::{
+            DrawListId
+        },
         window::{
             WindowId
         },
@@ -24,7 +27,7 @@ use {
         },
         area::{
             Area,
-            DrawListArea
+            //DrawListArea
         },
         menu::{
             Menu,
@@ -149,16 +152,9 @@ impl Cx {
     }
     
     pub fn get_dpi_factor_of(&mut self, area: &Area) -> f32 {
-        match area {
-            Area::Instance(ia) => {
-                let pass_id = self.draw_lists[ia.draw_list_id].pass_id.unwrap();
-                return self.get_delegated_dpi_factor(pass_id)
-            },
-            Area::DrawList(va) => {
-                let pass_id = self.draw_lists[va.draw_list_id].pass_id.unwrap();
-                return self.get_delegated_dpi_factor(pass_id)
-            },
-            _ => ()
+        if let Some(draw_list_id) = area.draw_list_id(){
+            let pass_id = self.draw_lists[draw_list_id].pass_id.unwrap();
+            return self.get_delegated_dpi_factor(pass_id)
         }
         return 1.0;
     }
@@ -181,25 +177,25 @@ impl Cx {
         }
         1.0
     }
-    
+    /*
     pub fn redraw_pass_of(&mut self, area: Area) {
         // we walk up the stack of area
         match area {
             Area::Empty => (),
-            Area::Instance(instance) => {
-                self.redraw_pass_and_parent_passes(self.draw_lists[instance.draw_list_id].pass_id.unwrap());
+            Area::Instance(area) => {
+                self.redraw_pass_and_parent_passes(self.draw_lists[area.draw_list_id].pass_id.unwrap());
             },
-            Area::DrawList(listarea) => {
-                self.redraw_pass_and_parent_passes(self.draw_lists[listarea.draw_list_id].pass_id.unwrap());
+            Area::Rect(area) => {
+                self.redraw_pass_and_parent_passes(self.draw_lists[area.draw_list_id].pass_id.unwrap());
             }
         }
-    }
+    }*/
     
     pub fn redraw_pass_and_parent_passes(&mut self, pass_id: PassId) {
         let mut walk_pass_id = pass_id;
         loop {
-            if let Some(main_view_id) = self.passes[walk_pass_id].main_draw_list_id {
-                self.redraw_area_and_children(Area::DrawList(DrawListArea {redraw_id: 0, draw_list_id: main_view_id}));
+            if let Some(main_list_id) = self.passes[walk_pass_id].main_draw_list_id {
+                self.redraw_list_and_children(main_list_id);
             }
             match self.passes[walk_pass_id].parent.clone() {
                 CxPassParent::Pass(next_pass_id) => {
@@ -219,8 +215,8 @@ impl Cx {
     
     pub fn redraw_pass_and_child_passes(&mut self, pass_id: PassId) {
         let cxpass = &self.passes[pass_id];
-        if let Some(main_list) = cxpass.main_draw_list_id {
-            self.redraw_area_and_children(Area::DrawList(DrawListArea {redraw_id: 0, draw_list_id: main_list}));
+        if let Some(main_list_id) = cxpass.main_draw_list_id {
+            self.redraw_list_and_children(main_list_id);
         }
         // lets redraw all subpasses as well
         for sub_pass_id in self.passes.id_iter() {
@@ -235,23 +231,31 @@ impl Cx {
     pub fn redraw_all(&mut self) {
         self.new_draw_event.redraw_all = true;
     }
-    
+
     pub fn redraw_area(&mut self, area: Area) {
-        if let Some(draw_list_id) = area.draw_list_id() {
-            if self.new_draw_event.draw_lists.iter().position( | v | *v == draw_list_id).is_some() {
-                return;
-            }
-            self.new_draw_event.draw_lists.push(draw_list_id);
+        if let Some(draw_list_id) = area.draw_list_id(){
+            self.redraw_list(draw_list_id);
         }
     }
-    
+
     pub fn redraw_area_and_children(&mut self, area: Area) {
-        if let Some(draw_list_id) = area.draw_list_id() {
-            if self.new_draw_event.draw_lists_and_children.iter().position( | v | *v == draw_list_id).is_some() {
-                return;
-            }
-            self.new_draw_event.draw_lists_and_children.push(draw_list_id);
+        if let Some(draw_list_id) = area.draw_list_id(){
+            self.redraw_list_and_children(draw_list_id);
         }
+    }
+
+    pub fn redraw_list(&mut self, draw_list_id: DrawListId) {
+        if self.new_draw_event.draw_lists.iter().position( | v | *v == draw_list_id).is_some() {
+            return;
+        }
+        self.new_draw_event.draw_lists.push(draw_list_id);
+    }
+    
+    pub fn redraw_list_and_children(&mut self, draw_list_id: DrawListId) {
+        if self.new_draw_event.draw_lists_and_children.iter().position( | v | *v == draw_list_id).is_some() {
+            return;
+        }
+        self.new_draw_event.draw_lists_and_children.push(draw_list_id);
     }
     
     /*
