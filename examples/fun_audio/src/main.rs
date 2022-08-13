@@ -91,7 +91,7 @@ live_register!{
             }
             g1 = GradientY {
                 walk: {width: Fill, height: 2}
-                bg: {color: #000a, color2: #0000, no_v_scroll: true}
+                bg: {color: #000a, color2: #0000}
             }
         }
     }
@@ -266,7 +266,6 @@ live_register!{
                     }
                 }
                 b: Box {
-                    clip: true,
                     cursor: Default,
                     bg: {color: #4, radius: 3.0, border_width: 0.5, border_color: #3}
                     walk: {height: Fill}

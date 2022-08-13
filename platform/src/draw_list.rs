@@ -263,7 +263,7 @@ pub struct CxDrawList {
     pub redraw_id: u64,
     pub pass_id: Option<PassId>,
     
-    pub locked_view_transform: bool,
+    //pub locked_view_transform: bool,
 
     // scrolling
     //pub no_v_scroll: bool, // this means we
@@ -277,11 +277,16 @@ pub struct CxDrawList {
     pub draw_list_uniforms: CxDrawListUniforms,
     pub platform: CxOsView,
     
-    pub rect: Rect,
-    pub draw_clip: (Vec2,Vec2),
+    //pub rect: Rect,
+    //pub draw_clip: (Vec2,Vec2),
     //pub unclipped: bool,
-    
+    pub rect_areas: Vec<CxRectArea>,
     pub nav_items: Vec<NavItem>
+}
+
+pub struct CxRectArea{
+    pub rect: Rect,
+    pub draw_clip: (Vec2,Vec2)
 }
 
 impl CxDrawList {
@@ -359,6 +364,7 @@ impl CxDrawList {
         self.redraw_id = redraw_id;
         self.draw_items.clear();
         self.nav_items.clear();
+        self.rect_areas.clear();
     }
     
     pub fn append_sub_list(&mut self, redraw_id: u64, sub_list_id: DrawListId) {

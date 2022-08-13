@@ -5,7 +5,7 @@ use {
     crate::{
         makepad_draw_2d::*,
         scroll_shadow::ScrollShadow,
-        scroll_view::ScrollView
+        scroll_bars::ScrollBars
     }
 };
 
@@ -189,11 +189,7 @@ live_register!{
             name: {is_folder: 1.0}
         }
         layout: {flow: Flow::Down},
-        scroll_view: {
-            view: {
-                debug_id: file_tree_view
-            }
-        }
+        scroll_bars: {}
     }
 }
 
@@ -258,7 +254,7 @@ pub struct FileTreeNode {
 
 #[derive(Live)]
 pub struct FileTree {
-    scroll_view: ScrollView,
+    scroll_bars: ScrollBars,
     file_node: Option<LivePtr>,
     folder_node: Option<LivePtr>,
     layout: Layout,
@@ -285,7 +281,7 @@ impl LiveHook for FileTree {
                 tree_node.apply(cx, from, index, nodes);
             }
         }
-        self.scroll_view.redraw(cx);
+        self.scroll_bars.redraw(cx);
     }
 }
 
@@ -407,10 +403,9 @@ impl FileTreeNode {
 
 impl FileTree {
     
-    pub fn begin(&mut self, cx: &mut Cx2d) -> ViewRedrawing {
-        self.scroll_view.begin(cx, Walk::default(), self.layout) ?;
+    pub fn begin(&mut self, cx: &mut Cx2d){
+        self.scroll_bars.begin(cx, Walk::default(), self.layout);
         self.count = 0;
-        ViewRedrawing::yes()
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
@@ -424,8 +419,8 @@ impl FileTree {
             walk += self.node_height.max(1.0);
         }
         
-        self.scroll_shadow.draw(cx, &self.scroll_view, vec2(0., 0.));
-        self.scroll_view.end(cx);
+        self.scroll_shadow.draw(cx, vec2(0., 0.));
+        self.scroll_bars.end(cx);
         
         let selected_node_id = self.selected_node_id;
         self.tree_nodes.retain_visible_and( | node_id, _ | Some(*node_id) == selected_node_id);
@@ -546,7 +541,7 @@ impl FileTree {
     }
     
     pub fn redraw(&mut self, cx: &mut Cx) {
-        self.scroll_view.redraw(cx);
+        self.scroll_bars.redraw(cx);
     }
     
     pub fn handle_event_iter(&mut self, cx: &mut Cx, event: &Event) -> Vec<FileTreeAction> {
@@ -561,9 +556,7 @@ impl FileTree {
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, FileTreeAction),
     ) {
-        if self.scroll_view.handle_event(cx, event) {
-            self.scroll_view.redraw(cx);
-        }
+        self.scroll_bars.handle_event(cx, event, &mut |_,_|{});
         
         match event {
             Event::DragEnd => self.dragging_node_id = None,
@@ -584,7 +577,7 @@ impl FileTree {
                     self.open_nodes.remove(&node_id);
                 }
                 FileTreeNodeAction::WasClicked => {
-                    cx.set_key_focus(self.scroll_view.area());
+                    cx.set_key_focus(self.scroll_bars.area());
                     if let Some(last_selected) = self.selected_node_id {
                         if last_selected != node_id {
                             self.tree_nodes.get_mut(&last_selected).unwrap().0.set_is_selected(cx, false, Animate::Yes);
@@ -602,7 +595,7 @@ impl FileTree {
             }
         }
         
-        match event.hits(cx, self.scroll_view.area()) {
+        match event.hits(cx, self.scroll_bars.area()) {
             Hit::KeyFocus(_) => {
                 if let Some(node_id) = self.selected_node_id {
                     self.tree_nodes.get_mut(&node_id).unwrap().0.set_is_focussed(cx, true, Animate::Yes);

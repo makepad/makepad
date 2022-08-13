@@ -2,7 +2,6 @@ use {
     crate::{
         makepad_platform::*,
         cx_2d::Cx2d,
-        turtle::{Layout, Size, Walk},
     }
 };
 
@@ -10,9 +9,6 @@ use {
 #[derive(Debug)]
 pub struct View { // draw info per UI element
     pub (crate) draw_list: DrawList,
-    pub (crate) is_overlay: bool,
-    pub (crate) always_redraw: bool,
-    pub (crate) redraw_id: u64,
 }
 
 impl LiveHook for View {}
@@ -20,9 +16,6 @@ impl LiveNew for View {
     fn new(cx: &mut Cx) -> Self {
         let draw_list = cx.draw_lists.alloc();
         Self {
-            always_redraw: false,
-            is_overlay: false,
-            redraw_id: 0,
             draw_list,
         }
     }
@@ -54,11 +47,6 @@ impl LiveApply for View {
             }
             match nodes[index].id {
                 id!(debug_id) => cx.draw_lists[self.draw_list.id()].debug_id = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
-                //id!(unclipped) => cx.draw_lists[self.draw_list.id()].unclipped = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
-                id!(is_overlay) => self.is_overlay = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
-                id!(always_redraw) => self.always_redraw = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
-                //id!(layout) => self.layout = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
-                //id!(walk) => self.walk = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes),
                 _ => {
                     cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
                     index = nodes.skip_node(index);
@@ -73,20 +61,13 @@ impl View {
     
     pub fn draw_list_id(&self) -> DrawListId {self.draw_list.id()}
     
-    //pub fn set_unclipped(&self, cx: &mut Cx, unclipped: bool) {cx.draw_lists[self.draw_list.id()].unclipped = unclipped;}
-    
-    pub fn lock_view_transform(&self, cx: &mut Cx, mat: &Mat4) {
-        let draw_list = &mut cx.draw_lists[self.draw_list.id()];
-        draw_list.uniform_view_transform(mat);
-        return draw_list.locked_view_transform = true;
-    }
     
     pub fn set_view_transform(&self, cx: &mut Cx, mat: &Mat4) {
         
         fn set_view_transform_recur(draw_list_id: DrawListId, cx: &mut Cx, mat: &Mat4) {
-            if cx.draw_lists[draw_list_id].locked_view_transform {
+            /*if cx.draw_lists[draw_list_id].locked_view_transform {
                 return
-            }
+            }*/
             cx.draw_lists[draw_list_id].uniform_view_transform(mat);
             let draw_items_len = cx.draw_lists[draw_list_id].draw_items.len();
             for draw_item_id in 0..draw_items_len {
@@ -99,7 +80,37 @@ impl View {
         set_view_transform_recur(self.draw_list.id(), cx, mat);
     }
     
-    pub fn begin(&mut self, cx: &mut Cx2d, mut walk: Walk, layout: Layout) -> ViewRedrawing {
+    pub fn begin_overlay(&mut self, cx: &mut Cx2d) {
+        let pass_id = cx.pass_id.expect("No pass found in begin_overlay");
+        let redraw_id = cx.cx.redraw_id;
+        
+        cx.draw_lists[self.draw_list.id()].pass_id = Some(pass_id);
+        
+        let codeflow_parent_id = cx.draw_list_stack.last().cloned().unwrap();
+        
+        let overlay_id = cx.overlay_id.unwrap();
+        cx.draw_lists[overlay_id].insert_sub_list(redraw_id, self.draw_list.id());
+        let parent = &mut cx.cx.draw_lists[codeflow_parent_id];
+        parent.nav_items.push(NavItem::Child(self.draw_list.id()));
+        
+        cx.cx.draw_lists[self.draw_list.id()].codeflow_parent_id = Some(codeflow_parent_id);
+        if cx.passes[pass_id].main_draw_list_id.unwrap() == self.draw_list.id() {
+            cx.passes[pass_id].paint_dirty = true;
+        }
+        
+        cx.cx.draw_lists[self.draw_list.id()].clear_draw_items(redraw_id);
+        cx.draw_list_stack.push(self.draw_list.id());
+    }
+    
+    pub fn begin_always(&mut self, cx: &mut Cx2d) {
+        self.begin_maybe(cx, true).expect_redraw();
+    }
+    
+    pub fn begin(&mut self, cx: &mut Cx2d) -> ViewRedrawing {
+        self.begin_maybe(cx, false)
+    }
+    
+    fn begin_maybe(&mut self, cx: &mut Cx2d, always_redraw: bool) -> ViewRedrawing {
         
         // check if we have a pass id parent
         let pass_id = cx.pass_id.expect("No pass found when begin_view");
@@ -109,126 +120,67 @@ impl View {
         
         let codeflow_parent_id = cx.draw_list_stack.last().cloned();
         
-        let view_will_redraw = cx.view_will_redraw(self);
+        let view_will_redraw = cx.view_will_redraw(self) || always_redraw;
         
         if cx.passes[pass_id].main_draw_list_id.is_none() {
             cx.passes[pass_id].main_draw_list_id = Some(self.draw_list.id());
-            walk.width = Size::Fixed(cx.passes[pass_id].pass_size.x);
-            walk.height = Size::Fixed(cx.passes[pass_id].pass_size.y);
         }
         
         // find the parent draw list id
         if let Some(parent_id) = codeflow_parent_id {
-            if self.is_overlay {
-                let overlay_id = cx.overlay_id.unwrap();
-                cx.draw_lists[overlay_id].insert_sub_list(redraw_id, self.draw_list.id());
-                let parent = &mut cx.cx.draw_lists[parent_id];
-                parent.nav_items.push(NavItem::Child(self.draw_list.id()));
-            }
-            else {
-                // copy the view transform
-                // TODO this whole idea will go away
-                /*if !cx.draw_lists[self.draw_list.id()].locked_view_transform {
-                    for i in 0..16 {
-                        cx.draw_lists[self.draw_list.id()].draw_list_uniforms.view_transform[i] =
-                        cx.draw_lists[parent_id].draw_list_uniforms.view_transform[i];
-                    }
-                }*/
-                let parent = &mut cx.cx.draw_lists[parent_id];
-                parent.append_sub_list(redraw_id, self.draw_list.id());
-                parent.nav_items.push(NavItem::Child(self.draw_list.id()));
-            }
+            let parent = &mut cx.cx.draw_lists[parent_id];
+            parent.append_sub_list(redraw_id, self.draw_list.id());
+            parent.nav_items.push(NavItem::Child(self.draw_list.id()));
         }
         
         // set nesting draw list id for incremental repaint scanning
         cx.cx.draw_lists[self.draw_list.id()].codeflow_parent_id = codeflow_parent_id;
         
         // check redraw status
-        if !self.is_overlay && !self.always_redraw
-            && cx.cx.draw_lists[self.draw_list.id()].draw_items.len() != 0
-            && !view_will_redraw {
-            
+        if cx.cx.draw_lists[self.draw_list.id()].draw_items.len() != 0 && !view_will_redraw {
+            /*
             let w = Size::Fixed(cx.cx.draw_lists[self.draw_list.id()].rect.size.x);
             let h = Size::Fixed(cx.cx.draw_lists[self.draw_list.id()].rect.size.y);
             let walk = Walk {abs_pos: None, width: w, height: h, margin: walk.margin};
-            let pos = cx.peek_walk_pos(walk);
-            if pos == cx.cx.draw_lists[self.draw_list.id()].rect.pos {
-                cx.walk_turtle(walk);
-                return ViewRedrawing::no();
-            }
+            let pos = cx.peek_walk_pos(walk);*/
+            //if pos == cx.cx.draw_lists[self.draw_list.id()].rect.pos {
+            //    cx.walk_turtle(walk);
+            return ViewRedrawing::no();
+            //}
         }
         
         if cx.passes[pass_id].main_draw_list_id.unwrap() == self.draw_list.id() {
             cx.passes[pass_id].paint_dirty = true;
         }
         
-        let cxview = &mut cx.cx.draw_lists[self.draw_list.id()];
-        
-        // update redraw id
-        let last_redraw_id = cxview.redraw_id;
-        self.redraw_id = redraw_id;
-        cxview.clear_draw_items(redraw_id);
-        
+        cx.cx.draw_lists[self.draw_list.id()].clear_draw_items(redraw_id);
         cx.draw_list_stack.push(self.draw_list.id());
-        
-        let old_area = Area::DrawList(DrawListArea {draw_list_id: self.draw_list.id(), redraw_id: last_redraw_id});
-        let new_area = Area::DrawList(DrawListArea {draw_list_id: self.draw_list.id(), redraw_id});
-        
-        cx.update_area_refs(old_area, new_area);
-        cx.begin_turtle_with_guard(walk, layout, new_area);
-        
-        cx.align_list.push(new_area);
         
         ViewRedrawing::yes()
     }
     
-    
-    pub fn end(&mut self, cx: &mut Cx2d) -> Area {
-        // let view_id = self.view_id.unwrap();
-        let view_area = Area::DrawList(DrawListArea {draw_list_id: self.draw_list.id(), redraw_id: cx.redraw_id});
-        let rect = cx.end_turtle_with_guard(view_area);
-        let cxview = &mut cx.draw_lists[self.draw_list.id()];
-        cxview.rect = rect;
-        cx.draw_list_stack.pop();
-        view_area
-    }
-    
-    pub fn get_rect(&self, cx: &Cx) -> Rect {
-        let cxview = &cx.draw_lists[self.draw_list.id()];
-        return cxview.rect
+    pub fn end(&mut self, cx: &mut Cx2d) {
+        let draw_list_id = cx.draw_list_stack.pop().unwrap();
+        if draw_list_id != self.draw_list.id() {
+            panic!("Mismatch in drawlist id in view.end, check your begin/end pairs");
+        }
+        if cx.cx.draw_lists[draw_list_id].redraw_id != cx.cx.redraw_id {
+            panic!("calling end on a view that didnt get begin called this redraw cycle");
+        }
     }
     
     pub fn get_view_transform(&self, cx: &Cx) -> Mat4 {
         let cxview = &cx.draw_lists[self.draw_list.id()];
         return cxview.get_view_transform()
     }
-    /*
-    pub fn set_view_debug(&self, cx: &mut Cx, debug: DrawListDebug) {
-        let cxview = &mut cx.draw_lists[self.draw_list.id()];
-        cxview.debug = Some(debug);
-    }
-    */
+    
     pub fn redraw(&self, cx: &mut Cx) {
-        cx.redraw_area(self.area());
+        cx.redraw_list(self.draw_list.id());
     }
     
     pub fn redraw_self_and_children(&self, cx: &mut Cx) {
-        cx.redraw_area_and_children(self.area());
+        cx.redraw_list_and_children(self.draw_list.id());
     }
-    
-    pub fn area(&self) -> Area {
-        Area::DrawList(DrawListArea {draw_list_id: self.draw_list.id(), redraw_id: self.redraw_id})
-    }
-    /*
-    pub fn set_scroll_pos(&mut self, cx: &mut Cx, scroll_pos: Vec2) {
-        cx.set_scroll_x(self.draw_list.id(), scroll_pos.x);
-        cx.set_scroll_y(self.draw_list.id(), scroll_pos.y);
-    }
-    
-    pub fn get_scroll_pos(&self, cx: &Cx) -> Vec2 {
-        let draw_list = &cx.draw_lists[self.draw_list.id()];
-        draw_list.unsnapped_scroll
-    }*/
 }
 
 
@@ -242,7 +194,7 @@ impl<'a> Cx2d<'a> {
         return self.get_draw_call(true, draw_vars);
     }
     
-    pub fn get_current_draw_list_id(&self)->Option<DrawListId>{
+    pub fn get_current_draw_list_id(&self) -> Option<DrawListId> {
         self.draw_list_stack.last().cloned()
     }
     
@@ -374,8 +326,8 @@ impl<'a> Cx2d<'a> {
     }
     
     pub fn add_nav_stop(&mut self, area: Area, role: NavRole, margin: Margin) {
-        let current_draw_list_id = *self.draw_list_stack.last().unwrap();
-        let draw_list = &mut self.cx.draw_lists[current_draw_list_id];
+        let draw_list_id = *self.draw_list_stack.last().unwrap();
+        let draw_list = &mut self.cx.draw_lists[draw_list_id];
         draw_list.nav_items.push(NavItem::Stop(NavStop {
             role,
             area,
@@ -383,12 +335,24 @@ impl<'a> Cx2d<'a> {
             margin
         }));
     }
-
-    pub fn set_view_rect(&mut self, draw_list_id: DrawListId, rect: Rect) {
-        let draw_list = &mut self.cx.draw_lists[draw_list_id];
-        draw_list.rect = rect;
-    }
     
+    pub fn add_aligned_rect_area(&mut self, area: &mut Area, rect: Rect, draw_clip: (Vec2, Vec2)) {
+        let draw_list_id = *self.draw_list_stack.last().unwrap();
+        let draw_list = &mut self.cx.draw_lists[draw_list_id];
+        // ok so we have to add
+        let rect_id = draw_list.rect_areas.len();
+        draw_list.rect_areas.push(CxRectArea {
+            rect,
+            draw_clip,
+        });
+        let new_area = Area::Rect(RectArea {
+            draw_list_id,
+            redraw_id: self.redraw_id,
+            rect_id
+        });
+        self.update_area_refs(*area, new_area);
+        *area = new_area;
+    }
 }
 
 #[derive(Debug)]
@@ -411,7 +375,7 @@ pub trait ViewRedrawingApi {
     fn yes() -> ViewRedrawing {Result::Ok(())}
     fn is_redrawing(&self) -> bool;
     fn not_redrawing(&self) -> bool;
-    fn assume_redrawing(&self);
+    fn expect_redraw(&self);
 }
 
 impl ViewRedrawingApi for ViewRedrawing {
@@ -427,7 +391,7 @@ impl ViewRedrawingApi for ViewRedrawing {
             Result::Err(_) => true
         }
     }
-    fn assume_redrawing(&self) {
+    fn expect_redraw(&self) {
         if !self.is_redrawing() {
             panic!("assume_redraw_yes it should redraw")
         }

@@ -149,7 +149,7 @@ pub enum ColorPickerDragMode {
 
 impl ColorPicker {
     
-    pub fn handle_finger(&mut self, cx: &mut Cx, rel: Vec2, dispatch_action: &mut dyn FnMut(&mut Cx, ColorPickerAction)){
+    pub fn handle_finger(&mut self, cx: &mut Cx, rel: Vec2, dispatch_action: &mut dyn FnMut(&mut Cx, ColorPickerAction)) {
         
         fn clamp(x: f32, mi: f32, ma: f32) -> f32 {if x < mi {mi} else if x > ma {ma} else {x}}
         
@@ -201,14 +201,15 @@ impl ColorPicker {
             Hit::FingerHoverIn(_) => {
                 self.animate_state(cx, ids!(hover.on));
             }
-            Hit::FingerHoverOut(_)=>{
+            Hit::FingerHoverOut(_) => {
                 self.animate_state(cx, ids!(hover.off));
             },
             Hit::FingerDown(fe) => {
                 self.animate_state(cx, ids!(hover.pressed));
                 let rsize = (self.size * 0.28) / 2.0f32.sqrt();
-                let vx = fe.rel.x - 0.5 * self.size;
-                let vy = fe.rel.y - 0.5 * self.size;
+                let rel = fe.abs - fe.rect.pos;
+                let vx = rel.x - 0.5 * self.size;
+                let vy = rel.y - 0.5 * self.size;
                 if vx >= -rsize && vx <= rsize && vy >= -rsize && vy <= rsize {
                     self.drag_mode = ColorPickerDragMode::Rect;
                 }
@@ -218,7 +219,7 @@ impl ColorPicker {
                 else {
                     self.drag_mode = ColorPickerDragMode::None;
                 }
-                return self.handle_finger(cx, fe.rel, dispatch_action);
+                return self.handle_finger(cx, rel, dispatch_action);
                 // lets check where we clicked!
             },
             Hit::FingerUp(fe) => {
@@ -257,7 +258,7 @@ impl ColorPicker {
         self.wheel.hue = self.hue;
         self.wheel.sat = self.sat;
         self.wheel.val = self.val;
-        self.wheel.draw_walk(cx, Walk::fixed_size(self.size * height_scale, self.size * height_scale));
+        self.wheel.draw_walk(cx, Walk::fixed_size(vec2(self.size * height_scale, self.size * height_scale)));
     }
 }
 

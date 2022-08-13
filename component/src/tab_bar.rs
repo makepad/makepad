@@ -2,7 +2,7 @@ use {
     
     crate::{
         makepad_draw_2d::*,
-        scroll_view::ScrollView,
+        scroll_bars::ScrollBars,
         tab::{TabAction, Tab},
     },
 };
@@ -24,15 +24,12 @@ live_register!{
             width: Size::Fill
             height: Size::Fixed((DIM_TAB_HEIGHT))
         }
-        scroll_view: {
-            v_show: false
-            h_show: true
-            h_scroll: {
+        scroll_bars: {
+            show_scroll_x: true
+            show_scroll_y: false
+            scroll_bar_x: {
                 bar_size: 8
                 use_vertical_finger_scroll: true
-            }
-            view: {
-                debug_id: tab_bar_view
             }
         }
     }
@@ -41,13 +38,15 @@ live_register!{
 #[derive(Live)]
 pub struct TabBar {
     
-    scroll_view: ScrollView,
+    scroll_bars: ScrollBars,
     drag: DrawColor,
     
     bar_fill: DrawColor,
     walk: Walk,
     tab: Option<LivePtr>,
     
+    #[rust] view_area: Area,
+
     #[rust] tab_order: Vec<TabId>,
     
     #[rust] is_dragged: bool,
@@ -67,20 +66,18 @@ impl LiveHook for TabBar {
                 tab.apply(cx, from, index, nodes);
             }
         }
-        self.scroll_view.redraw(cx);
+        self.view_area.redraw(cx);
     }
 }
 
 impl TabBar {
-    pub fn begin(&mut self, cx: &mut Cx2d, selected_tab: Option<usize>) -> ViewRedrawing {
+    pub fn begin(&mut self, cx: &mut Cx2d, selected_tab: Option<usize>) {
         self.selected_tab = selected_tab;
         //if selected_tab.is_some(){
         //    self.selected_tab_id = None
         // }
-        self.scroll_view.begin(cx, self.walk, Layout::flow_right()) ?;
+        self.scroll_bars.begin(cx, self.walk, Layout::flow_right());
         self.tab_order.clear();
-
-        ViewRedrawing::yes()
     }
     
     pub fn end(&mut self, cx: &mut Cx2d) {
@@ -96,7 +93,7 @@ impl TabBar {
         }
         self.tabs.retain_visible();
         self.bar_fill.draw_walk(cx, Walk::size(Size::Fill, Size::Fill));
-        self.scroll_view.end(cx);
+        self.scroll_bars.end(cx);
     }
     
     pub fn draw_tab(&mut self, cx: &mut Cx2d, tab_id: TabId, name: &str) {
@@ -146,7 +143,7 @@ impl TabBar {
             let tab = self.get_or_create_tab(cx, tab_id);
             tab.set_is_selected(cx, true, animate);
         }
-        self.scroll_view.redraw(cx);
+        self.view_area.redraw(cx);
     }
     
     
@@ -171,7 +168,7 @@ impl TabBar {
         
     }
     pub fn redraw(&mut self, cx: &mut Cx) {
-        self.scroll_view.redraw(cx)
+        self.view_area.redraw(cx)
     }
     
     pub fn handle_event(
@@ -180,9 +177,11 @@ impl TabBar {
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, TabBarAction),
     ) {
-        if self.scroll_view.handle_event(cx, event) {
-            self.scroll_view.redraw(cx);
-        }
+        let view_area = self.view_area;
+        self.scroll_bars.handle_event(cx, event, &mut |cx,_|{
+            view_area.redraw(cx);
+        });
+        
         if let Some(tab_id) = self.next_selected_tab_id.take() {
             dispatch_action(cx, TabBarAction::TabWasPressed(tab_id));
         }
@@ -199,6 +198,7 @@ impl TabBar {
                 }
             });
         }
+        /*
         match event.drag_hits(cx, self.scroll_view.area()) {
             DragHit::Drag(f) => match f.state {
                 DragState::In => {
@@ -223,7 +223,7 @@ impl TabBar {
                 dispatch_action(cx, TabBarAction::ReceivedDraggedItem(f.dragged_item.clone()))
             }
             _ => {}
-        }
+        }*/
     }
 }
 

@@ -23,16 +23,16 @@ live_register!{
             open = {
                 default: on
                 off = {
-                    from: {all: Play::Forward{duration:0.2}}
-                    ease: Ease::ExpDecay{d1:0.96,d2:0.97}
+                    from: {all: Play::Forward {duration: 0.2}}
+                    ease: Ease::ExpDecay {d1: 0.96, d2: 0.97}
                     redraw: true
                     apply: {
                         opened: [{time: 0.0, value: 1.0}, {time: 1.0, value: 0.0}]
                     }
                 }
                 on = {
-                    from: {all: Play::Forward{duration:0.2}}
-                    ease: Ease::ExpDecay{d1:0.98,d2:0.95}
+                    from: {all: Play::Forward {duration: 0.2}}
+                    ease: Ease::ExpDecay {d1: 0.98, d2: 0.95}
                     redraw: true
                     apply: {
                         opened: [{time: 0.0, value: 0.0}, {time: 1.0, value: 1.0}]
@@ -47,13 +47,12 @@ live_register!{
 #[live_register(frame_component!(FoldHeader))]
 pub struct FoldHeader {
     #[rust] draw_state: DrawStateWrap<DrawState>,
+    #[rust] rect_size: f32,
+    #[rust] area: Area,
     header: FrameRef,
     body: FrameRef,
-    
     state: State,
     opened: f32,
-    
-    view: View,
     layout: Layout,
     walk: Walk,
     body_walk: Walk,
@@ -74,9 +73,7 @@ impl FrameComponent for FoldHeader {
     ) {
         if self.state_handle_event(cx, event).must_redraw() {
             if self.state.is_track_animating(cx, id!(open)) {
-                let rect = self.view.get_rect(cx);
-                //self.view.set_scroll_pos(cx, vec2(0.0, rect.size.y * (1.0 - self.opened)));
-                self.view.redraw(cx);
+                self.area.redraw(cx);
             }
         };
         
@@ -99,7 +96,6 @@ impl FrameComponent for FoldHeader {
     }
     
     fn redraw(&mut self, cx: &mut Cx) {
-        self.view.redraw(cx);
         self.header.redraw(cx);
         self.body.redraw(cx);
     }
@@ -107,7 +103,7 @@ impl FrameComponent for FoldHeader {
     fn get_walk(&self) -> Walk {self.walk}
     
     fn frame_query(&mut self, query: &FrameQuery, callback: &mut Option<FrameQueryCb>) -> FrameResult {
-        self.header.frame_query(query, callback)?;
+        self.header.frame_query(query, callback) ?;
         self.body.frame_query(query, callback)
     }
     
@@ -117,30 +113,22 @@ impl FrameComponent for FoldHeader {
         }
         if let DrawState::DrawHeader = self.draw_state.get() {
             self.header.draw_walk_component(cx) ?;
-            if self.view.begin(cx, self.body_walk, Layout::flow_down()).not_redrawing() {
-                self.reverse_walk_opened(cx);
-                cx.end_turtle();
-                self.draw_state.end();
-                return FrameDraw::done()
-            };
+            cx.begin_turtle(
+                self.body_walk,
+                Layout::flow_down()
+                .with_scroll(vec2(0.0, -self.rect_size * (1.0 - self.opened)))
+                .with_clip(true,true)
+            );
             self.draw_state.set(DrawState::DrawBody);
         }
         if let DrawState::DrawBody = self.draw_state.get() {
             self.body.draw_walk_component(cx) ?;
-            self.view.end(cx);
-            // reverse walk
-            self.reverse_walk_opened(cx);
+            self.rect_size = cx.turtle().used().y;
             cx.end_turtle();
+            cx.end_turtle_with_area(&mut self.area);
             self.draw_state.end();
         }
         FrameDraw::done()
-    }
-}
-
-impl FoldHeader {
-    fn reverse_walk_opened(&mut self, cx: &mut Cx2d) {
-        let rect = self.view.get_rect(cx);
-        cx.walk_turtle(Walk::size(Size::Fill, Size::Negative(rect.size.y * (1.0 - self.opened))));
     }
 }
 

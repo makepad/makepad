@@ -485,8 +485,7 @@ impl<'a> Cx2d<'a> {
             
             draw_fonts_atlas.atlas_pass.clear_color_textures(self.cx);
             draw_fonts_atlas.atlas_pass.add_color_texture(self.cx, &draw_fonts_atlas.atlas_texture, clear);
-            draw_fonts_atlas.atlas_view.always_redraw = true;
-            draw_fonts_atlas.atlas_view.begin(self, Walk::default(), Layout::flow_right()).assume_redrawing();
+            draw_fonts_atlas.atlas_view.begin_always(self);
             let mut atlas_todo = Vec::new();
             std::mem::swap(&mut fonts_atlas.alloc.todo, &mut atlas_todo);
             
