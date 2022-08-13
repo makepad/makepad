@@ -3,7 +3,8 @@ use {
         makepad_image_formats::jpeg,
         makepad_image_formats::png,
         makepad_draw_2d::*,
-        frame::*
+        frame::*,
+        scroll_bars::ScrollBars,
     },
     std::any::TypeId
 };
@@ -29,6 +30,7 @@ impl Overflow{
     }
 }
 */
+
 #[derive(Live)]
 #[live_register(frame_component!(Frame))]
 pub struct Frame { // draw info per UI element
@@ -47,7 +49,10 @@ pub struct Frame { // draw info per UI element
     user_draw: bool,
     
     cursor: Option<MouseCursor>,
+    scroll_bars: Option<LivePtr>,
 
+    #[rust] scroll_bars_obj: Option<ScrollBars>,
+    
     #[live(false)] design_mode: bool,
     #[rust] area: Area,
     #[rust] pub view: Option<View>,
@@ -65,7 +70,11 @@ impl LiveHook for Frame {
         if self.has_view && self.view.is_none() {
             self.view = Some(View::new(cx));
         }
-        
+        if self.scroll_bars.is_some(){
+            if self.scroll_bars_obj.is_none(){
+                self.scroll_bars_obj = Some(ScrollBars::new_from_ptr(cx, self.scroll_bars));
+            }
+        }
         // lets load the image resource
         let image_path = self.image.as_ref();
         if image_path.len()>0 {
@@ -157,6 +166,10 @@ impl FrameComponent for Frame {
         event: &Event,
         dispatch_action: &mut dyn FnMut(&mut Cx, FrameActionItem)
     ) {
+        if let Some(scroll_bars) = &mut self.scroll_bars_obj{
+            scroll_bars.handle_event(cx, event, &mut |_,_|{});
+        }
+
         for id in &self.draw_order {
             if let Some(child) = self.children.get_mut(id) {
                 let uid = child.as_uid();
@@ -174,6 +187,11 @@ impl FrameComponent for Frame {
                 cx.set_cursor(*cursor);
             }
             _ => ()
+        }
+        
+        
+        if let Some(scroll_bars) = &mut self.scroll_bars_obj{
+            scroll_bars.handle_scroll(cx, event, &mut |_,_|{});
         }
     }
     
@@ -423,14 +441,20 @@ impl Frame {
             }
             
             // ok so.. we have to keep calling draw till we return LiveId(0)
+            let scroll = if let Some(scroll_bars) = &mut self.scroll_bars_obj{
+                scroll_bars.get_scroll_pos()
+            }
+            else{
+                dvec2(0.0,0.0)
+            };
             if self.bg.shape != Shape::None {
                 if self.bg.fill == Fill::Image {
                     self.bg.draw_vars.set_texture(0, &self.image_texture);
                 }
-                self.bg.begin(cx, walk, self.layout);
+                self.bg.begin(cx, walk, self.layout.with_scroll(scroll));
             }
             else {
-                cx.begin_turtle(walk, self.layout);
+                cx.begin_turtle(walk, self.layout.with_scroll(scroll));
             }
             
             if self.user_draw {
@@ -467,14 +491,22 @@ impl Frame {
                 self.draw_state.set(DrawState::DeferWalk(step + 1));
             }
             else {
+                if let Some(scroll_bars) = &mut self.scroll_bars_obj{
+                    scroll_bars.draw_scroll_bars(cx);
+                };
+
                 if self.bg.shape != Shape::None {
                     self.bg.end(cx);
                     self.area = self.bg.area();
                 }
                 else {
                     cx.end_turtle_with_area(&mut self.area);
-                }
+                };
                 
+                if let Some(scroll_bars) = &mut self.scroll_bars_obj{
+                    scroll_bars.set_area(self.area);
+                };
+
                 if self.has_view {
                     self.view.as_mut().unwrap().end(cx);
                 }

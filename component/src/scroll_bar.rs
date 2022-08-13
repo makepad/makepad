@@ -296,16 +296,15 @@ impl ScrollBar {
         }
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, rect:Rect, dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarAction)) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, scroll_area:Option<Area>, dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarAction)) {
         // lets check if our view-area gets a mouse-scroll.
-        match event {
-            Event::FingerScroll(fe) => { //if !fe.handled {
-                if !match self.axis {
-                    Axis::Horizontal => fe.handled_x.get(),
-                    Axis::Vertical => fe.handled_y.get()
-                } {
-                    if rect.contains(fe.abs) { // handle mousewheel
-                        // we should scroll in either x or y
+        if let Some(scroll_area) = scroll_area{
+            match event.hits(cx, scroll_area) {
+                Hit::FingerScroll(fe) => { //if !fe.handled {
+                    if !match self.axis {
+                        Axis::Horizontal => fe.handled_x.get(),
+                        Axis::Vertical => fe.handled_y.get()
+                    } {
                         let scroll = match self.axis {
                             Axis::Horizontal => if self.use_vertical_finger_scroll {fe.scroll.y}else {fe.scroll.x},
                             Axis::Vertical => fe.scroll.y
@@ -332,12 +331,11 @@ impl ScrollBar {
                              return dispatch_action(cx, self.make_scroll_action());
                         }
                     }
-                }
-            },
-            
-            _ => ()
-        };
-        if self.visible {
+                },
+                _ => ()
+            };
+        }
+        else if self.visible {
             self.state_handle_event(cx, event);
             if self.next_frame.is_event(event).is_some(){
                 if self.move_towards_scroll_target(cx) {

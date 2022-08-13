@@ -132,7 +132,7 @@ impl<'a> Cx2d<'a> {
         }
     }
     
-    pub fn current_pass_size(&mut self) -> DVec2 {
+    pub fn current_pass_size(&self) -> DVec2 {
         let pass_id = self.pass_id.expect("No pass found when begin_view");
         self.passes[pass_id].pass_size
     }

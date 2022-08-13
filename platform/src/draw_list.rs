@@ -171,7 +171,6 @@ pub struct CxDrawCall {
     pub draw_shader: DrawShader, // if shader_id changed, delete gl vao
     pub options: CxDrawShaderOptions,
     pub total_instance_slots: usize,
-    pub was_painted: bool,
     pub draw_uniforms: DrawUniforms, // draw uniforms
     pub geometry_id: Option<GeometryId>,
     pub user_uniforms: [f32; DRAW_CALL_USER_UNIFORMS], // user uniforms
@@ -190,7 +189,6 @@ impl CxDrawCall {
             draw_uniforms: DrawUniforms::default(),
             user_uniforms: draw_vars.user_uniforms,
             texture_slots: draw_vars.texture_slots,
-            was_painted: false,
             instance_dirty: true,
             uniforms_dirty: true,
         }

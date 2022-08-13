@@ -24,10 +24,10 @@ live_register!{
             let sz = 3.;
             let dx = 2.0;
             let c = vec2(8.0, 0.5 * self.rect_size.y);
-            sdf.move_to(c.x - sz+dx*0.5, c.y - sz+dx);
+            sdf.move_to(c.x - sz + dx * 0.5, c.y - sz + dx);
             sdf.line_to(c.x, c.y + sz);
             sdf.line_to(c.x + sz, c.y - sz);
-            sdf.stroke(mix(#fff0,#f, self.selected), 1.0);
+            sdf.stroke(mix(#fff0, #f, self.selected), 1.0);
             
             return sdf.result;
         }
@@ -53,7 +53,7 @@ live_register!{
             align: {y: 0.5},
             padding: {left: 15, top: 5, bottom: 5},
         }
-        walk:{
+        walk: {
             width: Fill,
             height: Fit
         }
@@ -96,8 +96,15 @@ live_register!{
     
     PopupMenu: {{PopupMenu}} {
         menu_item: PopupMenuItem {}
-        layout: {flow: Flow::Down, padding:5}
-        bg:{shape: ShadowBox, radius:4, color:#0}
+        layout: {
+            flow: Flow::Down,
+            padding: 5
+        }
+        bg: {
+            shape: ShadowBox,
+            radius: 4,
+            color: #0
+        }
     }
 }
 
@@ -124,7 +131,6 @@ pub struct PopupMenuItem {
     
     layout: Layout,
     state: State,
-    
     walk: Walk,
     
     indent_width: f32,
@@ -218,15 +224,15 @@ impl PopupMenuItem {
                 self.animate_state(cx, ids!(select.on));
             }
             Hit::FingerSweepOut(se) => {
-                if se.is_finger_up(){
-                    if se.was_tap(){// ok this only goes for the first time
+                if se.is_finger_up() {
+                    if se.was_tap() { // ok this only goes for the first time
                         dispatch_action(cx, PopupMenuItemAction::MightBeSelected);
                     }
-                    else{
+                    else {
                         dispatch_action(cx, PopupMenuItemAction::WasSelected);
                     }
                 }
-                else{
+                else {
                     self.animate_state(cx, ids!(hover.off));
                     self.animate_state(cx, ids!(select.off));
                 }
@@ -238,22 +244,29 @@ impl PopupMenuItem {
 
 impl PopupMenu {
     
-    pub fn menu_contains_pos(&self, cx:&mut Cx, pos:DVec2)->bool{
+    pub fn menu_contains_pos(&self, cx: &mut Cx, pos: DVec2) -> bool {
         self.bg.area().get_clipped_rect(cx).contains(pos)
     }
     
-    pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk){
+    pub fn begin(&mut self, cx: &mut Cx2d, width: f64) {
         self.view.begin_overlay(cx);
-        self.bg.begin(cx, walk, self.layout);
+        
+        cx.begin_overlay_turtle(Layout::flow_down());
+        
+        // ok so. this thing needs a complete position reset
+        self.bg.begin(cx, Walk::size(Size::Fixed(width), Size::Fit), self.layout);
         self.count = 0;
     }
     
-    pub fn end(&mut self, cx: &mut Cx2d, shift:DVec2) {
+    pub fn end(&mut self, cx: &mut Cx2d, shift: DVec2) {
         cx.turtle_mut().set_shift(shift);
         self.bg.end(cx);
+        // end the overlay turtle
+        cx.end_overlay_turtle();
+        //cx.debug.rect_r(self.bg.area().get_rect(cx));
         self.view.end(cx);
         self.menu_items.retain_visible();
-        if let Some(init_select_item) = self.init_select_item.take(){
+        if let Some(init_select_item) = self.init_select_item.take() {
             self.select_item_state(cx, init_select_item);
         }
     }
@@ -278,18 +291,18 @@ impl PopupMenu {
         menu_item.draw_item(cx, label);
     }
     
-    pub fn init_select_item(&mut self, which_id:PopupMenuItemId){
+    pub fn init_select_item(&mut self, which_id: PopupMenuItemId) {
         self.init_select_item = Some(which_id);
         self.first_tap = true;
     }
     
-    fn select_item_state(&mut self, cx:&mut Cx, which_id:PopupMenuItemId){
+    fn select_item_state(&mut self, cx: &mut Cx, which_id: PopupMenuItemId) {
         for (id, item) in &mut *self.menu_items {
-            if *id == which_id{
+            if *id == which_id {
                 item.cut_state(cx, ids!(select.on));
                 item.cut_state(cx, ids!(hover.on));
             }
-            else{
+            else {
                 item.cut_state(cx, ids!(select.off));
                 item.cut_state(cx, ids!(hover.off));
             }
@@ -310,20 +323,19 @@ impl PopupMenu {
         
         for (node_id, action) in actions {
             match action {
-                PopupMenuItemAction::MightBeSelected=>{
+                PopupMenuItemAction::MightBeSelected => {
                     // ok so. the first time we encounter this after open its sweep
                     // next time its selection
                     self.select_item_state(cx, node_id);
-                    if self.first_tap{
-                        log!("FIRST TAP");
+                    if self.first_tap {
                         self.first_tap = false;
                         dispatch_action(cx, PopupMenuAction::WasSweeped(node_id));
                     }
-                    else{
+                    else {
                         dispatch_action(cx, PopupMenuAction::WasSelected(node_id));
                     }
                 }
-                PopupMenuItemAction::WasSweeped=>{
+                PopupMenuItemAction::WasSweeped => {
                     self.select_item_state(cx, node_id);
                     dispatch_action(cx, PopupMenuAction::WasSweeped(node_id));
                 }

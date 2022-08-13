@@ -347,6 +347,7 @@ impl ToWasmScroll {
             device: if self.is_touch {DigitDevice::Touch(0)} else {DigitDevice::Mouse(0)},
             handled_x: Cell::new(false),
             handled_y: Cell::new(false),
+            sweep_lock: Cell::new(Area::Empty),
             modifiers: unpack_key_modifier(self.modifiers),
             time: self.time,
         }
