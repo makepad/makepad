@@ -17,7 +17,7 @@ impl QuadraticSegment {
     }
 
     /// Returns true if `self` is approximately linear with tolerance `epsilon`.
-    pub fn is_approximately_linear(self, epsilon: f32) -> bool {
+    pub fn is_approximately_linear(self, epsilon: f64) -> bool {
         let v1 = self.p1 - self.p0;
         (if let Some(vx) = (self.p2 - self.p0).normalize() {
             // If the baseline is a line segment, the segment is approximately linear if the
@@ -31,7 +31,7 @@ impl QuadraticSegment {
     }
 
     /// Splits `self` into two quadratic Bezier curve segments, at parameter `t`.
-    pub fn split(self, t: f32) -> (QuadraticSegment, QuadraticSegment) {
+    pub fn split(self, t: f64) -> (QuadraticSegment, QuadraticSegment) {
         let p01 = self.p0.lerp(self.p1, t);
         let p12 = self.p1.lerp(self.p2, t);
         let p012 = p01.lerp(p12, t);
@@ -43,7 +43,7 @@ impl QuadraticSegment {
 
     /// Returns an iterator over the points of a polyline that approximates `self` with tolerance
     /// `epsilon`, *excluding* the first point.
-    pub fn linearize(self, epsilon: f32) -> Linearize {
+    pub fn linearize(self, epsilon: f64) -> Linearize {
         Linearize {
             segment: self,
             epsilon,
@@ -76,7 +76,7 @@ impl Transform for QuadraticSegment {
 #[derive(Clone, Copy)]
 pub struct Linearize {
     segment: QuadraticSegment,
-    epsilon: f32,
+    epsilon: f64,
 }
 
 impl InternalIterator for Linearize {

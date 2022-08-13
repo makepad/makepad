@@ -24,30 +24,30 @@ pub const V00F:Vec4 = Vec4{x:0.0,y:0.0,z:1.0,w:1.0};
 
 #[derive(Clone, Copy, Default, Debug, PartialEq)]
 pub struct Rect {
-    pub pos: Vec2,
-    pub size: Vec2,
+    pub pos: DVec2,
+    pub size: DVec2,
 }
 
 impl Rect {
     
-    pub fn translate(self, pos: Vec2) -> Rect {
+    pub fn translate(self, pos: DVec2) -> Rect {
         Rect {pos: self.pos + pos, size: self.size}
     }
     
-    pub fn contains(&self, pos: Vec2) -> bool {
+    pub fn contains(&self, pos: DVec2) -> bool {
         return pos.x >= self.pos.x && pos.x <= self.pos.x + self.size.x &&
         pos.y >= self.pos.y && pos.y <= self.pos.y + self.size.y;
     }
 
-    pub fn center(&self) -> Vec2 {
-        Vec2{
+    pub fn center(&self) -> DVec2 {
+        DVec2{
             x:self.pos.x + self.size.x*0.5,
             y:self.pos.y + self.size.y*0.5,
         }
     }
 
     
-    pub fn scale_and_shift(&self, center: Vec2, scale:f32, shift: Vec2) -> Rect {
+    pub fn scale_and_shift(&self, center: DVec2, scale:f64, shift: DVec2) -> Rect {
         Rect{
             pos: (self.pos - center)*scale + center + shift,
             size: self.size * scale
@@ -62,6 +62,11 @@ impl Rect {
             r.pos.y + r.size.y < self.pos.y
         )
     }
+    
+    pub fn add_margin(self, size: DVec2) -> Rect {
+        Rect {pos: self.pos - size, size: self.size + 2.0 * size}
+    }
+
 /*
     pub fn scroll_and_clip(&self, scroll:Vec2, clip:(Vec2,Vec2)) -> Rect {
         let mut x1 = self.pos.x - scroll.x;
@@ -75,7 +80,7 @@ impl Rect {
         return Rect {pos: vec2(x1, y1), size: vec2(x2 - x1, y2 - y1)};
     }*/
     
-    pub fn clip(&self, clip:(Vec2,Vec2)) -> Rect {
+    pub fn clip(&self, clip:(DVec2,DVec2)) -> Rect {
         let mut x1 = self.pos.x;
         let mut y1 = self.pos.y;
         let mut x2 = x1 + self.size.x;
@@ -84,7 +89,7 @@ impl Rect {
         y1 = y1.max(clip.0.y).min(clip.1.y);
         x2 = x2.max(clip.0.x).min(clip.1.x);
         y2 = y2.max(clip.0.y).min(clip.1.y);
-        return Rect {pos: vec2(x1, y1), size: vec2(x2 - x1, y2 - y1)};
+        return Rect {pos: dvec2(x1, y1), size: dvec2(x2 - x1, y2 - y1)};
     }
     /*
     pub fn contains_with_margin(&self, pos: Vec2, margin: &Option<Margin>) -> bool {
@@ -100,7 +105,7 @@ impl Rect {
         }
     }
     */
-    pub fn from_lerp(a: Rect, b: Rect, f: f32) -> Rect {
+    pub fn from_lerp(a: Rect, b: Rect, f: f64) -> Rect {
         Rect {
             pos: (b.pos - a.pos) * f + a.pos,
             size: (b.size - a.size) * f + a.size
@@ -171,8 +176,8 @@ impl Vec2 {
     }
     
     
-    pub fn into_vec2f64(self)->Vec2F64{
-        Vec2F64{x:self.x as f64, y:self.y as f64}
+    pub fn into_dvec2(self)->DVec2{
+        DVec2{x:self.x as f64, y:self.y as f64}
     }
     
     pub fn all(x: f32) -> Vec2 {
@@ -435,9 +440,9 @@ impl Vec4 {
     }
 }
 
-impl From<(Vec2,Vec2)> for Vec4{
-    fn from(other:(Vec2,Vec2))->Vec4{
-        vec4(other.0.x, other.0.y, other.1.x, other.1.y)
+impl From<(DVec2,DVec2)> for Vec4{
+    fn from(other:(DVec2,DVec2))->Vec4{
+        vec4(other.0.x as f32, other.0.y as f32, other.1.x as f32, other.1.y as f32)
     }
 }
 

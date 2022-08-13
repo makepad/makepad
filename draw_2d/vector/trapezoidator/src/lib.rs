@@ -285,12 +285,12 @@ impl Trapezoidator {
             let lower_segment = trapezoid_segment_pair[0].segment;
             let upper_segment = trapezoid_segment_pair[1].segment;
             if !f(Trapezoid {
-                xs: [lower_segment.p0.x, lower_segment.p1.x],
+                xs: [lower_segment.p0.x as f32, lower_segment.p1.x as f32],
                 ys: [
-                    lower_segment.p0.y,
-                    lower_segment.p1.y,
-                    upper_segment.p0.y,
-                    upper_segment.p1.y,
+                    lower_segment.p0.y as f32,
+                    lower_segment.p1.y as f32,
+                    upper_segment.p0.y as f32,
+                    upper_segment.p1.y as f32,
                 ],
             }) {
                 return false;

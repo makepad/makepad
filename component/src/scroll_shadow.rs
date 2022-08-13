@@ -13,16 +13,18 @@ live_register!{
         varying is_viz: float;
         
         fn pixel(self) -> vec4 { // TODO make the corner overlap properly with a distance field eq.
-            let is_viz = clamp(self.scroll * 0.1, 0., 1.);            
+            let is_viz = clamp(self.scroll * 0.1, 0., 1.);
+            let pos = self.pos;
             let base = COLOR_BG_EDITOR.xyz;
             let alpha = 0.0;
             if self.shadow_is_top > 0.5 {
-                alpha = pow(self.geom_pos.y, 0.5);
+                alpha = pow(pos.y, 0.5);
             }
             else {
-                alpha = pow(self.geom_pos.x, 0.5);
+                alpha = pow(pos.x, 0.5);
             }
-            return Pal::premul(mix(vec4(base, is_viz), vec4(base, 0.), alpha));
+            //turn vec4(base,is_viz);
+            return Pal::premul(mix(vec4(#000.xyz, is_viz), vec4(base, 0.), alpha));
         }
     }
 }
@@ -33,28 +35,27 @@ pub struct ScrollShadow {
     shadow_size: f32,
     draw_super: DrawQuad,
     shadow_is_top: f32,
-    scroll:f32,
+    scroll: f32,
 }
 
 impl ScrollShadow {
-    pub fn draw(&mut self, cx: &mut Cx2d, offset: Vec2) {
-        let shadow_size = self.shadow_size;
+    pub fn draw(&mut self, cx: &mut Cx2d, offset: DVec2) {
+        let shadow_size = self.shadow_size as f64;
         let rect = cx.turtle().rect();
         let scroll = cx.turtle().scroll();
         
         self.shadow_is_top = 0.0;
-        self.scroll = scroll.x;
+        self.scroll = scroll.x as f32;
         self.draw_abs(cx, Rect {
-            pos: rect.pos + vec2(offset.x, 0.0) - scroll,
-            size: vec2(shadow_size, rect.size.y)
+            pos: rect.pos + dvec2(offset.x, 0.0) + scroll,
+            size: dvec2(shadow_size, rect.size.y)
         });
         
-        
         self.shadow_is_top = 1.0;
-        self.scroll = scroll.y;
+        self.scroll = scroll.y  as f32;
         self.draw_abs(cx, Rect {
-            pos: rect.pos + vec2(0., offset.y) - scroll,
-            size: vec2(rect.size.x, shadow_size)
+            pos: rect.pos + dvec2(0., offset.y) + scroll,
+            size: dvec2(rect.size.x, shadow_size)
         });
     }
 }

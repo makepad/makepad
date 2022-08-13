@@ -7,6 +7,6 @@ edition = "2018"
 #See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
 [dependencies]
-makepad-math = { path = "../math", version = "0.2" }
+makepad-math = { path = "../math", version = "0.1" }
 makepad-micro-serde = { path = "../micro_serde", version = "0.1" }
 makepad-live-id = { path = "../live_id", version = "0.1"}

@@ -4,7 +4,7 @@ use {
     crate::{
         makepad_live_id::*,
         makepad_wasm_bridge::*,
-        makepad_math::{Vec2, Vec3, Quat, Transform},
+        makepad_math::{DVec2, Vec3, Quat, Transform},
         cx::{OsType},
         window::CxWindowPool,
         area::Area,
@@ -29,21 +29,6 @@ use {
         },
     }
 };
-
-
-
-#[derive(ToWasm)]
-pub struct WVec2 {
-    pub x: f32,
-    pub y: f32,
-}
-
-impl Into<Vec2> for WVec2 {
-    fn into(self) -> Vec2 {
-        Vec2 {x: self.x, y: self.y}
-    }
-}
-
 
 #[derive(ToWasm)]
 pub struct WGpuInfo {
@@ -95,9 +80,9 @@ pub struct WindowInfo {
     pub can_fullscreen: bool,
     pub xr_is_presenting: bool,
     pub xr_can_present: bool,
-    pub dpi_factor: f32,
-    pub inner_width: f32,
-    pub inner_height: f32
+    pub dpi_factor: f64,
+    pub inner_width: f64,
+    pub inner_height: f64
 }
 
 impl Into<WindowGeom> for WindowInfo {
@@ -105,10 +90,10 @@ impl Into<WindowGeom> for WindowInfo {
         WindowGeom {
             is_fullscreen: self.is_fullscreen,
             is_topmost: false,
-            inner_size: Vec2 {x: self.inner_width, y: self.inner_height},
+            inner_size: DVec2 {x: self.inner_width, y: self.inner_height},
             dpi_factor: self.dpi_factor,
-            outer_size: Vec2 {x: 0., y: 0.},
-            position: Vec2 {x: 0., y: 0.},
+            outer_size: DVec2 {x: 0., y: 0.},
+            position: DVec2 {x: 0., y: 0.},
             xr_is_presenting: self.xr_is_presenting,
             xr_can_present: self.xr_can_present,
             can_fullscreen: self.can_fullscreen
@@ -140,8 +125,8 @@ pub struct ToWasmAnimationFrame {
 
 #[derive(ToWasm, Debug)]
 pub struct WTouch {
-    pub x: f32,
-    pub y: f32,
+    pub x: f64,
+    pub y: f64,
     pub uid: u32,
     pub modifiers: u32,
     pub time: f64,
@@ -165,7 +150,7 @@ impl ToWasmTouchStart {
     pub fn into_finger_down_event(self, fingers: &CxFingers, digit_id: DigitId) -> FingerDownEvent {
         FingerDownEvent {
             window_id: CxWindowPool::id_zero(),
-            abs: Vec2 {x: self.touch.x, y: self.touch.y},
+            abs: DVec2 {x: self.touch.x, y: self.touch.y},
             handled: Cell::new(false),
             digit: DigitInfo {
                 id: digit_id,
@@ -190,7 +175,7 @@ impl ToWasmTouchMove {
     pub fn into_finger_move_event(self, fingers: &CxFingers, digit_id: DigitId) -> FingerMoveEvent {
         FingerMoveEvent {
             window_id: CxWindowPool::id_zero(),
-            abs: Vec2 {x: self.touch.x, y: self.touch.y},
+            abs: DVec2 {x: self.touch.x, y: self.touch.y},
             tap_count: fingers.get_tap_count(digit_id),
             handled: Cell::new(false),
             sweep_lock: Cell::new(Area::Empty),
@@ -217,7 +202,7 @@ impl ToWasmTouchEnd {
     pub fn into_finger_up_event(self, fingers: &CxFingers, digit_id: DigitId) -> FingerUpEvent {
         FingerUpEvent {
             window_id: CxWindowPool::id_zero(),
-            abs: Vec2 {x: self.touch.x, y: self.touch.y},
+            abs: DVec2 {x: self.touch.x, y: self.touch.y},
             tap_count: fingers.get_tap_count(digit_id),
             digit: DigitInfo {
                 id: digit_id,
@@ -239,8 +224,8 @@ impl ToWasmTouchEnd {
 
 #[derive(ToWasm)]
 pub struct WMouse {
-    pub x: f32,
-    pub y: f32,
+    pub x: f64,
+    pub y: f64,
     pub modifiers: u32,
     pub button: u32,
     pub time: f64,
@@ -254,7 +239,7 @@ impl ToWasmMouseDown {
     pub fn into_finger_down_event(self, fingers: &CxFingers, digit_id: DigitId) -> FingerDownEvent {
         FingerDownEvent {
             window_id: CxWindowPool::id_zero(),
-            abs: Vec2 {x: self.mouse.x, y: self.mouse.y},
+            abs: DVec2 {x: self.mouse.x, y: self.mouse.y},
             handled: Cell::new(false),
             sweep_lock: Cell::new(Area::Empty),
             digit: DigitInfo {
@@ -280,7 +265,7 @@ impl ToWasmMouseMove {
     pub fn into_finger_move_event(self, fingers: &CxFingers, digit_id: DigitId, button: usize) -> FingerMoveEvent {
         FingerMoveEvent {
             window_id: CxWindowPool::id_zero(),
-            abs: Vec2 {x: self.mouse.x, y: self.mouse.y},
+            abs: DVec2 {x: self.mouse.x, y: self.mouse.y},
             sweep_lock: Cell::new(Area::Empty),
             digit: DigitInfo {
                 id: digit_id,
@@ -302,7 +287,7 @@ impl ToWasmMouseMove {
     pub fn into_finger_hover_event(self, fingers: &CxFingers, digit_id: DigitId,  button: usize) -> FingerHoverEvent {
         FingerHoverEvent {
             window_id: CxWindowPool::id_zero(),
-            abs: Vec2 {x: self.mouse.x, y: self.mouse.y},
+            abs: DVec2 {x: self.mouse.x, y: self.mouse.y},
             handled: Cell::new(false),
             hover_last: fingers.get_hover_area(digit_id),
             digit_id,
@@ -323,7 +308,7 @@ impl ToWasmMouseUp {
     pub fn into_finger_up_event(self, fingers: &CxFingers, digit_id: DigitId) -> FingerUpEvent {
         FingerUpEvent {
             window_id: CxWindowPool::id_zero(),
-            abs: Vec2 {x: self.mouse.x, y: self.mouse.y},
+            abs: DVec2 {x: self.mouse.x, y: self.mouse.y},
             tap_count: fingers.get_tap_count(digit_id),
             captured: fingers.get_captured_area(digit_id),
             digit: DigitInfo {
@@ -343,12 +328,12 @@ impl ToWasmMouseUp {
 
 #[derive(ToWasm)]
 pub struct ToWasmScroll {
-    pub x: f32,
-    pub y: f32,
+    pub x: f64,
+    pub y: f64,
     pub modifiers: u32,
     pub is_touch: bool,
-    pub scroll_x: f32,
-    pub scroll_y: f32,
+    pub scroll_x: f64,
+    pub scroll_y: f64,
     pub time: f64
 }
 
@@ -357,8 +342,8 @@ impl ToWasmScroll {
         FingerScrollEvent {
             window_id: CxWindowPool::id_zero(),
             digit_id,
-            abs: Vec2 {x: self.x, y: self.y},
-            scroll: Vec2 {x: self.scroll_x, y: self.scroll_y},
+            abs: DVec2 {x: self.x, y: self.y},
+            scroll: DVec2 {x: self.scroll_x, y: self.scroll_y},
             device: if self.is_touch {DigitDevice::Touch(0)} else {DigitDevice::Mouse(0)},
             handled_x: Cell::new(false),
             handled_y: Cell::new(false),

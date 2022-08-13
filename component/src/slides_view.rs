@@ -65,10 +65,10 @@ live_register!{
 
 #[derive(Live, LiveHook)]
 pub struct SlidesView {
-    slide_width: f32,
-    goal_pos: f32,
-    current_pos: f32,
-    anim_speed: f32,
+    slide_width: f64,
+    goal_pos: f64,
+    current_pos: f64,
+    anim_speed: f64,
     frame: Frame,
     #[rust] next_frame: NextFrame
 }
@@ -91,7 +91,7 @@ impl SlidesView {
                 if (self.current_pos - self.goal_pos).abs()>0.00001 {
                     self.next_frame(cx);
                 }
-                self.frame.set_scroll_pos(vec2(self.current_pos * self.slide_width, 0.0));
+                self.frame.set_scroll_pos(dvec2(self.current_pos * self.slide_width, 0.0));
                 self.frame.redraw(cx);
             }
             _ => ()

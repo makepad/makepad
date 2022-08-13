@@ -1,4 +1,4 @@
-use crate::{F32Ext, Transform, Transformation, Vector};
+use crate::{F64Ext, Transform, Transformation, Vector};
 use std::ops::{Add, AddAssign, Sub, SubAssign};
 
 /// A point in 2-dimensional Euclidian space.
@@ -9,13 +9,13 @@ use std::ops::{Add, AddAssign, Sub, SubAssign};
 /// a point can be scaled, rotated, and translated, a vector can only be scaled and rotated.
 #[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
 pub struct Point {
-    pub x: f32,
-    pub y: f32,
+    pub x: f64,
+    pub y: f64,
 }
 
 impl Point {
     /// Creates a new point with the given coordinates.
-    pub fn new(x: f32, y: f32) -> Point {
+    pub fn new(x: f64, y: f64) -> Point {
         Point { x, y }
     }
 
@@ -32,7 +32,7 @@ impl Point {
     }
 
     /// Linearly interpolate between `self` and `other` with parameter `t`.
-    pub fn lerp(self, other: Point, t: f32) -> Point {
+    pub fn lerp(self, other: Point, t: f64) -> Point {
         Point::new(self.x.ext_lerp(other.x, t), self.y.ext_lerp(other.y, t))
     }
 }

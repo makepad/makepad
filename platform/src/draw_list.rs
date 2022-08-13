@@ -286,7 +286,7 @@ pub struct CxDrawList {
 
 pub struct CxRectArea{
     pub rect: Rect,
-    pub draw_clip: (Vec2,Vec2)
+    pub draw_clip: (DVec2,DVec2)
 }
 
 impl CxDrawList {

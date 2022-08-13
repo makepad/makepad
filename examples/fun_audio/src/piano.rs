@@ -249,7 +249,7 @@ impl Piano {
         let midi_a0 = 21;
         let midi_c8 = 108;
         
-        fn black_key_shift(key: u32) -> Option<f32> {
+        fn black_key_shift(key: u32) -> Option<f64> {
             match key % 12 {
                 0 => None, // C
                 1 => Some(0.6), // C#
@@ -267,8 +267,8 @@ impl Piano {
             }
         }
         
-        let white_size = vec2(20.0, 100.0);
-        let black_size = vec2(15.0, 62.0);
+        let white_size = dvec2(20.0, 100.0);
+        let black_size = dvec2(15.0, 62.0);
         let piano_key = self.piano_key;
         // draw the white keys first because they go below the black ones
         for i in midi_a0..midi_c8 {
@@ -291,7 +291,7 @@ impl Piano {
                     PianoKey::new_from_ptr(cx, piano_key)
                 });
                 key.draw_abs(cx, 1.0, Rect {
-                    pos: pos - vec2(black_size.x * shift, 0.),
+                    pos: pos - dvec2(black_size.x * shift, 0.),
                     size: black_size
                 });
             }
@@ -299,7 +299,7 @@ impl Piano {
                 pos.x += white_size.x;
             }
         }
-        cx.turtle_mut().set_used(white_size.x * (midi_c8 - midi_a0) as f32, white_size.y);
+        cx.turtle_mut().set_used(white_size.x * (midi_c8 - midi_a0) as f64, white_size.y);
         cx.end_turtle_with_area(&mut self.area);
         self.white_keys.retain_visible();
         self.black_keys.retain_visible();

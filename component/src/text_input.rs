@@ -184,10 +184,10 @@ pub struct TextInput {
     align: Align,
     layout: Layout,
     
-    cursor_size: f32,
-    cursor_margin_bottom: f32,
-    cursor_margin_top: f32,
-    select_pad_edges: f32,
+    cursor_size: f64,
+    cursor_margin_bottom: f64,
+    cursor_margin_top: f64,
+    select_pad_edges: f64,
     empty_message: String,
     numeric_only: bool,
     
@@ -645,19 +645,19 @@ impl TextInput {
         // move the IME
         
         let head_x = self.label.get_cursor_pos(cx, 0.0, self.cursor_head)
-            .unwrap_or(vec2(turtle.pos.x, 0.0)).x;
+            .unwrap_or(dvec2(turtle.pos.x, 0.0)).x;
         
         if !self.read_only && self.cursor_head == self.cursor_tail {
             self.cursor.draw_abs(cx, Rect {
-                pos: vec2(head_x - 0.5 * self.cursor_size, turtle.pos.y),
-                size: vec2(self.cursor_size, turtle.size.y)
+                pos: dvec2(head_x - 0.5 * self.cursor_size, turtle.pos.y),
+                size: dvec2(self.cursor_size, turtle.size.y)
             });
         }
         
         // draw selection rect
         if self.cursor_head != self.cursor_tail {
             let tail_x = self.label.get_cursor_pos(cx, 0.0, self.cursor_tail)
-                .unwrap_or(vec2(turtle.pos.x, 0.0)).x;
+                .unwrap_or(dvec2(turtle.pos.x, 0.0)).x;
             
             let (left_x, right_x, left, right) = if self.cursor_head < self.cursor_tail {
                 (head_x, tail_x, self.cursor_head, self.cursor_tail)
@@ -669,8 +669,8 @@ impl TextInput {
             let pad = if left == 0 && right == char_count {self.select_pad_edges}else {0.0};
             
             self.select.draw_abs(cx, Rect {
-                pos: vec2(left_x - 0.5 * self.cursor_size - pad, turtle.pos.y),
-                size: vec2(right_x - left_x + self.cursor_size + 2.0 * pad, turtle.size.y)
+                pos: dvec2(left_x - 0.5 * self.cursor_size - pad, turtle.pos.y),
+                size: dvec2(right_x - left_x + self.cursor_size + 2.0 * pad, turtle.size.y)
             });
         }
         self.bg.end(cx);
@@ -678,13 +678,13 @@ impl TextInput {
         if cx.has_key_focus(self.bg.area()) {
             // ok so. if we have the IME we should inject a tracking point
             let ime_x = self.label.get_cursor_pos(cx, 0.5, self.cursor_head)
-                .unwrap_or(vec2(turtle.pos.x, 0.0)).x;
+                .unwrap_or(dvec2(turtle.pos.x, 0.0)).x;
             
             if self.numeric_only{
                 cx.hide_text_ime();
             }
             else{
-                let ime_abs = vec2(ime_x, turtle.pos.y);
+                let ime_abs = dvec2(ime_x, turtle.pos.y);
                 cx.show_text_ime(self.bg.area(), ime_abs - turtle_rect.pos);
             }
         }

@@ -127,7 +127,7 @@ pub struct ColorPicker {
     
     state: State,
     
-    #[rust] pub size: f32,
+    #[rust] pub size: f64,
     #[rust] hue: f32,
     #[rust] sat: f32,
     #[rust] val: f32,
@@ -149,24 +149,24 @@ pub enum ColorPickerDragMode {
 
 impl ColorPicker {
     
-    pub fn handle_finger(&mut self, cx: &mut Cx, rel: Vec2, dispatch_action: &mut dyn FnMut(&mut Cx, ColorPickerAction)) {
+    pub fn handle_finger(&mut self, cx: &mut Cx, rel: DVec2, dispatch_action: &mut dyn FnMut(&mut Cx, ColorPickerAction)) {
         
-        fn clamp(x: f32, mi: f32, ma: f32) -> f32 {if x < mi {mi} else if x > ma {ma} else {x}}
+        fn clamp(x: f64, mi: f64, ma: f64) -> f64 {if x < mi {mi} else if x > ma {ma} else {x}}
         
         let vx = rel.x - 0.5 * self.size;
         let vy = rel.y - 0.5 * self.size;
-        let rsize = (self.size * 0.28) / 2.0f32.sqrt();
+        let rsize = (self.size * 0.28) / 2.0f64.sqrt();
         let last_hue = self.hue;
         let last_sat = self.sat;
         let last_val = self.val;
         
         match self.drag_mode {
             ColorPickerDragMode::Rect => {
-                self.sat = clamp((vx + rsize) / (2.0 * rsize), 0.0, 1.0);
-                self.val = 1.0 - clamp((vy + rsize) / (2.0 * rsize), 0.0, 1.0);
+                self.sat = clamp((vx + rsize) / (2.0 * rsize), 0.0, 1.0) as f32;
+                self.val = 1.0 - clamp((vy + rsize) / (2.0 * rsize), 0.0, 1.0) as f32;
             },
             ColorPickerDragMode::Wheel => {
-                self.hue = (vx.atan2(vy) / std::f32::consts::PI * 0.5) - 0.33333 + 1.0;
+                self.hue = ((vx.atan2(vy) / std::f64::consts::PI * 0.5) - 0.33333 + 1.0) as f32;
             },
             _ => ()
         }
@@ -206,7 +206,7 @@ impl ColorPicker {
             },
             Hit::FingerDown(fe) => {
                 self.animate_state(cx, ids!(hover.pressed));
-                let rsize = (self.size * 0.28) / 2.0f32.sqrt();
+                let rsize = (self.size * 0.28) / 2.0f64.sqrt();
                 let rel = fe.abs - fe.rect.pos;
                 let vx = rel.x - 0.5 * self.size;
                 let vy = rel.y - 0.5 * self.size;
@@ -241,7 +241,7 @@ impl ColorPicker {
         }
     }
     
-    pub fn draw(&mut self, cx: &mut Cx2d, rgba: Vec4, height_scale: f32) {
+    pub fn draw(&mut self, cx: &mut Cx2d, rgba: Vec4, height_scale: f64) {
         if self.drag_mode == ColorPickerDragMode::None {
             // lets convert to rgba
             let old_rgba = self.to_rgba();
@@ -258,7 +258,7 @@ impl ColorPicker {
         self.wheel.hue = self.hue;
         self.wheel.sat = self.sat;
         self.wheel.val = self.val;
-        self.wheel.draw_walk(cx, Walk::fixed_size(vec2(self.size * height_scale, self.size * height_scale)));
+        self.wheel.draw_walk(cx, Walk::fixed_size(dvec2(self.size * height_scale, self.size * height_scale)));
     }
 }
 

@@ -10,7 +10,6 @@ use {
         },
         draw_list::DrawListId,
         makepad_math::{
-            Vec2,
             Rect
         },
         cx::Cx
@@ -235,17 +234,17 @@ impl Area {
                 // ok now we have to patch x/y/w/h into it
                 let buf = draw_item.instances.as_ref().unwrap();
                 if let Some(rect_pos) = sh.mapping.rect_pos {
-                    let pos = vec2(buf[inst.instance_offset + rect_pos + 0], buf[inst.instance_offset + rect_pos + 1]);
+                    let pos = dvec2(buf[inst.instance_offset + rect_pos + 0] as f64, buf[inst.instance_offset + rect_pos + 1] as f64);
                     if let Some(rect_size) = sh.mapping.rect_size {
-                        let size = vec2(buf[inst.instance_offset + rect_size + 0], buf[inst.instance_offset + rect_size + 1]);
+                        let size = dvec2(buf[inst.instance_offset + rect_size + 0] as f64, buf[inst.instance_offset + rect_size + 1] as f64);
                         if let Some(draw_clip) = sh.mapping.draw_clip {
-                            let p1= vec2(
-                                buf[inst.instance_offset + draw_clip + 0],
-                                buf[inst.instance_offset + draw_clip + 1],
+                            let p1= dvec2(
+                                buf[inst.instance_offset + draw_clip + 0] as f64,
+                                buf[inst.instance_offset + draw_clip + 1] as f64,
                             );
-                            let p2 = vec2(
-                                buf[inst.instance_offset + draw_clip + 2],
-                                buf[inst.instance_offset + draw_clip + 3]
+                            let p2 = dvec2(
+                                buf[inst.instance_offset + draw_clip + 2] as f64,
+                                buf[inst.instance_offset + draw_clip + 3] as f64
                             );
                             return Rect{pos,size}.clip((p1,p2));
                         }
@@ -295,9 +294,9 @@ impl Area {
                 // ok now we have to patch x/y/w/h into it
                 let buf = draw_item.instances.as_ref().unwrap();
                 if let Some(rect_pos) = sh.mapping.rect_pos {
-                    let pos = vec2(buf[inst.instance_offset + rect_pos + 0], buf[inst.instance_offset + rect_pos + 1]);
+                    let pos = dvec2(buf[inst.instance_offset + rect_pos + 0] as f64, buf[inst.instance_offset + rect_pos + 1] as f64);
                     if let Some(rect_size) = sh.mapping.rect_size {
-                        let size = vec2(buf[inst.instance_offset + rect_size + 0], buf[inst.instance_offset + rect_size + 1]);
+                        let size = dvec2(buf[inst.instance_offset + rect_size + 0] as f64, buf[inst.instance_offset + rect_size + 1] as f64);
                         return Rect{pos,size};
                     }
                 }
@@ -312,7 +311,7 @@ impl Area {
         }
     }
     
-    pub fn abs_to_rel(&self, cx: &Cx, abs: Vec2) -> Vec2 {
+    pub fn abs_to_rel(&self, cx: &Cx, abs: DVec2) -> DVec2 {
         return match self {
             Area::Instance(inst) => {
                 if inst.instance_count == 0 {
@@ -334,9 +333,9 @@ impl Area {
                 // ok now we have to patch x/y/w/h into it
                 if let Some(rect_pos) = sh.mapping.rect_pos {
                     let buf = draw_item.instances.as_ref().unwrap();
-                    let x = buf[inst.instance_offset + rect_pos + 0];
-                    let y = buf[inst.instance_offset + rect_pos + 1];
-                    return Vec2 {
+                    let x = buf[inst.instance_offset + rect_pos + 0] as f64; 
+                    let y = buf[inst.instance_offset + rect_pos + 1] as f64;
+                    return DVec2 {
                         x: abs.x - x,
                         y: abs.y - y
                     }
@@ -346,7 +345,7 @@ impl Area {
             Area::Rect(ra) => {
                 let draw_list = &cx.draw_lists[ra.draw_list_id];
                 let rect_area = &draw_list.rect_areas[ra.rect_id];
-                Vec2 {
+                DVec2 {
                     x: abs.x - rect_area.rect.pos.x,
                     y: abs.y - rect_area.rect.pos.y
                 }
@@ -372,12 +371,12 @@ impl Area {
                 let sh = &cx.draw_shaders[draw_call.draw_shader.draw_shader_id]; // ok now we have to patch x/y/w/h into it
                 let buf = draw_item.instances.as_mut().unwrap();
                 if let Some(rect_pos) = sh.mapping.rect_pos {
-                    buf[inst.instance_offset + rect_pos + 0] = rect.pos.x;
-                    buf[inst.instance_offset + rect_pos + 1] = rect.pos.y;
+                    buf[inst.instance_offset + rect_pos + 0] = rect.pos.x as f32;
+                    buf[inst.instance_offset + rect_pos + 1] = rect.pos.y as f32;
                 }
                 if let Some(rect_size) = sh.mapping.rect_size {
-                    buf[inst.instance_offset + rect_size + 0] = rect.size.x;
-                    buf[inst.instance_offset + rect_size + 1] = rect.size.y;
+                    buf[inst.instance_offset + rect_size + 0] = rect.size.x as f32;
+                    buf[inst.instance_offset + rect_size + 1] = rect.size.y as f32;
                 }
             },
             Area::Rect(ra) => {

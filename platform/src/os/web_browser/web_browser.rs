@@ -4,7 +4,7 @@ use {
     std::cell::RefCell,
     crate::{
         makepad_live_id::*,
-        makepad_math::Vec2,
+        makepad_math::DVec2,
         makepad_wasm_bridge::{WasmDataU8, FromWasmMsg, ToWasmMsg, FromWasm, ToWasm},
         os::{
             web_browser::{
@@ -36,7 +36,7 @@ use {
 
 impl Cx {
     
-    pub fn get_default_window_size(&self) -> Vec2 {
+    pub fn get_default_window_size(&self) -> DVec2 {
         return self.os.window_geom.inner_size;
     }
     
@@ -129,7 +129,7 @@ impl Cx {
                     
                     self.fingers.process_tap_count(
                         digit_id,
-                        Vec2 {x: tw.touch.x, y: tw.touch.y},
+                        DVec2 {x: tw.touch.x, y: tw.touch.y},
                         tw.touch.time
                     );
                     self.call_event_handler(&Event::FingerDown(
@@ -172,7 +172,7 @@ impl Cx {
                         
                         self.fingers.process_tap_count(
                             digit_id,
-                            Vec2 {x: tw.mouse.x, y: tw.mouse.y},
+                            DVec2 {x: tw.mouse.x, y: tw.mouse.y},
                             tw.mouse.time
                         );
                         
