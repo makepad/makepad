@@ -349,24 +349,7 @@ impl Frame {
     pub fn set_scroll_pos(&mut self, v:DVec2){
         self.layout.scroll = v;
     }
-    /*
-    fn overflow_h(&self)->Overflow{
-        if !self.overflow_h.is_visible(){
-            self.overflow_h
-        }
-        else{
-            self.overflow
-        }
-    }
-    fn overflow_v(&self)->Overflow{
-        if !self.overflow_v.is_visible(){
-            self.overflow_v
-        }
-        else{
-            self.overflow
-        }
-    }
-*/
+
     pub fn area(&self)->Area{
         self.area
     }
