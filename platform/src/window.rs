@@ -99,16 +99,16 @@ impl LiveApply for Window {
             }
             match nodes[index].id {
                 id!(inner_size) => {
-                    let v = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes);
-                    cx.windows[self.window_id()].create_inner_size = v;
+                    let v:Vec2 = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes);
+                    cx.windows[self.window_id()].create_inner_size = v.into();
                 },
                 id!(title) => {
                     let v = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes);
                     cx.windows[self.window_id()].create_title = v;
                 }
                 id!(position) => {
-                    let v = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes);
-                    cx.windows[self.window_id()].create_position = Some(v);
+                    let v:Vec2 = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes);
+                    cx.windows[self.window_id()].create_position = Some(v.into());
                 }
                 _ => {
                     cx.apply_error_no_matching_field(live_error_origin!(), index, nodes);
@@ -127,11 +127,11 @@ impl Window {
         cx.passes[pass.pass_id()].parent = CxPassParent::Window(self.window_id());
     }
     
-    pub fn get_inner_size(&mut self, cx: &mut Cx) -> Vec2 {
+    pub fn get_inner_size(&mut self, cx: &mut Cx) -> DVec2 {
         cx.windows[self.window_id()].get_inner_size()
     }
     
-    pub fn get_position(&mut self, cx: &mut Cx) -> Vec2 {
+    pub fn get_position(&mut self, cx: &mut Cx) -> DVec2 {
         cx.windows[self.window_id()].get_position()
     }
     
@@ -195,8 +195,8 @@ impl Window {
 #[derive(Clone, Default)]
 pub struct CxWindow {
     pub create_title: String,
-    pub create_position: Option<Vec2>,
-    pub create_inner_size: Vec2,
+    pub create_position: Option<DVec2>,
+    pub create_inner_size: DVec2,
     pub is_created: bool,
     pub window_geom: WindowGeom,
     pub main_pass_id: Option<PassId>,
@@ -204,7 +204,7 @@ pub struct CxWindow {
 
 impl CxWindow {
     
-    pub fn get_inner_size(&mut self) -> Vec2 {
+    pub fn get_inner_size(&mut self) -> DVec2 {
         if !self.is_created {
             self.create_inner_size
         }
@@ -213,7 +213,7 @@ impl CxWindow {
         }
     }
     
-    pub fn get_position(&mut self) -> Vec2 {
+    pub fn get_position(&mut self) -> DVec2 {
         if !self.is_created {
             self.create_position.unwrap()
         }

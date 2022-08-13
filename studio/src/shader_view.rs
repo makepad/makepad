@@ -77,8 +77,8 @@ live_register!{
 pub struct ShaderView {
     bg_quad: DrawQuad,
     
-    size: Vec2,
-    pad: Vec2,
+    size: DVec2,
+    pad: DVec2,
 
     state: State
 }

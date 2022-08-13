@@ -55,7 +55,7 @@ impl DebugView {
         }
         
         let points = debug.take_points();
-        let point_size = vec2(1.0, 1.0);
+        let point_size = dvec2(1.0, 1.0);
         for (point, color) in points {
             self.rect.color = color;
             let rect = Rect {pos: point - 0.5 * point_size, size: point_size};
@@ -63,7 +63,7 @@ impl DebugView {
         }
         
         let labels = debug.take_labels();
-        let point_size = vec2(1.0, 1.0);
+        let point_size = dvec2(1.0, 1.0);
         for (point, color, label) in labels {
             self.rect.color = color;
             let rect = Rect {pos: point - 0.5 * point_size, size: point_size};

@@ -336,7 +336,7 @@ impl<'a> Cx2d<'a> {
         }));
     }
     
-    pub fn add_aligned_rect_area(&mut self, area: &mut Area, rect: Rect, draw_clip: (Vec2, Vec2)) {
+    pub fn add_aligned_rect_area(&mut self, area: &mut Area, rect: Rect, draw_clip: (DVec2, DVec2)) {
         let draw_list_id = *self.draw_list_stack.last().unwrap();
         let draw_list = &mut self.cx.draw_lists[draw_list_id];
         // ok so we have to add

@@ -193,19 +193,19 @@ live_register!{
 pub struct CodeEditorImpl {
     #[rust] pub session_id: Option<SessionId>,
     
-    #[rust] pub text_glyph_size: Vec2,
+    #[rust] pub text_glyph_size: DVec2,
     #[rust] caret_blink_timer: Timer,
     #[rust] select_scroll: Option<SelectScroll>,
     #[rust] last_move_position: Option<Position>,
     #[rust] zoom_anim_center: Option<Position>,
-    #[rust] zoom_last_pos: Option<Vec2>,
+    #[rust] zoom_last_pos: Option<DVec2>,
     
     pub scroll_bars: ScrollBars,
     
-    pub zoom_out: f32,
-    pub max_zoom_out: f32,
+    pub zoom_out: f64,
+    pub max_zoom_out: f64,
     
-    padding_top: f32,
+    padding_top: f64,
     
     state: State,
     
@@ -225,7 +225,7 @@ pub struct CodeEditorImpl {
     
     scroll_shadow: ScrollShadow,
     
-    pub line_num_width: f32,
+    pub line_num_width: f64,
     caret_blink_timeout: f64,
     
 }
@@ -315,7 +315,7 @@ impl CodeEditorImpl {
             lines_layout.total_height + visible.y - self.text_glyph_size.y,
         );
         
-        self.scroll_shadow.draw(cx, vec2(self.line_num_width, 0.));
+        self.scroll_shadow.draw(cx, dvec2(self.line_num_width, 0.));
         self.scroll_bars.end(cx);
     }
     
@@ -334,10 +334,10 @@ impl CodeEditorImpl {
         // this keeps the animation zooming properly focussed around a cursor/line
         if let Some(center_line) = self.zoom_anim_center {
             if self.state.is_track_animating(cx, id!(zoom)) {
-                let next_pos = self.position_to_vec2(center_line, lines_layout);
+                let next_pos = self.position_to_dvec2(center_line, lines_layout);
                 let last_pos = self.zoom_last_pos.unwrap();
                 let pos = self.scroll_bars.get_scroll_pos();
-                self.scroll_bars.set_scroll_pos_no_clip(cx, vec2(pos.x, pos.y + (next_pos.y - last_pos.y)));
+                self.scroll_bars.set_scroll_pos_no_clip(cx, dvec2(pos.x, pos.y + (next_pos.y - last_pos.y)));
                 self.calc_lines_layout_inner(cx, document_inner, lines_layout, &mut compute_height);
                 self.zoom_last_pos = Some(next_pos);
             }
@@ -400,7 +400,7 @@ impl CodeEditorImpl {
                 font_scale,
                 zoom_out: output.zoom_out,
                 zoom_column: output.zoom_column,
-                zoom_displace: output.zoom_column as f32 * self.text_glyph_size.x * (1.0 - font_scale)
+                zoom_displace: output.zoom_column as f64 * self.text_glyph_size.x * (1.0 - font_scale)
             });
             
             let end_y = start_y + text_height + widget_height;
@@ -415,7 +415,7 @@ impl CodeEditorImpl {
         }
         // unwrap the computed values
         lines_layout.total_height = start_y;
-        lines_layout.max_line_width = max_line_width as f32 * self.text_glyph_size.x;
+        lines_layout.max_line_width = max_line_width as f64 * self.text_glyph_size.x;
         lines_layout.view_start = start.unwrap_or(0);
         lines_layout.view_end = end.unwrap_or(document_inner.text.as_lines().len());
         lines_layout.start_y = start_line_y.unwrap_or(0.0);
@@ -448,20 +448,20 @@ impl CodeEditorImpl {
             let document_inner = document.inner.as_ref().unwrap();
             
             let last_cursor = session.cursors.last_inserted();
-            let last_pos = self.position_to_vec2(last_cursor.head, lines_layout);
+            let last_pos = self.position_to_dvec2(last_cursor.head, lines_layout);
             
             let view_rect = self.scroll_bars.get_viewport_rect(cx);
             // check if our last_pos is visible
             let center_line = if !view_rect.contains(last_pos) {
                 let start = view_rect.pos + view_rect.size * 0.5;
-                let pos = self.vec2_to_position(&document_inner.text, start, lines_layout);
+                let pos = self.dvec2_to_position(&document_inner.text, start, lines_layout);
                 pos
             }
             else {
                 last_cursor.head
             };
             self.zoom_anim_center = Some(center_line);
-            self.zoom_last_pos = Some(self.position_to_vec2(center_line, lines_layout));
+            self.zoom_last_pos = Some(self.position_to_dvec2(center_line, lines_layout));
             self.animate_state(cx, anim)
         }
     }
@@ -534,28 +534,28 @@ impl CodeEditorImpl {
                 if span.is_included {
                     
                     let end_x = if end > layout.zoom_column {
-                        start_x + end as f32 * self.text_glyph_size.x * layout.font_scale
+                        start_x + end as f64 * self.text_glyph_size.x * layout.font_scale
                             + layout.zoom_displace
                     }
                     else {
-                        start_x + end as f32 * self.text_glyph_size.x
+                        start_x + end as f64 * self.text_glyph_size.x
                     };
                     let start_x = if start > layout.zoom_column {
-                        start_x + start as f32 * self.text_glyph_size.x * layout.font_scale
+                        start_x + start as f64 * self.text_glyph_size.x * layout.font_scale
                             + layout.zoom_displace
                     }
                     else {
-                        start_x + start as f32 * self.text_glyph_size.x
+                        start_x + start as f64 * self.text_glyph_size.x
                     };
                     
                     let size_x = end_x - start_x;
                     
                     selected_rects_on_next_line.push(Rect {
-                        pos: Vec2 {
+                        pos: DVec2 {
                             x: start_x,
                             y: start_y,
                         },
-                        size: Vec2 {
+                        size: DVec2 {
                             x: size_x,
                             y: draw_height,
                         },
@@ -582,16 +582,16 @@ impl CodeEditorImpl {
             if next_line_index > 0 {
                 for &rect in &selected_rects_on_current_line {
                     if let Some(r) = selected_rects_on_previous_line.first() {
-                        self.selection_quad.prev_x = r.pos.x - rect.pos.x;
-                        self.selection_quad.prev_w = r.size.x;
+                        self.selection_quad.prev_x = (r.pos.x - rect.pos.x) as f32;
+                        self.selection_quad.prev_w = r.size.x as f32;
                     }
                     else {
                         self.selection_quad.prev_x = 0.0;
                         self.selection_quad.prev_w = -1.0;
                     }
                     if let Some(r) = selected_rects_on_next_line.first() {
-                        self.selection_quad.next_x = r.pos.x - rect.pos.x;
-                        self.selection_quad.next_w = r.size.x;
+                        self.selection_quad.next_x = (r.pos.x - rect.pos.x) as f32;
+                        self.selection_quad.next_w = r.size.x as f32;
                     }
                     else {
                         self.selection_quad.next_x = 0.0;
@@ -605,8 +605,8 @@ impl CodeEditorImpl {
         // Draw the selected rects for the last line.
         for &rect in &selected_rects_on_next_line {
             if let Some(r) = selected_rects_on_previous_line.first() {
-                self.selection_quad.prev_x = r.pos.x - rect.pos.x;
-                self.selection_quad.prev_w = r.size.x;
+                self.selection_quad.prev_x = (r.pos.x - rect.pos.x) as f32;
+                self.selection_quad.prev_w = r.size.x as f32;
             }
             else {
                 self.selection_quad.prev_x = 0.0;
@@ -650,11 +650,12 @@ impl CodeEditorImpl {
         let Rect {pos: origin, size: viewport_size,} = cx.turtle().rect();
         
         //let mut start_y = lines_layout.start_y + origin.y;
-        let start_x = origin.x;
+        let scroll_x = cx.turtle().scroll().x;
+        let start_x = origin.x +scroll_x;
         
         self.line_num_quad.draw_abs(cx, Rect {
-            pos: origin,
-            size: Vec2 {x: self.line_num_width, y: viewport_size.y}
+            pos: origin + dvec2(scroll_x, 0.0),
+            size: DVec2 {x: self.line_num_width, y: viewport_size.y}
         });
         
         
@@ -673,9 +674,9 @@ impl CodeEditorImpl {
             self.line_num_text.font_scale = layout.font_scale;
             
             // lets scale around the right side center
-            let right_side = buf.len() as f32 * self.text_glyph_size.x;
+            let right_side = buf.len() as f64 * self.text_glyph_size.x;
             
-            self.line_num_text.draw_abs(cx, Vec2 {
+            self.line_num_text.draw_abs(cx, DVec2 {
                 x: start_x + right_side * (1.0 - layout.font_scale),
                 y: layout.start_y + origin.y,
             }, &buf);
@@ -703,10 +704,10 @@ impl CodeEditorImpl {
                 let indent_lines_column = indent * 4;
                 //self.indent_line_quad.color = self.text_color_indent_line; // TODO: Colored indent guides
                 
-                let pos = self.position_to_vec2(Position {line: line_index, column: indent_lines_column}, lines_layout);
+                let pos = self.position_to_dvec2(Position {line: line_index, column: indent_lines_column}, lines_layout);
                 self.indent_line_quad.draw_abs(cx, Rect {
                     pos: origin + pos,
-                    size: vec2(self.text_glyph_size.x * layout.font_scale, layout.total_height),
+                    size: dvec2(self.text_glyph_size.x * layout.font_scale, layout.total_height),
                 });
             }
         }
@@ -731,8 +732,8 @@ impl CodeEditorImpl {
             let line_index = line_index + lines_layout.view_start;
             let layout = &lines_layout.lines[line_index];
             for span in spans.spans() {
-                let start = self.position_to_vec2(Position {line: line_index, column: span.start_column}, lines_layout);
-                let end = self.position_to_vec2(Position {line: line_index, column: span.end_column}, lines_layout);
+                let start = self.position_to_dvec2(Position {line: line_index, column: span.start_column}, lines_layout);
+                let end = self.position_to_dvec2(Position {line: line_index, column: span.end_column}, lines_layout);
                 // letse draw it
                 let msg = &state.messages[span.msg_id];
                 match msg {
@@ -740,7 +741,7 @@ impl CodeEditorImpl {
                         self.msg_line_quad.level = MsgLineLevel::from(loc.level);
                         self.msg_line_quad.draw_abs(cx, Rect {
                             pos: origin + start,
-                            size: vec2(end.x - start.x, layout.total_height + 1.0),
+                            size: dvec2(end.x - start.x, layout.total_height + 1.0),
                         });
                     }
                     _ => ()
@@ -776,10 +777,10 @@ impl CodeEditorImpl {
                         if selections.contains_position(*caret) {
                             continue;
                         }
-                        let pos = self.position_to_vec2(*caret, lines_layout);
+                        let pos = self.position_to_dvec2(*caret, lines_layout);
                         self.caret_quad.draw_abs(cx, Rect {
                             pos: pos + origin,
-                            size: Vec2 {
+                            size: DVec2 {
                                 x: 1.5 * layout.font_scale,
                                 y: self.text_glyph_size.y * layout.font_scale,
                             },
@@ -795,9 +796,9 @@ impl CodeEditorImpl {
     pub fn draw_code_chunk(
         &mut self,
         cx: &mut Cx2d,
-        font_scale: f32,
+        font_scale: f64,
         color: Vec4,
-        pos: Vec2,
+        pos: DVec2,
         chunk: &[char],
     ) {
         self.code_text.font_scale = font_scale;
@@ -821,11 +822,11 @@ impl CodeEditorImpl {
             self.current_line_quad.draw_abs(
                 cx,
                 Rect {
-                    pos: Vec2 {
+                    pos: DVec2 {
                         x: rect.pos.x,
                         y: rect.pos.y + line.start_y,
                     },
-                    size: Vec2 {
+                    size: DVec2 {
                         x: rect.size.x,
                         y: line.text_height,
                     },
@@ -875,7 +876,7 @@ impl CodeEditorImpl {
                     let document_inner = document.inner.as_ref().unwrap();
                     // lets convert this one
                     let rel = fe.abs - fe.rect.pos;
-                    let position = self.vec2_to_position(
+                    let position = self.dvec2_to_position(
                         &document_inner.text,
                         rel + self.scroll_bars.get_scroll_pos(),
                         lines_layout
@@ -904,7 +905,7 @@ impl CodeEditorImpl {
                     let document = &state.documents[session.document_id];
                     let document_inner = document.inner.as_ref().unwrap();
                     let rel = fe.abs - fe.rect.pos;
-                    let position = self.vec2_to_position(
+                    let position = self.dvec2_to_position(
                         &document_inner.text,
                         rel + self.scroll_bars.get_scroll_pos(),
                         lines_layout
@@ -1099,7 +1100,7 @@ impl CodeEditorImpl {
             pos: fe.rect.pos + pad_scroll,
             size: fe.rect.size - 2. * pad_scroll
         };
-        let delta = Vec2 {
+        let delta = DVec2 {
             x: if fe.abs.x < rect.pos.x {
                 -((rect.pos.x - fe.abs.x) * pow_scale).powf(pow_fac).min(max_speed)
             }
@@ -1134,7 +1135,7 @@ impl CodeEditorImpl {
     fn handle_select_scroll_in_draw(&mut self, cx: &mut Cx) {
         if let Some(select_scroll) = &mut self.select_scroll {
             let old_pos = self.scroll_bars.get_scroll_pos();
-            let new_pos = Vec2 {
+            let new_pos = DVec2 {
                 x: old_pos.x + select_scroll.delta.x,
                 y: old_pos.y + select_scroll.delta.y
             };
@@ -1158,7 +1159,7 @@ impl CodeEditorImpl {
             let session = &state.sessions[self.session_id.unwrap()];
             let document = &state.documents[session.document_id];
             let document_inner = document.inner.as_ref().unwrap();
-            let position = self.vec2_to_position(&document_inner.text, rel, lines_layout);
+            let position = self.dvec2_to_position(&document_inner.text, rel, lines_layout);
             state.move_cursors_to(self.session_id.unwrap(), position, true);
             self.scroll_bars.redraw(cx);
         }
@@ -1171,33 +1172,33 @@ impl CodeEditorImpl {
             let last_cursor = session.cursors.last_inserted();
             
             // ok so. we need to compute the head
-            let pos = self.position_to_vec2(last_cursor.head, line_layout);
+            let pos = self.position_to_dvec2(last_cursor.head, line_layout);
             
             let rect = Rect {
-                pos: pos + self.text_glyph_size * vec2(-2.0, -1.0) - vec2(self.line_num_width, 0.),
-                size: self.text_glyph_size * vec2(4.0, 3.0) + vec2(self.line_num_width, 0.)
+                pos: pos + self.text_glyph_size * dvec2(-2.0, -1.0) - dvec2(self.line_num_width, 0.),
+                size: self.text_glyph_size * dvec2(4.0, 3.0) + dvec2(self.line_num_width, 0.)
             };
             self.scroll_bars.scroll_into_view(cx, rect);
         }
     }
     
     // coordinate maps a text position to a 2d position
-    fn position_to_vec2(&self, position: Position, lines_layout: &LinesLayout) -> Vec2 {
+    fn position_to_dvec2(&self, position: Position, lines_layout: &LinesLayout) -> DVec2 {
         // we need to compute the position in the editor space
         let layout = &lines_layout.lines[position.line];
         let x = if position.column >= layout.zoom_column {
-            self.line_num_width + position.column as f32 * self.text_glyph_size.x * layout.font_scale + layout.zoom_displace
+            self.line_num_width + position.column as f64 * self.text_glyph_size.x * layout.font_scale + layout.zoom_displace
         }
         else {
-            position.column as f32 * self.text_glyph_size.x + self.line_num_width
+            position.column as f64 * self.text_glyph_size.x + self.line_num_width
         };
-        vec2(
+        dvec2(
             x,
             layout.start_y,
         )
     }
     
-    fn vec2_to_position(&self, text: &Text, vec2: Vec2, lines_layout: &LinesLayout) -> Position {
+    fn dvec2_to_position(&self, text: &Text, vec2: DVec2, lines_layout: &LinesLayout) -> Position {
         
         if vec2.y < self.padding_top {
             return Position {
@@ -1208,7 +1209,7 @@ impl CodeEditorImpl {
         for (line, layout) in lines_layout.lines.iter().enumerate() {
             if vec2.y >= layout.start_y && vec2.y <= layout.start_y + layout.total_height {
                 let start_x = vec2.x - self.line_num_width;
-                let zoom_start = layout.zoom_column as f32 * self.text_glyph_size.x;
+                let zoom_start = layout.zoom_column as f64 * self.text_glyph_size.x;
                 let column = if start_x >= zoom_start {
                     let scale_x = self.text_glyph_size.x * layout.font_scale;
                     ((start_x + 0.5 * scale_x - zoom_start) / scale_x) as usize + layout.zoom_column
@@ -1233,45 +1234,45 @@ impl CodeEditorImpl {
 #[derive(Clone, Default)]
 pub struct SelectScroll {
     // pub margin:Margin,
-    pub delta: Vec2,
-    pub rel: Vec2,
+    pub delta: DVec2,
+    pub rel: DVec2,
     pub at_end: bool
 }
 
 pub struct LineLayoutInput {
     pub clear: bool,
-    pub zoom_out: f32,
+    pub zoom_out: f64,
     pub line: usize,
-    pub start_y: f32,
-    pub viewport_start: f32,
-    pub viewport_end: f32
+    pub start_y: f64,
+    pub viewport_start: f64,
+    pub viewport_end: f64
 }
 
 pub struct LineLayoutOutput {
-    pub widget_height: f32,
-    pub zoom_out: f32,
+    pub widget_height: f64,
+    pub zoom_out: f64,
     pub zoom_column: usize,
 }
 
 #[derive(Clone, Debug)]
 pub struct LineLayout {
-    pub start_y: f32,
-    pub text_height: f32,
-    pub widget_height: f32,
-    pub total_height: f32,
-    pub font_scale: f32,
+    pub start_y: f64,
+    pub text_height: f64,
+    pub widget_height: f64,
+    pub total_height: f64,
+    pub font_scale: f64,
     
-    pub zoom_out: f32,
+    pub zoom_out: f64,
     pub zoom_column: usize,
-    pub zoom_displace: f32
+    pub zoom_displace: f64
 }
 
 #[derive(Clone, Default, Debug)]
 pub struct LinesLayout {
     pub view_start: usize,
     pub view_end: usize,
-    pub start_y: f32,
-    pub max_line_width: f32,
-    pub total_height: f32,
+    pub start_y: f64,
+    pub max_line_width: f64,
+    pub total_height: f64,
     pub lines: Vec<LineLayout>
 }

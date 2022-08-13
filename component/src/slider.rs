@@ -164,18 +164,18 @@ pub struct Slider {
     
     text_input: TextInput,
     
-    min: f32,
-    max: f32,
+    min: f64,
+    max: f64,
     
-    #[rust] pub value: f32,
-    #[rust] pub dragging: Option<f32>,
+    #[rust] pub value: f64,
+    #[rust] pub dragging: Option<f64>,
 }
 
 #[derive(Clone, FrameAction)]
 pub enum SliderAction {
     StartSlide,
-    TextSlide(f32),
-    Slide(f32),
+    TextSlide(f64),
+    Slide(f64),
     EndSlide,
     None
 }
@@ -183,7 +183,7 @@ pub enum SliderAction {
 impl FrameComponent for Slider {
     fn bind_read(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
         if let Some(LiveValue::Float(v)) = nodes.read_path(&self.bind) {
-            self.set_internal(*v as f32);
+            self.set_internal(*v);
             self.update_text_input(cx);
         }
     }
@@ -217,11 +217,11 @@ impl FrameComponent for Slider {
 
 impl Slider {
     
-    fn to_external(&self) -> f32 {
+    fn to_external(&self) -> f64 {
         self.value * (self.max - self.min) + self.min
     }
     
-    fn set_internal(&mut self, external: f32) {
+    fn set_internal(&mut self, external: f64) {
         self.value = (external - self.min) / (self.max - self.min)
     }
     
@@ -236,7 +236,7 @@ impl Slider {
                     self.animate_state(cx, ids!(focus.off));
                 }
                 TextInputAction::Return(value) => {
-                    if let Ok(v) = value.parse::<f32>() {
+                    if let Ok(v) = value.parse::<f64>() {
                         self.set_internal(v.max(self.min).min(self.max));
                     }
                     self.update_text_input(cx);
@@ -301,7 +301,7 @@ impl Slider {
     }
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        self.slider.slide_pos = self.value;
+        self.slider.slide_pos = self.value as f32;
         self.slider.begin(cx, walk, self.layout);
         
         if let Some(dw) = cx.defer_walk(self.label_walk) {

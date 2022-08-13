@@ -129,7 +129,7 @@ impl RustEditor {
         
         self.editor_impl.calc_lines_layout(cx, document_inner, &mut self.lines_layout, | _cx, input | {
 
-            let max_height = 0.0f32;
+            let max_height = 0.0;
             
             let ws = document_inner.indent_cache[input.line].virtual_leading_whitespace();
             
@@ -256,7 +256,7 @@ impl RustEditor {
             while let Some(token) = token_iter.next() {
                 
                 let next_token = token_iter.peek();
-                let end_x = start_x + token.len as f32 * self.editor_impl.text_glyph_size.x * layout.font_scale;
+                let end_x = start_x + token.len as f64 * self.editor_impl.text_glyph_size.x * layout.font_scale;
                 let end = start + token.len;
                 
                 // check if we are whitespace. ifso, just skip rendering
@@ -265,7 +265,7 @@ impl RustEditor {
                         cx,
                         layout.font_scale,
                         self.text_color(&chars[start..end], token.token, next_token.map( | next_token | next_token.token)),
-                        Vec2 {x: start_x, y: layout.start_y + origin.y},
+                        DVec2 {x: start_x, y: layout.start_y + origin.y},
                         &chars[start..end]
                     );
                 }

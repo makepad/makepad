@@ -1,4 +1,4 @@
-use crate::{F32Ext, Point, Transform, Transformation};
+use crate::{F64Ext, Point, Transform, Transformation};
 use std::cmp::Ordering;
 
 /// A quadratic bezier curve segment in 2-dimensional Euclidian space.
@@ -26,7 +26,7 @@ impl LineSegment {
 
     /// Returns the intersection point of the supporting line of `self` with the vertical line
     /// through `x`, or None if these lines are coincident.
-    pub fn intersect_with_vertical_line(self, x: f32) -> Option<Point> {
+    pub fn intersect_with_vertical_line(self, x: f64) -> Option<Point> {
         let dx = self.p1.x - self.p0.x;
         if dx == 0.0 {
             return None;

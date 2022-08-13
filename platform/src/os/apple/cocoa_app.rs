@@ -10,7 +10,7 @@ use {
     },
     crate::{
         makepad_math::{
-            Vec2,
+            DVec2,
         },
         os::{
             apple::frameworks::*,
@@ -510,7 +510,7 @@ impl CocoaApp {
                     self.do_callback(vec![
                         CocoaEvent::Scroll(CocoaScrollEvent {
                             window_id: cocoa_window.window_id,
-                            scroll: Vec2 {x: -dx as f32, y: -dy as f32},
+                            scroll: DVec2 {x: -dx, y: -dy},
                             abs: cocoa_window.last_mouse_pos,
                             modifiers: get_event_key_modifier(ns_event),
                             time: self.time_now()
@@ -520,7 +520,7 @@ impl CocoaApp {
                     self.do_callback(vec![
                         CocoaEvent::Scroll(CocoaScrollEvent {
                             window_id: cocoa_window.window_id,
-                            scroll: Vec2 {x: -dx as f32 * 32., y: -dy as f32 * 32.},
+                            scroll: DVec2 {x: -dx * 32., y: -dy * 32.},
                             abs: cocoa_window.last_mouse_pos,
                             modifiers: get_event_key_modifier(ns_event),
                             time: self.time_now()

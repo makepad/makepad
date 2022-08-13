@@ -8,19 +8,19 @@ use {
 #[derive(Copy, Clone, Default, Debug, Live, LiveHook)]
 #[live_ignore]
 pub struct Layout {
-    pub scroll: Vec2,
+    pub scroll: DVec2,
     pub clip_x: bool,
     pub clip_y: bool,
     pub padding: Padding,
     pub align: Align,
     pub flow: Flow,
-    pub spacing: f32
+    pub spacing: f64
 }
 
 #[derive(Copy, Clone, Default, Debug, Live, LiveHook)]
 #[live_ignore]
 pub struct Walk {
-    pub abs_pos: Option<Vec2>,
+    pub abs_pos: Option<DVec2>,
     pub margin: Margin,
     pub width: Size,
     pub height: Size,
@@ -29,17 +29,17 @@ pub struct Walk {
 #[derive(Clone, Copy, Debug, Live, LiveHook)]
 #[live_ignore]
 pub struct Align {
-    pub x: f32,
-    pub y: f32
+    pub x: f64,
+    pub y: f64
 }
 
 #[derive(Clone, Copy, Default, Debug, Live)]
 #[live_ignore]
 pub struct Padding {
-    pub left: f32,
-    pub top: f32,
-    pub right: f32,
-    pub bottom: f32
+    pub left: f64,
+    pub top: f64,
+    pub right: f64,
+    pub bottom: f64
 }
 
 #[derive(Copy, Clone, Debug, Live, LiveHook)]
@@ -67,8 +67,7 @@ pub enum Flow {
 #[live_ignore]
 pub enum Size {
     #[pick] Fill,
-    #[live(200.0)] Fixed(f32),
-    #[live(0.0)] Negative(f32),
+    #[live(200.0)] Fixed(f64),
     Fit,
 }
 
@@ -77,7 +76,7 @@ pub struct DeferWalk {
     defer_index: usize,
     margin: Margin,
     other_axis: Size,
-    pos: Vec2
+    pos: DVec2
 }
 
 #[derive(Clone, Default, Debug)]
@@ -94,14 +93,14 @@ pub struct Turtle {
     align_start: usize,
     turtle_walks_start: usize,
     defer_count: usize,
-    shift: Option<Vec2>,
-    pos: Vec2,
-    origin: Vec2,
-    width: f32,
-    height: f32,
-    width_used: f32,
-    height_used: f32,
-    draw_clip: (Vec2, Vec2),
+    shift: Option<DVec2>,
+    pos: DVec2,
+    origin: DVec2,
+    width: f64,
+    height: f64,
+    width_used: f64,
+    height_used: f64,
+    draw_clip: (DVec2, DVec2),
     guard_area: Area
 }
 
@@ -122,7 +121,7 @@ impl<'a> Cx2d<'a> {
         let turtle = self.turtles.last_mut().unwrap();
         let defer_index = turtle.defer_count;
         let pos = turtle.pos;
-        let size = vec2(
+        let size = dvec2(
             turtle.eval_width(walk.width, walk.margin, turtle.layout.flow),
             turtle.eval_height(walk.height, walk.margin, turtle.layout.flow)
         );
@@ -190,14 +189,14 @@ impl<'a> Cx2d<'a> {
             else {
                 (parent.draw_clip.0.y, parent.draw_clip.1.y)
             };
-            (o - layout.scroll, w, h, (vec2(x0, y0), vec2(x1, y1)))
+            (o - layout.scroll, w, h, (dvec2(x0, y0), dvec2(x1, y1)))
         }
         else {
-            let o = Vec2 {x: walk.margin.left, y: walk.margin.top};
+            let o = DVec2 {x: walk.margin.left, y: walk.margin.top};
             let w = walk.width.fixed_or_nan();
             let h = walk.height.fixed_or_nan();
             
-            (o, w, h, (vec2(o.x, o.y), vec2(o.x + w, o.y + h)))
+            (o, w, h, (dvec2(o.x, o.y), dvec2(o.x + w, o.y + h)))
         };
         
         let turtle = Turtle {
@@ -207,7 +206,7 @@ impl<'a> Cx2d<'a> {
             align_start: self.align_list.len(),
             turtle_walks_start: self.turtle_walks.len(),
             defer_count: 0,
-            pos: Vec2 {
+            pos: DVec2 {
                 x: origin.x + layout.padding.left,
                 y: origin.y + layout.padding.top
             },
@@ -257,10 +256,10 @@ impl<'a> Cx2d<'a> {
             Flow::Right => {
                 if turtle.defer_count > 0 {
                     let left = turtle.width_left();
-                    let part = left / turtle.defer_count as f32;
+                    let part = left / turtle.defer_count as f64;
                     for i in turtle.turtle_walks_start..self.turtle_walks.len() {
                         let walk = &self.turtle_walks[i];
-                        let shift_x = walk.defer_index as f32 * part;
+                        let shift_x = walk.defer_index as f64 * part;
                         let shift_y = turtle.layout.align.y * (turtle.padded_height_or_used() - walk.rect.size.y);
                         let align_start = walk.align_start;
                         let align_end = self.get_turtle_walk_align_end(i);
@@ -281,11 +280,11 @@ impl<'a> Cx2d<'a> {
             Flow::Down => {
                 if turtle.defer_count > 0 {
                     let left = turtle.height_left();
-                    let part = left / turtle.defer_count as f32;
+                    let part = left / turtle.defer_count as f64;
                     for i in turtle.turtle_walks_start..self.turtle_walks.len() {
                         let walk = &self.turtle_walks[i];
                         let shift_x = turtle.layout.align.x * (turtle.padded_width_or_used() - walk.rect.size.x);
-                        let shift_y = walk.defer_index as f32 * part;
+                        let shift_y = walk.defer_index as f64 * part;
                         let align_start = walk.align_start;
                         let align_end = self.get_turtle_walk_align_end(i);
                         self.move_align_list(shift_x, shift_y, align_start, align_end);
@@ -326,8 +325,8 @@ impl<'a> Cx2d<'a> {
         
         if self.turtles.len() == 0 {
             return Rect {
-                pos: vec2(0.0, 0.0),
-                size: vec2(w.fixed_or_zero(), h.fixed_or_zero())
+                pos: dvec2(0.0, 0.0),
+                size: dvec2(w.fixed_or_zero(), h.fixed_or_zero())
             }
         }
         let mut rect = self.walk_turtle_internal(Walk {width: w, height: h, ..turtle.walk}, turtle.align_start, true);
@@ -360,7 +359,7 @@ impl<'a> Cx2d<'a> {
         self.turtle().rect_is_visible(rect)
     }
     
-    pub fn peek_walk_pos(&mut self, walk: Walk) -> Vec2 {
+    pub fn peek_walk_pos(&mut self, walk: Walk) -> DVec2 {
         if let Some(pos) = walk.abs_pos {
             pos + walk.margin.left_top()
         }
@@ -373,7 +372,7 @@ impl<'a> Cx2d<'a> {
     fn walk_turtle_internal(&mut self, walk: Walk, align_start: usize, actually_move: bool) -> Rect {
         
         let turtle = self.turtles.last_mut().unwrap();
-        let size = vec2(
+        let size = dvec2(
             turtle.eval_width(walk.width, walk.margin, turtle.layout.flow),
             turtle.eval_height(walk.height, walk.margin, turtle.layout.flow)
         );
@@ -432,7 +431,7 @@ impl<'a> Cx2d<'a> {
         }
     }
     
-    fn move_align_list(&mut self, dx: f32, dy: f32, align_start: usize, align_end: usize) {
+    fn move_align_list(&mut self, dx: f64, dy: f64, align_start: usize, align_end: usize) {
         let dx = if dx.is_nan() {0.0}else {dx};
         let dy = if dy.is_nan() {0.0}else {dy};
         if dx == 0.0 && dy == 0.0 {
@@ -440,6 +439,7 @@ impl<'a> Cx2d<'a> {
         }
         let dx = (dx * self.current_dpi_factor).floor() / self.current_dpi_factor;
         let dy = (dy * self.current_dpi_factor).floor() / self.current_dpi_factor;
+        let d = dvec2(dx, dy);
         for i in align_start..align_end {
             let align_item = &self.align_list[i];
             match align_item {
@@ -451,16 +451,23 @@ impl<'a> Cx2d<'a> {
                     let inst_buf = draw_item.instances.as_mut().unwrap();
                     for i in 0..inst.instance_count {
                         if let Some(rect_pos) = sh.mapping.rect_pos {
-                            inst_buf[inst.instance_offset + rect_pos + i * sh.mapping.instances.total_slots] += dx;
-                            inst_buf[inst.instance_offset + rect_pos + 1 + i * sh.mapping.instances.total_slots] += dy;
+                            inst_buf[inst.instance_offset + rect_pos + 0 + i * sh.mapping.instances.total_slots] += dx as f32;
+                            inst_buf[inst.instance_offset + rect_pos + 1 + i * sh.mapping.instances.total_slots] += dy as f32;
+                            if let Some(draw_clip) = sh.mapping.draw_clip {
+                                inst_buf[inst.instance_offset + draw_clip + 0 + i * sh.mapping.instances.total_slots] += dx as f32;
+                                inst_buf[inst.instance_offset + draw_clip + 1 + i * sh.mapping.instances.total_slots] += dy as f32;
+                                inst_buf[inst.instance_offset + draw_clip + 2 + i * sh.mapping.instances.total_slots] += dx as f32;
+                                inst_buf[inst.instance_offset + draw_clip + 3 + i * sh.mapping.instances.total_slots] += dy as f32;
+                            }
                         }
                     }
                 },
                 Area::Rect(ra) => {
                     let draw_list = &mut self.cx.draw_lists[ra.draw_list_id];
                     let rect_area = &mut draw_list.rect_areas[ra.rect_id];
-                    rect_area.rect.pos.x += dx;
-                    rect_area.rect.pos.y += dy;
+                    rect_area.rect.pos += d;
+                    rect_area.draw_clip.0 += d;
+                    rect_area.draw_clip.1 += d;
                 }
                 
                 _ => (),
@@ -484,66 +491,66 @@ impl<'a> Cx2d<'a> {
 }
 
 impl Turtle {
-    pub fn draw_clip(&self) -> (Vec2, Vec2) {
+    pub fn draw_clip(&self) -> (DVec2, DVec2) {
         self.draw_clip
     }
     
-    pub fn update_width_max(&mut self, dx: f32) {
+    pub fn update_width_max(&mut self, dx: f64) {
         self.width_used = self.width_used.max((self.pos.x + dx) - self.origin.x);
     }
     
-    pub fn update_height_max(&mut self, dy: f32) {
+    pub fn update_height_max(&mut self, dy: f64) {
         self.height_used = self.height_used.max((self.pos.y + dy) - self.origin.y);
     }
     
-    pub fn update_width_min(&mut self, dx: f32) {
+    pub fn update_width_min(&mut self, dx: f64) {
         self.width_used = self.width_used.min((self.pos.x + dx) - self.origin.x);
     }
     
-    pub fn update_height_min(&mut self, dy: f32) {
+    pub fn update_height_min(&mut self, dy: f64) {
         self.height_used = self.height_used.min((self.pos.y + dy) - self.origin.y);
     }
     
-    pub fn set_shift(&mut self, shift: Vec2) {
+    pub fn set_shift(&mut self, shift: DVec2) {
         self.shift = Some(shift);
     }
     
-    pub fn used(&self) -> Vec2 {
-        vec2(self.width_used, self.height_used)
+    pub fn used(&self) -> DVec2 {
+        dvec2(self.width_used, self.height_used)
     }
     
-    pub fn set_used(&mut self, width_used: f32, height_used: f32) {
+    pub fn set_used(&mut self, width_used: f64, height_used: f64) {
         self.width_used = width_used;
         self.height_used = height_used;
     }
     
-    pub fn move_pos(&mut self, dx: f32, dy: f32) {
+    pub fn move_pos(&mut self, dx: f64, dy: f64) {
         self.pos.x += dx;
         self.pos.y += dy;
         self.update_width_max(0.0);
         self.update_height_max(0.0);
     }
     
-    pub fn set_pos(&mut self, pos: Vec2) {
+    pub fn set_pos(&mut self, pos: DVec2) {
         self.pos = pos
     }
     
-    fn child_spacing(&self, walks_len: usize) -> Vec2 {
+    fn child_spacing(&self, walks_len: usize) -> DVec2 {
         if self.turtle_walks_start < walks_len || self.defer_count > 0 {
             match self.layout.flow {
                 Flow::Right => {
-                    vec2(self.layout.spacing, 0.0)
+                    dvec2(self.layout.spacing, 0.0)
                 }
                 Flow::Down => {
-                    vec2(0.0, self.layout.spacing)
+                    dvec2(0.0, self.layout.spacing)
                 }
                 Flow::Overlay => {
-                    vec2(0.0, 0.0)
+                    dvec2(0.0, 0.0)
                 }
             }
         }
         else {
-            vec2(0.0, 0.0)
+            dvec2(0.0, 0.0)
         }
     }
     
@@ -552,30 +559,29 @@ impl Turtle {
         return view.intersects(geom)
     }
     
-    pub fn origin(&self) -> Vec2 {
+    pub fn origin(&self) -> DVec2 {
         self.origin
     }
     
-    pub fn rel_pos(&self) -> Vec2 {
-        Vec2 {
+    pub fn rel_pos(&self) -> DVec2 {
+        DVec2 {
             x: self.pos.x - self.origin.x,
             y: self.pos.y - self.origin.y
         }
     }
     
-    pub fn pos(&self) -> Vec2 {
+    pub fn pos(&self) -> DVec2 {
         self.pos
     }
     
     
-    pub fn scroll(&self) -> Vec2 {
+    pub fn scroll(&self) -> DVec2 {
         self.layout.scroll
     }
     
-    pub fn eval_width(&self, width: Size, margin: Margin, flow: Flow) -> f32 {
+    pub fn eval_width(&self, width: Size, margin: Margin, flow: Flow) -> f64 {
         return match width {
-            Size::Fit => std::f32::NAN,
-            Size::Negative(v) => -v,
+            Size::Fit => std::f64::NAN,
             Size::Fixed(v) => max_zero_keep_nan(v),
             Size::Fill => {
                 match flow {
@@ -594,10 +600,9 @@ impl Turtle {
         }
     }
     
-    pub fn eval_height(&self, height: Size, margin: Margin, flow: Flow) -> f32 {
+    pub fn eval_height(&self, height: Size, margin: Margin, flow: Flow) -> f64 {
         return match height {
-            Size::Fit => std::f32::NAN,
-            Size::Negative(v) => -v,
+            Size::Fit => std::f64::NAN,
             Size::Fixed(v) => max_zero_keep_nan(v),
             Size::Fill => {
                 match flow {
@@ -619,7 +624,7 @@ impl Turtle {
     pub fn rect(&self) -> Rect {
         Rect {
             pos: self.origin,
-            size: vec2(self.width, self.height)
+            size: dvec2(self.width, self.height)
         }
     }
     pub fn padded_rect_used(&self) -> Rect {
@@ -631,30 +636,30 @@ impl Turtle {
     pub fn rect_left(&self) -> Rect {
         Rect {
             pos: self.pos,
-            size: vec2(self.width_left(), self.height_left())
+            size: dvec2(self.width_left(), self.height_left())
         }
     }
     
     pub fn padded_rect(&self) -> Rect {
         Rect {
             pos: self.origin + self.layout.padding.left_top(),
-            size: vec2(self.width, self.height) - self.layout.padding.size()
+            size: dvec2(self.width, self.height) - self.layout.padding.size()
         }
     }
     
-    pub fn size(&self) -> Vec2 {
-        vec2(self.width, self.height)
+    pub fn size(&self) -> DVec2 {
+        dvec2(self.width, self.height)
     }
     
-    pub fn width_left(&self) -> f32 {
+    pub fn width_left(&self) -> f64 {
         return max_zero_keep_nan(self.width - self.width_used - self.layout.padding.right);
     }
     
-    pub fn height_left(&self) -> f32 {
+    pub fn height_left(&self) -> f64 {
         return max_zero_keep_nan(self.height - self.height_used - self.layout.padding.bottom);
     }
     
-    pub fn padded_height_or_used(&self) -> f32 {
+    pub fn padded_height_or_used(&self) -> f64 {
         let r = max_zero_keep_nan(self.height - self.layout.padding.height());
         if r.is_nan() {
             self.height_used - self.layout.padding.bottom
@@ -664,7 +669,7 @@ impl Turtle {
         }
     }
     
-    pub fn padded_width_or_used(&self) -> f32 {
+    pub fn padded_width_or_used(&self) -> f64 {
         let r = max_zero_keep_nan(self.width - self.layout.padding.width());
         if r.is_nan() {
             self.width_used - self.layout.padding.right
@@ -681,9 +686,9 @@ impl DeferWalk {
         match turtle.layout.flow {
             Flow::Right => {
                 let left = turtle.width_left();
-                let part = left / turtle.defer_count as f32;
+                let part = left / turtle.defer_count as f64;
                 Walk {
-                    abs_pos: Some(self.pos + vec2(part * self.defer_index as f32, 0.)),
+                    abs_pos: Some(self.pos + dvec2(part * self.defer_index as f64, 0.)),
                     margin: self.margin,
                     width: Size::Fixed(part),
                     height: self.other_axis
@@ -691,9 +696,9 @@ impl DeferWalk {
             },
             Flow::Down => {
                 let left = turtle.height_left();
-                let part = left / turtle.defer_count as f32;
+                let part = left / turtle.defer_count as f64;
                 Walk {
-                    abs_pos: Some(self.pos + vec2(0., part * self.defer_index as f32)),
+                    abs_pos: Some(self.pos + dvec2(0., part * self.defer_index as f64)),
                     margin: self.margin,
                     height: Size::Fixed(part),
                     width: self.other_axis
@@ -719,7 +724,7 @@ impl Layout {
         }
     }
     
-    pub fn with_scroll(mut self, v: Vec2) -> Self {
+    pub fn with_scroll(mut self, v: DVec2) -> Self {
         self.scroll = v;
         self
     }
@@ -728,37 +733,37 @@ impl Layout {
         self.clip_y = y;
         self
     }
-    pub fn with_align_x(mut self, v: f32) -> Self {
+    pub fn with_align_x(mut self, v: f64) -> Self {
         self.align.x = v;
         self
     }
     
-    pub fn with_align_y(mut self, v: f32) -> Self {
+    pub fn with_align_y(mut self, v: f64) -> Self {
         self.align.y = v;
         self
     }
     
-    pub fn with_padding_all(mut self, v: f32) -> Self {
+    pub fn with_padding_all(mut self, v: f64) -> Self {
         self.padding = Padding {left: v, right: v, top: v, bottom: v};
         self
     }
     
-    pub fn with_padding_top(mut self, v: f32) -> Self {
+    pub fn with_padding_top(mut self, v: f64) -> Self {
         self.padding.top = v;
         self
     }
     
-    pub fn with_padding_right(mut self, v: f32) -> Self {
+    pub fn with_padding_right(mut self, v: f64) -> Self {
         self.padding.right = v;
         self
     }
     
-    pub fn with_padding_bottom(mut self, v: f32) -> Self {
+    pub fn with_padding_bottom(mut self, v: f64) -> Self {
         self.padding.bottom = v;
         self
     }
     
-    pub fn with_padding_left(mut self, v: f32) -> Self {
+    pub fn with_padding_left(mut self, v: f64) -> Self {
         self.padding.left = v;
         self
     }
@@ -788,7 +793,7 @@ impl Walk {
         }
     }
     
-    pub fn fixed_size(size: Vec2) -> Self {
+    pub fn fixed_size(size: DVec2) -> Self {
         Self {
             abs_pos: None,
             margin: Margin::default(),
@@ -825,27 +830,27 @@ impl Walk {
     }
     
     
-    pub fn with_margin_all(mut self, v: f32) -> Self {
+    pub fn with_margin_all(mut self, v: f64) -> Self {
         self.margin = Margin {left: v, right: v, top: v, bottom: v};
         self
     }
     
-    pub fn with_margin_top(mut self, v: f32) -> Self {
+    pub fn with_margin_top(mut self, v: f64) -> Self {
         self.margin.top = v;
         self
     }
     
-    pub fn with_margin_right(mut self, v: f32) -> Self {
+    pub fn with_margin_right(mut self, v: f64) -> Self {
         self.margin.right = v;
         self
     }
     
-    pub fn with_margin_bottom(mut self, v: f32) -> Self {
+    pub fn with_margin_bottom(mut self, v: f64) -> Self {
         self.margin.bottom = v;
         self
     }
     
-    pub fn with_margin_left(mut self, v: f32) -> Self {
+    pub fn with_margin_left(mut self, v: f64) -> Self {
         self.margin.left = v;
         self
     }
@@ -864,19 +869,19 @@ impl Default for Align {
 
 
 impl Padding {
-    pub fn left_top(&self) -> Vec2 {
-        vec2(self.left, self.top)
+    pub fn left_top(&self) -> DVec2 {
+        dvec2(self.left, self.top)
     }
-    pub fn right_bottom(&self) -> Vec2 {
-        vec2(self.right, self.bottom)
+    pub fn right_bottom(&self) -> DVec2 {
+        dvec2(self.right, self.bottom)
     }
-    pub fn size(&self) -> Vec2 {
-        vec2(self.left + self.right, self.top + self.bottom)
+    pub fn size(&self) -> DVec2 {
+        dvec2(self.left + self.right, self.top + self.bottom)
     }
-    pub fn width(&self) -> f32 {
+    pub fn width(&self) -> f64 {
         self.left + self.right
     }
-    pub fn height(&self) -> f32 {
+    pub fn height(&self) -> f64 {
         self.top + self.bottom
     }
 }
@@ -885,11 +890,11 @@ impl LiveHook for Padding {
     fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Option<usize> {
         match &nodes[index].value {
             LiveValue::Float(v) => {
-                *self = Self {left: *v as f32, top: *v as f32, right: *v as f32, bottom: *v as f32};
+                *self = Self {left: *v, top: *v, right: *v, bottom: *v};
                 Some(index + 1)
             }
             LiveValue::Int(v) => {
-                *self = Self {left: *v as f32, top: *v as f32, right: *v as f32, bottom: *v as f32};
+                *self = Self {left: *v as f64, top: *v as f64, right: *v as f64, bottom: *v as f64};
                 Some(index + 1)
             }
             _ => None
@@ -909,10 +914,10 @@ impl LiveHook for Size {
                 match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
                     Ok(ret) => match ret {
                         LiveEval::Float(v) => {
-                            *self = Self::Fixed(v as f32);
+                            *self = Self::Fixed(v);
                         }
                         LiveEval::Int(v) => {
-                            *self = Self::Fixed(v as f32);
+                            *self = Self::Fixed(v as f64);
                         }
                         _ => {
                             cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "bool", ret);
@@ -923,11 +928,11 @@ impl LiveHook for Size {
                 Some(nodes.skip_node(index))
             }
             LiveValue::Float(v) => {
-                *self = Self::Fixed(*v as f32);
+                *self = Self::Fixed(*v);
                 Some(index + 1)
             }
             LiveValue::Int(v) => {
-                *self = Self::Fixed(*v as f32);
+                *self = Self::Fixed(*v as f64);
                 Some(index + 1)
             }
             _ => None
@@ -942,17 +947,17 @@ impl Default for Size {
 }
 
 impl Size {
-    pub fn fixed_or_zero(&self) -> f32 {
+    pub fn fixed_or_zero(&self) -> f64 {
         match self {
             Self::Fixed(v) => *v,
             _ => 0.
         }
     }
     
-    pub fn fixed_or_nan(&self) -> f32 {
+    pub fn fixed_or_nan(&self) -> f64 {
         match self {
             Self::Fixed(v) => max_zero_keep_nan(*v),
-            _ => std::f32::NAN,
+            _ => std::f64::NAN,
         }
     }
     
@@ -971,12 +976,12 @@ impl Size {
     }
 }
 
-fn max_zero_keep_nan(v: f32) -> f32 {
+fn max_zero_keep_nan(v: f64) -> f64 {
     if v.is_nan() {
         v
     }
     else {
-        f32::max(v, 0.0)
+        f64::max(v, 0.0)
     }
 }
 

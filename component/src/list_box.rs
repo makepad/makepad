@@ -122,10 +122,10 @@ pub struct ListBoxItem {
     layout: Layout,
     state: State,
     
-    indent_width: f32,
+    indent_width: f64,
     icon_walk: Walk,
     
-    min_drag_distance: f32,
+    min_drag_distance: f64,
     opened: f32,
     hover: f32,
     selected: f32,
@@ -139,7 +139,7 @@ pub struct ListBox {
     
     filler_quad: DrawBgQuad,
     layout: Layout,
-    node_height: f32,
+    node_height: f64,
     multi_select: bool,
     
     walk: Walk,
@@ -190,7 +190,7 @@ impl ListBoxItem{
         cx: &mut Cx2d,
         label: &str,
         is_even: f32,
-        node_height: f32,
+        node_height: f64,
     ) {
         self.set_draw_state(is_even);
         self.bg_quad.begin(cx, Walk::size(Size::Fill, Size::Fixed(node_height)), self.layout);

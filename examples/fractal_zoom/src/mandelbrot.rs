@@ -86,10 +86,10 @@ fn mandelbrot_pixel_f64(max_iter: usize, c_x: f64, c_y: f64) -> (usize, f64) {
 
 #[allow(dead_code)]
 fn mandelbrot_f64(tile: &mut Tile, max_iter: usize) {
-    let tile_size = vec2f64(TILE_SIZE_X as f64, TILE_SIZE_Y as f64);
+    let tile_size = dvec2(TILE_SIZE_X as f64, TILE_SIZE_Y as f64);
     for y in 0..TILE_SIZE_Y {
         for x in 0..TILE_SIZE_X {
-            let fp = tile.fractal.pos + tile.fractal.size * (vec2f64(x as f64, y as f64) / tile_size);
+            let fp = tile.fractal.pos + tile.fractal.size * (dvec2(x as f64, y as f64) / tile_size);
             let (iter, dist) = mandelbrot_pixel_f64(max_iter, fp.x, fp.y);
             let dist = ((dist + 127.0) * 256.0).max(0.0).min(65535.0) as u32;
             tile.buffer[y * TILE_SIZE_X + x] = iter as u32 | (dist << 16);
@@ -103,7 +103,7 @@ pub struct Tile {
     // the makepad system texture backing the tile, when ready for drawing 'buffer' is swapped onto it
     pub texture_index: usize,
     // the fractal space rectangle that this tile represents
-    pub fractal: RectF64,
+    pub fractal: Rect,
 }
 
 impl Tile {
@@ -113,7 +113,7 @@ impl Tile {
         Self {
             buffer,
             texture_index,
-            fractal: RectF64::default()
+            fractal: Rect::default()
         }
     }
 }
@@ -122,7 +122,7 @@ impl Tile {
 #[derive(Clone, Default)]
 pub struct BailTest {
     // the position of our viewport in fractal space
-    space: RectF64,
+    space: Rect,
     // if zooming in, the bail-test is wether a tile is outside of the view
     // if zooming out if a tile uses less than X percentage of the view is.
     is_zoom_in: bool
@@ -232,8 +232,8 @@ impl TileCache {
     }
     
     // generates a queue
-    pub fn generate_tasks_and_flip_layers(&mut self, cx: &mut Cx, zoom: f64, center: Vec2F64, window: RectF64, is_zoom_in: bool) -> Vec<Tile> {
-        let size = vec2f64(zoom, zoom);
+    pub fn generate_tasks_and_flip_layers(&mut self, cx: &mut Cx, zoom: f64, center: DVec2, window: Rect, is_zoom_in: bool) -> Vec<Tile> {
+        let size = dvec2(zoom, zoom);
         
         // discard the next layer if we don't fill the screen yet at this point and reuse old
         if is_zoom_in && !self.next.is_empty() && self.next[0].fractal.size.x < 0.8 * zoom {
@@ -249,8 +249,8 @@ impl TileCache {
         let window = window.add_margin(size);
         
         Self::spiral_walk( | _step, i, j | {
-            let fractal = RectF64 {
-                pos: center + size * vec2f64(i as f64, j as f64) - 0.5 * size,
+            let fractal = Rect {
+                pos: center + size * dvec2(i as f64, j as f64) - 0.5 * size,
                 size: size
             };
             if window.intersects(fractal) {
@@ -327,15 +327,15 @@ pub struct FractalSpace {
     // the rectangle of the viewport on screen
     view_rect: Rect,
     // the size of the tile in fractal space
-    tile_size: Vec2F64,
+    tile_size: DVec2,
     // the center of the fractal space
-    center: Vec2F64,
+    center: DVec2,
     // the zoomfactor in the fractal space
     zoom: f64,
 }
 
 impl FractalSpace {
-    fn new(center: Vec2F64, zoom: f64) -> Self {
+    fn new(center: DVec2, zoom: f64) -> Self {
         Self {
             center,
             zoom,
@@ -344,7 +344,7 @@ impl FractalSpace {
     }
     
     // constructs a copy of self with other zoom/center values
-    fn other(&self, other_zoom: f64, other_center: Vec2F64) -> Self {
+    fn other(&self, other_zoom: f64, other_center: DVec2) -> Self {
         Self {
             center: other_center,
             zoom: other_zoom,
@@ -352,17 +352,17 @@ impl FractalSpace {
         }
     }
     
-    fn fractal_to_screen(&self, pos: Vec2F64) -> Vec2 {
+    fn fractal_to_screen(&self, pos: DVec2) -> DVec2 {
         let view_center = self.view_rect.pos + self.view_rect.size * 0.5;
-        return (((pos - self.center) / self.zoom) * self.tile_size).into_vec2() + view_center;
+        return (((pos - self.center) / self.zoom) * self.tile_size) + view_center;
     }
     
-    fn screen_to_fractal(&self, pos: Vec2) -> Vec2F64 {
+    fn screen_to_fractal(&self, pos: DVec2) -> DVec2 {
         let view_center = self.view_rect.pos + self.view_rect.size * 0.5;
-        return (((pos - view_center).into_vec2f64() / self.tile_size) * self.zoom) + self.center;
+        return (((pos - view_center) / self.tile_size) * self.zoom) + self.center;
     }
     
-    fn fractal_to_screen_rect(&self, rect: RectF64) -> Rect {
+    fn fractal_to_screen_rect(&self, rect: Rect) -> Rect {
         let pos1 = self.fractal_to_screen(rect.pos);
         let pos2 = self.fractal_to_screen(rect.pos + rect.size);
         Rect {
@@ -371,17 +371,17 @@ impl FractalSpace {
         }
     }
     
-    fn screen_to_fractal_rect(&self, rect: Rect) -> RectF64 {
+    fn screen_to_fractal_rect(&self, rect: Rect) -> Rect {
         let pos1 = self.screen_to_fractal(rect.pos);
         let pos2 = self.screen_to_fractal(rect.pos + rect.size);
-        RectF64 {
+        Rect {
             pos: pos1,
             size: pos2 - pos1
         }
     }
     
     // this zooms the fractal space around a point on the screen
-    fn zoom_around(&mut self, factor: f64, around: Vec2) {
+    fn zoom_around(&mut self, factor: f64, around: DVec2) {
         // hold on to the current position in fractal space
         let fpos1 = self.screen_to_fractal(around);
         self.zoom *= factor;
@@ -398,7 +398,7 @@ impl FractalSpace {
     }
     
     // self.view_rect in fractal space
-    fn view_rect_to_fractal(&self) -> RectF64 {
+    fn view_rect_to_fractal(&self) -> Rect {
         self.screen_to_fractal_rect(self.view_rect)
     }
 }
@@ -419,7 +419,7 @@ pub struct Mandelbrot {
     // and they dont get DSL accessors
     #[rust] next_frame: NextFrame,
     // where your finger/mouse was when moved
-    #[rust] finger_abs: Vec2,
+    #[rust] finger_abs: DVec2,
     // set to true when the fractal is actively zoom animating
     #[rust] is_zooming: bool,
     
@@ -429,7 +429,7 @@ pub struct Mandelbrot {
     is_zoom_in: bool,
     
     // default fractal space for looking at a mandelbrot
-    #[rust(FractalSpace::new(vec2f64(-0.5, 0.0), 0.5))]
+    #[rust(FractalSpace::new(dvec2(-0.5, 0.0), 0.5))]
     space: FractalSpace,
     
     #[rust]
@@ -504,7 +504,7 @@ impl Mandelbrot {
         })
     }
     
-    pub fn generate_tiles_around_finger(&mut self, cx: &mut Cx, zoom: f64, finger: Vec2) {
+    pub fn generate_tiles_around_finger(&mut self, cx: &mut Cx, zoom: f64, finger: DVec2) {
         self.generate_tiles(
             cx,
             zoom,
@@ -516,7 +516,7 @@ impl Mandelbrot {
     }
     
     // generates the tiles and emits them in the right spiral order
-    pub fn generate_tiles(&mut self, cx: &mut Cx, zoom: f64, center: Vec2F64, window: RectF64, is_zoom_in: bool, is_zooming: bool) {
+    pub fn generate_tiles(&mut self, cx: &mut Cx, zoom: f64, center: DVec2, window: Rect, is_zoom_in: bool, is_zooming: bool) {
         let render_tasks = self.tile_cache.generate_tasks_and_flip_layers(cx, zoom, center, window, is_zoom_in);
         if is_zoom_in {
             for tile in render_tasks {
@@ -636,7 +636,7 @@ impl Mandelbrot {
         
         self.had_first_draw = true;
         // store the view information here as its the only place it's known in the codeflow
-        self.space.tile_size = vec2f64(TILE_SIZE_X as f64, TILE_SIZE_Y as f64) / cx.current_dpi_factor() as f64;
+        self.space.tile_size = dvec2(TILE_SIZE_X as f64, TILE_SIZE_Y as f64) / cx.current_dpi_factor() as f64;
         self.space.view_rect = cx.turtle().rect();
         
         // update bail window the workers check to skip tiles that are no longer in view

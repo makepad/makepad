@@ -122,10 +122,10 @@ pub struct CxFontsAtlas {
 
 #[derive(Default)]
 pub struct CxFontsAtlasAlloc {
-    pub texture_size: Vec2,
-    pub xpos: f32,
-    pub ypos: f32,
-    pub hmax: f32,
+    pub texture_size: DVec2,
+    pub xpos: f64,
+    pub ypos: f64,
+    pub hmax: f64,
     pub todo: Vec<CxFontsAtlasTodo>,
 }
 
@@ -137,7 +137,7 @@ impl CxFontsAtlas {
             texture_id,
             clear_buffer: false,
             alloc: CxFontsAtlasAlloc{
-                texture_size: Vec2 {x: 2048.0, y: 2048.0},
+                texture_size: DVec2 {x: 2048.0, y: 2048.0},
                 xpos: 0.0,
                 ypos: 0.0,
                 hmax: 0.0,
@@ -147,7 +147,7 @@ impl CxFontsAtlas {
     }
 }
 impl CxFontsAtlasAlloc{
-    pub fn alloc_atlas_glyph(&mut self, w: f32, h: f32) -> CxFontAtlasGlyph {
+    pub fn alloc_atlas_glyph(&mut self, w: f64, h: f64) -> CxFontAtlasGlyph {
         if w + self.xpos >= self.texture_size.x {
             self.xpos = 0.0;
             self.ypos += self.hmax + 1.0;
@@ -172,8 +172,8 @@ impl CxFontsAtlasAlloc{
         CxFontAtlasGlyph {
             tx1: tx1,
             ty1: ty1,
-            tx2: tx1 + (w / self.texture_size.x),
-            ty2: ty1 + (h / self.texture_size.y)
+            tx2: (tx1 + (w / self.texture_size.x)),
+            ty2: (ty1 + (h / self.texture_size.y))
         }
     }
 }
@@ -515,23 +515,23 @@ pub const ATLAS_SUBPIXEL_SLOTS: usize = 64;
 
 #[derive(Clone)]
 pub struct CxFontAtlasPage {
-    pub dpi_factor: f32,
-    pub font_size: f32,
+    pub dpi_factor: f64,
+    pub font_size: f64,
     pub atlas_glyphs: Vec<[Option<CxFontAtlasGlyph>; ATLAS_SUBPIXEL_SLOTS]>
 }
 
 #[derive(Clone, Copy)]
 pub struct CxFontAtlasGlyph {
-    pub tx1: f32,
-    pub ty1: f32,
-    pub tx2: f32,
-    pub ty2: f32,
+    pub tx1: f64,
+    pub ty1: f64,
+    pub tx2: f64,
+    pub ty2: f64,
 }
 
 #[derive(Default, Debug)]
 pub struct CxFontsAtlasTodo {
-    pub subpixel_x_fract: f32,
-    pub subpixel_y_fract: f32,
+    pub subpixel_x_fract: f64,
+    pub subpixel_y_fract: f64,
     pub font_id: usize,
     pub atlas_page_id: usize,
     pub glyph_id: usize,
@@ -549,7 +549,7 @@ impl CxFont {
         })
     }
     
-    pub fn get_atlas_page_id(&mut self, dpi_factor: f32, font_size: f32) -> usize {
+    pub fn get_atlas_page_id(&mut self, dpi_factor: f64, font_size: f64) -> usize {
         for (index, sg) in self.atlas_pages.iter().enumerate() {
             if sg.dpi_factor == dpi_factor
                 && sg.font_size == font_size {

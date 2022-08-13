@@ -69,8 +69,8 @@ impl DrawQuad {
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
         let rect = cx.walk_turtle(walk);
         self.draw_clip = cx.turtle().draw_clip().into();
-        self.rect_pos = rect.pos;
-        self.rect_size = rect.size;
+        self.rect_pos = rect.pos.into();
+        self.rect_size = rect.size.into();
         self.draw(cx);
     }
 
@@ -86,16 +86,16 @@ impl DrawQuad {
     
     pub fn draw_abs(&mut self, cx: &mut Cx2d, rect: Rect) {
         self.draw_clip = cx.turtle().draw_clip().into();
-        self.rect_pos = rect.pos;
-        self.rect_size = rect.size;  
+        self.rect_pos = rect.pos.into();
+        self.rect_size = rect.size.into();  
         self.draw(cx);
     }
     
     pub fn draw_rel(&mut self, cx: &mut Cx2d, rect: Rect) {
         let rect = rect.translate(cx.turtle().origin());
         self.draw_clip = cx.turtle().draw_clip().into();
-        self.rect_pos = rect.pos;
-        self.rect_size = rect.size;
+        self.rect_pos = rect.pos.into();
+        self.rect_size = rect.size.into();
         self.draw(cx);
     }
 

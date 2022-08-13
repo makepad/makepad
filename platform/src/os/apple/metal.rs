@@ -278,10 +278,10 @@ impl Cx {
         }
     }
     
-    fn setup_render_pass_descriptor(&mut self, render_pass_descriptor: ObjcId, pass_id: PassId, inherit_dpi_factor: f32, first_texture: Option<ObjcId>, metal_cx: &MetalCx) {
+    fn setup_render_pass_descriptor(&mut self, render_pass_descriptor: ObjcId, pass_id: PassId, inherit_dpi_factor: f64, first_texture: Option<ObjcId>, metal_cx: &MetalCx) {
         let pass_size = self.passes[pass_id].pass_size;
         
-        self.passes[pass_id].set_matrix(Vec2::default(), pass_size);
+        self.passes[pass_id].set_matrix(DVec2::default(), pass_size);
         self.passes[pass_id].paint_dirty = false;
         let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor {
             override_dpi_factor
@@ -408,7 +408,7 @@ impl Cx {
     fn draw_pass_to_layer(
         &mut self,
         pass_id: PassId,
-        dpi_factor: f32,
+        dpi_factor: f64,
         layer: ObjcId,
         metal_cx: &mut MetalCx,
         is_resizing: bool
@@ -472,7 +472,7 @@ impl Cx {
     fn draw_pass_to_texture(
         &mut self,
         pass_id: PassId,
-        dpi_factor: f32,
+        dpi_factor: f64,
         metal_cx: &MetalCx,
     ) {
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
@@ -530,14 +530,14 @@ pub struct MetalCx {
 pub struct MetalWindow {
     pub window_id: WindowId,
     pub window_geom: WindowGeom,
-    cal_size: Vec2,
+    cal_size: DVec2,
     ca_layer: ObjcId,
     pub cocoa_window: Box<CocoaWindow>,
     is_resizing: bool
 }
 
 impl MetalWindow {
-    pub(crate) fn new(window_id: WindowId, metal_cx: &MetalCx, cocoa_app: &mut CocoaApp, inner_size: Vec2, position: Option<Vec2>, title: &str) -> MetalWindow {
+    pub(crate) fn new(window_id: WindowId, metal_cx: &MetalCx, cocoa_app: &mut CocoaApp, inner_size: DVec2, position: Option<DVec2>, title: &str) -> MetalWindow {
         
         let ca_layer: ObjcId = unsafe {msg_send![class!(CAMetalLayer), new]};
         
@@ -566,7 +566,7 @@ impl MetalWindow {
         MetalWindow {
             is_resizing: false,
             window_id,
-            cal_size: Vec2::default(),
+            cal_size: DVec2::default(),
             ca_layer,
             window_geom: cocoa_window.get_window_geom(),
             cocoa_window
@@ -584,15 +584,15 @@ impl MetalWindow {
     }
     
     pub(crate) fn resize_core_animation_layer(&mut self, _metal_cx: &MetalCx) -> bool {
-        let cal_size = Vec2 {
+        let cal_size = DVec2 {
             x: self.window_geom.inner_size.x * self.window_geom.dpi_factor,
             y: self.window_geom.inner_size.y * self.window_geom.dpi_factor
         };
         if self.cal_size != cal_size {
             self.cal_size = cal_size;
             unsafe {
-                let () = msg_send![self.ca_layer, setDrawableSize: CGSize {width: cal_size.x as f64, height: cal_size.y as f64}];
-                let () = msg_send![self.ca_layer, setContentsScale: self.window_geom.dpi_factor as f64];
+                let () = msg_send![self.ca_layer, setDrawableSize: CGSize {width: cal_size.x, height: cal_size.y}];
+                let () = msg_send![self.ca_layer, setContentsScale: self.window_geom.dpi_factor];
             }
             true
         }
@@ -967,7 +967,7 @@ impl CxOsTexture {
         metal_cx: &MetalCx,
         attachment_kind: AttachmentKind,
         desc: &TextureDesc,
-        default_size: Vec2
+        default_size: DVec2
     ) {
         let width = desc.width.unwrap_or(default_size.x as usize) as u64;
         let height = desc.height.unwrap_or(default_size.y as usize) as u64;

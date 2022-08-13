@@ -4,7 +4,7 @@ use {
         collections::HashSet,
     },
     crate::{
-        makepad_math::Vec2,
+        makepad_math::DVec2,
         gpu_info::GpuInfo,
         cx::{Cx, OsType},
         event::{
@@ -66,7 +66,7 @@ pub enum CxOsOp {
     XrStartPresenting(WindowId),
     XrStopPresenting(WindowId),
     
-    ShowTextIME(Area, Vec2),
+    ShowTextIME(Area, DVec2),
     HideTextIME,
     SetCursor(MouseCursor),
     StartTimer {timer_id: u64, interval: f64, repeats: bool},
@@ -105,7 +105,7 @@ impl Cx {
         }
     }
     
-    pub fn show_text_ime(&mut self, area: Area, pos: Vec2) {
+    pub fn show_text_ime(&mut self, area: Area, pos: DVec2) {
         self.platform_ops.push(CxOsOp::ShowTextIME(area, pos));
     }
     
@@ -151,7 +151,7 @@ impl Cx {
         }
     }
     
-    pub fn get_dpi_factor_of(&mut self, area: &Area) -> f32 {
+    pub fn get_dpi_factor_of(&mut self, area: &Area) -> f64 {
         if let Some(draw_list_id) = area.draw_list_id(){
             let pass_id = self.draw_lists[draw_list_id].pass_id.unwrap();
             return self.get_delegated_dpi_factor(pass_id)
@@ -159,7 +159,7 @@ impl Cx {
         return 1.0;
     }
     
-    pub fn get_delegated_dpi_factor(&mut self, pass_id: PassId) -> f32 {
+    pub fn get_delegated_dpi_factor(&mut self, pass_id: PassId) -> f64 {
         let mut pass_id_walk = pass_id;
         for _ in 0..25 {
             match self.passes[pass_id_walk].parent {

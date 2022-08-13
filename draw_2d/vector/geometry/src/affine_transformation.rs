@@ -20,7 +20,7 @@ impl AffineTransformation {
         AffineTransformation::new(LinearTransformation::scaling(v), Vector::zero())
     }
 
-    pub fn uniform_scaling(k: f32) -> AffineTransformation {
+    pub fn uniform_scaling(k: f64) -> AffineTransformation {
         AffineTransformation::new(LinearTransformation::uniform_scaling(k), Vector::zero())
     }
 
@@ -32,7 +32,7 @@ impl AffineTransformation {
         AffineTransformation::new(self.xy.scale(v), self.z.scale(v))
     }
 
-    pub fn uniform_scale(self, k: f32) -> AffineTransformation {
+    pub fn uniform_scale(self, k: f64) -> AffineTransformation {
         AffineTransformation::new(self.xy.uniform_scale(k), self.z * k)
     }
 

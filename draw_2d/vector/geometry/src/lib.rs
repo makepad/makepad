@@ -12,7 +12,7 @@ mod trapezoid;
 mod vector;
 
 pub use self::affine_transformation::AffineTransformation;
-pub use self::f32_ext::F32Ext;
+pub use self::f32_ext::F64Ext;
 pub use self::line_segment::LineSegment;
 pub use self::linear_transformation::LinearTransformation;
 pub use self::point::Point;
