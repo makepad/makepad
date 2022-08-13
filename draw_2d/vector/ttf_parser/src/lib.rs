@@ -72,8 +72,8 @@ impl<'a> GlyphsParser<'a> {
             let mut reader = Reader::new(&bytes);
             let contour_count = reader.read_i16()?;
             let bounds = Rectangle::new(
-                Point::new(reader.read_i16()? as f32, reader.read_i16()? as f32),
-                Point::new(reader.read_i16()? as f32, reader.read_i16()? as f32),
+                Point::new(reader.read_i16()? as f64, reader.read_i16()? as f64),
+                Point::new(reader.read_i16()? as f64, reader.read_i16()? as f64),
             );
             let bytes = &bytes[10..];
             if contour_count >= 0 {
@@ -103,17 +103,17 @@ impl<'a> GlyphsParser<'a> {
         if index < self.advance_width_count {
             reader.skip(index * 4)?;
             Ok(HorizontalMetrics {
-                advance_width: reader.read_u16()? as f32,
-                left_side_bearing: reader.read_i16()? as f32,
+                advance_width: reader.read_u16()? as f64,
+                left_side_bearing: reader.read_i16()? as f64,
             })
         } else {
             reader.skip((self.advance_width_count - 1) * 4)?;
-            let advance_width = reader.read_u16()? as f32;
+            let advance_width = reader.read_u16()? as f64;
             reader.skip(2)?;
             reader.skip((index - self.advance_width_count) * 2)?;
             Ok(HorizontalMetrics {
                 advance_width,
-                left_side_bearing: reader.read_i16()? as f32,
+                left_side_bearing: reader.read_i16()? as f64,
             })
         }
     }
@@ -224,8 +224,8 @@ impl<'a> GlyphsParser<'a> {
             };
             let z = if flags.args_are_xy_values() {
                 Vector::new(
-                    xy.x.x.hypot(xy.y.x) * argument_1 as f32,
-                    xy.x.y.hypot(xy.y.y) * argument_2 as f32,
+                    xy.x.x.hypot(xy.y.x) * argument_1 as f64,
+                    xy.x.y.hypot(xy.y.y) * argument_2 as f64,
                 )
             } else {
                 component_glyph
@@ -311,7 +311,7 @@ impl<'a> OutlinePointReader<'a> {
         let flags = self.flags_reader.read()?;
         self.current_point += Vector::new(
             if flags.x_short_vector() {
-                let x = self.x_coordinates_reader.read_u8()? as f32;
+                let x = self.x_coordinates_reader.read_u8()? as f64;
                 if flags.x_is_same_or_positive_x_short_vector() {
                     x
                 } else {
@@ -321,11 +321,11 @@ impl<'a> OutlinePointReader<'a> {
                 if flags.x_is_same_or_positive_x_short_vector() {
                     0.0
                 } else {
-                    self.x_coordinates_reader.read_i16()? as f32
+                    self.x_coordinates_reader.read_i16()? as f64
                 }
             },
             if flags.y_short_vector() {
-                let y = self.y_coordinates_reader.read_u8()? as f32;
+                let y = self.y_coordinates_reader.read_u8()? as f64;
                 if flags.y_is_same_or_positive_y_short_vector() {
                     y
                 } else {
@@ -335,7 +335,7 @@ impl<'a> OutlinePointReader<'a> {
                 if flags.y_is_same_or_positive_y_short_vector() {
                     0.0
                 } else {
-                    self.y_coordinates_reader.read_i16()? as f32
+                    self.y_coordinates_reader.read_i16()? as f64
                 }
             },
         );
@@ -500,8 +500,8 @@ impl<'a> Reader<'a> {
         Ok(u32::from_be_bytes(bytes))
     }
 
-    fn read_f2dot14(&mut self) -> Result<f32> {
-        Ok(self.read_i16()? as f32 / (1 << 14) as f32)
+    fn read_f2dot14(&mut self) -> Result<f64> {
+        Ok(self.read_i16()? as f64 / (1 << 14) as f64)
     }
 }
 
@@ -552,9 +552,9 @@ pub fn parse_ttf(bytes: &[u8]) -> Result<TTFFont> {
     let maxp_table_bytes = maxp_table_bytes.ok_or(Error)?;
     let mut reader = Reader::new(hhea_table_bytes);
     reader.skip(4)?;
-    let ascender = reader.read_i16()? as f32;
-    let descender = reader.read_i16()? as f32;
-    let line_gap = reader.read_i16()? as f32;
+    let ascender = reader.read_i16()? as f64;
+    let descender = reader.read_i16()? as f64;
+    let line_gap = reader.read_i16()? as f64;
     reader.skip(24)?;
     let advance_width_count = reader.read_u16()? as usize;
     let mut reader = Reader::new(maxp_table_bytes);
@@ -563,11 +563,11 @@ pub fn parse_ttf(bytes: &[u8]) -> Result<TTFFont> {
     reader.skip(26)?;
     let mut reader = Reader::new(head_table_bytes);
     reader.skip(18)?;
-    let units_per_em = reader.read_u16()? as f32;
+    let units_per_em = reader.read_u16()? as f64;
     reader.skip(16)?;
     let bounds = Rectangle::new(
-        Point::new(reader.read_i16()? as f32, reader.read_i16()? as f32),
-        Point::new(reader.read_i16()? as f32, reader.read_i16()? as f32),
+        Point::new(reader.read_i16()? as f64, reader.read_i16()? as f64),
+        Point::new(reader.read_i16()? as f64, reader.read_i16()? as f64),
     );
     reader.skip(6)?;
     let index_to_loc_format = IndexToLocFormat::from_i16(reader.read_i16()?).ok_or(Error)?;

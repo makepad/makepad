@@ -239,12 +239,12 @@ pub struct FileTreeNode {
     
     state: State,
     
-    indent_width: f32,
+    indent_width: f64,
     
     icon_walk: Walk,
     
     is_folder: bool,
-    min_drag_distance: f32,
+    min_drag_distance: f64,
     
     opened: f32,
     focussed: f32,
@@ -260,7 +260,7 @@ pub struct FileTree {
     layout: Layout,
     filler: DrawBgQuad,
     
-    node_height: f32,
+    node_height: f64,
     
     scroll_shadow: ScrollShadow,
     
@@ -271,7 +271,7 @@ pub struct FileTree {
     #[rust] tree_nodes: ComponentMap<FileNodeId, (FileTreeNode, LiveId)>,
     
     #[rust] count: usize,
-    #[rust] stack: Vec<f32>,
+    #[rust] stack: Vec<f64>,
 }
 
 impl LiveHook for FileTree {
@@ -299,17 +299,17 @@ pub enum FileTreeNodeAction {
 }
 
 impl FileTreeNode {
-    pub fn set_draw_state(&mut self, is_even: f32, scale: f32) {
-        self.bg.scale = scale;
+    pub fn set_draw_state(&mut self, is_even: f32, scale: f64) {
+        self.bg.scale = scale as f32; 
         self.bg.is_even = is_even;
-        self.name.scale = scale;
+        self.name.scale = scale as f32; 
         self.name.is_even = is_even;
-        self.icon.scale = scale;
+        self.icon.scale = scale as f32; 
         self.icon.is_even = is_even;
         self.name.font_scale = scale;
     }
     
-    pub fn draw_folder(&mut self, cx: &mut Cx2d, name: &str, is_even: f32, node_height: f32, depth: usize, scale: f32) {
+    pub fn draw_folder(&mut self, cx: &mut Cx2d, name: &str, is_even: f32, node_height: f64, depth: usize, scale: f64) {
         self.set_draw_state(is_even, scale);
         
         self.bg.begin(cx, Walk::size(Size::Fill, Size::Fixed(scale * node_height)), self.layout);
@@ -322,7 +322,7 @@ impl FileTreeNode {
         self.bg.end(cx);
     }
     
-    pub fn draw_file(&mut self, cx: &mut Cx2d, name: &str, is_even: f32, node_height: f32, depth: usize, scale: f32) {
+    pub fn draw_file(&mut self, cx: &mut Cx2d, name: &str, is_even: f32, node_height: f64, depth: usize, scale: f64) {
         self.set_draw_state(is_even, scale);
         
         self.bg.begin(cx, Walk::size(Size::Fill, Size::Fixed(scale * node_height)), self.layout);
@@ -336,12 +336,12 @@ impl FileTreeNode {
     fn indent_walk(&self, depth: usize) -> Walk {
         Walk {
             abs_pos: None,
-            width: Size::Fixed(depth as f32 * self.indent_width),
+            width: Size::Fixed(depth as f64 * self.indent_width),
             height: Size::Fixed(0.0),
             margin: Margin {
-                left: depth as f32 * 1.0,
+                left: depth as f64 * 1.0,
                 top: 0.0,
-                right: depth as f32 * 4.0,
+                right: depth as f64 * 4.0,
                 bottom: 0.0,
             },
         }
@@ -419,7 +419,7 @@ impl FileTree {
             walk += self.node_height.max(1.0);
         }
         
-        self.scroll_shadow.draw(cx, vec2(0., 0.));
+        self.scroll_shadow.draw(cx, dvec2(0., 0.));
         self.scroll_bars.end(cx);
         
         let selected_node_id = self.selected_node_id;
@@ -468,7 +468,7 @@ impl FileTree {
             });
             
             tree_node.draw_folder(cx, name, Self::is_even(self.count), self.node_height, self.stack.len(), scale);
-            self.stack.push(tree_node.opened * scale);
+            self.stack.push(tree_node.opened as f64 * scale);
             if tree_node.opened == 0.0 {
                 self.end_folder();
                 return Err(());

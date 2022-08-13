@@ -328,7 +328,7 @@ impl dyn FrameComponent {
 
 impl Frame {
 
-    pub fn set_scroll_pos(&mut self, v:Vec2){
+    pub fn set_scroll_pos(&mut self, v:DVec2){
         self.layout.scroll = v;
     }
     /*

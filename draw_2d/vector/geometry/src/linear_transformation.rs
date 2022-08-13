@@ -20,7 +20,7 @@ impl LinearTransformation {
         LinearTransformation::new(Vector::new(v.x, 0.0), Vector::new(0.0, v.y))
     }
 
-    pub fn uniform_scaling(k: f32) -> LinearTransformation {
+    pub fn uniform_scaling(k: f64) -> LinearTransformation {
         LinearTransformation::scaling(Vector::new(k, k))
     }
 
@@ -28,7 +28,7 @@ impl LinearTransformation {
         LinearTransformation::new(self.x * v.x, self.y * v.y)
     }
 
-    pub fn uniform_scale(self, k: f32) -> LinearTransformation {
+    pub fn uniform_scale(self, k: f64) -> LinearTransformation {
         LinearTransformation::new(self.x * k, self.y * k)
     }
 

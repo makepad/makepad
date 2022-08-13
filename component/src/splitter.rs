@@ -107,18 +107,18 @@ pub struct Splitter {
     #[live(Axis::Horizontal)] pub axis: Axis,
     #[live(SplitterAlign::Weighted(0.5))] pub align: SplitterAlign,
     #[rust] rect: Rect,
-    #[rust] position: f32,
+    #[rust] position: f64,
     #[rust] drag_start_align: Option<SplitterAlign>,
     
     state: State,
     
-    min_vertical: f32,
-    max_vertical: f32,
-    min_horizontal: f32,
-    max_horizontal: f32,
+    min_vertical: f64,
+    max_vertical: f64,
+    min_horizontal: f64,
+    max_horizontal: f64,
     
     bar: DrawSplitter,
-    split_bar_size: f32,
+    split_bar_size: f64,
     
     // framecomponent mode
     #[rust] draw_state: DrawStateWrap<DrawState>,
@@ -337,13 +337,13 @@ fn margin(&self) -> Margin {
 #[derive(Clone, Copy, Debug, Live, LiveHook)]
 #[live_ignore]
 pub enum SplitterAlign {
-    #[live(50.0)] FromStart(f32),
-    #[live(50.0)] FromEnd(f32),
-    #[pick(0.5)] Weighted(f32),
+    #[live(50.0)] FromStart(f64),
+    #[live(50.0)] FromEnd(f64),
+    #[pick(0.5)] Weighted(f64),
 }
 
 impl SplitterAlign {
-    fn to_position(self, axis: Axis, rect: Rect) -> f32 {
+    fn to_position(self, axis: Axis, rect: Rect) -> f64 {
         match axis {
             Axis::Horizontal => match self {
                 Self::FromStart(position) => position,

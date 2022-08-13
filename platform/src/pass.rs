@@ -140,7 +140,7 @@ impl Pass {
         cxpass.parent = CxPassParent::Pass(pass.pass_id());
     }
     
-    pub fn set_size(&self, cx: &mut Cx, pass_size: Vec2) {
+    pub fn set_size(&self, cx: &mut Cx, pass_size: DVec2) {
         let mut pass_size = pass_size;
         if pass_size.x < 1.0{pass_size.x = 1.0};
         if pass_size.y < 1.0{pass_size.y = 1.0};
@@ -242,11 +242,11 @@ pub struct CxPass {
     pub clear_depth: PassClearDepth,
     pub depth_init: f64,
     pub clear_color: Vec4,
-    pub override_dpi_factor: Option<f32>,
+    pub override_dpi_factor: Option<f64>,
     pub main_draw_list_id: Option<DrawListId>,
     pub parent: CxPassParent,
     pub paint_dirty: bool,
-    pub pass_size: Vec2,
+    pub pass_size: DVec2,
     pub pass_uniforms: PassUniforms,
     pub zbias_step: f32,
     pub platform: CxOsPass,
@@ -268,7 +268,7 @@ impl Default for CxPass {
             main_draw_list_id: None,
             parent: CxPassParent::None,
             paint_dirty: false,
-            pass_size: Vec2::default(),
+            pass_size: DVec2::default(),
             platform: CxOsPass::default()
         }
     }
@@ -283,20 +283,20 @@ pub enum CxPassParent {
 
 impl CxPass {
     
-    pub fn set_dpi_factor(&mut self, dpi_factor: f32) {
+    pub fn set_dpi_factor(&mut self, dpi_factor: f64) {
         let dpi_dilate = (2. - dpi_factor).max(0.).min(1.);
-        self.pass_uniforms.dpi_factor = dpi_factor;
-        self.pass_uniforms.dpi_dilate = dpi_dilate;
+        self.pass_uniforms.dpi_factor = dpi_factor as f32;
+        self.pass_uniforms.dpi_dilate = dpi_dilate as f32;
     }
     
-    pub fn set_matrix(&mut self, offset: Vec2, size: Vec2) {
+    pub fn set_matrix(&mut self, offset: DVec2, size: DVec2) {
          match self.matrix_mode{
             PassMatrixMode::Ortho=>{
                 let ortho = Mat4::ortho(
-                    offset.x,
-                    offset.x + size.x,
-                    offset.y,
-                    offset.y + size.y,
+                    offset.x as f32,
+                    (offset.x + size.x) as f32,
+                    offset.y as f32,
+                    (offset.y + size.y) as f32,
                     100.,
                     -100.,
                     1.0,
@@ -306,7 +306,7 @@ impl CxPass {
                 self.pass_uniforms.camera_view = Mat4::identity();
             }
             PassMatrixMode::Projection{fov_y, near, far, cam}=>{
-                let proj = Mat4::perspective(fov_y, size.x / size.y, near, far);
+                let proj = Mat4::perspective(fov_y, (size.x / size.y) as f32, near, far);
                 self.pass_uniforms.camera_projection = proj;
                 self.pass_uniforms.camera_view = cam;
             }

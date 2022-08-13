@@ -90,26 +90,26 @@ live_register!{
 #[derive(Live, LiveHook)]
 pub struct ScrollBar {
     bar: DrawScrollBar,
-    pub bar_size: f32,
-    pub min_handle_size: f32, //minimum size of the handle in pixels
-    bar_side_margin: f32,
+    pub bar_size: f64,
+    pub min_handle_size: f64, //minimum size of the handle in pixels
+    bar_side_margin: f64,
     #[live(Axis::Horizontal)] pub axis: Axis,
     
     use_vertical_finger_scroll: bool,
-    smoothing: Option<f32>,
+    smoothing: Option<f64>,
     
     state: State,
     
     #[rust] next_frame: NextFrame,
     #[rust(false)] visible: bool,
-    #[rust] view_total: f32, // the total view area
-    #[rust] view_visible: f32, // the visible view area
-    #[rust] scroll_size: f32, // the size of the scrollbar
-    #[rust] scroll_pos: f32, // scrolling position non normalised
+    #[rust] view_total: f64, // the total view area
+    #[rust] view_visible: f64, // the visible view area
+    #[rust] scroll_size: f64, // the size of the scrollbar
+    #[rust] scroll_pos: f64, // scrolling position non normalised
     
-    #[rust] scroll_target: f32,
-    #[rust] scroll_delta: f32,
-    #[rust] drag_point: Option<f32>, // the point in pixels where we are dragging
+    #[rust] scroll_target: f64,
+    #[rust] scroll_delta: f64,
+    #[rust] drag_point: Option<f64>, // the point in pixels where we are dragging
 }
 
 #[derive(Live, LiveHook)]
@@ -124,7 +124,7 @@ pub struct DrawScrollBar {
 #[derive(Clone, PartialEq, Debug)]
 pub enum ScrollBarAction {
     None,
-    Scroll {scroll_pos: f32, view_total: f32, view_visible: f32},
+    Scroll {scroll_pos: f64, view_total: f64, view_visible: f64},
     ScrollDone
 }
 
@@ -135,7 +135,7 @@ impl ScrollBar {
     pub fn with_use_vertical_finger_scroll(self, use_vertical_finger_scroll: bool) -> Self {Self {use_vertical_finger_scroll, ..self}}
     */
     // reads back normalized scroll position info
-    pub fn get_normalized_scroll_pos(&self) -> (f32, f32) {
+    pub fn get_normalized_scroll_pos(&self) -> (f64, f64) {
         // computed handle size normalized
         let vy = self.view_visible / self.view_total;
         if !self.visible {
@@ -147,7 +147,7 @@ impl ScrollBar {
     }
     
     // sets the scroll pos from finger position
-    pub fn set_scroll_pos_from_finger(&mut self, cx: &mut Cx, finger: f32) -> ScrollBarAction {
+    pub fn set_scroll_pos_from_finger(&mut self, cx: &mut Cx, finger: f64) -> ScrollBarAction {
         let vy = self.view_visible / self.view_total;
         let norm_handle = vy.max(self.min_handle_size / self.scroll_size);
         
@@ -212,11 +212,11 @@ impl ScrollBar {
         true
     }
     
-    pub fn get_scroll_pos(&self) -> f32 {
+    pub fn get_scroll_pos(&self) -> f64 {
         return self.scroll_pos;
     }
     
-    pub fn set_scroll_pos(&mut self, cx: &mut Cx, scroll_pos: f32) -> bool {
+    pub fn set_scroll_pos(&mut self, cx: &mut Cx, scroll_pos: f64) -> bool {
         // clamp scroll_pos to
         let scroll_pos = scroll_pos.min(self.view_total - self.view_visible).max(0.);
         if self.scroll_pos != scroll_pos {
@@ -230,7 +230,7 @@ impl ScrollBar {
     }
     
     
-    pub fn set_scroll_pos_no_clip(&mut self, cx: &mut Cx, scroll_pos: f32) -> bool {
+    pub fn set_scroll_pos_no_clip(&mut self, cx: &mut Cx, scroll_pos: f64) -> bool {
         // clamp scroll_pos to
         if self.scroll_pos != scroll_pos {
             self.scroll_pos = scroll_pos;
@@ -242,24 +242,24 @@ impl ScrollBar {
         return false
     }
     
-    pub fn get_scroll_target(&mut self) -> f32 {
+    pub fn get_scroll_target(&mut self) -> f64 {
         return self.scroll_target
     }
     
-    pub fn set_scroll_view_total(&mut self, _cx: &mut Cx, view_total: f32) {
+    pub fn set_scroll_view_total(&mut self, _cx: &mut Cx, view_total: f64) {
         self.view_total = view_total;
     }
     
-    pub fn get_scroll_view_total(&self) -> f32 {
+    pub fn get_scroll_view_total(&self) -> f64 {
         return self.view_total;
     }
     
-    pub fn get_scroll_view_visible(&self) -> f32 {
+    pub fn get_scroll_view_visible(&self) -> f64 {
         return self.view_visible;
     }
     
     
-    pub fn set_scroll_target(&mut self, cx: &mut Cx, scroll_pos_target: f32) -> bool {
+    pub fn set_scroll_target(&mut self, cx: &mut Cx, scroll_pos_target: f64) -> bool {
         // clamp scroll_pos to
         
         let new_target = scroll_pos_target.min(self.view_total - self.view_visible).max(0.);
@@ -272,7 +272,7 @@ impl ScrollBar {
         return false
     }
     
-    pub fn scroll_into_view(&mut self, cx: &mut Cx, pos: f32, size: f32, smooth: bool) {
+    pub fn scroll_into_view(&mut self, cx: &mut Cx, pos: f64, size: f64, smooth: bool) {
         if pos < self.scroll_pos { // scroll up
             let scroll_to = pos;
             if !smooth || self.smoothing.is_none() {
@@ -407,7 +407,7 @@ impl ScrollBar {
         }
     }
     
-    pub fn draw_scroll_bar(&mut self, cx: &mut Cx2d, axis: Axis,  view_rect: Rect, view_total: Vec2) -> f32 {
+    pub fn draw_scroll_bar(&mut self, cx: &mut Cx2d, axis: Axis,  view_rect: Rect, view_total: DVec2) -> f64 {
         
         self.axis = axis;
         
@@ -427,14 +427,14 @@ impl ScrollBar {
                 if self.visible {
                     let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
                     self.bar.is_vertical = 0.0;
-                    self.bar.norm_scroll = norm_scroll;
-                    self.bar.norm_handle = norm_handle;
+                    self.bar.norm_scroll = norm_scroll as f32;
+                    self.bar.norm_handle = norm_handle as f32;
                     let scroll = cx.turtle().scroll();
                     self.bar.draw_rel(
                         cx,
                         Rect {
-                            pos: vec2(self.bar_side_margin, view_rect.size.y - self.bar_size) + scroll,
-                            size: vec2(self.scroll_size, self.bar_size),
+                            pos: dvec2(self.bar_side_margin, view_rect.size.y - self.bar_size) + scroll,
+                            size: dvec2(self.scroll_size, self.bar_size),
                         }
                     );
                 }
@@ -454,14 +454,14 @@ impl ScrollBar {
                 if self.visible {
                     let (norm_scroll, norm_handle) = self.get_normalized_scroll_pos();
                     self.bar.is_vertical = 1.0;
-                    self.bar.norm_scroll = norm_scroll;
-                    self.bar.norm_handle = norm_handle;
+                    self.bar.norm_scroll = norm_scroll as f32;
+                    self.bar.norm_handle = norm_handle as f32;
                     let scroll = cx.turtle().scroll();
                     self.bar.draw_rel(
                         cx,
                         Rect {
-                            pos: vec2(view_rect.size.x - self.bar_size, self.bar_side_margin) + scroll,
-                            size: vec2(self.bar_size, self.scroll_size)
+                            pos: dvec2(view_rect.size.x - self.bar_size, self.bar_side_margin) + scroll,
+                            size: dvec2(self.bar_size, self.scroll_size)
                         }
                     );
                 }

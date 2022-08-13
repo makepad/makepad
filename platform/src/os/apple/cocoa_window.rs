@@ -7,7 +7,7 @@ use {
     },
     crate::{
         makepad_math::{
-            Vec2,
+            DVec2,
         },
         window::WindowId,
         os::{
@@ -42,9 +42,9 @@ pub struct CocoaWindow {
     pub(crate) window_id: WindowId,
     pub(crate) view: ObjcId,
     pub(crate) window: ObjcId,
-    pub(crate) ime_spot: Vec2,
+    pub(crate) ime_spot: DVec2,
     pub(crate) is_fullscreen: bool,
-    pub(crate) last_mouse_pos: Vec2,
+    pub(crate) last_mouse_pos: DVec2,
     window_delegate: ObjcId,
     live_resize_timer: ObjcId,
     last_window_geom: Option<WindowGeom>,
@@ -73,14 +73,14 @@ impl CocoaWindow {
                 window_id: window_id,
                 view: view,
                 last_window_geom: None,
-                ime_spot: Vec2::default(),
-                last_mouse_pos: Vec2::default(),
+                ime_spot: DVec2::default(),
+                last_mouse_pos: DVec2::default(),
             }
         }
     }
     
     // complete window initialization with pointers to self
-    pub fn init(&mut self, title: &str, size: Vec2, position: Option<Vec2>) {
+    pub fn init(&mut self, title: &str, size: DVec2, position: Option<DVec2>) {
         unsafe {
             let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
             
@@ -157,7 +157,7 @@ impl CocoaWindow {
         }
     }
     
-    pub fn set_ime_spot(&mut self, spot: Vec2) {
+    pub fn set_ime_spot(&mut self, spot: DVec2) {
         self.ime_spot = spot;
     }
     
@@ -242,7 +242,7 @@ impl CocoaWindow {
         get_cocoa_app_global().do_callback(events);
     }
     
-    pub fn set_position(&mut self, pos: Vec2) {
+    pub fn set_position(&mut self, pos: DVec2) {
         let mut window_frame: NSRect = unsafe {msg_send![self.window, frame]};
         window_frame.origin.x = pos.x as f64;
         window_frame.origin.y = pos.y as f64;
@@ -250,12 +250,12 @@ impl CocoaWindow {
         unsafe {let () = msg_send![self.window, setFrame: window_frame display: YES];};
     }
     
-    pub fn get_position(&self) -> Vec2 {
+    pub fn get_position(&self) -> DVec2 {
         let window_frame: NSRect = unsafe {msg_send![self.window, frame]};
-        Vec2 {x: window_frame.origin.x as f32, y: window_frame.origin.y as f32}
+        DVec2 {x: window_frame.origin.x, y: window_frame.origin.y}
     }
     
-    pub fn get_ime_origin(&self) -> Vec2 {
+    pub fn get_ime_origin(&self) -> DVec2 {
         let shift_x = 5.0; // unknown why
         let shift_y = -10.0;
         let rect = NSRect {
@@ -264,29 +264,29 @@ impl CocoaWindow {
             size: NSSize {width: 0.0, height: 0.0},
         };
         let out: NSRect = unsafe {msg_send![self.window, convertRectToScreen: rect]};
-        Vec2 {x: out.origin.x as f32 + shift_x, y: out.origin.y as f32 + shift_y}
+        DVec2 {x: out.origin.x + shift_x, y: out.origin.y + shift_y}
     }
     
-    pub fn get_inner_size(&self) -> Vec2 {
+    pub fn get_inner_size(&self) -> DVec2 {
         let view_frame: NSRect = unsafe {msg_send![self.view, frame]};
-        Vec2 {x: view_frame.size.width as f32, y: view_frame.size.height as f32}
+        DVec2 {x: view_frame.size.width, y: view_frame.size.height}
     }
     
-    pub fn get_outer_size(&self) -> Vec2 {
+    pub fn get_outer_size(&self) -> DVec2 {
         let window_frame: NSRect = unsafe {msg_send![self.window, frame]};
-        Vec2 {x: window_frame.size.width as f32, y: window_frame.size.height as f32}
+        DVec2 {x: window_frame.size.width, y: window_frame.size.height}
     }
     
-    pub fn set_outer_size(&self, size: Vec2) {
+    pub fn set_outer_size(&self, size: DVec2) {
         let mut window_frame: NSRect = unsafe {msg_send![self.window, frame]};
-        window_frame.size.width = size.x as f64;
-        window_frame.size.height = size.y as f64;
+        window_frame.size.width = size.x;
+        window_frame.size.height = size.y;
         unsafe {let () = msg_send![self.window, setFrame: window_frame display: YES];};
     }
     
-    pub fn get_dpi_factor(&self) -> f32 {
+    pub fn get_dpi_factor(&self) -> f64 {
         let scale: f64 = unsafe {msg_send![self.window, backingScaleFactor]};
-        scale as f32
+        scale
     }
     
     pub fn send_change_event(&mut self) {
@@ -359,7 +359,7 @@ impl CocoaWindow {
         })]);
     }
     
-    pub fn send_mouse_move(&mut self, _event: ObjcId, pos: Vec2, modifiers: KeyModifiers) {
+    pub fn send_mouse_move(&mut self, _event: ObjcId, pos: DVec2, modifiers: KeyModifiers) {
         self.last_mouse_pos = pos;
         let mut events = Vec::new();
         

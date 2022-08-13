@@ -1,6 +1,6 @@
 use std::cell::RefCell;
 use std::rc::Rc;
-use crate::makepad_math::{Rect, Vec4, Vec2};
+use crate::makepad_math::{Rect, Vec4, DVec2};
 use crate::cx::Cx;
 use crate::makepad_error_log::*;
 use crate::draw_list::DrawListId;
@@ -9,8 +9,8 @@ use std::fmt::Write;
 #[derive(Clone, Default)]
 pub struct DebugInner {
     pub rects: Vec<(Rect, Vec4)>,
-    pub points: Vec<(Vec2, Vec4)>,
-    pub labels: Vec<(Vec2, Vec4, String)>,
+    pub points: Vec<(DVec2, Vec4)>,
+    pub labels: Vec<(DVec2, Vec4, String)>,
 }
 
 #[derive(Clone, Default)]
@@ -21,23 +21,23 @@ impl Debug {
     const G: Vec4 = Vec4 {x: 0.0, y: 1.0, z: 0.0, w: 1.0};
     const B: Vec4 = Vec4 {x: 0.0, y: 0.0, z: 1.0, w: 1.0};
     
-    pub fn point(&self, color: Vec4, p: Vec2) {
+    pub fn point(&self, color: Vec4, p: DVec2) {
         let mut inner = self.0.borrow_mut();
         inner.points.push((p, color));
     }
     
-    pub fn point_r(&self, p: Vec2) {self.point(Self::R, p)}
-    pub fn point_g(&self, p: Vec2) {self.point(Self::G, p)}
-    pub fn point_b(&self, p: Vec2) {self.point(Self::B, p)}
+    pub fn point_r(&self, p: DVec2) {self.point(Self::R, p)}
+    pub fn point_g(&self, p: DVec2) {self.point(Self::G, p)}
+    pub fn point_b(&self, p: DVec2) {self.point(Self::B, p)}
 
-    pub fn label(&self, color: Vec4, p: Vec2, label:String) {
+    pub fn label(&self, color: Vec4, p: DVec2, label:String) {
         let mut inner = self.0.borrow_mut();
         inner.labels.push((p, color,label));
     }
     
-    pub fn label_r(&self, p: Vec2, label:String) {self.label(Self::R, p, label)}
-    pub fn label_g(&self, p: Vec2, label:String) {self.label(Self::G, p, label)}
-    pub fn label_b(&self, p: Vec2, label:String) {self.label(Self::B, p, label)}
+    pub fn label_r(&self, p: DVec2, label:String) {self.label(Self::R, p, label)}
+    pub fn label_g(&self, p: DVec2, label:String) {self.label(Self::G, p, label)}
+    pub fn label_b(&self, p: DVec2, label:String) {self.label(Self::B, p, label)}
 
     pub fn rect(&self, color: Vec4, p: Rect) {
         let mut inner = self.0.borrow_mut();
@@ -59,14 +59,14 @@ impl Debug {
         swap
     }
 
-    pub fn take_points(&self)->Vec<(Vec2, Vec4)>{
+    pub fn take_points(&self)->Vec<(DVec2, Vec4)>{
         let mut inner = self.0.borrow_mut();
         let mut swap = Vec::new();
         std::mem::swap(&mut swap, &mut inner.points);
         swap
     }
 
-    pub fn take_labels(&self)->Vec<(Vec2, Vec4, String)>{
+    pub fn take_labels(&self)->Vec<(DVec2, Vec4, String)>{
         let mut inner = self.0.borrow_mut();
         let mut swap = Vec::new();
         std::mem::swap(&mut swap, &mut inner.labels);

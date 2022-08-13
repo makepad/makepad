@@ -166,7 +166,7 @@ impl DrawDesktopButton{
             DesktopButtonType::XRMode => (50., 36.),
             DesktopButtonType::Fullscreen => (50., 36.),
         };
-        Walk::fixed_size(vec2(w, h))
+        Walk::fixed_size(dvec2(w, h))
     }
 }
 

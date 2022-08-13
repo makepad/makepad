@@ -99,8 +99,8 @@ pub struct FromWasmTextCopyResponse {
 
 #[derive(FromWasm)]
 pub struct FromWasmShowTextIME {
-    pub x: f32,
-    pub y: f32
+    pub x: f64,
+    pub y: f64
 }
 
 #[derive(FromWasm)]

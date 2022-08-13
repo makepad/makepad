@@ -6,7 +6,7 @@ use {
         ops::DerefMut
     },
     crate::{
-        makepad_math::Vec2,
+        makepad_math::DVec2,
         makepad_platform::{
             DrawEvent,
             Area,
@@ -37,7 +37,7 @@ pub struct Cx2d<'a> {
     pub (crate) turtles: Vec<Turtle>,
     pub (crate) turtle_walks: Vec<TurtleWalk>,
     pub (crate) align_list: Vec<Area>,
-    pub (crate) current_dpi_factor: f32,
+    pub (crate) current_dpi_factor: f64,
     pub fonts_atlas_rc: CxFontsAtlasRc,
 }
 
@@ -91,7 +91,7 @@ impl<'a> Cx2d<'a> {
         cx_2d.draw_font_atlas();
     }
     
-    pub fn current_dpi_factor(&self) -> f32 {
+    pub fn current_dpi_factor(&self) -> f64 {
         self.current_dpi_factor
     }
     
@@ -132,7 +132,7 @@ impl<'a> Cx2d<'a> {
         }
     }
     
-    pub fn current_pass_size(&mut self) -> Vec2 {
+    pub fn current_pass_size(&mut self) -> DVec2 {
         let pass_id = self.pass_id.expect("No pass found when begin_view");
         self.passes[pass_id].pass_size
     }

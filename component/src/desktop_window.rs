@@ -42,7 +42,7 @@ live_register!{
 
 #[derive(Live)]
 pub struct DesktopWindow {
-    #[rust] pub caption_size: Vec2,
+    #[rust] pub caption_size: DVec2,
     
     debug_view: DebugView,
     nav_control: NavControl,

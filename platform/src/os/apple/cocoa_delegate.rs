@@ -8,7 +8,7 @@ use {
     crate::{
         makepad_live_id::LiveId,
         makepad_math::{
-            Vec2,
+            DVec2,
         },
         os::{
             apple::frameworks::*,
@@ -469,10 +469,10 @@ pub fn define_cocoa_view_class() -> *const Class {
         cw.send_mouse_up(2, modifiers);
     }
     
-    fn mouse_pos_from_event(view: &Object, event: ObjcId) -> Vec2 {
+    fn mouse_pos_from_event(view: &Object, event: ObjcId) -> DVec2 {
         let window_point: NSPoint = unsafe {msg_send![event, locationInWindow]};
         let view_point = window_point_to_view_point(view, window_point);
-        ns_point_to_vec2(view_point)
+        ns_point_to_dvec2(view_point)
     }
     
     fn window_point_to_view_point(view: &Object, window_point: NSPoint) -> NSPoint {
@@ -484,10 +484,10 @@ pub fn define_cocoa_view_class() -> *const Class {
         }
     }
     
-    fn ns_point_to_vec2(point: NSPoint) -> Vec2 {
-        Vec2 {
-            x: point.x as f32,
-            y: point.y as f32,
+    fn ns_point_to_dvec2(point: NSPoint) -> DVec2 {
+        DVec2 {
+            x: point.x,
+            y: point.y,
         }
     }
     
@@ -624,7 +624,7 @@ pub fn define_cocoa_view_class() -> *const Class {
         //let shift_x = 4.0;
         //let bar = 0.0;// (window_rect.size.height - view_rect.size.height) as f32 - 5.;
         NSRect {
-            origin: NSPoint {x: (origin.x + cw.ime_spot.x) as f64, y: (origin.y + (view_rect.size.height as f32 - cw.ime_spot.y)) as f64},
+            origin: NSPoint {x: (origin.x + cw.ime_spot.x), y: (origin.y + (view_rect.size.height - cw.ime_spot.y))},
             // as _, y as _),
             size: NSSize {width: 0.0, height: 0.0},
         }
@@ -717,7 +717,7 @@ pub fn define_cocoa_view_class() -> *const Class {
     
     fn dragging(this: &Object, sender: ObjcId) -> NSDragOperation {
         let window = get_cocoa_window(this);
-        let pos = ns_point_to_vec2(window_point_to_view_point(this, unsafe {
+        let pos = ns_point_to_dvec2(window_point_to_view_point(this, unsafe {
             msg_send![sender, draggingLocation]
         }));
         let action = Rc::new(Cell::new(DragAction::None));
@@ -744,7 +744,7 @@ pub fn define_cocoa_view_class() -> *const Class {
     
     extern fn perform_drag_operation(this: &Object, _: Sel, sender: ObjcId) {
         let window = get_cocoa_window(this);
-        let pos = ns_point_to_vec2(window_point_to_view_point(this, unsafe {
+        let pos = ns_point_to_dvec2(window_point_to_view_point(this, unsafe {
             msg_send![sender, draggingLocation]
         }));
         let pasteboard: ObjcId = unsafe {msg_send![sender, draggingPasteboard]};

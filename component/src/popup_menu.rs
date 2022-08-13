@@ -91,9 +91,7 @@ live_register!{
                 }
             }
         }
-        
         indent_width: 10.0
-        min_drag_distance: 10.0
     }
     
     PopupMenu: {{PopupMenu}} {
@@ -132,7 +130,6 @@ pub struct PopupMenuItem {
     indent_width: f32,
     icon_walk: Walk,
     
-    min_drag_distance: f32,
     opened: f32,
     hover: f32,
     selected: f32,
@@ -241,7 +238,7 @@ impl PopupMenuItem {
 
 impl PopupMenu {
     
-    pub fn menu_contains_pos(&self, cx:&mut Cx, pos:Vec2)->bool{
+    pub fn menu_contains_pos(&self, cx:&mut Cx, pos:DVec2)->bool{
         self.bg.area().get_clipped_rect(cx).contains(pos)
     }
     
@@ -251,7 +248,7 @@ impl PopupMenu {
         self.count = 0;
     }
     
-    pub fn end(&mut self, cx: &mut Cx2d, shift:Vec2) {
+    pub fn end(&mut self, cx: &mut Cx2d, shift:DVec2) {
         cx.turtle_mut().set_shift(shift);
         self.bg.end(cx);
         self.view.end(cx);

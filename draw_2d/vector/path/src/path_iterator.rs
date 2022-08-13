@@ -6,7 +6,7 @@ use makepad_internal_iter::InternalIterator;
 pub trait PathIterator: InternalIterator<Item = PathCommand> {
     /// Returns an iterator over line path commands that approximate `self` with tolerance
     /// `epsilon`.
-    fn linearize(self, epsilon: f32) -> Linearize<Self>
+    fn linearize(self, epsilon: f64) -> Linearize<Self>
     where
         Self: Sized,
     {
@@ -23,7 +23,7 @@ impl<I> PathIterator for I where I: InternalIterator<Item = PathCommand> {}
 #[derive(Clone, Debug)]
 pub struct Linearize<P> {
     path: P,
-    epsilon: f32,
+    epsilon: f64,
 }
 
 impl<P> InternalIterator for Linearize<P>
