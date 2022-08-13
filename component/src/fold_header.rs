@@ -47,12 +47,12 @@ live_register!{
 #[live_register(frame_component!(FoldHeader))]
 pub struct FoldHeader {
     #[rust] draw_state: DrawStateWrap<DrawState>,
-    #[rust] rect_size: f32,
+    #[rust] rect_size: f64,
     #[rust] area: Area,
     header: FrameRef,
     body: FrameRef,
     state: State,
-    opened: f32,
+    opened: f64,
     layout: Layout,
     walk: Walk,
     body_walk: Walk,
@@ -116,7 +116,7 @@ impl FrameComponent for FoldHeader {
             cx.begin_turtle(
                 self.body_walk,
                 Layout::flow_down()
-                .with_scroll(vec2(0.0, -self.rect_size * (1.0 - self.opened)))
+                .with_scroll(dvec2(0.0, -self.rect_size * (1.0 - self.opened)))
                 .with_clip(true,true)
             );
             self.draw_state.set(DrawState::DrawBody);

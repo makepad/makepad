@@ -9,13 +9,13 @@ use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssi
 /// a point can be scaled, rotated, and translated, a vector can only be scaled and rotated.
 #[derive(Clone, Copy, Debug, Default, PartialEq, PartialOrd)]
 pub struct Vector {
-    pub x: f32,
-    pub y: f32,
+    pub x: f64,
+    pub y: f64,
 }
 
 impl Vector {
     /// Creates a new vector with the given coordinates.
-    pub fn new(x: f32, y: f32) -> Vector {
+    pub fn new(x: f64, y: f64) -> Vector {
         Vector { x, y }
     }
 
@@ -32,7 +32,7 @@ impl Vector {
     }
 
     /// Returns the length of `self`.
-    pub fn length(self) -> f32 {
+    pub fn length(self) -> f64 {
         // `hypot` is more numerically stable than using `sqrt`. See:
         // https://en.wikipedia.org/wiki/Hypot
         self.x.hypot(self.y)
@@ -49,12 +49,12 @@ impl Vector {
     }
 
     /// Returns the dot product of `self` and `other`.
-    pub fn dot(self, other: Vector) -> f32 {
+    pub fn dot(self, other: Vector) -> f64 {
         self.x * other.x + self.y * other.y
     }
 
     /// Returns the cross product of `self` and `other`.
-    pub fn cross(self, other: Vector) -> f32 {
+    pub fn cross(self, other: Vector) -> f64 {
         self.x * other.y - self.y * other.x
     }
 
@@ -76,14 +76,14 @@ impl SubAssign for Vector {
     }
 }
 
-impl MulAssign<f32> for Vector {
-    fn mul_assign(&mut self, k: f32) {
+impl MulAssign<f64> for Vector {
+    fn mul_assign(&mut self, k: f64) {
         *self = *self * k
     }
 }
 
-impl DivAssign<f32> for Vector {
-    fn div_assign(&mut self, k: f32) {
+impl DivAssign<f64> for Vector {
+    fn div_assign(&mut self, k: f64) {
         *self = *self / k
     }
 }
@@ -104,18 +104,18 @@ impl Sub for Vector {
     }
 }
 
-impl Mul<f32> for Vector {
+impl Mul<f64> for Vector {
     type Output = Vector;
 
-    fn mul(self, k: f32) -> Vector {
+    fn mul(self, k: f64) -> Vector {
         Vector::new(self.x * k, self.y * k)
     }
 }
 
-impl Div<f32> for Vector {
+impl Div<f64> for Vector {
     type Output = Vector;
 
-    fn div(self, k: f32) -> Vector {
+    fn div(self, k: f64) -> Vector {
         Vector::new(self.x / k, self.y / k)
     }
 }

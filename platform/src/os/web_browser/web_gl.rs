@@ -230,9 +230,9 @@ impl Cx {
         }*/
     }
     
-    pub fn setup_render_pass(&mut self, pass_id: PassId, inherit_dpi_factor: f32) {
+    pub fn setup_render_pass(&mut self, pass_id: PassId, inherit_dpi_factor: f64) {
         let pass_size = self.passes[pass_id].pass_size;
-        self.passes[pass_id].set_matrix(Vec2::default(), pass_size);
+        self.passes[pass_id].set_matrix(DVec2::default(), pass_size);
         self.passes[pass_id].paint_dirty = false;
         
         let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor {
@@ -247,7 +247,7 @@ impl Cx {
     pub fn draw_pass_to_canvas(
         &mut self,
         pass_id: PassId,
-        dpi_factor: f32
+        dpi_factor: f64
     ) {
         let view_id = self.passes[pass_id].main_draw_list_id.unwrap();
         
@@ -286,7 +286,7 @@ impl Cx {
         );
     }
     
-    pub fn draw_pass_to_texture(&mut self, pass_id: PassId, dpi_factor: f32) {
+    pub fn draw_pass_to_texture(&mut self, pass_id: PassId, dpi_factor: f64) {
         let pass_size = self.passes[pass_id].pass_size;
         let view_id = self.passes[pass_id].main_draw_list_id.unwrap();
         

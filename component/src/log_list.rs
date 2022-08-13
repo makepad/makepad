@@ -137,14 +137,14 @@ pub struct LogListNode {
     
     state: State,
     
-    indent_width: f32,
+    indent_width: f64,
     
     fold_button: FoldButton,
     link_label: LinkLabel,
     
     icon_walk: Walk,
     
-    min_drag_distance: f32,
+    min_drag_distance: f64,
     
     opened: f32,
     hover: f32,
@@ -158,7 +158,7 @@ pub struct LogList {
     
     filler_quad: DrawBgQuad,
     layout: Layout,
-    node_height: f32,
+    node_height: f64,
     
     #[rust] selected_node_ids: HashSet<LogListNodeId>,
     #[rust] open_nodes: HashSet<LogListNodeId>,
@@ -210,7 +210,7 @@ impl LogListNode {
         link: &str,
         body: &str,
         is_even: f32,
-        node_height: f32,
+        node_height: f64,
         _depth: usize
     ) {
         self.set_draw_state(is_even);

@@ -4,10 +4,10 @@ use makepad_geometry::Rectangle;
 /// A font.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TTFFont {
-    pub units_per_em: f32,
-    pub ascender: f32,
-    pub descender: f32,
-    pub line_gap: f32,
+    pub units_per_em: f64,
+    pub ascender: f64,
+    pub descender: f64,
+    pub line_gap: f64,
     pub bounds: Rectangle,
     pub char_code_to_glyph_index_map: Vec<usize>,
     pub glyphs: Vec<Glyph>,

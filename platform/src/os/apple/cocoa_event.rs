@@ -1,7 +1,7 @@
 use {
     std::cell::Cell,
     crate::{
-        makepad_math::Vec2,
+        makepad_math::DVec2,
         area::Area,
         window::WindowId,
         menu::MenuCommand,
@@ -62,7 +62,7 @@ pub enum CocoaEvent {
 
 #[derive(Debug)]
 pub struct CocoaMouseDownEvent {
-    pub abs: Vec2,
+    pub abs: DVec2,
     pub button: usize,
     pub window_id: WindowId,
     pub modifiers: KeyModifiers,
@@ -91,7 +91,7 @@ impl CocoaMouseDownEvent {
 
 #[derive(Debug)]
 pub struct CocoaMouseMoveEvent {
-    pub abs: Vec2,
+    pub abs: DVec2,
     pub window_id: WindowId,
     pub modifiers: KeyModifiers,
     pub time: f64
@@ -133,7 +133,7 @@ impl CocoaMouseMoveEvent {
 
 #[derive(Debug)]
 pub struct CocoaMouseUpEvent {
-    pub abs: Vec2,
+    pub abs: DVec2,
     pub button: usize,
     pub window_id: WindowId,
     pub modifiers: KeyModifiers,
@@ -163,8 +163,8 @@ impl CocoaMouseUpEvent {
 #[derive(Debug)]
 pub struct CocoaScrollEvent {
     pub window_id: WindowId,
-    pub scroll: Vec2,
-    pub abs: Vec2,
+    pub scroll: DVec2,
+    pub abs: DVec2,
     pub modifiers: KeyModifiers,
     pub time: f64
 }

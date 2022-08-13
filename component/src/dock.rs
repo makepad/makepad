@@ -72,7 +72,7 @@ pub struct Dock {
     overlay_view: View,
     round_corner: DrawRoundCorner,
     padding_fill: DrawColor,
-    border_size: f32,
+    border_size: f64,
     drag_quad: DrawColor,
     tab_bar: Option<LivePtr>,
     splitter: Option<LivePtr>,
@@ -121,16 +121,16 @@ impl Dock {
                 Panel::Tab(panel) => {
                     let rc = &mut self.round_corner;
                     rc.flip = vec2(0.0, 0.0);
-                    let rad = vec2(rc.border_radius, rc.border_radius);
+                    let rad = dvec2(rc.border_radius as f64, rc.border_radius as f64);
                     let pos = panel.full_rect.pos;
                     let size = panel.full_rect.size;
                     rc.draw_abs(cx, Rect {pos, size: rad});
                     rc.flip = vec2(1.0, 0.0);
-                    rc.draw_abs(cx, Rect {pos: pos + vec2(size.x - rad.x, 0.), size: rad});
+                    rc.draw_abs(cx, Rect {pos: pos + dvec2(size.x - rad.x, 0.), size: rad});
                     rc.flip = vec2(1.0, 1.0);
-                    rc.draw_abs(cx, Rect {pos: pos + vec2(size.x - rad.x, size.y - rad.y), size: rad});
+                    rc.draw_abs(cx, Rect {pos: pos + dvec2(size.x - rad.x, size.y - rad.y), size: rad});
                     rc.flip = vec2(0.0, 1.0);
-                    rc.draw_abs(cx, Rect {pos: pos + vec2(0., size.y - rad.y), size: rad});
+                    rc.draw_abs(cx, Rect {pos: pos + dvec2(0., size.y - rad.y), size: rad});
                 }
                 _ => ()
             }
@@ -141,15 +141,15 @@ impl Dock {
 
         pf.draw_abs(cx, Rect {
             pos: rect.pos,
-            size: vec2(self.border_size, rect.size.y)
+            size: dvec2(self.border_size, rect.size.y)
         });
         pf.draw_abs(cx, Rect {
-            pos: rect.pos + vec2(rect.size.x - self.border_size, 0.0),
-            size: vec2(self.border_size, rect.size.y)
+            pos: rect.pos + dvec2(rect.size.x - self.border_size, 0.0),
+            size: dvec2(self.border_size, rect.size.y)
         });
         pf.draw_abs(cx, Rect {
-            pos: rect.pos + vec2(0., rect.size.y - self.border_size),
-            size: vec2(rect.size.x, self.border_size)
+            pos: rect.pos + dvec2(0., rect.size.y - self.border_size),
+            size: dvec2(rect.size.x, self.border_size)
         });
         cx.end_turtle_with_area(&mut self.area);
     }
@@ -425,7 +425,7 @@ pub enum DockAction {
     ContentsReceivedDraggedItem(PanelId, DragPosition, DraggedItem),
 }
 
-fn compute_drag_position(rect: Rect, position: Vec2) -> DragPosition {
+fn compute_drag_position(rect: Rect, position: DVec2) -> DragPosition {
     let top_left = rect.pos;
     let bottom_right = rect.pos + rect.size;
     if (position.x - top_left.x) / rect.size.x < 0.1 {
@@ -445,34 +445,34 @@ fn compute_drag_rect(rect: Rect, position: DragPosition) -> Rect {
     match position {
         DragPosition::Left => Rect {
             pos: rect.pos,
-            size: Vec2 {
+            size: DVec2 {
                 x: rect.size.x / 2.0,
                 y: rect.size.y,
             },
         },
         DragPosition::Right => Rect {
-            pos: Vec2 {
+            pos: DVec2 {
                 x: rect.pos.x + rect.size.x / 2.0,
                 y: rect.pos.y,
             },
-            size: Vec2 {
+            size: DVec2 {
                 x: rect.size.x / 2.0,
                 y: rect.size.y,
             },
         },
         DragPosition::Top => Rect {
             pos: rect.pos,
-            size: Vec2 {
+            size: DVec2 {
                 x: rect.size.x,
                 y: rect.size.y / 2.0,
             },
         },
         DragPosition::Bottom => Rect {
-            pos: Vec2 {
+            pos: DVec2 {
                 x: rect.pos.x,
                 y: rect.pos.y + rect.size.y / 2.0,
             },
-            size: Vec2 {
+            size: DVec2 {
                 x: rect.size.x,
                 y: rect.size.y / 2.0,
             },

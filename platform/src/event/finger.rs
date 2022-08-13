@@ -34,10 +34,10 @@ use {
 #[derive(Clone, Copy, Default, Debug, Live)]
 #[live_ignore]
 pub struct Margin {
-    pub left: f32,
-    pub top: f32,
-    pub right: f32,
-    pub bottom: f32
+    pub left: f64,
+    pub top: f64,
+    pub right: f64,
+    pub bottom: f64
 }
 
 
@@ -45,11 +45,16 @@ impl LiveHook for Margin {
     fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Option<usize> {
         match &nodes[index].value {
             LiveValue::Float(v) => {
-                *self = Self {left: *v as f32, top: *v as f32, right: *v as f32, bottom: *v as f32};
+                *self = Self {left: *v, top: *v, right: *v, bottom: *v};
                 Some(index + 1)
             }
             LiveValue::Int(v) => {
-                *self = Self {left: *v as f32, top: *v as f32, right: *v as f32, bottom: *v as f32};
+                *self = Self {
+                    left: *v as f64,
+                    top: *v as f64,
+                    right: *v as f64,
+                    bottom: *v as f64
+                };
                 Some(index + 1)
             }
             _ => None
@@ -58,25 +63,25 @@ impl LiveHook for Margin {
 }
 
 impl Margin {
-    pub fn left_top(&self) -> Vec2 {
-        vec2(self.left, self.top)
+    pub fn left_top(&self) -> DVec2 {
+        dvec2(self.left, self.top)
     }
-    pub fn right_bottom(&self) -> Vec2 {
-        vec2(self.right, self.bottom)
+    pub fn right_bottom(&self) -> DVec2 {
+        dvec2(self.right, self.bottom)
     }
-    pub fn size(&self) -> Vec2 {
-        vec2(self.left + self.right, self.top + self.bottom)
+    pub fn size(&self) -> DVec2 {
+        dvec2(self.left + self.right, self.top + self.bottom)
     }
-    pub fn width(&self) -> f32 {
+    pub fn width(&self) -> f64 {
         self.left + self.right
     }
-    pub fn height(&self) -> f32 {
+    pub fn height(&self) -> f64 {
         self.top + self.bottom
     }
 }
 
 pub const TAP_COUNT_TIME: f64 = 0.5;
-pub const TAP_COUNT_DISTANCE: f32 = 10.0;
+pub const TAP_COUNT_DISTANCE: f64 = 10.0;
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct DigitId(pub LiveId);
@@ -86,13 +91,13 @@ pub struct CxDigit {
     digit_id: DigitId,
     pub captured: Area,
     pub capture_time: f64,
-    pub down_abs_start: Vec2,
+    pub down_abs_start: DVec2,
 }
 
 #[derive(Default, Clone)]
 pub struct CxDigitTap {
     digit_id: DigitId,
-    last_pos: Vec2,
+    last_pos: DVec2,
     last_time: f64,
     count: u32
 }
@@ -259,7 +264,7 @@ impl CxFingers {
         }
     }
     
-    pub (crate) fn process_tap_count(&mut self, digit_id: DigitId, pos: Vec2, time: f64) -> u32 {
+    pub (crate) fn process_tap_count(&mut self, digit_id: DigitId, pos: DVec2, time: f64) -> u32 {
         self.taps.retain( | tap | (time - tap.last_time) < TAP_COUNT_TIME);
         
         if let Some(tap) = self.taps.iter_mut().find( | v | v.digit_id == digit_id) {
@@ -346,7 +351,7 @@ impl Deref for DigitInfo {
 #[derive(Clone, Debug)]
 pub struct FingerDownEvent {
     pub window_id: WindowId,
-    pub abs: Vec2,
+    pub abs: DVec2,
     pub digit: DigitInfo,
     pub tap_count: u32,
     pub handled: Cell<bool>,
@@ -381,7 +386,7 @@ impl std::ops::DerefMut for FingerDownHitEvent {
 #[derive(Clone, Debug)]
 pub struct FingerMoveEvent {
     pub window_id: WindowId,
-    pub abs: Vec2,
+    pub abs: DVec2,
     pub handled: Cell<bool>,
     pub sweep_lock: Cell<Area>,
     pub hover_last: Area,
@@ -394,7 +399,7 @@ pub struct FingerMoveEvent {
 
 #[derive(Clone, Debug)]
 pub struct FingerMoveHitEvent {
-    pub abs_start: Vec2,
+    pub abs_start: DVec2,
     pub rect: Rect,
     pub is_over: bool,
     pub deref_target: FingerMoveEvent,
@@ -402,8 +407,8 @@ pub struct FingerMoveHitEvent {
 
 #[derive(Clone, Debug)]
 pub struct FingerSweepEvent {
-    pub abs: Vec2,
-    pub abs_start: Vec2,
+    pub abs: DVec2,
+    pub abs_start: DVec2,
     pub rect: Rect,
     
     pub window_id: WindowId,
@@ -441,7 +446,7 @@ impl std::ops::DerefMut for FingerMoveHitEvent {
 
 
 impl FingerMoveHitEvent {
-    pub fn move_distance(&self) -> f32 {
+    pub fn move_distance(&self) -> f64 {
         ((self.abs_start.x - self.abs.x).powf(2.) + (self.abs_start.y - self.abs.y).powf(2.)).sqrt()
     }
 }
@@ -450,7 +455,7 @@ impl FingerMoveHitEvent {
 #[derive(Clone, Debug)]
 pub struct FingerUpEvent {
     pub window_id: WindowId,
-    pub abs: Vec2,
+    pub abs: DVec2,
     pub captured: Area,
     pub capture_time: f64,
     pub digit: DigitInfo,
@@ -468,7 +473,7 @@ impl FingerUpHitEvent {
 
 #[derive(Clone, Debug)]
 pub struct FingerUpHitEvent {
-    pub abs_start: Vec2,
+    pub abs_start: DVec2,
     pub rect: Rect,
     pub is_over: bool,
     pub deref_target: FingerUpEvent
@@ -499,7 +504,7 @@ impl Default for HoverState {
 #[derive(Clone, Debug)]
 pub struct FingerHoverEvent {
     pub window_id: WindowId,
-    pub abs: Vec2,
+    pub abs: DVec2,
     pub digit_id: DigitId,
     pub hover_last: Area,
     pub handled: Cell<bool>,
@@ -529,8 +534,8 @@ impl std::ops::DerefMut for FingerHoverHitEvent {
 pub struct FingerScrollEvent {
     pub window_id: WindowId,
     pub digit_id: DigitId,
-    pub abs: Vec2,
-    pub scroll: Vec2,
+    pub abs: DVec2,
+    pub scroll: DVec2,
     pub device: DigitDevice,
     pub handled_x: Cell<bool>,
     pub handled_y: Cell<bool>,
@@ -557,7 +562,7 @@ impl std::ops::DerefMut for FingerScrollHitEvent {
 #[derive(Clone, Debug)]
 pub struct DragEvent {
     pub handled: Cell<bool>,
-    pub abs: Vec2,
+    pub abs: DVec2,
     pub state: DragState,
     pub action: Rc<Cell<DragAction >>,
 }
@@ -565,13 +570,13 @@ pub struct DragEvent {
 #[derive(Clone, Debug)]
 pub struct DropEvent {
     pub handled: Cell<bool>,
-    pub abs: Vec2,
+    pub abs: DVec2,
     pub dragged_item: DraggedItem,
 }
 
 #[derive(Debug, PartialEq)]
 pub struct DragHitEvent<'a> {
-    pub abs: Vec2,
+    pub abs: DVec2,
     pub rect: Rect,
     pub state: DragState,
     pub action: &'a Cell<DragAction>,
@@ -579,7 +584,7 @@ pub struct DragHitEvent<'a> {
 
 #[derive(Debug, PartialEq)]
 pub struct DropHitEvent<'a> {
-    pub abs: Vec2,
+    pub abs: DVec2,
     pub rect: Rect,
     pub dragged_item: &'a DraggedItem,
 }
@@ -644,7 +649,7 @@ impl HitOptions {
     }
 }
 
-fn rect_contains_with_margin(rect: &Rect, pos: Vec2, margin: &Option<Margin>) -> bool {
+fn rect_contains_with_margin(rect: &Rect, pos: DVec2, margin: &Option<Margin>) -> bool {
     if let Some(margin) = margin {
         return
         pos.x >= rect.pos.x - margin.left

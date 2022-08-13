@@ -89,8 +89,8 @@ pub struct FoldButton {
     opened: f32,
     
     bg: DrawQuad,
-    abs_size: Vec2,
-    abs_offset: Vec2,
+    abs_size: DVec2,
+    abs_offset: DVec2,
     walk: Walk,
 }
 
@@ -144,7 +144,7 @@ impl FoldButton {
         self.bg.draw_walk(cx, walk);
     }
     
-    pub fn draw_abs(&mut self, cx: &mut Cx2d, pos: Vec2, fade: f32) {
+    pub fn draw_abs(&mut self, cx: &mut Cx2d, pos: DVec2, fade: f64) {
         self.bg.apply_over(cx, live!{fade: (fade)});
         self.bg.draw_abs(cx, Rect {
             pos: pos + self.abs_offset,

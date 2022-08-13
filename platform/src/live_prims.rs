@@ -368,6 +368,60 @@ live_primitive!(
     }
 );
 
+
+live_primitive!(
+    DVec2,
+    DVec2::default(),
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        match &nodes[index].value {
+            LiveValue::Int(v) => {
+                *self = DVec2::all(*v as f64);
+                index + 1
+            }
+            LiveValue::Float(v) => {
+                *self = DVec2::all(*v);
+                index + 1
+            }
+            LiveValue::Vec2(val) => {
+                *self = val.clone().into();
+                index + 1
+            }
+            LiveValue::Array => {
+                if let Some(index) = State::last_keyframe_value_from_array(index, nodes) {
+                    self.apply(cx, from, index, nodes);
+                }
+                nodes.skip_node(index)
+            }
+            LiveValue::Expr {..} => {
+                match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
+                    Ok(ret) => match ret {
+                       LiveEval::Int(v) => {
+                            *self = DVec2::all(v as f64);
+                        }
+                        LiveEval::Float(v) => {
+                            *self = DVec2::all(v as f64);
+                        }
+                        LiveEval::Vec2(v) => {*self = v.into();}
+                        _ => {
+                            cx.apply_error_wrong_expression_type_for_primitive(live_error_origin!(), index, nodes, "Vec2", ret);
+                        }
+                    }
+                    Err(err) => cx.apply_error_eval(err)
+                }
+                nodes.skip_node(index)
+            }
+            LiveValue::DSL {..} => nodes.skip_node(index),
+            _ => {
+                cx.apply_error_wrong_value_type_for_primitive(live_error_origin!(), index, nodes, "Vec2");
+                nodes.skip_node(index)
+            }
+        }
+    },
+    fn to_live_value(&self) -> LiveValue {
+        LiveValue::Vec2(self.clone().into())
+    }
+);
+
 live_primitive!(
     Vec2,
     Vec2::default(),
