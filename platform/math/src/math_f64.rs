@@ -63,6 +63,22 @@ impl Rect {
         Rect {pos: self.pos - size, size: self.size + 2.0 * size}
     }
     
+    pub fn contain(&self, other: Rect) -> Rect {
+        let mut pos = other.pos;
+        if pos.x < self.pos.x{ pos.x = self.pos.x };
+        if pos.y < self.pos.y{ pos.y = self.pos.y };
+        if pos.x + other.size.x > self.pos.x + self.size.x{
+            pos.x = self.pos.x + self.size.x - other.size.x
+        }
+        if pos.y + other.size.y > self.pos.y+ self.size.y{
+            pos.y = self.pos.y + self.size.y - other.size.y
+        }
+        Rect{
+            pos,
+            size:other.size
+        }
+    }
+    
     pub fn clip(&self, clip: (DVec2, DVec2)) -> Rect {
         let mut x1 = self.pos.x;
         let mut y1 = self.pos.y;
