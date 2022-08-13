@@ -175,6 +175,7 @@ impl CocoaScrollEvent {
             window_id: self.window_id,
             abs: self.abs,
             digit_id,
+            sweep_lock: Cell::new(Area::Empty),
             scroll: self.scroll,
             handled_x: Cell::new(false),
             handled_y: Cell::new(false),

@@ -139,7 +139,6 @@ impl Cx {
                 }
                 
                 // update the zbias uniform if we have it.
-                draw_call.was_painted = true;
                 draw_call.draw_uniforms.set_zbias(*zbias);
                 *zbias += zbias_step;
                 

@@ -37,7 +37,7 @@ live_register!{
             cursor: Default,
             bg: {color: #6},
             walk: {width: Fill, height: Fit},
-            layout: {flow: Right, padding: 8, spacing: 5}
+            layout: {flow: Right,padding: 8, spacing: 5}
         }
     }
     
@@ -137,10 +137,11 @@ live_register!{
             }
             label = Label {text: "IronFish"}
         }
-        body: Frame {
+        body: ScrollY {
             layout: {flow: Down}
             walk: {width: Fill, height: Fill}
             stack = LayerHeader {
+                walk: {width: Fill, height: Fit}
                 header: {
                     fold_button = FoldButton {}
                     label = Label {text: "Stack item", walk: {width: Fill}}
@@ -148,7 +149,7 @@ live_register!{
                 body: Frame {
                     
                     layout: {flow: Down}
-                    walk: {width: Fill, height: Fill}
+                    walk: {width: Fill, height: Fit}
                     InstrumentSlider {
                         slider = {
                             bind: "filter1.cutoff"
@@ -197,6 +198,36 @@ live_register!{
                     InstrumentDropdown{
                         dropdown = {
                             items: ["1", "2", "3", "4", "5", "6"]
+                        }
+                    }
+                    InstrumentDropdown{
+                        dropdown = {
+                            items: ["One", "Two", "Three", "Four", "Five", "Six"]
+                        }
+                    }
+                    InstrumentDropdown{
+                        dropdown = {
+                            items: ["One", "Two", "Three", "Four", "Five", "Six"]
+                        }
+                    }
+                    InstrumentDropdown{
+                        dropdown = {
+                            items: ["One", "Two", "Three", "Four", "Five", "Six"]
+                        }
+                    }
+                    InstrumentDropdown{
+                        dropdown = {
+                            items: ["One", "Two", "Three", "Four", "Five", "Six"]
+                        }
+                    }
+                    InstrumentDropdown{
+                        dropdown = {
+                            items: ["One", "Two", "Three", "Four", "Five", "Six"]
+                        }
+                    }
+                    InstrumentDropdown{
+                        dropdown = {
+                            items: ["One", "Two", "Three", "Four", "Five", "Six"]
                         }
                     }
                 }

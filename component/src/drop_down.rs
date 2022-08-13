@@ -224,11 +224,13 @@ impl DropDown {
             if let Event::FingerDown(fd) = event {
                 if !menu.menu_contains_pos(cx, fd.abs) {
                     self.set_closed(cx);
+                    self.animate_state(cx, ids!(hover.off));
                 }
             }
             if let Event::FingerUp(fd) = event {
                 if !menu.menu_contains_pos(cx, fd.abs) {
                     self.set_closed(cx);
+                    self.animate_state(cx, ids!(hover.off));
                 }
             }
         }
@@ -301,6 +303,7 @@ impl DropDown {
             self.label.draw_walk(cx, Walk::fit(), Align::default(), " ");
         }
         self.bg.end(cx);
+        let width = self.bg.area().get_rect(cx).size.x;
         
         cx.add_nav_stop(self.bg.area(), NavRole::DropDown, Margin::default());
         
@@ -312,12 +315,7 @@ impl DropDown {
             let mut map = global.map.borrow_mut();
             let lb = map.get_mut(&self.popup_menu.unwrap()).unwrap();
             let mut item_pos = None;
-            lb.begin(cx, Walk {
-                abs_pos: Some(start_pos),
-                width: Size::Fill,
-                height: Size::Fit,
-                margin: Margin::default()
-            });
+            lb.begin(cx, width);
             for (i, item) in self.items.iter().enumerate() {
                 let node_id = LiveId(i as u64).into();
                 if i == self.selected_item {
@@ -325,18 +323,7 @@ impl DropDown {
                 }
                 lb.draw_item(cx, node_id, item);
             }
-            lb.end(cx, start_pos - item_pos.unwrap());
-            // ok so we know our current pos, and our last pos.
-            // this is how much it will shift down due to layout
-            // so if we take our lb viewrect
-            // and shift that we have our final viewrect without-shift
-            // owshit scrollbars
-            
-            // we also know how much we want to shift
-            // we also know our viewport rect
-            
-            // ok so. we know our rect size and our shift?
-            
+            lb.end(cx,start_pos - item_pos.unwrap());
         }
         self.is_open;
     }

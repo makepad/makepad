@@ -6,6 +6,8 @@ use crate::makepad_platform::*;
 
 live_register!{
     import crate::frame::frame::*;
+    import crate::scroll_bars::ScrollBars;
+    
     Solid: Frame {bg: {shape: Solid}}
     Rect: Frame {bg: {shape: Rect}}
     Box: Frame {bg: {shape: Box}}
@@ -19,7 +21,8 @@ live_register!{
     GradientY: Frame {bg: {shape: Solid, fill: GradientY}}
     Image: Frame {bg: {shape: Solid, fill: Image}}
     UserDraw: Frame {user_draw: true}
-    Clip: Frame {clip: true,}
-    Scroll: Frame {clip: true,}
+    ScrollXY: Frame {scroll_bars: ScrollBars{show_scroll_x:true, show_scroll_y:true}}
+    ScrollX: Frame {scroll_bars: ScrollBars{show_scroll_x:true, show_scroll_y:false}}
+    ScrollY: Frame {scroll_bars: ScrollBars{show_scroll_x:false, show_scroll_y:true}}
 }
 
