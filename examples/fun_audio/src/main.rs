@@ -42,8 +42,6 @@ live_register!{
     }
     
     InstrumentHeader: FoldHeader {
-        walk: {width: Fill, height: Fill}
-        body_walk: {width: Fill, height: Fill}
         header: Rect {
             cursor: Default,
             bg: {color: #5},
@@ -59,14 +57,6 @@ live_register!{
     }
     
     FoldablePiano: MainHeader {
-        walk: {
-            width: Size::Fill,
-            height: Size::Fit
-        }
-        body_walk: {
-            width: Size::Fill,
-            height: Size::Fit
-        }
         header: {
             fold_button = FoldButton {}
             label = Label {text: "Keys"}
@@ -99,7 +89,7 @@ live_register!{
     ElementBox: Rect {
         bg: {color: #4}
         walk: {width: Fill, height: Fit}
-        layout: {flow: Down, padding: 8, spacing: 5, align: {y: 0.5}}
+        layout: {flow: Down, padding: 8, spacing: 5}
     }
     
     InstrumentSlider: ElementBox {
@@ -123,8 +113,9 @@ live_register!{
     }
     
     InstrumentDropdown: ElementBox {
-        dropdown = DropDown {
-        }
+        layout: {align:{y:0.5}, padding: 5, flow:Right}
+        label = Label{walk:{width:70,margin:{left:4}}}
+        dropdown = DropDown {}
     }
     
     IronFishUI: InstrumentHeader {
@@ -137,9 +128,9 @@ live_register!{
             }
             label = Label {text: "IronFish"}
         }
-        body: ScrollY {
+        body: Frame {
             layout: {flow: Down}
-            walk: {width: Fill, height: Fill}
+            walk: {width: Fill, height: Fit}
             stack = LayerHeader {
                 walk: {width: Fill, height: Fit}
                 header: {
@@ -189,49 +180,28 @@ live_register!{
                             label: "Osc2 detune"
                         }
                     }
-                    /*Rect{
-                        walk:{height:500, width:Fill}
-                    }*/
                     InstrumentDropdown {
+                        label = {text: "Osc1 type"}
                         dropdown = {
-                            items: ["One", "Two", "Three", "Four", "Five", "Six"]
+                            bind_enum: "OscType"
+                            bind: "osc1.osc_type"
+                            items: ["DPWSawPulse", "TrivialSaw", "BlampTri", "Naive", "Pure"]
                         }
                     }
                     InstrumentDropdown {
+                        label = {text: "Osc2 type"}
                         dropdown = {
-                            items: ["One", "Two", "Three", "Four", "Five", "Six"]
+                            bind_enum: "OscType"
+                            bind: "osc2.osc_type"
+                            items: ["DPWSawPulse", "TrivialSaw", "BlampTri", "Naive", "Pure"]
                         }
-                    } InstrumentDropdown {
+                    }
+                    InstrumentDropdown {
+                        label = {text: "Filter"}
                         dropdown = {
-                            items: ["One", "Two", "Three", "Four", "Five", "Six"]
-                        }
-                    } InstrumentDropdown {
-                        dropdown = {
-                            items: ["One", "Two", "Three", "Four", "Five", "Six"]
-                        }
-                    } InstrumentDropdown {
-                        dropdown = {
-                            items: ["One", "Two", "Three", "Four", "Five", "Six"]
-                        }
-                    } InstrumentDropdown {
-                        dropdown = {
-                            items: ["One", "Two", "Three", "Four", "Five", "Six"]
-                        }
-                    } InstrumentDropdown {
-                        dropdown = {
-                            items: ["One", "Two", "Three", "Four", "Five", "Six"]
-                        }
-                    } InstrumentDropdown {
-                        dropdown = {
-                            items: ["One", "Two", "Three", "Four", "Five", "Six"]
-                        }
-                    } InstrumentDropdown {
-                        dropdown = {
-                            items: ["One", "Two", "Three", "Four", "Five", "Six"]
-                        }
-                    } InstrumentDropdown {
-                        dropdown = {
-                            items: ["One", "Two", "Three", "Four", "Five", "Six"]
+                            bind_enum: "FilterType"
+                            bind: "filter1.filter_type"
+                            items: ["Lowpass", "Highpass", "Bandpass"]
                         }
                     }
                 }
@@ -310,7 +280,7 @@ live_register!{
                             cursor: Hand,
                             label = Label {text: "Instruments"}
                         }
-                        body: Frame {
+                        body: ScrollY {
                             walk: {width: Fill, height: Fill}
                             layout: {flow: Down}
                             instrument = IronFishUI {}

@@ -144,8 +144,8 @@ impl<'a> Cx2d<'a> {
             Flow::Right if walk.width.is_fill() => {
                 let spacing = turtle.child_spacing(self.turtle_walks.len());
                 turtle.pos.x += margin_size.x + spacing.x;
-                turtle.update_width_max(0.0);
-                turtle.update_height_max(size.y + margin_size.y);
+                turtle.update_width_max(turtle.pos.x, 0.0);
+                turtle.update_height_max(turtle.pos.y, size.y + margin_size.y);
                 turtle.defer_count += 1;
                 Some(DeferWalk {
                     defer_index,
@@ -157,8 +157,8 @@ impl<'a> Cx2d<'a> {
             Flow::Down if walk.height.is_fill() => {
                 let spacing = turtle.child_spacing(self.turtle_walks.len());
                 turtle.pos.y += margin_size.y + spacing.y;
-                turtle.update_width_max(size.x + margin_size.x);
-                turtle.update_height_max(0.0);
+                turtle.update_width_max(turtle.pos.x, size.x + margin_size.x);
+                turtle.update_height_max(turtle.pos.y, 0.0);
                 turtle.defer_count += 1;
                 Some(DeferWalk {
                     defer_index,
@@ -426,6 +426,12 @@ impl<'a> Cx2d<'a> {
                     defer_index: 0,
                     rect: Rect {pos, size: size + walk.margin.size()}
                 });
+                
+                match turtle.layout.flow {
+                    Flow::Right=>turtle.update_height_max(pos.y, size.y + walk.margin.size().y),
+                    Flow::Down=>turtle.update_width_max(pos.x, size.x + walk.margin.size().x),
+                    _=>()
+                }
             }
             Rect {pos: pos + walk.margin.left_top(), size}
         }
@@ -438,28 +444,28 @@ impl<'a> Cx2d<'a> {
                     Flow::Right => {
                         turtle.pos.x = pos.x + size.x + margin_size.x + spacing.x;
                         if size.x < 0.0 {
-                            turtle.update_width_min(0.0);
-                            turtle.update_height_max(size.y + margin_size.y);
+                            turtle.update_width_min(turtle.pos.x, 0.0);
+                            turtle.update_height_max(turtle.pos.y,size.y + margin_size.y);
                         }
                         else {
-                            turtle.update_width_max(0.0);
-                            turtle.update_height_max(size.y + margin_size.y);
+                            turtle.update_width_max(turtle.pos.x, 0.0);
+                            turtle.update_height_max(turtle.pos.y,size.y + margin_size.y);
                         }
                     },
                     Flow::Down => {
                         turtle.pos.y = pos.y + size.y + margin_size.y + spacing.y;
                         if size.y < 0.0 {
-                            turtle.update_width_max(size.x + margin_size.x);
-                            turtle.update_height_min(0.0);
+                            turtle.update_width_max(turtle.pos.x, size.x + margin_size.x);
+                            turtle.update_height_min(turtle.pos.y,0.0);
                         }
                         else {
-                            turtle.update_width_max(size.x + margin_size.x);
-                            turtle.update_height_max(0.0);
+                            turtle.update_width_max(turtle.pos.x, size.x + margin_size.x);
+                            turtle.update_height_max(turtle.pos.y,0.0);
                         }
                     },
                     Flow::Overlay => { // do not walk
-                        turtle.update_width_max(size.x);
-                        turtle.update_height_max(size.y);
+                        turtle.update_width_max(turtle.pos.x, size.x);
+                        turtle.update_height_max(turtle.pos.y,size.y);
                     }
                 };
                 
@@ -537,20 +543,20 @@ impl Turtle {
         self.draw_clip
     }
     
-    pub fn update_width_max(&mut self, dx: f64) {
-        self.width_used = self.width_used.max((self.pos.x + dx) - self.origin.x);
+    pub fn update_width_max(&mut self, pos:f64, dx: f64) {
+        self.width_used = self.width_used.max((pos + dx) - self.origin.x);
     }
     
-    pub fn update_height_max(&mut self, dy: f64) {
-        self.height_used = self.height_used.max((self.pos.y + dy) - self.origin.y);
+    pub fn update_height_max(&mut self, pos:f64, dy: f64) {
+        self.height_used = self.height_used.max((pos + dy) - self.origin.y);
     }
     
-    pub fn update_width_min(&mut self, dx: f64) {
-        self.width_used = self.width_used.min((self.pos.x + dx) - self.origin.x);
+    pub fn update_width_min(&mut self, pos:f64, dx: f64) {
+        self.width_used = self.width_used.min((pos + dx) - self.origin.x);
     }
     
-    pub fn update_height_min(&mut self, dy: f64) {
-        self.height_used = self.height_used.min((self.pos.y + dy) - self.origin.y);
+    pub fn update_height_min(&mut self, pos:f64, dy: f64) {
+        self.height_used = self.height_used.min((pos + dy) - self.origin.y);
     }
     
     pub fn set_shift(&mut self, shift: DVec2) {
@@ -565,14 +571,14 @@ impl Turtle {
         self.width_used = width_used;
         self.height_used = height_used;
     }
-    
+    /*
     pub fn move_pos(&mut self, dx: f64, dy: f64) {
         self.pos.x += dx;
         self.pos.y += dy;
         self.update_width_max(0.0);
         self.update_height_max(0.0);
     }
-    
+    */
     pub fn set_pos(&mut self, pos: DVec2) {
         self.pos = pos
     }
@@ -1000,7 +1006,14 @@ impl Size {
             _ => std::f64::NAN,
         }
     }
-    
+
+    pub fn is_fixed(&self) -> bool {
+        match self {
+            Self::Fixed(_) => true,
+            _ => false
+        }
+    }
+
     pub fn is_fit(&self) -> bool {
         match self {
             Self::Fit => true,

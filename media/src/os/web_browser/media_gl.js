@@ -54,9 +54,8 @@ export class WasmMediaGL extends WasmWebGL {
     }
     
     FromWasmStartMidiInput() {
-        if(navigator.requestMidiAccess){
+        if(navigator.requestMIDIAccess){
             navigator.requestMIDIAccess().then((midi) => {
-                
                 let reload_midi_ports = () => {
                     
                     let inputs = [];
