@@ -1,6 +1,8 @@
-use crate::makepad_draw_2d::*;
-use crate::debug_view::DebugView;
-use crate::nav_control::NavControl;
+use crate::{
+    makepad_draw_2d::*,
+    debug_view::DebugView,
+    nav_control::NavControl,
+};
 
 live_register!{
     BareWindow: {{BareWindow}} {

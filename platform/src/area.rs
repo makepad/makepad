@@ -136,71 +136,7 @@ impl Area {
             _ => false,
         }
     }
-    /*
-    pub fn get_local_scroll_pos(&self, cx: &Cx) -> Vec2 {
-        return match self {
-            Area::Instance(inst) => {
-                let draw_list = &cx.draw_lists[inst.draw_list_id];
-                if draw_list.redraw_id != inst.redraw_id {
-                    Vec2::default()
-                }
-                else {
-                    draw_list.unsnapped_scroll
-                }
-            },
-            Area::DrawList(list) => {
-                let draw_list = &cx.draw_lists[list.draw_list_id];
-                draw_list.unsnapped_scroll
-            },
-            _ => Vec2::default(),
-        }
-    }
-    
-    pub fn get_scroll_pos(&self, cx: &Cx) -> Vec2 {
-        return match self {
-            Area::Instance(inst) => {
-                let draw_list = &cx.draw_lists[inst.draw_list_id];
-                if draw_list.redraw_id != inst.redraw_id {
-                    Vec2::default()
-                }
-                else {
-                    let draw_call = &draw_list.draw_items[inst.draw_item_id].draw_call().unwrap();
-                    Vec2 {
-                        x: draw_call.draw_uniforms.draw_scroll.x,
-                        y: draw_call.draw_uniforms.draw_scroll.y
-                    }
-                }
-            },
-            Area::DrawList(list) => {
-                let draw_list = &cx.draw_lists[list.draw_list_id];
-                draw_list.parent_scroll
-            },
-            _ => Vec2::default(),
-        }
-    }*/
-    /*
-    pub fn set_no_scroll(&self, cx: &mut Cx, hor: bool, ver: bool) {
-        return match self {
-            Area::Instance(inst) => {
-                let draw_list = &mut cx.draw_lists[inst.draw_list_id];
-                if draw_list.redraw_id != inst.redraw_id {
-                    return
-                }
-                else {
-                    let draw_call = draw_list.draw_items[inst.draw_item_id].kind.draw_call_mut().unwrap();
-                    draw_call.options.no_h_scroll = hor;
-                    draw_call.options.no_v_scroll = ver;
-                }
-            },
-            Area::DrawList(list) => {
-                let draw_list = &mut cx.draw_lists[list.draw_list_id];
-                draw_list.no_h_scroll = hor;
-                draw_list.no_v_scroll = ver;
-            },
-            _ => (),
-        }
-    }*/
-    
+
     // returns the final screen rect
     pub fn get_clipped_rect(&self, cx: &Cx) -> Rect {
         

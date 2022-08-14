@@ -198,7 +198,8 @@ impl<'a> Cx2d<'a> {
     }
     
     pub fn end_overlay_turtle(&mut self){
-        self.turtles.pop();
+        let turtle = self.turtles.pop().unwrap();
+        self.align_list.truncate(turtle.align_start);
     }
     
     pub fn begin_turtle_with_guard(&mut self, walk: Walk, layout: Layout, guard_area: Area) {

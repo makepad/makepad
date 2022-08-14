@@ -127,7 +127,10 @@ impl DisplayAudioLayer {
         }
     }
     
-    pub fn process_buffer(&mut self, cx: &mut Cx, audio: &AudioBuffer)->bool{
+    pub fn process_buffer(&mut self, cx: &mut Cx, active:bool, audio: &AudioBuffer)->bool{
+        if self.fft_empty_count >= FFT_SIZE_T * FFT_SIZE_Y && !active{
+            return false
+        }
         // alright we have a texture. lets write the audio somewhere
         //return;
         let mut buf = Vec::new();
@@ -258,19 +261,15 @@ impl DisplayAudio {
 pub struct DisplayAudioImGUI(ImGUIRef);
 
 impl DisplayAudioImGUI {
-    pub fn process_buffer(&self, cx: &mut Cx, voice: usize, buffer: &AudioBuffer) {
+    pub fn process_buffer(&self, cx: &mut Cx, active: bool, voice: usize, buffer: &AudioBuffer) {
         if let Some(mut inner) = self.inner() {
-            if inner.layers[voice].process_buffer(cx, buffer){
+            if inner.layers[voice].process_buffer(cx, active, buffer){
                 inner.area.redraw(cx);
             }
         }
     }
     
     pub fn voice_off(&self, _cx: &mut Cx, _voice: usize,) {
-        if let Some(mut _inner) = self.inner() {
-            //inner.layers[voice].active = false;
-            //inner.view.redraw(cx);
-        }
     }
     
     pub fn inner(&self) -> Option<std::cell::RefMut<'_, DisplayAudio >> {

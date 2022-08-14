@@ -1,6 +1,7 @@
 use {
     crate::{
         makepad_platform::*,
+        nav::*,
         cx_2d::Cx2d,
     }
 };
@@ -90,8 +91,8 @@ impl View {
         
         let overlay_id = cx.overlay_id.unwrap();
         cx.draw_lists[overlay_id].insert_sub_list(redraw_id, self.draw_list.id());
-        let parent = &mut cx.cx.draw_lists[codeflow_parent_id];
-        parent.nav_items.push(NavItem::Child(self.draw_list.id()));
+        
+        cx.nav_list_item_push(codeflow_parent_id, NavItem::Child(self.draw_list.id()));
         
         cx.cx.draw_lists[self.draw_list.id()].codeflow_parent_id = Some(codeflow_parent_id);
         if cx.passes[pass_id].main_draw_list_id.unwrap() == self.draw_list.id() {
@@ -99,6 +100,9 @@ impl View {
         }
         
         cx.cx.draw_lists[self.draw_list.id()].clear_draw_items(redraw_id);
+        
+        cx.nav_list_clear(self.draw_list.id());
+        
         cx.draw_list_stack.push(self.draw_list.id());
     }
     
@@ -130,7 +134,7 @@ impl View {
         if let Some(parent_id) = codeflow_parent_id {
             let parent = &mut cx.cx.draw_lists[parent_id];
             parent.append_sub_list(redraw_id, self.draw_list.id());
-            parent.nav_items.push(NavItem::Child(self.draw_list.id()));
+            cx.nav_list_item_push(parent_id, NavItem::Child(self.draw_list.id()));
         }
         
         // set nesting draw list id for incremental repaint scanning
@@ -154,6 +158,9 @@ impl View {
         }
         
         cx.cx.draw_lists[self.draw_list.id()].clear_draw_items(redraw_id);
+        
+        cx.nav_list_clear(self.draw_list.id());
+        
         cx.draw_list_stack.push(self.draw_list.id());
         
         ViewRedrawing::yes()
@@ -323,17 +330,6 @@ impl<'a> Cx2d<'a> {
         draw_item.instances.as_mut().unwrap().extend_from_slice(data);
         self.align_list.push(ia.clone());
         ia
-    }
-    
-    pub fn add_nav_stop(&mut self, area: Area, role: NavRole, margin: Margin) {
-        let draw_list_id = *self.draw_list_stack.last().unwrap();
-        let draw_list = &mut self.cx.draw_lists[draw_list_id];
-        draw_list.nav_items.push(NavItem::Stop(NavStop {
-            role,
-            area,
-            order: NavOrder::Default,
-            margin
-        }));
     }
     
     pub fn add_aligned_rect_area(&mut self, area: &mut Area, rect: Rect, draw_clip: (DVec2, DVec2)) {

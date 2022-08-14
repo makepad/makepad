@@ -101,7 +101,7 @@ pub enum DragHit<'a>{
 
 #[derive(Clone, Debug)]
 pub struct TriggerEvent {
-    pub triggers: HashMap<Area, HashSet<Trigger>>
+    pub triggers: HashMap<Area, Vec<Trigger>>
 }
 
 /*
@@ -172,14 +172,13 @@ impl From<LiveId> for Signal {
 
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq)]
-pub struct Trigger(pub LiveId);
-impl From<LiveId> for Trigger {
-    fn from(live_id: LiveId) -> Trigger {Trigger(live_id)}
+pub struct Trigger{
+    pub id:LiveId,
+    pub from:Area
 }
 
 #[derive(Clone, Debug, PartialEq)]
-pub struct TriggerHitEvent(pub HashSet<Trigger>);
-
+pub struct TriggerHitEvent(pub Vec<Trigger>);
 
 pub enum WebSocketAutoReconnect{
     Yes,

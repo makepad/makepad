@@ -1,7 +1,7 @@
 use crate::{
     debug_view::DebugView,
-    nav_control::NavControl,
     makepad_draw_2d::*,
+    nav_control::NavControl,
     button_logic::*,
     window_menu::*,
     frame::*,

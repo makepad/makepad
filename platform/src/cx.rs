@@ -102,7 +102,7 @@ pub struct Cx {
     pub (crate) dependencies: HashMap<String, CxDependency>,
     
     pub (crate) signals: HashSet<Signal>,
-    pub (crate) triggers: HashMap<Area, HashSet<Trigger >>,
+    pub (crate) triggers: HashMap<Area, Vec<Trigger >>,
     
     pub live_registry: Rc<RefCell<LiveRegistry >>,
     pub shader_registry: ShaderRegistry,

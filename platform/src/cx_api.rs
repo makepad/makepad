@@ -1,7 +1,6 @@
 use {
     std::{
         any::{TypeId, Any},
-        collections::HashSet,
     },
     crate::{
         makepad_math::DVec2,
@@ -283,11 +282,11 @@ impl Cx {
     
     pub fn send_trigger(&mut self, area: Area, trigger: Trigger) {
         if let Some(triggers) = self.triggers.get_mut(&area) {
-            triggers.insert(trigger);
+            triggers.push(trigger);
         }
         else {
-            let mut new_set = HashSet::new();
-            new_set.insert(trigger);
+            let mut new_set = Vec::new();
+            new_set.push(trigger);
             self.triggers.insert(area, new_set);
         }
     }

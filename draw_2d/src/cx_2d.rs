@@ -16,11 +16,11 @@ use {
             CxPassParent,
             Cx
         },
+        nav::{
+            CxNavTreeRc,
+        },
         font::{
             CxFontsAtlasRc,
-            CxFontsAtlas,
-            CxDrawFontsAtlas,
-            CxDrawFontsAtlasRc
         },
         view::View,
         turtle::{Turtle, TurtleWalk},
@@ -39,23 +39,13 @@ pub struct Cx2d<'a> {
     pub (crate) align_list: Vec<Area>,
     pub (crate) current_dpi_factor: f64,
     pub fonts_atlas_rc: CxFontsAtlasRc,
+    pub nav_tree_rc: CxNavTreeRc,
 }
 
 impl<'a> Deref for Cx2d<'a> {type Target = Cx; fn deref(&self) -> &Self::Target {self.cx}}
 impl<'a> DerefMut for Cx2d<'a> {fn deref_mut(&mut self) -> &mut Self::Target {self.cx}}
 
 impl<'a> Cx2d<'a> {
-    pub fn lazy_construct_font_atlas(cx: &mut Cx){
-        // ok lets fetch/instance our CxFontsAtlasRc
-        if !cx.has_global::<CxFontsAtlasRc>() {
-            let draw_fonts_atlas = CxDrawFontsAtlas::new(cx);
-            let texture_id = draw_fonts_atlas.atlas_texture.texture_id();
-            cx.set_global(CxDrawFontsAtlasRc(Rc::new(RefCell::new(draw_fonts_atlas))));
-            let fonts_atlas = CxFontsAtlas::new(texture_id);
-            cx.set_global(CxFontsAtlasRc(Rc::new(RefCell::new(fonts_atlas))));
-        }
-    }
-    
     pub fn set_sweep_lock(&mut self, lock:Area){
         *self.overlay_sweep_lock.as_ref().unwrap().borrow_mut() = lock;
     }
@@ -69,9 +59,10 @@ impl<'a> Cx2d<'a> {
     
     pub fn draw<T, F>(cx: &'a mut Cx, draw_event: &'a DrawEvent, app: &mut T,  mut cb: F) where F: FnMut(&mut Cx2d, &mut T) {
         Self::lazy_construct_font_atlas(cx);
-        
+        Self::lazy_construct_nav_tree(cx);
         cx.redraw_id += 1;
         let fonts_atlas_rc = cx.get_global::<CxFontsAtlasRc>().clone();
+        let nav_tree_rc = cx.get_global::<CxNavTreeRc>().clone();
 
         let mut cx_2d = Cx2d {
             overlay_id: None,
@@ -85,6 +76,7 @@ impl<'a> Cx2d<'a> {
             turtle_walks: Vec::new(),
             turtles: Vec::new(),
             align_list: Vec::new(),
+            nav_tree_rc,
         };
         cb(&mut cx_2d, app);
         // lets render fonts
