@@ -11,7 +11,6 @@ use {
         },
         pass::PassId,
         id_pool::*,
-        nav::*,
         cx_draw_shaders::{
             CxDrawShaderOptions,
             CxDrawShaderMapping,
@@ -34,6 +33,11 @@ pub struct DrawList(PoolId);
 
 #[derive(Clone, Debug, PartialEq, Copy, Hash, Ord, PartialOrd, Eq)]
 pub struct DrawListId(usize, u64);
+
+impl DrawListId{
+    pub fn index(&self)->usize{self.0}
+    pub fn generation(&self)->u64{self.1}
+}
 
 impl DrawList {
     pub fn id(&self) -> DrawListId {DrawListId(self.0.id, self.0.generation)}
@@ -279,7 +283,6 @@ pub struct CxDrawList {
     //pub draw_clip: (Vec2,Vec2),
     //pub unclipped: bool,
     pub rect_areas: Vec<CxRectArea>,
-    pub nav_items: Vec<NavItem>
 }
 
 pub struct CxRectArea{
@@ -361,7 +364,6 @@ impl CxDrawList {
     pub fn clear_draw_items(&mut self, redraw_id: u64) {
         self.redraw_id = redraw_id;
         self.draw_items.clear();
-        self.nav_items.clear();
         self.rect_areas.clear();
     }
     
