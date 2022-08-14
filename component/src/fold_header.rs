@@ -84,6 +84,10 @@ impl FrameComponent for FoldHeader {
                     }
                     FoldButtonAction::Closing => {
                         self.animate_state(cx, ids!(open.off))
+                        // ok so now we need to sample the rectsize
+                        // and now the body walk will switch to 
+                        // fixed height
+                        
                     }
                     _ => ()
                 }

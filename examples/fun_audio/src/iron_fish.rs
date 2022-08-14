@@ -149,7 +149,7 @@ impl OscillatorState {
         tmp_a[0] = gain * (tmp_a[0] - tmp_a[1]);
         
         
-        return tmp_a[0] * self.dpw_gain2; //* self.dpw_gain;
+        return tmp_a[0] * self.dpw_gain2 *0.005; //* self.dpw_gain;
     }
     
     fn trivialsaw(self) -> f32{
