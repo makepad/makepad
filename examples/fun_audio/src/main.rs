@@ -274,6 +274,8 @@ live_register!{
                     walk: {height: Fill}
                     layout: {padding: 0.5}
                     MainHeader {
+                        walk: {width: Fill, height: Fill}
+                        body_walk: {width: Fill, height: Fill}
                         header: {
                             cursor: Hand,
                             label = Label {text: "Instruments"}
