@@ -25,8 +25,6 @@ live_register!{
     import makepad_draw_2d::shader::std::*;
     
     MainHeader: FoldHeader {
-        walk: {width: Fill, height: Fill}
-        body_walk: {width: Fill, height: Fill}
         state: {
             open = {
                 off = {apply: {header: {bg: {radius: vec2(3.0, 3.0)}}}}
