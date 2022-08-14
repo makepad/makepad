@@ -180,40 +180,6 @@ pub enum SliderAction {
     None
 }
 
-impl FrameComponent for Slider {
-    fn bind_read(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
-        if let Some(LiveValue::Float(v)) = nodes.read_path(&self.bind) {
-            self.set_internal(*v);
-            self.update_text_input(cx);
-        }
-    }
-    
-    fn redraw(&mut self, cx: &mut Cx) {
-        self.slider.redraw(cx);
-    }
-    
-    fn handle_component_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, FrameActionItem)) {
-        self.handle_event(cx, event, &mut | cx, slider, action | {
-            let mut delta = Vec::new();
-            match &action {
-                SliderAction::TextSlide(v) | SliderAction::Slide(v) => {
-                    if slider.bind.len()>0 {
-                        delta.write_path(&slider.bind, LiveValue::Float(*v as f64));
-                    }
-                },
-                _ => ()
-            };
-            dispatch_action(cx, FrameActionItem::new(action.into()).bind_delta(delta))
-        });
-    }
-    
-    fn get_walk(&self) -> Walk {self.walk}
-    
-    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk, _self_uid: FrameUid) -> FrameDraw {
-        self.draw_walk(cx, walk);
-        FrameDraw::done()
-    }
-}
 
 impl Slider {
     
@@ -314,3 +280,37 @@ impl Slider {
     }
 }
 
+impl FrameComponent for Slider {
+    fn bind_read(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
+        if let Some(LiveValue::Float(v)) = nodes.read_path(&self.bind) {
+            self.set_internal(*v);
+            self.update_text_input(cx);
+        }
+    }
+    
+    fn redraw(&mut self, cx: &mut Cx) {
+        self.slider.redraw(cx);
+    }
+    
+    fn handle_component_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, FrameActionItem)) {
+        self.handle_event(cx, event, &mut | cx, slider, action | {
+            let mut delta = Vec::new();
+            match &action {
+                SliderAction::TextSlide(v) | SliderAction::Slide(v) => {
+                    if slider.bind.len()>0 {
+                        delta.write_path(&slider.bind, LiveValue::Float(*v as f64));
+                    }
+                },
+                _ => ()
+            };
+            dispatch_action(cx, FrameActionItem::new(action.into()).bind_delta(delta))
+        });
+    }
+    
+    fn get_walk(&self) -> Walk {self.walk}
+    
+    fn draw_component(&mut self, cx: &mut Cx2d, walk: Walk, _self_uid: FrameUid) -> FrameDraw {
+        self.draw_walk(cx, walk);
+        FrameDraw::done()
+    }
+}
