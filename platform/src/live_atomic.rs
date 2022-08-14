@@ -50,9 +50,9 @@ impl<T> Debug for U32A<T> where T: LiveAtomicU32Enum + Debug{
 
 impl<T> LiveAtomic for U32A<T> where T: LiveApply + LiveNew + 'static + LiveAtomicU32Enum {
     fn apply_atomic(&self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
-        let mut val = 0u32;
-        let index = val.apply(cx, apply_from, index, nodes);
-        self.0.store(val, Ordering::Relaxed);
+        let mut value = T::new(cx);
+        let index = value.apply(cx, apply_from, index, nodes);
+        self.set(value);
         index
     }
 }

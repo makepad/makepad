@@ -2,6 +2,7 @@ use {
     std::rc::Rc,
     std::cell::RefCell,
     crate::{
+        makepad_derive_frame::*,
         popup_menu::{PopupMenu, PopupMenuAction},
         makepad_draw_2d::*,
         frame::*
@@ -75,7 +76,7 @@ live_register!{
         }
         
         popup_menu: PopupMenu {}
-        selected_item: 2
+        selected_item: 0
         state: {
             hover = {
                 default: off,
@@ -137,6 +138,9 @@ pub struct DropDown {
     
     walk: Walk,
     
+    bind: String,
+    bind_enum: String,
+    
     popup_menu: Option<LivePtr>,
     
     items: Vec<String>,
@@ -177,6 +181,13 @@ impl LiveHook for DropDown {
         });
     }
 }
+#[derive(Clone, FrameAction)]
+pub enum DropDownAction {
+    Select(usize),
+    None
+}
+
+
 impl DropDown {
     
     pub fn set_open(&mut self, cx: &mut Cx) {
@@ -195,7 +206,7 @@ impl DropDown {
         self.bg.redraw(cx);
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, ButtonAction)) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, &DropDown, DropDownAction)) {
         self.state_handle_event(cx, event);
         
         if self.is_open && self.popup_menu.is_some() {
@@ -212,6 +223,7 @@ impl DropDown {
                     PopupMenuAction::WasSelected(node_id) => {
                         //dispatch_action(cx, PopupMenuAction::WasSelected(node_id));
                         self.selected_item = node_id.0.0 as usize;
+                        dispatch_action(cx, self, DropDownAction::Select(self.selected_item));
                         self.bg.redraw(cx);
                         close = true;
                     }
@@ -240,6 +252,7 @@ impl DropDown {
             Hit::KeyFocusLost(_) => {
                 self.animate_state(cx, ids!(focus.off));
                 self.set_closed(cx);
+                self.animate_state(cx, ids!(hover.off));
                 self.bg.redraw(cx);
             }
             Hit::KeyFocus(_) => {
@@ -249,12 +262,16 @@ impl DropDown {
                 KeyCode::ArrowUp => {
                     if self.selected_item > 0 {
                         self.selected_item -= 1;
+                        dispatch_action(cx, self, DropDownAction::Select(self.selected_item));
+                        self.set_closed(cx);
                         self.bg.redraw(cx);
                     }
                 }
                 KeyCode::ArrowDown => {
                     if self.items.len() > 0 && self.selected_item < self.items.len() - 1 {
                         self.selected_item += 1;
+                        dispatch_action(cx, self, DropDownAction::Select(self.selected_item));
+                        self.set_closed(cx);
                         self.bg.redraw(cx);
                     }
                 },
@@ -326,22 +343,42 @@ impl DropDown {
                 lb.draw_item(cx, node_id, item);
             }
             // ok we shift the entire menu. however we shouldnt go outside the screen area
-            lb.end(cx,last_rect.pos - item_pos.unwrap());
+            lb.end(cx, last_rect.pos - item_pos.unwrap());
         }
     }
 }
 
 impl FrameComponent for DropDown {
-    fn bind_read(&mut self, _cx: &mut Cx, _nodes: &[LiveNode]) {
+    fn bind_read(&mut self, _cx: &mut Cx, nodes: &[LiveNode]) {
+        if let Some(LiveValue::BareEnum {variant, ..}) = nodes.read_path(&self.bind) {
+            // it should be a BareEnum
+            for (index, item) in self.items.iter().enumerate() {
+                if LiveId::from_str(item).unwrap() == *variant {
+                    self.selected_item = index;
+                    break;
+                }
+            }
+        }
     }
     
     fn redraw(&mut self, cx: &mut Cx) {
         self.bg.redraw(cx);
     }
     
-    fn handle_component_event(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, FrameActionItem)) {
-        self.handle_event(cx, event, &mut | _cx, _action | {
-            //dispatch_action(cx, FrameActionItem::new(action.into()).bind_delta(delta))
+    fn handle_component_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, FrameActionItem)) {
+        self.handle_event(cx, event, &mut | cx, drop_down, action | {
+            let mut delta = Vec::new();
+            match &action {
+                DropDownAction::Select(v) => {
+                    if drop_down.bind.len()>0 {
+                        let base = LiveId::from_str(&drop_down.bind_enum).unwrap();
+                        let variant = LiveId::from_str(&drop_down.items[*v]).unwrap();
+                        delta.write_path(&drop_down.bind, LiveValue::BareEnum {base, variant});
+                    }
+                },
+                _ => ()
+            };
+            dispatch_action(cx, FrameActionItem::new(action.into()).bind_delta(delta))
         });
     }
     
