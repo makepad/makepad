@@ -262,7 +262,7 @@ impl PopupMenu {
         // ok so. 
         let menu_rect1 = cx.turtle().padded_rect_used().translate(shift);
         let pass_rect = Rect{pos:dvec2(0.0,0.0), size:cx.current_pass_size()};
-        let menu_rect2 = pass_rect.contain(menu_rect1);
+        let menu_rect2 = pass_rect.add_margin(-dvec2(10.0,10.0)).contain(menu_rect1);
         cx.turtle_mut().set_shift(shift + (menu_rect2.pos - menu_rect1.pos));
         self.bg.end(cx);
         
