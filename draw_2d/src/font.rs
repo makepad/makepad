@@ -10,7 +10,7 @@ pub use {
         makepad_platform::*,
         cx_2d::Cx2d,
         turtle::{Walk, Layout},
-        view::{ManyInstances,View, ViewRedrawingApi},
+        view::{ManyInstances, View, ViewRedrawingApi},
         geometry::GeometryQuad2D,
         makepad_font::Glyph,
         makepad_trapezoidator::Trapezoidator,
@@ -130,13 +130,13 @@ pub struct CxFontsAtlasAlloc {
 }
 
 impl CxFontsAtlas {
-    pub fn new(texture_id:TextureId) -> Self {
+    pub fn new(texture_id: TextureId) -> Self {
         Self {
             fonts: Vec::new(),
             path_to_font_id: HashMap::new(),
             texture_id,
             clear_buffer: false,
-            alloc: CxFontsAtlasAlloc{
+            alloc: CxFontsAtlasAlloc {
                 texture_size: DVec2 {x: 2048.0, y: 2048.0},
                 xpos: 0.0,
                 ypos: 0.0,
@@ -146,7 +146,7 @@ impl CxFontsAtlas {
         }
     }
 }
-impl CxFontsAtlasAlloc{
+impl CxFontsAtlasAlloc {
     pub fn alloc_atlas_glyph(&mut self, w: f64, h: f64) -> CxFontAtlasGlyph {
         if w + self.xpos >= self.texture_size.x {
             self.xpos = 0.0;
@@ -185,7 +185,7 @@ pub struct Font {
 }
 
 #[derive(Clone)]
-pub struct CxFontsAtlasRc(pub Rc<RefCell<CxFontsAtlas>>);
+pub struct CxFontsAtlasRc(pub Rc<RefCell<CxFontsAtlas >>);
 
 impl LiveHook for Font {
     fn after_apply(&mut self, cx: &mut Cx, _apply_from: ApplyFrom, _index: usize, _nodes: &[LiveNode]) {
@@ -196,8 +196,8 @@ impl LiveHook for Font {
 }
 
 impl CxFontsAtlas {
-    pub fn get_font_by_path(&mut self, cx:&Cx, path: &str) -> usize {
-
+    pub fn get_font_by_path(&mut self, cx: &Cx, path: &str) -> usize {
+        
         if let Some(item) = self.path_to_font_id.get(path) {
             return *item;
         }
@@ -205,8 +205,8 @@ impl CxFontsAtlas {
         self.fonts.push(None);
         self.path_to_font_id.insert(path.to_string(), font_id);
         
-        match cx.get_dependency(path){
-            Ok(data)=> match CxFont::load_from_ttf_bytes(&data) {
+        match cx.get_dependency(path) {
+            Ok(data) => match CxFont::load_from_ttf_bytes(&data) {
                 Err(_) => {
                     error!("Error loading font {} ", path);
                 }
@@ -220,29 +220,12 @@ impl CxFontsAtlas {
                     self.fonts[font_id] = Some(cxfont);
                 }
             }
-            Err(err)=>{
+            Err(err) => {
                 error!("get_font_by_path - {}", err)
             }
         }
         font_id
     }
-    /*
-    pub fn with_draw_font_atlas<T>(&mut self, mut cb: T) where T: FnMut(&mut Cx, &mut CxDrawFontAtlas) {
-        if self.draw_font_atlas.is_none() {
-            self.draw_font_atlas = Some(Box::new(CxDrawFontAtlas::new(self)));
-        }
-        let mut draw_font_atlas = None;
-        std::mem::swap(&mut self.draw_font_atlas, &mut draw_font_atlas);
-        cb(self, draw_font_atlas.as_mut().unwrap());
-        std::mem::swap(&mut self.draw_font_atlas, &mut draw_font_atlas);
-        
-    }*/
-    /*
-    pub fn after_handle_event(&mut self, event: &Event) {
-        self.with_draw_font_atlas( | cx, dfa | {
-            dfa.handle_event(cx, event);
-        })
-    }*/
     
     pub fn reset_font_atlas_and_redraw(&mut self) {
         for cxfont in &mut self.fonts {
@@ -258,7 +241,7 @@ impl CxFontsAtlas {
         //self.redraw_all();
     }
     
-    pub fn get_internal_font_atlas_texture_id(&self)->TextureId{
+    pub fn get_internal_font_atlas_texture_id(&self) -> TextureId {
         self.texture_id
     }
 }
@@ -339,7 +322,7 @@ impl DrawTrapezoidText {
     }*/
     
     // atlas drawing function used by CxAfterDraw
-    pub fn draw_todo(&mut self, fonts_atlas:&CxFontsAtlas, todo: CxFontsAtlasTodo, many: &mut ManyInstances) {
+    pub fn draw_todo(&mut self, fonts_atlas: &CxFontsAtlas, todo: CxFontsAtlasTodo, many: &mut ManyInstances) {
         //let fonts_atlas = cx.fonts_atlas_rc.0.borrow_mut();
         let mut size = 1.0;
         for i in 0..3 {
@@ -403,7 +386,7 @@ impl DrawTrapezoidText {
 }
 
 #[derive(Clone)]
-pub struct CxDrawFontsAtlasRc(pub Rc<RefCell<CxDrawFontsAtlas>>);
+pub struct CxDrawFontsAtlasRc(pub Rc<RefCell<CxDrawFontsAtlas >>);
 
 pub struct CxDrawFontsAtlas {
     pub draw_trapezoid_text: DrawTrapezoidText,
@@ -432,40 +415,28 @@ impl CxDrawFontsAtlas {
         }
     }
 }
-    
- /*   pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        match event {
-            Event::LiveEdit(live_edit_event) => {
-                match live_edit_event {
-                    /*
-                    LiveEditEvent::ReparseDocument => {
-                        let live_registry_rc = cx.live_registry.clone();
-                        let live_registry = live_registry_rc.borrow();
-                        if let Some(file_id) = live_registry.module_id_to_file_id.get(&LiveModuleId::from_str(&module_path!()).unwrap()) {
-                            let file = live_registry.file_id_to_file(*file_id);
-                            if let Some(index) = file.expanded.nodes.child_by_name(0, id!(DrawTrapezoidText).as_field()) {
-                                self.draw_trapezoid_text.apply(cx, ApplyFrom::UpdateFromDoc {file_id: *file_id}, index, &file.expanded.nodes);
-                            }
-                        }
-                    }
-                    _ => ()*/
-                }
-            }
-            Event::Draw(re) => {
-                self.draw(&mut Cx2d::new(cx, re));
-            }
-            _ => ()
+
+impl<'a> Cx2d<'a> {
+    pub fn lazy_construct_font_atlas(cx: &mut Cx){
+        // ok lets fetch/instance our CxFontsAtlasRc
+        if !cx.has_global::<CxFontsAtlasRc>() {
+            
+            let draw_fonts_atlas = CxDrawFontsAtlas::new(cx);
+            let texture_id = draw_fonts_atlas.atlas_texture.texture_id();
+            cx.set_global(CxDrawFontsAtlasRc(Rc::new(RefCell::new(draw_fonts_atlas))));
+            
+            let fonts_atlas = CxFontsAtlas::new(texture_id);
+            cx.set_global(CxFontsAtlasRc(Rc::new(RefCell::new(fonts_atlas))));
         }
-    }*/
-    
-impl<'a> Cx2d<'a> {    
+    }
+        
     pub fn draw_font_atlas(&mut self) {
         let draw_fonts_atlas_rc = self.cx.get_global::<CxDrawFontsAtlasRc>().clone();
         let mut draw_fonts_atlas = draw_fonts_atlas_rc.0.borrow_mut();
-        let fonts_atlas_rc  = self.fonts_atlas_rc.clone();
+        let fonts_atlas_rc = self.fonts_atlas_rc.clone();
         let mut fonts_atlas = fonts_atlas_rc.0.borrow_mut();
         let fonts_atlas = &mut*fonts_atlas;
-
+        
         //let start = Cx::profile_time_ns();
         // we need to start a pass that just uses the texture
         if fonts_atlas.alloc.todo.len()>0 {

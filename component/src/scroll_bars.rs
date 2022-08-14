@@ -16,6 +16,7 @@ pub struct ScrollBars {
     show_scroll_y: bool,
     scroll_bar_x: ScrollBar,
     scroll_bar_y: ScrollBar,
+    #[rust] nav_scroll_index: Option<NavScrollIndex>,
     #[rust] scroll: DVec2,
     #[rust] area: Area,
 }
@@ -43,7 +44,27 @@ impl ScrollBars {
     fn handle_internal(&mut self, cx: &mut Cx, event: &Event, is_scroll: bool, dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarsAction)) {
         let mut ret_x = None;
         let mut ret_y = None;
-        let area = if is_scroll {Some(self.area)}else {None};
+        
+        let area = if is_scroll{ // alright so. here we might get a trigger
+            if let Event::Trigger(te) = event{
+                if let Some(triggers) = te.triggers.get(&self.area){
+                    if let Some(trigger) = triggers.iter().find(|t| t.id == id!(scroll_focus_nav)){
+                        let self_rect = self.area.get_rect(cx);
+                        self.scroll_into_view(
+                            cx,
+                            trigger.from.get_rect(cx)
+                            .translate(-self_rect.pos + self.scroll)
+                            .add_margin(dvec2(5.0,5.0))
+                        );
+                    }
+                }
+            }
+            Some(self.area)
+        }
+        else{
+            None
+        };
+        
         if self.show_scroll_x {
             self.scroll_bar_x.handle_event(cx, event, area, &mut | cx, action | {
                 match action {
@@ -180,8 +201,33 @@ impl ScrollBars {
         }
     }
     
+    
+    // all in one scrollbar api
+    
     pub fn begin(&mut self, cx: &mut Cx2d, walk: Walk, layout: Layout) {
         cx.begin_turtle(walk, layout.with_scroll(self.scroll));
+        self.begin_nav_area(cx);
+    }
+    
+    pub fn end(&mut self, cx: &mut Cx2d) {
+        self.draw_scroll_bars(cx);
+        // this needs to be a rect_area
+        cx.end_turtle_with_area(&mut self.area);
+        self.end_nav_area(cx);
+    }
+    
+    
+    // separate API
+    
+    pub fn begin_nav_area(&mut self, cx: &mut Cx2d) {
+        self. nav_scroll_index = Some(cx.add_begin_scroll());
+    }
+    
+    pub fn end_nav_area(&mut self, cx: &mut Cx2d) {
+        if !self.area.is_valid(cx) {
+            panic!("Call set area before end_nav_area")
+        }
+        cx.add_end_scroll(self.nav_scroll_index.take().unwrap(), self.area);
     }
     
     pub fn draw_scroll_bars(&mut self, cx: &mut Cx2d) {
@@ -205,12 +251,6 @@ impl ScrollBars {
             let scroll_pos = self.scroll_bar_y.draw_scroll_bar(cx, Axis::Vertical, rect_now, view_total);
             self.set_scroll_y(cx, scroll_pos);
         }
-    }
-    
-    pub fn end(&mut self, cx: &mut Cx2d) {
-        self.draw_scroll_bars(cx);
-        // this needs to be a rect_area
-        cx.end_turtle_with_area(&mut self.area);
     }
     
     pub fn set_area(&mut self, area: Area) {

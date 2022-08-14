@@ -1,5 +1,4 @@
 use {
-    std::collections::HashSet,
     std::rc::Rc,
     std::ops::Deref,
     std::cell::{RefMut, RefCell},
@@ -195,7 +194,7 @@ pub trait ImGuiEventExt{
     fn on_finger_scroll(&self) -> Option<FingerScrollEvent>;
     fn on_timer(&self, timer: Timer) -> bool;
     fn on_signal(&self, signal: Signal) -> bool;
-    fn on_trigger(&self, area: Area) -> Option<HashSet<Trigger>>;
+    fn on_trigger(&self, area: Area) -> Option<Vec<Trigger>>;
     fn on_menu_command(&self) -> Option<MenuCommand>;
     fn on_key_focus(&self) -> Option<KeyFocusEvent>;
     fn on_key_focus_lost(&self) -> Option<KeyFocusEvent>;
@@ -301,7 +300,7 @@ impl ImGuiEventExt for Event {
     }
 
     //Trigger(Trigger),
-    fn on_trigger(&self, area: Area) -> Option<HashSet<Trigger>> {
+    fn on_trigger(&self, area: Area) -> Option<Vec<Trigger>> {
         if let Self::Trigger(e) = self {e.triggers.get(&area).cloned()}else {None}
     }
     

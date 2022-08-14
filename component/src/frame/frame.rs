@@ -425,11 +425,13 @@ impl Frame {
             
             // ok so.. we have to keep calling draw till we return LiveId(0)
             let scroll = if let Some(scroll_bars) = &mut self.scroll_bars_obj{
+                scroll_bars.begin_nav_area(cx);
                 scroll_bars.get_scroll_pos()
             }
             else{
                 dvec2(0.0,0.0)
             };
+            
             if self.bg.shape != Shape::None {
                 if self.bg.fill == Fill::Image {
                     self.bg.draw_vars.set_texture(0, &self.image_texture);
@@ -488,6 +490,7 @@ impl Frame {
                 
                 if let Some(scroll_bars) = &mut self.scroll_bars_obj{
                     scroll_bars.set_area(self.area);
+                    scroll_bars.end_nav_area(cx);
                 };
 
                 if self.has_view {

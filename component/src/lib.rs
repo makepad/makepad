@@ -11,7 +11,6 @@ pub mod scroll_shadow;
 pub mod scroll_bar;
 pub mod scroll_bars;
 pub mod link_label;
-pub mod nav_control;
 pub mod list_box;
 
 pub mod file_tree;
@@ -49,6 +48,8 @@ pub mod debug_view;
 pub mod imgui;
 pub mod frame;
 
+pub mod nav_control;
+
 mod theme;
 
 pub use crate::{
@@ -85,8 +86,8 @@ pub fn live_register(cx: &mut Cx) {
     crate::splitter::live_register(cx);
     crate::theme::live_register(cx);
     crate::slider::live_register(cx);
-    crate::nav_control::live_register(cx);
     crate::label::live_register(cx);
+    crate::nav_control::live_register(cx);
     crate::frame::frame::live_register(cx);
     crate::frame::live_register(cx);
     crate::fold_button::live_register(cx);

@@ -861,7 +861,7 @@ impl CodeEditorImpl {
         }
         
         match event.hits(cx, self.scroll_bars.area()) {
-            Hit::Trigger(_) => { //
+            Hit::Trigger(te) => if te.0.iter().any(|t| t.id == id!(select_scroll)) { //
                 self.handle_select_scroll_in_trigger(cx, state, lines_layout);
             },
             Hit::FingerDown(fe) => {
@@ -1146,7 +1146,7 @@ impl CodeEditorImpl {
             else {
                 select_scroll.at_end = true;
             }
-            cx.send_trigger(self.scroll_bars.area(), id!(scroll).into());
+            cx.send_trigger(self.scroll_bars.area(), Trigger{id:id!(select_scroll), from:Area::Empty});
         }
     }
     
