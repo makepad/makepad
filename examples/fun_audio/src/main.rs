@@ -37,7 +37,7 @@ live_register!{
             cursor: Default,
             bg: {color: #6},
             walk: {width: Fill, height: Fit},
-            layout: {flow: Right,padding: 8, spacing: 5}
+            layout: {flow: Right, padding: 8, spacing: 5}
         }
     }
     
@@ -147,7 +147,6 @@ live_register!{
                     label = Label {text: "Stack item", walk: {width: Fill}}
                 }
                 body: Frame {
-                    
                     layout: {flow: Down}
                     walk: {width: Fill, height: Fit}
                     InstrumentSlider {
@@ -190,42 +189,47 @@ live_register!{
                             label: "Osc2 detune"
                         }
                     }
-                    InstrumentDropdown{
+                    /*Rect{
+                        walk:{height:500, width:Fill}
+                    }*/
+                    InstrumentDropdown {
                         dropdown = {
                             items: ["One", "Two", "Three", "Four", "Five", "Six"]
                         }
                     }
-                    InstrumentDropdown{
-                        dropdown = {
-                            items: ["1", "2", "3", "4", "5", "6"]
-                        }
-                    }
-                    InstrumentDropdown{
+                    InstrumentDropdown {
                         dropdown = {
                             items: ["One", "Two", "Three", "Four", "Five", "Six"]
                         }
-                    }
-                    InstrumentDropdown{
+                    } InstrumentDropdown {
                         dropdown = {
                             items: ["One", "Two", "Three", "Four", "Five", "Six"]
                         }
-                    }
-                    InstrumentDropdown{
+                    } InstrumentDropdown {
                         dropdown = {
                             items: ["One", "Two", "Three", "Four", "Five", "Six"]
                         }
-                    }
-                    InstrumentDropdown{
+                    } InstrumentDropdown {
                         dropdown = {
                             items: ["One", "Two", "Three", "Four", "Five", "Six"]
                         }
-                    }
-                    InstrumentDropdown{
+                    } InstrumentDropdown {
                         dropdown = {
                             items: ["One", "Two", "Three", "Four", "Five", "Six"]
                         }
-                    }
-                    InstrumentDropdown{
+                    } InstrumentDropdown {
+                        dropdown = {
+                            items: ["One", "Two", "Three", "Four", "Five", "Six"]
+                        }
+                    } InstrumentDropdown {
+                        dropdown = {
+                            items: ["One", "Two", "Three", "Four", "Five", "Six"]
+                        }
+                    } InstrumentDropdown {
+                        dropdown = {
+                            items: ["One", "Two", "Three", "Four", "Five", "Six"]
+                        }
+                    } InstrumentDropdown {
                         dropdown = {
                             items: ["One", "Two", "Three", "Four", "Five", "Six"]
                         }
@@ -357,8 +361,8 @@ impl App {
         let mut buffers = 0;
         self.audio_graph.handle_event(ui.cx, ui.event, &mut | cx, action | {
             match action {
-                AudioGraphAction::DisplayAudio {buffer, voice} => {
-                    display_audio.process_buffer(cx, voice, buffer);
+                AudioGraphAction::DisplayAudio {buffer, voice, active} => {
+                    display_audio.process_buffer(cx, active, voice, buffer);
                     buffers += 1;
                 }
                 AudioGraphAction::VoiceOff {voice} => {

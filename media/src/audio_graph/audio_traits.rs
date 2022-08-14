@@ -43,7 +43,7 @@ generate_ref_cast_api!(AudioComponent);
 
 
 pub enum ToUIDisplayMsg{
-    DisplayAudio{voice: usize, buffer:AudioBuffer},
+    DisplayAudio{voice: usize, buffer:AudioBuffer, active:bool},
     VoiceOff{voice: usize},
     OutOfBuffers
 }
@@ -65,8 +65,8 @@ impl<'a> DisplayAudioGraph<'a>{
             None
         }
     }
-    pub fn send_buffer(&self, voice: usize, buffer:AudioBuffer){
-        self.to_ui.send(ToUIDisplayMsg::DisplayAudio{voice, buffer}).unwrap();
+    pub fn send_buffer(&self, active:bool, voice: usize, buffer:AudioBuffer){
+        self.to_ui.send(ToUIDisplayMsg::DisplayAudio{active, voice, buffer}).unwrap();
     }
     
     pub fn send_voice_off(&self, voice: usize){

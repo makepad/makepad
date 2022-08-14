@@ -187,7 +187,7 @@ impl DropDown {
         let lb = map.get_mut(&self.popup_menu.unwrap()).unwrap();
         let node_id = LiveId(self.selected_item as u64).into();
         lb.init_select_item(node_id);
-        self.last_rect = Some(self.bg.area().get_clipped_rect(cx));
+        self.last_rect = Some(self.bg.area().get_rect(cx));
     }
     
     pub fn set_closed(&mut self, cx: &mut Cx) {
@@ -244,8 +244,6 @@ impl DropDown {
             }
             Hit::KeyFocus(_) => {
                 self.animate_state(cx, ids!(focus.on));
-                // how do we scroll this thing into view.
-                
             }
             Hit::KeyDown(ke) => match ke.key_code {
                 KeyCode::ArrowUp => {
@@ -298,7 +296,7 @@ impl DropDown {
         cx.clear_sweep_lock(self.bg.area());
         
         self.bg.begin(cx, walk, self.layout);
-        let start_pos = cx.turtle().rect().pos;
+        //let start_pos = cx.turtle().rect().pos;
         if let Some(val) = self.items.get(self.selected_item) {
             self.label.draw_walk(cx, Walk::fit(), Align::default(), val);
         }
@@ -307,11 +305,10 @@ impl DropDown {
         }
         self.bg.end(cx);
         
-        let width = self.bg.area().get_rect(cx).size.x;
-        
         cx.add_nav_stop(self.bg.area(), NavRole::DropDown, Margin::default());
         
         if self.is_open && self.popup_menu.is_some() {
+            let last_rect = self.last_rect.unwrap_or(Rect::default());
             cx.set_sweep_lock(self.bg.area());
             // ok so if self was not open, we need to
             // ok so how will we solve this one
@@ -320,7 +317,7 @@ impl DropDown {
             let lb = map.get_mut(&self.popup_menu.unwrap()).unwrap();
             let mut item_pos = None;
             
-            lb.begin(cx, width);
+            lb.begin(cx, last_rect.size.x);
             for (i, item) in self.items.iter().enumerate() {
                 let node_id = LiveId(i as u64).into();
                 if i == self.selected_item {
@@ -329,9 +326,8 @@ impl DropDown {
                 lb.draw_item(cx, node_id, item);
             }
             // ok we shift the entire menu. however we shouldnt go outside the screen area
-            lb.end(cx,start_pos - item_pos.unwrap());
+            lb.end(cx,last_rect.pos - item_pos.unwrap());
         }
-        self.is_open;
     }
 }
 

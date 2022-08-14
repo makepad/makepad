@@ -15,7 +15,6 @@ pub mod live_atomic;
 pub mod thread;
 mod id_pool;
 mod event;
-mod nav;
 mod area;
 mod window;
 mod pass;
@@ -112,11 +111,6 @@ pub use {
             RectArea,
             InstanceArea
         },
-        /*midi::{
-            Midi1Event,
-            Midi1Note,
-            Midi1InputData,
-        },*/
         menu::{
             MenuCommand,
         },
@@ -171,12 +165,6 @@ pub use {
             FingerUpHitEvent,
             DragHitEvent,
             DropHitEvent,
-        },
-        nav::{
-            NavRole,
-            NavOrder,
-            NavStop,
-            NavItem
         },
         cursor::MouseCursor,
         menu::Menu,

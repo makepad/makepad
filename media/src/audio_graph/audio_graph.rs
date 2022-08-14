@@ -27,6 +27,7 @@ pub enum FromUI {
 
 pub enum AudioGraphAction<'a> {
     DisplayAudio {
+        active: bool,
         voice: usize,
         buffer: &'a AudioBuffer
     },
@@ -143,9 +144,9 @@ impl AudioGraph {
         
         while let Ok(to_ui) = self.to_ui.try_recv(event) {
             match to_ui {
-                ToUIDisplayMsg::DisplayAudio {voice, buffer} => {
+                ToUIDisplayMsg::DisplayAudio {voice, buffer, active} => {
                     //log!("GOT DISPLAY AUDIO");
-                    dispatch_action(cx, AudioGraphAction::DisplayAudio {buffer: &buffer, voice});
+                    dispatch_action(cx, AudioGraphAction::DisplayAudio {buffer: &buffer, voice, active});
                     self.from_ui.send(FromUI::DisplayAudio(buffer)).unwrap();
                 },
                 ToUIDisplayMsg::VoiceOff {voice} => {

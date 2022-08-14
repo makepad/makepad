@@ -14,6 +14,7 @@ pub mod shader;
 pub mod turtle;
 pub mod font;
 pub mod geometry;
+pub mod nav;
 
 pub use crate::{
     font::Font,
@@ -29,6 +30,13 @@ pub use crate::{
     },
     overlay::{
         Overlay
+    },
+    nav::{
+        NavRole,
+        NavOrder,
+        NavStop,
+        NavItem,
+        NavScrollIndex
     },
     view::{
         View,
@@ -51,7 +59,7 @@ pub use crate::{
     },
 };
 
-pub fn live_register(cx:&mut Cx) {
+pub fn live_register(cx: &mut Cx) {
     crate::shader::draw_quad::live_register(cx);
     crate::shader::draw_color::live_register(cx);
     crate::shader::draw_shape::live_register(cx);
