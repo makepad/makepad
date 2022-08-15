@@ -5,6 +5,7 @@ use crate::{
     Ast, Program,
 };
 
+#[derive(Clone, Debug)]
 pub(crate) struct Compiler;
 
 impl Compiler {
@@ -13,11 +14,17 @@ impl Compiler {
     }
 
     pub(crate) fn compile(&mut self, ast: &Ast) -> Program {
-        CompileContext { instrs: Vec::new() }.compile(ast)
+        CompileContext {
+            slot_count: 0,
+            instrs: Vec::new(),
+        }
+        .compile(ast)
     }
 }
 
+#[derive(Debug)]
 struct CompileContext {
+    slot_count: usize,
     instrs: Vec<Instr>,
 }
 
@@ -28,6 +35,7 @@ impl CompileContext {
         frag.ends.fill(instr, &mut self.instrs);
         Program {
             start: frag.start,
+            slot_count: self.slot_count,
             instrs: self.instrs,
         }
     }
@@ -35,6 +43,7 @@ impl CompileContext {
     fn compile_recursive(&mut self, ast: &Ast) -> Frag {
         match *ast {
             Ast::Char(ch) => self.compile_char(ch),
+            Ast::Cap(ref ast, index) => self.compile_cap(ast, index),
             Ast::Rep(ref ast, Quant::Quest) => self.compile_quest(ast),
             Ast::Rep(ref ast, Quant::Star) => self.compile_star(ast),
             Ast::Rep(ref ast, Quant::Plus) => self.compile_plus(ast),
@@ -48,6 +57,19 @@ impl CompileContext {
         Frag {
             start,
             ends: HolePtrList::unit(HolePtr::next_0(start)),
+        }
+    }
+
+    fn compile_cap(&mut self, ast: &Ast, cap_index: usize) -> Frag {
+        let frag = self.compile_recursive(ast);
+        let first_slot_index = cap_index * 2;
+        self.slot_count = self.slot_count.max(first_slot_index + 2);
+        let instr_0 = self.emit_instr(Instr::Save(first_slot_index, frag.start));
+        let instr_1 = self.emit_instr(Instr::Save(first_slot_index + 1, program::NULL_INSTR_PTR));
+        frag.ends.fill(instr_1, &mut self.instrs);
+        Frag {
+            start: instr_0,
+            ends: HolePtrList::unit(HolePtr::next_0(instr_1)),
         }
     }
 
@@ -112,11 +134,13 @@ impl CompileContext {
     }
 }
 
+#[derive(Debug)]
 struct Frag {
     start: InstrPtr,
     ends: HolePtrList,
 }
 
+#[derive(Debug)]
 struct HolePtrList {
     head: HolePtr,
     tail: HolePtr,
@@ -165,7 +189,7 @@ impl HolePtrList {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 struct HolePtr(usize);
 
 impl HolePtr {

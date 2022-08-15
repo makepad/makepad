@@ -18,10 +18,13 @@ mod tests {
     #[test]
     fn test() {
         let ast = Parser::new().parse("ac|bc");
+        println!("{:?}", ast);
         let program = Compiler::new().compile(&ast);
         println!("{:?}", program);
         let mut nfa = Nfa::new();
-        let mut cursor = str::StrCursor::new("xyacbz");
-        println!("{:?}", nfa.run(&program, cursor));
+        let cursor = str::StrCursor::new("xyabcz");
+        let mut slots = [None; 2];
+        println!("{:?}", nfa.run(&program, cursor, &mut slots));
+        println!("{:?}", slots);
     }
 }
