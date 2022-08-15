@@ -7,4 +7,4 @@ edition = "2018"
 [dependencies]
 makepad-id-macros = { path = "id_macros", version = "0.1" }
 makepad-error-log = { path = "../error_log", version = "0.1" }
-
+makepad-debug-opt = { path = "../debug_opt", version = "0.1" }
