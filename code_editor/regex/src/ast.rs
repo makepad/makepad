@@ -1,6 +1,7 @@
 #[derive(Clone, Debug)]
 pub(crate) enum Ast {
     Char(char),
+    Cap(Box<Ast>, usize),
     Rep(Box<Ast>, Quant),
     Cat(Vec<Ast>),
     Alt(Vec<Ast>),
