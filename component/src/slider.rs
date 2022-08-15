@@ -280,6 +280,7 @@ impl Slider {
     }
 }
 
+
 impl FrameComponent for Slider {
     fn bind_read(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
         if let Some(LiveValue::Float(v)) = nodes.read_path(&self.bind) {

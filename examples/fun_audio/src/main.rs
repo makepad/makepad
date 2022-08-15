@@ -314,6 +314,7 @@ impl App {
         if let Event::Draw(event) = event {
             return Cx2d::draw(cx, event, self, | cx, s | s.draw(cx));
         }
+        //let dt = profile_start();
         
         self.window.handle_event(cx, event);
         
@@ -364,6 +365,7 @@ impl App {
                 velocity: note.velocity
             }.into());
         }
+        //profile_end(dt);
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
