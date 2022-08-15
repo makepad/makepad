@@ -14,6 +14,7 @@
 
 use {
     crate::{
+        makepad_debug_opt::DebugOpt,
         char_ext::CharExt,
         live_id::{LiveId,LIVE_ID_SEED},
         full_token::{TokenWithLen, Delim, FullToken},
@@ -22,7 +23,7 @@ use {
 };
 
 /// The state of the tokenizer.
-#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+#[derive(Clone, Copy, DebugOpt, Eq, Hash, PartialEq)]
 pub enum State {
     Initial(InitialState),
     BlockCommentTail(BlockCommentTailState),
