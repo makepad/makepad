@@ -27,16 +27,16 @@ impl<'a> Cursor for StrCursor<'a> {
     fn byte_position(&self) -> usize {
         self.byte_position
     }
-    
-    fn current(&self) -> Option<char> {
+
+    fn current_char(&self) -> Option<char> {
         self.string[self.byte_position..].chars().next()
     }
 
-    fn move_next(&mut self) {
+    fn move_next_char(&mut self) {
         self.byte_position += utf8_char_width(self.string.as_bytes()[self.byte_position]);
     }
 
-    fn move_prev(&mut self) {
+    fn move_prev_char(&mut self) {
         loop {
             self.byte_position -= 1;
             if self.string.is_char_boundary(self.byte_position) {

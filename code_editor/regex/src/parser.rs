@@ -1,5 +1,6 @@
-use crate::{ast::Quant, Ast, str};
+use crate::{ast::Quant, str, Ast};
 
+#[derive(Clone, Debug)]
 pub struct Parser {
     asts: Vec<Ast>,
     groups: Vec<Group>,
@@ -15,9 +16,10 @@ impl Parser {
 
     pub(crate) fn parse(&mut self, string: &str) -> Ast {
         ParseContext {
+            cap_count: 1,
             asts: &mut self.asts,
             groups: &mut self.groups,
-            group: Group::default(),
+            group: Group::new(Some(0)),
             string,
             position: 0,
         }
@@ -25,7 +27,9 @@ impl Parser {
     }
 }
 
+#[derive(Debug)]
 struct ParseContext<'a> {
+    cap_count: usize,
     asts: &'a mut Vec<Ast>,
     groups: &'a mut Vec<Group>,
     group: Group,
@@ -60,7 +64,14 @@ impl<'a> ParseContext<'a> {
                 }
                 Some('(') => {
                     self.skip_char();
-                    self.push_group();
+                    let cap = match self.peek_two_chars() {
+                        (Some('?'), Some(':')) => {
+                            self.skip_two_chars();
+                            false
+                        }
+                        _ => true,
+                    };
+                    self.push_group(cap);
                 }
                 Some(')') => {
                     self.skip_char();
@@ -77,36 +88,58 @@ impl<'a> ParseContext<'a> {
         }
         self.maybe_push_cat();
         self.pop_alts();
-        self.asts.pop().unwrap()
+        Ast::Cap(Box::new(self.asts.pop().unwrap()), 0)
     }
 
     fn peek_char(&self) -> Option<char> {
         self.string[self.position..].chars().next()
     }
 
+    fn peek_two_chars(&self) -> (Option<char>, Option<char>) {
+        let mut chars = self.string[self.position..].chars();
+        (chars.next(), chars.next())
+    }
+
     fn skip_char(&mut self) {
         self.position += str::utf8_char_width(self.string.as_bytes()[self.position]);
     }
 
-    fn push_group(&mut self) {
+    fn skip_two_chars(&mut self) {
+        self.skip_char();
+        self.skip_char();
+    }
+
+    fn push_group(&mut self, cap: bool) {
         use std::mem;
 
         self.maybe_push_cat();
         self.pop_cats();
-        let group = mem::replace(&mut self.group, Group::default());
+        let cap_index = if cap {
+            let cap_index = self.cap_count;
+            self.cap_count += 1;
+            Some(cap_index)
+        } else {
+            None
+        };
+        let group = mem::replace(&mut self.group, Group::new(cap_index));
         self.groups.push(group);
+    }
+
+    fn pop_group(&mut self) {
+        self.maybe_push_cat();
+        self.pop_alts();
+        if let Some(index) = self.group.cap {
+            let ast = self.asts.pop().unwrap();
+            self.asts.push(Ast::Cap(Box::new(ast), index));
+        }
+        self.group = self.groups.pop().unwrap();
+        self.group.ast_count += 1;
     }
 
     fn maybe_push_cat(&mut self) {
         if self.group.ast_count - self.group.alt_count - self.group.cat_count == 2 {
             self.group.cat_count += 1;
         }
-    }
-
-    fn pop_group(&mut self) {
-        self.maybe_push_cat();
-        self.pop_alts();
-        self.group.ast_count += 1;
     }
 
     fn pop_alts(&mut self) {
@@ -135,9 +168,21 @@ impl<'a> ParseContext<'a> {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 struct Group {
+    cap: Option<usize>,
     ast_count: usize,
     alt_count: usize,
     cat_count: usize,
+}
+
+impl Group {
+    fn new(index: Option<usize>) -> Self {
+        Self {
+            cap: index,
+            ast_count: 0,
+            alt_count: 0,
+            cat_count: 0,
+        }
+    }
 }

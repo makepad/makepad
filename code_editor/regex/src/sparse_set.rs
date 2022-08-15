@@ -7,11 +7,7 @@ pub(crate) struct SparseSet {
 }
 
 impl SparseSet {
-    pub(crate) fn new() -> Self {
-        Self::with_capacity(0)
-    }
-
-    pub(crate) fn with_capacity(capacity: usize) -> Self {
+    pub(crate) fn new(capacity: usize) -> Self {
         Self {
             dense: Vec::with_capacity(capacity),
             sparse: vec![0; capacity].into_boxed_slice(),
@@ -56,7 +52,7 @@ impl SparseSet {
 }
 
 impl<'a> IntoIterator for &'a SparseSet {
-    type Item = usize;
+    type Item = &'a usize;
     type IntoIter = Iter<'a>;
 
     fn into_iter(self) -> Self::IntoIter {
@@ -69,9 +65,9 @@ pub(crate) struct Iter<'a> {
 }
 
 impl<'a> Iterator for Iter<'a> {
-    type Item = usize;
+    type Item = &'a usize;
 
     fn next(&mut self) -> Option<Self::Item> {
-        self.iter.next().cloned()
+        self.iter.next()
     }
 }
