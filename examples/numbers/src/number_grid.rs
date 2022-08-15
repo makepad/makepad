@@ -13,9 +13,6 @@ live_register!{
         instance focus: float
         
         fn pixel(self) -> vec4 {
-            let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-            // lets darw a rect
-            sdf.box(0,0,self.rect_size.x, self.rect_size.y,2);
             
             let base = #3;
             let up = 0.0;
@@ -28,6 +25,15 @@ live_register!{
                 base = #0a0
                 up = 0
             }
+            
+            if self.fast_path > 0.0{
+                return base
+            }
+            
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+            // lets darw a rect
+            sdf.box(0,0,self.rect_size.x, self.rect_size.y,2);
+            
             
             sdf.fill(mix(base, #8, self.hover));
             
@@ -113,6 +119,7 @@ live_register!{
 pub struct DrawBg {
     draw_super: DrawQuad,
     last_number: f32,
+    fast_path: f32,
     number: f32
 }
 
@@ -142,13 +149,14 @@ pub struct NumberGrid {
     walk: Walk,
     layout: Layout,
     seed: u32,
+    fast_path: bool,
     number_box: Option<LivePtr>,
     regen_animate: bool,
     #[rust] number_boxes: ComponentMap<NumberBoxId, NumberBox>,
 }
 
 impl NumberBox {
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, NumberBoxAction)) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, NumberBoxAction)) {
         self.state_handle_event(cx, event);
         
         match event.hits(cx, self.bg.area()) {
@@ -212,7 +220,7 @@ fn random_bit(seed:&mut u32)->u32{
 
 fn random_f32(seed:&mut u32)->f32{
     let mut out = 0;
-    for i in 0..32{
+    for _ in 0..32{
         out |= random_bit(seed);
         out <<=1;
     }
@@ -222,7 +230,7 @@ fn random_f32(seed:&mut u32)->f32{
 impl NumberGrid{
     
     pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
-        self.scroll_bars.begin(cx, Walk::default(), self.layout);
+        self.scroll_bars.begin(cx, walk, self.layout);
 
         let start_pos = cx.turtle().pos(); //+ vec2(10., 10.);
         let number_box = self.number_box;
@@ -239,6 +247,7 @@ impl NumberGrid{
                 buf.clear();
                 write!(buf,"{:.3}", number).unwrap();
                 let pos = start_pos + dvec2(x as f64 * 55.0,y as f64*15.0);
+                number_box.bg.fast_path = if self.fast_path{1.0}else{0.0};
                 number_box.draw_abs(cx, pos, number, &buf);
             }
         }
@@ -264,6 +273,10 @@ impl NumberGrid{
             }
             Event::KeyUp(fe) if fe.key_code == KeyCode::Space=>{
                 self.regen_animate = false;
+            }
+            Event::KeyDown(fe) if fe.key_code == KeyCode::ReturnKey =>{
+                self.fast_path = !self.fast_path;
+                self.scroll_bars.redraw(cx);
             }
             _=>()
         }
