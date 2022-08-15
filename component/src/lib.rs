@@ -28,6 +28,8 @@ pub mod color_picker;
 pub mod text_input;
 pub mod slider;
 
+pub mod check_box;
+
 pub mod popup_menu;
 
 #[macro_use]
@@ -101,6 +103,7 @@ pub fn live_register(cx: &mut Cx) {
     crate::window_menu::live_register(cx);
     crate::scroll_bar::live_register(cx);
     crate::scroll_bars::live_register(cx);
+    crate::check_box::live_register(cx);
     crate::tab_close_button::live_register(cx);
     crate::tab::live_register(cx);
     crate::tab_bar::live_register(cx);
