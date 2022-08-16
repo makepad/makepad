@@ -316,7 +316,7 @@ impl std::hash::BuildHasher for LiveIdHasherBuilder {
     }
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct LiveIdMap<K, V> {
     map: HashMap<K, V, LiveIdHasherBuilder>,
     alloc_set: HashSet<K, LiveIdHasherBuilder>
