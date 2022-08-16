@@ -8,7 +8,8 @@ mod sparse_set;
 mod str;
 
 use self::{
-    ast::Ast, compiler::Compiler, nfa::Nfa, parser::Parser, program::Program, sparse_set::SparseSet,
+    ast::Ast, compiler::Compiler, nfa::Nfa, parser::Parser, program::Program,
+    sparse_set::SparseSet,
 };
 
 #[cfg(test)]
