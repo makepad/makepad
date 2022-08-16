@@ -1,6 +1,7 @@
 [workspace]
 
 members = [
+    "code_editor/range_set",
     "code_editor/regex",
     "code_editor/rope",
     "code_editor/segment",

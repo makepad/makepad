@@ -1,4 +1,7 @@
-use crate::{ast::Quant, str, Ast};
+use {
+    crate::{ast::Quant, Ast},
+    std::str::Chars,
+};
 
 #[derive(Clone, Debug)]
 pub struct Parser {
@@ -15,13 +18,16 @@ impl Parser {
     }
 
     pub(crate) fn parse(&mut self, string: &str) -> Ast {
+        let mut chars = string.chars();
         ParseContext {
             cap_count: 1,
+            ch_0: chars.next(),
+            ch_1: chars.next(),
+            chars,
+            position: 0,
             asts: &mut self.asts,
             groups: &mut self.groups,
             group: Group::new(Some(0)),
-            string,
-            position: 0,
         }
         .parse()
     }
@@ -30,11 +36,13 @@ impl Parser {
 #[derive(Debug)]
 struct ParseContext<'a> {
     cap_count: usize,
+    ch_0: Option<char>,
+    ch_1: Option<char>,
+    chars: Chars<'a>,
+    position: usize,
     asts: &'a mut Vec<Ast>,
     groups: &'a mut Vec<Group>,
     group: Group,
-    string: &'a str,
-    position: usize,
 }
 
 impl<'a> ParseContext<'a> {
@@ -92,21 +100,24 @@ impl<'a> ParseContext<'a> {
     }
 
     fn peek_char(&self) -> Option<char> {
-        self.string[self.position..].chars().next()
+        self.ch_0
     }
 
     fn peek_two_chars(&self) -> (Option<char>, Option<char>) {
-        let mut chars = self.string[self.position..].chars();
-        (chars.next(), chars.next())
+        (self.ch_0, self.ch_1)
     }
 
     fn skip_char(&mut self) {
-        self.position += str::utf8_char_width(self.string.as_bytes()[self.position]);
+        self.position += self.ch_0.unwrap().len_utf8();
+        self.ch_0 = self.ch_1;
+        self.ch_1 = self.chars.next();
     }
 
     fn skip_two_chars(&mut self) {
-        self.skip_char();
-        self.skip_char();
+        self.position += self.ch_1.unwrap().len_utf8();
+        self.position += self.ch_1.unwrap().len_utf8();
+        self.ch_0 = self.chars.next();
+        self.ch_1 = self.chars.next();
     }
 
     fn push_group(&mut self, cap: bool) {
