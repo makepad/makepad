@@ -1,6 +1,9 @@
 use crate::{Branch, Node};
 
-/// A cursor over the chunks of a `Rope`.
+/// A cursor over the chunks of a [`Rope`] or [`Slice`].
+///
+/// [`Rope`]: crate::Rope
+/// [`Slice`]: crate::Slice
 #[derive(Clone, Debug)]
 pub struct ChunkCursor<'a> {
     root: &'a Node,
@@ -11,31 +14,42 @@ pub struct ChunkCursor<'a> {
 }
 
 impl<'a> ChunkCursor<'a> {
-    /// Returns `true` if `self` is currently pointing to the front chunk of the `Rope`.
+    /// Returns `true` if `self` is currently pointing to the front chunk of the [`Rope`] or
+    /// [`Slice`].
     ///
     /// # Performance
     ///
     /// Runs in O(1) time.
+    ///
+    /// [`Rope`]: crate::Rope
+    /// [`Slice`]: crate::Slice
     #[inline]
     pub fn is_at_front(&self) -> bool {
         self.byte_position <= self.byte_start
     }
 
-    /// Returns `true` if `self` is currently pointing to the back chunk of the `Rope`.
+    /// Returns `true` if `self` is currently pointing to the back chunk of the [`Rope`] or
+    /// [`Slice`].
     ///
     /// # Performance
     ///
     /// Runs in O(1) time.
+    ///
+    /// [`Rope`]: crate::Rope
+    /// [`Slice`]: crate::Slice
     #[inline]
     pub fn is_at_back(&self) -> bool {
         self.byte_position + self.current_node().as_leaf().len() >= self.byte_end
     }
 
-    /// Returns the byte position of `self` within the `Rope`.
+    /// Returns the byte position of `self` within the [`Rope`] or [`Slice`].
     ///
     /// # Performance
     ///
     /// Runs in O(1) time.
+    ///
+    /// [`Rope`]: crate::Rope
+    /// [`Slice`]: crate::Slice
     #[inline]
     pub fn byte_position(&self) -> usize {
         self.byte_position.saturating_sub(self.byte_start)
@@ -54,7 +68,7 @@ impl<'a> ChunkCursor<'a> {
         &leaf[start..end]
     }
 
-    /// Moves `self` to the next chunk of the `Rope`.
+    /// Moves `self` to the next chunk of the [`Rope`] or [`Slice`].
     ///
     /// # Performance
     ///
@@ -62,7 +76,10 @@ impl<'a> ChunkCursor<'a> {
     ///
     /// # Panics
     ///
-    /// Panics if `self` is currently pointing to the back of the `Rope`.
+    /// Panics if `self` is currently pointing to the back of the [`Rope`] or [`Slice`].
+    ///
+    /// [`Rope`]: crate::Rope
+    /// [`Slice`]: crate::Slice
     pub fn move_next(&mut self) {
         assert!(!self.is_at_back());
         self.byte_position += self.current_node().as_leaf().len();
@@ -76,7 +93,7 @@ impl<'a> ChunkCursor<'a> {
         self.descend_left();
     }
 
-    /// Moves `self` to the previous chunk of the `Rope`.
+    /// Moves `self` to the previous chunk of the [`Rope`] or [`Slice`].
     ///
     /// # Performance
     ///
@@ -84,7 +101,10 @@ impl<'a> ChunkCursor<'a> {
     ///
     /// # Panics
     ///
-    /// Panics if `self` is currently pointing to the front of the `Rope`.
+    /// Panics if `self` is currently pointing to the front of the [`Rope`] or [`Slice`].
+    ///
+    /// [`Rope`]: crate::Rope
+    /// [`Slice`]: crate::Slice
     pub fn move_prev(&mut self) {
         assert!(!self.is_at_front());
         while let Some((branch, index)) = self.path.last_mut() {
@@ -98,7 +118,8 @@ impl<'a> ChunkCursor<'a> {
         self.descend_right();
     }
 
-    /// Moves `self` to the chunk containing the given `byte_position` within the `Rope`.
+    /// Moves `self` to the chunk containing the given `byte_position` within the [`Rope`] or
+    /// [`Slice`].
     ///
     /// # Performance
     ///
@@ -106,7 +127,10 @@ impl<'a> ChunkCursor<'a> {
     ///
     /// # Panics
     ///
-    /// Panics if `byte_position` is greater than the length of the `Rope` in bytes.
+    /// Panics if `byte_position` is greater than the length of the [`Rope`] or [`Slice`] in bytes.
+    ///
+    /// [`Rope`]: crate::Rope
+    /// [`Slice`]: crate::Slice
     #[inline]
     pub fn move_to(&mut self, byte_position: usize) {
         let byte_position = self.byte_start + byte_position;
