@@ -1,6 +1,9 @@
+use crate::CharClass;
+
 #[derive(Clone, Debug)]
 pub(crate) enum Ast {
     Char(char),
+    CharClass(CharClass),
     Cap(Box<Ast>, usize),
     Rep(Box<Ast>, Quant),
     Cat(Vec<Ast>),
