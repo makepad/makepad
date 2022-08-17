@@ -138,7 +138,7 @@ impl<T> RangeSet<T> {
         Union::new(&self.ranges, &other.ranges)
     }
 
-    /// Inserts the given `range` in `self`.
+    /// Adds the given `range` to `self`.
     ///
     /// # Performance
     ///
