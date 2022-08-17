@@ -69,7 +69,7 @@ impl Rope {
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     pub fn is_char_boundary(&self, byte_index: usize) -> bool {
         if byte_index > self.byte_len() {
             return false;
@@ -84,7 +84,7 @@ impl Rope {
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     ///
     /// # Panics
     ///
@@ -98,7 +98,7 @@ impl Rope {
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     ///
     /// # Panics
     ///
@@ -112,7 +112,7 @@ impl Rope {
     ///
     /// # Performance
     ///  
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     ///
     /// # Panics
     ///
@@ -131,7 +131,7 @@ impl Rope {
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     ///
     /// # Panics
     ///
@@ -147,7 +147,7 @@ impl Rope {
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     ///
     /// # Panics
     ///
@@ -157,29 +157,29 @@ impl Rope {
         Slice::new(self, byte_range.start, byte_range.end)
     }
 
-    /// Returns a `ChunkCursor` at the front chunk of `self`.
+    /// Returns a [`ChunkCursor`] at the front chunk of `self`.
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     pub fn chunk_cursor_front(&self) -> ChunkCursor<'_> {
         self.slice(..).chunk_cursor_front()
     }
 
-    /// Returns a `ChunkCursor` at the back chunk of `self`.
+    /// Returns a [`ChunkCursor`] at the back chunk of `self`.
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     pub fn chunk_cursor_back(&self) -> ChunkCursor<'_> {
         self.slice(..).chunk_cursor_back()
     }
 
-    /// Returns a `ChunkCursor` at chunk containing the given `byte_position` within `self`.
+    /// Returns a [`ChunkCursor`] at chunk containing the given `byte_position` within `self`.
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     ///
     /// # Panics
     ///
@@ -188,29 +188,29 @@ impl Rope {
         self.slice(..).chunk_cursor_at(byte_position)
     }
 
-    /// Returns a `Cursor` at the front of `self`.
+    /// Returns a [`Cursor`] at the front of `self`.
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     pub fn cursor_front(&self) -> Cursor<'_> {
         self.slice(..).cursor_front()
     }
 
-    /// Returns a `Cursor` at the back of `self`.
+    /// Returns a [`Cursor`] at the back of `self`.
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     pub fn cursor_back(&self) -> Cursor<'_> {
         self.slice(..).cursor_back()
     }
 
-    /// Returns a `Cursor` at the the given `byte_position` within `self`.
+    /// Returns a [`Cursor`] at the the given `byte_position` within `self`.
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     ///
     /// # Panics
     ///
@@ -220,56 +220,56 @@ impl Rope {
         self.slice(..).cursor_at(byte_position)
     }
 
-    /// Returns an iterator over the chunks of `self`.
+    /// Returns an iterator over the chunks in `self`.
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     pub fn chunks(&self) -> Chunks<'_> {
         self.slice(..).chunks()
     }
 
-    /// Returns a reverse iterator over the chunks of `self`.
+    /// Returns a reverse iterator over the chunks in `self`.
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     pub fn chunks_rev(&self) -> ChunksRev<'_> {
         self.slice(..).chunks_rev()
     }
 
-    /// Returns an iterator over the bytes of `self`.
+    /// Returns an iterator over the bytes in `self`.
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     pub fn bytes(&self) -> Bytes<'_> {
         self.slice(..).bytes()
     }
 
-    /// Returns a reverse iterator over the bytes of `self`.
+    /// Returns a reverse iterator over the bytes in `self`.
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     pub fn bytes_rev(&self) -> BytesRev<'_> {
         self.slice(..).bytes_rev()
     }
 
-    /// Returns an iterator over the `char`s of `self`.
+    /// Returns an iterator over the `char`s in `self`.
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     pub fn chars(&self) -> Chars<'_> {
         self.slice(..).chars()
     }
 
-    /// Returns a reverse iterator over the `char`s of `self`.
+    /// Returns a reverse iterator over the `char`s in `self`.
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     pub fn chars_rev(&self) -> CharsRev<'_> {
         self.slice(..).chars_rev()
     }
@@ -278,7 +278,7 @@ impl Rope {
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     pub fn append(&mut self, mut other: Self) {
         use crate::StrUtils;
 
@@ -301,7 +301,7 @@ impl Rope {
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     ///
     /// # Panics
     ///
@@ -329,7 +329,7 @@ impl Rope {
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     ///
     /// # Panics
     ///
@@ -351,7 +351,7 @@ impl Rope {
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     ///
     /// # Panics
     ///
