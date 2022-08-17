@@ -10,6 +10,7 @@ use {
     },
 };
 
+/// A rope data structure.
 #[derive(Clone, Debug)]
 pub struct Rope {
     height: usize,
