@@ -20,12 +20,14 @@ impl<T> RangeSet<T> {
     }
 
     /// Constructs a new, empty `RangeSet` with at least the given `capacity`.
-    /// 
+    ///
     /// # Performance
-    /// 
+    ///
     /// Runs in O(1) time.
     pub fn with_capacity(capacity: usize) -> Self {
-        Self { ranges: Vec::with_capacity(capacity) }
+        Self {
+            ranges: Vec::with_capacity(capacity),
+        }
     }
 
     /// Returns a slice of all [`Range`]s in `self`.
@@ -192,6 +194,12 @@ impl<T> RangeSet<T> {
     /// Runs in O(1) time.
     pub fn clear(&mut self) {
         self.ranges.clear();
+    }
+}
+
+impl<T> Default for RangeSet<T> {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
