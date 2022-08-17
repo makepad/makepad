@@ -1,5 +1,5 @@
 use {
-    crate::{ast::Quant, Ast},
+    crate::{ast::Quant, Ast, CharClass, Range},
     std::str::Chars,
 };
 
@@ -85,6 +85,12 @@ impl<'a> ParseContext<'a> {
                     self.skip_char();
                     self.pop_group();
                 }
+                Some('[') => {
+                    self.maybe_push_cat();
+                    let char_class = self.parse_char_class();
+                    self.asts.push(Ast::CharClass(char_class));
+                    self.group.ast_count += 1;
+                }
                 Some(ch) => {
                     self.skip_char();
                     self.maybe_push_cat();
@@ -97,6 +103,41 @@ impl<'a> ParseContext<'a> {
         self.maybe_push_cat();
         self.pop_alts();
         Ast::Cap(Box::new(self.asts.pop().unwrap()), 0)
+    }
+
+    fn parse_char_class(&mut self) -> CharClass {
+        let mut char_class = CharClass::new();
+        self.skip_char();
+        let mut is_first = true;
+        loop {
+            match self.peek_char() {
+                Some(']') if !is_first => {
+                    self.skip_char();
+                    break;
+                }
+                _ => char_class.insert(self.parse_char_range()),
+            }
+            is_first = false;
+        }
+        char_class
+    }
+
+    fn parse_char_range(&mut self) -> Range<char> {
+        let start = self.parse_char();
+        match self.peek_two_chars() {
+            (Some('-'), ch) if ch != Some(']') => {
+                self.skip_char();
+                let end = self.parse_char();
+                return Range::new(start, end);
+            }
+            _ => Range::new(start, start),
+        }
+    }
+
+    fn parse_char(&mut self) -> char {
+        let ch = self.peek_char().unwrap();
+        self.skip_char();
+        ch
     }
 
     fn peek_char(&self) -> Option<char> {
