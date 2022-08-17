@@ -1,6 +1,6 @@
 use std::slice;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) struct SparseSet {
     dense: Vec<usize>,
     sparse: Box<[usize]>,
@@ -60,6 +60,7 @@ impl<'a> IntoIterator for &'a SparseSet {
     }
 }
 
+#[derive(Clone, Debug)]
 pub(crate) struct Iter<'a> {
     iter: slice::Iter<'a, usize>,
 }
