@@ -1,6 +1,6 @@
 use std::slice;
 
-/// A sparse set of integer values.
+/// A sparse set of integers.
 /// 
 /// Based on: [https://research.swtch.com/sparse](https://research.swtch.com/sparse).
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
@@ -31,7 +31,7 @@ impl SparseSet {
         self.dense.is_empty()
     }
 
-    /// Returns the number of values `self` can hold.
+    /// Returns the number of integers `self` can hold.
     /// 
     /// # Performance
     /// 
@@ -40,7 +40,7 @@ impl SparseSet {
         self.sparse.len()
     }
 
-    /// Returns a slice of all values in `self`, in insertion order.
+    /// Returns a slice of all integers in `self`, in insertion order.
     ///
     /// # Performance
     /// 
@@ -49,7 +49,7 @@ impl SparseSet {
         self.dense.as_slice()
     }
 
-    /// Returns true if `self` contains the given `value`.
+    /// Returns true if `self` contains the integer `value`.
     /// 
     /// # Performance
     /// 
@@ -58,7 +58,7 @@ impl SparseSet {
         self.dense.get(self.sparse[value]) == Some(&value)
     }
 
-    /// Returns an iterator over the values in `self`.
+    /// Returns an iterator over the integers in `self`.
     /// 
     /// # Performance
     /// 
@@ -69,7 +69,7 @@ impl SparseSet {
         }
     }
 
-    /// Adds the given `value` to `self`.
+    /// Adds the integer `value` to `self`.
     /// 
     /// # Performance
     /// 
@@ -88,7 +88,7 @@ impl SparseSet {
         true
     }
 
-    /// Clears `self`, removing all values.
+    /// Clears `self`, removing all integers.
     /// 
     /// # Performance
     /// 
@@ -116,7 +116,7 @@ pub struct Iter<'a> {
 impl<'a> Iterator for Iter<'a> {
     type Item = &'a usize;
 
-    /// Advances the iterator and returns the next value.
+    /// Advances the iterator and returns the next integer.
     /// 
     /// # Performance
     /// 
