@@ -2,7 +2,7 @@ use crate::{
     ast::Quant,
     program,
     program::{Instr, InstrPtr},
-    Ast, Program,
+    Ast, CharClass, Program,
 };
 
 #[derive(Clone, Debug)]
@@ -43,6 +43,7 @@ impl CompileContext {
     fn compile_recursive(&mut self, ast: &Ast) -> Frag {
         match *ast {
             Ast::Char(ch) => self.compile_char(ch),
+            Ast::CharClass(ref char_class) => self.compile_char_class(char_class),
             Ast::Cap(ref ast, index) => self.compile_cap(ast, index),
             Ast::Rep(ref ast, Quant::Quest) => self.compile_quest(ast),
             Ast::Rep(ref ast, Quant::Star) => self.compile_star(ast),
@@ -53,10 +54,21 @@ impl CompileContext {
     }
 
     fn compile_char(&mut self, ch: char) -> Frag {
-        let start = self.emit_instr(Instr::Char(ch, program::NULL_INSTR_PTR));
+        let instr = self.emit_instr(Instr::Char(ch, program::NULL_INSTR_PTR));
         Frag {
-            start,
-            ends: HolePtrList::unit(HolePtr::next_0(start)),
+            start: instr,
+            ends: HolePtrList::unit(HolePtr::next_0(instr)),
+        }
+    }
+
+    fn compile_char_class(&mut self, char_class: &CharClass) -> Frag {
+        let instr = self.emit_instr(Instr::CharClass(
+            char_class.clone(),
+            program::NULL_INSTR_PTR,
+        ));
+        Frag {
+            start: instr,
+            ends: HolePtrList::unit(HolePtr::next_0(instr)),
         }
     }
 

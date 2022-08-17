@@ -1,3 +1,5 @@
+use crate::CharClass;
+
 #[derive(Clone, Debug)]
 pub(crate) struct Program {
     pub(crate) start: usize,
@@ -5,10 +7,11 @@ pub(crate) struct Program {
     pub(crate) instrs: Vec<Instr>,
 }
 
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Debug)]
 pub(crate) enum Instr {
     Match,
     Char(char, InstrPtr),
+    CharClass(CharClass, InstrPtr),
     Save(usize, InstrPtr),
     Split(InstrPtr, InstrPtr),
 }
@@ -17,6 +20,7 @@ impl Instr {
     pub fn next_0(&self) -> &InstrPtr {
         match self {
             Self::Char(_, next_0) => next_0,
+            Self::CharClass(_, next_0) => next_0,
             Self::Save(_, next_0) => next_0,
             Self::Split(next_0, _) => next_0,
             _ => panic!(),
@@ -33,6 +37,7 @@ impl Instr {
     pub fn next_0_mut(&mut self) -> &mut InstrPtr {
         match self {
             Self::Char(_, next_0) => next_0,
+            Self::CharClass(_, next_0) => next_0,
             Self::Save(_, next_0) => next_0,
             Self::Split(next_0, _) => next_0,
             _ => panic!(),

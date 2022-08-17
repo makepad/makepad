@@ -1,7 +1,6 @@
 use crate::{
-    cursor::Cursor,
     program::{Instr, InstrPtr},
-    Program, SparseSet,
+    Cursor, Program, SparseSet,
 };
 
 #[derive(Clone, Debug)]
@@ -41,8 +40,8 @@ impl Nfa {
                 slots,
                 &mut self.add_thread_stack,
             );
-            let ch = cursor.current_char().map_or(u32::MAX, |ch| ch as u32);
-            if ch != u32::MAX {
+            let ch = cursor.current_char();
+            if ch.is_some() {
                 cursor.move_next_char();
             }
             for &instr in &self.current_threads.instr {
@@ -53,7 +52,18 @@ impl Nfa {
                         break;
                     }
                     Instr::Char(other_ch, next) => {
-                        if other_ch as u32 == ch {
+                        if ch.map_or(false, |ch| other_ch == ch) {
+                            self.new_threads.add_thread(
+                                next,
+                                cursor.byte_position(),
+                                &program.instrs,
+                                self.current_threads.slots.get_mut(instr),
+                                &mut self.add_thread_stack,
+                            );
+                        }
+                    }
+                    Instr::CharClass(ref char_class, next) => {
+                        if ch.map_or(false, |ch| char_class.contains(ch)) {
                             self.new_threads.add_thread(
                                 next,
                                 cursor.byte_position(),
