@@ -5,6 +5,7 @@ members = [
     "code_editor/regex",
     "code_editor/rope",
     "code_editor/segment",
+    "code_editor/varint",
     "code_editor/ucd",
     "examples/numbers", 
     "examples/fractal_zoom", 
