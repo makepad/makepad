@@ -2,6 +2,7 @@ mod ast;
 mod char_class;
 mod compiler;
 mod cursor;
+mod dfa;
 mod nfa;
 mod parser;
 mod program;
