@@ -28,8 +28,20 @@ impl<'a> Cursor for StrCursor<'a> {
         self.byte_position
     }
 
+    fn current_byte(&self) -> Option<u8> {
+        self.string.as_bytes().get(self.byte_position).cloned()
+    }
+
     fn current_char(&self) -> Option<char> {
         self.string[self.byte_position..].chars().next()
+    }
+
+    fn move_next_byte(&mut self) {
+        self.byte_position += 1;
+    }
+
+    fn move_prev_byte(&mut self) {
+        self.byte_position -= 1;
     }
 
     fn move_next_char(&mut self) {

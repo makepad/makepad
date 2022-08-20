@@ -7,7 +7,7 @@ use crate::{
 pub(crate) struct Nfa {
     current_threads: Threads,
     new_threads: Threads,
-    add_thread_stack: Vec<AddThreadStackFrame>,
+    stack: Vec<Frame>,
 }
 
 impl Nfa {
@@ -15,7 +15,7 @@ impl Nfa {
         Self {
             current_threads: Threads::new(0, 0),
             new_threads: Threads::new(0, 0),
-            add_thread_stack: Vec::new(),
+            stack: Vec::new(),
         }
     }
 
@@ -40,7 +40,7 @@ impl Nfa {
                 cursor.byte_position(),
                 &program.instrs,
                 slots,
-                &mut self.add_thread_stack,
+                &mut self.stack,
             );
             let ch = cursor.current_char();
             if ch.is_some() {
@@ -60,7 +60,7 @@ impl Nfa {
                                 cursor.byte_position(),
                                 &program.instrs,
                                 self.current_threads.slots.get_mut(instr),
-                                &mut self.add_thread_stack,
+                                &mut self.stack,
                             );
                         }
                     }
@@ -71,7 +71,7 @@ impl Nfa {
                                 cursor.byte_position(),
                                 &program.instrs,
                                 self.current_threads.slots.get_mut(instr),
-                                &mut self.add_thread_stack,
+                                &mut self.stack,
                             );
                         }
                     }
@@ -95,13 +95,13 @@ struct Threads {
 }
 
 impl Threads {
-    fn new(instr_count: usize, slot_count: usize) -> Self {
+    fn new(thread_count: usize, slot_count_per_thread: usize) -> Self {
         Self {
-            instrs: SparseSet::new(instr_count),
+            instrs: SparseSet::new(thread_count),
             slots: Slots {
-                slot_count_per_thread: slot_count,
-                slots: vec![None; instr_count * slot_count],
-            }
+                slot_count_per_thread,
+                slots: vec![None; thread_count * slot_count_per_thread].into_boxed_slice(),
+            },
         }
     }
 
@@ -111,26 +111,23 @@ impl Threads {
         byte_position: usize,
         instrs: &[Instr],
         slots: &mut [Option<usize>],
-        stack: &mut Vec<AddThreadStackFrame>,
+        stack: &mut Vec<Frame>,
     ) {
-        stack.push(AddThreadStackFrame::AddThread(instr));
+        stack.push(Frame::AddThread(instr));
         while let Some(frame) = stack.pop() {
             match frame {
-                AddThreadStackFrame::AddThread(mut instr) => loop {
+                Frame::AddThread(mut instr) => loop {
                     if self.instrs.contains(instr) {
                         break;
                     }
                     self.instrs.insert(instr);
                     match instrs[instr] {
                         Instr::Split(next_0, next_1) => {
-                            stack.push(AddThreadStackFrame::AddThread(next_1));
+                            stack.push(Frame::AddThread(next_1));
                             instr = next_0;
                         }
                         Instr::Save(slot_index, next) => {
-                            stack.push(AddThreadStackFrame::RestoreSlot(
-                                slot_index,
-                                slots[slot_index],
-                            ));
+                            stack.push(Frame::RestoreSlot(slot_index, slots[slot_index]));
                             slots[slot_index] = Some(byte_position);
                             instr = next;
                         }
@@ -140,7 +137,7 @@ impl Threads {
                         }
                     }
                 },
-                AddThreadStackFrame::RestoreSlot(slot_index, byte_position) => {
+                Frame::RestoreSlot(slot_index, byte_position) => {
                     slots[slot_index] = byte_position;
                 }
             }
@@ -151,7 +148,7 @@ impl Threads {
 #[derive(Clone, Debug)]
 struct Slots {
     slot_count_per_thread: usize,
-    slots: Vec<Option<usize>>,
+    slots: Box<[Option<usize>]>,
 }
 
 impl Slots {
@@ -164,8 +161,8 @@ impl Slots {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-enum AddThreadStackFrame {
+#[derive(Clone, Debug)]
+enum Frame {
     AddThread(InstrPtr),
     RestoreSlot(usize, Option<usize>),
 }
