@@ -1,4 +1,4 @@
-use crate::CharClass;
+use crate::{CharClass, Range};
 
 #[derive(Clone, Debug)]
 pub(crate) struct Program {
@@ -10,6 +10,7 @@ pub(crate) struct Program {
 #[derive(Clone, Debug)]
 pub(crate) enum Instr {
     Match,
+    ByteRange(Range<u8>, InstrPtr),
     Char(char, InstrPtr),
     CharClass(CharClass, InstrPtr),
     Save(usize, InstrPtr),
