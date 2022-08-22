@@ -25,6 +25,7 @@ impl Compiler {
 
 #[derive(Debug, Default)]
 pub(crate) struct Options {
+    pub(crate) dot_star: bool,
     pub(crate) bytewise: bool,
 }
 
@@ -37,11 +38,26 @@ struct CompileContext {
 
 impl CompileContext {
     fn compile(mut self, ast: &Ast) -> Program {
+        let mut dot_star_frag = Frag {
+            start: program::NULL_INSTR_PTR,
+            ends: HolePtrList::new(),
+        };
+        if self.options.dot_star {
+            dot_star_frag = self.compile_recursive(&Ast::Rep(
+                Box::new(Ast::CharClass(CharClass::any())),
+                Quant::Star,
+            ));
+        }
         let frag = self.compile_recursive(ast);
         let instr = self.emit_instr(Instr::Match);
         frag.ends.fill(instr, &mut self.instrs);
+        let mut start = frag.start;
+        if self.options.dot_star {
+            dot_star_frag.ends.fill(start, &mut self.instrs);
+            start = dot_star_frag.start;
+        }
         Program {
-            start: frag.start,
+            start,
             slot_count: self.slot_count,
             instrs: self.instrs,
         }
@@ -192,7 +208,7 @@ struct HolePtrList {
 }
 
 impl HolePtrList {
-    fn empty() -> Self {
+    fn new() -> Self {
         Self {
             head: HolePtr::null(),
             tail: HolePtr::null(),
