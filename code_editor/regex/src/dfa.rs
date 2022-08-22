@@ -6,6 +6,11 @@ use {
     std::{collections::HashMap, rc::Rc},
 };
 
+const MAX_STATE_PTR: StatePtr = (1 << 30) - 1;
+const MATCH_STATE_FLAG: StatePtr = 1 << 30;
+const UNKNOWN_STATE_PTR: StatePtr = 1 << 31;
+const DEAD_STATE_PTR: StatePtr = (1 << 31) + 1;
+
 #[derive(Clone, Debug)]
 pub struct Dfa {
     start_state_cache: Option<StatePtr>,
@@ -33,7 +38,7 @@ impl Dfa {
     pub(crate) fn run<C: Cursor>(&mut self, program: &Program, cursor: C) -> Option<usize> {
         if !self.current_threads.instrs.capacity() != program.instrs.len() {
             self.current_threads = Threads::new(program.instrs.len());
-            self.next_threads = Threads::new(program.instrs.len()); 
+            self.next_threads = Threads::new(program.instrs.len());
         }
         RunContext {
             start_state_cache: &mut self.start_state_cache,
@@ -260,8 +265,3 @@ impl Threads {
         }
     }
 }
-
-const MAX_STATE_PTR: StatePtr = (1 << 30) - 1;
-const MATCH_STATE_FLAG: StatePtr = 1 << 30;
-const UNKNOWN_STATE_PTR: StatePtr = 1 << 31;
-const DEAD_STATE_PTR: StatePtr = (1 << 31) + 1;
