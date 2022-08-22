@@ -2,7 +2,7 @@ use crate::{
     ast::Quant,
     program,
     program::{Instr, InstrPtr},
-    Ast, CharClass, Program,
+    Ast, CharClass, Program, Range,
 };
 
 #[derive(Clone, Debug)]
@@ -13,19 +13,26 @@ impl Compiler {
         Self
     }
 
-    pub(crate) fn compile(&mut self, ast: &Ast) -> Program {
+    pub(crate) fn compile(&mut self, ast: &Ast, options: Options) -> Program {
         CompileContext {
             slot_count: 0,
             instrs: Vec::new(),
+            options,
         }
         .compile(ast)
     }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct Options {
+    pub(crate) byte_based: bool,
 }
 
 #[derive(Debug)]
 struct CompileContext {
     slot_count: usize,
     instrs: Vec<Instr>,
+    options: Options,
 }
 
 impl CompileContext {
@@ -53,11 +60,37 @@ impl CompileContext {
         }
     }
 
-    fn compile_char(&mut self, ch: char) -> Frag {
-        let instr = self.emit_instr(Instr::Char(ch, program::NULL_INSTR_PTR));
+    fn compile_byte_range(&mut self, byte_range: Range<u8>) -> Frag {
+        let instr = self.emit_instr(Instr::ByteRange(byte_range, program::NULL_INSTR_PTR));
         Frag {
             start: instr,
             ends: HolePtrList::unit(HolePtr::next_0(instr)),
+        }
+    }
+
+    fn compile_char(&mut self, ch: char) -> Frag {
+        if self.options.byte_based {
+            let mut bytes = [0; 4];
+            let mut bytes = ch.encode_utf8(&mut bytes).bytes().rev();
+            let byte = bytes.next().unwrap();
+            let instr = self.emit_instr(Instr::ByteRange(
+                Range::new(byte, byte),
+                program::NULL_INSTR_PTR,
+            ));
+            let mut acc_instr = instr;
+            for byte in bytes {
+                acc_instr = self.emit_instr(Instr::ByteRange(Range::new(byte, byte), instr));
+            }
+            Frag {
+                start: acc_instr,
+                ends: HolePtrList::unit(HolePtr::next_0(instr)),
+            }
+        } else {
+            let instr = self.emit_instr(Instr::Char(ch, program::NULL_INSTR_PTR));
+            Frag {
+                start: instr,
+                ends: HolePtrList::unit(HolePtr::next_0(instr)),
+            }
         }
     }
 
