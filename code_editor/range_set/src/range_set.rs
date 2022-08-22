@@ -203,6 +203,14 @@ impl<T> Default for RangeSet<T> {
     }
 }
 
+impl<T> From<Range<T>> for RangeSet<T> {
+    fn from(range: Range<T>) -> Self {
+        Self {
+            ranges: vec![range],
+        }
+    }
+}
+
 impl<T: Clone + Ord> Extend<Range<T>> for RangeSet<T> {
     /// Extends a `RangeSet` with the contents of an iterator.
     ///
