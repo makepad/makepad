@@ -31,6 +31,10 @@ impl Dfa {
     }
 
     pub(crate) fn run<C: Cursor>(&mut self, program: &Program, cursor: C) -> Option<usize> {
+        if !self.current_threads.instrs.capacity() != program.instrs.len() {
+            self.current_threads = Threads::new(program.instrs.len());
+            self.next_threads = Threads::new(program.instrs.len()); 
+        }
         RunContext {
             start_state_cache: &mut self.start_state_cache,
             states: &mut self.states,
@@ -38,43 +42,47 @@ impl Dfa {
             next_threads: &mut self.next_threads,
             stack: &mut self.stack,
             program,
+            cursor,
         }
-        .run(cursor)
+        .run()
     }
 }
 
-pub struct RunContext<'a> {
+pub struct RunContext<'a, C> {
     start_state_cache: &'a mut Option<StatePtr>,
     states: &'a mut States,
     current_threads: &'a mut Threads,
     next_threads: &'a mut Threads,
     stack: &'a mut Vec<InstrPtr>,
     program: &'a Program,
+    cursor: C,
 }
 
-impl<'a> RunContext<'a> {
-    fn run<C: Cursor>(&mut self, mut cursor: C) -> Option<usize> {
+impl<'a, C: Cursor> RunContext<'a, C> {
+    fn run(&mut self) -> Option<usize> {
         let mut matched = None;
         let mut current_state = UNKNOWN_STATE_PTR;
         let mut next_state = self.get_or_create_start_state();
-        let mut byte = cursor.current_byte();
-        while !cursor.is_at_back() {
-            while next_state <= MAX_STATE_PTR && !cursor.is_at_back() {
-                cursor.move_next_byte();
+        let mut byte = self.cursor.current_byte();
+        while !self.cursor.is_at_back() {
+            while next_state <= MAX_STATE_PTR && !self.cursor.is_at_back() {
+                self.cursor.move_next_byte();
                 current_state = next_state;
                 next_state = *self.states.next_state(current_state, byte);
-                byte = cursor.current_byte();
+                byte = self.cursor.current_byte();
             }
             if next_state & MATCH_STATE_FLAG != 0 {
-                matched = Some(cursor.byte_position() - 1);
+                matched = Some(self.cursor.byte_position() - 1);
                 next_state &= !MATCH_STATE_FLAG;
             } else if next_state == UNKNOWN_STATE_PTR {
-                cursor.move_prev_byte();
-                let byte = cursor.current_byte();
-                cursor.move_next_byte();
+                self.cursor.move_prev_byte();
+                let byte = self.cursor.current_byte();
+                self.cursor.move_next_byte();
                 next_state = self.get_or_create_next_state(current_state, byte);
                 *self.states.next_state_mut(current_state, byte) = next_state;
             } else if next_state == DEAD_STATE_PTR {
+                return matched;
+            } else {
                 break;
             }
         }
@@ -82,7 +90,7 @@ impl<'a> RunContext<'a> {
         current_state = next_state;
         next_state = self.get_or_create_next_state(current_state, None);
         if next_state & MATCH_STATE_FLAG != 0 {
-            matched = Some(cursor.byte_position());
+            matched = Some(self.cursor.byte_position());
         }
         matched
     }
@@ -122,6 +130,7 @@ impl<'a> RunContext<'a> {
                 _ => {}
             }
         }
+        self.current_threads.instrs.clear();
         if !matched && self.next_threads.instrs.is_empty() {
             return DEAD_STATE_PTR;
         }
@@ -144,11 +153,11 @@ struct States {
 
 impl States {
     fn next_state(&self, state: StatePtr, byte: Option<u8>) -> &StatePtr {
-        unimplemented!()
+        &self.next_states[state as usize * 257 + byte.map_or(256, |byte| byte as usize)]
     }
 
     fn next_state_mut(&mut self, state: StatePtr, byte: Option<u8>) -> &mut StatePtr {
-        unimplemented!()
+        &mut self.next_states[state as usize * 257 + byte.map_or(256, |byte| byte as usize)]
     }
 
     fn get_or_create_state(&mut self, state_id: StateId) -> StatePtr {
@@ -160,7 +169,7 @@ impl States {
             move || {
                 let state_ptr = state_ids.len() as StatePtr;
                 state_ids.push(state_id);
-                next_states.extend(iter::repeat(UNKNOWN_STATE_PTR).take(256));
+                next_states.extend(iter::repeat(UNKNOWN_STATE_PTR).take(257));
                 state_ptr
             }
         })
@@ -233,14 +242,20 @@ impl Threads {
 
     fn add_thread(&mut self, instr: InstrPtr, instrs: &[Instr], stack: &mut Vec<InstrPtr>) {
         stack.push(instr);
-        while let Some(mut inst) = stack.pop() {
-            match instrs[inst] {
-                Instr::Save(_, next) => inst = next,
-                Instr::Split(next_0, next_1) => {
-                    stack.push(next_1);
-                    inst = next_0;
+        while let Some(mut instr) = stack.pop() {
+            loop {
+                if self.instrs.contains(instr) {
+                    break;
                 }
-                _ => {}
+                self.instrs.insert(instr);
+                match instrs[instr] {
+                    Instr::Save(_, next) => instr = next,
+                    Instr::Split(next_0, next_1) => {
+                        stack.push(next_1);
+                        instr = next_0;
+                    }
+                    _ => break,
+                }
             }
         }
     }
