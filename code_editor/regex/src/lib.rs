@@ -26,13 +26,13 @@ mod tests {
         let program = Compiler::new().compile(
             &ast,
             compiler::Options {
-                byte_based: true,
+                bytewise: true,
                 ..compiler::Options::default()
             },
         );
         println!("{:?}", program);
         let mut dfa = Dfa::new();
-        let cursor = str::StrCursor::new("xyxxxdacz");
+        let cursor = str::StrCursor::new("abcz");
         println!("{:?}", dfa.run(&program, cursor));
     }
 }
