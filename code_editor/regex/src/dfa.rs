@@ -6,6 +6,7 @@ use {
     std::{collections::HashMap, rc::Rc},
 };
 
+#[derive(Clone, Debug)]
 pub struct Dfa {
     start_state_cache: Option<StatePtr>,
     states: States,
@@ -37,7 +38,8 @@ impl Dfa {
             next_threads: &mut self.next_threads,
             stack: &mut self.stack,
             program,
-        }.run(cursor)
+        }
+        .run(cursor)
     }
 }
 
@@ -133,6 +135,7 @@ impl<'a> RunContext<'a> {
     }
 }
 
+#[derive(Clone, Debug)]
 struct States {
     state_cache: HashMap<StateId, StatePtr>,
     state_ids: Vec<StateId>,
@@ -166,7 +169,7 @@ impl States {
 
 type StatePtr = u32;
 
-#[derive(Clone, Eq, Hash, PartialEq)]
+#[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct StateId {
     bytes: Rc<[u8]>,
 }
@@ -195,6 +198,7 @@ impl StateId {
     }
 }
 
+#[derive(Debug)]
 struct Instrs<'a> {
     prev_instr: i32,
     bytes: &'a [u8],
@@ -215,6 +219,7 @@ impl<'a> Iterator for Instrs<'a> {
     }
 }
 
+#[derive(Clone, Debug)]
 struct Threads {
     instrs: SparseSet,
 }
@@ -241,7 +246,7 @@ impl Threads {
     }
 }
 
-const MAX_STATE_PTR: StatePtr = 1 << 30 - 1;
+const MAX_STATE_PTR: StatePtr = (1 << 30) - 1;
 const MATCH_STATE_FLAG: StatePtr = 1 << 30;
 const UNKNOWN_STATE_PTR: StatePtr = 1 << 31;
-const DEAD_STATE_PTR: StatePtr = 1 << 31 + 1;
+const DEAD_STATE_PTR: StatePtr = (1 << 31) + 1;

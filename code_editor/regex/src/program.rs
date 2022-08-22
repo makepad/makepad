@@ -20,6 +20,7 @@ pub(crate) enum Instr {
 impl Instr {
     pub fn next_0(&self) -> &InstrPtr {
         match self {
+            Self::ByteRange(_, next_0) => next_0,
             Self::Char(_, next_0) => next_0,
             Self::CharClass(_, next_0) => next_0,
             Self::Save(_, next_0) => next_0,
@@ -37,6 +38,7 @@ impl Instr {
 
     pub fn next_0_mut(&mut self) -> &mut InstrPtr {
         match self {
+            Self::ByteRange(_, next_0) => next_0,
             Self::Char(_, next_0) => next_0,
             Self::CharClass(_, next_0) => next_0,
             Self::Save(_, next_0) => next_0,
