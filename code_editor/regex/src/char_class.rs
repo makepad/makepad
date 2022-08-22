@@ -10,6 +10,12 @@ impl CharClass {
         CharClass::default()
     }
 
+    pub(crate) fn any() -> Self {
+        Self {
+            range_set: (0..char::MAX as u32 + 1).into(),
+        }
+    }
+
     pub(crate) fn is_empty(&self) -> bool {
         self.range_set.is_empty()
     }

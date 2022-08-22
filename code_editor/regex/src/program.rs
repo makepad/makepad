@@ -1,5 +1,7 @@
 use crate::{CharClass, Range};
 
+pub(crate) const NULL_INSTR_PTR: InstrPtr = usize::MAX;
+
 #[derive(Clone, Debug)]
 pub(crate) struct Program {
     pub(crate) start: usize,
@@ -56,5 +58,3 @@ impl Instr {
 }
 
 pub(crate) type InstrPtr = usize;
-
-pub const NULL_INSTR_PTR: InstrPtr = usize::MAX;
