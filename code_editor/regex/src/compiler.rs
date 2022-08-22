@@ -25,7 +25,7 @@ impl Compiler {
 
 #[derive(Debug, Default)]
 pub(crate) struct Options {
-    pub(crate) byte_based: bool,
+    pub(crate) bytewise: bool,
 }
 
 #[derive(Debug)]
@@ -69,7 +69,7 @@ impl CompileContext {
     }
 
     fn compile_char(&mut self, ch: char) -> Frag {
-        if self.options.byte_based {
+        if self.options.bytewise {
             let mut bytes = [0; 4];
             let mut bytes = ch.encode_utf8(&mut bytes).bytes().rev();
             let byte = bytes.next().unwrap();

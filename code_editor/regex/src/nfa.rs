@@ -122,14 +122,14 @@ impl Threads {
                     }
                     self.instrs.insert(instr);
                     match instrs[instr] {
-                        Instr::Split(next_0, next_1) => {
-                            stack.push(Frame::AddThread(next_1));
-                            instr = next_0;
-                        }
                         Instr::Save(slot_index, next) => {
                             stack.push(Frame::RestoreSlot(slot_index, slots[slot_index]));
                             slots[slot_index] = Some(byte_position);
                             instr = next;
+                        }
+                        Instr::Split(next_0, next_1) => {
+                            stack.push(Frame::AddThread(next_1));
+                            instr = next_0;
                         }
                         _ => {
                             self.slots.get_mut(instr).copy_from_slice(slots);
