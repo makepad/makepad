@@ -37,10 +37,11 @@ impl Compiler {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Copy, Debug, Default)]
 pub(crate) struct Options {
     pub(crate) dot_star: bool,
-    pub(crate) bytewise: bool,
+    pub(crate) reverse: bool,
+    pub(crate) bytes: bool,
 }
 
 #[derive(Debug)]
@@ -55,28 +56,21 @@ struct CompileContext<'a> {
 
 impl<'a> CompileContext<'a> {
     fn compile(mut self, ast: &Ast) -> Program {
-        let mut dot_star_frag = Frag {
-            start: program::NULL_INSTR_PTR,
-            ends: HolePtrList::new(),
-        };
+        let mut frag = self.compile_recursive(ast);
+        self.options.reverse = false;
+        let match_frag = self.compile_match();
+        frag = self.compile_cat(frag, match_frag);
         if self.options.dot_star {
-            dot_star_frag = self.compile_recursive(&Ast::Rep(
+            let dot_star_frag = self.compile_recursive(&Ast::Rep(
                 Box::new(Ast::CharClass(CharClass::any())),
                 Quant::Star,
             ));
-        }
-        let frag = self.compile_recursive(ast);
-        let instr = self.emit_instr(Instr::Match);
-        frag.ends.fill(instr, &mut self.instrs);
-        let mut start = frag.start;
-        if self.options.dot_star {
-            dot_star_frag.ends.fill(start, &mut self.instrs);
-            start = dot_star_frag.start;
+            frag = self.compile_cat(dot_star_frag, frag);
         }
         Program {
             slot_count: self.slot_count,
             instrs: self.instrs,
-            start,
+            start: frag.start,
         }
     }
 
@@ -84,12 +78,47 @@ impl<'a> CompileContext<'a> {
         match *ast {
             Ast::Char(ch) => self.compile_char(ch),
             Ast::CharClass(ref char_class) => self.compile_char_class(char_class),
-            Ast::Cap(ref ast, index) => self.compile_cap(ast, index),
-            Ast::Rep(ref ast, Quant::Quest) => self.compile_quest(ast),
-            Ast::Rep(ref ast, Quant::Star) => self.compile_star(ast),
-            Ast::Rep(ref ast, Quant::Plus) => self.compile_plus(ast),
-            Ast::Cat(ref asts) => self.compile_cat(asts),
-            Ast::Alt(ref asts) => self.compile_alt(asts),
+            Ast::Cap(ref ast, index) => {
+                let frag = self.compile_recursive(ast);
+                self.compile_cap(frag, index)
+            }
+            Ast::Rep(ref ast, Quant::Quest) => {
+                let frag = self.compile_recursive(ast);
+                self.compile_quest(frag)
+            }
+            Ast::Rep(ref ast, Quant::Star) => {
+                let frag = self.compile_recursive(ast);
+                self.compile_star(frag)
+            }
+            Ast::Rep(ref ast, Quant::Plus) => {
+                let frag = self.compile_recursive(ast);
+                self.compile_plus(frag)
+            }
+            Ast::Cat(ref asts) => {
+                let mut asts = asts.iter();
+                let mut acc_frag = self.compile_recursive(asts.next().unwrap());
+                for ast in asts {
+                    let frag = self.compile_recursive(ast);
+                    acc_frag = self.compile_cat(acc_frag, frag);
+                }
+                acc_frag
+            }
+            Ast::Alt(ref asts) => {
+                let mut asts = asts.iter();
+                let mut acc_frag = self.compile_recursive(asts.next().unwrap());
+                for ast in asts {
+                    let frag = self.compile_recursive(ast);
+                    acc_frag = self.compile_alt(acc_frag, frag);
+                }
+                acc_frag
+            }
+        }
+    }
+
+    fn compile_match(&mut self) -> Frag {
+        Frag {
+            start: self.emit_instr(Instr::Match),
+            ends: HolePtrList::new(),
         }
     }
 
@@ -102,22 +131,16 @@ impl<'a> CompileContext<'a> {
     }
 
     fn compile_char(&mut self, ch: char) -> Frag {
-        if self.options.bytewise {
+        if self.options.bytes {
             let mut bytes = [0; 4];
-            let mut bytes = ch.encode_utf8(&mut bytes).bytes().rev();
+            let mut bytes = ch.encode_utf8(&mut bytes).bytes();
             let byte = bytes.next().unwrap();
-            let instr = self.emit_instr(Instr::ByteRange(
-                Range::new(byte, byte),
-                program::NULL_INSTR_PTR,
-            ));
-            let mut acc_instr = instr;
+            let mut acc_frag = self.compile_byte_range(Range::new(byte, byte));
             for byte in bytes {
-                acc_instr = self.emit_instr(Instr::ByteRange(Range::new(byte, byte), instr));
+                let frag = self.compile_byte_range(Range::new(byte, byte));
+                acc_frag = self.compile_cat(acc_frag, frag);
             }
-            Frag {
-                start: acc_instr,
-                ends: HolePtrList::unit(HolePtr::next_0(instr)),
-            }
+            acc_frag
         } else {
             let instr = self.emit_instr(Instr::Char(ch, program::NULL_INSTR_PTR));
             Frag {
@@ -128,18 +151,28 @@ impl<'a> CompileContext<'a> {
     }
 
     fn compile_char_class(&mut self, char_class: &CharClass) -> Frag {
-        if self.options.bytewise {
+        if self.options.bytes {
             let mut suffix_tree = SuffixTree {
-                ends: HolePtrList::new(),
                 states: self.states,
                 suffix_cache: SuffixCache {
                     instr_cache: self.instr_cache,
                     instrs: &mut self.instrs,
                 },
+                options: self.options,
+                ends: HolePtrList::new(),
             };
-            for char_range in char_class {
-                for byte_ranges in self.encoder.encode(char_range) {
-                    suffix_tree.add_byte_ranges(&byte_ranges);
+            if self.options.reverse {
+                for char_range in char_class {
+                    for byte_ranges in self.encoder.encode(char_range) {
+                        suffix_tree.add_byte_ranges(&byte_ranges);
+                    }
+                }
+            } else {
+                for char_range in char_class {
+                    for mut byte_ranges in self.encoder.encode(char_range) {
+                        byte_ranges.reverse();
+                        suffix_tree.add_byte_ranges(&byte_ranges);
+                    }
                 }
             }
             suffix_tree.compile()
@@ -155,8 +188,7 @@ impl<'a> CompileContext<'a> {
         }
     }
 
-    fn compile_cap(&mut self, ast: &Ast, cap_index: usize) -> Frag {
-        let frag = self.compile_recursive(ast);
+    fn compile_cap(&mut self, frag: Frag, cap_index: usize) -> Frag {
         let first_slot_index = cap_index * 2;
         self.slot_count = self.slot_count.max(first_slot_index + 2);
         let instr_0 = self.emit_instr(Instr::Save(first_slot_index, frag.start));
@@ -168,8 +200,7 @@ impl<'a> CompileContext<'a> {
         }
     }
 
-    fn compile_quest(&mut self, ast: &Ast) -> Frag {
-        let frag = self.compile_recursive(ast);
+    fn compile_quest(&mut self, frag: Frag) -> Frag {
         let instr = self.emit_instr(Instr::Split(frag.start, program::NULL_INSTR_PTR));
         Frag {
             start: instr,
@@ -177,8 +208,7 @@ impl<'a> CompileContext<'a> {
         }
     }
 
-    fn compile_star(&mut self, ast: &Ast) -> Frag {
-        let frag = self.compile_recursive(ast);
+    fn compile_star(&mut self, frag: Frag) -> Frag {
         let instr = self.emit_instr(Instr::Split(frag.start, program::NULL_INSTR_PTR));
         frag.ends.fill(instr, &mut self.instrs);
         Frag {
@@ -187,8 +217,7 @@ impl<'a> CompileContext<'a> {
         }
     }
 
-    fn compile_plus(&mut self, ast: &Ast) -> Frag {
-        let frag = self.compile_recursive(ast);
+    fn compile_plus(&mut self, frag: Frag) -> Frag {
         let instr = self.emit_instr(Instr::Split(frag.start, program::NULL_INSTR_PTR));
         frag.ends.fill(instr, &mut self.instrs);
         Frag {
@@ -197,29 +226,24 @@ impl<'a> CompileContext<'a> {
         }
     }
 
-    fn compile_cat(&mut self, asts: &[Ast]) -> Frag {
-        let mut asts = asts.iter();
-        let mut acc_frag = self.compile_recursive(asts.next().unwrap());
-        for ast in asts {
-            let frag = self.compile_recursive(ast);
-            acc_frag.ends.fill(frag.start, &mut self.instrs);
-            acc_frag.ends = frag.ends;
+    fn compile_cat(&mut self, mut frag_0: Frag, mut frag_1: Frag) -> Frag {
+        use std::mem;
+
+        if self.options.reverse {
+            mem::swap(&mut frag_0, &mut frag_1);
         }
-        acc_frag
+        frag_0.ends.fill(frag_1.start, &mut self.instrs);
+        Frag {
+            start: frag_0.start,
+            ends: frag_1.ends,
+        }
     }
 
-    fn compile_alt(&mut self, asts: &[Ast]) -> Frag {
-        let mut asts = asts.iter();
-        let mut acc_frag = self.compile_recursive(asts.next().unwrap());
-        for ast in asts {
-            let frag = self.compile_recursive(ast);
-            let instr = self.emit_instr(Instr::Split(acc_frag.start, frag.start));
-            acc_frag = Frag {
-                start: instr,
-                ends: acc_frag.ends.concat(frag.ends, &mut self.instrs),
-            };
+    fn compile_alt(&mut self, frag_0: Frag, frag_1: Frag) -> Frag {
+        Frag {
+            start: self.emit_instr(Instr::Split(frag_0.start, frag_1.start)),
+            ends: frag_0.ends.concat(frag_1.ends, &mut self.instrs),
         }
-        acc_frag
     }
 
     fn emit_instr(&mut self, instr: Instr) -> InstrPtr {
@@ -231,9 +255,10 @@ impl<'a> CompileContext<'a> {
 
 #[derive(Debug)]
 struct SuffixTree<'a> {
-    ends: HolePtrList,
     states: &'a mut Vec<State>,
     suffix_cache: SuffixCache<'a>,
+    options: Options,
+    ends: HolePtrList,
 }
 
 impl<'a> SuffixTree<'a> {
@@ -263,11 +288,15 @@ impl<'a> SuffixTree<'a> {
     }
 
     fn prefix_len(&self, byte_ranges: &[Range<u8>]) -> usize {
-        byte_ranges
-            .iter()
-            .zip(self.states.iter())
-            .take_while(|&(&byte_range, state)| byte_range == state.byte_range)
-            .count()
+        if self.options.reverse {
+            0
+        } else {
+            byte_ranges
+                .iter()
+                .zip(self.states.iter())
+                .take_while(|&(&byte_range, state)| byte_range == state.byte_range)
+                .count()
+        }
     }
 
     fn compile_suffix(&mut self, start: usize) -> InstrPtr {

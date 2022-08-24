@@ -1,4 +1,7 @@
-use {crate::Range, std::ops::Deref};
+use {
+    crate::Range,
+    std::ops::{Deref, DerefMut},
+};
 
 const MAX_LEN: usize = 4;
 
@@ -126,6 +129,15 @@ impl ByteRanges {
             Self::Four(byte_ranges) => byte_ranges.as_slice(),
         }
     }
+
+    fn as_mut_slice(&mut self) -> &mut [Range<u8>] {
+        match self {
+            Self::One(byte_ranges) => byte_ranges.as_mut_slice(),
+            Self::Two(byte_ranges) => byte_ranges.as_mut_slice(),
+            Self::Three(byte_ranges) => byte_ranges.as_mut_slice(),
+            Self::Four(byte_ranges) => byte_ranges.as_mut_slice(),
+        }
+    }
 }
 
 impl Deref for ByteRanges {
@@ -133,6 +145,12 @@ impl Deref for ByteRanges {
 
     fn deref(&self) -> &Self::Target {
         self.as_slice()
+    }
+}
+
+impl DerefMut for ByteRanges {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        self.as_mut_slice()
     }
 }
 
