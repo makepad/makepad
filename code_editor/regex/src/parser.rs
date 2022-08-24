@@ -1,5 +1,5 @@
 use {
-    crate::{ast::Quant, Ast, CharClass, Range},
+    crate::{ast::{Pred, Quant}, Ast, CharClass, Range},
     std::str::Chars,
 };
 
@@ -85,6 +85,18 @@ impl<'a> ParseContext<'a> {
                     let ast = self.asts.pop().unwrap();
                     self.asts.push(Ast::Rep(Box::new(ast), Quant::Plus(lazy)));
                 }
+                Some('^') => {
+                    self.skip_char();
+                    self.maybe_push_cat();
+                    self.asts.push(Ast::Assert(Pred::TextStart));
+                    self.group.ast_count += 1;
+                }
+                Some('$') => {
+                    self.skip_char();
+                    self.maybe_push_cat();
+                    self.asts.push(Ast::Assert(Pred::TextEnd));
+                    self.group.ast_count += 1;
+                }
                 Some('(') => {
                     self.skip_char();
                     let cap = match self.peek_two_chars() {
@@ -104,6 +116,12 @@ impl<'a> ParseContext<'a> {
                     self.maybe_push_cat();
                     let char_class = self.parse_char_class();
                     self.asts.push(Ast::CharClass(char_class));
+                    self.group.ast_count += 1;
+                }
+                Some('.') => {
+                    self.skip_char();
+                    self.maybe_push_cat();
+                    self.asts.push(Ast::CharClass(CharClass::any()));
                     self.group.ast_count += 1;
                 }
                 Some(ch) => {
