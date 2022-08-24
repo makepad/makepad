@@ -22,19 +22,20 @@ mod tests {
 
     #[test]
     fn test() {
-        let ast = Parser::new().parse("ab|bc");
+        let ast = Parser::new().parse("(?:ab)|(?:bc)");
         println!("{:?}", ast);
         let program = Compiler::new().compile(
             &ast,
             compiler::Options {
                 dot_star: true,
-                bytewise: true,
+                reverse: true,
+                bytes: true,
                 ..compiler::Options::default()
             },
         );
         println!("{:?}", program);
         let mut dfa = Dfa::new();
-        let cursor = str::StrCursor::new("xabcz");
+        let cursor = str::StrCursor::new("cbz");
         println!("{:?}", dfa.run(&program, cursor));
     }
 }

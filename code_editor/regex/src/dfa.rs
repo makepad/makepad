@@ -69,7 +69,7 @@ impl<'a, C: Cursor> RunContext<'a, C> {
         let mut current_state = UNKNOWN_STATE_PTR;
         let mut next_state = self.get_or_create_start_state();
         let mut byte = self.cursor.current_byte();
-        while !self.cursor.is_at_back() {
+        loop {
             while next_state <= MAX_STATE_PTR && !self.cursor.is_at_back() {
                 self.cursor.move_next_byte();
                 current_state = next_state;
@@ -108,7 +108,7 @@ impl<'a, C: Cursor> RunContext<'a, C> {
             let program = &self.program;
             move || {
                 current_threads.add_thread(program.start, &program.instrs, stack);
-                let state_id = StateId::new(current_threads.instrs.as_slice());
+                let state_id = StateId::new(Flags::default(), current_threads.instrs.as_slice());
                 current_threads.instrs.clear();
                 states.get_or_create_state(state_id)
             }
@@ -119,11 +119,11 @@ impl<'a, C: Cursor> RunContext<'a, C> {
         for instr in self.states.state_ids[state as usize].instrs() {
             self.current_threads.instrs.insert(instr);
         }
-        let mut matched = false;
+        let mut flags = Flags::default();
         for &instr in self.current_threads.instrs.as_slice() {
             match self.program.instrs[instr] {
                 Instr::Match => {
-                    matched = true;
+                    flags.set_matched();
                     break;
                 }
                 Instr::ByteRange(byte_range, next) => {
@@ -136,13 +136,13 @@ impl<'a, C: Cursor> RunContext<'a, C> {
             }
         }
         self.current_threads.instrs.clear();
-        if !matched && self.next_threads.instrs.is_empty() {
+        if !flags.matched() && self.next_threads.instrs.is_empty() {
             return DEAD_STATE_PTR;
         }
-        let state_id = StateId::new(self.next_threads.instrs.as_slice());
+        let next_state_id = StateId::new(flags, self.next_threads.instrs.as_slice());
         self.next_threads.instrs.clear();
-        let mut next_state = self.states.get_or_create_state(state_id);
-        if matched {
+        let mut next_state = self.states.get_or_create_state(next_state_id);
+        if flags.matched() {
             next_state |= MATCH_STATE_FLAG;
         }
         next_state
@@ -185,11 +185,12 @@ type StatePtr = u32;
 
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 struct StateId {
+    flags: Flags,
     bytes: Rc<[u8]>,
 }
 
 impl StateId {
-    fn new(instrs: &[InstrPtr]) -> Self {
+    fn new(flags: Flags, instrs: &[InstrPtr]) -> Self {
         use makepad_varint::WriteVarint;
 
         let mut bytes = Vec::new();
@@ -200,6 +201,7 @@ impl StateId {
             prev_instr = instr;
         }
         Self {
+            flags,
             bytes: Rc::from(bytes),
         }
     }
@@ -209,6 +211,19 @@ impl StateId {
             prev_instr: 0,
             bytes: &self.bytes,
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, Hash, PartialEq)]
+struct Flags(u8);
+
+impl Flags {
+    fn matched(&self) -> bool {
+        self.0 & 1 << 0 != 0
+    }
+
+    fn set_matched(&mut self) {
+        self.0 |= 1 << 0
     }
 }
 
