@@ -1,6 +1,6 @@
 use {
     crate::{
-        ast::Quant,
+        ast::{Pred, Quant},
         program,
         program::{Instr, InstrPtr},
         utf8, Ast, CharClass, Program, Range,
@@ -81,6 +81,7 @@ impl<'a> CompileContext<'a> {
                 let frag = self.compile_recursive(ast);
                 self.compile_cap(frag, index)
             }
+            Ast::Assert(pred) => self.compile_assert(pred),
             Ast::Rep(ref ast, Quant::Quest(lazy)) => {
                 let frag = self.compile_recursive(ast);
                 self.compile_quest(frag, lazy)
@@ -197,6 +198,10 @@ impl<'a> CompileContext<'a> {
             start: instr_0,
             ends: HolePtrList::unit(HolePtr::next_0(instr_1)),
         }
+    }
+
+    fn compile_assert(&mut self, mut pred: Pred) -> Frag {
+        unimplemented!() // TODO
     }
 
     fn compile_quest(&mut self, frag: Frag, lazy: bool) -> Frag {
