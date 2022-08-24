@@ -1,23 +1,31 @@
-use crate::{
-    ast::Quant,
-    program,
-    program::{Instr, InstrPtr},
-    Ast, CharClass, Program, Range,
+use {
+    crate::{
+        ast::Quant,
+        program,
+        program::{Instr, InstrPtr},
+        utf8, Ast, CharClass, Program, Range,
+    },
+    std::collections::HashMap,
 };
 
 #[derive(Clone, Debug)]
-pub(crate) struct Compiler;
+pub(crate) struct Compiler {
+    encoder: utf8::Encoder,
+}
 
 impl Compiler {
     pub(crate) fn new() -> Self {
-        Self
+        Self {
+            encoder: utf8::Encoder::new(),
+        }
     }
 
     pub(crate) fn compile(&mut self, ast: &Ast, options: Options) -> Program {
         CompileContext {
+            encoder: &mut self.encoder,
+            options,
             slot_count: 0,
             instrs: Vec::new(),
-            options,
         }
         .compile(ast)
     }
@@ -30,13 +38,14 @@ pub(crate) struct Options {
 }
 
 #[derive(Debug)]
-struct CompileContext {
+struct CompileContext<'a> {
+    encoder: &'a mut utf8::Encoder,
+    options: Options,
     slot_count: usize,
     instrs: Vec<Instr>,
-    options: Options,
 }
 
-impl CompileContext {
+impl<'a> CompileContext<'a> {
     fn compile(mut self, ast: &Ast) -> Program {
         let mut dot_star_frag = Frag {
             start: program::NULL_INSTR_PTR,
@@ -57,9 +66,9 @@ impl CompileContext {
             start = dot_star_frag.start;
         }
         Program {
-            start,
             slot_count: self.slot_count,
             instrs: self.instrs,
+            start,
         }
     }
 
@@ -193,6 +202,116 @@ impl CompileContext {
         self.instrs.push(instr);
         instr_ptr
     }
+}
+
+struct SuffixTree<'a> {
+    ends: HolePtrList,
+    uncompiled_instrs: &'a mut Vec<UncompiledInstr>,
+    suffix_cache: SuffixCache<'a>,
+}
+
+impl<'a> SuffixTree<'a> {
+    fn end(mut self) -> Frag {
+        let start = self.compile_suffix(0);
+        self.suffix_cache.instr_cache.clear();
+        if start == program::NULL_INSTR_PTR {
+            let instr = self
+                .suffix_cache
+                .emit_instr(Instr::Nop(program::NULL_INSTR_PTR));
+            Frag {
+                start: instr,
+                ends: HolePtrList::unit(HolePtr::next_0(instr)),
+            }
+        } else {
+            Frag {
+                start,
+                ends: self.ends,
+            }
+        }
+    }
+
+    fn add_byte_ranges(&mut self, byte_ranges: &[Range<u8>]) {
+        let index = self.prefix_len(byte_ranges);
+        let instr = self.compile_suffix(index);
+        self.add_suffix(instr, &byte_ranges[index..]);
+    }
+
+    fn prefix_len(&self, byte_ranges: &[Range<u8>]) -> usize {
+        byte_ranges
+            .iter()
+            .zip(self.uncompiled_instrs.iter())
+            .take_while(|&(&byte_range, uncompiled_instrs)| {
+                byte_range == uncompiled_instrs.byte_range
+            })
+            .count()
+    }
+
+    fn compile_suffix(&mut self, start: usize) -> InstrPtr {
+        use std::mem;
+
+        let mut acc_instr = program::NULL_INSTR_PTR;
+        for uncompiled_instr in self.uncompiled_instrs.drain(start..) {
+            let has_hole = acc_instr == program::NULL_INSTR_PTR;
+            let (instr, is_new) = self
+                .suffix_cache
+                .get_or_emit_instr(Instr::ByteRange(uncompiled_instr.byte_range, acc_instr));
+            acc_instr = instr;
+            if is_new && has_hole {
+                let ends = mem::replace(&mut self.ends, HolePtrList::new());
+                self.ends = ends.append(HolePtr::next_0(instr), &mut self.suffix_cache.instrs);
+            }
+            if uncompiled_instr.compiled_instr != program::NULL_INSTR_PTR {
+                let (instr, _) = self
+                    .suffix_cache
+                    .get_or_emit_instr(Instr::Split(uncompiled_instr.compiled_instr, acc_instr));
+                acc_instr = instr;
+            }
+        }
+        acc_instr
+    }
+
+    fn add_suffix(&mut self, compiled_instr: InstrPtr, byte_ranges: &[Range<u8>]) {
+        let mut byte_ranges = byte_ranges.iter();
+        self.uncompiled_instrs.push(UncompiledInstr {
+            compiled_instr,
+            byte_range: *byte_ranges.next().unwrap(),
+        });
+        for &byte_range in byte_ranges {
+            self.uncompiled_instrs.push(UncompiledInstr {
+                compiled_instr: program::NULL_INSTR_PTR,
+                byte_range,
+            });
+        }
+    }
+}
+
+struct SuffixCache<'a> {
+    instr_cache: &'a mut HashMap<Instr, InstrPtr>,
+    instrs: &'a mut Vec<Instr>,
+}
+
+impl<'a> SuffixCache<'a> {
+    fn get_or_emit_instr(&mut self, instr: Instr) -> (InstrPtr, bool) {
+        match self.instr_cache.get(&instr) {
+            Some(&ptr) => (ptr, false),
+            None => {
+                let ptr = self.emit_instr(instr.clone());
+                self.instr_cache.insert(instr, ptr);
+                (ptr, true)
+            }
+        }
+    }
+
+    fn emit_instr(&mut self, instr: Instr) -> InstrPtr {
+        let instr_ptr = self.instrs.len();
+        self.instrs.push(instr);
+        instr_ptr
+    }
+}
+
+struct UncompiledInstr {
+    compiled_instr: InstrPtr,
+    byte_range: Range<u8>,
 }
 
 #[derive(Debug)]
