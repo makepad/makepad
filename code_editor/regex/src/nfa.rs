@@ -122,6 +122,9 @@ impl Threads {
                     }
                     self.instrs.insert(instr);
                     match instrs[instr] {
+                        Instr::Nop(next) => {
+                            instr = next;
+                        }
                         Instr::Save(slot_index, next) => {
                             stack.push(Frame::RestoreSlot(slot_index, slots[slot_index]));
                             slots[slot_index] = Some(byte_position);
