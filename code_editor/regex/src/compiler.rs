@@ -11,18 +11,24 @@ use {
 #[derive(Clone, Debug)]
 pub(crate) struct Compiler {
     encoder: utf8::Encoder,
+    states: Vec<State>,
+    instr_cache: HashMap<Instr, InstrPtr>,
 }
 
 impl Compiler {
     pub(crate) fn new() -> Self {
         Self {
             encoder: utf8::Encoder::new(),
+            states: Vec::new(),
+            instr_cache: HashMap::new(),
         }
     }
 
     pub(crate) fn compile(&mut self, ast: &Ast, options: Options) -> Program {
         CompileContext {
             encoder: &mut self.encoder,
+            states: &mut self.states,
+            instr_cache: &mut self.instr_cache,
             options,
             slot_count: 0,
             instrs: Vec::new(),
@@ -40,6 +46,8 @@ pub(crate) struct Options {
 #[derive(Debug)]
 struct CompileContext<'a> {
     encoder: &'a mut utf8::Encoder,
+    states: &'a mut Vec<State>,
+    instr_cache: &'a mut HashMap<Instr, InstrPtr>,
     options: Options,
     slot_count: usize,
     instrs: Vec<Instr>,
@@ -120,13 +128,30 @@ impl<'a> CompileContext<'a> {
     }
 
     fn compile_char_class(&mut self, char_class: &CharClass) -> Frag {
-        let instr = self.emit_instr(Instr::CharClass(
-            char_class.clone(),
-            program::NULL_INSTR_PTR,
-        ));
-        Frag {
-            start: instr,
-            ends: HolePtrList::unit(HolePtr::next_0(instr)),
+        if self.options.bytewise {
+            let mut suffix_tree = SuffixTree {
+                ends: HolePtrList::new(),
+                states: self.states,
+                suffix_cache: SuffixCache {
+                    instr_cache: self.instr_cache,
+                    instrs: &mut self.instrs,
+                },
+            };
+            for char_range in char_class {
+                for byte_ranges in self.encoder.encode(char_range) {
+                    suffix_tree.add_byte_ranges(&byte_ranges);
+                }
+            }
+            suffix_tree.compile()
+        } else {
+            let instr = self.emit_instr(Instr::CharClass(
+                char_class.clone(),
+                program::NULL_INSTR_PTR,
+            ));
+            Frag {
+                start: instr,
+                ends: HolePtrList::unit(HolePtr::next_0(instr)),
+            }
         }
     }
 
@@ -204,14 +229,15 @@ impl<'a> CompileContext<'a> {
     }
 }
 
+#[derive(Debug)]
 struct SuffixTree<'a> {
     ends: HolePtrList,
-    uncompiled_instrs: &'a mut Vec<UncompiledInstr>,
+    states: &'a mut Vec<State>,
     suffix_cache: SuffixCache<'a>,
 }
 
 impl<'a> SuffixTree<'a> {
-    fn end(mut self) -> Frag {
+    fn compile(mut self) -> Frag {
         let start = self.compile_suffix(0);
         self.suffix_cache.instr_cache.clear();
         if start == program::NULL_INSTR_PTR {
@@ -233,16 +259,14 @@ impl<'a> SuffixTree<'a> {
     fn add_byte_ranges(&mut self, byte_ranges: &[Range<u8>]) {
         let index = self.prefix_len(byte_ranges);
         let instr = self.compile_suffix(index);
-        self.add_suffix(instr, &byte_ranges[index..]);
+        self.extend_suffix(instr, &byte_ranges[index..]);
     }
 
     fn prefix_len(&self, byte_ranges: &[Range<u8>]) -> usize {
         byte_ranges
             .iter()
-            .zip(self.uncompiled_instrs.iter())
-            .take_while(|&(&byte_range, uncompiled_instrs)| {
-                byte_range == uncompiled_instrs.byte_range
-            })
+            .zip(self.states.iter())
+            .take_while(|&(&byte_range, state)| byte_range == state.byte_range)
             .count()
     }
 
@@ -250,41 +274,42 @@ impl<'a> SuffixTree<'a> {
         use std::mem;
 
         let mut acc_instr = program::NULL_INSTR_PTR;
-        for uncompiled_instr in self.uncompiled_instrs.drain(start..) {
+        for state in self.states.drain(start..).rev() {
             let has_hole = acc_instr == program::NULL_INSTR_PTR;
             let (instr, is_new) = self
                 .suffix_cache
-                .get_or_emit_instr(Instr::ByteRange(uncompiled_instr.byte_range, acc_instr));
+                .get_or_emit_instr(Instr::ByteRange(state.byte_range, acc_instr));
             acc_instr = instr;
             if is_new && has_hole {
                 let ends = mem::replace(&mut self.ends, HolePtrList::new());
                 self.ends = ends.append(HolePtr::next_0(instr), &mut self.suffix_cache.instrs);
             }
-            if uncompiled_instr.compiled_instr != program::NULL_INSTR_PTR {
+            if state.instr != program::NULL_INSTR_PTR {
                 let (instr, _) = self
                     .suffix_cache
-                    .get_or_emit_instr(Instr::Split(uncompiled_instr.compiled_instr, acc_instr));
+                    .get_or_emit_instr(Instr::Split(state.instr, acc_instr));
                 acc_instr = instr;
             }
         }
         acc_instr
     }
 
-    fn add_suffix(&mut self, compiled_instr: InstrPtr, byte_ranges: &[Range<u8>]) {
+    fn extend_suffix(&mut self, compiled_instr: InstrPtr, byte_ranges: &[Range<u8>]) {
         let mut byte_ranges = byte_ranges.iter();
-        self.uncompiled_instrs.push(UncompiledInstr {
-            compiled_instr,
+        self.states.push(State {
+            instr: compiled_instr,
             byte_range: *byte_ranges.next().unwrap(),
         });
         for &byte_range in byte_ranges {
-            self.uncompiled_instrs.push(UncompiledInstr {
-                compiled_instr: program::NULL_INSTR_PTR,
+            self.states.push(State {
+                instr: program::NULL_INSTR_PTR,
                 byte_range,
             });
         }
     }
 }
 
+#[derive(Debug)]
 struct SuffixCache<'a> {
     instr_cache: &'a mut HashMap<Instr, InstrPtr>,
     instrs: &'a mut Vec<Instr>,
@@ -309,8 +334,9 @@ impl<'a> SuffixCache<'a> {
     }
 }
 
-struct UncompiledInstr {
-    compiled_instr: InstrPtr,
+#[derive(Clone, Debug)]
+struct State {
+    instr: InstrPtr,
     byte_range: Range<u8>,
 }
 
