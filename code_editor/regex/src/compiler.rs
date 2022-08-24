@@ -57,14 +57,13 @@ struct CompileContext<'a> {
 impl<'a> CompileContext<'a> {
     fn compile(mut self, ast: &Ast) -> Program {
         let mut frag = self.compile_recursive(ast);
+        frag = self.compile_cap(frag, 0);
         self.options.reverse = false;
         let match_frag = self.compile_match();
         frag = self.compile_cat(frag, match_frag);
         if self.options.dot_star {
-            let dot_star_frag = self.compile_recursive(&Ast::Rep(
-                Box::new(Ast::CharClass(CharClass::any())),
-                Quant::Star,
-            ));
+            let dot_star_frag = self.compile_char_class(&CharClass::any());
+            let dot_star_frag = self.compile_star(dot_star_frag, false);
             frag = self.compile_cat(dot_star_frag, frag);
         }
         Program {
@@ -82,17 +81,17 @@ impl<'a> CompileContext<'a> {
                 let frag = self.compile_recursive(ast);
                 self.compile_cap(frag, index)
             }
-            Ast::Rep(ref ast, Quant::Quest) => {
+            Ast::Rep(ref ast, Quant::Quest(lazy)) => {
                 let frag = self.compile_recursive(ast);
-                self.compile_quest(frag)
+                self.compile_quest(frag, lazy)
             }
-            Ast::Rep(ref ast, Quant::Star) => {
+            Ast::Rep(ref ast, Quant::Star(lazy)) => {
                 let frag = self.compile_recursive(ast);
-                self.compile_star(frag)
+                self.compile_star(frag, lazy)
             }
-            Ast::Rep(ref ast, Quant::Plus) => {
+            Ast::Rep(ref ast, Quant::Plus(lazy)) => {
                 let frag = self.compile_recursive(ast);
-                self.compile_plus(frag)
+                self.compile_plus(frag, lazy)
             }
             Ast::Cat(ref asts) => {
                 let mut asts = asts.iter();
@@ -200,29 +199,53 @@ impl<'a> CompileContext<'a> {
         }
     }
 
-    fn compile_quest(&mut self, frag: Frag) -> Frag {
-        let instr = self.emit_instr(Instr::Split(frag.start, program::NULL_INSTR_PTR));
+    fn compile_quest(&mut self, frag: Frag, lazy: bool) -> Frag {
+        let instr;
+        let hole;
+        if lazy {
+            instr = self.emit_instr(Instr::Split(program::NULL_INSTR_PTR, frag.start));
+            hole = HolePtr::next_0(instr);
+        } else {
+            instr = self.emit_instr(Instr::Split(frag.start, program::NULL_INSTR_PTR));
+            hole = HolePtr::next_1(instr);
+        }
         Frag {
             start: instr,
-            ends: frag.ends.append(HolePtr::next_1(instr), &mut self.instrs),
+            ends: frag.ends.append(hole, &mut self.instrs),
         }
     }
 
-    fn compile_star(&mut self, frag: Frag) -> Frag {
-        let instr = self.emit_instr(Instr::Split(frag.start, program::NULL_INSTR_PTR));
+    fn compile_star(&mut self, frag: Frag, lazy: bool) -> Frag {
+        let instr;
+        let hole;
+        if lazy {
+            instr = self.emit_instr(Instr::Split(program::NULL_INSTR_PTR, frag.start));
+            hole = HolePtr::next_0(instr);
+        } else {
+            instr = self.emit_instr(Instr::Split(frag.start, program::NULL_INSTR_PTR));
+            hole = HolePtr::next_1(instr);
+        }
         frag.ends.fill(instr, &mut self.instrs);
         Frag {
             start: instr,
-            ends: HolePtrList::unit(HolePtr::next_1(instr)),
+            ends: HolePtrList::unit(hole),
         }
     }
 
-    fn compile_plus(&mut self, frag: Frag) -> Frag {
-        let instr = self.emit_instr(Instr::Split(frag.start, program::NULL_INSTR_PTR));
+    fn compile_plus(&mut self, frag: Frag, lazy: bool) -> Frag {
+        let instr;
+        let hole;
+        if lazy {
+            instr = self.emit_instr(Instr::Split(program::NULL_INSTR_PTR, frag.start));
+            hole = HolePtr::next_0(instr);
+        } else {
+            instr = self.emit_instr(Instr::Split(frag.start, program::NULL_INSTR_PTR));
+            hole = HolePtr::next_1(instr);
+        }
         frag.ends.fill(instr, &mut self.instrs);
         Frag {
             start: frag.start,
-            ends: HolePtrList::unit(HolePtr::next_1(instr)),
+            ends: HolePtrList::unit(hole),
         }
     }
 
@@ -404,7 +427,7 @@ impl HolePtrList {
         if self.tail.is_null() {
             return other;
         }
-        if self.head.is_null() {
+        if other.head.is_null() {
             return self;
         }
         *self.tail.get_mut(instrs) = other.head.0;
@@ -415,11 +438,11 @@ impl HolePtrList {
     }
 
     fn fill(self, instr: InstrPtr, instrs: &mut [Instr]) {
-        let mut curr = self.head;
-        while curr.0 != program::NULL_INSTR_PTR {
-            let next = *curr.get(instrs);
-            *curr.get_mut(instrs) = instr;
-            curr = HolePtr(next);
+        let mut current = self.head;
+        while current.0 != program::NULL_INSTR_PTR {
+            let next = *current.get(instrs);
+            *current.get_mut(instrs) = instr;
+            current = HolePtr(next);
         }
     }
 }
