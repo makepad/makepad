@@ -12,7 +12,7 @@ pub(crate) enum Ast {
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Quant {
-    Quest,
-    Star,
-    Plus,
+    Quest(bool),
+    Star(bool),
+    Plus(bool),
 }
