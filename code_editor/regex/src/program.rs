@@ -1,4 +1,7 @@
-use crate::{CharClass, Range};
+use {
+    crate::{CharClass, Range},
+    std::fmt,
+};
 
 pub(crate) const NULL_INSTR_PTR: InstrPtr = usize::MAX;
 

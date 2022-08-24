@@ -1,4 +1,4 @@
-use crate::Range;
+use {crate::Range, std::ops::Deref};
 
 const MAX_LEN: usize = 4;
 
@@ -115,6 +115,25 @@ pub(crate) enum ByteRanges {
     Two([Range<u8>; 2]),
     Three([Range<u8>; 3]),
     Four([Range<u8>; 4]),
+}
+
+impl ByteRanges {
+    fn as_slice(&self) -> &[Range<u8>] {
+        match self {
+            Self::One(byte_ranges) => byte_ranges.as_slice(),
+            Self::Two(byte_ranges) => byte_ranges.as_slice(),
+            Self::Three(byte_ranges) => byte_ranges.as_slice(),
+            Self::Four(byte_ranges) => byte_ranges.as_slice(),
+        }
+    }
+}
+
+impl Deref for ByteRanges {
+    type Target = [Range<u8>];
+
+    fn deref(&self) -> &Self::Target {
+        self.as_slice()
+    }
 }
 
 fn max_scalar(len: usize) -> u32 {
