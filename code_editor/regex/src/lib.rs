@@ -22,7 +22,7 @@ mod tests {
 
     #[test]
     fn test() {
-        let ast = Parser::new().parse("(a|b)*bbxxx");
+        let ast = Parser::new().parse("a.*b");
         println!("{:?}", ast);
         let program = Compiler::new().compile(
             &ast,
@@ -35,7 +35,7 @@ mod tests {
         );
         println!("{:?}", program);
         let mut dfa = Dfa::new();
-        let cursor = str::StrCursor::new("ababababbxxx");
+        let cursor = str::StrCursor::new("xxxa123byyy");
         println!("{:?}", dfa.run(&program, cursor));
     }
 }
