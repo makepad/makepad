@@ -57,18 +57,33 @@ impl<'a> ParseContext<'a> {
                 }
                 Some('?') => {
                     self.skip_char();
+                    let mut lazy = false;
+                    if self.peek_char() == Some('?') {
+                        self.skip_char();
+                        lazy = true;
+                    }
                     let ast = self.asts.pop().unwrap();
-                    self.asts.push(Ast::Rep(Box::new(ast), Quant::Quest));
+                    self.asts.push(Ast::Rep(Box::new(ast), Quant::Quest(lazy)));
                 }
                 Some('*') => {
                     self.skip_char();
+                    let mut lazy = false;
+                    if self.peek_char() == Some('?') {
+                        self.skip_char();
+                        lazy = true;
+                    }
                     let ast = self.asts.pop().unwrap();
-                    self.asts.push(Ast::Rep(Box::new(ast), Quant::Star));
+                    self.asts.push(Ast::Rep(Box::new(ast), Quant::Star(lazy)));
                 }
                 Some('+') => {
                     self.skip_char();
+                    let mut lazy = false;
+                    if self.peek_char() == Some('?') {
+                        self.skip_char();
+                        lazy = true;
+                    }
                     let ast = self.asts.pop().unwrap();
-                    self.asts.push(Ast::Rep(Box::new(ast), Quant::Plus));
+                    self.asts.push(Ast::Rep(Box::new(ast), Quant::Plus(lazy)));
                 }
                 Some('(') => {
                     self.skip_char();
@@ -102,7 +117,7 @@ impl<'a> ParseContext<'a> {
         }
         self.maybe_push_cat();
         self.pop_alts();
-        Ast::Cap(Box::new(self.asts.pop().unwrap()), 0)
+        self.asts.pop().unwrap()
     }
 
     fn parse_char_class(&mut self) -> CharClass {
