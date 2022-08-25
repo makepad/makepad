@@ -1,19 +1,19 @@
 use {
     crate::{
-        program::{Instr, InstrPtr},
+        program::{Instr, InstrPtr, Pred},
         Cursor, Program, SparseSet,
     },
     std::{collections::HashMap, rc::Rc},
 };
 
 const MAX_STATE_PTR: StatePtr = (1 << 30) - 1;
-const MATCH_STATE_FLAG: StatePtr = 1 << 30;
+const MATCHED_FLAG: StatePtr = 1 << 30;
 const UNKNOWN_STATE_PTR: StatePtr = 1 << 31;
 const DEAD_STATE_PTR: StatePtr = (1 << 31) + 1;
 
 #[derive(Clone, Debug)]
 pub struct Dfa {
-    start_state_cache: Option<StatePtr>,
+    start_state_cache: Box<[StatePtr]>,
     states: States,
     current_threads: Threads,
     next_threads: Threads,
@@ -23,7 +23,7 @@ pub struct Dfa {
 impl Dfa {
     pub(crate) fn new() -> Self {
         Self {
-            start_state_cache: None,
+            start_state_cache: vec![UNKNOWN_STATE_PTR; 1 << 5].into_boxed_slice(),
             states: States {
                 state_cache: HashMap::new(),
                 state_ids: Vec::new(),
@@ -54,7 +54,7 @@ impl Dfa {
 }
 
 pub struct RunContext<'a, C> {
-    start_state_cache: &'a mut Option<StatePtr>,
+    start_state_cache: &'a mut [StatePtr],
     states: &'a mut States,
     current_threads: &'a mut Threads,
     next_threads: &'a mut Threads,
@@ -70,15 +70,15 @@ impl<'a, C: Cursor> RunContext<'a, C> {
         let mut next_state = self.get_or_create_start_state();
         let mut byte = self.cursor.current_byte();
         loop {
-            while next_state <= MAX_STATE_PTR && !self.cursor.is_at_back() {
+            while next_state <= MAX_STATE_PTR && !self.cursor.is_at_end_of_text() {
                 self.cursor.move_next_byte();
                 current_state = next_state;
                 next_state = *self.states.next_state(current_state, byte);
                 byte = self.cursor.current_byte();
             }
-            if next_state & MATCH_STATE_FLAG != 0 {
+            if next_state & MATCHED_FLAG != 0 {
                 matched = Some(self.cursor.byte_position() - 1);
-                next_state &= !MATCH_STATE_FLAG;
+                next_state &= !MATCHED_FLAG;
             } else if next_state == UNKNOWN_STATE_PTR {
                 self.cursor.move_prev_byte();
                 let byte = self.cursor.current_byte();
@@ -94,32 +94,63 @@ impl<'a, C: Cursor> RunContext<'a, C> {
         next_state &= MAX_STATE_PTR;
         current_state = next_state;
         next_state = self.get_or_create_next_state(current_state, None);
-        if next_state & MATCH_STATE_FLAG != 0 {
+        if next_state & MATCHED_FLAG != 0 {
             matched = Some(self.cursor.byte_position());
         }
         matched
     }
 
     fn get_or_create_start_state(&mut self) -> StatePtr {
-        *self.start_state_cache.get_or_insert_with({
-            let states = &mut self.states;
-            let current_threads = &mut self.current_threads;
-            let stack = &mut self.stack;
-            let program = &self.program;
-            move || {
-                current_threads.add_thread(program.start, &program.instrs, stack);
-                let state_id = StateId::new(Flags::default(), current_threads.instrs.as_slice());
-                current_threads.instrs.clear();
-                states.get_or_create_state(state_id)
+        let preds = Preds {
+            is_at_start_of_text: self.cursor.is_at_start_of_text(),
+            is_at_end_of_text: self.cursor.is_at_end_of_text(),
+        };
+        let bits = preds.to_bits() as usize;
+        match self.start_state_cache[bits] {
+            UNKNOWN_STATE_PTR => {
+                let mut flags = Flags::default();
+                self.current_threads.add_thread(
+                    self.program.start,
+                    preds,
+                    &mut flags,
+                    &self.program.instrs,
+                    &mut self.stack,
+                );
+                let state_id = StateId::new(flags, self.current_threads.instrs.as_slice());
+                self.current_threads.instrs.clear();
+                let state = self.states.get_or_create_state(state_id);
+                self.start_state_cache[bits] = state;
+                state
             }
-        })
+            state => state,
+        }
     }
 
     fn get_or_create_next_state(&mut self, state: StatePtr, byte: Option<u8>) -> StatePtr {
-        for instr in self.states.state_ids[state as usize].instrs() {
+        use std::mem;
+
+        let state_id = &self.states.state_ids[state as usize];
+        for instr in state_id.instrs() {
             self.current_threads.instrs.insert(instr);
         }
         let mut flags = Flags::default();
+        if state_id.flags.assert() {
+            let preds = Preds {
+                is_at_end_of_text: byte.is_none(),
+                ..Preds::default()
+            };
+            for &instr in &self.current_threads.instrs {
+                self.next_threads.add_thread(
+                    instr,
+                    preds,
+                    &mut flags,
+                    &self.program.instrs,
+                    &mut self.stack,
+                );
+            }
+            mem::swap(&mut self.current_threads, &mut self.next_threads);
+            self.next_threads.instrs.clear();
+        }
         for &instr in self.current_threads.instrs.as_slice() {
             match self.program.instrs[instr] {
                 Instr::Match => {
@@ -128,8 +159,13 @@ impl<'a, C: Cursor> RunContext<'a, C> {
                 }
                 Instr::ByteRange(byte_range, next) => {
                     if byte.map_or(false, |byte| byte_range.contains(&byte)) {
-                        self.next_threads
-                            .add_thread(next, &self.program.instrs, &mut self.stack);
+                        self.next_threads.add_thread(
+                            next,
+                            Preds::default(),
+                            &mut flags,
+                            &self.program.instrs,
+                            &mut self.stack,
+                        );
                     }
                 }
                 _ => {}
@@ -143,7 +179,7 @@ impl<'a, C: Cursor> RunContext<'a, C> {
         self.next_threads.instrs.clear();
         let mut next_state = self.states.get_or_create_state(next_state_id);
         if flags.matched() {
-            next_state |= MATCH_STATE_FLAG;
+            next_state |= MATCHED_FLAG;
         }
         next_state
     }
@@ -225,6 +261,14 @@ impl Flags {
     fn set_matched(&mut self) {
         self.0 |= 1 << 0
     }
+
+    fn assert(&self) -> bool {
+        self.0 & 1 << 1 != 0
+    }
+
+    fn set_assert(&mut self) {
+        self.0 |= 1 << 1
+    }
 }
 
 #[derive(Debug)]
@@ -260,16 +304,32 @@ impl Threads {
         }
     }
 
-    fn add_thread(&mut self, instr: InstrPtr, instrs: &[Instr], stack: &mut Vec<InstrPtr>) {
+    fn add_thread(
+        &mut self,
+        instr: InstrPtr,
+        preds: Preds,
+        flags: &mut Flags,
+        instrs: &[Instr],
+        stack: &mut Vec<InstrPtr>,
+    ) {
         stack.push(instr);
         while let Some(mut instr) = stack.pop() {
             loop {
-                if self.instrs.contains(instr) {
+                if !self.instrs.insert(instr) {
                     break;
                 }
-                self.instrs.insert(instr);
                 match instrs[instr] {
-                    Instr::Save(_, next) => instr = next,
+                    Instr::Nop(next) | Instr::Save(_, next) => instr = next,
+                    Instr::Assert(pred, next) => {
+                        if match pred {
+                            Pred::IsAtStartOfText => preds.is_at_start_of_text,
+                            Pred::IsAtEndOfText => preds.is_at_end_of_text,
+                        } {
+                            instr = next;
+                        } else {
+                            flags.set_assert();
+                        }
+                    }
                     Instr::Split(next_0, next_1) => {
                         stack.push(next_1);
                         instr = next_0;
@@ -278,5 +338,20 @@ impl Threads {
                 }
             }
         }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+struct Preds {
+    is_at_start_of_text: bool,
+    is_at_end_of_text: bool,
+}
+
+impl Preds {
+    fn to_bits(self) -> u8 {
+        let mut bits = 0;
+        bits |= (self.is_at_start_of_text as u8) << 0;
+        bits |= (self.is_at_end_of_text as u8) << 1;
+        bits
     }
 }

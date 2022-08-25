@@ -13,8 +13,8 @@ pub(crate) enum Ast {
 
 #[derive(Clone, Copy, Debug)]
 pub(crate) enum Pred {
-    TextStart,
-    TextEnd,
+    IsAtStartOfText,
+    IsAtEndOfText,
 }
 
 #[derive(Clone, Copy, Debug)]

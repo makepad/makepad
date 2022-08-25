@@ -1,5 +1,8 @@
 use {
-    crate::{ast::{Pred, Quant}, Ast, CharClass, Range},
+    crate::{
+        ast::{Pred, Quant},
+        Ast, CharClass, Range,
+    },
     std::str::Chars,
 };
 
@@ -88,13 +91,13 @@ impl<'a> ParseContext<'a> {
                 Some('^') => {
                     self.skip_char();
                     self.maybe_push_cat();
-                    self.asts.push(Ast::Assert(Pred::TextStart));
+                    self.asts.push(Ast::Assert(Pred::IsAtStartOfText));
                     self.group.ast_count += 1;
                 }
                 Some('$') => {
                     self.skip_char();
                     self.maybe_push_cat();
-                    self.asts.push(Ast::Assert(Pred::TextEnd));
+                    self.asts.push(Ast::Assert(Pred::IsAtEndOfText));
                     self.group.ast_count += 1;
                 }
                 Some('(') => {
