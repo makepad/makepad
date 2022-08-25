@@ -1,6 +1,7 @@
 use {
     crate::{
-        ast::{Pred, Quant},
+        ast,
+        ast::Quant,
         program,
         program::{Instr, InstrPtr},
         utf8, Ast, CharClass, Program, Range,
@@ -200,8 +201,25 @@ impl<'a> CompileContext<'a> {
         }
     }
 
-    fn compile_assert(&mut self, mut pred: Pred) -> Frag {
-        unimplemented!() // TODO
+    fn compile_assert(&mut self, pred: ast::Pred) -> Frag {
+        let instr = self.emit_instr(Instr::Assert(
+            if self.options.reverse {
+                match pred {
+                    ast::Pred::IsAtStartOfText => program::Pred::IsAtEndOfText,
+                    ast::Pred::IsAtEndOfText => program::Pred::IsAtStartOfText,
+                }
+            } else {
+                match pred {
+                    ast::Pred::IsAtStartOfText => program::Pred::IsAtStartOfText,
+                    ast::Pred::IsAtEndOfText => program::Pred::IsAtEndOfText,
+                }
+            },
+            program::NULL_INSTR_PTR,
+        ));
+        Frag {
+            start: instr,
+            ends: HolePtrList::unit(HolePtr::next_0(instr)),
+        }
     }
 
     fn compile_quest(&mut self, frag: Frag, lazy: bool) -> Frag {
