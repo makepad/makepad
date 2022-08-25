@@ -1,5 +1,5 @@
 use crate::{
-    program::{Instr, InstrPtr},
+    program::{Instr, InstrPtr, Pred},
     Cursor, Program, SparseSet,
 };
 
@@ -37,7 +37,7 @@ impl Nfa {
         while !matched {
             self.current_threads.add_thread(
                 program.start,
-                cursor.byte_position(),
+                &cursor,
                 &program.instrs,
                 slots,
                 &mut self.stack,
@@ -57,7 +57,7 @@ impl Nfa {
                         if ch.map_or(false, |ch| other_ch == ch) {
                             self.new_threads.add_thread(
                                 next,
-                                cursor.byte_position(),
+                                &cursor,
                                 &program.instrs,
                                 self.current_threads.slots.get_mut(instr),
                                 &mut self.stack,
@@ -68,7 +68,7 @@ impl Nfa {
                         if ch.map_or(false, |ch| char_class.contains(ch)) {
                             self.new_threads.add_thread(
                                 next,
-                                cursor.byte_position(),
+                                &cursor,
                                 &program.instrs,
                                 self.current_threads.slots.get_mut(instr),
                                 &mut self.stack,
@@ -78,7 +78,7 @@ impl Nfa {
                     _ => {}
                 }
             }
-            if cursor.is_at_back() {
+            if ch.is_none() {
                 break;
             }
             mem::swap(&mut self.current_threads, &mut self.new_threads);
@@ -105,10 +105,10 @@ impl Threads {
         }
     }
 
-    fn add_thread(
+    fn add_thread<C: Cursor>(
         &mut self,
         instr: InstrPtr,
-        byte_position: usize,
+        cursor: &C,
         instrs: &[Instr],
         slots: &mut [Option<usize>],
         stack: &mut Vec<Frame>,
@@ -117,18 +117,25 @@ impl Threads {
         while let Some(frame) = stack.pop() {
             match frame {
                 Frame::AddThread(mut instr) => loop {
-                    if self.instrs.contains(instr) {
+                    if !self.instrs.insert(instr) {
                         break;
                     }
-                    self.instrs.insert(instr);
                     match instrs[instr] {
                         Instr::Nop(next) => {
                             instr = next;
                         }
                         Instr::Save(slot_index, next) => {
                             stack.push(Frame::RestoreSlot(slot_index, slots[slot_index]));
-                            slots[slot_index] = Some(byte_position);
+                            slots[slot_index] = Some(cursor.byte_position());
                             instr = next;
+                        }
+                        Instr::Assert(pred, next) => {
+                            if match pred {
+                                Pred::IsAtStartOfText => cursor.is_at_start_of_text(),
+                                Pred::IsAtEndOfText => cursor.is_at_end_of_text(),
+                            } {
+                                instr = next;
+                            }
                         }
                         Instr::Split(next_0, next_1) => {
                             stack.push(Frame::AddThread(next_1));

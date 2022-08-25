@@ -16,11 +16,11 @@ impl<'a> StrCursor<'a> {
 }
 
 impl<'a> Cursor for StrCursor<'a> {
-    fn is_at_front(&self) -> bool {
+    fn is_at_start_of_text(&self) -> bool {
         self.byte_position == 0
     }
 
-    fn is_at_back(&self) -> bool {
+    fn is_at_end_of_text(&self) -> bool {
         self.byte_position == self.string.len()
     }
 

@@ -17,6 +17,7 @@ pub(crate) enum Instr {
     CharClass(CharClass, InstrPtr),
     Nop(InstrPtr),
     Save(usize, InstrPtr),
+    Assert(Pred, InstrPtr),
     Split(InstrPtr, InstrPtr),
 }
 
@@ -28,6 +29,7 @@ impl Instr {
             Self::CharClass(_, next_0) => next_0,
             Self::Nop(next_0) => next_0,
             Self::Save(_, next_0) => next_0,
+            Self::Assert(_, next_0) => next_0,
             Self::Split(next_0, _) => next_0,
             _ => panic!(),
         }
@@ -48,6 +50,7 @@ impl Instr {
             Self::CharClass(_, next_0) => next_0,
             Self::Nop(next_0) => next_0,
             Self::Save(_, next_0) => next_0,
+            Self::Assert(_, next_0) => next_0,
             Self::Split(next_0, _) => next_0,
             _ => panic!(),
         }
@@ -62,3 +65,9 @@ impl Instr {
 }
 
 pub(crate) type InstrPtr = usize;
+
+#[derive(Clone, Copy, Debug, Eq, Hash, PartialEq)]
+pub(crate) enum Pred {
+    IsAtStartOfText,
+    IsAtEndOfText,
+}

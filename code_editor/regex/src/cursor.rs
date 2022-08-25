@@ -1,6 +1,6 @@
 pub trait Cursor {
-    fn is_at_front(&self) -> bool;
-    fn is_at_back(&self) -> bool;
+    fn is_at_start_of_text(&self) -> bool;
+    fn is_at_end_of_text(&self) -> bool;
     fn byte_position(&self) -> usize;
     fn current_byte(&self) -> Option<u8>;
     fn current_char(&self) -> Option<char>;
