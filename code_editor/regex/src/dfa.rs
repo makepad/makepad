@@ -35,7 +35,7 @@ impl Dfa {
         }
     }
 
-    pub(crate) fn run<C: Cursor>(&mut self, program: &Program, cursor: C) -> Option<usize> {
+    pub(crate) fn run<C: Cursor + std::fmt::Debug>(&mut self, program: &Program, cursor: C) -> Option<usize> {
         if !self.current_threads.instrs.capacity() != program.instrs.len() {
             self.current_threads = Threads::new(program.instrs.len());
             self.next_threads = Threads::new(program.instrs.len());
@@ -53,7 +53,7 @@ impl Dfa {
     }
 }
 
-pub struct RunContext<'a, C> {
+struct RunContext<'a, C> {
     start_state_cache: &'a mut [StatePtr],
     states: &'a mut States,
     current_threads: &'a mut Threads,
@@ -63,26 +63,26 @@ pub struct RunContext<'a, C> {
     cursor: C,
 }
 
-impl<'a, C: Cursor> RunContext<'a, C> {
+impl<'a, C: Cursor + std::fmt::Debug> RunContext<'a, C> {
     fn run(&mut self) -> Option<usize> {
         let mut matched = None;
         let mut current_state = UNKNOWN_STATE_PTR;
         let mut next_state = self.get_or_create_start_state();
-        let mut byte = self.cursor.current_byte();
+        let mut byte = self.cursor.next_byte();
         loop {
-            while next_state <= MAX_STATE_PTR && !self.cursor.is_at_end_of_text() {
-                self.cursor.move_next_byte();
+            while next_state <= MAX_STATE_PTR && byte.is_some() {
                 current_state = next_state;
                 next_state = *self.states.next_state(current_state, byte);
-                byte = self.cursor.current_byte();
+                byte = self.cursor.next_byte();
             }
+            self.cursor.prev_byte().unwrap();
             if next_state & MATCHED_FLAG != 0 {
-                matched = Some(self.cursor.byte_position() - 1);
+                self.cursor.prev_byte().unwrap();
+                matched = Some(self.cursor.byte_position());
+                self.cursor.next_byte().unwrap();
                 next_state &= !MATCHED_FLAG;
             } else if next_state == UNKNOWN_STATE_PTR {
-                self.cursor.move_prev_byte();
-                let byte = self.cursor.current_byte();
-                self.cursor.move_next_byte();
+                let byte = Some(self.cursor.prev_byte().unwrap());
                 next_state = self.get_or_create_next_state(current_state, byte);
                 *self.states.next_state_mut(current_state, byte) = next_state;
             } else if next_state == DEAD_STATE_PTR {

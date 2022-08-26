@@ -20,8 +20,8 @@ impl Parser {
         }
     }
 
-    pub(crate) fn parse(&mut self, string: &str) -> Ast {
-        let mut chars = string.chars();
+    pub(crate) fn parse(&mut self, pattern: &str) -> Ast {
+        let mut chars = pattern.chars();
         ParseContext {
             cap_count: 1,
             ch_0: chars.next(),
