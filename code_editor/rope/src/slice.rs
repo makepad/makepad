@@ -7,7 +7,7 @@ use {
     },
 };
 
-/// A view into a a `Rope`.
+/// A view into a a [`Rope`].
 #[derive(Clone, Copy, Debug)]
 pub struct Slice<'a> {
     rope: &'a Rope,
@@ -16,11 +16,11 @@ pub struct Slice<'a> {
 }
 
 impl<'a> Slice<'a> {
-    /// Converts `self` to a `Rope`.
+    /// Converts `self` to a [`Rope`].
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     pub fn to_rope(self) -> Rope {
         let mut rope = self.rope.clone();
         rope.truncate_back(self.end_info.byte_count);
@@ -68,7 +68,7 @@ impl<'a> Slice<'a> {
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     pub fn is_char_boundary(self, byte_index: usize) -> bool {
         assert!(byte_index <= self.byte_len());
         self.rope
@@ -79,7 +79,7 @@ impl<'a> Slice<'a> {
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     ///
     /// # Panics
     ///
@@ -93,7 +93,7 @@ impl<'a> Slice<'a> {
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     ///
     /// # Panics
     ///
@@ -108,7 +108,7 @@ impl<'a> Slice<'a> {
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     ///
     /// # Panics
     ///
@@ -130,7 +130,7 @@ impl<'a> Slice<'a> {
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     ///
     /// # Panics
     ///
@@ -151,7 +151,7 @@ impl<'a> Slice<'a> {
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     ///
     /// # Panics
     ///
@@ -165,11 +165,11 @@ impl<'a> Slice<'a> {
         )
     }
 
-    /// Returns a `ChunkCursor` at the front chunk of `self`.
+    /// Returns a [`ChunkCursor`] at the front chunk of `self`.
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     pub fn chunk_cursor_front(self) -> ChunkCursor<'a> {
         ChunkCursor::front(
             self.rope.root(),
@@ -178,11 +178,11 @@ impl<'a> Slice<'a> {
         )
     }
 
-    /// Returns a `ChunkCursor` at the back chunk of `self`.
+    /// Returns a [`ChunkCursor`] at the back chunk of `self`.
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     pub fn chunk_cursor_back(self) -> ChunkCursor<'a> {
         ChunkCursor::back(
             self.rope.root(),
@@ -191,11 +191,11 @@ impl<'a> Slice<'a> {
         )
     }
 
-    /// Returns a `ChunkCursor` at the chunk containing the given `byte_position` within `self`.
+    /// Returns a [`ChunkCursor`] at the chunk containing the given `byte_position` within `self`.
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     ///
     /// # Panics
     ///
@@ -210,29 +210,29 @@ impl<'a> Slice<'a> {
         )
     }
 
-    /// Returns a `Cursor` at the front of `self`.
+    /// Returns a [`Cursor`] at the front of `self`.
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     pub fn cursor_front(self) -> Cursor<'a> {
         Cursor::front(self)
     }
 
-    /// Returns a `Cursor` at the back of `self`.
+    /// Returns a [`Cursor`] at the back of `self`.
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     pub fn cursor_back(self) -> Cursor<'a> {
         Cursor::back(self)
     }
 
-    /// Returns a `Cursor` at the given `byte_position` within `self`.
+    /// Returns a [`Cursor`] at the given `byte_position` within `self`.
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     ///
     /// # Panics
     ///
@@ -245,7 +245,7 @@ impl<'a> Slice<'a> {
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     pub fn chunks(self) -> Chunks<'a> {
         Chunks::new(self)
     }
@@ -254,7 +254,7 @@ impl<'a> Slice<'a> {
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     pub fn chunks_rev(self) -> ChunksRev<'a> {
         ChunksRev::new(self)
     }
@@ -263,7 +263,7 @@ impl<'a> Slice<'a> {
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     pub fn bytes(self) -> Bytes<'a> {
         Bytes::new(self)
     }
@@ -272,7 +272,7 @@ impl<'a> Slice<'a> {
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     pub fn bytes_rev(self) -> BytesRev<'a> {
         BytesRev::new(self)
     }
@@ -281,7 +281,7 @@ impl<'a> Slice<'a> {
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     pub fn chars(self) -> Chars<'a> {
         Chars::new(self)
     }
@@ -290,7 +290,7 @@ impl<'a> Slice<'a> {
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     pub fn chars_rev(self) -> CharsRev<'a> {
         CharsRev::new(self)
     }

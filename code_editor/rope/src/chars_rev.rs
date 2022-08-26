@@ -3,7 +3,12 @@ use {
     std::str,
 };
 
-/// A reverse iterator over the `char`s of a `Rope` or `Slice`.
+/// A reverse iterator over the [`char`]s in a [`Rope`] or [`Slice`].
+/// 
+/// This `struct` is created by the [`chars_rev`](crate::Rope::chars_rev) method on [`Rope`] or the
+/// [`chars_rev`](crate::Slice::chars_rev) method on [`Slice`].
+/// 
+/// [`Rope`]: crate::Rope
 #[derive(Clone, Debug)]
 pub struct CharsRev<'a> {
     chars: Option<str::Chars<'a>>,
@@ -26,7 +31,7 @@ impl<'a> Iterator for CharsRev<'a> {
     ///
     /// # Performance
     ///
-    /// Runs in amortized O(1) and worst-case O(log n) time.
+    /// Runs in amortized O(1) and worst-case O(log(n)) time.
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         loop {

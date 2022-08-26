@@ -1,4 +1,10 @@
-use crate::{ast::Quant, str, Ast};
+use {
+    crate::{
+        ast::{Pred, Quant},
+        Ast, CharClass, Range,
+    },
+    std::str::Chars,
+};
 
 #[derive(Clone, Debug)]
 pub struct Parser {
@@ -15,13 +21,16 @@ impl Parser {
     }
 
     pub(crate) fn parse(&mut self, string: &str) -> Ast {
+        let mut chars = string.chars();
         ParseContext {
             cap_count: 1,
+            ch_0: chars.next(),
+            ch_1: chars.next(),
+            chars,
+            position: 0,
             asts: &mut self.asts,
             groups: &mut self.groups,
             group: Group::new(Some(0)),
-            string,
-            position: 0,
         }
         .parse()
     }
@@ -30,11 +39,13 @@ impl Parser {
 #[derive(Debug)]
 struct ParseContext<'a> {
     cap_count: usize,
+    ch_0: Option<char>,
+    ch_1: Option<char>,
+    chars: Chars<'a>,
+    position: usize,
     asts: &'a mut Vec<Ast>,
     groups: &'a mut Vec<Group>,
     group: Group,
-    string: &'a str,
-    position: usize,
 }
 
 impl<'a> ParseContext<'a> {
@@ -49,18 +60,45 @@ impl<'a> ParseContext<'a> {
                 }
                 Some('?') => {
                     self.skip_char();
+                    let mut lazy = false;
+                    if self.peek_char() == Some('?') {
+                        self.skip_char();
+                        lazy = true;
+                    }
                     let ast = self.asts.pop().unwrap();
-                    self.asts.push(Ast::Rep(Box::new(ast), Quant::Quest));
+                    self.asts.push(Ast::Rep(Box::new(ast), Quant::Quest(lazy)));
                 }
                 Some('*') => {
                     self.skip_char();
+                    let mut lazy = false;
+                    if self.peek_char() == Some('?') {
+                        self.skip_char();
+                        lazy = true;
+                    }
                     let ast = self.asts.pop().unwrap();
-                    self.asts.push(Ast::Rep(Box::new(ast), Quant::Star));
+                    self.asts.push(Ast::Rep(Box::new(ast), Quant::Star(lazy)));
                 }
                 Some('+') => {
                     self.skip_char();
+                    let mut lazy = false;
+                    if self.peek_char() == Some('?') {
+                        self.skip_char();
+                        lazy = true;
+                    }
                     let ast = self.asts.pop().unwrap();
-                    self.asts.push(Ast::Rep(Box::new(ast), Quant::Plus));
+                    self.asts.push(Ast::Rep(Box::new(ast), Quant::Plus(lazy)));
+                }
+                Some('^') => {
+                    self.skip_char();
+                    self.maybe_push_cat();
+                    self.asts.push(Ast::Assert(Pred::IsAtStartOfText));
+                    self.group.ast_count += 1;
+                }
+                Some('$') => {
+                    self.skip_char();
+                    self.maybe_push_cat();
+                    self.asts.push(Ast::Assert(Pred::IsAtEndOfText));
+                    self.group.ast_count += 1;
                 }
                 Some('(') => {
                     self.skip_char();
@@ -77,6 +115,18 @@ impl<'a> ParseContext<'a> {
                     self.skip_char();
                     self.pop_group();
                 }
+                Some('[') => {
+                    self.maybe_push_cat();
+                    let char_class = self.parse_char_class();
+                    self.asts.push(Ast::CharClass(char_class));
+                    self.group.ast_count += 1;
+                }
+                Some('.') => {
+                    self.skip_char();
+                    self.maybe_push_cat();
+                    self.asts.push(Ast::CharClass(CharClass::any()));
+                    self.group.ast_count += 1;
+                }
                 Some(ch) => {
                     self.skip_char();
                     self.maybe_push_cat();
@@ -88,25 +138,63 @@ impl<'a> ParseContext<'a> {
         }
         self.maybe_push_cat();
         self.pop_alts();
-        Ast::Cap(Box::new(self.asts.pop().unwrap()), 0)
+        self.asts.pop().unwrap()
+    }
+
+    fn parse_char_class(&mut self) -> CharClass {
+        let mut char_class = CharClass::new();
+        self.skip_char();
+        let mut is_first = true;
+        loop {
+            match self.peek_char() {
+                Some(']') if !is_first => {
+                    self.skip_char();
+                    break;
+                }
+                _ => char_class.insert(self.parse_char_range()),
+            }
+            is_first = false;
+        }
+        char_class
+    }
+
+    fn parse_char_range(&mut self) -> Range<char> {
+        let start = self.parse_char();
+        match self.peek_two_chars() {
+            (Some('-'), ch) if ch != Some(']') => {
+                self.skip_char();
+                let end = self.parse_char();
+                return Range::new(start, end);
+            }
+            _ => Range::new(start, start),
+        }
+    }
+
+    fn parse_char(&mut self) -> char {
+        let ch = self.peek_char().unwrap();
+        self.skip_char();
+        ch
     }
 
     fn peek_char(&self) -> Option<char> {
-        self.string[self.position..].chars().next()
+        self.ch_0
     }
 
     fn peek_two_chars(&self) -> (Option<char>, Option<char>) {
-        let mut chars = self.string[self.position..].chars();
-        (chars.next(), chars.next())
+        (self.ch_0, self.ch_1)
     }
 
     fn skip_char(&mut self) {
-        self.position += str::utf8_char_width(self.string.as_bytes()[self.position]);
+        self.position += self.ch_0.unwrap().len_utf8();
+        self.ch_0 = self.ch_1;
+        self.ch_1 = self.chars.next();
     }
 
     fn skip_two_chars(&mut self) {
-        self.skip_char();
-        self.skip_char();
+        self.position += self.ch_1.unwrap().len_utf8();
+        self.position += self.ch_1.unwrap().len_utf8();
+        self.ch_0 = self.chars.next();
+        self.ch_1 = self.chars.next();
     }
 
     fn push_group(&mut self, cap: bool) {

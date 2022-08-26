@@ -1,20 +1,36 @@
-use crate::{
-    ast::Quant,
-    program,
-    program::{Instr, InstrPtr},
-    Ast, Program,
+use {
+    crate::{
+        ast,
+        ast::Quant,
+        program,
+        program::{Instr, InstrPtr},
+        utf8, Ast, CharClass, Program, Range,
+    },
+    std::collections::HashMap,
 };
 
 #[derive(Clone, Debug)]
-pub(crate) struct Compiler;
+pub(crate) struct Compiler {
+    encoder: utf8::Encoder,
+    states: Vec<State>,
+    instr_cache: HashMap<Instr, InstrPtr>,
+}
 
 impl Compiler {
     pub(crate) fn new() -> Self {
-        Self
+        Self {
+            encoder: utf8::Encoder::new(),
+            states: Vec::new(),
+            instr_cache: HashMap::new(),
+        }
     }
 
-    pub(crate) fn compile(&mut self, ast: &Ast) -> Program {
+    pub(crate) fn compile(&mut self, ast: &Ast, options: Options) -> Program {
         CompileContext {
+            encoder: &mut self.encoder,
+            states: &mut self.states,
+            instr_cache: &mut self.instr_cache,
+            options,
             slot_count: 0,
             instrs: Vec::new(),
         }
@@ -22,46 +38,158 @@ impl Compiler {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default)]
+pub(crate) struct Options {
+    pub(crate) dot_star: bool,
+    pub(crate) reverse: bool,
+    pub(crate) bytes: bool,
+}
+
 #[derive(Debug)]
-struct CompileContext {
+struct CompileContext<'a> {
+    encoder: &'a mut utf8::Encoder,
+    states: &'a mut Vec<State>,
+    instr_cache: &'a mut HashMap<Instr, InstrPtr>,
+    options: Options,
     slot_count: usize,
     instrs: Vec<Instr>,
 }
 
-impl CompileContext {
+impl<'a> CompileContext<'a> {
     fn compile(mut self, ast: &Ast) -> Program {
-        let frag = self.compile_recursive(ast);
-        let instr = self.emit_instr(Instr::Match);
-        frag.ends.fill(instr, &mut self.instrs);
+        let mut frag = self.compile_recursive(ast);
+        frag = self.compile_cap(frag, 0);
+        self.options.reverse = false;
+        let match_frag = self.compile_match();
+        frag = self.compile_cat(frag, match_frag);
+        if self.options.dot_star {
+            let dot_star_frag = self.compile_char_class(&CharClass::any());
+            let dot_star_frag = self.compile_star(dot_star_frag, false);
+            frag = self.compile_cat(dot_star_frag, frag);
+        }
         Program {
-            start: frag.start,
             slot_count: self.slot_count,
             instrs: self.instrs,
+            start: frag.start,
         }
     }
 
     fn compile_recursive(&mut self, ast: &Ast) -> Frag {
         match *ast {
             Ast::Char(ch) => self.compile_char(ch),
-            Ast::Cap(ref ast, index) => self.compile_cap(ast, index),
-            Ast::Rep(ref ast, Quant::Quest) => self.compile_quest(ast),
-            Ast::Rep(ref ast, Quant::Star) => self.compile_star(ast),
-            Ast::Rep(ref ast, Quant::Plus) => self.compile_plus(ast),
-            Ast::Cat(ref asts) => self.compile_cat(asts),
-            Ast::Alt(ref asts) => self.compile_alt(asts),
+            Ast::CharClass(ref char_class) => self.compile_char_class(char_class),
+            Ast::Cap(ref ast, index) => {
+                let frag = self.compile_recursive(ast);
+                self.compile_cap(frag, index)
+            }
+            Ast::Assert(pred) => self.compile_assert(pred),
+            Ast::Rep(ref ast, Quant::Quest(lazy)) => {
+                let frag = self.compile_recursive(ast);
+                self.compile_quest(frag, lazy)
+            }
+            Ast::Rep(ref ast, Quant::Star(lazy)) => {
+                let frag = self.compile_recursive(ast);
+                self.compile_star(frag, lazy)
+            }
+            Ast::Rep(ref ast, Quant::Plus(lazy)) => {
+                let frag = self.compile_recursive(ast);
+                self.compile_plus(frag, lazy)
+            }
+            Ast::Cat(ref asts) => {
+                let mut asts = asts.iter();
+                let mut acc_frag = self.compile_recursive(asts.next().unwrap());
+                for ast in asts {
+                    let frag = self.compile_recursive(ast);
+                    acc_frag = self.compile_cat(acc_frag, frag);
+                }
+                acc_frag
+            }
+            Ast::Alt(ref asts) => {
+                let mut asts = asts.iter();
+                let mut acc_frag = self.compile_recursive(asts.next().unwrap());
+                for ast in asts {
+                    let frag = self.compile_recursive(ast);
+                    acc_frag = self.compile_alt(acc_frag, frag);
+                }
+                acc_frag
+            }
+        }
+    }
+
+    fn compile_match(&mut self) -> Frag {
+        Frag {
+            start: self.emit_instr(Instr::Match),
+            ends: HolePtrList::new(),
+        }
+    }
+
+    fn compile_byte_range(&mut self, byte_range: Range<u8>) -> Frag {
+        let instr = self.emit_instr(Instr::ByteRange(byte_range, program::NULL_INSTR_PTR));
+        Frag {
+            start: instr,
+            ends: HolePtrList::unit(HolePtr::next_0(instr)),
         }
     }
 
     fn compile_char(&mut self, ch: char) -> Frag {
-        let start = self.emit_instr(Instr::Char(ch, program::NULL_INSTR_PTR));
-        Frag {
-            start,
-            ends: HolePtrList::unit(HolePtr::next_0(start)),
+        if self.options.bytes {
+            let mut bytes = [0; 4];
+            let mut bytes = ch.encode_utf8(&mut bytes).bytes();
+            let byte = bytes.next().unwrap();
+            let mut acc_frag = self.compile_byte_range(Range::new(byte, byte));
+            for byte in bytes {
+                let frag = self.compile_byte_range(Range::new(byte, byte));
+                acc_frag = self.compile_cat(acc_frag, frag);
+            }
+            acc_frag
+        } else {
+            let instr = self.emit_instr(Instr::Char(ch, program::NULL_INSTR_PTR));
+            Frag {
+                start: instr,
+                ends: HolePtrList::unit(HolePtr::next_0(instr)),
+            }
         }
     }
 
-    fn compile_cap(&mut self, ast: &Ast, cap_index: usize) -> Frag {
-        let frag = self.compile_recursive(ast);
+    fn compile_char_class(&mut self, char_class: &CharClass) -> Frag {
+        if self.options.bytes {
+            let mut suffix_tree = SuffixTree {
+                states: self.states,
+                suffix_cache: SuffixCache {
+                    instr_cache: self.instr_cache,
+                    instrs: &mut self.instrs,
+                },
+                options: self.options,
+                ends: HolePtrList::new(),
+            };
+            if self.options.reverse {
+                for char_range in char_class {
+                    for byte_ranges in self.encoder.encode(char_range) {
+                        suffix_tree.add_byte_ranges(&byte_ranges);
+                    }
+                }
+            } else {
+                for char_range in char_class {
+                    for mut byte_ranges in self.encoder.encode(char_range) {
+                        byte_ranges.reverse();
+                        suffix_tree.add_byte_ranges(&byte_ranges);
+                    }
+                }
+            }
+            suffix_tree.compile()
+        } else {
+            let instr = self.emit_instr(Instr::CharClass(
+                char_class.clone(),
+                program::NULL_INSTR_PTR,
+            ));
+            Frag {
+                start: instr,
+                ends: HolePtrList::unit(HolePtr::next_0(instr)),
+            }
+        }
+    }
+
+    fn compile_cap(&mut self, frag: Frag, cap_index: usize) -> Frag {
         let first_slot_index = cap_index * 2;
         self.slot_count = self.slot_count.max(first_slot_index + 2);
         let instr_0 = self.emit_instr(Instr::Save(first_slot_index, frag.start));
@@ -73,58 +201,95 @@ impl CompileContext {
         }
     }
 
-    fn compile_quest(&mut self, ast: &Ast) -> Frag {
-        let frag = self.compile_recursive(ast);
-        let instr = self.emit_instr(Instr::Split(frag.start, program::NULL_INSTR_PTR));
+    fn compile_assert(&mut self, pred: ast::Pred) -> Frag {
+        let instr = self.emit_instr(Instr::Assert(
+            if self.options.reverse {
+                match pred {
+                    ast::Pred::IsAtStartOfText => program::Pred::IsAtEndOfText,
+                    ast::Pred::IsAtEndOfText => program::Pred::IsAtStartOfText,
+                }
+            } else {
+                match pred {
+                    ast::Pred::IsAtStartOfText => program::Pred::IsAtStartOfText,
+                    ast::Pred::IsAtEndOfText => program::Pred::IsAtEndOfText,
+                }
+            },
+            program::NULL_INSTR_PTR,
+        ));
         Frag {
             start: instr,
-            ends: frag.ends.append(HolePtr::next_1(instr), &mut self.instrs),
+            ends: HolePtrList::unit(HolePtr::next_0(instr)),
         }
     }
 
-    fn compile_star(&mut self, ast: &Ast) -> Frag {
-        let frag = self.compile_recursive(ast);
-        let instr = self.emit_instr(Instr::Split(frag.start, program::NULL_INSTR_PTR));
+    fn compile_quest(&mut self, frag: Frag, lazy: bool) -> Frag {
+        let instr;
+        let hole;
+        if lazy {
+            instr = self.emit_instr(Instr::Split(program::NULL_INSTR_PTR, frag.start));
+            hole = HolePtr::next_0(instr);
+        } else {
+            instr = self.emit_instr(Instr::Split(frag.start, program::NULL_INSTR_PTR));
+            hole = HolePtr::next_1(instr);
+        }
+        Frag {
+            start: instr,
+            ends: frag.ends.append(hole, &mut self.instrs),
+        }
+    }
+
+    fn compile_star(&mut self, frag: Frag, lazy: bool) -> Frag {
+        let instr;
+        let hole;
+        if lazy {
+            instr = self.emit_instr(Instr::Split(program::NULL_INSTR_PTR, frag.start));
+            hole = HolePtr::next_0(instr);
+        } else {
+            instr = self.emit_instr(Instr::Split(frag.start, program::NULL_INSTR_PTR));
+            hole = HolePtr::next_1(instr);
+        }
         frag.ends.fill(instr, &mut self.instrs);
         Frag {
             start: instr,
-            ends: HolePtrList::unit(HolePtr::next_1(instr)),
+            ends: HolePtrList::unit(hole),
         }
     }
 
-    fn compile_plus(&mut self, ast: &Ast) -> Frag {
-        let frag = self.compile_recursive(ast);
-        let instr = self.emit_instr(Instr::Split(frag.start, program::NULL_INSTR_PTR));
+    fn compile_plus(&mut self, frag: Frag, lazy: bool) -> Frag {
+        let instr;
+        let hole;
+        if lazy {
+            instr = self.emit_instr(Instr::Split(program::NULL_INSTR_PTR, frag.start));
+            hole = HolePtr::next_0(instr);
+        } else {
+            instr = self.emit_instr(Instr::Split(frag.start, program::NULL_INSTR_PTR));
+            hole = HolePtr::next_1(instr);
+        }
         frag.ends.fill(instr, &mut self.instrs);
         Frag {
             start: frag.start,
-            ends: HolePtrList::unit(HolePtr::next_1(instr)),
+            ends: HolePtrList::unit(hole),
         }
     }
 
-    fn compile_cat(&mut self, asts: &[Ast]) -> Frag {
-        let mut asts = asts.iter();
-        let mut acc_frag = self.compile_recursive(asts.next().unwrap());
-        for ast in asts {
-            let frag = self.compile_recursive(ast);
-            acc_frag.ends.fill(frag.start, &mut self.instrs);
-            acc_frag.ends = frag.ends;
+    fn compile_cat(&mut self, mut frag_0: Frag, mut frag_1: Frag) -> Frag {
+        use std::mem;
+
+        if self.options.reverse {
+            mem::swap(&mut frag_0, &mut frag_1);
         }
-        acc_frag
+        frag_0.ends.fill(frag_1.start, &mut self.instrs);
+        Frag {
+            start: frag_0.start,
+            ends: frag_1.ends,
+        }
     }
 
-    fn compile_alt(&mut self, asts: &[Ast]) -> Frag {
-        let mut asts = asts.iter();
-        let mut acc_frag = self.compile_recursive(asts.next().unwrap());
-        for ast in asts {
-            let frag = self.compile_recursive(ast);
-            let instr = self.emit_instr(Instr::Split(acc_frag.start, frag.start));
-            acc_frag = Frag {
-                start: instr,
-                ends: acc_frag.ends.concat(frag.ends, &mut self.instrs),
-            };
+    fn compile_alt(&mut self, frag_0: Frag, frag_1: Frag) -> Frag {
+        Frag {
+            start: self.emit_instr(Instr::Split(frag_0.start, frag_1.start)),
+            ends: frag_0.ends.concat(frag_1.ends, &mut self.instrs),
         }
-        acc_frag
     }
 
     fn emit_instr(&mut self, instr: Instr) -> InstrPtr {
@@ -132,6 +297,122 @@ impl CompileContext {
         self.instrs.push(instr);
         instr_ptr
     }
+}
+
+#[derive(Debug)]
+struct SuffixTree<'a> {
+    states: &'a mut Vec<State>,
+    suffix_cache: SuffixCache<'a>,
+    options: Options,
+    ends: HolePtrList,
+}
+
+impl<'a> SuffixTree<'a> {
+    fn compile(mut self) -> Frag {
+        let start = self.compile_suffix(0);
+        self.suffix_cache.instr_cache.clear();
+        if start == program::NULL_INSTR_PTR {
+            let instr = self
+                .suffix_cache
+                .emit_instr(Instr::Nop(program::NULL_INSTR_PTR));
+            Frag {
+                start: instr,
+                ends: HolePtrList::unit(HolePtr::next_0(instr)),
+            }
+        } else {
+            Frag {
+                start,
+                ends: self.ends,
+            }
+        }
+    }
+
+    fn add_byte_ranges(&mut self, byte_ranges: &[Range<u8>]) {
+        let index = self.prefix_len(byte_ranges);
+        let instr = self.compile_suffix(index);
+        self.extend_suffix(instr, &byte_ranges[index..]);
+    }
+
+    fn prefix_len(&self, byte_ranges: &[Range<u8>]) -> usize {
+        if self.options.reverse {
+            0
+        } else {
+            byte_ranges
+                .iter()
+                .zip(self.states.iter())
+                .take_while(|&(&byte_range, state)| byte_range == state.byte_range)
+                .count()
+        }
+    }
+
+    fn compile_suffix(&mut self, start: usize) -> InstrPtr {
+        use std::mem;
+
+        let mut acc_instr = program::NULL_INSTR_PTR;
+        for state in self.states.drain(start..).rev() {
+            let has_hole = acc_instr == program::NULL_INSTR_PTR;
+            let (instr, is_new) = self
+                .suffix_cache
+                .get_or_emit_instr(Instr::ByteRange(state.byte_range, acc_instr));
+            acc_instr = instr;
+            if is_new && has_hole {
+                let ends = mem::replace(&mut self.ends, HolePtrList::new());
+                self.ends = ends.append(HolePtr::next_0(instr), &mut self.suffix_cache.instrs);
+            }
+            if state.instr != program::NULL_INSTR_PTR {
+                let (instr, _) = self
+                    .suffix_cache
+                    .get_or_emit_instr(Instr::Split(state.instr, acc_instr));
+                acc_instr = instr;
+            }
+        }
+        acc_instr
+    }
+
+    fn extend_suffix(&mut self, compiled_instr: InstrPtr, byte_ranges: &[Range<u8>]) {
+        let mut byte_ranges = byte_ranges.iter();
+        self.states.push(State {
+            instr: compiled_instr,
+            byte_range: *byte_ranges.next().unwrap(),
+        });
+        for &byte_range in byte_ranges {
+            self.states.push(State {
+                instr: program::NULL_INSTR_PTR,
+                byte_range,
+            });
+        }
+    }
+}
+
+#[derive(Debug)]
+struct SuffixCache<'a> {
+    instr_cache: &'a mut HashMap<Instr, InstrPtr>,
+    instrs: &'a mut Vec<Instr>,
+}
+
+impl<'a> SuffixCache<'a> {
+    fn get_or_emit_instr(&mut self, instr: Instr) -> (InstrPtr, bool) {
+        match self.instr_cache.get(&instr) {
+            Some(&ptr) => (ptr, false),
+            None => {
+                let ptr = self.emit_instr(instr.clone());
+                self.instr_cache.insert(instr, ptr);
+                (ptr, true)
+            }
+        }
+    }
+
+    fn emit_instr(&mut self, instr: Instr) -> InstrPtr {
+        let instr_ptr = self.instrs.len();
+        self.instrs.push(instr);
+        instr_ptr
+    }
+}
+
+#[derive(Clone, Debug)]
+struct State {
+    instr: InstrPtr,
+    byte_range: Range<u8>,
 }
 
 #[derive(Debug)]
@@ -147,7 +428,7 @@ struct HolePtrList {
 }
 
 impl HolePtrList {
-    fn empty() -> Self {
+    fn new() -> Self {
         Self {
             head: HolePtr::null(),
             tail: HolePtr::null(),
@@ -169,7 +450,7 @@ impl HolePtrList {
         if self.tail.is_null() {
             return other;
         }
-        if self.head.is_null() {
+        if other.head.is_null() {
             return self;
         }
         *self.tail.get_mut(instrs) = other.head.0;
@@ -180,11 +461,11 @@ impl HolePtrList {
     }
 
     fn fill(self, instr: InstrPtr, instrs: &mut [Instr]) {
-        let mut curr = self.head;
-        while curr.0 != program::NULL_INSTR_PTR {
-            let next = *curr.get(instrs);
-            *curr.get_mut(instrs) = instr;
-            curr = HolePtr(next);
+        let mut current = self.head;
+        while current.0 != program::NULL_INSTR_PTR {
+            let next = *current.get(instrs);
+            *current.get_mut(instrs) = instr;
+            current = HolePtr(next);
         }
     }
 }
