@@ -34,14 +34,19 @@ impl Nfa {
             self.new_threads = Threads::new(program.instrs.len(), program.slot_count);
         }
         let mut matched = false;
-        while !matched {
-            self.current_threads.add_thread(
-                program.start,
-                &cursor,
-                &program.instrs,
-                slots,
-                &mut self.stack,
-            );
+        loop {
+            if !matched {
+                self.current_threads.add_thread(
+                    program.start,
+                    &cursor,
+                    &program.instrs,
+                    slots,
+                    &mut self.stack,
+                );
+            }
+            if self.current_threads.instrs.is_empty() {
+                break;
+            }
             let ch = cursor.next_char();
             for &instr in &self.current_threads.instrs {
                 match program.instrs[instr] {
