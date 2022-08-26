@@ -88,8 +88,8 @@ impl<'a, C: Cursor> RunContext<'a, C> {
                 next_state = *self.states.next_state(current_state, byte);
                 byte = self.cursor.next_byte();
             }
-            self.cursor.prev_byte().unwrap();
             if next_state & MATCHED_FLAG != 0 {
+                self.cursor.prev_byte().unwrap();
                 self.cursor.prev_byte().unwrap();
                 matched = Some(self.cursor.byte_position());
                 self.cursor.next_byte().unwrap();
@@ -99,6 +99,7 @@ impl<'a, C: Cursor> RunContext<'a, C> {
                 }
                 next_state &= !MATCHED_FLAG;
             } else if next_state == UNKNOWN_STATE_PTR {
+                self.cursor.prev_byte().unwrap();
                 let byte = Some(self.cursor.prev_byte().unwrap());
                 self.cursor.next_byte().unwrap();
                 self.cursor.next_byte().unwrap();
