@@ -1,14 +1,26 @@
-use crate::{CharClass, Range};
+use {crate::{CharClass, Range}, std::fmt};
 
 pub(crate) const NULL_INSTR_PTR: InstrPtr = usize::MAX;
 
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub(crate) struct Program {
     pub(crate) slot_count: usize,
     pub(crate) instrs: Vec<Instr>,
     pub(crate) start: usize,
 }
 
+impl fmt::Debug for Program {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for (index, instr) in self.instrs.iter().enumerate() {
+            write!(f, "{:04} {:?}", index, instr)?;
+            if index == self.start {
+                write!(f, " <start>")?;
+            }
+            writeln!(f)?;
+        }
+        Ok(())
+    }
+}
 #[derive(Clone, Debug, Eq, Hash, PartialEq)]
 pub(crate) enum Instr {
     Match,
