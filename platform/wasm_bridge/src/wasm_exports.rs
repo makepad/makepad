@@ -34,13 +34,20 @@ pub unsafe extern "C" fn wasm_free_data_u8(ptr: u32, len:u32, cap:u32) {
     WasmDataU8::take_ownership(ptr, len, cap);
 }
 
-pub fn panic_hook(info: &panic::PanicInfo) {
-    error!("{}", info)
-}
-
 #[export_name = "wasm_init_panic_hook"]
 #[cfg(target_arch = "wasm32")]
 pub unsafe extern "C" fn init_panic_hook(){
+    pub fn panic_hook(info: &panic::PanicInfo) {
+        error!("{}", info)
+    }
+    panic::set_hook(Box::new(panic_hook));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub fn init_panic_hook(){
+    pub fn panic_hook(info: &panic::PanicInfo) {
+        // ok so. 
+    }
     panic::set_hook(Box::new(panic_hook));
 }
 

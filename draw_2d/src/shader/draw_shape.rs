@@ -189,25 +189,25 @@ live_register!{
 #[derive(Live, LiveHook, PartialEq)]
 #[repr(u32)]
 pub enum Shape {
-    #[pick] None,
-    Solid,
-    Rect,
-    Box,
-    BoxX,
-    BoxY,
-    BoxAll,
-    Circle,
-    Hexagon,
-    ShadowBox,
+    #[pick] None = shader_enum(1),
+    Solid = shader_enum(2),
+    Rect = shader_enum(3),
+    Box = shader_enum(4),
+    BoxX = shader_enum(5),
+    BoxY = shader_enum(6),
+    BoxAll = shader_enum(7),
+    Circle = shader_enum(8),
+    Hexagon = shader_enum(9),
+    ShadowBox = shader_enum(10),
 }
 
 #[derive(Live, LiveHook, PartialEq)]
 #[repr(u32)]
 pub enum Fill {
-    #[pick] Color,
-    GradientX,
-    GradientY,
-    Image
+    #[pick] Color = shader_enum(1),
+    GradientX = shader_enum(2),
+    GradientY = shader_enum(3),
+    Image = shader_enum(4),
 }
 
 #[derive(Live, LiveHook)]

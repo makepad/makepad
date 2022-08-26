@@ -82,7 +82,7 @@ impl CocoaMouseDownEvent {
             },
             sweep_lock: Cell::new(Area::Empty),
             tap_count: fingers.get_tap_count(digit_id),
-            handled: Cell::new(false),
+            handled: Cell::new(Area::Empty),
             modifiers: self.modifiers,
             time: self.time
         }
@@ -114,7 +114,7 @@ impl CocoaMouseMoveEvent {
     pub fn into_finger_move_event(self, fingers: &CxFingers, digit_id: DigitId, button: usize) -> FingerMoveEvent {
         FingerMoveEvent {
             window_id: self.window_id,
-            handled: Cell::new(false),
+            handled: Cell::new(Area::Empty),
             sweep_lock: Cell::new(Area::Empty),
             hover_last: fingers.get_hover_area(digit_id), 
             tap_count: fingers.get_tap_count(digit_id),

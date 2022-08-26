@@ -17,7 +17,7 @@ live_register!{
                 //bind: "127.0.0.1"
                 path: (FS_ROOT)
             }
-            builder_client: {
+            build_manager: {
                 //bind: "127.0.0.1"
                 path: (FS_ROOT)
             }
@@ -34,7 +34,7 @@ pub struct App {
 impl App {
     pub fn live_register(cx: &mut Cx) {
         makepad_component::live_register(cx);
-        crate::builder::builder_client::live_register(cx);
+        crate::build::build_manager::live_register(cx);
         crate::collab_client::live_register(cx);
         crate::rust_editor::live_register(cx);
         crate::log_view::live_register(cx);

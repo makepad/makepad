@@ -6,11 +6,7 @@ live_register!{
     
     ScrollShadow: {{ScrollShadow}} {
         
-        no_h_scroll: true
-        no_v_scroll: true
-        
         shadow_size: 4.0,
-        varying is_viz: float;
         
         fn pixel(self) -> vec4 { // TODO make the corner overlap properly with a distance field eq.
             let is_viz = clamp(self.scroll * 0.1, 0., 1.);

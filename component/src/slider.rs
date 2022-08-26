@@ -147,9 +147,6 @@ pub struct DrawSlider {
 pub struct Slider {
     slider: DrawSlider,
     
-    #[alias(width, walk.width)]
-    #[alias(height, walk.height)]
-    #[alias(margin, walk.margin)]
     walk: Walk,
     
     layout: Layout,
@@ -193,7 +190,7 @@ impl Slider {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, &mut Self, SliderAction)) {
         self.state_handle_event(cx, event);
-        for action in self.text_input.handle_event_iter(cx, event) {
+        for action in self.text_input.handle_event_vec(cx, event) {
             match action {
                 TextInputAction::KeyFocus => {
                     self.animate_state(cx, ids!(focus.on));

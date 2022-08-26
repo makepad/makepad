@@ -19,13 +19,6 @@ use {
             CollabNotification,
             CollabRequest,
             CollabResponse,
-            unix_path::{UnixPath},
-        },
-        builder::{
-            builder_protocol::{
-                BuilderMsgWrap,
-                BuilderMsg
-            }
         },
         rust_editor::{
             rust_editor::{
@@ -214,32 +207,8 @@ impl Editors {
             CollabNotification::DeltaWasApplied(file_id, delta) => {
                 let document_id = state.handle_delta_applied_notification(file_id, delta);
                 self.redraw_views_for_document(cx, state, document_id);
+                
             }
-        }
-    }
-    
-    pub fn handle_builder_messages(
-        &mut self,
-        cx: &mut Cx,
-        state: &mut EditorState,
-        msgs: Vec<BuilderMsgWrap>,
-    ) {
-        for wrap in msgs {
-            let msg_id = state.messages.len();
-            match &wrap.msg {
-                BuilderMsg::Location(loc) => {
-                    if let Some(doc_id) = state.documents_by_path.get(UnixPath::new(&loc.file_name)) {
-                        let doc = &mut state.documents[*doc_id];
-                        if let Some(inner) = &mut doc.inner {
-                            inner.msg_cache.add_range(&inner.text, msg_id, loc.range);
-                        }
-                        // lets redraw this doc. with new squigglies
-                        self.redraw_views_for_document(cx, state, *doc_id);
-                    }
-                }
-                _ => ()
-            }
-            state.messages.push(wrap.msg);
         }
     }
     
