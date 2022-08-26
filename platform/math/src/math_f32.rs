@@ -347,6 +347,15 @@ impl Vec4 {
         let a = (self.w * 255.0) as u8 as u32;
         return (r<<24)|(g<<16)|(b<<8)|a;
     }
+
+    pub fn xy(&self) -> Vec2 {
+        Vec2{x:self.x, y:self.y}
+    }
+
+    pub fn zw(&self) -> Vec2 {
+        Vec2{x:self.z, y:self.w}
+    }
+
 }
 
 impl From<(DVec2,DVec2)> for Vec4{

@@ -1,5 +1,6 @@
 use {
     crate::{
+        makepad_error_log::*,
         makepad_shader_compiler::{
             generate_glsl,
         },
@@ -18,10 +19,10 @@ use {
 };
 
 impl Cx {
-    
+     
     pub fn handle_repaint(&mut self){
         let mut passes_todo = Vec::new();
-        
+         
         self.compute_pass_repaint_order(&mut passes_todo);
         self.repaint_id += 1;
         for pass_id in &passes_todo {
@@ -45,19 +46,13 @@ impl Cx {
         &mut self,
         pass_id: PassId,
         draw_list_id: DrawListId,
-        //scroll: Vec2,
-        //clip: (Vec2, Vec2),
         zbias: &mut f32,
         zbias_step: f32
     ) {
         // tad ugly otherwise the borrow checker locks 'self' and we can't recur
         let draw_items_len = self.draw_lists[draw_list_id].draw_items.len();
-        //self.views[view_id].set_clipping_uniforms();
         self.draw_lists[draw_list_id].uniform_view_transform(&Mat4::identity());
-        //self.draw_lists[draw_list_id].parent_scroll = scroll;
-        //let local_scroll = self.draw_lists[draw_list_id].get_local_scroll();
-        //let clip = self.draw_lists[draw_list_id].intersect_clip(clip);
-        
+
         for draw_item_id in 0..draw_items_len {
             if let Some(sub_list_id) = self.draw_lists[draw_list_id].draw_items[draw_item_id].sub_list() {
                 self.render_view(
@@ -81,26 +76,12 @@ impl Cx {
                 if sh.platform.is_none() { // shader didnt compile somehow
                     continue;
                 }
-                //let shp = &self.draw_shaders.platform[sh.platform.unwrap()];
                 
                 if draw_call.instance_dirty || draw_item.os.inst_vb_id.is_none() {
                     draw_call.instance_dirty = false;
                     if draw_item.os.inst_vb_id.is_none() {
                         draw_item.os.inst_vb_id = Some(self.os.vertex_buffers);
                         self.os.vertex_buffers += 1;
-                    }
-                    
-                    let slots = sh.mapping.instances.total_slots;
-                    let instances = draw_item.instances.as_ref().unwrap().len() / slots;
-                    
-                    // lets patch up integer enums to floats because we dont support integers in attributes
-                    for offset in &sh.mapping.instance_enums{
-                        for i in 0..instances{
-                            let instances = draw_item.instances.as_mut().unwrap();
-                            let float = instances[i * sh.mapping.instances.total_slots + offset];
-                            let integer : u32 = unsafe{std::mem::transmute(float)};
-                            instances[i * sh.mapping.instances.total_slots + offset] = integer as f32;
-                        }
                     }
                     
                     self.os.from_wasm(FromWasmAllocArrayBuffer {
@@ -110,12 +91,6 @@ impl Cx {
                     draw_call.instance_dirty = false;
                 }
                 draw_call.draw_uniforms.set_zbias(*zbias);
-                /*draw_call.draw_uniforms.set_local_scroll(
-                    scroll,
-                    local_scroll,
-                    &draw_call.options
-                );
-                draw_call.draw_uniforms.set_clip(clip);*/
                 *zbias += zbias_step;
                 
                 // update/alloc textures?
@@ -377,9 +352,9 @@ impl Cx {
                     &cx_shader.mapping.const_table,
                     &self.shader_registry
                 );
-                
+                 
                 if cx_shader.mapping.flags.debug {
-                    println!("{}\n{}", vertex,pixel);
+                   log!("{}\n{}", vertex,pixel);
                 }
                 // lets see if we have the shader already
                 for (index, ds) in self.draw_shaders.platform.iter().enumerate() {

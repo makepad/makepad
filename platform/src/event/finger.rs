@@ -354,7 +354,7 @@ pub struct FingerDownEvent {
     pub abs: DVec2,
     pub digit: DigitInfo,
     pub tap_count: u32,
-    pub handled: Cell<bool>,
+    pub handled: Cell<Area>,
     pub sweep_lock: Cell<Area>,
     pub modifiers: KeyModifiers,
     pub time: f64
@@ -387,7 +387,7 @@ impl std::ops::DerefMut for FingerDownHitEvent {
 pub struct FingerMoveEvent {
     pub window_id: WindowId,
     pub abs: DVec2,
-    pub handled: Cell<bool>,
+    pub handled: Cell<Area>,
     pub sweep_lock: Cell<Area>,
     pub hover_last: Area,
     //pub captured: Area,
@@ -763,8 +763,9 @@ impl Event {
                         let abs_start = digit.down_abs_start;
                         let rect = area.get_clipped_rect(&cx);
                         if fe.hover_last == area {
-                            if !fe.handled.get() && rect_contains_with_margin(&rect, fe.abs, &options.margin) {
-                                fe.handled.set(true);
+                            let handled_area = fe.handled.get();
+                            if (handled_area.is_empty() || handled_area == area) && rect_contains_with_margin(&rect, fe.abs, &options.margin) {
+                                fe.handled.set(area);
                                 cx.fingers.new_hover_area(fe.digit.id, area);
                                 return Hit::FingerSweep(FingerSweepEvent {
                                     abs_start,
@@ -793,9 +794,10 @@ impl Event {
                             }
                         }
                         else {
-                            if !fe.handled.get() && rect_contains_with_margin(&rect, fe.abs, &options.margin) {
+                            let handled_area = fe.handled.get();
+                            if (handled_area.is_empty() || handled_area == area) && rect_contains_with_margin(&rect, fe.abs, &options.margin) {
                                 cx.fingers.new_hover_area(fe.digit.id, area);
-                                fe.handled.set(true);
+                                fe.handled.set(area);
                                 return Hit::FingerSweepIn(FingerSweepEvent {
                                     abs_start,
                                     rect: rect,
@@ -826,7 +828,8 @@ impl Event {
                 if !sweep_lock.is_empty() && sweep_lock != options.sweep_area {
                     return Hit::Nothing
                 }
-                if !fe.handled.get() {
+                let handled_area = fe.handled.get();
+                if handled_area.is_empty() || handled_area == area{
                     let rect = area.get_clipped_rect(&cx);
                     if rect_contains_with_margin(&rect, fe.abs, &options.margin) {
                         // if we have a parent area, capture that one
@@ -836,7 +839,7 @@ impl Event {
                                 cx.fingers.new_hover_area(fe.digit.id, area);
                                 let digit = cx.fingers.get_digit_mut(fe.digit.id).unwrap();
                                 digit.down_abs_start = fe.abs;
-                                fe.handled.set(true);
+                                fe.handled.set(area);
                                 
                                 return Hit::FingerSweepIn(FingerSweepEvent {
                                     abs_start: fe.abs,
@@ -855,7 +858,7 @@ impl Event {
                             if cx.fingers.capture_digit(fe.digit.id, area, fe.time) {
                                 let digit = cx.fingers.get_digit_mut(fe.digit.id).unwrap();
                                 digit.down_abs_start = fe.abs;
-                                fe.handled.set(true);
+                                fe.handled.set(area);
                                 return Hit::FingerDown(FingerDownHitEvent {
                                     rect: rect,
                                     deref_target: fe.clone()

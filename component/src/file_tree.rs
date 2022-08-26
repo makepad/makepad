@@ -45,7 +45,7 @@ live_register!{
         }
         
         text_style: FONT_DATA {
-            top_drop: 1.3,
+            top_drop: 1.2,
         }
     }
     
@@ -73,16 +73,16 @@ live_register!{
         
         layout: {
             align: {y: 0.5},
-            padding: {left: 5.0, bottom: 1.0,},
+            padding: {left: 5.0, bottom: 0,},
         }
         
         icon_walk:{
-            width: Size::Fixed((DIM_DATA_ICON_WIDTH)),
-            height: Size::Fixed((DIM_DATA_ICON_HEIGHT)),
+            width:Size::Fixed((DIM_DATA_ICON_WIDTH)),
+            height:Size::Fixed((DIM_DATA_ICON_HEIGHT)),
             margin:{
                 left: 1
                 top: 0
-                right: 4
+                right: 2
                 bottom: 0
             },
         }
@@ -188,7 +188,7 @@ live_register!{
             bg: {is_folder: 1.0}
             name: {is_folder: 1.0}
         }
-        layout: {flow: Flow::Down},
+        layout: {flow: Flow::Down, clip_x:true, clip_y:true},
         scroll_bars: {}
     }
 }
@@ -544,7 +544,7 @@ impl FileTree {
         self.scroll_bars.redraw(cx);
     }
     
-    pub fn handle_event_iter(&mut self, cx: &mut Cx, event: &Event) -> Vec<FileTreeAction> {
+    pub fn handle_event_vec(&mut self, cx: &mut Cx, event: &Event) -> Vec<FileTreeAction> {
         let mut a = Vec::new();
         self.handle_event(cx, event, &mut | _, v | a.push(v));
         a

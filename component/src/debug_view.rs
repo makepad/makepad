@@ -6,18 +6,23 @@ live_register!{
     
     DrawRect: {{DrawRect}} {
         fn pixel(self) -> vec4 {
-            return vec4(self.color.xyz * self.color.w, self.color.w)
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+            sdf.rect(0., 0., self.rect_size.x, self.rect_size.y);
+            sdf.stroke(self.color, 1.0);
+            return sdf.result;
+            //return vec4(self.color.xyz * self.color.w, self.color.w)
         }
+        draw_depth: 20.0
     }
     
     DebugView: {{DebugView}} {
         label: {
-            text_style:{
+            text_style: {
                 font_size: 6
             },
             color: #a
         }
-        view:{}
+        view: {}
     }
 }
 
@@ -38,13 +43,13 @@ pub struct DebugView {
 
 impl DebugView {
     pub fn handle_event(&mut self, cx: &mut Cx, _event: &Event) {
-        if cx.debug.has_data(){
+        if cx.debug.has_data() {
             self.view.redraw(cx);
         }
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
-        if !self.view.begin(cx).is_redrawing(){
+        if !self.view.begin(cx).is_redrawing() {
             return
         }
         let debug = cx.debug.clone();

@@ -3,7 +3,7 @@ pub mod app_inner;
 pub mod app_state;
 
 pub mod collab_client;
-pub mod builder;
+pub mod build;
 
 pub mod code_editor;
 pub mod editors;

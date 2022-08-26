@@ -212,7 +212,7 @@ impl fmt::Debug for LiveNodeOrigin {
 
 // ok if we are a DSL node then what else do we need. we need a node index pointer.
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 #[repr(usize)]
 pub enum LivePropType{
     Field = 0,

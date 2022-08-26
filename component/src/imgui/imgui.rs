@@ -123,7 +123,7 @@ impl ImGUI {
     
     pub fn run<'a>(&self, cx: &'a mut Cx, event: &'a Event) -> ImGUIRun<'a> {
         // fetch actions and wrap
-        let actions = ImGUIActions(Rc::new(self.frame().handle_event_iter(cx, event)));
+        let actions = ImGUIActions(Rc::new(self.frame().handle_event_vec(cx, event)));
         ImGUIRun {
             event,
             cx,
