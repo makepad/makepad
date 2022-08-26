@@ -25,7 +25,9 @@ mod tests {
 
     #[test]
     fn test() {
-        let regex = Regex::new("a.*a");
-        println!("{:?}", regex.find("xxxaaaayyy"));
+        let regex = Regex::new("a*(bbb)c*");
+        let mut slots = [None; 4];
+        println!("{:?}", regex.run("xxxaaabbbcccyyy", &mut slots));
+        println!("{:?}", slots);
     }
 }
