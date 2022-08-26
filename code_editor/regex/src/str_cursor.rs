@@ -29,7 +29,7 @@ impl<'a> Cursor for StrCursor<'a> {
     }
 
     fn move_to(&mut self, position: usize) {
-        assert!(position < self.string.len());
+        assert!(position <= self.string.len());
         self.position = position;
     }
 
