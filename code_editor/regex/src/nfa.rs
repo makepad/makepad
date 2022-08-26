@@ -42,10 +42,7 @@ impl Nfa {
                 slots,
                 &mut self.stack,
             );
-            let ch = cursor.current_char();
-            if ch.is_some() {
-                cursor.move_next_char();
-            }
+            let ch = cursor.next_char();
             for &instr in &self.current_threads.instrs {
                 match program.instrs[instr] {
                     Instr::Match => {
