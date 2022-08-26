@@ -3,18 +3,16 @@ pub trait Cursor {
     fn is_at_end_of_text(&self) -> bool;
     fn byte_position(&self) -> usize;
     fn move_to(&mut self, byte_position: usize);
-    fn next_byte(&mut self) -> Option<u8>; 
+    fn next_byte(&mut self) -> Option<u8>;
     fn prev_byte(&mut self) -> Option<u8>;
     fn next_char(&mut self) -> Option<char>;
     fn prev_char(&mut self) -> Option<char>;
 
     fn rev(self) -> Rev<Self>
     where
-        Self: Sized
+        Self: Sized,
     {
-        Rev {
-            cursor: self,
-        }
+        Rev { cursor: self }
     }
 }
 
@@ -54,7 +52,7 @@ impl<'a, T: Cursor> Cursor for &'a mut T {
 
 #[derive(Clone, Debug)]
 pub struct Rev<C> {
-    cursor: C
+    cursor: C,
 }
 
 impl<C: Cursor> Cursor for Rev<C> {

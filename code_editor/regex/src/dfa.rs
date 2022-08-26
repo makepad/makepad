@@ -35,7 +35,12 @@ impl Dfa {
         }
     }
 
-    pub(crate) fn run<C: Cursor + std::fmt::Debug>(&mut self, program: &Program, cursor: C) -> Option<usize> {
+    pub(crate) fn run<C: Cursor>(
+        &mut self,
+        program: &Program,
+        cursor: C,
+        options: Options,
+    ) -> Option<usize> {
         if !self.current_threads.instrs.capacity() != program.instrs.len() {
             self.current_threads = Threads::new(program.instrs.len());
             self.next_threads = Threads::new(program.instrs.len());
@@ -48,9 +53,16 @@ impl Dfa {
             stack: &mut self.stack,
             program,
             cursor,
+            options,
         }
         .run()
     }
+}
+
+#[derive(Clone, Copy, Debug, Default)]
+pub struct Options {
+    pub stop_after_first_match: bool,
+    pub continue_until_last_match: bool,
 }
 
 struct RunContext<'a, C> {
@@ -61,9 +73,10 @@ struct RunContext<'a, C> {
     stack: &'a mut Vec<InstrPtr>,
     program: &'a Program,
     cursor: C,
+    options: Options,
 }
 
-impl<'a, C: Cursor + std::fmt::Debug> RunContext<'a, C> {
+impl<'a, C: Cursor> RunContext<'a, C> {
     fn run(&mut self) -> Option<usize> {
         let mut matched = None;
         let mut current_state = UNKNOWN_STATE_PTR;
@@ -80,9 +93,15 @@ impl<'a, C: Cursor + std::fmt::Debug> RunContext<'a, C> {
                 self.cursor.prev_byte().unwrap();
                 matched = Some(self.cursor.byte_position());
                 self.cursor.next_byte().unwrap();
+                self.cursor.next_byte().unwrap();
+                if self.options.stop_after_first_match {
+                    return matched;
+                }
                 next_state &= !MATCHED_FLAG;
             } else if next_state == UNKNOWN_STATE_PTR {
                 let byte = Some(self.cursor.prev_byte().unwrap());
+                self.cursor.next_byte().unwrap();
+                self.cursor.next_byte().unwrap();
                 next_state = self.get_or_create_next_state(current_state, byte);
                 *self.states.next_state_mut(current_state, byte) = next_state;
             } else if next_state == DEAD_STATE_PTR {
@@ -155,7 +174,9 @@ impl<'a, C: Cursor + std::fmt::Debug> RunContext<'a, C> {
             match self.program.instrs[instr] {
                 Instr::Match => {
                     flags.set_matched();
-                    break;
+                    if !self.options.continue_until_last_match {
+                        break;
+                    }
                 }
                 Instr::ByteRange(byte_range, next) => {
                     if byte.map_or(false, |byte| byte_range.contains(&byte)) {
