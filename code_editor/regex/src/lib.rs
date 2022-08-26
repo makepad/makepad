@@ -25,7 +25,7 @@ mod tests {
 
     #[test]
     fn test() {
-        let regex = Regex::new("abc");
-        println!("{:?}", regex.find("xxxabcyyy"));
+        let regex = Regex::new("a.*a");
+        println!("{:?}", regex.find("xxxaaaayyy"));
     }
 }
