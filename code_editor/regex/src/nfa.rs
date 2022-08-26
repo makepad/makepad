@@ -1,14 +1,13 @@
 use crate::{
-    cursor::Cursor,
-    program::{Instr, InstrPtr},
-    Program, SparseSet,
+    program::{Instr, InstrPtr, Pred},
+    Cursor, Program, SparseSet,
 };
 
 #[derive(Clone, Debug)]
 pub(crate) struct Nfa {
     current_threads: Threads,
     new_threads: Threads,
-    add_thread_stack: Vec<AddThreadStackFrame>,
+    stack: Vec<Frame>,
 }
 
 impl Nfa {
@@ -16,7 +15,7 @@ impl Nfa {
         Self {
             current_threads: Threads::new(0, 0),
             new_threads: Threads::new(0, 0),
-            add_thread_stack: Vec::new(),
+            stack: Vec::new(),
         }
     }
 
@@ -28,7 +27,9 @@ impl Nfa {
     ) -> bool {
         use std::mem;
 
-        if self.current_threads.instr.capacity() != program.instrs.len() {
+        if self.current_threads.instrs.capacity() != program.instrs.len()
+            || self.current_threads.slots.slot_count_per_thread != program.slot_count
+        {
             self.current_threads = Threads::new(program.instrs.len(), program.slot_count);
             self.new_threads = Threads::new(program.instrs.len(), program.slot_count);
         }
@@ -36,41 +37,52 @@ impl Nfa {
         while !matched {
             self.current_threads.add_thread(
                 program.start,
-                cursor.byte_position(),
+                &cursor,
                 &program.instrs,
                 slots,
-                &mut self.add_thread_stack,
+                &mut self.stack,
             );
-            let ch = cursor.current_char().map_or(u32::MAX, |ch| ch as u32);
-            if ch != u32::MAX {
+            let ch = cursor.current_char();
+            if ch.is_some() {
                 cursor.move_next_char();
             }
-            for &instr in &self.current_threads.instr {
+            for &instr in &self.current_threads.instrs {
                 match program.instrs[instr] {
                     Instr::Match => {
-                        slots.copy_from_slice(self.current_threads.slots.get_mut(instr));
+                        slots.copy_from_slice(self.current_threads.slots.get(instr));
                         matched = true;
                         break;
                     }
                     Instr::Char(other_ch, next) => {
-                        if other_ch as u32 == ch {
+                        if ch.map_or(false, |ch| other_ch == ch) {
                             self.new_threads.add_thread(
                                 next,
-                                cursor.byte_position(),
+                                &cursor,
                                 &program.instrs,
                                 self.current_threads.slots.get_mut(instr),
-                                &mut self.add_thread_stack,
+                                &mut self.stack,
+                            );
+                        }
+                    }
+                    Instr::CharClass(ref char_class, next) => {
+                        if ch.map_or(false, |ch| char_class.contains(ch)) {
+                            self.new_threads.add_thread(
+                                next,
+                                &cursor,
+                                &program.instrs,
+                                self.current_threads.slots.get_mut(instr),
+                                &mut self.stack,
                             );
                         }
                     }
                     _ => {}
                 }
             }
-            if cursor.is_at_back() {
+            if ch.is_none() {
                 break;
             }
             mem::swap(&mut self.current_threads, &mut self.new_threads);
-            self.new_threads.instr.clear();
+            self.new_threads.instrs.clear();
         }
         matched
     }
@@ -78,46 +90,56 @@ impl Nfa {
 
 #[derive(Clone, Debug)]
 struct Threads {
-    instr: SparseSet,
+    instrs: SparseSet,
     slots: Slots,
 }
 
 impl Threads {
-    fn new(instr_count: usize, slot_count: usize) -> Self {
+    fn new(thread_count: usize, slot_count_per_thread: usize) -> Self {
         Self {
-            instr: SparseSet::new(instr_count),
-            slots: Slots::new(instr_count, slot_count),
+            instrs: SparseSet::new(thread_count),
+            slots: Slots {
+                slot_count_per_thread,
+                slots: vec![None; thread_count * slot_count_per_thread].into_boxed_slice(),
+            },
         }
     }
 
-    fn add_thread(
+    fn add_thread<C: Cursor>(
         &mut self,
         instr: InstrPtr,
-        byte_position: usize,
+        cursor: &C,
         instrs: &[Instr],
         slots: &mut [Option<usize>],
-        stack: &mut Vec<AddThreadStackFrame>,
+        stack: &mut Vec<Frame>,
     ) {
-        stack.push(AddThreadStackFrame::AddThread(instr));
+        stack.push(Frame::AddThread(instr));
         while let Some(frame) = stack.pop() {
             match frame {
-                AddThreadStackFrame::AddThread(mut instr) => loop {
-                    if self.instr.contains(instr) {
+                Frame::AddThread(mut instr) => loop {
+                    if !self.instrs.insert(instr) {
                         break;
                     }
-                    self.instr.insert(instr);
                     match instrs[instr] {
-                        Instr::Split(next_0, next_1) => {
-                            stack.push(AddThreadStackFrame::AddThread(next_1));
-                            instr = next_0;
+                        Instr::Nop(next) => {
+                            instr = next;
                         }
                         Instr::Save(slot_index, next) => {
-                            stack.push(AddThreadStackFrame::RestoreSlot(
-                                slot_index,
-                                slots[slot_index],
-                            ));
-                            slots[slot_index] = Some(byte_position);
+                            stack.push(Frame::RestoreSlot(slot_index, slots[slot_index]));
+                            slots[slot_index] = Some(cursor.byte_position());
                             instr = next;
+                        }
+                        Instr::Assert(pred, next) => {
+                            if match pred {
+                                Pred::IsAtStartOfText => cursor.is_at_start_of_text(),
+                                Pred::IsAtEndOfText => cursor.is_at_end_of_text(),
+                            } {
+                                instr = next;
+                            }
+                        }
+                        Instr::Split(next_0, next_1) => {
+                            stack.push(Frame::AddThread(next_1));
+                            instr = next_0;
                         }
                         _ => {
                             self.slots.get_mut(instr).copy_from_slice(slots);
@@ -125,7 +147,7 @@ impl Threads {
                         }
                     }
                 },
-                AddThreadStackFrame::RestoreSlot(slot_index, byte_position) => {
+                Frame::RestoreSlot(slot_index, byte_position) => {
                     slots[slot_index] = byte_position;
                 }
             }
@@ -133,26 +155,13 @@ impl Threads {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-enum AddThreadStackFrame {
-    AddThread(InstrPtr),
-    RestoreSlot(usize, Option<usize>),
-}
-
 #[derive(Clone, Debug)]
 struct Slots {
     slot_count_per_thread: usize,
-    slots: Vec<Option<usize>>,
+    slots: Box<[Option<usize>]>,
 }
 
 impl Slots {
-    fn new(instr_count: usize, slot_count: usize) -> Self {
-        Self {
-            slot_count_per_thread: slot_count,
-            slots: vec![None; instr_count * slot_count],
-        }
-    }
-
     fn get(&self, instr: InstrPtr) -> &[Option<usize>] {
         &self.slots[instr * self.slot_count_per_thread..][..self.slot_count_per_thread]
     }
@@ -160,4 +169,10 @@ impl Slots {
     fn get_mut(&mut self, instr: InstrPtr) -> &mut [Option<usize>] {
         &mut self.slots[instr * self.slot_count_per_thread..][..self.slot_count_per_thread]
     }
+}
+
+#[derive(Clone, Debug)]
+enum Frame {
+    AddThread(InstrPtr),
+    RestoreSlot(usize, Option<usize>),
 }

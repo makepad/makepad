@@ -1,14 +1,19 @@
 mod ast;
+mod char_class;
 mod compiler;
 mod cursor;
+mod dfa;
 mod nfa;
 mod parser;
 mod program;
+mod range;
 mod sparse_set;
 mod str;
+mod utf8;
 
 use self::{
-    ast::Ast, compiler::Compiler, nfa::Nfa, parser::Parser, program::Program, sparse_set::SparseSet,
+    ast::Ast, char_class::CharClass, compiler::Compiler, cursor::Cursor, dfa::Dfa, nfa::Nfa,
+    parser::Parser, program::Program, range::Range, sparse_set::SparseSet,
 };
 
 #[cfg(test)]
@@ -17,14 +22,20 @@ mod tests {
 
     #[test]
     fn test() {
-        let ast = Parser::new().parse("ac|bc");
+        let ast = Parser::new().parse("^axxx$");
         println!("{:?}", ast);
-        let program = Compiler::new().compile(&ast);
+        let program = Compiler::new().compile(
+            &ast,
+            compiler::Options {
+                dot_star: true,
+                reverse: false,
+                bytes: true,
+                ..compiler::Options::default()
+            },
+        );
         println!("{:?}", program);
-        let mut nfa = Nfa::new();
-        let cursor = str::StrCursor::new("xyabcz");
-        let mut slots = [None; 2];
-        println!("{:?}", nfa.run(&program, cursor, &mut slots));
-        println!("{:?}", slots);
+        let mut dfa = Dfa::new();
+        let cursor = str::StrCursor::new("axxx");
+        println!("{:?}", dfa.run(&program, cursor));
     }
 }

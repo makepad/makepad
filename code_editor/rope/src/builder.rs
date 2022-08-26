@@ -3,7 +3,8 @@ use {
     std::sync::Arc,
 };
 
-/// A builder for `Rope`s.
+/// A builder for [`Rope`]s.
+/// 
 #[derive(Debug)]
 pub struct Builder {
     stack: Vec<(usize, Vec<Node>)>,
@@ -18,11 +19,11 @@ impl Builder {
         }
     }
 
-    /// Appends the given `string` to the `Rope` under construction.
+    /// Appends the given `string` to the [`Rope`] under construction.
     ///
     /// # Performance
     ///
-    /// Runs in O(1) amortized time.
+    /// Runs in O(1) amortized and O(log(n)) worst-case time.
     pub fn push_str(&mut self, mut string: &str) {
         use crate::StrUtils;
 
@@ -47,11 +48,11 @@ impl Builder {
         }
     }
 
-    /// Finishes and then returns the `Rope` under construction.
+    /// Finishes and then returns the [`Rope`] under construction.
     ///
     /// # Performance
     ///
-    /// Runs in O(log n) time.
+    /// Runs in O(log(n)) time.
     pub(crate) fn build(mut self) -> Rope {
         use std::mem;
 

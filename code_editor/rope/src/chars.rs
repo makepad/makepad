@@ -3,7 +3,12 @@ use {
     std::str,
 };
 
-/// An iterator over the `char`s of a `Rope` or `Slice`.
+/// An iterator over the [`char`]s in a [`Rope`] or [`Slice`].
+/// 
+/// This `struct` is created by the [`chars`](crate::Rope::chars) method on [`Rope`] or the
+/// [`chars`](crate::Slice::chars) method on [`Slice`].
+/// 
+/// [`Rope`]: crate::Rope
 #[derive(Clone, Debug)]
 pub struct Chars<'a> {
     chars: Option<str::Chars<'a>>,
@@ -26,7 +31,7 @@ impl<'a> Iterator for Chars<'a> {
     ///
     /// # Performance
     ///
-    /// Runs in amortized O(1) and worst-case O(log n) time.
+    /// Runs in amortized O(1) and worst-case O(log(n)) time.
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         loop {

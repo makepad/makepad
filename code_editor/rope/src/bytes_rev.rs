@@ -3,7 +3,12 @@ use {
     std::str,
 };
 
-/// A reverse iterator over the bytes of a `Rope` or `Slice`.
+/// A reverse iterator over the bytes in a [`Rope`] or [`Slice`].
+/// 
+/// This `struct` is created by the [`bytes_rev`](crate::Rope::bytes_rev) method on [`Rope`] or the
+/// [`bytes_rev`](crate::Slice::bytes_rev) method on [`Slice`].
+/// 
+/// [`Rope`]: crate::Rope
 #[derive(Clone, Debug)]
 pub struct BytesRev<'a> {
     bytes: Option<str::Bytes<'a>>,
@@ -26,7 +31,7 @@ impl<'a> Iterator for BytesRev<'a> {
     ///
     /// # Performance
     ///
-    /// Runs in amortized O(1) and worst-case O(log n) time.
+    /// Runs in amortized O(1) and worst-case O(log(n)) time.
     #[inline]
     fn next(&mut self) -> Option<Self::Item> {
         loop {

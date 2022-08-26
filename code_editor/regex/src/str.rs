@@ -16,11 +16,11 @@ impl<'a> StrCursor<'a> {
 }
 
 impl<'a> Cursor for StrCursor<'a> {
-    fn is_at_front(&self) -> bool {
+    fn is_at_start_of_text(&self) -> bool {
         self.byte_position == 0
     }
 
-    fn is_at_back(&self) -> bool {
+    fn is_at_end_of_text(&self) -> bool {
         self.byte_position == self.string.len()
     }
 
@@ -28,8 +28,20 @@ impl<'a> Cursor for StrCursor<'a> {
         self.byte_position
     }
 
+    fn current_byte(&self) -> Option<u8> {
+        self.string.as_bytes().get(self.byte_position).cloned()
+    }
+
     fn current_char(&self) -> Option<char> {
         self.string[self.byte_position..].chars().next()
+    }
+
+    fn move_next_byte(&mut self) {
+        self.byte_position += 1;
+    }
+
+    fn move_prev_byte(&mut self) {
+        self.byte_position -= 1;
     }
 
     fn move_next_char(&mut self) {
