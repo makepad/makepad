@@ -3,10 +3,10 @@ use {
         fmt::Write,
     },
     crate::{
-        builder::{
-            builder_protocol::{
-                BuilderMsg,
-                BuilderMsgLevel
+        build::{
+            build_protocol::{
+                BuildMsg,
+                BuildMsgLevel
             }
         },
         makepad_component::{
@@ -35,12 +35,12 @@ pub enum LogViewAction {
     None
 }
 
-impl Into<LogIconType> for BuilderMsgLevel{
+impl Into<LogIconType> for BuildMsgLevel{
     fn into(self)->LogIconType{
         match self{
-            BuilderMsgLevel::Warning=>LogIconType::Warning,
-            BuilderMsgLevel::Error=>LogIconType::Error,
-            BuilderMsgLevel::Log=>LogIconType::Ok,
+            BuildMsgLevel::Warning=>LogIconType::Warning,
+            BuildMsgLevel::Error=>LogIconType::Error,
+            BuildMsgLevel::Log=>LogIconType::Ok,
         }
     }
 }
@@ -60,9 +60,10 @@ impl LogView {
                 body.clear();
                 let id = LiveId(index as  u64).into();
                 match msg{
-                    BuilderMsg::Bare(_msg)=>{
+                    BuildMsg::Bare(msg)=>{
+                        self.log_list.draw_node(cx, msg.level.into(), id, "", &msg.line, true);
                     }
-                    BuilderMsg::Location(msg)=>{
+                    BuildMsg::Location(msg)=>{
                         write!(file, "{}:{}", msg.file_name, msg.range.start.line).unwrap();
                         self.log_list.draw_node(cx, msg.level.into(), id, &file, &msg.msg, true);
                     }

@@ -7,17 +7,17 @@ use {
 
 
 #[derive(Clone, Copy, Debug, SerBin, DeBin)]
-pub struct BuilderCmdId(pub u64);
+pub struct BuildCmdId(pub u64);
 
 #[derive(Clone, Debug, SerBin, DeBin)]
-pub struct BuilderCmdWrap {
-    pub cmd_id: BuilderCmdId,
-    pub cmd: BuilderCmd
+pub struct BuildCmdWrap {
+    pub cmd_id: BuildCmdId,
+    pub cmd: BuildCmd
 }
 
-impl BuilderCmdId{
-    pub fn wrap_msg(&self, msg:BuilderMsg)->BuilderMsgWrap{
-        BuilderMsgWrap{
+impl BuildCmdId{
+    pub fn wrap_msg(&self, msg:BuildMsg)->BuildMsgWrap{
+        BuildMsgWrap{
             cmd_id: *self,
             msg,
         }
@@ -25,39 +25,39 @@ impl BuilderCmdId{
 }
 
 #[derive(Clone, Debug, SerBin, DeBin)]
-pub enum BuilderCmd {
-    CargoCheck
+pub enum BuildCmd {
+    CargoRun{what:String}
 }
 
 #[derive(Clone, Debug, SerBin, DeBin)]
-pub struct BuilderMsgWrap {
-    pub cmd_id: BuilderCmdId,
-    pub msg: BuilderMsg
+pub struct BuildMsgWrap {
+    pub cmd_id: BuildCmdId,
+    pub msg: BuildMsg
 }
 
 #[derive(Clone, Copy, Debug, SerBin, DeBin)]
-pub enum BuilderMsgLevel{
+pub enum BuildMsgLevel{
     Warning,
     Error,
     Log
 }
 
 #[derive(Clone, Debug, SerBin, DeBin)]
-pub struct BuilderMsgLocation{
-    pub level: BuilderMsgLevel,
+pub struct BuildMsgLocation{
+    pub level: BuildMsgLevel,
     pub file_name: String,
     pub range: Range,
     pub msg: String
 }
 
 #[derive(Clone, Debug, SerBin, DeBin)]
-pub struct BuilderMsgBare{
-    pub level: BuilderMsgLevel,
+pub struct BuildMsgBare{
+    pub level: BuildMsgLevel,
     pub line: String,
 }
 
 #[derive(Clone, Debug, SerBin, DeBin)]
-pub enum BuilderMsg {
-    Bare(BuilderMsgBare),
-    Location(BuilderMsgLocation)
+pub enum BuildMsg {
+    Bare(BuildMsgBare),
+    Location(BuildMsgLocation)
 }

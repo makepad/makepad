@@ -34,6 +34,53 @@ pub enum ShaderCompileResult {
     Ok
 }*/
 
+
+#[cfg(target_arch = "wasm32")]
+pub const fn shader_enum(i:u32)->u32{
+    match i{
+        1=>0x3f800000,
+        2=>0x40000000,
+        3=>0x40400000,
+        4=>0x40800000,
+        5=>0x40a00000,
+        6=>0x40c00000,
+        7=>0x40e00000,
+        8=>0x41000000,
+        9=>0x41100000,
+        10=>0x41200000,
+        11=>0x41300000,
+        12=>0x41400000,
+        13=>0x41500000,
+        14=>0x41600000,
+        15=>0x41700000,
+        16=>0x41800000,
+        17=>0x41880000,
+        18=>0x41900000,
+        19=>0x41980000,
+        20=>0x41a00000,
+        21=>0x41a80000,
+        22=>0x41b00000,
+        23=>0x41b80000,
+        24=>0x41c00000,
+        25=>0x41c80000,
+        26=>0x41d00000,
+        27=>0x41d80000,
+        28=>0x41e00000,
+        29=>0x41e80000,
+        30=>0x41f00000,
+        31=>0x41f80000,
+        _=>panic!()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+pub const fn shader_enum(i:u32)->u32{
+    if i<1 ||i > 31{
+        panic!();
+    }
+    i
+}
+
 pub const DRAW_CALL_USER_UNIFORMS: usize = 16;
 pub const DRAW_CALL_TEXTURE_SLOTS: usize = 4;
 pub const DRAW_CALL_VAR_INSTANCES: usize = 16;
@@ -243,7 +290,7 @@ impl DrawVars {
                         DRAW_SHADER_INPUT_PACKING
                     );
                     
-                    mapping.update_live_uniforms(cx, from);
+                    mapping.update_live_and_user_uniforms(cx, from);
                     
                     let live_registry_rc = cx.live_registry.clone();
                     let live_registry = live_registry_rc.borrow();
@@ -481,8 +528,6 @@ impl DrawVars {
         let unknown_shader_props = match nodes[index].id {
             id!(debug) => false,
             id!(debug_id) => false,
-            id!(no_v_scroll) => false,
-            id!(no_h_scroll) => false,
             id!(draw_call_group) => false,
             _ => true
         };

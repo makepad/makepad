@@ -81,9 +81,9 @@ pub struct DrawLogIconQuad {
 #[derive(Live, LiveHook)]
 #[repr(u32)]
 pub enum LogIconType {
-    Wait,
-    #[pick] Ok,
-    Error,
-    Warning,
-    Panic
+    Wait = shader_enum(1),
+    #[pick] Ok  = shader_enum(2),
+    Error  = shader_enum(3),
+    Warning  = shader_enum(4),
+    Panic = shader_enum(5),
 }

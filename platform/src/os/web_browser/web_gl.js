@@ -3,7 +3,9 @@ import {WasmWebBrowser} from "./web_browser.js";
 export class WasmWebGL extends WasmWebBrowser {
     constructor(wasm, dispatch, canvas) {
         super (wasm, dispatch, canvas);
-
+        if(wasm === undefined){
+            return
+        }
         this.draw_shaders = [];
         this.array_buffers = [];
         this.index_buffers = [];

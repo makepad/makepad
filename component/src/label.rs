@@ -41,6 +41,8 @@ impl FrameComponent for Label {
     fn draw_component(&mut self, cx: &mut Cx2d, walk:Walk, self_uid:FrameUid)->FrameDraw{
         let mut lines = self.text.split("\\n");
         for line in lines{
+            // lets debugdraw the cliprect
+            
             self.label.draw_walk(cx, walk, self.align, line);
         }
         FrameDraw::done()

@@ -181,12 +181,12 @@ impl DrawText {
     }
     
     pub fn begin_many_instances(&mut self, cx: &mut Cx2d) {
-        let fonts_atlas_rc  =cx.fonts_atlas_rc.clone();
+        let fonts_atlas_rc = cx.fonts_atlas_rc.clone();
         let fonts_atlas = fonts_atlas_rc.0.borrow();
         self.begin_many_instances_internal(cx, &*fonts_atlas);
     }
     
-    fn begin_many_instances_internal(&mut self, cx: &mut Cx2d, fonts_atlas:&CxFontsAtlas) {
+    fn begin_many_instances_internal(&mut self, cx: &mut Cx2d, fonts_atlas: &CxFontsAtlas) {
         self.update_draw_call_vars(fonts_atlas);
         let mi = cx.begin_many_aligned_instances(&self.draw_vars);
         self.many_instances = mi;
@@ -203,7 +203,7 @@ impl DrawText {
         cx.new_draw_call(&self.draw_vars);
     }
     
-    pub fn update_draw_call_vars(&mut self, font_atlas:&CxFontsAtlas) {
+    pub fn update_draw_call_vars(&mut self, font_atlas: &CxFontsAtlas) {
         self.draw_vars.texture_slots[0] = Some(font_atlas.texture_id);
         self.draw_vars.user_uniforms[0] = self.text_style.brightness;
         self.draw_vars.user_uniforms[1] = self.text_style.curve;
@@ -222,7 +222,7 @@ impl DrawText {
         let in_many = self.many_instances.is_some();
         let font_id = self.text_style.font.font_id.unwrap();
         
-        let fonts_atlas_rc  =cx.fonts_atlas_rc.clone();
+        let fonts_atlas_rc = cx.fonts_atlas_rc.clone();
         let mut fonts_atlas = fonts_atlas_rc.0.borrow_mut();
         let fonts_atlas = &mut*fonts_atlas;
         
@@ -244,7 +244,7 @@ impl DrawText {
         let font = &mut cxfont.ttf_font;
         
         let font_size_logical = self.text_style.font_size * 96.0 / (72.0 * font.units_per_em);
-        let font_size_pixels = font_size_logical * dpi_factor ;
+        let font_size_pixels = font_size_logical * dpi_factor;
         
         let atlas_page = &mut cxfont.atlas_pages[atlas_page_id];
         
@@ -263,7 +263,7 @@ impl DrawText {
             
             // snap width/height to pixel granularity
             let w = ((glyph.bounds.p_max.x - glyph.bounds.p_min.x) * font_size_pixels).ceil() + 1.0;
-            let h = ((glyph.bounds.p_max.y - glyph.bounds.p_min.y)* font_size_pixels).ceil() + 1.0;
+            let h = ((glyph.bounds.p_max.y - glyph.bounds.p_min.y) * font_size_pixels).ceil() + 1.0;
             
             // this one needs pixel snapping
             let min_pos_x = walk_x + font_size_logical * glyph.bounds.p_min.x;
@@ -343,8 +343,8 @@ impl DrawText {
         self.draw_clip = cx.turtle().draw_clip().into();
         let in_many = self.many_instances.is_some();
         let font_id = self.text_style.font.font_id.unwrap();
-
-        let fonts_atlas_rc  =cx.fonts_atlas_rc.clone();
+        
+        let fonts_atlas_rc = cx.fonts_atlas_rc.clone();
         let mut fonts_atlas = fonts_atlas_rc.0.borrow_mut();
         let fonts_atlas = &mut*fonts_atlas;
         
@@ -355,7 +355,8 @@ impl DrawText {
         if !in_many {
             self.begin_many_instances_internal(cx, fonts_atlas);
         }
-        
+       
+        //cx.debug.rect_r(Rect{pos:dvec2(1.0,2.0), size:dvec2(200.0,300.0)});
         let mut walk_x = pos.x;
         //let mut char_offset = char_offset;
         
@@ -443,9 +444,9 @@ impl DrawText {
             self.rect_pos = dvec2(walk_x + delta_x, pos.y + delta_y).into();
             self.rect_size = dvec2(w * self.font_scale / dpi_factor, h * self.font_scale / dpi_factor).into();
             self.char_depth = char_depth;
-            self.delta.x = delta_x as f32; 
+            self.delta.x = delta_x as f32;
             self.delta.y = delta_y as f32;
-            self.font_size = self.text_style.font_size  as f32;
+            self.font_size = self.text_style.font_size as f32;
             self.advance = advance as f32; //char_offset as f32;
             char_depth += zbias_step;
             mi.instances.extend_from_slice(self.draw_vars.as_slice());
@@ -576,6 +577,7 @@ impl DrawText {
                         width: Size::Fixed(geom.eval_width),
                         height: Size::Fixed(height)
                     });
+                    
                     self.draw_inner(cx, rect.pos + dvec2(0.0, y_align), &text[0..ellip]);
                     self.draw_inner(cx, rect.pos + dvec2(at_x, y_align), &"..."[0..dots]);
                 }
@@ -625,13 +627,13 @@ impl DrawText {
             let x = rect_pos.buffer[index + 0] as f64 - delta.buffer[index + 0] as f64;
             //let y = rect_pos.buffer[index + 1] - delta.buffer[index + 1];
             let advance = advance.buffer[index + 0] as f64;
-            if pos.x < x + advance * 0.5{
+            if pos.x < x + advance * 0.5 {
                 return Some(i)
             }
         }
         return Some(rect_pos.repeat);
     }
-
+    
     pub fn get_char_count(&self, cx: &Cx) -> usize {
         let area = &self.draw_vars.area;
         if !area.is_valid(cx) {

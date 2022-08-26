@@ -3,6 +3,7 @@ use crate::frame::*;
 
 live_register!{
     import makepad_draw_2d::shader::std::*;
+    import makepad_component::frame::*;
     registry FrameComponent::*;
     
     const SLIDE_WIDTH: 800
@@ -36,8 +37,7 @@ live_register!{
         slide_width: (SLIDE_WIDTH)
         goal_pos: 0.0
         anim_speed: 0.9
-        frame: {
-            layout:{clip_x:true,clip_y:true},
+        frame: ScrollX{
             walk: {width: Fill, height: Fill}
             Slide {title = {text: "Makepad"}, Body {text: "A new way to build UI\nFor web and native"}}
             Slide {title = {text: "Long long ago"}, Body {text: "Founded cloud 9 IDE\nHTML based code editor ACE"}}
@@ -82,6 +82,7 @@ impl SlidesView {
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         // lets handle mousedown, setfocus
+        self.frame.handle_event_vec(cx, event);
         match event {
             Event::Construct => {
                 self.next_frame(cx);
@@ -91,7 +92,7 @@ impl SlidesView {
                 if (self.current_pos - self.goal_pos).abs()>0.00001 {
                     self.next_frame(cx);
                 }
-                self.frame.set_scroll_pos(dvec2(self.current_pos * self.slide_width, 0.0));
+                self.frame.set_scroll_pos(cx, dvec2(self.current_pos * self.slide_width, 0.0));
                 self.frame.redraw(cx);
             }
             _ => ()
@@ -113,7 +114,6 @@ impl SlidesView {
             },
             _ => ()
         }
-        self.frame.handle_event_iter(cx, event);
     }
     
     pub fn redraw(&mut self, cx: &mut Cx) {

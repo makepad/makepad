@@ -29,8 +29,8 @@ use {
             msg_cache::MsgCache
             
         },
-        builder::{
-            builder_protocol::{BuilderMsg, BuilderMsgLevel}
+        build::{
+            build_protocol::{BuildMsg, BuildMsgLevel}
         },
         makepad_collab_protocol::CollabRequest,
     },
@@ -120,15 +120,10 @@ live_register!{
         }
         
         line_num_text: code_text {
-            //draw_depth: 4.5
-            no_h_scroll: true
         }
         
         line_num_quad: {
             color: (COLOR_BG_EDITOR)
-            //draw_depth: 4.0
-            no_h_scroll: true
-            no_v_scroll: true
         }
         
         scroll_shadow: {
@@ -147,7 +142,6 @@ live_register!{
         }
         
         current_line_quad: {
-            no_h_scroll: true
             color: (COLOR_BG_CURSOR)
         }
         
@@ -250,17 +244,17 @@ pub struct DrawIndentLine {
 #[derive(Live, LiveHook)]
 #[repr(u32)]
 pub enum MsgLineLevel {
-    Warning,
-    #[pick] Error,
-    Log,
+    Warning = shader_enum(1),
+    #[pick] Error = shader_enum(2),
+    Log = shader_enum(3),
 }
 
-impl From<BuilderMsgLevel> for MsgLineLevel {
-    fn from(other: BuilderMsgLevel) -> Self {
+impl From<BuildMsgLevel> for MsgLineLevel {
+    fn from(other: BuildMsgLevel) -> Self {
         match other {
-            BuilderMsgLevel::Warning => Self::Warning,
-            BuilderMsgLevel::Error => Self::Error,
-            BuilderMsgLevel::Log => Self::Log
+            BuildMsgLevel::Warning => Self::Warning,
+            BuildMsgLevel::Error => Self::Error,
+            BuildMsgLevel::Log => Self::Log
         }
     }
 }
@@ -468,7 +462,7 @@ impl CodeEditorImpl {
     
     pub fn reset_caret_blink(&mut self, cx: &mut Cx) {
         cx.stop_timer(self.caret_blink_timer);
-        self.caret_blink_timer = cx.start_timer(self.caret_blink_timeout, true);
+        self.caret_blink_timer = cx.start_interval(self.caret_blink_timeout);
         self.cut_state(cx, ids!(caret.on));
     }
     
@@ -737,12 +731,13 @@ impl CodeEditorImpl {
                 // letse draw it
                 let msg = &state.messages[span.msg_id];
                 match msg {
-                    BuilderMsg::Location(loc) => {
+                    BuildMsg::Location(loc) => {
                         self.msg_line_quad.level = MsgLineLevel::from(loc.level);
-                        self.msg_line_quad.draw_abs(cx, Rect {
+                        let r = Rect {
                             pos: origin + start,
                             size: dvec2(end.x - start.x, layout.total_height + 1.0),
-                        });
+                        };
+                        self.msg_line_quad.draw_abs(cx,r);
                     }
                     _ => ()
                 }

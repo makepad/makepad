@@ -179,19 +179,20 @@ impl FrameComponent for Frame {
             }
         }
         
-        match event.hits(cx, self.bg.area()) {
-            Hit::FingerDown(_) => {
-                cx.set_key_focus(Area::Empty);
+        if let Some(cursor) = &self.cursor {
+            match event.hits(cx, self.area()) {
+                Hit::FingerDown(_) => {
+                    cx.set_key_focus(Area::Empty);
+                }
+                Hit::FingerHoverIn(_) => {
+                    cx.set_cursor(*cursor);
+                }
+                _ => ()
             }
-            Hit::FingerHoverIn(_) => if let Some(cursor) = &self.cursor {
-                cx.set_cursor(*cursor);
-            }
-            _ => ()
         }
         
-        
         if let Some(scroll_bars) = &mut self.scroll_bars_obj{
-            scroll_bars.handle_scroll(cx, event, &mut |_,_|{});
+            scroll_bars.handle_scroll_event(cx, event, &mut |_,_|{});
         }
     }
     
@@ -346,15 +347,20 @@ impl dyn FrameComponent {
 
 impl Frame {
 
-    pub fn set_scroll_pos(&mut self, v:DVec2){
-        self.layout.scroll = v;
+    pub fn set_scroll_pos(&mut self, cx:&mut Cx, v:DVec2){
+        if let Some(scroll_bars) = &mut self.scroll_bars_obj{
+            scroll_bars.set_scroll_pos(cx, v);
+        }
+        else{
+            self.layout.scroll = v;
+        }
     }
 
     pub fn area(&self)->Area{
         self.area
     }
     
-    pub fn handle_event_iter(&mut self, cx: &mut Cx, event: &Event) -> Vec<FrameActionItem> {
+    pub fn handle_event_vec(&mut self, cx: &mut Cx, event: &Event) -> Vec<FrameActionItem> {
         // ok so.
         // if we get a tab key press
         // we need to do a next_focus or prev_focus
@@ -429,7 +435,7 @@ impl Frame {
                 scroll_bars.get_scroll_pos()
             }
             else{
-                dvec2(0.0,0.0)
+                self.layout.scroll
             };
             
             if self.bg.shape != Shape::None {

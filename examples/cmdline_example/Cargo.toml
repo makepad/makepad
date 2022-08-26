@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2018"
 
 [dependencies]
+makepad-error-log = {path="../../platform/error_log", version="0.1"}
 
 [features]
-
+nightly = ["makepad-error-log/nightly"]

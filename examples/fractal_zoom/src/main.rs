@@ -45,7 +45,7 @@ impl App {
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
         self.window.handle_event(cx, event, &mut |_,_|{});
         
-        for _ in self.frame.handle_event_iter(cx, event) {
+        for _ in self.frame.handle_event_vec(cx, event) {
         }
         
         match event {

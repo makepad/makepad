@@ -40,7 +40,7 @@ pub struct Walk {
     pub height: Size,
 }
 
-#[derive(Clone, Copy, Debug, Live, LiveHook)]
+#[derive(Clone, Copy, Default, Debug, Live, LiveHook)]
 #[live_ignore]
 pub struct Align {
     pub x: f64,
@@ -501,12 +501,12 @@ impl<'a> Cx2d<'a> {
                         if let Some(rect_pos) = sh.mapping.rect_pos {
                             inst_buf[inst.instance_offset + rect_pos + 0 + i * sh.mapping.instances.total_slots] += dx as f32;
                             inst_buf[inst.instance_offset + rect_pos + 1 + i * sh.mapping.instances.total_slots] += dy as f32;
-                            if let Some(draw_clip) = sh.mapping.draw_clip {
+                            /*if let Some(draw_clip) = sh.mapping.draw_clip {
                                 inst_buf[inst.instance_offset + draw_clip + 0 + i * sh.mapping.instances.total_slots] += dx as f32;
                                 inst_buf[inst.instance_offset + draw_clip + 1 + i * sh.mapping.instances.total_slots] += dy as f32;
                                 inst_buf[inst.instance_offset + draw_clip + 2 + i * sh.mapping.instances.total_slots] += dx as f32;
                                 inst_buf[inst.instance_offset + draw_clip + 3 + i * sh.mapping.instances.total_slots] += dy as f32;
-                            }
+                            }*/
                         }
                     }
                 },
@@ -514,8 +514,8 @@ impl<'a> Cx2d<'a> {
                     let draw_list = &mut self.cx.draw_lists[ra.draw_list_id];
                     let rect_area = &mut draw_list.rect_areas[ra.rect_id];
                     rect_area.rect.pos += d;
-                    rect_area.draw_clip.0 += d;
-                    rect_area.draw_clip.1 += d;
+                    /*rect_area.draw_clip.0 += d;
+                    rect_area.draw_clip.1 += d;*/
                 }
                 
                 _ => (),
@@ -786,6 +786,12 @@ impl Layout {
         self
     }
     
+    pub fn with_clip(mut self, clip_x:bool, clip_y:bool) -> Self {
+        self.clip_x = clip_x;
+        self.clip_y = clip_y;
+        self
+    }
+    
     pub fn with_padding_all(mut self, v: f64) -> Self {
         self.padding = Padding {left: v, right: v, top: v, bottom: v};
         self
@@ -906,13 +912,6 @@ impl Walk {
         self
     }
 }
-
-impl Default for Align {
-    fn default() -> Self {
-        Self {x: 0.0, y: 0.0}
-    }
-}
-
 
 impl Padding {
     pub fn left_top(&self) -> DVec2 {

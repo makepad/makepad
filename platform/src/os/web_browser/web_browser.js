@@ -3,7 +3,10 @@ import {WasmBridge} from "/makepad/platform/wasm_bridge/src/wasm_bridge.js"
 export class WasmWebBrowser extends WasmBridge {
     constructor(wasm, dispatch, canvas) {
         super (wasm, dispatch);
-        
+        if(wasm === undefined){
+            return
+        }
+
         window.onbeforeunload = _ => {
             this.clear_memory_refs();
             for (let worker of this.workers) {

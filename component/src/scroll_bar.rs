@@ -48,9 +48,9 @@ live_register!{
         bar_side_margin: 3.0
         min_handle_size: 30.0
         
-        state :{
+        state: {
             hover = {
-                default:off
+                default: off
                 off = {
                     from: {all: Play::Forward {duration: 0.1}}
                     apply: {
@@ -59,7 +59,7 @@ live_register!{
                 }
                 
                 on = {
-                    cursor:Default,
+                    cursor: Default,
                     from: {
                         all: Play::Forward {duration: 0.1}
                         pressed: Play::Forward {duration: 0.01}
@@ -296,48 +296,47 @@ impl ScrollBar {
         }
     }
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, scroll_area:Option<Area>, dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarAction)) {
-        // lets check if our view-area gets a mouse-scroll.
-        if let Some(scroll_area) = scroll_area{
-            match event.hits(cx, scroll_area) {
-                Hit::FingerScroll(fe) => { //if !fe.handled {
-                    if !match self.axis {
-                        Axis::Horizontal => fe.handled_x.get(),
-                        Axis::Vertical => fe.handled_y.get()
-                    } {
-                        let scroll = match self.axis {
-                            Axis::Horizontal => if self.use_vertical_finger_scroll {fe.scroll.y}else {fe.scroll.x},
-                            Axis::Vertical => fe.scroll.y
-                        };
-                        if !self.smoothing.is_none() && fe.device.is_mouse() {
-                            let scroll_pos_target = self.get_scroll_target();
-                            if self.set_scroll_target(cx, scroll_pos_target + scroll) {
-                                match self.axis {
-                                    Axis::Horizontal => fe.handled_x.set(true),
-                                    Axis::Vertical => fe.handled_y.set(true)
-                                }
-                            };
-                            self.move_towards_scroll_target(cx); // take the first step now
-                            return dispatch_action(cx, self.make_scroll_action());
-                        }
-                        else {
-                            let scroll_pos = self.get_scroll_pos();
-                            if self.set_scroll_pos(cx, scroll_pos + scroll) {
-                                match self.axis {
-                                    Axis::Horizontal => fe.handled_x.set(true),
-                                    Axis::Vertical => fe.handled_y.set(true)
-                                }
+    pub fn handle_scroll_event(&mut self, cx: &mut Cx, event: &Event, scroll_area: Area, dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarAction)) {
+        if let Event::FingerScroll(fe) = event {
+            if scroll_area.get_rect(cx).contains(fe.abs) {
+                if !match self.axis {
+                    Axis::Horizontal => fe.handled_x.get(),
+                    Axis::Vertical => fe.handled_y.get()
+                } {
+                    let scroll = match self.axis {
+                        Axis::Horizontal => if self.use_vertical_finger_scroll {fe.scroll.y}else {fe.scroll.x},
+                        Axis::Vertical => fe.scroll.y
+                    };
+                    if !self.smoothing.is_none() && fe.device.is_mouse() {
+                        let scroll_pos_target = self.get_scroll_target();
+                        if self.set_scroll_target(cx, scroll_pos_target + scroll) {
+                            match self.axis {
+                                Axis::Horizontal => fe.handled_x.set(true),
+                                Axis::Vertical => fe.handled_y.set(true)
                             }
-                             return dispatch_action(cx, self.make_scroll_action());
-                        }
+                        };
+                        self.move_towards_scroll_target(cx); // take the first step now
+                        return dispatch_action(cx, self.make_scroll_action());
                     }
-                },
-                _ => ()
-            };
+                    else {
+                        let scroll_pos = self.get_scroll_pos();
+                        if self.set_scroll_pos(cx, scroll_pos + scroll) {
+                            match self.axis {
+                                Axis::Horizontal => fe.handled_x.set(true),
+                                Axis::Vertical => fe.handled_y.set(true)
+                            }
+                        }
+                        return dispatch_action(cx, self.make_scroll_action());
+                    }
+                }
+            }
         }
-        else if self.visible {
+    }
+    
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarAction)) {
+        if self.visible {
             self.state_handle_event(cx, event);
-            if self.next_frame.is_event(event).is_some(){
+            if self.next_frame.is_event(event).is_some() {
                 if self.move_towards_scroll_target(cx) {
                     self.next_frame = cx.new_next_frame();
                 }
@@ -347,7 +346,7 @@ impl ScrollBar {
             match event.hits(cx, self.bar.area()) {
                 Hit::FingerDown(fe) => {
                     self.animate_state(cx, ids!(hover.pressed));
-                    let rel= fe.abs - fe.rect.pos;
+                    let rel = fe.abs - fe.rect.pos;
                     let rel = match self.axis {
                         Axis::Horizontal => rel.x,
                         Axis::Vertical => rel.y
@@ -358,7 +357,7 @@ impl ScrollBar {
                     if rel < bar_start || rel > bar_start + bar_size { // clicked outside
                         self.drag_point = Some(bar_size * 0.5);
                         let action = self.set_scroll_pos_from_finger(cx, rel - self.drag_point.unwrap());
-                        return dispatch_action(cx,action);
+                        return dispatch_action(cx, action);
                     }
                     else { // clicked on
                         self.drag_point = Some(rel - bar_start); // store the drag delta
@@ -367,7 +366,7 @@ impl ScrollBar {
                 Hit::FingerHoverIn(_) => {
                     self.animate_state(cx, ids!(hover.on));
                 },
-                Hit::FingerHoverOut(_)=>{
+                Hit::FingerHoverOut(_) => {
                     self.animate_state(cx, ids!(hover.off));
                 },
                 Hit::FingerUp(fe) => {
@@ -390,12 +389,12 @@ impl ScrollBar {
                     else {
                         match self.axis {
                             Axis::Horizontal => {
-                                let action =  self.set_scroll_pos_from_finger(cx, rel.x - self.drag_point.unwrap());
-                                return dispatch_action(cx,action);
+                                let action = self.set_scroll_pos_from_finger(cx, rel.x - self.drag_point.unwrap());
+                                return dispatch_action(cx, action);
                             },
                             Axis::Vertical => {
-                                let action =  self.set_scroll_pos_from_finger(cx, rel.y - self.drag_point.unwrap());
-                                return dispatch_action(cx,action);
+                                let action = self.set_scroll_pos_from_finger(cx, rel.y - self.drag_point.unwrap());
+                                return dispatch_action(cx, action);
                             }
                         }
                     }
@@ -405,7 +404,7 @@ impl ScrollBar {
         }
     }
     
-    pub fn draw_scroll_bar(&mut self, cx: &mut Cx2d, axis: Axis,  view_rect: Rect, view_total: DVec2) -> f64 {
+    pub fn draw_scroll_bar(&mut self, cx: &mut Cx2d, axis: Axis, view_rect: Rect, view_total: DVec2) -> f64 {
         
         self.axis = axis;
         

@@ -540,7 +540,16 @@ impl ShaderRegistry {
                         LiveValue::Vec3(_) |
                         LiveValue::Vec4(_) | 
                         LiveValue::Expr{..} => {
-                            
+                            if prop.origin.prop_type() != LivePropType::Field{
+                                return Err(LiveError {
+                                    origin: live_error_origin!(),
+                                    span: prop.origin.token_id().unwrap().into(),
+                                    message: format!("Can only support field colon : values don't use =")
+                                })
+                            }
+                            if prop.id == id!(size){
+                                
+                            }
                             let first_def = prop.origin.first_def().unwrap();
                             let before = live_registry.get_node_prefix(prop.origin);
                            

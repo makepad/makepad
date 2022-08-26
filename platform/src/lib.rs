@@ -206,6 +206,7 @@ pub use {
             StatePair
         },
         draw_vars::{
+            shader_enum,
             DrawVars
         },
         geometry::{
