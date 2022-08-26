@@ -1,6 +1,11 @@
 use crate::{ChunkCursor, Slice};
 
-/// An iterator over the chunks in a `Rope` or `Slice`.
+/// An iterator over the chunks in a [`Rope`] or [`Slice`].
+/// 
+/// This `struct` is created by the [`chunks`](crate::Rope::chunks) method on [`Rope`] or the
+/// [`chunks`](crate::Slice::chunks) method on [`Slice`].
+/// 
+/// [`Rope`]: crate::Rope
 #[derive(Clone, Debug)]
 pub struct Chunks<'a> {
     is_at_end: bool,
@@ -23,7 +28,7 @@ impl<'a> Iterator for Chunks<'a> {
     ///
     /// # Performance
     ///
-    /// Runs in amortized O(1) and worst-case O(log n) time.
+    /// Runs in amortized O(1) and worst-case O(log(n)) time.
     fn next(&mut self) -> Option<Self::Item> {
         if self.is_at_end {
             return None;

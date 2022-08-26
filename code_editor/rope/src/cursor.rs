@@ -1,6 +1,8 @@
 use crate::{ChunkCursor, Slice};
 
-/// A cursor over a `Rope`.
+/// A cursor over a [`Rope`] or [`Slice`].
+/// 
+/// [`Rope`]: crate::Rope
 #[derive(Clone, Debug)]
 pub struct Cursor<'a> {
     chunk_cursor: ChunkCursor<'a>,
@@ -9,55 +11,67 @@ pub struct Cursor<'a> {
 }
 
 impl<'a> Cursor<'a> {
-    /// Returns `true` if `self` is pointing to the front of the `Rope`.
+    /// Returns `true` if `self` is currently pointing to the front of the [`Rope`] or [`Slice`].
     ///
     /// # Performance
     ///
     /// Runs in O(1) time.
+    /// 
+    /// [`Rope`]: crate::Rope
     #[inline]
     pub fn is_at_front(&self) -> bool {
         self.chunk_cursor.is_at_front() && self.byte_index == 0
     }
 
-    /// Returns `true` if `self` is pointing to the back of the `Rope`.
+    /// Returns `true` if `self` is currently pointing to the back of the [`Rope`] or [`Slice`].
     ///
     /// # Performance
     ///
     /// Runs in O(1) time.
+    /// 
+    /// [`Rope`]: crate::Rope
     #[inline]
     pub fn is_at_back(&self) -> bool {
         self.chunk_cursor.is_at_back() && self.byte_index == self.chunk.len()
     }
 
-    /// Returns `true` if `self` is pointing to a `char` boundary.
+    /// Returns `true` if `self` is currently pointing to a `char` boundary.
+    /// 
+    /// # Performance
+    /// 
+    /// Runs in O(1) time.
     #[inline]
     pub fn is_at_char_boundary(&self) -> bool {
         self.chunk.is_char_boundary(self.byte_index)
     }
 
-    /// Returns the byte position of `self` within the `Rope`.
+    /// Returns the byte position of `self` within the [`Rope`] or [`Slice`].
     ///
     /// # Performance
     ///
     /// Runs in O(1) time.
+    ///
+    /// [`Rope`]: crate::Rope
     #[inline]
     pub fn byte_position(&self) -> usize {
         self.chunk_cursor.byte_position() + self.byte_index
     }
 
     /// Returns the byte that `self` is currently pointing to, or `None` if `self` is currently
-    /// pointing to the back of the `Rope`.
+    /// pointing to the back of the [`Rope`] or [`Slice`].
     ///
     /// # Performance
     ///
     /// Runs in O(1) time.
+    ///
+    /// [`Rope`]: crate::Rope
     #[inline]
     pub fn current_byte(&self) -> Option<u8> {
         self.chunk.as_bytes().get(self.byte_index).cloned()
     }
 
-    /// Returns the char that `self` is currently pointing to, or `None` if `self` is currently
-    /// pointing to the back of the `Rope`.
+    /// Returns the [`char`] that `self` is currently pointing to, or `None` if `self` is currently
+    /// pointing to the back of the [`Rope`] or [`Slice`].
     ///
     /// # Performance
     ///
@@ -65,17 +79,25 @@ impl<'a> Cursor<'a> {
     ///
     /// # Panics
     ///
-    /// Panics if `self` is not pointing to a `char` boundary.
+    /// Panics if `self` is not currently pointing to a `char` boundary.
+    ///
+    /// [`Rope`]: crate::Rope
     #[inline]
     pub fn current_char(&self) -> Option<char> {
         self.chunk[self.byte_index..].chars().next()
     }
 
-    /// Moves `self` to the next byte of the `Rope`.
+    /// Moves `self` to the next byte of the [`Rope`] or [`Slice`].
     ///
     /// # Performance
     ///
     /// Runs in amortized O(1) and worst-case O(log n) time.
+    /// 
+    /// # Panics
+    ///
+    /// Panics if `self` is currently pointing to the back of the [`Rope`] or [`Slice`].
+    ///
+    /// [`Rope`]: crate::Rope
     #[inline]
     pub fn move_next_byte(&mut self) {
         assert!(!self.is_at_back());
@@ -85,11 +107,17 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    /// Moves `self` to the previous byte of the `Rope`.
+    /// Moves `self` to the previous byte of the [`Rope`] or [`Slice`].
     ///
     /// # Performance
     ///
     /// Runs in amortized O(1) and worst-case O(log n) time.
+    /// 
+    /// # Panics
+    ///
+    /// Panics if `self` is currently pointing to the front of the [`Rope`] or [`Slice`].
+    /// 
+    /// [`Rope`]: crate::Rope
     #[inline]
     pub fn move_prev_byte(&mut self) {
         assert!(!self.is_at_front());
@@ -99,7 +127,7 @@ impl<'a> Cursor<'a> {
         self.byte_index -= 1;
     }
 
-    /// Moves `self` to the next `char` of the `Rope`.
+    /// Moves `self` to the next [`char`] of the [`Rope`] or [`Slice`].
     ///
     /// # Performance
     ///
@@ -107,7 +135,9 @@ impl<'a> Cursor<'a> {
     ///
     /// # Panics
     ///
-    /// Panics if `self` is currently pointing to the back of the `Rope`.
+    /// Panics if `self` is currently pointing to the back of the [`Rope`] or [`Slice`].
+    /// 
+    /// [`Rope`]: crate::Rope
     #[inline]
     pub fn move_next_char(&mut self) {
         assert!(!self.is_at_back());
@@ -117,7 +147,7 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    /// Moves `self` to the previous `char` of the `Rope`.
+    /// Moves `self` to the previous [`char`] of the [`Rope`] or [`Slice`].
     ///
     /// # Performance
     ///
@@ -125,7 +155,9 @@ impl<'a> Cursor<'a> {
     ///
     /// # Panics
     ///
-    /// Panics if `self` is currently pointing to the front of the `Rope`.
+    /// Panics if `self` is currently pointing to the front of the [`Rope`] or [`Slice`].
+    ///
+    /// [`Rope`]: crate::Rope
     #[inline]
     pub fn move_prev_char(&mut self) {
         assert!(!self.is_at_front());
@@ -140,7 +172,7 @@ impl<'a> Cursor<'a> {
         }
     }
 
-    /// Moves `self` to the given `byte_position` within the `Rope`.
+    /// Moves `self` to the given `byte_position` within the [`Rope`] or [`Slice`].
     ///
     /// # Performance
     ///
@@ -148,7 +180,9 @@ impl<'a> Cursor<'a> {
     ///
     /// # Panics
     ///
-    /// Panics if `byte_position` is greater than the length of the `Rope` in bytes.
+    /// Panics if `byte_position` is greater than the length of the [`Rope`] or [`Slice`] in bytes.
+    ///
+    /// [`Rope`]: crate::Rope
     #[inline]
     pub fn move_to(&mut self, byte_position: usize) {
         self.chunk_cursor.move_to(byte_position);

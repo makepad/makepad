@@ -2,3 +2,7 @@
 name = "makepad-regex"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+makepad-range-set = { path = "../range_set" }
+makepad-varint = { path = "../varint" }
