@@ -18,11 +18,11 @@ use {
             CollabClientAction,
             unix_path::{UnixPath, UnixPathBuf},
         },
-        builder::{
-            builder_client::BuilderClient,
-            builder_protocol::{
-                BuilderCmd,
-            }
+        build::{
+            build_manager::{
+                BuildManager,
+                BuildManagerAction
+            },
         },
         app_state::{TabKind, AppState, SplitPanel, TabPanel, Panel, Tab},
         log_view::{LogView},
@@ -32,7 +32,7 @@ use {
 
 live_register!{
     AppInner: {{AppInner}} {
-       // window: {caption: "Makepad Studio"}
+        // window: {caption: "Makepad Studio"}
     }
 }
 
@@ -47,7 +47,7 @@ pub struct AppInner {
     slides_view: SlidesView,
     editors: Editors,
     collab_client: CollabClient,
-    builder_client: BuilderClient
+    build_manager: BuildManager,
 }
 
 impl AppInner {
@@ -79,7 +79,7 @@ impl AppInner {
                     self.dock.draw_tab(cx, *tab_id, &tab.name);
                 }
                 self.dock.end_tab_bar(cx);
-                if self.dock.begin_contents(cx).is_redrawing(){
+                if self.dock.begin_contents(cx).is_redrawing() {
                     if let Some(tab_id) = self.dock.selected_tab_id(cx, panel_id) {
                         let tab = &state.tabs[tab_id];
                         match tab.kind {
@@ -132,7 +132,7 @@ impl AppInner {
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, state: &mut AppState) {
-        self.window.handle_event(cx, event, &mut |_,_|{});
+        self.window.handle_event(cx, event, &mut | _, _ | {});
         
         match event {
             Event::Construct => {
@@ -142,13 +142,13 @@ impl AppInner {
                     state,
                     id!(content).into(),
                     None,
-                    state.file_path_join(&["studio/src/shader_view.rs"]),
+                    state.file_path_join(&["examples/cmdline_example/src/main.rs"]),
                     true
                 );
-                self.builder_client.send_cmd(BuilderCmd::CargoCheck);
+                self.build_manager.init(cx, state);
             }
             Event::Draw(event) => {
-                return Cx2d::draw(cx, event, self, |cx, s| s.draw(cx, state));
+                return Cx2d::draw(cx, event, self, | cx, s | s.draw(cx, state));
             }
             _ => ()
         }
@@ -215,7 +215,7 @@ impl AppInner {
             }
         }
         
-        for action in self.file_tree.handle_event_iter(cx, event) {
+        for action in self.file_tree.handle_event_vec(cx, event) {
             match action {
                 FileTreeAction::WasClicked(file_node_id) => {
                     let node = &state.file_nodes[file_node_id];
@@ -271,7 +271,8 @@ impl AppInner {
                         self.load_file_tree(cx, state, response.unwrap());
                         self.select_tab(cx, state, id!(file_tree).into(), id!(file_tree).into(), Animate::No);
                     }
-                    response => {
+                    response=>{
+                        self.build_manager.handle_collab_response(cx, state, &response);
                         self.editors.handle_collab_response(cx, &mut state.editor_state, response, &mut self.collab_client.request_sender())
                     }
                 },
@@ -281,14 +282,19 @@ impl AppInner {
             }
         }
         
-        let msgs = self.builder_client.handle_event(cx, event);
-        if msgs.len()>0 {
-            self.editors.handle_builder_messages(cx, &mut state.editor_state, msgs);
-            // lets redraw the logview
-            self.log_view.redraw(cx);
+        for action in self.build_manager.handle_event_vec(cx, event, state){
+            match action{
+                BuildManagerAction::RedrawDoc{doc_id}=>{
+                    self.editors.redraw_views_for_document(cx, &mut state.editor_state, doc_id);
+                },
+                BuildManagerAction::RedrawLog=>{
+                    self.log_view.redraw(cx);
+                },
+                _=>()
+            }
         }
         
-        self.log_view.handle_event(cx, event,&mut |_,_|{});
+        self.log_view.handle_event(cx, event, &mut | _, _ | {});
         self.shader_view.handle_event(cx, event);
         self.slides_view.handle_event(cx, event);
     }
@@ -355,7 +361,7 @@ impl AppInner {
         select: bool
     ) {
         let name = path.file_name().unwrap().to_string_lossy().into_owned();
-
+        
         let session_id = state.editor_state.create_session(path, &mut self.collab_client.request_sender());
         
         let tab_id = state.tabs.insert_unique(Tab {
@@ -371,7 +377,7 @@ impl AppInner {
             }
             None => panel.tab_ids.push(tab_id),
         }
-        if select{
+        if select {
             self.select_tab(cx, state, panel_id, tab_id, Animate::No);
         }
     }

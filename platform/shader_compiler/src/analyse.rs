@@ -958,7 +958,7 @@ impl<'a> FnDefAnalyser<'a> {
                 } 
                 
                 if let Some(pos) = shader_enum.variants.iter().position( | id | *id == match_item.enum_variant.0) {
-                    match_item.enum_value.set(Some(pos));
+                    match_item.enum_value.set(Some(pos + 1));
                 }
                 else{
                     return Err(LiveError {

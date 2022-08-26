@@ -12,7 +12,9 @@ use {
         makepad_shader_compiler::*,
         makepad_live_id::*,
         live_traits::*,
-        draw_vars::DrawVars,
+        draw_vars::{
+            DrawVars,
+        },
         os::{
             CxOsDrawShader,
         },
@@ -24,8 +26,6 @@ use {
 pub struct CxDrawShaderOptions {
     pub draw_call_group: LiveId,
     pub debug_id: Option<LiveId>,
-    pub no_h_scroll: bool,
-    pub no_v_scroll: bool
 }
 
 impl CxDrawShaderOptions {
@@ -44,12 +44,6 @@ impl CxDrawShaderOptions {
                 }
                 id!(debug_id) => if let LiveValue::Id(id) = node.value {
                     ret.debug_id = Some(id);
-                }
-                id!(no_h_scroll) => if let LiveValue::Bool(v) = node.value {
-                    ret.no_h_scroll = v;
-                }
-                id!(no_v_scroll) => if let LiveValue::Bool(v) = node.value {
-                    ret.no_v_scroll = v;
                 }
                 _ => ()
             }
@@ -287,7 +281,7 @@ pub struct CxDrawShaderMapping {
     pub rect_pos: Option<usize>,
     pub rect_size: Option<usize>,
     pub draw_clip: Option<usize>,
-    pub live_uniforms_buf: Vec<f32>
+    pub live_uniforms_buf: Vec<f32>,
 }
 
 impl CxDrawShaderMapping {
@@ -372,6 +366,9 @@ impl CxDrawShaderMapping {
         view_uniforms.finalize();
         pass_uniforms.finalize();
         
+        // fill up the default values for the user uniforms
+        
+        
         // ok now the live uniforms
         for (value_node_ptr, ty) in draw_shader_def.all_live_refs.borrow().iter() {
             live_uniforms.push(LiveId(0), ty.clone(), Some(value_node_ptr.0));
@@ -394,11 +391,11 @@ impl CxDrawShaderMapping {
             textures,
             rect_pos,
             rect_size,
-            draw_clip
+            draw_clip,
         }
     }
     
-    pub fn update_live_uniforms(&mut self, cx: &mut Cx, from: ApplyFrom) {
+    pub fn update_live_and_user_uniforms(&mut self, cx: &mut Cx, from: ApplyFrom) {
         // and write em into the live_uniforms buffer
         let live_registry = cx.live_registry.clone();
         let live_registry = live_registry.borrow();

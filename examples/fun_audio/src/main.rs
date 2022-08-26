@@ -93,7 +93,13 @@ live_register!{
     InstrumentSlider: ElementBox {
         slider = Slider {
             label: "CutOff1"
-            height: 22
+            walk:{height: 22}
+        }
+    }
+    
+    InstrumentCheckbox: ElementBox {
+        checkbox = CheckBox {
+            label: "CutOff1"
         }
     }
     
@@ -202,6 +208,11 @@ live_register!{
                             items: ["Lowpass", "Highpass", "Bandpass"]
                         }
                     }
+                    InstrumentCheckbox{
+                        checkbox = {
+                            label:"Hello world"
+                        }
+                    }
                 }
             }
         }
@@ -212,13 +223,17 @@ live_register!{
         audio_graph: {
             root: Mixer {
                 c1 = Instrument {
+                    
+                    
+                  /*  AudioUnitInstrument {
+                        plugin: "Kontakt"
+                    }*/
+                    
                     IronFish {
                     }
+                    
                     //key_range: {start: 34, end: 47 shift: 30}
                     /*
-                    AudioUnitEffect {
-                        plugin: "AUReverb2"
-                    }
                     AudioUnitInstrument {
                         plugin: "Kontakt"
                     }*/
@@ -343,10 +358,12 @@ impl App {
         });
         
         // fetch ui binding deltas
+        /*
         for delta in ui.on_bind_deltas() {
             let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
             iron_fish.settings.apply_over(ui.cx, &delta);
         }
+        */
         
         let piano = ui.piano(ids!(piano));
         

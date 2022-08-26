@@ -1,7 +1,7 @@
 use {
     std::{
         process::{Command, Child, Stdio},
-        sync::mpsc::{self, Receiver},
+        sync::mpsc::{self, Sender, Receiver},
         thread,
         io::prelude::*,
         io::{BufReader},
@@ -11,14 +11,16 @@ use {
 };
 
 pub struct ChildProcess {
-    pub child: Option<Child>,
+    pub child: Child,
+    pub line_sender: Sender<ChildLine>,
     pub line_receiver: Receiver<ChildLine>,
 }
 
 pub enum ChildLine {
     StdOut(String),
     StdErr(String),
-    Term
+    Term,
+    Kill
 }
 
 impl ChildProcess {
@@ -86,23 +88,18 @@ impl ChildProcess {
         };
         
         Ok(ChildProcess {
-            child: Some(child),
+            line_sender,
+            child,
             line_receiver,
         })
     }
     
-    pub fn wait(&mut self) {
-        if let Some(child) = &mut self.child {
-            let _ = child.wait();
-            self.child = None;
-        }
+    pub fn wait(mut self) {
+        let _ = self.child.wait();
     }
     
-    pub fn kill(&mut self) {
-        if let Some(child) = &mut self.child {
-            let _ = child.kill();
-            let _ = child.wait();
-            self.child = None;
-        }
+    pub fn kill(mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
     }
 }

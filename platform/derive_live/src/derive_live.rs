@@ -458,15 +458,12 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
                 else if let Some(fields) = parser.eat_all_struct_fields() { // named variant
                     items.push(EnumItem {name, attributes, kind: EnumKind::Named(fields)})
                 }
-                else if parser.is_punct_alone(',') || parser.is_eot() { // bare variant
-                    items.push(EnumItem {name, attributes, kind: EnumKind::Bare})
-                }
                 else {
-                    return error_result("unexpected whilst parsing enum")
+                    items.push(EnumItem {name, attributes, kind: EnumKind::Bare})
                 }
             }
             //eprintln!("HERE2");
-            parser.eat_punct_alone(',');
+            parser.eat_level_or_punct(',');
         }
         
         if pick.is_none() {

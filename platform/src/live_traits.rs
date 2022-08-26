@@ -184,6 +184,13 @@ impl ApplyFrom {
             _ => false
         }
     }
+
+    pub fn is_new_from_doc(&self) -> bool {
+        match self {
+            Self::NewFromDoc {..} => true,
+            _ => false
+        }
+    }
     
     pub fn file_id(&self) -> Option<LiveFileId> {
         match self {

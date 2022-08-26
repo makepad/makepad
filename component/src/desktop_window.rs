@@ -95,7 +95,7 @@ impl DesktopWindow {
         self.nav_control.handle_event(cx, event, self.main_view.draw_list_id());
         self.overlay.handle_event(cx, event);
         
-        for item in self.frame.handle_event_iter(cx, event) {
+        for item in self.frame.handle_event_vec(cx, event) {
             if let ButtonAction::WasClicked = item.action.cast() {match item.id() {
                 id!(min_btn) => {
                     self.window.minimize(cx);

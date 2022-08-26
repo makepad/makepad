@@ -1,6 +1,9 @@
 export class WasmBridge {
     constructor(wasm, dispatch) {
         this.wasm = wasm;
+        if(wasm === undefined){
+            return console.error("Wasm object is undefined, check your URL and build output")
+        }
         this.wasm._bridge = this;
         this.dispatch = dispatch;
         this.exports = wasm.exports;
@@ -187,9 +190,12 @@ export class WasmBridge {
     
     static fetch_and_instantiate_wasm(wasm_url, memory) {
         return WebAssembly.compileStreaming(fetch(wasm_url))
-            .then((module) => this.instantiate_wasm(module, memory, {_post_signal: _ => {}}), error => {
-            console.error(error)
-        })
+            .then(
+            (module) => this.instantiate_wasm(module, memory, {_post_signal: _ => {}}),
+            error => {
+                console.error(error)
+            }
+        )
     }
 }
 

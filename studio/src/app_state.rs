@@ -8,6 +8,7 @@ use {
         },
         makepad_draw_2d::*,
         editor_state::{EditorState, SessionId},
+        build::build_manager::BuildState,
         makepad_collab_protocol::{
             FileNodeData, FileTreeData,
             unix_path::UnixPathBuf,
@@ -24,7 +25,10 @@ pub struct AppState {
     pub selected_panel_id: PanelId,
     
     pub path: UnixPathBuf,
+    
     pub editor_state: EditorState,
+    
+    pub build_state: BuildState
 }
 
 impl AppState {
@@ -123,6 +127,7 @@ impl AppState {
             file_nodes,
             path: UnixPathBuf::new(),
             editor_state: EditorState::new(),
+            build_state: BuildState::default(),
         }
     }
     

@@ -9,7 +9,7 @@ use {
             size::Size,
             text::Text,
         },
-        builder::builder_protocol::BuilderMsg,
+        build::build_protocol::BuildMsg,
         code_editor::{
             cursor_set::CursorSet,
             indent_cache::IndentCache,
@@ -65,7 +65,7 @@ pub struct EditorState {
     /// The queue of outstanding documents for this code editor. A document is outstanding if it has
     /// been created, but we have not yet received its contents from the collab server.
     pub outstanding_document_queue: VecDeque<DocumentId>,
-    pub messages: Vec<BuilderMsg>,
+    pub messages: Vec<BuildMsg>,
 }
 
 impl EditorState {

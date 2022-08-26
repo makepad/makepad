@@ -134,12 +134,22 @@ impl Cx {
         }
     }
     
-    pub fn start_timer(&mut self, interval: f64, repeats: bool) -> Timer {
+    pub fn start_timeout(&mut self, interval: f64) -> Timer {
         self.timer_id += 1;
         self.platform_ops.push(CxOsOp::StartTimer {
             timer_id: self.timer_id,
             interval,
-            repeats
+            repeats:false
+        });
+        Timer(self.timer_id)
+    }
+
+    pub fn start_interval(&mut self, interval: f64) -> Timer {
+        self.timer_id += 1;
+        self.platform_ops.push(CxOsOp::StartTimer {
+            timer_id: self.timer_id,
+            interval,
+            repeats:true
         });
         Timer(self.timer_id)
     }

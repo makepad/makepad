@@ -433,7 +433,7 @@ impl TextInput {
         }
     }
     
-    pub fn handle_event_iter(&mut self, cx: &mut Cx, event: &Event) -> Vec<TextInputAction> {
+    pub fn handle_event_vec(&mut self, cx: &mut Cx, event: &Event) -> Vec<TextInputAction> {
         let mut actions = Vec::new();
         self.handle_event(cx, event, &mut | _, a | actions.push(a));
         actions
