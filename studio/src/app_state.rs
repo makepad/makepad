@@ -88,8 +88,25 @@ impl AppState {
         
         panels.insert(
             id!(content),
+            Panel::Split(SplitPanel {
+                axis: Axis::Horizontal,
+                align: SplitterAlign::Weighted(0.5),
+                child_panel_ids: [id!(content1).into(), id!(content2).into()],
+            }),
+        );
+        
+        panels.insert(
+            id!(content1),
             Panel::Tab(TabPanel {
                 tab_ids: vec![id!(slides_view).into()],
+                selected_tab: Some(0)
+            }),
+        );
+        
+        panels.insert(
+            id!(content2),
+            Panel::Tab(TabPanel {
+                tab_ids: vec![id!(run_view).into()],
                 selected_tab: Some(0)
             }),
         );
@@ -103,11 +120,19 @@ impl AppState {
             }),
         );
         
-         tabs.insert(
+        tabs.insert(
             id!(slides_view),
             Tab {
                 name: String::from("Slides"),
                 kind: TabKind::SlidesView,
+            },
+        );
+        
+        tabs.insert(
+            id!(run_view),
+            Tab {
+                name: String::from("Run"),
+                kind: TabKind::RunView,
             },
         );
         
@@ -286,6 +311,7 @@ pub enum TabKind {
     LogView,
     ShaderView,
     SlidesView,
+    RunView,
     FileTree,
     CodeEditor {session_id: SessionId},
 }

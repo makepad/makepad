@@ -545,9 +545,10 @@ impl EditorState {
                     //
                     // This should be refactored in the future, by in the meantime we work around
                     // the problem by only performing autoindenting if there is just a single cursor.
+                    let lines = &document_inner.text.as_lines()[cursor.start().line];
+                    
                     if session.cursors.len() == 1
-                        && document_inner.text.as_lines()[cursor.start().line]
-                    [..cursor.start().column]
+                        && lines[..cursor.start().column]
                         .iter()
                         .all( | &ch | ch.is_whitespace())
                     {

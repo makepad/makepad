@@ -167,7 +167,7 @@ impl FrameComponent for Frame {
         dispatch_action: &mut dyn FnMut(&mut Cx, FrameActionItem)
     ) {
         if let Some(scroll_bars) = &mut self.scroll_bars_obj{
-            scroll_bars.handle_event(cx, event, &mut |_,_|{});
+            scroll_bars.handle_main_event(cx, event, &mut |_,_|{});
         }
 
         for id in &self.draw_order {

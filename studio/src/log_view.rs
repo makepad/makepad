@@ -40,7 +40,9 @@ impl Into<LogIconType> for BuildMsgLevel{
         match self{
             BuildMsgLevel::Warning=>LogIconType::Warning,
             BuildMsgLevel::Error=>LogIconType::Error,
-            BuildMsgLevel::Log=>LogIconType::Ok,
+            BuildMsgLevel::Log=>LogIconType::Log,
+            BuildMsgLevel::Wait=>LogIconType::Wait,
+            BuildMsgLevel::Panic=>LogIconType::Panic,
         }
     }
 }
