@@ -7,13 +7,16 @@ mod nfa;
 mod parser;
 mod program;
 mod range;
+mod regex;
 mod sparse_set;
-mod str;
+mod str_cursor;
 mod utf8;
+
+pub use self::regex::Regex;
 
 use self::{
     ast::Ast, char_class::CharClass, compiler::Compiler, cursor::Cursor, dfa::Dfa, nfa::Nfa,
-    parser::Parser, program::Program, range::Range, sparse_set::SparseSet,
+    parser::Parser, program::Program, range::Range, sparse_set::SparseSet, str_cursor::StrCursor,
 };
 
 #[cfg(test)]
@@ -22,20 +25,9 @@ mod tests {
 
     #[test]
     fn test() {
-        let ast = Parser::new().parse("^axxx$");
-        println!("{:?}", ast);
-        let program = Compiler::new().compile(
-            &ast,
-            compiler::Options {
-                dot_star: true,
-                reverse: false,
-                bytes: true,
-                ..compiler::Options::default()
-            },
-        );
-        println!("{:?}", program);
-        let mut dfa = Dfa::new();
-        let cursor = str::StrCursor::new("axxx");
-        println!("{:?}", dfa.run(&program, cursor));
+        let regex = Regex::new("a*(bbb)c*");
+        let mut slots = [None; 4];
+        println!("{:?}", regex.run("xxxaaabbbcccyyy", &mut slots));
+        println!("{:?}", slots);
     }
 }
