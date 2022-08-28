@@ -89,7 +89,7 @@ live_register!{
         const WAVE_HEIGHT: 0.05
         const WAVE_FREQ: 1.5
         fn pixel(self) -> vec4 {
-            let offset_y = 1.5;
+            let offset_y = 3.5;
             let pos2 = vec2(self.pos.x, self.pos.y + WAVE_HEIGHT * sin(WAVE_FREQ * self.pos.x * self.rect_size.x));
             let sdf = Sdf2d::viewport(pos2 * self.rect_size);
             sdf.move_to(0., self.rect_size.y - offset_y);
@@ -103,6 +103,12 @@ live_register!{
                 }
                 MsgLineLevel::Log => {
                     sdf.stroke(COLOR_TEXT_META, THICKNESS);
+                }
+                MsgLineLevel::Wait => {
+                    sdf.stroke(COLOR_TEXT_META, THICKNESS);
+                }
+                MsgLineLevel::Panic => {
+                    sdf.stroke(COLOR_PANIC, THICKNESS);
                 }
             }
             return sdf.result
@@ -247,6 +253,8 @@ pub enum MsgLineLevel {
     Warning = shader_enum(1),
     #[pick] Error = shader_enum(2),
     Log = shader_enum(3),
+    Wait = shader_enum(4),
+    Panic = shader_enum(5),
 }
 
 impl From<BuildMsgLevel> for MsgLineLevel {
@@ -254,7 +262,9 @@ impl From<BuildMsgLevel> for MsgLineLevel {
         match other {
             BuildMsgLevel::Warning => Self::Warning,
             BuildMsgLevel::Error => Self::Error,
-            BuildMsgLevel::Log => Self::Log
+            BuildMsgLevel::Log => Self::Log,
+            BuildMsgLevel::Wait => Self::Wait,
+            BuildMsgLevel::Panic=> Self::Panic
         }
     }
 }

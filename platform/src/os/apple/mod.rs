@@ -7,6 +7,7 @@ pub mod frameworks;
 pub mod metal;
 pub mod macos;
 pub mod cocoa_event;
+pub mod metal_xpc;
 
 pub(crate) use crate::os::apple::metal::*;
 pub(crate) use crate::os::apple::macos::*;

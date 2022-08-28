@@ -6,8 +6,8 @@
 
 pub use {
     makepad_objc_sys::{
-        runtime::{Class, Object, Protocol, Sel, BOOL, YES, NO},
-        declare::ClassDecl,
+        runtime::{Class, Object, Protocol, Sel, BOOL, YES, NO,},
+        declare::{ClassDecl, ProtocolDecl},
         msg_send,
         sel,
         class,

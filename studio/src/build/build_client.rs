@@ -18,8 +18,6 @@ use {
 };
 
 pub struct BuildClient{
-    cmd_id_counter: u64,
-
     pub cmd_sender: Sender<BuildCmdWrap>,
     pub msg_signal: Signal,
     pub msg_receiver: Receiver<BuildMsgWrap>,
@@ -28,12 +26,13 @@ pub struct BuildClient{
 impl BuildClient {
     
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn send_cmd(&mut self, cmd: BuildCmd) {
+    pub fn send_cmd(&mut self, cmd: BuildCmd)->BuildCmdId{
+        let cmd_id = BuildCmdId(LiveId::unique().0);
         self.cmd_sender.send(BuildCmdWrap{
-            cmd_id: BuildCmdId(self.cmd_id_counter),
+            cmd_id,
             cmd
         }).unwrap();
-        self.cmd_id_counter += 1;
+        cmd_id
     }
     
     #[cfg(target_arch = "wasm32")]
@@ -97,7 +96,6 @@ impl BuildClient {
         spawn_connection_listener(TcpListener::bind("127.0.0.1:0").unwrap(), server);
         
         Self {
-            cmd_id_counter: 0,
             cmd_sender,
             msg_signal,
             msg_receiver,

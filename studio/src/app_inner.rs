@@ -26,6 +26,7 @@ use {
         },
         app_state::{TabKind, AppState, SplitPanel, TabPanel, Panel, Tab},
         log_view::{LogView},
+        run_view::RunView,
         editors::{Editors},
     },
 };
@@ -45,6 +46,7 @@ pub struct AppInner {
     log_view: LogView,
     shader_view: ShaderView,
     slides_view: SlidesView,
+    run_view: RunView,
     editors: Editors,
     collab_client: CollabClient,
     build_manager: BuildManager,
@@ -85,6 +87,9 @@ impl AppInner {
                         match tab.kind {
                             TabKind::ShaderView => {
                                 self.shader_view.draw(cx)
+                            }
+                            TabKind::RunView => {
+                                self.run_view.draw(cx, &state.build_state)
                             }
                             TabKind::SlidesView => {
                                 self.slides_view.draw(cx)
@@ -140,7 +145,7 @@ impl AppInner {
                 self.create_code_editor_tab(
                     cx,
                     state,
-                    id!(content).into(),
+                    id!(content1).into(),
                     None,
                     state.file_path_join(&["examples/cmdline_example/src/main.rs"]),
                     true
@@ -415,6 +420,9 @@ impl AppInner {
                 if let Some(tab_id) = self.dock.selected_tab_id(cx, panel_id) {
                     let tab = &state.tabs[tab_id];
                     match tab.kind {
+                        TabKind::RunView => {
+                            self.run_view.redraw(cx);
+                        }
                         TabKind::ShaderView => {
                             self.shader_view.redraw(cx);
                         }

@@ -740,11 +740,3 @@ impl CocoaApp {
         cocoa_window.start_dragging(self.ns_event, dragged_item);
     }
 }
-/*
-pub fn get_cocoa_app2(this: &Object) -> &mut CocoaApp {
-    unsafe {
-        let ptr: *mut c_void = *this.get_ivar("cocoa_app_ptr");
-        &mut *(ptr as *mut CocoaApp)
-    }
-}*/
-

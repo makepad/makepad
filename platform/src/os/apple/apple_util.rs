@@ -463,7 +463,7 @@ macro_rules!objc_block {
             
             static DESCRIPTOR: BlockDescriptor = BlockDescriptor {
                 reserved: 0,
-                size: mem::size_of::<BlockLiteral>() as std::os::raw::c_ulong,
+                size: std::mem::size_of::<BlockLiteral>() as std::os::raw::c_ulong,
                 copy_helper,
                 dispose_helper,
             };
@@ -471,7 +471,7 @@ macro_rules!objc_block {
             #[allow(unused_unsafe)]
             extern "C" fn copy_helper(dst: *mut std::os::raw::c_void, src: *const std::os::raw::c_void) {
                 unsafe {
-                    ptr::write(
+                    std::ptr::write(
                         &mut (*(dst as *mut BlockLiteral)).inner as *mut _,
                         (&*(src as *const BlockLiteral)).inner.clone()
                     );
@@ -481,7 +481,7 @@ macro_rules!objc_block {
             #[allow(unused_unsafe)]
             extern "C" fn dispose_helper(src: *mut std::os::raw::c_void) {
                 unsafe {
-                    ptr::drop_in_place(src as *mut BlockLiteral);
+                    std::ptr::drop_in_place(src as *mut BlockLiteral);
                 }
             }
             
