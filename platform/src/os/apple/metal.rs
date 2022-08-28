@@ -29,13 +29,12 @@ use {
         pass::{CxPassParent, PassClearColor, PassClearDepth, PassId},
         window::WindowId,
         texture::{
+            Texture,
             TextureFormat,
             TextureDesc,
         },
     },
     std::{
-        mem,
-        ptr,
         sync::{
             Arc,
             Condvar,
@@ -45,6 +44,12 @@ use {
 };
 
 impl Cx {
+
+    pub fn get_shared_texture_handle(&mut self, _texture:&Texture)->u64{
+        //let cxtexture = &self.textures[texture.texture_id()];
+        0
+    }
+
     pub(crate) fn handle_repaint(&mut self, metal_windows: &mut Vec<MetalWindow>, metal_cx: &mut MetalCx) {
 
         let mut passes_todo = Vec::new();
@@ -928,10 +933,17 @@ impl CxOsTexture {
                             descriptor.as_id(),
                             setPixelFormat: MTLPixelFormat::BGRA8Unorm
                         ];
+                        msg_send![metal_cx.device, newTextureWithDescriptor: descriptor]
+                    }
+                    TextureFormat::SharedBGRA=>{
+                        let _: () = msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Private];
+                        let _: () = msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::RenderTarget];
+                        msg_send![metal_cx.device, newSharedTextureWithDescriptor: descriptor]
+                        // ok so upnext.
+                        
                     }
                     _ => panic!(),
-                }
-                msg_send![metal_cx.device, newTextureWithDescriptor: descriptor]
+                } 
             }).unwrap());
         
             self.inner = Some(CxOsTextureInner {

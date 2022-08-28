@@ -9,6 +9,8 @@ pub mod error_log_wasm;
 
 #[cfg(not(target_arch = "wasm32"))]
 pub use error_log_desktop::*;
+#[cfg(not(target_arch = "wasm32"))]
+pub use error_log_desktop as makepad_error_log;
 
 #[cfg(target_arch = "wasm32")]
 pub use error_log_wasm::*;

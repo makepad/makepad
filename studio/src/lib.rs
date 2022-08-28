@@ -11,6 +11,7 @@ pub mod editor_state;
 pub mod log_view;
 pub mod rust_editor;
 pub mod shader_view;
+pub mod run_view;
 
 pub use makepad_collab_protocol;
 pub use makepad_collab_server;

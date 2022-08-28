@@ -12,11 +12,13 @@ use {
 
 pub struct ChildProcess {
     pub child: Child,
-    pub line_sender: Sender<ChildLine>,
-    pub line_receiver: Receiver<ChildLine>,
+    pub stdin_sender: Sender<ChildStdIO>,
+    pub line_sender: Sender<ChildStdIO>,
+    pub line_receiver: Receiver<ChildStdIO>,
 }
 
-pub enum ChildLine {
+pub enum ChildStdIO {
+    StdIn(String),
     StdOut(String),
     StdErr(String),
     Term,
@@ -30,7 +32,7 @@ impl ChildProcess {
         let mut cmd_build = Command::new(cmd);
         
         cmd_build.args(args)
-            .stdin(Stdio::null())
+            .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .current_dir(current_dir);
@@ -42,11 +44,15 @@ impl ChildProcess {
         let mut child = cmd_build.spawn()?;
         
         let (line_sender, line_receiver) = mpsc::channel();
+        let (stdin_sender, stdin_receiver) = mpsc::channel();
 
+        let mut stdin = child.stdin.take().expect("stdout cannot be taken!");
         let stdout = child.stdout.take().expect("stdout cannot be taken!");
         let stderr = child.stderr.take().expect("stderr cannot be taken!");
+        
         let _stdout_thread = {
             let line_sender = line_sender.clone();
+            let stdin_sender = stdin_sender.clone();
             thread::spawn(move || {
                 let mut reader = BufReader::new(stdout);
                 loop{
@@ -55,17 +61,19 @@ impl ChildProcess {
                         if len == 0{
                             break
                         }
-                        if line_sender.send(ChildLine::StdOut(line)).is_err(){
+                        if line_sender.send(ChildStdIO::StdOut(line)).is_err(){
                             break;
                         }
                     }
                     else{
-                        let _ = line_sender.send(ChildLine::Term);
+                        let _ = line_sender.send(ChildStdIO::Term);
+                        let _ = stdin_sender.send(ChildStdIO::Term);
                         break;
                     }
                 }
             })
         };
+        
         let _stderr_thread = {
             let line_sender = line_sender.clone();
             thread::spawn(move || {
@@ -76,7 +84,7 @@ impl ChildProcess {
                         if len == 0{
                             break
                         }
-                        if line_sender.send(ChildLine::StdErr(line)).is_err(){
+                        if line_sender.send(ChildStdIO::StdErr(line)).is_err(){
                             break
                         };
                     }
@@ -86,8 +94,24 @@ impl ChildProcess {
                 }
             });
         };
-        
+
+        let _stdin_thread = {
+            thread::spawn(move || {
+                while let Ok(line) = stdin_receiver.recv() {
+                    match line {
+                        ChildStdIO::StdIn(line) => {
+                            let _ = stdin.write_all(line.as_bytes());
+                        }
+                        ChildStdIO::Term=>{
+                            break;
+                        }
+                        _=>panic!()
+                    }
+                }
+            });
+        };
         Ok(ChildProcess {
+            stdin_sender,
             line_sender,
             child,
             line_receiver,
@@ -99,6 +123,7 @@ impl ChildProcess {
     }
     
     pub fn kill(mut self) {
+        let _ = self.stdin_sender.send(ChildStdIO::Term);
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

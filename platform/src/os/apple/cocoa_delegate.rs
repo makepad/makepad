@@ -118,7 +118,6 @@ pub fn define_key_value_observing_delegate() -> *const Class {
 }
 
 
-
 pub fn define_cocoa_timer_delegate() -> *const Class {
     
     extern fn received_timer(_this: &Object, _: Sel, nstimer: ObjcId) {

@@ -323,7 +323,7 @@ pub struct LiveIdMap<K, V> {
 }
 
 impl<K, V> Default for LiveIdMap<K, V>
-where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId> {
+where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId> + std::fmt::Debug {
     fn default() -> Self {
         Self {
             map: HashMap::with_hasher(LiveIdHasherBuilder {}),
@@ -333,7 +333,7 @@ where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId> {
 }
 
 impl<K, V> LiveIdMap<K, V>
-where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId>
+where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId> + std::fmt::Debug
 {
     pub fn new() -> Self {Self::default()}
     
@@ -368,7 +368,7 @@ where K: std::cmp::Eq + std::hash::Hash + Copy + From<LiveId>
         let k = k.into();
         self.alloc_set.remove(&k);
         match self.map.entry(k) {
-            Entry::Occupied(_) => panic!(),
+            Entry::Occupied(_) => panic!("Item {:?} already inserted",k),
             Entry::Vacant(v) => v.insert(value)
         };
     }

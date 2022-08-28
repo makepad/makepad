@@ -40,8 +40,13 @@ impl ScrollBars {
     pub fn get_scroll_pos(&self) -> DVec2 {
         self.scroll
     }
-    
+
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event,  dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarsAction)) {
+        self.handle_main_event(cx, event, dispatch_action);
+        self.handle_scroll_event(cx, event, dispatch_action);
+    }
+    
+    pub fn handle_main_event(&mut self, cx: &mut Cx, event: &Event,  dispatch_action: &mut dyn FnMut(&mut Cx, ScrollBarsAction)) {
         if let Event::Trigger(te) = event{
             if let Some(triggers) = te.triggers.get(&self.area){
                 if let Some(trigger) = triggers.iter().find(|t| t.id == id!(scroll_focus_nav)){

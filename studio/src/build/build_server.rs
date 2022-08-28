@@ -1,14 +1,12 @@
-#![allow(dead_code)]
 use {
     crate::{
-        makepad_error_log::*,
         makepad_micro_serde::*,
         makepad_editor_core::range::{Range},
         build::{
             build_protocol::*,
             child_process::{
                 ChildProcess,
-                ChildLine
+                ChildStdIO
             },
             rustc_json::*,
         },
@@ -21,21 +19,23 @@ use {
     },
 };
 
+struct BuildServerProcess{
+    sender: Mutex<Sender<ChildStdIO> >,
+}
+
 struct BuildServerShared {
     path: PathBuf,
     // here we should store our connections send slots
-    processes: HashMap<String, Mutex<Sender<ChildLine> >>
+    processes: HashMap<String, BuildServerProcess>
 }
 
 pub struct BuildServer {
-    next_connection_id: usize,
     shared: Arc<RwLock<BuildServerShared >>,
 }
 
 impl BuildServer {
     pub fn new<P: Into<PathBuf >> (path: P) -> BuildServer {
         BuildServer {
-            next_connection_id: 0,
             shared: Arc::new(RwLock::new(BuildServerShared {
                 path: path.into(),
                 processes: Default::default()
@@ -44,10 +44,7 @@ impl BuildServer {
     }
     
     pub fn connect(&mut self, msg_sender: Box<dyn MsgSender>) -> BuildConnection {
-        let connection_id = ConnectionId(self.next_connection_id);
-        self.next_connection_id += 1;
         BuildConnection {
-            connection_id,
             shared: self.shared.clone(),
             msg_sender,
         }
@@ -55,14 +52,22 @@ impl BuildServer {
 }
 
 pub struct BuildConnection {
-    connection_id: ConnectionId,
+//    connection_id: ConnectionId,
     shared: Arc<RwLock<BuildServerShared >>,
     msg_sender: Box<dyn MsgSender>,
 }
 
+#[derive(Debug, PartialEq)]
+enum StdErrState{
+    First,
+    Sync,
+    Desync,
+    Running,
+}
+
 impl BuildConnection {
     
-    pub fn cargo_run(&self, what: &str, cmd_id: BuildCmdId) {
+    pub fn cargo_run(&self, what: &str, render_to: u64, cmd_id: BuildCmdId) {
         let shared = self.shared.clone();
         let msg_sender = self.msg_sender.clone();
         // alright lets run a cargo check and parse its output
@@ -70,8 +75,8 @@ impl BuildConnection {
         
         if let Ok(shared) = shared.write() {
             if let Some(proc) = shared.processes.get(what) {
-                let sender = proc.lock().unwrap();
-                let _ = sender.send(ChildLine::Kill);
+                let sender = proc.sender.lock().unwrap();
+                let _ = sender.send(ChildStdIO::Kill);
             }
         }
         
@@ -81,63 +86,103 @@ impl BuildConnection {
             what,
             "--message-format=json",
             "--features=nightly",
+            "--",
+            "--message-format=json",
+            &format!("--render-to={}",render_to),
         ];
         
         let process = ChildProcess::start("cargo", &args, path, &[]).expect("Cannot start process");
 
         shared.write().unwrap().processes.insert(
             what.to_string(),
-            Mutex::new(process.line_sender.clone())
+            BuildServerProcess{
+                sender: Mutex::new(process.line_sender.clone())
+            }
         );
-        
+        let mut stderr_state = StdErrState::First;
         std::thread::spawn(move || {
             // lets create a BuildProcess and run it
             while let Ok(line) = process.line_receiver.recv() {
+                
                 match line {
-                    ChildLine::StdOut(line) => {
+                    ChildStdIO::StdOut(line) => {
                         let parsed: Result<RustcCompilerMessage, DeJsonErr> = DeJson::deserialize_json(&line);
                         match parsed {
                             Ok(msg) => {
                                 // alright we have a couple of 'reasons'
                                 match msg.reason.as_str() {
-                                    "compiler-message" => {
-                                        //println!("OK MSG {:#?}", msg);
+                                    "makepad-error-log" | "compiler-message" => {
                                         msg_sender.process_compiler_message(cmd_id, msg);
-                                        //println!("MSG");
+                                    }
+                                    "build-finished"=>{
+                                        if Some(true) == msg.success{
+                                        }
+                                        else{
+                                        }
                                     }
                                     "compiler-artifact" => {
-                                        //println!("ARTIFACT");
                                     }
                                     _ => ()
                                 }
-                                //println!("OK MSG {:#?}", msg);
                             }
                             Err(_) => { // we should output a log string
+                                //log!("{:?}", err);
                                 msg_sender.send_bare_msg(cmd_id, BuildMsgLevel::Log, line);
                             }
                         }
                     }
-                    ChildLine::StdErr(line) => {
-                        log!("STDERR {}", line);
-                        msg_sender.send_bare_msg(cmd_id, BuildMsgLevel::Error, line);
+                    ChildStdIO::StdErr(line) => {
+                        // attempt to clean up stderr of cargo
+                        match stderr_state{
+                            StdErrState::First=>{
+                                if line.trim().starts_with("Compiling "){
+                                    msg_sender.send_bare_msg(cmd_id, BuildMsgLevel::Wait, line);
+                                }
+                                else if line.trim().starts_with("Finished "){
+                                    stderr_state = StdErrState::Running;
+                                }
+                                else if line.trim().starts_with("error: could not compile "){
+                                    msg_sender.send_bare_msg(cmd_id, BuildMsgLevel::Log, line);
+                                }
+                                else{
+                                    stderr_state = StdErrState::Desync;
+                                    msg_sender.send_bare_msg(cmd_id, BuildMsgLevel::Error, line);                                    
+                                }
+                            }                            
+                            StdErrState::Desync => {
+                                msg_sender.send_bare_msg(cmd_id, BuildMsgLevel::Error, line);
+                            }
+                            StdErrState::Running=>{
+                                if line.trim().starts_with("Running "){
+                                     msg_sender.send_bare_msg(cmd_id, BuildMsgLevel::Wait, format!("{}",line.trim()));
+                                    stderr_state = StdErrState::Sync
+                                }
+                                else{
+                                    stderr_state = StdErrState::Desync;
+                                    msg_sender.send_bare_msg(cmd_id, BuildMsgLevel::Error, line);
+                                }
+                            }
+                            _=>()
+                        }
                     }
-                    ChildLine::Term => {
+                    ChildStdIO::Term => {
+                        msg_sender.send_bare_msg(cmd_id, BuildMsgLevel::Log, "process terminated".into());
                         break;
                     }
-                    ChildLine::Kill => {
+                    ChildStdIO::Kill => {
                         return process.kill();
                     }
+                    _=>panic!()
                 }
             };
-            process.wait();
         });
     }
     
     pub fn handle_cmd(&self, cmd_wrap: BuildCmdWrap) {
         match cmd_wrap.cmd {
-            BuildCmd::CargoRun {what} => {
+            BuildCmd::CargoRun {what, render_to} => {
                 // lets kill all other 'whats'
-                self.cargo_run(&what, cmd_wrap.cmd_id);
+                self.cargo_run(&what, render_to, cmd_wrap.cmd_id);
             }
         }
     }
@@ -149,9 +194,10 @@ pub trait MsgSender: Send {
     fn send_message(&self, wrap: BuildMsgWrap);
     
     fn send_bare_msg(&self, cmd_id: BuildCmdId, level: BuildMsgLevel, line: String) {
+        let line = line.trim();
         self.send_message(
             cmd_id.wrap_msg(BuildMsg::Bare(BuildMsgBare {
-                line,
+                line:line.to_string(),
                 level
             }))
         );
@@ -173,6 +219,9 @@ pub trait MsgSender: Send {
             let level = match msg.level.as_ref() {
                 "error" => BuildMsgLevel::Error,
                 "warning" => BuildMsgLevel::Warning,
+                "log" => BuildMsgLevel::Log,
+                "failure-note" => BuildMsgLevel::Error,
+                "panic"=>BuildMsgLevel::Panic,
                 other => {
                     self.send_bare_msg(cmd_id, BuildMsgLevel::Error, format!("process_compiler_message: unexpected level {}", other));
                     return
@@ -192,8 +241,15 @@ pub trait MsgSender: Send {
                     self.send_location_msg(cmd_id, level, span.file_name.clone(), range, msg.message.clone());
                 }*/
             }
-            else {
-                self.send_bare_msg(cmd_id, BuildMsgLevel::Error, format!("process_compiler_message: no span:  {}", msg.message));
+            else { 
+                if msg.message.trim().starts_with("aborting due to ") ||
+                    msg.message.trim().starts_with("For more information about this error") ||
+                        msg.message.trim().ends_with("warning emitted") ||
+                        msg.message.trim().ends_with("warnings emitted"){
+                }
+                else{
+                    self.send_bare_msg(cmd_id, BuildMsgLevel::Warning, msg.message);
+                }
             }
         }
     }
