@@ -131,6 +131,7 @@ live_register!{
     const COLOR_WARNING: (COLOR_MID),
     const COLOR_ICON_PANIC: (COLOR_HIGH)
     const COLOR_DRAG_QUAD: (COLOR_UP_50)
+    const COLOR_PANIC: #f0f
     
     const DIM_TAB_HEIGHT: 26.0,
     const DIM_SPLITTER_HORIZONTAL: 16.0,

@@ -26,7 +26,7 @@ impl BuildCmdId{
 
 #[derive(Clone, Debug, SerBin, DeBin)]
 pub enum BuildCmd {
-    CargoRun{what:String}
+    CargoRun{what:String, render_to:u64}
 }
 
 #[derive(Clone, Debug, SerBin, DeBin)]
@@ -39,7 +39,9 @@ pub struct BuildMsgWrap {
 pub enum BuildMsgLevel{
     Warning,
     Error,
-    Log
+    Log,
+    Wait,
+    Panic
 }
 
 #[derive(Clone, Debug, SerBin, DeBin)]

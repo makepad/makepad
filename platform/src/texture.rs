@@ -66,6 +66,7 @@ pub enum TextureFormat {
     RenderBGRA,
     RenderBGRAf16,
     RenderBGRAf32,
+    SharedBGRA,
     //    ImageBGRAf32,
     //    ImageRf32,
     //    ImageRGf32,

@@ -5,7 +5,15 @@ use {
         makepad_live_id::*,
         os::{
             cocoa_event::{CocoaEvent},
-            cocoa_app::{CocoaApp, get_cocoa_app_global, init_cocoa_globals},
+            metal_xpc::{
+                start_xpc_service,
+                fetch_xpc_service_texture,
+            },
+            cocoa_app::{
+                CocoaApp,
+                get_cocoa_app_global,
+                init_cocoa_globals
+            },
             metal::{MetalCx, MetalWindow},
         },
         event::{
@@ -24,11 +32,27 @@ const KEEP_ALIVE_COUNT: usize = 5;
 impl Cx {
     
     pub fn event_loop(mut self) {
-        self.platform_type = OsType::OSX;
+        for arg in std::env::args() {
+            if arg == "--metal-xpc" {
+                return start_xpc_service();
+            }
+        }
         
+        self.platform_type = OsType::OSX;
         let metal_cx: Rc<RefCell<MetalCx >> = Rc::new(RefCell::new(MetalCx::new()));
         let metal_windows = Rc::new(RefCell::new(Vec::new()));
         let cx = Rc::new(RefCell::new(self));
+        
+        for arg in std::env::args() {
+            if arg.starts_with("--render-to") {
+                fetch_xpc_service_texture(0);
+                return;
+                let mut cx = cx.borrow_mut();
+                let mut metal_cx = metal_cx.borrow_mut();
+                let mut metal_windows = metal_windows.borrow_mut();
+                return cx.stdin_event_loop(&mut metal_cx, &mut metal_windows);
+            }
+        }
         
         init_cocoa_globals(Box::new({
             let cx = cx.clone();
@@ -46,6 +70,10 @@ impl Cx {
         cx.borrow_mut().call_event_handler(&Event::Construct);
         cx.borrow_mut().redraw_all();
         get_cocoa_app_global().event_loop();
+    }
+    
+    pub fn stdin_event_loop(&mut self, _metal_cx: &mut MetalCx, _metal_windows: &mut Vec<MetalWindow>) {
+        
     }
     
     fn cocoa_event_callback(
@@ -357,10 +385,10 @@ impl Cx {
 }
 
 impl CxOsApi for Cx {
-    fn init(&mut self){
+    fn init(&mut self) {
         self.live_expand();
         self.live_scan_dependencies();
-        self.desktop_load_dependencies();        
+        self.desktop_load_dependencies();
     }
     
     fn post_signal(signal: Signal) {

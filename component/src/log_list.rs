@@ -3,7 +3,7 @@ use {
         collections::{HashSet},
     },
     crate::{
-        frame::*,
+        scroll_shadow::ScrollShadow,
         fold_button::FoldButton,
         scroll_bars::ScrollBars,
         link_label::LinkLabel,
@@ -42,14 +42,16 @@ live_register!{
     }
     
     LogListNode: {{LogListNode}} {
-        link_label: {
-        }
-        
+
         layout: {
             align: {y: 0.5},
             padding: {left: 5},
         }
-        
+        name_walk: {
+            width: Fit,
+            height: Fit,
+            margin:{left:5}
+        }
         icon_walk: {
             width: Size::Fixed((DIM_DATA_ICON_WIDTH)),
             height: Size::Fixed((DIM_DATA_ICON_WIDTH)),
@@ -105,7 +107,7 @@ live_register!{
     LogList: {{LogList}} {
         node_height: (DIM_DATA_ITEM_HEIGHT),
         fold_node: LogListNode {}
-        layout: {flow: Flow::Down}
+        layout: {flow: Flow::Down, clip_x:true, clip_y:true},
     }
 }
 
@@ -143,7 +145,7 @@ pub struct LogListNode {
     link_label: LinkLabel,
     
     icon_walk: Walk,
-    
+    name_walk: Walk, 
     min_drag_distance: f64,
     
     opened: f32,
@@ -159,6 +161,8 @@ pub struct LogList {
     filler_quad: DrawBgQuad,
     layout: Layout,
     node_height: f64,
+
+    scroll_shadow: ScrollShadow,
     
     #[rust] selected_node_ids: HashSet<LogListNodeId>,
     #[rust] open_nodes: HashSet<LogListNodeId>,
@@ -218,14 +222,16 @@ impl LogListNode {
         self.bg.begin(cx, Walk::size(Size::Fill, Size::Fixed(node_height)), self.layout);
         
         // lets draw a fold button
-        self.fold_button.draw_walk(cx, self.fold_button.get_walk());
+        //self.fold_button.draw_walk(cx, self.fold_button.get_walk());
         
         // lets draw a fold button
         self.icon.icon_type = icon_type;
         self.icon.draw_walk(cx, self.icon_walk);
-        self.link_label.draw_label(cx, link);
+        if link.len()>0{
+            self.link_label.draw_label(cx, link);
+        }
         
-        self.name.draw_walk(cx, Walk::fit(), Align::default(), body);
+        self.name.draw_walk(cx, self.name_walk, Align::default(), body);
         self.bg.end(cx);
     }
     
@@ -299,6 +305,7 @@ impl LogList {
             self.filler_quad.draw_walk(cx, Walk::size(Size::Fill, Size::Fixed(self.node_height.min(height_left - walk))));
             walk += self.node_height.max(1.0);
         }
+        self.scroll_shadow.draw(cx, dvec2(0., 0.));
         self.scroll_bars.end(cx);
         
         let selected_node_ids = &self.selected_node_ids;
