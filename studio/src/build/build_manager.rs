@@ -4,12 +4,17 @@ use {
     crate::{
         makepad_micro_serde::*,
         makepad_platform::*,
+        makepad_platform::os::cx_stdin::{
+            HostToStdin,
+            StdinToHost,
+            StdinWindowSize            
+        },
         app_state::AppState,
         editor_state::{
             DocumentId,
         },
         build::{
-            build_protocol::{BuildMsg, BuildCmd, BuildCmdWrap, BuildMsgWrap, BuildCmdId},
+            build_protocol::*,
             build_server::{BuildConnection, BuildServer},
             build_client::BuildClient
         },
@@ -23,6 +28,7 @@ use {
     std::{
         collections::HashMap,
         env,
+        cell::Cell,
         io::{Read, Write},
         net::{TcpListener, TcpStream},
         sync::mpsc::{self, Receiver, Sender, TryRecvError},
@@ -39,17 +45,42 @@ live_register!{
 
 #[derive(Default)]
 pub struct BuildState {
-    clients: Vec<BuildClientWrap>,
+    pub clients: Vec<BuildClientWrap>,
+}
+
+impl BuildState {
+    pub fn get_process(&mut self, cmd_id: BuildCmdId) -> Option<&mut BuildClientProcess> {
+        for wrap in &mut self.clients {
+            for process in wrap.processes.values_mut() {
+                if process.cmd_id == cmd_id {
+                    return Some(process)
+                }
+            }
+        }
+        return None
+    }
+    
+    pub fn send_host_to_stdin(&self, cmd_id: Option<BuildCmdId>, msg: HostToStdin) {
+        for wrap in &self.clients {
+            for process in wrap.processes.values() {
+                if cmd_id.is_none() || Some(process.cmd_id) == cmd_id {
+                    wrap.client.send_cmd_with_id(process.cmd_id, BuildCmd::HostToStdin(msg.to_json()));
+                    return;
+                }
+            }
+        }
+        log!("Send host to stdin process not found");
+    }
 }
 
 pub struct BuildClientProcess {
-    cmd_id: BuildCmdId,
-    texture: Texture
+    pub cmd_id: BuildCmdId,
+    pub texture: Texture
 }
 
 pub struct BuildClientWrap {
     client: BuildClient,
-    processes: HashMap<String, BuildClientProcess>,
+    pub processes: HashMap<String, BuildClientProcess>,
 }
 
 #[derive(Live, LiveHook)]
@@ -61,27 +92,24 @@ pub struct BuildManager {
 
 pub enum BuildManagerAction {
     RedrawDoc {doc_id: DocumentId},
+    StdinToHost {cmd_id: BuildCmdId, msg: StdinToHost},
     RedrawLog,
     ClearLog,
     None
 }
 
+const WHAT_TO_BUILD:&'static str = "fractal_zoom";
+
 impl BuildManager {
     pub fn init(&mut self, cx: &mut Cx, state: &mut AppState) {
-        let mut client = BuildClientWrap{
+        let mut client = BuildClientWrap {
             client: BuildClient::new_with_local_server(&self.path),
             processes: HashMap::new()
         };
         
         let texture = Texture::new(cx);
-        texture.set_desc(cx, TextureDesc {
-            format: TextureFormat::SharedBGRA,
-            width: Some(1024),
-            height: Some(1024),
-            multisample: None
-        });
         
-        client.processes.insert("cmdline_example".into(), BuildClientProcess {
+        client.processes.insert(WHAT_TO_BUILD.into(), BuildClientProcess {
             texture,
             cmd_id: BuildCmdId(0)
         });
@@ -92,11 +120,10 @@ impl BuildManager {
     
     pub fn file_change(&mut self, _cx: &mut Cx, state: &mut AppState) {
         for wrap in &mut state.build_state.clients {
-            if let Some(process) = wrap.processes.get_mut("cmdline_example"){
+            if let Some(process) = wrap.processes.get_mut(WHAT_TO_BUILD) {
                 
                 process.cmd_id = wrap.client.send_cmd(BuildCmd::CargoRun {
-                    what: "cmdline_example".into(),
-                    render_to: 0
+                    what: WHAT_TO_BUILD.into(),
                 });
             }
         }
@@ -141,7 +168,8 @@ impl BuildManager {
             let editor_state = &mut state.editor_state;
             wrap.client.handle_event(cx, event, &mut | cx, wrap | {
                 let msg_id = editor_state.messages.len();
-                match &wrap.msg {
+                // ok we have a cmd_id in wrap.msg
+                match wrap.msg {
                     BuildMsg::Location(loc) => {
                         if let Some(doc_id) = editor_state.documents_by_path.get(UnixPath::new(&loc.file_name)) {
                             let doc = &mut editor_state.documents[*doc_id];
@@ -152,10 +180,29 @@ impl BuildManager {
                                 doc_id: *doc_id
                             })
                         }
+                        editor_state.messages.push(BuildMsg::Location(loc));
                     }
-                    _ => ()
+                    BuildMsg::Bare(_) => {
+                        editor_state.messages.push(wrap.msg);
+                    }
+                    BuildMsg::StdinToHost(line) => {
+                        let msg: Result<StdinToHost, DeJsonErr> = DeJson::deserialize_json(&line);
+                        match msg {
+                            Ok(msg) => {
+                                dispatch_event(cx, BuildManagerAction::StdinToHost {
+                                    cmd_id: wrap.cmd_id,
+                                    msg
+                                });
+                            }
+                            Err(_) => { // we should output a log string
+                                editor_state.messages.push(BuildMsg::Bare(BuildMsgBare {
+                                    level: BuildMsgLevel::Log,
+                                    line
+                                }));
+                            }
+                        }
+                    }
                 }
-                editor_state.messages.push(wrap.msg);
                 any_msg = true;
             });
         }

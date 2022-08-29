@@ -18,8 +18,3 @@ members = [
     "tools/brotli_check",
 ]
 
-[profile.release]
-#lto=true
-#codegen-units=1
-#panic = 'abort'
-#opt-level = 'z'

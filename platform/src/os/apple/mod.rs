@@ -6,6 +6,7 @@ pub mod cocoa_window;
 pub mod frameworks;
 pub mod metal;
 pub mod macos;
+pub mod macos_stdin;
 pub mod cocoa_event;
 pub mod metal_xpc;
 

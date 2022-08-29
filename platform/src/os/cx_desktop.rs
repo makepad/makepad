@@ -4,7 +4,6 @@ use {
         fs::File,
     },
     crate::{
-        makepad_math::DVec2,
         cx::Cx,
     }
 };
@@ -28,9 +27,6 @@ impl Cx {
         }
     }
     
-    pub fn get_default_window_size(&self) -> DVec2 {
-        return DVec2 {x: 800., y: 600.}
-    }
     /*
     pub(crate) fn process_desktop_pre_event(&mut self, event: &mut Event)
     {

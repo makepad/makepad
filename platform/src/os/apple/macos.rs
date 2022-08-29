@@ -1,13 +1,22 @@
 use {
-    std::rc::Rc,
-    std::cell::{RefCell},
+    std::{
+        rc::Rc,
+        cell::{RefCell},
+    },
+    makepad_objc_sys::{
+        
+        msg_send,
+        sel,
+        sel_impl,
+    },
     crate::{
         makepad_live_id::*,
+        makepad_math::*,
         os::{
+            apple::frameworks::*,
             cocoa_event::{CocoaEvent},
             metal_xpc::{
                 start_xpc_service,
-                fetch_xpc_service_texture,
             },
             cocoa_app::{
                 CocoaApp,
@@ -16,6 +25,7 @@ use {
             },
             metal::{MetalCx, MetalWindow},
         },
+        pass::{CxPassParent},
         event::{
             WebSocket,
             WebSocketAutoReconnect,
@@ -40,20 +50,17 @@ impl Cx {
         
         self.platform_type = OsType::OSX;
         let metal_cx: Rc<RefCell<MetalCx >> = Rc::new(RefCell::new(MetalCx::new()));
-        let metal_windows = Rc::new(RefCell::new(Vec::new()));
         let cx = Rc::new(RefCell::new(self));
         
         for arg in std::env::args() {
-            if arg.starts_with("--render-to") {
-                fetch_xpc_service_texture(0);
-                return;
+            if arg == "--stdin-loop" {
                 let mut cx = cx.borrow_mut();
                 let mut metal_cx = metal_cx.borrow_mut();
-                let mut metal_windows = metal_windows.borrow_mut();
-                return cx.stdin_event_loop(&mut metal_cx, &mut metal_windows);
+                return cx.stdin_event_loop(&mut metal_cx);
             }
         }
         
+        let metal_windows = Rc::new(RefCell::new(Vec::new()));
         init_cocoa_globals(Box::new({
             let cx = cx.clone();
             move | cocoa_app,
@@ -66,14 +73,38 @@ impl Cx {
         }));
         
         // final bit of initflow
-        get_cocoa_app_global().start_timer(0, 0.2, true);
+        //get_cocoa_app_global().start_timer(0, 0.2, true);
         cx.borrow_mut().call_event_handler(&Event::Construct);
         cx.borrow_mut().redraw_all();
         get_cocoa_app_global().event_loop();
     }
     
-    pub fn stdin_event_loop(&mut self, _metal_cx: &mut MetalCx, _metal_windows: &mut Vec<MetalWindow>) {
-        
+    pub (crate) fn handle_repaint(&mut self, metal_windows: &mut Vec<MetalWindow>, metal_cx: &mut MetalCx) {
+        let mut passes_todo = Vec::new();
+        self.compute_pass_repaint_order(&mut passes_todo);
+        self.repaint_id += 1;
+        for pass_id in &passes_todo {
+            match self.passes[*pass_id].parent.clone() {
+                CxPassParent::Window(window_id) => {
+                    if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
+                        let dpi_factor = metal_window.window_geom.dpi_factor;
+                        metal_window.resize_core_animation_layer(&metal_cx);
+                        let drawable: ObjcId = unsafe {msg_send![metal_window.ca_layer, nextDrawable]};
+                        if drawable == nil {
+                            return
+                        }
+                        self.draw_pass(*pass_id, dpi_factor, metal_cx, drawable, metal_window.is_resizing);
+                    }
+                }
+                CxPassParent::Pass(parent_pass_id) => {
+                    let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
+                    self.draw_pass(*pass_id, dpi_factor, metal_cx, nil, false);
+                },
+                CxPassParent::None => {
+                    self.draw_pass(*pass_id, 1.0, metal_cx, nil, false);
+                }
+            }
+        }
     }
     
     fn cocoa_event_callback(
@@ -287,7 +318,7 @@ impl Cx {
                         window_id,
                         &metal_cx,
                         cocoa_app,
-                        window.create_inner_size,
+                        window.create_inner_size.unwrap_or(dvec2(800.,600.)),
                         window.create_position,
                         &window.create_title
                     );

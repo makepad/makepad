@@ -165,8 +165,7 @@ impl Cx {
         self.inner_key_focus_change();
         self.handle_triggers_and_signals();
     }
-    
-    
+
     // helpers
     
     
@@ -182,7 +181,7 @@ impl Cx {
         std::mem::swap(&mut draw_event, &mut self.new_draw_event);
         self.call_event_handler(&Event::Draw(draw_event));
     }
-    
+
     pub (crate) fn call_next_frame_event(&mut self, time: f64) {
         let mut set = HashSet::default();
         std::mem::swap(&mut set, &mut self.new_next_frames);

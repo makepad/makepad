@@ -24,4 +24,4 @@ echo "">>$PLIST
 launchctl unload $PLIST  
 launchctl load $PLIST
 
-$PWD/target/debug/makepad_studio --render-to=0
+#$PWD/target/debug/makepad_studio --render-to=0

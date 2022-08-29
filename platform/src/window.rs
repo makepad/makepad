@@ -62,11 +62,10 @@ impl LiveHook for Window {}
 impl LiveNew for Window {
     fn new(cx: &mut Cx) -> Self {
         let window = cx.windows.alloc();
-        let inner_size = cx.get_default_window_size();
         let cxwindow = &mut cx.windows[window.window_id()];
         cxwindow.is_created = false;
         cxwindow.create_title = "Makepad".to_string();
-        cxwindow.create_inner_size = inner_size;
+        cxwindow.create_inner_size = None;
         cxwindow.create_position = None;
         cx.platform_ops.push(CxOsOp::CreateWindow(window.window_id()));
         window
@@ -100,7 +99,7 @@ impl LiveApply for Window {
             match nodes[index].id {
                 id!(inner_size) => {
                     let v:Vec2 = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes);
-                    cx.windows[self.window_id()].create_inner_size = v.into();
+                    cx.windows[self.window_id()].create_inner_size = Some(v.into());
                 },
                 id!(title) => {
                     let v = LiveNew::new_apply_mut_index(cx, from, &mut index, nodes);
@@ -196,7 +195,7 @@ impl Window {
 pub struct CxWindow {
     pub create_title: String,
     pub create_position: Option<DVec2>,
-    pub create_inner_size: DVec2,
+    pub create_inner_size: Option<DVec2>,
     pub is_created: bool,
     pub window_geom: WindowGeom,
     pub main_pass_id: Option<PassId>,
@@ -206,7 +205,7 @@ impl CxWindow {
     
     pub fn get_inner_size(&mut self) -> DVec2 {
         if !self.is_created {
-            self.create_inner_size
+            panic!();
         }
         else {
             self.window_geom.inner_size
@@ -215,7 +214,7 @@ impl CxWindow {
     
     pub fn get_position(&mut self) -> DVec2 {
         if !self.is_created {
-            self.create_position.unwrap()
+            panic!();
         }
         else {
             self.window_geom.position
