@@ -3,7 +3,7 @@ use makepad_geometry::{
     AffineTransformation, LinearTransformation, Point, Rectangle, Transform, Vector,
 };
 use makepad_internal_iter::ExtendFromInternalIterator;
-use std::{mem, result};
+use std::{convert::TryFrom, mem, result};
 
 #[derive(Clone, Debug)]
 pub struct GlyphsParser<'a> {
@@ -636,23 +636,23 @@ fn parse_char_code_to_glyph_index_map_format_4(bytes: &[u8]) -> Result<Vec<usize
     for seg_index in 0..seg_count {
         let end_code = end_code_reader.read_u16()?;
         let start_code = start_code_reader.read_u16()?;
-        let id_delta = id_delta_reader.read_u16()? as usize;
-        let id_range_offset = id_range_offset_reader.read_u16()? as usize;
-        for code in start_code..end_code {
-            let mut id = if id_range_offset == 0 {
-                code
+        let id_delta = id_delta_reader.read_u16()?;
+        let id_range_offset = id_range_offset_reader.read_u16()?;
+        for code in start_code..=end_code {
+            let id = if id_range_offset == 0 {
+                code.wrapping_add(id_delta)
             } else {
-                let id_range_bytes = &id_range_offset_bytes[(seg_index * 2)..];
-                let mut reader = Reader::new(id_range_bytes);
-                reader.skip(id_range_offset + (code - start_code) as usize * 2)?;
+                let delta = (code as u32 - start_code as u32) * 2;
+                let delta = u16::try_from(delta).unwrap();
+                let mut pos = (id_range_offset_bytes_start + seg_index * 2) as u16;
+                pos = pos.wrapping_add(delta);
+                pos = pos.wrapping_add(id_range_offset);
+                let mut reader = Reader::new(&bytes[pos as usize..]);
                 let id = reader.read_u16()?;
                 id
-            } as usize;
-            if id != 0 {
-                id = (id + id_delta) % 65536;
-            }
+            };
             char_code_to_glyph_index_map.resize(code as usize + 1, 0);
-            char_code_to_glyph_index_map[code as usize] = id;
+            char_code_to_glyph_index_map[code as usize] = id as usize;
         }
     }
     Ok(char_code_to_glyph_index_map)
