@@ -36,9 +36,6 @@ use {
 
 impl Cx {
     
-    pub fn get_default_window_size(&self) -> DVec2 {
-        return self.os.window_geom.inner_size;
-    }
     
     pub fn process_to_wasm(&mut self, msg_ptr: u32) -> u32
     //where F: FnMut(&mut Cx, &Event),
@@ -90,6 +87,8 @@ impl Cx {
                         }
                     }
                     self.os.window_geom = tw.window_info.into();
+                    
+                    self.default_inner_window_size = self.os.window_geom.inner_size;
                     
                     self.call_event_handler(&Event::Construct);
                     //self.platform.from_wasm(FromWasmCreateThread{thread_id:1});

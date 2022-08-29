@@ -214,7 +214,7 @@ impl LiveHook for NumberGrid {
 }
 
 fn random_bit(seed:&mut u32)->u32{
-    *seed += (*seed * *seed) | 5;
+    *seed = seed.overflowing_add((seed.overflowing_mul(*seed)).0 | 5).0;
     return *seed >> 31;
 }
 

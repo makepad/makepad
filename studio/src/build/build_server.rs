@@ -5,6 +5,7 @@ use {
         build::{
             build_protocol::*,
             child_process::{
+                ChildStdIn, 
                 ChildProcess,
                 ChildStdIO
             },
@@ -20,7 +21,9 @@ use {
 };
 
 struct BuildServerProcess{
-    sender: Mutex<Sender<ChildStdIO> >,
+    cmd_id: BuildCmdId,
+    stdin_sender: Mutex<Sender<ChildStdIn> >,
+    line_sender: Mutex<Sender<ChildStdIO> >,
 }
 
 struct BuildServerShared {
@@ -67,7 +70,7 @@ enum StdErrState{
 
 impl BuildConnection {
     
-    pub fn cargo_run(&self, what: &str, render_to: u64, cmd_id: BuildCmdId) {
+    pub fn cargo_run(&self, what: &str, cmd_id: BuildCmdId) {
         let shared = self.shared.clone();
         let msg_sender = self.msg_sender.clone();
         // alright lets run a cargo check and parse its output
@@ -75,20 +78,22 @@ impl BuildConnection {
         
         if let Ok(shared) = shared.write() {
             if let Some(proc) = shared.processes.get(what) {
-                let sender = proc.sender.lock().unwrap();
-                let _ = sender.send(ChildStdIO::Kill);
+                let line_sender = proc.line_sender.lock().unwrap();
+                let _ = line_sender.send(ChildStdIO::Kill);
             }
         }
         
         let args = [
+            "+nightly",
             "run",
             "-p",
             what,
             "--message-format=json",
+            "--release",
             "--features=nightly",
             "--",
             "--message-format=json",
-            &format!("--render-to={}",render_to),
+            &format!("--stdin-loop"),
         ];
         
         let process = ChildProcess::start("cargo", &args, path, &[]).expect("Cannot start process");
@@ -96,7 +101,9 @@ impl BuildConnection {
         shared.write().unwrap().processes.insert(
             what.to_string(),
             BuildServerProcess{
-                sender: Mutex::new(process.line_sender.clone())
+                cmd_id,
+                stdin_sender: Mutex::new(process.stdin_sender.clone()),
+                line_sender: Mutex::new(process.line_sender.clone())
             }
         );
         let mut stderr_state = StdErrState::First;
@@ -106,8 +113,8 @@ impl BuildConnection {
                 
                 match line {
                     ChildStdIO::StdOut(line) => {
-                        let parsed: Result<RustcCompilerMessage, DeJsonErr> = DeJson::deserialize_json(&line);
-                        match parsed {
+                        let comp_msg: Result<RustcCompilerMessage, DeJsonErr> = DeJson::deserialize_json(&line);
+                        match comp_msg {
                             Ok(msg) => {
                                 // alright we have a couple of 'reasons'
                                 match msg.reason.as_str() {
@@ -127,7 +134,7 @@ impl BuildConnection {
                             }
                             Err(_) => { // we should output a log string
                                 //log!("{:?}", err);
-                                msg_sender.send_bare_msg(cmd_id, BuildMsgLevel::Log, line);
+                                msg_sender.send_stdin_to_host_msg(cmd_id, line);
                             }
                         }
                     }
@@ -149,7 +156,7 @@ impl BuildConnection {
                                     msg_sender.send_bare_msg(cmd_id, BuildMsgLevel::Error, line);                                    
                                 }
                             }                            
-                            StdErrState::Desync => {
+                            StdErrState::Sync | StdErrState::Desync => {
                                 msg_sender.send_bare_msg(cmd_id, BuildMsgLevel::Error, line);
                             }
                             StdErrState::Running=>{
@@ -162,7 +169,6 @@ impl BuildConnection {
                                     msg_sender.send_bare_msg(cmd_id, BuildMsgLevel::Error, line);
                                 }
                             }
-                            _=>()
                         }
                     }
                     ChildStdIO::Term => {
@@ -172,7 +178,6 @@ impl BuildConnection {
                     ChildStdIO::Kill => {
                         return process.kill();
                     }
-                    _=>panic!()
                 }
             };
         });
@@ -180,9 +185,24 @@ impl BuildConnection {
     
     pub fn handle_cmd(&self, cmd_wrap: BuildCmdWrap) {
         match cmd_wrap.cmd {
-            BuildCmd::CargoRun {what, render_to} => {
+            BuildCmd::CargoRun {what} => {
                 // lets kill all other 'whats'
-                self.cargo_run(&what, render_to, cmd_wrap.cmd_id);
+                self.cargo_run(&what, cmd_wrap.cmd_id);
+            }
+            BuildCmd::HostToStdin(msg)=>{
+                // ok lets fetch the running process from the cmd_id
+                // and plug this msg on the standard input as serialiser json
+                if let Ok(shared) = self.shared.read(){
+                    for v in shared.processes.values(){
+                        if v.cmd_id == cmd_wrap.cmd_id{
+                            // lets send it on sender
+                            if let Ok(stdin_sender) = v.stdin_sender.lock(){
+                                let _= stdin_sender.send(ChildStdIn::Send(msg));
+                            }
+                            break;
+                        }
+                    }
+                }
             }
         }
     }
@@ -202,6 +222,13 @@ pub trait MsgSender: Send {
             }))
         );
     }
+    
+    fn send_stdin_to_host_msg(&self, cmd_id: BuildCmdId, line: String) {
+        self.send_message(
+            cmd_id.wrap_msg(BuildMsg::StdinToHost(line))
+        );
+    }
+    
     
     fn send_location_msg(&self, cmd_id: BuildCmdId, level: BuildMsgLevel, file_name: String, range: Range, msg: String) {
         self.send_message(
