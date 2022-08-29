@@ -83,6 +83,7 @@ pub struct Cx {
     pub (crate) new_draw_event: DrawEvent,
     
     pub redraw_id: u64,
+
     pub (crate) repaint_id: u64,
     pub (crate) event_id: u64,
     pub (crate) timer_id: u64,
@@ -148,6 +149,7 @@ impl OsType {
 
 impl Cx {
     pub fn new(event_handler:Box<dyn FnMut(&mut Cx, &Event)>) -> Self {
+        crate::makepad_error_log::set_panic_hook();
         // the null texture
         /*let mut textures = CxTexturePool::default();
         textures.alloc_new(CxTexture {

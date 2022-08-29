@@ -79,12 +79,13 @@ impl DrawQuad {
         self.draw_vars.area.set_rect(cx, &rect);
     }
     
-    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk) {
+    pub fn draw_walk(&mut self, cx: &mut Cx2d, walk: Walk)->Rect {
         let rect = cx.walk_turtle(walk);
         self.draw_clip = cx.turtle().draw_clip().into();
         self.rect_pos = rect.pos.into();
         self.rect_size = rect.size.into();
         self.draw(cx);
+        rect
     }
 
     pub fn draw(&mut self, cx: &mut Cx2d){

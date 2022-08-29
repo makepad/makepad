@@ -5,6 +5,7 @@ pub mod cx_desktop;
 #[macro_use]
 pub mod cx_shared;
 
+pub mod cx_stdin;
 
 #[cfg(target_os = "macos")]
 pub mod apple;

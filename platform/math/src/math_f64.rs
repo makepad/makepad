@@ -97,6 +97,14 @@ impl Rect {
             size: (b.size - a.size) * f + a.size
         }
     }
+
+    pub fn dpi_snap(&self, f:f64)->Rect{
+        Rect{
+            pos: dvec2((self.pos.x / f).floor() * f,(self.pos.y / f).floor() * f),
+            size:  dvec2((self.size.x / f).floor() * f,(self.size.y / f).floor() * f),
+        }
+    }
+
 }
 
 

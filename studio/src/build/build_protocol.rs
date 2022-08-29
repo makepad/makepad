@@ -6,7 +6,7 @@ use {
 };
 
 
-#[derive(Clone, Copy, Debug, SerBin, DeBin)]
+#[derive(PartialEq, Clone, Copy, Debug, SerBin, DeBin)]
 pub struct BuildCmdId(pub u64);
 
 #[derive(Clone, Debug, SerBin, DeBin)]
@@ -26,7 +26,8 @@ impl BuildCmdId{
 
 #[derive(Clone, Debug, SerBin, DeBin)]
 pub enum BuildCmd {
-    CargoRun{what:String, render_to:u64}
+    CargoRun{what:String},
+    HostToStdin(String)
 }
 
 #[derive(Clone, Debug, SerBin, DeBin)]
@@ -41,7 +42,7 @@ pub enum BuildMsgLevel{
     Error,
     Log,
     Wait,
-    Panic
+    Panic,
 }
 
 #[derive(Clone, Debug, SerBin, DeBin)]
@@ -61,5 +62,6 @@ pub struct BuildMsgBare{
 #[derive(Clone, Debug, SerBin, DeBin)]
 pub enum BuildMsg {
     Bare(BuildMsgBare),
-    Location(BuildMsgLocation)
+    Location(BuildMsgLocation),
+    StdinToHost(String),
 }

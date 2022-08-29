@@ -12,17 +12,21 @@ use {
 
 pub struct ChildProcess {
     pub child: Child,
-    pub stdin_sender: Sender<ChildStdIO>,
+    pub stdin_sender: Sender<ChildStdIn>,
     pub line_sender: Sender<ChildStdIO>,
     pub line_receiver: Receiver<ChildStdIO>,
 }
 
 pub enum ChildStdIO {
-    StdIn(String),
     StdOut(String),
     StdErr(String),
     Term,
     Kill
+}
+
+pub enum ChildStdIn {
+    Send(String),
+    Term,
 }
 
 impl ChildProcess {
@@ -67,7 +71,7 @@ impl ChildProcess {
                     }
                     else{
                         let _ = line_sender.send(ChildStdIO::Term);
-                        let _ = stdin_sender.send(ChildStdIO::Term);
+                        let _ = stdin_sender.send(ChildStdIn::Term);
                         break;
                     }
                 }
@@ -99,13 +103,12 @@ impl ChildProcess {
             thread::spawn(move || {
                 while let Ok(line) = stdin_receiver.recv() {
                     match line {
-                        ChildStdIO::StdIn(line) => {
+                        ChildStdIn::Send(line) => {
                             let _ = stdin.write_all(line.as_bytes());
                         }
-                        ChildStdIO::Term=>{
+                        ChildStdIn::Term=>{
                             break;
                         }
-                        _=>panic!()
                     }
                 }
             });
@@ -123,7 +126,7 @@ impl ChildProcess {
     }
     
     pub fn kill(mut self) {
-        let _ = self.stdin_sender.send(ChildStdIO::Term);
+        let _ = self.stdin_sender.send(ChildStdIn::Term);
         let _ = self.child.kill();
         let _ = self.child.wait();
     }

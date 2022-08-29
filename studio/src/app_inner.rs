@@ -147,7 +147,7 @@ impl AppInner {
                     state,
                     id!(content1).into(),
                     None,
-                    state.file_path_join(&["examples/cmdline_example/src/main.rs"]),
+                    state.file_path_join(&["examples/numbers/src/main.rs"]),
                     true
                 );
                 self.build_manager.init(cx, state);
@@ -294,11 +294,15 @@ impl AppInner {
                 },
                 BuildManagerAction::RedrawLog=>{
                     self.log_view.redraw(cx);
+                    self.run_view.redraw(cx);
                 },
+                BuildManagerAction::StdinToHost{cmd_id, msg}=>{
+                    self.run_view.handle_stdin_to_host(cx, cmd_id, msg, &mut state.build_state);
+                }
                 _=>()
             }
         }
-        
+        self.run_view.handle_event(cx, event, &mut state.build_state);
         self.log_view.handle_event(cx, event, &mut | _, _ | {});
         self.shader_view.handle_event(cx, event);
         self.slides_view.handle_event(cx, event);
