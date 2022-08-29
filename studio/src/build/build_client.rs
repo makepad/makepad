@@ -26,7 +26,7 @@ pub struct BuildClient{
 impl BuildClient {
     
     #[cfg(not(target_arch = "wasm32"))]
-    pub fn send_cmd(&mut self, cmd: BuildCmd)->BuildCmdId{
+    pub fn send_cmd(&self, cmd: BuildCmd)->BuildCmdId{
         let cmd_id = BuildCmdId(LiveId::unique().0);
         self.cmd_sender.send(BuildCmdWrap{
             cmd_id,
@@ -35,10 +35,20 @@ impl BuildClient {
         cmd_id
     }
     
-    #[cfg(target_arch = "wasm32")]
-    pub fn send_cmd(&mut self, _cmd: BuilderCmd) {
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn send_cmd_with_id(&self, cmd_id: BuildCmdId, cmd: BuildCmd){
+        self.cmd_sender.send(BuildCmdWrap{
+            cmd_id,
+            cmd
+        }).unwrap();
     }
     
+    #[cfg(target_arch = "wasm32")]
+    pub fn send_cmd(&mut self, _cmd: BuilderCmd) {}
+
+    #[cfg(target_arch = "wasm32")]
+    pub fn send_cmd_with_id(&mut self, cmd_id: BuildCmdId, cmd: BuildCmd){}
+     
     pub fn handle_event_vec(&mut self, cx: &mut Cx, event: &Event) -> Vec<BuildMsgWrap> {
         let mut a = Vec::new();
         self.handle_event(cx, event, &mut | _, v | a.push(v));

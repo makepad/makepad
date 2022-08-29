@@ -69,6 +69,7 @@ impl LogView {
                         write!(file, "{}:{}", msg.file_name, msg.range.start.line).unwrap();
                         self.log_list.draw_node(cx, msg.level.into(), id, &file, &msg.msg, true);
                     }
+                    _=>()
                 }
             }
         }

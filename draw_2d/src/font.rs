@@ -352,7 +352,6 @@ impl DrawTrapezoidText {
                 let font_scale_pixels = font_scale_logical * atlas_page.dpi_factor;
                 let mut trapezoids = Vec::new();
                 //log_str(&format!("Serializing char {} {} {} {}", glyphtc.tx1 , cx.fonts_atlas.texture_size.x ,todo.subpixel_x_fract ,atlas_page.dpi_factor));
-                
                 let trapezoidate = self.trapezoidator.trapezoidate(
                     glyph
                         .outline
@@ -436,11 +435,9 @@ impl<'a> Cx2d<'a> {
         let fonts_atlas_rc = self.fonts_atlas_rc.clone();
         let mut fonts_atlas = fonts_atlas_rc.0.borrow_mut();
         let fonts_atlas = &mut*fonts_atlas;
-        
         //let start = Cx::profile_time_ns();
         // we need to start a pass that just uses the texture
         if fonts_atlas.alloc.todo.len()>0 {
-            
             self.begin_pass(&draw_fonts_atlas.atlas_pass);
             
             let texture_size = fonts_atlas.alloc.texture_size;
@@ -457,10 +454,12 @@ impl<'a> Cx2d<'a> {
             draw_fonts_atlas.atlas_pass.clear_color_textures(self.cx);
             draw_fonts_atlas.atlas_pass.add_color_texture(self.cx, &draw_fonts_atlas.atlas_texture, clear);
             draw_fonts_atlas.atlas_view.begin_always(self);
+
             let mut atlas_todo = Vec::new();
             std::mem::swap(&mut fonts_atlas.alloc.todo, &mut atlas_todo);
             
             if let Some(mut many) = self.begin_many_instances(&draw_fonts_atlas.draw_trapezoid_text.draw_vars) {
+
                 for todo in atlas_todo {
                     draw_fonts_atlas.draw_trapezoid_text.draw_todo(fonts_atlas, todo, &mut many);
                 }

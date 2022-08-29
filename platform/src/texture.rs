@@ -66,7 +66,7 @@ pub enum TextureFormat {
     RenderBGRA,
     RenderBGRAf16,
     RenderBGRAf32,
-    SharedBGRA,
+    SharedBGRA(u64),
     //    ImageBGRAf32,
     //    ImageRf32,
     //    ImageRGf32,
@@ -75,7 +75,14 @@ pub enum TextureFormat {
     //    MappedRf32,
     //    MappedRGf32,
 }
-
+impl TextureFormat{
+    pub fn is_shared(&self)->bool{
+         match self{
+             Self::SharedBGRA(_)=>true,
+             _=>false
+         }
+    }
+}
 #[derive(Clone, Copy, PartialEq)]
 pub struct TextureDesc {
     pub format: TextureFormat,
@@ -163,5 +170,5 @@ pub struct CxTexture {
     pub (crate) image_u32: Vec<u32>,
     //pub(crate) _image_f32: Vec<f32>,
     pub (crate) update_image: bool,
-    pub platform: CxOsTexture
+    pub os: CxOsTexture
 }

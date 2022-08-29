@@ -20,16 +20,16 @@ use {
                 nsstring_to_string,
                 str_to_nsstring,
             },
+            metal_xpc::store_xpc_service_texture,
             cocoa_app::CocoaApp,
             cocoa_window::CocoaWindow,
         },
         draw_list::DrawListId,
         event::WindowGeom,
         cx::Cx,
-        pass::{CxPassParent, PassClearColor, PassClearDepth, PassId},
+        pass::{PassClearColor, PassClearDepth, PassId},
         window::WindowId,
         texture::{
-            Texture,
             TextureFormat,
             TextureDesc,
         },
@@ -44,52 +44,6 @@ use {
 };
 
 impl Cx {
-
-    pub fn get_shared_texture_handle(&mut self, _texture:&Texture)->u64{
-        //let cxtexture = &self.textures[texture.texture_id()];
-        0
-    }
-
-    pub(crate) fn handle_repaint(&mut self, metal_windows: &mut Vec<MetalWindow>, metal_cx: &mut MetalCx) {
-
-        let mut passes_todo = Vec::new();
-        self.compute_pass_repaint_order(&mut passes_todo);
-        self.repaint_id += 1;
-        for pass_id in &passes_todo {
-            match self.passes[*pass_id].parent.clone() {
-                CxPassParent::Window(window_id) => {
-                    if let Some(metal_window) = metal_windows.iter_mut().find( | w | w.window_id == window_id) {
-                        let dpi_factor = metal_window.window_geom.dpi_factor;
-                        metal_window.resize_core_animation_layer(&metal_cx);
-                        
-                        self.draw_pass_to_layer(
-                            *pass_id,
-                            dpi_factor,
-                            metal_window.ca_layer,
-                            metal_cx,
-                            metal_window.is_resizing
-                        );
-                    }
-                    
-                }
-                CxPassParent::Pass(parent_pass_id) => {
-                    let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass_to_texture(
-                        *pass_id,
-                        dpi_factor,
-                        metal_cx,
-                    );
-                },
-                CxPassParent::None => {
-                    self.draw_pass_to_texture(
-                        *pass_id,
-                        1.0,
-                        metal_cx,
-                    );
-                }
-            }
-        }
-    }
     
     
     fn render_view(
@@ -124,9 +78,9 @@ impl Cx {
             else {
                 let draw_list = &mut self.draw_lists[draw_list_id];
                 let draw_item = &mut draw_list.draw_items[draw_item_id];
-                let draw_call = if let Some(draw_call) = draw_item.kind.draw_call_mut(){
+                let draw_call = if let Some(draw_call) = draw_item.kind.draw_call_mut() {
                     draw_call
-                }else{
+                }else {
                     continue;
                 };
                 let sh = &self.draw_shaders[draw_call.draw_shader.draw_shader_id];
@@ -238,16 +192,22 @@ impl Cx {
                     
                     let cxtexture = &mut self.textures[texture_id];
                     
-                    if cxtexture.update_image {
+                    if cxtexture.desc.format.is_shared() {
+                        cxtexture.os.update_shared_texture(
+                            metal_cx,
+                            &cxtexture.desc,
+                        );
+                    }
+                    else if cxtexture.update_image {
                         cxtexture.update_image = false;
-                        cxtexture.platform.update_normal_texture(
+                        cxtexture.os.update_normal_texture(
                             metal_cx,
                             &cxtexture.desc,
                             &cxtexture.image_u32
                         );
                     }
                     
-                    if let Some(inner) = cxtexture.platform.inner.as_ref() {
+                    if let Some(inner) = cxtexture.os.inner.as_ref() {
                         let () = unsafe {msg_send![
                             encoder,
                             setFragmentTexture: inner.texture.as_id()
@@ -282,20 +242,36 @@ impl Cx {
         }
     }
     
-    fn setup_render_pass_descriptor(&mut self, render_pass_descriptor: ObjcId, pass_id: PassId, inherit_dpi_factor: f64, first_texture: Option<ObjcId>, metal_cx: &MetalCx) {
+    pub fn draw_pass(
+        &mut self,
+        pass_id: PassId,
+        dpi_factor: f64,
+        metal_cx: &mut MetalCx,
+        drawable: ObjcId,
+        is_resizing: bool
+    ) {
+        let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
+        
+        let pool: ObjcId = unsafe {msg_send![class!(NSAutoreleasePool), new]};
+        
+        let render_pass_descriptor: ObjcId = unsafe {msg_send![class!(MTLRenderPassDescriptorInternal), renderPassDescriptor]};
+        
         let pass_size = self.passes[pass_id].pass_size;
         
         self.passes[pass_id].set_matrix(DVec2::default(), pass_size);
         self.passes[pass_id].paint_dirty = false;
+        
         let dpi_factor = if let Some(override_dpi_factor) = self.passes[pass_id].override_dpi_factor {
             override_dpi_factor
         }
         else {
-            inherit_dpi_factor
+            dpi_factor
         };
+        
         self.passes[pass_id].set_dpi_factor(dpi_factor);
         
-        if let Some(first_texture) = first_texture {
+        if drawable != nil {
+            let first_texture: ObjcId = unsafe {msg_send![drawable, texture]};
             let color_attachments: ObjcId = unsafe {msg_send![render_pass_descriptor, colorAttachments]};
             let color_attachment: ObjcId = unsafe {msg_send![color_attachments, objectAtIndexedSubscript: 0]};
             
@@ -320,11 +296,12 @@ impl Cx {
                 let color_attachment: ObjcId = unsafe {msg_send![color_attachments, objectAtIndexedSubscript: index as u64]};
                 
                 let cxtexture = &mut self.textures[color_texture.texture_id];
-                cxtexture.platform.update_render_target(metal_cx, AttachmentKind::Color, &cxtexture.desc, dpi_factor * pass_size);
+
+                cxtexture.os.update_render_target(metal_cx, AttachmentKind::Color, &cxtexture.desc, dpi_factor * pass_size);
                 
-                let is_initial = cxtexture.platform.inner.as_mut().unwrap().initial();
+                let is_initial = cxtexture.os.inner.as_mut().unwrap().initial();
                 
-                if let Some(inner) = cxtexture.platform.inner.as_ref() {
+                if let Some(inner) = cxtexture.os.inner.as_ref() {
                     let () = unsafe {msg_send![
                         color_attachment,
                         setTexture: inner.texture.as_id()
@@ -369,12 +346,12 @@ impl Cx {
         // attach depth texture
         if let Some(depth_texture_id) = self.passes[pass_id].depth_texture {
             let cxtexture = &mut self.textures[depth_texture_id];
-            cxtexture.platform.update_render_target(metal_cx, AttachmentKind::Depth, &cxtexture.desc, dpi_factor * pass_size);
-            let is_initial = cxtexture.platform.inner.as_mut().unwrap().initial();
+            cxtexture.os.update_render_target(metal_cx, AttachmentKind::Depth, &cxtexture.desc, dpi_factor * pass_size);
+            let is_initial = cxtexture.os.inner.as_mut().unwrap().initial();
             
             let depth_attachment: ObjcId = unsafe {msg_send![render_pass_descriptor, depthAttachment]};
             
-            if let Some(inner) = cxtexture.platform.inner.as_ref() {
+            if let Some(inner) = cxtexture.os.inner.as_ref() {
                 unsafe {msg_send![depth_attachment, setTexture: inner.texture.as_id()]}
             }
             else {
@@ -407,84 +384,6 @@ impl Cx {
                 self.passes[pass_id].platform.mtl_depth_state = Some(depth_stencil_state);
             }
         }
-    }
-    
-    fn draw_pass_to_layer(
-        &mut self,
-        pass_id: PassId,
-        dpi_factor: f64,
-        layer: ObjcId,
-        metal_cx: &mut MetalCx,
-        is_resizing: bool
-    ) {
-        self.os.bytes_written = 0;
-        self.os.draw_calls_done = 0;
-        let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
-        
-        let pool: ObjcId = unsafe {msg_send![class!(NSAutoreleasePool), new]};
-        
-        //let command_buffer = command_queue.new_command_buffer();
-        let drawable: ObjcId = unsafe {msg_send![layer, nextDrawable]};
-        if drawable != nil {
-            let render_pass_descriptor: ObjcId = unsafe {msg_send![class!(MTLRenderPassDescriptorInternal), renderPassDescriptor]};
-            
-            let texture: ObjcId = unsafe {msg_send![drawable, texture]};
-            
-            self.setup_render_pass_descriptor(render_pass_descriptor, pass_id, dpi_factor, Some(texture), metal_cx);
-            
-            let command_buffer: ObjcId = unsafe {msg_send![metal_cx.command_queue, commandBuffer]};
-            let encoder: ObjcId = unsafe {msg_send![command_buffer, renderCommandEncoderWithDescriptor: render_pass_descriptor]};
-            
-            //println!("BUFFER START! {}", command_buffer as *const _ as u64);
-            
-            unsafe {msg_send![encoder, textureBarrier]}
-            
-            if let Some(depth_state) = self.passes[pass_id].platform.mtl_depth_state {
-                let () = unsafe {msg_send![encoder, setDepthStencilState: depth_state]};
-            }
-            let mut zbias = 0.0;
-            let zbias_step = self.passes[pass_id].zbias_step;
-            
-            let mut gpu_read_guards = Vec::new();
-            self.render_view(
-                pass_id,
-                draw_list_id,
-                &mut zbias,
-                zbias_step,
-                encoder,
-                command_buffer,
-                &mut gpu_read_guards,
-                &metal_cx,
-            );
-            
-            let () = unsafe {msg_send![encoder, endEncoding]};
-            if is_resizing {
-                self.commit_command_buffer(command_buffer, gpu_read_guards);
-                let () = unsafe {msg_send![command_buffer, waitUntilScheduled]};
-                let () = unsafe {msg_send![drawable, present]};
-            }
-            else {
-                
-                let () = unsafe {msg_send![command_buffer, presentDrawable: drawable]};
-                self.commit_command_buffer(command_buffer, gpu_read_guards);
-            }
-            
-        }
-        let () = unsafe {msg_send![pool, release]};
-    }
-    
-    fn draw_pass_to_texture(
-        &mut self,
-        pass_id: PassId,
-        dpi_factor: f64,
-        metal_cx: &MetalCx,
-    ) {
-        let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
-        
-        let pool: ObjcId = unsafe {msg_send![class!(NSAutoreleasePool), new]};
-        let render_pass_descriptor: ObjcId = unsafe {msg_send![class!(MTLRenderPassDescriptorInternal), renderPassDescriptor]};
-        
-        self.setup_render_pass_descriptor(render_pass_descriptor, pass_id, dpi_factor, None, metal_cx);
         
         let command_buffer: ObjcId = unsafe {msg_send![metal_cx.command_queue, commandBuffer]};
         let encoder: ObjcId = unsafe {msg_send![command_buffer, renderCommandEncoderWithDescriptor: render_pass_descriptor]};
@@ -496,6 +395,7 @@ impl Cx {
         let mut zbias = 0.0;
         let zbias_step = self.passes[pass_id].zbias_step;
         let mut gpu_read_guards = Vec::new();
+        
         self.render_view(
             pass_id,
             draw_list_id,
@@ -506,9 +406,22 @@ impl Cx {
             &mut gpu_read_guards,
             &metal_cx,
         );
-        let () = unsafe {msg_send![encoder, textureBarrier]};
+        
         let () = unsafe {msg_send![encoder, endEncoding]};
-        self.commit_command_buffer(command_buffer, gpu_read_guards);
+        
+        if drawable == nil {
+            self.commit_command_buffer(command_buffer, gpu_read_guards);
+        }
+        else if is_resizing {
+            self.commit_command_buffer(command_buffer, gpu_read_guards);
+            let () = unsafe {msg_send![command_buffer, waitUntilScheduled]};
+            let () = unsafe {msg_send![drawable, present]};
+        }
+        else {
+            let () = unsafe {msg_send![command_buffer, presentDrawable: drawable]};
+            self.commit_command_buffer(command_buffer, gpu_read_guards);
+        }
+        
         let () = unsafe {msg_send![pool, release]};
     }
     
@@ -535,13 +448,20 @@ pub struct MetalWindow {
     pub window_id: WindowId,
     pub window_geom: WindowGeom,
     cal_size: DVec2,
-    ca_layer: ObjcId,
+    pub ca_layer: ObjcId,
     pub cocoa_window: Box<CocoaWindow>,
-    is_resizing: bool
+    pub is_resizing: bool
 }
 
 impl MetalWindow {
-    pub(crate) fn new(window_id: WindowId, metal_cx: &MetalCx, cocoa_app: &mut CocoaApp, inner_size: DVec2, position: Option<DVec2>, title: &str) -> MetalWindow {
+    pub (crate) fn new(
+        window_id: WindowId,
+        metal_cx: &MetalCx,
+        cocoa_app: &mut CocoaApp,
+        inner_size: DVec2,
+        position: Option<DVec2>,
+        title: &str
+    ) -> MetalWindow {
         
         let ca_layer: ObjcId = unsafe {msg_send![class!(CAMetalLayer), new]};
         
@@ -577,17 +497,17 @@ impl MetalWindow {
         }
     }
     
-    pub(crate) fn start_resize(&mut self) {
+    pub (crate) fn start_resize(&mut self) {
         self.is_resizing = true;
         let () = unsafe {msg_send![self.ca_layer, setPresentsWithTransaction: YES]};
     }
     
-    pub(crate) fn stop_resize(&mut self) {
+    pub (crate) fn stop_resize(&mut self) {
         self.is_resizing = false;
         let () = unsafe {msg_send![self.ca_layer, setPresentsWithTransaction: NO]};
     }
     
-    pub(crate) fn resize_core_animation_layer(&mut self, _metal_cx: &MetalCx) -> bool {
+    pub (crate) fn resize_core_animation_layer(&mut self, _metal_cx: &MetalCx) -> bool {
         let cal_size = DVec2 {
             x: self.window_geom.inner_size.x * self.window_geom.dpi_factor,
             y: self.window_geom.inner_size.y * self.window_geom.dpi_factor
@@ -627,7 +547,7 @@ pub struct SlErr {
 
 impl Cx {
     
-    pub(crate) fn mtl_compile_shaders(&mut self, metal_cx: &MetalCx) {
+    pub (crate) fn mtl_compile_shaders(&mut self, metal_cx: &MetalCx) {
         for draw_shader_ptr in &self.draw_shaders.compile_set {
             if let Some(item) = self.draw_shaders.ptr_to_item.get(&draw_shader_ptr) {
                 let cx_shader = &mut self.draw_shaders.shaders[item.draw_shader_id];
@@ -662,19 +582,7 @@ impl Cx {
 
 impl MetalCx {
     
-    pub(crate) fn new() -> MetalCx {
-        /*
-        let devices = get_all_metal_devices();
-        for device in devices {
-            let is_low_power: BOOL = unsafe {msg_send![device, isLowPower]};
-            let command_queue: id = unsafe {msg_send![device, newCommandQueue]};
-            if is_low_power == YES {
-                return MetalCx {
-                    command_queue: command_queue,
-                    device: device
-                }
-            }
-        }*/
+    pub (crate) fn new() -> MetalCx {
         let device = get_default_metal_device().expect("Cannot get default metal device");
         MetalCx {
             command_queue: unsafe {msg_send![device, newCommandQueue]},
@@ -696,7 +604,7 @@ pub struct CxOsDrawShader {
 }
 
 impl CxOsDrawShader {
-    pub(crate) fn new(
+    pub (crate) fn new(
         metal_cx: &MetalCx,
         shader: MetalGeneratedShader,
     ) -> Option<Self> {
@@ -879,8 +787,8 @@ pub struct CxOsTexture {
 }
 
 impl CxOsTexture {
-
-
+    
+    
     fn update_normal_texture(
         &mut self,
         metal_cx: &MetalCx,
@@ -888,7 +796,7 @@ impl CxOsTexture {
         data: &[u32],
     ) {
         // we need a width/height for this one.
-        if desc.width.is_none() || desc.height.is_none(){
+        if desc.width.is_none() || desc.height.is_none() {
             log!("Normal texture width/height is undefined, cannot allocate it");
             return
         }
@@ -898,8 +806,8 @@ impl CxOsTexture {
         
         match desc.format {
             TextureFormat::ImageBGRA | TextureFormat::Default => {
-                if (width * height)as usize != data.len(){
-                    if data.len() != 0{
+                if (width * height)as usize != data.len() {
+                    if data.len() != 0 {
                         error!("Texture buffer not correct size {}*{} != {}", width, height, data.len());
                     }
                     return
@@ -908,14 +816,14 @@ impl CxOsTexture {
             _ => panic!(),
         }
         
-        let need_alloc = if let Some(inner) = &self.inner{
+        let need_alloc = if let Some(inner) = &self.inner {
             CxOsTextureInner::need_alloc(width, height, desc, inner)
         }
-        else{
+        else {
             true
         };
         
-        if need_alloc{
+        if need_alloc {
             let descriptor = RcObjcId::from_owned(NonNull::new(unsafe {
                 msg_send![class!(MTLTextureDescriptor), new]
             }).unwrap());
@@ -935,25 +843,34 @@ impl CxOsTexture {
                         ];
                         msg_send![metal_cx.device, newTextureWithDescriptor: descriptor]
                     }
-                    TextureFormat::SharedBGRA=>{
+                    TextureFormat::SharedBGRA(shared_id) => {
                         let _: () = msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Private];
                         let _: () = msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::RenderTarget];
-                        msg_send![metal_cx.device, newSharedTextureWithDescriptor: descriptor]
-                        // ok so upnext.
+                        let texture: ObjcId = msg_send![metal_cx.device, newSharedTextureWithDescriptor: descriptor];
+                        // lets send this to the other side.
+                        let shared: ObjcId = msg_send![texture, makeSharedTextureHandle];
+                        // lets send it over
+                        store_xpc_service_texture(shared_id, shared);
                         
+                        texture
                     }
                     _ => panic!(),
-                } 
+                }
             }).unwrap());
-        
+            
             self.inner = Some(CxOsTextureInner {
                 is_initial: true,
                 width,
                 height,
                 format: desc.format,
                 multisample: desc.multisample,
+                shared_handle: nil,
                 texture,
             });
+            
+            if desc.format.is_shared() {
+                return
+            }
         }
         
         let inner = self.inner.as_ref().unwrap();
@@ -969,8 +886,95 @@ impl CxOsTexture {
             replaceRegion: region
             mipmapLevel: 0
             withBytes: data.as_ptr() as *const std::ffi::c_void
-            bytesPerRow: (width * std::mem::size_of::<u32>() as u64 )
+            bytesPerRow: (width * std::mem::size_of::<u32>() as u64)
         ]};
+    }
+    
+    
+    fn update_shared_texture(
+        &mut self,
+        metal_cx: &MetalCx,
+        desc: &TextureDesc,
+    ) {
+        // we need a width/height for this one.
+        if desc.width.is_none() || desc.height.is_none() {
+            log!("Shared texture width/height is undefined, cannot allocate it");
+            return
+        }
+        
+        let width = desc.width.unwrap() as u64;
+        let height = desc.height.unwrap() as u64;
+        
+        let need_alloc = if let Some(inner) = &self.inner {
+            CxOsTextureInner::need_alloc(width, height, desc, inner)
+        }
+        else {
+            true
+        };
+        
+        if need_alloc {
+            let descriptor = RcObjcId::from_owned(NonNull::new(unsafe {
+                msg_send![class!(MTLTextureDescriptor), new]
+            }).unwrap());
+            
+            let texture = RcObjcId::from_owned(NonNull::new(unsafe {
+                let _: () = msg_send![descriptor.as_id(), setTextureType: MTLTextureType::D2];
+                let _: () = msg_send![descriptor.as_id(), setWidth: width as u64];
+                let _: () = msg_send![descriptor.as_id(), setHeight: height as u64];
+                let _: () = msg_send![descriptor.as_id(), setDepth: 1u64];
+                let _: () = msg_send![descriptor.as_id(), setStorageMode: MTLStorageMode::Private];
+                let _: () = msg_send![descriptor.as_id(), setUsage: MTLTextureUsage::RenderTarget];
+                match desc.format {
+                    TextureFormat::SharedBGRA(shared_id) => {
+                        let texture: ObjcId = msg_send![metal_cx.device, newSharedTextureWithDescriptor: descriptor];
+                        // lets send this to the other side.
+                        let shared: ObjcId = msg_send![texture, newSharedTextureHandle];
+                        // lets send it over
+                        store_xpc_service_texture(shared_id, shared);
+                        texture
+                    }
+                    _ => panic!(),
+                }
+            }).unwrap());
+            
+            self.inner = Some(CxOsTextureInner {
+                is_initial: true,
+                width,
+                height,
+                format: desc.format,
+                shared_handle: nil,
+                multisample: desc.multisample,
+                texture,
+            });
+        }
+    }
+    
+    pub fn update_from_shared_handle(
+        &mut self,
+        metal_cx: &MetalCx,
+        shared_handle: ObjcId,
+        width: u64,
+        height: u64,
+    ) {
+        if let Some(inner) = &self.inner {
+            if inner.shared_handle == shared_handle {
+                return
+            }
+        }
+        
+        let texture = RcObjcId::from_owned(NonNull::new(unsafe {
+            msg_send![metal_cx.device, newSharedTextureWithHandle: shared_handle]
+        }).unwrap());
+        
+        self.inner = Some(CxOsTextureInner {
+            is_initial: true,
+            width,
+            height,
+            format: TextureFormat::RenderBGRA,
+            multisample: None,
+            shared_handle,
+            texture,
+        });
     }
     
     fn update_render_target(
@@ -983,9 +987,12 @@ impl CxOsTexture {
         let width = desc.width.unwrap_or(default_size.x as usize) as u64;
         let height = desc.height.unwrap_or(default_size.y as usize) as u64;
         
-        if let Some(inner) = &self.inner{
-            if !CxOsTextureInner::need_alloc(width, height, desc, inner){
-                return 
+        if let Some(inner) = &self.inner {
+            if inner.shared_handle != nil{
+                return;
+            }
+            if !CxOsTextureInner::need_alloc(width, height, desc, inner) {
+                return
             }
         }
         
@@ -1032,6 +1039,7 @@ impl CxOsTexture {
             width,
             height,
             format: desc.format,
+            shared_handle: nil,
             multisample: desc.multisample,
             texture,
         });
@@ -1044,11 +1052,12 @@ struct CxOsTextureInner {
     height: u64,
     format: TextureFormat,
     multisample: Option<usize>,
+    shared_handle: ObjcId,
     texture: RcObjcId
 }
 
-impl CxOsTextureInner{
-    fn need_alloc(width:u64, height: u64, desc:&TextureDesc, inner:&CxOsTextureInner)->bool{
+impl CxOsTextureInner {
+    fn need_alloc(width: u64, height: u64, desc: &TextureDesc, inner: &CxOsTextureInner) -> bool {
         if inner.width != width {
             return true;
         }
@@ -1064,7 +1073,7 @@ impl CxOsTextureInner{
         false
     }
     
-    fn initial(&mut self)->bool{
+    fn initial(&mut self) -> bool {
         let ret = self.is_initial;
         self.is_initial = false;
         ret
@@ -1124,14 +1133,12 @@ impl Drop for MetalRwLockGpuReadGuard {
     }
 }
 
-
 pub fn get_default_metal_device() -> Option<ObjcId> {
     unsafe {
         let dev = MTLCreateSystemDefaultDevice();
         if dev == nil {None} else {Some(dev)}
     }
 }
-
 
 pub fn get_all_metal_devices() -> Vec<ObjcId> {
     #[cfg(target_os = "ios")]
