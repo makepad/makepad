@@ -92,6 +92,7 @@ pub struct RustcProfile {
 #[derive(Clone, DeJson, Debug, Default)]
 pub struct RustcCompilerMessage {
     pub reason: String,
+    pub signal: Option<u64>,
     pub success: Option<bool>,
     pub package_id: Option<String>,
     pub manifest_path: Option<String>,
