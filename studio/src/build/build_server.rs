@@ -107,6 +107,7 @@ impl BuildConnection {
             }
         );
         let mut stderr_state = StdErrState::First;
+        let stdin_sender = process.stdin_sender.clone();
         std::thread::spawn(move || {
             // lets create a BuildProcess and run it
             while let Ok(line) = process.line_receiver.recv() {
@@ -118,6 +119,9 @@ impl BuildConnection {
                             Ok(msg) => {
                                 // alright we have a couple of 'reasons'
                                 match msg.reason.as_str() {
+                                    "makepad-signal"=>{
+                                        let _ = stdin_sender.send(ChildStdIn::Send(format!("{{\"Signal\":[{}]}}", msg.signal.unwrap())));
+                                    }
                                     "makepad-error-log" | "compiler-message" => {
                                         msg_sender.process_compiler_message(cmd_id, msg);
                                     }
@@ -132,7 +136,8 @@ impl BuildConnection {
                                     _ => ()
                                 }
                             }
-                            Err(_) => { // we should output a log string
+                            Err(err) => { // we should output a log string
+                                //eprintln!("GOT ERROR {:?}", err);
                                 //log!("{:?}", err);
                                 msg_sender.send_stdin_to_host_msg(cmd_id, line);
                             }
