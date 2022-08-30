@@ -423,6 +423,11 @@ impl CxOsApi for Cx {
     }
     
     fn post_signal(signal: Signal) {
+         for arg in std::env::args() {
+            if arg == "--stdin-loop" {
+                return Self::stdin_post_signal(signal);
+            }
+        }
         CocoaApp::post_signal(signal.0.0);
     }
     

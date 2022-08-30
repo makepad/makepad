@@ -33,7 +33,7 @@ main_app!(App);
 #[derive(Live, LiveHook)]
 pub struct App {
     frame: Frame,
-    window: DesktopWindow,
+    window: BareWindow,
 }
 
 impl App {
@@ -43,7 +43,7 @@ impl App {
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
-        self.window.handle_event(cx, event, &mut |_,_|{});
+        self.window.handle_event(cx, event);
         
         for _ in self.frame.handle_event_vec(cx, event) {
         }
@@ -57,7 +57,7 @@ impl App {
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
-        if self.window.begin(cx, None).not_redrawing() {
+        if self.window.begin(cx).not_redrawing() {
             return;
         }
         while self.frame.draw(cx).is_not_done(){

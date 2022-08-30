@@ -68,9 +68,11 @@ impl RunView {
                 time: self.time
             })
         }
+        // ok what do we want. lets do fingerdown, finger 
+        
     }
     
-    pub fn handle_stdin_to_host(&mut self, cx: &mut Cx, cmd_id: BuildCmdId, msg: StdinToHost, state: &mut BuildState) {
+    pub fn handle_stdin_to_host(&mut self, cx: &mut Cx, _cmd_id: BuildCmdId, msg: StdinToHost, _state: &mut BuildState) {
         match msg {
             StdinToHost::ReadyToStart => {
                 // cause a resize event to fire
