@@ -150,6 +150,14 @@ impl AppInner {
                     state.file_path_join(&["examples/numbers/src/main.rs"]),
                     true
                 );
+                self.create_code_editor_tab(
+                    cx,
+                    state,
+                    id!(content1).into(),
+                    None,
+                    state.file_path_join(&["examples/fractal_zoom/src/mandelbrot.rs"]),
+                    true
+                );
                 self.build_manager.init(cx, state);
             }
             Event::Draw(event) => {
