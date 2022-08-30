@@ -1,6 +1,4 @@
 use {
-    std::ptr,
-    std::mem,
     std::sync::{Arc, Mutex},
     crate::{
         makepad_error_log::*,

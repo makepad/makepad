@@ -1,8 +1,6 @@
 use crate::from_wasm::*;
 use crate::to_wasm::*;
 use crate::wasm_types::*;
-use std::panic;
-use crate::makepad_error_log::*;
 
 #[export_name = "wasm_new_msg_with_u64_capacity"]
 #[cfg(target_arch = "wasm32")]
@@ -33,12 +31,3 @@ pub unsafe extern "C" fn wasm_new_data_u8(capacity_u8: u32) -> u32 {
 pub unsafe extern "C" fn wasm_free_data_u8(ptr: u32, len:u32, cap:u32) {
     WasmDataU8::take_ownership(ptr, len, cap);
 }
-
-#[cfg(not(target_arch = "wasm32"))]
-pub fn init_panic_hook(){
-    pub fn panic_hook(info: &panic::PanicInfo) {
-        // ok so. 
-    }
-    panic::set_hook(Box::new(panic_hook));
-}
-

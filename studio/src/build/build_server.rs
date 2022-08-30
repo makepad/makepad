@@ -120,7 +120,7 @@ impl BuildConnection {
                                 // alright we have a couple of 'reasons'
                                 match msg.reason.as_str() {
                                     "makepad-signal"=>{
-                                        let _ = stdin_sender.send(ChildStdIn::Send(format!("{{\"Signal\":[{}]}}", msg.signal.unwrap())));
+                                        let _ = stdin_sender.send(ChildStdIn::Send(format!("{{\"Signal\":[{}]}}\n", msg.signal.unwrap())));
                                     }
                                     "makepad-error-log" | "compiler-message" => {
                                         msg_sender.process_compiler_message(cmd_id, msg);
@@ -136,7 +136,7 @@ impl BuildConnection {
                                     _ => ()
                                 }
                             }
-                            Err(err) => { // we should output a log string
+                            Err(_) => { // we should output a log string
                                 //eprintln!("GOT ERROR {:?}", err);
                                 //log!("{:?}", err);
                                 msg_sender.send_stdin_to_host_msg(cmd_id, line);

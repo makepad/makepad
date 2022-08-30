@@ -1,11 +1,7 @@
 use crate::{
     makepad_draw_2d::*,
     build::build_manager::BuildState,
-    makepad_platform::os::cx_stdin::{
-        HostToStdin,
-        StdinToHost,
-        StdinWindowSize
-    },
+    makepad_platform::os::cx_stdin::*,
     build::{
         build_protocol::*,
     }
@@ -69,7 +65,45 @@ impl RunView {
             })
         }
         // ok what do we want. lets do fingerdown, finger 
-        
+        match event.hits(cx, self.bg.area()) {
+            Hit::FingerDown(fe) => {
+                let rel = fe.abs - fe.rect.pos;
+                state.send_host_to_stdin(None, HostToStdin::FingerDown(StdinFingerDown{
+                    time: fe.time,
+                    x: rel.x,
+                    y: rel.y,
+                    mouse_button: if let DigitDevice::Mouse(mb) = fe.digit.device{
+                        Some(mb)
+                    }else{None},
+                    digit_id: fe.digit.id.0.0,
+                }));
+            },
+            Hit::FingerUp(fe) => {
+                let rel = fe.abs - fe.rect.pos;
+                state.send_host_to_stdin(None, HostToStdin::FingerUp(StdinFingerUp{
+                    time: fe.time,
+                    x: rel.x,
+                    y: rel.y,
+                    mouse_button: if let DigitDevice::Mouse(mb) = fe.digit.device{
+                        Some(mb)
+                    }else{None},
+                    digit_id: fe.digit.id.0.0,
+                }));
+            }
+            Hit::FingerMove(fe) => {
+                let rel = fe.abs - fe.rect.pos;
+                state.send_host_to_stdin(None, HostToStdin::FingerMove(StdinFingerMove{
+                    time: fe.time,
+                    x: rel.x,
+                    y: rel.y,
+                    mouse_button: if let DigitDevice::Mouse(mb) = fe.digit.device{
+                        Some(mb)
+                    }else{None},
+                    digit_id: fe.digit.id.0.0,
+                }));
+            }
+            _ => ()
+        }
     }
     
     pub fn handle_stdin_to_host(&mut self, cx: &mut Cx, _cmd_id: BuildCmdId, msg: StdinToHost, _state: &mut BuildState) {
@@ -99,6 +133,7 @@ impl RunView {
         self.bg.draw_abs(cx, rect);
         for client in &state.clients {
             for process in client.processes.values() {
+                
                 let new_size = ((rect.size.x * dpi_factor) as usize, (rect.size.y * dpi_factor) as usize);
                 if new_size != self.last_size {
                     self.last_size = new_size;
@@ -117,6 +152,7 @@ impl RunView {
                     }));
                 }
                 self.bg.set_texture(0, &process.texture);
+                
                 break
             }
         }
