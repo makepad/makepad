@@ -1,3 +1,7 @@
+#![allow(unused_imports)]
+#![allow(unused_variables)]
+#![allow(dead_code)]
+
 use {
     crate::{
         makepad_micro_serde::*,
@@ -8,11 +12,11 @@ use {
         }
     },
     std::{
-        env,
         io::{Read, Write},
         net::{TcpListener, TcpStream},
         sync::mpsc::{self, Receiver, Sender, TryRecvError},
         thread,
+        env,
         path::PathBuf
     },
 };
@@ -44,10 +48,12 @@ impl BuildClient {
     }
     
     #[cfg(target_arch = "wasm32")]
-    pub fn send_cmd(&mut self, _cmd: BuilderCmd) {}
+    pub fn send_cmd(&self, _cmd: BuildCmd) ->BuildCmdId{
+        BuildCmdId(LiveId::unique().0)
+    }
 
     #[cfg(target_arch = "wasm32")]
-    pub fn send_cmd_with_id(&mut self, cmd_id: BuildCmdId, cmd: BuildCmd){}
+    pub fn send_cmd_with_id(&self, cmd_id: BuildCmdId, cmd: BuildCmd){}
      
     pub fn handle_event_vec(&mut self, cx: &mut Cx, event: &Event) -> Vec<BuildMsgWrap> {
         let mut a = Vec::new();

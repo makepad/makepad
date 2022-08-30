@@ -62,7 +62,7 @@ impl AudioGraphNode for Node {
         }
         if let Some(audio_unit) = &self.audio_unit {
             audio_unit.render_to_audio_buffer(time, outputs, inputs);
-            let mut display_buffer = display.pop_buffer_resize(outputs[0].frame_count(), outputs[0].channel_count());
+            let display_buffer = display.pop_buffer_resize(outputs[0].frame_count(), outputs[0].channel_count());
             if let Some(mut buf) = display_buffer {
                 buf.copy_from(&outputs[0]);
                 display.send_buffer(true, 0, buf);

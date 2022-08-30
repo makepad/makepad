@@ -50,7 +50,7 @@ impl ChildProcess {
         let (line_sender, line_receiver) = mpsc::channel();
         let (stdin_sender, stdin_receiver) = mpsc::channel();
 
-        let mut stdin = child.stdin.take().expect("stdout cannot be taken!");
+        let mut stdin = child.stdin.take().expect("stdin cannot be taken!");
         let stdout = child.stdout.take().expect("stdout cannot be taken!");
         let stderr = child.stderr.take().expect("stderr cannot be taken!");
         
@@ -104,7 +104,10 @@ impl ChildProcess {
                 while let Ok(line) = stdin_receiver.recv() {
                     match line {
                         ChildStdIn::Send(line) => {
-                            let _ = stdin.write_all(line.as_bytes());
+                            if let Err(e) = stdin.write_all(line.as_bytes()){
+                                println!("Stdin send error {}", e);
+                            }
+                            let _ = stdin.flush();
                         }
                         ChildStdIn::Term=>{
                             break;

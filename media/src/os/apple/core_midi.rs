@@ -1,6 +1,4 @@
 use {
-    std::ptr,
-    std::mem,
     crate::{
         midi::*,
         os::apple::frameworks::*,

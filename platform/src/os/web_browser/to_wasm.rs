@@ -12,13 +12,13 @@ use {
             CxFingers,
             DigitInfo,
             DigitId,
+            DigitDevice,
             XRButton,
             XRInput,
             XRUpdateEvent,
             KeyCode,
-            FingerDownEvent,
             KeyModifiers,
-            DigitDevice,
+            FingerDownEvent,
             FingerUpEvent,
             FingerMoveEvent,
             FingerHoverEvent,
@@ -151,7 +151,7 @@ impl ToWasmTouchStart {
         FingerDownEvent {
             window_id: CxWindowPool::id_zero(),
             abs: DVec2 {x: self.touch.x, y: self.touch.y},
-            handled: Cell::new(false),
+            handled: Cell::new(Area::Empty),
             digit: DigitInfo {
                 id: digit_id,
                 index: fingers.get_digit_index(digit_id),
@@ -177,7 +177,7 @@ impl ToWasmTouchMove {
             window_id: CxWindowPool::id_zero(),
             abs: DVec2 {x: self.touch.x, y: self.touch.y},
             tap_count: fingers.get_tap_count(digit_id),
-            handled: Cell::new(false),
+            handled: Cell::new(Area::Empty),
             sweep_lock: Cell::new(Area::Empty),
             digit: DigitInfo {
                 id: digit_id,
@@ -240,7 +240,7 @@ impl ToWasmMouseDown {
         FingerDownEvent {
             window_id: CxWindowPool::id_zero(),
             abs: DVec2 {x: self.mouse.x, y: self.mouse.y},
-            handled: Cell::new(false),
+            handled: Cell::new(Area::Empty),
             sweep_lock: Cell::new(Area::Empty),
             digit: DigitInfo {
                 id: digit_id,
@@ -273,7 +273,7 @@ impl ToWasmMouseMove {
                 count: fingers.get_digit_count(),
                 device: DigitDevice::Mouse(button),
             },
-            handled: Cell::new(false),
+            handled: Cell::new(Area::Empty),
             hover_last: fingers.get_hover_area(digit_id),
             tap_count: fingers.get_tap_count(digit_id),
             //captured: fingers.get_captured_area(digit_id),
