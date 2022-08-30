@@ -56,7 +56,7 @@ impl Cx {
         }
     }
     
-    pub fn stdin_post_signal(signal:Signal){
+    pub fn stdin_post_signal(signal: Signal) {
         let _ = std::io::stdout().write_all(format!("{{\"reason\":\"makepad-signal\", \"signal\":{}}}\n", signal.0.0).as_bytes());
     }
     
@@ -78,6 +78,35 @@ impl Cx {
                 let parsed: Result<HostToStdin, DeJsonErr> = DeJson::deserialize_json(&line);
                 match parsed {
                     Ok(msg) => match msg {
+                        HostToStdin::FingerDown(fe) => {
+                            let digit_id = LiveId(fe.digit_id).into();
+                            self.fingers.alloc_digit(digit_id);
+                            self.fingers.process_tap_count(
+                                digit_id,
+                                DVec2 {x: fe.x, y: fe.y},
+                                fe.time
+                            );
+                            self.call_event_handler(&Event::FingerDown(
+                                fe.into_finger_down_event(&self.fingers)
+                            ));
+                            self.fingers.cycle_hover_area(digit_id);
+                        }
+                        HostToStdin::FingerMove(fe) => {
+                            let digit_id = LiveId(fe.digit_id).into();
+                            // lets grab the captured area
+                            self.call_event_handler(&Event::FingerMove(
+                                fe.into_finger_move_event(&self.fingers)
+                            ));
+                            self.fingers.cycle_hover_area(digit_id);
+                        }
+                        HostToStdin::FingerUp(fe) => {
+                            log!("GOT UP!");
+                            let digit_id = LiveId(fe.digit_id).into();
+                            self.call_event_handler(&Event::FingerUp(
+                                fe.into_finger_up_event(&self.fingers)
+                            ));
+                            self.fingers.free_digit(digit_id);
+                        }
                         HostToStdin::WindowSize(ws) => {
                             if window_size.is_none() {
                                 // lets allocate our framebuffer textures
@@ -86,7 +115,7 @@ impl Cx {
                             if window_size != Some(ws) {
                                 window_size = Some(ws);
                                 self.redraw_all();
-
+                                
                                 let window = &mut self.windows[CxWindowPool::id_zero()];
                                 window.window_geom = WindowGeom {
                                     dpi_factor: ws.dpi_factor,
@@ -97,19 +126,20 @@ impl Cx {
                                 self.stdin_handle_platform_ops(metal_cx, &fb_texture);
                             }
                         }
-                        HostToStdin::Signal(signal_id)=>{
+                        HostToStdin::Signal(signal_id) => {
                             self.send_signal(Signal(LiveId(signal_id)));
                             self.handle_triggers_and_signals();
                         }
                         HostToStdin::Tick {frame: _, time} => if let Some(ws) = window_size {
                             // ok so..
                             // as long as dont have the texture with id 'x' we keep requesting it here
-                            let uid = if let Some((_, uid)) = fb_shared.lock().unwrap().borrow().as_ref() {*uid}else{0};
+                            let uid = if let Some((_, uid)) = fb_shared.lock().unwrap().borrow().as_ref() {*uid}else {0};
                             fetch_xpc_service_texture(service_proxy.as_id(), 0, uid, Box::new({
                                 let fb_shared = fb_shared.clone();
-                                move | shared_handle, shared_uid | {
+                                move | shared_handle,
+                                shared_uid | {
                                     *fb_shared.lock().unwrap().borrow_mut() = Some((shared_handle, shared_uid));
-                                } 
+                                }
                             }));
                             
                             // alright a tick.
@@ -123,7 +153,6 @@ impl Cx {
                                 self.mtl_compile_shaders(metal_cx);
                             }
                             
-                            self.stdin_handle_platform_ops(metal_cx, &fb_texture);
                             // lets render to the framebuffer
                             if let Some((shared_handle, shared_uid)) = fb_shared.lock().unwrap().borrow().as_ref() {
                                 if shared_check != *shared_uid {
@@ -151,6 +180,7 @@ impl Cx {
                 }
             }
             // we should poll our runloop
+            self.stdin_handle_platform_ops(metal_cx, &fb_texture);
             xpc_service_proxy_poll_run_loop();
         }
     }
