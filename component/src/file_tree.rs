@@ -18,7 +18,7 @@ live_register!{
             return mix(
                 mix(
                     COLOR_BG_EDITOR,
-                    #2,
+                    COLOR_BG_ODD,
                     self.is_even
                 ),
                 mix(

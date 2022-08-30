@@ -88,7 +88,7 @@ impl Cx {
                     }
                     self.os.window_geom = tw.window_info.into();
                     
-                    self.default_inner_window_size = self.os.window_geom.inner_size;
+                    //self.default_inner_window_size = self.os.window_geom.inner_size;
                     
                     self.call_event_handler(&Event::Construct);
                     //self.platform.from_wasm(FromWasmCreateThread{thread_id:1});

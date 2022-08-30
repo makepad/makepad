@@ -37,7 +37,7 @@ live_register!{
     }
     
     Mandelbrot: {{Mandelbrot}} {
-        max_iter: 500,
+        max_iter: 320,
     }
 }
 
@@ -176,7 +176,7 @@ impl TileCache {
             current_zoom: 0.0,
             next_zoom: 0.0,
             tiles_in_flight: 0,
-            thread_pool: ThreadPool::new(cx, 8),
+            thread_pool: ThreadPool::new(cx, use_cores),
         }
     }
     
@@ -279,7 +279,7 @@ impl TileCache {
         let mut seg_pass = 0;
         let mut any_intersect = false;
         let mut intersect_step = 0;
-        for step in 0..10000 {
+        for step in 0..100000 {
             if f(step, i, j) {
                 any_intersect = true;
             }
@@ -464,6 +464,7 @@ impl Mandelbrot {
         let max_iter = self.max_iter;
         // we pull a cloneable sender from the to_ui message channel for the worker
         let to_ui = self.to_ui.sender();
+        
         self.tile_cache.thread_pool.execute(move | bail_test | {
             if TileCache::tile_needs_to_bail(&tile, bail_test) {
                 return to_ui.send(ToUI::TileBailed {tile}).unwrap();
