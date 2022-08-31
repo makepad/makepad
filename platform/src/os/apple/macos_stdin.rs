@@ -100,7 +100,6 @@ impl Cx {
                             self.fingers.cycle_hover_area(digit_id);
                         }
                         HostToStdin::FingerUp(fe) => {
-                            log!("GOT UP!");
                             let digit_id = LiveId(fe.digit_id).into();
                             self.call_event_handler(&Event::FingerUp(
                                 fe.into_finger_up_event(&self.fingers)
