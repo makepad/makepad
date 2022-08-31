@@ -96,7 +96,44 @@ live_register!{
             walk:{height: 22}
         }
     }
-    
+    InstrumentBipolarSlider: ElementBox {
+        slider = Slider {
+            label: "CutOff1"
+            walk:{height: 22}
+            slider:{
+                fn pixel(self) -> vec4 {
+                    let slider_height = 7;
+                    let nub_size = mix(3, 4, self.hover);
+                    let nubbg_size = 18
+                    
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                    
+                    let slider_bg_color = mix(#38, #30, self.focus);
+                    
+                    let slider_color = mix(mix(#5, #68, self.hover), #68, self.focus);
+                    let nub_color = mix(mix(#8, #f, self.hover), mix(#c, #f, self.drag), self.focus);
+                    let nubbg_color = mix(#eee0, #8, self.drag);
+                    
+                    sdf.rect(0, self.rect_size.y - slider_height, self.rect_size.x, slider_height)
+                    sdf.fill(slider_bg_color);
+                    
+                    sdf.rect(self.rect_size.x /2, self.rect_size.y - slider_height, self.slide_pos * (self.rect_size.x - nub_size) + nub_size, slider_height)
+                    sdf.fill(slider_color);
+                    
+                    let nubbg_x = self.slide_pos * (self.rect_size.x - nub_size) - nubbg_size * 0.5 + 0.5 * nub_size;
+                    sdf.rect(nubbg_x, self.rect_size.y - slider_height, nubbg_size, slider_height)
+                    sdf.fill(nubbg_color);
+                    
+                    // the nub
+                    let nub_x = self.slide_pos * (self.rect_size.x - nub_size);
+                    sdf.rect(nub_x, self.rect_size.y - slider_height, nub_size, slider_height)
+                    sdf.fill(nub_color);
+                    
+                    return sdf.result
+                }
+            }
+        }
+    }
     InstrumentCheckbox: ElementBox {
         checkbox = CheckBox {
             label: "CutOff1"
@@ -122,7 +159,7 @@ live_register!{
         dropdown = DropDown {}
     } 
      GraphPaper: Box{
-        walk: {width: Fill, height: 200}
+        walk: {width: Fill, height: 100}
         bg: {
             color: #202020ff, 
             color: #202020ff, 
@@ -188,7 +225,7 @@ live_register!{
         walk:{width: Fit, height: Fit}
         layout:{padding: 5}
         label = Label{
-            label:{text_style:{font_size: 12}, color: #f}
+            label:{text_style:{font_size: 12}, color: #0}
             text: "replace me!"
         }
     }
@@ -201,7 +238,7 @@ live_register!{
             color: #804030, 
             color2: #404040, 
             fn get_fill(self)->vec4{
-                return mix(self.color*0.8, self.color2, clamp((self.pos.y * self.rect_size.y)/300,0,1))
+                return mix(self.color*0.9, self.color2, clamp((self.pos.y * self.rect_size.y)/300,0,1))
             }
         }
     }
@@ -215,7 +252,7 @@ live_register!{
     MixerPanel: FishPanel{
         bg: {color: #d0d0d0}
         label = {label={text:"Mixer"}}
-        balance = InstrumentSlider {
+        balance = InstrumentBipolarSlider {
             slider = {
                 bind: "osc_balance"
                 min: 0.0
@@ -243,7 +280,26 @@ live_register!{
     }
     FXPanel: FishPanel{
         bg: {color: #8080f0}
-        label = {label={text:"FX"}}
+        label = {label={text:"FX", label:{color:#fff}}}
+    }
+    LFOPanel: FishPanel{
+        bg: {color: #ff0000}
+        label = {label={text:"LFO"}}
+
+        rate = InstrumentSlider {
+            slider = {
+                bind: "lfo.rate"
+                min: 0.0
+                max: 1.0
+                label: "Rate"
+            }
+        }
+        sync = InstrumentCheckbox{
+            checkbox = {
+                bind: "lfo.synconkey",
+                label:"Key sync"
+            }
+        }
     }
     VolumeEnvelopePanel:FishPanel{
         bg: {color: #f08000}
@@ -273,7 +329,12 @@ live_register!{
 
         bg: {color: #0000f0}
 
-        label = {label={text:"Filter"}}
+        label = {
+                 label={text:"Filter",
+                label:{color:#fff}
+            }
+            
+        }
         InstrumentDropdown {
             label = {text: "Filter"}
             dropdown = {
@@ -301,7 +362,7 @@ live_register!{
             }
         }
         
-        modamount = InstrumentSlider {
+        modamount = InstrumentBipolarSlider {
             slider = {
                 bind: "filter1.envelope_amount"
                 min: -1.0
@@ -309,8 +370,15 @@ live_register!{
                 label: "Mod Env Amount"
             }
         }
-        
-        touchamount = InstrumentSlider {
+        lfoamount = InstrumentBipolarSlider {
+            slider = {
+                bind: "filter1.lfo_amount"
+                min: -1.0
+                max: 1.0
+                label: "LFO Amount"
+            }
+        }
+        touchamount = InstrumentBipolarSlider {
             slider = {
                 bind: "filter1.touch_amount"
                 min: -1.0
@@ -332,19 +400,19 @@ live_register!{
             }
         }
 
-        transpose = InstrumentSlider {
+        transpose = InstrumentBipolarSlider {
             slider = {
                 bind: "osc1.transpose"
-                min: -36.0
-                max: 36.0
+                min: -24.0
+                max: 24.0
                 label: "Transpose"
             }
         }
 
-        detune = InstrumentSlider {
+        detune = InstrumentBipolarSlider {
             slider = {
                 bind: "osc1.detune"
-                min: 0.0
+                min: -1.0
                 max: 1.0
                 label: "Detune"
             }
@@ -453,7 +521,7 @@ live_register!{
     }
     
     App: {{App}} {
-        window: {window:{inner_size: vec2(1280,1000)},pass: {clear_color: (COLOR_BG_APP)}}
+        window: {window:{inner_size: vec2(1280,1000)},pass: {clear_color: (#1)}}
         audio_graph: {
             root: Mixer {
                 c1 = Instrument {
@@ -498,8 +566,8 @@ live_register!{
             }
                      
             FoldablePiano {}
-            Frame {
-                layout: {flow: Right, spacing: 5.0}
+                Frame {
+                    layout: {flow: Right, spacing: 5.0}
                 Frame {
                     layout: {flow: Down, spacing: 5.0}
                     OscPanel{
@@ -524,14 +592,21 @@ live_register!{
                 Frame{
                     layout: {flow: Down, spacing: 5.0}
 
+                    LFOPanel{}
                     FilterPanel{}
-                    TouchPanel{}         
+                    TouchPanel{}   
+                          
                     FXPanel{}
+                    FishPanel{
+                        bg: {color: #3}
+                        label = {label={text:"Scope"}}
+                        display_audio = DisplayAudio {
+                            walk: {height: 300, width: Fill}
+                        }  
+                    }                
                 }
             }
-            display_audio = DisplayAudio {
-                walk: {height: Fill, width: Fill}
-            }                    
+                              
         }
     }
 }

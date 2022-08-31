@@ -26,6 +26,14 @@ pub enum OscType {
 }
 
 #[derive(Live, LiveHook, PartialEq, LiveAtomic, Debug, LiveRead)]
+pub enum LFOWave {
+    #[pick] Saw,
+    Sine,
+    Pulse,
+    Triangle
+}
+
+#[derive(Live, LiveHook, PartialEq, LiveAtomic, Debug, LiveRead)]
 pub enum FilterType {
     #[pick] Lowpass,
     Highpass,
@@ -67,11 +75,23 @@ pub struct OscSettings {
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub struct EnvelopeSettings {
     #[live(0.0)] predelay: f32a,
-    #[live(0.1)] a: f32a,
+    #[live(0.05)] a: f32a,
     #[live(0.0)] h: f32a,
-    #[live(0.6)] d: f32a,
-    #[live(0.3)] s: f32a,
-    #[live(0.5)] r: f32a
+    #[live(0.2)] d: f32a,
+    #[live(0.5)] s: f32a,
+    #[live(0.2)] r: f32a
+}
+#[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
+pub struct LFOSettings {
+    #[live(0.2)] rate: f32a,
+    #[live(0)] keysync: u32a,
+    waveform: U32A<LFOWave> 
+}
+
+#[derive(Copy, Clone)]
+pub struct LFOState
+{
+    phase: f32
 }
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
@@ -80,6 +100,7 @@ pub struct FilterSettings {
     #[live(300.0 / 44100.0)] cutoff: f32a,
     #[live(0.05)] resonance: f32a,
     #[live(0.1)] envelope_amount: f32a,
+    #[live(0.1)] lfo_amount: f32a,
     #[live(0.1)] touch_amount: f32a,
     #[live(0.0)] envelope_curvature: f32a
 }
@@ -90,14 +111,14 @@ pub struct IronFishSettings {
     osc1: OscSettings,
     osc2: OscSettings,
     subosc: OscSettings,
-    
+    lfo: LFOSettings,
     filter1: FilterSettings,
     volume_envelope: EnvelopeSettings,
     mod_envelope: EnvelopeSettings,
     #[live(44100.0)] sample_rate: f32a,
     #[live(0.5)] osc_balance: f32a,
     #[live(0.5)] sub_osc: f32a,
-    #[live(0.1)] noise: f32a,
+    #[live(0.0)] noise: f32a,
 }
 
 #[derive(Copy, Clone)]
@@ -335,32 +356,35 @@ impl EnvelopeState {
                         self.delta_value = 0.0;
                         self.current_value = 1.0;
                         self.target_value = 1.0;
-                        self.state_time = (settings.h.get() * samplerate) as i32;
+                        self.state_time = EnvelopeState::nicerange(settings.h.get() ,samplerate) as i32;
                         
                     }
                     else {
                         self.phase = EnvelopePhase::Decay;
-                        self.delta_value = -(1.0 - settings.s.get()) / (settings.d.get() * samplerate);
+                        let sustainlevel = settings.s.get()*settings.s.get();
+                        self.delta_value = -(1.0 - sustainlevel) / EnvelopeState::nicerange(settings.d.get() , samplerate);
                         self.current_value = 1.0;
-                        self.target_value = settings.s.get();
-                        self.state_time = (settings.d.get() * samplerate) as i32;
+                        self.target_value = sustainlevel;
+                        self.state_time = EnvelopeState::nicerange(settings.d.get(),samplerate) as i32;
                     }
                 }
                 
                 EnvelopePhase::Hold => {
                     
+                    let sustainlevel = settings.s.get()*settings.s.get();
                     self.phase = EnvelopePhase::Decay;
-                    self.delta_value = -(1.0 - settings.s.get()) / (settings.d.get() * samplerate);
+                    self.delta_value = -(1.0 - settings.s.get()) / EnvelopeState::nicerange(settings.d.get(), samplerate);
                     self.current_value = 1.0;
-                    self.target_value = settings.s.get();
-                    self.state_time = (settings.d.get() * samplerate) as i32;
+                    self.target_value = sustainlevel;
+                    self.state_time = EnvelopeState::nicerange(settings.d.get() , samplerate) as i32;
                 }
                 
                 EnvelopePhase::Decay => {
                     self.phase = EnvelopePhase::Sustain;
                     self.delta_value = 0.0;
-                    self.current_value = settings.s.get();
-                    self.target_value = settings.s.get();
+                    let sustainlevel = settings.s.get()*settings.s.get();
+                    self.current_value = sustainlevel;
+                    self.target_value =sustainlevel;
                     self.state_time = -1;
                 }
                 
@@ -374,12 +398,20 @@ impl EnvelopeState {
                 }
                 EnvelopePhase::Predelay => {
                     self.phase = EnvelopePhase::Attack;
-                    self.delta_value = (1.0 - self.current_value) / (settings.a.get() * samplerate);
-                    self.state_time = (settings.a.get() * samplerate) as i32;
+                    self.delta_value = (1.0 - self.current_value) / EnvelopeState::nicerange(settings.a.get() ,samplerate);
+                    self.state_time = EnvelopeState::nicerange(settings.a.get() , samplerate) as i32;
                     self.target_value = 1.0;
                 }
                 
                 _ => {}
+            }
+        }
+        else
+        {
+            if self.phase == EnvelopePhase::Sustain{
+                let sustainlevel = settings.s.get()*settings.s.get();
+                    self.current_value = sustainlevel;
+                    self.target_value =sustainlevel;
             }
         }
         return self.current_value;
@@ -398,17 +430,21 @@ impl EnvelopeState {
             self.current_value = 0.0;
             self.target_value = 0.0;
             self.phase = EnvelopePhase::Predelay;
-            self.state_time = (samplerate * settings.predelay.get()) as i32;
+            self.state_time = EnvelopeState::nicerange(settings.predelay.get(), samplerate) as i32;
             return;
         };
         
         self.phase = EnvelopePhase::Attack;
-        self.delta_value = (1.0 - self.current_value) / (settings.a.get() * samplerate);
-        self.state_time = (settings.a.get() * samplerate) as i32;
+        self.delta_value = (1.0 - self.current_value) / (EnvelopeState::nicerange(settings.a.get() ,samplerate));
+        self.state_time = EnvelopeState::nicerange(settings.a.get(), samplerate) as i32;
         self.target_value = 1.0;
         //  println!("attacking with {} {} {} {} {}",self.state_time,  settings.a, samplerate, settings.a * samplerate, self.delta_value);
     }
-    
+
+    fn nicerange(input: f32, samplerate: f32) ->f32 {
+        return 1.0 + input*input * samplerate* 5.0;
+    } 
+
     fn trigger_off(&mut self, velocity: f32, settings: &EnvelopeSettings, samplerate: f32) {
         
         match self.phase {
@@ -417,8 +453,8 @@ impl EnvelopeState {
             EnvelopePhase::Sustain => {
                 self.phase = EnvelopePhase::Release;
                 self.target_value = 0.0;
-                self.delta_value = -self.current_value / (settings.r.get() * samplerate);
-                self.state_time = (settings.r.get() * samplerate) as i32;
+                self.delta_value = -self.current_value / EnvelopeState::nicerange(settings.r.get() ,samplerate);
+                self.state_time = EnvelopeState::nicerange(settings.r.get() , samplerate) as i32;
             }
             _ => {}
         }
@@ -446,8 +482,8 @@ impl FilterState {
     }
     
     fn set_cutoff(&mut self, settings: &FilterSettings, envelope: f32, sample_rate: f32) {
-        self.fc = (settings.cutoff.get() + envelope * settings.envelope_amount.get()).clamp(0.0, 1.0);
-        self.damp = settings.resonance.get();
+        self.fc = (settings.cutoff.get() + envelope * settings.envelope_amount.get()*0.5).clamp(0.0, 1.0);
+        self.damp = 1.0 - settings.resonance.get();
         let preclamp = 2.0 * ((3.1415 * self.fc).sin());
         self.phi = (preclamp).clamp(0.0, 1.0);
         self.gamma = (2.0 * self.damp).clamp(0.0, 1.0);
