@@ -57,7 +57,7 @@ impl Default for LaddFilterCoefficients {
     }
 }*/
 
-#[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
+#[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead, Clone)]
 pub struct OscSettings {
     osc_type: U32A<OscType>,
     #[live(-12)] transpose: i64a,
@@ -77,7 +77,7 @@ pub struct EnvelopeSettings {
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub struct FilterSettings {
     filter_type: U32A<FilterType>,
-    envelope: EnvelopeSettings,
+    
     #[live(300.0 / 44100.0)] cutoff: f32a,
     #[live(0.05)] resonance: f32a,
     #[live(0.1)] envelope_amount: f32a,
@@ -91,6 +91,7 @@ pub struct IronFishSettings {
     osc2: OscSettings,
     filter1: FilterSettings,
     volume_envelope: EnvelopeSettings,
+    mod_envelope: EnvelopeSettings,
     #[live(44100.0)] sample_rate: f32a,
     #[live(0.5)] osc_balance: f32a,
 }
@@ -227,7 +228,7 @@ impl Default for OscillatorState {
             dpw_gain2: 1.0,
             dpw_init_countdown: 4,
             dpw_diff_b: [3.0, 3.0, 3.0, 3.0],
-            dpw_diff_b_write_index: 0
+            dpw_diff_b_write_index: 0            
         }
     }
 }
@@ -235,7 +236,7 @@ impl Default for OscillatorState {
 impl Default for FilterState {
     fn default() -> Self {
         Self {
-            filter_envelope: EnvelopeState::default(),
+           
             hp: 0.0,
             bp: 0.0,
             lp: 0.0,
@@ -389,7 +390,6 @@ impl EnvelopeState {
 
 #[derive(Copy, Clone)]
 struct FilterState {
-    filter_envelope: EnvelopeState,
     
     hp: f32,
     bp: f32,
@@ -450,6 +450,7 @@ pub struct IronFishVoice {
     osc2: OscillatorState,
     filter1: FilterState,
     volume_envelope: EnvelopeState,
+    mod_envelope: EnvelopeState,
     current_note: i16
 }
 
@@ -465,7 +466,12 @@ impl IronFishVoice {
     pub fn note_off(&mut self, b1: u8, b2: u8, settings: &IronFishSettings) {
         let velocity = (b2 as f32) / 127.0;
         self.volume_envelope.trigger_off(velocity, &settings.volume_envelope, settings.sample_rate.get());
-        self.filter1.filter_envelope.trigger_off(velocity, &settings.filter1.envelope, settings.sample_rate.get());
+        self.mod_envelope.trigger_off(velocity, &settings.mod_envelope, settings.sample_rate.get());
+    }
+
+    pub fn update_note(&mut self, settings: &IronFishSettings) {
+        self.osc1.set_note(self.current_note as u8, settings.sample_rate.get(), &settings.osc1);
+        self.osc2.set_note(self.current_note as u8, settings.sample_rate.get(), &settings.osc2);
     }
     
     pub fn note_on(&mut self, b1: u8, b2: u8, settings: &IronFishSettings) {
@@ -474,7 +480,7 @@ impl IronFishVoice {
         self.osc1.set_note(b1, settings.sample_rate.get(), &settings.osc1);
         self.osc2.set_note(b1, settings.sample_rate.get(), &settings.osc2);
         self.volume_envelope.trigger_on(velocity, &settings.volume_envelope, settings.sample_rate.get());
-        self.filter1.filter_envelope.trigger_on(velocity, &settings.filter1.envelope, settings.sample_rate.get());
+        self.mod_envelope.trigger_on(velocity, &settings.mod_envelope, settings.sample_rate.get());
         self.current_note = b1 as i16;
     }
     
@@ -482,9 +488,9 @@ impl IronFishVoice {
         let osc1 = self.osc1.get(&settings.osc1, settings.sample_rate.get());
         let osc2 = self.osc2.get(&settings.osc2, settings.sample_rate.get());
         let volume_envelope = self.volume_envelope.get(&settings.volume_envelope, settings.sample_rate.get());
-        let filter_envelope = self.filter1.filter_envelope.get(&settings.filter1.envelope, settings.sample_rate.get());
+        let mod_envelope = self.mod_envelope.get(&settings.mod_envelope, settings.sample_rate.get());
         
-        self.filter1.set_cutoff(&settings.filter1, filter_envelope, settings.sample_rate.get());
+        self.filter1.set_cutoff(&settings.filter1, mod_envelope, settings.sample_rate.get());
         let oscinput = osc1 * settings.osc_balance.get() + osc2 * (1.0 - settings.osc_balance.get());
         let filter = self.filter1.get(oscinput);
         
@@ -494,6 +500,7 @@ impl IronFishVoice {
     }
     
     pub fn fill_buffer(&mut self, mix_buffer: &mut AudioBuffer, display_buffer: Option<&mut AudioBuffer>, settings: &IronFishSettings) {
+        
         
         let frame_count = mix_buffer.frame_count();
         let (left, right) = mix_buffer.stereo_mut();
@@ -524,7 +531,9 @@ pub struct IronFishState {
     to_ui: ToUISender<ToUI>,
     display_buffers: Vec<AudioBuffer>,
     settings: Arc<IronFishSettings>,
-    voices: [IronFishVoice; 16]
+    voices: [IronFishVoice; 16],
+    osc1cache: OscSettings,
+    osc2cache: OscSettings
 }
 
 impl IronFishState {
@@ -558,6 +567,26 @@ impl IronFishState {
     pub fn fill_buffer(&mut self, buffer: &mut AudioBuffer, display:&mut DisplayAudioGraph) {
         
         buffer.zero();
+//        if (self.settings.osc1.transpose != )
+        let mut pitchdirty: bool = false;
+        if(self.osc1cache.transpose.get() != self.settings.osc1.transpose.get()){ pitchdirty = true;}
+        if(self.osc1cache.detune.get() != self.settings.osc1.detune.get()) {pitchdirty = true;}
+        if(self.osc2cache.transpose.get() != self.settings.osc2.transpose.get()){ pitchdirty = true;}
+        if(self.osc2cache.detune.get() != self.settings.osc2.detune.get()) {pitchdirty = true;}
+        if (pitchdirty)
+        {
+            self.osc1cache.transpose.set(self.settings.osc1.transpose.get()) ;
+            self.osc1cache.detune.set(self.settings.osc1.detune.get()) ;
+            self.osc2cache.transpose.set(self.settings.osc2.transpose.get()) ;
+            self.osc2cache.detune.set(self.settings.osc2.detune.get()) ;
+
+            for i in 0..self.voices.len() {
+                if self.voices[i].active() > -1 {
+                    self.voices[i].update_note(&self.settings);
+                }
+            }
+
+        }
         for i in 0..self.voices.len() {
             if self.voices[i].active() > -1 {
                 let mut display_buffer = display.pop_buffer_resize(buffer.frame_count(), buffer.channel_count());
@@ -585,6 +614,7 @@ impl Default for IronFishVoice {
             osc2: OscillatorState::default(),
             filter1: FilterState::default(),
             volume_envelope: EnvelopeState::default(),
+            mod_envelope: EnvelopeState::default(),
             current_note: -1
         }
     }
@@ -647,7 +677,9 @@ impl AudioComponent for IronFish {
             settings: self.settings.clone(),
             voices:Default::default(),
             to_ui: self.to_ui.sender(),
-            from_ui: self.from_ui.receiver()
+            from_ui: self.from_ui.receiver(),
+            osc1cache: self.settings.osc1.clone(),
+            osc2cache: self.settings.osc2.clone(),
         })
     }
     
