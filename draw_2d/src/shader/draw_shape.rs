@@ -13,23 +13,27 @@ live_register!{
         fn get_color(self)->vec4{
             return self.color
         }
-        
-        fn pixel(self) -> vec4 {
-            let color = vec4(0.0,1.0,0.0,0.0);
+
+        fn get_fill(self)->vec4{
             match self.fill {
                 Fill::Color => {
-                    color = self.get_color()
+                    return self.get_color()
                 }
                 Fill::GradientX => {
-                    color = mix(self.color, self.color2, self.pos.x)
+                    return mix(self.color, self.color2, self.pos.x)
                 }
                 Fill::GradientY => {
-                    color = mix(self.color, self.color2, self.pos.y)
+                    return mix(self.color, self.color2, self.pos.y)
                 }
                 Fill::Image => {
-                    color = sample2d(self.image, self.pos * self.image_scale + self.image_pan).xyzw;
+                    return sample2d(self.image, self.pos * self.image_scale + self.image_pan).xyzw;
                 }
             }
+        }
+
+        fn pixel(self) -> vec4 {
+            let color = self.get_fill();
+            
             match self.shape {
                 Shape::None => {
                     return #0000
