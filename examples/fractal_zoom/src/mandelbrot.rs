@@ -32,12 +32,12 @@ live_register!{
                 return vec4(0, 0, 0, 1.0);
             }
             // fetch a color using iq2 (inigo quilez' shadertoy palette #2)
-            return vec4(Pal::iq2(index + self.color_cycle), 1.0);
+            return vec4(Pal::iq3(index + self.color_cycle), 1.0);
         }
     }
     
     Mandelbrot: {{Mandelbrot}} {
-        max_iter: 320,
+        max_iter: 3200,
     }
 }
 
@@ -175,8 +175,8 @@ impl TileCache {
             empty,
             current_zoom: 0.0,
             next_zoom: 0.0,
-            tiles_in_flight: 0,
-            thread_pool: ThreadPool::new(cx, use_cores),
+            tiles_in_flight: 0, 
+            thread_pool: ThreadPool::new(cx, 8),
         }
     }
     
@@ -470,10 +470,10 @@ impl Mandelbrot {
                 return to_ui.send(ToUI::TileBailed {tile}).unwrap();
             }
             
-            if !is_zooming {
-               mandelbrot_f64x2_4xaa(&mut tile, max_iter);
-             }
-            else
+            //if !is_zooming {
+            //   mandelbrot_f64x2_4xaa(&mut tile, max_iter);
+            // }
+            //else
             if fractal_zoom >2e-5 {
                 // we can use a f32x4 path when we aren't zoomed in far (2x faster)
                 // as f32 has limited zoom-depth it can support
