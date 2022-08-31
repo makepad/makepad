@@ -310,7 +310,7 @@ live_register!{
         transpose = InstrumentSlider {
             slider = {
                 bind: "osc1.transpose"
-                min: 0.0
+                min: -36.0
                 max: 36.0
                 label: "Transpose"
             }
@@ -461,25 +461,14 @@ live_register!{
             Frame {
                 layout: {flow: Right, spacing: 5.0}
                 walk: {margin: {left: 60}, height: Fit}
-                Button {text: "+  Band"}
-                Button {text: "<"}
-                Button {text: ">"}
-                Solid {
-                    walk: {width: Fill, height: 36}
-                    bg: {
-                        const WAVE_HEIGHT: 0.15
-                        const WAVE_FREQ: 0.2
-                        fn pixel(self) -> vec4 {
-                            let offset_y = 1.5
-                            let pos2 = vec2(self.pos.x, self.pos.y + WAVE_HEIGHT * sin(WAVE_FREQ * self.pos.x * self.rect_size.x))
-                            let sdf = Sdf2d::viewport(pos2 * self.rect_size)
-                            sdf.clear(#2f)
-                            sdf.move_to(0., self.rect_size.y * 0.5)
-                            sdf.line_to(self.rect_size.x, self.rect_size.y * 0.5)
-                            return sdf.stroke(#f, 1.0)
-                        }
-                    }
-                }
+                save1 = Button {text: "S1"}
+                save2 = Button {text: "S2"}
+                save3 = Button {text: "S3"}
+                save4 = Button {text: "S4"}
+                load1 = Button {text: "L1"}
+                load2 = Button {text: "L2"}
+                load3 = Button {text: "L3"}
+                load4 = Button {text: "L4"}
             }
                      
             FoldablePiano {}
