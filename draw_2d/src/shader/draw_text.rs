@@ -33,7 +33,6 @@ live_register!{
         varying tex_coord3: vec2
         varying clipped: vec2
         
-        
         fn vertex(self) -> vec4 {
             let min_pos = vec2(self.rect_pos.x, self.rect_pos.y)
             let max_pos = vec2(self.rect_pos.x + self.rect_size.x, self.rect_pos.y - self.rect_size.y)

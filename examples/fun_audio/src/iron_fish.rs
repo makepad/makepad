@@ -672,6 +672,7 @@ impl AudioComponent for IronFish {
         for i in 0..12*16{ 
             buffers.push(AudioBuffer::default());
         }
+        self.settings.osc1.clone();
         Box::new(IronFishState{
             display_buffers: buffers,
             settings: self.settings.clone(),
