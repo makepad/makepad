@@ -42,6 +42,14 @@ impl <T> U32A<T> where T: LiveAtomicU32Enum {
     }
 }
 
+
+impl <T> Clone for U32A<T> where T: LiveAtomicU32Enum {
+    fn clone(&self)->Self{ 
+        let t = self.get();
+        U32A(AtomicU32::new(t.as_u32()), PhantomData)
+    }
+}
+
 impl<T> Debug for U32A<T> where T: LiveAtomicU32Enum + Debug{
     fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error>{
         self.get().fmt(f)
@@ -126,6 +134,12 @@ pub trait AtomicGetSet<T> {
 
 pub struct f32a(AtomicU32);
 
+impl Clone for f32a {
+    fn clone(&self)->Self{ 
+        f32a(AtomicU32::new(self.get().to_bits()))
+    }
+}
+
 impl AtomicGetSet<f32> for f32a {
     fn get(&self) -> f32 {
         f32::from_bits(self.0.load(Ordering::Relaxed))
@@ -186,6 +200,13 @@ impl LiveNew for f32a {
 
 pub struct u32a(AtomicU32);
 
+impl Clone for u32a {
+    fn clone(&self)->Self{ 
+        u32a(AtomicU32::new(self.get()))
+    }
+}
+
+
 impl AtomicGetSet<u32> for u32a {
     fn get(&self) -> u32 {
         self.0.load(Ordering::Relaxed)
@@ -243,6 +264,13 @@ impl LiveRead for u32a{
 
 
 pub struct i64a(AtomicI64);
+
+impl Clone for i64a {
+    fn clone(&self)->Self{ 
+        i64a(AtomicI64::new(self.get()))
+    }
+}
+
 
 impl AtomicGetSet<i64> for i64a {
     fn get(&self) -> i64 {

@@ -293,6 +293,9 @@ impl InitialState {
             }
             _ => {
                 let start = cursor.index();
+                if cursor.peek(0) == '-'{
+                    
+                }
                 // normal number
                 cursor.skip_digits(10);
                 

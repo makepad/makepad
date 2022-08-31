@@ -57,7 +57,7 @@ impl Default for LaddFilterCoefficients {
     }
 }*/
 
-#[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
+#[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead, Clone)]
 pub struct OscSettings {
     osc_type: U32A<OscType>,
     #[live(-12)] transpose: i64a,
@@ -642,6 +642,7 @@ impl AudioComponent for IronFish {
         for i in 0..12*16{ 
             buffers.push(AudioBuffer::default());
         }
+        self.settings.osc1.clone();
         Box::new(IronFishState{
             display_buffers: buffers,
             settings: self.settings.clone(),
