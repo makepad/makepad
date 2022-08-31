@@ -183,7 +183,15 @@ impl InitialState {
                 )
             }
             ('#', ch1, ch2) if ch1 == 'x' && ch2.is_digit(16) || ch1.is_digit(16) => self.color(cursor),
-            ('.', ch1, _) if ch1.is_digit(10) => self.number(cursor),
+            ('.', ch1, _) if ch1.is_digit(10) => self.number(cursor, true),
+            ('-', ch, _) if ch.is_digit(10) => {
+                cursor.skip(1);
+                self.number(cursor, false)
+            },
+            ('-', '.', ch1) if ch1.is_digit(10) => {
+                cursor.skip(1);
+                self.number(cursor, false)
+            }
             ('!', _, _)
                 | ('#', _, _)
                 | ('$', _, _)
@@ -213,7 +221,7 @@ impl InitialState {
                 )
             }
             (ch, _, _) if ch.is_identifier_start() => self.identifier_or_bool(cursor),
-            (ch, _, _) if ch.is_digit(10) => self.number(cursor),
+            (ch, _, _) if ch.is_digit(10) => self.number(cursor, true),
             (ch, _, _) if ch.is_whitespace() => self.whitespace(cursor),
             _ => {
                 cursor.skip(1);
@@ -268,7 +276,7 @@ impl InitialState {
         ))
     }
     
-    fn number(self, cursor: &mut Cursor) -> (State, FullToken) {
+    fn number(self, cursor: &mut Cursor, positive:bool) -> (State, FullToken) {
         match (cursor.peek(0), cursor.peek(1)) {
             ('0', 'b') => {
                 cursor.skip(2);
@@ -293,9 +301,6 @@ impl InitialState {
             }
             _ => {
                 let start = cursor.index();
-                if cursor.peek(0) == '-'{
-                    
-                }
                 // normal number
                 cursor.skip_digits(10);
                 
@@ -314,7 +319,7 @@ impl InitialState {
                         }
                         // parse as float
                         if let Ok(value) = cursor.from_start_to_scratch(start).parse::<f64>() {
-                            return (State::Initial(InitialState), FullToken::Float(value))
+                            return (State::Initial(InitialState), FullToken::Float(if positive{value}else{-value}))
                         }
                         else {
                             return (State::Initial(InitialState), FullToken::Unknown)
@@ -329,7 +334,7 @@ impl InitialState {
                         }
                         // parse as float
                         if let Ok(value) = cursor.from_start_to_scratch(start).parse::<f64>() {
-                            return (State::Initial(InitialState), FullToken::Float(value))
+                            return (State::Initial(InitialState), FullToken::Float(if positive{value}else{-value}))
                         }
                         else {
                             return (State::Initial(InitialState), FullToken::Unknown)
@@ -341,7 +346,7 @@ impl InitialState {
                         }
                         // normal number
                         if let Ok(value) = cursor.from_start_to_scratch(start).parse::<i64>() {
-                            return (State::Initial(InitialState), FullToken::Int(value))
+                            return (State::Initial(InitialState), FullToken::Int(if positive{value}else{-value}))
                         }
                         else {
                             return (State::Initial(InitialState), FullToken::Unknown)
