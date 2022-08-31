@@ -31,7 +31,7 @@ live_register!{
             path: d"resources/LiberationMono-Regular.ttf"
         }
         brightness: 1.1
-        font_size: 14.0
+        font_size: 9.0
         line_spacing: 2.0
         top_drop: 1.3
     }
