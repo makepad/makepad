@@ -32,7 +32,7 @@ live_register!{
                 return vec4(0, 0, 0, 1.0);
             }
             // fetch a color using iq2 (inigo quilez' shadertoy palette #2)
-            return vec4(Pal::iq3(index + self.color_cycle), 1.0);
+            return vec4(Pal::iq2(index + self.color_cycle), 1.0);
         }
     }
     
@@ -160,7 +160,6 @@ impl TileCache {
             });
             textures.push(texture);
         }
-        
         // preallocate buffers otherwise safari barfs in the worker
         let use_cores = match cx.cpu_cores() {
             1 | 2 | 3 => 1,
