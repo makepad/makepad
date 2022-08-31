@@ -105,7 +105,7 @@ impl ChildProcess {
                     match line {
                         ChildStdIn::Send(line) => {
                             if let Err(e) = stdin.write_all(line.as_bytes()){
-                                println!("Stdin send error {}", e);
+                                //println!("Stdin send error {}", e);
                             }
                             let _ = stdin.flush();
                         }

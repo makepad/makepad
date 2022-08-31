@@ -136,7 +136,7 @@ live_register!{
             //draw_depth: 4.0
         }
         
-        line_num_width: 45.0,
+        //line_num_width: 45.0,
         padding_top: 30.0,
         
         text_color_linenum: (COLOR_TEXT_META)
@@ -225,7 +225,7 @@ pub struct CodeEditorImpl {
     
     scroll_shadow: ScrollShadow,
     
-    pub line_num_width: f64,
+    #[rust] pub line_num_width: f64,
     caret_blink_timeout: f64,
     
 }
@@ -334,6 +334,7 @@ impl CodeEditorImpl {
     where T: FnMut(&mut Cx, LineLayoutInput) -> LineLayoutOutput
     {
         self.text_glyph_size = self.code_text.text_style.font_size * self.code_text.get_monospace_base(cx);
+        self.line_num_width = self.text_glyph_size.x * 6.0;//+25.0;
         self.calc_lines_layout_inner(cx, document_inner, lines_layout, &mut compute_height);
         // this keeps the animation zooming properly focussed around a cursor/line
         if let Some(center_line) = self.zoom_anim_center {
@@ -654,11 +655,11 @@ impl CodeEditorImpl {
         let Rect {pos: origin, size: viewport_size,} = cx.turtle().rect();
         
         //let mut start_y = lines_layout.start_y + origin.y;
-        let scroll_x = cx.turtle().scroll().x;
-        let start_x = origin.x +scroll_x;
+        let scroll = cx.turtle().scroll();
+        let start_x = origin.x +scroll.x;
         
         self.line_num_quad.draw_abs(cx, Rect {
-            pos: origin + dvec2(scroll_x, 0.0),
+            pos: origin + dvec2(scroll.x, scroll.y),
             size: DVec2 {x: self.line_num_width, y: viewport_size.y}
         });
         
