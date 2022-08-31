@@ -122,6 +122,35 @@ live_register!{
         dropdown = DropDown {}
     }
     
+    OscPanel:Frame{
+        layout: {flow: Down}
+        walk: {width: Fill, height: Fit}
+        type = InstrumentDropdown {
+            label = {text: "Osc1 type"}
+            dropdown = {
+                bind_enum: "OscType"
+                bind: "osc1.osc_type"
+                items: ["DPWSawPulse", "TrivialSaw", "BlampTri", "Naive", "Pure"]
+            }
+        }
+        transpose = InstrumentSlider {
+            slider = {
+                bind: "osc1.transpose"
+                min: 0.0
+                max: 36.0
+                label: "Transpose"
+            }
+        }
+        detune = InstrumentSlider {
+            slider = {
+                bind: "osc1.detune"
+                min: 0.0
+                max: 1.0
+                label: "Detune"
+            }
+        }
+    }
+    
     IronFishUI: InstrumentHeader {
         header: {
             layout: {align: {y: 0.5}}
@@ -144,6 +173,17 @@ live_register!{
                 body: Frame {
                     layout: {flow: Down}
                     walk: {width: Fill, height: Fit}
+                    OscPanel{
+                        type={dropdown={bind:"osc1.osc_type"}}
+                        transpose={slider={bind:"osc1.transpose"}}
+                        detune={slider={bind:"osc1.detune"}}
+                    }
+                    OscPanel{
+                        type={dropdown={bind:"osc2.osc_type"}}
+                        transpose={slider={bind:"osc2.transpose"}}
+                        detune={slider={bind:"osc2.detune"}}
+                    }
+                    /*
                     InstrumentSlider {
                         slider = {
                             bind: "filter1.cutoff"
@@ -212,7 +252,7 @@ live_register!{
                         checkbox = {
                             label:"Hello world"
                         }
-                    }
+                    }*/
                 }
             }
         }
@@ -279,6 +319,11 @@ live_register!{
                 a: Frame {
                     layout: {flow: Down}
                     FoldablePiano {}
+                    OscPanel{
+                        type={dropdown={bind:"osc1.osc_type"}}
+                        transpose={slider={bind:"osc1.transpose"}}
+                        detune={slider={bind:"osc1.detune"}}
+                    }
                     display_audio = DisplayAudio {
                         walk: {height: Fill, width: Fill}
                     }
@@ -360,8 +405,10 @@ impl App {
         // fetch ui binding deltas
         
         for delta in ui.on_bind_deltas() {
+            log!("{}", delta.to_string(0,100));
             let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
             iron_fish.settings.apply_over(ui.cx, &delta);
+            ui.bind_read(&delta);
         }
         
         let piano = ui.piano(ids!(piano));

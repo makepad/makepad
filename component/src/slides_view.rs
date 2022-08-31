@@ -39,9 +39,29 @@ live_register!{
         anim_speed: 0.9
         frame: ScrollX{
             walk: {width: Fill, height: Fill}
-            Slide {title = {text: "Makepad"}, Body {text: "A new way to build UI\nFor web and native"}}
-            Slide {title = {text: "Long long ago"}, Body {text: "Founded cloud 9 IDE\nHTML based code editor ACE"}}
-            Slide {title = {text: "WebGL and JS"}, Body {text: "6 years\nover and over"}}
+            Slide {title = {text: "Portable SIMD"}, Body {text: "For Native and Wasm"}}
+            Slide {title = {text: "Intro"}, Body {text: "Rik Arends\nBuilding Makepad\nRust livecoding IDE"}}
+            
+            Slide {title = {text: "Fractals Native"}, Body {text: "Native: All cores and SIMD"}}
+            Slide {title = {text: "Fractals web"}, Body {text: "No SIMD on safari"}}
+            
+            Slide {title = {text: "Mandelbrot"}, Body {text: "Trivially parallel"}}
+            Slide {title = {text: "Tile engine"}, Body {text: "Threads and queues\nchange core counter"}}
+            Slide {title = {text: "Live updating"}, Body {text: "Core feature of makepad\nLive shaders+DSL"}}
+
+            Slide {title = {text: "SIMD"}, Body {text: "Single instruction\nMultiple data\nLane bitsize"}}
+            Slide {title = {text: "Lanes"}, Body {text: "128 bit (ARM/Wasm)\n256 bit: AMD/Intel\n512 bit intel"}}
+            Slide {title = {text: "CPU Instructions"}, Body {text: "intel: MMX\nintel: SSE2\nintel: AVX\nARM: Neon"}}
+            Slide {title = {text: "Intrinsics"}, Body {text: "CPU specific\nMany codepaths"}}
+            Slide {title = {text: "Portable SIMD"}, Body {text: "Write once run everywhere"}}
+            Slide {title = {text: "Mandelbrot"}, Body {text: "Show code"}}
+
+            Slide {title = {text: "Web issues"}, Body {text: "Bindgen huge\nRust primitives\nStack frame\nSafari"}}
+            Slide {title = {text: "Audio threads"}, Body {text: "Fun audio"}}
+
+            Slide {title = {text: "Future for Makepad"}, Body {text: "Rust IDE\nLive coding\nDesigntool"}}
+            Slide {title = {text: "Links"}, Body {text: "twitter: @makepad @rikarends\ngithub.com/makepad/makepad"}}
+/*
             Slide {title = {text: "Makepad JS"}}
             Slide {title = {text: "What was wrong"}, Body {text: "Not stable after 30+ mins"}}
             Slide {title = {text: "The real problem"}, Body {text: "No CPU perf left over\nNo VR + HiFPS"}}
@@ -58,6 +78,7 @@ live_register!{
             Slide {title = {text: "Fun Audio"}}
             Slide {title = {text: "Future"}, Body {text: "OSS release in 3 months\nDesigntool will be commercial"}}
             Slide {title = {text: "Links"}, Body {text: "makepad.dev\ngithub.com/makepad/makepad\ntwitter: @rikarends @makepad"}}
+            */
         }
     }
 }
