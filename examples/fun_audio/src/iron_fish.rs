@@ -18,9 +18,9 @@ use {
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub enum OscType {
-    DPWSawPulse,
+    #[pick] DPWSawPulse,
     TrivialSaw,
-    #[pick] BlampTri,
+    BlampTri,
     Naive,
     Pure
 }
@@ -76,11 +76,11 @@ pub struct EnvelopeSettings {
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub struct FilterSettings {
-    filter_type: U32A<FilterType>,
-    
+    filter_type: U32A<FilterType>,    
     #[live(300.0 / 44100.0)] cutoff: f32a,
     #[live(0.05)] resonance: f32a,
     #[live(0.1)] envelope_amount: f32a,
+    #[live(0.1)] touch_amount: f32a,
     #[live(0.0)] envelope_curvature: f32a
 }
 
@@ -89,11 +89,15 @@ pub struct FilterSettings {
 pub struct IronFishSettings {
     osc1: OscSettings,
     osc2: OscSettings,
+    subosc: OscSettings,
+    
     filter1: FilterSettings,
     volume_envelope: EnvelopeSettings,
     mod_envelope: EnvelopeSettings,
     #[live(44100.0)] sample_rate: f32a,
     #[live(0.5)] osc_balance: f32a,
+    #[live(0.5)] sub_osc: f32a,
+    #[live(0.1)] noise: f32a,
 }
 
 #[derive(Copy, Clone)]
@@ -105,6 +109,30 @@ pub struct OscillatorState {
     dpw_diff_b: [f32; 4],
     dpw_diff_b_write_index: i8, // diffB write index
     dpw_init_countdown: i8
+}
+
+#[derive(Copy, Clone)]
+pub struct SubOscillatorState {
+    phase: f32,
+    delta_phase: f32,
+}
+
+impl SubOscillatorState{
+    fn get(&mut self) -> f32 {
+        self.phase += self.delta_phase;
+        while self.phase > 1.0{
+            self.phase -= 1.0
+        }
+        // return self.dpw();
+        
+       return (self.phase * 6.283).sin();
+    }
+    
+    fn set_note(&mut self, note: u8, samplerate: f32){
+        let freq = 440.0 * f32::powf(2.0, ((note as f32) - 69.0 - 12.0 ) / 12.0);
+        self.delta_phase = (6.283 * freq) / samplerate;
+        let sampletime = 1.0 / samplerate;
+    }
 }
 
 impl OscillatorState {
@@ -216,6 +244,15 @@ impl OscillatorState {
         
         // println!("gain: {} {} ", self.dpw_gain, prep);
         //  gain = std::pow(1.f / factorial(dpwOrder) * std::pow(M_PI / (2.f*sin(M_PI*pitch * APP->engine->getSampleTime())),  dpwOrder-1.f), 1.0 / (dpwOrder-1.f));
+    }
+}
+
+impl Default for SubOscillatorState {
+    fn default() -> Self {
+        Self {
+            phase: 0.0,
+            delta_phase: 0.0001,
+        }
     }
 }
 
@@ -448,10 +485,25 @@ impl GriesingerReverb {
 pub struct IronFishVoice {
     osc1: OscillatorState,
     osc2: OscillatorState,
+    subosc: SubOscillatorState,
     filter1: FilterState,
     volume_envelope: EnvelopeState,
     mod_envelope: EnvelopeState,
-    current_note: i16
+    current_note: i16,
+    seed: u32
+}
+fn random_bit(seed:&mut u32)->u32{
+    *seed = seed.overflowing_add((seed.overflowing_mul(*seed)).0 | 5).0;
+    return *seed >> 31;
+}
+
+fn random_f32(seed:&mut u32)->f32{
+    let mut out = 0;
+    for _ in 0..32{
+        out |= random_bit(seed);
+        out <<=1;
+    }
+    out as f32 / std::u32::MAX as f32
 }
 
 impl IronFishVoice {
@@ -479,19 +531,26 @@ impl IronFishVoice {
         let velocity = (b2 as f32) / 127.0;
         self.osc1.set_note(b1, settings.sample_rate.get(), &settings.osc1);
         self.osc2.set_note(b1, settings.sample_rate.get(), &settings.osc2);
+        self.subosc.set_note(b1, settings.sample_rate.get());
         self.volume_envelope.trigger_on(velocity, &settings.volume_envelope, settings.sample_rate.get());
         self.mod_envelope.trigger_on(velocity, &settings.mod_envelope, settings.sample_rate.get());
         self.current_note = b1 as i16;
     }
-    
+
     pub fn one(&mut self, settings: &IronFishSettings) -> f32 {
+        
+        let sub = self.subosc.get();
+        
         let osc1 = self.osc1.get(&settings.osc1, settings.sample_rate.get());
         let osc2 = self.osc2.get(&settings.osc2, settings.sample_rate.get());
         let volume_envelope = self.volume_envelope.get(&settings.volume_envelope, settings.sample_rate.get());
         let mod_envelope = self.mod_envelope.get(&settings.mod_envelope, settings.sample_rate.get());
         
         self.filter1.set_cutoff(&settings.filter1, mod_envelope, settings.sample_rate.get());
-        let oscinput = osc1 * settings.osc_balance.get() + osc2 * (1.0 - settings.osc_balance.get());
+        
+        let noise = random_f32(&mut self.seed)*2.0-1.0;
+
+        let oscinput = osc1 * settings.osc_balance.get() + osc2 * (1.0 - settings.osc_balance.get())  + settings.sub_osc.get() * sub  + settings.noise.get() * noise;
         let filter = self.filter1.get(oscinput);
         
         let output = volume_envelope * filter;
@@ -612,10 +671,12 @@ impl Default for IronFishVoice {
         Self {
             osc1: OscillatorState::default(),
             osc2: OscillatorState::default(),
+            subosc: SubOscillatorState::default(),
             filter1: FilterState::default(),
             volume_envelope: EnvelopeState::default(),
             mod_envelope: EnvelopeState::default(),
-            current_note: -1
+            current_note: -1,
+            seed: 1234
         }
     }
 }
