@@ -121,10 +121,27 @@ live_register!{
         label = Label{walk:{width:70,margin:{left:4}}}
         dropdown = DropDown {}
     } 
-     
+     GraphPaper: Box{
+        walk: {width: Fill, height: 200}
+        bg: {
+            color: #202020ff, 
+            color: #202020ff, 
+            color2: #707070ff, 
+            fn get_fill(self)->vec4{
+                let sdf = Sdf2d::viewport(mod(self.pos * self.rect_size,15))
+                sdf.clear(self.color)
+                sdf.rect(0.0,0.0, 16,16)
+                sdf.stroke(self.color2, 2)
+                return sdf.result
+            }
+        }
+     }
     EnvelopePanel:Frame{
-        layout: {flow: Right}
+        layout: {flow: Down}
         walk: {width: Fill, height: Fit}
+        display = GraphPaper{
+
+        }
         attack = InstrumentSlider {
             slider = {
                 bind: "adsr.a"
@@ -168,7 +185,7 @@ live_register!{
     }
     
     FishHeader: Frame{     
-        walk:{width: Fill, height: Fit}
+        walk:{width: Fit, height: Fit}
         layout:{padding: 5}
         label = Label{
             label:{text_style:{font_size: 12}, color: #f}
@@ -184,7 +201,7 @@ live_register!{
             color: #804030, 
             color2: #404040, 
             fn get_fill(self)->vec4{
-                return mix(self.color, self.color2, clamp((self.pos.y * self.rect_size.y)/100,0,1))
+                return mix(self.color*0.8, self.color2, clamp((self.pos.y * self.rect_size.y)/300,0,1))
             }
         }
     }
@@ -198,7 +215,14 @@ live_register!{
     MixerPanel: FishPanel{
         bg: {color: #d0d0d0}
         label = {label={text:"Mixer"}}
-
+        balance = InstrumentSlider {
+            slider = {
+                bind: "osc_balance"
+                min: 0.0
+                max: 1.0
+                label: "Oscillator 1/2 Balance"
+            }
+        }
         noise = InstrumentSlider {
             slider = {
                 bind: "noise"
@@ -234,7 +258,6 @@ live_register!{
     }
 
     ModEnvelopePanel:FishPanel{
-
         bg: {color: #f08000}
         label = {label={text:"Modulation Envelope"}}
         env = EnvelopePanel{
@@ -268,6 +291,7 @@ live_register!{
                 label: "Cutoff"
             }
         }
+
         resonance = InstrumentSlider {
             slider = {
                 bind: "filter1.resonance"
@@ -307,6 +331,7 @@ live_register!{
                 items: ["DPWSawPulse", "TrivialSaw", "BlampTri", "Naive", "Pure"]
             }
         }
+
         transpose = InstrumentSlider {
             slider = {
                 bind: "osc1.transpose"
@@ -315,6 +340,7 @@ live_register!{
                 label: "Transpose"
             }
         }
+
         detune = InstrumentSlider {
             slider = {
                 bind: "osc1.detune"
@@ -458,7 +484,7 @@ live_register!{
                 spacing: 5.,
                 flow: Flow::Down
             },
-            Frame {
+            Frame {                
                 layout: {flow: Right, spacing: 5.0}
                 walk: {margin: {left: 60}, height: Fit}
                 save1 = Button {text: "S1"}
@@ -472,25 +498,37 @@ live_register!{
             }
                      
             FoldablePiano {}
-            OscPanel{
-                label={label={text:"Oscillator 1"}}                    
-                type={dropdown={bind:"osc1.osc_type"}}
-                transpose={slider={bind:"osc1.transpose"}}
-                detune={slider={bind:"osc1.detune"}}
+            Frame {
+                layout: {flow: Right, spacing: 5.0}
+                Frame {
+                    layout: {flow: Down, spacing: 5.0}
+                    OscPanel{
+                        label={label={text:"Oscillator 1"}}                    
+                        type={dropdown={bind:"osc1.osc_type"}}
+                        transpose={slider={bind:"osc1.transpose"}}
+                        detune={slider={bind:"osc1.detune"}}
+                    }
+                    MixerPanel{}
+                    OscPanel{
+                        label={label={text:"Oscillator 2"}}                    
+                        type={dropdown={bind:"osc2.osc_type"}}
+                        transpose={slider={bind:"osc2.transpose"}}
+                        detune={slider={bind:"osc2.detune"}}
+                    }
+                }
+                Frame {
+                    layout: {flow: Down, spacing: 5.0}
+                    VolumeEnvelopePanel{}
+                    ModEnvelopePanel{}
+                }
+                Frame{
+                    layout: {flow: Down, spacing: 5.0}
+
+                    FilterPanel{}
+                    TouchPanel{}         
+                    FXPanel{}
+                }
             }
-            MixerPanel{}
-            OscPanel{
-                label={label={text:"Oscillator 2"}}                    
-                type={dropdown={bind:"osc2.osc_type"}}
-                transpose={slider={bind:"osc2.transpose"}}
-                detune={slider={bind:"osc2.detune"}}
-            }
-            FilterPanel{}
-            VolumeEnvelopePanel{}
-            ModEnvelopePanel{}
-            TouchPanel{}
-           
-            FXPanel{}
             display_audio = DisplayAudio {
                 walk: {height: Fill, width: Fill}
             }                    
