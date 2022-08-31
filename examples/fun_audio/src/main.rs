@@ -84,7 +84,7 @@ live_register!{
         }
     }
     
-    ElementBox: Rect {
+    ElementBox: Frame {
         bg: {color: #4}
         walk: {width: Fill, height: Fit}
         layout: {flow: Down, padding: 8, spacing: 5}
@@ -169,9 +169,9 @@ live_register!{
     
     FishHeader: Frame{     
         walk:{width: Fill, height: Fit}
-        layout:{padding: 15}
+        layout:{padding: 5}
         label = Label{
-            label:{text_style:{font_size: 18}, color: #f}
+            label:{text_style:{font_size: 12}, color: #f}
             text: "replace me!"
         }
     }
@@ -180,7 +180,13 @@ live_register!{
         layout: {flow: Down}
         walk: {width: Fill, height: Fit}
         label = FishHeader{label={text:"ReplaceMe"}}    
-        bg: {color: #804030, color2: #404040, fill: GradientY}
+        bg: {
+            color: #804030, 
+            color2: #404040, 
+            fn get_fill(self)->vec4{
+                return mix(self.color, self.color2, clamp((self.pos.y * self.rect_size.y)/100,0,1))
+            }
+        }
     }
 
     TouchPanel: FishPanel{
@@ -192,6 +198,24 @@ live_register!{
     MixerPanel: FishPanel{
         bg: {color: #d0d0d0}
         label = {label={text:"Mixer"}}
+
+        noise = InstrumentSlider {
+            slider = {
+                bind: "noise"
+                min: 0.0
+                max: 1.0
+                label: "Noise"
+            }
+        }
+        sub = InstrumentSlider {
+            slider = {
+                bind: "sub_osc"
+                min: 0.0
+                max: 1.0
+                label: "Sub Oscillator"
+            }
+        }
+
     }
     FXPanel: FishPanel{
         bg: {color: #8080f0}
@@ -250,6 +274,24 @@ live_register!{
                 min: 0.0
                 max: 1.0
                 label: "Resonance"
+            }
+        }
+        
+        modamount = InstrumentSlider {
+            slider = {
+                bind: "filter1.envelope_amount"
+                min: -1.0
+                max: 1.0
+                label: "Mod Env Amount"
+            }
+        }
+        
+        touchamount = InstrumentSlider {
+            slider = {
+                bind: "filter1.touch_amount"
+                min: -1.0
+                max: 1.0
+                label: "Touch Amount"
             }
         }
     }
@@ -385,7 +427,7 @@ live_register!{
     }
     
     App: {{App}} {
-        window: {pass: {clear_color: (COLOR_BG_APP)}}
+        window: {window:{inner_size: vec2(1280,1000)},pass: {clear_color: (COLOR_BG_APP)}}
         audio_graph: {
             root: Mixer {
                 c1 = Instrument {
@@ -439,54 +481,30 @@ live_register!{
                     }
                 }
             }
-            Splitter {
-                align: SplitterAlign::FromEnd(300)
-                walk: {width: Fill, height: Fill}
-                a: ScrollY {
-                    layout: {flow: Down}
-                    FoldablePiano {}
-                    OscPanel{
-                        label={label={text:"Oscillator 1"}}                    
-                        type={dropdown={bind:"osc1.osc_type"}}
-                        transpose={slider={bind:"osc1.transpose"}}
-                        detune={slider={bind:"osc1.detune"}}
-                    }
-                    OscPanel{
-                        label={label={text:"Oscillator 2"}}                    
-                        type={dropdown={bind:"osc2.osc_type"}}
-                        transpose={slider={bind:"osc2.transpose"}}
-                        detune={slider={bind:"osc2.detune"}}
-                    }
-                    FilterPanel{}
-                    VolumeEnvelopePanel{}
-                    ModEnvelopePanel{}
-                    TouchPanel{}
-                    MixerPanel{}
-                    FXPanel{}
-                    display_audio = DisplayAudio {
-                        walk: {height: Fill, width: Fill}
-                    }
-                }
-                b: Box {
-                    cursor: Default,
-                    bg: {color: #4, radius: 3.0, border_width: 0.5, border_color: #3}
-                    walk: {height: Fill}
-                    layout: {padding: 0.5}
-                    MainHeader {
-                        walk: {width: Fill, height: Fill}
-                        body_walk: {width: Fill, height: Fill}
-                        header: {
-                            cursor: Hand,
-                            label = Label {text: "Instruments"}
-                        }
-                        body: ScrollY {
-                            walk: {width: Fill, height: Fill}
-                            layout: {flow: Down}
-                            instrument = IronFishUI {}
-                        }
-                    }
-                }
+                     
+            FoldablePiano {}
+            OscPanel{
+                label={label={text:"Oscillator 1"}}                    
+                type={dropdown={bind:"osc1.osc_type"}}
+                transpose={slider={bind:"osc1.transpose"}}
+                detune={slider={bind:"osc1.detune"}}
             }
+            MixerPanel{}
+            OscPanel{
+                label={label={text:"Oscillator 2"}}                    
+                type={dropdown={bind:"osc2.osc_type"}}
+                transpose={slider={bind:"osc2.transpose"}}
+                detune={slider={bind:"osc2.detune"}}
+            }
+            FilterPanel{}
+            VolumeEnvelopePanel{}
+            ModEnvelopePanel{}
+            TouchPanel{}
+           
+            FXPanel{}
+            display_audio = DisplayAudio {
+                walk: {height: Fill, width: Fill}
+            }                    
         }
     }
 }
