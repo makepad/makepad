@@ -657,10 +657,33 @@ pub struct App {
     #[rust(vec![
         KnobBind {name: "osc1.detune".into(), value:0.0, rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
         KnobBind {name: "osc2.detune".into(), value:0.0, rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
+        
         KnobBind {name: "osc1.transpose".into(), value:0.0, rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min: -36.0, max: 36.0},
         KnobBind {name: "osc2.transpose".into(), value:0.0, rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min: -36.0, max: 36.0},
-        KnobBind {name: "filter1.cutoff".into(), value:0.0, rgb: KnobRGB::Indigo, ty: KnobType::UniPolar, min: 0.0, max: 1.0}
-    ])] knob_table: Vec<KnobBind>
+        
+        KnobBind {name: "filter1.cutoff".into(), value:0.0, rgb: KnobRGB::Indigo, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+        KnobBind {name: "filter1.resonance".into(), value:0.0, rgb: KnobRGB::Indigo, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+        KnobBind {name: "filter1.touch_amount".into(), value:0.0, rgb: KnobRGB::Indigo, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
+        KnobBind {name: "filter1.lfo_amount".into(), value:0.0, rgb: KnobRGB::Indigo, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
+        KnobBind {name: "filter1.envelope_amount".into(), value:0.0, rgb: KnobRGB::Indigo, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
+
+        KnobBind {name: "osc_balance".into(), value:0.0, rgb: KnobRGB::Grey, ty: KnobType::BiPolar, min: 0.0, max: 1.0},
+        KnobBind {name: "noise".into(), value:0.0, rgb: KnobRGB::Grey, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+        KnobBind {name: "sub_osc".into(), value:0.0, rgb: KnobRGB::Grey, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+
+        KnobBind {name: "mod_envelope.a".into(), value:0.0, rgb: KnobRGB::Orange, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+        KnobBind {name: "mod_envelope.h".into(), value:0.0, rgb: KnobRGB::Orange, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+        KnobBind {name: "mod_envelope.d".into(), value:0.0, rgb: KnobRGB::Orange, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+        KnobBind {name: "mod_envelope.s".into(), value:0.0, rgb: KnobRGB::Orange, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+        KnobBind {name: "mod_envelope.r".into(), value:0.0, rgb: KnobRGB::Orange, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+
+        KnobBind {name: "volume_envelope.a".into(), value:0.0, rgb: KnobRGB::Orange, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+        KnobBind {name: "volume_envelope.h".into(), value:0.0, rgb: KnobRGB::Orange, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+        KnobBind {name: "volume_envelope.d".into(), value:0.0, rgb: KnobRGB::Orange, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+        KnobBind {name: "volume_envelope.s".into(), value:0.0, rgb: KnobRGB::Orange, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+        KnobBind {name: "volume_envelope.r".into(), value:0.0, rgb: KnobRGB::Orange, ty: KnobType::UniPolar, min: 0.0, max: 1.0}
+
+        ])] knob_table: Vec<KnobBind>
 }
 
 impl App {
@@ -727,9 +750,9 @@ impl App {
                         });
                         //log!("SET SHIT");
                         self.knob_change = (self.knob_change + 1) % (self.knob_bind.len());
-                        bind.value = *v;
+                     
                     }
-                    
+                    bind.value = *v;
                     //log!("SEND SHIT {} {}", v, (((v - bind.min) / (bind.max - bind.min)) * 127.0)  as u8);
                     ui.cx.send_midi_1_data(Midi1Data {
                         data0: 0xb0,
@@ -765,9 +788,10 @@ impl App {
                             data1: (3 + last_knob)as u8,
                             data2: (((bind.value - bind.min) / (bind.max - bind.min)) * 127.0) as u8
                         });
+                        let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
+                        iron_fish.settings.apply_over(ui.cx, &delta);
                     }
                     11 => {
-                        
                     }
                     _ => ()
                 }
