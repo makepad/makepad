@@ -23,6 +23,11 @@ struct CxMediaApple{
 
 impl CxMediaApi for Cx{
     
+    fn send_midi_1_data(&mut self, data:Midi1Data){
+         let media = self.get_global::<CxMediaApple>();
+         media.midi_access.as_ref().unwrap().send_midi_1_data(data);
+    }
+    
     fn on_midi_1_input_data(&mut self, event:&Event)->Vec<Midi1InputData>{
         if let Event::Signal(se) = event{
             if se.signals.contains(&id!(CoreMidiInputData).into()) {
@@ -47,6 +52,7 @@ impl CxMediaApi for Cx{
             if se.signals.contains(&id!(CoreMidiInputsChanged).into()) {
                 let media = self.get_global::<CxMediaApple>();
                 let inputs = media.midi_access.as_ref().unwrap().connect_all_inputs();
+                media.midi_access.as_mut().unwrap().update_destinations();
                 return inputs
             }
         }

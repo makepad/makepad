@@ -447,6 +447,12 @@ extern "C" {
     pub fn MIDIGetNumberOfDestinations() -> ItemCount;
     pub fn MIDIGetDestination(sourceIndex0: ItemCount) -> MIDIEndpointRef;
     
+    pub fn MIDISendEventList(
+        port: MIDIPortRef,
+        dest: MIDIEndpointRef,
+        evtlist: *const MIDIEventList,
+    ) -> OSStatus;
+    
     pub fn MIDIClientCreateWithBlock(
         name: CFStringRef,
         outClient: *mut MIDIClientRef,
