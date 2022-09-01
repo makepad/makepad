@@ -3,6 +3,7 @@ use {
     std::{
         rc::Rc,
         cell::RefCell,
+        sync::Mutex,
         ptr,
         time::Instant,
         collections::{HashMap,HashSet},
@@ -134,6 +135,7 @@ pub struct CocoaApp {
     pub time_start: Instant,
     pub timer_delegate_instance: ObjcId,
     timers: Vec<CocoaTimer>,
+    pub signals: Mutex<RefCell<HashSet<Signal>>>,
     pub cocoa_windows: Vec<(ObjcId, ObjcId)>,
     last_key_mod: KeyModifiers,
     pasteboard: ObjcId,
@@ -163,6 +165,7 @@ impl CocoaApp {
                 timer_delegate_instance:msg_send![get_cocoa_class_global().timer_delegate, new],
                 menu_delegate_instance:msg_send![get_cocoa_class_global().menu_delegate, new],
                 //app_delegate_instance,
+                signals: Mutex::new(RefCell::new(HashSet::new())),
                 timers: Vec::new(),
                 cocoa_windows: Vec::new(),
                 loop_block: false,
@@ -584,43 +587,36 @@ impl CocoaApp {
         //self.event_recur_block = false;
     }
     
-    pub fn post_signal(signal_id: u64) {
+    pub fn post_signal(signal: Signal) {
         unsafe {
-            let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
-            
-            //let cocoa_app = get_cocoa_app_global();
-            let post_delegate_instance: ObjcId = msg_send![get_cocoa_class_global().post_delegate, new];
-            /*
-            // lock it
-            let status_id = if let Ok(mut status_map) = cocoa_app.status_map.lock() {
-                if let Some(id) = status_map.status_to_usize.get(&status) {
-                    *id
+            let cocoa_app = get_cocoa_app_global();
+            if let Ok(signals) = cocoa_app.signals.lock(){
+                let mut signals = signals.borrow_mut();
+                // if empty, we do shit. otherwise we add
+                if signals.is_empty(){
+                    signals.insert(signal);
+                    let pool: ObjcId = msg_send![class!(NSAutoreleasePool), new];
+                    //let cocoa_app = get_cocoa_app_global();
+                    let post_delegate_instance: ObjcId = msg_send![get_cocoa_class_global().post_delegate, new];
+                    //(*post_delegate_instance).set_ivar("cocoa_app_ptr", GLOBAL_COCOA_APP as *mut _ as *mut c_void);
+                    let nstimer: ObjcId = msg_send![
+                        class!(NSTimer),
+                        timerWithTimeInterval: 0.
+                        target: post_delegate_instance
+                        selector: sel!(receivedPost:)
+                        userInfo: nil
+                        repeats: false
+                    ];
+                    let nsrunloop: ObjcId = msg_send![class!(NSRunLoop), mainRunLoop];
+                    let () = msg_send![nsrunloop, addTimer: nstimer forMode: NSRunLoopCommonModes];
+                    
+                    let () = msg_send![pool, release];
                 }
-                else {
-                    let id = status_map.status_to_usize.len();
-                    status_map.status_to_usize.insert(status, id);
-                    status_map.usize_to_status.insert(id, status);
-                    id
+                else{
+                    signals.insert(signal);
                 }
             }
-            else {
-                panic!("Cannot lock cmd_map");
-            };*/
             
-            //(*post_delegate_instance).set_ivar("cocoa_app_ptr", GLOBAL_COCOA_APP as *mut _ as *mut c_void);
-            (*post_delegate_instance).set_ivar("signal_id", signal_id);
-            let nstimer: ObjcId = msg_send![
-                class!(NSTimer),
-                timerWithTimeInterval: 0.
-                target: post_delegate_instance
-                selector: sel!(receivedPost:)
-                userInfo: nil
-                repeats: false
-            ];
-            let nsrunloop: ObjcId = msg_send![class!(NSRunLoop), mainRunLoop];
-            let () = msg_send![nsrunloop, addTimer: nstimer forMode: NSRunLoopCommonModes];
-            
-            let () = msg_send![pool, release];
         }
     }
     
@@ -707,12 +703,16 @@ impl CocoaApp {
         }
     }
     
-    pub fn send_signal_event(&mut self, signal: Signal) {
-        let mut signals = HashSet::new();
-        signals.insert(signal);
+    pub fn send_signal_event(&mut self) {
+        let signals = if let Ok(signals) = self.signals.lock(){
+            let mut new_signals = HashSet::new();
+            std::mem::swap(&mut *signals.borrow_mut(), &mut new_signals);
+            new_signals
+        }else{panic!()};
+        
         self.do_callback(vec![
             CocoaEvent::Signal(SignalEvent {
-                signals: signals,
+                signals,
             })
         ]);
         self.do_callback(vec![CocoaEvent::Paint]);
