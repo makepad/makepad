@@ -93,14 +93,14 @@ live_register!{
     InstrumentSlider: ElementBox {
         slider = Slider {
             label: "CutOff1"
-            walk:{height: 22}
+            walk: {height: 22}
         }
     }
     InstrumentBipolarSlider: ElementBox {
         slider = Slider {
             label: "CutOff1"
-            walk:{height: 22}
-            slider:{
+            walk: {height: 22}
+            slider: {
                 fn pixel(self) -> vec4 {
                     let slider_height = 7;
                     let nub_size = mix(3, 4, self.hover);
@@ -117,7 +117,7 @@ live_register!{
                     sdf.rect(0, self.rect_size.y - slider_height, self.rect_size.x, slider_height)
                     sdf.fill(slider_bg_color);
                     
-                    sdf.rect(self.rect_size.x /2, self.rect_size.y - slider_height, self.slide_pos * (self.rect_size.x - nub_size) + nub_size, slider_height)
+                    sdf.rect(self.rect_size.x / 2, self.rect_size.y - slider_height, self.slide_pos * (self.rect_size.x - nub_size) + nub_size, slider_height)
                     sdf.fill(slider_color);
                     
                     let nubbg_x = self.slide_pos * (self.rect_size.x - nub_size) - nubbg_size * 0.5 + 0.5 * nub_size;
@@ -154,30 +154,30 @@ live_register!{
     }
     
     InstrumentDropdown: ElementBox {
-        layout: {align:{y:0.5}, padding: 5, flow:Right}
-        label = Label{walk:{width:70,margin:{left:4}}}
+        layout: {align: {y: 0.5}, padding: 5, flow: Right}
+        label = Label {walk: {width: 70, margin: {left: 4}}}
         dropdown = DropDown {}
-    } 
-     GraphPaper: Box{
+    }
+    GraphPaper: Box {
         walk: {width: Fill, height: 100}
         bg: {
-            color: #202020ff, 
-            color: #202020ff, 
-            color2: #707070ff, 
-            fn get_fill(self)->vec4{
-                let sdf = Sdf2d::viewport(mod(self.pos * self.rect_size,15))
+            color: #202020ff,
+            color: #202020ff,
+            color2: #707070ff,
+            fn get_fill(self) -> vec4 {
+                let sdf = Sdf2d::viewport(mod (self.pos * self.rect_size, 15))
                 sdf.clear(self.color)
-                sdf.rect(0.0,0.0, 16,16)
+                sdf.rect(0.0, 0.0, 16, 16)
                 sdf.stroke(self.color2, 2)
                 return sdf.result
             }
         }
-     }
-    EnvelopePanel:Frame{
+    }
+    EnvelopePanel: Frame {
         layout: {flow: Down}
         walk: {width: Fill, height: Fit}
-        display = GraphPaper{
-
+        display = GraphPaper {
+            
         }
         attack = InstrumentSlider {
             slider = {
@@ -221,37 +221,37 @@ live_register!{
         }
     }
     
-    FishHeader: Frame{     
-        walk:{width: Fit, height: Fit}
-        layout:{padding: 5}
-        label = Label{
-            label:{text_style:{font_size: 12}, color: #0}
+    FishHeader: Frame {
+        walk: {width: Fit, height: Fit}
+        layout: {padding: 5}
+        label = Label {
+            label: {text_style: {font_size: 12}, color: #0}
             text: "replace me!"
         }
     }
-
-    FishPanel:Box{
+    
+    FishPanel: Box {
         layout: {flow: Down}
         walk: {width: Fill, height: Fit}
-        label = FishHeader{label={text:"ReplaceMe"}}    
+        label = FishHeader {label = {text: "ReplaceMe"}}
         bg: {
-            color: #804030, 
-            color2: #404040, 
-            fn get_fill(self)->vec4{
-                return mix(self.color*0.9, self.color2, clamp((self.pos.y * self.rect_size.y)/300,0,1))
+            color: #804030,
+            color2: #404040,
+            fn get_fill(self) -> vec4 {
+                return mix(self.color * 0.9, self.color2, clamp((self.pos.y * self.rect_size.y) / 300, 0, 1))
             }
         }
     }
-
-    TouchPanel: FishPanel{
+    
+    TouchPanel: FishPanel {
         bg: {color: #f08000}
-
-        label = {label={text:"Touch"}}
+        
+        label = {label = {text: "Touch"}}
     }
-
-    MixerPanel: FishPanel{
+    
+    MixerPanel: FishPanel {
         bg: {color: #d0d0d0}
-        label = {label={text:"Mixer"}}
+        label = {label = {text: "Mixer"}}
         balance = InstrumentBipolarSlider {
             slider = {
                 bind: "osc_balance"
@@ -276,16 +276,16 @@ live_register!{
                 label: "Sub Oscillator"
             }
         }
-
+        
     }
-    FXPanel: FishPanel{
+    FXPanel: FishPanel {
         bg: {color: #8080f0}
-        label = {label={text:"FX", label:{color:#fff}}}
+        label = {label = {text: "FX", label: {color: #fff}}}
     }
-    LFOPanel: FishPanel{
+    LFOPanel: FishPanel {
         bg: {color: #ff0000}
-        label = {label={text:"LFO"}}
-
+        label = {label = {text: "LFO"}}
+        
         rate = InstrumentSlider {
             slider = {
                 bind: "lfo.rate"
@@ -294,46 +294,43 @@ live_register!{
                 label: "Rate"
             }
         }
-        sync = InstrumentCheckbox{
+        sync = InstrumentCheckbox {
             checkbox = {
                 bind: "lfo.synconkey",
-                label:"Key sync"
+                label: "Key sync"
             }
         }
     }
-    VolumeEnvelopePanel:FishPanel{
+    VolumeEnvelopePanel: FishPanel {
         bg: {color: #f08000}
-        label = {label={text:"Volume Envelope"}}
-        env = EnvelopePanel{
-            attack={slider={bind:"volume_envelope.a"}}
-            hold={slider={bind:"volume_envelope.h"}}
-            decay={slider={bind:"volume_envelope.d"}}
-            sustain={slider={bind:"volume_envelope.s"}}
-            release={slider={bind:"volume_envelope.r"}}
+        label = {label = {text: "Volume Envelope"}}
+        env = EnvelopePanel {
+            attack = {slider = {bind: "volume_envelope.a"}}
+            hold = {slider = {bind: "volume_envelope.h"}}
+            decay = {slider = {bind: "volume_envelope.d"}}
+            sustain = {slider = {bind: "volume_envelope.s"}}
+            release = {slider = {bind: "volume_envelope.r"}}
         }
     }
-
-    ModEnvelopePanel:FishPanel{
+    
+    ModEnvelopePanel: FishPanel {
         bg: {color: #f08000}
-        label = {label={text:"Modulation Envelope"}}
-        env = EnvelopePanel{
-            attack={slider={bind:"mod_envelope.a"}}
-            hold={slider={bind:"mod_envelope.h"}}
-            decay={slider={bind:"mod_envelope.d"}}
-            sustain={slider={bind:"mod_envelope.s"}}
-            release={slider={bind:"mod_envelope.r"}}
+        label = {label = {text: "Modulation Envelope"}}
+        env = EnvelopePanel {
+            attack = {slider = {bind: "mod_envelope.a"}}
+            hold = {slider = {bind: "mod_envelope.h"}}
+            decay = {slider = {bind: "mod_envelope.d"}}
+            sustain = {slider = {bind: "mod_envelope.s"}}
+            release = {slider = {bind: "mod_envelope.r"}}
         }
     }
-
-    FilterPanel:FishPanel{
-
+    
+    FilterPanel: FishPanel {
+        
         bg: {color: #0000f0}
-
+        
         label = {
-                 label={text:"Filter",
-                label:{color:#fff}
-            }
-            
+            label = {text: "Filter", label: {color: #fff}}
         }
         InstrumentDropdown {
             label = {text: "Filter"}
@@ -343,7 +340,7 @@ live_register!{
                 items: ["Lowpass", "Highpass", "Bandpass"]
             }
         }
-
+        
         cutoff = InstrumentSlider {
             slider = {
                 bind: "filter1.cutoff"
@@ -352,7 +349,7 @@ live_register!{
                 label: "Cutoff"
             }
         }
-
+        
         resonance = InstrumentSlider {
             slider = {
                 bind: "filter1.resonance"
@@ -387,9 +384,9 @@ live_register!{
             }
         }
     }
-
-    OscPanel:FishPanel{
-        label = {label={text:"Oscillator ?"}}
+    
+    OscPanel: FishPanel {
+        label = {label = {text: "Oscillator ?"}}
         bg: {color: #f0f000}
         type = InstrumentDropdown {
             label = {text: "Osc1 type"}
@@ -399,7 +396,7 @@ live_register!{
                 items: ["DPWSawPulse", "TrivialSaw", "BlampTri", "Naive", "Pure"]
             }
         }
-
+        
         transpose = InstrumentBipolarSlider {
             slider = {
                 bind: "osc1.transpose"
@@ -408,7 +405,7 @@ live_register!{
                 label: "Transpose"
             }
         }
-
+        
         detune = InstrumentBipolarSlider {
             slider = {
                 bind: "osc1.detune"
@@ -444,7 +441,7 @@ live_register!{
                     
                     
                     
-
+                    
                     /*
                     InstrumentSlider {
                         slider = {
@@ -521,13 +518,13 @@ live_register!{
     }
     
     App: {{App}} {
-        window: {window:{inner_size: vec2(1280,1000)},pass: {clear_color: (#1)}}
+        window: {window: {inner_size: vec2(1280, 1000)}, pass: {clear_color: (#1)}}
         audio_graph: {
             root: Mixer {
                 c1 = Instrument {
                     
                     
-                  /*  AudioUnitInstrument {
+                    /*  AudioUnitInstrument {
                         plugin: "Kontakt"
                     }*/
                     
@@ -552,7 +549,7 @@ live_register!{
                 spacing: 5.,
                 flow: Flow::Down
             },
-            Frame {                
+            Frame {
                 layout: {flow: Right, spacing: 5.0}
                 walk: {margin: {left: 60}, height: Fit}
                 save1 = Button {text: "S1"}
@@ -564,49 +561,49 @@ live_register!{
                 load3 = Button {text: "L3"}
                 load4 = Button {text: "L4"}
             }
-                     
+            
             FoldablePiano {}
-                Frame {
-                    layout: {flow: Right, spacing: 5.0}
+            Frame {
+                layout: {flow: Right, spacing: 5.0}
                 Frame {
                     layout: {flow: Down, spacing: 5.0}
-                    OscPanel{
-                        label={label={text:"Oscillator 1"}}                    
-                        type={dropdown={bind:"osc1.osc_type"}}
-                        transpose={slider={bind:"osc1.transpose"}}
-                        detune={slider={bind:"osc1.detune"}}
+                    OscPanel {
+                        label = {label = {text: "Oscillator 1"}}
+                        type = {dropdown = {bind: "osc1.osc_type"}}
+                        transpose = {slider = {bind: "osc1.transpose"}}
+                        detune = {slider = {bind: "osc1.detune"}}
                     }
-                    MixerPanel{}
-                    OscPanel{
-                        label={label={text:"Oscillator 2"}}                    
-                        type={dropdown={bind:"osc2.osc_type"}}
-                        transpose={slider={bind:"osc2.transpose"}}
-                        detune={slider={bind:"osc2.detune"}}
+                    MixerPanel {}
+                    OscPanel {
+                        label = {label = {text: "Oscillator 2"}}
+                        type = {dropdown = {bind: "osc2.osc_type"}}
+                        transpose = {slider = {bind: "osc2.transpose"}}
+                        detune = {slider = {bind: "osc2.detune"}}
                     }
                 }
                 Frame {
                     layout: {flow: Down, spacing: 5.0}
-                    VolumeEnvelopePanel{}
-                    ModEnvelopePanel{}
+                    VolumeEnvelopePanel {}
+                    ModEnvelopePanel {}
                 }
-                Frame{
+                Frame {
                     layout: {flow: Down, spacing: 5.0}
-
-                    LFOPanel{}
-                    FilterPanel{}
-                    TouchPanel{}   
-                          
-                    FXPanel{}
-                    FishPanel{
+                    
+                    LFOPanel {}
+                    FilterPanel {}
+                    TouchPanel {}
+                    
+                    FXPanel {}
+                    FishPanel {
                         bg: {color: #3}
-                        label = {label={text:"Scope"}}
+                        label = {label = {text: "Scope"}}
                         display_audio = DisplayAudio {
                             walk: {height: 300, width: Fill}
-                        }  
-                    }                
+                        }
+                    }
                 }
             }
-                              
+            
         }
     }
 }
@@ -618,6 +615,9 @@ pub struct App {
     audio_graph: AudioGraph,
     window: BareWindow,
     data: f32,
+    #[rust(usize::MAX)] last_knob_index: usize,
+    #[rust] knob_bind: [usize; 2],
+    #[rust] knob_change: usize
 }
 
 impl App {
@@ -663,8 +663,76 @@ impl App {
         
         // fetch ui binding deltas
         
+        #[repr(u8)]
+        #[allow(unused)]
+        enum KnobType{
+            UniPolar = 0,
+            BiPolar,
+            ToggleHoriz,
+            ToggleVert,
+            OneOutOf4,
+            OneOutOf4Smooth,
+            Circular1,
+            Circular2,
+            Circular3,
+            Circular4
+        }
+        
+        #[repr(u8)]
+        #[allow(unused)]
+        enum KnobRGB{
+            Yellow = 0,
+            Orange,
+            Red,
+            Indigo,
+            LightBlue,
+            Green,
+            Grey
+        }
+        
+        struct KnobBind {
+            name: String,
+            min: f64,
+            max: f64,
+            rgb: KnobRGB,
+            ty: KnobType
+        }
+        
+        let knob_table = [
+            KnobBind {name: "osc1.detune".into(), rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min:-1.0, max:1.0}
+        ];
+        
         for delta in ui.on_bind_deltas() {
-            log!("{}", delta.to_string(0,100));
+            for (index, bind) in knob_table.iter().enumerate() {
+                if let Some(LiveValue::Float(v)) = delta.read_path(&bind.name) {
+                    let knob = self.knob_change;
+                    if index != self.last_knob_index{
+                        self.last_knob_index = index;
+                        self.knob_bind[knob] = index;
+                        
+                        ui.cx.send_midi_1_data(Midi1Data{
+                            data0: 0xb0,
+                            data1: (1 + knob)as u8,
+                            data2: bind.ty as u8
+                        });
+
+                        ui.cx.send_midi_1_data(Midi1Data{
+                            data0: 0xb0,
+                            data1: (5 + knob)as u8,
+                            data2: bind.rgb  as u8
+                        });
+                        //log!("SET SHIT");
+                        self.knob_change = (self.knob_change + 1) % (self.knob_bind.len());
+                    }
+
+                    //log!("SEND SHIT {} {}", v, (((v - bind.min) / (bind.max - bind.min)) * 127.0)  as u8);
+                    ui.cx.send_midi_1_data(Midi1Data{
+                        data0: 0xb0,
+                        data1: (3 + knob)as u8,
+                        data2: (((v - bind.min) / (bind.max - bind.min)) * 127.0)  as u8
+                    });
+                }
+            }
             let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
             iron_fish.settings.apply_over(ui.cx, &delta);
             ui.bind_read(&delta);
