@@ -38,17 +38,19 @@ impl MidiInputInfo {
     }
 }
 
-pub struct CoreMidiAccess{
+pub struct CoreMidiAccess {
     //_midi_client : MIDIClientRef,
     midi_in_port: MIDIPortRef,
-    //_midi_out_port: MIDIPortRef,
+    midi_out_port: MIDIPortRef,
+    destinations: Vec<MIDIEndpointRef>
 }
 
-impl CoreMidiAccess{
+impl CoreMidiAccess {
     
-    pub fn new_midi_1_input<F,G>(data_callback: F, notify_callback:G)  -> Result<Self, OSError>  where
+    pub fn new_midi_1_input<F, G>(data_callback: F, notify_callback: G) -> Result<Self,
+    OSError> where
     F: Fn(Vec<Midi1InputData>) + Send + 'static,
-    G: Fn() + Send + 'static 
+    G: Fn() + Send + 'static
     {
         let mut midi_notify = objc_block!(move | _notification: &MIDINotification | {
             notify_callback();
@@ -68,18 +70,18 @@ impl CoreMidiAccess{
                     if ty == 0x02 { // midi 1.0 channel voice
                         datas.push(Midi1InputData {
                             input_id: user_data as usize,
-                            data: Midi1Data{
+                            data: Midi1Data {
                                 data0,
                                 data1,
                                 data2
                             }
-                       });
+                        });
                         
                     }
                 }
             }
-            if datas.len()>0{
-                data_callback(datas)                
+            if datas.len()>0 {
+                data_callback(datas)
             }
         });
         
@@ -107,12 +109,44 @@ impl CoreMidiAccess{
                 &mut midi_out_port
             )) ?;
         }
-        Ok(Self{
+        Ok(Self {
             midi_in_port,
+            midi_out_port,
+            destinations: Vec::new()
         })
     }
     
-    pub fn connect_all_inputs(&self)->Vec<MidiInputInfo>{
+    pub fn send_midi_1_data(&self, d:Midi1Data){
+        let mut words = [0u32;64];
+        words[0] = ((d.data0 as u32)<<16)|((d.data1 as u32)<<8)|d.data2 as u32;
+        let event_list = MIDIEventList{
+            protocol: kMIDIProtocol_1_0,
+            numPackets:1,
+            packet:[MIDIEventPacket{
+                timeStamp:0,
+                wordCount: 1,
+                words
+            }]
+        };
+        for dest in &self.destinations{
+            unsafe{
+                MIDISendEventList(self.midi_out_port, *dest, &event_list);
+            }
+        }
+    }
+    
+    pub fn update_destinations(&mut self)  {
+        let mut destinations = Vec::new();
+        unsafe {
+            for i in 0..MIDIGetNumberOfDestinations() {
+                let dest =  MIDIGetDestination(i);
+                destinations.push(dest);
+            }
+        }
+        self.destinations = destinations;
+    }
+    
+    pub fn connect_all_inputs(&self) -> Vec<MidiInputInfo> {
         /*
         for i in 0..MIDIGetNumberOfDestinations() {
             if let Ok(ep) = MidiEndpoint::new(MIDIGetDestination(i)) {
@@ -121,7 +155,7 @@ impl CoreMidiAccess{
         }
         */
         let mut input_infos = Vec::new();
-        unsafe{
+        unsafe {
             for i in 0..MIDIGetNumberOfSources() {
                 let ep = MIDIGetSource(i);
                 if let Ok(info) = MidiInputInfo::from_endpoint(ep) {
