@@ -3,6 +3,7 @@ use makepad_platform::*;
 use crate::midi::*;
 
 pub trait CxMediaApi {
+    fn send_midi_1_data(&mut self, data:Midi1Data);
     fn on_midi_1_input_data(&mut self, event:&Event)->Vec<Midi1InputData>;
     fn on_midi_input_list(&mut self, event:&Event)->Vec<MidiInputInfo>;
     fn start_midi_input(&mut self);
