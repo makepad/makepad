@@ -53,6 +53,7 @@ impl CoreMidiAccess {
     G: Fn() + Send + 'static
     {
         let mut midi_notify = objc_block!(move | _notification: &MIDINotification | {
+            println!("NOTIFY!");
             notify_callback();
         });
         

@@ -672,6 +672,7 @@ impl App {
         
         let piano = ui.piano(ids!(piano));
         
+        ui.cx.on_midi_input_list(ui.event);
         for inp in ui.cx.on_midi_1_input_data(ui.event) {
             self.audio_graph.send_midi_1_data(inp.data);
             if let Some(note) = inp.data.decode().on_note() {
