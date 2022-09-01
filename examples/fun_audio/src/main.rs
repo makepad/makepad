@@ -609,6 +609,42 @@ live_register!{
 }
 main_app!(App);
 
+#[repr(u8)]
+#[allow(unused)]
+enum KnobType {
+    UniPolar = 0,
+    BiPolar,
+    ToggleHoriz,
+    ToggleVert,
+    OneOutOf4,
+    OneOutOf4Smooth,
+    Circular1,
+    Circular2,
+    Circular3,
+    Circular4
+}
+
+#[repr(u8)]
+#[allow(unused)]
+enum KnobRGB {
+    Yellow = 0,
+    Orange,
+    Red,
+    Indigo,
+    LightBlue,
+    Green,
+    Grey
+}
+
+struct KnobBind {
+    name: String,
+    min: f64,
+    max: f64,
+    value: f64,
+    rgb: KnobRGB,
+    ty: KnobType
+}
+
 #[derive(Live, LiveHook)]
 pub struct App {
     imgui: ImGUI,
@@ -617,7 +653,10 @@ pub struct App {
     data: f32,
     #[rust(usize::MAX)] last_knob_index: usize,
     #[rust] knob_bind: [usize; 2],
-    #[rust] knob_change: usize
+    #[rust] knob_change: usize,
+    #[rust(vec![
+        KnobBind {name: "osc1.detune".into(), value:0.0, rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min: -1.0, max: 1.0}
+    ])] knob_table: Vec<KnobBind>
 }
 
 impl App {
@@ -663,73 +702,35 @@ impl App {
         
         // fetch ui binding deltas
         
-        #[repr(u8)]
-        #[allow(unused)]
-        enum KnobType{
-            UniPolar = 0,
-            BiPolar,
-            ToggleHoriz,
-            ToggleVert,
-            OneOutOf4,
-            OneOutOf4Smooth,
-            Circular1,
-            Circular2,
-            Circular3,
-            Circular4
-        }
-        
-        #[repr(u8)]
-        #[allow(unused)]
-        enum KnobRGB{
-            Yellow = 0,
-            Orange,
-            Red,
-            Indigo,
-            LightBlue,
-            Green,
-            Grey
-        }
-        
-        struct KnobBind {
-            name: String,
-            min: f64,
-            max: f64,
-            rgb: KnobRGB,
-            ty: KnobType
-        }
-        
-        let knob_table = [
-            KnobBind {name: "osc1.detune".into(), rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min:-1.0, max:1.0}
-        ];
-        
         for delta in ui.on_bind_deltas() {
-            for (index, bind) in knob_table.iter().enumerate() {
+            for (index, bind) in self.knob_table.iter_mut().enumerate() {
                 if let Some(LiveValue::Float(v)) = delta.read_path(&bind.name) {
                     let knob = self.knob_change;
-                    if index != self.last_knob_index{
+                    if index != self.last_knob_index {
                         self.last_knob_index = index;
                         self.knob_bind[knob] = index;
                         
-                        ui.cx.send_midi_1_data(Midi1Data{
+                        ui.cx.send_midi_1_data(Midi1Data {
                             data0: 0xb0,
                             data1: (1 + knob)as u8,
                             data2: bind.ty as u8
                         });
-
-                        ui.cx.send_midi_1_data(Midi1Data{
+                        
+                        ui.cx.send_midi_1_data(Midi1Data {
                             data0: 0xb0,
                             data1: (5 + knob)as u8,
-                            data2: bind.rgb  as u8
+                            data2: bind.rgb as u8
                         });
                         //log!("SET SHIT");
                         self.knob_change = (self.knob_change + 1) % (self.knob_bind.len());
+                        bind.value = *v;
                     }
-
+                    
                     //log!("SEND SHIT {} {}", v, (((v - bind.min) / (bind.max - bind.min)) * 127.0)  as u8);
-                    ui.cx.send_midi_1_data(Midi1Data{
+                    ui.cx.send_midi_1_data(Midi1Data {
                         data0: 0xb0,
                         data1: (3 + knob)as u8,
-                        data2: (((v - bind.min) / (bind.max - bind.min)) * 127.0)  as u8
+                        data2: (((v - bind.min) / (bind.max - bind.min)) * 127.0) as u8
                     });
                 }
             }
@@ -742,6 +743,25 @@ impl App {
         
         ui.cx.on_midi_input_list(ui.event);
         for inp in ui.cx.on_midi_1_input_data(ui.event) {
+            if inp.data.data0 == 0xb0 {
+                log!("{:?}", inp.data);
+                match inp.data.data1 {
+                    10 => {
+                        let last_knob = (self.knob_change + 1) % (self.knob_bind.len());
+                        let bind_id = self.knob_bind[last_knob];
+                        let bind = &mut self.knob_table[bind_id];
+                        bind.value = ((inp.data.data2 as f64 - 63.0) * ((bind.max-bind.min)*0.001) + bind.value).min(bind.max).max(bind.min);
+                        let mut delta = Vec::new();
+                        delta.write_path(&bind.name, LiveValue::Float(bind.value));
+                        delta.debug_print(0,100);
+                        ui.bind_read(&delta);
+                    }
+                    11 => {
+                        
+                    }
+                    _ => ()
+                }
+            }
             self.audio_graph.send_midi_1_data(inp.data);
             if let Some(note) = inp.data.decode().on_note() {
                 piano.set_note(ui.cx, note.is_on, note.note_number)
