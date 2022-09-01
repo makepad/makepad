@@ -755,9 +755,10 @@ impl App {
                         delta.write_path(&bind.name, LiveValue::Float(bind.value));
                         delta.debug_print(0,100);
                         ui.bind_read(&delta);
+                        let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
+                        iron_fish.settings.apply_over(ui.cx, &delta);
                     }
                     11 => {
-                        
                     }
                     _ => ()
                 }
