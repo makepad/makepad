@@ -34,7 +34,6 @@ use {
             MenuCommand
         },
         event::{
-            Signal,
             DragState,
             DragEvent,
             DropEvent,
@@ -213,7 +212,7 @@ pub fn define_cocoa_post_delegate() -> *const Class {
             else {
                 panic!("cannot lock cmd_map")
             };*/
-            ca.send_signal_event(Signal(LiveId(signal_id)));
+            ca.send_signal_event();
         }
     }
     

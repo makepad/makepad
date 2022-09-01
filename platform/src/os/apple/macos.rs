@@ -293,6 +293,7 @@ impl Cx {
                     self.call_event_handler(&Event::Timer(e))
                 }
                 CocoaEvent::Signal(se) => {
+                    //println!("SIGNAL!");
                     //self.handle_core_midi_signals(&se);
                     self.call_event_handler(&Event::Signal(se));
                 }
@@ -423,12 +424,12 @@ impl CxOsApi for Cx {
     }
     
     fn post_signal(signal: Signal) {
-         for arg in std::env::args() {
+        for arg in std::env::args() {
             if arg == "--stdin-loop" {
                 return Self::stdin_post_signal(signal);
             }
         }
-        CocoaApp::post_signal(signal.0.0);
+        CocoaApp::post_signal(signal);
     }
     
     fn spawn_thread<F>(&mut self, f: F) where F: FnOnce() + Send + 'static {
