@@ -655,7 +655,11 @@ pub struct App {
     #[rust] knob_bind: [usize; 2],
     #[rust] knob_change: usize,
     #[rust(vec![
-        KnobBind {name: "osc1.detune".into(), value:0.0, rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min: -1.0, max: 1.0}
+        KnobBind {name: "osc1.detune".into(), value:0.0, rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
+        KnobBind {name: "osc2.detune".into(), value:0.0, rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
+        KnobBind {name: "osc1.transpose".into(), value:0.0, rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min: -36.0, max: 36.0},
+        KnobBind {name: "osc2.transpose".into(), value:0.0, rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min: -36.0, max: 36.0},
+        KnobBind {name: "filter1.cutoff".into(), value:0.0, rgb: KnobRGB::Indigo, ty: KnobType::UniPolar, min: 0.0, max: 1.0}
     ])] knob_table: Vec<KnobBind>
 }
 
@@ -718,7 +722,7 @@ impl App {
                         
                         ui.cx.send_midi_1_data(Midi1Data {
                             data0: 0xb0,
-                            data1: (5 + knob)as u8,
+                            data1: (5 + knob) as u8,
                             data2: bind.rgb as u8
                         });
                         //log!("SET SHIT");
@@ -755,6 +759,12 @@ impl App {
                         delta.write_path(&bind.name, LiveValue::Float(bind.value));
                         delta.debug_print(0,100);
                         ui.bind_read(&delta);
+
+                        ui.cx.send_midi_1_data(Midi1Data {
+                            data0: 0xb0,
+                            data1: (3 + last_knob)as u8,
+                            data2: (((bind.value - bind.min) / (bind.max - bind.min)) * 127.0) as u8
+                        });
                     }
                     11 => {
                         
