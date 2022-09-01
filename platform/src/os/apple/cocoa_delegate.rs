@@ -202,10 +202,10 @@ struct CocoaPostInit {
 
 pub fn define_cocoa_post_delegate() -> *const Class {
     
-    extern fn received_post(this: &Object, _: Sel, _nstimer: ObjcId) {
+    extern fn received_post(_this: &Object, _: Sel, _nstimer: ObjcId) {
         let ca = get_cocoa_app_global();
-        unsafe {
-            let signal_id: u64 = *this.get_ivar("signal_id");
+        //unsafe {
+            //let signal_id: u64 = *this.get_ivar("signal_id");
             /*let status = if let Ok(status_map) = ca.status_map.lock() {
                 *status_map.usize_to_status.get(&status).expect("status invalid")
             }
@@ -213,7 +213,7 @@ pub fn define_cocoa_post_delegate() -> *const Class {
                 panic!("cannot lock cmd_map")
             };*/
             ca.send_signal_event();
-        }
+        //}
     }
     
     let superclass = class!(NSObject);
