@@ -119,7 +119,7 @@ impl CoreMidiAccess {
     
     pub fn send_midi_1_data(&self, d:Midi1Data){
         let mut words = [0u32;64];
-        words[0] = ((d.data0 as u32)<<16)|((d.data1 as u32)<<8)|d.data2 as u32;
+        words[0] = (0x20000000)|((d.data0 as u32)<<16)|((d.data1 as u32)<<8)|d.data2 as u32;
         let event_list = MIDIEventList{
             protocol: kMIDIProtocol_1_0,
             numPackets:1,
@@ -130,6 +130,7 @@ impl CoreMidiAccess {
             }]
         };
         for dest in &self.destinations{
+            println!("SENDING {:?}", d);
             unsafe{
                 MIDISendEventList(self.midi_out_port, *dest, &event_list);
             }
