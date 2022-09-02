@@ -528,7 +528,6 @@ pub struct IronFishVoice {
     mod_envelope: EnvelopeState,
     current_note: i16,
     seed: u32, 
-    touch: f32
 }
 fn random_bit(seed: &mut u32) -> u32 {
     *seed = seed.overflowing_add((seed.overflowing_mul(*seed)).0 | 5).0;
@@ -575,7 +574,7 @@ impl IronFishVoice {
         self.current_note = b1 as i16;
     }
     
-    pub fn one(&mut self, settings: &IronFishSettings) -> f32 {
+    pub fn one(&mut self, settings: &IronFishSettings, touch: f32) -> f32 {
         
         let sub = self.subosc.get();
         
@@ -596,7 +595,7 @@ impl IronFishVoice {
         return output * 0.006; //* 1000.0;
     }
     
-    pub fn fill_buffer(&mut self, mix_buffer: &mut AudioBuffer, display_buffer: Option<&mut AudioBuffer>, settings: &IronFishSettings) {
+    pub fn fill_buffer(&mut self, mix_buffer: &mut AudioBuffer, display_buffer: Option<&mut AudioBuffer>, settings: &IronFishSettings, touch: f32) {
         
         
         let frame_count = mix_buffer.frame_count();
@@ -605,7 +604,7 @@ impl IronFishVoice {
         if let Some(display_buffer) = display_buffer {
             let (left_disp, right_disp) = display_buffer.stereo_mut();
             for i in 0..frame_count {
-                let output = self.one(&settings) * 8.0;
+                let output = self.one(&settings,touch) * 8.0;
                 left_disp[i] = output as f32;
                 right_disp[i] = output as f32;
                 left[i] += output as f32;
@@ -614,7 +613,7 @@ impl IronFishVoice {
         }
         else {
             for i in 0..frame_count {
-                let output = self.one(&settings) * 8.0;
+                let output = self.one(&settings,touch) * 8.0;
                 left[i] += output as f32;
                 right[i] += output as f32;
             }
@@ -630,7 +629,8 @@ pub struct IronFishState {
     settings: Arc<IronFishSettings>,
     voices: [IronFishVoice; 16],
     osc1cache: OscSettings,
-    osc2cache: OscSettings
+    osc2cache: OscSettings,
+    touch: f32 
 }
 
 impl IronFishState {
@@ -656,7 +656,7 @@ impl IronFishState {
     pub fn one(&mut self) -> f32 {
         let mut output: f32 = 0.0;
         for i in 0..self.voices.len() {
-            output += self.voices[i].one(&self.settings);
+            output += self.voices[i].one(&self.settings,self.touch);
         }
         return output; //* 1000.0;
     }
@@ -687,7 +687,7 @@ impl IronFishState {
         for i in 0..self.voices.len() {
             if self.voices[i].active() > -1 {
                 let mut display_buffer = display.pop_buffer_resize(buffer.frame_count(), buffer.channel_count());
-                self.voices[i].fill_buffer(buffer, display_buffer.as_mut(), &self.settings);
+                self.voices[i].fill_buffer(buffer, display_buffer.as_mut(), &self.settings, self.touch);
                 if let Some(dp) = display_buffer {
                     display.send_buffer(true, i, dp);
                 }
@@ -715,7 +715,6 @@ impl Default for IronFishVoice {
             mod_envelope: EnvelopeState::default(),
             current_note: -1,
             seed: 1234,
-            touch: 0.0
         }
     }
 }
@@ -764,6 +763,10 @@ impl AudioGraphNode for IronFishState {
             }
             _ => ()
         }
+        if (data.data0 == 0xb0 && data.data1 == 1)
+        {
+            self.touch = (data.data2 as f32 - 40.0)/(127.0-40.0);
+        }
     }
     
     fn render_to_audio_buffer(&mut self, _time: AudioTime, outputs: &mut [&mut AudioBuffer], _inputs: &[&AudioBuffer], display: &mut DisplayAudioGraph) {
@@ -787,6 +790,7 @@ impl AudioComponent for IronFish {
             from_ui: self.from_ui.receiver(),
             osc1cache: self.settings.osc1.clone(),
             osc2cache: self.settings.osc2.clone(),
+            touch: 0.0
         })
     }
     
