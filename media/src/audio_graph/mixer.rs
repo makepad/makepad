@@ -46,6 +46,13 @@ struct Node {
 // ok so how do we spawn this shit up.
 
 impl AudioGraphNode for Node {
+    fn all_notes_off(&mut self){
+        for i in 0..self.inputs.len() {
+            let input = &mut self.inputs[i];
+            input.all_notes_off();
+        }
+    }
+
     fn handle_midi_1_data(&mut self, data: Midi1Data) {
         for input in &mut self.inputs {
             input.handle_midi_1_data(data);
