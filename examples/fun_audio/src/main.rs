@@ -160,7 +160,7 @@ live_register!{
     
     InstrumentDropdown: ElementBox {
         layout: {align: {y: 0.5}, padding: 5, flow: Right}
-        label = Label {walk: {width: 70, margin: {left: 4}}}
+        label = Label {walk: {width: 30, margin: {left: 4}}}
         dropdown = DropDown {}
     }
     GraphPaper: Box {
@@ -170,7 +170,7 @@ live_register!{
             color2: #0,
             fn get_fill(self) -> vec4 {
                 let sdf = Sdf2d::viewport(mod (self.pos * self.rect_size, 15))
-                let base_color = mix(self.color, self.color2, pow(length((self.pos-vec2(0.5,0.5))*1.2),2.0));
+                let base_color = mix(self.color, self.color2, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 2.0));
                 sdf.clear(base_color)
                 let darker = base_color * 0.6;
                 sdf.rect(1.0, 1.0, 16, 16)
@@ -227,7 +227,7 @@ live_register!{
         }
     }
     
-    FishHeader: Frame {
+    FishHeader: Solid {
         walk: {width: Fit, height: Fit}
         layout: {padding: 5}
         label = Label {
@@ -236,188 +236,206 @@ live_register!{
         }
     }
     
-    FishPanel: Box {
+    FishPanel: Frame {
         layout: {flow: Down}
         walk: {width: Fill, height: Fit}
         label = FishHeader {label = {text: "ReplaceMe"}}
-        bg: {
-            color: #804030,
-            color2: #404040,
-            fn get_fill(self) -> vec4 {
-                return mix(self.color * 0.9, self.color2, clamp((self.pos.y * self.rect_size.y) / 300, 0, 1))
+        body = Box {
+            layout: {flow: Down,padding: 5}
+            walk: {width: Fill, height: Fit}
+            bg: {
+                color: #5
+                fn pixel(self)->vec4{
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                    sdf.clear(#3);
+                    sdf.box(0.,0.,self.rect_size.x, self.rect_size.y,1.0);
+                    sdf.stroke(self.color, 2.0)
+                    return sdf.result
+                }
             }
         }
     }
     
     TouchPanel: FishPanel {
         bg: {color: #f08000}
-        
         label = {label = {text: "Touch"}}
     }
     
     MixerPanel: FishPanel {
-        bg: {color: #d0d0d0}
-        label = {label = {text: "Mixer"}}
-        balance = InstrumentBipolarSlider {
-            slider = {
-                bind: "osc_balance"
-                min: 0.0
-                max: 1.0
-                label: "Oscillator 1/2 Balance"
+        label = {bg: {color: #c8c8c8}, label = {text: "Mixer"}}
+        body = {
+            bg: {color: #c8c8c8}
+            balance = InstrumentBipolarSlider {
+                slider = {
+                    bind: "osc_balance"
+                    min: 0.0
+                    max: 1.0
+                    label: "Oscillator 1/2 Balance"
+                }
             }
-        }
-        noise = InstrumentSlider {
-            slider = {
-                bind: "noise"
-                min: 0.0
-                max: 1.0
-                label: "Noise"
+            noise = InstrumentSlider {
+                slider = {
+                    bind: "noise"
+                    min: 0.0
+                    max: 1.0
+                    label: "Noise"
+                }
             }
-        }
-        sub = InstrumentSlider {
-            slider = {
-                bind: "sub_osc"
-                min: 0.0
-                max: 1.0
-                label: "Sub Oscillator"
+            sub = InstrumentSlider {
+                slider = {
+                    bind: "sub_osc"
+                    min: 0.0
+                    max: 1.0
+                    label: "Sub Oscillator"
+                }
             }
         }
         
     }
     FXPanel: FishPanel {
-        bg: {color: #8080f0}
+        //bg: {color: #8080f0}
         label = {label = {text: "FX", label: {color: #fff}}}
     }
     LFOPanel: FishPanel {
-        bg: {color: #ff0000}
-        label = {label = {text: "LFO"}}
-        
-        rate = InstrumentSlider {
-            slider = {
-                bind: "lfo.rate"
-                min: 0.0
-                max: 1.0
-                label: "Rate"
+        //bg: {color: #ff0000}
+        label = {bg: {color: #f4756e}, label = {text: "LFO"}}
+        body = {
+            bg: {color: #f4756e}
+            rate = InstrumentSlider {
+                slider = {
+                    bind: "lfo.rate"
+                    min: 0.0
+                    max: 1.0
+                    label: "Rate"
+                }
             }
-        }
-        sync = InstrumentCheckbox {
-            checkbox = {
-                bind: "lfo.synconkey",
-                label: "Key sync"
+            sync = InstrumentCheckbox {
+                checkbox = {
+                    bind: "lfo.synconkey",
+                    label: "Key sync"
+                }
             }
         }
     }
     VolumeEnvelopePanel: FishPanel {
-        bg: {color: #f08000}
-        label = {label = {text: "Volume Envelope"}}
-        env = EnvelopePanel {
-            attack = {slider = {bind: "volume_envelope.a"}}
-            hold = {slider = {bind: "volume_envelope.h"}}
-            decay = {slider = {bind: "volume_envelope.d"}}
-            sustain = {slider = {bind: "volume_envelope.s"}}
-            release = {slider = {bind: "volume_envelope.r"}}
+        //bg: {color: #f08000}
+        label = {bg: {color: #f9b08b}, label = {text: "Volume Envelope"}}
+        body = {
+            bg: {color: #f9b08b}
+            env = EnvelopePanel {
+                attack = {slider = {bind: "volume_envelope.a"}}
+                hold = {slider = {bind: "volume_envelope.h"}}
+                decay = {slider = {bind: "volume_envelope.d"}}
+                sustain = {slider = {bind: "volume_envelope.s"}}
+                release = {slider = {bind: "volume_envelope.r"}}
+            }
         }
     }
     
     ModEnvelopePanel: FishPanel {
-        bg: {color: #f08000}
-        label = {label = {text: "Modulation Envelope"}}
-        env = EnvelopePanel {
-            attack = {slider = {bind: "mod_envelope.a"}}
-            hold = {slider = {bind: "mod_envelope.h"}}
-            decay = {slider = {bind: "mod_envelope.d"}}
-            sustain = {slider = {bind: "mod_envelope.s"}}
-            release = {slider = {bind: "mod_envelope.r"}}
+        //bg: {color: #f08000}
+        label = {bg: {color: #f9b08b}, label = {text: "Modulation Envelope"}}
+        body = {
+            bg: {color: #f9b08b}
+            env = EnvelopePanel {
+                attack = {slider = {bind: "mod_envelope.a"}}
+                hold = {slider = {bind: "mod_envelope.h"}}
+                decay = {slider = {bind: "mod_envelope.d"}}
+                sustain = {slider = {bind: "mod_envelope.s"}}
+                release = {slider = {bind: "mod_envelope.r"}}
+            }
         }
     }
     
     FilterPanel: FishPanel {
         
-        bg: {color: #0000f0}
-        
-        label = {
-            label = {text: "Filter", label: {color: #fff}}
-        }
-        InstrumentDropdown {
-            label = {text: "Filter"}
-            dropdown = {
-                bind_enum: "FilterType"
-                bind: "filter1.filter_type"
-                items: ["Lowpass", "Highpass", "Bandpass"]
+        //bg: {color: #0000f0}
+        label = {bg: {color: #3F64A1}, label = {text: "Filter"}}
+        body = {
+            bg: {color: #3F64A1}
+            InstrumentDropdown {
+                label = {text: "Filter"}
+                dropdown = {
+                    bind_enum: "FilterType"
+                    bind: "filter1.filter_type"
+                    items: ["Lowpass", "Highpass", "Bandpass"]
+                }
             }
-        }
-        
-        cutoff = InstrumentSlider {
-            slider = {
-                bind: "filter1.cutoff"
-                min: 0.0
-                max: 1.0
-                label: "Cutoff"
+            
+            cutoff = InstrumentSlider {
+                slider = {
+                    bind: "filter1.cutoff"
+                    min: 0.0
+                    max: 1.0
+                    label: "Cutoff"
+                }
             }
-        }
-        
-        resonance = InstrumentSlider {
-            slider = {
-                bind: "filter1.resonance"
-                min: 0.0
-                max: 1.0
-                label: "Resonance"
+            
+            resonance = InstrumentSlider {
+                slider = {
+                    bind: "filter1.resonance"
+                    min: 0.0
+                    max: 1.0
+                    label: "Resonance"
+                }
             }
-        }
-        
-        modamount = InstrumentBipolarSlider {
-            slider = {
-                bind: "filter1.envelope_amount"
-                min: -1.0
-                max: 1.0
-                label: "Mod Env Amount"
+            
+            modamount = InstrumentBipolarSlider {
+                slider = {
+                    bind: "filter1.envelope_amount"
+                    min: -1.0
+                    max: 1.0
+                    label: "Mod Env Amount"
+                }
             }
-        }
-        lfoamount = InstrumentBipolarSlider {
-            slider = {
-                bind: "filter1.lfo_amount"
-                min: -1.0
-                max: 1.0
-                label: "LFO Amount"
+            lfoamount = InstrumentBipolarSlider {
+                slider = {
+                    bind: "filter1.lfo_amount"
+                    min: -1.0
+                    max: 1.0
+                    label: "LFO Amount"
+                }
             }
-        }
-        touchamount = InstrumentBipolarSlider {
-            slider = {
-                bind: "filter1.touch_amount"
-                min: -1.0
-                max: 1.0
-                label: "Touch Amount"
+            touchamount = InstrumentBipolarSlider {
+                slider = {
+                    bind: "filter1.touch_amount"
+                    min: -1.0
+                    max: 1.0
+                    label: "Touch Amount"
+                }
             }
         }
     }
     
     OscPanel: FishPanel {
-        label = {label = {text: "Oscillator ?"}}
-        bg: {color: #f0f000}
-        type = InstrumentDropdown {
-            label = {text: "Osc1 type"}
-            dropdown = {
-                bind_enum: "OscType"
-                bind: "osc1.osc_type"
-                items: ["DPWSawPulse", "TrivialSaw", "BlampTri", "Naive", "Pure"]
+        label = {bg: {color: #fffb9f}, label = {text: "Oscillator ?"}}
+        body = {
+            bg: {color: #fffb9f}
+            type = InstrumentDropdown {
+                label = {text: "Type"}
+                dropdown = {
+                    bind_enum: "OscType"
+                    bind: "osc1.osc_type"
+                    items: ["DPWSawPulse", "TrivialSaw", "BlampTri", "Naive", "Pure"]
+                }
             }
-        }
-        
-        transpose = InstrumentBipolarSlider {
-            slider = {
-                bind: "osc1.transpose"
-                min: -24.0
-                max: 24.0
-                label: "Transpose"
+            
+            transpose = InstrumentBipolarSlider {
+                slider = {
+                    bind: "osc1.transpose"
+                    min: -24.0
+                    max: 24.0
+                    label: "Transpose"
+                }
             }
-        }
-        
-        detune = InstrumentBipolarSlider {
-            slider = {
-                bind: "osc1.detune"
-                min: -1.0
-                max: 1.0
-                label: "Detune"
+            
+            detune = InstrumentBipolarSlider {
+                slider = {
+                    bind: "osc1.detune"
+                    min: -1.0
+                    max: 1.0
+                    label: "Detune"
+                }
             }
         }
     }
@@ -558,15 +576,15 @@ live_register!{
             Frame {
                 layout: {flow: Right, spacing: 5.0}
                 walk: {margin: {left: 00}, height: Fit}
-                Image{
-                   image: d"resources/tinrs.png",
-                   walk:{width:480,height:100}
+                Image {
+                    image: d"resources/tinrs.png",
+                    walk: {width: 480, height: 100}
                 }
-                panic = Button {walk:{margin:{left:100}},text: "Panic"}
-                Frame{
-                    Frame{walk:{width:Fit, height:Fit}}
+                panic = Button {walk: {margin: {left: 100}}, text: "Panic"}
+                Frame {
+                    Frame {walk: {width: Fit, height: Fit}}
                     layout: {flow: Down, spacing: 0.0}
-                    Frame{
+                    Frame {
                         save1 = Button {text: "S1"}
                         save2 = Button {text: "S2"}
                         save3 = Button {text: "S3"}
@@ -576,7 +594,7 @@ live_register!{
                         save7 = Button {text: "S7"}
                         save8 = Button {text: "S8"}
                     }
-                    Frame{
+                    Frame {
                         load1 = Button {text: "L1"}
                         load2 = Button {text: "L2"}
                         load3 = Button {text: "L3"}
@@ -605,31 +623,43 @@ live_register!{
                     layout: {flow: Down, spacing: 5.0}
                     OscPanel {
                         label = {label = {text: "Oscillator 1"}}
-                        type = {dropdown = {bind: "osc1.osc_type"}}
-                        transpose = {slider = {bind: "osc1.transpose"}}
-                        detune = {slider = {bind: "osc1.detune"}}
+                        body = {
+                            type = {dropdown = {bind: "osc1.osc_type"}}
+                            transpose = {slider = {bind: "osc1.transpose"}}
+                            detune = {slider = {bind: "osc1.detune"}}
+                        }
                     }
-                    MixerPanel {}
                     OscPanel {
                         label = {label = {text: "Oscillator 2"}}
-                        type = {dropdown = {bind: "osc2.osc_type"}}
-                        transpose = {slider = {bind: "osc2.transpose"}}
-                        detune = {slider = {bind: "osc2.detune"}}
+                        body = {
+                            type = {dropdown = {bind: "osc2.osc_type"}}
+                            transpose = {slider = {bind: "osc2.transpose"}}
+                            detune = {slider = {bind: "osc2.detune"}}
+                        }
                     }
                 }
+                Frame{
+                    MixerPanel {}
+                }
+
                 Frame {
                     layout: {flow: Down, spacing: 5.0}
                     VolumeEnvelopePanel {}
+                }
+                Frame{
                     ModEnvelopePanel {}
+                }
+                Frame{
+                    FilterPanel {}
                 }
                 Frame {
                     layout: {flow: Down, spacing: 5.0}
                     
                     LFOPanel {}
-                    FilterPanel {}
+                    /*
                     TouchPanel {}
-                    
                     FXPanel {}
+                    */
                     /*
                     FishPanel {
                         bg: {color: #3}
@@ -842,12 +872,12 @@ impl App {
                     _ => ()
                 }
                 if keypressure < 40 {
-
+                    
                 }
                 
-                if ring<3{
+                if ring<3 {
                     log!("{:?}", inp.data);
-                
+                    
                     let bind_id = self.knob_bind[ring];
                     let bind = &mut self.knob_table[bind_id];
                     bind.value = ((inp.data.data2 as f64 - 63.0) * ((bind.max - bind.min) * 0.001) + bind.value).min(bind.max).max(bind.min);
