@@ -56,7 +56,7 @@ live_register!{
             bg: {color: #4},
         }
     }
-    
+    /*
     FoldablePiano: MainHeader {
         header: {
             fold_button = FoldButton {}
@@ -85,7 +85,7 @@ live_register!{
                 bg: {color: #000a, color2: #0000}
             }
         }
-    }
+    }*/
     
     ElementBox: Frame {
         bg: {color: #4}
@@ -99,6 +99,7 @@ live_register!{
             walk: {height: 22}
         }
     }
+    
     InstrumentBipolarSlider: ElementBox {
         slider = Slider {
             label: "CutOff1"
@@ -137,12 +138,13 @@ live_register!{
             }
         }
     }
+    
     InstrumentCheckbox: ElementBox {
         checkbox = CheckBox {
             label: "CutOff1"
         }
     }
-    
+    /*
     TextInputTest: ElementBox {
         layout: {padding: {left: 8}}
         textbox = TextInput {
@@ -154,7 +156,7 @@ live_register!{
         listbox = ListBox {
             items: ["One", "Two", "Three", "Four", "Five", "Six"]
         }
-    }
+    }*/
     
     InstrumentDropdown: ElementBox {
         layout: {align: {y: 0.5}, padding: 5, flow: Right}
@@ -164,14 +166,13 @@ live_register!{
     GraphPaper: Box {
         walk: {width: Fill, height: 100}
         bg: {
-            color: #202020ff,
-            color: #202020ff,
-            color2: #707070ff,
+            color: #452C20ff,
+            color2: #0,
             fn get_fill(self) -> vec4 {
                 let sdf = Sdf2d::viewport(mod (self.pos * self.rect_size, 15))
-                sdf.clear(self.color)
-                sdf.rect(0.0, 0.0, 16, 16)
-                sdf.stroke(self.color2, 2)
+                sdf.clear(mix(self.color, self.color2, pow(length((self.pos-vec2(0.5,0.5))*1.2),2.0)))
+                //sdf.rect(1.0, 1.0, 16, 16)
+                //sdf.stroke(self.color2, 1)
                 return sdf.result
             }
         }
@@ -521,7 +522,7 @@ live_register!{
     }
     
     App: {{App}} {
-        window: {window: {inner_size: vec2(1280, 1000)}, pass: {clear_color: (#1)}}
+        window: {window: {inner_size: vec2(1280, 1000)}, pass: {clear_color: (#2)}}
         audio_graph: {
             root: Mixer {
                 c1 = Instrument {
@@ -544,7 +545,7 @@ live_register!{
         }
         imgui: {
             design_mode: false,
-            bg: {color: (COLOR_BG_APP)},
+            bg: {color: #f00},
             walk: {width: Fill, height: Fill}
             layout: {
                 padding: 8
@@ -554,27 +555,48 @@ live_register!{
             },
             Frame {
                 layout: {flow: Right, spacing: 5.0}
-                walk: {margin: {left: 60}, height: Fit}
-                panic = Button {text: "Panic"}
-                save1 = Button {text: "S1"}
-                save2 = Button {text: "S2"}
-                save3 = Button {text: "S3"}
-                save4 = Button {text: "S4"}
-                save5 = Button {text: "S5"}
-                save6 = Button {text: "S6"}
-                save7 = Button {text: "S7"}
-                save8 = Button {text: "S8"}
-                load1 = Button {text: "L1"}
-                load2 = Button {text: "L2"}
-                load3 = Button {text: "L3"}
-                load4 = Button {text: "L4"}
-                load5 = Button {text: "L5"}
-                load6 = Button {text: "L6"}
-                load7 = Button {text: "L7"}
-                load8 = Button {text: "L8"}
+                walk: {margin: {left: 00}, height: Fit}
+                Image{
+                   image: d"resources/tinrs.png",
+                   walk:{width:480,height:100}
+                }
+                panic = Button {walk:{margin:{left:100}},text: "Panic"}
+                Frame{
+                    Frame{walk:{width:Fit, height:Fit}}
+                    layout: {flow: Down, spacing: 0.0}
+                    Frame{
+                        save1 = Button {text: "S1"}
+                        save2 = Button {text: "S2"}
+                        save3 = Button {text: "S3"}
+                        save4 = Button {text: "S4"}
+                        save5 = Button {text: "S5"}
+                        save6 = Button {text: "S6"}
+                        save7 = Button {text: "S7"}
+                        save8 = Button {text: "S8"}
+                    }
+                    Frame{
+                        load1 = Button {text: "L1"}
+                        load2 = Button {text: "L2"}
+                        load3 = Button {text: "L3"}
+                        load4 = Button {text: "L4"}
+                        load5 = Button {text: "L5"}
+                        load6 = Button {text: "L6"}
+                        load7 = Button {text: "L7"}
+                        load8 = Button {text: "L8"}
+                    }
+                }
             }
             
-            FoldablePiano {}
+            piano = Piano {}
+            GradientY {
+                walk: {width: Fill, height: 10}
+                bg: {color: #000a, color2: #0000}
+            }
+            display_audio = DisplayAudio {
+                walk: {height: 100, width: Fill}
+            }
+            
+            //FoldablePiano {}
             Frame {
                 layout: {flow: Right, spacing: 5.0}
                 Frame {
@@ -606,13 +628,14 @@ live_register!{
                     TouchPanel {}
                     
                     FXPanel {}
+                    /*
                     FishPanel {
                         bg: {color: #3}
                         label = {label = {text: "Scope"}}
                         display_audio = DisplayAudio {
                             walk: {height: 300, width: Fill}
                         }
-                    }
+                    }*/
                 }
             }
             
@@ -667,35 +690,35 @@ pub struct App {
     #[rust] knob_bind: [usize; 2],
     #[rust] knob_change: usize,
     #[rust(vec![
-        KnobBind {name: "osc1.detune".into(), value:0.0, rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
-        KnobBind {name: "osc2.detune".into(), value:0.0, rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
+        KnobBind {name: "osc1.detune".into(), value: 0.0, rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
+        KnobBind {name: "osc2.detune".into(), value: 0.0, rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
         
-        KnobBind {name: "osc1.transpose".into(), value:0.0, rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min: -36.0, max: 36.0},
-        KnobBind {name: "osc2.transpose".into(), value:0.0, rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min: -36.0, max: 36.0},
+        KnobBind {name: "osc1.transpose".into(), value: 0.0, rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min: -36.0, max: 36.0},
+        KnobBind {name: "osc2.transpose".into(), value: 0.0, rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min: -36.0, max: 36.0},
         
-        KnobBind {name: "filter1.cutoff".into(), value:0.0, rgb: KnobRGB::Indigo, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
-        KnobBind {name: "filter1.resonance".into(), value:0.0, rgb: KnobRGB::Indigo, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
-        KnobBind {name: "filter1.touch_amount".into(), value:0.0, rgb: KnobRGB::Indigo, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
-        KnobBind {name: "filter1.lfo_amount".into(), value:0.0, rgb: KnobRGB::Indigo, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
-        KnobBind {name: "filter1.envelope_amount".into(), value:0.0, rgb: KnobRGB::Indigo, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
-
-        KnobBind {name: "osc_balance".into(), value:0.0, rgb: KnobRGB::Grey, ty: KnobType::BiPolar, min: 0.0, max: 1.0},
-        KnobBind {name: "noise".into(), value:0.0, rgb: KnobRGB::Grey, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
-        KnobBind {name: "sub_osc".into(), value:0.0, rgb: KnobRGB::Grey, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
-
-        KnobBind {name: "mod_envelope.a".into(), value:0.0, rgb: KnobRGB::Orange, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
-        KnobBind {name: "mod_envelope.h".into(), value:0.0, rgb: KnobRGB::Orange, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
-        KnobBind {name: "mod_envelope.d".into(), value:0.0, rgb: KnobRGB::Orange, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
-        KnobBind {name: "mod_envelope.s".into(), value:0.0, rgb: KnobRGB::Orange, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
-        KnobBind {name: "mod_envelope.r".into(), value:0.0, rgb: KnobRGB::Orange, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
-
-        KnobBind {name: "volume_envelope.a".into(), value:0.0, rgb: KnobRGB::Orange, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
-        KnobBind {name: "volume_envelope.h".into(), value:0.0, rgb: KnobRGB::Orange, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
-        KnobBind {name: "volume_envelope.d".into(), value:0.0, rgb: KnobRGB::Orange, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
-        KnobBind {name: "volume_envelope.s".into(), value:0.0, rgb: KnobRGB::Orange, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
-        KnobBind {name: "volume_envelope.r".into(), value:0.0, rgb: KnobRGB::Orange, ty: KnobType::UniPolar, min: 0.0, max: 1.0}
-
-        ])] knob_table: Vec<KnobBind>
+        KnobBind {name: "filter1.cutoff".into(), value: 0.0, rgb: KnobRGB::Indigo, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+        KnobBind {name: "filter1.resonance".into(), value: 0.0, rgb: KnobRGB::Indigo, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+        KnobBind {name: "filter1.touch_amount".into(), value: 0.0, rgb: KnobRGB::Indigo, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
+        KnobBind {name: "filter1.lfo_amount".into(), value: 0.0, rgb: KnobRGB::Indigo, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
+        KnobBind {name: "filter1.envelope_amount".into(), value: 0.0, rgb: KnobRGB::Indigo, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
+        
+        KnobBind {name: "osc_balance".into(), value: 0.0, rgb: KnobRGB::Grey, ty: KnobType::BiPolar, min: 0.0, max: 1.0},
+        KnobBind {name: "noise".into(), value: 0.0, rgb: KnobRGB::Grey, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+        KnobBind {name: "sub_osc".into(), value: 0.0, rgb: KnobRGB::Grey, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+        
+        KnobBind {name: "mod_envelope.a".into(), value: 0.0, rgb: KnobRGB::Orange, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+        KnobBind {name: "mod_envelope.h".into(), value: 0.0, rgb: KnobRGB::Orange, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+        KnobBind {name: "mod_envelope.d".into(), value: 0.0, rgb: KnobRGB::Orange, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+        KnobBind {name: "mod_envelope.s".into(), value: 0.0, rgb: KnobRGB::Orange, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+        KnobBind {name: "mod_envelope.r".into(), value: 0.0, rgb: KnobRGB::Orange, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+        
+        KnobBind {name: "volume_envelope.a".into(), value: 0.0, rgb: KnobRGB::Orange, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+        KnobBind {name: "volume_envelope.h".into(), value: 0.0, rgb: KnobRGB::Orange, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+        KnobBind {name: "volume_envelope.d".into(), value: 0.0, rgb: KnobRGB::Orange, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+        KnobBind {name: "volume_envelope.s".into(), value: 0.0, rgb: KnobRGB::Orange, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+        KnobBind {name: "volume_envelope.r".into(), value: 0.0, rgb: KnobRGB::Orange, ty: KnobType::UniPolar, min: 0.0, max: 1.0}
+        
+    ])] knob_table: Vec<KnobBind>
 }
 
 impl App {
@@ -745,10 +768,10 @@ impl App {
             for (index, bind) in self.knob_table.iter_mut().enumerate() {
                 if let Some(LiveValue::Float(v)) = delta.read_path(&bind.name) {
                     let mut knob = 3;
-                    if self.knob_bind[0]  == index{
-                        knob =0 
-                    } 
-                    if self.knob_bind[1] == index{
+                    if self.knob_bind[0] == index {
+                        knob = 0
+                    }
+                    if self.knob_bind[1] == index {
                         knob = 1
                     }
                     if knob == 3
@@ -769,9 +792,9 @@ impl App {
                             data1: (5 + knob) as u8,
                             data2: bind.rgb as u8
                         });
-
+                        
                     }
-                  
+                    
                     bind.value = *v;
                     //log!("SEND SHIT {} {}", v, (((v - bind.min) / (bind.max - bind.min)) * 127.0)  as u8);
                     ui.cx.send_midi_1_data(Midi1Data {
@@ -802,16 +825,16 @@ impl App {
                     }
                     _ => ()
                 }
-
-                if ring<3{
+                
+                if ring<3 {
                     let bind_id = self.knob_bind[ring];
                     let bind = &mut self.knob_table[bind_id];
-                    bind.value = ((inp.data.data2 as f64 - 63.0) * ((bind.max-bind.min)*0.001) + bind.value).min(bind.max).max(bind.min);
+                    bind.value = ((inp.data.data2 as f64 - 63.0) * ((bind.max - bind.min) * 0.001) + bind.value).min(bind.max).max(bind.min);
                     let mut delta = Vec::new();
                     delta.write_path(&bind.name, LiveValue::Float(bind.value));
-                    delta.debug_print(0,100);
+                    delta.debug_print(0, 100);
                     ui.bind_read(&delta);
-
+                    
                     ui.cx.send_midi_1_data(Midi1Data {
                         data0: 0xb0,
                         data1: (3 + ring)as u8,
@@ -835,40 +858,40 @@ impl App {
                 velocity: note.velocity
             }.into());
         }
-        if ui.button(ids!(panic)).was_clicked(){
+        if ui.button(ids!(panic)).was_clicked() {
             self.audio_graph.all_notes_off();
         }
         
-        if ui.button(ids!(save1)).was_clicked(){self.save_preset(1);}
-        if ui.button(ids!(save2)).was_clicked(){self.save_preset(2);}
-        if ui.button(ids!(save3)).was_clicked(){self.save_preset(3);}
-        if ui.button(ids!(save4)).was_clicked(){self.save_preset(4);}
-        if ui.button(ids!(save5)).was_clicked(){self.save_preset(5);}
-        if ui.button(ids!(save6)).was_clicked(){self.save_preset(6);}
-        if ui.button(ids!(save7)).was_clicked(){self.save_preset(7);}
-        if ui.button(ids!(save8)).was_clicked(){self.save_preset(8);}
-        if ui.button(ids!(load1)).was_clicked(){self.load_preset(ui.cx, 1);}
-        if ui.button(ids!(load2)).was_clicked(){self.load_preset(ui.cx, 2);}
-        if ui.button(ids!(load3)).was_clicked(){self.load_preset(ui.cx, 3);}
-        if ui.button(ids!(load4)).was_clicked(){self.load_preset(ui.cx, 4);}
-        if ui.button(ids!(load5)).was_clicked(){self.load_preset(ui.cx, 5);}
-        if ui.button(ids!(load6)).was_clicked(){self.load_preset(ui.cx, 6);}
-        if ui.button(ids!(load7)).was_clicked(){self.load_preset(ui.cx, 7);}
-        if ui.button(ids!(load8)).was_clicked(){self.load_preset(ui.cx, 8);}
+        if ui.button(ids!(save1)).was_clicked() {self.save_preset(1);}
+        if ui.button(ids!(save2)).was_clicked() {self.save_preset(2);}
+        if ui.button(ids!(save3)).was_clicked() {self.save_preset(3);}
+        if ui.button(ids!(save4)).was_clicked() {self.save_preset(4);}
+        if ui.button(ids!(save5)).was_clicked() {self.save_preset(5);}
+        if ui.button(ids!(save6)).was_clicked() {self.save_preset(6);}
+        if ui.button(ids!(save7)).was_clicked() {self.save_preset(7);}
+        if ui.button(ids!(save8)).was_clicked() {self.save_preset(8);}
+        if ui.button(ids!(load1)).was_clicked() {self.load_preset(ui.cx, 1);}
+        if ui.button(ids!(load2)).was_clicked() {self.load_preset(ui.cx, 2);}
+        if ui.button(ids!(load3)).was_clicked() {self.load_preset(ui.cx, 3);}
+        if ui.button(ids!(load4)).was_clicked() {self.load_preset(ui.cx, 4);}
+        if ui.button(ids!(load5)).was_clicked() {self.load_preset(ui.cx, 5);}
+        if ui.button(ids!(load6)).was_clicked() {self.load_preset(ui.cx, 6);}
+        if ui.button(ids!(load7)).was_clicked() {self.load_preset(ui.cx, 7);}
+        if ui.button(ids!(load8)).was_clicked() {self.load_preset(ui.cx, 8);}
         
         //profile_end(dt);
     }
     
-    pub fn save_preset(&mut self, index:usize){
+    pub fn save_preset(&mut self, index: usize) {
         let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
         let preset = iron_fish.settings.live_read();
         let data = preset.to_binary(0).unwrap();
         let mut file = File::create(format!("preset_{}.bin", index)).unwrap();
         file.write_all(&data).unwrap();
     }
-
-    pub fn load_preset(&mut self, cx:&mut Cx, index:usize){
-        if let Ok(mut file) = File::open(format!("preset_{}.bin", index)){
+    
+    pub fn load_preset(&mut self, cx: &mut Cx, index: usize) {
+        if let Ok(mut file) = File::open(format!("preset_{}.bin", index)) {
             let mut bytes = Vec::new();
             file.read_to_end(&mut bytes).unwrap();
             let mut nodes = Vec::new();
