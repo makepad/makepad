@@ -252,7 +252,7 @@ impl Piano {
         let mut pos = start_pos;
         
         let midi_a0 = 21;
-        let midi_c8 = 108;
+        let midi_c8 = 108+24;
         
         fn black_key_shift(key: u32) -> Option<f64> {
             match key % 12 {
