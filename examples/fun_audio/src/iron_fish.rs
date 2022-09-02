@@ -583,7 +583,7 @@ impl IronFishVoice {
         let volume_envelope = self.volume_envelope.get(&settings.volume_envelope, settings.sample_rate.get());
         let mod_envelope = self.mod_envelope.get(&settings.mod_envelope, settings.sample_rate.get());
         
-        self.filter1.set_cutoff(&settings.filter1, mod_envelope, settings.sample_rate.get(), self.touch);
+        self.filter1.set_cutoff(&settings.filter1, mod_envelope, settings.sample_rate.get(), touch);
         
         let noise = random_f32(&mut self.seed) * 2.0 - 1.0;
         
