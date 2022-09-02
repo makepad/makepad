@@ -302,6 +302,31 @@ live_register!{
         label = {bg: {color: #ccfc9f}, label = {text: "Touch"}}
         body = {
             bg: {color: #ccfc9f}
+        
+        scale = InstrumentBipolarSlider {
+            slider = {
+                bind: "touch.scale"
+                min: -1.0
+                max: 1.0
+                label: "Scale"
+            }
+        }
+        offset = InstrumentBipolarSlider {
+            slider = {
+                bind: "touch.offset"
+                min: -1.0
+                max: 1.0
+                label: "Offset"
+            }
+        }
+        curve = InstrumentSlider {
+            slider = {
+                bind: "touch.curve"
+                min: 0.0
+                max: 1.0
+                label: "Curvature"
+            }
+        }
         }
     }
     
@@ -779,7 +804,12 @@ pub struct App {
        
         KnobBind {name: "osc1.transpose".into(), value: 0.0, rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min: -36.0, max: 36.0},
         KnobBind {name: "osc2.transpose".into(), value: 0.0, rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min: -36.0, max: 36.0},
-        
+     
+        KnobBind {name: "touch.offset".into(), value: 0.0, rgb: KnobRGB::Green, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
+        KnobBind {name: "touch.curve".into(), value: 0.0, rgb: KnobRGB::Green, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+        KnobBind {name: "touch.scale".into(), value: 0.0, rgb: KnobRGB::Green, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
+     
+
         KnobBind {name: "filter1.cutoff".into(), value: 0.0, rgb: KnobRGB::Indigo, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
         KnobBind {name: "filter1.resonance".into(), value: 0.0, rgb: KnobRGB::Indigo, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
         KnobBind {name: "filter1.touch_amount".into(), value: 0.0, rgb: KnobRGB::Indigo, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
