@@ -483,6 +483,7 @@ impl FilterState {
     
     fn set_cutoff(&mut self, settings: &FilterSettings, envelope: f32, sample_rate: f32) {
         self.fc = (settings.cutoff.get() + envelope * settings.envelope_amount.get()*0.5).clamp(0.0, 1.0);
+        self.fc *= self.fc*0.5;
         self.damp = 1.0 - settings.resonance.get();
         let preclamp = 2.0 * ((3.1415 * self.fc).sin());
         self.phi = (preclamp).clamp(0.0, 1.0);
