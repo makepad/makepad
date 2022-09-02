@@ -45,6 +45,9 @@ impl AudioGraphNode for Node {
             audio_unit.handle_midi_1_data(data);
         }
     }
+
+    fn all_notes_off(&mut self) {
+    }
     
     fn render_to_audio_buffer(
         &mut self,
