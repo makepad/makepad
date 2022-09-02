@@ -247,8 +247,10 @@ live_register!{
                 color: #5
                 fn pixel(self)->vec4{
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                    sdf.clear(#3);
+                    sdf.clear(#4);
+                    // cut a corner off...
                     sdf.box(0.,0.,self.rect_size.x, self.rect_size.y,1.0);
+                    
                     sdf.stroke(self.color, 2.0)
                     return sdf.result
                 }
@@ -542,7 +544,7 @@ live_register!{
     }
     
     App: {{App}} {
-        window: {window: {inner_size: vec2(1280, 1000)}, pass: {clear_color: (#2)}}
+        window: {window: {inner_size: vec2(1280, 1000)}, pass: {clear_color: (#3)}}
         audio_graph: {
             root: Mixer {
                 c1 = Instrument {
@@ -641,13 +643,12 @@ live_register!{
                 Frame{
                     MixerPanel {}
                 }
-
+                Frame{
+                    ModEnvelopePanel {}
+                }
                 Frame {
                     layout: {flow: Down, spacing: 5.0}
                     VolumeEnvelopePanel {}
-                }
-                Frame{
-                    ModEnvelopePanel {}
                 }
                 Frame{
                     FilterPanel {}
