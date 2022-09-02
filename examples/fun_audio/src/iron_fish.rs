@@ -714,7 +714,8 @@ impl Default for IronFishVoice {
             volume_envelope: EnvelopeState::default(),
             mod_envelope: EnvelopeState::default(),
             current_note: -1,
-            seed: 1234
+            seed: 1234,
+            touch: 0.0
         }
     }
 }
