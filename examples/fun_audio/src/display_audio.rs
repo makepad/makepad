@@ -21,7 +21,7 @@ live_register!{
             
             let fft = sample2d(
                 self.fft_texture,
-                vec2(mod (1.0 - self.pos.y, 0.5), fract(self.pos.x + self.shift_fft))
+                vec2(mod (1.0 - self.pos.y*0.5, 0.5), fract(self.pos.x + self.shift_fft))
                 //vec2(self.pos.y, fract(self.pos.x + self.shift_fft))
             );
             
@@ -30,9 +30,8 @@ live_register!{
             let right_fft = fft.y + fft.z / 256.0;
             let left_fft = fft.w + fft.x / 256.0;
             
-            let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-            let color = Pal::iq1(self.layer+0.5) * 0.5;
-            
+            let sdf = Sdf2d::viewport(self.pos * self.rect_size*vec2(1.0,0.5));
+            let color = Pal::iq1(self.layer+0.25) * 0.5;
             if left < 0.0 {
                 sdf.rect(0., self.rect_size.y * 0.25, self.rect_size.x, -left * self.rect_size.y + 0.5);
             }
