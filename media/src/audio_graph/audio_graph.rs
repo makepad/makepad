@@ -20,6 +20,7 @@ live_register!{
 }
 
 pub enum FromUI {
+    AllNotesOff,
     Midi1Data(Midi1Data),
     NewRoot(Box<dyn AudioGraphNode + Send>),
     DisplayAudio(AudioBuffer),
@@ -74,6 +75,11 @@ impl AudioGraph {
         self.from_ui.send(FromUI::Midi1Data(data)).unwrap();
     }
     
+    
+    pub fn all_notes_off(&self) {
+        self.from_ui.send(FromUI::AllNotesOff).unwrap();
+    }
+    
     fn render_to_output_buffer(node: &mut Node, to_ui: &ToUISender<ToUIDisplayMsg>, time: AudioTime, output: &mut dyn AudioOutputBuffer) {
         
         while let Ok(msg) = node.from_ui.try_recv() {
@@ -91,6 +97,11 @@ impl AudioGraph {
                         root.handle_midi_1_data(data);
                     }
                     // }
+                }
+                FromUI::AllNotesOff=>{
+                    if let Some(root) = node.root.as_mut() {
+                        root.all_notes_off();
+                    }
                 }
             }
         }

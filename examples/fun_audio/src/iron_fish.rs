@@ -85,7 +85,7 @@ pub struct EnvelopeSettings {
 pub struct LFOSettings {
     #[live(0.2)] rate: f32a,
     #[live(0)] keysync: u32a,
-    waveform: U32A<LFOWave> 
+    waveform: U32A<LFOWave>
 }
 
 #[derive(Copy, Clone)]
@@ -96,8 +96,8 @@ pub struct LFOState
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub struct FilterSettings {
-    filter_type: U32A<FilterType>,    
-    #[live(0.5)] cutoff: f32a,
+    filter_type: U32A<FilterType>,
+    #[live(300.0 / 44100.0)] cutoff: f32a,
     #[live(0.05)] resonance: f32a,
     #[live(0.1)] envelope_amount: f32a,
     #[live(0.1)] lfo_amount: f32a,
@@ -138,19 +138,19 @@ pub struct SubOscillatorState {
     delta_phase: f32,
 }
 
-impl SubOscillatorState{
+impl SubOscillatorState {
     fn get(&mut self) -> f32 {
         self.phase += self.delta_phase;
-        while self.phase > 1.0{
+        while self.phase > 1.0 {
             self.phase -= 1.0
         }
         // return self.dpw();
         
-       return (self.phase * 6.283).sin();
+        return (self.phase * 6.283).sin();
     }
     
-    fn set_note(&mut self, note: u8, samplerate: f32){
-        let freq = 440.0 * f32::powf(2.0, ((note as f32) - 69.0 - 12.0 ) / 12.0);
+    fn set_note(&mut self, note: u8, samplerate: f32) {
+        let freq = 440.0 * f32::powf(2.0, ((note as f32) - 69.0 - 12.0) / 12.0);
         self.delta_phase = (6.283 * freq) / samplerate;
         let sampletime = 1.0 / samplerate;
     }
@@ -170,7 +170,7 @@ impl OscillatorState {
         
         if self.dpw_diff_b_write_index == 4 {self.dpw_diff_b_write_index = 0};
         
-        if self.dpw_init_countdown > 0{
+        if self.dpw_init_countdown > 0 {
             self.dpw_init_countdown = self.dpw_init_countdown - 1;
             
             return poly;
@@ -199,10 +199,10 @@ impl OscillatorState {
         tmp_a[0] = gain * (tmp_a[0] - tmp_a[1]);
         
         
-        return tmp_a[0] * self.dpw_gain2 *0.005; //* self.dpw_gain;
+        return tmp_a[0] * self.dpw_gain2 * 0.005; //* self.dpw_gain;
     }
     
-    fn trivialsaw(self) -> f32{
+    fn trivialsaw(self) -> f32 {
         return self.phase * 2.0 - 1.0
     }
     
@@ -239,7 +239,7 @@ impl OscillatorState {
     
     fn get(&mut self, settings: &OscSettings, _samplerate: f32) -> f32 {
         self.phase += self.delta_phase;
-        while self.phase > 1.0{
+        while self.phase > 1.0 {
             self.phase -= 1.0
         }
         // return self.dpw();
@@ -253,7 +253,7 @@ impl OscillatorState {
         }
     }
     
-    fn set_note(&mut self, note: u8, samplerate: f32, settings: &OscSettings){
+    fn set_note(&mut self, note: u8, samplerate: f32, settings: &OscSettings) {
         let freq = 440.0 * f32::powf(2.0, ((note as f32) - 69.0 + settings.transpose.get() as f32 + settings.detune.get()) / 12.0);
         self.delta_phase = (6.283 * freq) / samplerate;
         //let w = freq * 6.283 / samplerate;
@@ -286,7 +286,7 @@ impl Default for OscillatorState {
             dpw_gain2: 1.0,
             dpw_init_countdown: 4,
             dpw_diff_b: [3.0, 3.0, 3.0, 3.0],
-            dpw_diff_b_write_index: 0            
+            dpw_diff_b_write_index: 0
         }
     }
 }
@@ -294,7 +294,7 @@ impl Default for OscillatorState {
 impl Default for FilterState {
     fn default() -> Self {
         Self {
-           
+            
             hp: 0.0,
             bp: 0.0,
             lp: 0.0,
@@ -356,35 +356,35 @@ impl EnvelopeState {
                         self.delta_value = 0.0;
                         self.current_value = 1.0;
                         self.target_value = 1.0;
-                        self.state_time = EnvelopeState::nicerange(settings.h.get() ,samplerate) as i32;
+                        self.state_time = EnvelopeState::nicerange(settings.h.get(), samplerate) as i32;
                         
                     }
                     else {
                         self.phase = EnvelopePhase::Decay;
-                        let sustainlevel = settings.s.get()*settings.s.get();
-                        self.delta_value = -(1.0 - sustainlevel) / EnvelopeState::nicerange(settings.d.get() , samplerate);
+                        let sustainlevel = settings.s.get() * settings.s.get();
+                        self.delta_value = -(1.0 - sustainlevel) / EnvelopeState::nicerange(settings.d.get(), samplerate);
                         self.current_value = 1.0;
                         self.target_value = sustainlevel;
-                        self.state_time = EnvelopeState::nicerange(settings.d.get(),samplerate) as i32;
+                        self.state_time = EnvelopeState::nicerange(settings.d.get(), samplerate) as i32;
                     }
                 }
                 
                 EnvelopePhase::Hold => {
                     
-                    let sustainlevel = settings.s.get()*settings.s.get();
+                    let sustainlevel = settings.s.get() * settings.s.get();
                     self.phase = EnvelopePhase::Decay;
                     self.delta_value = -(1.0 - settings.s.get()) / EnvelopeState::nicerange(settings.d.get(), samplerate);
                     self.current_value = 1.0;
                     self.target_value = sustainlevel;
-                    self.state_time = EnvelopeState::nicerange(settings.d.get() , samplerate) as i32;
+                    self.state_time = EnvelopeState::nicerange(settings.d.get(), samplerate) as i32;
                 }
                 
                 EnvelopePhase::Decay => {
                     self.phase = EnvelopePhase::Sustain;
                     self.delta_value = 0.0;
-                    let sustainlevel = settings.s.get()*settings.s.get();
+                    let sustainlevel = settings.s.get() * settings.s.get();
                     self.current_value = sustainlevel;
-                    self.target_value =sustainlevel;
+                    self.target_value = sustainlevel;
                     self.state_time = -1;
                 }
                 
@@ -398,8 +398,8 @@ impl EnvelopeState {
                 }
                 EnvelopePhase::Predelay => {
                     self.phase = EnvelopePhase::Attack;
-                    self.delta_value = (1.0 - self.current_value) / EnvelopeState::nicerange(settings.a.get() ,samplerate);
-                    self.state_time = EnvelopeState::nicerange(settings.a.get() , samplerate) as i32;
+                    self.delta_value = (1.0 - self.current_value) / EnvelopeState::nicerange(settings.a.get(), samplerate);
+                    self.state_time = EnvelopeState::nicerange(settings.a.get(), samplerate) as i32;
                     self.target_value = 1.0;
                 }
                 
@@ -408,10 +408,10 @@ impl EnvelopeState {
         }
         else
         {
-            if self.phase == EnvelopePhase::Sustain{
-                let sustainlevel = settings.s.get()*settings.s.get();
-                    self.current_value = sustainlevel;
-                    self.target_value =sustainlevel;
+            if self.phase == EnvelopePhase::Sustain {
+                let sustainlevel = settings.s.get() * settings.s.get();
+                self.current_value = sustainlevel;
+                self.target_value = sustainlevel;
             }
         }
         return self.current_value;
@@ -435,16 +435,16 @@ impl EnvelopeState {
         };
         
         self.phase = EnvelopePhase::Attack;
-        self.delta_value = (1.0 - self.current_value) / (EnvelopeState::nicerange(settings.a.get() ,samplerate));
+        self.delta_value = (1.0 - self.current_value) / (EnvelopeState::nicerange(settings.a.get(), samplerate));
         self.state_time = EnvelopeState::nicerange(settings.a.get(), samplerate) as i32;
         self.target_value = 1.0;
         //  println!("attacking with {} {} {} {} {}",self.state_time,  settings.a, samplerate, settings.a * samplerate, self.delta_value);
     }
-
-    fn nicerange(input: f32, samplerate: f32) ->f32 {
-        return 1.0 + input*input * samplerate* 5.0;
-    } 
-
+    
+    fn nicerange(input: f32, samplerate: f32) -> f32 {
+        return 1.0 + input * input * samplerate * 5.0;
+    }
+    
     fn trigger_off(&mut self, velocity: f32, settings: &EnvelopeSettings, samplerate: f32) {
         
         match self.phase {
@@ -453,8 +453,8 @@ impl EnvelopeState {
             EnvelopePhase::Sustain => {
                 self.phase = EnvelopePhase::Release;
                 self.target_value = 0.0;
-                self.delta_value = -self.current_value / EnvelopeState::nicerange(settings.r.get() ,samplerate);
-                self.state_time = EnvelopeState::nicerange(settings.r.get() , samplerate) as i32;
+                self.delta_value = -self.current_value / EnvelopeState::nicerange(settings.r.get(), samplerate);
+                self.state_time = EnvelopeState::nicerange(settings.r.get(), samplerate) as i32;
             }
             _ => {}
         }
@@ -482,8 +482,8 @@ impl FilterState {
     }
     
     fn set_cutoff(&mut self, settings: &FilterSettings, envelope: f32, sample_rate: f32) {
-        self.fc = (settings.cutoff.get() + envelope * settings.envelope_amount.get()*0.5).clamp(0.0, 1.0);
-        self.fc *= self.fc*0.5;
+        self.fc = (settings.cutoff.get() + envelope * settings.envelope_amount.get() * 0.5).clamp(0.0, 1.0);
+        self.fc *= self.fc * 0.5;
         self.damp = 1.0 - settings.resonance.get();
         let preclamp = 2.0 * ((3.1415 * self.fc).sin());
         self.phi = (preclamp).clamp(0.0, 1.0);
@@ -529,16 +529,16 @@ pub struct IronFishVoice {
     current_note: i16,
     seed: u32
 }
-fn random_bit(seed:&mut u32)->u32{
+fn random_bit(seed: &mut u32) -> u32 {
     *seed = seed.overflowing_add((seed.overflowing_mul(*seed)).0 | 5).0;
     return *seed >> 31;
 }
 
-fn random_f32(seed:&mut u32)->f32{
+fn random_f32(seed: &mut u32) -> f32 {
     let mut out = 0;
-    for _ in 0..32{
+    for _ in 0..32 {
         out |= random_bit(seed);
-        out <<=1;
+        out <<= 1;
     }
     out as f32 / std::u32::MAX as f32
 }
@@ -557,7 +557,7 @@ impl IronFishVoice {
         self.volume_envelope.trigger_off(velocity, &settings.volume_envelope, settings.sample_rate.get());
         self.mod_envelope.trigger_off(velocity, &settings.mod_envelope, settings.sample_rate.get());
     }
-
+    
     pub fn update_note(&mut self, settings: &IronFishSettings) {
         self.osc1.set_note(self.current_note as u8, settings.sample_rate.get(), &settings.osc1);
         self.osc2.set_note(self.current_note as u8, settings.sample_rate.get(), &settings.osc2);
@@ -573,7 +573,7 @@ impl IronFishVoice {
         self.mod_envelope.trigger_on(velocity, &settings.mod_envelope, settings.sample_rate.get());
         self.current_note = b1 as i16;
     }
-
+    
     pub fn one(&mut self, settings: &IronFishSettings) -> f32 {
         
         let sub = self.subosc.get();
@@ -585,9 +585,9 @@ impl IronFishVoice {
         
         self.filter1.set_cutoff(&settings.filter1, mod_envelope, settings.sample_rate.get());
         
-        let noise = random_f32(&mut self.seed)*2.0-1.0;
-
-        let oscinput = osc1 * settings.osc_balance.get() + osc2 * (1.0 - settings.osc_balance.get())  + settings.sub_osc.get() * sub  + settings.noise.get() * noise;
+        let noise = random_f32(&mut self.seed) * 2.0 - 1.0;
+        
+        let oscinput = osc1 * settings.osc_balance.get() + osc2 * (1.0 - settings.osc_balance.get()) + settings.sub_osc.get() * sub + settings.noise.get() * noise;
         let filter = self.filter1.get(oscinput);
         
         let output = volume_envelope * filter;
@@ -601,7 +601,7 @@ impl IronFishVoice {
         let frame_count = mix_buffer.frame_count();
         let (left, right) = mix_buffer.stereo_mut();
         
-        if let Some(display_buffer) = display_buffer{
+        if let Some(display_buffer) = display_buffer {
             let (left_disp, right_disp) = display_buffer.stereo_mut();
             for i in 0..frame_count {
                 let output = self.one(&settings) * 8.0;
@@ -611,7 +611,7 @@ impl IronFishVoice {
                 right[i] += output as f32;
             }
         }
-        else{
+        else {
             for i in 0..frame_count {
                 let output = self.one(&settings) * 8.0;
                 left[i] += output as f32;
@@ -660,43 +660,43 @@ impl IronFishState {
         return output; //* 1000.0;
     }
     
-    pub fn fill_buffer(&mut self, buffer: &mut AudioBuffer, display:&mut DisplayAudioGraph) {
+    pub fn fill_buffer(&mut self, buffer: &mut AudioBuffer, display: &mut DisplayAudioGraph) {
         
         buffer.zero();
-//        if (self.settings.osc1.transpose != )
+        //        if (self.settings.osc1.transpose != )
         let mut pitchdirty: bool = false;
-        if(self.osc1cache.transpose.get() != self.settings.osc1.transpose.get()){ pitchdirty = true;}
-        if(self.osc1cache.detune.get() != self.settings.osc1.detune.get()) {pitchdirty = true;}
-        if(self.osc2cache.transpose.get() != self.settings.osc2.transpose.get()){ pitchdirty = true;}
-        if(self.osc2cache.detune.get() != self.settings.osc2.detune.get()) {pitchdirty = true;}
+        if (self.osc1cache.transpose.get() != self.settings.osc1.transpose.get()) {pitchdirty = true;}
+        if (self.osc1cache.detune.get() != self.settings.osc1.detune.get()) {pitchdirty = true;}
+        if (self.osc2cache.transpose.get() != self.settings.osc2.transpose.get()) {pitchdirty = true;}
+        if (self.osc2cache.detune.get() != self.settings.osc2.detune.get()) {pitchdirty = true;}
         if (pitchdirty)
         {
-            self.osc1cache.transpose.set(self.settings.osc1.transpose.get()) ;
-            self.osc1cache.detune.set(self.settings.osc1.detune.get()) ;
-            self.osc2cache.transpose.set(self.settings.osc2.transpose.get()) ;
-            self.osc2cache.detune.set(self.settings.osc2.detune.get()) ;
-
+            self.osc1cache.transpose.set(self.settings.osc1.transpose.get());
+            self.osc1cache.detune.set(self.settings.osc1.detune.get());
+            self.osc2cache.transpose.set(self.settings.osc2.transpose.get());
+            self.osc2cache.detune.set(self.settings.osc2.detune.get());
+            
             for i in 0..self.voices.len() {
                 if self.voices[i].active() > -1 {
                     self.voices[i].update_note(&self.settings);
                 }
             }
-
+            
         }
         for i in 0..self.voices.len() {
             if self.voices[i].active() > -1 {
                 let mut display_buffer = display.pop_buffer_resize(buffer.frame_count(), buffer.channel_count());
                 self.voices[i].fill_buffer(buffer, display_buffer.as_mut(), &self.settings);
-                if let Some(dp) = display_buffer{
+                if let Some(dp) = display_buffer {
                     display.send_buffer(true, i, dp);
                 }
             }
-            else{
+            else {
                 display.send_voice_off(i);
                 let mut display_buffer = display.pop_buffer_resize(buffer.frame_count(), buffer.channel_count());
-                if let Some(mut dp) = display_buffer{
+                if let Some(mut dp) = display_buffer {
                     dp.zero();
-                    display.send_buffer(false, i,dp);
+                    display.send_buffer(false, i, dp);
                 }
             }
         }
@@ -720,14 +720,14 @@ impl Default for IronFishVoice {
 
 live_register!{
     IronFish: {{IronFish}} {
-        settings:{}
+        settings: {}
     }
 }
 
 enum ToUI {
-    DisplayAudio{
-        voice:usize,
-        buffer:AudioBuffer
+    DisplayAudio {
+        voice: usize,
+        buffer: AudioBuffer
     },
 }
 
@@ -742,39 +742,45 @@ pub struct IronFish {
     #[rust] to_ui: ToUIReceiver<ToUI>,
     #[rust] from_ui: FromUISender<FromUI>,
 }
- 
-impl AudioGraphNode for IronFishState{
-    fn handle_midi_1_data(&mut self, data:Midi1Data){
-        match data.decode(){
-            Midi1Event::Note(note)  =>{
-                if note.is_on{
-                    self.note_on(note.note_number, note.velocity);
-                }
-                else{
-                    self.note_off(note.note_number, note.velocity);
-                }
-            }
-            _=>()
+
+impl AudioGraphNode for IronFishState {
+    fn all_notes_off(&mut self) {
+        for i in 0..self.voices.len() {
+            self.voices[i].volume_envelope.phase = EnvelopePhase::Idle;
         }
     }
     
-    fn render_to_audio_buffer(&mut self, _time: AudioTime, outputs: &mut [&mut AudioBuffer], _inputs: &[&AudioBuffer], display:&mut DisplayAudioGraph){
+    fn handle_midi_1_data(&mut self, data: Midi1Data) {
+        match data.decode() {
+            Midi1Event::Note(note) => {
+                if note.is_on {
+                    self.note_on(note.note_number, note.velocity);
+                }
+                else {
+                    self.note_off(note.note_number, note.velocity);
+                }
+            }
+            _ => ()
+        }
+    }
+    
+    fn render_to_audio_buffer(&mut self, _time: AudioTime, outputs: &mut [&mut AudioBuffer], _inputs: &[&AudioBuffer], display: &mut DisplayAudioGraph) {
         self.fill_buffer(outputs[0], display)
     }
 }
 
 impl AudioComponent for IronFish {
-    fn get_graph_node(&mut self, cx:&mut Cx) -> Box<dyn AudioGraphNode + Send>{
+    fn get_graph_node(&mut self, cx: &mut Cx) -> Box<dyn AudioGraphNode + Send> {
         self.from_ui.new_channel();
         let mut buffers = Vec::new();
-        for i in 0..12*16{ 
+        for i in 0..12 * 16 {
             buffers.push(AudioBuffer::default());
         }
         self.settings.osc1.clone();
-        Box::new(IronFishState{
+        Box::new(IronFishState {
             display_buffers: buffers,
             settings: self.settings.clone(),
-            voices:Default::default(),
+            voices: Default::default(),
             to_ui: self.to_ui.sender(),
             from_ui: self.from_ui.receiver(),
             osc1cache: self.settings.osc1.clone(),
@@ -782,10 +788,10 @@ impl AudioComponent for IronFish {
         })
     }
     
-    fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)){
+    fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, AudioComponentAction)) {
     }
     // we dont have inputs
-    fn audio_query(&mut self, _query: &AudioQuery, _callback: &mut Option<AudioQueryCb>) -> AudioResult{
+    fn audio_query(&mut self, _query: &AudioQuery, _callback: &mut Option<AudioQueryCb>) -> AudioResult {
         AudioResult::not_found()
     }
 }
