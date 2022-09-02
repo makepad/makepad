@@ -559,10 +559,18 @@ live_register!{
                 save2 = Button {text: "S2"}
                 save3 = Button {text: "S3"}
                 save4 = Button {text: "S4"}
+                save5 = Button {text: "S5"}
+                save6 = Button {text: "S6"}
+                save7 = Button {text: "S7"}
+                save8 = Button {text: "S8"}
                 load1 = Button {text: "L1"}
                 load2 = Button {text: "L2"}
                 load3 = Button {text: "L3"}
                 load4 = Button {text: "L4"}
+                load5 = Button {text: "L5"}
+                load6 = Button {text: "L6"}
+                load7 = Button {text: "L7"}
+                load8 = Button {text: "L8"}
             }
             
             FoldablePiano {}
@@ -831,10 +839,18 @@ impl App {
         if ui.button(ids!(save2)).was_clicked(){self.save_preset(2);}
         if ui.button(ids!(save3)).was_clicked(){self.save_preset(3);}
         if ui.button(ids!(save4)).was_clicked(){self.save_preset(4);}
+        if ui.button(ids!(save5)).was_clicked(){self.save_preset(5);}
+        if ui.button(ids!(save6)).was_clicked(){self.save_preset(6);}
+        if ui.button(ids!(save7)).was_clicked(){self.save_preset(7);}
+        if ui.button(ids!(save8)).was_clicked(){self.save_preset(8);}
         if ui.button(ids!(load1)).was_clicked(){self.load_preset(ui.cx, 1);}
         if ui.button(ids!(load2)).was_clicked(){self.load_preset(ui.cx, 2);}
         if ui.button(ids!(load3)).was_clicked(){self.load_preset(ui.cx, 3);}
         if ui.button(ids!(load4)).was_clicked(){self.load_preset(ui.cx, 4);}
+        if ui.button(ids!(load5)).was_clicked(){self.load_preset(ui.cx, 5);}
+        if ui.button(ids!(load6)).was_clicked(){self.load_preset(ui.cx, 6);}
+        if ui.button(ids!(load7)).was_clicked(){self.load_preset(ui.cx, 7);}
+        if ui.button(ids!(load8)).was_clicked(){self.load_preset(ui.cx, 8);}
         
         //profile_end(dt);
     }
