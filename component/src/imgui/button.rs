@@ -27,21 +27,12 @@ impl ButtonImGUI {
 }
 
 pub trait ButtonImGUIExt {
-    fn button(&mut self, label: &str) -> ButtonImGUI;
+    fn button(&mut self, path: &[LiveId]) -> ButtonImGUI;
 }
 
 impl<'a> ButtonImGUIExt for ImGUIRun<'a> {
-    fn button(&mut self, text: &str) -> ButtonImGUI {
-        let new_id = id_num!(button, self.alloc_auto_id());
+    fn button(&mut self, path: &[LiveId]) -> ButtonImGUI {
         let mut frame = self.imgui.frame();
-        let button = if let Some(button) = frame.component_by_path(&[new_id]) {
-            Some(button)
-        }
-        else {
-            frame.template(self.cx, ids!(button), new_id, live!{
-                text: (text)
-            })
-        };
-        ButtonImGUI(self.safe_ref::<Button>(button))
+        ButtonImGUI(self.safe_ref::<Button>(frame.component_by_path(path)))
     }
 }
