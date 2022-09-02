@@ -144,6 +144,8 @@ pub struct DropDown {
     popup_menu: Option<LivePtr>,
     
     items: Vec<String>,
+    display: Vec<String>,
+    
     #[rust] last_rect: Option<Rect>,
     #[rust] is_open: bool,
     selected_item: usize,
@@ -314,10 +316,13 @@ impl DropDown {
         
         self.bg.begin(cx, walk, self.layout);
         //let start_pos = cx.turtle().rect().pos;
-        if let Some(val) = self.items.get(self.selected_item) {
+        if let Some(val) = self.display.get(self.selected_item) {
             self.label.draw_walk(cx, Walk::fit(), Align::default(), val);
         }
-        else {
+        else if let Some(val) = self.items.get(self.selected_item) {
+            self.label.draw_walk(cx, Walk::fit(), Align::default(), val);
+        }
+        else{
             self.label.draw_walk(cx, Walk::fit(), Align::default(), " ");
         }
         self.bg.end(cx);
@@ -340,7 +345,12 @@ impl DropDown {
                 if i == self.selected_item {
                     item_pos = Some(cx.turtle().pos());
                 }
-                lb.draw_item(cx, node_id, item);
+                if i < self.display.len(){
+                    lb.draw_item(cx, node_id, &self.display[i]);
+                }
+                else{
+                    lb.draw_item(cx, node_id, item);
+                }
             }
             // ok we shift the entire menu. however we shouldnt go outside the screen area
             lb.end(cx, last_rect.pos - item_pos.unwrap());
