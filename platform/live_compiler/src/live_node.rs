@@ -313,7 +313,7 @@ impl LiveNodeOrigin {
 }
 
 impl LivePropType {
-    fn from_usize(val: usize) -> Self {
+    pub fn from_usize(val: usize) -> Self {
         match val {
             0 => Self::Field,
             1 => Self::Instance,
