@@ -97,7 +97,7 @@ pub struct LFOState
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub struct FilterSettings {
     filter_type: U32A<FilterType>,    
-    #[live(300.0 / 44100.0)] cutoff: f32a,
+    #[live(0.5)] cutoff: f32a,
     #[live(0.05)] resonance: f32a,
     #[live(0.1)] envelope_amount: f32a,
     #[live(0.1)] lfo_amount: f32a,
