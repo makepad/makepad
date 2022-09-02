@@ -841,8 +841,6 @@ impl App {
                     31 => {keypressure = 11;}
                     _ => ()
                 }
-<<<<<<< HEAD
-
                 if keypressure < 40 {
 
                 }
@@ -850,10 +848,6 @@ impl App {
                 if ring<3{
                     log!("{:?}", inp.data);
                 
-=======
-                
-                if ring<3 {
->>>>>>> 4511457e45c3f1d73c907b6fb606d9ae38bdfb71
                     let bind_id = self.knob_bind[ring];
                     let bind = &mut self.knob_table[bind_id];
                     bind.value = ((inp.data.data2 as f64 - 63.0) * ((bind.max - bind.min) * 0.001) + bind.value).min(bind.max).max(bind.min);
