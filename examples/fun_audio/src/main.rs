@@ -17,6 +17,9 @@ use crate::iron_fish::*;
 use crate::piano::*;
 use crate::display_audio::*;
 
+use std::fs::File;
+use std::io::prelude::*;
+
 live_register!{
     registry AudioComponent::*;
     registry FrameComponent::*;
@@ -823,7 +826,37 @@ impl App {
                 velocity: note.velocity
             }.into());
         }
+        
+        if ui.button(ids!(save1)).was_clicked(){self.save_preset(1);}
+        if ui.button(ids!(save2)).was_clicked(){self.save_preset(2);}
+        if ui.button(ids!(save3)).was_clicked(){self.save_preset(3);}
+        if ui.button(ids!(save4)).was_clicked(){self.save_preset(4);}
+        if ui.button(ids!(load1)).was_clicked(){self.load_preset(ui.cx, 1);}
+        if ui.button(ids!(load2)).was_clicked(){self.load_preset(ui.cx, 2);}
+        if ui.button(ids!(load3)).was_clicked(){self.load_preset(ui.cx, 3);}
+        if ui.button(ids!(load4)).was_clicked(){self.load_preset(ui.cx, 4);}
+        
         //profile_end(dt);
+    }
+    
+    pub fn save_preset(&mut self, index:usize){
+        let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
+        let preset = iron_fish.settings.live_read();
+        let data = preset.to_binary(0).unwrap();
+        let mut file = File::create(format!("preset_{}.bin", index)).unwrap();
+        file.write_all(&data).unwrap();
+    }
+
+    pub fn load_preset(&mut self, cx:&mut Cx, index:usize){
+        if let Ok(mut file) = File::open(format!("preset_{}.bin", index)){
+            let mut bytes = Vec::new();
+            file.read_to_end(&mut bytes).unwrap();
+            let mut nodes = Vec::new();
+            nodes.from_binary(&bytes).unwrap();
+            let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
+            iron_fish.settings.apply_over(cx, &nodes);
+            self.imgui.frame().bind_read(cx, &nodes);
+        }
     }
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
