@@ -297,6 +297,7 @@ live_register!{
         
         scale = InstrumentBipolarSlider {
             slider = {
+                slider:{line_color:#ccfc9f}
                 bind: "touch.scale"
                 min: -1.0
                 max: 1.0
@@ -305,6 +306,7 @@ live_register!{
         }
         offset = InstrumentBipolarSlider {
             slider = {
+                slider:{line_color:#ccfc9f}
                 bind: "touch.offset"
                 min: -1.0
                 max: 1.0
@@ -313,6 +315,7 @@ live_register!{
         }
         curve = InstrumentSlider {
             slider = {
+                slider:{line_color:#ccfc9f}
                 bind: "touch.curve"
                 min: 0.0
                 max: 1.0
