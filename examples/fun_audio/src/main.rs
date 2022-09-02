@@ -269,7 +269,7 @@ live_register!{
                     sdf.line_to(self.rect_size.x - edge, self.rect_size.y - 2.0)
                     sdf.line_to(1.0, self.rect_size.y - 2.0);
                     sdf.close_path();
-                    sdf.fill_keep(#4);
+                    sdf.fill_keep(mix(#47,#3c, pow(self.pos.x,8.0)));
                     sdf.stroke(self.color, 1.0)
                     return sdf.result
                 }
@@ -645,9 +645,9 @@ live_register!{
             
             //FoldablePiano {}
             Frame {
-                layout: {flow: Right, spacing: 5.0}
+                layout: {flow: Right, spacing: 12.0}
                 Frame {
-                    layout: {flow: Down, spacing: 5.0}
+                    layout: {flow: Down, spacing: 12.0}
                     OscPanel {
                         label = {label = {text: "Oscillator 1"}}
                         body = {
