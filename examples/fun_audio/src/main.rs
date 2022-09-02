@@ -779,8 +779,8 @@ impl App {
         ui.cx.on_midi_input_list(ui.event);
         for inp in ui.cx.on_midi_1_input_data(ui.event) {
             if inp.data.data0 == 0xb0 {
-                log!("{:?}", inp.data);
                 let mut ring = 3;
+                let mut keypressure = 40;
                 match inp.data.data1 {
                     10 => {
                         ring = 0;
@@ -788,10 +788,28 @@ impl App {
                     11 => {
                         ring = 1;
                     }
+                    20 => {keypressure = 0;}
+                    21 => {keypressure = 1;}
+                    22 => {keypressure = 2;}
+                    23 => {keypressure = 3;}
+                    24 => {keypressure = 4;}
+                    25 => {keypressure = 5;}
+                    26 => {keypressure = 6;}
+                    27 => {keypressure = 7;}
+                    28 => {keypressure = 8;}
+                    29 => {keypressure = 9;}
+                    30 => {keypressure = 10;}
+                    31 => {keypressure = 11;}
                     _ => ()
                 }
 
+                if keypressure < 40 {
+
+                }
+                
                 if ring<3{
+                    log!("{:?}", inp.data);
+                
                     let bind_id = self.knob_bind[ring];
                     let bind = &mut self.knob_table[bind_id];
                     bind.value = ((inp.data.data2 as f64 - 63.0) * ((bind.max-bind.min)*0.001) + bind.value).min(bind.max).max(bind.min);
@@ -811,6 +829,7 @@ impl App {
             }
             self.audio_graph.send_midi_1_data(inp.data);
             if let Some(note) = inp.data.decode().on_note() {
+                log!("{:?}", inp.data);
                 piano.set_note(ui.cx, note.is_on, note.note_number)
             }
         }
