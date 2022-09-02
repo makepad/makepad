@@ -33,6 +33,10 @@ struct Node {
 }
 
 impl AudioGraphNode for Node{
+
+    fn all_notes_off(&mut self){
+    }
+
     fn handle_midi_1_data(&mut self, data:Midi1Data){
         match data.decode(){
             Midi1Event::Note(note) if note.is_on =>{
