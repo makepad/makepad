@@ -228,8 +228,23 @@ live_register!{
     }
     
     FishHeader: Solid {
+        bg: {
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                let edge = 5.0;
+                sdf.move_to(1.0 + edge, 1.0);
+                sdf.line_to(self.rect_size.x - 2.0, 1.0);
+                sdf.line_to(self.rect_size.x - 2.0, self.rect_size.y - 2.0)
+                sdf.line_to(1.0, self.rect_size.y - 2.0);
+                sdf.line_to(1.0, 1.0 + edge);
+                sdf.close_path();
+                sdf.fill(self.color);
+                //sdf.stroke(self.color, 1.0)
+                return sdf.result
+            }
+        }
         walk: {width: Fit, height: Fit}
-        layout: {padding: 5}
+        layout: {padding: {left:10,top:5,right:10,bottom:5}}
         label = Label {
             label: {text_style: {font_size: 12}, color: #0}
             text: "replace me!"
@@ -241,17 +256,21 @@ live_register!{
         walk: {width: Fill, height: Fit}
         label = FishHeader {label = {text: "ReplaceMe"}}
         body = Box {
-            layout: {flow: Down,padding: 5}
-            walk: {width: Fill, height: Fit}
+            layout: {flow: Down, padding: 5}
+            walk: {width: Fill, height: Fit, margin:{top:-3,left:0.25}}
             bg: {
                 color: #5
-                fn pixel(self)->vec4{
+                fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                    sdf.clear(#4);
-                    // cut a corner off...
-                    sdf.box(0.,0.,self.rect_size.x, self.rect_size.y,1.0);
-                    
-                    sdf.stroke(self.color, 2.0)
+                    let edge = 8.0;
+                    sdf.move_to(1.0, 1.0);
+                    sdf.line_to(self.rect_size.x - 2.0, 1.0);
+                    sdf.line_to(self.rect_size.x - 2.0, self.rect_size.y - edge)
+                    sdf.line_to(self.rect_size.x - edge, self.rect_size.y - 2.0)
+                    sdf.line_to(1.0, self.rect_size.y - 2.0);
+                    sdf.close_path();
+                    sdf.fill_keep(#4);
+                    sdf.stroke(self.color, 1.0)
                     return sdf.result
                 }
             }
@@ -321,7 +340,7 @@ live_register!{
     }
     VolumeEnvelopePanel: FishPanel {
         //bg: {color: #f08000}
-        label = {bg: {color: #f9b08b}, label = {text: "Volume Envelope"}}
+        label = {bg: {color: #f9b08b}, label = {text: "Volume Env"}}
         body = {
             bg: {color: #f9b08b}
             env = EnvelopePanel {
@@ -336,7 +355,7 @@ live_register!{
     
     ModEnvelopePanel: FishPanel {
         //bg: {color: #f08000}
-        label = {bg: {color: #f9b08b}, label = {text: "Modulation Envelope"}}
+        label = {bg: {color: #f9b08b}, label = {text: "Modulation Env"}}
         body = {
             bg: {color: #f9b08b}
             env = EnvelopePanel {
@@ -640,17 +659,17 @@ live_register!{
                         }
                     }
                 }
-                Frame{
+                Frame {
                     MixerPanel {}
                 }
-                Frame{
+                Frame {
                     ModEnvelopePanel {}
                 }
                 Frame {
                     layout: {flow: Down, spacing: 5.0}
                     VolumeEnvelopePanel {}
                 }
-                Frame{
+                Frame {
                     FilterPanel {}
                 }
                 Frame {
