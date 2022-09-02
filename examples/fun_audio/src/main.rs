@@ -438,6 +438,7 @@ live_register!{
                     bind_enum: "OscType"
                     bind: "osc1.osc_type"
                     items: ["DPWSawPulse", "TrivialSaw", "BlampTri", "Naive", "Pure"]
+                    display: ["SawPulse", "Saw", "Triangle", "Naive", "Pure"]
                 }
             }
             
