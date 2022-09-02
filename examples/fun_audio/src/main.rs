@@ -646,6 +646,7 @@ live_register!{
 }
 main_app!(App);
 
+#[derive(Copy, Clone)]
 #[repr(u8)]
 #[allow(unused)]
 enum KnobType {
@@ -661,6 +662,7 @@ enum KnobType {
     Circular4
 }
 
+#[derive(Copy, Clone)]
 #[repr(u8)]
 #[allow(unused)]
 enum KnobRGB {
