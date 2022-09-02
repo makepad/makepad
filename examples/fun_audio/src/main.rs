@@ -103,7 +103,7 @@ live_register!{
     InstrumentBipolarSlider: ElementBox {
         slider = Slider {
             label: "CutOff1"
-            walk: {height: 22}
+            walk: {height: 40}
             slider: {
                 fn pixel(self) -> vec4 {
                     let slider_height = 7;
@@ -111,6 +111,27 @@ live_register!{
                     let nubbg_size = 18
                     
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                    let top = 20.0;
+                    
+                    sdf.box(1.0, top, self.rect_size.x - 2, self.rect_size.y - top - 2, 2);
+                    sdf.fill_keep(mix(#2, #3, self.pos.y))
+                    sdf.stroke(#5, 1.0)
+                    let in_side = 5.0;
+                    let in_top = 7.0;
+                    sdf.rect(1.0 + in_side, top + in_top, self.rect_size.x - 2 - 2 * in_side, 3);
+                    sdf.fill(#1);
+                    let in_top = 9.0;
+                    sdf.rect(1.0 + in_side, top + in_top, self.rect_size.x - 2 - 2 * in_side, 3);
+                    sdf.fill(#4);
+                    
+                    let nub_x = self.slide_pos * (self.rect_size.x - nub_size - in_side * 2 - 6);
+                    sdf.rect(nub_x + in_side, top + 3.0, 12, 12)
+                    sdf.fill(#6);
+                    
+                    //letss draw a shape at the bottom
+                    /*
+                    
+                    sdf.clear(#f00);
                     
                     let slider_bg_color = mix(#38, #30, self.focus);
                     
@@ -132,7 +153,7 @@ live_register!{
                     let nub_x = self.slide_pos * (self.rect_size.x - nub_size);
                     sdf.rect(nub_x, self.rect_size.y - slider_height, nub_size, slider_height)
                     sdf.fill(nub_color);
-                    
+                    */
                     return sdf.result
                 }
             }
@@ -244,7 +265,7 @@ live_register!{
             }
         }
         walk: {width: Fit, height: Fit}
-        layout: {padding: {left:10,top:5,right:10,bottom:5}}
+        layout: {padding: {left: 10, top: 5, right: 10, bottom: 5}}
         label = Label {
             label: {text_style: {font_size: 12}, color: #0}
             text: "replace me!"
@@ -257,7 +278,7 @@ live_register!{
         label = FishHeader {label = {text: "ReplaceMe"}}
         body = Box {
             layout: {flow: Down, padding: 5}
-            walk: {width: Fill, height: Fit, margin:{top:-3,left:0.25}}
+            walk: {width: Fill, height: Fit, margin: {top: -3, left: 0.25}}
             bg: {
                 color: #5
                 fn pixel(self) -> vec4 {
@@ -269,7 +290,7 @@ live_register!{
                     sdf.line_to(self.rect_size.x - edge, self.rect_size.y - 2.0)
                     sdf.line_to(1.0, self.rect_size.y - 2.0);
                     sdf.close_path();
-                    sdf.fill_keep(mix(#47,#3c, pow(self.pos.x,8.0)));
+                    sdf.fill_keep(mix(#47, #3c, pow(self.pos.x, 8.0)));
                     sdf.stroke(self.color, 1.0)
                     return sdf.result
                 }
@@ -278,8 +299,10 @@ live_register!{
     }
     
     TouchPanel: FishPanel {
-        bg: {color: #f08000}
-        label = {label = {text: "Touch"}}
+        label = {bg: {color: #ccfc9f}, label = {text: "Touch"}}
+        body = {
+            bg: {color: #ccfc9f}
+        }
     }
     
     MixerPanel: FishPanel {
@@ -314,8 +337,8 @@ live_register!{
         
     }
     FXPanel: FishPanel {
-        //bg: {color: #8080f0}
-        label = {label = {text: "FX", label: {color: #fff}}}
+        label = {bg: {color: #9fe2fc},label = {text: "Effects",}}
+        body = {bg: {color: #9fe2fc}}
     }
     LFOPanel: FishPanel {
         //bg: {color: #ff0000}
@@ -682,10 +705,10 @@ live_register!{
                     layout: {flow: Down, spacing: 5.0}
                     
                     LFOPanel {}
-                    /*
+                    
                     TouchPanel {}
                     FXPanel {}
-                    */
+                    
                     /*
                     FishPanel {
                         bg: {color: #3}
