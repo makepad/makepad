@@ -170,9 +170,11 @@ live_register!{
             color2: #0,
             fn get_fill(self) -> vec4 {
                 let sdf = Sdf2d::viewport(mod (self.pos * self.rect_size, 15))
-                sdf.clear(mix(self.color, self.color2, pow(length((self.pos-vec2(0.5,0.5))*1.2),2.0)))
-                //sdf.rect(1.0, 1.0, 16, 16)
-                //sdf.stroke(self.color2, 1)
+                let base_color = mix(self.color, self.color2, pow(length((self.pos-vec2(0.5,0.5))*1.2),2.0));
+                sdf.clear(base_color)
+                let darker = base_color * 0.6;
+                sdf.rect(1.0, 1.0, 16, 16)
+                sdf.stroke(darker, 1)
                 return sdf.result
             }
         }
