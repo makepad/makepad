@@ -591,7 +591,7 @@ live_register!{
             layout: {
                 padding: 8
                 align: {x: 0.0, y: 0.0}
-                spacing: 5.,
+                spacing: 0.,
                 flow: Flow::Down
             },
             Frame {
@@ -631,11 +631,16 @@ live_register!{
             piano = Piano {}
             GradientY {
                 walk: {width: Fill, height: 10}
-                bg: {color: #000a, color2: #0000}
+                bg: {color: #000a, color2: #0004}
             }
-            display_audio = DisplayAudio {
-                walk: {height: 100, width: Fill}
+            GradientY {
+                walk: {width: Fill, height: 100}
+                bg: {color: #0004, color2: #0000}
+                display_audio = DisplayAudio {
+                    walk: {height: Fill, width: Fill}
+                }
             }
+            
             
             //FoldablePiano {}
             Frame {
