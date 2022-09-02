@@ -105,6 +105,13 @@ pub struct FilterSettings {
     #[live(0.0)] envelope_curvature: f32a
 }
 
+#[derive(Live,LiveHook, LiveAtomic, Debug, LiveRead)]
+pub struct TouchSettings{
+    #[live(0.5)] offset: f32a,
+    #[live(1.0)] scale: f32a,
+    #[live(0.5)] curve: f32a,
+}
+
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 #[live_ignore]
 pub struct IronFishSettings {
@@ -115,6 +122,7 @@ pub struct IronFishSettings {
     filter1: FilterSettings,
     volume_envelope: EnvelopeSettings,
     mod_envelope: EnvelopeSettings,
+    touch: TouchSettings,
     #[live(44100.0)] sample_rate: f32a,
     #[live(0.5)] osc_balance: f32a,
     #[live(0.5)] sub_osc: f32a,
@@ -583,7 +591,7 @@ impl IronFishVoice {
         let volume_envelope = self.volume_envelope.get(&settings.volume_envelope, settings.sample_rate.get());
         let mod_envelope = self.mod_envelope.get(&settings.mod_envelope, settings.sample_rate.get());
         
-        self.filter1.set_cutoff(&settings.filter1, mod_envelope, settings.sample_rate.get(), self.touch);
+        self.filter1.set_cutoff(&settings.filter1, mod_envelope, settings.sample_rate.get(), touch);
         
         let noise = random_f32(&mut self.seed) * 2.0 - 1.0;
         
