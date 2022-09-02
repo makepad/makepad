@@ -76,6 +76,9 @@ pub fn live_register(cx: &mut Cx) {
 
 impl CxMediaApi for Cx {
     
+    fn send_midi_1_data(&mut self, _data:Midi1Data){
+    }
+    
     fn on_midi_1_input_data(&mut self, event: &Event) -> Vec<Midi1InputData> {
         if let Event::ToWasmMsg(event) = event {
             match event.id{

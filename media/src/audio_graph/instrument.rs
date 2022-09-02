@@ -36,6 +36,11 @@ struct Node {
 }
 
 impl AudioGraphNode for Node {
+    fn all_notes_off(&mut self){
+        for step in &mut self.steps {
+            step.graph_node.all_notes_off();
+        }
+    }
     fn handle_midi_1_data(&mut self, data: Midi1Data) {
         for step in &mut self.steps {
             step.graph_node.handle_midi_1_data(data);
