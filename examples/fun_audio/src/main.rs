@@ -90,73 +90,59 @@ live_register!{
     ElementBox: Frame {
         bg: {color: #4}
         walk: {width: Fill, height: Fit}
-        layout: {flow: Down, padding: 8, spacing: 5}
+        layout: {flow: Down, padding: {left:8, top:5, bottom:3, right:8}, spacing: 5}
+    } 
+    
+    FishSlider: Slider{
+        label: "CutOff1"
+        walk: {height: 40}
+        slider: {
+            instance line_color:#f00
+            instance bipolar: 0.0
+            fn pixel(self) -> vec4 {
+                let slider_height = 7;
+                let nub_size = 3
+                
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                let top = 20.0;
+                
+                sdf.box(1.0, top, self.rect_size.x - 2, self.rect_size.y - top - 2, 2);
+                sdf.fill_keep(mix(#2, #3c, self.pos.y))
+                sdf.stroke(#5, 1.0)
+                let in_side = 5.0;
+                let in_top = 7.0;
+                sdf.rect(1.0 + in_side, top + in_top, self.rect_size.x - 2 - 2 * in_side, 3);
+                sdf.fill(#1);
+                let in_top = 9.0;
+                sdf.rect(1.0 + in_side, top + in_top, self.rect_size.x - 2 - 2 * in_side, 3);
+                sdf.fill(#4);
+                
+                let nub_x = self.slide_pos * (self.rect_size.x - nub_size - in_side * 2 - 6);
+                sdf.move_to(mix(in_side + 3.5,self.rect_size.x * 0.5, self.bipolar), top + in_top);
+                
+                sdf.line_to(nub_x+ in_side + nub_size * 0.5, top + in_top);
+                sdf.stroke(self.line_color,1)
+                
+                let nub_x = self.slide_pos * (self.rect_size.x - nub_size - in_side * 2 - 6);
+                sdf.box(nub_x + in_side, top + 3.0, 12, 12, 1.)
+                
+                sdf.fill_keep(mix(mix(#7,#a,self.hover),#3, self.pos.y));
+                sdf.stroke(mix(mix(#7,#a,self.hover),#0, pow(self.pos.y,3)), 1.);
+
+                return sdf.result
+            }
+        }
     }
     
     InstrumentSlider: ElementBox {
-        slider = Slider {
-            label: "CutOff1"
-            walk: {height: 22}
+        slider = FishSlider {
+            slider:{bipolar: 0.0}
         }
     }
     
     InstrumentBipolarSlider: ElementBox {
-        slider = Slider {
-            label: "CutOff1"
-            walk: {height: 40}
-            slider: {
-                fn pixel(self) -> vec4 {
-                    let slider_height = 7;
-                    let nub_size = mix(3, 4, self.hover);
-                    let nubbg_size = 18
-                    
-                    let sdf = Sdf2d::viewport(self.pos * self.rect_size)
-                    let top = 20.0;
-                    
-                    sdf.box(1.0, top, self.rect_size.x - 2, self.rect_size.y - top - 2, 2);
-                    sdf.fill_keep(mix(#2, #3, self.pos.y))
-                    sdf.stroke(#5, 1.0)
-                    let in_side = 5.0;
-                    let in_top = 7.0;
-                    sdf.rect(1.0 + in_side, top + in_top, self.rect_size.x - 2 - 2 * in_side, 3);
-                    sdf.fill(#1);
-                    let in_top = 9.0;
-                    sdf.rect(1.0 + in_side, top + in_top, self.rect_size.x - 2 - 2 * in_side, 3);
-                    sdf.fill(#4);
-                    
-                    let nub_x = self.slide_pos * (self.rect_size.x - nub_size - in_side * 2 - 6);
-                    sdf.rect(nub_x + in_side, top + 3.0, 12, 12)
-                    sdf.fill(#6);
-                    
-                    //letss draw a shape at the bottom
-                    /*
-                    
-                    sdf.clear(#f00);
-                    
-                    let slider_bg_color = mix(#38, #30, self.focus);
-                    
-                    let slider_color = mix(mix(#5, #68, self.hover), #68, self.focus);
-                    let nub_color = mix(mix(#8, #f, self.hover), mix(#c, #f, self.drag), self.focus);
-                    let nubbg_color = mix(#eee0, #8, self.drag);
-                    
-                    sdf.rect(0, self.rect_size.y - slider_height, self.rect_size.x, slider_height)
-                    sdf.fill(slider_bg_color);
-                    
-                    sdf.rect(self.rect_size.x / 2, self.rect_size.y - slider_height, self.slide_pos * (self.rect_size.x - nub_size) + nub_size, slider_height)
-                    sdf.fill(slider_color);
-                    
-                    let nubbg_x = self.slide_pos * (self.rect_size.x - nub_size) - nubbg_size * 0.5 + 0.5 * nub_size;
-                    sdf.rect(nubbg_x, self.rect_size.y - slider_height, nubbg_size, slider_height)
-                    sdf.fill(nubbg_color);
-                    
-                    // the nub
-                    let nub_x = self.slide_pos * (self.rect_size.x - nub_size);
-                    sdf.rect(nub_x, self.rect_size.y - slider_height, nub_size, slider_height)
-                    sdf.fill(nub_color);
-                    */
-                    return sdf.result
-                }
-            }
+        slider = FishSlider {
+            slider:{bipolar: 1.0}
         }
     }
     
@@ -185,8 +171,9 @@ live_register!{
         dropdown = DropDown {}
     }
     GraphPaper: Box {
-        walk: {width: Fill, height: 100}
+        walk: {width: Fill, height: 100, margin:{left:5, right:5}}
         bg: {
+            radius: 3,
             color: #452C20ff,
             color2: #0,
             fn get_fill(self) -> vec4 {
@@ -208,6 +195,7 @@ live_register!{
         }
         attack = InstrumentSlider {
             slider = {
+                slider:{line_color:#f9b08b}
                 bind: "adsr.a"
                 min: 0.0
                 max: 1.0
@@ -216,6 +204,7 @@ live_register!{
         }
         hold = InstrumentSlider {
             slider = {
+                slider:{line_color:#f9b08b}
                 bind: "adsr.h"
                 min: 0.0
                 max: 1.0
@@ -224,6 +213,7 @@ live_register!{
         }
         decay = InstrumentSlider {
             slider = {
+                slider:{line_color:#f9b08b}
                 bind: "adsr.d"
                 min: 0.0
                 max: 1.0
@@ -232,6 +222,7 @@ live_register!{
         }
         sustain = InstrumentSlider {
             slider = {
+                slider:{line_color:#f9b08b}
                 bind: "adsr.s"
                 min: 0.0
                 max: 1.0
@@ -240,6 +231,7 @@ live_register!{
         }
         release = InstrumentSlider {
             slider = {
+                slider:{line_color:#f9b08b}
                 bind: "adsr.r"
                 min: 0.0
                 max: 1.0
@@ -277,7 +269,7 @@ live_register!{
         walk: {width: Fill, height: Fit}
         label = FishHeader {label = {text: "ReplaceMe"}}
         body = Box {
-            layout: {flow: Down, padding: 5}
+            layout: {flow: Down, padding: {top:10,left:6,right:6,bottom:15}}
             walk: {width: Fill, height: Fit, margin: {top: -3, left: 0.25}}
             bg: {
                 color: #5
@@ -311,6 +303,7 @@ live_register!{
             bg: {color: #c8c8c8}
             balance = InstrumentBipolarSlider {
                 slider = {
+                    slider:{line_color:#c8c8c8}
                     bind: "osc_balance"
                     min: 0.0
                     max: 1.0
@@ -319,6 +312,7 @@ live_register!{
             }
             noise = InstrumentSlider {
                 slider = {
+                    slider:{line_color:#c8c8c8}
                     bind: "noise"
                     min: 0.0
                     max: 1.0
@@ -327,6 +321,7 @@ live_register!{
             }
             sub = InstrumentSlider {
                 slider = {
+                    slider:{line_color:#c8c8c8}
                     bind: "sub_osc"
                     min: 0.0
                     max: 1.0
@@ -341,12 +336,12 @@ live_register!{
         body = {bg: {color: #9fe2fc}}
     }
     LFOPanel: FishPanel {
-        //bg: {color: #ff0000}
         label = {bg: {color: #f4756e}, label = {text: "LFO"}}
         body = {
             bg: {color: #f4756e}
             rate = InstrumentSlider {
                 slider = {
+                    slider:{line_color:#f4756e}
                     bind: "lfo.rate"
                     min: 0.0
                     max: 1.0
@@ -362,7 +357,6 @@ live_register!{
         }
     }
     VolumeEnvelopePanel: FishPanel {
-        //bg: {color: #f08000}
         label = {bg: {color: #f9b08b}, label = {text: "Volume Env"}}
         body = {
             bg: {color: #f9b08b}
@@ -377,7 +371,6 @@ live_register!{
     }
     
     ModEnvelopePanel: FishPanel {
-        //bg: {color: #f08000}
         label = {bg: {color: #f9b08b}, label = {text: "Modulation Env"}}
         body = {
             bg: {color: #f9b08b}
@@ -392,8 +385,6 @@ live_register!{
     }
     
     FilterPanel: FishPanel {
-        
-        //bg: {color: #0000f0}
         label = {bg: {color: #3F64A1}, label = {text: "Filter"}}
         body = {
             bg: {color: #3F64A1}
@@ -408,6 +399,7 @@ live_register!{
             
             cutoff = InstrumentSlider {
                 slider = {
+                    slider:{line_color:#3F64A1}
                     bind: "filter1.cutoff"
                     min: 0.0
                     max: 1.0
@@ -417,6 +409,7 @@ live_register!{
             
             resonance = InstrumentSlider {
                 slider = {
+                    slider:{line_color:#3F64A1}
                     bind: "filter1.resonance"
                     min: 0.0
                     max: 1.0
@@ -426,6 +419,7 @@ live_register!{
             
             modamount = InstrumentBipolarSlider {
                 slider = {
+                    slider:{line_color:#3F64A1}
                     bind: "filter1.envelope_amount"
                     min: -1.0
                     max: 1.0
@@ -434,6 +428,7 @@ live_register!{
             }
             lfoamount = InstrumentBipolarSlider {
                 slider = {
+                    slider:{line_color:#3F64A1}
                     bind: "filter1.lfo_amount"
                     min: -1.0
                     max: 1.0
@@ -442,6 +437,7 @@ live_register!{
             }
             touchamount = InstrumentBipolarSlider {
                 slider = {
+                    slider:{line_color:#3F64A1}
                     bind: "filter1.touch_amount"
                     min: -1.0
                     max: 1.0
@@ -467,6 +463,7 @@ live_register!{
             
             transpose = InstrumentBipolarSlider {
                 slider = {
+                    slider:{line_color:#fffb9f}
                     bind: "osc1.transpose"
                     min: -24.0
                     max: 24.0
@@ -476,6 +473,7 @@ live_register!{
             
             detune = InstrumentBipolarSlider {
                 slider = {
+                    slider:{line_color:#fffb9f}
                     bind: "osc1.detune"
                     min: -1.0
                     max: 1.0
