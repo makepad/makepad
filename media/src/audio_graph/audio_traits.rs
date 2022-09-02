@@ -27,6 +27,7 @@ pub trait AudioComponent: LiveApply {
 
 pub trait AudioGraphNode {
     fn handle_midi_1_data(&mut self, data: Midi1Data);
+    fn all_notes_off(&mut self);
     fn render_to_audio_buffer(
         &mut self,
         time: AudioTime,

@@ -555,6 +555,7 @@ live_register!{
             Frame {
                 layout: {flow: Right, spacing: 5.0}
                 walk: {margin: {left: 60}, height: Fit}
+                panic = Button {text: "Panic"}
                 save1 = Button {text: "S1"}
                 save2 = Button {text: "S2"}
                 save3 = Button {text: "S3"}
@@ -833,6 +834,9 @@ impl App {
                 note_number: note.note_number,
                 velocity: note.velocity
             }.into());
+        }
+        if ui.button(ids!(panic)).was_clicked(){
+            self.audio_graph.all_notes_off();
         }
         
         if ui.button(ids!(save1)).was_clicked(){self.save_preset(1);}
