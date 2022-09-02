@@ -43,6 +43,9 @@ impl AudioGraphNode for Node {
     fn handle_midi_1_data(&mut self, _data: Midi1Data) {
     }
     
+    fn all_notes_off(&mut self) {
+    }
+    
     fn render_to_audio_buffer(
         &mut self,
         time: AudioTime,
