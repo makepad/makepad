@@ -732,8 +732,17 @@ impl App {
         for delta in ui.on_bind_deltas() {
             for (index, bind) in self.knob_table.iter_mut().enumerate() {
                 if let Some(LiveValue::Float(v)) = delta.read_path(&bind.name) {
-                    let knob = self.knob_change;
-                    if index != self.last_knob_index {
+                    let mut knob = 3;
+                    if self.knob_bind[0]  == index{
+                        knob =0 
+                    } 
+                    if self.knob_bind[1] == index{
+                        knob = 1
+                    }
+                    if knob == 3
+                    {
+                        knob = self.knob_change;
+                        self.knob_change = (self.knob_change + 1) % (self.knob_bind.len());
                         self.last_knob_index = index;
                         self.knob_bind[knob] = index;
                         
@@ -748,10 +757,9 @@ impl App {
                             data1: (5 + knob) as u8,
                             data2: bind.rgb as u8
                         });
-                        //log!("SET SHIT");
-                        self.knob_change = (self.knob_change + 1) % (self.knob_bind.len());
-                     
+
                     }
+                  
                     bind.value = *v;
                     //log!("SEND SHIT {} {}", v, (((v - bind.min) / (bind.max - bind.min)) * 127.0)  as u8);
                     ui.cx.send_midi_1_data(Midi1Data {
@@ -772,28 +780,33 @@ impl App {
         for inp in ui.cx.on_midi_1_input_data(ui.event) {
             if inp.data.data0 == 0xb0 {
                 log!("{:?}", inp.data);
+                let mut ring = 3;
                 match inp.data.data1 {
                     10 => {
-                        let last_knob = (self.knob_change + 1) % (self.knob_bind.len());
-                        let bind_id = self.knob_bind[last_knob];
-                        let bind = &mut self.knob_table[bind_id];
-                        bind.value = ((inp.data.data2 as f64 - 63.0) * ((bind.max-bind.min)*0.001) + bind.value).min(bind.max).max(bind.min);
-                        let mut delta = Vec::new();
-                        delta.write_path(&bind.name, LiveValue::Float(bind.value));
-                        delta.debug_print(0,100);
-                        ui.bind_read(&delta);
-
-                        ui.cx.send_midi_1_data(Midi1Data {
-                            data0: 0xb0,
-                            data1: (3 + last_knob)as u8,
-                            data2: (((bind.value - bind.min) / (bind.max - bind.min)) * 127.0) as u8
-                        });
-                        let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
-                        iron_fish.settings.apply_over(ui.cx, &delta);
+                        ring = 0;
                     }
                     11 => {
+                        ring = 1;
                     }
                     _ => ()
+                }
+
+                if ring<3{
+                    let bind_id = self.knob_bind[ring];
+                    let bind = &mut self.knob_table[bind_id];
+                    bind.value = ((inp.data.data2 as f64 - 63.0) * ((bind.max-bind.min)*0.001) + bind.value).min(bind.max).max(bind.min);
+                    let mut delta = Vec::new();
+                    delta.write_path(&bind.name, LiveValue::Float(bind.value));
+                    delta.debug_print(0,100);
+                    ui.bind_read(&delta);
+
+                    ui.cx.send_midi_1_data(Midi1Data {
+                        data0: 0xb0,
+                        data1: (3 + ring)as u8,
+                        data2: (((bind.value - bind.min) / (bind.max - bind.min)) * 127.0) as u8
+                    });
+                    let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
+                    iron_fish.settings.apply_over(ui.cx, &delta);
                 }
             }
             self.audio_graph.send_midi_1_data(inp.data);
