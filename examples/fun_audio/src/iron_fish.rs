@@ -481,8 +481,8 @@ impl FilterState {
         return self.lp;
     }
     
-    fn set_cutoff(&mut self, settings: &FilterSettings, envelope: f32, sample_rate: f32) {
-        self.fc = (settings.cutoff.get() + envelope * settings.envelope_amount.get() * 0.5).clamp(0.0, 1.0);
+    fn set_cutoff(&mut self, settings: &FilterSettings, envelope: f32, sample_rate: f32, touch: f32) {
+        self.fc = (settings.cutoff.get() + touch * settings.touch_amount.get() +  envelope * settings.envelope_amount.get() * 0.5).clamp(0.0, 1.0);
         self.fc *= self.fc * 0.5;
         self.damp = 1.0 - settings.resonance.get();
         let preclamp = 2.0 * ((3.1415 * self.fc).sin());
@@ -527,7 +527,8 @@ pub struct IronFishVoice {
     volume_envelope: EnvelopeState,
     mod_envelope: EnvelopeState,
     current_note: i16,
-    seed: u32
+    seed: u32, 
+    touch: f32
 }
 fn random_bit(seed: &mut u32) -> u32 {
     *seed = seed.overflowing_add((seed.overflowing_mul(*seed)).0 | 5).0;
@@ -583,7 +584,7 @@ impl IronFishVoice {
         let volume_envelope = self.volume_envelope.get(&settings.volume_envelope, settings.sample_rate.get());
         let mod_envelope = self.mod_envelope.get(&settings.mod_envelope, settings.sample_rate.get());
         
-        self.filter1.set_cutoff(&settings.filter1, mod_envelope, settings.sample_rate.get());
+        self.filter1.set_cutoff(&settings.filter1, mod_envelope, settings.sample_rate.get(), self.touch);
         
         let noise = random_f32(&mut self.seed) * 2.0 - 1.0;
         
