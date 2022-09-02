@@ -752,7 +752,8 @@ pub struct App {
     #[rust(vec![
         KnobBind {name: "osc1.detune".into(), value: 0.0, rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
         KnobBind {name: "osc2.detune".into(), value: 0.0, rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
-        
+        KnobBind {name: "lfo.rate".into(), value: 0.0, rgb: KnobRGB::Red, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+       
         KnobBind {name: "osc1.transpose".into(), value: 0.0, rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min: -36.0, max: 36.0},
         KnobBind {name: "osc2.transpose".into(), value: 0.0, rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min: -36.0, max: 36.0},
         
