@@ -174,13 +174,13 @@ live_register!{
                 sdf.rect(1.0 + in_side, top + in_top, self.rect_size.x - 2 - 2 * in_side, 3);
                 sdf.fill(#4);
                 
-                let nub_x = self.slide_pos * (self.rect_size.x - nub_size - in_side * 2 - 6);
+                let nub_x = self.slide_pos * (self.rect_size.x - nub_size - in_side * 2 - 9);
                 sdf.move_to(mix(in_side + 3.5, self.rect_size.x * 0.5, self.bipolar), top + in_top);
                 
                 sdf.line_to(nub_x + in_side + nub_size * 0.5, top + in_top);
                 sdf.stroke(self.line_color, 1)
                 
-                let nub_x = self.slide_pos * (self.rect_size.x - nub_size - in_side * 2 - 6);
+                let nub_x = self.slide_pos * (self.rect_size.x - nub_size - in_side * 2 - 9);
                 sdf.box(nub_x + in_side, top + 3.0, 12, 12, 1.)
                 
                 sdf.fill_keep(mix(mix(#7, #a, self.hover), #3, self.pos.y));
