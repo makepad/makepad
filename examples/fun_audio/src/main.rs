@@ -225,7 +225,7 @@ live_register!{
     
     InstrumentDropdown: ElementBox {
         layout: {align: {y: 0.5}, padding: 5, flow: Right}
-        label = Label {walk: {width: 30, margin: {left: 4}}}
+        label = Label {walk: {width: 30, margin: {left: 7}}}
         dropdown = FishDropDown {}
     }
     GraphPaper: Box {
@@ -573,7 +573,7 @@ live_register!{
     OscPanel: FishPanel {
         label = {bg: {color: #fffb9f}, label = {text: "Oscillator ?"}}
         body = {
-            bg: {color: #fffb9f}
+            bg: {color: #fffb9f} 
             type = InstrumentDropdown {
                 label = {text: "Type"}
                 dropdown = {
@@ -749,14 +749,6 @@ live_register!{
                 Frame {
                     walk: {width: Fill, height: Fit, margin: {bottom: 20}}
                     layout: {flow: Down, spacing: 8.0, align: {x: 1.0, y: 1.0}}
-                    /*Frame {
-                        walk: {width: Fit, height: Fit}
-                        layout: {flow: Right, spacing: 8.0}
-                        save1 = FishButton {text: "Preset 1"}
-                        save2 = FishButton {text: "Preset 2"}
-                        save3 = FishButton {text: "Preset 3"}
-                        save4 = FishButton {text: "Preset 4"}
-                    }*/
                     Frame {
                         walk: {width: Fit, height: Fit}
                         layout: {flow: Right, spacing: 8.0}
@@ -769,16 +761,6 @@ live_register!{
                         save7 = FishButton {text: "Preset 7"}
                         save8 = FishButton {text: "Preset 8"}
                     }
-                    /*Frame {
-                        load1 = FishButton {text: "Load 1"}
-                        load2 = FishButton {text: "Load 2"}
-                        load3 = FishButton {text: "Load 3"}
-                        load4 = FishButton {text: "Load 4"}
-                        load5 = FishButton {text: "Load 5"}
-                        load6 = FishButton {text: "Load 6"}
-                        load7 = FishButton {text: "Load 7"}
-                        load8 = FishButton {text: "Load 8"}
-                    }*/
                 }
                 panic = FishButton {layout: {padding: 20}, walk: {height: Fill, margin: {left: 20, top: 20, right: 20, bottom: 22}}, text: "Panic"}
             }
@@ -796,8 +778,6 @@ live_register!{
                 }
             }
             
-            
-            //FoldablePiano {}
             Frame {
                 layout: {flow: Right, spacing: 12.0}
                 Frame {
