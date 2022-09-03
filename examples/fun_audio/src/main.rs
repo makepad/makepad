@@ -260,7 +260,7 @@ live_register!{
                 sdf.line_to(pad_s + width * ((self.attack + self.decay)/total), sustain)
                 sdf.line_to(pad_s + width * (1.0 - self.release/total), sustain)
                 sdf.line_to(pad_s + width, self.rect_size.y - pad_b)
-                sdf.stroke_keep(#7, 1.);
+                sdf.stroke_keep(#f9b08b, 1.);
                 return sdf.result
             }
         }
