@@ -251,11 +251,13 @@ live_register!{
                 let pad_s = 8
                 let width = self.rect_size.x - 2 * pad_s
                 let height = self.rect_size.y - 2 * pad_b
+                let total = self.attack + self.decay + self.release + 0.5
+                let sustain = self.rect_size.y - pad_b - height * self.sustain;
                 sdf.pos = self.pos * self.rect_size;
                 sdf.move_to(pad_s, self.rect_size.y - pad_b)
-                sdf.line_to(pad_s + width * self.attack, pad_b)
-                sdf.line_to(pad_s + width * (self.attack + self.decay), self.rect_size.y - pad_b - height * self.sustain)
-                sdf.line_to(pad_s + width * (1.0 - self.release), self.rect_size.y - pad_b - height * self.sustain)
+                sdf.line_to(pad_s + width * (self.attack/total), pad_b)
+                sdf.line_to(pad_s + width * ((self.attack + self.decay)/total), sustain)
+                sdf.line_to(pad_s + width * (1.0 - self.release/total), sustain)
                 sdf.line_to(pad_s + width, self.rect_size.y - pad_b)
                 //sdf.close_path()
                 sdf.stroke_keep(#7, 1.);
