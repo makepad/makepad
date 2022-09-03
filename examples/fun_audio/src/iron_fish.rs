@@ -112,6 +112,13 @@ pub struct TouchSettings{
     #[live(0.5)] curve: f32a,
 }
 
+
+#[derive(Live,LiveHook, LiveAtomic, Debug, LiveRead)]
+pub struct EffectSettings{
+    #[live(0.5)] delaysend: f32a,
+    #[live(0.8)] delayfeedback: f32a,
+}
+
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 #[live_ignore]
 pub struct IronFishSettings {
@@ -123,6 +130,7 @@ pub struct IronFishSettings {
     volume_envelope: EnvelopeSettings,
     mod_envelope: EnvelopeSettings,
     touch: TouchSettings,
+    fx: EffectSettings,
     #[live(44100.0)] sample_rate: f32a,
     #[live(0.5)] osc_balance: f32a,
     #[live(0.5)] sub_osc: f32a,
@@ -638,7 +646,10 @@ pub struct IronFishState {
     voices: [IronFishVoice; 16],
     osc1cache: OscSettings,
     osc2cache: OscSettings,
-    touch: f32 
+    touch: f32, 
+    delayline: Vec<f32>,
+    delayreadpos: usize,
+    delaywritepos: usize
 }
 
 impl IronFishState {
@@ -668,7 +679,24 @@ impl IronFishState {
         }
         return output; //* 1000.0;
     }
-    
+    pub fn apply_delay(&mut self, buffer: &mut AudioBuffer) {
+        let frame_count = buffer.frame_count();
+        let (left, right) = buffer.stereo_mut();
+        
+            for i in 0..frame_count {
+                let mut R = self.delayline[self.delayreadpos];
+                R *= self.settings.fx.delayfeedback.get() * 0.9;
+                R += self.settings.fx.delaysend.get() * (left[i] + right[i]);
+                self.delayline[self.delaywritepos] = R;
+                left[i] += R;
+                right[i] += R;
+                self.delaywritepos +=1;
+                if (self.delaywritepos>=44100) {self.delaywritepos = 0;}
+                self.delayreadpos +=1;
+                if (self.delayreadpos >= 44100) {self.delayreadpos = 0;}
+            }
+        }
+
     pub fn fill_buffer(&mut self, buffer: &mut AudioBuffer, display: &mut DisplayAudioGraph) {
         
         buffer.zero();
@@ -709,6 +737,7 @@ impl IronFishState {
                 }
             }
         }
+        self.apply_delay(buffer);
     }
 }
 
@@ -774,6 +803,9 @@ impl AudioGraphNode for IronFishState {
         if (data.data0 == 0xb0 && data.data1 == 1)
         {
             self.touch = (data.data2 as f32 - 40.0)/(127.0-40.0);
+            self.touch += self.settings.touch.offset.get();
+            self.touch *= self.settings.touch.scale.get();
+            self.touch = self.touch.powf(self.settings.touch.curve.get()*3.0).min(1.0).max(-1.0);
         }
     }
     
@@ -798,7 +830,10 @@ impl AudioComponent for IronFish {
             from_ui: self.from_ui.receiver(),
             osc1cache: self.settings.osc1.clone(),
             osc2cache: self.settings.osc2.clone(),
-            touch: 0.0
+            touch: 0.0,
+            delayline: vec![0.0f32; 44100],
+            delaywritepos: 15000,
+            delayreadpos: 0
         })
     }
     
