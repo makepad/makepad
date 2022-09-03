@@ -320,7 +320,7 @@ live_register!{
         
         layout: {
             align: {x: 0.5, y: 0.5},
-            padding: {left: 5.0, top: 5.0, right: 5.0, bottom: 5.0}
+            padding: 8
         }
     }
     
