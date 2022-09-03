@@ -264,6 +264,66 @@ live_register!{
         }
     }
     
+    FishButton: Button {
+        bg: {
+            instance hover: 0.0
+            instance pressed: 0.0
+            
+            const BORDER_RADIUS: 3.0
+            
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                /*
+                let grad_top = 5.0;
+                let grad_bot = 1.0;
+                let body = mix(mix(#53, #5c, self.hover), #33, self.pressed);
+                let body_transp = vec4(body.xyz, 0.0);
+                let top_gradient = mix(body_transp, mix(#6d, #1f, self.pressed), max(0.0, grad_top - sdf.pos.y) / grad_top);
+                let bot_gradient = mix(
+                    mix(body_transp, #5c, self.pressed),
+                    top_gradient,
+                    clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
+                );
+                
+                // the little drop shadow at the bottom
+                let shift_inward = BORDER_RADIUS + 4.0;
+                sdf.move_to(shift_inward, self.rect_size.y - BORDER_RADIUS);
+                sdf.line_to(self.rect_size.x - shift_inward, self.rect_size.y - BORDER_RADIUS);
+                sdf.stroke(
+                    mix(mix(#2f, #1f, self.hover), #0000, self.pressed),
+                    BORDER_RADIUS
+                )
+                */
+                sdf.box(
+                    1.,
+                    1.,
+                    self.rect_size.x - 2.0,
+                    self.rect_size.y - 2.0,
+                    2.0
+                )
+                sdf.fill_keep(mix(#5,#2,self.pos.y))
+                
+                sdf.stroke(
+                    #0,
+                    1.0
+                )
+                
+                return sdf.result
+            }
+        }
+        
+        walk: {
+            width: Size::Fit,
+            height: Size::Fit,
+            margin: {left: 1.0, right: 1.0, top: 1.0, bottom: 1.0},
+        }
+        
+        layout: {
+            align: {x: 0.5, y: 0.5},
+            padding: {left: 5.0, top: 5.0, right: 5.0, bottom: 5.0}
+        }
+    }
+    
     FishPanel: Frame {
         layout: {flow: Down}
         walk: {width: Fill, height: Fit}
@@ -664,37 +724,47 @@ live_register!{
                 flow: Flow::Down
             },
             Frame {
-                layout: {flow: Right, spacing: 5.0}
-                walk: {margin: {left: 00}, height: Fit}
+                layout: {flow: Right, spacing: 5.0,padding:{bottom:0},align:{x:0.0,y:1.0}}
+                walk: {margin: {left: 00}, width:Fill, height: Fit}
                 Image {
                     image: d"resources/tinrs.png",
                     walk: {width: 480, height: 100}
                 }
-                panic = Button {walk: {margin: {left: 100}}, text: "Panic"}
                 Frame {
-                    Frame {walk: {width: Fit, height: Fit}}
-                    layout: {flow: Down, spacing: 0.0}
-                    Frame {
-                        save1 = Button {text: "S1"}
-                        save2 = Button {text: "S2"}
-                        save3 = Button {text: "S3"}
-                        save4 = Button {text: "S4"}
-                        save5 = Button {text: "S5"}
-                        save6 = Button {text: "S6"}
-                        save7 = Button {text: "S7"}
-                        save8 = Button {text: "S8"}
+                    walk: {width: Fill, height: Fit, margin:{bottom:20}}
+                    layout: {flow: Down, spacing: 8.0, align:{x:1.0,y:1.0}}
+                    /*Frame {
+                        walk: {width: Fit, height: Fit}
+                        layout: {flow: Right, spacing: 8.0}
+                        save1 = FishButton {text: "Preset 1"}
+                        save2 = FishButton {text: "Preset 2"}
+                        save3 = FishButton {text: "Preset 3"}
+                        save4 = FishButton {text: "Preset 4"}
+                    }*/
+                    Frame{
+                        walk: {width: Fit, height: Fit}
+                        layout: {flow: Right, spacing: 8.0}
+                        save1 = FishButton {text: "Preset 1"}
+                        save2 = FishButton {text: "Preset 2"}
+                        save3 = FishButton {text: "Preset 3"}
+                        save4 = FishButton {text: "Preset 4"}
+                        save5 = FishButton {text: "Preset 5"}
+                        save6 = FishButton {text: "Preset 6"}
+                        save7 = FishButton {text: "Preset 7"}
+                        save8 = FishButton {text: "Preset 8"}
                     }
-                    Frame {
-                        load1 = Button {text: "L1"}
-                        load2 = Button {text: "L2"}
-                        load3 = Button {text: "L3"}
-                        load4 = Button {text: "L4"}
-                        load5 = Button {text: "L5"}
-                        load6 = Button {text: "L6"}
-                        load7 = Button {text: "L7"}
-                        load8 = Button {text: "L8"}
-                    }
+                    /*Frame {
+                        load1 = FishButton {text: "Load 1"}
+                        load2 = FishButton {text: "Load 2"}
+                        load3 = FishButton {text: "Load 3"}
+                        load4 = FishButton {text: "Load 4"}
+                        load5 = FishButton {text: "Load 5"}
+                        load6 = FishButton {text: "Load 6"}
+                        load7 = FishButton {text: "Load 7"}
+                        load8 = FishButton {text: "Load 8"}
+                    }*/
                 }
+                panic = FishButton {layout:{padding:20},walk: {height:Fill,margin: {left: 20, top:20,right:20, bottom:22}}, text: "Panic"}
             }
             
             piano = Piano {}
@@ -1016,45 +1086,38 @@ impl App {
             self.audio_graph.all_notes_off();
         }
         
-        if ui.button(ids!(save1)).was_clicked() {self.save_preset(1);}
-        if ui.button(ids!(save2)).was_clicked() {self.save_preset(2);}
-        if ui.button(ids!(save3)).was_clicked() {self.save_preset(3);}
-        if ui.button(ids!(save4)).was_clicked() {self.save_preset(4);}
-        if ui.button(ids!(save5)).was_clicked() {self.save_preset(5);}
-        if ui.button(ids!(save6)).was_clicked() {self.save_preset(6);}
-        if ui.button(ids!(save7)).was_clicked() {self.save_preset(7);}
-        if ui.button(ids!(save8)).was_clicked() {self.save_preset(8);}
-        if ui.button(ids!(load1)).was_clicked() {self.load_preset(ui.cx, 1);}
-        if ui.button(ids!(load2)).was_clicked() {self.load_preset(ui.cx, 2);}
-        if ui.button(ids!(load3)).was_clicked() {self.load_preset(ui.cx, 3);}
-        if ui.button(ids!(load4)).was_clicked() {self.load_preset(ui.cx, 4);}
-        if ui.button(ids!(load5)).was_clicked() {self.load_preset(ui.cx, 5);}
-        if ui.button(ids!(load6)).was_clicked() {self.load_preset(ui.cx, 6);}
-        if ui.button(ids!(load7)).was_clicked() {self.load_preset(ui.cx, 7);}
-        if ui.button(ids!(load8)).was_clicked() {self.load_preset(ui.cx, 8);}
-        
-        //profile_end(dt);
+        let shift = if let Event::FingerUp(fu) = event{fu.modifiers.shift}else{false};
+        if ui.button(ids!(save1)).was_clicked() {self.preset(ui.cx, 1,shift);}
+        if ui.button(ids!(save2)).was_clicked() {self.preset(ui.cx, 2,shift);}
+        if ui.button(ids!(save3)).was_clicked() {self.preset(ui.cx, 3,shift);}
+        if ui.button(ids!(save4)).was_clicked() {self.preset(ui.cx, 4,shift);}
+        if ui.button(ids!(save5)).was_clicked() {self.preset(ui.cx, 5,shift);}
+        if ui.button(ids!(save6)).was_clicked() {self.preset(ui.cx, 6,shift);}
+        if ui.button(ids!(save7)).was_clicked() {self.preset(ui.cx, 7,shift);}
+        if ui.button(ids!(save8)).was_clicked() {self.preset(ui.cx, 8,shift);}
     }
     
-    pub fn save_preset(&mut self, index: usize) {
+    pub fn preset(&mut self, cx:&mut Cx, index: usize, save:bool) {
         let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
-        let preset = iron_fish.settings.live_read();
-        let data = preset.to_binary(0).unwrap();
-        let mut file = File::create(format!("preset_{}.bin", index)).unwrap();
-        file.write_all(&data).unwrap();
-    }
-    
-    pub fn load_preset(&mut self, cx: &mut Cx, index: usize) {
-        if let Ok(mut file) = File::open(format!("preset_{}.bin", index)) {
+        let file_name = format!("preset_{}.bin", index);
+        if save{
+            let preset = iron_fish.settings.live_read();
+            let data = preset.to_binary(0).unwrap();
+            log!("Saving preset {}",file_name);
+            let mut file = File::create(&file_name).unwrap();
+            file.write_all(&data).unwrap();
+        }
+        else if let Ok(mut file) = File::open(&file_name) {
+            log!("Loading preset {}",file_name);
             let mut bytes = Vec::new();
             file.read_to_end(&mut bytes).unwrap();
             let mut nodes = Vec::new();
             nodes.from_binary(&bytes).unwrap();
-            let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
             iron_fish.settings.apply_over(cx, &nodes);
             self.imgui.frame().bind_read(cx, &nodes);
         }
     }
+    
     
     pub fn draw(&mut self, cx: &mut Cx2d) {
         if self.window.begin(cx).not_redrawing() {
