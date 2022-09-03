@@ -684,12 +684,12 @@ impl IronFishState {
         let (left, right) = buffer.stereo_mut();
         
             for i in 0..frame_count {
-                let mut R = self.delayline[self.delayreadpos];
-                R *= self.settings.fx.delayfeedback.get() * 0.9;
-                R += self.settings.fx.delaysend.get() * (left[i] + right[i]);
-                self.delayline[self.delaywritepos] = R;
-                left[i] += R;
-                right[i] += R;
+                let mut r = self.delayline[self.delayreadpos];
+                r *= self.settings.fx.delayfeedback.get() * 0.9;
+                r += self.settings.fx.delaysend.get() * (left[i] + right[i]);
+                self.delayline[self.delaywritepos] = r;
+                left[i] += r;
+                right[i] += r;
                 self.delaywritepos +=1;
                 if (self.delaywritepos>=44100) {self.delaywritepos = 0;}
                 self.delayreadpos +=1;
