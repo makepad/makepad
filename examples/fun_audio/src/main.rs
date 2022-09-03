@@ -361,7 +361,26 @@ live_register!{
     }
     FXPanel: FishPanel {
         label = {bg: {color: #9fe2fc},label = {text: "Effects",}}
-        body = {bg: {color: #9fe2fc}}
+        body = {bg: {color: #9fe2fc}
+        delaysend = InstrumentSlider {
+            slider = {
+                slider:{line_color:#9fe2fc}
+                bind: "fx.delaysend"
+                min: 0.0
+                max: 1.0
+                label: "Delay Send"
+            }
+        }
+        delayfeedback = InstrumentSlider {
+            slider = {
+                slider:{line_color:#9fe2fc}
+                bind: "fx.delayfeedback"
+                min: 0.0
+                max: 1.0
+                label: "Delay Feedback"
+            }
+        }
+    }
     }
     LFOPanel: FishPanel {
         label = {bg: {color: #f4756e}, label = {text: "LFO"}}
@@ -810,7 +829,9 @@ pub struct App {
         KnobBind {name: "touch.curve".into(), value: 0.0, rgb: KnobRGB::Green, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
         KnobBind {name: "touch.scale".into(), value: 0.0, rgb: KnobRGB::Green, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
      
-
+        KnobBind {name: "fx.delaysend".into(), value: 0.0, rgb: KnobRGB::LightBlue, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+        KnobBind {name: "fx.delayfeedback".into(), value: 0.0, rgb: KnobRGB::LightBlue, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+       
         KnobBind {name: "filter1.cutoff".into(), value: 0.0, rgb: KnobRGB::Indigo, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
         KnobBind {name: "filter1.resonance".into(), value: 0.0, rgb: KnobRGB::Indigo, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
         KnobBind {name: "filter1.touch_amount".into(), value: 0.0, rgb: KnobRGB::Indigo, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
