@@ -243,8 +243,9 @@ live_register!{
             fn get_fill(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size); //mod (self.pos * self.rect_size, 15))
                 let base_color = mix(self.color, self.color2, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 2.0));
-                sdf.clear(base_color)
-                let darker = base_color * 0.6;
+                let darker = base_color * 0.8;
+                let pos = self.pos * self.rect_size; 
+                sdf.clear(mix(base_color,darker,pow(abs(sin(pos.x*0.5)),24)+pow(abs(sin(pos.y*0.5)),32.0)));
                 sdf.rect(1.0, 1.0, 16, 16)
                 sdf.stroke(darker, 1)
                 let pad_b = 8
@@ -259,11 +260,7 @@ live_register!{
                 sdf.line_to(pad_s + width * ((self.attack + self.decay)/total), sustain)
                 sdf.line_to(pad_s + width * (1.0 - self.release/total), sustain)
                 sdf.line_to(pad_s + width, self.rect_size.y - pad_b)
-                //sdf.close_path()
                 sdf.stroke_keep(#7, 1.);
-                //sdf.close_path();
-                //sdf.fill(#f);
-                
                 return sdf.result
             }
         }
