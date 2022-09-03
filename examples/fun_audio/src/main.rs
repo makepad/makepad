@@ -93,6 +93,63 @@ live_register!{
         layout: {flow: Down, padding: {left: 8, top: 5, bottom: 3, right: 8}, spacing: 5}
     }
     
+    FishDropDown: DropDown {
+        layout: {
+            padding: {left: 6.0, top: 6.0, right: 4.0, bottom: 6.0}
+        }
+        bg: {
+            fn get_bg(self, inout sdf: Sdf2d) {
+                sdf.box(
+                    1,
+                    1,
+                    self.rect_size.x - 2,
+                    self.rect_size.y - 2,
+                    3
+                )
+                sdf.stroke_keep(#0, 1);
+                sdf.fill(mix(#5, #2, self.pos.y));
+            }
+        }
+    }
+    
+    FishButton: Button {
+        bg: {
+            instance hover: 0.0
+            instance pressed: 0.0
+            
+            const BORDER_RADIUS: 3.0
+            
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                sdf.box(
+                    1.,
+                    1.,
+                    self.rect_size.x - 2.0,
+                    self.rect_size.y - 2.0,
+                    2.0
+                )
+                sdf.fill_keep(mix(mix(#5, #2, self.pos.y), mix(#1, #3, self.pos.y), self.pressed))
+                
+                sdf.stroke(
+                    #0,
+                    1.0
+                )
+                
+                return sdf.result
+            }
+        }
+        
+        walk: {
+            width: Size::Fit,
+            height: Size::Fit,
+            margin: {left: 1.0, right: 1.0, top: 1.0, bottom: 1.0},
+        }
+        
+        layout: {
+            align: {x: 0.5, y: 0.5},
+            padding: 8
+        }
+    }
     FishSlider: Slider {
         label: "CutOff1"
         walk: {height: 40}
@@ -165,10 +222,11 @@ live_register!{
         }
     }*/
     
+    
     InstrumentDropdown: ElementBox {
         layout: {align: {y: 0.5}, padding: 5, flow: Right}
         label = Label {walk: {width: 30, margin: {left: 4}}}
-        dropdown = DropDown {}
+        dropdown = FishDropDown {}
     }
     GraphPaper: Box {
         walk: {width: Fill, height: 100, margin: {left: 5, right: 5}}
@@ -285,44 +343,6 @@ live_register!{
         }
     }
     
-    FishButton: Button {
-        bg: {
-            instance hover: 0.0
-            instance pressed: 0.0
-            
-            const BORDER_RADIUS: 3.0
-            
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                sdf.box(
-                    1.,
-                    1.,
-                    self.rect_size.x - 2.0,
-                    self.rect_size.y - 2.0,
-                    2.0
-                )
-                sdf.fill_keep(mix(mix(#5, #2, self.pos.y), mix(#1, #3, self.pos.y), self.pressed))
-                
-                sdf.stroke(
-                    #0,
-                    1.0
-                )
-                
-                return sdf.result
-            }
-        }
-        
-        walk: {
-            width: Size::Fit,
-            height: Size::Fit,
-            margin: {left: 1.0, right: 1.0, top: 1.0, bottom: 1.0},
-        }
-        
-        layout: {
-            align: {x: 0.5, y: 0.5},
-            padding: 8
-        }
-    }
     
     FishPanel: Frame {
         layout: {flow: Down}

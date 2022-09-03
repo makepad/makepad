@@ -38,8 +38,8 @@ live_register!{
             instance pressed: 0.0
             instance focus: 0.0,
             const BORDER_RADIUS: 0.5
-            fn pixel(self) -> vec4 {
-                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+            
+            fn get_bg(self, inout sdf:Sdf2d){
                 sdf.box(
                     0.,
                     0.,
@@ -48,6 +48,11 @@ live_register!{
                     BORDER_RADIUS
                 )
                 sdf.fill(mix(#2, #3, self.hover));
+            }
+            
+            fn pixel(self) -> vec4 {
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size);
+                self.get_bg(sdf);
                 // lets draw a little triangle in the corner
                 let c = vec2(self.rect_size.x - 10.0, self.rect_size.y * 0.5)
                 let sz = 3;
