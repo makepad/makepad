@@ -90,14 +90,14 @@ live_register!{
     ElementBox: Frame {
         bg: {color: #4}
         walk: {width: Fill, height: Fit}
-        layout: {flow: Down, padding: {left:8, top:5, bottom:3, right:8}, spacing: 5}
-    } 
+        layout: {flow: Down, padding: {left: 8, top: 5, bottom: 3, right: 8}, spacing: 5}
+    }
     
-    FishSlider: Slider{
+    FishSlider: Slider {
         label: "CutOff1"
         walk: {height: 40}
         slider: {
-            instance line_color:#f00
+            instance line_color: #f00
             instance bipolar: 0.0
             fn pixel(self) -> vec4 {
                 let slider_height = 7;
@@ -118,17 +118,17 @@ live_register!{
                 sdf.fill(#4);
                 
                 let nub_x = self.slide_pos * (self.rect_size.x - nub_size - in_side * 2 - 6);
-                sdf.move_to(mix(in_side + 3.5,self.rect_size.x * 0.5, self.bipolar), top + in_top);
+                sdf.move_to(mix(in_side + 3.5, self.rect_size.x * 0.5, self.bipolar), top + in_top);
                 
-                sdf.line_to(nub_x+ in_side + nub_size * 0.5, top + in_top);
-                sdf.stroke(self.line_color,1)
+                sdf.line_to(nub_x + in_side + nub_size * 0.5, top + in_top);
+                sdf.stroke(self.line_color, 1)
                 
                 let nub_x = self.slide_pos * (self.rect_size.x - nub_size - in_side * 2 - 6);
                 sdf.box(nub_x + in_side, top + 3.0, 12, 12, 1.)
                 
-                sdf.fill_keep(mix(mix(#7,#a,self.hover),#3, self.pos.y));
-                sdf.stroke(mix(mix(#7,#a,self.hover),#0, pow(self.pos.y,3)), 1.);
-
+                sdf.fill_keep(mix(mix(#7, #a, self.hover), #3, self.pos.y));
+                sdf.stroke(mix(mix(#7, #a, self.hover), #0, pow(self.pos.y, 3)), 1.);
+                
                 return sdf.result
             }
         }
@@ -136,13 +136,13 @@ live_register!{
     
     InstrumentSlider: ElementBox {
         slider = FishSlider {
-            slider:{bipolar: 0.0}
+            slider: {bipolar: 0.0}
         }
     }
     
     InstrumentBipolarSlider: ElementBox {
         slider = FishSlider {
-            slider:{bipolar: 1.0}
+            slider: {bipolar: 1.0}
         }
     }
     
@@ -171,18 +171,39 @@ live_register!{
         dropdown = DropDown {}
     }
     GraphPaper: Box {
-        walk: {width: Fill, height: 100, margin:{left:5, right:5}}
+        walk: {width: Fill, height: 100, margin: {left: 5, right: 5}}
         bg: {
             radius: 3,
             color: #452C20ff,
             color2: #0,
+            
+            instance attack: 0.05
+            instance decay: 0.2
+            instance sustain: 0.5
+            instance release: 0.2
+            
             fn get_fill(self) -> vec4 {
-                let sdf = Sdf2d::viewport(mod (self.pos * self.rect_size, 15))
+                let sdf = Sdf2d::viewport(self.pos * self.rect_size); //mod (self.pos * self.rect_size, 15))
                 let base_color = mix(self.color, self.color2, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 2.0));
                 sdf.clear(base_color)
                 let darker = base_color * 0.6;
                 sdf.rect(1.0, 1.0, 16, 16)
                 sdf.stroke(darker, 1)
+                let pad_b = 8
+                let pad_s = 8
+                let width = self.rect_size.x - 2 * pad_s
+                let height = self.rect_size.y - 2 * pad_b
+                sdf.pos = self.pos * self.rect_size;
+                sdf.move_to(pad_s, self.rect_size.y - pad_b)
+                sdf.line_to(pad_s + width * self.attack, pad_b)
+                sdf.line_to(pad_s + width * (self.attack + self.decay), self.rect_size.y - pad_b - height * self.sustain)
+                sdf.line_to(pad_s + width * (1.0 - self.release), self.rect_size.y - pad_b - height * self.sustain)
+                sdf.line_to(pad_s + width, self.rect_size.y - pad_b)
+                //sdf.close_path()
+                sdf.stroke_keep(#7, 1.);
+                //sdf.close_path();
+                //sdf.fill(#f);
+                
                 return sdf.result
             }
         }
@@ -195,7 +216,7 @@ live_register!{
         }
         attack = InstrumentSlider {
             slider = {
-                slider:{line_color:#f9b08b}
+                slider: {line_color: #f9b08b}
                 bind: "adsr.a"
                 min: 0.0
                 max: 1.0
@@ -204,7 +225,7 @@ live_register!{
         }
         hold = InstrumentSlider {
             slider = {
-                slider:{line_color:#f9b08b}
+                slider: {line_color: #f9b08b}
                 bind: "adsr.h"
                 min: 0.0
                 max: 1.0
@@ -213,7 +234,7 @@ live_register!{
         }
         decay = InstrumentSlider {
             slider = {
-                slider:{line_color:#f9b08b}
+                slider: {line_color: #f9b08b}
                 bind: "adsr.d"
                 min: 0.0
                 max: 1.0
@@ -222,7 +243,7 @@ live_register!{
         }
         sustain = InstrumentSlider {
             slider = {
-                slider:{line_color:#f9b08b}
+                slider: {line_color: #f9b08b}
                 bind: "adsr.s"
                 min: 0.0
                 max: 1.0
@@ -231,7 +252,7 @@ live_register!{
         }
         release = InstrumentSlider {
             slider = {
-                slider:{line_color:#f9b08b}
+                slider: {line_color: #f9b08b}
                 bind: "adsr.r"
                 min: 0.0
                 max: 1.0
@@ -273,27 +294,6 @@ live_register!{
             
             fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-                /*
-                let grad_top = 5.0;
-                let grad_bot = 1.0;
-                let body = mix(mix(#53, #5c, self.hover), #33, self.pressed);
-                let body_transp = vec4(body.xyz, 0.0);
-                let top_gradient = mix(body_transp, mix(#6d, #1f, self.pressed), max(0.0, grad_top - sdf.pos.y) / grad_top);
-                let bot_gradient = mix(
-                    mix(body_transp, #5c, self.pressed),
-                    top_gradient,
-                    clamp((self.rect_size.y - grad_bot - sdf.pos.y - 1.0) / grad_bot, 0.0, 1.0)
-                );
-                
-                // the little drop shadow at the bottom
-                let shift_inward = BORDER_RADIUS + 4.0;
-                sdf.move_to(shift_inward, self.rect_size.y - BORDER_RADIUS);
-                sdf.line_to(self.rect_size.x - shift_inward, self.rect_size.y - BORDER_RADIUS);
-                sdf.stroke(
-                    mix(mix(#2f, #1f, self.hover), #0000, self.pressed),
-                    BORDER_RADIUS
-                )
-                */
                 sdf.box(
                     1.,
                     1.,
@@ -301,7 +301,7 @@ live_register!{
                     self.rect_size.y - 2.0,
                     2.0
                 )
-                sdf.fill_keep(mix(mix(#5,#2,self.pos.y),mix(#1,#3,self.pos.y),self.pressed))
+                sdf.fill_keep(mix(mix(#5, #2, self.pos.y), mix(#1, #3, self.pos.y), self.pressed))
                 
                 sdf.stroke(
                     #0,
@@ -329,7 +329,7 @@ live_register!{
         walk: {width: Fill, height: Fit}
         label = FishHeader {label = {text: "ReplaceMe"}}
         body = Box {
-            layout: {flow: Down, padding: {top:10,left:6,right:6,bottom:15}}
+            layout: {flow: Down, padding: {top: 10, left: 6, right: 6, bottom: 15}}
             walk: {width: Fill, height: Fit, margin: {top: -3, left: 0.25}}
             bg: {
                 color: #5
@@ -354,34 +354,34 @@ live_register!{
         label = {bg: {color: #ccfc9f}, label = {text: "Touch"}}
         body = {
             bg: {color: #ccfc9f}
-        
-        scale = InstrumentBipolarSlider {
-            slider = {
-                slider:{line_color:#ccfc9f}
-                bind: "touch.scale"
-                min: -1.0
-                max: 1.0
-                label: "Scale"
+            
+            scale = InstrumentBipolarSlider {
+                slider = {
+                    slider: {line_color: #ccfc9f}
+                    bind: "touch.scale"
+                    min: -1.0
+                    max: 1.0
+                    label: "Scale"
+                }
             }
-        }
-        offset = InstrumentBipolarSlider {
-            slider = {
-                slider:{line_color:#ccfc9f}
-                bind: "touch.offset"
-                min: -1.0
-                max: 1.0
-                label: "Offset"
+            offset = InstrumentBipolarSlider {
+                slider = {
+                    slider: {line_color: #ccfc9f}
+                    bind: "touch.offset"
+                    min: -1.0
+                    max: 1.0
+                    label: "Offset"
+                }
             }
-        }
-        curve = InstrumentSlider {
-            slider = {
-                slider:{line_color:#ccfc9f}
-                bind: "touch.curve"
-                min: 0.0
-                max: 1.0
-                label: "Curvature"
+            curve = InstrumentSlider {
+                slider = {
+                    slider: {line_color: #ccfc9f}
+                    bind: "touch.curve"
+                    min: 0.0
+                    max: 1.0
+                    label: "Curvature"
+                }
             }
-        }
         }
     }
     
@@ -391,7 +391,7 @@ live_register!{
             bg: {color: #c8c8c8}
             balance = InstrumentBipolarSlider {
                 slider = {
-                    slider:{line_color:#c8c8c8}
+                    slider: {line_color: #c8c8c8}
                     bind: "osc_balance"
                     min: 0.0
                     max: 1.0
@@ -400,7 +400,7 @@ live_register!{
             }
             noise = InstrumentSlider {
                 slider = {
-                    slider:{line_color:#c8c8c8}
+                    slider: {line_color: #c8c8c8}
                     bind: "noise"
                     min: 0.0
                     max: 1.0
@@ -409,7 +409,7 @@ live_register!{
             }
             sub = InstrumentSlider {
                 slider = {
-                    slider:{line_color:#c8c8c8}
+                    slider: {line_color: #c8c8c8}
                     bind: "sub_osc"
                     min: 0.0
                     max: 1.0
@@ -420,27 +420,24 @@ live_register!{
         
     }
     FXPanel: FishPanel {
-        label = {bg: {color: #9fe2fc},label = {text: "Effects",}}
-        body = {bg: {color: #9fe2fc}
-        delaysend = InstrumentSlider {
+        label = {bg: {color: #9fe2fc}, label = {text: "Effects",}}
+        body = {bg: {color: #9fe2fc} delaysend = InstrumentSlider {
             slider = {
-                slider:{line_color:#9fe2fc}
+                slider: {line_color: #9fe2fc}
                 bind: "fx.delaysend"
                 min: 0.0
                 max: 1.0
                 label: "Delay Send"
             }
-        }
-        delayfeedback = InstrumentSlider {
+        } delayfeedback = InstrumentSlider {
             slider = {
-                slider:{line_color:#9fe2fc}
+                slider: {line_color: #9fe2fc}
                 bind: "fx.delayfeedback"
                 min: 0.0
                 max: 1.0
                 label: "Delay Feedback"
             }
-        }
-    }
+        }}
     }
     LFOPanel: FishPanel {
         label = {bg: {color: #f4756e}, label = {text: "LFO"}}
@@ -448,7 +445,7 @@ live_register!{
             bg: {color: #f4756e}
             rate = InstrumentSlider {
                 slider = {
-                    slider:{line_color:#f4756e}
+                    slider: {line_color: #f4756e}
                     bind: "lfo.rate"
                     min: 0.0
                     max: 1.0
@@ -467,7 +464,7 @@ live_register!{
         label = {bg: {color: #f9b08b}, label = {text: "Volume Env"}}
         body = {
             bg: {color: #f9b08b}
-            env = EnvelopePanel {
+            vol_env = EnvelopePanel {
                 attack = {slider = {bind: "volume_envelope.a"}}
                 hold = {slider = {bind: "volume_envelope.h"}}
                 decay = {slider = {bind: "volume_envelope.d"}}
@@ -481,7 +478,7 @@ live_register!{
         label = {bg: {color: #f9b08b}, label = {text: "Modulation Env"}}
         body = {
             bg: {color: #f9b08b}
-            env = EnvelopePanel {
+            mod_env = EnvelopePanel {
                 attack = {slider = {bind: "mod_envelope.a"}}
                 hold = {slider = {bind: "mod_envelope.h"}}
                 decay = {slider = {bind: "mod_envelope.d"}}
@@ -506,7 +503,7 @@ live_register!{
             
             cutoff = InstrumentSlider {
                 slider = {
-                    slider:{line_color:#3F64A1}
+                    slider: {line_color: #3F64A1}
                     bind: "filter1.cutoff"
                     min: 0.0
                     max: 1.0
@@ -516,7 +513,7 @@ live_register!{
             
             resonance = InstrumentSlider {
                 slider = {
-                    slider:{line_color:#3F64A1}
+                    slider: {line_color: #3F64A1}
                     bind: "filter1.resonance"
                     min: 0.0
                     max: 1.0
@@ -526,7 +523,7 @@ live_register!{
             
             modamount = InstrumentBipolarSlider {
                 slider = {
-                    slider:{line_color:#3F64A1}
+                    slider: {line_color: #3F64A1}
                     bind: "filter1.envelope_amount"
                     min: -1.0
                     max: 1.0
@@ -535,7 +532,7 @@ live_register!{
             }
             lfoamount = InstrumentBipolarSlider {
                 slider = {
-                    slider:{line_color:#3F64A1}
+                    slider: {line_color: #3F64A1}
                     bind: "filter1.lfo_amount"
                     min: -1.0
                     max: 1.0
@@ -544,7 +541,7 @@ live_register!{
             }
             touchamount = InstrumentBipolarSlider {
                 slider = {
-                    slider:{line_color:#3F64A1}
+                    slider: {line_color: #3F64A1}
                     bind: "filter1.touch_amount"
                     min: -1.0
                     max: 1.0
@@ -570,7 +567,7 @@ live_register!{
             
             transpose = InstrumentBipolarSlider {
                 slider = {
-                    slider:{line_color:#fffb9f}
+                    slider: {line_color: #fffb9f}
                     bind: "osc1.transpose"
                     min: -24.0
                     max: 24.0
@@ -580,7 +577,7 @@ live_register!{
             
             detune = InstrumentBipolarSlider {
                 slider = {
-                    slider:{line_color:#fffb9f}
+                    slider: {line_color: #fffb9f}
                     bind: "osc1.detune"
                     min: -1.0
                     max: 1.0
@@ -724,15 +721,15 @@ live_register!{
                 flow: Flow::Down
             },
             Frame {
-                layout: {flow: Right, spacing: 5.0,padding:{bottom:0},align:{x:0.0,y:1.0}}
-                walk: {margin: {left: 00}, width:Fill, height: Fit}
+                layout: {flow: Right, spacing: 5.0, padding: {bottom: 0}, align: {x: 0.0, y: 1.0}}
+                walk: {margin: {left: 00}, width: Fill, height: Fit}
                 Image {
                     image: d"resources/tinrs.png",
                     walk: {width: 480, height: 100}
                 }
                 Frame {
-                    walk: {width: Fill, height: Fit, margin:{bottom:20}}
-                    layout: {flow: Down, spacing: 8.0, align:{x:1.0,y:1.0}}
+                    walk: {width: Fill, height: Fit, margin: {bottom: 20}}
+                    layout: {flow: Down, spacing: 8.0, align: {x: 1.0, y: 1.0}}
                     /*Frame {
                         walk: {width: Fit, height: Fit}
                         layout: {flow: Right, spacing: 8.0}
@@ -741,7 +738,7 @@ live_register!{
                         save3 = FishButton {text: "Preset 3"}
                         save4 = FishButton {text: "Preset 4"}
                     }*/
-                    Frame{
+                    Frame {
                         walk: {width: Fit, height: Fit}
                         layout: {flow: Right, spacing: 8.0}
                         save1 = FishButton {text: "Preset 1"}
@@ -764,17 +761,17 @@ live_register!{
                         load8 = FishButton {text: "Load 8"}
                     }*/
                 }
-                panic = FishButton {layout:{padding:20},walk: {height:Fill,margin: {left: 20, top:20,right:20, bottom:22}}, text: "Panic"}
+                panic = FishButton {layout: {padding: 20}, walk: {height: Fill, margin: {left: 20, top: 20, right: 20, bottom: 22}}, text: "Panic"}
             }
             
             piano = Piano {}
             GradientY {
                 walk: {width: Fill, height: 10}
-                bg: {color: #000a, color2: #0004}
+                bg: {color: #000a, color2: #0008}
             }
             GradientY {
                 walk: {width: Fill, height: 100}
-                bg: {color: #0004, color2: #0000}
+                bg: {color: #0008, color2: #0000}
                 display_audio = DisplayAudio {
                     walk: {height: Fill, width: Fill}
                 }
@@ -891,17 +888,17 @@ pub struct App {
         KnobBind {name: "osc1.detune".into(), value: 0.0, rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
         KnobBind {name: "osc2.detune".into(), value: 0.0, rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
         KnobBind {name: "lfo.rate".into(), value: 0.0, rgb: KnobRGB::Red, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
-       
+        
         KnobBind {name: "osc1.transpose".into(), value: 0.0, rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min: -36.0, max: 36.0},
         KnobBind {name: "osc2.transpose".into(), value: 0.0, rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min: -36.0, max: 36.0},
-     
+        
         KnobBind {name: "touch.offset".into(), value: 0.0, rgb: KnobRGB::Green, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
         KnobBind {name: "touch.curve".into(), value: 0.0, rgb: KnobRGB::Green, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
         KnobBind {name: "touch.scale".into(), value: 0.0, rgb: KnobRGB::Green, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
-     
+        
         KnobBind {name: "fx.delaysend".into(), value: 0.0, rgb: KnobRGB::LightBlue, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
         KnobBind {name: "fx.delayfeedback".into(), value: 0.0, rgb: KnobRGB::LightBlue, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
-       
+        
         KnobBind {name: "filter1.cutoff".into(), value: 0.0, rgb: KnobRGB::Indigo, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
         KnobBind {name: "filter1.resonance".into(), value: 0.0, rgb: KnobRGB::Indigo, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
         KnobBind {name: "filter1.touch_amount".into(), value: 0.0, rgb: KnobRGB::Indigo, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
@@ -973,6 +970,19 @@ impl App {
         for delta in ui.on_bind_deltas() {
             for (index, bind) in self.knob_table.iter_mut().enumerate() {
                 if let Some(LiveValue::Float(v)) = delta.read_path(&bind.name) {
+                    let mod_env = ui.frame(ids!(mod_env.display));
+                    let vol_env = ui.frame(ids!(vol_env.display));
+                    match bind.name.as_ref() {
+                        "mod_envelope.a" => mod_env.apply_over(ui.cx, live!{bg: {attack: (v)}}),
+                        "mod_envelope.d" => mod_env.apply_over(ui.cx, live!{bg: {decay: (v)}}),
+                        "mod_envelope.s" => mod_env.apply_over(ui.cx, live!{bg: {sustain: (v)}}),
+                        "mod_envelope.r" => mod_env.apply_over(ui.cx, live!{bg: {release: (v)}}),
+                        "volume_envelope.a" => vol_env.apply_over(ui.cx, live!{bg: {attack: (v)}}),
+                        "volume_envelope.d" => vol_env.apply_over(ui.cx, live!{bg: {decay: (v)}}),
+                        "volume_envelope.s" => vol_env.apply_over(ui.cx, live!{bg: {sustain: (v)}}),
+                        "volume_envelope.r" => vol_env.apply_over(ui.cx, live!{bg: {release: (v)}}),
+                        _ => ()
+                    }
                     let mut knob = 3;
                     if self.knob_bind[0] == index {
                         knob = 0
@@ -1086,35 +1096,35 @@ impl App {
             self.audio_graph.all_notes_off();
         }
         
-        let shift = if let Event::FingerUp(fu) = event{fu.modifiers.shift}else{false};
-        if ui.button(ids!(save1)).was_clicked() {self.preset(ui.cx, 1,shift);}
-        if ui.button(ids!(save2)).was_clicked() {self.preset(ui.cx, 2,shift);}
-        if ui.button(ids!(save3)).was_clicked() {self.preset(ui.cx, 3,shift);}
-        if ui.button(ids!(save4)).was_clicked() {self.preset(ui.cx, 4,shift);}
-        if ui.button(ids!(save5)).was_clicked() {self.preset(ui.cx, 5,shift);}
-        if ui.button(ids!(save6)).was_clicked() {self.preset(ui.cx, 6,shift);}
-        if ui.button(ids!(save7)).was_clicked() {self.preset(ui.cx, 7,shift);}
-        if ui.button(ids!(save8)).was_clicked() {self.preset(ui.cx, 8,shift);}
+        let shift = if let Event::FingerUp(fu) = event {fu.modifiers.shift}else {false};
+        if ui.button(ids!(save1)).was_clicked() {self.preset(ui.cx, 1, shift);}
+        if ui.button(ids!(save2)).was_clicked() {self.preset(ui.cx, 2, shift);}
+        if ui.button(ids!(save3)).was_clicked() {self.preset(ui.cx, 3, shift);}
+        if ui.button(ids!(save4)).was_clicked() {self.preset(ui.cx, 4, shift);}
+        if ui.button(ids!(save5)).was_clicked() {self.preset(ui.cx, 5, shift);}
+        if ui.button(ids!(save6)).was_clicked() {self.preset(ui.cx, 6, shift);}
+        if ui.button(ids!(save7)).was_clicked() {self.preset(ui.cx, 7, shift);}
+        if ui.button(ids!(save8)).was_clicked() {self.preset(ui.cx, 8, shift);}
     }
     
-    pub fn preset(&mut self, cx:&mut Cx, index: usize, save:bool) {
+    pub fn preset(&mut self, cx: &mut Cx, index: usize, save: bool) {
         let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
         let file_name = format!("preset_{}.bin", index);
-        if save{
+        if save {
             let preset = iron_fish.settings.live_read();
             let data = preset.to_binary(0).unwrap();
-            log!("Saving preset {}",file_name);
+            log!("Saving preset {}", file_name);
             let mut file = File::create(&file_name).unwrap();
             file.write_all(&data).unwrap();
         }
         else if let Ok(mut file) = File::open(&file_name) {
-            log!("Loading preset {}",file_name);
+            log!("Loading preset {}", file_name);
             let mut bytes = Vec::new();
             file.read_to_end(&mut bytes).unwrap();
             let mut nodes = Vec::new();
             nodes.from_binary(&bytes).unwrap();
             iron_fish.settings.apply_over(cx, &nodes);
-            self.imgui.frame().bind_read(cx, &nodes);
+            self.imgui.root_frame().bind_read(cx, &nodes);
         }
     }
     

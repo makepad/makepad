@@ -31,7 +31,7 @@ pub trait ButtonImGUIExt {
 
 impl<'a> ButtonImGUIExt for ImGUIRun<'a> {
     fn button(&mut self, path: &[LiveId]) -> ButtonImGUI {
-        let mut frame = self.imgui.frame();
+        let mut frame = self.imgui.root_frame();
         ButtonImGUI(self.safe_ref::<Button>(frame.component_by_path(path)))
     }
 }
