@@ -487,7 +487,7 @@ pub trait PianoImGUIExt {
 
 impl<'a> PianoImGUIExt for ImGUIRun<'a> {
     fn piano(&mut self, path: &[LiveId]) -> PianoImGUI {
-        let mut frame = self.imgui.frame();
+        let mut frame = self.imgui.root_frame();
         PianoImGUI(self.safe_ref::<Piano>(frame.component_by_path(path)))
     }
 }

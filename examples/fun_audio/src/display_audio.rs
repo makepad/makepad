@@ -282,7 +282,7 @@ pub trait DisplayAudioImGUIExt {
 
 impl<'a> DisplayAudioImGUIExt for ImGUIRun<'a> {
     fn display_audio(&mut self, path: &[LiveId]) -> DisplayAudioImGUI {
-        let mut frame = self.imgui.frame();
+        let mut frame = self.imgui.root_frame();
         DisplayAudioImGUI(self.safe_ref::<DisplayAudio>(frame.component_by_path(path)))
     }
 }

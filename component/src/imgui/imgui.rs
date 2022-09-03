@@ -45,8 +45,13 @@ impl<'a> ImGUIRun<'a> {
         }
     }
     
-    pub fn frame(&self) -> RefMut<'_, Frame> {
-        self.imgui.frame()
+    pub fn frame(&self, path: &[LiveId])->FrameImGUI{
+        let mut frame = self.root_frame();
+        FrameImGUI(self.safe_ref::<Frame>(frame.component_by_path(path)))
+    }
+    
+    pub fn root_frame(&self) -> RefMut<'_, Frame> {
+        self.imgui.root_frame()
     }
     
     pub fn alloc_auto_id(&mut self) -> u64 {
@@ -57,7 +62,7 @@ impl<'a> ImGUIRun<'a> {
     pub fn stop(self) {}
     
     pub fn bind_read(&mut self, nodes: &[LiveNode]) {
-        self.imgui.frame().bind_read(self.cx, nodes);
+        self.imgui.root_frame().bind_read(self.cx, nodes);
     }
     
     
@@ -99,7 +104,7 @@ impl ImGUIRef {
             None
         }
         else {
-            Some(std::cell::RefMut::map(self.imgui.frame(), | frame | {
+            Some(std::cell::RefMut::map(self.imgui.root_frame(), | frame | {
                 frame.component_by_uid(self.uid).unwrap().cast_mut::<T>().unwrap()
             }))
         }
@@ -116,14 +121,29 @@ pub struct ImGUI {
     inner: Rc<RefCell<ImGUIInner >>,
 }
 
+pub struct FrameImGUI(ImGUIRef);
+
+impl FrameImGUI{
+
+    pub fn apply_over(&self, cx:&mut Cx, nodes:&[LiveNode]){
+        if let Some(mut inner) = self.inner(){
+            inner.apply_over(cx, nodes);
+        }
+    }
+
+    pub fn inner(&self) -> Option<std::cell::RefMut<'_, Frame >> {
+        self.0.inner()
+    }    
+}
+
 impl ImGUI {
-    pub fn frame(&self) -> RefMut<'_, Frame> {
+    pub fn root_frame(&self) -> RefMut<'_, Frame> {
         RefMut::map(self.inner.borrow_mut(), | v | &mut v.frame)
     }
     
     pub fn run<'a>(&self, cx: &'a mut Cx, event: &'a Event) -> ImGUIRun<'a> {
         // fetch actions and wrap
-        let actions = ImGUIActions(Rc::new(self.frame().handle_event_vec(cx, event)));
+        let actions = ImGUIActions(Rc::new(self.root_frame().handle_event_vec(cx, event)));
         ImGUIRun {
             event,
             cx,
@@ -139,8 +159,8 @@ impl ImGUI {
     }
     
     pub fn by_type<T: 'static + FrameComponent>(&mut self) -> Option<std::cell::RefMut<'_, T >> {
-        if self.frame().by_type::<T>().is_some() {
-            Some(std::cell::RefMut::map(self.frame(), | frame | {
+        if self.root_frame().by_type::<T>().is_some() {
+            Some(std::cell::RefMut::map(self.root_frame(), | frame | {
                 frame.by_type::<T>().unwrap()
             }))
         }
