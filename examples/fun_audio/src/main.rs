@@ -301,7 +301,7 @@ live_register!{
                     self.rect_size.y - 2.0,
                     2.0
                 )
-                sdf.fill_keep(mix(#5,#2,self.pos.y))
+                sdf.fill_keep(mix(mix(#5,#2,self.pos.y),mix(#1,#3,self.pos.y),self.pressed))
                 
                 sdf.stroke(
                     #0,
