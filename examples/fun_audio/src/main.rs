@@ -56,36 +56,6 @@ live_register!{
             bg: {color: #4},
         }
     }
-    /*
-    FoldablePiano: MainHeader {
-        header: {
-            fold_button = FoldButton {}
-            label = Label {text: "Keys"}
-        }
-        state: {
-            open = {
-                off = {apply: {body: {g1 = {bg: {color: #0000}}}}}
-                on = {apply: {body: {g1 = {bg: {color: #000a}}}}}
-            }
-        }
-        body: Frame {
-            layout: {flow: Overlay}
-            walk: {width: Fit, height: Fit}
-            Frame {
-                layout: {flow: Down}
-                walk: {width: Fit, height: Fit},
-                piano = Piano {}
-                GradientY {
-                    walk: {width: Fill, height: 10}
-                    bg: {color: #000a, color2: #0000}
-                }
-            }
-            g1 = GradientY {
-                walk: {width: Fill, height: 2}
-                bg: {color: #000a, color2: #0000}
-            }
-        }
-    }*/
     
     ElementBox: Frame {
         bg: {color: #4}
@@ -208,20 +178,6 @@ live_register!{
             label: "CutOff1"
         }
     }
-    /*
-    TextInputTest: ElementBox {
-        layout: {padding: {left: 8}}
-        textbox = TextInput {
-            text: "Hello WOrld"
-        }
-    }
-    
-    ListBoxTest: ElementBox {
-        listbox = ListBox {
-            items: ["One", "Two", "Three", "Four", "Five", "Six"]
-        }
-    }*/
-    
     
     InstrumentDropdown: ElementBox {
         layout: {align: {y: 0.5}, padding: 5, flow: Right}
@@ -628,80 +584,6 @@ live_register!{
                 body: Frame {
                     layout: {flow: Down}
                     walk: {width: Fill, height: Fit}
-                    
-                    
-                    
-                    
-                    /*
-                    InstrumentSlider {
-                        slider = {
-                            bind: "filter1.cutoff"
-                            min: 0.0
-                            max: 1.0
-                            label: "Filter Cutoff"
-                        }
-                    }
-                    InstrumentSlider {
-                        slider = {
-                            bind: "filter1.resonance"
-                            min: 0.02
-                            max: 1.0
-                            label: "Filter Resonance"
-                        }
-                    }
-                    InstrumentSlider {
-                        slider = {
-                            bind: "filter1.envelope_amount"
-                            min: 0.0
-                            max: 1.0
-                            label: "Envelope Amount"
-                        }
-                    }
-                    InstrumentSlider {
-                        slider = {
-                            bind: "osc1.detune"
-                            min: 0.0
-                            max: 10.0
-                            label: "Osc1 detune"
-                        }
-                    }
-                    InstrumentSlider {
-                        slider = {
-                            bind: "osc2.detune"
-                            min: 0.0
-                            max: 10.0
-                            label: "Osc2 detune"
-                        }
-                    }
-                    InstrumentDropdown {
-                        label = {text: "Osc1 type"}
-                        dropdown = {
-                            bind_enum: "OscType"
-                            bind: "osc1.osc_type"
-                            items: ["DPWSawPulse", "TrivialSaw", "BlampTri", "Naive", "Pure"]
-                        }
-                    }
-                    InstrumentDropdown {
-                        label = {text: "Osc2 type"}
-                        dropdown = {
-                            bind_enum: "OscType"
-                            bind: "osc2.osc_type"
-                            items: ["DPWSawPulse", "TrivialSaw", "BlampTri", "Naive", "Pure"]
-                        }
-                    }
-                    InstrumentDropdown {
-                        label = {text: "Filter"}
-                        dropdown = {
-                            bind_enum: "FilterType"
-                            bind: "filter1.filter_type"
-                            items: ["Lowpass", "Highpass", "Bandpass"]
-                        }
-                    }
-                    InstrumentCheckbox{
-                        checkbox = {
-                            label:"Hello world"
-                        }
-                    }*/
                 }
             }
         }
@@ -712,15 +594,11 @@ live_register!{
         audio_graph: {
             root: Mixer {
                 c1 = Instrument {
-                    
-                    
                     /*  AudioUnitInstrument {
                         plugin: "Kontakt"
                     }*/
-                    
                     IronFish {
                     }
-                    
                     //key_range: {start: 34, end: 47 shift: 30}
                     /*
                     AudioUnitInstrument {
@@ -819,15 +697,6 @@ live_register!{
                     
                     TouchPanel {}
                     FXPanel {}
-                    
-                    /*
-                    FishPanel {
-                        bg: {color: #3}
-                        label = {label = {text: "Scope"}}
-                        display_audio = DisplayAudio {
-                            walk: {height: 300, width: Fill}
-                        }
-                    }*/
                 }
             }
             
