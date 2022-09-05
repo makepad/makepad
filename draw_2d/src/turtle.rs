@@ -933,16 +933,12 @@ impl Padding {
 
 impl LiveHook for Padding {
     fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Option<usize> {
-        match &nodes[index].value {
-            LiveValue::Float(v) => {
-                *self = Self {left: *v, top: *v, right: *v, bottom: *v};
-                Some(index + 1)
-            }
-            LiveValue::Int(v) => {
-                *self = Self {left: *v as f64, top: *v as f64, right: *v as f64, bottom: *v as f64};
-                Some(index + 1)
-            }
-            _ => None
+        if let Some(v) = nodes[index].value.as_float(){
+            *self = Self {left: v, top: v, right: v, bottom: v};
+            Some(index + 1)
+        }
+        else{
+            None
         }
     }
 }
@@ -958,10 +954,10 @@ impl LiveHook for Size {
             LiveValue::Expr {..} => {
                 match live_eval(&cx.live_registry.clone().borrow(), index, &mut (index + 1), nodes) {
                     Ok(ret) => match ret {
-                        LiveEval::Float(v) => {
+                        LiveEval::Float64(v) => {
                             *self = Self::Fixed(v);
                         }
-                        LiveEval::Int(v) => {
+                        LiveEval::Int64(v) => {
                             *self = Self::Fixed(v as f64);
                         }
                         _ => {
@@ -972,11 +968,15 @@ impl LiveHook for Size {
                 }
                 Some(nodes.skip_node(index))
             }
-            LiveValue::Float(v) => {
+            LiveValue::Float32(v) => {
+                *self = Self::Fixed(*v as f64);
+                Some(index + 1)
+            }
+            LiveValue::Float64(v) => {
                 *self = Self::Fixed(*v);
                 Some(index + 1)
             }
-            LiveValue::Int(v) => {
+            LiveValue::Int64(v) => {
                 *self = Self::Fixed(*v as f64);
                 Some(index + 1)
             }

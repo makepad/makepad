@@ -280,8 +280,8 @@ impl Slider {
 
 impl FrameComponent for Slider {
     fn bind_read(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
-        if let Some(LiveValue::Float(v)) = nodes.read_path(&self.bind) {
-            self.set_internal(*v);
+        if let Some(value) = nodes.read_path(&self.bind) && let Some(value) = value.as_float(){
+            self.set_internal(value);
             self.update_text_input(cx);
         }
     }
@@ -296,7 +296,7 @@ impl FrameComponent for Slider {
             match &action {
                 SliderAction::TextSlide(v) | SliderAction::Slide(v) => {
                     if slider.bind.len()>0 {
-                        delta.write_path(&slider.bind, LiveValue::Float(*v as f64));
+                        delta.write_path(&slider.bind, LiveValue::Float64(*v as f64));
                     }
                 },
                 _ => ()

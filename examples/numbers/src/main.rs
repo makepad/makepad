@@ -53,7 +53,7 @@ impl App {
         while let Some(_) = self.imgui.draw(cx).into_not_done() {
             // we have to draw our own Uid. which in this case is simply 
         };
-        self.imgui.frame().redraw(cx);
+        self.imgui.root_frame().redraw(cx);
         self.window.end(cx);
     }
 }

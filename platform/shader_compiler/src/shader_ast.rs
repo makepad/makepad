@@ -1092,8 +1092,8 @@ impl Ty {
     pub fn from_live_eval(live_eval: LiveEval) -> Option<Self> {
         match live_eval {
             LiveEval::Bool(_) => Some(Self::Float),
-            LiveEval::Int(_) => Some(Self::Int),
-            LiveEval::Float(_) => Some(Self::Float),
+            LiveEval::Int64(_) => Some(Self::Int),
+            LiveEval::Float64(_) => Some(Self::Float),
             LiveEval::Vec2(_) => Some(Self::Vec2),
             LiveEval::Vec3(_) => Some(Self::Vec3),
             LiveEval::Vec4(_) => Some(Self::Vec4),
@@ -1107,8 +1107,8 @@ impl Ty {
             LiveValue::Expr {..} => {
                 match live_eval(live_registry, index, &mut (index + 1), nodes) ? {
                     LiveEval::Bool(_) => Self::Float,
-                    LiveEval::Int(_) => Self::Int,
-                    LiveEval::Float(_) => Self::Float,
+                    LiveEval::Int64(_) => Self::Int,
+                    LiveEval::Float64(_) => Self::Float,
                     LiveEval::Vec2(_) => Self::Vec2,
                     LiveEval::Vec3(_) => Self::Vec3,
                     LiveEval::Vec4(_) => Self::Vec4,
@@ -1138,8 +1138,9 @@ impl Ty {
                 }
             }
             LiveValue::Bool(_) => Self::Int,
-            LiveValue::Int(_) => Self::Int,
-            LiveValue::Float(_) => Self::Float,
+            LiveValue::Int64(_) => Self::Int,
+            LiveValue::Float32(_) => Self::Float,
+            LiveValue::Float64(_) => Self::Float,
             LiveValue::Color(_) => Self::Vec4,
             LiveValue::Vec2(_) => Self::Vec2,
             LiveValue::Vec3(_) => Self::Vec3,
