@@ -16,11 +16,11 @@ pub use {
 
 #[derive(Debug)]
 pub enum LiveEval {
-    Float(f64),
+    Float64(f64),
     Vec2(Vec2),
     Vec3(Vec3),
     Vec4(Vec4),
-    Int(i64),
+    Int64(i64),
     Bool(bool),
     String(String),
 }
@@ -63,13 +63,17 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
         LiveValue::DocumentString {..} => {
             LiveEval::String(live_registry.live_node_as_string(&nodes[*index]).unwrap())
         }
-        LiveValue::Float(v) => {
+        LiveValue::Float32(v) => {
             *index += 1;
-            LiveEval::Float(*v)
+            LiveEval::Float64(*v as f64)
         }
-        LiveValue::Int(v) => {
+        LiveValue::Float64(v) => {
             *index += 1;
-            LiveEval::Int(*v)
+            LiveEval::Float64(*v)
+        }
+        LiveValue::Int64(v) => {
+            *index += 1;
+            LiveEval::Int64(*v)
         }
         LiveValue::Vec2(v) => {
             *index += 1;
@@ -108,8 +112,8 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
             
             fn value_to_live_value(live_registry: &LiveRegistry, index: usize, nodes: &[LiveNode]) -> Result<LiveEval, LiveError> {
                 return Ok(match &nodes[index].value {
-                    LiveValue::Float(val) => LiveEval::Float(*val),
-                    LiveValue::Int(val) => LiveEval::Int(*val),
+                    LiveValue::Float64(val) => LiveEval::Float64(*val),
+                    LiveValue::Int64(val) => LiveEval::Int64(*val),
                     LiveValue::Bool(val) => LiveEval::Bool(*val),
                     LiveValue::Vec2(val) => LiveEval::Vec2(*val),
                     LiveValue::Vec3(val) => LiveEval::Vec3(*val),
@@ -125,8 +129,8 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
                     LiveValue::Array => { // got an animation track. select the last value
                         if let Some(index) = last_keyframe_value_from_array(index, nodes) {
                             match &nodes[index].value {
-                                LiveValue::Float(val) => LiveEval::Float(*val),
-                                LiveValue::Int(val) => LiveEval::Int(*val),
+                                LiveValue::Float64(val) => LiveEval::Float64(*val),
+                                LiveValue::Int64(val) => LiveEval::Int64(*val),
                                 LiveValue::Bool(val) => LiveEval::Bool(*val),
                                 _ => {
                                     return Err(LiveError::eval_error_wrong_value_in_expression(live_error_origin!(), index, nodes, "Animation array"))
@@ -173,8 +177,8 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
                     _ => return Err(LiveError::eval_error_unop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a))
                 }
                 LiveUnOp::Neg => match a {
-                    LiveEval::Float(va) => LiveEval::Float(-va),
-                    LiveEval::Int(va) => LiveEval::Int(-va),
+                    LiveEval::Float64(va) => LiveEval::Float64(-va),
+                    LiveEval::Int64(va) => LiveEval::Int64(-va),
                     _ => return Err(LiveError::eval_error_unop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a))
                 }
             }
@@ -226,14 +230,14 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
                         LiveEval::Bool(vb) => LiveEval::Bool(va == vb),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
-                    LiveEval::Int(va) => match b {
-                        LiveEval::Int(vb) => LiveEval::Bool(va == vb),
-                        LiveEval::Float(vb) => LiveEval::Bool(va as f64 == vb),
+                    LiveEval::Int64(va) => match b {
+                        LiveEval::Int64(vb) => LiveEval::Bool(va == vb),
+                        LiveEval::Float64(vb) => LiveEval::Bool(va as f64 == vb),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
-                    LiveEval::Float(va) => match b {
-                        LiveEval::Int(vb) => LiveEval::Bool(va == vb as f64),
-                        LiveEval::Float(vb) => LiveEval::Bool(va == vb),
+                    LiveEval::Float64(va) => match b {
+                        LiveEval::Int64(vb) => LiveEval::Bool(va == vb as f64),
+                        LiveEval::Float64(vb) => LiveEval::Bool(va == vb),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
                     LiveEval::Vec2(va) => match b {
@@ -255,14 +259,14 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
                         LiveEval::Bool(vb) => LiveEval::Bool(va != vb),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
-                    LiveEval::Int(va) => match b {
-                        LiveEval::Int(vb) => LiveEval::Bool(va != vb),
-                        LiveEval::Float(vb) => LiveEval::Bool(va as f64 != vb),
+                    LiveEval::Int64(va) => match b {
+                        LiveEval::Int64(vb) => LiveEval::Bool(va != vb),
+                        LiveEval::Float64(vb) => LiveEval::Bool(va as f64 != vb),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
-                    LiveEval::Float(va) => match b {
-                        LiveEval::Int(vb) => LiveEval::Bool(va != vb as f64),
-                        LiveEval::Float(vb) => LiveEval::Bool(va != vb),
+                    LiveEval::Float64(va) => match b {
+                        LiveEval::Int64(vb) => LiveEval::Bool(va != vb as f64),
+                        LiveEval::Float64(vb) => LiveEval::Bool(va != vb),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
                     LiveEval::Vec2(va) => match b {
@@ -280,69 +284,69 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
                     _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                 },
                 LiveBinOp::Lt => match a {
-                    LiveEval::Int(va) => match b {
-                        LiveEval::Int(vb) => LiveEval::Bool(va < vb),
-                        LiveEval::Float(vb) => LiveEval::Bool((va as f64) < vb),
+                    LiveEval::Int64(va) => match b {
+                        LiveEval::Int64(vb) => LiveEval::Bool(va < vb),
+                        LiveEval::Float64(vb) => LiveEval::Bool((va as f64) < vb),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
-                    LiveEval::Float(va) => match b {
-                        LiveEval::Int(vb) => LiveEval::Bool(va < vb as f64),
-                        LiveEval::Float(vb) => LiveEval::Bool(va < vb),
+                    LiveEval::Float64(va) => match b {
+                        LiveEval::Int64(vb) => LiveEval::Bool(va < vb as f64),
+                        LiveEval::Float64(vb) => LiveEval::Bool(va < vb),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
                     _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                 },
                 LiveBinOp::Le => match a {
-                    LiveEval::Int(va) => match b {
-                        LiveEval::Int(vb) => LiveEval::Bool(va <= vb),
-                        LiveEval::Float(vb) => LiveEval::Bool((va as f64) <= vb),
+                    LiveEval::Int64(va) => match b {
+                        LiveEval::Int64(vb) => LiveEval::Bool(va <= vb),
+                        LiveEval::Float64(vb) => LiveEval::Bool((va as f64) <= vb),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
-                    LiveEval::Float(va) => match b {
-                        LiveEval::Int(vb) => LiveEval::Bool(va <= vb as f64),
-                        LiveEval::Float(vb) => LiveEval::Bool(va <= vb),
+                    LiveEval::Float64(va) => match b {
+                        LiveEval::Int64(vb) => LiveEval::Bool(va <= vb as f64),
+                        LiveEval::Float64(vb) => LiveEval::Bool(va <= vb),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
                     _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                 },
                 LiveBinOp::Gt => match a {
-                    LiveEval::Int(va) => match b {
-                        LiveEval::Int(vb) => LiveEval::Bool(va > vb),
-                        LiveEval::Float(vb) => LiveEval::Bool((va as f64) > vb),
+                    LiveEval::Int64(va) => match b {
+                        LiveEval::Int64(vb) => LiveEval::Bool(va > vb),
+                        LiveEval::Float64(vb) => LiveEval::Bool((va as f64) > vb),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
-                    LiveEval::Float(va) => match b {
-                        LiveEval::Int(vb) => LiveEval::Bool(va > vb as f64),
-                        LiveEval::Float(vb) => LiveEval::Bool(va > vb),
+                    LiveEval::Float64(va) => match b {
+                        LiveEval::Int64(vb) => LiveEval::Bool(va > vb as f64),
+                        LiveEval::Float64(vb) => LiveEval::Bool(va > vb),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
                     _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                 },
                 LiveBinOp::Ge => match a {
-                    LiveEval::Int(va) => match b {
-                        LiveEval::Int(vb) => LiveEval::Bool(va >= vb),
-                        LiveEval::Float(vb) => LiveEval::Bool((va as f64) >= vb),
+                    LiveEval::Int64(va) => match b {
+                        LiveEval::Int64(vb) => LiveEval::Bool(va >= vb),
+                        LiveEval::Float64(vb) => LiveEval::Bool((va as f64) >= vb),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
-                    LiveEval::Float(va) => match b {
-                        LiveEval::Int(vb) => LiveEval::Bool(va >= vb as f64),
-                        LiveEval::Float(vb) => LiveEval::Bool(va >= vb),
+                    LiveEval::Float64(va) => match b {
+                        LiveEval::Int64(vb) => LiveEval::Bool(va >= vb as f64),
+                        LiveEval::Float64(vb) => LiveEval::Bool(va >= vb),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
                     _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                 },
                 LiveBinOp::Add => match a {
-                    LiveEval::Int(va) => match b {
-                        LiveEval::Int(vb) => LiveEval::Int(va + vb),
-                        LiveEval::Float(vb) => LiveEval::Float((va as f64) + vb),
+                    LiveEval::Int64(va) => match b {
+                        LiveEval::Int64(vb) => LiveEval::Int64(va + vb),
+                        LiveEval::Float64(vb) => LiveEval::Float64((va as f64) + vb),
                         LiveEval::Vec2(vb) => LiveEval::Vec2(vb + va as f32),
                         LiveEval::Vec3(vb) => LiveEval::Vec3(vb + va as f32),
                         LiveEval::Vec4(vb) => LiveEval::Vec4(vb + va as f32),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
-                    LiveEval::Float(va) => match b {
-                        LiveEval::Int(vb) => LiveEval::Float(va + vb as f64),
-                        LiveEval::Float(vb) => LiveEval::Float(va + vb),
+                    LiveEval::Float64(va) => match b {
+                        LiveEval::Int64(vb) => LiveEval::Float64(va + vb as f64),
+                        LiveEval::Float64(vb) => LiveEval::Float64(va + vb),
                         LiveEval::Vec2(vb) => LiveEval::Vec2(vb + va as f32),
                         LiveEval::Vec3(vb) => LiveEval::Vec3(vb + va as f32),
                         LiveEval::Vec4(vb) => LiveEval::Vec4(vb + va as f32),
@@ -350,36 +354,36 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
                     }
                     LiveEval::Vec2(va) => match b {
                         LiveEval::Vec2(vb) => LiveEval::Vec2(va + vb),
-                        LiveEval::Int(vb) => LiveEval::Vec2(va + vb as f32),
-                        LiveEval::Float(vb) => LiveEval::Vec2(va + vb as f32),
+                        LiveEval::Int64(vb) => LiveEval::Vec2(va + vb as f32),
+                        LiveEval::Float64(vb) => LiveEval::Vec2(va + vb as f32),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
                     LiveEval::Vec3(va) => match b {
                         LiveEval::Vec3(vb) => LiveEval::Vec3(va + vb),
-                        LiveEval::Int(vb) => LiveEval::Vec3(va + vb as f32),
-                        LiveEval::Float(vb) => LiveEval::Vec3(va + vb as f32),
+                        LiveEval::Int64(vb) => LiveEval::Vec3(va + vb as f32),
+                        LiveEval::Float64(vb) => LiveEval::Vec3(va + vb as f32),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
                     LiveEval::Vec4(va) => match b {
                         LiveEval::Vec4(vb) => LiveEval::Vec4(va + vb),
-                        LiveEval::Int(vb) => LiveEval::Vec4(va + vb as f32),
-                        LiveEval::Float(vb) => LiveEval::Vec4(va + vb as f32),
+                        LiveEval::Int64(vb) => LiveEval::Vec4(va + vb as f32),
+                        LiveEval::Float64(vb) => LiveEval::Vec4(va + vb as f32),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
                     _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                 },
                 LiveBinOp::Sub => match a {
-                    LiveEval::Int(va) => match b {
-                        LiveEval::Int(vb) => LiveEval::Int(va - vb),
-                        LiveEval::Float(vb) => LiveEval::Float((va as f64) - vb),
+                    LiveEval::Int64(va) => match b {
+                        LiveEval::Int64(vb) => LiveEval::Int64(va - vb),
+                        LiveEval::Float64(vb) => LiveEval::Float64((va as f64) - vb),
                         LiveEval::Vec2(vb) => LiveEval::Vec2(vb - va as f32),
                         LiveEval::Vec3(vb) => LiveEval::Vec3(vb - va as f32),
                         LiveEval::Vec4(vb) => LiveEval::Vec4(vb - va as f32),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
-                    LiveEval::Float(va) => match b {
-                        LiveEval::Int(vb) => LiveEval::Float(va - vb as f64),
-                        LiveEval::Float(vb) => LiveEval::Float(va - vb),
+                    LiveEval::Float64(va) => match b {
+                        LiveEval::Int64(vb) => LiveEval::Float64(va - vb as f64),
+                        LiveEval::Float64(vb) => LiveEval::Float64(va - vb),
                         LiveEval::Vec2(vb) => LiveEval::Vec2(vb - va as f32),
                         LiveEval::Vec3(vb) => LiveEval::Vec3(vb - va as f32),
                         LiveEval::Vec4(vb) => LiveEval::Vec4(vb - va as f32),
@@ -387,36 +391,36 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
                     }
                     LiveEval::Vec2(va) => match b {
                         LiveEval::Vec2(vb) => LiveEval::Vec2(va - vb),
-                        LiveEval::Int(vb) => LiveEval::Vec2(va - vb as f32),
-                        LiveEval::Float(vb) => LiveEval::Vec2(va - vb as f32),
+                        LiveEval::Int64(vb) => LiveEval::Vec2(va - vb as f32),
+                        LiveEval::Float64(vb) => LiveEval::Vec2(va - vb as f32),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
                     LiveEval::Vec3(va) => match b {
                         LiveEval::Vec3(vb) => LiveEval::Vec3(va - vb),
-                        LiveEval::Int(vb) => LiveEval::Vec3(va - vb as f32),
-                        LiveEval::Float(vb) => LiveEval::Vec3(va - vb as f32),
+                        LiveEval::Int64(vb) => LiveEval::Vec3(va - vb as f32),
+                        LiveEval::Float64(vb) => LiveEval::Vec3(va - vb as f32),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
                     LiveEval::Vec4(va) => match b {
                         LiveEval::Vec4(vb) => LiveEval::Vec4(va - vb),
-                        LiveEval::Int(vb) => LiveEval::Vec4(va - vb as f32),
-                        LiveEval::Float(vb) => LiveEval::Vec4(va - vb as f32),
+                        LiveEval::Int64(vb) => LiveEval::Vec4(va - vb as f32),
+                        LiveEval::Float64(vb) => LiveEval::Vec4(va - vb as f32),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
                     _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                 },
                 LiveBinOp::Mul => match a {
-                    LiveEval::Int(va) => match b {
-                        LiveEval::Int(vb) => LiveEval::Int(va * vb),
-                        LiveEval::Float(vb) => LiveEval::Float((va as f64) * vb),
+                    LiveEval::Int64(va) => match b {
+                        LiveEval::Int64(vb) => LiveEval::Int64(va * vb),
+                        LiveEval::Float64(vb) => LiveEval::Float64((va as f64) * vb),
                         LiveEval::Vec2(vb) => LiveEval::Vec2(vb * va as f32),
                         LiveEval::Vec3(vb) => LiveEval::Vec3(vb * va as f32),
                         LiveEval::Vec4(vb) => LiveEval::Vec4(vb * va as f32),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
-                    LiveEval::Float(va) => match b {
-                        LiveEval::Int(vb) => LiveEval::Float(va * vb as f64),
-                        LiveEval::Float(vb) => LiveEval::Float(va * vb),
+                    LiveEval::Float64(va) => match b {
+                        LiveEval::Int64(vb) => LiveEval::Float64(va * vb as f64),
+                        LiveEval::Float64(vb) => LiveEval::Float64(va * vb),
                         LiveEval::Vec2(vb) => LiveEval::Vec2(vb * va as f32),
                         LiveEval::Vec3(vb) => LiveEval::Vec3(vb * va as f32),
                         LiveEval::Vec4(vb) => LiveEval::Vec4(vb * va as f32),
@@ -424,36 +428,36 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
                     }
                     LiveEval::Vec2(va) => match b {
                         LiveEval::Vec2(vb) => LiveEval::Vec2(va * vb),
-                        LiveEval::Int(vb) => LiveEval::Vec2(va * vb as f32),
-                        LiveEval::Float(vb) => LiveEval::Vec2(va * vb as f32),
+                        LiveEval::Int64(vb) => LiveEval::Vec2(va * vb as f32),
+                        LiveEval::Float64(vb) => LiveEval::Vec2(va * vb as f32),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
                     LiveEval::Vec3(va) => match b {
                         LiveEval::Vec3(vb) => LiveEval::Vec3(va * vb),
-                        LiveEval::Int(vb) => LiveEval::Vec3(va * vb as f32),
-                        LiveEval::Float(vb) => LiveEval::Vec3(va * vb as f32),
+                        LiveEval::Int64(vb) => LiveEval::Vec3(va * vb as f32),
+                        LiveEval::Float64(vb) => LiveEval::Vec3(va * vb as f32),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
                     LiveEval::Vec4(va) => match b {
                         LiveEval::Vec4(vb) => LiveEval::Vec4(va * vb),
-                        LiveEval::Int(vb) => LiveEval::Vec4(va * vb as f32),
-                        LiveEval::Float(vb) => LiveEval::Vec4(va * vb as f32),
+                        LiveEval::Int64(vb) => LiveEval::Vec4(va * vb as f32),
+                        LiveEval::Float64(vb) => LiveEval::Vec4(va * vb as f32),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
                     _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                 },
                 LiveBinOp::Div => match a {
-                    LiveEval::Int(va) => match b {
-                        LiveEval::Int(vb) => LiveEval::Float(va as f64 / vb as f64),
-                        LiveEval::Float(vb) => LiveEval::Float((va as f64) / vb),
+                    LiveEval::Int64(va) => match b {
+                        LiveEval::Int64(vb) => LiveEval::Float64(va as f64 / vb as f64),
+                        LiveEval::Float64(vb) => LiveEval::Float64((va as f64) / vb),
                         LiveEval::Vec2(vb) => LiveEval::Vec2(vb / va as f32),
                         LiveEval::Vec3(vb) => LiveEval::Vec3(vb / va as f32),
                         LiveEval::Vec4(vb) => LiveEval::Vec4(vb / va as f32),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
-                    LiveEval::Float(va) => match b {
-                        LiveEval::Int(vb) => LiveEval::Float(va / vb as f64),
-                        LiveEval::Float(vb) => LiveEval::Float(va / vb),
+                    LiveEval::Float64(va) => match b {
+                        LiveEval::Int64(vb) => LiveEval::Float64(va / vb as f64),
+                        LiveEval::Float64(vb) => LiveEval::Float64(va / vb),
                         LiveEval::Vec2(vb) => LiveEval::Vec2(vb / va as f32),
                         LiveEval::Vec3(vb) => LiveEval::Vec3(vb / va as f32),
                         LiveEval::Vec4(vb) => LiveEval::Vec4(vb / va as f32),
@@ -461,20 +465,20 @@ pub fn live_eval(live_registry: &LiveRegistry, start: usize, index: &mut usize, 
                     }
                     LiveEval::Vec2(va) => match b {
                         LiveEval::Vec2(vb) => LiveEval::Vec2(va / vb),
-                        LiveEval::Int(vb) => LiveEval::Vec2(va / vb as f32),
-                        LiveEval::Float(vb) => LiveEval::Vec2(va / vb as f32),
+                        LiveEval::Int64(vb) => LiveEval::Vec2(va / vb as f32),
+                        LiveEval::Float64(vb) => LiveEval::Vec2(va / vb as f32),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
                     LiveEval::Vec3(va) => match b {
                         LiveEval::Vec3(vb) => LiveEval::Vec3(va / vb),
-                        LiveEval::Int(vb) => LiveEval::Vec3(va / vb as f32),
-                        LiveEval::Float(vb) => LiveEval::Vec3(va / vb as f32),
+                        LiveEval::Int64(vb) => LiveEval::Vec3(va / vb as f32),
+                        LiveEval::Float64(vb) => LiveEval::Vec3(va / vb as f32),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     }
                     LiveEval::Vec4(va) => match b {
                         LiveEval::Vec4(vb) => LiveEval::Vec4(va / vb),
-                        LiveEval::Int(vb) => LiveEval::Vec4(va / vb as f32),
-                        LiveEval::Float(vb) => LiveEval::Vec4(va / vb as f32),
+                        LiveEval::Int64(vb) => LiveEval::Vec4(va / vb as f32),
+                        LiveEval::Float64(vb) => LiveEval::Vec4(va / vb as f32),
                         _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                     } _ => return Err(LiveError::eval_error_binop_undefined_in_expression(live_error_origin!(), *index, nodes, *op, a, b))
                 },

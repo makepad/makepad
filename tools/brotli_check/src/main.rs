@@ -10,7 +10,7 @@ fn main() {
     let data = fs::read(file_path).expect("Can't read file"); 
     // lets brotli it
     let compressed = deflate_bytes(&data);
-    println!("Deflate compressed size {}kb", compressed.len()/1024);
+    println!("Deflate compressed size {}kb", compressed.len());
     
     for i in 1..12{
         println!("Compressing {} level {} ...", file_path, i);
@@ -19,7 +19,7 @@ fn main() {
             let mut writer = brotli::CompressorWriter::new(&mut result, 4096 /* buffer size */, i, 22);
             writer.write_all(&data).expect("Can't write data");
         };
-        println!("Brotli {} compressed size {}kb", i, result.len()/1024);
+        println!("Brotli {} compressed size {}b", i, result.len());
     }
 }
 

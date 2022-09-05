@@ -171,14 +171,14 @@ fn parse_value(node_start:TokenStream,  parser:&mut TokenParser, tb:&mut TokenBu
         else{
             if s.chars().position(|c| c == '.').is_some(){
                 if let Ok(value) = s.parse::<f64>(){
-                    tb.add("LiveNode{").stream(Some(node_start)).add(",value:LiveValue::Float(").unsuf_f64(value).add(")},");
+                    tb.add("LiveNode{").stream(Some(node_start)).add(",value:LiveValue::Float64(").unsuf_f64(value).add(")},");
                 }
                 else{
                     return Err(error("Value cant be parsed"));
                 }
             }
             else if let Ok(value) = s.parse::<i64>(){
-                tb.add("LiveNode{").stream(Some(node_start)).add(",value:LiveValue::Int(").unsuf_i64(value).add(")},");
+                tb.add("LiveNode{").stream(Some(node_start)).add(",value:LiveValue::Int64(").unsuf_i64(value).add(")},");
             }
             else{
                 return Err(error("Value cant be parsed"));

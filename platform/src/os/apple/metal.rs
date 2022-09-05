@@ -247,8 +247,7 @@ impl Cx {
         pass_id: PassId,
         dpi_factor: f64,
         metal_cx: &mut MetalCx,
-        drawable: ObjcId,
-        is_resizing: bool
+        mode: DrawPassMode,
     ) {
         let draw_list_id = self.passes[pass_id].main_draw_list_id.unwrap();
         
@@ -270,7 +269,7 @@ impl Cx {
         
         self.passes[pass_id].set_dpi_factor(dpi_factor);
         
-        if drawable != nil {
+        if let Some(drawable) = mode.is_drawable() {
             let first_texture: ObjcId = unsafe {msg_send![drawable, texture]};
             let color_attachments: ObjcId = unsafe {msg_send![render_pass_descriptor, colorAttachments]};
             let color_attachment: ObjcId = unsafe {msg_send![color_attachments, objectAtIndexedSubscript: 0]};
@@ -296,7 +295,7 @@ impl Cx {
                 let color_attachment: ObjcId = unsafe {msg_send![color_attachments, objectAtIndexedSubscript: index as u64]};
                 
                 let cxtexture = &mut self.textures[color_texture.texture_id];
-
+                
                 cxtexture.os.update_render_target(metal_cx, AttachmentKind::Color, &cxtexture.desc, dpi_factor * pass_size);
                 
                 let is_initial = cxtexture.os.inner.as_mut().unwrap().initial();
@@ -409,23 +408,27 @@ impl Cx {
         
         let () = unsafe {msg_send![encoder, endEncoding]};
         
-        if drawable == nil {
-            self.commit_command_buffer(command_buffer, gpu_read_guards);
+        match mode {
+            DrawPassMode::Texture => {
+                self.commit_command_buffer(None, command_buffer, gpu_read_guards);
+            }
+            DrawPassMode::StdinMain => {
+                self.commit_command_buffer(Some(0), command_buffer, gpu_read_guards);
+            }
+            DrawPassMode::Drawable(drawable) => {
+                let () = unsafe {msg_send![command_buffer, presentDrawable: drawable]};
+                self.commit_command_buffer(None, command_buffer, gpu_read_guards);
+            }
+            DrawPassMode::Resizing(drawable) => {
+                self.commit_command_buffer(None, command_buffer, gpu_read_guards);
+                let () = unsafe {msg_send![command_buffer, waitUntilScheduled]};
+                let () = unsafe {msg_send![drawable, present]};
+            }
         }
-        else if is_resizing {
-            self.commit_command_buffer(command_buffer, gpu_read_guards);
-            let () = unsafe {msg_send![command_buffer, waitUntilScheduled]};
-            let () = unsafe {msg_send![drawable, present]};
-        }
-        else {
-            let () = unsafe {msg_send![command_buffer, presentDrawable: drawable]};
-            self.commit_command_buffer(command_buffer, gpu_read_guards);
-        }
-        
         let () = unsafe {msg_send![pool, release]};
     }
     
-    fn commit_command_buffer(&mut self, command_buffer: ObjcId, gpu_read_guards: Vec<MetalRwLockGpuReadGuard>) {
+    fn commit_command_buffer(&mut self, _stdin_frame:Option<u32>, command_buffer: ObjcId, gpu_read_guards: Vec<MetalRwLockGpuReadGuard>) {
         let gpu_read_guards = Mutex::new(Some(gpu_read_guards));
         let () = unsafe {msg_send![
             command_buffer,
@@ -434,6 +437,22 @@ impl Cx {
             })
         ]};
         let () = unsafe {msg_send![command_buffer, commit]};
+    }
+}
+
+pub enum DrawPassMode {
+    Texture,
+    StdinMain,
+    Drawable(ObjcId),
+    Resizing(ObjcId)
+}
+
+impl DrawPassMode {
+    fn is_drawable(&self) -> Option<ObjcId> {
+        match self {
+            Self::Drawable(obj) | Self::Resizing(obj) => Some(*obj),
+            Self::StdinMain | Self::Texture => None
+        }
     }
 }
 
@@ -864,7 +883,6 @@ impl CxOsTexture {
                 height,
                 format: desc.format,
                 multisample: desc.multisample,
-                shared_handle: nil,
                 texture,
             });
             
@@ -942,7 +960,6 @@ impl CxOsTexture {
                 width,
                 height,
                 format: desc.format,
-                shared_handle: nil,
                 multisample: desc.multisample,
                 texture,
             });
@@ -956,11 +973,6 @@ impl CxOsTexture {
         width: u64,
         height: u64,
     ) {
-        if let Some(inner) = &self.inner {
-            if inner.shared_handle == shared_handle {
-                return
-            }
-        }
         
         let texture = RcObjcId::from_owned(NonNull::new(unsafe {
             msg_send![metal_cx.device, newSharedTextureWithHandle: shared_handle]
@@ -972,7 +984,6 @@ impl CxOsTexture {
             height,
             format: TextureFormat::RenderBGRA,
             multisample: None,
-            shared_handle,
             texture,
         });
     }
@@ -988,7 +999,7 @@ impl CxOsTexture {
         let height = desc.height.unwrap_or(default_size.y as usize) as u64;
         
         if let Some(inner) = &self.inner {
-            if inner.shared_handle != nil{
+            if inner.format.is_shared() {
                 return;
             }
             if !CxOsTextureInner::need_alloc(width, height, desc, inner) {
@@ -1039,7 +1050,6 @@ impl CxOsTexture {
             width,
             height,
             format: desc.format,
-            shared_handle: nil,
             multisample: desc.multisample,
             texture,
         });
@@ -1052,7 +1062,8 @@ struct CxOsTextureInner {
     height: u64,
     format: TextureFormat,
     multisample: Option<usize>,
-    shared_handle: ObjcId,
+    
+    
     texture: RcObjcId
 }
 
