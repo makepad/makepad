@@ -71,8 +71,8 @@ pub trait LiveNodeVec {
     fn push_str(&mut self, id: LiveId, v: &'static str);
     fn push_string(&mut self, id: LiveId, v: &str);
     fn push_bool(&mut self, id: LiveId, v: bool);
-    fn push_int(&mut self, id: LiveId, v: i64);
-    fn push_float(&mut self, id: LiveId, v: f64);
+    fn push_int64(&mut self, id: LiveId, v: i64);
+    fn push_float64(&mut self, id: LiveId, v: f64);
     fn push_color(&mut self, id: LiveId, v: u32);
     fn push_vec2(&mut self, id: LiveId, v: Vec2);
     fn push_vec3(&mut self, id: LiveId, v: Vec3);
@@ -699,11 +699,14 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
                 LiveValue::Bool(v) => {
                     writeln!(f, "{}{} <Bool> {}", node.id, pt, v).unwrap();
                 }
-                LiveValue::Int(v) => {
+                LiveValue::Int64(v) => {
                     writeln!(f, "{}{} <Int> {}", node.id, pt, v).unwrap();
                 }
-                LiveValue::Float(v) => {
+                LiveValue::Float64(v) => {
                     writeln!(f, "{}{} <Float> {}", node.id, pt, v).unwrap();
+                },
+                LiveValue::Float32(v) => {
+                    writeln!(f, "{}{} <Float32> {}", node.id, pt, v).unwrap();
                 },
                 LiveValue::Color(v) => {
                     writeln!(f, "{}{} <Color>{:08x}", node.id, pt, v).unwrap();
@@ -805,39 +808,157 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
         
         while index < self_ref.len() {
             let node = &self_ref[index];
-            out.extend_from_slice(&node.id.0.to_be_bytes());
+            
+            fn encode_id(id: LiveId, out: &mut Vec<u8>) {
+                if id.0 & 0x8000_0000_0000_0000 == 0 {
+                    if id.0 == 0 {
+                        out.push(64); // 0 but ids cant start with a number so safe
+                    }
+                    else {
+                        //ids cant be a single digit so its safe to encode it as a string digit 0
+                        if id.0 <= std::u8::MAX as u64 {
+                            out.push(65); // 1
+                            out.extend_from_slice(&(id.0 as u8).to_be_bytes());
+                        }
+                        else if id.0 <= std::u16::MAX as u64 {
+                            out.push(66); // 2
+                            out.extend_from_slice(&(id.0 as u16).to_be_bytes());
+                        }
+                        else if id.0 <= std::u32::MAX as u64 {
+                            out.push(68); // 4
+                            out.extend_from_slice(&(id.0 as u32).to_be_bytes());
+                        }
+                        else {
+                            out.push(72); // 8
+                            out.extend_from_slice(&id.0.to_be_bytes());
+                        }
+                    }
+                }
+                else {
+                    id.as_string( | v | {
+                        if let Some(v) = v {
+                            if v.len() <= 7 { // encode the string not the u64
+                                let mut char_count = 0;
+                                for c in v.chars() { // lets say we compress into 64 bits
+                                    if c >= '0' && c <= '9' || c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c == '_' {}
+                                    else {
+                                        char_count = 0;
+                                        break;
+                                    }
+                                    char_count += 1;
+                                }
+                                if char_count != 0 {
+                                    for (index, c) in v.chars().enumerate() {
+                                        let v = if c >= '0' && c <= '9' {c as u8 - '0' as u8}
+                                        else if c >= 'a' && c <= 'z' {c as u8 - 'a' as u8 + 10}
+                                        else if c >= 'A' && c <= 'Z' {c as u8 - 'A' as u8 + 36}
+                                        else if c == '_' {63}
+                                        else {panic!()};
+                                        out.push(v | if index == char_count - 1 {0}else {64});
+                                    }
+                                    return
+                                }
+                            }
+                        }
+                        out.extend_from_slice(&id.0.to_be_bytes());
+                    });
+                }
+            }
+            
+            encode_id(node.id, &mut out);
             let prop_type = (node.origin.prop_type() as u8) << 5;
+            
+            fn encode_string(s: &str, out: &mut Vec<u8>, prop_type: u8) {
+                if s.len() < std::u8::MAX as usize {
+                    out.push(BIN_STRING_8 | prop_type);
+                    out.push(s.len() as u8);
+                    out.extend_from_slice(s.as_bytes());
+                }
+                else if s.len() < std::u16::MAX as usize {
+                    out.push(BIN_STRING_16 | prop_type);
+                    out.extend_from_slice(&(s.len() as u16).to_be_bytes());
+                    out.extend_from_slice(s.as_bytes());
+                }
+                else {
+                    out.push(BIN_STRING_32 | prop_type);
+                    out.extend_from_slice(&(s.len() as u32).to_be_bytes());
+                    out.extend_from_slice(s.as_bytes());
+                }
+            }
             
             match &node.value {
                 LiveValue::None => {
+                    log!("ENCODING NONE");
                     out.push(BIN_NONE | prop_type);
                 },
                 LiveValue::Str(s) => {
-                    out.push(BIN_STRING | prop_type);
-                    out.extend_from_slice(&(s.len() as u32).to_be_bytes());
-                    out.extend_from_slice(s.as_bytes());
+                    encode_string(s, &mut out, prop_type);
                 },
                 LiveValue::InlineString(s) => {
-                    out.push(BIN_STRING | prop_type);
-                    out.extend_from_slice(&(s.as_str().len() as u32).to_be_bytes());
-                    out.extend_from_slice(s.as_str().as_bytes());
+                    encode_string(s.as_str(), &mut out, prop_type);
                 },
                 LiveValue::FittedString(s) => {
-                    out.push(BIN_STRING | prop_type);
-                    out.extend_from_slice(&(s.as_str().len() as u32).to_be_bytes());
-                    out.extend_from_slice(s.as_str().as_bytes());
+                    encode_string(s.as_str(), &mut out, prop_type);
                 },
                 LiveValue::Bool(v) => {
                     out.push(if *v {BIN_TRUE} else {BIN_FALSE} as u8 | prop_type);
-                    out.push(node.variant_id() as u8);
                 }
-                LiveValue::Int(v) => {
-                    out.push(BIN_INT | prop_type);
-                    out.extend_from_slice(&v.to_be_bytes());
+                LiveValue::Int64(v) => {
+                    if *v > -127 && *v <= 127 {
+                        if *v == 0 {
+                            out.push(BIN_INT0 | prop_type);
+                        }
+                        else {
+                            out.push(BIN_INT8 | prop_type);
+                            out.extend_from_slice(&(*v as i8).to_be_bytes());
+                        }
+                    }
+                    else if *v >= -32768 && *v <= 32767 {
+                        out.push(BIN_INT16 | prop_type);
+                        out.extend_from_slice(&(*v as i16).to_be_bytes());
+                    }
+                    else if *v >= -2_147_483_648 && *v <= 2_147_483_647 {
+                        out.push(BIN_INT32 | prop_type);
+                        out.extend_from_slice(&(*v as i32).to_be_bytes());
+                    }
+                    else {
+                        out.push(BIN_INT64 | prop_type);
+                        out.extend_from_slice(&v.to_be_bytes());
+                    }
                 }
-                LiveValue::Float(v) => {
-                    out.push(BIN_FLOAT | prop_type);
-                    out.extend_from_slice(&v.to_be_bytes());
+                LiveValue::Float32(v) => {
+                    if *v == 0.0 {
+                        out.push(BIN_FLOAT32_0 | prop_type);
+                    }
+                    else {
+                        let v8 = *v * 40.0;
+                        if v8.fract() == 0.0 && v8 >= -128.0 && v8 <= 127.0 {
+                            let v8 = v8 as i8;
+                            out.push(BIN_FLOAT32_8 | prop_type);
+                            out.extend_from_slice(&v8.to_be_bytes());
+                        }
+                        else {
+                            out.push(BIN_FLOAT32 | prop_type);
+                            out.extend_from_slice(&(*v as f32).to_be_bytes());
+                        }
+                    }
+                },
+                LiveValue::Float64(v) => {
+                    if *v == 0.0 {
+                        out.push(BIN_FLOAT64_0 | prop_type);
+                    }
+                    else {
+                        let v8 = *v * 40.0;
+                        if v8.fract() == 0.0 && v8 >= -128.0 && v8 <= 127.0 {
+                            let v8 = v8 as i8;
+                            out.push(BIN_FLOAT64_8 | prop_type);
+                            out.extend_from_slice(&v8.to_be_bytes());
+                        }
+                        else {
+                            out.push(BIN_FLOAT64 | prop_type);
+                            out.extend_from_slice(&v.to_be_bytes());
+                        }
+                    }
                 },
                 LiveValue::Color(v) => {
                     out.push(BIN_COLOR | prop_type);
@@ -867,28 +988,28 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
                 },
                 LiveValue::BareEnum {base, variant} => {
                     out.push(BIN_BARE_ENUM | prop_type);
-                    out.extend_from_slice(&base.0.to_be_bytes());
-                    out.extend_from_slice(&variant.0.to_be_bytes());
+                    encode_id(*base, &mut out);
+                    encode_id(*variant, &mut out);
                 },
                 LiveValue::Array => {
                     out.push(BIN_ARRAY | prop_type);
                 },
                 LiveValue::TupleEnum {base, variant} => {
                     out.push(BIN_TUPLE_ENUM | prop_type);
-                    out.extend_from_slice(&base.0.to_be_bytes());
-                    out.extend_from_slice(&variant.0.to_be_bytes());
+                    encode_id(*base, &mut out);
+                    encode_id(*variant, &mut out);
                 },
                 LiveValue::NamedEnum {base, variant} => {
                     out.push(BIN_NAMED_ENUM | prop_type);
-                    out.extend_from_slice(&base.0.to_be_bytes());
-                    out.extend_from_slice(&variant.0.to_be_bytes());
+                    encode_id(*base, &mut out);
+                    encode_id(*variant, &mut out);
                 },
                 LiveValue::Object => {
                     out.push(BIN_OBJECT | prop_type);
                 }, // subnodes including this one
                 LiveValue::Clone(clone) => {
                     out.push(BIN_CLONE | prop_type);
-                    out.extend_from_slice(&clone.0.to_be_bytes());
+                    encode_id(*clone, &mut out);
                 }, // subnodes including this one
                 LiveValue::Close => {
                     out.push(BIN_CLOSE | prop_type);
@@ -935,31 +1056,38 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
     }
     
 }
-//}
-/*
-impl_live_node_slice!(&[LiveNode]);
-impl_live_node_slice!(&mut [LiveNode]);
-impl_live_node_slice!(Vec<LiveNode>);
-*/
 
 const BIN_NONE: u8 = 0;
-const BIN_STRING: u8 = 1;
-const BIN_TRUE: u8 = 2;
-const BIN_FALSE: u8 = 3;
-const BIN_INT: u8 = 4;
-const BIN_FLOAT: u8 = 5;
-const BIN_COLOR: u8 = 6;
-const BIN_VEC2: u8 = 7;
-const BIN_VEC3: u8 = 8;
-const BIN_VEC4: u8 = 9;
-const BIN_ID: u8 = 10;
-const BIN_BARE_ENUM: u8 = 11;
-const BIN_ARRAY: u8 = 12;
-const BIN_TUPLE_ENUM: u8 = 13;
-const BIN_NAMED_ENUM: u8 = 14;
-const BIN_OBJECT: u8 = 15;
-const BIN_CLONE: u8 = 16;
-const BIN_CLOSE: u8 = 17;
+const BIN_STRING_8: u8 = 1;
+const BIN_STRING_16: u8 = 2;
+const BIN_STRING_32: u8 = 3;
+const BIN_TRUE: u8 = 4;
+const BIN_FALSE: u8 = 5;
+const BIN_INT0: u8 = 6;
+const BIN_INT8: u8 = 7;
+const BIN_INT16: u8 = 8;
+const BIN_INT32: u8 = 9;
+const BIN_INT64: u8 = 10;
+const BIN_FLOAT32: u8 = 11;
+const BIN_FLOAT32_0: u8 = 12;
+const BIN_FLOAT32_8: u8 = 13;
+const BIN_FLOAT64: u8 = 14;
+const BIN_FLOAT64_0: u8 = 15;
+const BIN_FLOAT64_8: u8 = 16;
+const BIN_COLOR: u8 = 17;
+const BIN_VEC2: u8 = 18;
+const BIN_VEC3: u8 = 19;
+const BIN_VEC4: u8 = 20;
+const BIN_ID: u8 = 21;
+const BIN_BARE_ENUM: u8 = 22;
+const BIN_ARRAY: u8 = 23;
+const BIN_TUPLE_ENUM: u8 = 24;
+const BIN_NAMED_ENUM: u8 = 25;
+const BIN_OBJECT: u8 = 26;
+const BIN_CLONE: u8 = 27;
+const BIN_CLOSE: u8 = 28;
+
+// compressed number values
 
 #[derive(Debug)]
 pub enum LiveNodeFromBinaryError {
@@ -971,26 +1099,98 @@ pub enum LiveNodeFromBinaryError {
 impl LiveNodeVec for Vec<LiveNode> {
     
     fn from_binary(&mut self, data: &[u8]) -> Result<(), LiveNodeFromBinaryError> {
+        let mut strbuf = String::new();
+        
+        fn assert_len(o: usize, len: usize, data: &[u8]) -> Result<(), LiveNodeFromBinaryError> {
+            if o + len > data.len() {panic!()}//return Err(LiveNodeFromBinaryError::OutOfBounds);}
+            Ok(())
+        }
+        
+        fn decode_id(data: &[u8], o: &mut usize, strbuf: &mut String) -> Result<LiveId, LiveNodeFromBinaryError> {
+            assert_len(*o, 1, data) ?;
+            if data[*o] & 128 != 0 {
+                assert_len(*o, 8, data) ?;
+                let id = LiveId(u64::from_be_bytes(data[*o..*o + 8].try_into().unwrap()));
+                *o += 8;
+                return Ok(id);
+            }
+            if data[*o] == 64 {
+                *o += 1;
+                return Ok(LiveId(0))
+            }
+            if data[*o] == 65 {
+                *o += 1;
+                assert_len(*o, 1, data) ?;
+                let id = LiveId(data[*o] as u64);
+                *o += 1;
+                return Ok(id);
+            }
+            if data[*o] == 66 {
+                *o += 1;
+                assert_len(*o, 2, data) ?;
+                let id = LiveId(u16::from_be_bytes(data[*o..*o + 2].try_into().unwrap()) as u64);
+                *o += 2;
+                return Ok(id);
+            }
+            if data[*o] == 68 {
+                *o += 1;
+                assert_len(*o, 4, data) ?;
+                let id = LiveId(u32::from_be_bytes(data[*o..*o + 4].try_into().unwrap()) as u64);
+                *o += 4;
+                return Ok(id);
+            }
+            if data[*o] == 72 {
+                *o += 1;
+                assert_len(*o, 8, data) ?;
+                let id = LiveId(u64::from_be_bytes(data[*o..*o + 8].try_into().unwrap()));
+                *o += 8;
+                return Ok(id);
+            }
+            strbuf.clear();
+            loop {
+                assert_len(*o, 1, data) ?;
+                let d = data[*o];
+                let c = d & 63;
+                if c<10 {strbuf.push(('0' as u8 + c) as char)}
+                else if c >= 10 && c<36 {strbuf.push(('a' as u8 + (c - 10)) as char)}
+                else if c >= 36 && c<63 {strbuf.push(('A' as u8 + (c - 36)) as char)}
+                else {strbuf.push('_')}
+                *o += 1;
+                if d & 64 == 0 {break}
+            }
+            return Ok(LiveId::from_str_unchecked(strbuf));
+        }
         
         let mut o = 0;
         while o < data.len() {
-            if o + 8 > data.len() {return Err(LiveNodeFromBinaryError::OutOfBounds);}
-            let id = LiveId(u64::from_be_bytes(data[o..o + 8].try_into().unwrap()));
-            o += 8;
-
-            if o + 1 > data.len() {return Err(LiveNodeFromBinaryError::OutOfBounds);}
+            let id = decode_id(data, &mut o, &mut strbuf) ?;
+            assert_len(o, 1, data)?;
+            
             let prop_type = data[o] >> 5;
-            let variant_id = data[o] &0x1f;
+            let variant_id = data[o] & 0x1f;
             o += 1;
-
+            
             let value = match variant_id {
                 BIN_NONE => {LiveValue::None},
-                BIN_STRING => {
-                    if o + 4 > data.len() {return Err(LiveNodeFromBinaryError::OutOfBounds);}
-                    let len = u32::from_be_bytes(data[o..o + 4].try_into().unwrap()) as usize;
-                    o += 4;
-                    
-                    if o + len > data.len() {return Err(LiveNodeFromBinaryError::OutOfBounds);}
+                BIN_STRING_8 | BIN_STRING_16 | BIN_STRING_32 => {
+                    let len = if variant_id == BIN_STRING_8 {
+                        assert_len(o, 1, data) ?;
+                        let len = data[o] as usize;
+                        o += 1;
+                        len
+                    }
+                    else if variant_id == BIN_STRING_16 {
+                        assert_len(o, 2, data) ?;
+                        let len = u16::from_be_bytes(data[o..o + 2].try_into().unwrap()) as usize;
+                        o += 2;
+                        len
+                    }
+                    else{
+                        assert_len(o, 4, data) ?;
+                        let len = u32::from_be_bytes(data[o..o + 2].try_into().unwrap()) as usize;
+                        o += 4;
+                        len
+                    };
                     if let Ok(val) = std::str::from_utf8(&data[o..o + len]) {
                         o += len;
                         if let Some(inline_str) = InlineString::from_str(val) {
@@ -1006,26 +1206,71 @@ impl LiveNodeVec for Vec<LiveNode> {
                 },
                 BIN_TRUE => {LiveValue::Bool(true)},
                 BIN_FALSE => {LiveValue::Bool(false)},
-                BIN_INT => {
-                    if o + 8 > data.len() {return Err(LiveNodeFromBinaryError::OutOfBounds)};
-                    let int = i64::from_be_bytes(data[o..o + 8].try_into().unwrap());
-                    o += 8;
-                    LiveValue::Int(int)
+                BIN_INT0 => {
+                    LiveValue::Int64(0)
                 },
-                BIN_FLOAT => {
-                    if o + 8 > data.len() {return Err(LiveNodeFromBinaryError::OutOfBounds)};
-                    let int = f64::from_be_bytes(data[o..o + 8].try_into().unwrap());
+                BIN_INT8 => {
+                    assert_len(o, 1, data)?;
+                    let b = i8::from_be_bytes(data[o..o + 1].try_into().unwrap()) as i64;
+                    o += 1;
+                    LiveValue::Int64(b)
+                },
+                BIN_INT16 => {
+                    assert_len(o, 2, data)?;
+                    let v = i16::from_be_bytes(data[o..o + 2].try_into().unwrap()) as i64;
+                    o += 2;
+                    LiveValue::Int64(v)
+                },
+                BIN_INT32 => {
+                    assert_len(o, 4, data)?;
+                    let v = i32::from_be_bytes(data[o..o + 4].try_into().unwrap()) as i64;
+                    o += 4;
+                    LiveValue::Int64(v)
+                },
+                BIN_INT64 => {
+                    assert_len(o, 8, data)?;
+                    let v = i64::from_be_bytes(data[o..o + 8].try_into().unwrap());
                     o += 8;
-                    LiveValue::Float(int)
+                    LiveValue::Int64(v)
+                },
+                BIN_FLOAT32 => {
+                    assert_len(o, 4, data)?;
+                    let v = f32::from_be_bytes(data[o..o + 4].try_into().unwrap());
+                    o += 4;
+                    LiveValue::Float32(v)
+                },
+                BIN_FLOAT32_0 => {
+                    LiveValue::Float32(0.0)
+                },
+                BIN_FLOAT32_8 => {
+                    assert_len(o, 1, data)?;
+                    let v = (i8::from_be_bytes(data[o..o + 1].try_into().unwrap()) as f32) / 40.0;
+                    o += 1;
+                    LiveValue::Float32(v)
+                },
+                BIN_FLOAT64 => {
+                    assert_len(o, 8, data)?;
+                    let v = f64::from_be_bytes(data[o..o + 8].try_into().unwrap());
+                    o += 8;
+                    LiveValue::Float64(v)
+                },
+                BIN_FLOAT64_0 => {
+                    LiveValue::Float64(0.0)
+                },
+                BIN_FLOAT64_8 => {
+                    assert_len(o, 1, data)?;
+                    let v = (i8::from_be_bytes(data[o..o + 1].try_into().unwrap()) as f64) / 40.0;
+                    o += 1;
+                    LiveValue::Float64(v)
                 },
                 BIN_COLOR => {
-                    if o + 4 > data.len() {return Err(LiveNodeFromBinaryError::OutOfBounds)};
+                    assert_len(o, 4, data)?;
                     let u = u32::from_be_bytes(data[o..o + 4].try_into().unwrap());
                     o += 4;
                     LiveValue::Color(u)
                 },
                 BIN_VEC2 => {
-                    if o + 8 > data.len() {return Err(LiveNodeFromBinaryError::OutOfBounds)};
+                    assert_len(o, 8, data)?;
                     let x = f32::from_be_bytes(data[o..o + 4].try_into().unwrap());
                     o += 4;
                     let y = f32::from_be_bytes(data[o..o + 4].try_into().unwrap());
@@ -1033,7 +1278,7 @@ impl LiveNodeVec for Vec<LiveNode> {
                     LiveValue::Vec2(Vec2 {x, y})
                 },
                 BIN_VEC3 => {
-                    if o + 12 > data.len() {return Err(LiveNodeFromBinaryError::OutOfBounds)};
+                    assert_len(o, 12, data)?;
                     let x = f32::from_be_bytes(data[o..o + 4].try_into().unwrap());
                     o += 4;
                     let y = f32::from_be_bytes(data[o..o + 4].try_into().unwrap());
@@ -1043,7 +1288,7 @@ impl LiveNodeVec for Vec<LiveNode> {
                     LiveValue::Vec3(Vec3 {x, y, z})
                 },
                 BIN_VEC4 => {
-                    if o + 16 > data.len() {return Err(LiveNodeFromBinaryError::OutOfBounds)};
+                    assert_len(o, 16, data)?;
                     let x = f32::from_be_bytes(data[o..o + 4].try_into().unwrap());
                     o += 4;
                     let y = f32::from_be_bytes(data[o..o + 4].try_into().unwrap());
@@ -1055,46 +1300,31 @@ impl LiveNodeVec for Vec<LiveNode> {
                     LiveValue::Vec4(Vec4 {x, y, z, w})
                 },
                 BIN_ID => {
-                    if o + 8 > data.len() {return Err(LiveNodeFromBinaryError::OutOfBounds);}
-                    let id = LiveId(u64::from_be_bytes(data[o..o + 8].try_into().unwrap()));
-                    o += 8;
-                    LiveValue::Id(id)
+                    LiveValue::Id(decode_id(data, &mut o, &mut strbuf) ?)
                 },
                 BIN_BARE_ENUM => {
-                    if o + 16 > data.len() {return Err(LiveNodeFromBinaryError::OutOfBounds);}
-                    let base = LiveId(u64::from_be_bytes(data[o..o + 8].try_into().unwrap()));
-                    o += 8;
-                    let variant = LiveId(u64::from_be_bytes(data[o..o + 8].try_into().unwrap()));
-                    o += 8;
+                    let base = decode_id(data, &mut o, &mut strbuf) ?;
+                    let variant = decode_id(data, &mut o, &mut strbuf) ?;
                     LiveValue::BareEnum {base, variant}
                 },
                 BIN_ARRAY => {
                     LiveValue::Array
                 },
                 BIN_TUPLE_ENUM => {
-                    if o + 16 > data.len() {return Err(LiveNodeFromBinaryError::OutOfBounds);}
-                    let base = LiveId(u64::from_be_bytes(data[o..o + 8].try_into().unwrap()));
-                    o += 8;
-                    let variant = LiveId(u64::from_be_bytes(data[o..o + 8].try_into().unwrap()));
-                    o += 8;
+                    let base = decode_id(data, &mut o, &mut strbuf) ?;
+                    let variant = decode_id(data, &mut o, &mut strbuf) ?;
                     LiveValue::TupleEnum {base, variant}
                 },
                 BIN_NAMED_ENUM => {
-                    if o + 16 > data.len() {return Err(LiveNodeFromBinaryError::OutOfBounds);}
-                    let base = LiveId(u64::from_be_bytes(data[o..o + 8].try_into().unwrap()));
-                    o += 8;
-                    let variant = LiveId(u64::from_be_bytes(data[o..o + 8].try_into().unwrap()));
-                    o += 8;
+                    let base = decode_id(data, &mut o, &mut strbuf) ?;
+                    let variant = decode_id(data, &mut o, &mut strbuf) ?;
                     LiveValue::NamedEnum {base, variant}
                 },
                 BIN_OBJECT => {
                     LiveValue::Object
                 },
                 BIN_CLONE => {
-                    if o + 8 > data.len() {return Err(LiveNodeFromBinaryError::OutOfBounds);}
-                    let id = LiveId(u64::from_be_bytes(data[o..o + 8].try_into().unwrap()));
-                    o += 8;
-                    LiveValue::Clone(id)
+                    LiveValue::Clone(decode_id(data, &mut o, &mut strbuf) ?)
                 },
                 BIN_CLOSE => {
                     LiveValue::Close
@@ -1279,8 +1509,8 @@ impl LiveNodeVec for Vec<LiveNode> {
     }
     
     fn push_bool(&mut self, id: LiveId, v: bool) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Bool(v)})}
-    fn push_int(&mut self, id: LiveId, v: i64) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Int(v)})}
-    fn push_float(&mut self, id: LiveId, v: f64) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Float(v)})}
+    fn push_int64(&mut self, id: LiveId, v: i64) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Int64(v)})}
+    fn push_float64(&mut self, id: LiveId, v: f64) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Float64(v)})}
     fn push_color(&mut self, id: LiveId, v: u32) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Color(v)})}
     fn push_vec2(&mut self, id: LiveId, v: Vec2) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Vec2(v)})}
     fn push_vec3(&mut self, id: LiveId, v: Vec3) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Vec3(v)})}

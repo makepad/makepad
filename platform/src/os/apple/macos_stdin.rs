@@ -18,13 +18,12 @@ use {
         texture::Texture,
         live_traits::LiveNew,
         os::{
-            apple::frameworks::*,
             metal_xpc::{
                 xpc_service_proxy,
                 xpc_service_proxy_poll_run_loop,
                 fetch_xpc_service_texture,
             },
-            metal::{MetalCx},
+            metal::{MetalCx, DrawPassMode},
             cx_stdin::{HostToStdin, StdinToHost},
         },
         pass::{CxPassParent, PassClearColor, CxPassColorTexture},
@@ -42,15 +41,15 @@ impl Cx {
         for pass_id in &passes_todo {
             match self.passes[*pass_id].parent.clone() {
                 CxPassParent::Window(_) => {
-                    self.draw_pass(*pass_id, dpi_factor, metal_cx, nil, false);
+                    self.draw_pass(*pass_id, dpi_factor, metal_cx, DrawPassMode::StdinMain);
                     let _ = io::stdout().write_all(StdinToHost::DrawComplete.to_json().as_bytes());
                 }
                 CxPassParent::Pass(parent_pass_id) => {
                     let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass(*pass_id, dpi_factor, metal_cx, nil, false);
+                    self.draw_pass(*pass_id, dpi_factor, metal_cx, DrawPassMode::Texture);
                 },
                 CxPassParent::None => {
-                    self.draw_pass(*pass_id, 1.0, metal_cx, nil, false);
+                    self.draw_pass(*pass_id, 1.0, metal_cx, DrawPassMode::Texture);
                 }
             }
         }
@@ -59,6 +58,11 @@ impl Cx {
     pub fn stdin_post_signal(signal: Signal) {
         let _ = std::io::stdout().write_all(format!("{{\"reason\":\"makepad-signal\", \"signal\":{}}}\n", signal.0.0).as_bytes());
     }
+
+    pub fn stdin_render_done(buffer: u32) {
+        let _ = std::io::stdout().write_all(format!("{{\"reason\":\"makepad-render\", \"buffer\":{}}}\n", buffer).as_bytes());
+    }
+
     
     pub fn stdin_event_loop(&mut self, metal_cx: &mut MetalCx) {
         let _ = io::stdout().write_all(StdinToHost::ReadyToStart.to_json().as_bytes());
@@ -130,8 +134,7 @@ impl Cx {
                             self.handle_triggers_and_signals();
                         }
                         HostToStdin::Tick {frame: _, time} => if let Some(ws) = window_size {
-                            // ok so..
-                            // as long as dont have the texture with id 'x' we keep requesting it here
+                            // poll the service for updates
                             let uid = if let Some((_, uid)) = fb_shared.lock().unwrap().borrow().as_ref() {*uid}else {0};
                             fetch_xpc_service_texture(service_proxy.as_id(), 0, uid, Box::new({
                                 let fb_shared = fb_shared.clone();
