@@ -834,10 +834,11 @@ impl App {
         });
         
         // fetch ui binding deltas
-        
         for delta in ui.on_bind_deltas() {
             for (index, bind) in self.knob_table.iter_mut().enumerate() {
-                if let Some(LiveValue::Float(v)) = delta.read_path(&bind.name) {
+                if let Some(value) = delta.read_path(&bind.name) && let Some(v) = value.as_float() {
+                    
+                    
                     let mod_env = ui.frame(ids!(mod_env.display));
                     let vol_env = ui.frame(ids!(vol_env.display));
                     match bind.name.as_ref() {
@@ -851,6 +852,7 @@ impl App {
                         "volume_envelope.r" => vol_env.apply_over(ui.cx, live!{bg: {release: (v)}}),
                         _ => ()
                     }
+                    
                     let mut knob = 3;
                     if self.knob_bind[0] == index {
                         knob = 0
@@ -879,7 +881,7 @@ impl App {
                         
                     }
                     
-                    bind.value = *v;
+                    bind.value = v;
                     //log!("SEND SHIT {} {}", v, (((v - bind.min) / (bind.max - bind.min)) * 127.0)  as u8);
                     ui.cx.send_midi_1_data(Midi1Data {
                         data0: 0xb0,
@@ -932,7 +934,7 @@ impl App {
                     let bind = &mut self.knob_table[bind_id];
                     bind.value = ((inp.data.data2 as f64 - 63.0) * ((bind.max - bind.min) * 0.001) + bind.value).min(bind.max).max(bind.min);
                     let mut delta = Vec::new();
-                    delta.write_path(&bind.name, LiveValue::Float(bind.value));
+                    delta.write_path(&bind.name, LiveValue::Float64(bind.value));
                     delta.debug_print(0, 100);
                     ui.bind_read(&delta);
                     

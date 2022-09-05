@@ -173,10 +173,13 @@ impl ShaderRegistry {
                 LiveValue::Bool(_) if live_registry.get_node_prefix(node.origin) == Some(id!(const)) => {
                     return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Bool)
                 },
-                LiveValue::Int(_) if live_registry.get_node_prefix(node.origin) == Some(id!(const)) => {
+                LiveValue::Int64(_) if live_registry.get_node_prefix(node.origin) == Some(id!(const)) => {
                     return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Int)
                 }
-                LiveValue::Float(_) if live_registry.get_node_prefix(node.origin) == Some(id!(const)) => {
+                LiveValue::Float32(_) if live_registry.get_node_prefix(node.origin) == Some(id!(const)) => {
+                    return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Float)
+                }
+                LiveValue::Float64(_) if live_registry.get_node_prefix(node.origin) == Some(id!(const)) => {
                     return LiveNodeFindResult::LiveValue(ValuePtr(now_ptr), TyLit::Float)
                 }
                 LiveValue::Color(_) if live_registry.get_node_prefix(node.origin) == Some(id!(const)) => {
@@ -533,8 +536,9 @@ impl ShaderRegistry {
                     match prop.value {
                         LiveValue::Bool(_) |
                         LiveValue::Id(_)  |
-                        LiveValue::Int(_) |
-                        LiveValue::Float(_) |
+                        LiveValue::Int64(_) |
+                        LiveValue::Float32(_) |
+                        LiveValue::Float64(_) |
                         LiveValue::Color(_) |
                         LiveValue::Vec2(_) |
                         LiveValue::Vec3(_) |
