@@ -35,9 +35,10 @@ pub enum LFOWave {
 
 #[derive(Live, LiveHook, PartialEq, LiveAtomic, Debug, LiveRead)]
 pub enum FilterType {
-    #[pick] Lowpass,
-    Highpass,
-    Bandpass
+    #[pick] LowPass,
+    HighPass,
+    BandPass,
+    BandReject
 }
 /*
 struct LaddFilterCoefficients {
@@ -501,6 +502,7 @@ impl EnvelopeState {
         match self.phase {
             EnvelopePhase::Attack |
             EnvelopePhase::Decay |
+            EnvelopePhase::Hold |
             EnvelopePhase::Sustain => {
                 self.phase = EnvelopePhase::Release;
                 self.target_value = 0.0;
@@ -525,11 +527,39 @@ struct FilterState {
 }
 
 impl FilterState {
-    fn get(&mut self, input: f32) -> f32 {
+    fn pump(&mut self,input:f32){
         self.bp = self.phi * self.hp + self.bp;
         self.lp = self.phi * self.bp + self.lp;
-        self.hp = input - self.lp - self.gamma * self.bp;
+        self.hp = input - self.lp - self.gamma * self.bp;        
+    }
+
+    fn get_lp(&mut self, input: f32) -> f32 {
+        self.pump(input);
         return self.lp;
+    }
+    
+    fn get_bp(&mut self, input: f32) -> f32 {
+        self.pump(input);
+        return self.bp;
+    }
+
+    fn get_br(&mut self, input: f32) -> f32 {
+        self.pump(input);
+        return input - self.bp;
+    }
+    
+    fn get_hp(&mut self, input: f32) -> f32 {
+        self.pump(input);
+        return self.hp;
+    }
+
+    fn get(&mut self, input: f32, settings: &FilterSettings) -> f32{
+        match settings.filter_type.get(){
+            FilterType::LowPass => self.get_lp(input),
+            FilterType::HighPass => self.get_hp(input),
+            FilterType::BandPass => self.get_bp(input),
+            FilterType::BandReject => self.get_br(input)
+        }
     }
     
     fn set_cutoff(&mut self, settings: &FilterSettings, envelope: f32, sample_rate: f32, touch: f32) {
@@ -642,7 +672,7 @@ impl IronFishVoice {
         let noise = random_f32(&mut self.seed) * 2.0 - 1.0;
         
         let oscinput = osc1 * settings.osc_balance.get() + osc2 * (1.0 - settings.osc_balance.get()) + settings.sub_osc.get() * sub + settings.noise.get() * noise;
-        let filter = self.filter1.get(oscinput);
+        let filter = self.filter1.get(oscinput, &settings.filter1);
         
         let output = volume_envelope * filter;
         
