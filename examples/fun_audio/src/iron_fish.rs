@@ -124,19 +124,19 @@ pub struct EffectSettings{
 pub struct SequencerSettings{
     
     #[live(0)] step0: u32a,
-    #[live(0)] step1: u32a,
+    #[live(1)] step1: u32a,
     #[live(0)] step2: u32a,
-    #[live(0)] step3: u32a,
+    #[live(2)] step3: u32a,
     #[live(0)] step4: u32a,
-    #[live(0)] step5: u32a,
+    #[live(4)] step5: u32a,
     #[live(0)] step6: u32a,
-    #[live(0)] step7: u32a,
+    #[live(8)] step7: u32a,
     #[live(0)] step8: u32a,
-    #[live(0)] step9: u32a,
+    #[live(14)] step9: u32a,
     #[live(0)] step10: u32a,
-    #[live(0)] step11: u32a,
+    #[live(30)] step11: u32a,
     #[live(0)] step12: u32a,
-    #[live(0)] step13: u32a,
+    #[live(1)] step13: u32a,
     #[live(0)] step14: u32a,
     #[live(0)] step15: u32a,
     
@@ -768,21 +768,22 @@ impl IronFishState {
         pub fn get_sequencer_step(&mut self, step: usize) ->u32
         {
             match step{
-                0 => self.settings.sequencer.step0.get(),
-                2 => self.settings.sequencer.step2.get(),
-                3 => self.settings.sequencer.step3.get(),
-                4 => self.settings.sequencer.step4.get(),
-                5 => self.settings.sequencer.step5.get(),
-                6 => self.settings.sequencer.step6.get(),
-                7 => self.settings.sequencer.step7.get(),
-                8 => self.settings.sequencer.step8.get(),
-                9 => self.settings.sequencer.step9.get(),
-                10 => self.settings.sequencer.step10.get(),
-                11 => self.settings.sequencer.step11.get(),
-                12 => self.settings.sequencer.step12.get(),
-                13 => self.settings.sequencer.step13.get(),
-                14 => self.settings.sequencer.step14.get(),
-                15 => self.settings.sequencer.step15.get(),
+                0 => return self.settings.sequencer.step0.get(),
+                1 => return self.settings.sequencer.step1.get(),
+                2 => return self.settings.sequencer.step2.get(),
+                3 => return self.settings.sequencer.step3.get(),
+                4 => return self.settings.sequencer.step4.get(),
+                5 => return self.settings.sequencer.step5.get(),
+                6 => return self.settings.sequencer.step6.get(),
+                7 => return self.settings.sequencer.step7.get(),
+                8 => return self.settings.sequencer.step8.get(),
+                9 => return self.settings.sequencer.step9.get(),
+                10 => return self.settings.sequencer.step10.get(),
+                11 => return self.settings.sequencer.step11.get(),
+                12 => return self.settings.sequencer.step12.get(),
+                13 => return self.settings.sequencer.step13.get(),
+                14 => return self.settings.sequencer.step14.get(),
+                15 => return self.settings.sequencer.step15.get(),
                 _ => 0
                 
             };
@@ -820,19 +821,27 @@ impl IronFishState {
             if (self.settings.sequencer.playing.get())
             {
                 if (self.sequencer.samplesleftinstep == 0){
-                    //log!("tick!");
-                    // process notes!
+                     // process notes!
                     let newstepidx = (self.sequencer.currentstep + 1) % 16;
                     let old_step = self.get_sequencer_step(self.sequencer.currentstep);
                     let new_step = self.get_sequencer_step(newstepidx);
+                  
+                    //log!("tick! {:?} {:?}",newstepidx, new_step);
+                   // minor scale..
+                    let scale = [36   ,38   ,39   ,41   ,43   ,44   ,46   ,
+                                 36+12,38+12,39+12,41+12,43+12,44+12,46+12,
+                                 36+24,38+24,39+24,41+24,43+24,44+24,46+24];
+
                     for i in 0..32 {
                         if old_step & (1<<i) != 0{
                             if (new_step & (1<<i)) == 0 {
-                                self.note_off(i,127);
+                      //          log!("note on {:?}",scale[i]);
+                                self.note_off(scale[i],127);
                             }
                         } else {
                             if (new_step & (1<<i) != 0){
-                                self.note_on(i,127);
+                        //        log!("note off {:?}",scale[i]);
+                                self.note_on(scale[i],127);
                             }
                         }
                     }
