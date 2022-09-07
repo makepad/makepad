@@ -522,7 +522,7 @@ live_register!{
                 dropdown = {
                     bind_enum: "FilterType"
                     bind: "filter1.filter_type"
-                    items: ["Lowpass", "Highpass", "Bandpass"]
+                    items: ["LowPass", "HighPass", "BandPass", "BandReject"]
                 }
             }
             
