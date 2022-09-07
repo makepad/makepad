@@ -408,7 +408,7 @@ live_register!{
         label = {bg: {color: (COLOR_MIX)}, label = {text: "Sequencer"}}
         body = {
             // bg: {color: (COLOR_MIX)}
-            speed = InstrumentBipolarSlider {
+            speed = InstrumentSlider {
                 slider = {
                     slider: {line_color: (COLOR_MIX)}
                     bind: "sequencer.bpm"
@@ -754,6 +754,8 @@ live_register!{
                     MixerPanel {}
                 }
                 Frame {
+                  //  walk: { margin: {top: 10, right: 20, bottom: 10, left: 20}}
+                    layout: {flow: Down, spacing: (SPACING_PANELS)}
                     ModEnvelopePanel {}
                     SequencerPanel {}
                 }
