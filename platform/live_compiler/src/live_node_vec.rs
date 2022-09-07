@@ -1,9 +1,6 @@
 use {
     std::{
-        convert::TryInto,
         fmt::Write,
-        ops::Deref,
-        ops::DerefMut,
         iter
     },
     crate::{
@@ -52,8 +49,6 @@ pub trait LiveNodeSlice {
     fn clone_child(&self, parent_index: usize, out_vec: &mut Vec<LiveNode>);
     fn to_string(&self, parent_index: usize, max_depth: usize) -> String;
     fn debug_print(&self, parent_index: usize, max_depth: usize);
-    
-    fn to_binary(&self, parent_index: usize) -> Result<Vec<u8>, String>;
 }
 
 pub trait LiveNodeVec {
@@ -71,8 +66,8 @@ pub trait LiveNodeVec {
     fn push_str(&mut self, id: LiveId, v: &'static str);
     fn push_string(&mut self, id: LiveId, v: &str);
     fn push_bool(&mut self, id: LiveId, v: bool);
-    fn push_int(&mut self, id: LiveId, v: i64);
-    fn push_float(&mut self, id: LiveId, v: f64);
+    fn push_int64(&mut self, id: LiveId, v: i64);
+    fn push_float64(&mut self, id: LiveId, v: f64);
     fn push_color(&mut self, id: LiveId, v: u32);
     fn push_vec2(&mut self, id: LiveId, v: Vec2);
     fn push_vec3(&mut self, id: LiveId, v: Vec3);
@@ -88,8 +83,6 @@ pub trait LiveNodeVec {
     
     fn open(&mut self);
     fn close(&mut self);
-    
-    fn from_binary(&mut self, buf: &[u8]) -> Result<(), LiveNodeFromBinaryError>;
 }
 
 // accessing the Gen structure like a tree
@@ -699,11 +692,14 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
                 LiveValue::Bool(v) => {
                     writeln!(f, "{}{} <Bool> {}", node.id, pt, v).unwrap();
                 }
-                LiveValue::Int(v) => {
+                LiveValue::Int64(v) => {
                     writeln!(f, "{}{} <Int> {}", node.id, pt, v).unwrap();
                 }
-                LiveValue::Float(v) => {
+                LiveValue::Float64(v) => {
                     writeln!(f, "{}{} <Float> {}", node.id, pt, v).unwrap();
+                },
+                LiveValue::Float32(v) => {
+                    writeln!(f, "{}{} <Float32> {}", node.id, pt, v).unwrap();
                 },
                 LiveValue::Color(v) => {
                     writeln!(f, "{}{} <Color>{:08x}", node.id, pt, v).unwrap();
@@ -796,323 +792,11 @@ impl<T> LiveNodeSlice for T where T: AsRef<[LiveNode]> {
             writeln!(f, "[[ERROR Stackdepth not 0 at end {}]]", stack_depth).unwrap()
         }
         f
-    }
-    
-    fn to_binary(&self, parent_index: usize) -> Result<Vec<u8>, String> {
-        let mut out = Vec::new();
-        let self_ref = self.as_ref();
-        let mut index = parent_index;
-        
-        while index < self_ref.len() {
-            let node = &self_ref[index];
-            out.extend_from_slice(&node.id.0.to_be_bytes());
-            let prop_type = (node.origin.prop_type() as u8) << 5;
-            
-            match &node.value {
-                LiveValue::None => {
-                    out.push(BIN_NONE | prop_type);
-                },
-                LiveValue::Str(s) => {
-                    out.push(BIN_STRING | prop_type);
-                    out.extend_from_slice(&(s.len() as u32).to_be_bytes());
-                    out.extend_from_slice(s.as_bytes());
-                },
-                LiveValue::InlineString(s) => {
-                    out.push(BIN_STRING | prop_type);
-                    out.extend_from_slice(&(s.as_str().len() as u32).to_be_bytes());
-                    out.extend_from_slice(s.as_str().as_bytes());
-                },
-                LiveValue::FittedString(s) => {
-                    out.push(BIN_STRING | prop_type);
-                    out.extend_from_slice(&(s.as_str().len() as u32).to_be_bytes());
-                    out.extend_from_slice(s.as_str().as_bytes());
-                },
-                LiveValue::Bool(v) => {
-                    out.push(if *v {BIN_TRUE} else {BIN_FALSE} as u8 | prop_type);
-                    out.push(node.variant_id() as u8);
-                }
-                LiveValue::Int(v) => {
-                    out.push(BIN_INT | prop_type);
-                    out.extend_from_slice(&v.to_be_bytes());
-                }
-                LiveValue::Float(v) => {
-                    out.push(BIN_FLOAT | prop_type);
-                    out.extend_from_slice(&v.to_be_bytes());
-                },
-                LiveValue::Color(v) => {
-                    out.push(BIN_COLOR | prop_type);
-                    out.extend_from_slice(&v.to_be_bytes());
-                },
-                LiveValue::Vec2(v) => {
-                    out.push(BIN_VEC2 | prop_type);
-                    out.extend_from_slice(&v.x.to_be_bytes());
-                    out.extend_from_slice(&v.y.to_be_bytes());
-                },
-                LiveValue::Vec3(v) => {
-                    out.push(BIN_VEC3 | prop_type);
-                    out.extend_from_slice(&v.x.to_be_bytes());
-                    out.extend_from_slice(&v.y.to_be_bytes());
-                    out.extend_from_slice(&v.z.to_be_bytes());
-                },
-                LiveValue::Vec4(v) => {
-                    out.push(BIN_VEC4 | prop_type);
-                    out.extend_from_slice(&v.x.to_be_bytes());
-                    out.extend_from_slice(&v.y.to_be_bytes());
-                    out.extend_from_slice(&v.z.to_be_bytes());
-                    out.extend_from_slice(&v.w.to_be_bytes());
-                },
-                LiveValue::Id(id) => {
-                    out.push(BIN_ID | prop_type);
-                    out.extend_from_slice(&id.0.to_be_bytes());
-                },
-                LiveValue::BareEnum {base, variant} => {
-                    out.push(BIN_BARE_ENUM | prop_type);
-                    out.extend_from_slice(&base.0.to_be_bytes());
-                    out.extend_from_slice(&variant.0.to_be_bytes());
-                },
-                LiveValue::Array => {
-                    out.push(BIN_ARRAY | prop_type);
-                },
-                LiveValue::TupleEnum {base, variant} => {
-                    out.push(BIN_TUPLE_ENUM | prop_type);
-                    out.extend_from_slice(&base.0.to_be_bytes());
-                    out.extend_from_slice(&variant.0.to_be_bytes());
-                },
-                LiveValue::NamedEnum {base, variant} => {
-                    out.push(BIN_NAMED_ENUM | prop_type);
-                    out.extend_from_slice(&base.0.to_be_bytes());
-                    out.extend_from_slice(&variant.0.to_be_bytes());
-                },
-                LiveValue::Object => {
-                    out.push(BIN_OBJECT | prop_type);
-                }, // subnodes including this one
-                LiveValue::Clone(clone) => {
-                    out.push(BIN_CLONE | prop_type);
-                    out.extend_from_slice(&clone.0.to_be_bytes());
-                }, // subnodes including this one
-                LiveValue::Close => {
-                    out.push(BIN_CLOSE | prop_type);
-                },
-                
-                // stack items
-                LiveValue::ExprBinOp(_) => {
-                    return Err("Cannot serialise LiveValue::ExprBinOp".into())
-                },
-                LiveValue::ExprUnOp(_) => {
-                    return Err("Cannot serialise LiveValue::ExprUnOp".into())
-                },
-                LiveValue::ExprMember(_) => {
-                    return Err("Cannot serialise LiveValue::ExprMember".into())
-                },
-                LiveValue::Expr {..} => {
-                    return Err("Cannot serialise LiveValue::Expr".into())
-                },
-                LiveValue::ExprCall {..} => {
-                    return Err("Cannot serialise LiveValue::ExprCall".into())
-                },
-                LiveValue::DocumentString {..} => {
-                    return Err("Cannot serialise LiveValue::DocumentString".into())
-                },
-                LiveValue::Dependency {..} => {
-                    return Err("Cannot serialise LiveValue::Dependency".into())
-                },
-                LiveValue::Class {..} => {
-                    return Err("Cannot serialise LiveValue::Class".into())
-                }, // subnodes including this one
-                LiveValue::DSL {..} => {
-                    return Err("Cannot serialise LiveValue::DSL".into())
-                },
-                LiveValue::Import(..) => {
-                    return Err("Cannot serialise LiveValue::Import".into())
-                }
-                LiveValue::Registry(..) => {
-                    return Err("Cannot serialise LiveValue::Registry".into())
-                }
-            }
-            index += 1;
-        }
-        Ok(out)
-    }
-    
+    } 
 }
-//}
-/*
-impl_live_node_slice!(&[LiveNode]);
-impl_live_node_slice!(&mut [LiveNode]);
-impl_live_node_slice!(Vec<LiveNode>);
-*/
 
-const BIN_NONE: u8 = 0;
-const BIN_STRING: u8 = 1;
-const BIN_TRUE: u8 = 2;
-const BIN_FALSE: u8 = 3;
-const BIN_INT: u8 = 4;
-const BIN_FLOAT: u8 = 5;
-const BIN_COLOR: u8 = 6;
-const BIN_VEC2: u8 = 7;
-const BIN_VEC3: u8 = 8;
-const BIN_VEC4: u8 = 9;
-const BIN_ID: u8 = 10;
-const BIN_BARE_ENUM: u8 = 11;
-const BIN_ARRAY: u8 = 12;
-const BIN_TUPLE_ENUM: u8 = 13;
-const BIN_NAMED_ENUM: u8 = 14;
-const BIN_OBJECT: u8 = 15;
-const BIN_CLONE: u8 = 16;
-const BIN_CLOSE: u8 = 17;
-
-#[derive(Debug)]
-pub enum LiveNodeFromBinaryError {
-    OutOfBounds,
-    UnexpectedVariant,
-    UTF8Error
-}
 
 impl LiveNodeVec for Vec<LiveNode> {
-    
-    fn from_binary(&mut self, data: &[u8]) -> Result<(), LiveNodeFromBinaryError> {
-        
-        let mut o = 0;
-        while o < data.len() {
-            if o + 8 > data.len() {return Err(LiveNodeFromBinaryError::OutOfBounds);}
-            let id = LiveId(u64::from_be_bytes(data[o..o + 8].try_into().unwrap()));
-            o += 8;
-
-            if o + 1 > data.len() {return Err(LiveNodeFromBinaryError::OutOfBounds);}
-            let prop_type = data[o] >> 5;
-            let variant_id = data[o] &0x1f;
-            o += 1;
-
-            let value = match variant_id {
-                BIN_NONE => {LiveValue::None},
-                BIN_STRING => {
-                    if o + 4 > data.len() {return Err(LiveNodeFromBinaryError::OutOfBounds);}
-                    let len = u32::from_be_bytes(data[o..o + 4].try_into().unwrap()) as usize;
-                    o += 4;
-                    
-                    if o + len > data.len() {return Err(LiveNodeFromBinaryError::OutOfBounds);}
-                    if let Ok(val) = std::str::from_utf8(&data[o..o + len]) {
-                        o += len;
-                        if let Some(inline_str) = InlineString::from_str(val) {
-                            LiveValue::InlineString(inline_str)
-                        }
-                        else {
-                            LiveValue::FittedString(FittedString::from_string(val.to_string()))
-                        }
-                    }
-                    else {
-                        return Err(LiveNodeFromBinaryError::UTF8Error);
-                    }
-                },
-                BIN_TRUE => {LiveValue::Bool(true)},
-                BIN_FALSE => {LiveValue::Bool(false)},
-                BIN_INT => {
-                    if o + 8 > data.len() {return Err(LiveNodeFromBinaryError::OutOfBounds)};
-                    let int = i64::from_be_bytes(data[o..o + 8].try_into().unwrap());
-                    o += 8;
-                    LiveValue::Int(int)
-                },
-                BIN_FLOAT => {
-                    if o + 8 > data.len() {return Err(LiveNodeFromBinaryError::OutOfBounds)};
-                    let int = f64::from_be_bytes(data[o..o + 8].try_into().unwrap());
-                    o += 8;
-                    LiveValue::Float(int)
-                },
-                BIN_COLOR => {
-                    if o + 4 > data.len() {return Err(LiveNodeFromBinaryError::OutOfBounds)};
-                    let u = u32::from_be_bytes(data[o..o + 4].try_into().unwrap());
-                    o += 4;
-                    LiveValue::Color(u)
-                },
-                BIN_VEC2 => {
-                    if o + 8 > data.len() {return Err(LiveNodeFromBinaryError::OutOfBounds)};
-                    let x = f32::from_be_bytes(data[o..o + 4].try_into().unwrap());
-                    o += 4;
-                    let y = f32::from_be_bytes(data[o..o + 4].try_into().unwrap());
-                    o += 4;
-                    LiveValue::Vec2(Vec2 {x, y})
-                },
-                BIN_VEC3 => {
-                    if o + 12 > data.len() {return Err(LiveNodeFromBinaryError::OutOfBounds)};
-                    let x = f32::from_be_bytes(data[o..o + 4].try_into().unwrap());
-                    o += 4;
-                    let y = f32::from_be_bytes(data[o..o + 4].try_into().unwrap());
-                    o += 4;
-                    let z = f32::from_be_bytes(data[o..o + 4].try_into().unwrap());
-                    o += 4;
-                    LiveValue::Vec3(Vec3 {x, y, z})
-                },
-                BIN_VEC4 => {
-                    if o + 16 > data.len() {return Err(LiveNodeFromBinaryError::OutOfBounds)};
-                    let x = f32::from_be_bytes(data[o..o + 4].try_into().unwrap());
-                    o += 4;
-                    let y = f32::from_be_bytes(data[o..o + 4].try_into().unwrap());
-                    o += 4;
-                    let z = f32::from_be_bytes(data[o..o + 4].try_into().unwrap());
-                    o += 4;
-                    let w = f32::from_be_bytes(data[o..o + 4].try_into().unwrap());
-                    o += 4;
-                    LiveValue::Vec4(Vec4 {x, y, z, w})
-                },
-                BIN_ID => {
-                    if o + 8 > data.len() {return Err(LiveNodeFromBinaryError::OutOfBounds);}
-                    let id = LiveId(u64::from_be_bytes(data[o..o + 8].try_into().unwrap()));
-                    o += 8;
-                    LiveValue::Id(id)
-                },
-                BIN_BARE_ENUM => {
-                    if o + 16 > data.len() {return Err(LiveNodeFromBinaryError::OutOfBounds);}
-                    let base = LiveId(u64::from_be_bytes(data[o..o + 8].try_into().unwrap()));
-                    o += 8;
-                    let variant = LiveId(u64::from_be_bytes(data[o..o + 8].try_into().unwrap()));
-                    o += 8;
-                    LiveValue::BareEnum {base, variant}
-                },
-                BIN_ARRAY => {
-                    LiveValue::Array
-                },
-                BIN_TUPLE_ENUM => {
-                    if o + 16 > data.len() {return Err(LiveNodeFromBinaryError::OutOfBounds);}
-                    let base = LiveId(u64::from_be_bytes(data[o..o + 8].try_into().unwrap()));
-                    o += 8;
-                    let variant = LiveId(u64::from_be_bytes(data[o..o + 8].try_into().unwrap()));
-                    o += 8;
-                    LiveValue::TupleEnum {base, variant}
-                },
-                BIN_NAMED_ENUM => {
-                    if o + 16 > data.len() {return Err(LiveNodeFromBinaryError::OutOfBounds);}
-                    let base = LiveId(u64::from_be_bytes(data[o..o + 8].try_into().unwrap()));
-                    o += 8;
-                    let variant = LiveId(u64::from_be_bytes(data[o..o + 8].try_into().unwrap()));
-                    o += 8;
-                    LiveValue::NamedEnum {base, variant}
-                },
-                BIN_OBJECT => {
-                    LiveValue::Object
-                },
-                BIN_CLONE => {
-                    if o + 8 > data.len() {return Err(LiveNodeFromBinaryError::OutOfBounds);}
-                    let id = LiveId(u64::from_be_bytes(data[o..o + 8].try_into().unwrap()));
-                    o += 8;
-                    LiveValue::Clone(id)
-                },
-                BIN_CLOSE => {
-                    LiveValue::Close
-                },
-                _ => {
-                    return Err(LiveNodeFromBinaryError::UnexpectedVariant);
-                }
-            };
-            self.push(LiveNode {
-                origin: LiveNodeOrigin::empty()
-                    .with_prop_type(LivePropType::from_usize(prop_type as usize)),
-                id,
-                value
-            });
-        }
-        Ok(())
-    }
-    
     fn insert_children_from_other(&mut self, source_index: usize, insert_point: usize, other: &[LiveNode]) {
         
         if !other[source_index].is_open() {
@@ -1279,8 +963,8 @@ impl LiveNodeVec for Vec<LiveNode> {
     }
     
     fn push_bool(&mut self, id: LiveId, v: bool) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Bool(v)})}
-    fn push_int(&mut self, id: LiveId, v: i64) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Int(v)})}
-    fn push_float(&mut self, id: LiveId, v: f64) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Float(v)})}
+    fn push_int64(&mut self, id: LiveId, v: i64) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Int64(v)})}
+    fn push_float64(&mut self, id: LiveId, v: f64) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Float64(v)})}
     fn push_color(&mut self, id: LiveId, v: u32) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Color(v)})}
     fn push_vec2(&mut self, id: LiveId, v: Vec2) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Vec2(v)})}
     fn push_vec3(&mut self, id: LiveId, v: Vec3) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Vec3(v)})}
@@ -1295,234 +979,4 @@ impl LiveNodeVec for Vec<LiveNode> {
     fn open_array(&mut self, id: LiveId) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id, value: LiveValue::Array})}
     fn close(&mut self) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id: LiveId(0), value: LiveValue::Close})}
     fn open(&mut self) {self.push(LiveNode {origin: LiveNodeOrigin::empty(), id: LiveId(0), value: LiveValue::Object})}
-}
-const MAX_CLONE_STACK_DEPTH_SAFETY: usize = 100;
-
-pub struct LiveNodeReader<'a> {
-    eot: bool,
-    depth: usize,
-    index: usize,
-    nodes: &'a[LiveNode]
-}
-
-impl<'a> LiveNodeReader<'a> {
-    pub fn new(index: usize, nodes: &'a[LiveNode]) -> Self {
-        
-        Self {
-            eot: false,
-            depth: 0,
-            index,
-            nodes
-        }
-    }
-    
-    pub fn index_option(&self, index: Option<usize>, depth_change: isize) -> Option<Self> {
-        if self.eot {panic!();}
-        if let Some(index) = index {
-            Some(Self {
-                eot: self.eot,
-                depth: (self.depth as isize + depth_change) as usize,
-                index: index,
-                nodes: self.nodes
-            })
-        }
-        else {
-            None
-        }
-    }
-    
-    pub fn node(&self) -> &LiveNode {
-        if self.eot {panic!();}
-        &self.nodes[self.index]
-    }
-    
-    pub fn parent(&self) -> Option<Self> {self.index_option(self.nodes.parent(self.index), -1)}
-    pub fn append_child_index(&self) -> usize {self.nodes.append_child_index(self.index)}
-    pub fn first_child(&self) -> Option<Self> {self.index_option(self.nodes.first_child(self.index), 1)}
-    pub fn last_child(&self) -> Option<Self> {self.index_option(self.nodes.last_child(self.index), 1)}
-    pub fn next_child(&self) -> Option<Self> {self.index_option(self.nodes.next_child(self.index), 0)}
-    
-    pub fn node_slice(&self) -> &[LiveNode] {
-        if self.eot {panic!()}
-        self.nodes.node_slice(self.index)
-    }
-    
-    pub fn children_slice(&self) -> &[LiveNode] {
-        if self.eot {panic!()}
-        self.nodes.children_slice(self.index)
-    }
-    
-    pub fn child_by_number(&self, child_number: usize) -> Option<Self> {
-        self.index_option(self.nodes.child_by_number(self.index, child_number), 1)
-    }
-    
-    pub fn child_by_name(&self, name: LiveProp) -> Option<Self> {
-        self.index_option(self.nodes.child_by_name(self.index, name), 1)
-    }
-    
-    fn child_by_path(&self, path: &[LiveProp]) -> Option<Self> {
-        self.index_option(self.nodes.child_by_path(self.index, path), 1)
-    }
-    
-    pub fn scope_up_by_name(&self, name: LiveProp) -> Option<Self> {
-        self.index_option(self.nodes.scope_up_by_name(self.index, name), 0)
-    }
-    
-    pub fn count_children(&self) -> usize {self.nodes.count_children(self.index)}
-    pub fn clone_child(&self, out_vec: &mut Vec<LiveNode>) {
-        if self.eot {panic!();}
-        self.nodes.clone_child(self.index, out_vec)
-    }
-    
-    pub fn to_string(&self, max_depth: usize) -> String {
-        if self.eot {panic!();}
-        self.nodes.to_string(self.index, max_depth)
-    }
-    
-    pub fn skip(&mut self) {
-        if self.eot {panic!();}
-        self.index = self.nodes.skip_node(self.index);
-        // check eot
-        if self.nodes[self.index].is_close() { // standing on a close node
-            if self.depth == 1 {
-                self.eot = true;
-                self.index += 1;
-            }
-        }
-    }
-    
-    pub fn walk(&mut self) {
-        if self.eot {panic!();}
-        if self.nodes[self.index].is_open() {
-            self.depth += 1;
-        }
-        else if self.nodes[self.index].is_close() {
-            if self.depth == 0 {panic!()}
-            self.depth -= 1;
-            if self.depth == 0 {
-                self.eot = true;
-            }
-        }
-        self.index += 1;
-    }
-    
-    pub fn is_eot(&self) -> bool {
-        return self.eot
-    }
-    
-    pub fn index(&self) -> usize {
-        self.index
-    }
-    
-    pub fn depth(&self) -> usize {
-        self.depth
-    }
-    
-    pub fn nodes(&self) -> &[LiveNode] {
-        self.nodes
-    }
-    
-}
-
-impl<'a> Deref for LiveNodeReader<'a> {
-    type Target = LiveNode;
-    fn deref(&self) -> &Self::Target {&self.nodes[self.index]}
-}
-
-
-pub struct LiveNodeMutReader<'a> {
-    eot: bool,
-    depth: usize,
-    index: usize,
-    nodes: &'a mut [LiveNode]
-}
-
-impl<'a> LiveNodeMutReader<'a> {
-    pub fn new(index: usize, nodes: &'a mut [LiveNode]) -> Self {
-        Self {
-            eot: false,
-            depth: 0,
-            index,
-            nodes
-        }
-    }
-    
-    pub fn node(&mut self) -> &mut LiveNode {
-        if self.eot {panic!();}
-        &mut self.nodes[self.index]
-    }
-    
-    pub fn node_slice(&self) -> &[LiveNode] {
-        if self.eot {panic!()}
-        self.nodes.node_slice(self.index)
-    }
-    
-    pub fn children_slice(&self) -> &[LiveNode] {
-        if self.eot {panic!()}
-        self.nodes.children_slice(self.index)
-    }
-    
-    pub fn count_children(&self) -> usize {self.nodes.count_children(self.index)}
-    
-    pub fn clone_child(&self, out_vec: &mut Vec<LiveNode>) {
-        if self.eot {panic!();}
-        self.nodes.clone_child(self.index, out_vec)
-    }
-    
-    pub fn to_string(&self, max_depth: usize) -> String {
-        if self.eot {panic!();}
-        self.nodes.to_string(self.index, max_depth)
-    }
-    
-    pub fn skip(&mut self) {
-        if self.eot {panic!();}
-        self.index = self.nodes.skip_node(self.index);
-        if self.nodes[self.index].is_close() { // standing on a close node
-            if self.depth == 1 {
-                self.eot = true;
-                self.index += 1;
-            }
-        }
-    }
-    
-    pub fn walk(&mut self) {
-        if self.eot {panic!();}
-        if self.nodes[self.index].is_open() {
-            self.depth += 1;
-        }
-        else if self.nodes[self.index].value.is_close() {
-            if self.depth == 0 {panic!()}
-            self.depth -= 1;
-            if self.depth == 0 {
-                self.eot = true;
-            }
-        }
-        self.index += 1;
-    }
-    
-    pub fn is_eot(&mut self) -> bool {
-        return self.eot
-    }
-    
-    pub fn index(&mut self) -> usize {
-        self.index
-    }
-    
-    pub fn depth(&mut self) -> usize {
-        self.depth
-    }
-    
-    pub fn nodes(&mut self) -> &mut [LiveNode] {
-        self.nodes
-    }
-    
-}
-
-impl<'a> Deref for LiveNodeMutReader<'a> {
-    type Target = LiveNode;
-    fn deref(&self) -> &Self::Target {&self.nodes[self.index]}
-}
-
-impl<'a> DerefMut for LiveNodeMutReader<'a> {
-    fn deref_mut(&mut self) -> &mut Self::Target {&mut self.nodes[self.index]}
 }

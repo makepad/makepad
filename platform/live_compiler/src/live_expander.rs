@@ -339,7 +339,9 @@ impl<'a> LiveExpander<'a> {
                 LiveValue::Object => { // lets check what we are overwriting
                     current_parent.push((out_doc.nodes[out_index].id, out_index));
                 },
-                LiveValue::DSL {..} => {},
+                LiveValue::DSL {..} => {
+                    //println!("{}",std::mem::size_of::<TextSpan>());
+                },
                 _ => {}
             }
             
