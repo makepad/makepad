@@ -19,9 +19,9 @@ use {
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub enum OscType {
     #[pick] DPWSawPulse,
-    TrivialSaw,
+  //  TrivialSaw,
     BlampTri,
-    Naive,
+  //  Naive,
     Pure
 }
 
@@ -68,7 +68,7 @@ impl Default for LaddFilterCoefficients {
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead, Clone)]
 pub struct OscSettings {
     osc_type: U32A<OscType>,
-    #[live(-12)] transpose: i64a,
+    #[live(0)] transpose: i64a,
     #[live(0.0)] detune: f32a
 }
 
@@ -164,6 +164,15 @@ pub struct IronFishSettings {
     #[live(0.5)] sub_osc: f32a,
     #[live(0.0)] noise: f32a,
 }
+
+
+#[derive(Copy, Clone)]
+pub struct SequencerState
+{
+    currentstep: i32,
+    samplesleftinstep: i32
+}
+
 
 #[derive(Copy, Clone)]
 pub struct OscillatorState {
@@ -290,9 +299,8 @@ impl OscillatorState {
         match settings.osc_type.get() {
             OscType::Pure => (self.phase * 6.283).sin(),
             OscType::DPWSawPulse => self.dpw(),
-            OscType::TrivialSaw => self.trivialsaw(),
+            //OscType::TrivialSaw => self.trivialsaw(),
             OscType::BlampTri => self.blamptriangle(),
-            OscType::Naive => 0.0,
         }
     }
     
@@ -561,6 +569,7 @@ impl GriesingerReverb {
     }
 }
 */
+
 #[derive(Copy, Clone)]
 pub struct IronFishVoice {
     osc1: OscillatorState,
@@ -571,7 +580,9 @@ pub struct IronFishVoice {
     mod_envelope: EnvelopeState,
     current_note: i16,
     seed: u32, 
+    sequencer: SequencerState
 }
+
 fn random_bit(seed: &mut u32) -> u32 {
     *seed = seed.overflowing_add((seed.overflowing_mul(*seed)).0 | 5).0;
     return *seed >> 31;
@@ -638,15 +649,14 @@ impl IronFishVoice {
         return output * 0.006; //* 1000.0;
     }
     
-    pub fn fill_buffer(&mut self, mix_buffer: &mut AudioBuffer, display_buffer: Option<&mut AudioBuffer>, settings: &IronFishSettings, touch: f32) {
+    pub fn fill_buffer(&mut self, mix_buffer: &mut AudioBuffer,startidx: usize, frame_count: usize ,display_buffer: Option<&mut AudioBuffer>, settings: &IronFishSettings, touch: f32) {
         
         
-        let frame_count = mix_buffer.frame_count();
         let (left, right) = mix_buffer.stereo_mut();
         
         if let Some(display_buffer) = display_buffer {
             let (left_disp, right_disp) = display_buffer.stereo_mut();
-            for i in 0..frame_count {
+            for i in startidx..frame_count {
                 let output = self.one(&settings,touch) * 8.0;
                 left_disp[i] = output as f32;
                 right_disp[i] = output as f32;
@@ -655,16 +665,15 @@ impl IronFishVoice {
             }
         }
         else {
-            for i in 0..frame_count {
+            for i in startidx..frame_count {
                 let output = self.one(&settings,touch) * 8.0;
                 left[i] += output as f32;
                 right[i] += output as f32;
             }
         }
-        // profile_end(pf);
     }
-    
 }
+
 pub struct IronFishState {
     from_ui: FromUIReceiver<FromUI>,
     to_ui: ToUISender<ToUI>,
@@ -676,7 +685,8 @@ pub struct IronFishState {
     touch: f32, 
     delayline: Vec<f32>,
     delayreadpos: usize,
-    delaywritepos: usize
+    delaywritepos: usize,
+    sequencer: SequencerState,
 }
 
 impl IronFishState {
@@ -750,7 +760,7 @@ impl IronFishState {
         for i in 0..self.voices.len() {
             if self.voices[i].active() > -1 {
                 let mut display_buffer = display.pop_buffer_resize(buffer.frame_count(), buffer.channel_count());
-                self.voices[i].fill_buffer(buffer, display_buffer.as_mut(), &self.settings, self.touch);
+                self.voices[i].fill_buffer(buffer, 0,buffer.frame_count(),display_buffer.as_mut(), &self.settings, self.touch);
                 if let Some(dp) = display_buffer {
                     display.send_buffer(true, i, dp);
                 }
@@ -768,6 +778,15 @@ impl IronFishState {
     }
 }
 
+impl Default for SequencerState{
+    fn default() -> Self {
+        Self {
+            samplesleftinstep: 10,
+            currentstep: 0
+        }
+    }
+}
+
 impl Default for IronFishVoice {
     fn default() -> Self {
         Self {
@@ -777,6 +796,7 @@ impl Default for IronFishVoice {
             filter1: FilterState::default(),
             volume_envelope: EnvelopeState::default(),
             mod_envelope: EnvelopeState::default(),
+            sequencer: SequencerState::default(),
             current_note: -1,
             seed: 1234,
         }
@@ -827,8 +847,8 @@ impl AudioGraphNode for IronFishState {
             }
             _ => ()
         }
-        if (data.data0 == 0xb0 && data.data1 == 1)
-        {
+
+        if (data.data0 == 0xb0 && data.data1 == 1){
             self.touch = (data.data2 as f32 - 40.0)/(127.0-40.0);
             self.touch += self.settings.touch.offset.get();
             self.touch *= self.settings.touch.scale.get();
@@ -860,7 +880,8 @@ impl AudioComponent for IronFish {
             touch: 0.0,
             delayline: vec![0.0f32; 44100],
             delaywritepos: 15000,
-            delayreadpos: 0
+            delayreadpos: 0,
+            sequencer: SequencerState::default()
         })
     }
     
