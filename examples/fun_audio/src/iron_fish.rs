@@ -16,9 +16,9 @@ use {
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub enum OscType {
     #[pick] DPWSawPulse,
-  //  TrivialSaw,
+    //  TrivialSaw,
     BlampTri,
-  //  Naive,
+    //  Naive,
     Pure
 }
 
@@ -104,24 +104,24 @@ pub struct FilterSettings {
     #[live(0.0)] envelope_curvature: f32a
 }
 
-#[derive(Live,LiveHook, LiveAtomic, Debug, LiveRead)]
-pub struct TouchSettings{
+#[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
+pub struct TouchSettings {
     #[live(0.5)] offset: f32a,
     #[live(1.0)] scale: f32a,
     #[live(0.5)] curve: f32a,
 }
 
 
-#[derive(Live,LiveHook, LiveAtomic, Debug, LiveRead)]
-pub struct EffectSettings{
+#[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
+pub struct EffectSettings {
     #[live(0.5)] delaysend: f32a,
     #[live(0.8)] delayfeedback: f32a,
 }
 
 
 
-#[derive(Live,LiveHook, LiveAtomic, Debug, LiveRead)]
-pub struct SequencerSettings{
+#[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
+pub struct SequencerSettings {
     
     #[live(0)] pub step0: u32a,
     #[live(0)] pub step1: u32a,
@@ -139,12 +139,30 @@ pub struct SequencerSettings{
     #[live(0)] pub step13: u32a,
     #[live(0)] pub step14: u32a,
     #[live(0)] pub step15: u32a,
+    /*
+    #[live(0)] step0: u32a,
+    #[live(1)] step1: u32a,
+    #[live(0)] step2: u32a,
+    #[live(2)] step3: u32a,
+    #[live(0)] step4: u32a,
+    #[live(4)] step5: u32a,
+    #[live(0)] step6: u32a,
+    #[live(8)] step7: u32a,
+    #[live(0)] step8: u32a,
+    #[live(14)] step9: u32a,
+    #[live(0)] step10: u32a,
+    #[live(30)] step11: u32a,
+    #[live(0)] step12: u32a,
+    #[live(1)] step13: u32a,
+    #[live(0)] step14: u32a,
+    #[live(0)] step15: u32a,
+*/
     
     #[live(125.0)] bpm: f32a,
     #[live(false)] playing: boola,
     #[live(0)] oneshot: u32a,
     #[live(1)] transposewithmidi: u32a,
-    #[live(0)] polyphoniconeshot: u32a,    
+    #[live(0)] polyphoniconeshot: u32a,
 }
 
 
@@ -277,7 +295,7 @@ impl OscillatorState {
                 y += 4.0 * v5;
             }
         }
-        return y * dt / 15.0 
+        return y * dt / 15.0
     }
     
     fn blamptriangle(&mut self) -> f32 {
@@ -529,12 +547,12 @@ struct FilterState {
 }
 
 impl FilterState {
-    fn pump(&mut self,input:f32){
+    fn pump(&mut self, input: f32) {
         self.bp = self.phi * self.hp + self.bp;
         self.lp = self.phi * self.bp + self.lp;
-        self.hp = input - self.lp - self.gamma * self.bp;        
+        self.hp = input - self.lp - self.gamma * self.bp;
     }
-
+    
     fn get_lp(&mut self, input: f32) -> f32 {
         self.pump(input);
         return self.lp;
@@ -544,7 +562,7 @@ impl FilterState {
         self.pump(input);
         return self.bp;
     }
-
+    
     fn get_br(&mut self, input: f32) -> f32 {
         self.pump(input);
         return input - self.bp;
@@ -554,9 +572,9 @@ impl FilterState {
         self.pump(input);
         return self.hp;
     }
-
-    fn get(&mut self, input: f32, settings: &FilterSettings) -> f32{
-        match settings.filter_type.get(){
+    
+    fn get(&mut self, input: f32, settings: &FilterSettings) -> f32 {
+        match settings.filter_type.get() {
             FilterType::LowPass => self.get_lp(input),
             FilterType::HighPass => self.get_hp(input),
             FilterType::BandPass => self.get_bp(input),
@@ -565,7 +583,7 @@ impl FilterState {
     }
     
     fn set_cutoff(&mut self, settings: &FilterSettings, envelope: f32, sample_rate: f32, touch: f32) {
-        self.fc = (settings.cutoff.get() + touch * settings.touch_amount.get() +  envelope * settings.envelope_amount.get() * 0.5).clamp(0.0, 1.0);
+        self.fc = (settings.cutoff.get() + touch * settings.touch_amount.get() + envelope * settings.envelope_amount.get() * 0.5).clamp(0.0, 1.0);
         self.fc *= self.fc * 0.5;
         self.damp = 1.0 - settings.resonance.get();
         let preclamp = 2.0 * ((3.1415 * self.fc).sin());
@@ -611,7 +629,7 @@ pub struct IronFishVoice {
     volume_envelope: EnvelopeState,
     mod_envelope: EnvelopeState,
     current_note: i16,
-    seed: u32, 
+    seed: u32,
     sequencer: SequencerState
 }
 
@@ -681,7 +699,7 @@ impl IronFishVoice {
         return output * 0.006; //* 1000.0;
     }
     
-    pub fn fill_buffer(&mut self, mix_buffer: &mut AudioBuffer,startidx: usize, frame_count: usize ,display_buffer: Option<&mut AudioBuffer>, settings: &IronFishSettings, touch: f32) {
+    pub fn fill_buffer(&mut self, mix_buffer: &mut AudioBuffer, startidx: usize, frame_count: usize, display_buffer: Option<&mut AudioBuffer>, settings: &IronFishSettings, touch: f32) {
         
         
         let (left, right) = mix_buffer.stereo_mut();
@@ -689,7 +707,7 @@ impl IronFishVoice {
         if let Some(display_buffer) = display_buffer {
             let (left_disp, right_disp) = display_buffer.stereo_mut();
             for i in startidx..frame_count {
-                let output = self.one(&settings,touch) * 8.0;
+                let output = self.one(&settings, touch) * 8.0;
                 left_disp[i] = output as f32;
                 right_disp[i] = output as f32;
                 left[i] += output as f32;
@@ -698,7 +716,7 @@ impl IronFishVoice {
         }
         else {
             for i in startidx..frame_count {
-                let output = self.one(&settings,touch) * 8.0;
+                let output = self.one(&settings, touch) * 8.0;
                 left[i] += output as f32;
                 right[i] += output as f32;
             }
@@ -714,7 +732,7 @@ pub struct IronFishState {
     voices: [IronFishVoice; 16],
     osc1cache: OscSettings,
     osc2cache: OscSettings,
-    touch: f32, 
+    touch: f32,
     delayline: Vec<f32>,
     delayreadpos: usize,
     delaywritepos: usize,
@@ -744,7 +762,7 @@ impl IronFishState {
     pub fn one(&mut self) -> f32 {
         let mut output: f32 = 0.0;
         for i in 0..self.voices.len() {
-            output += self.voices[i].one(&self.settings,self.touch);
+            output += self.voices[i].one(&self.settings, self.touch);
         }
         return output; //* 1000.0;
     }
@@ -752,43 +770,44 @@ impl IronFishState {
         let frame_count = buffer.frame_count();
         let (left, right) = buffer.stereo_mut();
         
-            for i in 0..frame_count {
-                let mut r = self.delayline[self.delayreadpos];
-                r *= self.settings.fx.delayfeedback.get() * 0.9;
-                r += self.settings.fx.delaysend.get() * (left[i] + right[i]);
-                self.delayline[self.delaywritepos] = r;
-                left[i] += r;
-                right[i] += r;
-                self.delaywritepos +=1;
-                if (self.delaywritepos>=44100) {self.delaywritepos = 0;}
-                self.delayreadpos +=1;
-                if (self.delayreadpos >= 44100) {self.delayreadpos = 0;}
-            }
+        for i in 0..frame_count {
+            let mut r = self.delayline[self.delayreadpos];
+            r *= self.settings.fx.delayfeedback.get() * 0.9;
+            r += self.settings.fx.delaysend.get() * (left[i] + right[i]);
+            self.delayline[self.delaywritepos] = r;
+            left[i] += r;
+            right[i] += r;
+            self.delaywritepos += 1;
+            if (self.delaywritepos >= 44100) {self.delaywritepos = 0;}
+            self.delayreadpos += 1;
+            if (self.delayreadpos >= 44100) {self.delayreadpos = 0;}
         }
-        pub fn get_sequencer_step(&mut self, step: usize) ->u32
-        {
-            match step{
-                0 => self.settings.sequencer.step0.get(),
-                2 => self.settings.sequencer.step2.get(),
-                3 => self.settings.sequencer.step3.get(),
-                4 => self.settings.sequencer.step4.get(),
-                5 => self.settings.sequencer.step5.get(),
-                6 => self.settings.sequencer.step6.get(),
-                7 => self.settings.sequencer.step7.get(),
-                8 => self.settings.sequencer.step8.get(),
-                9 => self.settings.sequencer.step9.get(),
-                10 => self.settings.sequencer.step10.get(),
-                11 => self.settings.sequencer.step11.get(),
-                12 => self.settings.sequencer.step12.get(),
-                13 => self.settings.sequencer.step13.get(),
-                14 => self.settings.sequencer.step14.get(),
-                15 => self.settings.sequencer.step15.get(),
-                _ => 0
-                
-            };
-            return 0;
-        }
-
+    }
+    pub fn get_sequencer_step(&mut self, step: usize) -> u32
+    {
+        match step {
+            0 => return self.settings.sequencer.step0.get(),
+            1 => return self.settings.sequencer.step1.get(),
+            2 => return self.settings.sequencer.step2.get(),
+            3 => return self.settings.sequencer.step3.get(),
+            4 => return self.settings.sequencer.step4.get(),
+            5 => return self.settings.sequencer.step5.get(),
+            6 => return self.settings.sequencer.step6.get(),
+            7 => return self.settings.sequencer.step7.get(),
+            8 => return self.settings.sequencer.step8.get(),
+            9 => return self.settings.sequencer.step9.get(),
+            10 => return self.settings.sequencer.step10.get(),
+            11 => return self.settings.sequencer.step11.get(),
+            12 => return self.settings.sequencer.step12.get(),
+            13 => return self.settings.sequencer.step13.get(),
+            14 => return self.settings.sequencer.step14.get(),
+            15 => return self.settings.sequencer.step15.get(),
+            _ => 0
+            
+        };
+        return 0;
+    }
+    
     pub fn fill_buffer(&mut self, buffer: &mut AudioBuffer, display: &mut DisplayAudioGraph) {
         
         buffer.zero();
@@ -819,20 +838,26 @@ impl IronFishState {
             let mut toprocess = remaining;
             if (self.settings.sequencer.playing.get())
             {
-                if (self.sequencer.samplesleftinstep == 0){
-                    //log!("tick!");
+                if (self.sequencer.samplesleftinstep == 0) {
                     // process notes!
                     let newstepidx = (self.sequencer.currentstep + 1) % 16;
                     let old_step = self.get_sequencer_step(self.sequencer.currentstep);
                     let new_step = self.get_sequencer_step(newstepidx);
+                    
+                    //log!("tick! {:?} {:?}",newstepidx, new_step);
+                    // minor scale..
+                    let scale = [36, 38, 39, 41, 43, 44, 46, 36 + 12, 38 + 12, 39 + 12, 41 + 12, 43 + 12, 44 + 12, 46 + 12, 36 + 24, 38 + 24, 39 + 24, 41 + 24, 43 + 24, 44 + 24, 46 + 24];
+                    
                     for i in 0..32 {
-                        if old_step & (1<<i) != 0{
-                            if (new_step & (1<<i)) == 0 {
-                                self.note_off(i,127);
+                        if old_step & (1 << i) != 0 {
+                            if (new_step & (1 << i)) == 0 {
+                                //          log!("note on {:?}",scale[i]);
+                                self.note_off(scale[i], 127);
                             }
                         } else {
-                            if (new_step & (1<<i) != 0){
-                                self.note_on(i,127);
+                            if (new_step & (1 << i) != 0) {
+                                //        log!("note off {:?}",scale[i]);
+                                self.note_on(scale[i], 127);
                             }
                         }
                     }
@@ -843,25 +868,25 @@ impl IronFishState {
                 {
                     toprocess = toprocess.min(self.sequencer.samplesleftinstep);
                     self.sequencer.samplesleftinstep -= toprocess;
-                  //  log!("{:?} {:?}", toprocess, self.sequencer.samplesleftinstep)
+                    //  log!("{:?} {:?}", toprocess, self.sequencer.samplesleftinstep)
                 }
             }
             for i in 0..self.voices.len() {
                 if self.voices[i].active() > -1 {
                     //let mut display_buffer = display.pop_buffer_resize(buffer.frame_count(), buffer.channel_count());
                     //self.voices[i].fill_buffer(buffer, bufferidx,toprocess,display_buffer.as_mut(), &self.settings, self.touch);
-                    self.voices[i].fill_buffer(buffer, bufferidx,toprocess,None, &self.settings, self.touch);
-                   // if let Some(dp) = display_buffer {
-                   //     display.send_buffer(true, i, dp);
-                   // }
+                    self.voices[i].fill_buffer(buffer, bufferidx, toprocess, None, &self.settings, self.touch);
+                    // if let Some(dp) = display_buffer {
+                    //     display.send_buffer(true, i, dp);
+                    // }
                 }
                 else {
                     display.send_voice_off(i);
-//                    let mut display_buffer = display.pop_buffer_resize(buffer.frame_count(), buffer.channel_count());
-  //                  if let Some(mut dp) = display_buffer {
-    //                    dp.zero();
-      //                  display.send_buffer(false, i, dp);
-        //            }
+                    //                    let mut display_buffer = display.pop_buffer_resize(buffer.frame_count(), buffer.channel_count());
+                    //                  if let Some(mut dp) = display_buffer {
+                    //                    dp.zero();
+                    //                  display.send_buffer(false, i, dp);
+                    //            }
                 }
             }
             bufferidx += toprocess;
@@ -871,7 +896,7 @@ impl IronFishState {
     }
 }
 
-impl Default for SequencerState{
+impl Default for SequencerState {
     fn default() -> Self {
         Self {
             samplesleftinstep: 10,
@@ -940,12 +965,12 @@ impl AudioGraphNode for IronFishState {
             }
             _ => ()
         }
-
-        if (data.data0 == 0xb0 && data.data1 == 1){
-            self.touch = (data.data2 as f32 - 40.0)/(127.0-40.0);
+        
+        if (data.data0 == 0xb0 && data.data1 == 1) {
+            self.touch = (data.data2 as f32 - 40.0) / (127.0 - 40.0);
             self.touch += self.settings.touch.offset.get();
             self.touch *= self.settings.touch.scale.get();
-            self.touch = self.touch.powf(self.settings.touch.curve.get()*3.0).min(1.0).max(-1.0);
+            self.touch = self.touch.powf(self.settings.touch.curve.get() * 3.0).min(1.0).max(-1.0);
         }
     }
     
