@@ -671,7 +671,7 @@ impl IronFishVoice {
         
         let noise = random_f32(&mut self.seed) * 2.0 - 1.0;
         
-        let oscinput = osc1 * settings.osc_balance.get() + osc2 * (1.0 - settings.osc_balance.get()) + settings.sub_osc.get() * sub + settings.noise.get() * noise;
+        let oscinput = osc2 * settings.osc_balance.get() + osc1 * (1.0 - settings.osc_balance.get()) + settings.sub_osc.get() * sub + settings.noise.get() * noise;
         let filter = self.filter1.get(oscinput, &settings.filter1);
         
         let output = volume_envelope * filter;
