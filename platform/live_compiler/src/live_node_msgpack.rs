@@ -445,7 +445,20 @@ impl LiveNodeVecFromMsgPack for Vec<LiveNode> {
             *o += 8;
             Ok(d)
         }
+        
+        fn read_f32(data: &[u8], o: &mut usize) -> Result<f32, LiveNodeFromMsgPackError> {
+            assert_len(*o, 4, data) ?;
+            let d = f32::from_be_bytes(data[*o..*o + 4].try_into().unwrap());
+            *o += 4;
+            Ok(d)
+        }
 
+        fn read_f64(data: &[u8], o: &mut usize) -> Result<f64, LiveNodeFromMsgPackError> {
+            assert_len(*o, 8, data) ?;
+            let d = f64::from_be_bytes(data[*o..*o + 8].try_into().unwrap());
+            *o += 8; 
+            Ok(d)
+        }
                 
         fn decode_str<'a>(data: &'a [u8], o: &mut usize) -> Result<Option<&'a str>, LiveNodeFromMsgPackError> {
             assert_len(*o, 1, data) ?;
@@ -584,18 +597,31 @@ impl LiveNodeVecFromMsgPack for Vec<LiveNode> {
                     LiveValue::FittedString(FittedString::from_string(v.to_string()))
                 }
             }
-            else {
+            else if data[o] & MSGPACK_FIXMAP == MSGPACK_FIXMAP{
+                LiveValue::None
+            }
+            else if data[o] & MSGPACK_FIXARRAY == MSGPACK_FIXARRAY{
+                LiveValue::None
+            }
+            else{
                 match data[o]{
+                    MSGPACK_F32=>{
+                        o+=1;
+                        LiveValue::Float32(read_f32(data, &mut o)?)
+                    }
+                    MSGPACK_F64=>{
+                        o+=1;
+                        LiveValue::Float64(read_f64(data, &mut o)?)
+                    }
                     MSGPACK_NIL=>{
+                        o+=1;
                         LiveValue::None
                     },
                     _=>{
                         LiveValue::None
                     }
                 }
-                
             };
-            break;
             /*
             if let Some(v) = decode_i64(data, &mut o)?{
                 self.push(LiveNode{

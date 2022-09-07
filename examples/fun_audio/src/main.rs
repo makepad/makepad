@@ -574,11 +574,6 @@ live_register!{
     OscPanel: FishPanel {
         label = {bg: {color: (COLOR_OSC)}, label = {text: "Oscillator ?"}}
         body = {
-<<<<<<< HEAD
-            // bg: {color: #fffb9f} 
-=======
-            bg: {color: #fffb9f}
->>>>>>> bef1a6de00d5cff38ae8f510434d2905ba163e6d
             type = InstrumentDropdown {
                 label = {text: "Type"}
                 dropdown = {
