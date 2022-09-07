@@ -818,6 +818,7 @@ impl IronFishState {
             if (self.settings.sequencer.playing.get())
             {
                 if (self.sequencer.samplesleftinstep == 0){
+                    log!("tick!");
                     // process notes!
                     let newstepidx = (self.sequencer.currentstep + 1) % 16;
                     let old_step = self.get_sequencer_step(self.sequencer.currentstep);
