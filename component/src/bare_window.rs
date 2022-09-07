@@ -22,7 +22,7 @@ pub struct BareWindow {
 }
 
 impl LiveHook for BareWindow{
-    fn after_new(&mut self, cx:&mut Cx){
+    fn after_new_before_apply(&mut self, cx:&mut Cx){
         self.window.set_pass(cx, &self.pass);
         self.pass.set_depth_texture(cx, &self.depth_texture, PassClearDepth::ClearWith(1.0));
     }

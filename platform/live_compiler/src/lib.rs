@@ -13,6 +13,8 @@ pub mod live_expander;
 pub mod live_ptr;
 pub mod live_eval;
 pub mod live_component;
+pub mod live_node_msgpack;
+pub mod live_node_reader;
 
 pub use makepad_math;
 pub use makepad_derive_live;
@@ -51,6 +53,16 @@ pub use {
         live_node_vec::{
             LiveNodeSlice,
             LiveNodeVec,
+        },
+       /* live_node_bin::{
+            LiveNodeSliceToBinary,
+            LiveNodeVecFromBinary
+        },*/
+        live_node_msgpack::{
+            LiveNodeSliceToMsgPack,
+            LiveNodeVecFromMsgPack
+        },
+        live_node_reader::{
             LiveNodeReader,
         },
         live_node::{

@@ -30,7 +30,7 @@ pub trait LiveHook {
     }
     
     fn after_new_from_doc(&mut self, _cx:&mut Cx){}
-    fn after_new(&mut self, _cx: &mut Cx) {}
+    fn after_new_before_apply(&mut self, _cx: &mut Cx) {}
 }
 
 

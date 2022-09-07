@@ -225,7 +225,6 @@ live_register!{
         layout: {flow: Down}
         walk: {width: Fill, height: Fit}
         display = GraphPaper {
-            
         }
         attack = InstrumentSlider {
             slider = {
@@ -838,7 +837,6 @@ impl App {
             for (index, bind) in self.knob_table.iter_mut().enumerate() {
                 if let Some(value) = delta.read_path(&bind.name) && let Some(v) = value.as_float() {
                     
-                    
                     let mod_env = ui.frame(ids!(mod_env.display));
                     let vol_env = ui.frame(ids!(vol_env.display));
                     match bind.name.as_ref() {
@@ -981,20 +979,26 @@ impl App {
         let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
         let file_name = format!("preset_{}.bin", index);
         if save {
-            let preset = iron_fish.settings.live_read();
-            let data = preset.to_binary(0).unwrap();
+            let nodes = iron_fish.settings.live_read();
+            let data = nodes.to_msgpack(0).unwrap();
+            let data = makepad_miniz::compress_to_vec(&data, 10);
             log!("Saving preset {}", file_name);
             let mut file = File::create(&file_name).unwrap();
             file.write_all(&data).unwrap();
         }
         else if let Ok(mut file) = File::open(&file_name) {
             log!("Loading preset {}", file_name);
-            let mut bytes = Vec::new();
-            file.read_to_end(&mut bytes).unwrap();
-            let mut nodes = Vec::new();
-            nodes.from_binary(&bytes).unwrap();
-            iron_fish.settings.apply_over(cx, &nodes);
-            self.imgui.root_frame().bind_read(cx, &nodes);
+            let mut data = Vec::new();
+            file.read_to_end(&mut data).unwrap();
+            if let Ok(data) = makepad_miniz::decompress_to_vec(&data){
+                let mut nodes = Vec::new();
+                nodes.from_msgpack(&data).unwrap();
+                iron_fish.settings.apply_over(cx, &nodes);
+                self.imgui.root_frame().bind_read(cx, &nodes);
+            }
+            else{
+                log!("Error decompressing preset");
+            }
         }
     }
     
