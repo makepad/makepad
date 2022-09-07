@@ -289,7 +289,7 @@ impl<'a> LiveParser<'a> {
                                 ld.edit_info.push(LiveNode {
                                     origin: LiveNodeOrigin::from_token_id(self.get_token_id()),
                                     id: prop_id,
-                                    value: LiveValue::Int(val)
+                                    value: LiveValue::Int64(val)
                                 });
                             },
                             LiveToken::Float(val) => {
@@ -297,7 +297,7 @@ impl<'a> LiveParser<'a> {
                                 ld.edit_info.push(LiveNode {
                                     origin: LiveNodeOrigin::from_token_id(self.get_token_id()),
                                     id: prop_id,
-                                    value: LiveValue::Float(val)
+                                    value: LiveValue::Float64(val)
                                 });
                             },
                             LiveToken::Color(val) => {
@@ -497,7 +497,7 @@ impl<'a> LiveParser<'a> {
                 ld.nodes.push(LiveNode {
                     origin,
                     id: prop_id,
-                    value: LiveValue::Int(val)
+                    value: LiveValue::Int64(val)
                 });
             },
             LiveToken::Float(val) => {
@@ -505,7 +505,7 @@ impl<'a> LiveParser<'a> {
                 ld.nodes.push(LiveNode {
                     origin,
                     id: prop_id,
-                    value: LiveValue::Float(val)
+                    value: LiveValue::Float64(val)
                 });
             },
             LiveToken::Color(val) => {
@@ -904,14 +904,14 @@ impl<'a> LiveParser<'a> {
                     ld.nodes.push(LiveNode {
                         origin: LiveNodeOrigin::from_token_id(token_id).with_prop_type(LivePropType::Nameless),
                         id: LiveId::empty(),
-                        value: LiveValue::Int(v)
+                        value: LiveValue::Int64(v)
                     });
                 }
                 Expr::Float {token_id, v} => {
                     ld.nodes.push(LiveNode {
                         origin: LiveNodeOrigin::from_token_id(token_id).with_prop_type(LivePropType::Nameless),
                         id: LiveId::empty(),
-                        value: LiveValue::Float(v)
+                        value: LiveValue::Float64(v)
                     });
                 }
                 Expr::Color {token_id, v} => {
