@@ -200,8 +200,8 @@ live_register!{
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size); //mod (self.pos * self.rect_size, 15))
                 let base_color = mix(self.color, self.color2, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 2.0));
                 let darker = base_color * 0.8;
-                let pos = self.pos * self.rect_size; 
-                sdf.clear(mix(base_color,darker,pow(abs(sin(pos.x*0.5)),24)+pow(abs(sin(pos.y*0.5)),32.0)));
+                let pos = self.pos * self.rect_size;
+                sdf.clear(mix(base_color, darker, pow(abs(sin(pos.x * 0.5)), 24) + pow(abs(sin(pos.y * 0.5)), 32.0)));
                 sdf.rect(1.0, 1.0, 16, 16)
                 sdf.stroke(darker, 1)
                 let pad_b = 8
@@ -212,9 +212,9 @@ live_register!{
                 let sustain = self.rect_size.y - pad_b - height * self.sustain;
                 sdf.pos = self.pos * self.rect_size;
                 sdf.move_to(pad_s, self.rect_size.y - pad_b)
-                sdf.line_to(pad_s + width * (self.attack/total), pad_b)
-                sdf.line_to(pad_s + width * ((self.attack + self.decay)/total), sustain)
-                sdf.line_to(pad_s + width * (1.0 - self.release/total), sustain)
+                sdf.line_to(pad_s + width * (self.attack / total), pad_b)
+                sdf.line_to(pad_s + width * ((self.attack + self.decay) / total), sustain)
+                sdf.line_to(pad_s + width * (1.0 - self.release / total), sustain)
                 sdf.line_to(pad_s + width, self.rect_size.y - pad_b)
                 sdf.stroke_keep(#f9b08b, 1.);
                 return sdf.result
@@ -528,7 +528,7 @@ live_register!{
     OscPanel: FishPanel {
         label = {bg: {color: #fffb9f}, label = {text: "Oscillator ?"}}
         body = {
-            bg: {color: #fffb9f} 
+            bg: {color: #fffb9f}
             type = InstrumentDropdown {
                 label = {text: "Type"}
                 dropdown = {
@@ -835,57 +835,59 @@ impl App {
         // fetch ui binding deltas
         for delta in ui.on_bind_deltas() {
             for (index, bind) in self.knob_table.iter_mut().enumerate() {
-                if let Some(value) = delta.read_path(&bind.name) && let Some(v) = value.as_float() {
-                    
-                    let mod_env = ui.frame(ids!(mod_env.display));
-                    let vol_env = ui.frame(ids!(vol_env.display));
-                    match bind.name.as_ref() {
-                        "mod_envelope.a" => mod_env.apply_over(ui.cx, live!{bg: {attack: (v)}}),
-                        "mod_envelope.d" => mod_env.apply_over(ui.cx, live!{bg: {decay: (v)}}),
-                        "mod_envelope.s" => mod_env.apply_over(ui.cx, live!{bg: {sustain: (v)}}),
-                        "mod_envelope.r" => mod_env.apply_over(ui.cx, live!{bg: {release: (v)}}),
-                        "volume_envelope.a" => vol_env.apply_over(ui.cx, live!{bg: {attack: (v)}}),
-                        "volume_envelope.d" => vol_env.apply_over(ui.cx, live!{bg: {decay: (v)}}),
-                        "volume_envelope.s" => vol_env.apply_over(ui.cx, live!{bg: {sustain: (v)}}),
-                        "volume_envelope.r" => vol_env.apply_over(ui.cx, live!{bg: {release: (v)}}),
-                        _ => ()
-                    }
-                    
-                    let mut knob = 3;
-                    if self.knob_bind[0] == index {
-                        knob = 0
-                    }
-                    if self.knob_bind[1] == index {
-                        knob = 1
-                    }
-                    if knob == 3
-                    {
-                        knob = self.knob_change;
-                        self.knob_change = (self.knob_change + 1) % (self.knob_bind.len());
-                        self.last_knob_index = index;
-                        self.knob_bind[knob] = index;
+                if let Some(value) = delta.read_path(&bind.name) {
+                    if let Some(v) = value.as_float() {
                         
+                        let mod_env = ui.frame(ids!(mod_env.display));
+                        let vol_env = ui.frame(ids!(vol_env.display));
+                        match bind.name.as_ref() {
+                            "mod_envelope.a" => mod_env.apply_over(ui.cx, live!{bg: {attack: (v)}}),
+                            "mod_envelope.d" => mod_env.apply_over(ui.cx, live!{bg: {decay: (v)}}),
+                            "mod_envelope.s" => mod_env.apply_over(ui.cx, live!{bg: {sustain: (v)}}),
+                            "mod_envelope.r" => mod_env.apply_over(ui.cx, live!{bg: {release: (v)}}),
+                            "volume_envelope.a" => vol_env.apply_over(ui.cx, live!{bg: {attack: (v)}}),
+                            "volume_envelope.d" => vol_env.apply_over(ui.cx, live!{bg: {decay: (v)}}),
+                            "volume_envelope.s" => vol_env.apply_over(ui.cx, live!{bg: {sustain: (v)}}),
+                            "volume_envelope.r" => vol_env.apply_over(ui.cx, live!{bg: {release: (v)}}),
+                            _ => ()
+                        }
+                        
+                        let mut knob = 3;
+                        if self.knob_bind[0] == index {
+                            knob = 0
+                        }
+                        if self.knob_bind[1] == index {
+                            knob = 1
+                        }
+                        if knob == 3
+                        {
+                            knob = self.knob_change;
+                            self.knob_change = (self.knob_change + 1) % (self.knob_bind.len());
+                            self.last_knob_index = index;
+                            self.knob_bind[knob] = index;
+                            
+                            ui.cx.send_midi_1_data(Midi1Data {
+                                data0: 0xb0,
+                                data1: (1 + knob)as u8,
+                                data2: bind.ty as u8
+                            });
+                            
+                            ui.cx.send_midi_1_data(Midi1Data {
+                                data0: 0xb0,
+                                data1: (5 + knob) as u8,
+                                data2: bind.rgb as u8
+                            });
+                            
+                        }
+                        
+                        bind.value = v;
+                        //log!("SEND SHIT {} {}", v, (((v - bind.min) / (bind.max - bind.min)) * 127.0)  as u8);
                         ui.cx.send_midi_1_data(Midi1Data {
                             data0: 0xb0,
-                            data1: (1 + knob)as u8,
-                            data2: bind.ty as u8
+                            data1: (3 + knob)as u8,
+                            data2: (((v - bind.min) / (bind.max - bind.min)) * 127.0) as u8
                         });
-                        
-                        ui.cx.send_midi_1_data(Midi1Data {
-                            data0: 0xb0,
-                            data1: (5 + knob) as u8,
-                            data2: bind.rgb as u8
-                        });
-                        
                     }
-                    
-                    bind.value = v;
-                    //log!("SEND SHIT {} {}", v, (((v - bind.min) / (bind.max - bind.min)) * 127.0)  as u8);
-                    ui.cx.send_midi_1_data(Midi1Data {
-                        data0: 0xb0,
-                        data1: (3 + knob)as u8,
-                        data2: (((v - bind.min) / (bind.max - bind.min)) * 127.0) as u8
-                    });
                 }
             }
             let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
@@ -990,13 +992,13 @@ impl App {
             log!("Loading preset {}", file_name);
             let mut data = Vec::new();
             file.read_to_end(&mut data).unwrap();
-            if let Ok(data) = makepad_miniz::decompress_to_vec(&data){
+            if let Ok(data) = makepad_miniz::decompress_to_vec(&data) {
                 let mut nodes = Vec::new();
                 nodes.from_msgpack(&data).unwrap();
                 iron_fish.settings.apply_over(cx, &nodes);
                 self.imgui.root_frame().bind_read(cx, &nodes);
             }
-            else{
+            else {
                 log!("Error decompressing preset");
             }
         }
