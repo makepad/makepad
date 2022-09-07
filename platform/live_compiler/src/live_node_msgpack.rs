@@ -2,7 +2,7 @@ use {
     std::convert::TryInto,
     crate::{
         makepad_live_tokenizer::LiveId,
-        live_node::{LivePropType, LiveNode, LiveValue, FittedString, InlineString},
+        live_node::*,
     }
 };
 
@@ -78,10 +78,10 @@ impl<T> LiveNodeSliceToMsgPack for T where T: AsRef<[LiveNode]> {
         let mut out = Vec::new();
         let nodes = self.as_ref();
         let mut index = parent_index;
-
+        
         struct StackItem {index: usize, count: usize, has_keys: bool}
-
-        let mut stack = vec![StackItem{index:0, count:0, has_keys:false}];
+        
+        let mut stack = vec![StackItem {index: 0, count: 0, has_keys: false}];
         
         while index < nodes.len() {
             let node = &nodes[index];
@@ -377,6 +377,8 @@ pub enum LiveNodeFromMsgPackError {
     UnexpectedVariant,
     LiveIdCollision,
     ExpectedId,
+    UnexpectedValue,
+    ExpectedBareEnumString,
     UTF8Error
 }
 
@@ -384,7 +386,7 @@ impl LiveNodeVecFromMsgPack for Vec<LiveNode> {
     
     fn from_msgpack(&mut self, data: &[u8]) -> Result<(), LiveNodeFromMsgPackError> {
         // alright lets decode msgpack livenodes
-
+        
         fn assert_len(o: usize, len: usize, data: &[u8]) -> Result<(), LiveNodeFromMsgPackError> {
             if o + len > data.len() {panic!()} //return Err(LiveNodeFromBinaryError::OutOfBounds);}
             Ok(())
@@ -417,7 +419,7 @@ impl LiveNodeVecFromMsgPack for Vec<LiveNode> {
             *o += 8;
             Ok(d)
         }
-
+        
         fn read_i8(data: &[u8], o: &mut usize) -> Result<i8, LiveNodeFromMsgPackError> {
             assert_len(*o, 1, data) ?;
             let d = i8::from_be_bytes(data[*o..*o + 1].try_into().unwrap());
@@ -452,18 +454,21 @@ impl LiveNodeVecFromMsgPack for Vec<LiveNode> {
             *o += 4;
             Ok(d)
         }
-
+        
         fn read_f64(data: &[u8], o: &mut usize) -> Result<f64, LiveNodeFromMsgPackError> {
             assert_len(*o, 8, data) ?;
             let d = f64::from_be_bytes(data[*o..*o + 8].try_into().unwrap());
-            *o += 8; 
+            *o += 8;
             Ok(d)
         }
-                
-        fn decode_str<'a>(data: &'a [u8], o: &mut usize) -> Result<Option<&'a str>, LiveNodeFromMsgPackError> {
+        
+        fn decode_str<'a>(data: &'a [u8], o: &mut usize) -> Result<Option<&'a str>,
+        LiveNodeFromMsgPackError> {
             assert_len(*o, 1, data) ?;
             let len = if data[*o] & MSGPACK_FIXSTR == MSGPACK_FIXSTR {
-                (data[*o] & 0xf) as usize
+                let r = (data[*o] & 0xf) as usize;
+                *o += 1;
+                r
             }
             else {
                 match data[*o] {
@@ -489,11 +494,13 @@ impl LiveNodeVecFromMsgPack for Vec<LiveNode> {
             }
             return Err(LiveNodeFromMsgPackError::UTF8Error);
         }
-
+        
         fn decode_u64(data: &[u8], o: &mut usize) -> Result<Option<u64>, LiveNodeFromMsgPackError> {
             assert_len(*o, 1, data) ?;
             let v = if data[*o] & MSGPACK_FIXINT == 0 {
-                Some(data[*o] as u64)
+                let r = Some(data[*o] as u64);
+                *o += 1;
+                r
             }
             else {
                 match data[*o] {
@@ -518,16 +525,20 @@ impl LiveNodeVecFromMsgPack for Vec<LiveNode> {
             };
             return Ok(v)
         }
-
+        
         fn decode_i64(data: &[u8], o: &mut usize) -> Result<Option<i64>, LiveNodeFromMsgPackError> {
             assert_len(*o, 1, data) ?;
             let v = if data[*o] & MSGPACK_FIXINT == 0 {
-                Some(data[*o] as i64)
+                let r = Some(data[*o] as i64);
+                *o += 1;
+                r
             }
             else if data[*o] & MSGPACK_FIXNEGINT == MSGPACK_FIXNEGINT {
-                Some(- ((data[*o] & 0xdf) as i64))
+                let r = Some(-((data[*o] & 0xdf) as i64));
+                *o += 1;
+                r
             }
-            else{
+            else {
                 match data[*o] {
                     MSGPACK_I8 => {
                         *o += 1;
@@ -551,13 +562,59 @@ impl LiveNodeVecFromMsgPack for Vec<LiveNode> {
             Ok(v)
         }
         
+        fn decode_array_len(data: &[u8], o: &mut usize) -> Result<Option<usize>, LiveNodeFromMsgPackError> {
+            assert_len(*o, 1, data) ?;
+            let v = if data[*o] & MSGPACK_FIXARRAY == MSGPACK_FIXARRAY {
+                let r = Some((data[*o] & 0xf) as usize);
+                *o += 1;
+                r
+            }
+            else {
+                match data[*o] {
+                    MSGPACK_ARRAY16 => {
+                        *o += 1;
+                        Some(read_u16(data, o) ? as usize)
+                    }
+                    MSGPACK_ARRAY32 => {
+                        *o += 1;
+                        Some(read_u32(data, o) ? as usize)
+                    }
+                    _ => return Ok(None)
+                }
+            };
+            Ok(v)
+        }
+        
+        fn decode_map_len(data: &[u8], o: &mut usize) -> Result<Option<usize>, LiveNodeFromMsgPackError> {
+            assert_len(*o, 1, data) ?;
+            let v = if data[*o] & MSGPACK_FIXMAP == MSGPACK_FIXMAP {
+                let r = Some((data[*o] & 0xf) as usize);
+                *o += 1;
+                r
+            }
+            else {
+                match data[*o] {
+                    MSGPACK_MAP16 => {
+                        *o += 1;
+                        Some(read_u16(data, o) ? as usize)
+                    }
+                    MSGPACK_MAP32 => {
+                        *o += 1;
+                        Some(read_u32(data, o) ? as usize)
+                    }
+                    _ => return Ok(None)
+                }
+            };
+            Ok(v)
+        }
+        
         fn decode_id(data: &[u8], o: &mut usize) -> Result<Option<LiveId>, LiveNodeFromMsgPackError> {
             // we expect a string OR a u64
             if let Some(val) = decode_str(data, o) ? {
-                if let Ok(id) = LiveId::from_str(val){
+                if let Ok(id) = LiveId::from_str(val) {
                     return Ok(Some(id))
                 }
-                else{
+                else {
                     return Err(LiveNodeFromMsgPackError::LiveIdCollision)
                 }
             }
@@ -567,307 +624,117 @@ impl LiveNodeVecFromMsgPack for Vec<LiveNode> {
             Ok(None)
         }
         
-        struct StackItem {index: usize, count: usize, has_keys: bool}
-
-        let stack = vec![StackItem{index:0, count:0, has_keys:false}];
-
+        struct StackItem {len: usize, count: usize, has_keys: bool}
+        
+        let mut stack = vec![StackItem {count: 0, len: 1, has_keys: false}];
+        
         let mut o = 0;
-        while o < data.len(){
+        while o < data.len() {
+            let origin = LiveNodeOrigin::field();
+            
+            if stack.last().unwrap().count == stack.last().unwrap().len {
+                self.push(LiveNode {id: LiveId(0), origin, value: LiveValue::Close});
+                stack.pop();
+            }
             
             // ok lets read
-            let _id = if stack.last().unwrap().has_keys{
-                let id = decode_id(data, &mut o)?;
-                if id.is_none(){return Err(LiveNodeFromMsgPackError::ExpectedId)}
+            let stack_item = stack.last_mut().unwrap();
+            let id = if stack_item.has_keys {
+                let id = decode_id(data, &mut o) ?;
+                if id.is_none() {return Err(LiveNodeFromMsgPackError::ExpectedId)}
                 id.unwrap()
             }
-            else{
+            else {
                 LiveId(0)
             };
             
-            assert_len(o, 1, data)?;
+            stack_item.count += 1;
             
-            let _value = if let Some(v) = decode_i64(data, &mut o)?{
-                LiveValue::Int64(v)
+            assert_len(o, 1, data) ?;
+            
+            println!("{:x}", data[o]);
+            
+            if let Some(v) = decode_i64(data, &mut o) ? {
+                self.push(LiveNode {id, origin, value: LiveValue::Int64(v)});
             }
-            else if let Some(v) = decode_str(data, &mut o)?{
-                if let Some(inline_str) = InlineString::from_str(&v) {
+            else if let Some(v) = decode_str(data, &mut o) ? {
+                let value = if let Some(inline_str) = InlineString::from_str(&v) {
                     LiveValue::InlineString(inline_str)
                 }
                 else {
                     LiveValue::FittedString(FittedString::from_string(v.to_string()))
+                };
+                self.push(LiveNode {id, origin, value});
+            }
+            else if let Some(len) = decode_array_len(data, &mut o) ? {
+                stack.push(StackItem {count: 0, len, has_keys: false});
+                self.push(LiveNode {id, origin, value: LiveValue::Array});
+            }
+            else if let Some(len) = decode_map_len(data, &mut o) ? {
+                // this COULD be a special type.
+                if len == 1 {
+                    let mut o1 = o;
+                    if let Some(s) = decode_str(data, &mut o1) ? {
+                        match s {
+                            "in" => { // its a vec
+                            }
+                            "as" => { // its a color
+                            }
+                            "if" => { // bare enum
+                                if let Some(id) = decode_id(data, &mut o1) ? {
+                                    self.push(LiveNode {
+                                        id,
+                                        origin,
+                                        value: LiveValue::BareEnum {base: LiveId(0), variant: id}
+                                    });
+                                    o = o1;
+                                    continue;
+                                }
+                                else {
+                                    return Err(LiveNodeFromMsgPackError::ExpectedBareEnumString)
+                                }
+                            }
+                            "enum" => { // other enum
+                            }
+                            _ => ()
+                        }
+                    }
                 }
+                stack.push(StackItem {count: 0, len, has_keys: false});
+                self.push(LiveNode {id, origin, value: LiveValue::Object});
             }
-            else if data[o] & MSGPACK_FIXMAP == MSGPACK_FIXMAP{
-                LiveValue::None
-            }
-            else if data[o] & MSGPACK_FIXARRAY == MSGPACK_FIXARRAY{
-                LiveValue::None
-            }
-            else{
-                match data[o]{
-                    MSGPACK_F32=>{
-                        o+=1;
-                        LiveValue::Float32(read_f32(data, &mut o)?)
-                    }
-                    MSGPACK_F64=>{
-                        o+=1;
-                        LiveValue::Float64(read_f64(data, &mut o)?)
-                    }
-                    MSGPACK_NIL=>{
-                        o+=1;
-                        LiveValue::None
-                    },
-                    _=>{
-                        LiveValue::None
-                    }
-                }
-            };
-            /*
-            if let Some(v) = decode_i64(data, &mut o)?{
-                self.push(LiveNode{
-                    origin:LiveNodeOrigin::default()),
-                    value:LiveValue::Int64(v),
-                });
-            }
-            assert_len(o, 1, data);
-            */
-        }
-        
-        Ok(())
-            
-        
-        
-        /*
-         let mut strbuf = String::new();
-        
-        fn assert_len(o: usize, len: usize, data: &[u8]) -> Result<(), LiveNodeFromMsgPackError> {
-            if o + len > data.len() {panic!()}//return Err(LiveNodeFromBinaryError::OutOfBounds);}
-            Ok(())
-        }
-        
-        fn decode_id(data: &[u8], o: &mut usize, strbuf: &mut String) -> Result<LiveId, LiveNodeFromMsgPackError> {
-            assert_len(*o, 1, data) ?;
-            if data[*o] & 128 != 0 {
-                assert_len(*o, 8, data) ?;
-                let id = LiveId(u64::from_be_bytes(data[*o..*o + 8].try_into().unwrap()));
-                *o += 8;
-                return Ok(id);
-            }
-            if data[*o] == 64 {
-                *o += 1;
-                return Ok(LiveId(0))
-            }
-            if data[*o] == 65 {
-                *o += 1;
-                assert_len(*o, 1, data) ?;
-                let id = LiveId(data[*o] as u64);
-                *o += 1;
-                return Ok(id);
-            }
-            if data[*o] == 66 {
-                *o += 1;
-                assert_len(*o, 2, data) ?;
-                let id = LiveId(u16::from_be_bytes(data[*o..*o + 2].try_into().unwrap()) as u64);
-                *o += 2;
-                return Ok(id);
-            }
-            if data[*o] == 68 {
-                *o += 1;
-                assert_len(*o, 4, data) ?;
-                let id = LiveId(u32::from_be_bytes(data[*o..*o + 4].try_into().unwrap()) as u64);
-                *o += 4;
-                return Ok(id);
-            }
-            if data[*o] == 72 {
-                *o += 1;
-                assert_len(*o, 8, data) ?;
-                let id = LiveId(u64::from_be_bytes(data[*o..*o + 8].try_into().unwrap()));
-                *o += 8;
-                return Ok(id);
-            }
-            strbuf.clear();
-            loop {
-                assert_len(*o, 1, data) ?;
-                let d = data[*o];
-                let c = d & 63;
-                if c<10 {strbuf.push(('0' as u8 + c) as char)}
-                else if c >= 10 && c<36 {strbuf.push(('a' as u8 + (c - 10)) as char)}
-                else if c >= 36 && c<63 {strbuf.push(('A' as u8 + (c - 36)) as char)}
-                else {strbuf.push('_')}
-                *o += 1;
-                if d & 64 == 0 {break}
-            }
-            return Ok(LiveId::from_str_unchecked(strbuf));
-        }
-        
-        let mut o = 0;
-        while o < data.len() {
-            let id = decode_id(data, &mut o, &mut strbuf) ?;
-            assert_len(o, 1, data)?;
-            
-            let prop_type = data[o] >> 5;
-            let variant_id = data[o] & 0x1f;
-            o += 1;
-            
-            let value = match variant_id {
-                BIN_NONE => {LiveValue::None},
-                BIN_STRING_8 | BIN_STRING_16 | BIN_STRING_32 => {
-                    let len = if variant_id == BIN_STRING_8 {
-                        assert_len(o, 1, data) ?;
-                        let len = data[o] as usize;
+            else {
+                match data[o] {
+                    MSGPACK_TRUE=>{
                         o += 1;
-                        len
+                        self.push(LiveNode {id, origin, value:LiveValue::Bool(true)});
                     }
-                    else if variant_id == BIN_STRING_16 {
-                        assert_len(o, 2, data) ?;
-                        let len = u16::from_be_bytes(data[o..o + 2].try_into().unwrap()) as usize;
-                        o += 2;
-                        len
+                    MSGPACK_FALSE=>{
+                        o += 1;
+                        self.push(LiveNode {id, origin, value:LiveValue::Bool(false)});
                     }
-                    else{
-                        assert_len(o, 4, data) ?;
-                        let len = u32::from_be_bytes(data[o..o + 2].try_into().unwrap()) as usize;
-                        o += 4;
-                        len
-                    };
-                    if let Ok(val) = std::str::from_utf8(&data[o..o + len]) {
-                        o += len;
-                        if let Some(inline_str) = InlineString::from_str(val) {
-                            LiveValue::InlineString(inline_str)
-                        }
-                        else {
-                            LiveValue::FittedString(FittedString::from_string(val.to_string()))
-                        }
+                    MSGPACK_F32 => {
+                        o += 1;
+                        let value = LiveValue::Float32(read_f32(data, &mut o) ?);
+                        self.push(LiveNode {id, origin, value});
                     }
-                    else {
-                        return Err(LiveNodeFromBinaryError::UTF8Error);
+                    MSGPACK_F64 => {
+                        o += 1;
+                        let value = LiveValue::Float64(read_f64(data, &mut o) ?);
+                        self.push(LiveNode {id, origin, value});
                     }
-                },
-                BIN_TRUE => {LiveValue::Bool(true)},
-                BIN_FALSE => {LiveValue::Bool(false)},
-                BIN_INT0 => {
-                    LiveValue::Int64(0)
-                },
-                BIN_INT8 => {
-                    assert_len(o, 1, data)?;
-                    let b = i8::from_be_bytes(data[o..o + 1].try_into().unwrap()) as i64;
-                    o += 1;
-                    LiveValue::Int64(b)
-                },
-                BIN_INT16 => {
-                    assert_len(o, 2, data)?;
-                    let v = i16::from_be_bytes(data[o..o + 2].try_into().unwrap()) as i64;
-                    o += 2;
-                    LiveValue::Int64(v)
-                },
-                BIN_INT32 => {
-                    assert_len(o, 4, data)?;
-                    let v = i32::from_be_bytes(data[o..o + 4].try_into().unwrap()) as i64;
-                    o += 4;
-                    LiveValue::Int64(v)
-                },
-                BIN_INT64 => {
-                    assert_len(o, 8, data)?;
-                    let v = i64::from_be_bytes(data[o..o + 8].try_into().unwrap());
-                    o += 8;
-                    LiveValue::Int64(v)
-                },
-                BIN_FLOAT32 => {
-                    assert_len(o, 4, data)?;
-                    let v = f32::from_be_bytes(data[o..o + 4].try_into().unwrap());
-                    o += 4;
-                    LiveValue::Float32(v)
-                },
-                BIN_FLOAT64 => {
-                    assert_len(o, 8, data)?;
-                    let v = f64::from_be_bytes(data[o..o + 8].try_into().unwrap());
-                    o += 8;
-                    LiveValue::Float64(v)
-                },
-                BIN_FLOAT64_8 => {
-                    assert_len(o, 1, data)?;
-                    let v = (i8::from_be_bytes(data[o..o + 1].try_into().unwrap()) as f64) / 40.0;
-                    o += 1;
-                    LiveValue::Float64(v)
-                },
-                BIN_COLOR => {
-                    assert_len(o, 4, data)?;
-                    let u = u32::from_be_bytes(data[o..o + 4].try_into().unwrap());
-                    o += 4;
-                    LiveValue::Color(u)
-                },
-                BIN_VEC2 => {
-                    assert_len(o, 8, data)?;
-                    let x = f32::from_be_bytes(data[o..o + 4].try_into().unwrap());
-                    o += 4;
-                    let y = f32::from_be_bytes(data[o..o + 4].try_into().unwrap());
-                    o += 4;
-                    LiveValue::Vec2(Vec2 {x, y})
-                },
-                BIN_VEC3 => {
-                    assert_len(o, 12, data)?;
-                    let x = f32::from_be_bytes(data[o..o + 4].try_into().unwrap());
-                    o += 4;
-                    let y = f32::from_be_bytes(data[o..o + 4].try_into().unwrap());
-                    o += 4;
-                    let z = f32::from_be_bytes(data[o..o + 4].try_into().unwrap());
-                    o += 4;
-                    LiveValue::Vec3(Vec3 {x, y, z})
-                },
-                BIN_VEC4 => {
-                    assert_len(o, 16, data)?;
-                    let x = f32::from_be_bytes(data[o..o + 4].try_into().unwrap());
-                    o += 4;
-                    let y = f32::from_be_bytes(data[o..o + 4].try_into().unwrap());
-                    o += 4;
-                    let z = f32::from_be_bytes(data[o..o + 4].try_into().unwrap());
-                    o += 4;
-                    let w = f32::from_be_bytes(data[o..o + 4].try_into().unwrap());
-                    o += 4;
-                    LiveValue::Vec4(Vec4 {x, y, z, w})
-                },
-                BIN_ID => {
-                    LiveValue::Id(decode_id(data, &mut o, &mut strbuf) ?)
-                },
-                BIN_BARE_ENUM => {
-                    let base = decode_id(data, &mut o, &mut strbuf) ?;
-                    let variant = decode_id(data, &mut o, &mut strbuf) ?;
-                    LiveValue::BareEnum {base, variant}
-                },
-                BIN_ARRAY => {
-                    LiveValue::Array
-                },
-                BIN_TUPLE_ENUM => {
-                    let base = decode_id(data, &mut o, &mut strbuf) ?;
-                    let variant = decode_id(data, &mut o, &mut strbuf) ?;
-                    LiveValue::TupleEnum {base, variant}
-                },
-                BIN_NAMED_ENUM => {
-                    let base = decode_id(data, &mut o, &mut strbuf) ?;
-                    let variant = decode_id(data, &mut o, &mut strbuf) ?;
-                    LiveValue::NamedEnum {base, variant}
-                },
-                BIN_OBJECT => {
-                    LiveValue::Object
-                },
-                BIN_CLONE => {
-                    LiveValue::Clone(decode_id(data, &mut o, &mut strbuf) ?)
-                },
-                BIN_CLOSE => {
-                    LiveValue::Close
-                },
-                _ => {
-                    return Err(LiveNodeFromBinaryError::UnexpectedVariant);
+                    MSGPACK_NIL => {
+                        o += 1;
+                        self.push(LiveNode {id, origin, value: LiveValue::None});
+                    },
+                    value => {
+                        println!("UNEXPECTED VALUE {:x}", value);
+                        return Err(LiveNodeFromMsgPackError::UnexpectedValue)
+                    }
                 }
             };
-            self.push(LiveNode {
-                origin: LiveNodeOrigin::empty()
-                    .with_prop_type(LivePropType::from_usize(prop_type as usize)),
-                id,
-                value
-            });
         }
+        
         Ok(())
-        */
     }
 }
