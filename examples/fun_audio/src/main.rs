@@ -9,6 +9,7 @@ use makepad_draw_2d::*;
 use makepad_media::*;
 use makepad_media::audio_graph::*;
 
+mod sequencer;
 mod display_audio;
 mod piano;
 mod iron_fish;
