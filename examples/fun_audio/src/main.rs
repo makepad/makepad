@@ -404,7 +404,27 @@ live_register!{
             }
         }
     }
-    
+    SequencerPanel: FishPanel {
+        label = {bg: {color: (COLOR_MIX)}, label = {text: "Sequencer"}}
+        body = {
+            // bg: {color: (COLOR_MIX)}
+            speed = InstrumentBipolarSlider {
+                slider = {
+                    slider: {line_color: (COLOR_MIX)}
+                    bind: "sequencer.bpm"
+                    min: 0.0
+                    max: 240.0
+                    label: "BPM"
+                }
+                playpause = InstrumentCheckbox {
+                    checkbox = {
+                        bind: "sequencer.playing",
+                        label: "Play"
+                    }
+                }
+            }
+        }
+    }  
     MixerPanel: FishPanel {
         label = {bg: {color: (COLOR_MIX)}, label = {text: "Mixer"}}
         body = {
@@ -735,6 +755,7 @@ live_register!{
                 }
                 Frame {
                     ModEnvelopePanel {}
+                    SequencerPanel {}
                 }
                 Frame {
                     layout: {flow: Down, spacing: 10.0}

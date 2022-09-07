@@ -169,7 +169,7 @@ pub struct IronFishSettings {
 #[derive(Copy, Clone)]
 pub struct SequencerState
 {
-    playing: bool,
+    
     currentstep: usize,
     samplesleftinstep: usize
 }
@@ -815,7 +815,7 @@ impl IronFishState {
         while (remaining > 0)
         {
             let mut toprocess = remaining;
-            if (self.sequencer.playing)
+            if (self.settings.sequencer.playing.get())
             {
                 if (self.sequencer.samplesleftinstep == 0){
                     // process notes!
@@ -834,7 +834,7 @@ impl IronFishState {
                         }
                     }
                     self.sequencer.currentstep = newstepidx;
-                    self.sequencer.samplesleftinstep = ((self.settings.sample_rate.get() * 60.0) / (self.settings.sequencer.bpm.get() * 240.0 * 4.0)) as usize;
+                    self.sequencer.samplesleftinstep = ((self.settings.sample_rate.get() * 60.0) / (self.settings.sequencer.bpm.get() * 4.0)) as usize;
                 }
                 else
                 {
@@ -870,7 +870,6 @@ impl IronFishState {
 impl Default for SequencerState{
     fn default() -> Self {
         Self {
-            playing: false,
             samplesleftinstep: 10,
             currentstep: 0
         }
