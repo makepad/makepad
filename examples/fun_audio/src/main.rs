@@ -423,6 +423,9 @@ live_register!{
                         label: "Play"
                     }
                 }
+                sequencer = Sequencer{
+                     
+                }
             }
         }
     }  
@@ -758,7 +761,6 @@ live_register!{
                   //  walk: { margin: {top: 10, right: 20, bottom: 10, left: 20}}
                     layout: {flow: Down, spacing: (SPACING_PANELS)}
                     ModEnvelopePanel {}
-                    SequencerPanel {}
                 }
                 Frame {
                     layout: {flow: Down, spacing: 10.0}
@@ -772,9 +774,9 @@ live_register!{
                 }
                 Frame {
                     layout: {flow: Down, spacing: (SPACING_PANELS)}
-                    
-                    TouchPanel {}
+                    SequencerPanel {}
                     FXPanel {}
+                    TouchPanel {}
                 }
             }
             
@@ -877,6 +879,7 @@ impl App {
         crate::display_audio::live_register(cx);
         crate::iron_fish::live_register(cx);
         crate::piano::live_register(cx);
+        crate::sequencer::live_register(cx);
     }
     
     pub fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
@@ -1043,6 +1046,8 @@ impl App {
                 velocity: note.velocity
             }.into());
         }
+        
+        
         if ui.button(ids!(panic)).was_clicked() {
             self.audio_graph.all_notes_off();
         }

@@ -15,8 +15,8 @@ live_register!{
         
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-            sdf.box(1, 1, self.rect_size.x-2, self.rect_size.y -2, 2);
-            sdf.fill(mix(#4,#9, self.active));
+            sdf.box(1, 1, self.rect_size.x - 2, self.rect_size.y - 2, 2);
+            sdf.fill(mix(#2,#9, self.active));
             return sdf.result
         }
     }
@@ -28,12 +28,12 @@ live_register!{
                 default: off,
                 off = {
                     from: {all: Play::Forward {duration: 0.2}}
-                    apply: {draw_key: {hover: 0.0}}
+                    apply: {button: {hover: 0.0}}
                 }
                 
                 on = {
                     from: {all: Play::Snap}
-                    apply: {draw_key: {hover: 1.0}}
+                    apply: {button: {hover: 1.0}}
                 }
             }
             
@@ -41,12 +41,12 @@ live_register!{
                 default: off
                 off = {
                     from: {all: Play::Forward {duration: 0.05}}
-                    apply: {draw_key: {active: 0.0}}
+                    apply: {button: {active: 0.0}}
                 }
                 
                 on = {
                     from: {all: Play::Snap}
-                    apply: {draw_key: {active: 1.0}}
+                    apply: {button: {active: 1.0}}
                 }
             }
         }
@@ -54,8 +54,9 @@ live_register!{
     
     Sequencer: {{Sequencer}} {
         button: SeqButton {}
-        button_size: vec2(25.0, 25.0),
-        
+        button_size: vec2(12.0, 12.0),
+        grid_x: 16,
+        grid_y: 16,
         walk: {
             width: Size::Fit,
             height: Size::Fit
@@ -150,11 +151,11 @@ impl SeqButton {
             }
             Hit::FingerSweepIn(_) => {
                 if self.state.is_in_state(cx, ids!(active.on)){
-                    self.animate_state(cx, ids!(pressed.off));
+                    self.animate_state(cx, ids!(active.off));
                     dispatch_action(cx, SeqButtonAction::Off);
                 }
                 else{
-                    self.animate_state(cx, ids!(pressed.on));
+                    self.animate_state(cx, ids!(active.on));
                     dispatch_action(cx, SeqButtonAction::On);
                     
                 }
