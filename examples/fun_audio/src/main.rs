@@ -1054,14 +1054,28 @@ impl App {
         for (btn_x,btn_y,active) in sequencer.on_buttons(){
             let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
             let s = iron_fish.settings.clone();
-            let bit = 1<<btn_x;
+            let bit = 1<<btn_y;
             let act = if active{bit} else{0};
-            match btn_y{
+            match btn_x{
                 0=>s.sequencer.step0.set(s.sequencer.step0.get()^bit|act),
+                1=>s.sequencer.step1.set(s.sequencer.step1.get()^bit|act),
+                2=>s.sequencer.step2.set(s.sequencer.step2.get()^bit|act),
+                3=>s.sequencer.step3.set(s.sequencer.step3.get()^bit|act),
+                4=>s.sequencer.step4.set(s.sequencer.step4.get()^bit|act),
+                5=>s.sequencer.step5.set(s.sequencer.step5.get()^bit|act),
+                6=>s.sequencer.step6.set(s.sequencer.step6.get()^bit|act),
+                7=>s.sequencer.step7.set(s.sequencer.step7.get()^bit|act),
+                8=>s.sequencer.step8.set(s.sequencer.step8.get()^bit|act),
+                9=>s.sequencer.step9.set(s.sequencer.step9.get()^bit|act),
+                10=>s.sequencer.step10.set(s.sequencer.step10.get()^bit|act),
+                11=>s.sequencer.step11.set(s.sequencer.step11.get()^bit|act),
+                12=>s.sequencer.step12.set(s.sequencer.step12.get()^bit|act),
+                13=>s.sequencer.step13.set(s.sequencer.step13.get()^bit|act),
+                14=>s.sequencer.step14.set(s.sequencer.step14.get()^bit|act),
+                15=>s.sequencer.step15.set(s.sequencer.step15.get()^bit|act),
                 _=>()
             }
         }
-        
         
         if ui.button(ids!(panic)).was_clicked() {
             self.audio_graph.all_notes_off();

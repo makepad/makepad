@@ -251,8 +251,6 @@ impl Sequencer {
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
 pub struct SeqButtonId(pub LiveId);
 
-// ImGUI convenience API for Piano
-
 pub struct SequencerImGUI(ImGUIRef);
 
 impl SequencerImGUI {
