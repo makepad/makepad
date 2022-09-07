@@ -396,7 +396,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
             tb.add(",");
         }
         tb.add("        };");
-        tb.add("        ret.after_new(cx);");
+        tb.add("        ret.after_new_before_apply(cx);");
         tb.add("        ret");
         tb.add("    }");
         
@@ -477,7 +477,7 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("    fn new(cx:&mut Cx) -> Self {");
         tb.add("        let mut ret = ");
         items[pick.unwrap()].gen_new(tb);
-        tb.add("        ;ret.after_new(cx);ret");
+        tb.add("        ;ret.after_new_before_apply(cx);ret");
         tb.add("    }");
         
         tb.add("    fn live_type_info(cx:&mut Cx) -> LiveTypeInfo {");

@@ -681,10 +681,10 @@ impl State {
                     let start_time = match &nodes[time_index].value {
                         LiveValue::Id(v) => {
                             assert!(*v == id!(void));
-                            nodes[time_index].value = LiveValue::Float(ext_time);
+                            nodes[time_index].value = LiveValue::Float64(ext_time);
                             ext_time
                         }
-                        LiveValue::Float(time) => {
+                        LiveValue::Float64(time) => {
                             *time
                         }
                         _ => panic!()
@@ -702,7 +702,7 @@ impl State {
                     
                     if ended { // mark ended step 1
                         if let Some(index) = nodes.child_by_name(track_index, id!(ended).as_field()) {
-                            nodes[index].value = LiveValue::Int(cx.event_id as i64);
+                            nodes[index].value = LiveValue::Int64(cx.event_id as i64);
                         }
                     }
                     
@@ -770,21 +770,21 @@ impl State {
                         let b = &next_kf.value;
                         
                         let new_val = match a {
-                            LiveValue::Int(va) => match b {
-                                LiveValue::Int(vb) => {
-                                    LiveValue::Float(((vb - va) as f64) * mix + *va as f64)
+                            LiveValue::Int64(va) => match b {
+                                LiveValue::Int64(vb) => {
+                                    LiveValue::Float64(((vb - va) as f64) * mix + *va as f64)
                                 }
-                                LiveValue::Float(vb) => {
-                                    LiveValue::Float(((vb - *va as f64) as f64) * mix + *va as f64)
+                                LiveValue::Float64(vb) => {
+                                    LiveValue::Float64(((vb - *va as f64) as f64) * mix + *va as f64)
                                 }
                                 _ => LiveValue::None
                             }
-                            LiveValue::Float(va) => match b {
-                                LiveValue::Int(vb) => {
-                                    LiveValue::Float(((*vb as f64 - va) as f64) * mix + *va as f64)
+                            LiveValue::Float64(va) => match b {
+                                LiveValue::Int64(vb) => {
+                                    LiveValue::Float64(((*vb as f64 - va) as f64) * mix + *va as f64)
                                 }
-                                LiveValue::Float(vb) => {
-                                    LiveValue::Float(((vb - va)) * mix + *va)
+                                LiveValue::Float64(vb) => {
+                                    LiveValue::Float64(((vb - va)) * mix + *va)
                                 }
                                 _ => LiveValue::None
                             }
@@ -853,8 +853,8 @@ impl State {
             if reader.is_object() {
                 if let Some(reader) = reader.child_by_name(id!(time).as_field()) {
                     return match &reader.value {
-                        LiveValue::Float(v) => *v,
-                        LiveValue::Int(v) => *v as f64,
+                        LiveValue::Float64(v) => *v,
+                        LiveValue::Int64(v) => *v as f64,
                         _ => 1.0
                     }
                 }
@@ -865,7 +865,7 @@ impl State {
     
     pub fn is_track_animating(&self, cx: &mut Cx, track_id: LiveId) -> bool {
         if let Some(state) = self.state.as_ref() {
-            if let Some(LiveValue::Int(ended)) = state.child_value_by_path(0, &[id!(tracks).as_field(), track_id.as_field(), id!(ended).as_field()]) {
+            if let Some(LiveValue::Int64(ended)) = state.child_value_by_path(0, &[id!(tracks).as_field(), track_id.as_field(), id!(ended).as_field()]) {
                 if *ended == 0 || *ended == cx.event_id as i64 {
                     return true
                 }

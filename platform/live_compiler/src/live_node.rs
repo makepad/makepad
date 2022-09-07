@@ -38,18 +38,20 @@ pub enum LiveValue {
         string_count: usize
     }, // bare values
     Bool(bool),
-    Int(i64),
-    Float(f64),
+    Int64(i64),
+    Float32(f32),
+    Float64(f64),
     Color(u32),
     Vec2(Vec2),
     Vec3(Vec3),
     Vec4(Vec4),
     Id(LiveId),
+    
     ExprBinOp(LiveBinOp),
     ExprUnOp(LiveUnOp),
     ExprMember(LiveId),
     ExprCall {ident: LiveId, args: usize},
-    // enum thing
+     // enum thing
     BareEnum {base: LiveId, variant: LiveId},
     // tree items
     Array,
@@ -96,23 +98,33 @@ impl LiveValue {
                 *o = *i;
                 return true
             },
-            Self::Int(o) => {
+            Self::Int64(o) => {
                 if let LiveToken::Int(i) = token {
                     *o = *i;
                     return true
                 }
                 if let LiveToken::Float(v) = token {
-                    *self = LiveValue::Float(*v);
+                    *self = LiveValue::Float64(*v);
                     return true
                 }
             }
-            Self::Float(o) => {
+            Self::Float64(o) => {
                 if let LiveToken::Float(i) = token {
                     *o = *i;
                     return true
                 }
                 if let LiveToken::Int(v) = token {
-                    *self = LiveValue::Int(*v);
+                    *self = LiveValue::Int64(*v);
+                    return true
+                }
+            }
+            Self::Float32(o) => {
+                if let LiveToken::Float(i) = token {
+                    *o = *i as f32;
+                    return true
+                }
+                if let LiveToken::Int(v) = token {
+                    *self = LiveValue::Int64(*v);
                     return true
                 }
             }
@@ -208,7 +220,7 @@ impl fmt::Debug for LiveNodeOrigin {
 
 // 6 bits (64) edit_info index
 // 1 bit node_has_prefix
-// 2 bits LiveAssignType
+// 2 bits LivePropType
 
 // ok if we are a DSL node then what else do we need. we need a node index pointer.
 
@@ -595,8 +607,9 @@ impl LiveValue {
             Self::InlineString {..} |
             Self::DocumentString {..} |
             Self::Bool(_) |
-            Self::Int(_) |
-            Self::Float(_) |
+            Self::Int64(_) |
+            Self::Float64(_) |
+            Self::Float32(_) |
             Self::Color(_) |
             Self::Vec2(_) |
             Self::Vec3(_) |
@@ -616,16 +629,18 @@ impl LiveValue {
     
     pub fn is_number_type(&self) -> bool {
         match self {
-            Self::Int(_) |
-            Self::Float(_) => true,
+            Self::Int64(_) |
+            Self::Float32(_) |
+            Self::Float64(_) => true,
             _ => false
         }
     }
     
     pub fn as_float(&self) -> Option<f64> {
         match self {
-            Self::Float(v) => Some(*v),
-            Self::Int(v) => Some(*v as f64),
+            Self::Float64(v) => Some(*v),
+            Self::Float32(v) => Some(*v as f64),
+            Self::Int64(v) => Some(*v as f64),
             _ => None
         }
     }
@@ -691,31 +706,32 @@ impl LiveValue {
             Self::DocumentString {..} => 4,
             Self::Dependency {..} => 5,
             Self::Bool(_) => 6,
-            Self::Int(_) => 7,
-            Self::Float(_) => 8,
-            Self::Color(_) => 9,
-            Self::Vec2(_) => 10,
-            Self::Vec3(_) => 11,
-            Self::Vec4(_) => 12,
-            Self::Id(_) => 13,
-            Self::ExprBinOp(_) => 14,
-            Self::ExprUnOp(_) => 15,
-            Self::ExprMember(_) => 16,
-            Self::ExprCall {..} => 17,
+            Self::Int64(_) => 7,
+            Self::Float64(_) => 8,
+            Self::Float32(_) => 9,
+            Self::Color(_) => 10,
+            Self::Vec2(_) => 11,
+            Self::Vec3(_) => 12,
+            Self::Vec4(_) => 13,
+            Self::Id(_) => 14,
+            Self::ExprBinOp(_) => 15,
+            Self::ExprUnOp(_) => 16,
+            Self::ExprMember(_) => 17,
+            Self::ExprCall {..} => 18,
             
-            Self::BareEnum {..} => 18,
-            Self::Array => 19,
-            Self::Expr {..} => 20,
-            Self::TupleEnum {..} => 21,
-            Self::NamedEnum {..} => 22,
-            Self::Object => 23,
-            Self::Clone {..} => 24,
-            Self::Class {..} => 25,
-            Self::Close => 26,
+            Self::BareEnum {..} => 19,
+            Self::Array => 20,
+            Self::Expr {..} => 21,
+            Self::TupleEnum {..} => 22,
+            Self::NamedEnum {..} => 23,
+            Self::Object => 24,
+            Self::Clone {..} => 25,
+            Self::Class {..} => 26,
+            Self::Close => 27,
             
-            Self::DSL {..} => 27,
-            Self::Import {..} => 28,
-            Self::Registry {..} => 29
+            Self::DSL {..} => 28,
+            Self::Import {..} => 29,
+            Self::Registry {..} => 30
         }
     }
 }
