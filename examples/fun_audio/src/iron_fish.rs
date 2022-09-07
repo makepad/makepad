@@ -138,7 +138,7 @@ pub struct SequencerSettings{
     #[live(0)] step13: u32a,
     #[live(0)] step14: u32a,
     #[live(0)] step15: u32a,
-    #[live(125)] bpm: f32a,
+    #[live(125.0)] bpm: f32a,
     #[live(false)] playing: boola,
     #[live(0)] oneshot: u32a,
     #[live(1)] transposewithmidi: u32a,
@@ -818,7 +818,7 @@ impl IronFishState {
             if (self.settings.sequencer.playing.get())
             {
                 if (self.sequencer.samplesleftinstep == 0){
-                    log!("tick!");
+                    //log!("tick!");
                     // process notes!
                     let newstepidx = (self.sequencer.currentstep + 1) % 16;
                     let old_step = self.get_sequencer_step(self.sequencer.currentstep);
@@ -841,6 +841,7 @@ impl IronFishState {
                 {
                     toprocess = toprocess.min(self.sequencer.samplesleftinstep);
                     self.sequencer.samplesleftinstep -= toprocess;
+                  //  log!("{:?} {:?}", toprocess, self.sequencer.samplesleftinstep)
                 }
             }
             for i in 0..self.voices.len() {
