@@ -42,7 +42,6 @@ impl <T> U32A<T> where T: LiveAtomicU32Enum {
     }
 }
 
-
 impl <T> Clone for U32A<T> where T: LiveAtomicU32Enum {
     fn clone(&self)->Self{ 
         let t = self.get();
