@@ -462,6 +462,7 @@ live_register!{
             }
         }
     }
+    }
     LFOPanel: FishPanel {
         label = {bg: {color: (COLOR_LFO)}, label = {text: "LFO"}}
         body = {
