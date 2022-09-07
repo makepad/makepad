@@ -81,6 +81,7 @@ pub struct EnvelopeSettings {
     #[live(0.5)] s: f32a,
     #[live(0.2)] r: f32a
 }
+
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub struct LFOSettings {
     #[live(0.2)] rate: f32a,
@@ -118,6 +119,33 @@ pub struct EffectSettings{
     #[live(0.5)] delaysend: f32a,
     #[live(0.8)] delayfeedback: f32a,
 }
+
+
+
+#[derive(Live,LiveHook, LiveAtomic, Debug, LiveRead)]
+pub struct SequencerSettings{
+    #[live(0)] step0: u32a,
+    #[live(0)] step1: u32a,
+    #[live(0)] step2: u32a,
+    #[live(0)] step3: u32a,
+    #[live(0)] step4: u32a,
+    #[live(0)] step5: u32a,
+    #[live(0)] step6: u32a,
+    #[live(0)] step7: u32a,
+    #[live(0)] step8: u32a,
+    #[live(0)] step9: u32a,
+    #[live(0)] step10: u32a,
+    #[live(0)] step11: u32a,
+    #[live(0)] step12: u32a,
+    #[live(0)] step13: u32a,
+    #[live(0)] step14: u32a,
+    #[live(0)] step15: u32a,
+    #[live(0.5)] playbackspeed: f32a,
+    #[live(0)] oneshot: u32a,
+    #[live(1)] transposewithmidi: u32a,
+    #[live(0)] polyphoniconeshot: u32a,    
+}
+
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 #[live_ignore]
@@ -237,8 +265,7 @@ impl OscillatorState {
                 y += 4.0 * v5;
             }
         }
-        return y * dt / 15.0
-        
+        return y * dt / 15.0 
     }
     
     fn blamptriangle(&mut self) -> f32 {
