@@ -192,7 +192,7 @@ live_register!{
             color2: #0,
             
             instance attack: 0.05
-            instance hold: 0.05
+            instance hold: 0.0
             instance decay: 0.2
             instance sustain: 0.5
             instance release: 0.2
@@ -539,8 +539,8 @@ live_register!{
                 dropdown = {
                     bind_enum: "OscType"
                     bind: "osc1.osc_type"
-                    items: ["DPWSawPulse", "TrivialSaw", "BlampTri", "Naive", "Pure"]
-                    display: ["SawPulse", "Saw", "Triangle", "Naive", "Pure"]
+                    items: ["DPWSawPulse","BlampTri",  "Pure"]
+                    display: ["Saw", "Triangle",  "Sine"]
                 }
             }
             
