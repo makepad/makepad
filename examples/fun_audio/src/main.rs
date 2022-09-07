@@ -229,6 +229,7 @@ live_register!{
             color2: #0,
             
             instance attack: 0.05
+            instance hold: 0.0
             instance decay: 0.2
             instance sustain: 0.5
             instance release: 0.2
@@ -245,12 +246,13 @@ live_register!{
                 let pad_s = 8
                 let width = self.rect_size.x - 2 * pad_s
                 let height = self.rect_size.y - 2 * pad_b
-                let total = self.attack + self.decay + self.release + 0.5
+                let total = self.attack + self.decay + self.release + 0.5  + self.hold
                 let sustain = self.rect_size.y - pad_b - height * self.sustain;
                 sdf.pos = self.pos * self.rect_size;
                 sdf.move_to(pad_s, self.rect_size.y - pad_b)
                 sdf.line_to(pad_s + width * (self.attack / total), pad_b)
-                sdf.line_to(pad_s + width * ((self.attack + self.decay) / total), sustain)
+                sdf.line_to(pad_s + width * ((self.attack +self.hold)/ total), pad_b)
+                sdf.line_to(pad_s + width * ((self.attack + self.decay + self.hold) / total), sustain)
                 sdf.line_to(pad_s + width * (1.0 - self.release / total), sustain)
                 sdf.line_to(pad_s + width, self.rect_size.y - pad_b)
                 sdf.stroke_keep(#xFFC49910, 8.0);
@@ -434,10 +436,10 @@ live_register!{
                     label: "Sub Oscillator"
                 }
             }
-        }
-        
+        }        
     }
     FXPanel: FishPanel {
+
         label = {bg: {color: (COLOR_FX)}, label = {text: "Effects",}}
         body = {
             // bg: {color: #9fe2fc},
@@ -456,8 +458,10 @@ live_register!{
                 min: 0.0
                 max: 1.0
                 label: "Delay Feedback"
+
             }
-        }}
+        }
+    }
     }
     LFOPanel: FishPanel {
         label = {bg: {color: (COLOR_LFO)}, label = {text: "LFO"}}
@@ -480,6 +484,7 @@ live_register!{
             }
         }
     }
+
     VolumeEnvelopePanel: FishPanel {
         label = {bg: {color: (COLOR_ENV)}, label = {text: "Volume Env"}}
         body = {
@@ -517,7 +522,7 @@ live_register!{
                 dropdown = {
                     bind_enum: "FilterType"
                     bind: "filter1.filter_type"
-                    items: ["Lowpass", "Highpass", "Bandpass"]
+                    items: ["LowPass", "HighPass", "BandPass", "BandReject"]
                 }
             }
             
@@ -579,8 +584,8 @@ live_register!{
                 dropdown = {
                     bind_enum: "OscType"
                     bind: "osc1.osc_type"
-                    items: ["DPWSawPulse", "TrivialSaw", "BlampTri", "Naive", "Pure"]
-                    display: ["SawPulse", "Saw", "Triangle", "Naive", "Pure"]
+                    items: ["DPWSawPulse","BlampTri",  "Pure"]
+                    display: ["Saw", "Triangle",  "Sine"]
                 }
             }
             
@@ -892,10 +897,12 @@ impl App {
                         let vol_env = ui.frame(ids!(vol_env.display));
                         match bind.name.as_ref() {
                             "mod_envelope.a" => mod_env.apply_over(ui.cx, live!{bg: {attack: (v)}}),
+                            "mod_envelope.h" => mod_env.apply_over(ui.cx, live!{bg: {hold: (v)}}),
                             "mod_envelope.d" => mod_env.apply_over(ui.cx, live!{bg: {decay: (v)}}),
                             "mod_envelope.s" => mod_env.apply_over(ui.cx, live!{bg: {sustain: (v)}}),
                             "mod_envelope.r" => mod_env.apply_over(ui.cx, live!{bg: {release: (v)}}),
                             "volume_envelope.a" => vol_env.apply_over(ui.cx, live!{bg: {attack: (v)}}),
+                            "volume_envelope.h" => vol_env.apply_over(ui.cx, live!{bg: {hold: (v)}}),
                             "volume_envelope.d" => vol_env.apply_over(ui.cx, live!{bg: {decay: (v)}}),
                             "volume_envelope.s" => vol_env.apply_over(ui.cx, live!{bg: {sustain: (v)}}),
                             "volume_envelope.r" => vol_env.apply_over(ui.cx, live!{bg: {release: (v)}}),
