@@ -138,7 +138,7 @@ pub struct SequencerSettings{
     #[live(0)] step13: u32a,
     #[live(0)] step14: u32a,
     #[live(0)] step15: u32a,
-    #[live(0.5)] bpm: f32a,
+    #[live(125)] bpm: f32a,
     #[live(false)] playing: boola,
     #[live(0)] oneshot: u32a,
     #[live(1)] transposewithmidi: u32a,
