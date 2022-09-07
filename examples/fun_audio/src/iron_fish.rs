@@ -122,6 +122,7 @@ pub struct EffectSettings{
 
 #[derive(Live,LiveHook, LiveAtomic, Debug, LiveRead)]
 pub struct SequencerSettings{
+    
     #[live(0)] step0: u32a,
     #[live(0)] step1: u32a,
     #[live(0)] step2: u32a,
@@ -138,6 +139,7 @@ pub struct SequencerSettings{
     #[live(0)] step13: u32a,
     #[live(0)] step14: u32a,
     #[live(0)] step15: u32a,
+    
     #[live(125.0)] bpm: f32a,
     #[live(false)] playing: boola,
     #[live(0)] oneshot: u32a,

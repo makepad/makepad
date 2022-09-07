@@ -162,13 +162,14 @@ pub struct CheckBox {
 
 #[derive(Clone, FrameAction)]
 pub enum CheckBoxAction {
+    Change(bool),
     None
 }
 
 
 impl CheckBox {
     
-    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, &mut Self, CheckBoxAction)) {
+    pub fn handle_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, &mut Self, CheckBoxAction)) {
         self.state_handle_event(cx, event);
         
         match event.hits(cx, self.check_box.area()) {
@@ -182,9 +183,11 @@ impl CheckBox {
             Hit::FingerDown(_fe) => {
                 if self.state.is_in_state(cx, ids!(selected.on)) {
                     self.animate_state(cx, ids!(selected.off));
+                    dispatch_action(cx, self, CheckBoxAction::Change(false));
                 }
                 else {
                     self.animate_state(cx, ids!(selected.on));
+                    dispatch_action(cx, self, CheckBoxAction::Change(true));
                 }
             },
             Hit::FingerUp(_fe) => {
@@ -205,15 +208,30 @@ impl CheckBox {
 }
 
 impl FrameComponent for CheckBox {
-    fn bind_read(&mut self, _cx: &mut Cx, _nodes: &[LiveNode]) {
+    fn bind_read(&mut self, cx: &mut Cx, nodes: &[LiveNode]) {
+        if let Some(value) = nodes.read_path(&self.bind) {
+            if let Some(value) = value.as_bool(){
+                self.toggle_state(cx, value, Animate::Yes, ids!(selected.on), ids!(selected.off));
+            }
+        }
     }
     
     fn redraw(&mut self, cx: &mut Cx) {
         self.check_box.redraw(cx);
     }
     
-    fn handle_component_event(&mut self, cx: &mut Cx, event: &Event, _dispatch_action: &mut dyn FnMut(&mut Cx, FrameActionItem)) {
-        self.handle_event(cx, event, &mut | _cx, _checkbox, _action | {
+    fn handle_component_event(&mut self, cx: &mut Cx, event: &Event, dispatch_action: &mut dyn FnMut(&mut Cx, FrameActionItem)) {
+        self.handle_event(cx, event, &mut | cx, checkbox, action | {
+        let mut delta = Vec::new();
+            match &action {
+                CheckBoxAction::Change(v)=> {
+                    if checkbox.bind.len()>0 {
+                        delta.write_path(&checkbox.bind, LiveValue::Bool(*v));
+                    }
+                },
+                _ => ()
+            };
+            dispatch_action(cx, FrameActionItem::new(action.into()).bind_delta(delta))
         });
     }
     
