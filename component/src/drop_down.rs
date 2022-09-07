@@ -55,14 +55,14 @@ live_register!{
                 self.get_bg(sdf);
                 // lets draw a little triangle in the corner
                 let c = vec2(self.rect_size.x - 10.0, self.rect_size.y * 0.5)
-                let sz = 3;
+                let sz = 2.5;
                 
                 sdf.move_to(c.x - sz, c.y - sz);
                 sdf.line_to(c.x + sz, c.y - sz);
-                sdf.line_to(c.x, c.y + sz);
+                sdf.line_to(c.x, c.y + sz * 0.75);
                 sdf.close_path();
                 
-                sdf.fill(mix(#a, #f, self.hover));
+                sdf.fill(mix(#8, #c, self.hover));
                 
                 return sdf.result
             }

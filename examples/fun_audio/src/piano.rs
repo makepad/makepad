@@ -30,19 +30,19 @@ live_register!{
             let light = normalize(vec3(0.75, 0.5, 0.5))
             let light_hover = normalize(vec3(0.75, 0.5, 1.5))
             let diff = pow(max(dot(mix(light, light_hover, self.hover * (1 - self.pressed)), normal), 0), 3)
-            return mix(#00, #cc, diff)
+            return mix(#181818, #bc, diff)
         }
         
         fn white_key(self) -> vec4 {
             return mix(
-                #ff,
+                #DEDAD3FF,
                 mix(
                     mix(
-                        #df,
+                        #EAE7E2FF,
                         #ff,
                         self.hover
                     ),
-                    mix(#99, #39, pow(1.0 - sin(self.pos.x * PI), 1.8)),
+                    mix(#96989CFF, #131820FF, pow(1.0 - sin(self.pos.x * PI), 1.8)),
                     self.pressed
                 ),
                 self.pos.y
@@ -109,8 +109,8 @@ live_register!{
     
     Piano: {{Piano}} {
         piano_key: PianoKey {}
-        white_size: vec2(25.0, 90.0),
-        black_size: vec2(20.0, 52.0),
+        white_size: vec2(25.0, 100.0),
+        black_size: vec2(20.0, 60.0),
         walk: {
             width: Size::Fit,
             height: Size::Fit
