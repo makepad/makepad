@@ -666,6 +666,13 @@ impl LiveValue {
         }
     }
     
+    pub fn as_bool(&self) -> Option<bool> {
+        match self {
+            Self::Bool(v) => Some(*v),
+            _ => None
+        }
+    }
+    
     /*
     pub fn named_class_id(&self) -> Option<Id> {
         match self {
