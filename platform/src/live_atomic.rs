@@ -4,7 +4,7 @@ use {
     std::marker::PhantomData,
     std::{
         sync::Arc,
-        sync::atomic::{AtomicU32, AtomicI64,  Ordering},
+        sync::atomic::{AtomicU32, AtomicI64,  Ordering, AtomicBool},
     },
     crate::{
         live_traits::*,
@@ -324,3 +324,71 @@ impl LiveRead for i64a{
     }
 }
 
+
+
+
+
+// atomic u32
+
+
+pub struct boola(AtomicBool);
+
+impl Clone for boola {
+    fn clone(&self)->Self{ 
+        boola(AtomicBool::new(self.get()))
+    }
+}
+
+
+impl AtomicGetSet<bool> for boola {
+    fn get(&self) -> bool {
+        self.0.load(Ordering::Relaxed)
+    }
+    fn set(&self, val: bool) {
+        self.0.store(val, Ordering::Relaxed);
+    }
+}
+
+impl LiveAtomic for boola {
+    fn apply_atomic(&self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        let mut val = false;
+        let index = val.apply(cx, apply_from, index, nodes);
+        self.0.store(val, Ordering::Relaxed);
+        index
+    }
+}
+
+impl LiveHook for boola {}
+impl LiveApply for boola {
+    fn apply(&mut self, cx: &mut Cx, from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> usize {
+        self.apply_atomic(cx, from, index, nodes)
+    }
+}
+
+impl Debug for boola{
+    fn fmt(&self, f: &mut Formatter<'_>) -> Result<(), Error>{
+        self.get().fmt(f)
+    }
+}
+
+impl Into<boola> for bool {
+    fn into(self) -> boola {
+        boola(AtomicBool::new(self))
+    }
+}
+
+impl LiveNew for boola {
+    fn new(_cx: &mut Cx) -> Self {
+        Self (AtomicBool::new(false))
+    }
+    
+    fn live_type_info(_cx: &mut Cx) -> LiveTypeInfo {
+        bool::live_type_info(_cx)
+    }
+}
+
+impl LiveRead for boola{
+    fn live_read_to(&self, id:LiveId, out:&mut Vec<LiveNode>){
+        self.get().live_read_to(id, out);
+    }
+}
