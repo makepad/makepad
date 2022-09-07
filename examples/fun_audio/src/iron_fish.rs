@@ -1,6 +1,4 @@
-
 // Iron fish is MIT licensed, (C) Stijn Kuipers
-
 
 #![allow(unused)]
 use {
@@ -14,7 +12,6 @@ use {
         makepad_draw_2d::*
     },
 };
-
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub enum OscType {
@@ -141,7 +138,8 @@ pub struct SequencerSettings{
     #[live(0)] step13: u32a,
     #[live(0)] step14: u32a,
     #[live(0)] step15: u32a,
-    #[live(0.5)] bpm: f32a,
+    #[live(125.0)] bpm: f32a,
+    #[live(false)] playing: boola,
     #[live(0)] oneshot: u32a,
     #[live(1)] transposewithmidi: u32a,
     #[live(0)] polyphoniconeshot: u32a,    
@@ -171,7 +169,7 @@ pub struct IronFishSettings {
 #[derive(Copy, Clone)]
 pub struct SequencerState
 {
-    playing: bool,
+    
     currentstep: usize,
     samplesleftinstep: usize
 }
@@ -817,9 +815,10 @@ impl IronFishState {
         while (remaining > 0)
         {
             let mut toprocess = remaining;
-            if (self.sequencer.playing)
+            if (self.settings.sequencer.playing.get())
             {
                 if (self.sequencer.samplesleftinstep == 0){
+                    //log!("tick!");
                     // process notes!
                     let newstepidx = (self.sequencer.currentstep + 1) % 16;
                     let old_step = self.get_sequencer_step(self.sequencer.currentstep);
@@ -836,12 +835,13 @@ impl IronFishState {
                         }
                     }
                     self.sequencer.currentstep = newstepidx;
-                    self.sequencer.samplesleftinstep = ((self.settings.sample_rate.get() * 60.0) / (self.settings.sequencer.bpm.get() * 240.0 * 4.0)) as usize;
+                    self.sequencer.samplesleftinstep = ((self.settings.sample_rate.get() * 60.0) / (self.settings.sequencer.bpm.get() * 4.0)) as usize;
                 }
                 else
                 {
                     toprocess = toprocess.min(self.sequencer.samplesleftinstep);
                     self.sequencer.samplesleftinstep -= toprocess;
+                  //  log!("{:?} {:?}", toprocess, self.sequencer.samplesleftinstep)
                 }
             }
             for i in 0..self.voices.len() {
@@ -872,7 +872,6 @@ impl IronFishState {
 impl Default for SequencerState{
     fn default() -> Self {
         Self {
-            playing: false,
             samplesleftinstep: 10,
             currentstep: 0
         }
