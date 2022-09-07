@@ -8,6 +8,7 @@ use makepad_component::imgui::*;
 use makepad_draw_2d::*;
 use makepad_media::*;
 use makepad_media::audio_graph::*;
+use makepad_platform::live_atomic::*;
 
 mod sequencer;
 mod display_audio;
@@ -16,6 +17,7 @@ mod iron_fish;
 
 use crate::iron_fish::*;
 use crate::piano::*;
+use crate::sequencer::*;
 use crate::display_audio::*;
 
 use std::fs::File;
@@ -1045,6 +1047,19 @@ impl App {
                 note_number: note.note_number,
                 velocity: note.velocity
             }.into());
+        }
+        
+        let sequencer = ui.sequencer(ids!(sequencer));
+        
+        for (btn_x,btn_y,active) in sequencer.on_buttons(){
+            let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
+            let s = iron_fish.settings.clone();
+            let bit = 1<<btn_x;
+            let act = if active{bit} else{0};
+            match btn_y{
+                0=>s.sequencer.step0.set(s.sequencer.step0.get()^bit|act),
+                _=>()
+            }
         }
         
         
