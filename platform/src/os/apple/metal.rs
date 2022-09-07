@@ -948,6 +948,7 @@ impl CxOsTexture {
                         // lets send this to the other side.
                         let shared: ObjcId = msg_send![texture, newSharedTextureHandle];
                         // lets send it over
+                        log!("STORING SHARED TEXTURE {}", shared_id);
                         store_xpc_service_texture(shared_id, shared);
                         texture
                     }
