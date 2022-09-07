@@ -126,7 +126,6 @@ impl Cx {
         self.apply_error(origin, index, nodes, format!("Resource not loaded {} {}", path, msg))
     }
     
-    
     pub fn apply_error_eval(&mut self, err: LiveError) {
         let live_registry = self.live_registry.borrow();
         error!("{}", live_registry.live_error_to_live_file_error(err));

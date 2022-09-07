@@ -46,11 +46,12 @@ pub enum LiveValue {
     Vec3(Vec3),
     Vec4(Vec4),
     Id(LiveId),
+    
     ExprBinOp(LiveBinOp),
     ExprUnOp(LiveUnOp),
     ExprMember(LiveId),
     ExprCall {ident: LiveId, args: usize},
-    // enum thing
+     // enum thing
     BareEnum {base: LiveId, variant: LiveId},
     // tree items
     Array,
@@ -219,7 +220,7 @@ impl fmt::Debug for LiveNodeOrigin {
 
 // 6 bits (64) edit_info index
 // 1 bit node_has_prefix
-// 2 bits LiveAssignType
+// 2 bits LivePropType
 
 // ok if we are a DSL node then what else do we need. we need a node index pointer.
 
