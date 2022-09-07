@@ -256,7 +256,7 @@ pub struct SeqButtonId(pub LiveId);
 pub struct SequencerImGUI(ImGUIRef);
 
 impl SequencerImGUI {
-    pub fn on_button(&self) -> Vec<(usize, usize, bool)> {
+    pub fn on_buttons(&self) -> Vec<(usize, usize, bool)> {
         let mut btns = Vec::new();
         for item in self.0.actions.0.iter() {
             if item.uid() == self.0.uid {
