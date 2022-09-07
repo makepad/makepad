@@ -19,9 +19,9 @@ use {
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub enum OscType {
     #[pick] DPWSawPulse,
-    TrivialSaw,
+  //  TrivialSaw,
     BlampTri,
-    Naive,
+  //  Naive,
     Pure
 }
 
@@ -35,9 +35,10 @@ pub enum LFOWave {
 
 #[derive(Live, LiveHook, PartialEq, LiveAtomic, Debug, LiveRead)]
 pub enum FilterType {
-    #[pick] Lowpass,
-    Highpass,
-    Bandpass
+    #[pick] LowPass,
+    HighPass,
+    BandPass,
+    BandReject
 }
 /*
 struct LaddFilterCoefficients {
@@ -68,7 +69,7 @@ impl Default for LaddFilterCoefficients {
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead, Clone)]
 pub struct OscSettings {
     osc_type: U32A<OscType>,
-    #[live(-12)] transpose: i64a,
+    #[live(0)] transpose: i64a,
     #[live(0.0)] detune: f32a
 }
 
@@ -81,6 +82,7 @@ pub struct EnvelopeSettings {
     #[live(0.5)] s: f32a,
     #[live(0.2)] r: f32a
 }
+
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub struct LFOSettings {
     #[live(0.2)] rate: f32a,
@@ -119,6 +121,33 @@ pub struct EffectSettings{
     #[live(0.8)] delayfeedback: f32a,
 }
 
+
+
+#[derive(Live,LiveHook, LiveAtomic, Debug, LiveRead)]
+pub struct SequencerSettings{
+    #[live(0)] step0: u32a,
+    #[live(0)] step1: u32a,
+    #[live(0)] step2: u32a,
+    #[live(0)] step3: u32a,
+    #[live(0)] step4: u32a,
+    #[live(0)] step5: u32a,
+    #[live(0)] step6: u32a,
+    #[live(0)] step7: u32a,
+    #[live(0)] step8: u32a,
+    #[live(0)] step9: u32a,
+    #[live(0)] step10: u32a,
+    #[live(0)] step11: u32a,
+    #[live(0)] step12: u32a,
+    #[live(0)] step13: u32a,
+    #[live(0)] step14: u32a,
+    #[live(0)] step15: u32a,
+    #[live(0.5)] bpm: f32a,
+    #[live(0)] oneshot: u32a,
+    #[live(1)] transposewithmidi: u32a,
+    #[live(0)] polyphoniconeshot: u32a,    
+}
+
+
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 #[live_ignore]
 pub struct IronFishSettings {
@@ -131,11 +160,22 @@ pub struct IronFishSettings {
     mod_envelope: EnvelopeSettings,
     touch: TouchSettings,
     fx: EffectSettings,
+    sequencer: SequencerSettings,
     #[live(44100.0)] sample_rate: f32a,
     #[live(0.5)] osc_balance: f32a,
     #[live(0.5)] sub_osc: f32a,
     #[live(0.0)] noise: f32a,
 }
+
+
+#[derive(Copy, Clone)]
+pub struct SequencerState
+{
+    playing: bool,
+    currentstep: usize,
+    samplesleftinstep: usize
+}
+
 
 #[derive(Copy, Clone)]
 pub struct OscillatorState {
@@ -237,8 +277,7 @@ impl OscillatorState {
                 y += 4.0 * v5;
             }
         }
-        return y * dt / 15.0
-        
+        return y * dt / 15.0 
     }
     
     fn blamptriangle(&mut self) -> f32 {
@@ -263,9 +302,8 @@ impl OscillatorState {
         match settings.osc_type.get() {
             OscType::Pure => (self.phase * 6.283).sin(),
             OscType::DPWSawPulse => self.dpw(),
-            OscType::TrivialSaw => self.trivialsaw(),
+            //OscType::TrivialSaw => self.trivialsaw(),
             OscType::BlampTri => self.blamptriangle(),
-            OscType::Naive => 0.0,
         }
     }
     
@@ -466,6 +504,7 @@ impl EnvelopeState {
         match self.phase {
             EnvelopePhase::Attack |
             EnvelopePhase::Decay |
+            EnvelopePhase::Hold |
             EnvelopePhase::Sustain => {
                 self.phase = EnvelopePhase::Release;
                 self.target_value = 0.0;
@@ -490,11 +529,39 @@ struct FilterState {
 }
 
 impl FilterState {
-    fn get(&mut self, input: f32) -> f32 {
+    fn pump(&mut self,input:f32){
         self.bp = self.phi * self.hp + self.bp;
         self.lp = self.phi * self.bp + self.lp;
-        self.hp = input - self.lp - self.gamma * self.bp;
+        self.hp = input - self.lp - self.gamma * self.bp;        
+    }
+
+    fn get_lp(&mut self, input: f32) -> f32 {
+        self.pump(input);
         return self.lp;
+    }
+    
+    fn get_bp(&mut self, input: f32) -> f32 {
+        self.pump(input);
+        return self.bp;
+    }
+
+    fn get_br(&mut self, input: f32) -> f32 {
+        self.pump(input);
+        return input - self.bp;
+    }
+    
+    fn get_hp(&mut self, input: f32) -> f32 {
+        self.pump(input);
+        return self.hp;
+    }
+
+    fn get(&mut self, input: f32, settings: &FilterSettings) -> f32{
+        match settings.filter_type.get(){
+            FilterType::LowPass => self.get_lp(input),
+            FilterType::HighPass => self.get_hp(input),
+            FilterType::BandPass => self.get_bp(input),
+            FilterType::BandReject => self.get_br(input)
+        }
     }
     
     fn set_cutoff(&mut self, settings: &FilterSettings, envelope: f32, sample_rate: f32, touch: f32) {
@@ -534,6 +601,7 @@ impl GriesingerReverb {
     }
 }
 */
+
 #[derive(Copy, Clone)]
 pub struct IronFishVoice {
     osc1: OscillatorState,
@@ -544,7 +612,9 @@ pub struct IronFishVoice {
     mod_envelope: EnvelopeState,
     current_note: i16,
     seed: u32, 
+    sequencer: SequencerState
 }
+
 fn random_bit(seed: &mut u32) -> u32 {
     *seed = seed.overflowing_add((seed.overflowing_mul(*seed)).0 | 5).0;
     return *seed >> 31;
@@ -603,23 +673,22 @@ impl IronFishVoice {
         
         let noise = random_f32(&mut self.seed) * 2.0 - 1.0;
         
-        let oscinput = osc1 * settings.osc_balance.get() + osc2 * (1.0 - settings.osc_balance.get()) + settings.sub_osc.get() * sub + settings.noise.get() * noise;
-        let filter = self.filter1.get(oscinput);
+        let oscinput = osc2 * settings.osc_balance.get() + osc1 * (1.0 - settings.osc_balance.get()) + settings.sub_osc.get() * sub + settings.noise.get() * noise;
+        let filter = self.filter1.get(oscinput, &settings.filter1);
         
         let output = volume_envelope * filter;
         
         return output * 0.006; //* 1000.0;
     }
     
-    pub fn fill_buffer(&mut self, mix_buffer: &mut AudioBuffer, display_buffer: Option<&mut AudioBuffer>, settings: &IronFishSettings, touch: f32) {
+    pub fn fill_buffer(&mut self, mix_buffer: &mut AudioBuffer,startidx: usize, frame_count: usize ,display_buffer: Option<&mut AudioBuffer>, settings: &IronFishSettings, touch: f32) {
         
         
-        let frame_count = mix_buffer.frame_count();
         let (left, right) = mix_buffer.stereo_mut();
         
         if let Some(display_buffer) = display_buffer {
             let (left_disp, right_disp) = display_buffer.stereo_mut();
-            for i in 0..frame_count {
+            for i in startidx..frame_count {
                 let output = self.one(&settings,touch) * 8.0;
                 left_disp[i] = output as f32;
                 right_disp[i] = output as f32;
@@ -628,16 +697,15 @@ impl IronFishVoice {
             }
         }
         else {
-            for i in 0..frame_count {
+            for i in startidx..frame_count {
                 let output = self.one(&settings,touch) * 8.0;
                 left[i] += output as f32;
                 right[i] += output as f32;
             }
         }
-        // profile_end(pf);
     }
-    
 }
+
 pub struct IronFishState {
     from_ui: FromUIReceiver<FromUI>,
     to_ui: ToUISender<ToUI>,
@@ -649,7 +717,8 @@ pub struct IronFishState {
     touch: f32, 
     delayline: Vec<f32>,
     delayreadpos: usize,
-    delaywritepos: usize
+    delaywritepos: usize,
+    sequencer: SequencerState,
 }
 
 impl IronFishState {
@@ -696,6 +765,29 @@ impl IronFishState {
                 if (self.delayreadpos >= 44100) {self.delayreadpos = 0;}
             }
         }
+        pub fn get_sequencer_step(&mut self, step: usize) ->u32
+        {
+            match step{
+                0 => self.settings.sequencer.step0.get(),
+                2 => self.settings.sequencer.step2.get(),
+                3 => self.settings.sequencer.step3.get(),
+                4 => self.settings.sequencer.step4.get(),
+                5 => self.settings.sequencer.step5.get(),
+                6 => self.settings.sequencer.step6.get(),
+                7 => self.settings.sequencer.step7.get(),
+                8 => self.settings.sequencer.step8.get(),
+                9 => self.settings.sequencer.step9.get(),
+                10 => self.settings.sequencer.step10.get(),
+                11 => self.settings.sequencer.step11.get(),
+                12 => self.settings.sequencer.step12.get(),
+                13 => self.settings.sequencer.step13.get(),
+                14 => self.settings.sequencer.step14.get(),
+                15 => self.settings.sequencer.step15.get(),
+                _ => 0
+                
+            };
+            return 0;
+        }
 
     pub fn fill_buffer(&mut self, buffer: &mut AudioBuffer, display: &mut DisplayAudioGraph) {
         
@@ -720,24 +812,70 @@ impl IronFishState {
             }
             
         }
-        for i in 0..self.voices.len() {
-            if self.voices[i].active() > -1 {
-                let mut display_buffer = display.pop_buffer_resize(buffer.frame_count(), buffer.channel_count());
-                self.voices[i].fill_buffer(buffer, display_buffer.as_mut(), &self.settings, self.touch);
-                if let Some(dp) = display_buffer {
-                    display.send_buffer(true, i, dp);
+        let mut remaining = buffer.frame_count();
+        let mut bufferidx = 0;
+        while (remaining > 0)
+        {
+            let mut toprocess = remaining;
+            if (self.sequencer.playing)
+            {
+                if (self.sequencer.samplesleftinstep == 0){
+                    // process notes!
+                    let newstepidx = (self.sequencer.currentstep + 1) % 16;
+                    let old_step = self.get_sequencer_step(self.sequencer.currentstep);
+                    let new_step = self.get_sequencer_step(newstepidx);
+                    for i in 0..32 {
+                        if old_step & (1<<i) != 0{
+                            if (new_step & (1<<i)) == 0 {
+                                self.note_off(i,127);
+                            }
+                        } else {
+                            if (new_step & (1<<i) != 0){
+                                self.note_on(i,127);
+                            }
+                        }
+                    }
+                    self.sequencer.currentstep = newstepidx;
+                    self.sequencer.samplesleftinstep = ((self.settings.sample_rate.get() * 60.0) / (self.settings.sequencer.bpm.get() * 240.0 * 4.0)) as usize;
+                }
+                else
+                {
+                    toprocess = toprocess.min(self.sequencer.samplesleftinstep);
+                    self.sequencer.samplesleftinstep -= toprocess;
                 }
             }
-            else {
-                display.send_voice_off(i);
-                let mut display_buffer = display.pop_buffer_resize(buffer.frame_count(), buffer.channel_count());
-                if let Some(mut dp) = display_buffer {
-                    dp.zero();
-                    display.send_buffer(false, i, dp);
+            for i in 0..self.voices.len() {
+                if self.voices[i].active() > -1 {
+                    //let mut display_buffer = display.pop_buffer_resize(buffer.frame_count(), buffer.channel_count());
+                    //self.voices[i].fill_buffer(buffer, bufferidx,toprocess,display_buffer.as_mut(), &self.settings, self.touch);
+                    self.voices[i].fill_buffer(buffer, bufferidx,toprocess,None, &self.settings, self.touch);
+                   // if let Some(dp) = display_buffer {
+                   //     display.send_buffer(true, i, dp);
+                   // }
+                }
+                else {
+                    display.send_voice_off(i);
+//                    let mut display_buffer = display.pop_buffer_resize(buffer.frame_count(), buffer.channel_count());
+  //                  if let Some(mut dp) = display_buffer {
+    //                    dp.zero();
+      //                  display.send_buffer(false, i, dp);
+        //            }
                 }
             }
+            bufferidx += toprocess;
+            remaining -= toprocess;
         }
         self.apply_delay(buffer);
+    }
+}
+
+impl Default for SequencerState{
+    fn default() -> Self {
+        Self {
+            playing: false,
+            samplesleftinstep: 10,
+            currentstep: 0
+        }
     }
 }
 
@@ -750,6 +888,7 @@ impl Default for IronFishVoice {
             filter1: FilterState::default(),
             volume_envelope: EnvelopeState::default(),
             mod_envelope: EnvelopeState::default(),
+            sequencer: SequencerState::default(),
             current_note: -1,
             seed: 1234,
         }
@@ -800,8 +939,8 @@ impl AudioGraphNode for IronFishState {
             }
             _ => ()
         }
-        if (data.data0 == 0xb0 && data.data1 == 1)
-        {
+
+        if (data.data0 == 0xb0 && data.data1 == 1){
             self.touch = (data.data2 as f32 - 40.0)/(127.0-40.0);
             self.touch += self.settings.touch.offset.get();
             self.touch *= self.settings.touch.scale.get();
@@ -833,7 +972,8 @@ impl AudioComponent for IronFish {
             touch: 0.0,
             delayline: vec![0.0f32; 44100],
             delaywritepos: 15000,
-            delayreadpos: 0
+            delayreadpos: 0,
+            sequencer: SequencerState::default()
         })
     }
     
