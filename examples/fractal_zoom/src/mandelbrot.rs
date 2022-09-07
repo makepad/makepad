@@ -37,7 +37,7 @@ live_register!{
     }
     
     Mandelbrot: {{Mandelbrot}} {
-        max_iter: 3200,
+        max_iter: 320,
     }
 }
 

@@ -77,6 +77,8 @@ pub use {
         LiveValue,
         FittedString,
         InlineString,
+        LiveNodeSliceToMsgPack,
+        LiveNodeVecFromMsgPack,
         LiveModuleId,
         LiveNodeSlice,
         LiveNodeVec,

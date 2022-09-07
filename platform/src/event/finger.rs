@@ -5,7 +5,6 @@ use {
     crate::{
         makepad_live_tokenizer::{LiveErrorOrigin, live_error_origin},
         makepad_live_compiler::{
-            LiveValue,
             LivePropType,
             LiveType,
             LiveTypeField,
@@ -43,21 +42,12 @@ pub struct Margin {
 
 impl LiveHook for Margin {
     fn before_apply(&mut self, _cx: &mut Cx, _apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]) -> Option<usize> {
-        match &nodes[index].value {
-            LiveValue::Float(v) => {
-                *self = Self {left: *v, top: *v, right: *v, bottom: *v};
-                Some(index + 1)
-            }
-            LiveValue::Int(v) => {
-                *self = Self {
-                    left: *v as f64,
-                    top: *v as f64,
-                    right: *v as f64,
-                    bottom: *v as f64
-                };
-                Some(index + 1)
-            }
-            _ => None
+        if let Some(v) = nodes[index].value.as_float(){
+            *self = Self {left: v, top: v, right: v, bottom: v};
+            Some(index + 1)
+        }
+        else{
+            None
         }
     }
 }

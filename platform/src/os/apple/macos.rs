@@ -23,7 +23,7 @@ use {
                 get_cocoa_app_global,
                 init_cocoa_globals
             },
-            metal::{MetalCx, MetalWindow},
+            metal::{MetalCx, MetalWindow, DrawPassMode},
         },
         pass::{CxPassParent},
         event::{
@@ -93,15 +93,20 @@ impl Cx {
                         if drawable == nil {
                             return
                         }
-                        self.draw_pass(*pass_id, dpi_factor, metal_cx, drawable, metal_window.is_resizing);
+                        if metal_window.is_resizing{
+                            self.draw_pass(*pass_id, dpi_factor, metal_cx, DrawPassMode::Resizing(drawable));
+                        }
+                        else{
+                            self.draw_pass(*pass_id, dpi_factor, metal_cx, DrawPassMode::Drawable(drawable));
+                        }
                     }
                 }
                 CxPassParent::Pass(parent_pass_id) => {
                     let dpi_factor = self.get_delegated_dpi_factor(parent_pass_id);
-                    self.draw_pass(*pass_id, dpi_factor, metal_cx, nil, false);
+                    self.draw_pass(*pass_id, dpi_factor, metal_cx, DrawPassMode::Texture);
                 },
                 CxPassParent::None => {
-                    self.draw_pass(*pass_id, 1.0, metal_cx, nil, false);
+                    self.draw_pass(*pass_id, 1.0, metal_cx, DrawPassMode::Texture);
                 }
             }
         }
@@ -200,6 +205,8 @@ impl Cx {
                         self.call_draw_event();
                         self.mtl_compile_shaders(&metal_cx);
                     }
+                    // ok here we send out to all our childprocesses
+                    
                     self.handle_repaint(metal_windows, metal_cx);
                 }
                 CocoaEvent::MouseDown(md) => {

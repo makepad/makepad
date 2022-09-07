@@ -65,7 +65,7 @@ live_register!{
             height: Fit
         }
         label_walk: {
-            margin: {left: 30.0, top: 8, bottom: 8, right: 10}
+            margin: {left: 770.0, top: 8, bottom: 8, right: 10}
             width: Fit,
             height: Fit,
         }
