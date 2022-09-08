@@ -6,64 +6,79 @@ use {
     }
 };
 
-pub trait LiveNodeSliceToMsgPack {
-    fn to_msgpack(&self, parent_index: usize) -> Result<Vec<u8>, String>;
+pub trait LiveNodeSliceToCbor {
+    fn to_cbor(&self, parent_index: usize) -> Result<Vec<u8>, String>;
 }
 
-pub trait LiveNodeVecFromMsgPack {
-    fn from_msgpack(&mut self, buf: &[u8]) -> Result<(), LiveNodeFromMsgPackError>;
+pub trait LiveNodeVecFromCbor {
+    fn from_cbor(&mut self, buf: &[u8]) -> Result<(), LiveNodeFromCborError>;
 }
 
 
-const MSGPACK_FIXMAP: u8 = 0x80;
-const MSGPACK_FIXARRAY: u8 = 0x90;
-const MSGPACK_FIXSTR: u8 = 0xa0;
-
-const MSGPACK_NIL: u8 = 0xc0;
-
-const MSGPACK_FALSE: u8 = 0xc2;
-const MSGPACK_TRUE: u8 = 0xc3;
-
-const MSGPACK_BIN8: u8 = 0xc4;
-const MSGPACK_BIN16: u8 = 0xc5;
-const MSGPACK_BIN32: u8 = 0xc6;
-
-const MSGPACK_EXT8: u8 = 0xc7;
-const MSGPACK_EXT16: u8 = 0xc8;
-const MSGPACK_EXT32: u8 = 0xc9;
-
-const MSGPACK_F32: u8 = 0xca;
-const MSGPACK_F64: u8 = 0xcb;
-
-const MSGPACK_U8: u8 = 0xcc;
-const MSGPACK_U16: u8 = 0xcd;
-const MSGPACK_U32: u8 = 0xce;
-const MSGPACK_U64: u8 = 0xcf;
-
-const MSGPACK_I8: u8 = 0xd0;
-const MSGPACK_I16: u8 = 0xd1;
-const MSGPACK_I32: u8 = 0xd2;
-const MSGPACK_I64: u8 = 0xd3;
-
-const MSGPACK_FIX_EXT1: u8 = 0xd4;
-const MSGPACK_FIX_EXT2: u8 = 0xd5;
-const MSGPACK_FIX_EXT4: u8 = 0xd6;
-const MSGPACK_FIX_EXT8: u8 = 0xd7;
-const MSGPACK_FIX_EXT16: u8 = 0xd8;
-
-const MSGPACK_STR8: u8 = 0xd9;
-const MSGPACK_STR16: u8 = 0xda;
-const MSGPACK_STR32: u8 = 0xdb;
-
-const MSGPACK_ARRAY16: u8 = 0xdc;
-const MSGPACK_ARRAY32: u8 = 0xdd;
-
-const MSGPACK_MAP16: u8 = 0xde;
-const MSGPACK_MAP32: u8 = 0xdf;
-
-const MSGPACK_FIXNEGINT: u8 = 0xe0;
-const MSGPACK_FIXINT: u8 = 0x80;
-
+//0x00..0x17	unsigned integer 0x00..0x17 (0..23)
+const CBOR_UINT_START: u8 = 0x00;
+const CBOR_UINT_END: u8 = 0x17;
+const CBOR_U8: u8 = 0x18; //	unsigned integer (one-byte uint8_t follows)
+const CBOR_U16: u8 = 0x19; // unsigned integer (two - byte uint16_t follows)
+const CBOR_U32: u8 = 0x1a; //	unsigned integer (four-byte uint32_t follows)
+const CBOR_U64: u8 = 0x1b; //	unsigned integer (eight-byte uint64_t follows)
+const CBOR_NUINT_START: u8 = 0x20; //..0x37	negative integer -1-0x00..-1-0x17 (-1..-24)
+const CBOR_NUINT_END: u8 = 0x37; //..0x37	negative integer -1-0x00..-1-0x17 (-1..-24)
+const CBOR_NU8: u8 = 0x38; //	negative integer -1-n (one-byte uint8_t for n follows)
+const CBOR_NU16: u8 = 0x39; //	negative integer -1-n (two-byte uint16_t for n follows)
+const CBOR_NU32: u8 = 0x3a; //	negative integer -1-n (four-byte uint32_t for n follows)
+const CBOR_NU64: u8 = 0x3b; //	negative integer -1-n (eight-byte uint64_t for n follows)
+const CBOR_BSTR_START: u8 = 0x40; //..0x57	byte string (0x00..0x17 bytes follow)
+const CBOR_BSTR_END: u8 = 0x57; //..0x57	byte string (0x00..0x17 bytes follow)
+const CBOR_BSTR_8: u8 = 0x58; //	byte string (one-byte uint8_t for n, and then n bytes follow)
+const CBOR_BSTR_16: u8 = 0x59; //	byte string (two-byte uint16_t for n, and then n bytes follow)
+const CBOR_BSTR_32: u8 = 0x5a; //	byte string (four-byte uint32_t for n, and then n bytes follow)
+const CBOR_BSTR_64: u8 = 0x5b; //	byte string (eight-byte uint64_t for n, and then n bytes follow)
+const CBOR_BSTR_BRK: u8 = 0x5f; //	byte string, byte strings follow, terminated by "break"
+const CBOR_UTF8_START: u8 = 0x60; //..0x77	UTF-8 string (0x00..0x17 bytes follow)
+const CBOR_UTF8_END: u8 = 0x77; //..0x77	UTF-8 string (0x00..0x17 bytes follow)
+const CBOR_UTF8_8: u8 = 0x78; //	UTF-8 string (one-byte uint8_t for n, and then n bytes follow)
+const CBOR_UTF8_16: u8 = 0x79; //	UTF-8 string (two-byte uint16_t for n, and then n bytes follow)
+const CBOR_UTF8_32: u8 = 0x7a; //	UTF-8 string (four-byte uint32_t for n, and then n bytes follow)
+const CBOR_UTF8_64: u8 = 0x7b; //	UTF-8 string (eight-byte uint64_t for n, and then n bytes follow)
+const CBOR_UTF8_BRK: u8 = 0x7f; //	UTF-8 string, UTF-8 strings follow, terminated by "break"
+const CBOR_ARRAY_START: u8 = 0x80; //..0x97	array (0x00..0x17 data items follow)
+const CBOR_ARRAY_END: u8 = 0x97; //..0x97	array (0x00..0x17 data items follow)
+const CBOR_ARRAY_8: u8 = 0x98; //	array (one-byte uint8_t for n, and then n data items follow)
+const CBOR_ARRAY_16: u8 = 0x99; //	array (two-byte uint16_t for n, and then n data items follow)
+const CBOR_ARRAY_32: u8 = 0x9a; //	array (four-byte uint32_t for n, and then n data items follow)
+const CBOR_ARRAY_64: u8 = 0x9b; //	array (eight-byte uint64_t for n, and then n data items follow)
+const CBOR_ARRAY_BRK: u8 = 0x9f; //	array, data items follow, terminated by "break"
+const CBOR_MAP_START: u8 = 0xa0; //..0xb7	map (0x00..0x17 pairs of data items follow)
+const CBOR_MAP_END: u8 = 0xb7; //..0xb7	map (0x00..0x17 pairs of data items follow)
+const CBOR_MAP_8: u8 = 0xb8; //	map (one-byte uint8_t for n, and then n pairs of data items follow)
+const CBOR_MAP_16: u8 = 0xb9; //	map (two-byte uint16_t for n, and then n pairs of data items follow)
+const CBOR_MAP_32: u8 = 0xba; //	map (four-byte uint32_t for n, and then n pairs of data items follow)
+const CBOR_MAP_64: u8 = 0xbb; //	map (eight-byte uint64_t for n, and then n pairs of data items follow)
+const CBOR_MAP_BRK: u8 = 0xbf; //	map, pairs of data items follow, terminated by "break"
+const CBOR_TIME_TEXT: u8 = 0xc0; //	text-based date/time (data item follows; see Section 3.4.1)
+const CBOR_TIME_EPOCH: u8 = 0xc1; //	epoch-based date/time (data item follows; see Section 3.4.2)
+const CBOR_UBIGNUM: u8 = 0xc2; //	unsigned bignum (data item "byte string" follows)
+const CBOR_NBIGNUM: u8 = 0xc3; //	negative bignum (data item "byte string" follows)
+const CBOR_DECFRACT: u8 = 0xc4; //	decimal Fraction (data item "array" follows; see Section 3.4.4)
+const CBOR_BIGFLOAT: u8 = 0xc5; //	bigfloat (data item "array" follows; see Section 3.4.4)
+const CBOR_TAG_START: u8 = 0xc6; //..0xd4	(tag)
+const CBOR_TAG_END: u8 = 0xd4; //..0xd4	(tag)
+const CBOR_CONV_START: u8 = 0xd5; //..0xd7	expected conversion (data item follows; see Section 3.4.5.2)
+const CBOR_CONV_END: u8 = 0xd7; //..0xd7	expected conversion (data item follows; see Section 3.4.5.2)
+const CBOR_MTAG_START: u8 = 0xd8; //..0xdb	(more tags; 1/2/4/8 bytes of tag number and then a data item follow)
+const CBOR_MTAG_END: u8 = 0xdb; //..0xdb	(more tags; 1/2/4/8 bytes of tag number and then a data item follow)
+const CBOR_SIMPLE_START: u8 = 0xe0; //..0xf3	(simple value)
+const CBOR_SIMPLE_END: u8 = 0xf3; //..0xf3	(simple value)
+const CBOR_FALSE: u8 = 0xf4; //	false
+const CBOR_TRUE: u8 = 0xf5; //	true
+const CBOR_NULL: u8 = 0xf6; //	null
+const CBOR_UNDEIFNED: u8 = 0xf7; //	undefined
+const CBOR_SIMPLE_8: u8 = 0xf8; //	(simple value, one byte follows)
+const CBOR_FLOAT16: u8 = 0xf9; //	half-precision float (two-byte IEEE 754)
+const CBOR_FLOAT32: u8 = 0xfa; //	single-precision float (four-byte IEEE 754)
+const CBOR_FLOAT64: u8 = 0xfb; //	double-precision float (eight-byte IEEE 754)
+const CBOR_BREAK: u8 = 0xff; //	"break" stop code
 
 /* some Rust keyword abuse here 
 key:{move:{}} // clone
@@ -74,8 +89,8 @@ key:{as:u32} // color
 key {enum:"String"} // enum
 */
 
-impl<T> LiveNodeSliceToMsgPack for T where T: AsRef<[LiveNode]> {
-    fn to_msgpack(&self, parent_index: usize) -> Result<Vec<u8>, String> {
+impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
+    fn to_cbor(&self, parent_index: usize) -> Result<Vec<u8>, String> {
         let mut out = Vec::new();
         let nodes = self.as_ref();
         let mut index = parent_index;
@@ -92,13 +107,19 @@ impl<T> LiveNodeSliceToMsgPack for T where T: AsRef<[LiveNode]> {
                     return Err("Unmatched closed".into())
                 }
                 let item = stack.pop().unwrap();
+                
                 if item.count > std::u16::MAX as usize {
-                    out[item.index] = if item.has_keys {MSGPACK_MAP32}else {MSGPACK_ARRAY32};
+                    out[item.index] = if item.has_keys {CBOR_MAP_32}else {CBOR_ARRAY_32};
                     let bytes = (item.count as u32).to_be_bytes();
                     out.splice(item.index + 1..item.index + 1, bytes.iter().cloned());
                 }
-                else if item.count >= 16 {
-                    out[item.index] = if item.has_keys {MSGPACK_MAP16}else {MSGPACK_ARRAY16};
+                else if item.count > std::u8::MAX as usize {
+                    out[item.index] = if item.has_keys {CBOR_MAP_16}else {CBOR_ARRAY_16};
+                    let bytes = (item.count as u8).to_be_bytes();
+                    out.splice(item.index + 1..item.index + 1, bytes.iter().cloned());
+                }
+                else if item.count >= 32 {
+                    out[item.index] = if item.has_keys {CBOR_MAP_8}else {CBOR_ARRAY_8};
                     let bytes = (item.count as u16).to_be_bytes();
                     out.splice(item.index + 1..item.index + 1, bytes.iter().cloned());
                 }
@@ -117,19 +138,19 @@ impl<T> LiveNodeSliceToMsgPack for T where T: AsRef<[LiveNode]> {
             }
             
             fn encode_u32(v: u32, out: &mut Vec<u8>) {
-                if v <= 127 {
+                if v <= CBOR_UINT_END as u32 {
                     out.push(v as u8)
                 }
                 else if v <= std::u8::MAX as u32 {
-                    out.push(MSGPACK_U8);
+                    out.push(CBOR_U8);
                     out.push(v as u8)
                 }
                 else if v <= std::u16::MAX as u32 {
-                    out.push(MSGPACK_U16);
+                    out.push(CBOR_U16);
                     out.extend_from_slice(&(v as u16).to_be_bytes());
                 }
                 else if v <= std::u32::MAX as u32 {
-                    out.push(MSGPACK_U32);
+                    out.push(CBOR_U32);
                     out.extend_from_slice(&(v as u32).to_be_bytes());
                 }
             }
@@ -139,12 +160,24 @@ impl<T> LiveNodeSliceToMsgPack for T where T: AsRef<[LiveNode]> {
                     encode_u32(v as u32, out);
                 }
                 else {
-                    out.push(MSGPACK_U64);
+                    out.push(CBOR_U64);
                     out.extend_from_slice(&v.to_be_bytes());
                 }
             }
             
             fn encode_i64(v: i64, out: &mut Vec<u8>) {
+                if v < 0{
+                    let v = -v - 1;
+                    if v <= (CBOR_NUINT_END - CBOR_NUINT_START) as i64{
+                        out.push(CBOR_NUINT_START + v as u8);
+                    }
+                    else if v <= std::u8::MAX as i64{
+                        out.push(CBOR_NU8);
+                    }
+                }
+                else{
+                    
+                }
                 if v >= -32 && v < 0 {
                     out.push((-v) as u8 | MSGPACK_FIXNEGINT);
                 }
@@ -378,7 +411,7 @@ const BIN_EXPR_CALL: u8 = 31;
 // compressed number values
 
 #[derive(Debug)]
-pub enum LiveNodeFromMsgPackError {
+pub enum LiveNodeFromCborError {
     OutOfBounds,
     UnexpectedVariant,
     LiveIdCollision,
@@ -389,80 +422,80 @@ pub enum LiveNodeFromMsgPackError {
     UTF8Error
 }
 
-impl LiveNodeVecFromMsgPack for Vec<LiveNode> {
+impl LiveNodeVecFromCbor for Vec<LiveNode> {
     
-    fn from_msgpack(&mut self, data: &[u8]) -> Result<(), LiveNodeFromMsgPackError> {
+    fn from_cbor(&mut self, data: &[u8]) -> Result<(), LiveNodeFromCborError> {
         // alright lets decode msgpack livenodes
         
-        fn assert_len(o: usize, len: usize, data: &[u8]) -> Result<(), LiveNodeFromMsgPackError> {
+        fn assert_len(o: usize, len: usize, data: &[u8]) -> Result<(), LiveNodeFromCborError> {
             if o + len > data.len() {panic!()} //return Err(LiveNodeFromBinaryError::OutOfBounds);}
             Ok(())
         }
         
-        fn read_u8(data: &[u8], o: &mut usize) -> Result<u8, LiveNodeFromMsgPackError> {
+        fn read_u8(data: &[u8], o: &mut usize) -> Result<u8, LiveNodeFromCborError> {
             assert_len(*o, 1, data) ?;
             let d = data[*o];
             *o += 1;
             Ok(d)
         }
         
-        fn read_u16(data: &[u8], o: &mut usize) -> Result<u16, LiveNodeFromMsgPackError> {
+        fn read_u16(data: &[u8], o: &mut usize) -> Result<u16, LiveNodeFromCborError> {
             assert_len(*o, 2, data) ?;
             let d = u16::from_be_bytes(data[*o..*o + 2].try_into().unwrap());
             *o += 2;
             Ok(d)
         }
         
-        fn read_u32(data: &[u8], o: &mut usize) -> Result<u32, LiveNodeFromMsgPackError> {
+        fn read_u32(data: &[u8], o: &mut usize) -> Result<u32, LiveNodeFromCborError> {
             assert_len(*o, 4, data) ?;
             let d = u32::from_be_bytes(data[*o..*o + 4].try_into().unwrap());
             *o += 4;
             Ok(d)
         }
         
-        fn read_u64(data: &[u8], o: &mut usize) -> Result<u64, LiveNodeFromMsgPackError> {
+        fn read_u64(data: &[u8], o: &mut usize) -> Result<u64, LiveNodeFromCborError> {
             assert_len(*o, 8, data) ?;
             let d = u64::from_be_bytes(data[*o..*o + 8].try_into().unwrap());
             *o += 8;
             Ok(d)
         }
         
-        fn read_i8(data: &[u8], o: &mut usize) -> Result<i8, LiveNodeFromMsgPackError> {
+        fn read_i8(data: &[u8], o: &mut usize) -> Result<i8, LiveNodeFromCborError> {
             assert_len(*o, 1, data) ?;
             let d = i8::from_be_bytes(data[*o..*o + 1].try_into().unwrap());
             *o += 1;
             Ok(d)
         }
         
-        fn read_i16(data: &[u8], o: &mut usize) -> Result<i16, LiveNodeFromMsgPackError> {
+        fn read_i16(data: &[u8], o: &mut usize) -> Result<i16, LiveNodeFromCborError> {
             assert_len(*o, 2, data) ?;
             let d = i16::from_be_bytes(data[*o..*o + 2].try_into().unwrap());
             *o += 2;
             Ok(d)
         }
         
-        fn read_i32(data: &[u8], o: &mut usize) -> Result<i32, LiveNodeFromMsgPackError> {
+        fn read_i32(data: &[u8], o: &mut usize) -> Result<i32, LiveNodeFromCborError> {
             assert_len(*o, 4, data) ?;
             let d = i32::from_be_bytes(data[*o..*o + 4].try_into().unwrap());
             *o += 4;
             Ok(d)
         }
         
-        fn read_i64(data: &[u8], o: &mut usize) -> Result<i64, LiveNodeFromMsgPackError> {
+        fn read_i64(data: &[u8], o: &mut usize) -> Result<i64, LiveNodeFromCborError> {
             assert_len(*o, 8, data) ?;
             let d = i64::from_be_bytes(data[*o..*o + 8].try_into().unwrap());
             *o += 8;
             Ok(d)
         }
         
-        fn read_f32(data: &[u8], o: &mut usize) -> Result<f32, LiveNodeFromMsgPackError> {
+        fn read_f32(data: &[u8], o: &mut usize) -> Result<f32, LiveNodeFromCborError> {
             assert_len(*o, 4, data) ?;
             let d = f32::from_be_bytes(data[*o..*o + 4].try_into().unwrap());
             *o += 4;
             Ok(d)
         }
         
-        fn read_f64(data: &[u8], o: &mut usize) -> Result<f64, LiveNodeFromMsgPackError> {
+        fn read_f64(data: &[u8], o: &mut usize) -> Result<f64, LiveNodeFromCborError> {
             assert_len(*o, 8, data) ?;
             let d = f64::from_be_bytes(data[*o..*o + 8].try_into().unwrap());
             *o += 8;
@@ -470,7 +503,7 @@ impl LiveNodeVecFromMsgPack for Vec<LiveNode> {
         }
         
         fn decode_str<'a>(data: &'a [u8], o: &mut usize) -> Result<Option<&'a str>,
-        LiveNodeFromMsgPackError> {
+        LiveNodeFromCborError> {
             assert_len(*o, 1, data) ?;
             let len = if data[*o] & MSGPACK_FIXSTR == MSGPACK_FIXSTR {
                 let r = (data[*o] & 0xf) as usize;
@@ -500,10 +533,10 @@ impl LiveNodeVecFromMsgPack for Vec<LiveNode> {
                 *o += len;
                 return Ok(Some(val))
             }
-            return Err(LiveNodeFromMsgPackError::UTF8Error);
+            return Err(LiveNodeFromCborError::UTF8Error);
         }
         
-        fn decode_u64(data: &[u8], o: &mut usize) -> Result<Option<u64>, LiveNodeFromMsgPackError> {
+        fn decode_u64(data: &[u8], o: &mut usize) -> Result<Option<u64>, LiveNodeFromCborError> {
             assert_len(*o, 1, data) ?;
             let v = if data[*o] & MSGPACK_FIXINT == 0 {
                 let r = Some(data[*o] as u64);
@@ -534,7 +567,7 @@ impl LiveNodeVecFromMsgPack for Vec<LiveNode> {
             return Ok(v)
         }
         
-        fn decode_i64(data: &[u8], o: &mut usize) -> Result<Option<i64>, LiveNodeFromMsgPackError> {
+        fn decode_i64(data: &[u8], o: &mut usize) -> Result<Option<i64>, LiveNodeFromCborError> {
             assert_len(*o, 1, data) ?;
             let v = if data[*o] & MSGPACK_FIXINT == 0 {
                 let r = Some(data[*o] as i64);
@@ -570,7 +603,7 @@ impl LiveNodeVecFromMsgPack for Vec<LiveNode> {
             Ok(v)
         }
         
-        fn decode_array_len(data: &[u8], o: &mut usize) -> Result<Option<usize>, LiveNodeFromMsgPackError> {
+        fn decode_array_len(data: &[u8], o: &mut usize) -> Result<Option<usize>, LiveNodeFromCborError> {
             assert_len(*o, 1, data) ?;
             let v = if data[*o] & MSGPACK_FIXARRAY == MSGPACK_FIXARRAY {
                 let r = Some((data[*o] & 0xf) as usize);
@@ -593,7 +626,7 @@ impl LiveNodeVecFromMsgPack for Vec<LiveNode> {
             Ok(v)
         }
         
-        fn decode_map_len(data: &[u8], o: &mut usize) -> Result<Option<usize>, LiveNodeFromMsgPackError> {
+        fn decode_map_len(data: &[u8], o: &mut usize) -> Result<Option<usize>, LiveNodeFromCborError> {
             assert_len(*o, 1, data) ?;
             let v = if data[*o] & MSGPACK_FIXMAP == MSGPACK_FIXMAP {
                 let r = Some((data[*o] & 0xf) as usize);
@@ -616,14 +649,14 @@ impl LiveNodeVecFromMsgPack for Vec<LiveNode> {
             Ok(v)
         }
         
-        fn decode_id(data: &[u8], o: &mut usize) -> Result<Option<LiveId>, LiveNodeFromMsgPackError> {
+        fn decode_id(data: &[u8], o: &mut usize) -> Result<Option<LiveId>, LiveNodeFromCborError> {
             // we expect a string OR a u64
             if let Some(val) = decode_str(data, o) ? {
                 if let Ok(id) = LiveId::from_str(val) {
                     return Ok(Some(id))
                 }
                 else {
-                    return Err(LiveNodeFromMsgPackError::LiveIdCollision)
+                    return Err(LiveNodeFromCborError::LiveIdCollision)
                 }
             }
             else if let Some(v) = decode_u64(data, o) ? {
@@ -650,7 +683,7 @@ impl LiveNodeVecFromMsgPack for Vec<LiveNode> {
             let stack_item = stack.last_mut().unwrap();
             let id = if stack_item.has_keys {
                 let id = decode_id(data, &mut o) ?;
-                if id.is_none() {return Err(LiveNodeFromMsgPackError::ExpectedId)}
+                if id.is_none() {return Err(LiveNodeFromCborError::ExpectedId)}
                 id.unwrap()
             }
             else {
@@ -686,10 +719,10 @@ impl LiveNodeVecFromMsgPack for Vec<LiveNode> {
                     if let Some(s) = decode_str(data, &mut o1) ? {
                         match s {
                             "in" => { // its a vec
-                                return Err(LiveNodeFromMsgPackError::NotImpl)
+                                return Err(LiveNodeFromCborError::NotImpl)
                             }
                             "as" => { // its a color
-                                return Err(LiveNodeFromMsgPackError::NotImpl)
+                                return Err(LiveNodeFromCborError::NotImpl)
                             }
                             "if" => { // bare enum
                                 if let Some(id) = decode_id(data, &mut o1) ? {
@@ -702,11 +735,11 @@ impl LiveNodeVecFromMsgPack for Vec<LiveNode> {
                                     continue;
                                 }
                                 else {
-                                    return Err(LiveNodeFromMsgPackError::ExpectedBareEnumString)
+                                    return Err(LiveNodeFromCborError::ExpectedBareEnumString)
                                 }
                             }
                             "enum" => { // other enum
-                                return Err(LiveNodeFromMsgPackError::NotImpl)
+                                return Err(LiveNodeFromCborError::NotImpl)
                             }
                             _ => ()
                         }
@@ -740,7 +773,7 @@ impl LiveNodeVecFromMsgPack for Vec<LiveNode> {
                         self.push(LiveNode {id, origin, value: LiveValue::None});
                     },
                     _ => {
-                        return Err(LiveNodeFromMsgPackError::UnexpectedValue)
+                        return Err(LiveNodeFromCborError::UnexpectedValue)
                     }
                 }
             };
