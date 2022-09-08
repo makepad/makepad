@@ -14,6 +14,7 @@ pub trait LiveNodeVecFromMsgPack {
     fn from_msgpack(&mut self, buf: &[u8]) -> Result<(), LiveNodeFromMsgPackError>;
 }
 
+
 const MSGPACK_FIXMAP: u8 = 0x80;
 const MSGPACK_FIXARRAY: u8 = 0x90;
 const MSGPACK_FIXSTR: u8 = 0xa0;
@@ -85,6 +86,29 @@ impl<T> LiveNodeSliceToMsgPack for T where T: AsRef<[LiveNode]> {
         
         while index < nodes.len() {
             let node = &nodes[index];
+            
+            if node.value.is_close() {
+                if stack.len() == 0 {
+                    return Err("Unmatched closed".into())
+                }
+                let item = stack.pop().unwrap();
+                if item.count > std::u16::MAX as usize {
+                    out[item.index] = if item.has_keys {MSGPACK_MAP32}else {MSGPACK_ARRAY32};
+                    let bytes = (item.count as u32).to_be_bytes();
+                    out.splice(item.index + 1..item.index + 1, bytes.iter().cloned());
+                }
+                else if item.count >= 16 {
+                    out[item.index] = if item.has_keys {MSGPACK_MAP16}else {MSGPACK_ARRAY16};
+                    let bytes = (item.count as u16).to_be_bytes();
+                    out.splice(item.index + 1..item.index + 1, bytes.iter().cloned());
+                }
+                else {
+                    out[item.index] |= item.count as u8
+                }
+                index += 1;
+                continue;
+            }
+            
             let item = stack.last_mut().unwrap();
             item.count += 1;
             
@@ -288,28 +312,10 @@ impl<T> LiveNodeSliceToMsgPack for T where T: AsRef<[LiveNode]> {
                     out.push(MSGPACK_FIXMAP);
                 },
                 LiveValue::Object => {
-                    out.push(MSGPACK_FIXMAP);
                     stack.push(StackItem {index: out.len(), count: 0, has_keys: true});
+                    out.push(MSGPACK_FIXMAP);
                 }, // subnodes including this one
-                LiveValue::Close => {
-                    if stack.len() == 0 {
-                        return Err("Unmatched closed".into())
-                    }
-                    let item = stack.pop().unwrap();
-                    if item.count > std::u16::MAX as usize {
-                        out[item.index] = if item.has_keys {MSGPACK_MAP32}else {MSGPACK_ARRAY32};
-                        let bytes = (item.count as u32).to_be_bytes();
-                        out.splice(item.index + 1..item.index + 1, bytes.iter().cloned());
-                    }
-                    else if item.count >= 16 {
-                        out[item.index] = if item.has_keys {MSGPACK_MAP16}else {MSGPACK_ARRAY16};
-                        let bytes = (item.count as u16).to_be_bytes();
-                        out.splice(item.index + 1..item.index + 1, bytes.iter().cloned());
-                    }
-                    else {
-                        out[item.index] |= item.count as u8
-                    }
-                },
+                LiveValue::Close => {},
                 // TODO ITEMS
                 LiveValue::Id(_) => {
                     return Err("Cannot serialise LiveValue::Id".into())
@@ -377,6 +383,7 @@ pub enum LiveNodeFromMsgPackError {
     UnexpectedVariant,
     LiveIdCollision,
     ExpectedId,
+    NotImpl,
     UnexpectedValue,
     ExpectedBareEnumString,
     UTF8Error
@@ -490,6 +497,7 @@ impl LiveNodeVecFromMsgPack for Vec<LiveNode> {
             };
             assert_len(*o, len, data) ?;
             if let Ok(val) = std::str::from_utf8(&data[*o..*o + len]) {
+                *o += len;
                 return Ok(Some(val))
             }
             return Err(LiveNodeFromMsgPackError::UTF8Error);
@@ -633,6 +641,7 @@ impl LiveNodeVecFromMsgPack for Vec<LiveNode> {
             let origin = LiveNodeOrigin::field();
             
             if stack.last().unwrap().count == stack.last().unwrap().len {
+                println!("CLOSE!");
                 self.push(LiveNode {id: LiveId(0), origin, value: LiveValue::Close});
                 stack.pop();
             }
@@ -652,7 +661,7 @@ impl LiveNodeVecFromMsgPack for Vec<LiveNode> {
             
             assert_len(o, 1, data) ?;
             
-            println!("{:x}", data[o]);
+            println!("{} {:x}", id, data[o]);
             
             if let Some(v) = decode_i64(data, &mut o) ? {
                 self.push(LiveNode {id, origin, value: LiveValue::Int64(v)});
@@ -677,8 +686,10 @@ impl LiveNodeVecFromMsgPack for Vec<LiveNode> {
                     if let Some(s) = decode_str(data, &mut o1) ? {
                         match s {
                             "in" => { // its a vec
+                                return Err(LiveNodeFromMsgPackError::NotImpl)
                             }
                             "as" => { // its a color
+                                return Err(LiveNodeFromMsgPackError::NotImpl)
                             }
                             "if" => { // bare enum
                                 if let Some(id) = decode_id(data, &mut o1) ? {
@@ -695,23 +706,24 @@ impl LiveNodeVecFromMsgPack for Vec<LiveNode> {
                                 }
                             }
                             "enum" => { // other enum
+                                return Err(LiveNodeFromMsgPackError::NotImpl)
                             }
                             _ => ()
                         }
                     }
                 }
-                stack.push(StackItem {count: 0, len, has_keys: false});
+                stack.push(StackItem {count: 0, len, has_keys: true});
                 self.push(LiveNode {id, origin, value: LiveValue::Object});
             }
             else {
                 match data[o] {
-                    MSGPACK_TRUE=>{
+                    MSGPACK_TRUE => {
                         o += 1;
-                        self.push(LiveNode {id, origin, value:LiveValue::Bool(true)});
+                        self.push(LiveNode {id, origin, value: LiveValue::Bool(true)});
                     }
-                    MSGPACK_FALSE=>{
+                    MSGPACK_FALSE => {
                         o += 1;
-                        self.push(LiveNode {id, origin, value:LiveValue::Bool(false)});
+                        self.push(LiveNode {id, origin, value: LiveValue::Bool(false)});
                     }
                     MSGPACK_F32 => {
                         o += 1;
@@ -727,8 +739,7 @@ impl LiveNodeVecFromMsgPack for Vec<LiveNode> {
                         o += 1;
                         self.push(LiveNode {id, origin, value: LiveValue::None});
                     },
-                    value => {
-                        println!("UNEXPECTED VALUE {:x}", value);
+                    _ => {
                         return Err(LiveNodeFromMsgPackError::UnexpectedValue)
                     }
                 }

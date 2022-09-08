@@ -14,6 +14,7 @@ pub mod live_ptr;
 pub mod live_eval;
 pub mod live_component;
 pub mod live_node_msgpack;
+//pub mod live_node_cbor;
 pub mod live_node_reader;
 
 pub use makepad_math;
