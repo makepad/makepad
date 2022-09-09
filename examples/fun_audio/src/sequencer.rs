@@ -22,7 +22,6 @@ live_register!{
     }
     
     SeqButton: {{SeqButton}} {
-        
         state: {
             hover = {
                 default: off,
@@ -78,6 +77,9 @@ pub struct SeqButton {
     state: State,
 }
 
+#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
+pub struct SeqButtonId(pub LiveId);
+
 #[derive(Live, FrameComponent)]
 #[live_register(frame_component!(Sequencer))]
 pub struct Sequencer {
@@ -106,8 +108,7 @@ impl LiveHook for Sequencer {
 
 #[derive(Clone, FrameAction)]
 pub enum SeqButtonAction {
-    On,
-    Off,
+    Change(bool),
     None
 }
 
@@ -152,11 +153,11 @@ impl SeqButton {
             Hit::FingerSweepIn(_) => {
                 if self.state.is_in_state(cx, ids!(active.on)){
                     self.animate_state(cx, ids!(active.off));
-                    dispatch_action(cx, SeqButtonAction::Off);
+                    dispatch_action(cx, SeqButtonAction::Change(false));
                 }
                 else{
                     self.animate_state(cx, ids!(active.on));
-                    dispatch_action(cx, SeqButtonAction::On);
+                    dispatch_action(cx, SeqButtonAction::Change(true));
                     
                 }
                 self.animate_state(cx, ids!(hover.on));
@@ -223,12 +224,8 @@ impl Sequencer {
             let x = i % self.grid_x;
             let y = i / self.grid_x;
             match action {
-                SeqButtonAction::On => {
-                    self.set_key_focus(cx);
-                    dispatch_action(cx, SequencerAction::Change(x, y, true));
-                }
-                SeqButtonAction::Off => {
-                    dispatch_action(cx, SequencerAction::Change(x, y, false));
+                SeqButtonAction::Change(active) => {
+                    dispatch_action(cx, SequencerAction::Change(x, y, active));
                 }
                 _=>()
             }
@@ -248,8 +245,6 @@ impl Sequencer {
     }
 }
 
-#[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
-pub struct SeqButtonId(pub LiveId);
 
 pub struct SequencerImGUI(ImGUIRef);
 

@@ -1121,7 +1121,7 @@ impl App {
         if save {
             let nodes = iron_fish.settings.live_read();
             let data = nodes.to_msgpack(0).unwrap();
-            let data = makepad_miniz::compress_to_vec(&data, 10);
+            //let data = makepad_miniz::compress_to_vec(&data, 10);
             log!("Saving preset {}", file_name);
             let mut file = File::create(&file_name).unwrap();
             file.write_all(&data).unwrap();
@@ -1130,16 +1130,16 @@ impl App {
             log!("Loading preset {}", file_name);
             let mut data = Vec::new();
             file.read_to_end(&mut data).unwrap();
-            if let Ok(data) = makepad_miniz::decompress_to_vec(&data) {
+            //if let Ok(data) = makepad_miniz::decompress_to_vec(&data) {
                 let mut nodes = Vec::new();
                 nodes.from_msgpack(&data).unwrap();
                 
                 iron_fish.settings.apply_over(cx, &nodes);
                 self.imgui.root_frame().bind_read(cx, &nodes);
-            }
-            else {
-                log!("Error decompressing preset");
-            }
+            //}
+            //else {
+           //     log!("Error decompressing preset");
+            //}
         }
     }
     
