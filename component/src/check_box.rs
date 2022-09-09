@@ -81,7 +81,7 @@ live_register!{
             hover = {
                 default: off
                 off = {
-                    from: {all: Play::Forward {duration: 0.1}}
+                    from: {all: Play::Forward {duration: 0.0}}
                     apply: {
                         check_box: {hover: 0.0}
                     }
@@ -96,7 +96,7 @@ live_register!{
             focus = {
                 default: off
                 off = {
-                    from: {all: Play::Forward {duration: 0.1}}
+                    from: {all: Play::Forward {duration: 0.0}}
                     apply: {
                         check_box: {focus: 0.0}
                     }
@@ -111,12 +111,12 @@ live_register!{
             selected = {
                 default: off
                 off = {
-                    from: {all: Play::Forward {duration: 0.1}}
+                    from: {all: Play::Forward {duration: 0.0}}
                     apply: {check_box: {selected: 0.0}}
                 }
                 on = {
                     cursor: Arrow,
-                    from: {all: Play::Forward {duration: 0.1}}
+                    from: {all: Play::Forward {duration: 0.0}}
                     apply: {check_box: {selected: 1.0}}
                 }
             }
