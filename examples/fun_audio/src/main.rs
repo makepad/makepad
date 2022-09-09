@@ -31,7 +31,8 @@ live_register!{
     import makepad_component::frame::*;
     import makepad_draw_2d::shader::std::*;
 
-    SPACING_PANELS : 15.0
+    const SPACING_PANELS : 10.0
+    const SPACING_CONTROLS : 4.0
     const COLOR_OSC : #xFFFF99 // yellow
     const COLOR_MIX : #xC // gray
     const COLOR_ENV : #xFFC499 // light red
@@ -41,24 +42,24 @@ live_register!{
     const COLOR_FX : #x99EEFF // light green
     const COLOR_TEXT_H1 : #x181818
     const COLOR_TEXT_H2 : #x9
-    const FONT_SIZE_H1: 11.5
-    const FONT_SIZE_H2: 10 
+    const FONT_SIZE_H1: 11.0
+    const FONT_SIZE_H2: 9.5
     
 
-    MainHeader: FoldHeader {
-        state: {
-            open = {
-                off = {apply: {header: {bg: {radius: vec2(3.0, 3.0)}}}}
-                on = {apply: {header: {bg: {radius: vec2(3.0, 1.0)}}}}
-            }
-        }
-        header: BoxY {
-            cursor: Default,
-            bg: {color: #6},
-            walk: {width: Fill, height: Fit},
-            layout: {flow: Right, padding: 8, spacing: 5}
-        }
-    }
+    // MainHeader: FoldHeader {
+    //     state: {
+    //         open = {
+    //             off = {apply: {header: {bg: {radius: vec2(3.0, 3.0)}}}}
+    //             on = {apply: {header: {bg: {radius: vec2(3.0, 1.0)}}}}
+    //         }
+    //     }
+    //     header: BoxY {
+    //         cursor: Default,
+    //         bg: {color: #6},
+    //         walk: {width: Fill, height: Fit},
+    //         layout: {flow: Right, padding: 8, spacing: 5}
+    //     }
+    // }
     
     InstrumentHeader: FoldHeader {
         header: Rect {
@@ -78,19 +79,13 @@ live_register!{
     ElementBox: Frame {
         bg: {color: #4}
         walk: {width: Fill, height: Fit}
-        layout: {flow: Down, padding: {left: 8, top: 5, bottom: 3, right: 8}, spacing: 5}
+        layout: {flow: Down, padding: {left: (SPACING_CONTROLS), top: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), right: (SPACING_CONTROLS)}, spacing: (SPACING_CONTROLS)}
     }
     
     FishDropDown: DropDown {
-        // popup_menu: {
-        //     name: {
-        //         {text_style: {font_size: (FONT_SIZE_H2), font: { path: d"resources/IBMPlexSans-SemiBold.ttf" }}, color: (COLOR_TEXT_H1)}
-        //     }
-        // }
-        layout: {
-            padding: {left: 6.0, top: 6.0, right: 4.0, bottom: 6.0}
-        }
-        label:{text_style: {font_size: (FONT_SIZE_H2), font: { path: d"resources/IBMPlexSans-SemiBold.ttf" }}, color: (COLOR_TEXT_H1)}
+        walk: { margin: {left: 0.0, right: 0.0, top: 0.0, bottom: 0.0}}
+        layout: {padding: 6.0}
+        label: {text_style: {font_size: (FONT_SIZE_H2), font: { path: d"resources/IBMPlexSans-SemiBold.ttf" }}, color: (COLOR_TEXT_H1)}
         bg: {
             fn get_bg(self, inout sdf: Sdf2d) {
                 sdf.box(
@@ -135,8 +130,8 @@ live_register!{
         }
         
         walk: {
-            width: Size::Fit,
-            height: Size::Fit,
+            width: 30,
+            height: 30,
             margin: {left: 1.0, right: 1.0, top: 1.0, bottom: 1.0},
         }
         
@@ -148,7 +143,11 @@ live_register!{
 
     FishSlider: Slider {
         label: "CutOff1"
-        walk: {height: 40}
+        walk: {
+                height: 40,
+                margin: {left: 0.0, right: 1.0, top: 0.0, bottom: 0.0},
+        }
+
         label_text:{text_style: {font_size: (FONT_SIZE_H2), font: { path: d"resources/IBMPlexSans-SemiBold.ttf" }}, color: (COLOR_TEXT_H2)}
         slider: {
             instance line_color: #f00
@@ -202,30 +201,31 @@ live_register!{
     
     InstrumentCheckbox: ElementBox {
         bg: {color: #f00}
+        layout: { padding: 0.0 }
         checkbox = CheckBox {
             label: "CutOff1"
-            
-
             label_text: {text_style: {font_size: (FONT_SIZE_H2), font: { path: d"resources/IBMPlexSans-SemiBold.ttf" }}, color: (COLOR_TEXT_H2)}
-
+            walk: { margin: {top: 5, right: 0, bottom: 5, left: 0} }
             label_walk: {
-                margin: {left: 23.0, top: 8, bottom: 8, right: 10}
+                margin: {left: 23.0, top: 0, bottom: 0, right: 0}
             }
         }
     }
     
     InstrumentDropdown: ElementBox {
-        layout: {align: {y: 0.5}, padding: 5, flow: Right}
-        label = Label { walk: {width: 30, margin: {left: 7}},
+        layout: {align: {y: 0.5}, padding: 0, flow: Right}
+        label = Label { walk: {width: Fit, margin: {right: 5} }, 
             label: {
                 color: (COLOR_TEXT_H2)
+                text_style: {font_size: (FONT_SIZE_H2), font: { path: d"resources/IBMPlexSans-SemiBold.ttf" }}, color: (COLOR_TEXT_H2)
             }
         }
+        walk: {margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: (SPACING_CONTROLS)}}
         dropdown = FishDropDown {}
     }
 
     GraphPaper: Box {
-        walk: {width: Fill, height: 100, margin: {left: 5, right: 5}}
+        walk: {width: Fill, height: 100, margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: (SPACING_CONTROLS)}}
         bg: {
             radius: 3,
             color: #x3F,
@@ -286,6 +286,7 @@ live_register!{
             slider = {
                 slider: {line_color: (COLOR_ENV)}
                 bind: "adsr.h"
+            walk: { margin: 0.0 }
                 min: 0.0
                 max: 1.0
                 label: "H"
@@ -332,12 +333,11 @@ live_register!{
                 sdf.line_to(1.0, 1.0 + edge);
                 sdf.close_path();
                 sdf.fill(self.color);
-                //sdf.stroke(self.color, 1.0)
                 return sdf.result
             }
         }
         walk: {width: Fill, height: Fit}
-        layout: {padding: {left: 10, top: 5, right: 10, bottom: 5}}
+        layout: {padding: {left: (SPACING_CONTROLS), top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS)}}
         label = Label {
             label: {text_style: {font_size: (FONT_SIZE_H1), font: { path: d"resources/IBMPlexSans-SemiBold.ttf" }}, color: (COLOR_TEXT_H1)}
             text: "replace me!"
@@ -348,9 +348,9 @@ live_register!{
     FishPanel: Frame {
         layout: {flow: Down}
         walk: {width: Fill, height: Fit}
-        label = FishHeader {label = {text: "ReplaceMe"}}
+        label = FishHeader {label = {text: "ReplaceMe", walk: { margin: { top: 0, right: (SPACING_CONTROLS), bottom: 0, left: (SPACING_CONTROLS) }}}}
         body = Box {
-            layout: {flow: Down, padding: {top: 10, left: 6, right: 6, bottom: 15}}
+            layout: {flow: Down, padding: {top: (SPACING_CONTROLS), left: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS)}}
             walk: {width: Fill, height: Fit, margin: {top: -3, left: 0.25}}
             bg: {
                 color: #5
@@ -363,7 +363,13 @@ live_register!{
                     sdf.line_to(self.rect_size.x - edge, self.rect_size.y - 2.0)
                     sdf.line_to(1.0, self.rect_size.y - 2.0);
                     sdf.close_path();
-                    sdf.fill_keep(mix(#47, #3c, pow(self.pos.x, 8.0)));
+                    sdf.fill_keep(mix(#xFFFFFF60, #xFFFFFF10, pow(self.pos.x, 0.05)));
+                    // sdf.fill_keep(
+                    //  mix(
+                    //     mix(#xf00f, #x00ff, self.rect_size.x / 0.5),
+                    //     mix(#x00ff, #ffff, (self.rect_size.x - 0.5)/(1.0 - 0.5)),
+                    //     step(0.5, self.rect_size.x))
+                    // )
                     sdf.stroke(self.color, 1.0)
                     return sdf.result
                 }
@@ -374,8 +380,6 @@ live_register!{
     TouchPanel: FishPanel {
         label = {bg: {color: (COLOR_TOUCH)}, label = {text: "Touch"}}
         body = {
-            // bg: {color: #ccfc9f}
-            
             scale = InstrumentBipolarSlider {
                 slider = {
                     slider: {line_color: (COLOR_TOUCH)}
@@ -387,30 +391,44 @@ live_register!{
                     label: "Scale"
                 }
             }
-            offset = InstrumentBipolarSlider {
-                slider = {
-                    slider: {line_color: (COLOR_TOUCH)}
-                    bind: "touch.offset"
-                    min: -1.0
-                    max: 1.0
-                    label: "Offset"
+            twocol = Frame {
+                layout: {flow: Right}
+                walk: {width: Fill, height: Fit}
+                offset = InstrumentBipolarSlider {
+                    slider = {
+                        slider: {line_color: (COLOR_TOUCH)}
+                        bind: "touch.offset"
+                        min: -1.0
+                        max: 1.0
+                        label: "Offset"
+                    }
                 }
-            }
-            curve = InstrumentSlider {
-                slider = {
-                    slider: {line_color: (COLOR_TOUCH)}
-                    bind: "touch.curve"
-                    min: 0.0
-                    max: 1.0
-                    label: "Curvature"
+                curve = InstrumentSlider {
+                    slider = {
+                        slider: {line_color: (COLOR_TOUCH)}
+                        bind: "touch.curve"
+                        min: 0.0
+                        max: 1.0
+                        label: "Curvature"
+                    }
                 }
             }
         }
     }
     SequencerPanel: FishPanel {
         label = {bg: {color: (COLOR_MIX)}, label = {text: "Sequencer"}}
+        walk: {width: Fill, height: Fill}
         body = {
-            // bg: {color: (COLOR_MIX)}
+            walk: {width: Fill, height: Fill}
+            Frame {
+                walk: {height: Fit}
+                playpause = InstrumentCheckbox {
+                    checkbox = {
+                        bind: "sequencer.playing",
+                        label: "Play"
+                    }
+                }
+            }
             speed = InstrumentSlider {
                 slider = {
                     slider: {line_color: (COLOR_MIX)}
@@ -419,14 +437,7 @@ live_register!{
                     max: 240.0
                     label: "BPM"
                 }
-                playpause = InstrumentCheckbox {
-                    checkbox = {
-                        bind: "sequencer.playing",
-                        label: "Play"
-                    }
-                }
-                sequencer = Sequencer{
-                     
+                sequencer = Sequencer {
                 }
             }
         }
@@ -434,7 +445,6 @@ live_register!{
     MixerPanel: FishPanel {
         label = {bg: {color: (COLOR_MIX)}, label = {text: "Mixer"}}
         body = {
-            // bg: {color: (COLOR_MIX)}
             balance = InstrumentBipolarSlider {
                 slider = {
                     slider: {line_color: (COLOR_MIX)}
@@ -444,55 +454,61 @@ live_register!{
                     label: "Oscillator 1/2 Balance"
                 }
             }
-            noise = InstrumentSlider {
-                slider = {
-                    slider: {line_color: (COLOR_MIX)}
-                    bind: "noise"
-                    min: 0.0
-                    max: 1.0
-                    label: "Noise"
+            twocol = Frame {
+                layout: {flow: Right}
+                walk: {width: Fill, height: Fit}
+                noise = InstrumentSlider {
+                    slider = {
+                        slider: {line_color: (COLOR_MIX)}
+                        bind: "noise"
+                        min: 0.0
+                        max: 1.0
+                        label: "Noise"
+                    }
                 }
-            }
-            sub = InstrumentSlider {
-                slider = {
-                    slider: {line_color: (COLOR_MIX)}
-                    bind: "sub_osc"
-                    min: 0.0
-                    max: 1.0
-                    label: "Sub Oscillator"
+                sub = InstrumentSlider {
+                    slider = {
+                        slider: {line_color: (COLOR_MIX)}
+                        bind: "sub_osc"
+                        min: 0.0
+                        max: 1.0
+                        label: "Sub Oscillator"
+                    }
                 }
             }
         }        
     }
     FXPanel: FishPanel {
-
         label = {bg: {color: (COLOR_FX)}, label = {text: "Effects",}}
         body = {
-            // bg: {color: #9fe2fc},
+            layout: {flow: Right}
+            walk: {width: Fill, height: Fit}
             delaysend = InstrumentSlider {
-            slider = {
-                slider: {line_color: (COLOR_FX)}
-                bind: "fx.delaysend"
-                min: 0.0
-                max: 1.0
-                label: "Delay Send"
+                slider = {
+                    slider: {line_color: (COLOR_FX)}
+                    bind: "fx.delaysend"
+                    min: 0.0
+                    max: 1.0
+                    label: "Delay Send"
+                }
             }
-        } delayfeedback = InstrumentSlider {
-            slider = {
-                slider: {line_color: (COLOR_FX)}
-                bind: "fx.delayfeedback"
-                min: 0.0
-                max: 1.0
-                label: "Delay Feedback"
+            delayfeedback = InstrumentSlider {
+                slider = {
+                    slider: {line_color: (COLOR_FX)}
+                    bind: "fx.delayfeedback"
+                    min: 0.0
+                    max: 1.0
+                    label: "Delay Feedback"
 
+                }
             }
         }
-    }
     }
     LFOPanel: FishPanel {
         label = {bg: {color: (COLOR_LFO)}, label = {text: "LFO"}}
         body = {
-            // bg: {color: #f4756e}
+            layout: {flow: Right}
+            walk: {width: Fill, height: Fit}
             rate = InstrumentSlider {
                 slider = {
                     slider: {line_color: (COLOR_LFO)}
@@ -514,10 +530,9 @@ live_register!{
     VolumeEnvelopePanel: FishPanel {
         label = {bg: {color: (COLOR_ENV)}, label = {text: "Volume Env"}}
         body = {
-            // bg: {color: #f9b08b}
             vol_env = EnvelopePanel {
-                attack = {slider = {bind: "volume_envelope.a"}}
-                hold = {slider = {bind: "volume_envelope.h"}}
+                attack = { slider = {bind: "volume_envelope.a"}}
+                hold = { slider = {bind: "volume_envelope.h"}}
                 decay = {slider = {bind: "volume_envelope.d"}}
                 sustain = {slider = {bind: "volume_envelope.s"}}
                 release = {slider = {bind: "volume_envelope.r"}}
@@ -528,10 +543,9 @@ live_register!{
     ModEnvelopePanel: FishPanel {
         label = {bg: {color: (COLOR_ENV)}, label = {text: "Modulation Env"}}
         body = {
-            // bg: {color: #f9b08b}
             mod_env = EnvelopePanel {
-                attack = {slider = {bind: "mod_envelope.a"}}
-                hold = {slider = {bind: "mod_envelope.h"}}
+                attack = { slider = {bind: "mod_envelope.a"}}
+                hold = { slider = {bind: "mod_envelope.h"}}
                 decay = {slider = {bind: "mod_envelope.d"}}
                 sustain = {slider = {bind: "mod_envelope.s"}}
                 release = {slider = {bind: "mod_envelope.r"}}
@@ -541,8 +555,10 @@ live_register!{
     
     FilterPanel: FishPanel {
         label = {bg: {color: (COLOR_FILTER)}, label = {text: "Filter"}}
+        walk: {width: Fill, height: Fill}
         body = {
-            // bg: {color: #7C93B8}
+            layout: {flow: Down}
+            walk: {width: Fill, height: Fill}
             InstrumentDropdown {
                 label = {text: "Filter"}
                 dropdown = {
@@ -551,7 +567,7 @@ live_register!{
                     items: ["LowPass", "HighPass", "BandPass", "BandReject"]
                 }
             }
-            
+           
             cutoff = InstrumentSlider {
                 slider = {
                     slider: {line_color: (COLOR_FILTER)}
@@ -571,7 +587,6 @@ live_register!{
                     label: "Resonance"
                 }
             }
-            
             modamount = InstrumentBipolarSlider {
                 slider = {
                     slider: {line_color: (COLOR_FILTER)}
@@ -615,23 +630,27 @@ live_register!{
                 }
             }
             
-            transpose = InstrumentBipolarSlider {
-                slider = {
-                    slider: {line_color:(COLOR_OSC)}
-                    bind: "osc1.transpose"
-                    min: -24.0
-                    max: 24.0
-                    label: "Transpose"
+            twocol = Frame {
+                layout: {flow: Right}
+                walk: {width: Fill, height: Fit}
+                transpose = InstrumentBipolarSlider {
+                    slider = {
+                        slider: {line_color:(COLOR_OSC)}
+                        bind: "osc1.transpose"
+                        min: -24.0
+                        max: 24.0
+                        label: "Transpose"
+                    }
                 }
-            }
-            
-            detune = InstrumentBipolarSlider {
-                slider = {
-                    slider: {line_color: (COLOR_OSC)}
-                    bind: "osc1.detune"
-                    min: -1.0
-                    max: 1.0
-                    label: "Detune"
+                
+                detune = InstrumentBipolarSlider {
+                    slider = {
+                        slider: {line_color: (COLOR_OSC)}
+                        bind: "osc1.detune"
+                        min: -1.0
+                        max: 1.0
+                        label: "Detune"
+                    }
                 }
             }
         }
@@ -693,6 +712,25 @@ live_register!{
                 flow: Flow::Down
             },
             Frame {
+                Frame {
+                    walk: {width: Fill, height: Fit, margin: {bottom: 5, left: 80, top: 10}}
+                    bg: {color: #f00}
+                    layout: {flow: Down, spacing: 8.0, align: {x: 1.0, y: 1.0}}
+                    Frame {
+                        walk: {width: Fill, height: Fit}
+                        layout: {flow: Right, spacing: 2.0}
+                        save1 = FishButton {text: "1"}
+                        save2 = FishButton {text: "2"}
+                        save3 = FishButton {text: "3"}
+                        save4 = FishButton {text: "4"}
+                        save5 = FishButton {text: "5"}
+                        save6 = FishButton {text: "6"}
+                        save7 = FishButton {text: "7"}
+                        save8 = FishButton {text: "8"}
+                        panic = FishButton {text: "Panic", walk: {width: Fit}}
+                    }
+                }
+            
                 layout: {flow: Right, spacing: 0.0, padding: {bottom: -50}, align: {x: 1.0, y: 0.0}}
                 walk: {margin: {left: 0, right: 5}, width: Fill, height: Fit}
                 Image {
@@ -701,84 +739,69 @@ live_register!{
                 }
             }
             GradientY {
-                walk: {width: Fill, height: 200, margin: {top: 0, right: 0, bottom: 0, left: 0}}
-                bg: {color: #000A, color2: #0004}
+                walk: {width: Fill, height: 150, margin: {top: 0, right: 0, bottom: 0, left: 0}}
+                bg: {color: #100A, color2: #0034}
                 display_audio = DisplayAudio {
                     walk: {height: Fill, width: Fill}
                 }
             }
             
             piano = Piano {
-                walk: {width: Fill, height: Fit, margin: {top: 0, right: 0, bottom: 10, left: 0}}
+                walk: {width: Fill, height: Fit, margin: 0.0}
             }
             GradientY {
-                walk: {width: Fill, height: 25, margin: {top: -10, left: 0}}
+                walk: {width: Fill, height: 25, margin: {top: 0, left: 0}}
                 bg: {color: #131820FF, color2: #13182000}
             }
 
             Frame {
-                walk: {width: Fill, height: Fit, margin: {bottom: 5, left: 20}}
-                bg: {color: #f00}
-                layout: {flow: Down, spacing: 8.0, align: {x: 1.0, y: 1.0}}
-                Frame {
-                    walk: {width: Fill, height: Fit}
-                    layout: {flow: Right, spacing: 2.0}
-                    save1 = FishButton {text: "1"}
-                    save2 = FishButton {text: "2"}
-                    save3 = FishButton {text: "3"}
-                    save4 = FishButton {text: "4"}
-                    save5 = FishButton {text: "5"}
-                    save6 = FishButton {text: "6"}
-                    save7 = FishButton {text: "7"}
-                    save8 = FishButton {text: "8"}
-                    panic = FishButton {text: "Panic"}
-                    // panic = FishButton {layout: {padding: 0}, walk: {height: Fill, margin: {left: 20, top: 20, right: 20, bottom: 20}}, text: "Panic"}
-                }
-            }
-            
-            Frame {
-                walk: { margin: {top: 10, right: 20, bottom: 10, left: 20}}
+                walk: { margin: {top: (SPACING_PANELS), right: (SPACING_PANELS * 1.5), bottom: (SPACING_PANELS), left: (SPACING_PANELS * 1.5)}}
                 layout: {flow: Right, spacing: (SPACING_PANELS)}
                 Frame {
                     layout: {flow: Down, spacing: (SPACING_PANELS)}
-                    OscPanel {
-                        label = {label = {text: "Oscillator 1"}}
-                        body = {
-                            type = {dropdown = {bind: "osc1.osc_type"}}
-                            transpose = {slider = {bind: "osc1.transpose"}}
-                            detune = {slider = {bind: "osc1.detune"}}
+                    Frame {
+                        walk: {height: Fit, width: Fill}
+                        layout: {flow: Right, spacing: (SPACING_PANELS)}
+                        OscPanel {
+                            label = {label = {text: "Oscillator 1"}}
+                            body = {
+                                type = {dropdown = {bind: "osc1.osc_type"}}
+                                twocol = {transpose = {slider = {bind: "osc1.transpose"}}}
+                                twocol = {detune = {slider = {bind: "osc1.detune"}}}
+                            }
+                        }
+                        OscPanel {
+                            label = {label = {text: "Oscillator 2"}}
+                            body = {
+                                type = {dropdown = {bind: "osc2.osc_type"}}
+                                twocol = {transpose = {slider = {bind: "osc2.transpose"}}}
+                                twocol = {detune = {slider = {bind: "osc2.detune"}}}
+                            }
                         }
                     }
-                    OscPanel {
-                        label = {label = {text: "Oscillator 2"}}
-                        body = {
-                            type = {dropdown = {bind: "osc2.osc_type"}}
-                            transpose = {slider = {bind: "osc2.transpose"}}
-                            detune = {slider = {bind: "osc2.detune"}}
-                        }
+                    Frame {
+                        walk: {height: Fit, width: Fill}
+                        layout: {flow: Right, spacing: (SPACING_PANELS)}
+                        MixerPanel {}
+                        TouchPanel {}
                     }
-                    MixerPanel {}
-                }
-                Frame {
-                  //  walk: { margin: {top: 10, right: 20, bottom: 10, left: 20}}
-                    layout: {flow: Down, spacing: (SPACING_PANELS)}
-                    ModEnvelopePanel {}
-                }
-                Frame {
-                    layout: {flow: Down, spacing: 10.0}
-                    VolumeEnvelopePanel {}
-                }
-                Frame {
-                    layout: {flow: Down, spacing: (SPACING_PANELS)}
-
-                    FilterPanel {}
-                    LFOPanel {}
+                    Frame {
+                        walk: {height: Fit, width: Fill}
+                        layout: {flow: Right, spacing: (SPACING_PANELS)}
+                        ModEnvelopePanel {}
+                        VolumeEnvelopePanel {}
+                        FilterPanel {}
+                    }
+                    Frame {
+                        walk: {height: Fit, width: Fill}
+                        layout: {flow: Right, spacing: (SPACING_PANELS)}
+                        LFOPanel {}
+                        FXPanel {}
+                    }
                 }
                 Frame {
                     layout: {flow: Down, spacing: (SPACING_PANELS)}
                     SequencerPanel {}
-                    FXPanel {}
-                    TouchPanel {}
                 }
             }
             
