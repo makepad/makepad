@@ -13,7 +13,7 @@ pub mod live_expander;
 pub mod live_ptr;
 pub mod live_eval;
 pub mod live_component;
-pub mod live_node_msgpack;
+pub mod live_node_cbor;
 //pub mod live_node_cbor;
 pub mod live_node_reader;
 
@@ -55,14 +55,14 @@ pub use {
             LiveNodeSlice,
             LiveNodeVec,
         },
-       /* live_node_bin::{
-            LiveNodeSliceToBinary,
-            LiveNodeVecFromBinary
-        },*/
+       live_node_cbor::{
+            LiveNodeSliceToCbor,
+            LiveNodeVecFromCbor
+        },/*
         live_node_msgpack::{
             LiveNodeSliceToMsgPack,
-            LiveNodeVecFromMsgPack
-        },
+            L*iveNodeVecFromMsgPack
+        },*/
         live_node_reader::{
             LiveNodeReader,
         },
