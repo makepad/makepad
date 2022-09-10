@@ -167,38 +167,29 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
             
             fn encode_i64(v: i64, out: &mut Vec<u8>) {
                 if v < 0{
-                    let v = -v - 1;
-                    if v <= (CBOR_NUINT_END - CBOR_NUINT_START) as i64{
+                    let v = ((-v) - 1) as u64;
+                    if v <= (CBOR_NUINT_END - CBOR_NUINT_START) as u64{
                         out.push(CBOR_NUINT_START + v as u8);
                     }
-                    else if v <= std::u8::MAX as i64{
+                    else if v <= std::u8::MAX as u64{
                         out.push(CBOR_NU8);
+                        out.extend_from_slice(&(v as u8).to_be_bytes());
+                    }
+                    else if v <= std::u16::MAX as u64{
+                        out.push(CBOR_NU16);
+                        out.extend_from_slice(&(v as u16).to_be_bytes());
+                    }
+                    else if v <= std::u32::MAX as u64{
+                        out.push(CBOR_NU32);
+                        out.extend_from_slice(&(v as u32).to_be_bytes());
+                    }
+                    else{
+                        out.push(CBOR_NU64);
+                        out.extend_from_slice(&v.to_be_bytes());
                     }
                 }
-                else{
-                    
-                }
-                if v >= -32 && v < 0 {
-                    out.push((-v) as u8 | MSGPACK_FIXNEGINT);
-                }
-                else if v >= 0 && v <= 127 {
-                    out.push(v as u8);
-                }
-                else if v >= std::i8::MIN as i64 && v <= std::i8::MAX as i64 {
-                    out.push(MSGPACK_I8);
-                    out.extend_from_slice(&(v as i8).to_be_bytes());
-                }
-                else if v >= std::i16::MIN as i64 && v <= std::i16::MAX as i64 {
-                    out.push(MSGPACK_I16);
-                    out.extend_from_slice(&(v as i16).to_be_bytes());
-                }
-                else if v >= std::i32::MIN as i64 && v <= std::i32::MAX as i64 {
-                    out.push(MSGPACK_I32);
-                    out.extend_from_slice(&(v as i32).to_be_bytes());
-                }
                 else {
-                    out.push(MSGPACK_I64);
-                    out.extend_from_slice(&v.to_be_bytes());
+                    encode_u64(v as u64, out);
                 }
             }
             
@@ -207,7 +198,7 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                     encode_i64(v as i64, out)
                 }
                 else {
-                    out.push(MSGPACK_F32);
+                    out.push(CBOR_FLOAT32);
                     out.extend_from_slice(&v.to_be_bytes());
                 }
             }
@@ -217,10 +208,11 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                     encode_i64(v as i64, out)
                 }
                 else {
-                    out.push(MSGPACK_F64);
+                    out.push(CBOR_FLOAT64);
                     out.extend_from_slice(&v.to_be_bytes());
                 }
             }
+            
             fn encode_id(id: LiveId, out: &mut Vec<u8>) {
                 if id.0 & 0x8000_0000_0000_0000 == 0 {
                     encode_u64(id.0, out);
@@ -244,30 +236,35 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
             
             fn encode_str(s: &str, out: &mut Vec<u8>) {
                 let len = s.len();
-                if len <= 31 {
-                    out.push(len as u8 | MSGPACK_FIXSTR);
+                if len <= (CBOR_UTF8_END-CBOR_UTF8_START) as usize {
+                    out.push(len as u8 | CBOR_UTF8_START);
                     out.extend_from_slice(s.as_bytes());
                 }
-                else if len < std::u8::MAX as usize {
-                    out.push(MSGPACK_STR8);
+                else if len <= std::u8::MAX as usize {
+                    out.push(CBOR_UTF8_8);
                     out.push(len as u8);
                     out.extend_from_slice(s.as_bytes());
                 }
-                else if len < std::u16::MAX as usize {
-                    out.push(MSGPACK_STR16);
+                else if len <= std::u16::MAX as usize {
+                    out.push(CBOR_UTF8_16);
                     out.extend_from_slice(&(len as u16).to_be_bytes());
                     out.extend_from_slice(s.as_bytes());
                 }
-                else {
-                    out.push(MSGPACK_STR32);
+                else if len <= std::u32::MAX as usize {
+                    out.push(CBOR_UTF8_32);
                     out.extend_from_slice(&(len as u32).to_be_bytes());
+                    out.extend_from_slice(s.as_bytes());
+                }
+                else{
+                    out.push(CBOR_UTF8_64);
+                    out.extend_from_slice(&(len as u64).to_be_bytes());
                     out.extend_from_slice(s.as_bytes());
                 }
             }
             
             match &node.value {
                 LiveValue::None => {
-                    out.push(MSGPACK_NIL);
+                    out.push(CBOR_NULL);
                 },
                 LiveValue::Str(s) => {
                     encode_str(s, &mut out);
@@ -279,7 +276,7 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                     encode_str(s.as_str(), &mut out);
                 },
                 LiveValue::Bool(v) => {
-                    out.push(if *v {MSGPACK_TRUE} else {MSGPACK_FALSE});
+                    out.push(if *v {CBOR_TRUE} else {CBOR_FALSE});
                 }
                 LiveValue::Int64(v) => {
                     encode_i64(*v, &mut out);
@@ -291,62 +288,62 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                     encode_f64(*v, &mut out);
                 },
                 LiveValue::Color(v) => {
-                    out.push(1 | MSGPACK_FIXMAP);
+                    out.push(1 | CBOR_MAP_START);
                     encode_str("as", &mut out);
                     encode_u32(*v, &mut out);
                 },
                 LiveValue::Vec2(v) => {
-                    out.push(1 | MSGPACK_FIXMAP);
+                    out.push(1 | CBOR_MAP_START);
                     encode_str("in", &mut out);
-                    out.push(2 | MSGPACK_FIXARRAY);
+                    out.push(2 | CBOR_ARRAY_START);
                     encode_f32(v.x, &mut out);
                     encode_f32(v.x, &mut out);
                 },
                 LiveValue::Vec3(v) => {
-                    out.push(1 | MSGPACK_FIXMAP);
+                    out.push(1 | CBOR_MAP_START);
                     encode_str("in", &mut out);
-                    out.push(3 | MSGPACK_FIXARRAY);
+                    out.push(3 | CBOR_ARRAY_START);
                     encode_f32(v.x, &mut out);
                     encode_f32(v.x, &mut out);
                     encode_f32(v.z, &mut out);
                 },
                 LiveValue::Vec4(v) => {
-                    out.push(1 | MSGPACK_FIXMAP);
+                    out.push(1 | CBOR_MAP_START);
                     encode_str("in", &mut out);
-                    out.push(4 | MSGPACK_FIXARRAY);
+                    out.push(4 | CBOR_ARRAY_START);
                     encode_f32(v.x, &mut out);
                     encode_f32(v.x, &mut out);
                     encode_f32(v.z, &mut out);
                     encode_f32(v.w, &mut out);
                 },
                 LiveValue::BareEnum {variant, ..} => {
-                    out.push(1 | MSGPACK_FIXMAP);
+                    out.push(1 | CBOR_MAP_START);
                     encode_str("if", &mut out);
                     encode_id(*variant, &mut out);
                 },
                 LiveValue::Array => {
                     stack.push(StackItem {index: out.len(), count: 0, has_keys: false});
-                    out.push(MSGPACK_FIXARRAY);
+                    out.push(CBOR_ARRAY_START);
                 },
                 LiveValue::TupleEnum {variant, ..} => {
-                    out.push(1 | MSGPACK_FIXMAP);
+                    out.push(1 | CBOR_MAP_START);
                     encode_str("enum", &mut out);
-                    out.push(2 | MSGPACK_FIXARRAY);
+                    out.push(2 | CBOR_ARRAY_START);
                     encode_id(*variant, &mut out);
                     stack.push(StackItem {index: out.len(), count: 0, has_keys: false});
-                    out.push(MSGPACK_FIXARRAY);
+                    out.push(CBOR_ARRAY_START);
                 },
                 LiveValue::NamedEnum {variant, ..} => {
-                    out.push(1 | MSGPACK_FIXMAP);
+                    out.push(1 | CBOR_MAP_START);
                     encode_str("enum", &mut out);
-                    out.push(2 | MSGPACK_FIXARRAY);
+                    out.push(2 | CBOR_ARRAY_START);
                     encode_id(*variant, &mut out);
                     stack.push(StackItem {index: out.len(), count: 0, has_keys: true});
-                    out.push(MSGPACK_FIXMAP);
+                    out.push(CBOR_MAP_START);
                 },
                 LiveValue::Object => {
                     stack.push(StackItem {index: out.len(), count: 0, has_keys: true});
-                    out.push(MSGPACK_FIXMAP);
+                    out.push(CBOR_MAP_START);
                 }, // subnodes including this one
                 LiveValue::Close => {},
                 // TODO ITEMS
@@ -505,25 +502,28 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
         fn decode_str<'a>(data: &'a [u8], o: &mut usize) -> Result<Option<&'a str>,
         LiveNodeFromCborError> {
             assert_len(*o, 1, data) ?;
-            let len = if data[*o] & MSGPACK_FIXSTR == MSGPACK_FIXSTR {
-                let r = (data[*o] & 0xf) as usize;
+            let len = if data[*o] & CBOR_UTF8_START == CBOR_UTF8_START {
+                let r = (data[*o] - CBOR_UTF8_START) as usize;
                 *o += 1;
                 r
             }
             else {
                 match data[*o] {
-                    MSGPACK_STR8 => {
+                    CBOR_UTF8_8 => {
                         *o += 1;
                         read_u8(data, o) ? as usize
                     }
-                    MSGPACK_STR16 => {
+                    CBOR_UTF8_16 => {
                         *o += 1;
                         read_u16(data, o) ? as usize
                     }
-                    MSGPACK_STR32 => {
+                    CBOR_UTF8_32 => {
                         *o += 1;
                         read_u32(data, o) ? as usize
-                        
+                    }
+                    CBOR_UTF8_64 => {
+                        *o += 1;
+                        read_u64(data, o) ? as usize
                     }
                     _ => return Ok(None)
                 }
@@ -538,26 +538,26 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
         
         fn decode_u64(data: &[u8], o: &mut usize) -> Result<Option<u64>, LiveNodeFromCborError> {
             assert_len(*o, 1, data) ?;
-            let v = if data[*o] & MSGPACK_FIXINT == 0 {
+            let v = if data[*o] <= CBOR_UINT_END {
                 let r = Some(data[*o] as u64);
                 *o += 1;
                 r
             }
             else {
                 match data[*o] {
-                    MSGPACK_U8 => {
+                    CBOR_U8 => {
                         *o += 1;
                         Some(read_u8(data, o) ? as u64)
                     }
-                    MSGPACK_U16 => {
+                    CBOR_U16 => {
                         *o += 1;
                         Some(read_u16(data, o) ? as u64)
                     }
-                    MSGPACK_U32 => {
+                    CBOR_U32 => {
                         *o += 1;
                         Some(read_u32(data, o) ? as u64)
                     }
-                    MSGPACK_U64 => {
+                    CBOR_U64 => {
                         *o += 1;
                         Some(read_u64(data, o) ? as u64)
                     }
@@ -569,35 +569,35 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
         
         fn decode_i64(data: &[u8], o: &mut usize) -> Result<Option<i64>, LiveNodeFromCborError> {
             assert_len(*o, 1, data) ?;
-            let v = if data[*o] & MSGPACK_FIXINT == 0 {
-                let r = Some(data[*o] as i64);
-                *o += 1;
-                r
-            }
-            else if data[*o] & MSGPACK_FIXNEGINT == MSGPACK_FIXNEGINT {
-                let r = Some(-((data[*o] & 0xdf) as i64));
+            let v = if data[*o] >= CBOR_NUINT_START && data[*o] <= CBOR_NUINT_END {
+                let r = Some(-((data[*o] - CBOR_NUINT_START + 1) as i64));
                 *o += 1;
                 r
             }
             else {
                 match data[*o] {
-                    MSGPACK_I8 => {
+                    CBOR_NU8 => {
                         *o += 1;
-                        Some(read_i8(data, o) ? as i64)
+                        Some(-(read_i8(data, o) ? as i64+1))
                     }
-                    MSGPACK_I16 => {
+                    CBOR_NU16 => {
                         *o += 1;
-                        Some(read_i16(data, o) ? as i64)
+                        Some(-(read_i16(data, o) ? as i64+1))
                     }
-                    MSGPACK_I32 => {
+                    CBOR_NU32 => {
                         *o += 1;
-                        Some(read_i32(data, o) ? as i64)
+                        Some(-(read_i32(data, o) ? as i64+1))
                     }
-                    MSGPACK_I64 => {
+                    CBOR_NU64 => {
                         *o += 1;
-                        Some(read_i64(data, o) ? as i64)
+                        Some(-(read_i64(data, o) ? as i64+1))
                     }
-                    _ => return Ok(None)
+                    _ => if let Some(data) = decode_u64(data, o)?{
+                        Some(data as i64)
+                    }
+                    else{
+                        None
+                    }
                 }
             };
             Ok(v)
@@ -605,20 +605,28 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
         
         fn decode_array_len(data: &[u8], o: &mut usize) -> Result<Option<usize>, LiveNodeFromCborError> {
             assert_len(*o, 1, data) ?;
-            let v = if data[*o] & MSGPACK_FIXARRAY == MSGPACK_FIXARRAY {
-                let r = Some((data[*o] & 0xf) as usize);
+            let v = if data[*o] & CBOR_ARRAY_START == CBOR_ARRAY_START {
+                let r = Some((data[*o] - CBOR_ARRAY_START) as usize);
                 *o += 1;
                 r
             }
             else {
                 match data[*o] {
-                    MSGPACK_ARRAY16 => {
+                    CBOR_ARRAY_8 => {
+                        *o += 1;
+                        Some(read_u8(data, o) ? as usize)
+                    }
+                    CBOR_ARRAY_16 => {
                         *o += 1;
                         Some(read_u16(data, o) ? as usize)
                     }
-                    MSGPACK_ARRAY32 => {
+                    CBOR_ARRAY_32 => {
                         *o += 1;
                         Some(read_u32(data, o) ? as usize)
+                    }
+                    CBOR_ARRAY_64 => {
+                        *o += 1;
+                        Some(read_u64(data, o) ? as usize)
                     }
                     _ => return Ok(None)
                 }
@@ -628,18 +636,26 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
         
         fn decode_map_len(data: &[u8], o: &mut usize) -> Result<Option<usize>, LiveNodeFromCborError> {
             assert_len(*o, 1, data) ?;
-            let v = if data[*o] & MSGPACK_FIXMAP == MSGPACK_FIXMAP {
-                let r = Some((data[*o] & 0xf) as usize);
+            let v = if data[*o] & CBOR_MAP_START == CBOR_MAP_START {
+                let r = Some((data[*o] - CBOR_MAP_START) as usize);
                 *o += 1;
                 r
             }
             else {
                 match data[*o] {
-                    MSGPACK_MAP16 => {
+                    CBOR_MAP_8 => {
+                        *o += 1;
+                        Some(read_u8(data, o) ? as usize)
+                    }
+                    CBOR_MAP_16 => {
                         *o += 1;
                         Some(read_u16(data, o) ? as usize)
                     }
-                    MSGPACK_MAP32 => {
+                    CBOR_MAP_32 => {
+                        *o += 1;
+                        Some(read_u32(data, o) ? as usize)
+                    }
+                    CBOR_MAP_64 => {
                         *o += 1;
                         Some(read_u32(data, o) ? as usize)
                     }
@@ -750,25 +766,25 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
             }
             else {
                 match data[o] {
-                    MSGPACK_TRUE => {
+                    CBOR_TRUE => {
                         o += 1;
                         self.push(LiveNode {id, origin, value: LiveValue::Bool(true)});
                     }
-                    MSGPACK_FALSE => {
+                    CBOR_FALSE => {
                         o += 1;
                         self.push(LiveNode {id, origin, value: LiveValue::Bool(false)});
                     }
-                    MSGPACK_F32 => {
+                    CBOR_FLOAT32 => {
                         o += 1;
                         let value = LiveValue::Float32(read_f32(data, &mut o) ?);
                         self.push(LiveNode {id, origin, value});
                     }
-                    MSGPACK_F64 => {
+                    CBOR_FLOAT64 => {
                         o += 1;
                         let value = LiveValue::Float64(read_f64(data, &mut o) ?);
                         self.push(LiveNode {id, origin, value});
                     }
-                    MSGPACK_NIL => {
+                    CBOR_NULL => {
                         o += 1;
                         self.push(LiveNode {id, origin, value: LiveValue::None});
                     },
