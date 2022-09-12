@@ -53,7 +53,7 @@ live_register!{
     
     Sequencer: {{Sequencer}} {
         button: SeqButton {}
-        button_size: vec2(12.0, 12.0),
+        button_size: vec2(34.0, 34.0),
         grid_x: 16,
         grid_y: 16,
         walk: {
