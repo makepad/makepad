@@ -45,36 +45,7 @@ live_register!{
     const FONT_SIZE_H1: 11.0
     const FONT_SIZE_H2: 9.5
     
-
-    // MainHeader: FoldHeader {
-    //     state: {
-    //         open = {
-    //             off = {apply: {header: {bg: {radius: vec2(3.0, 3.0)}}}}
-    //             on = {apply: {header: {bg: {radius: vec2(3.0, 1.0)}}}}
-    //         }
-    //     }
-    //     header: BoxY {
-    //         cursor: Default,
-    //         bg: {color: #6},
-    //         walk: {width: Fill, height: Fit},
-    //         layout: {flow: Right, padding: 8, spacing: 5}
-    //     }
-    // }
     
-    InstrumentHeader: FoldHeader {
-        header: Rect {
-            cursor: Default,
-            bg: {color: #5},
-            walk: {width: Fill, height: Fit}
-            layout: {flow: Right, padding: 8, spacing: 5}
-        }
-    }
-    
-    LayerHeader: InstrumentHeader {
-        header: {
-            bg: {color: #4},
-        }
-    }
     
     ElementBox: Frame {
         bg: {color: #4}
@@ -651,33 +622,6 @@ live_register!{
                         max: 1.0
                         label: "Detune"
                     }
-                }
-            }
-        }
-    }
-    
-    IronFishUI: InstrumentHeader {
-        header: {
-            layout: {align: {y: 0.5}}
-            fold_button = FoldButton {}
-            swatch = Circle {
-                walk: {width: 10, height: 10}
-                bg: {color: #f00}
-            }
-            label = Label {text: "IronFish"}
-        }
-        body: Frame {
-            layout: {flow: Down}
-            walk: {width: Fill, height: Fit}
-            stack = LayerHeader {
-                walk: {width: Fill, height: Fit}
-                header: {
-                    fold_button = FoldButton {}
-                    label = Label {text: "Stack item", walk: {width: Fill}}
-                }
-                body: Frame {
-                    layout: {flow: Down}
-                    walk: {width: Fill, height: Fit}
                 }
             }
         }
