@@ -873,20 +873,20 @@ impl IronFishState {
             }
             for i in 0..self.voices.len() {
                 if self.voices[i].active() > -1 {
-                    //let mut display_buffer = display.pop_buffer_resize(buffer.frame_count(), buffer.channel_count());
-                    //self.voices[i].fill_buffer(buffer, bufferidx,toprocess,display_buffer.as_mut(), &self.settings, self.touch);
-                    self.voices[i].fill_buffer(buffer, bufferidx, toprocess, None, &self.settings, self.touch);
-                    // if let Some(dp) = display_buffer {
-                    //     display.send_buffer(true, i, dp);
-                    // }
+                    let mut display_buffer = display.pop_buffer_resize(buffer.frame_count(), buffer.channel_count());
+                    self.voices[i].fill_buffer(buffer, bufferidx, toprocess, display_buffer.as_mut(), &self.settings, self.touch);
+                    //self.voices[i].fill_buffer(buffer, bufferidx, toprocess, None, &self.settings, self.touch);
+                    if let Some(dp) = display_buffer {
+                        display.send_buffer(true, i, dp);
+                    }
                 }
                 else {
                     display.send_voice_off(i);
-                    //                    let mut display_buffer = display.pop_buffer_resize(buffer.frame_count(), buffer.channel_count());
-                    //                  if let Some(mut dp) = display_buffer {
-                    //                    dp.zero();
-                    //                  display.send_buffer(false, i, dp);
-                    //            }
+                    let mut display_buffer = display.pop_buffer_resize(buffer.frame_count(), buffer.channel_count());
+                    if let Some(mut dp) = display_buffer {
+                        dp.zero();
+                        display.send_buffer(false, i, dp);
+                    }
                 }
             }
             bufferidx += toprocess;
