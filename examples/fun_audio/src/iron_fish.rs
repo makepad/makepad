@@ -116,6 +116,9 @@ pub struct TouchSettings {
 pub struct EffectSettings {
     #[live(0.5)] delaysend: f32a,
     #[live(0.8)] delayfeedback: f32a,
+    #[live(0.0)] cross: f32a,
+    #[live(0.5)] difference: f32a
+    
 }
 
 
@@ -373,6 +376,14 @@ impl Default for ArpState {
     }
 }
 
+impl Default for LFOState {
+    fn default() -> Self {
+        Self {
+            phase: 0.0,
+            
+        }
+    }
+}
 
 impl Default for OscillatorState {
     fn default() -> Self {
@@ -607,8 +618,8 @@ impl FilterState {
         }
     }
     
-    fn set_cutoff(&mut self, settings: &FilterSettings, envelope: f32, sample_rate: f32, touch: f32) {
-        self.fc = (settings.cutoff.get() + touch * settings.touch_amount.get() + envelope * settings.envelope_amount.get() * 0.5).clamp(0.0, 1.0);
+    fn set_cutoff(&mut self, settings: &FilterSettings, envelope: f32, sample_rate: f32, touch: f32, lfo: f32) {
+        self.fc = (settings.cutoff.get() + touch * settings.touch_amount.get()+ lfo * settings.lfo_amount.get()   + envelope * settings.envelope_amount.get() * 0.5).clamp(0.0, 1.0);
         self.fc *= self.fc * 0.5;
         self.damp = 1.0 - settings.resonance.get();
         let preclamp = 2.0 * ((3.1415 * self.fc).sin());
@@ -703,7 +714,7 @@ impl IronFishVoice {
         self.current_note = b1 as i16;
     }
     
-    pub fn one(&mut self, settings: &IronFishSettings, touch: f32) -> f32 {
+    pub fn one(&mut self, settings: &IronFishSettings, touch: f32, lfo: f32) -> f32 {
         
         let sub = self.subosc.get();
         
@@ -712,7 +723,7 @@ impl IronFishVoice {
         let volume_envelope = self.volume_envelope.get(&settings.volume_envelope, settings.sample_rate.get());
         let mod_envelope = self.mod_envelope.get(&settings.mod_envelope, settings.sample_rate.get());
         
-        self.filter1.set_cutoff(&settings.filter1, mod_envelope, settings.sample_rate.get(), touch);
+        self.filter1.set_cutoff(&settings.filter1, mod_envelope, settings.sample_rate.get(), touch, lfo);
         
         let noise = random_f32(&mut self.seed) * 2.0 - 1.0;
         
@@ -724,7 +735,7 @@ impl IronFishVoice {
         return output * 0.006; //* 1000.0;
     }
     
-    pub fn fill_buffer(&mut self, mix_buffer: &mut AudioBuffer, startidx: usize, frame_count: usize, display_buffer: Option<&mut AudioBuffer>, settings: &IronFishSettings, touch: f32) {
+    pub fn fill_buffer(&mut self, mix_buffer: &mut AudioBuffer, startidx: usize, frame_count: usize, display_buffer: Option<&mut AudioBuffer>, settings: &IronFishSettings, touch: f32, lfo: f32) {
         
 //        log!("blah {} {}", startidx, frame_count);
         let (left, right) = mix_buffer.stereo_mut();
@@ -732,7 +743,7 @@ impl IronFishVoice {
         if let Some(display_buffer) = display_buffer {
             let (left_disp, right_disp) = display_buffer.stereo_mut();
             for i in startidx..frame_count+startidx {
-                let output = self.one(&settings, touch) * 8.0;
+                let output = self.one(&settings, touch, lfo) * 8.0;
                 left_disp[i] = output as f32;
                 right_disp[i] = output as f32;
                 left[i] += output as f32;
@@ -741,7 +752,7 @@ impl IronFishVoice {
         }
         else {
             for i in startidx..frame_count+startidx {
-                let output = self.one(&settings, touch) * 8.0;
+                let output = self.one(&settings, touch, lfo) * 8.0;
                 left[i] += output as f32;
                 right[i] += output as f32;
             }
@@ -760,13 +771,16 @@ pub struct IronFishState {
     osc1cache: OscSettings,
     osc2cache: OscSettings,
     touch: f32,
-    delayline: Vec<f32>,
+    delaylineleft: Vec<f32>,
+    delaylineright: Vec<f32>,
     delayreadpos: usize,
     delaywritepos: usize,
     sequencer: SequencerState,
     arp: ArpState,
     lastplaying: bool,
-    old_step: u32
+    old_step: u32,
+    lfo: LFOState,
+    lfovalue: f32
 }
 
 impl IronFishState {
@@ -818,13 +832,11 @@ impl IronFishState {
 
     pub fn rebuildarp(&mut self)
     {
-        log!("rebuilding arp");
         let mut current = 0;
         for i in 0..128 {
             if (self.activemidinotes[i] ) {
                 self.arp.melody[current] = i as u32;
                 current +=1;
-                //   self.activemidinotecount += 1;
             }
         }
         self.arp.melodylength = current;
@@ -835,7 +847,7 @@ impl IronFishState {
     pub fn one(&mut self) -> f32 {
         let mut output: f32 = 0.0;
         for i in 0..self.voices.len() {
-            output += self.voices[i].one(&self.settings, self.touch);
+            output += self.voices[i].one(&self.settings, self.touch, self.lfovalue);
         }
         return output; //* 1000.0;
     }
@@ -843,17 +855,42 @@ impl IronFishState {
         let frame_count = buffer.frame_count();
         let (left, right) = buffer.stereo_mut();
         
+        let icross = self.settings.fx.cross.get();
+        let cross = 1.0 - icross;
+
+        let leftoffs = (self.settings.fx.difference.get()*15000.0) as usize;
+      
+        let mut delayreadposl = self.delaywritepos + (44100-15000) - leftoffs;
+        let mut delayreadposr = self.delaywritepos + (44100-15000) + leftoffs;
+        if (delayreadposl > 44100) {delayreadposl-=44100;};
+        if (delayreadposr > 44100) {delayreadposr-=44100;};
         for i in 0..frame_count {
-            let mut r = self.delayline[self.delayreadpos];
+
+             
+
+            let mut rr = self.delaylineright[delayreadposr];
+            let mut ll = self.delaylineleft[delayreadposl];
+            
+            let mut r = ll * cross + rr * icross;
+            let mut l = rr * cross + ll * icross;
+
             r *= self.settings.fx.delayfeedback.get() * 0.9;
-            r += self.settings.fx.delaysend.get() * (left[i] + right[i]);
-            self.delayline[self.delaywritepos] = r;
-            left[i] += r;
+            r += self.settings.fx.delaysend.get() * ( right[i] );
+            
+            l *= self.settings.fx.delayfeedback.get() * 0.9;
+            l += self.settings.fx.delaysend.get() * ( left[i] );
+          
+            self.delaylineright[self.delaywritepos] = r;
+            self.delaylineleft[self.delaywritepos] = l;
+            
+            left[i] += l;
             right[i] += r;
             self.delaywritepos += 1;
             if (self.delaywritepos >= 44100) {self.delaywritepos = 0;}
-            self.delayreadpos += 1;
-            if (self.delayreadpos >= 44100) {self.delayreadpos = 0;}
+            delayreadposl += 1;
+            if (delayreadposl >= 44100) {delayreadposl = 0;}
+            delayreadposr += 1;
+            if (delayreadposr >= 44100) {delayreadposr = 0;}
         }
     }
 
@@ -884,7 +921,8 @@ impl IronFishState {
     
     pub fn fill_buffer(&mut self, buffer: &mut AudioBuffer, display: &mut DisplayAudioGraph) {
         
-        let mut disp_buffers = Vec::new();
+
+       let mut disp_buffers = Vec::new();
         for i in 0..self.voices.len() {
             let mut dp = display.pop_buffer_resize(buffer.frame_count(), buffer.channel_count());
             if let Some(dp) = &mut dp{
@@ -915,6 +953,13 @@ impl IronFishState {
         }
         let mut remaining = buffer.frame_count();
         let mut bufferidx = 0;
+
+        self.lfo.phase += remaining as f32 *( (20.0/44100.0)  * self.settings.lfo.rate.get()) ;
+
+        if (self.lfo.phase > 1.0) {
+            self.lfo.phase -= 1.0;
+        }
+        self.lfovalue = (self.lfo.phase * 6.283).sin();
      //   log!("s{}", remaining);
             
         while (remaining > 0)
@@ -993,7 +1038,7 @@ impl IronFishState {
         
             for i in 0..self.voices.len() {
                 if self.voices[i].active() > -1 {
-                    self.voices[i].fill_buffer(buffer, bufferidx, toprocess, disp_buffers[i].as_mut(), &self.settings, self.touch);                   
+                    self.voices[i].fill_buffer(buffer, bufferidx, toprocess, disp_buffers[i].as_mut(), &self.settings, self.touch, self.lfovalue);                   
                 }
             }
             bufferidx += toprocess;
@@ -1114,14 +1159,17 @@ impl AudioComponent for IronFish {
             osc1cache: self.settings.osc1.clone(),
             osc2cache: self.settings.osc2.clone(),
             touch: 0.0,
-            delayline: vec![0.0f32; 44100],
+            delaylineleft: vec![0.0f32; 44100],
+            delaylineright: vec![0.0f32; 44100],
             delaywritepos: 15000,
             delayreadpos: 0,
             sequencer: SequencerState::default(),
             lastplaying: false,
             old_step: 0,
             arp: Default::default(),
-            activemidinotecount : 0
+            activemidinotecount : 0, 
+            lfo: Default::default(),
+            lfovalue: 0.0
         })
     }
     
