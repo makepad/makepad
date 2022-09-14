@@ -428,6 +428,13 @@ live_register!{
                         label: "Play"
                     }
                 }
+
+                arp = InstrumentCheckbox {
+                    checkbox = {
+                        bind: "arp.enabled",
+                        label: "Arpeggiator"
+                    }
+                }
             }
             speed = InstrumentSlider {
                 slider = {
