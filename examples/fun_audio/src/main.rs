@@ -509,6 +509,25 @@ live_register!{
 
                 }
             }
+            delaydifference = InstrumentSlider {
+                slider = {
+                    slider: {line_color: (COLOR_FX)}
+                    bind: "fx.difference"
+                    min: 0.0
+                    max: 1.0
+                    label: "Delay Stereo"
+                }
+            }
+            delaycross = InstrumentSlider {
+                slider = {
+                    slider: {line_color: (COLOR_FX)}
+                    bind: "fx.cross"
+                    min: 0.0
+                    max: 1.0
+                    label: "Delay Cross"
+
+                }
+            }
         }
     }
     LFOPanel: FishPanel {
