@@ -737,6 +737,8 @@ pub struct IronFishState {
     delayreadpos: usize,
     delaywritepos: usize,
     sequencer: SequencerState,
+    lastplaying: bool,
+    old_step: u32
 }
 
 impl IronFishState {
@@ -828,8 +830,7 @@ impl IronFishState {
                 if self.voices[i].active() > -1 {
                     self.voices[i].update_note(&self.settings);
                 }
-            }
-            
+            } 
         }
         let mut remaining = buffer.frame_count();
         let mut bufferidx = 0;
@@ -838,39 +839,64 @@ impl IronFishState {
             let mut toprocess = remaining;
             if (self.settings.sequencer.playing.get())
             {
+                if (self.lastplaying == false)
+                {
+                    self.lastplaying = true;
+                    self.sequencer.currentstep = 15;
+                    self.old_step = 0;
+                }
+
+
                 if (self.sequencer.samplesleftinstep == 0) {
                     // process notes!
                     let newstepidx = (self.sequencer.currentstep + 1) % 16;
-                    let old_step = self.get_sequencer_step(self.sequencer.currentstep);
                     let new_step = self.get_sequencer_step(newstepidx);
                     
                     //log!("tick! {:?} {:?}",newstepidx, new_step);
                     // minor scale..
-                    let scale = [36, 38, 39, 41, 43, 44, 46, 36 + 12, 38 + 12, 39 + 12, 41 + 12, 43 + 12, 44 + 12, 46 + 12, 36 + 24, 38 + 24, 39 + 24, 41 + 24, 43 + 24, 44 + 24, 46 + 24];
+                    let scale = [
+                        
+                                36 - 24, 38 - 24, 39 - 24, 41 - 24, 43 - 24, 44 - 24, 46 - 24, 
+                                36 - 12, 38 - 12, 39 - 12, 41 - 12, 43 - 12, 44 - 12, 46 - 12, 
+                                36     , 38     , 39     , 41     , 43     , 44     , 46     , 
+                                36 + 12, 38 + 12, 39 + 12, 41 + 12, 43 + 12, 44 + 12, 46 + 12, 
+                                36 + 24, 38 + 24, 39 + 24, 41 + 24, 43 + 24, 44 + 24, 46 + 24];
                     
                     for i in 0..32 {
-                        if old_step & (1 << i) != 0 {
-                            if (new_step & (1 << i)) == 0 {
-                                //          log!("note on {:?}",scale[i]);
+                        if self.old_step & (1 << (31-i)) != 0 {
+                            if (new_step & (1 << (31-i))) == 0 {
+                                        //  log!("note off {:?}",scale[i]);
                                 self.note_off(scale[i], 127);
                             }
                         } else {
-                            if (new_step & (1 << i) != 0) {
-                                //        log!("note off {:?}",scale[i]);
+                            if (new_step & (1 << (31-i)) != 0) {
+                                       // log!("note on {:?}",scale[i]);
                                 self.note_on(scale[i], 127);
                             }
                         }
                     }
+                    self.old_step = new_step;
+                    
                     self.sequencer.currentstep = newstepidx;
                     self.sequencer.samplesleftinstep = ((self.settings.sample_rate.get() * 60.0) / (self.settings.sequencer.bpm.get() * 4.0)) as usize;
                 }
                 else
                 {
-                    toprocess = toprocess.min(self.sequencer.samplesleftinstep);
-                    self.sequencer.samplesleftinstep -= toprocess;
+                    
+                   
                     //  log!("{:?} {:?}", toprocess, self.sequencer.samplesleftinstep)
                 }
+                toprocess = toprocess.min(self.sequencer.samplesleftinstep);
+                self.sequencer.samplesleftinstep -= toprocess;
+            }else{
+                if (self.lastplaying)
+                {
+                    self.all_notes_off();
+                    self.lastplaying = false;
+                }
             }
+
+            
             for i in 0..self.voices.len() {
                 if self.voices[i].active() > -1 {
                     let mut display_buffer = display.pop_buffer_resize(buffer.frame_count(), buffer.channel_count());
@@ -999,7 +1025,9 @@ impl AudioComponent for IronFish {
             delayline: vec![0.0f32; 44100],
             delaywritepos: 15000,
             delayreadpos: 0,
-            sequencer: SequencerState::default()
+            sequencer: SequencerState::default(),
+            lastplaying: false,
+            old_step: 0
         })
     }
     
