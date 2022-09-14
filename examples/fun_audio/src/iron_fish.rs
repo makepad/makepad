@@ -119,6 +119,10 @@ pub struct EffectSettings {
 }
 
 
+#[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
+pub struct ArpSettings {
+    #[live(true)] enabled: boola,
+}
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 pub struct SequencerSettings {
@@ -160,6 +164,7 @@ pub struct SequencerSettings {
     
     #[live(125.0)] bpm: f32a,
     #[live(false)] playing: boola,
+    
     #[live(0)] oneshot: u32a,
     #[live(1)] transposewithmidi: u32a,
     #[live(0)] polyphoniconeshot: u32a,
@@ -179,6 +184,7 @@ pub struct IronFishSettings {
     touch: TouchSettings,
     fx: EffectSettings,
     pub sequencer: SequencerSettings,
+    pub arp: ArpSettings,
     #[live(44100.0)] sample_rate: f32a,
     #[live(0.5)] osc_balance: f32a,
     #[live(0.5)] sub_osc: f32a,
@@ -194,6 +200,13 @@ pub struct SequencerState
     samplesleftinstep: usize
 }
 
+#[derive(Copy, Clone)]
+pub struct ArpState{
+    step: usize,
+    lastarpnote: u32,
+    melody: [u32;128],
+    melodylength: usize
+}
 
 #[derive(Copy, Clone)]
 pub struct OscillatorState {
@@ -224,8 +237,8 @@ impl SubOscillatorState {
     }
     
     fn set_note(&mut self, note: u8, samplerate: f32) {
-        let freq = 440.0 * f32::powf(2.0, ((note as f32) - 69.0 - 12.0) / 12.0);
-        self.delta_phase = (6.283 * freq) / samplerate;
+        let freq = 440.0 * f32::powf(2.0, ((note as f32) - 69.0 - 24.0) / 12.0);
+        self.delta_phase = ((6.283/2.0) * freq) / samplerate;
         let sampletime = 1.0 / samplerate;
     }
 }
@@ -348,6 +361,18 @@ impl Default for SubOscillatorState {
         }
     }
 }
+
+impl Default for ArpState {
+    fn default() -> Self {
+        Self {
+            step: 0,
+            lastarpnote: 0,
+            melody: [0u32;128],
+            melodylength: 0
+        }
+    }
+}
+
 
 impl Default for OscillatorState {
     fn default() -> Self {
@@ -701,12 +726,12 @@ impl IronFishVoice {
     
     pub fn fill_buffer(&mut self, mix_buffer: &mut AudioBuffer, startidx: usize, frame_count: usize, display_buffer: Option<&mut AudioBuffer>, settings: &IronFishSettings, touch: f32) {
         
-        
+//        log!("blah {} {}", startidx, frame_count);
         let (left, right) = mix_buffer.stereo_mut();
         
         if let Some(display_buffer) = display_buffer {
             let (left_disp, right_disp) = display_buffer.stereo_mut();
-            for i in startidx..frame_count {
+            for i in startidx..frame_count+startidx {
                 let output = self.one(&settings, touch) * 8.0;
                 left_disp[i] = output as f32;
                 right_disp[i] = output as f32;
@@ -715,7 +740,7 @@ impl IronFishVoice {
             }
         }
         else {
-            for i in startidx..frame_count {
+            for i in startidx..frame_count+startidx {
                 let output = self.one(&settings, touch) * 8.0;
                 left[i] += output as f32;
                 right[i] += output as f32;
@@ -730,6 +755,8 @@ pub struct IronFishState {
     display_buffers: Vec<AudioBuffer>,
     settings: Arc<IronFishSettings>,
     voices: [IronFishVoice; 16],
+    activemidinotes: [bool; 256],
+    activemidinotecount: usize,
     osc1cache: OscSettings,
     osc2cache: OscSettings,
     touch: f32,
@@ -737,6 +764,7 @@ pub struct IronFishState {
     delayreadpos: usize,
     delaywritepos: usize,
     sequencer: SequencerState,
+    arp: ArpState,
     lastplaying: bool,
     old_step: u32
 }
@@ -744,22 +772,65 @@ pub struct IronFishState {
 impl IronFishState {
     
     pub fn note_off(&mut self, b1: u8, b2: u8) {
+        if (self.settings.arp.enabled.get())
+        {
+            self.activemidinotes[b1 as usize] = false;
+            if (self.activemidinotecount >0){   
+                     self.activemidinotecount =  self.activemidinotecount  - 1;
+            }
+            self.rebuildarp();
+        }
+        else{
+            self.internal_note_off(b1, b2);
+        }
         
+    }
+    pub fn internal_note_off(&mut self, b1: u8, b2: u8){
         for i in 0..self.voices.len() {
             if self.voices[i].active() == b1 as i16 {
                 self.voices[i].note_off(b1, b2, &self.settings)
             }
         }
+
     }
-    
     pub fn note_on(&mut self, b1: u8, b2: u8) {
+        if (self.settings.arp.enabled.get())
+        {
+            self.activemidinotes[b1 as usize] = true;
+            self.activemidinotecount = self.activemidinotecount  + 1;
+            self.rebuildarp();
+      
+        }
+        else{
+            self.internal_note_on(b1, b2);
+        }
+    }
+
+    pub fn internal_note_on(&mut self, b1: u8, b2: u8) {
         for i in 0..self.voices.len() {
             if self.voices[i].active() == -1 {
                 self.voices[i].note_on(b1, b2, &self.settings);
                 return;
             }
         }
+       
     }
+
+    pub fn rebuildarp(&mut self)
+    {
+        log!("rebuilding arp");
+        let mut current = 0;
+        for i in 0..128 {
+            if (self.activemidinotes[i] ) {
+                self.arp.melody[current] = i as u32;
+                current +=1;
+                //   self.activemidinotecount += 1;
+            }
+        }
+        self.arp.melodylength = current;
+    }
+    
+   
     
     pub fn one(&mut self) -> f32 {
         let mut output: f32 = 0.0;
@@ -785,6 +856,7 @@ impl IronFishState {
             if (self.delayreadpos >= 44100) {self.delayreadpos = 0;}
         }
     }
+
     pub fn get_sequencer_step(&mut self, step: usize) -> u32
     {
         match step {
@@ -812,6 +884,15 @@ impl IronFishState {
     
     pub fn fill_buffer(&mut self, buffer: &mut AudioBuffer, display: &mut DisplayAudioGraph) {
         
+        let mut disp_buffers = Vec::new();
+        for i in 0..self.voices.len() {
+            let mut dp = display.pop_buffer_resize(buffer.frame_count(), buffer.channel_count());
+            if let Some(dp) = &mut dp{
+                dp.zero();
+            }
+            disp_buffers.push(dp);
+        }
+
         buffer.zero();
         //        if (self.settings.osc1.transpose != )
         let mut pitchdirty: bool = false;
@@ -834,27 +915,33 @@ impl IronFishState {
         }
         let mut remaining = buffer.frame_count();
         let mut bufferidx = 0;
+     //   log!("s{}", remaining);
+            
         while (remaining > 0)
         {
+            //log!("b{}", remaining);
             let mut toprocess = remaining;
-            if (self.settings.sequencer.playing.get())
-            {
-                if (self.lastplaying == false)
-                {
-                    self.lastplaying = true;
-                    self.sequencer.currentstep = 15;
-                    self.old_step = 0;
-                }
+           
 
 
                 if (self.sequencer.samplesleftinstep == 0) {
-                    // process notes!
-                    let newstepidx = (self.sequencer.currentstep + 1) % 16;
-                    let new_step = self.get_sequencer_step(newstepidx);
-                    
-                    //log!("tick! {:?} {:?}",newstepidx, new_step);
-                    // minor scale..
-                    let scale = [
+
+                    if (self.settings.sequencer.playing.get())
+                    {
+                        if (self.lastplaying == false)
+                        {
+                            self.lastplaying = true;
+                            self.sequencer.currentstep = 15;
+                            self.old_step = 0;
+                        }
+
+                        // process notes!
+                        let newstepidx = (self.sequencer.currentstep + 1) % 16;
+                        let new_step = self.get_sequencer_step(newstepidx);
+                        
+                        //log!("tick! {:?} {:?}",newstepidx, new_step);
+                        // minor scale..
+                        let scale = [
                         
                                 36 - 24, 38 - 24, 39 - 24, 41 - 24, 43 - 24, 44 - 24, 46 - 24, 
                                 36 - 12, 38 - 12, 39 - 12, 41 - 12, 43 - 12, 44 - 12, 46 - 12, 
@@ -862,62 +949,63 @@ impl IronFishState {
                                 36 + 12, 38 + 12, 39 + 12, 41 + 12, 43 + 12, 44 + 12, 46 + 12, 
                                 36 + 24, 38 + 24, 39 + 24, 41 + 24, 43 + 24, 44 + 24, 46 + 24];
                     
-                    for i in 0..32 {
-                        if self.old_step & (1 << (31-i)) != 0 {
-                            if (new_step & (1 << (31-i))) == 0 {
-                                        //  log!("note off {:?}",scale[i]);
-                                self.note_off(scale[i], 127);
-                            }
-                        } else {
-                            if (new_step & (1 << (31-i)) != 0) {
-                                       // log!("note on {:?}",scale[i]);
-                                self.note_on(scale[i], 127);
+                        for i in 0..32 {
+                            if self.old_step & (1 << (31-i)) != 0 {
+                                if (new_step & (1 << (31-i))) == 0 {
+                                            //  log!("note off {:?}",scale[i]);
+                                    self.internal_note_off(scale[i], 127);
+                                }
+                            } else {
+                                if (new_step & (1 << (31-i)) != 0) {
+                                        // log!("note on {:?}",scale[i]);
+                                    self.internal_note_on(scale[i], 127);
+                                }
                             }
                         }
-                    }
-                    self.old_step = new_step;
+                        self.old_step = new_step;
                     
-                    self.sequencer.currentstep = newstepidx;
+                        self.sequencer.currentstep = newstepidx;
+                    }
+
+                    if  (self.settings.arp.enabled.get())
+                    {   
+                        self.internal_note_off(self.arp.lastarpnote as u8,127);
+                                            
+                        if  self.activemidinotecount > 0{
+                            self.arp.lastarpnote = self.arp.melody[self.arp.step];
+                            self.internal_note_on(self.arp.lastarpnote as u8,127);
+                            self.arp.step = (self.arp.step + 1) % self.arp.melodylength.max(1);
+                        }
+                    }
                     self.sequencer.samplesleftinstep = ((self.settings.sample_rate.get() * 60.0) / (self.settings.sequencer.bpm.get() * 4.0)) as usize;
                 }
-                else
-                {
-                    
-                   
-                    //  log!("{:?} {:?}", toprocess, self.sequencer.samplesleftinstep)
-                }
+               
+                
                 toprocess = toprocess.min(self.sequencer.samplesleftinstep);
                 self.sequencer.samplesleftinstep -= toprocess;
-            }else{
-                if (self.lastplaying)
-                {
-                    self.all_notes_off();
-                    self.lastplaying = false;
-                }
-            }
-
             
+
+            if (self.lastplaying && self.settings.sequencer.playing.get() == false)
+            {
+                self.all_notes_off();
+                self.lastplaying = false;
+            }
+        
             for i in 0..self.voices.len() {
                 if self.voices[i].active() > -1 {
-                    let mut display_buffer = display.pop_buffer_resize(buffer.frame_count(), buffer.channel_count());
-                    self.voices[i].fill_buffer(buffer, bufferidx, toprocess, display_buffer.as_mut(), &self.settings, self.touch);
-                    //self.voices[i].fill_buffer(buffer, bufferidx, toprocess, None, &self.settings, self.touch);
-                    if let Some(dp) = display_buffer {
-                        display.send_buffer(true, i, dp);
-                    }
-                }
-                else {
-                    display.send_voice_off(i);
-                    let mut display_buffer = display.pop_buffer_resize(buffer.frame_count(), buffer.channel_count());
-                    if let Some(mut dp) = display_buffer {
-                        dp.zero();
-                        display.send_buffer(false, i, dp);
-                    }
+                    self.voices[i].fill_buffer(buffer, bufferidx, toprocess, disp_buffers[i].as_mut(), &self.settings, self.touch);                   
                 }
             }
             bufferidx += toprocess;
             remaining -= toprocess;
         }
+
+        for (i,dp) in disp_buffers.into_iter().enumerate(){
+            if let Some(dp) = dp{
+                display.send_buffer(true, i, dp);
+            }
+        }
+
         self.apply_delay(buffer);
     }
 }
@@ -976,7 +1064,10 @@ impl AudioGraphNode for IronFishState {
     fn all_notes_off(&mut self) {
         for i in 0..self.voices.len() {
             self.voices[i].volume_envelope.phase = EnvelopePhase::Idle;
+            self.activemidinotes[i] = false;
         }
+        self.activemidinotecount = 0;
+        self.rebuildarp();
     }
     
     fn handle_midi_1_data(&mut self, data: Midi1Data) {
@@ -1017,6 +1108,7 @@ impl AudioComponent for IronFish {
             display_buffers: buffers,
             settings: self.settings.clone(),
             voices: Default::default(),
+            activemidinotes: [false;256],
             to_ui: self.to_ui.sender(),
             from_ui: self.from_ui.receiver(),
             osc1cache: self.settings.osc1.clone(),
@@ -1027,7 +1119,9 @@ impl AudioComponent for IronFish {
             delayreadpos: 0,
             sequencer: SequencerState::default(),
             lastplaying: false,
-            old_step: 0
+            old_step: 0,
+            arp: Default::default(),
+            activemidinotecount : 0
         })
     }
     
