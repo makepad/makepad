@@ -99,6 +99,7 @@ fn main() {
                 else if path.ends_with(".css") {"text/css"}
                 else if path.ends_with(".js") {"text/javascript"}
                 else if path.ends_with(".ttf") {"application/ttf"}
+                else if path.ends_with(".png") {"image/png"}
                 else {continue};
                 
                 if path.contains("..") || path.contains("//") || path.contains("\\"){
