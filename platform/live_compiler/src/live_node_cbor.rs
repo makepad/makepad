@@ -690,7 +690,6 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
             let origin = LiveNodeOrigin::field();
             
             if stack.last().unwrap().count == stack.last().unwrap().len {
-                println!("CLOSE!");
                 self.push(LiveNode {id: LiveId(0), origin, value: LiveValue::Close});
                 stack.pop();
             }
