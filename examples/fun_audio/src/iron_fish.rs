@@ -862,8 +862,8 @@ impl IronFishState {
       
         let mut delayreadposl = self.delaywritepos + (44100-15000) - leftoffs;
         let mut delayreadposr = self.delaywritepos + (44100-15000) + leftoffs;
-        if (delayreadposl > 44100) {delayreadposl-=44100;};
-        if (delayreadposr > 44100) {delayreadposr-=44100;};
+        while (delayreadposl >= 44100) {delayreadposl-=44100;};
+        while (delayreadposr >= 44100) {delayreadposr-=44100;};
         for i in 0..frame_count {
 
              
