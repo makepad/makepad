@@ -444,7 +444,11 @@ live_register!{
                     max: 240.0
                     label: "BPM"
                 }
-                sequencer = Sequencer {
+            }
+            sequencer = Sequencer {
+                walk:{
+                    width: Fill,
+                    height: Fill
                 }
             }
         }
@@ -486,7 +490,7 @@ live_register!{
         }        
     }
     FXPanel: FishPanel {
-        label = {bg: {color: (COLOR_FX)}, label = {text: "Effects",}}
+        label = {bg: {color: (COLOR_FX)}, label = {text: "Delay Effects",}}
         body = {
             layout: {flow: Right}
             walk: {width: Fill, height: Fit}
@@ -496,7 +500,7 @@ live_register!{
                     bind: "fx.delaysend"
                     min: 0.0
                     max: 1.0
-                    label: "Delay Send"
+                    label: "Send"
                 }
             }
             delayfeedback = InstrumentSlider {
@@ -505,7 +509,7 @@ live_register!{
                     bind: "fx.delayfeedback"
                     min: 0.0
                     max: 1.0
-                    label: "Delay Feedback"
+                    label: "Feedback"
 
                 }
             }
@@ -515,7 +519,7 @@ live_register!{
                     bind: "fx.difference"
                     min: 0.0
                     max: 1.0
-                    label: "Delay Stereo"
+                    label: "Stereo"
                 }
             }
             delaycross = InstrumentSlider {
@@ -524,7 +528,7 @@ live_register!{
                     bind: "fx.cross"
                     min: 0.0
                     max: 1.0
-                    label: "Delay Cross"
+                    label: "Cross"
 
                 }
             }
@@ -1141,6 +1145,7 @@ impl App {
         if ui.button(ids!(save8)).was_clicked() {self.preset(ui.cx, 8, shift);}
     }
     
+    #[cfg(not(target_arch = "wasm32"))]
     pub fn preset(&mut self, cx: &mut Cx, index: usize, save: bool) {
         let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
         let file_name = format!("preset_{}.bin", index);
@@ -1167,6 +1172,9 @@ impl App {
            //     log!("Error decompressing preset");
             //}
         }
+    }
+    #[cfg(target_arch = "wasm32")]
+    pub fn preset(&mut self, _cx: &mut Cx, _index: usize, _save: bool) {
     }
     
     
