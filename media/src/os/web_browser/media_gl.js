@@ -9,8 +9,12 @@ export class WasmMediaGL extends WasmWebGL {
         
         if (!this.audio_context) {
             const start_audio = async () => {
+                if(this.audio_context){
+                   return 
+                }
                 let context = this.audio_context = new AudioContext();
                 
+                context.resume();
                 await context.audioWorklet.addModule("/makepad/media/src/os/web_browser/audio_worklet.js", {credentials: 'omit'});
                 
                 const audio_worklet = new AudioWorkletNode(context, 'audio-worklet', {
@@ -41,12 +45,13 @@ export class WasmMediaGL extends WasmWebGL {
                     console.error(err);
                 }
                 audio_worklet.connect(context.destination);
+                
+                
                 return audio_worklet;
             };
             
-            start_audio();
             let user_interact_hook = () => {
-                this.audio_context.resume();
+                start_audio();
             }
             window.addEventListener('click', user_interact_hook)
             window.addEventListener('touchstart', user_interact_hook)
