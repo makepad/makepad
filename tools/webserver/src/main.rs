@@ -18,7 +18,7 @@ use std::{
 #[derive(Clone)]
 struct CollabNotificationSender{
     sender: mpsc::Sender<Vec<u8>>,
-}
+} 
 
 impl NotificationSender for CollabNotificationSender{
     fn box_clone(&self) -> Box<dyn NotificationSender> {
