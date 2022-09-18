@@ -255,15 +255,7 @@ impl SubOscillatorState {
 }
 
 impl OscillatorState {
-    fn sps_calc_detune(&mut self, detune: f32) {
-        // FIXME: here I would assert that detune is [0..1]
-        self.sps_detune =
-        (10028.7312891634 * pow(detune, 11.0)) - (50818.8652045924 * pow(detune, 10.0)) + (111363.4808729368 * pow(detune, 9.0)) -
-        (138150.6761080548 * pow(detune, 8.0)) + (106649.6679158292 * pow(detune, 7.0)) - (53046.9642751875 * pow(detune, 6.0)) +
-        (17019.9518580080 * pow(detune, 5.0)) - (3425.0836591318 * pow(detune, 4.0)) + (404.2703938388 * pow(detune, 3.0)) -
-        (24.1878824391 * pow(detune, 2.0)) + (0.6717417634 * detune) + 0.0030115596;
-    }
-    
+
     fn sps_calc_mix(&mut self, mix: f32) {
         // FIXME: here I would assert that mix is [0..1]
         self.sps_mix_main = -0.55366 * mix + 0.99785;
@@ -380,22 +372,27 @@ impl OscillatorState {
         }
     }
     
-    fn set_note(&mut self, note: u8, samplerate: f32, settings: &OscSettings, supersaw: &SupersawSettings, _update: bool) {
+    fn set_note(&mut self, note: u8, samplerate: f32, settings: &OscSettings, supersaw: &SupersawSettings, sps_detune_tab: &[f32; 1024], _update: bool) {
         let freq = 440.0 * f32::powf(2.0, ((note as f32) - 69.0 + settings.transpose.get() as f32 + settings.detune.get()) / 12.0);
         self.delta_phase[0] = (6.28318530718 * freq) / samplerate;
         
         match settings.osc_type.get() {
             OscType::Pure | OscType::DPWSawPulse | OscType::BlampTri => {}
             OscType::Supersaw => {
-                // FIXME: precalculate table (like in BISON), that'll do away with any performance concerns
-                self.sps_calc_detune(supersaw.detune.get());
+                // look up detune base (interpolated)
+                let detune = supersaw.detune.get();
+                let detune_idx_lo = (detune * (1023.0 - 1.0)) as usize;
+                let detune_lo = sps_detune_tab[detune_idx_lo];
+                let detune_hi = sps_detune_tab[detune_idx_lo + 1];
+                self.sps_detune = detune_lo + (detune_hi - detune_lo) * detune;
                 
+                // set main & side band gains
                 self.sps_calc_mix(supersaw.mix.get());
                 
-                // FIXME: only relevant for supersaw, lazily initialiizing here (constants courtesy of Alex Shore)
+                // lazily initialiizing here (constants courtesy of Alex Shore, the better sounding set of the 2 I have in FM. BISON)
                 let sps_coeffs: [f32; 6] = [-0.11002313, -0.06288439, -0.03024148, 0.02953130, 0.06216538, 0.10745242];
                 
-                // FIXME: running phases are preferable to this
+                // FIXME: running phases are better, but this does the job fairly OK
                 self.phase[0] = random_f32(&mut self.sps_seed);
                 
                 for n in 1..6 {
@@ -769,16 +766,16 @@ impl IronFishVoice {
         self.mod_envelope.trigger_off(velocity, &settings.mod_envelope, settings.sample_rate.get());
     }
     
-    pub fn update_note(&mut self, settings: &IronFishSettings) {
-        self.osc1.set_note(self.current_note as u8, settings.sample_rate.get(), &settings.osc1, &settings.supersaw, true);
-        self.osc2.set_note(self.current_note as u8, settings.sample_rate.get(), &settings.osc2, &settings.supersaw, true);
+    pub fn update_note(&mut self, settings: &IronFishSettings, sps_detune_tab: &[f32; 1024]) {
+        self.osc1.set_note(self.current_note as u8, settings.sample_rate.get(), &settings.osc1, &settings.supersaw, sps_detune_tab, true);
+        self.osc2.set_note(self.current_note as u8, settings.sample_rate.get(), &settings.osc2, &settings.supersaw, sps_detune_tab, true);
     }
     
-    pub fn note_on(&mut self, b1: u8, b2: u8, settings: &IronFishSettings) {
+    pub fn note_on(&mut self, b1: u8, b2: u8, settings: &IronFishSettings, sps_detune_tab: &[f32; 1024]) {
         
         let velocity = (b2 as f32) / 127.0;
-        self.osc1.set_note(b1, settings.sample_rate.get(), &settings.osc1, &settings.supersaw, false);
-        self.osc2.set_note(b1, settings.sample_rate.get(), &settings.osc2, &settings.supersaw, false);
+        self.osc1.set_note(b1, settings.sample_rate.get(), &settings.osc1, &settings.supersaw, sps_detune_tab, false);
+        self.osc2.set_note(b1, settings.sample_rate.get(), &settings.osc2, &settings.supersaw, sps_detune_tab, false);
         self.subosc.set_note(b1, settings.sample_rate.get());
         self.volume_envelope.trigger_on(velocity, &settings.volume_envelope, settings.sample_rate.get());
         self.mod_envelope.trigger_on(velocity, &settings.mod_envelope, settings.sample_rate.get());
@@ -834,7 +831,7 @@ impl IronFishVoice {
 pub struct IronFishState {
     //from_ui: FromUIReceiver<FromUI>,
     //to_ui: ToUISender<ToUI>,
-    display_buffers: Vec<Option<AudioBuffer>>,
+    display_buffers: Vec<Option<AudioBuffer >>,
     settings: Arc<IronFishSettings>,
     voices: [IronFishVoice; 16],
     activemidinotes: [bool; 256],
@@ -851,7 +848,8 @@ pub struct IronFishState {
     lastplaying: bool,
     old_step: u32,
     lfo: LFOState,
-    lfovalue: f32
+    lfovalue: f32,
+    sps_detune_tab: [f32; 1024]
 }
 
 impl IronFishState {
@@ -891,7 +889,7 @@ impl IronFishState {
     pub fn internal_note_on(&mut self, b1: u8, b2: u8) {
         for i in 0..self.voices.len() {
             if self.voices[i].active() == -1 {
-                self.voices[i].note_on(b1, b2, &self.settings);
+                self.voices[i].note_on(b1, b2, &self.settings, &self.sps_detune_tab);
                 return;
             }
         }
@@ -1010,7 +1008,7 @@ impl IronFishState {
             
             for i in 0..self.voices.len() {
                 if self.voices[i].active() > -1 {
-                    self.voices[i].update_note(&self.settings);
+                    self.voices[i].update_note(&self.settings, &self.sps_detune_tab);
                 }
             }
         }
@@ -1231,8 +1229,24 @@ impl AudioGraphNode for IronFishState {
 impl AudioComponent for IronFish {
     fn get_graph_node(&mut self, _cx: &mut Cx) -> Box<dyn AudioGraphNode + Send> {
         //self.from_ui.new_channel();
+
+        // precalculate supersaw detune table (heavy polnynomial, based on data sampled from an actual JP-80000)
+        // FIXME: move to it's own function to keep things tidy
+        let mut sps_detune_tab = [0f32;1024];
+        for i in 0..1024
+        {
+            let detune = (1.0/1024.0) * i as f32;
+
+            sps_detune_tab[i] = 
+            (10028.7312891634*pow(detune, 11.0)) - (50818.8652045924*pow(detune, 10.0)) + (111363.4808729368*pow(detune, 9.0)) -
+            (138150.6761080548*pow(detune, 8.0)) + (106649.6679158292*pow(detune, 7.0)) - (53046.9642751875*pow(detune, 6.0))  + 
+            (17019.9518580080*pow(detune, 5.0))  - (3425.0836591318*pow(detune, 4.0))   + (404.2703938388*pow(detune, 3.0))    - 
+            (24.1878824391*pow(detune, 2.0))     + (0.6717417634*detune)                + 0.0030115596;		
+        }
+
         let mut buffers = Vec::new();
         buffers.resize(16, None);
+
         Box::new(IronFishState {
             display_buffers: buffers,
             settings: self.settings.clone(),
@@ -1253,7 +1267,8 @@ impl AudioComponent for IronFish {
             arp: Default::default(),
             activemidinotecount: 0,
             lfo: Default::default(),
-            lfovalue: 0.0
+            lfovalue: 0.0,
+            sps_detune_tab
         })
     }
     
