@@ -426,7 +426,7 @@ impl OscillatorState {
                 // FIXME: running phases are better, but this does the job fairly OK
                 self.phase[0] = random_f32(&mut self.sps_seed);
                 
-                for n in 1..6 {
+                for n in 1..7 {
                     self.phase[n] = random_f32(&mut self.sps_seed);
                     
                     // calculate & set sideband phase delta
