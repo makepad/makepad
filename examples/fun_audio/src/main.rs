@@ -416,7 +416,7 @@ live_register!{
             }
         }
     }
-
+    
     SequencerPanel: FishPanel {
         label = {bg: {color: (COLOR_MIX)}, label = {text: "Sequencer"}}
         walk: {width: Fill, height: Fill}
@@ -454,27 +454,53 @@ live_register!{
     }  
 
     SupersawPanel: FishPanel {
-        label = {bg: {color: (COLOR_SUPERSAW)}, label = {text: "Supersaw"}}
+        label = {bg: {color: (COLOR_SUPERSAW)}, label = {text: "Supersaw (JP8K)"}}
         body = {
-            noise = InstrumentSlider {
-                slider = {
-                    slider: {line_color: (COLOR_SUPERSAW)}
-                    bind: "supersaw.detune"
-                    min: 0.0
-                    max: 1.0
-                    label: "Supersaw detune"
+                twocol1 = Frame {
+                    layout: {flow: Right}
+                    walk: {width: Fill, height: Fit}
+                    detune = InstrumentSlider {
+                    slider = {
+                        slider: {line_color: (COLOR_SUPERSAW)}
+                        bind: "supersaw1.detune"
+                        min: 0.0
+                        max: 1.0
+                        label: "Detune #1"
+                    }
+                }
+                mix = InstrumentSlider {
+                    slider = {
+                        slider: {line_color: (COLOR_SUPERSAW)}
+                        bind: "supersaw1.mix"
+                        min: 0.0
+                        max: 1.0
+                        label: "Mix #1"
+                    }
                 }
             }
-            sub = InstrumentSlider {
+            twocol2 = Frame {
+                layout: {flow: Right}
+                walk: {width: Fill, height: Fit}
+                detune = InstrumentSlider {
                 slider = {
                     slider: {line_color: (COLOR_SUPERSAW)}
-                    bind: "supersaw.mix"
+                    bind: "supersaw2.detune"
                     min: 0.0
                     max: 1.0
-                    label: "Supersaw mix"
+                    label: "Detune #2"
+                }
+            }
+            mix = InstrumentSlider {
+                slider = {
+                    slider: {line_color: (COLOR_SUPERSAW)}
+                    bind: "supersaw2.mix"
+                    min: 0.0
+                    max: 1.0
+                    label: "Mix #2"
                 }
             }
         }
+    }
     }
 
     MixerPanel: FishPanel {
@@ -513,6 +539,7 @@ live_register!{
            }
         }        
     }
+
     FXPanel: FishPanel {
         label = {bg: {color: (COLOR_FX)}, label = {text: "Effects",}}
         body = {
