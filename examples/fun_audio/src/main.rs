@@ -35,6 +35,7 @@ live_register!{
     const SPACING_CONTROLS : 4.0
     const COLOR_OSC : #xFFFF99 // yellow
     const COLOR_MIX : #xC // gray
+    const COLOR_SUPERSAW : #xFF7766 // red-ish
     const COLOR_ENV : #xFFC499 // light red
     const COLOR_FILTER : #xA7ADF2 // indigo
     const COLOR_LFO : #xFF9999 // red
@@ -320,7 +321,7 @@ live_register!{
             }
         }
     }
-    
+
     FishHeader: Solid {
         bg: {
             fn pixel(self) -> vec4 {
@@ -376,7 +377,7 @@ live_register!{
             }
         }
     }
-    
+
     TouchPanel: FishPanel {
         label = {bg: {color: (COLOR_TOUCH)}, label = {text: "Touch"}}
         body = {
@@ -415,6 +416,7 @@ live_register!{
             }
         }
     }
+
     SequencerPanel: FishPanel {
         label = {bg: {color: (COLOR_MIX)}, label = {text: "Sequencer"}}
         walk: {width: Fill, height: Fill}
@@ -446,13 +448,35 @@ live_register!{
                 }
             }
             sequencer = Sequencer {
-                walk:{
-                    width: Fill,
-                    height: Fill
-                }
+                walk: {width: Fill, height: Fill}
             }
         }
     }  
+
+    SupersawPanel: FishPanel {
+        label = {bg: {color: (COLOR_SUPERSAW)}, label = {text: "Supersaw"}}
+        body = {
+            noise = InstrumentSlider {
+                slider = {
+                    slider: {line_color: (COLOR_SUPERSAW)}
+                    bind: "supersaw.detune"
+                    min: 0.0
+                    max: 1.0
+                    label: "Supersaw detune"
+                }
+            }
+            sub = InstrumentSlider {
+                slider = {
+                    slider: {line_color: (COLOR_SUPERSAW)}
+                    bind: "supersaw.mix"
+                    min: 0.0
+                    max: 1.0
+                    label: "Supersaw mix"
+                }
+            }
+        }
+    }
+
     MixerPanel: FishPanel {
         label = {bg: {color: (COLOR_MIX)}, label = {text: "Mixer"}}
         body = {
@@ -486,11 +510,11 @@ live_register!{
                         label: "Sub Oscillator"
                     }
                 }
-            }
+           }
         }        
     }
     FXPanel: FishPanel {
-        label = {bg: {color: (COLOR_FX)}, label = {text: "Delay Effects",}}
+        label = {bg: {color: (COLOR_FX)}, label = {text: "Effects",}}
         body = {
             layout: {flow: Right}
             walk: {width: Fill, height: Fit}
@@ -500,7 +524,7 @@ live_register!{
                     bind: "fx.delaysend"
                     min: 0.0
                     max: 1.0
-                    label: "Send"
+                    label: "Delay Send"
                 }
             }
             delayfeedback = InstrumentSlider {
@@ -509,7 +533,7 @@ live_register!{
                     bind: "fx.delayfeedback"
                     min: 0.0
                     max: 1.0
-                    label: "Feedback"
+                    label: "Delay Feedback"
 
                 }
             }
@@ -519,7 +543,7 @@ live_register!{
                     bind: "fx.difference"
                     min: 0.0
                     max: 1.0
-                    label: "Stereo"
+                    label: "Delay Stereo"
                 }
             }
             delaycross = InstrumentSlider {
@@ -528,7 +552,7 @@ live_register!{
                     bind: "fx.cross"
                     min: 0.0
                     max: 1.0
-                    label: "Cross"
+                    label: "Delay Cross"
 
                 }
             }
@@ -655,8 +679,8 @@ live_register!{
                 dropdown = {
                     bind_enum: "OscType"
                     bind: "osc1.osc_type"
-                    items: ["DPWSawPulse","BlampTri",  "Pure"]
-                    display: ["Saw", "Triangle",  "Sine"]
+                    items: ["DPWSawPulse","BlampTri",  "Pure", "Supersaw"]
+                    display: ["Saw", "Triangle",  "Sine", "Supersaw"]
                 }
             }
             
@@ -814,6 +838,7 @@ live_register!{
                         layout: {flow: Right, spacing: (SPACING_PANELS)}
                         MixerPanel {}
                         TouchPanel {}
+                        SupersawPanel{}
                     }
                     Frame {
                         walk: {height: Fit, width: Fill}
@@ -888,6 +913,9 @@ pub struct App {
     #[rust] knob_bind: [usize; 2],
     #[rust] knob_change: usize,
     #[rust(vec![
+        KnobBind {name: "supersaw.detune".into(), value: 0.0, rgb: KnobRGB::Red, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+        KnobBind {name: "supersaw.mix".into(), value: 0.0, rgb: KnobRGB::Red, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+
         KnobBind {name: "osc1.detune".into(), value: 0.0, rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
         KnobBind {name: "osc2.detune".into(), value: 0.0, rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
         KnobBind {name: "lfo.rate".into(), value: 0.0, rgb: KnobRGB::Red, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
@@ -1145,7 +1173,6 @@ impl App {
         if ui.button(ids!(save8)).was_clicked() {self.preset(ui.cx, 8, shift);}
     }
     
-    #[cfg(not(target_arch = "wasm32"))]
     pub fn preset(&mut self, cx: &mut Cx, index: usize, save: bool) {
         let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
         let file_name = format!("preset_{}.bin", index);
@@ -1172,9 +1199,6 @@ impl App {
            //     log!("Error decompressing preset");
             //}
         }
-    }
-    #[cfg(target_arch = "wasm32")]
-    pub fn preset(&mut self, _cx: &mut Cx, _index: usize, _save: bool) {
     }
     
     
