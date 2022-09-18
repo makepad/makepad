@@ -352,14 +352,23 @@ impl OscillatorState {
         tri -= self.blamp(1.0 - t2, self.delta_phase[0]);
         return tri;
     }
+
+    fn pure(&mut self, phase_idx: usize) -> f32 {
+        return (self.phase[phase_idx] * 6.28318530718).sin();
+    }
     
-    // FIXME: implement Stijn's suggestion to subtract sine wave for all but one to filter the imminent wobble
     fn supersaw(&mut self) -> f32 {
-        let main_band = self.trivialsaw(0);
-        
+        let mut main_band = self.trivialsaw(0);
+        main_band -= self.pure(0);
+
         let mut side_bands = 0.0;
-        for n in 1..6 {
-            side_bands += self.trivialsaw(n);
+        for n in 1..7 {
+            let mut signal = self.trivialsaw(n);
+            if n < 6 {
+                signal -= self.pure(n);
+            }
+
+            side_bands += signal;
         }
         
         return main_band * self.sps_mix_main + side_bands * self.sps_mix_side_bands;
@@ -375,7 +384,7 @@ impl OscillatorState {
         }
         
         match settings.osc_type.get() {
-            OscType::Pure => (self.phase[0] * 6.28318530718).sin(),
+            OscType::Pure => self.pure(0),
             OscType::DPWSawPulse => self.dpw(0),
             //OscType::TrivialSaw => self.trivialsaw(),
             OscType::BlampTri => self.blamptriangle(),
