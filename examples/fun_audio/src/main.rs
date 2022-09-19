@@ -35,6 +35,7 @@ live_register!{
     const SPACING_CONTROLS : 4.0
     const COLOR_OSC : #xFFFF99 // yellow
     const COLOR_MIX : #xB // gray
+    const COLOR_SUPERSAW : #xFF7766 // red-ish
     const COLOR_ENV : #xFFC499 // light red
     const COLOR_FILTER : #xA7BEF2 // indigo
     const COLOR_LFO : #xFF9999 // red
@@ -340,7 +341,7 @@ live_register!{
             }
         }
     }
-    
+
     FishHeader: Solid {
         bg: {
             fn pixel(self) -> vec4 {
@@ -397,7 +398,7 @@ live_register!{
             }
         }
     }
-    
+
     TouchPanel: FishPanel {
         label = {bg: {color: (COLOR_TOUCH)}, label = {text: "Touch"}}
         body = {
@@ -436,6 +437,7 @@ live_register!{
             }
         }
     }
+    
     SequencerPanel: FishPanel {
         label = {bg: {color: (COLOR_MIX)}, label = {text: "Sequencer"}}
         walk: {width: Fill, height: Fill}
@@ -451,16 +453,11 @@ live_register!{
                         label: "Play"
                     }
                 }
-                clear_grid = FishButton {
-                    text: "Clear Grid"
-                    walk: {width: Fit, height: Fit, margin: 5}
-                }
-                InstrumentDropdown {
-                    walk: {margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: 0.0}}
-                    dropdown = {
-                        // bind_enum: "Scale"
-                        // bind: "filter1.filter_type"
-                        items: ["Scale", "Option A", "Option B", "Option C"]
+
+                arp = InstrumentCheckbox {
+                    checkbox = {
+                        bind: "arp.enabled",
+                        label: "Arpeggiator"
                     }
                 }
             }
@@ -472,11 +469,63 @@ live_register!{
                     max: 240.0
                     label: "BPM"
                 }
-                sequencer = Sequencer {
-                }
+            }
+            sequencer = Sequencer {
+                walk: {width: Fill, height: Fill}
             }
         }
     }  
+
+    SupersawPanel: FishPanel {
+        label = {bg: {color: (COLOR_SUPERSAW)}, label = {text: "Supersaw (JP8K)"}}
+        body = {
+                twocol1 = Frame {
+                    layout: {flow: Right}
+                    walk: {width: Fill, height: Fit}
+                    detune = InstrumentSlider {
+                    slider = {
+                        slider: {line_color: (COLOR_SUPERSAW)}
+                        bind: "supersaw1.detune"
+                        min: 0.0
+                        max: 1.0
+                        label: "Detune #1"
+                    }
+                }
+                mix = InstrumentSlider {
+                    slider = {
+                        slider: {line_color: (COLOR_SUPERSAW)}
+                        bind: "supersaw1.mix"
+                        min: 0.0
+                        max: 1.0
+                        label: "Mix #1"
+                    }
+                }
+            }
+            twocol2 = Frame {
+                layout: {flow: Right}
+                walk: {width: Fill, height: Fit}
+                detune = InstrumentSlider {
+                slider = {
+                    slider: {line_color: (COLOR_SUPERSAW)}
+                    bind: "supersaw2.detune"
+                    min: 0.0
+                    max: 1.0
+                    label: "Detune #2"
+                }
+            }
+            mix = InstrumentSlider {
+                slider = {
+                    slider: {line_color: (COLOR_SUPERSAW)}
+                    bind: "supersaw2.mix"
+                    min: 0.0
+                    max: 1.0
+                    label: "Mix #2"
+                }
+            }
+        }
+    }
+    }
+
     MixerPanel: FishPanel {
         label = {bg: {color: (COLOR_MIX)}, label = {text: "Mixer"}}
         body = {
@@ -510,9 +559,10 @@ live_register!{
                         label: "Sub Oscillator"
                     }
                 }
-            }
+           }
         }        
     }
+
     FXPanel: FishPanel {
         label = {bg: {color: (COLOR_FX)}, label = {text: "Effects",}}
         body = {
@@ -534,6 +584,25 @@ live_register!{
                     min: 0.0
                     max: 1.0
                     label: "Delay Feedback"
+
+                }
+            }
+            delaydifference = InstrumentSlider {
+                slider = {
+                    slider: {line_color: (COLOR_FX)}
+                    bind: "fx.difference"
+                    min: 0.0
+                    max: 1.0
+                    label: "Delay Stereo"
+                }
+            }
+            delaycross = InstrumentSlider {
+                slider = {
+                    slider: {line_color: (COLOR_FX)}
+                    bind: "fx.cross"
+                    min: 0.0
+                    max: 1.0
+                    label: "Delay Cross"
 
                 }
             }
@@ -672,8 +741,8 @@ live_register!{
                 dropdown = {
                     bind_enum: "OscType"
                     bind: "osc1.osc_type"
-                    items: ["DPWSawPulse","BlampTri",  "Pure"]
-                    display: ["Saw", "Triangle",  "Sine"]
+                    items: ["DPWSawPulse","BlampTri",  "Pure", "Supersaw"]
+                    display: ["Saw", "Triangle",  "Sine", "Supersaw"]
                 }
             }
             
@@ -805,6 +874,7 @@ live_register!{
                         layout: {flow: Right, spacing: (SPACING_PANELS)}
                         MixerPanel {}
                         TouchPanel {}
+                        SupersawPanel{}
                     }
                     Frame {
                         layout: {flow: Right, spacing: (SPACING_PANELS)}
@@ -888,6 +958,9 @@ pub struct App {
     #[rust] knob_bind: [usize; 2],
     #[rust] knob_change: usize,
     #[rust(vec![
+        KnobBind {name: "supersaw.detune".into(), value: 0.0, rgb: KnobRGB::Red, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+        KnobBind {name: "supersaw.mix".into(), value: 0.0, rgb: KnobRGB::Red, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
+
         KnobBind {name: "osc1.detune".into(), value: 0.0, rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
         KnobBind {name: "osc2.detune".into(), value: 0.0, rgb: KnobRGB::Yellow, ty: KnobType::BiPolar, min: -1.0, max: 1.0},
         KnobBind {name: "lfo.rate".into(), value: 0.0, rgb: KnobRGB::Red, ty: KnobType::UniPolar, min: 0.0, max: 1.0},
