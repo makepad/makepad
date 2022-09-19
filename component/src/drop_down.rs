@@ -80,7 +80,8 @@ live_register!{
             padding: {left: 5.0, top: 5.0, right: 4.0, bottom: 5.0}
         }
         
-        popup_menu: PopupMenu {}
+        popup_menu: PopupMenu {
+        }
         selected_item: 0
         state: {
             hover = {
