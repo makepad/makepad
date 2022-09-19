@@ -17,8 +17,9 @@ live_register!{
                     let left = 3;
                     let sz = self.size;
                     let c = vec2(left + sz, self.rect_size.y * 0.5);
-                    sdf.box(left, c.y - sz, sz * 2.0, sz * 2.0, 1.0);
-                    sdf.fill(#2)
+                    sdf.box(left, c.y - sz, sz * 2.0, sz * 2.0, 3.0); // rounding = 3rd value
+                    sdf.fill_keep(mix(mix(#x00000077, #x00000044, pow(self.pos.y, 1.)), mix(#x000000AA, #x00000066, pow(self.pos.y, 1.0)), self.hover))
+                    sdf.stroke(#x888, 1.0) // outline
                     let szs = sz * 0.5;
                     let dx = 1.0;
                     sdf.move_to(left + 4.0, c.y);
@@ -48,7 +49,6 @@ live_register!{
                     sdf.subtract();
                     sdf.circle(left + sz + self.selected * sz, c.y, isz);
                     sdf.blend(self.selected)
-
                     sdf.fill(#f);
                 }
             }
@@ -81,7 +81,7 @@ live_register!{
             hover = {
                 default: off
                 off = {
-                    from: {all: Play::Forward {duration: 0.0}}
+                    from: {all: Play::Forward {duration: 0.15}}
                     apply: {
                         check_box: {hover: 0.0}
                     }
