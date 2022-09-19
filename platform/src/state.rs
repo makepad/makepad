@@ -30,7 +30,6 @@ use {
         cx::Cx,
         live_traits::*,
     },
-    
 };
 
 pub trait LiveState {
@@ -60,8 +59,6 @@ pub trait LiveState {
     fn after_apply_state_changed(&mut self, cx: &mut Cx, apply_from: ApplyFrom, index: usize, nodes: &[LiveNode]);
     fn state_handle_event(&mut self, cx: &mut Cx, event: &Event) -> StateAction;
 }
-
-
 
 #[derive(Debug, Clone, Copy)]
 pub enum Animate {
