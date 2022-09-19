@@ -34,8 +34,8 @@ live_register!{
     const SPACING_PANELS : 10.0
     const SPACING_CONTROLS : 4.0
     const COLOR_OSC : #xFFFF99 // yellow
-    const COLOR_MIX : #xB // gray
-    const COLOR_SUPERSAW : #xFF7766 // red-ish
+    const COLOR_MIX : #xC // gray
+    // const COLOR_SUPERSAW : #xFF7766 // red-ish
     const COLOR_ENV : #xFFC499 // light red
     const COLOR_FILTER : #xA7BEF2 // indigo
     const COLOR_LFO : #xFF9999 // red
@@ -455,11 +455,25 @@ live_register!{
                 }
 
                 arp = InstrumentCheckbox {
+                    walk: {width: Fit, height: Fit, margin: 5}
                     checkbox = {
                         bind: "arp.enabled",
                         label: "Arpeggiator"
                     }
                 }
+
+                clear_grid = FishButton {
+                    text: "Clear Grid"
+                    walk: {width: Fit, height: Fit, margin: 5}
+                }
+
+                InstrumentDropdown {
+                    walk: {margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: 0.0}}
+                    dropdown = {
+                        items: ["Scale A", "Scale B", "Scale C"]
+                    }
+                }
+
             }
             speed = InstrumentSlider {
                 slider = {
@@ -476,55 +490,11 @@ live_register!{
         }
     }  
 
-    SupersawPanel: FishPanel {
-        label = {bg: {color: (COLOR_SUPERSAW)}, label = {text: "Supersaw (JP8K)"}}
-        body = {
-                twocol1 = Frame {
-                    layout: {flow: Right}
-                    walk: {width: Fill, height: Fit}
-                    detune = InstrumentSlider {
-                    slider = {
-                        slider: {line_color: (COLOR_SUPERSAW)}
-                        bind: "supersaw1.detune"
-                        min: 0.0
-                        max: 1.0
-                        label: "Detune #1"
-                    }
-                }
-                mix = InstrumentSlider {
-                    slider = {
-                        slider: {line_color: (COLOR_SUPERSAW)}
-                        bind: "supersaw1.mix"
-                        min: 0.0
-                        max: 1.0
-                        label: "Mix #1"
-                    }
-                }
-            }
-            twocol2 = Frame {
-                layout: {flow: Right}
-                walk: {width: Fill, height: Fit}
-                detune = InstrumentSlider {
-                slider = {
-                    slider: {line_color: (COLOR_SUPERSAW)}
-                    bind: "supersaw2.detune"
-                    min: 0.0
-                    max: 1.0
-                    label: "Detune #2"
-                }
-            }
-            mix = InstrumentSlider {
-                slider = {
-                    slider: {line_color: (COLOR_SUPERSAW)}
-                    bind: "supersaw2.mix"
-                    min: 0.0
-                    max: 1.0
-                    label: "Mix #2"
-                }
-            }
-        }
-    }
-    }
+    // SupersawPanel: FishPanel {
+    //     label = {bg: {color: (COLOR_SUPERSAW)}, label = {text: "Supersaw (JP8K)"}}
+    //     body = {
+    // }
+    // }
 
     MixerPanel: FishPanel {
         label = {bg: {color: (COLOR_MIX)}, label = {text: "Mixer"}}
@@ -732,11 +702,13 @@ live_register!{
         }
     }
     
-    OscPanel: FishPanel {
+    
+    OscPanel_A: FishPanel {
         label = {bg: {color: (COLOR_OSC)}, label = {text: "Oscillator ?"}}
         body = {
             type = InstrumentDropdown {
                 // label = {text: "Type"}
+                layout: {flow: Down}
                 walk: {margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: 0.0}}
                 dropdown = {
                     bind_enum: "OscType"
@@ -744,8 +716,93 @@ live_register!{
                     items: ["DPWSawPulse","BlampTri",  "Pure", "Supersaw"]
                     display: ["Saw", "Triangle",  "Sine", "Supersaw"]
                 }
+                Frame {
+                    layout: {flow: Right}
+                    walk: {width: Fill, height: Fit}
+                    detune = InstrumentSlider {
+                        slider = {
+                            slider: {line_color: (COLOR_OSC)}
+                            bind: "supersaw1.detune"
+                            min: 0.0
+                            max: 1.0
+                            label: "Detune"
+                        }
+                    }
+                    mix = InstrumentSlider {
+                        slider = {
+                            slider: {line_color: (COLOR_OSC)}
+                            bind: "supersaw1.mix"
+                            min: 0.0
+                            max: 1.0
+                            label: "Mix"
+                        }
+                    }
+                }
             }
-            
+
+            twocol = Frame {
+                layout: {flow: Right}
+                walk: {width: Fill, height: Fit}
+                transpose = InstrumentBipolarSlider {
+                    slider = {
+                        slider: {line_color:(COLOR_OSC)}
+                        bind: "osc1.transpose"
+                        min: -24.0
+                        max: 24.0
+                        label: "Transpose"
+                    }
+                }
+                
+                detune = InstrumentBipolarSlider {
+                    slider = {
+                        slider: {line_color: (COLOR_OSC)}
+                        bind: "osc1.detune"
+                        min: -1.0
+                        max: 1.0
+                        label: "Detune"
+                    }
+                }
+            }
+        }
+    }
+    
+    OscPanel_B: FishPanel {
+        label = {bg: {color: (COLOR_OSC)}, label = {text: "Oscillator ?"}}
+        body = {
+            type = InstrumentDropdown {
+                // label = {text: "Type"}
+                layout: {flow: Down}
+                walk: {margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: 0.0}}
+                dropdown = {
+                    bind_enum: "OscType"
+                    bind: "osc1.osc_type"
+                    items: ["DPWSawPulse","BlampTri",  "Pure", "Supersaw"]
+                    display: ["Saw", "Triangle",  "Sine", "Supersaw"]
+                }
+                Frame {
+                    layout: {flow: Right}
+                    walk: {width: Fill, height: Fit}
+                    detune = InstrumentSlider {
+                        slider = {
+                            slider: {line_color: (COLOR_OSC)}
+                            bind: "supersaw2.detune"
+                            min: 0.0
+                            max: 1.0
+                            label: "Detune"
+                        }
+                    }
+                    mix = InstrumentSlider {
+                        slider = {
+                            slider: {line_color: (COLOR_OSC)}
+                            bind: "supersaw2.mix"
+                            min: 0.0
+                            max: 1.0
+                            label: "Mix"
+                        }
+                    }
+                }
+            }
+
             twocol = Frame {
                 layout: {flow: Right}
                 walk: {width: Fill, height: Fit}
@@ -773,7 +830,7 @@ live_register!{
     }
     
     App: {{App}} {
-        window: {window: {inner_size: vec2(1280, 950)}, pass: {clear_color: #3}}
+        window: {window: {inner_size: vec2(1280, 1000)}, pass: {clear_color: #3}}
 
         audio_graph: {
             root: Mixer {
@@ -852,7 +909,7 @@ live_register!{
                     Frame {
                         walk: {height: Fit, width: Fill}
                         layout: {flow: Right, spacing: (SPACING_PANELS)}
-                        OscPanel {
+                        OscPanel_A {
                             label = {label = {text: "Oscillator 1"}}
                             body = {
                                 type = {dropdown = {bind: "osc1.osc_type"}}
@@ -860,7 +917,7 @@ live_register!{
                                 twocol = {detune = {slider = {bind: "osc1.detune"}}}
                             }
                         }
-                        OscPanel {
+                        OscPanel_B {
                             label = {label = {text: "Oscillator 2"}}
                             body = {
                                 type = {dropdown = {bind: "osc2.osc_type"}}
@@ -874,7 +931,7 @@ live_register!{
                         layout: {flow: Right, spacing: (SPACING_PANELS)}
                         MixerPanel {}
                         TouchPanel {}
-                        SupersawPanel{}
+                        // SupersawPanel{}
                     }
                     Frame {
                         layout: {flow: Right, spacing: (SPACING_PANELS)}
@@ -896,11 +953,11 @@ live_register!{
                         walk: {height: Fit, width: Fill}
                         layout: {flow: Right, spacing: (SPACING_PANELS)}
                         LFOPanel {}
-                        FXPanel {}
                     }
                 }
                 Frame {
                     layout: {flow: Down, spacing: (SPACING_PANELS)}
+                    FXPanel {}
                     SequencerPanel {}
                 }
             }
