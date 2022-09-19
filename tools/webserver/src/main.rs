@@ -18,7 +18,7 @@ use std::{
 #[derive(Clone)]
 struct CollabNotificationSender{
     sender: mpsc::Sender<Vec<u8>>,
-}
+} 
 
 impl NotificationSender for CollabNotificationSender{
     fn box_clone(&self) -> Box<dyn NotificationSender> {
@@ -99,6 +99,7 @@ fn main() {
                 else if path.ends_with(".css") {"text/css"}
                 else if path.ends_with(".js") {"text/javascript"}
                 else if path.ends_with(".ttf") {"application/ttf"}
+                else if path.ends_with(".png") {"image/png"}
                 else {continue};
                 
                 if path.contains("..") || path.contains("//") || path.contains("\\"){
