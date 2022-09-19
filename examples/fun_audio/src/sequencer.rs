@@ -53,7 +53,7 @@ live_register!{
     
     Sequencer: {{Sequencer}} {
         button: SeqButton {}
-        button_size: vec2(34.0, 34.0),
+        button_size: vec2(25.0, 25.0),
         grid_x: 16,
         grid_y: 16,
         walk: {
@@ -124,7 +124,7 @@ impl SeqButton {
         self.button.draw_abs(cx, rect);
     }
     
-    fn set_is_active(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
+    fn _set_is_active(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
         self.toggle_state(cx, is, animate, ids!(pressed.on), ids!(pressed.off))
     }
     
@@ -182,16 +182,18 @@ impl Sequencer {
 
         let start_pos = cx.turtle().pos(); //+ vec2(10., 10.);
         
+        let rect = cx.turtle().rect();
+        let sz = rect.size / dvec2(self.grid_x as f64, self.grid_y as f64);
         let button = self.button;
         for y in 0..self.grid_y{
             for x in 0..self.grid_x{
                 let i = x + y * self.grid_x;
-                let pos = start_pos + dvec2(x as f64 * self.button_size.x, y as f64 * self.button_size.y);
+                let pos = start_pos + dvec2(x as f64 * sz.x, y as f64 * sz.y);
                 let btn_id = LiveId(i as u64).into();
                 let btn = self.buttons.get_or_insert(cx, btn_id, | cx | {
                     SeqButton::new_from_ptr(cx, button)
                 });
-                btn.draw_abs(cx, Rect {pos: pos, size: self.button_size});
+                btn.draw_abs(cx, Rect {pos: pos, size: sz});
             }
         }
         let used = dvec2(self.grid_x as f64 * self.button_size.x, self.grid_y as f64 * self.button_size.y);
@@ -202,7 +204,7 @@ impl Sequencer {
         self.buttons.retain_visible();
     }
     
-    pub fn set_key_focus(&self, cx: &mut Cx) {
+    pub fn _set_key_focus(&self, cx: &mut Cx) {
         cx.set_key_focus(self.area);
     }
     
@@ -261,7 +263,7 @@ impl SequencerImGUI {
         btns
     }
     
-    pub fn inner(&self) -> Option<std::cell::RefMut<'_, Sequencer >> {
+    pub fn _inner(&self) -> Option<std::cell::RefMut<'_, Sequencer >> {
         self.0.inner()
     }
 }
