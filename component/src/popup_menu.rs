@@ -101,7 +101,7 @@ live_register!{
             padding: 5
         }
         bg: {
-            shape: ShadowBox,
+            shape: Box,
             radius: 4,
             color: #0
         }
