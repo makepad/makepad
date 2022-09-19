@@ -490,11 +490,6 @@ live_register!{
         }
     }  
 
-    // SupersawPanel: FishPanel {
-    //     label = {bg: {color: (COLOR_SUPERSAW)}, label = {text: "Supersaw (JP8K)"}}
-    //     body = {
-    // }
-    // }
 
     MixerPanel: FishPanel {
         label = {bg: {color: (COLOR_MIX)}, label = {text: "Mixer"}}
