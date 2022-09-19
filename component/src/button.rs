@@ -22,7 +22,7 @@ live_register!{
             return mix(
                 mix(
                     #9,
-                    #f,
+                    #c,
                     self.hover
                 ),
                 #9,

@@ -21,11 +21,11 @@ live_register!{
             mix(
                 mix(
                     mix(
-                        #9,
-                        #b,
+                        #xFFFFFF33,
+                        #xFFFFFF88,
                         self.hover
                     ),
-                    #c,
+                    #xFFFFFFCC,
                     self.focus
                 ),
                 #3,
@@ -68,7 +68,7 @@ live_register!{
                     self.rect_size.y,
                     BORDER_RADIUS
                 )
-                sdf.fill(mix(#5550, #777f, self.focus));
+                sdf.fill(mix(#5550, #xFFFFFF40, self.focus)); // Pad color
                 return sdf.result
             }
         }
