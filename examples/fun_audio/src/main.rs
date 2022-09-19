@@ -34,16 +34,18 @@ live_register!{
     const SPACING_PANELS : 10.0
     const SPACING_CONTROLS : 4.0
     const COLOR_OSC : #xFFFF99 // yellow
-    const COLOR_MIX : #xC // gray
+    const COLOR_MIX : #xB // gray
     const COLOR_ENV : #xFFC499 // light red
-    const COLOR_FILTER : #xA7ADF2 // indigo
+    const COLOR_FILTER : #xA7BEF2 // indigo
     const COLOR_LFO : #xFF9999 // red
     const COLOR_TOUCH : #xBBFF99 // light green
     const COLOR_FX : #x99EEFF // light green
-    const COLOR_TEXT_H1 : #x181818
+    const COLOR_TEXT_H1 : #x222222FF
     const COLOR_TEXT_H2 : #x9
-    const FONT_SIZE_H1: 11.0
-    const FONT_SIZE_H2: 9.5
+    const COLOR_BEVEL_SHADOW : #x00000066
+    const COLOR_BEVEL_HIGHLIGHT : #xFFFFFF33
+    const FONT_SIZE_H1 : 11.0
+    const FONT_SIZE_H2 : 9.5
     
     
     
@@ -54,9 +56,20 @@ live_register!{
     }
     
     FishDropDown: DropDown {
-        walk: { margin: {left: 0.0, right: 0.0, top: 0.0, bottom: 0.0}}
+        walk: { margin: {left: 5.0, right: 0.0, top: 0.0, bottom: 0.0}}
         layout: {padding: 6.0}
         label: {text_style: {font_size: (FONT_SIZE_H2), font: { path: d"resources/IBMPlexSans-SemiBold.ttf" }}, color: (COLOR_TEXT_H1)}
+
+        popup_menu: {
+            bg: {color: #x000000AA}
+            menu_item: {
+                indent_width: 10.0
+                layout: {
+                    padding: {left: 15, top: 5, bottom: 5},
+                }
+                // label:{text_style: {font_size: 30, font: { path: d"resources/IBMPlexSans-SemiBold.ttf" }}, color: (COLOR_TEXT_H1)}
+            }
+        }
         bg: {
             fn get_bg(self, inout sdf: Sdf2d) {
                 sdf.box(
@@ -66,8 +79,8 @@ live_register!{
                     self.rect_size.y - 2,
                     3
                 )
-                sdf.stroke_keep(#0, 1);
-                sdf.fill(mix(#5, #2, self.pos.y));
+                sdf.stroke_keep(mix(mix((COLOR_BEVEL_HIGHLIGHT), (COLOR_BEVEL_SHADOW), pow(self.pos.y, 1.0)), mix((COLOR_BEVEL_SHADOW), (COLOR_BEVEL_HIGHLIGHT), pow(self.pos.y, 5.0)), self.pressed), 1.);
+                sdf.fill(mix(mix(#xFFFFFF66, #xFFFFFF00, pow(self.pos.y, 0.075)), mix(#x00000088, #x00000022, pow(self.pos.y, 0.3)), self.pressed));
             }
         }
     }
@@ -89,13 +102,10 @@ live_register!{
                     self.rect_size.y - 2.0,
                     2.0
                 )
-                sdf.fill_keep(mix(mix(#5, #2, self.pos.y), mix(#1, #3, self.pos.y), self.pressed))
                 
-                sdf.stroke(
-                    #0,
-                    1.0
-                )
-                
+                sdf.stroke_keep(mix(mix((COLOR_BEVEL_HIGHLIGHT), (COLOR_BEVEL_SHADOW), pow(self.pos.y, 1.0)), mix((COLOR_BEVEL_SHADOW), (COLOR_BEVEL_HIGHLIGHT), pow(self.pos.y, 5.0)), self.pressed), 1.);
+                sdf.fill(mix(mix(#xFFFFFF66, #xFFFFFF00, pow(self.pos.y, 0.075)), mix(#x00000088, #x00000022, pow(self.pos.y, 0.3)), self.pressed));
+
                 return sdf.result
             }
         }
@@ -108,50 +118,71 @@ live_register!{
         
         layout: {
             align: {x: 0.5, y: 0.5},
-            padding: 8
+            padding: 6
         }
     }
 
     FishSlider: Slider {
-        label: "CutOff1"
         walk: {
-                height: 40,
+                height: 36,
                 margin: {left: 0.0, right: 1.0, top: 0.0, bottom: 0.0},
         }
-
+        label: "CutOff1"
         label_text:{text_style: {font_size: (FONT_SIZE_H2), font: { path: d"resources/IBMPlexSans-SemiBold.ttf" }}, color: (COLOR_TEXT_H2)}
+        text_input: {
+            cursor_margin_bottom: 3.0,
+            cursor_margin_top: 4.0,
+            select_pad_edges: 3.0
+            cursor_size: 2.0,
+            empty_message: "0",
+            numeric_only: true,
+            bg: {
+                shape: None
+                color: #5
+                radius: 2
+            },
+            layout: {
+                padding: 0,
+                align: {y: 0.}
+            },
+            walk: {
+                margin: {top: 3, right: 5}
+            }
+        }
         slider: {
             instance line_color: #f00
             instance bipolar: 0.0
             fn pixel(self) -> vec4 {
-                let slider_height = 7;
                 let nub_size = 3
                 
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size)
                 let top = 20.0;
                 
-                sdf.box(1.0, top, self.rect_size.x - 2, self.rect_size.y - top - 2, 2);
-                sdf.fill_keep(mix(#2, #3c, self.pos.y))
-                sdf.stroke(#5, 1.0)
+                sdf.box(1.0, top, self.rect_size.x - 2, self.rect_size.y - top - 2, 1);
+                sdf.fill_keep(mix(mix(#x00000040, #x000000AA, self.drag), mix(#x00000010, #x00000010, self.drag), pow(self.pos.y, 1.0))) // Control backdrop gradient
+                sdf.stroke(mix(mix(#x00000060, #x00000070, self.drag), #xFFFFFF10, pow(self.pos.y, 10.0)), 1.0) // Control outline
                 let in_side = 5.0;
+                let in_top = 5.0; // Ridge: vertical position
+                sdf.rect(1.0 + in_side, top + in_top, self.rect_size.x - 2 - 2 * in_side, 3);
+                sdf.fill(mix(#x2, #1, self.drag)); // Ridge color
                 let in_top = 7.0;
                 sdf.rect(1.0 + in_side, top + in_top, self.rect_size.x - 2 - 2 * in_side, 3);
-                sdf.fill(#1);
-                let in_top = 9.0;
-                sdf.rect(1.0 + in_side, top + in_top, self.rect_size.x - 2 - 2 * in_side, 3);
-                sdf.fill(#4);
+                sdf.fill(#4); // Ridge: Rim light catcher
                 
                 let nub_x = self.slide_pos * (self.rect_size.x - nub_size - in_side * 2 - 9);
                 sdf.move_to(mix(in_side + 3.5, self.rect_size.x * 0.5, self.bipolar), top + in_top);
                 
                 sdf.line_to(nub_x + in_side + nub_size * 0.5, top + in_top);
-                sdf.stroke(self.line_color, 1)
+                sdf.stroke_keep(mix(#xFFFFFF00, self.line_color, self.drag), 1.5)
+                sdf.stroke(
+                    mix(mix(self.line_color * 0.85, self.line_color, self.hover), #xFFFFFF80, self.drag), 1
+                )
                 
-                let nub_x = self.slide_pos * (self.rect_size.x - nub_size - in_side * 2 - 9);
-                sdf.box(nub_x + in_side, top + 3.0, 12, 12, 1.)
+                let nub_x = self.slide_pos * (self.rect_size.x - nub_size - in_side * 2 - 3) - 3;
+                sdf.box(nub_x + in_side, top + 1.0, 12, 12, 1.)
                 
-                sdf.fill_keep(mix(mix(#7, #a, self.hover), #3, self.pos.y));
-                sdf.stroke(mix(mix(#7, #a, self.hover), #0, pow(self.pos.y, 3)), 1.);
+                sdf.fill_keep(mix(mix(#x7, #x8, self.hover), #3, self.pos.y)); // Nub background gradient
+                sdf.stroke(mix(mix(#xa, #xC, self.hover), #0, pow(self.pos.y, 1.5)), 1.); // Nub outline gradient
                 
                 return sdf.result
             }
@@ -171,12 +202,30 @@ live_register!{
     }
     
     InstrumentCheckbox: ElementBox {
-        bg: {color: #f00}
         layout: { padding: 0.0 }
         checkbox = CheckBox {
+            layout: { padding: 2.5 }
             label: "CutOff1"
+            check_box: {
+                fn pixel(self) -> vec4 {
+                    let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                    let left = 3;
+                    let sz = 7.0;
+                    let c = vec2(left + sz, self.rect_size.y * 0.5);
+                    sdf.box(left, c.y - sz, sz * 2.0, sz * 2.2, 1.5); // rounding = 3rd value
+                    sdf.fill_keep(mix(mix(#x00000055, #x00000022, pow(self.pos.y, 1.)), mix(#x00000066, #x00000033, pow(self.pos.y, 1.0)), self.hover))
+                    sdf.stroke(mix(mix((COLOR_BEVEL_SHADOW), (COLOR_BEVEL_HIGHLIGHT), pow(self.pos.y, 5.0)), mix(#x00000088, #xFFFFFF22, pow(self.pos.y, 5.0)), self.hover), 1.0) // outline
+                    let szs = sz * 0.5;
+                    let dx = 1.0;
+                    sdf.move_to(left + 4.0, c.y);
+                    sdf.line_to(c.x, c.y + szs);
+                    sdf.line_to(c.x + szs, c.y - szs);
+                    sdf.stroke(mix(#fff0, #f, self.selected), 1.25);
+                    return sdf.result
+                }
+            }
             label_text: {text_style: {font_size: (FONT_SIZE_H2), font: { path: d"resources/IBMPlexSans-SemiBold.ttf" }}, color: (COLOR_TEXT_H2)}
-            walk: { margin: {top: 5, right: 0, bottom: 5, left: 0} }
+            walk: { margin: {top: 3, right: 0, bottom: 5, left: 0} }
             label_walk: {
                 margin: {left: 23.0, top: 0, bottom: 0, right: 0}
             }
@@ -191,7 +240,7 @@ live_register!{
                 text_style: {font_size: (FONT_SIZE_H2), font: { path: d"resources/IBMPlexSans-SemiBold.ttf" }}, color: (COLOR_TEXT_H2)
             }
         }
-        walk: {margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: (SPACING_CONTROLS)}}
+        walk: {margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: 0}}
         dropdown = FishDropDown {}
     }
 
@@ -199,7 +248,7 @@ live_register!{
         walk: {width: Fill, height: 100, margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: (SPACING_CONTROLS)}}
         bg: {
             radius: 3,
-            color: #x3F,
+            color: #x38,
             color2: #0,
             
             instance attack: 0.05
@@ -210,10 +259,10 @@ live_register!{
             
             fn get_fill(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size); //mod (self.pos * self.rect_size, 15))
-                let base_color = mix(self.color, self.color2, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 2.0));
+                let base_color = mix(self.color, self.color2, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 3.0));
                 let darker = base_color * 0.8;
                 let pos = self.pos * self.rect_size;
-                sdf.clear(mix(base_color, darker, pow(abs(sin(pos.x * 0.5)), 24) + pow(abs(sin(pos.y * 0.5)), 32.0)));
+                sdf.clear(mix(base_color, darker, pow(abs(sin(pos.x * 0.5)), 24) + pow(abs(sin(pos.y * 0.5)), 32.0))); // Grid
                 sdf.rect(1.0, 1.0, 16, 16)
                 sdf.stroke(darker, 1)
                 let pad_b = 8
@@ -234,14 +283,14 @@ live_register!{
                 sdf.stroke_keep(#xFFC49920, 4.0);
                 sdf.stroke_keep(#xFFC49980, 2.0);
                 sdf.stroke_keep(#xFFFFFFFF, 1.0);
-                // sdf.stroke_keep(#f9b08b, 1.);
+                // sdf.fill_keep(mix(#xFF0000FF, #xFF000000, self.pos.y)) // TODO: place gradient under the line
                 return sdf.result
             }
         }
     }
     EnvelopePanel: Frame {
         layout: {flow: Down}
-        walk: {width: Fill, height: Fit}
+        walk: {width: Fill, height: Fill}
         display = GraphPaper {
         }
         attack = InstrumentSlider {
@@ -257,7 +306,7 @@ live_register!{
             slider = {
                 slider: {line_color: (COLOR_ENV)}
                 bind: "adsr.h"
-            walk: { margin: 0.0 }
+                walk: { margin: 0.0 }
                 min: 0.0
                 max: 1.0
                 label: "H"
@@ -324,7 +373,8 @@ live_register!{
             layout: {flow: Down, padding: {top: (SPACING_CONTROLS), left: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS)}}
             walk: {width: Fill, height: Fit, margin: {top: -3, left: 0.25}}
             bg: {
-                color: #5
+                color: #FFFFFF00
+                // color: mix(#f, #0, self.pos.y)
                 fn pixel(self) -> vec4 {
                     let sdf = Sdf2d::viewport(self.pos * self.rect_size);
                     let edge = 8.0;
@@ -334,7 +384,7 @@ live_register!{
                     sdf.line_to(self.rect_size.x - edge, self.rect_size.y - 2.0)
                     sdf.line_to(1.0, self.rect_size.y - 2.0);
                     sdf.close_path();
-                    sdf.fill_keep(mix(#xFFFFFF60, #xFFFFFF10, pow(self.pos.x, 0.05)));
+                    sdf.fill_keep(mix(#xFFFFFF40, #xFFFFFF10, pow(self.pos.y, 0.20)));
                     // sdf.fill_keep(
                     //  mix(
                     //     mix(#xf00f, #x00ff, self.rect_size.x / 0.5),
@@ -393,10 +443,24 @@ live_register!{
             walk: {width: Fill, height: Fill}
             Frame {
                 walk: {height: Fit}
+                layout: {flow: Right}
                 playpause = InstrumentCheckbox {
+                    walk: {width: Fit, height: Fit, margin: 5}
                     checkbox = {
                         bind: "sequencer.playing",
                         label: "Play"
+                    }
+                }
+                clear_grid = FishButton {
+                    text: "Clear Grid"
+                    walk: {width: Fit, height: Fit, margin: 5}
+                }
+                InstrumentDropdown {
+                    walk: {margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: 0.0}}
+                    dropdown = {
+                        // bind_enum: "Scale"
+                        // bind: "filter1.filter_type"
+                        items: ["Scale", "Option A", "Option B", "Option C"]
                     }
                 }
             }
@@ -490,6 +554,8 @@ live_register!{
                 }
             }
             sync = InstrumentCheckbox {
+                walk: {height: Fill}
+                layout: {flow: Down, spacing: 0.0, align: {x: 0.0, y: 0.8}}
                 checkbox = {
                     bind: "lfo.synconkey",
                     label: "Key sync"
@@ -501,7 +567,11 @@ live_register!{
     VolumeEnvelopePanel: FishPanel {
         label = {bg: {color: (COLOR_ENV)}, label = {text: "Volume Env"}}
         body = {
+            layout: {flow: Down}
+            walk: {width: Fill, height: Fill}
             vol_env = EnvelopePanel {
+                layout: {flow: Down}
+                walk: {width: Fill, height: Fill}
                 attack = { slider = {bind: "volume_envelope.a"}}
                 hold = { slider = {bind: "volume_envelope.h"}}
                 decay = {slider = {bind: "volume_envelope.d"}}
@@ -514,7 +584,12 @@ live_register!{
     ModEnvelopePanel: FishPanel {
         label = {bg: {color: (COLOR_ENV)}, label = {text: "Modulation Env"}}
         body = {
+            layout: {flow: Down}
+            walk: {width: Fill, height: Fill}
             mod_env = EnvelopePanel {
+                layout: {flow: Down}
+                walk: {width: Fill, height: Fill}
+
                 attack = { slider = {bind: "mod_envelope.a"}}
                 hold = { slider = {bind: "mod_envelope.h"}}
                 decay = {slider = {bind: "mod_envelope.d"}}
@@ -526,12 +601,12 @@ live_register!{
     
     FilterPanel: FishPanel {
         label = {bg: {color: (COLOR_FILTER)}, label = {text: "Filter"}}
-        walk: {width: Fill, height: Fill}
         body = {
             layout: {flow: Down}
             walk: {width: Fill, height: Fill}
             InstrumentDropdown {
-                label = {text: "Filter"}
+                // label = {text: "Filter"}
+                walk: {margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: 0.0}}
                 dropdown = {
                     bind_enum: "FilterType"
                     bind: "filter1.filter_type"
@@ -592,7 +667,8 @@ live_register!{
         label = {bg: {color: (COLOR_OSC)}, label = {text: "Oscillator ?"}}
         body = {
             type = InstrumentDropdown {
-                label = {text: "Type"}
+                // label = {text: "Type"}
+                walk: {margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: 0.0}}
                 dropdown = {
                     bind_enum: "OscType"
                     bind: "osc1.osc_type"
@@ -628,7 +704,8 @@ live_register!{
     }
     
     App: {{App}} {
-        window: {window: {inner_size: vec2(1280, 1000)}, pass: {clear_color: (#3)}}
+        window: {window: {inner_size: vec2(1280, 950)}, pass: {clear_color: #3}}
+
         audio_graph: {
             root: Mixer {
                 c1 = Instrument {
@@ -694,7 +771,7 @@ live_register!{
                 walk: {width: Fill, height: Fit, margin: 0.0}
             }
             GradientY {
-                walk: {width: Fill, height: 25, margin: {top: 0, left: 0}}
+                walk: {width: Fill, height: 15, margin: {top: 0, left: 0}}
                 bg: {color: #131820FF, color2: #13182000}
             }
 
@@ -730,11 +807,20 @@ live_register!{
                         TouchPanel {}
                     }
                     Frame {
-                        walk: {height: Fit, width: Fill}
                         layout: {flow: Right, spacing: (SPACING_PANELS)}
-                        ModEnvelopePanel {}
-                        VolumeEnvelopePanel {}
-                        FilterPanel {}
+                        walk: {height: Fill, width: Fill}
+                        ModEnvelopePanel {
+                            layout: {flow: Down}
+                            walk: {width: Fill, height: Fill}
+                        }
+                        VolumeEnvelopePanel {
+                            layout: {flow: Down}
+                            walk: {width: Fill, height: Fill}
+                        }
+                        FilterPanel {
+                            layout: {flow: Down}
+                            walk: {width: Fill, height: Fill}
+                        }
                     }
                     Frame {
                         walk: {height: Fit, width: Fill}

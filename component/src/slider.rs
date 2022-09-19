@@ -64,8 +64,6 @@ live_register!{
             y: 0.0
         }
        
-        
-        // TODO:: CHANGE SELECTION BG
         text_input: {
             cursor_margin_bottom: 3.0,
             cursor_margin_top: 4.0,
@@ -91,7 +89,7 @@ live_register!{
             hover = {
                 default: off
                 off = {
-                    from: {all: Play::Forward {duration: 0.1}}
+                    from: {all: Play::Forward {duration: 0.2}}
                     apply: {
                         slider: {hover: 0.0}
                         //text_input: {state: {hover = off}}
@@ -109,7 +107,7 @@ live_register!{
             focus = {
                 default: off
                 off = {
-                    from: {all: Play::Forward {duration: 0.1}}
+                    from: {all: Play::Forward {duration: 0.0}}
                     apply: {
                         slider: {focus: 0.0}
                     }
