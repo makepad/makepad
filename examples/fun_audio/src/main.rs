@@ -477,7 +477,7 @@ live_register!{
     }  
 
     SupersawPanel: FishPanel {
-        label = {bg: {color: (COLOR_SUPERSAW)}, label = {text: "Supersaw (JP8K)"}}
+        label = {bg: {color: (COLOR_SUPERSAW)}, label = {text: "Supersaw"}}
         body = {
                 twocol1 = Frame {
                     layout: {flow: Right}
