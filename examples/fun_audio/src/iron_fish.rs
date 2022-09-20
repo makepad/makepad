@@ -218,8 +218,10 @@ pub struct ArpState {
 
 #[derive(Copy, Clone)]
 pub struct OscillatorState {
-    phase: [f32; 7],
-    delta_phase: [f32; 7],
+    phase: f32,
+    delta_phase: f32,
+    phase_supersaw: [f32; 7],
+    delta_phase_supersaw: [f32; 7],
     dpw_gain1: f32,
     dpw_gain2: f32,
     dpw_diff_b: [f32; 4],
@@ -273,10 +275,10 @@ impl OscillatorState {
         self.sps_mix_side_bands = -0.73764 * powf(mix, 2.0) + 1.2841 * mix + 0.044372;
     }
     
-    fn dpw(&mut self, phase_idx: usize) -> f32 {
-        // FIXME: assert that 'phase_idx' is in range
+    fn dpw(&mut self) -> f32 {
+       
         
-        let triv = 2.0 * self.phase[phase_idx] - 1.0;
+        let triv = 2.0 * self.phase - 1.0;
         
         let sqr = triv * triv;
         
@@ -319,8 +321,12 @@ impl OscillatorState {
         return tmp_a[0] * self.dpw_gain2 * 0.005; //* self.dpw_gain;
     }
     
-    fn trivialsaw(self, phase_idx: usize) -> f32 {
-        return self.phase[phase_idx] * 2.0 - 1.0
+    fn trivialsaw(self) -> f32 {
+        return self.phase * 2.0 - 1.0
+    }
+
+    fn trivialsaw_indexed(self, phase_idx: usize) -> f32 {
+        return self.phase_supersaw[phase_idx] * 2.0 - 1.0
     }
     
     fn blamp(&mut self, t: f32, dt: f32) -> f32 {
@@ -342,50 +348,59 @@ impl OscillatorState {
     }
     
     fn blamptriangle(&mut self) -> f32 {
-        let mut tri = 2.0 * (2.0 * self.phase[0] - 1.0).abs() - 1.0;
+        let mut tri = 2.0 * (2.0 * self.phase - 1.0).abs() - 1.0;
         
-        tri += self.blamp(self.phase[0], self.delta_phase[0]);
-        tri += self.blamp(1.0 - self.phase[0], self.delta_phase[0]);
-        let mut t2 = self.phase[0] + 0.5;
+        tri += self.blamp(self.phase, self.delta_phase);
+        tri += self.blamp(1.0 - self.phase, self.delta_phase);
+        let mut t2 = self.phase + 0.5;
         t2 -= t2.floor();
-        tri -= self.blamp(t2, self.delta_phase[0]);
-        tri -= self.blamp(1.0 - t2, self.delta_phase[0]);
-        return tri;
+        tri -= self.blamp(t2, self.delta_phase);
+        tri -= self.blamp(1.0 - t2, self.delta_phase);
+                return tri;
     }
 
-    fn pure(&mut self, phase_idx: usize) -> f32 {
-        return (self.phase[phase_idx] * 6.28318530718).sin();
+    fn pure(&mut self) -> f32 {
+        return (self.phase * 6.28318530718).sin();
+    }
+
+    fn pure_indexed(&mut self, phase_idx: usize) -> f32 {
+        return (self.phase_supersaw[phase_idx] * 6.28318530718).sin();
     }
     
     fn supersaw(&mut self) -> f32 {
-        let mut main_band = self.trivialsaw(0);
-        main_band -= self.pure(0);
+
+        for n in 0..7 {
+            self.phase_supersaw[n] += self.delta_phase_supersaw[n];
+            if self.phase_supersaw[n] > 1.0 {
+                self.phase_supersaw[n] -= 1.0;
+            }
+        }
+
+        let mut main_band = self.trivialsaw_indexed(0);
+        //main_band -= self.pure(0);
 
         let mut side_bands = 0.0;
         for n in 1..7 {
-            let mut signal = self.trivialsaw(n);
+            side_bands += self.trivialsaw_indexed(n);
             if n < 6 {
-                signal -= self.pure(n);
+                side_bands -= self.pure_indexed(n);
             }
-
-            side_bands += signal;
         }
         
         return main_band * self.sps_mix_main + side_bands * self.sps_mix_side_bands;
     }
     
     fn get(&mut self, settings: &OscSettings, _samplerate: f32) -> f32 {
+
+        self.phase += self.delta_phase;
+        if (self.phase > 1.0) {
+            self.phase -= 1.0;
+        };
         // FIXME: could just update the first one for most types but it's hardly worth special-casing
-        for n in 0..6 {
-            self.phase[n] += self.delta_phase[n];
-            if self.phase[n] > 1.0 {
-                self.phase[n] = 0.0;
-            }
-        }
         
         match settings.osc_type.get() {
-            OscType::Pure => self.pure(0),
-            OscType::DPWSawPulse => self.dpw(0),
+            OscType::Pure => self.pure(),
+            OscType::DPWSawPulse => self.dpw(),
             //OscType::TrivialSaw => self.trivialsaw(),
             OscType::BlampTri => self.blamptriangle(),
             OscType::Supersaw => self.supersaw()
@@ -394,7 +409,7 @@ impl OscillatorState {
     
     fn set_note(&mut self, note: u8, samplerate: f32, settings: &OscSettings, supersaw: &SupersawSettings, sps_detune_tab: &[f32; 1024], _update: bool) {
         let freq = 440.0 * f32::powf(2.0, ((note as f32) - 69.0 + settings.transpose.get() as f32 + settings.detune.get()) / 12.0);
-        self.delta_phase[0] = (6.28318530718 * freq) / samplerate;
+        self.delta_phase = (6.28318530718 * freq) / samplerate;
         
         match settings.osc_type.get() {
             OscType::Pure | OscType::BlampTri => {}
@@ -424,16 +439,16 @@ impl OscillatorState {
                 let sps_coeffs: [f32; 6] = [-0.11002313, -0.06288439, -0.03024148, 0.02953130, 0.06216538, 0.10745242];
                 
                 // FIXME: running phases are better, but this does the job fairly OK
-                self.phase[0] = random_f32(&mut self.sps_seed);
-                
+                self.phase_supersaw[0] = random_f32(&mut self.sps_seed);
+                self.delta_phase_supersaw[0] = self.delta_phase;
                 for n in 1..7 {
-                    self.phase[n] = random_f32(&mut self.sps_seed);
+                    self.phase_supersaw[n] = random_f32(&mut self.sps_seed);
                     
                     // calculate & set sideband phase delta
                     let offs = self.sps_detune * sps_coeffs[n - 1];
                     let freq_offs = freq * offs;
                     let detuned_freq = freq + freq_offs;
-                    self.delta_phase[n] = (6.28318530718 * detuned_freq) / samplerate;
+                    self.delta_phase_supersaw[n] = (6.28318530718 * detuned_freq) / samplerate;
                 }
             }
         }
@@ -472,8 +487,10 @@ impl Default for LFOState {
 impl Default for OscillatorState {
     fn default() -> Self {
         Self {
-            phase: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            delta_phase: [0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001],
+            phase: 0.0,
+            phase_supersaw: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            delta_phase: 0.0001,
+            delta_phase_supersaw: [0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001],
             dpw_gain1: 1.0,
             dpw_gain2: 1.0,
             dpw_init_countdown: 4,
