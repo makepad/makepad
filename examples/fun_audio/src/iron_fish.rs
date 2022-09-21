@@ -269,6 +269,12 @@ impl HyperSawGlobalState{
         self.new_n_saws = self.n_extra_saws + 1;
 
 
+
+    }
+
+    pub fn recalclevels(&mut self){
+
+        
     }
 }
 
@@ -1197,11 +1203,11 @@ impl IronFishState {
         let mut recalchyperpitch2 = false;
 
         if recalchyperlevels1 {
-            self.g.hypers1.recalclevels();
+            self.g.hypersaw1.recalclevels();
         }
 
         if recalchyperlevels2 {
-            self.g.hypers2.recalclevels();            
+            self.g.hypersaw2.recalclevels();            
         }
 
         if pitchdirty {
