@@ -792,7 +792,7 @@ live_register!{
                     detune = InstrumentSlider {
                         slider = {
                             slider: {line_color: (COLOR_OSC)}
-                            bind: "supersaw1.detune"
+                            bind: "supersaw1.spread"
                             min: 0.0
                             max: 1.0
                             label: "Spread"
@@ -801,7 +801,7 @@ live_register!{
                     mix = InstrumentSlider {
                         slider = {
                             slider: {line_color: (COLOR_OSC)}
-                            bind: "supersaw1.mix"
+                            bind: "supersaw1.diffuse"
                             min: 0.0
                             max: 1.0
                             label: "Diffuse"
@@ -845,8 +845,8 @@ live_register!{
                 dropdown = {
                     bind_enum: "OscType"
                     bind: "osc1.osc_type"
-                    items: ["DPWSawPulse","BlampTri",  "Pure", "Supersaw"]
-                    display: ["Saw", "Triangle",  "Sine", "Supersaw"]
+                    items: ["DPWSawPulse","BlampTri",  "Pure", "SuperSaw","HyperSaw" ]
+                    display: ["Saw", "Triangle",  "Sine", "Super Saw", "Hyper Saw"]
                 }
                 Frame {
                     layout: {flow: Right}
@@ -854,7 +854,7 @@ live_register!{
                     detune = InstrumentSlider {
                         slider = {
                             slider: {line_color: (COLOR_OSC)}
-                            bind: "supersaw2.detune"
+                            bind: "supersaw2.spread"
                             min: 0.0
                             max: 1.0
                             label: "Spread"
@@ -863,7 +863,7 @@ live_register!{
                     mix = InstrumentSlider {
                         slider = {
                             slider: {line_color: (COLOR_OSC)}
-                            bind: "supersaw2.mix"
+                            bind: "supersaw2.diffuse"
                             min: 0.0
                             max: 1.0
                             label: "Diffuse"
