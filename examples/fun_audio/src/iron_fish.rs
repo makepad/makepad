@@ -548,7 +548,7 @@ impl OscillatorState {
         for n in 0..7 {
             self.supersaw.phase[n] += self.supersaw.delta_phase[n];
             if self.supersaw.phase[n] > 1.0 {
-                self.supersaw.phase[n] -= 1.0;
+                self.supersaw.phase[n] = 0.0;
             }
         }
 
