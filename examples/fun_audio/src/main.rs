@@ -857,7 +857,7 @@ live_register!{
                             bind: "supersaw2.detune"
                             min: 0.0
                             max: 1.0
-                            label: "Detune"
+                            label: "Spread"
                         }
                     }
                     mix = InstrumentSlider {
@@ -866,7 +866,7 @@ live_register!{
                             bind: "supersaw2.mix"
                             min: 0.0
                             max: 1.0
-                            label: "Mix"
+                            label: "Diffuse"
                         }
                     }
                 }
@@ -1335,6 +1335,27 @@ impl App {
         }
         
         let shift = if let Event::FingerUp(fu) = event {fu.modifiers.shift}else {false};
+        if ui.button(ids!(clear_grid)).was_clicked() 
+        {
+            let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
+            iron_fish.settings.sequencer.step0.set(0);
+            iron_fish.settings.sequencer.step1.set(0);
+            iron_fish.settings.sequencer.step2.set(0);
+            iron_fish.settings.sequencer.step3.set(0);
+            iron_fish.settings.sequencer.step4.set(0);
+            iron_fish.settings.sequencer.step5.set(0);
+            iron_fish.settings.sequencer.step6.set(0);
+            iron_fish.settings.sequencer.step7.set(0);
+            iron_fish.settings.sequencer.step8.set(0);
+            iron_fish.settings.sequencer.step9.set(0);
+            iron_fish.settings.sequencer.step10.set(0);
+            iron_fish.settings.sequencer.step11.set(0);
+            iron_fish.settings.sequencer.step12.set(0);
+            iron_fish.settings.sequencer.step13.set(0);
+            iron_fish.settings.sequencer.step14.set(0);
+            iron_fish.settings.sequencer.step15.set(0);
+        } 
+
         if ui.button(ids!(save1)).was_clicked() {self.preset(ui.cx, 1, shift);}
         if ui.button(ids!(save2)).was_clicked() {self.preset(ui.cx, 2, shift);}
         if ui.button(ids!(save3)).was_clicked() {self.preset(ui.cx, 3, shift);}
