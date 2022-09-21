@@ -316,7 +316,7 @@ live_register!{
     }
 
     GraphPaper: Box {
-        walk: {width: Fill, height: 100, margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: (SPACING_CONTROLS)}}
+        walk: {width: Fill, height: 50, margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: (SPACING_CONTROLS)}}
         bg: {
             radius: 3,
             color: #x38,
@@ -506,7 +506,7 @@ live_register!{
                         bind: "filter1.touch_amount"
                         min: -1.0
                         max: 1.0
-                        label: "Touch Amount"
+                        label: "Touch -> Cutoff"
                     }
                 }
             }
@@ -679,7 +679,7 @@ live_register!{
                     bind: "filter1.lfo_amount"
                     min: -1.0
                     max: 1.0
-                    label: "LFO Amount"
+                    label: "LFO -> Cutoff"
                 }
             }
             sync = InstrumentCheckbox {
@@ -720,7 +720,7 @@ live_register!{
                 walk: {width: Fill, height: Fit}
 
                 attack = { slider = {bind: "mod_envelope.a"}}
-                hold = { slider = {bind: "mod_envelope.h"}}
+                hold = {slider = {bind: "mod_envelope.h"}}
                 decay = {slider = {bind: "mod_envelope.d"}}
                 sustain = {slider = {bind: "mod_envelope.s"}}
                 release = {slider = {bind: "mod_envelope.r"}}
@@ -731,7 +731,7 @@ live_register!{
                     bind: "filter1.envelope_amount"
                     min: -1.0
                     max: 1.0
-                    label: "Mod Amount"
+                    label: "Mod -> Cutoff"
                 }
             }
         }
