@@ -15,8 +15,19 @@ live_register!{
         
         fn pixel(self) -> vec4 {
             let sdf = Sdf2d::viewport(self.pos * self.rect_size);
-            sdf.box(1, 1, self.rect_size.x - 2, self.rect_size.y - 2, 2);
-            sdf.fill(mix(#2,#9, self.active));
+            sdf.box(1, 1, self.rect_size.x - 5, self.rect_size.y - 5, 2);
+            sdf.stroke_keep(mix(#xFFFFFF80, #x00000040, pow(self.pos.y, 0.2)), 1.0);
+            sdf.fill(
+                mix(
+                mix(
+                mix(#xFFFFFF10, #xFFFFFF10, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 0.75)), // 1st value = outer edges, 2nd value = center
+                mix(#xFFFFFF40, #xFFFFFF08, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 1.25)),
+                self.hover),
+                mix(#xFFFDDDFF, #xFFFFFF08, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 1.25)),
+                // mix(#xFFFFFFFF, #xFFFFFF08, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 1.25)),
+                self.active
+                )
+            );
             return sdf.result
         }
     }
@@ -39,7 +50,7 @@ live_register!{
             active = {
                 default: off
                 off = {
-                    from: {all: Play::Forward {duration: 0.05}}
+                    from: {all: Play::Forward {duration: 0.15}}
                     apply: {button: {active: 0.0}}
                 }
                 
@@ -57,6 +68,7 @@ live_register!{
         grid_x: 16,
         grid_y: 16,
         walk: {
+            margin: 3,
             width: Size::Fit,
             height: Size::Fit
         }
