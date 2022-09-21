@@ -272,9 +272,34 @@ impl HyperSawGlobalState{
 
     }
 
-    pub fn recalclevels(&mut self){
+    pub fn recalclevels(&mut self)
+    {
+        let mut NewLevel = (self.orig_level * self.orig_level)/(self.downrampfrom1(-0.1f ,self.f_saws) ); 
+		for (int i =0;i<self.new_n_saws;i++)
+		{
+			NewSawLevel[i] = 1;
+		};
 
-        
+		if (fabs(self.f_frac_saw)>0.00001)
+		{
+			let mut FractLevel = self.f_frac_saw*self.f_frac_saw;
+			self.volume_level[NewnSaws-1 ] = FractLevel;
+		}
+		
+		let mut total = 0.0;
+
+		for (int i = 0;i<self.new_n_saws;i++)
+		{
+			total += self.volume_level[i];
+		}
+
+		for (int i = 0;i<self.new_n_saws;i++)
+		{
+			self.volume_level[i]*=(1/total)*NewLevel;
+		}
+		
+		self.n_saws = self.new_n_saws;
+
     }
 }
 
