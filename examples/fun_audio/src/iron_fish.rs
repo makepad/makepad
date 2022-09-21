@@ -268,7 +268,7 @@ impl HyperSawGlobalState{
         self.f_saws = 1.0 + self.f_extra_saws;
         self.new_n_saws = self.n_extra_saws + 1;
 
-        
+
     }
 }
 
@@ -1191,18 +1191,18 @@ impl IronFishState {
             spread2dirty = true;
         }
 
-        let mut recalchyperlevels1 = false;
-        let mut recalchyperlevels2 = false;
+        let mut recalchyperlevels1 = diffuse1dirty;
+        let mut recalchyperlevels2 = diffuse2dirty;
         let mut recalchyperpitch1 = false;
         let mut recalchyperpitch2 = false;
 
         if recalchyperlevels1 {
- 
-        }
-        if recalchyperlevels2 {
-            
+            self.g.hypers1.recalclevels();
         }
 
+        if recalchyperlevels2 {
+            self.g.hypers2.recalclevels();            
+        }
 
         if pitchdirty {
             self.osc1cache.transpose.set(self.settings.osc1.transpose.get());
