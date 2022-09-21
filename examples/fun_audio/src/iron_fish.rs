@@ -70,8 +70,8 @@ pub struct OscSettings {
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead, Clone)]
 pub struct SupersawSettings {
-    #[live(0.0)] detune: f32a,
-    #[live(0.0)] mix: f32a
+    #[live(0.0)] spread: f32a,
+    #[live(0.0)] diffuse: f32a
 }
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
@@ -227,10 +227,26 @@ pub struct HyperSawOscillatorState {
     phase: [f32; 7],
     delta_phase: [f32; 7],
 
+}
+
+#[derive(Copy, Clone)]
+pub struct HyperSawGlobalState{
     volume_level: [f32; 7],
     freq_multiplier: [f32; 7],
     last_spread: f32,
     last_diffuse: f32, 
+}
+
+impl Default for HyperSawGlobalState{
+    fn default() -> Self {
+        Self{
+            volume_level: [0.0,0.0,0.0,0.0,0.0,0.0,0.0],
+            freq_multiplier:[1.0,1.0,1.0,1.0,1.0,1.0,1.0],
+            last_spread: -1.0,
+            last_diffuse: -1.0,
+          
+        }
+    }
 }
 
 impl Default for HyperSawOscillatorState{
@@ -239,10 +255,6 @@ impl Default for HyperSawOscillatorState{
         phase: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
         delta_phase: [0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001] ,
 
-        volume_level: [0.0,0.0,0.0,0.0,0.0,0.0,0.0],
-        freq_multiplier:[1.0,1.0,1.0,1.0,1.0,1.0,1.0],
-        last_spread: -1.0,
-        last_diffuse: -1.0,
         }
     }
 }
@@ -463,14 +475,14 @@ impl OscillatorState {
             }
             OscType::SuperSaw => {
                 // look up detune base (interpolated)
-                let detune = supersaw.detune.get();
+                let detune = supersaw.spread.get();
                 let detune_idx_lo = (detune * (1023.0 - 1.0)) as usize;
                 let detune_lo = sps_detune_tab[detune_idx_lo];
                 let detune_hi = sps_detune_tab[detune_idx_lo + 1];
                 self.sps_detune = detune_lo + (detune_hi - detune_lo) * detune;
                 
                 // set main & side band gains
-                self.sps_calc_mix(supersaw.mix.get());
+                self.sps_calc_mix(supersaw.diffuse.get());
                 
                 // lazily initialiizing here (constants courtesy of Alex Shore, the better sounding set of the 2 I have in FM. BISON)
                 let sps_coeffs: [f32; 6] = [-0.11002313, -0.06288439, -0.03024148, 0.02953130, 0.06216538, 0.10745242];
@@ -934,7 +946,10 @@ pub struct IronFishState {
     old_step: u32,
     lfo: LFOState,
     lfovalue: f32,
-    sps_detune_tab: [f32; 1024]
+    sps_detune_tab: [f32; 1024],
+    hypersaw1: HyperSawGlobalState,
+    hypersaw2: HyperSawGlobalState,
+    
 }
 
 impl IronFishState {
@@ -1084,6 +1099,36 @@ impl IronFishState {
         if self.osc1cache.detune.get() != self.settings.osc1.detune.get() {pitchdirty = true;}
         if self.osc2cache.transpose.get() != self.settings.osc2.transpose.get() {pitchdirty = true;}
         if self.osc2cache.detune.get() != self.settings.osc2.detune.get() {pitchdirty = true;}
+
+
+        let mut diffuse1dirty: bool = false;
+        let mut diffuse2dirty: bool = false;
+        let mut spread1dirty: bool = false;
+        let mut spread2dirty: bool = false;
+        
+
+        if (self.hypersaw1.last_diffuse != self.settings.supersaw1.diffuse.get())
+        {
+            diffuse1dirty = true;
+        }
+
+        if (self.hypersaw2.last_diffuse != self.settings.supersaw2.diffuse.get())
+        {
+            diffuse2dirty = true;
+        }
+        
+        let mut recalchyperlevels1 = false;
+        let mut recalchyperlevels2 = false;
+        let mut recalchyperpitch1 = false;
+        let mut recalchyperpitch2 = false;
+        if recalchyperlevels1 {
+
+        }
+        if recalchyperlevels2 {
+            
+        }
+
+
         if pitchdirty {
             self.osc1cache.transpose.set(self.settings.osc1.transpose.get());
             self.osc1cache.detune.set(self.settings.osc1.detune.get());
@@ -1339,7 +1384,9 @@ impl AudioComponent for IronFish {
             activemidinotecount: 0,
             lfo: Default::default(),
             lfovalue: 0.0,
-            sps_detune_tab
+            sps_detune_tab,
+            hypersaw1: Default::default(),
+            hypersaw2: Default::default()
         })
     }
     
