@@ -783,8 +783,8 @@ live_register!{
                 dropdown = {
                     bind_enum: "OscType"
                     bind: "osc1.osc_type"
-                    items: ["DPWSawPulse","BlampTri",  "Pure", "Supersaw"]
-                    display: ["Saw", "Triangle",  "Sine", "Supersaw"]
+                    items: ["DPWSawPulse","BlampTri",  "Pure", "SuperSaw", "HyperSaw"]
+                    display: ["Saw", "Triangle",  "Sine", "Super Saw", "Hyper Saw"]
                 }
                 Frame {
                     layout: {flow: Right}
@@ -795,7 +795,7 @@ live_register!{
                             bind: "supersaw1.detune"
                             min: 0.0
                             max: 1.0
-                            label: "Detune"
+                            label: "Spread"
                         }
                     }
                     mix = InstrumentSlider {
@@ -804,7 +804,7 @@ live_register!{
                             bind: "supersaw1.mix"
                             min: 0.0
                             max: 1.0
-                            label: "Mix"
+                            label: "Diffuse"
                         }
                     }
                 }
