@@ -1030,8 +1030,11 @@ impl IronFishVoice {
         self.filter1.set_cutoff(&settings.filter1, mod_envelope, settings.sample_rate.get(), touch, lfo);
         
         let noise = random_f32(&mut self.seed) * 2.0 - 1.0;
-        
-        let oscinput = osc2 * settings.osc_balance.get() + osc1 * (1.0 - settings.osc_balance.get()) + settings.sub_osc.get() * sub + settings.noise.get() * noise;
+
+        let pan_left = (1.0-settings.osc_balance.get()).sqrt();
+        let pan_right = (settings.osc_balance.get()).sqrt();
+        let oscinput = osc1*pan_left + osc2*pan_right + settings.sub_osc.get() * sub + noise * settings.noise.get();
+
         let filter = self.filter1.get(oscinput, &settings.filter1);
         
         let output = volume_envelope * filter;
