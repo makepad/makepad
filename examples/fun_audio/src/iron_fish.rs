@@ -481,8 +481,7 @@ pub struct OscillatorState {
     delta_phase: f32,
     supersaw: SuperSawOscillatorState,
     hypersaw: HyperSawOscillatorState,
-    dpw: DPWState,
-    seed: u32,
+    dpw: DPWState
 }
 
 #[derive(Copy, Clone)]
@@ -521,6 +520,7 @@ impl OscillatorState {
     }
     */
     
+    // supersaw impl.
     fn sps_calc_mix(&mut self, mix: f32) {
         // FIXME: here I would assert that mix is [0..1]
         self.supersaw.mix_main = -0.55366 * mix + 0.99785;
@@ -566,18 +566,24 @@ impl OscillatorState {
         return (self.supersaw.phase[phase_idx] * 6.28318530718).sin();
     }
 
+    // supersaw impl.
     fn sps_trivialsaw(self, phase_idx: usize) -> f32 {
         return self.supersaw.phase[phase_idx] * 2.0 - 1.0
     }
-    // supersaw impl. (FIXME: move functions and initialization into object)
-    fn supersaw(&mut self) -> f32 {
+
+    // supersaw impl. (FIXME: support arbitrary number of ticks using fmod() so this can be called just once in fill_buffer())
+    fn sps_tick(&mut self)
+    {
         for n in 0..7 {
             self.supersaw.phase[n] += self.supersaw.delta_phase[n];
-            if self.supersaw.phase[n] > 1.0 {
+            while self.supersaw.phase[n] > 1.0 {
                 self.supersaw.phase[n] -= 1.0;
             }
         }
+    }
 
+    // supersaw impl. (FIXME: move functions and initialization into object!)
+    fn supersaw(&mut self) -> f32 {
         let mut main_band =  self.supersaw.dpw[0].get(self.supersaw.phase[0]);
         main_band -= self.sps_pure(0);
 
@@ -650,10 +656,8 @@ impl OscillatorState {
                 // reference: https://github.com/bipolaraudio/FM-BISON/blob/master/literature/Supersaw%20thesis.pdf
                 let sps_coeffs: [f32; 6] = [-0.11002313, -0.06288439, -0.03024148, 0.02953130, 0.06216538, 0.10745242];
                 
-                // FIXME: free running phases please
                 if !_update {
                     self.supersaw.dpw[0] = DPWState::default();
-                    self.supersaw.phase[0] = random_f32(&mut self.seed);
                     self.supersaw.dpw[0].dpw_gain1 = self.supersaw.mix_main;
                 }
 
@@ -668,7 +672,6 @@ impl OscillatorState {
  
                     if !_update {
                         self.supersaw.dpw[n] = DPWState::default();
-                        self.supersaw.phase[n] = random_f32(&mut self.seed); 
 
                         // FIXME: Stijn, what does this value mean more or less? Not using this oscillator for sidebands ATM.
                         // self.supersaw.dpw[n].dpw_gain1 = self.supersaw.mix_side_bands;
@@ -711,7 +714,7 @@ impl Default for SuperSawOscillatorState{
     fn default() -> Self {
         Self{
             phase: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            delta_phase: [0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001],
+            delta_phase: [1.414, 1.732, 2.236, 2.646, 3.317, 3.606, 4.123], // square root of primes: 2, 3, 5, 7, 11, 13, 17 (FIXME: initialize in code)
             detune: 0.0,
             mix_main: 1.0,
             mix_side_bands: 0.0,
@@ -725,7 +728,6 @@ impl Default for OscillatorState {
         Self {
             phase: 0.0,
             delta_phase: 0.0,
-            seed: 4321,
             supersaw: Default::default(),
             hypersaw: Default::default(),
             dpw: Default::default()
@@ -1049,25 +1051,33 @@ impl IronFishVoice {
     }
     
     pub fn one(&mut self,state: &IronFishGlobalVoiceState, settings: &IronFishSettings, touch: f32, lfo: f32) -> f32 {
-        
+        // update free running supersaw phases    
+        self.osc1.sps_tick();
+        self.osc2.sps_tick();
+
+        // sample 
         let sub = self.subosc.get();        
         let osc1 = self.osc1.get(&settings.osc1, settings.sample_rate.get(), state.hypersaw1);
         let osc2 = self.osc2.get(&settings.osc2, settings.sample_rate.get(), state.hypersaw2);
         let volume_envelope = self.volume_envelope.get(&settings.volume_envelope, settings.sample_rate.get());
         let mod_envelope = self.mod_envelope.get(&settings.mod_envelope, settings.sample_rate.get());
 
+        // set up filter
         self.filter1.set_cutoff(&settings.filter1, mod_envelope, settings.sample_rate.get(), touch, lfo);
         
+        // mix signal
         let noise = random_f32(&mut self.seed) * 2.0 - 1.0;
-
         let pan_left = (1.0-settings.osc_balance.get()).sqrt();
         let pan_right = (settings.osc_balance.get()).sqrt();
         let oscinput = osc1*pan_left + osc2*pan_right + settings.sub_osc.get() * sub + noise * settings.noise.get();
 
+        // apply filter
         let filter = self.filter1.get(oscinput, &settings.filter1);
         
+        // apply envelope
         let output = volume_envelope * filter;
-        
+
+        // FIXME: why 0.006?
         return output * 0.006; //* 1000.0;
     }
     
@@ -1366,7 +1376,7 @@ impl IronFishState {
         
         self.lfo.phase += remaining as f32 * ((20.0 / 44100.0) * self.settings.lfo.rate.get());
         
-        if self.lfo.phase > 1.0 {
+        while self.lfo.phase > 1.0 {
             self.lfo.phase -= 1.0;
         }
         self.lfovalue = (self.lfo.phase * 6.283).sin();
