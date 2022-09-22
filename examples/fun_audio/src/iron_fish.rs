@@ -247,12 +247,15 @@ impl HyperSawOscillatorState{
         return res;
     }
 
-    pub fn set_freq(&mut self, freq: f32, samplerate: f32, delta_phase: f32, state: &HyperSawGlobalState){      
+    pub fn set_freq(&mut self, freq: f32, samplerate: f32, delta_phase: f32, state: &HyperSawGlobalState, _update: bool){      
         //self.dpw_gain1 = (prep*prep*prep);
         //self.dpw_gain2 = 1.0/192.0 ;// (1.0 / 24.0 * (3.1415 / (2.0 * (3.1415 * prep).sin())).powf(3.0)).powf(1.0/3.0);
         for i in 0..7 {
             self.delta_phase[i] = delta_phase * state.freq_multiplier[i];
             let prep = samplerate / (freq * state.freq_multiplier[i]); // / samplerate;
+            if !_update  {
+                self.dpw[i] = DPWState::default();
+            }
             self.dpw[i].dpw_gain1 = (1.0 / 24.0 * (3.1415 / (2.0 * (3.1415 / prep).sin())).powf(3.0)).powf(1.0 / 3.0); 
     
         }
@@ -580,7 +583,7 @@ impl OscillatorState {
     }
     
     fn set_note(&mut self, note: u8, samplerate: f32, settings: &OscSettings, supersaw: &SupersawSettings,hypersaw: &HyperSawGlobalState,  sps_detune_tab: &[f32; 1024], _update: bool) {
-        let freq = 440.0 * f32::powf(2.0, ((note as f32) - 69.0 + settings.transpose.get() as f32 + settings.detune.get()) / 12.0);
+        let freq = (440.0 /6.28318530718 ) * f32::powf(2.0, ((note as f32) - 69.0 + settings.transpose.get() as f32 + settings.detune.get()) / 12.0);
         self.delta_phase = (6.28318530718 * freq) / samplerate;
         
         match settings.osc_type.get() {
@@ -602,7 +605,7 @@ impl OscillatorState {
                 //  gain = std::pow(1.f / factorial(dpwOrder) * std::pow(M_PI / (2.f*sin(M_PI*pitch * APP->engine->getSampleTime())),  dpwOrder-1.f), 1.0 / (dpwOrder-1.f));
             }
             OscType::HyperSaw => {
-                self.hypersaw.set_freq(freq, samplerate, self.delta_phase, &hypersaw );               
+                self.hypersaw.set_freq(freq, samplerate, self.delta_phase, &hypersaw, _update );               
             }
            
             OscType::SuperSaw => {
@@ -843,7 +846,10 @@ impl EnvelopeState {
     }
     
     fn nicerange(input: f32, samplerate: f32) -> f32 {
-        return 1.0 + input * input * samplerate * 5.0;
+
+        let inputexp = input.powf(0.54);
+        let result = 64.0*((samplerate * 6.0)/64.0).powf(inputexp);
+        return result; 
     }
     
     fn trigger_off(&mut self, _velocity: f32, settings: &EnvelopeSettings, samplerate: f32) {
@@ -1114,7 +1120,7 @@ impl IronFishState {
 
     pub fn note_on(&mut self, b1: u8, b2: u8) {
         if b1 > 127 {return;};
-        log!("note! {} {}", b1,b2);
+        //log!("note! {} {}", b1,b2);
         if self.settings.arp.enabled.get() {
             self.activemidinotes[b1 as usize] = true;
             self.activemidinotecount = self.activemidinotecount + 1;
@@ -1282,17 +1288,28 @@ impl IronFishState {
         let recalchyperlevels2 = diffuse2dirty;
 
         if recalchyperlevels1 {
+            log!("dirty1 {} {}", diffuse1dirty, osc_dirty);
             self.g.hypersaw1.recalclevels();
+            spread1dirty = true;
         }
 
         if recalchyperlevels2 {
+            log!("dirty2 {} {}", diffuse1dirty, osc_dirty);
             self.g.hypersaw2.recalclevels();            
+            spread2dirty = true;
         }
+
         if spread1dirty {
             self.g.hypersaw1.recalcfreqs();
         }
+        
         if spread2dirty {
             self.g.hypersaw2.recalcfreqs();
+        }
+
+        if osc_dirty {
+            self.osc1cache.osc_type.set(self.settings.osc1.osc_type.get());
+            self.osc2cache.osc_type.set(self.settings.osc2.osc_type.get());
         }
 
         if pitchdirty {
