@@ -108,7 +108,7 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                     return Err("Unmatched closed".into())
                 }
                 let item = stack.pop().unwrap();
-                
+                log!("CLOSING {}", item.count);
                 if item.count > std::u16::MAX as usize {
                     out[item.index] = if item.has_keys {CBOR_MAP_32}else {CBOR_ARRAY_32};
                     let bytes = (item.count as u32).to_be_bytes();
@@ -125,7 +125,7 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                     out.splice(item.index + 1..item.index + 1, bytes.iter().cloned());
                 }
                 else {
-                    out[item.index] |= item.count as u8
+                    out[item.index] += item.count as u8
                 }
                 index += 1;
                 continue;
@@ -262,7 +262,7 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                     out.extend_from_slice(s.as_bytes());
                 }
             }
-            log!("SAVING {:?} {}", node.value, out.len());
+            //log!("SAVING {:?} {}", node.value, out.len());
             match &node.value {
                 LiveValue::None => {
                     out.push(CBOR_NULL);
