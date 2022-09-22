@@ -247,12 +247,15 @@ impl HyperSawOscillatorState{
         return res;
     }
 
-    pub fn set_freq(&mut self, freq: f32, samplerate: f32, delta_phase: f32, state: &HyperSawGlobalState){      
+    pub fn set_freq(&mut self, freq: f32, samplerate: f32, delta_phase: f32, state: &HyperSawGlobalState, _update: bool){      
         //self.dpw_gain1 = (prep*prep*prep);
         //self.dpw_gain2 = 1.0/192.0 ;// (1.0 / 24.0 * (3.1415 / (2.0 * (3.1415 * prep).sin())).powf(3.0)).powf(1.0/3.0);
         for i in 0..7 {
             self.delta_phase[i] = delta_phase * state.freq_multiplier[i];
             let prep = samplerate / (freq * state.freq_multiplier[i]); // / samplerate;
+            if !_update  {
+                self.dpw[i] = DPWState::default();
+            }
             self.dpw[i].dpw_gain1 = (1.0 / 24.0 * (3.1415 / (2.0 * (3.1415 / prep).sin())).powf(3.0)).powf(1.0 / 3.0); 
     
         }
@@ -581,7 +584,7 @@ impl OscillatorState {
     
     fn set_note(&mut self, note: u8, samplerate: f32, settings: &OscSettings, supersaw: &SupersawSettings,hypersaw: &HyperSawGlobalState,  sps_detune_tab: &[f32; 1024], _update: bool) {
         let freq = 440.0 * f32::powf(2.0, ((note as f32) - 69.0 + settings.transpose.get() as f32 + settings.detune.get()) / 12.0);
-        self.delta_phase = (6.28318530718 * freq) / samplerate;
+        self.delta_phase = ( freq) / samplerate;
         
         match settings.osc_type.get() {
             OscType::Pure | OscType::BlampTri => {}
@@ -602,7 +605,7 @@ impl OscillatorState {
                 //  gain = std::pow(1.f / factorial(dpwOrder) * std::pow(M_PI / (2.f*sin(M_PI*pitch * APP->engine->getSampleTime())),  dpwOrder-1.f), 1.0 / (dpwOrder-1.f));
             }
             OscType::HyperSaw => {
-                self.hypersaw.set_freq(freq, samplerate, self.delta_phase, &hypersaw );               
+                self.hypersaw.set_freq(freq, samplerate, self.delta_phase, &hypersaw, _update );               
             }
            
             OscType::SuperSaw => {
