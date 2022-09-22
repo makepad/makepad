@@ -1387,55 +1387,21 @@ impl IronFishState {
                     
                     //log!("tick! {:?} {:?}",newstepidx, new_step);
                     // minor scale..
-                    let scale = [
-                        
-                        36 - 24,
-                        38 - 24,
-                        39 - 24,
-                        41 - 24,
-                        43 - 24,
-                        44 - 24,
-                        46 - 24,
-                        36 - 12,
-                        38 - 12,
-                        39 - 12,
-                        41 - 12,
-                        43 - 12,
-                        44 - 12,
-                        46 - 12,
-                        36,
-                        38,
-                        39,
-                        41,
-                        43,
-                        44,
-                        46,
-                        36 + 12,
-                        38 + 12,
-                        39 + 12,
-                        41 + 12,
-                        43 + 12,
-                        44 + 12,
-                        46 + 12,
-                        36 + 24,
-                        38 + 24,
-                        39 + 24,
-                        41 + 24,
-                        43 + 24,
-                        44 + 24,
-                        46 + 24
-                    ];
+                    let scalecount = [7,7,7,5];
+                    let scale =[[0,1,2,3,4,5,6],
+                                [0,1,2,3,4,5,6],[0,1,2,3,4,5,6],[0,1,2,3,4,5,6]];
+
                     
                     for i in 0..32 {
                         if self.old_step & (1 << (31 - i)) != 0 {
                             if (new_step & (1 << (31 - i))) == 0 {
                                 //  log!("note off {:?}",scale[i]);
-                                self.internal_note_off(scale[i], 127);
+                                self.internal_note_off(scale[0][(i%scalecount[0]) as usize] +  (i/scalecount[0])*12, 127);
                             }
                         } else {
                             if new_step & (1 << (31 - i)) != 0{
                                 // log!("note on {:?}",scale[i]);
-                                self.internal_note_on(scale[i], 127);
+                                self.internal_note_on(scale[0][(i%scalecount[0]) as usize]+  (i/scalecount[0])*12, 127);
                             }
                         }
                     }
