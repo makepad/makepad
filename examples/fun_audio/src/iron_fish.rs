@@ -521,7 +521,7 @@ impl OscillatorState {
         t2 -= t2.floor();
         tri -= self.blamp(t2, self.delta_phase);
         tri -= self.blamp(1.0 - t2, self.delta_phase);
-                return tri;
+        return tri;
     }
 
     fn pure(&mut self) -> f32 {
