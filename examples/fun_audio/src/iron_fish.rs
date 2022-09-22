@@ -29,7 +29,7 @@ pub enum LFOWave {
 }
 
 
-#[derive(Live, LiveHook, PartialEq, LiveAtomic, Debug, LiveRead)]
+#[derive(Copy,Clone,Live, LiveHook, PartialEq, LiveAtomic, Debug, LiveRead)]
 pub enum RootNote {
     A, 
     Asharp,
@@ -45,7 +45,7 @@ pub enum RootNote {
     Gsharp
 }
 
-#[derive(Live, LiveHook, PartialEq, LiveAtomic, Debug, LiveRead)]
+#[derive(Copy, Clone,Live, LiveHook, PartialEq, LiveAtomic, Debug, LiveRead)]
 pub enum MusicalScale {
     #[pick] Minor,
     Major,
@@ -232,7 +232,9 @@ pub struct IronFishSettings {
 pub struct SequencerState
 {
     currentstep: usize,
-    samplesleftinstep: usize
+    samplesleftinstep: usize,
+    currentrootnote: RootNote,
+    currentscale: MusicalScale
 }
 
 #[derive(Copy, Clone)]
@@ -1378,6 +1380,16 @@ impl IronFishState {
                         self.sequencer.currentstep = 15;
                         self.old_step = 0;
                     }
+
+                    if self.sequencer.currentscale != self.settings.sequencer.scale.get(){
+                        self.sequencer.currentscale = self.settings.sequencer.scale.get();
+                        self.all_notes_off();
+                    }
+                    if self.sequencer.currentrootnote != self.settings.sequencer.rootnote.get(){
+                        self.all_notes_off();
+                        self.sequencer.currentrootnote = self.settings.sequencer.rootnote.get();
+                    }
+
                     
                     // process notes!
                     let newstepidx = (self.sequencer.currentstep + 1) % 16;
@@ -1476,7 +1488,9 @@ impl Default for SequencerState {
     fn default() -> Self {
         Self {
             samplesleftinstep: 10,
-            currentstep: 0
+            currentstep: 0,
+            currentscale: MusicalScale::Minor,
+            currentrootnote: RootNote::C
         }
     }
 }
