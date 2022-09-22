@@ -524,7 +524,7 @@ impl OscillatorState {
         t2 -= t2.floor();
         tri -= self.blamp(t2, self.delta_phase);
         tri -= self.blamp(1.0 - t2, self.delta_phase);
-                return tri;
+        return tri;
     }
 
     fn pure(&mut self) -> f32 {
@@ -583,8 +583,8 @@ impl OscillatorState {
     }
     
     fn set_note(&mut self, note: u8, samplerate: f32, settings: &OscSettings, supersaw: &SupersawSettings,hypersaw: &HyperSawGlobalState,  sps_detune_tab: &[f32; 1024], _update: bool) {
-        let freq = 440.0 * f32::powf(2.0, ((note as f32) - 69.0 + settings.transpose.get() as f32 + settings.detune.get()) / 12.0);
-        self.delta_phase = ( freq) / samplerate;
+        let freq = (440.0 /6.28318530718 ) * f32::powf(2.0, ((note as f32) - 69.0 + settings.transpose.get() as f32 + settings.detune.get()) / 12.0);
+        self.delta_phase = (6.28318530718 * freq) / samplerate;
         
         match settings.osc_type.get() {
             OscType::Pure | OscType::BlampTri => {}
@@ -846,7 +846,10 @@ impl EnvelopeState {
     }
     
     fn nicerange(input: f32, samplerate: f32) -> f32 {
-        return 1.0 + input * input * samplerate * 5.0;
+
+        let inputexp = input.powf(0.54);
+        let result = 64.0*((samplerate * 6.0)/64.0).powf(inputexp);
+        return result; 
     }
     
     fn trigger_off(&mut self, _velocity: f32, settings: &EnvelopeSettings, samplerate: f32) {
