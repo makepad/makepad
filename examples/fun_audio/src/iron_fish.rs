@@ -1282,11 +1282,13 @@ impl IronFishState {
         let recalchyperlevels2 = diffuse2dirty;
 
         if recalchyperlevels1 {
+            log!("dirty1 {} {}", diffuse1dirty, osc_dirty);
             self.g.hypersaw1.recalclevels();
             spread1dirty = true;
         }
 
         if recalchyperlevels2 {
+            log!("dirty2 {} {}", diffuse1dirty, osc_dirty);
             self.g.hypersaw2.recalclevels();            
             spread2dirty = true;
         }
@@ -1297,6 +1299,11 @@ impl IronFishState {
         
         if spread2dirty {
             self.g.hypersaw2.recalcfreqs();
+        }
+
+        if osc_dirty {
+            self.osc1cache.osc_type.set(self.settings.osc1.osc_type.get());
+            self.osc2cache.osc_type.set(self.settings.osc2.osc_type.get());
         }
 
         if pitchdirty {
