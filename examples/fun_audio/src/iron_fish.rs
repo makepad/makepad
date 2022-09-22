@@ -474,7 +474,7 @@ impl SubOscillatorState {
     
     fn set_note(&mut self, note: u8, samplerate: f32) {
         let freq = 440.0 * f32::powf(2.0, ((note as f32) - 69.0 - 24.0) / 12.0);
-        self.delta_phase = ((6.283 / 2.0) * freq) / samplerate;
+        self.delta_phase = freq / samplerate;
         //let sampletime = 1.0 / samplerate;
     }
 }
