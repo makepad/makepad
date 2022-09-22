@@ -1357,6 +1357,7 @@ impl App {
         let shift = if let Event::FingerUp(fu) = event {fu.modifiers.shift}else {false};
         if ui.button(ids!(clear_grid)).was_clicked() 
         {
+            sequencer.clear_buttons(ui.cx);
             let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
             iron_fish.settings.sequencer.step0.set(0);
             iron_fish.settings.sequencer.step1.set(0);
