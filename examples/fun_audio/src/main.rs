@@ -41,7 +41,7 @@ live_register!{
     const COLOR_TOUCH : #xBBFF99 // light green
     const COLOR_FX : #x99EEFF // light green
     const COLOR_TEXT_H1 : #x000000CC
-    const COLOR_TEXT_H2 : #xFFFFFF88
+    const COLOR_TEXT_H2 : #xFFFFFF66
     const COLOR_TEXT_H2_HOVER : #xD
     const COLOR_BEVEL_SHADOW : #x00000066
     const COLOR_BEVEL_HIGHLIGHT : #xFFFFFF33
@@ -316,11 +316,11 @@ live_register!{
     }
 
     GraphPaper: Box {
-        walk: {width: Fill, height: 50, margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: (SPACING_CONTROLS)}}
+        walk: {width: Fill, height: 100, margin: {top: -4.0, right: -4.0, bottom: 0.0, left: -4.0,}}
         bg: {
-            radius: 3,
-            color: #x38,
-            color2: #0,
+            radius: 0,
+            color: #x44,
+            color2: #x0,
             
             instance attack: 0.05
             instance hold: 0.0
@@ -330,8 +330,8 @@ live_register!{
             
             fn get_fill(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size); //mod (self.pos * self.rect_size, 15))
-                let base_color = mix(self.color, self.color2, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 3.0));
-                let darker = base_color * 0.8;
+                let base_color = mix(self.color, self.color2, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 2.0));
+                let darker = base_color * 0.85;
                 let pos = self.pos * self.rect_size;
                 sdf.clear(mix(base_color, darker, pow(abs(sin(pos.x * 0.5)), 24) + pow(abs(sin(pos.y * 0.5)), 32.0))); // Grid
                 sdf.rect(1.0, 1.0, 16, 16)
@@ -521,16 +521,56 @@ live_register!{
             Frame {
                 walk: {height: Fit}
                 layout: {flow: Right}
-                    speed = InstrumentSlider {
-                        walk: {width: 200}
-                        slider = {
-                            slider: {line_color: (COLOR_MIX)}
-                            bind: "sequencer.bpm"
-                            min: 0.0
-                            max: 240.0
-                            label: "BPM"
+
+                playpause = InstrumentCheckbox {
+                    walk: {width: Fit, height: Fit, margin: 5}
+                    layout: {align: {x: 0.0, y: 0.5}}
+                    checkbox = {
+                        walk: {width: 20, height: 20, margin: 5}
+                        bind: "sequencer.playing",
+                        label: ""
+                        check_box: {
+                            fn pixel(self) -> vec4 {
+                                let sdf = Sdf2d::viewport(self.pos * self.rect_size)
+                                let left = 3;
+                                let sz = 20.0;
+                                let c = vec2(left + sz, self.rect_size.y);
+                                sdf.move_to(0.0, 0.0);
+                                sdf.line_to(c.x * 0.75, c.y * 0.5);
+                                sdf.line_to(0.0, c.y);
+                                sdf.close_path();
+                                sdf.fill_keep(
+                                    mix(
+                                        mix((COLOR_TEXT_H2) * 0.75, (COLOR_TEXT_H2), self.hover),
+                                        mix(
+                                            mix(#xFFFDDDFF, #xFFFFFF08, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 1.25)),
+                                            mix(#xFFFDDDFF, #xFFFFFF08, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 1.25)),
+                                            self.hover),
+                                        self.selected
+                                    )
+                                )
+                                sdf.stroke_keep(
+                                    mix(
+                                        mix(#xFFFFFF66, #xFFFFFF10, pow(self.pos.y, 0.5)),
+                                        #xFFFFFF80,
+                                        self.selected),
+                                    1.)
+                                return sdf.result
+                            }
                         }
                     }
+                }
+
+                speed = InstrumentSlider {
+                    walk: {width: 200}
+                    slider = {
+                        slider: {line_color: (COLOR_MIX)}
+                        bind: "sequencer.bpm"
+                        min: 0.0
+                        max: 240.0
+                        label: "BPM"
+                    }
+                }
 
                 InstrumentDropdown {
                     walk: {height: Fill}
@@ -548,15 +588,6 @@ live_register!{
                     checkbox = {
                         bind: "arp.enabled",
                         label: "Arp"
-                    }
-                }
-
-                playpause = InstrumentCheckbox {
-                    walk: {width: Fit, height: Fill, margin: 5}
-                    layout: {align: {x: 0.0, y: 0.5}}
-                    checkbox = {
-                        bind: "sequencer.playing",
-                        label: "Play"
                     }
                 }
 
