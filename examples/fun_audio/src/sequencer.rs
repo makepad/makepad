@@ -136,8 +136,8 @@ impl SeqButton {
         self.button.draw_abs(cx, rect);
     }
     
-    fn _set_is_active(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
-        self.toggle_state(cx, is, animate, ids!(pressed.on), ids!(pressed.off))
+    fn set_is_active(&mut self, cx: &mut Cx, is: bool, animate: Animate) {
+        self.toggle_state(cx, is, animate, ids!(active.on), ids!(active.off))
     }
     
     pub fn handle_event(
@@ -275,7 +275,15 @@ impl SequencerImGUI {
         btns
     }
     
-    pub fn _inner(&self) -> Option<std::cell::RefMut<'_, Sequencer >> {
+    pub fn clear_buttons(&self, cx:&mut Cx){
+        if let Some(mut inner) = self.inner(){
+            for (_, button) in inner.buttons.iter_mut() {
+                button.set_is_active(cx, false, Animate::Yes);
+            }
+        }
+    }
+    
+    pub fn inner(&self) -> Option<std::cell::RefMut<'_, Sequencer >> {
         self.0.inner()
     }
 }
