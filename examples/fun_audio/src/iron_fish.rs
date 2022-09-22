@@ -28,6 +28,31 @@ pub enum LFOWave {
     Triangle
 }
 
+
+#[derive(Live, LiveHook, PartialEq, LiveAtomic, Debug, LiveRead)]
+pub enum RootNote {
+    A,
+    Asharp,
+    B,
+    #[pick]C,
+    Csharp, 
+    D,
+    Dsharp,
+    E,
+    F,
+    Fsharp,
+    G,
+    Gsharp
+}
+
+#[derive(Live, LiveHook, PartialEq, LiveAtomic, Debug, LiveRead)]
+pub enum MusicalScale {
+    #[pick] Minor,
+    Major,
+    Dorian,
+    Pentatonic
+}
+
 #[derive(Live, LiveHook, PartialEq, LiveAtomic, Debug, LiveRead)]
 pub enum FilterType {
     #[pick] LowPass,
@@ -150,6 +175,8 @@ pub struct SequencerSettings {
     #[live(0)] pub step13: u32a,
     #[live(0)] pub step14: u32a,
     #[live(0)] pub step15: u32a,
+    scale: MusicalScale,
+    rootnote: RootNote,
     /*
     #[live(0)] step0: u32a,
     #[live(1)] step1: u32a,
