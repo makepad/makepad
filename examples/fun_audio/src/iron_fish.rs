@@ -28,6 +28,31 @@ pub enum LFOWave {
     Triangle
 }
 
+
+#[derive(Copy,Clone,Live, LiveHook, PartialEq, LiveAtomic, Debug, LiveRead)]
+pub enum RootNote {
+    A, 
+    Asharp,
+    B,
+    #[pick]C,
+    Csharp, 
+    D,
+    Dsharp,
+    E,
+    F,
+    Fsharp,
+    G,
+    Gsharp
+}
+
+#[derive(Copy, Clone,Live, LiveHook, PartialEq, LiveAtomic, Debug, LiveRead)]
+pub enum MusicalScale {
+    #[pick] Minor,
+    Major,
+    Dorian,
+    Pentatonic
+}
+
 #[derive(Live, LiveHook, PartialEq, LiveAtomic, Debug, LiveRead)]
 pub enum FilterType {
     #[pick] LowPass,
@@ -150,6 +175,8 @@ pub struct SequencerSettings {
     #[live(0)] pub step13: u32a,
     #[live(0)] pub step14: u32a,
     #[live(0)] pub step15: u32a,
+    scale: U32A<MusicalScale>,
+    rootnote: U32A<RootNote>,
     /*
     #[live(0)] step0: u32a,
     #[live(1)] step1: u32a,
@@ -205,7 +232,9 @@ pub struct IronFishSettings {
 pub struct SequencerState
 {
     currentstep: usize,
-    samplesleftinstep: usize
+    samplesleftinstep: usize,
+    currentrootnote: RootNote,
+    currentscale: MusicalScale
 }
 
 #[derive(Copy, Clone)]
@@ -344,7 +373,7 @@ impl HyperSawGlobalState{
 			};
 		};
 
-        log!("{:?} {} {:?}", std::time::Instant::now(), self.new_n_saws, self.freq_multiplier);
+        //log!("{:?} {} {:?}", std::time::Instant::now(), self.new_n_saws, self.freq_multiplier);
     }
 }
 
@@ -1297,13 +1326,11 @@ impl IronFishState {
         let recalchyperlevels2 = diffuse2dirty;
 
         if recalchyperlevels1 {
-            log!("dirty1 {} {}", diffuse1dirty, osc_dirty);
             self.g.hypersaw1.recalclevels();
             spread1dirty = true;
         }
 
         if recalchyperlevels2 {
-            log!("dirty2 {} {}", diffuse1dirty, osc_dirty);
             self.g.hypersaw2.recalclevels();            
             spread2dirty = true;
         }
@@ -1356,6 +1383,16 @@ impl IronFishState {
                         self.sequencer.currentstep = 15;
                         self.old_step = 0;
                     }
+
+                    if self.sequencer.currentscale != self.settings.sequencer.scale.get(){
+                        self.sequencer.currentscale = self.settings.sequencer.scale.get();
+                        self.all_notes_off();
+                    }
+                    if self.sequencer.currentrootnote != self.settings.sequencer.rootnote.get(){
+                        self.all_notes_off();
+                        self.sequencer.currentrootnote = self.settings.sequencer.rootnote.get();
+                    }
+
                     
                     // process notes!
                     let newstepidx = (self.sequencer.currentstep + 1) % 16;
@@ -1363,55 +1400,44 @@ impl IronFishState {
                     
                     //log!("tick! {:?} {:?}",newstepidx, new_step);
                     // minor scale..
-                    let scale = [
-                        
-                        36 - 24,
-                        38 - 24,
-                        39 - 24,
-                        41 - 24,
-                        43 - 24,
-                        44 - 24,
-                        46 - 24,
-                        36 - 12,
-                        38 - 12,
-                        39 - 12,
-                        41 - 12,
-                        43 - 12,
-                        44 - 12,
-                        46 - 12,
-                        36,
-                        38,
-                        39,
-                        41,
-                        43,
-                        44,
-                        46,
-                        36 + 12,
-                        38 + 12,
-                        39 + 12,
-                        41 + 12,
-                        43 + 12,
-                        44 + 12,
-                        46 + 12,
-                        36 + 24,
-                        38 + 24,
-                        39 + 24,
-                        41 + 24,
-                        43 + 24,
-                        44 + 24,
-                        46 + 24
-                    ];
+                    let scalecount = [7,7,7,5];
+                    let scale =[[0,2,3,5,7,8,11],
+                                [0,2,4,5,7,9,11],
+                                [0,2,3,5,7,9,10],
+                                [0,2,5,7,9,12,14]];
+
+                    let mut scaleidx = 0;
+                    let rootnoteenum = self.settings.sequencer.rootnote.get() ;
                     
+                    let mut rootnote = 12;
+                    if rootnoteenum == RootNote::A{rootnote = 12-3 ;};
+                    if rootnoteenum == RootNote::Asharp{rootnote = 12-2 ;};
+                    if rootnoteenum == RootNote::B{rootnote = 12-1 ;};
+                    if rootnoteenum == RootNote::C{rootnote = 12-0 ;};
+                    if rootnoteenum == RootNote::Csharp{rootnote = 12+1 ;};
+                    if rootnoteenum == RootNote::D{rootnote = 12+2 ;};
+                    if rootnoteenum == RootNote::Dsharp{rootnote = 12+3 ;};
+                    if rootnoteenum == RootNote::E{rootnote = 12+4 ;};
+                    if rootnoteenum == RootNote::F{rootnote = 12+5 ;};
+                    if rootnoteenum == RootNote::Fsharp{rootnote = 12+6 ;};
+                    if rootnoteenum == RootNote::G{rootnote = 12+7 ;};
+                    if rootnoteenum == RootNote::Gsharp{rootnote = 12+8 ;};
+                    
+                    
+                    if self.settings.sequencer.scale.get() == MusicalScale::Major {scaleidx = 1;} ;
+                    if self.settings.sequencer.scale.get() == MusicalScale::Dorian {scaleidx = 2;} ;
+                    if self.settings.sequencer.scale.get() == MusicalScale::Pentatonic {scaleidx = 3;} ;
+
                     for i in 0..32 {
                         if self.old_step & (1 << (31 - i)) != 0 {
                             if (new_step & (1 << (31 - i))) == 0 {
                                 //  log!("note off {:?}",scale[i]);
-                                self.internal_note_off(scale[i], 127);
+                                self.internal_note_off(rootnote + scale[scaleidx][(i%scalecount[scaleidx]) as usize] +  (i/scalecount[scaleidx])*12, 127);
                             }
                         } else {
                             if new_step & (1 << (31 - i)) != 0{
                                 // log!("note on {:?}",scale[i]);
-                                self.internal_note_on(scale[i], 127);
+                                self.internal_note_on(rootnote + scale[scaleidx][(i%scalecount[scaleidx]) as usize]+  (i/scalecount[scaleidx])*12, 127);
                             }
                         }
                     }
@@ -1465,7 +1491,9 @@ impl Default for SequencerState {
     fn default() -> Self {
         Self {
             samplesleftinstep: 10,
-            currentstep: 0
+            currentstep: 0,
+            currentscale: MusicalScale::Minor,
+            currentrootnote: RootNote::C
         }
     }
 }
