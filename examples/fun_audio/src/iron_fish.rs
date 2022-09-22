@@ -381,6 +381,11 @@ pub struct DPWState {
 
 impl DPWState 
 {
+    pub fn reset(&mut self)
+    {
+
+    }
+
     pub fn get(&mut self, phase: f32) -> f32
     {
         let triv = 2.0 * phase - 1.0;     
@@ -500,10 +505,6 @@ impl OscillatorState {
     fn trivialsaw(self) -> f32 {
         return self.phase * 2.0 - 1.0
     }
-
-    fn trivialsaw_indexed(self, phase_idx: usize) -> f32 {
-        return self.supersaw.phase[phase_idx] * 2.0 - 1.0
-    }
     
     fn blamp(&mut self, t: f32, dt: f32) -> f32 {
         let mut y = 0.0;
@@ -539,10 +540,14 @@ impl OscillatorState {
         return (self.phase * 6.28318530718).sin();
     }
 
-    fn pure_indexed(&mut self, phase_idx: usize) -> f32 {
+    fn sps_pure(&mut self, phase_idx: usize) -> f32 {
         return (self.supersaw.phase[phase_idx] * 6.28318530718).sin();
     }
-    
+
+    fn sps_trivialsaw(self, phase_idx: usize) -> f32 {
+        return self.supersaw.phase[phase_idx] * 2.0 - 1.0
+    }
+
     fn supersaw(&mut self) -> f32 {
 
         for n in 0..7 {
@@ -552,14 +557,14 @@ impl OscillatorState {
             }
         }
 
-        let main_band = self.trivialsaw_indexed(0);
-        //main_band -= self.pure(0);
+        let mut main_band = self.sps_trivialsaw(0);
+        // main_band -= self.sps_pure(0);
 
         let mut side_bands = 0.0;
         for n in 1..7 {
-            side_bands += self.trivialsaw_indexed(n);
+            side_bands += self.sps_trivialsaw(n);
             if n < 6 {
-                side_bands -= self.pure_indexed(n);
+                side_bands -= self.sps_pure(n);
             }
         }
         
@@ -572,7 +577,6 @@ impl OscillatorState {
         if self.phase > 1.0 {
             self.phase -= 1.0;
         };
-        // FIXME: could just update the first one for most types but it's hardly worth special-casing
         
         match settings.osc_type.get() {
             OscType::Pure => self.pure(),
@@ -591,6 +595,11 @@ impl OscillatorState {
         match settings.osc_type.get() {
             OscType::Pure | OscType::BlampTri => {}
             OscType::DPWSawPulse => {
+                if (!_update)
+                {
+                    self.dpw = DPWState::default();
+
+                }
                 //let w = freq * 6.283 / samplerate;
                 //let sampletime = 1.0 / samplerate;
                 let prep = samplerate / freq; // / samplerate;
@@ -602,6 +611,7 @@ impl OscillatorState {
                 //  gain = std::pow(1.f / factorial(dpwOrder) * std::pow(M_PI / (2.f*sin(M_PI*pitch * APP->engine->getSampleTime())),  dpwOrder-1.f), 1.0 / (dpwOrder-1.f));
             }
             OscType::HyperSaw => {
+                // FIXME: check/pass '_update' to save time et cetera?
                 self.hypersaw.set_freq(freq, samplerate, self.delta_phase, &hypersaw );               
             }
            
@@ -619,11 +629,16 @@ impl OscillatorState {
                 // lazily initialiizing here (constants courtesy of Alex Shore, the better sounding set of the 2 I have in FM. BISON)
                 let sps_coeffs: [f32; 6] = [-0.11002313, -0.06288439, -0.03024148, 0.02953130, 0.06216538, 0.10745242];
                 
-                // FIXME: running phases are better, but this does the job fairly OK
-                self.supersaw.phase[0] = random_f32(&mut self.sps_seed);
+                // FIXME: free running phasors are better, but this does the job fairly OK
+                if (!_update) {
+                    self.supersaw.phase[0] = random_f32(&mut self.sps_seed);
+                }
+                
                 self.supersaw.delta_phase[0] = self.delta_phase;
                 for n in 1..7 {
-                    self.supersaw.phase[n] = random_f32(&mut self.sps_seed);
+                    if (!_update) {
+                        self.supersaw.phase[n] = random_f32(&mut self.sps_seed);
+                    }
                     
                     // calculate & set sideband phase delta
                     let offs = self.sps_detune * sps_coeffs[n - 1];
@@ -677,7 +692,7 @@ impl Default for OscillatorState {
     fn default() -> Self {
         Self {
             phase: 0.0,
-            delta_phase: 0.0001,
+            delta_phase: 0.0,
             sps_seed: 4321,
             sps_detune: 0.0,
             sps_mix_main: 0.0,
@@ -1241,6 +1256,7 @@ impl IronFishState {
         let mut spread2dirty: bool = false;
         
 
+        // FIXME: maybe we should rename 'supersaw*' to something generic shared by both types?
         if self.g.hypersaw1.last_diffuse != self.settings.supersaw1.diffuse.get()
         {
             diffuse1dirty = true;
@@ -1508,7 +1524,7 @@ impl AudioComponent for IronFish {
         let mut buffers = Vec::new();
         buffers.resize(16,None);
         
-        // precalculate supersaw detune table (heavy polnynomial, based on data sampled from an actual JP-80000)
+        // precalculate supersaw detune table (heavy polnynomial, based on data sampled from an actual JP-8000)
         // FIXME: move to it's own function to keep things tidy
         let mut sps_detune_tab = [0f32; 1024];
         for i in 0..1024{
