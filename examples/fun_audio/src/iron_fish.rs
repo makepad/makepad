@@ -1417,12 +1417,12 @@ impl IronFishState {
                         if self.old_step & (1 << (31 - i)) != 0 {
                             if (new_step & (1 << (31 - i))) == 0 {
                                 //  log!("note off {:?}",scale[i]);
-                                self.internal_note_off(rootnote + scale[0][(i%scalecount[scaleidx]) as usize] +  (i/scalecount[scaleidx])*12, 127);
+                                self.internal_note_off(rootnote + scale[scaleidx][(i%scalecount[scaleidx]) as usize] +  (i/scalecount[scaleidx])*12, 127);
                             }
                         } else {
                             if new_step & (1 << (31 - i)) != 0{
                                 // log!("note on {:?}",scale[i]);
-                                self.internal_note_on(rootnote + scale[0][(i%scalecount[scaleidx]) as usize]+  (i/scalecount[scaleidx])*12, 127);
+                                self.internal_note_on(rootnote + scale[scaleidx][(i%scalecount[scaleidx]) as usize]+  (i/scalecount[scaleidx])*12, 127);
                             }
                         }
                     }
