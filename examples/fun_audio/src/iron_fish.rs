@@ -1,5 +1,5 @@
 // Iron fish is MIT licensed, (C) Stijn Kuipers
-// Supersaw is MIT licensed (C) Niels J. de Wit
+// Super saw oscillator implementation is MIT licensed (C) Niels J. de Wit
 
 use {
     std::sync::Arc,
@@ -247,6 +247,10 @@ pub struct ArpState {
 pub struct SuperSawOscillatorState {
     phase: [f32; 7],
     delta_phase: [f32; 7],
+    detune: f32,
+    mix_main: f32,
+    mix_side_bands: f32,
+    dpw: [DPWState;7]
 }
 
 #[derive(Copy, Clone)]
@@ -477,9 +481,6 @@ pub struct OscillatorState {
     hypersaw: HyperSawOscillatorState,
     dpw: DPWState,
     seed: u32,
-    sps_detune: f32,
-    sps_mix_main: f32,
-    sps_mix_side_bands: f32
 }
 
 #[derive(Copy, Clone)]
@@ -501,7 +502,7 @@ impl SubOscillatorState {
     
     fn set_note(&mut self, note: u8, samplerate: f32) {
         let freq = 440.0 * f32::powf(2.0, ((note as f32) - 69.0 - 24.0) / 12.0);
-        self.delta_phase = (freq*0.25) / samplerate;
+        self.delta_phase = (freq*0.5) / samplerate;
         //let sampletime = 1.0 / samplerate;
     }
 }
@@ -520,8 +521,8 @@ impl OscillatorState {
     
     fn sps_calc_mix(&mut self, mix: f32) {
         // FIXME: here I would assert that mix is [0..1]
-        self.sps_mix_main = -0.55366 * mix + 0.99785;
-        self.sps_mix_side_bands = -0.73764 * powf(mix, 2.0) + 1.2841 * mix + 0.044372;
+        self.supersaw.mix_main = -0.55366 * mix + 0.99785;
+        self.supersaw.mix_side_bands = -0.73764 * powf(mix, 2.0) + 1.2841 * mix + 0.044372;
     }
     
     fn blamp(&mut self, t: f32, dt: f32) -> f32 {
@@ -563,33 +564,30 @@ impl OscillatorState {
         return (self.supersaw.phase[phase_idx] * 6.28318530718).sin();
     }
 
-    // supersaw impl.
     fn sps_trivialsaw(self, phase_idx: usize) -> f32 {
         return self.supersaw.phase[phase_idx] * 2.0 - 1.0
     }
-
-    // supersaw impl.
+    // supersaw impl. (FIXME: move functions and initialization into object)
     fn supersaw(&mut self) -> f32 {
-        // FIXME: fact that I'm altering sub-state here is reason enough to warrant it's own object
         for n in 0..7 {
             self.supersaw.phase[n] += self.supersaw.delta_phase[n];
-            while self.supersaw.phase[n] > 1.0 {
+            if self.supersaw.phase[n] > 1.0 {
                 self.supersaw.phase[n] -= 1.0;
             }
         }
 
-        let main_band = self.sps_trivialsaw(0);
-        // main_band -= self.sps_pure(0);
+        let mut main_band =  self.supersaw.dpw[0].get(self.supersaw.phase[0]);
+        main_band -= self.sps_pure(0);
 
         let mut side_bands = 0.0;
         for n in 1..7 {
-            side_bands += self.sps_trivialsaw(n);
+            side_bands += self.sps_trivialsaw(n); // self.supersaw.dpw[n].get(self.supersaw.phase[n]); 
             if n < 6 {
                 side_bands -= self.sps_pure(n);
             }
         }
         
-        return main_band*self.sps_mix_main + side_bands*self.sps_mix_side_bands;
+        return main_band*self.supersaw.mix_main + side_bands*self.supersaw.mix_side_bands;
     }
     
     fn get(&mut self, settings: &OscSettings, _samplerate: f32, hyper: HyperSawGlobalState) -> f32 {
@@ -641,7 +639,7 @@ impl OscillatorState {
                 let detune_idx_lo = (detune * (1023.0 - 1.0)) as usize;
                 let detune_lo = sps_detune_tab[detune_idx_lo];
                 let detune_hi = sps_detune_tab[detune_idx_lo + 1];
-                self.sps_detune = detune_lo + (detune_hi - detune_lo) * detune;
+                self.supersaw.detune = detune_lo + (detune_hi - detune_lo) * detune;
                 
                 // set main & side band gains
                 self.sps_calc_mix(supersaw.diffuse.get());
@@ -650,23 +648,30 @@ impl OscillatorState {
                 // reference: https://github.com/bipolaraudio/FM-BISON/blob/master/literature/Supersaw%20thesis.pdf
                 let sps_coeffs: [f32; 6] = [-0.11002313, -0.06288439, -0.03024148, 0.02953130, 0.06216538, 0.10745242];
                 
-                // FIXME: free running phasors (<- !!) are better, but this does the job fairly OK
+                // FIXME: free running phases please
                 if !_update {
+                    self.supersaw.dpw[0] = DPWState::default();
                     self.supersaw.phase[0] = random_f32(&mut self.seed);
+                    self.supersaw.dpw[0].dpw_gain1 = self.supersaw.mix_main;
                 }
-                
+
                 self.supersaw.delta_phase[0] = self.delta_phase;
+               
                 for n in 1..7 {
-                    if !_update {
-                        self.supersaw.phase[n] = random_f32(&mut self.seed);
-                    }
-                    
-                    // calculate & set sideband phase delta
-                    let offs = self.sps_detune * sps_coeffs[n - 1];
+                    // calculate & set sideband phase deltas
+                    let offs = self.supersaw.detune * sps_coeffs[n - 1];
                     let freq_offs = freq * offs;
                     let detuned_freq = freq + freq_offs;
-                    self.supersaw.delta_phase[n] = (6.28318530718 * detuned_freq) / samplerate;
-                }
+                    self.supersaw.delta_phase[n] = (6.28318530718 * detuned_freq)/samplerate;
+ 
+                    if !_update {
+                        self.supersaw.dpw[n] = DPWState::default();
+                        self.supersaw.phase[n] = random_f32(&mut self.seed); 
+
+                        // FIXME: Stijn, what does this value mean more or less? Not using this oscillator for sidebands ATM.
+                        // self.supersaw.dpw[n].dpw_gain1 = self.supersaw.mix_side_bands;
+                    }
+               }
             }
         }
     }
@@ -704,7 +709,11 @@ impl Default for SuperSawOscillatorState{
     fn default() -> Self {
         Self{
             phase: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            delta_phase: [0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001] 
+            delta_phase: [0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001],
+            detune: 0.0,
+            mix_main: 1.0,
+            mix_side_bands: 0.0,
+            dpw: [Default::default();7]
         }
     }
 }
@@ -715,9 +724,6 @@ impl Default for OscillatorState {
             phase: 0.0,
             delta_phase: 0.0,
             seed: 4321,
-            sps_detune: 0.0,
-            sps_mix_main: 0.0,
-            sps_mix_side_bands: 0.0,
             supersaw: Default::default(),
             hypersaw: Default::default(),
             dpw: Default::default()
