@@ -1,5 +1,5 @@
 // Iron fish is MIT licensed, (C) Stijn Kuipers
-// Supersaw is MIT licensed (C) Niels J. de Wit
+// Super saw oscillator implementation is MIT licensed (C) Niels J. de Wit
 
 use {
     std::sync::Arc,
@@ -26,6 +26,31 @@ pub enum LFOWave {
     Sine,
     Pulse,
     Triangle
+}
+
+
+#[derive(Copy,Clone,Live, LiveHook, PartialEq, LiveAtomic, Debug, LiveRead)]
+pub enum RootNote {
+    A, 
+    Asharp,
+    B,
+    #[pick]C,
+    Csharp, 
+    D,
+    Dsharp,
+    E,
+    F,
+    Fsharp,
+    G,
+    Gsharp
+}
+
+#[derive(Copy, Clone,Live, LiveHook, PartialEq, LiveAtomic, Debug, LiveRead)]
+pub enum MusicalScale {
+    #[pick] Minor,
+    Major,
+    Dorian,
+    Pentatonic
 }
 
 #[derive(Live, LiveHook, PartialEq, LiveAtomic, Debug, LiveRead)]
@@ -150,6 +175,8 @@ pub struct SequencerSettings {
     #[live(0)] pub step13: u32a,
     #[live(0)] pub step14: u32a,
     #[live(0)] pub step15: u32a,
+    scale: U32A<MusicalScale>,
+    rootnote: U32A<RootNote>,
     /*
     #[live(0)] step0: u32a,
     #[live(1)] step1: u32a,
@@ -205,7 +232,9 @@ pub struct IronFishSettings {
 pub struct SequencerState
 {
     currentstep: usize,
-    samplesleftinstep: usize
+    samplesleftinstep: usize,
+    currentrootnote: RootNote,
+    currentscale: MusicalScale
 }
 
 #[derive(Copy, Clone)]
@@ -220,6 +249,10 @@ pub struct ArpState {
 pub struct SuperSawOscillatorState {
     phase: [f32; 7],
     delta_phase: [f32; 7],
+    detune: f32,
+    mix_main: f32,
+    mix_side_bands: f32,
+    dpw: [DPWState;7]
 }
 
 #[derive(Copy, Clone)]
@@ -247,12 +280,15 @@ impl HyperSawOscillatorState{
         return res;
     }
 
-    pub fn set_freq(&mut self, freq: f32, samplerate: f32, delta_phase: f32, state: &HyperSawGlobalState){      
+    pub fn set_freq(&mut self, freq: f32, samplerate: f32, delta_phase: f32, state: &HyperSawGlobalState, _update: bool){      
         //self.dpw_gain1 = (prep*prep*prep);
         //self.dpw_gain2 = 1.0/192.0 ;// (1.0 / 24.0 * (3.1415 / (2.0 * (3.1415 * prep).sin())).powf(3.0)).powf(1.0/3.0);
         for i in 0..7 {
             self.delta_phase[i] = delta_phase * state.freq_multiplier[i];
             let prep = samplerate / (freq * state.freq_multiplier[i]); // / samplerate;
+            if !_update  {
+                self.dpw[i] = DPWState::default();
+            }
             self.dpw[i].dpw_gain1 = (1.0 / 24.0 * (3.1415 / (2.0 * (3.1415 / prep).sin())).powf(3.0)).powf(1.0 / 3.0); 
     
         }
@@ -337,7 +373,7 @@ impl HyperSawGlobalState{
 			};
 		};
 
-        log!("{:?} {} {:?}", std::time::Instant::now(), self.new_n_saws, self.freq_multiplier);
+        //log!("{:?} {} {:?}", std::time::Instant::now(), self.new_n_saws, self.freq_multiplier);
     }
 }
 
@@ -447,9 +483,6 @@ pub struct OscillatorState {
     hypersaw: HyperSawOscillatorState,
     dpw: DPWState,
     seed: u32,
-    sps_detune: f32,
-    sps_mix_main: f32,
-    sps_mix_side_bands: f32
 }
 
 #[derive(Copy, Clone)]
@@ -471,7 +504,7 @@ impl SubOscillatorState {
     
     fn set_note(&mut self, note: u8, samplerate: f32) {
         let freq = 440.0 * f32::powf(2.0, ((note as f32) - 69.0 - 24.0) / 12.0);
-        self.delta_phase = ((6.283 / 2.0) * freq) / samplerate;
+        self.delta_phase = (freq*0.5) / samplerate;
         //let sampletime = 1.0 / samplerate;
     }
 }
@@ -490,8 +523,8 @@ impl OscillatorState {
     
     fn sps_calc_mix(&mut self, mix: f32) {
         // FIXME: here I would assert that mix is [0..1]
-        self.sps_mix_main = -0.55366 * mix + 0.99785;
-        self.sps_mix_side_bands = -0.73764 * powf(mix, 2.0) + 1.2841 * mix + 0.044372;
+        self.supersaw.mix_main = -0.55366 * mix + 0.99785;
+        self.supersaw.mix_side_bands = -0.73764 * powf(mix, 2.0) + 1.2841 * mix + 0.044372;
     }
     
     fn blamp(&mut self, t: f32, dt: f32) -> f32 {
@@ -521,7 +554,7 @@ impl OscillatorState {
         t2 -= t2.floor();
         tri -= self.blamp(t2, self.delta_phase);
         tri -= self.blamp(1.0 - t2, self.delta_phase);
-                return tri;
+        return tri;
     }
 
     fn pure(&mut self) -> f32 {
@@ -533,33 +566,30 @@ impl OscillatorState {
         return (self.supersaw.phase[phase_idx] * 6.28318530718).sin();
     }
 
-    // supersaw impl.
     fn sps_trivialsaw(self, phase_idx: usize) -> f32 {
         return self.supersaw.phase[phase_idx] * 2.0 - 1.0
     }
-
-    // supersaw impl.
+    // supersaw impl. (FIXME: move functions and initialization into object)
     fn supersaw(&mut self) -> f32 {
-        // FIXME: fact that I'm altering sub-state here is reason enough to warrant it's own object
         for n in 0..7 {
             self.supersaw.phase[n] += self.supersaw.delta_phase[n];
-            while self.supersaw.phase[n] > 1.0 {
+            if self.supersaw.phase[n] > 1.0 {
                 self.supersaw.phase[n] -= 1.0;
             }
         }
 
-        let main_band = self.sps_trivialsaw(0);
-        // main_band -= self.sps_pure(0);
+        let mut main_band =  self.supersaw.dpw[0].get(self.supersaw.phase[0]);
+        main_band -= self.sps_pure(0);
 
         let mut side_bands = 0.0;
         for n in 1..7 {
-            side_bands += self.sps_trivialsaw(n);
+            side_bands += self.sps_trivialsaw(n); // self.supersaw.dpw[n].get(self.supersaw.phase[n]); 
             if n < 6 {
                 side_bands -= self.sps_pure(n);
             }
         }
         
-        return main_band*self.sps_mix_main + side_bands*self.sps_mix_side_bands;
+        return main_band*self.supersaw.mix_main + side_bands*self.supersaw.mix_side_bands;
     }
     
     fn get(&mut self, settings: &OscSettings, _samplerate: f32, hyper: HyperSawGlobalState) -> f32 {
@@ -580,7 +610,7 @@ impl OscillatorState {
     }
     
     fn set_note(&mut self, note: u8, samplerate: f32, settings: &OscSettings, supersaw: &SupersawSettings,hypersaw: &HyperSawGlobalState,  sps_detune_tab: &[f32; 1024], _update: bool) {
-        let freq = 440.0 * f32::powf(2.0, ((note as f32) - 69.0 + settings.transpose.get() as f32 + settings.detune.get()) / 12.0);
+        let freq = (440.0 /6.28318530718 ) * f32::powf(2.0, ((note as f32) - 69.0 + settings.transpose.get() as f32 + settings.detune.get()) / 12.0);
         self.delta_phase = (6.28318530718 * freq) / samplerate;
         
         match settings.osc_type.get() {
@@ -602,7 +632,7 @@ impl OscillatorState {
                 //  gain = std::pow(1.f / factorial(dpwOrder) * std::pow(M_PI / (2.f*sin(M_PI*pitch * APP->engine->getSampleTime())),  dpwOrder-1.f), 1.0 / (dpwOrder-1.f));
             }
             OscType::HyperSaw => {
-                self.hypersaw.set_freq(freq, samplerate, self.delta_phase, &hypersaw );               
+                self.hypersaw.set_freq(freq, samplerate, self.delta_phase, &hypersaw, _update );               
             }
            
             OscType::SuperSaw => {
@@ -611,7 +641,7 @@ impl OscillatorState {
                 let detune_idx_lo = (detune * (1023.0 - 1.0)) as usize;
                 let detune_lo = sps_detune_tab[detune_idx_lo];
                 let detune_hi = sps_detune_tab[detune_idx_lo + 1];
-                self.sps_detune = detune_lo + (detune_hi - detune_lo) * detune;
+                self.supersaw.detune = detune_lo + (detune_hi - detune_lo) * detune;
                 
                 // set main & side band gains
                 self.sps_calc_mix(supersaw.diffuse.get());
@@ -620,23 +650,30 @@ impl OscillatorState {
                 // reference: https://github.com/bipolaraudio/FM-BISON/blob/master/literature/Supersaw%20thesis.pdf
                 let sps_coeffs: [f32; 6] = [-0.11002313, -0.06288439, -0.03024148, 0.02953130, 0.06216538, 0.10745242];
                 
-                // FIXME: free running phasors (<- !!) are better, but this does the job fairly OK
+                // FIXME: free running phases please
                 if !_update {
+                    self.supersaw.dpw[0] = DPWState::default();
                     self.supersaw.phase[0] = random_f32(&mut self.seed);
+                    self.supersaw.dpw[0].dpw_gain1 = self.supersaw.mix_main;
                 }
-                
+
                 self.supersaw.delta_phase[0] = self.delta_phase;
+               
                 for n in 1..7 {
-                    if !_update {
-                        self.supersaw.phase[n] = random_f32(&mut self.seed);
-                    }
-                    
-                    // calculate & set sideband phase delta
-                    let offs = self.sps_detune * sps_coeffs[n - 1];
+                    // calculate & set sideband phase deltas
+                    let offs = self.supersaw.detune * sps_coeffs[n - 1];
                     let freq_offs = freq * offs;
                     let detuned_freq = freq + freq_offs;
-                    self.supersaw.delta_phase[n] = (6.28318530718 * detuned_freq) / samplerate;
-                }
+                    self.supersaw.delta_phase[n] = (6.28318530718 * detuned_freq)/samplerate;
+ 
+                    if !_update {
+                        self.supersaw.dpw[n] = DPWState::default();
+                        self.supersaw.phase[n] = random_f32(&mut self.seed); 
+
+                        // FIXME: Stijn, what does this value mean more or less? Not using this oscillator for sidebands ATM.
+                        // self.supersaw.dpw[n].dpw_gain1 = self.supersaw.mix_side_bands;
+                    }
+               }
             }
         }
     }
@@ -674,7 +711,11 @@ impl Default for SuperSawOscillatorState{
     fn default() -> Self {
         Self{
             phase: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-            delta_phase: [0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001] 
+            delta_phase: [0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001],
+            detune: 0.0,
+            mix_main: 1.0,
+            mix_side_bands: 0.0,
+            dpw: [Default::default();7]
         }
     }
 }
@@ -685,9 +726,6 @@ impl Default for OscillatorState {
             phase: 0.0,
             delta_phase: 0.0,
             seed: 4321,
-            sps_detune: 0.0,
-            sps_mix_main: 0.0,
-            sps_mix_side_bands: 0.0,
             supersaw: Default::default(),
             hypersaw: Default::default(),
             dpw: Default::default()
@@ -843,7 +881,10 @@ impl EnvelopeState {
     }
     
     fn nicerange(input: f32, samplerate: f32) -> f32 {
-        return 1.0 + input * input * samplerate * 5.0;
+
+        let inputexp = input.powf(0.54);
+        let result = 64.0*((samplerate * 6.0)/64.0).powf(inputexp);
+        return result; 
     }
     
     fn trigger_off(&mut self, _velocity: f32, settings: &EnvelopeSettings, samplerate: f32) {
@@ -912,7 +953,7 @@ impl FilterState {
     }
     
     fn set_cutoff(&mut self, settings: &FilterSettings, envelope: f32, _sample_rate: f32, touch: f32, lfo: f32) {
-        self.fc = (settings.cutoff.get() + touch * settings.touch_amount.get() + lfo * settings.lfo_amount.get() + envelope * settings.envelope_amount.get() * 0.5).clamp(0.0, 1.0);
+        self.fc = (settings.cutoff.get() + touch * settings.touch_amount.get() + lfo * settings.lfo_amount.get()*0.5 + envelope * settings.envelope_amount.get() * 0.5).clamp(0.0, 1.0);
         self.fc *= self.fc * 0.5;
         self.damp = 1.0 - settings.resonance.get();
         let preclamp = 2.0 * ((3.1415 * self.fc).sin());
@@ -1018,8 +1059,11 @@ impl IronFishVoice {
         self.filter1.set_cutoff(&settings.filter1, mod_envelope, settings.sample_rate.get(), touch, lfo);
         
         let noise = random_f32(&mut self.seed) * 2.0 - 1.0;
-        
-        let oscinput = osc2 * settings.osc_balance.get() + osc1 * (1.0 - settings.osc_balance.get()) + settings.sub_osc.get() * sub + settings.noise.get() * noise;
+
+        let pan_left = (1.0-settings.osc_balance.get()).sqrt();
+        let pan_right = (settings.osc_balance.get()).sqrt();
+        let oscinput = osc1*pan_left + osc2*pan_right + settings.sub_osc.get() * sub + noise * settings.noise.get();
+
         let filter = self.filter1.get(oscinput, &settings.filter1);
         
         let output = volume_envelope * filter;
@@ -1282,13 +1326,11 @@ impl IronFishState {
         let recalchyperlevels2 = diffuse2dirty;
 
         if recalchyperlevels1 {
-            log!("dirty1 {} {}", diffuse1dirty, osc_dirty);
             self.g.hypersaw1.recalclevels();
             spread1dirty = true;
         }
 
         if recalchyperlevels2 {
-            log!("dirty2 {} {}", diffuse1dirty, osc_dirty);
             self.g.hypersaw2.recalclevels();            
             spread2dirty = true;
         }
@@ -1341,6 +1383,16 @@ impl IronFishState {
                         self.sequencer.currentstep = 15;
                         self.old_step = 0;
                     }
+
+                    if self.sequencer.currentscale != self.settings.sequencer.scale.get(){
+                        self.sequencer.currentscale = self.settings.sequencer.scale.get();
+                        self.all_notes_off();
+                    }
+                    if self.sequencer.currentrootnote != self.settings.sequencer.rootnote.get(){
+                        self.all_notes_off();
+                        self.sequencer.currentrootnote = self.settings.sequencer.rootnote.get();
+                    }
+
                     
                     // process notes!
                     let newstepidx = (self.sequencer.currentstep + 1) % 16;
@@ -1348,55 +1400,44 @@ impl IronFishState {
                     
                     //log!("tick! {:?} {:?}",newstepidx, new_step);
                     // minor scale..
-                    let scale = [
-                        
-                        36 - 24,
-                        38 - 24,
-                        39 - 24,
-                        41 - 24,
-                        43 - 24,
-                        44 - 24,
-                        46 - 24,
-                        36 - 12,
-                        38 - 12,
-                        39 - 12,
-                        41 - 12,
-                        43 - 12,
-                        44 - 12,
-                        46 - 12,
-                        36,
-                        38,
-                        39,
-                        41,
-                        43,
-                        44,
-                        46,
-                        36 + 12,
-                        38 + 12,
-                        39 + 12,
-                        41 + 12,
-                        43 + 12,
-                        44 + 12,
-                        46 + 12,
-                        36 + 24,
-                        38 + 24,
-                        39 + 24,
-                        41 + 24,
-                        43 + 24,
-                        44 + 24,
-                        46 + 24
-                    ];
+                    let scalecount = [7,7,7,5];
+                    let scale =[[0,2,3,5,7,8,11],
+                                [0,2,4,5,7,9,11],
+                                [0,2,3,5,7,9,10],
+                                [0,2,5,7,9,12,14]];
+
+                    let mut scaleidx = 0;
+                    let rootnoteenum = self.settings.sequencer.rootnote.get() ;
                     
+                    let mut rootnote = 12;
+                    if rootnoteenum == RootNote::A{rootnote = 12-3 ;};
+                    if rootnoteenum == RootNote::Asharp{rootnote = 12-2 ;};
+                    if rootnoteenum == RootNote::B{rootnote = 12-1 ;};
+                    if rootnoteenum == RootNote::C{rootnote = 12-0 ;};
+                    if rootnoteenum == RootNote::Csharp{rootnote = 12+1 ;};
+                    if rootnoteenum == RootNote::D{rootnote = 12+2 ;};
+                    if rootnoteenum == RootNote::Dsharp{rootnote = 12+3 ;};
+                    if rootnoteenum == RootNote::E{rootnote = 12+4 ;};
+                    if rootnoteenum == RootNote::F{rootnote = 12+5 ;};
+                    if rootnoteenum == RootNote::Fsharp{rootnote = 12+6 ;};
+                    if rootnoteenum == RootNote::G{rootnote = 12+7 ;};
+                    if rootnoteenum == RootNote::Gsharp{rootnote = 12+8 ;};
+                    
+                    
+                    if self.settings.sequencer.scale.get() == MusicalScale::Major {scaleidx = 1;} ;
+                    if self.settings.sequencer.scale.get() == MusicalScale::Dorian {scaleidx = 2;} ;
+                    if self.settings.sequencer.scale.get() == MusicalScale::Pentatonic {scaleidx = 3;} ;
+
                     for i in 0..32 {
                         if self.old_step & (1 << (31 - i)) != 0 {
                             if (new_step & (1 << (31 - i))) == 0 {
                                 //  log!("note off {:?}",scale[i]);
-                                self.internal_note_off(scale[i], 127);
+                                self.internal_note_off(rootnote + scale[scaleidx][(i%scalecount[scaleidx]) as usize] +  (i/scalecount[scaleidx])*12, 127);
                             }
                         } else {
                             if new_step & (1 << (31 - i)) != 0{
                                 // log!("note on {:?}",scale[i]);
-                                self.internal_note_on(scale[i], 127);
+                                self.internal_note_on(rootnote + scale[scaleidx][(i%scalecount[scaleidx]) as usize]+  (i/scalecount[scaleidx])*12, 127);
                             }
                         }
                     }
@@ -1450,7 +1491,9 @@ impl Default for SequencerState {
     fn default() -> Self {
         Self {
             samplesleftinstep: 10,
-            currentstep: 0
+            currentstep: 0,
+            currentscale: MusicalScale::Minor,
+            currentrootnote: RootNote::C
         }
     }
 }
