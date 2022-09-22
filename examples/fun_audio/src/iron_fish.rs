@@ -11,7 +11,7 @@ use {
     },
 };
 
-#[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
+#[derive(Live, LiveHook, PartialEq, LiveAtomic, Debug, LiveRead)]
 pub enum OscType {
     #[pick] DPWSawPulse,
     BlampTri,
@@ -236,7 +236,7 @@ impl HyperSawOscillatorState{
         let mut res = 0.0;
         for i in 0..state.new_n_saws{
             self.phase[i]+= self.delta_phase[i];
-            while self.phase[i]>1.0 {
+            while self.phase[i]>=1.0 {
                 self.phase[i]-=1.0;
             }
             res += self.dpw[i].get(self.phase[i]) * state.volume_level[i];
@@ -251,8 +251,8 @@ impl HyperSawOscillatorState{
         //self.dpw_gain1 = (prep*prep*prep);
         //self.dpw_gain2 = 1.0/192.0 ;// (1.0 / 24.0 * (3.1415 / (2.0 * (3.1415 * prep).sin())).powf(3.0)).powf(1.0/3.0);
         for i in 0..7 {
-            let prep = samplerate / (freq * state.freq_multiplier[i]); // / samplerate;
             self.delta_phase[i] = delta_phase * state.freq_multiplier[i];
+            let prep = samplerate / (freq * state.freq_multiplier[i]); // / samplerate;
             self.dpw[i].dpw_gain1 = (1.0 / 24.0 * (3.1415 / (2.0 * (3.1415 / prep).sin())).powf(3.0)).powf(1.0 / 3.0); 
     
         }
@@ -277,13 +277,12 @@ impl HyperSawGlobalState{
     pub fn recalcsaws(&mut self){
         self.f_extra_saws = self.last_diffuse*6.0;
         self.n_extra_saws = (self.f_extra_saws.floor()+1.0).min(6.0) as usize;
-        if (self.f_extra_saws <= 0.000001) {self.n_extra_saws = 0;}
+        if self.f_extra_saws <= 0.000001 {self.n_extra_saws = 0;}
         self.f_frac_saw = self.f_extra_saws-self.f_extra_saws.floor();
         self.f_saws = 1.0 + self.f_extra_saws;
         self.new_n_saws = self.n_extra_saws + 1;
     }
     
-        
     pub fn downrampfrom1(&mut self, factor: f32, input: f32) -> f32
     {
         return 1.0 + ((input-1.0)*factor);
@@ -291,7 +290,7 @@ impl HyperSawGlobalState{
 
     pub fn recalclevels(&mut self)
     {
-        let mut new_level = (self.orig_level * self.orig_level)/(self.downrampfrom1(-0.1 ,self.f_saws) ); 
+        let new_level = (self.orig_level * self.orig_level)/(self.downrampfrom1(-0.1 ,self.f_saws) ); 
 		
         for i in 0..self.new_n_saws
 		{
@@ -300,7 +299,7 @@ impl HyperSawGlobalState{
 
 		if self.f_frac_saw.abs()>0.00001
 		{
-			let mut fract_level = self.f_frac_saw*self.f_frac_saw;
+			let fract_level = self.f_frac_saw*self.f_frac_saw;
 			self.volume_level[self.new_n_saws-1 ] = fract_level;
 		}
 		
@@ -328,7 +327,7 @@ impl HyperSawGlobalState{
 		for  i in 1..self.new_n_saws
 		{
 			let detune = (((i as f32)/2.0))*(self.last_spread*(1.0/6.0))*(0.5/(self.f_saws*0.5));
-			if (i & 2 ==0)
+			if i & 2 ==0
 			{
 				self.freq_multiplier[i] = 2.0f32.powf(detune);
 			}
@@ -381,11 +380,6 @@ pub struct DPWState {
 
 impl DPWState 
 {
-    pub fn reset(&mut self)
-    {
-
-    }
-
     pub fn get(&mut self, phase: f32) -> f32
     {
         let triv = 2.0 * phase - 1.0;     
@@ -452,7 +446,7 @@ pub struct OscillatorState {
     supersaw: SuperSawOscillatorState,
     hypersaw: HyperSawOscillatorState,
     dpw: DPWState,
-    sps_seed: u32,
+    seed: u32,
     sps_detune: f32,
     sps_mix_main: f32,
     sps_mix_side_bands: f32
@@ -500,12 +494,6 @@ impl OscillatorState {
         self.sps_mix_side_bands = -0.73764 * powf(mix, 2.0) + 1.2841 * mix + 0.044372;
     }
     
-   
-    
-    fn trivialsaw(self) -> f32 {
-        return self.phase * 2.0 - 1.0
-    }
-    
     fn blamp(&mut self, t: f32, dt: f32) -> f32 {
         let mut y = 0.0;
         if 0.0 <= t && t<2.0 * dt {
@@ -540,24 +528,27 @@ impl OscillatorState {
         return (self.phase * 6.28318530718).sin();
     }
 
+    // supersaw impl.
     fn sps_pure(&mut self, phase_idx: usize) -> f32 {
         return (self.supersaw.phase[phase_idx] * 6.28318530718).sin();
     }
 
+    // supersaw impl.
     fn sps_trivialsaw(self, phase_idx: usize) -> f32 {
         return self.supersaw.phase[phase_idx] * 2.0 - 1.0
     }
 
+    // supersaw impl.
     fn supersaw(&mut self) -> f32 {
-
+        // FIXME: fact that I'm altering sub-state here is reason enough to warrant it's own object
         for n in 0..7 {
             self.supersaw.phase[n] += self.supersaw.delta_phase[n];
-            if self.supersaw.phase[n] > 1.0 {
-                self.supersaw.phase[n] = 0.0;
+            while self.supersaw.phase[n] > 1.0 {
+                self.supersaw.phase[n] -= 1.0;
             }
         }
 
-        let mut main_band = self.sps_trivialsaw(0);
+        let main_band = self.sps_trivialsaw(0);
         // main_band -= self.sps_pure(0);
 
         let mut side_bands = 0.0;
@@ -568,13 +559,13 @@ impl OscillatorState {
             }
         }
         
-        return main_band * self.sps_mix_main + side_bands * self.sps_mix_side_bands;
+        return main_band*self.sps_mix_main + side_bands*self.sps_mix_side_bands;
     }
     
     fn get(&mut self, settings: &OscSettings, _samplerate: f32, hyper: HyperSawGlobalState) -> f32 {
 
         self.phase += self.delta_phase;
-        if self.phase > 1.0 {
+        while self.phase > 1.0 {
             self.phase -= 1.0;
         };
         
@@ -595,7 +586,7 @@ impl OscillatorState {
         match settings.osc_type.get() {
             OscType::Pure | OscType::BlampTri => {}
             OscType::DPWSawPulse => {
-                if (!_update)
+                if !_update
                 {
                     self.dpw = DPWState::default();
 
@@ -611,7 +602,6 @@ impl OscillatorState {
                 //  gain = std::pow(1.f / factorial(dpwOrder) * std::pow(M_PI / (2.f*sin(M_PI*pitch * APP->engine->getSampleTime())),  dpwOrder-1.f), 1.0 / (dpwOrder-1.f));
             }
             OscType::HyperSaw => {
-                // FIXME: check/pass '_update' to save time et cetera?
                 self.hypersaw.set_freq(freq, samplerate, self.delta_phase, &hypersaw );               
             }
            
@@ -627,17 +617,18 @@ impl OscillatorState {
                 self.sps_calc_mix(supersaw.diffuse.get());
                 
                 // lazily initialiizing here (constants courtesy of Alex Shore, the better sounding set of the 2 I have in FM. BISON)
+                // reference: https://github.com/bipolaraudio/FM-BISON/blob/master/literature/Supersaw%20thesis.pdf
                 let sps_coeffs: [f32; 6] = [-0.11002313, -0.06288439, -0.03024148, 0.02953130, 0.06216538, 0.10745242];
                 
-                // FIXME: free running phasors are better, but this does the job fairly OK
-                if (!_update) {
-                    self.supersaw.phase[0] = random_f32(&mut self.sps_seed);
+                // FIXME: free running phasors (<- !!) are better, but this does the job fairly OK
+                if !_update {
+                    self.supersaw.phase[0] = random_f32(&mut self.seed);
                 }
                 
                 self.supersaw.delta_phase[0] = self.delta_phase;
                 for n in 1..7 {
-                    if (!_update) {
-                        self.supersaw.phase[n] = random_f32(&mut self.sps_seed);
+                    if !_update {
+                        self.supersaw.phase[n] = random_f32(&mut self.seed);
                     }
                     
                     // calculate & set sideband phase delta
@@ -693,7 +684,7 @@ impl Default for OscillatorState {
         Self {
             phase: 0.0,
             delta_phase: 0.0,
-            sps_seed: 4321,
+            seed: 4321,
             sps_detune: 0.0,
             sps_mix_main: 0.0,
             sps_mix_side_bands: 0.0,
@@ -1066,7 +1057,7 @@ impl IronFishVoice {
 }
 
 #[derive(Default)]
-pub struct IronFishGlobalVoiceState{
+pub struct IronFishGlobalVoiceState {
     hypersaw1: HyperSawGlobalState,
     hypersaw2: HyperSawGlobalState,
 }
@@ -1094,7 +1085,7 @@ pub struct IronFishState {
     old_step: u32,
     lfo: LFOState,
     lfovalue: f32,
-    sps_detune_tab: [f32; 1024],
+    sps_detune_tab: [f32; 1024], // FIXME: move to IronFishGlobalVoiceState
     g: IronFishGlobalVoiceState   
 }
 
@@ -1232,7 +1223,6 @@ impl IronFishState {
     }
     
     pub fn fill_buffer(&mut self, buffer: &mut AudioBuffer, display: &mut DisplayAudioGraph) {
-        
         for i in 0..self.voices.len() {
             let mut dp = display.pop_buffer_resize(buffer.frame_count(), buffer.channel_count());
             if let Some(dp) = &mut dp {
@@ -1242,50 +1232,54 @@ impl IronFishState {
         }
         
         buffer.zero();
-        //        if (self.settings.osc1.transpose != )
+
         let mut pitchdirty: bool = false;
         if self.osc1cache.transpose.get() != self.settings.osc1.transpose.get() {pitchdirty = true;}
         if self.osc1cache.detune.get() != self.settings.osc1.detune.get() {pitchdirty = true;}
         if self.osc2cache.transpose.get() != self.settings.osc2.transpose.get() {pitchdirty = true;}
         if self.osc2cache.detune.get() != self.settings.osc2.detune.get() {pitchdirty = true;}
 
-
-        let mut diffuse1dirty: bool = false;
-        let mut diffuse2dirty: bool = false;
-        let mut spread1dirty: bool = false;
-        let mut spread2dirty: bool = false;
-        
+        // FIXME: if oscillator is dirty always re-evaluate/calculate hypersaw settings (situation
+        //        would occur where settings were not picked up when switching from supersaw to hypersaw,
+        //        that said I'd like those to be separate parameters, and shouldn't this logic just not live here
+        //        or even better: not exist in this capacity?)
+        let osc_dirty = 
+            self.osc1cache.osc_type.get() != self.settings.osc1.osc_type.get()
+        ||  self.osc2cache.osc_type.get() != self.settings.osc2.osc_type.get();
 
         // FIXME: maybe we should rename 'supersaw*' to something generic shared by both types?
-        if self.g.hypersaw1.last_diffuse != self.settings.supersaw1.diffuse.get()
+        let mut diffuse1dirty: bool = false;
+        if osc_dirty || self.g.hypersaw1.last_diffuse != self.settings.supersaw1.diffuse.get()
         {
             diffuse1dirty = true;
             self.g.hypersaw1.last_diffuse = self.settings.supersaw1.diffuse.get();
             self.g.hypersaw1.recalcsaws();
         }
 
-        if self.g.hypersaw2.last_diffuse != self.settings.supersaw2.diffuse.get()
+        let mut diffuse2dirty: bool = false;
+        if osc_dirty || self.g.hypersaw2.last_diffuse != self.settings.supersaw2.diffuse.get()
         {
-            self.g.hypersaw2.last_diffuse = self.settings.supersaw2.diffuse.get();
             diffuse2dirty = true;
+            self.g.hypersaw2.last_diffuse = self.settings.supersaw2.diffuse.get();
             self.g.hypersaw2.recalcsaws();
         }
         
-        if self.g.hypersaw1.last_spread != self.settings.supersaw1.spread.get()
+        let mut spread1dirty: bool = false;
+        if osc_dirty || self.g.hypersaw1.last_spread != self.settings.supersaw1.spread.get()
         {
-            spread1dirty = true;self.g.hypersaw1.last_spread =  self.settings.supersaw1.spread.get();
+            spread1dirty = true;
+            self.g.hypersaw1.last_spread =  self.settings.supersaw1.spread.get();
         }
 
-        if self.g.hypersaw2.last_spread != self.settings.supersaw2.spread.get()
+        let mut spread2dirty: bool = false;
+        if osc_dirty || self.g.hypersaw2.last_spread != self.settings.supersaw2.spread.get()
         {
             spread2dirty = true;
             self.g.hypersaw2.last_spread = self.settings.supersaw2.spread.get();
         }
 
-        let mut recalchyperlevels1 = diffuse1dirty;
-        let mut recalchyperlevels2 = diffuse2dirty;
-        let mut recalchyperpitch1 = false;
-        let mut recalchyperpitch2 = false;
+        let recalchyperlevels1 = diffuse1dirty;
+        let recalchyperlevels2 = diffuse2dirty;
 
         if recalchyperlevels1 {
             self.g.hypersaw1.recalclevels();
@@ -1301,7 +1295,6 @@ impl IronFishState {
             self.g.hypersaw2.recalcfreqs();
         }
 
-
         if pitchdirty {
             self.osc1cache.transpose.set(self.settings.osc1.transpose.get());
             self.osc1cache.detune.set(self.settings.osc1.detune.get());
@@ -1314,6 +1307,7 @@ impl IronFishState {
                 }
             }
         }
+
         let mut remaining = buffer.frame_count();
         let mut bufferidx = 0;
         
@@ -1524,8 +1518,9 @@ impl AudioComponent for IronFish {
         let mut buffers = Vec::new();
         buffers.resize(16,None);
         
-        // precalculate supersaw detune table (heavy polnynomial, based on data sampled from an actual JP-8000)
-        // FIXME: move to it's own function to keep things tidy
+        // precalculate supersaw detune table (heavy polnynomial, based on data sampled from actual synth.)
+        // reference: https://github.com/bipolaraudio/FM-BISON/blob/master/literature/Supersaw%20thesis.pdf
+        // FIXME: move to it's own function/object to keep things tidy
         let mut sps_detune_tab = [0f32; 1024];
         for i in 0..1024{
             let detune = (1.0 / 1024.0) * i as f32;
