@@ -1114,7 +1114,7 @@ impl IronFishState {
 
     pub fn note_on(&mut self, b1: u8, b2: u8) {
         if b1 > 127 {return;};
-        log!("note! {} {}", b1,b2);
+        //log!("note! {} {}", b1,b2);
         if self.settings.arp.enabled.get() {
             self.activemidinotes[b1 as usize] = true;
             self.activemidinotecount = self.activemidinotecount + 1;
@@ -1283,14 +1283,18 @@ impl IronFishState {
 
         if recalchyperlevels1 {
             self.g.hypersaw1.recalclevels();
+            spread1dirty = true;
         }
 
         if recalchyperlevels2 {
             self.g.hypersaw2.recalclevels();            
+            spread2dirty = true;
         }
+
         if spread1dirty {
             self.g.hypersaw1.recalcfreqs();
         }
+        
         if spread2dirty {
             self.g.hypersaw2.recalcfreqs();
         }
