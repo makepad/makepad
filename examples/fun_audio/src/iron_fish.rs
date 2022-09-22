@@ -371,7 +371,7 @@ impl HyperSawGlobalState{
 			};
 		};
 
-        log!("{:?} {} {:?}", std::time::Instant::now(), self.new_n_saws, self.freq_multiplier);
+        //log!("{:?} {} {:?}", std::time::Instant::now(), self.new_n_saws, self.freq_multiplier);
     }
 }
 
@@ -1321,13 +1321,11 @@ impl IronFishState {
         let recalchyperlevels2 = diffuse2dirty;
 
         if recalchyperlevels1 {
-            log!("dirty1 {} {}", diffuse1dirty, osc_dirty);
             self.g.hypersaw1.recalclevels();
             spread1dirty = true;
         }
 
         if recalchyperlevels2 {
-            log!("dirty2 {} {}", diffuse1dirty, osc_dirty);
             self.g.hypersaw2.recalclevels();            
             spread2dirty = true;
         }
@@ -1388,20 +1386,43 @@ impl IronFishState {
                     //log!("tick! {:?} {:?}",newstepidx, new_step);
                     // minor scale..
                     let scalecount = [7,7,7,5];
-                    let scale =[[0,1,2,3,4,5,6],
-                                [0,1,2,3,4,5,6],[0,1,2,3,4,5,6],[0,1,2,3,4,5,6]];
+                    let scale =[[0,2,3,5,7,8,11],
+                                [0,2,4,5,7,9,11],
+                                [0,2,3,5,7,9,10],
+                                [0,2,5,7,9,12,14]];
 
+                    let mut scaleidx = 0;
+                    let rootnoteenum = self.settings.sequencer.rootnote.get() ;
                     
+                    let mut rootnote = 12;
+                    if rootnoteenum == RootNote::A{rootnote = 12-3 ;};
+                    if rootnoteenum == RootNote::Asharp{rootnote = 12-2 ;};
+                    if rootnoteenum == RootNote::B{rootnote = 12-1 ;};
+                    if rootnoteenum == RootNote::C{rootnote = 12-0 ;};
+                    if rootnoteenum == RootNote::Csharp{rootnote = 12+1 ;};
+                    if rootnoteenum == RootNote::D{rootnote = 12+2 ;};
+                    if rootnoteenum == RootNote::Dsharp{rootnote = 12+3 ;};
+                    if rootnoteenum == RootNote::E{rootnote = 12+4 ;};
+                    if rootnoteenum == RootNote::F{rootnote = 12+5 ;};
+                    if rootnoteenum == RootNote::Fsharp{rootnote = 12+6 ;};
+                    if rootnoteenum == RootNote::G{rootnote = 12+7 ;};
+                    if rootnoteenum == RootNote::Gsharp{rootnote = 12+8 ;};
+                    
+                    
+                    if self.settings.sequencer.scale.get() == MusicalScale::Major {scaleidx = 1;} ;
+                    if self.settings.sequencer.scale.get() == MusicalScale::Dorian {scaleidx = 2;} ;
+                    if self.settings.sequencer.scale.get() == MusicalScale::Pentatonic {scaleidx = 3;} ;
+
                     for i in 0..32 {
                         if self.old_step & (1 << (31 - i)) != 0 {
                             if (new_step & (1 << (31 - i))) == 0 {
                                 //  log!("note off {:?}",scale[i]);
-                                self.internal_note_off(scale[0][(i%scalecount[0]) as usize] +  (i/scalecount[0])*12, 127);
+                                self.internal_note_off(rootnote + scale[0][(i%scalecount[scaleidx]) as usize] +  (i/scalecount[scaleidx])*12, 127);
                             }
                         } else {
                             if new_step & (1 << (31 - i)) != 0{
                                 // log!("note on {:?}",scale[i]);
-                                self.internal_note_on(scale[0][(i%scalecount[0]) as usize]+  (i/scalecount[0])*12, 127);
+                                self.internal_note_on(rootnote + scale[0][(i%scalecount[scaleidx]) as usize]+  (i/scalecount[scaleidx])*12, 127);
                             }
                         }
                     }
