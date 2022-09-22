@@ -532,15 +532,35 @@ live_register!{
                         }
                     }
 
-                InstrumentDropdown {
+                    rootnote = InstrumentDropdown {
+                        walk: {height: Fill}
+                        layout: {align: {x: 0.0, y: 0.5}}
+                        dropdown = {
+                            layout: {align: {x: 0.0, y: 0.0}}
+                            walk: {width: Fill, height: Fit, margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: 0.0}}
+                            display: ["A", "A#", "B", "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#"]
+                            bind_enum: "RootNote"
+                            bind: "sequencer.rootnote"
+                            items:  ["A", "Asharp", "B", "C", "Csharp", "D", "Dsharp", "E", "F", "Fsharp", "G", "Gsharp"]
+    
+        
+                        }
+                    }
+
+                scaletype = InstrumentDropdown {
                     walk: {height: Fill}
                     layout: {align: {x: 0.0, y: 0.5}}
                     dropdown = {
                         layout: {align: {x: 0.0, y: 0.0}}
                         walk: {width: Fill, height: Fit, margin: {top: (SPACING_CONTROLS), right: (SPACING_CONTROLS), bottom: (SPACING_CONTROLS), left: 0.0}}
-                        items: ["Scale A", "Scale B", "Scale C"]
+                        items: ["Minor", "Major", "Dorian","Pentatonic"]
+                        bind: "sequencer.scale"
+                        bind_enum: "MusicalScale"
+                        display: ["Minor", "Major", "Dorian","Pentatonic"]
                     }
                 }
+
+              
 
                 arp = InstrumentCheckbox {
                     walk: {width: Fit, height: Fill, margin: 5}
@@ -1337,6 +1357,7 @@ impl App {
         let shift = if let Event::FingerUp(fu) = event {fu.modifiers.shift}else {false};
         if ui.button(ids!(clear_grid)).was_clicked() 
         {
+            sequencer.clear_buttons(ui.cx);
             let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
             iron_fish.settings.sequencer.step0.set(0);
             iron_fish.settings.sequencer.step1.set(0);
