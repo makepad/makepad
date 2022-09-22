@@ -1,6 +1,7 @@
 use {
     std::convert::TryInto,
     crate::{
+        makepad_error_log::*,
         makepad_live_tokenizer::LiveId,
         live_node::*,
     }
@@ -107,7 +108,7 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                     return Err("Unmatched closed".into())
                 }
                 let item = stack.pop().unwrap();
-                
+                log!("CLOSING {}", item.count);
                 if item.count > std::u16::MAX as usize {
                     out[item.index] = if item.has_keys {CBOR_MAP_32}else {CBOR_ARRAY_32};
                     let bytes = (item.count as u32).to_be_bytes();
@@ -115,16 +116,16 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                 }
                 else if item.count > std::u8::MAX as usize {
                     out[item.index] = if item.has_keys {CBOR_MAP_16}else {CBOR_ARRAY_16};
-                    let bytes = (item.count as u8).to_be_bytes();
+                    let bytes = (item.count as u16).to_be_bytes();
                     out.splice(item.index + 1..item.index + 1, bytes.iter().cloned());
                 }
                 else if item.count >= 32 {
                     out[item.index] = if item.has_keys {CBOR_MAP_8}else {CBOR_ARRAY_8};
-                    let bytes = (item.count as u16).to_be_bytes();
+                    let bytes = (item.count as u8).to_be_bytes();
                     out.splice(item.index + 1..item.index + 1, bytes.iter().cloned());
                 }
                 else {
-                    out[item.index] |= item.count as u8
+                    out[item.index] += item.count as u8
                 }
                 index += 1;
                 continue;
@@ -261,7 +262,7 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                     out.extend_from_slice(s.as_bytes());
                 }
             }
-            
+            //log!("SAVING {:?} {}", node.value, out.len());
             match &node.value {
                 LiveValue::None => {
                     out.push(CBOR_NULL);
@@ -709,7 +710,7 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
             
             assert_len(o, 1, data) ?;
             
-            println!("{} {:x}", id, data[o]);
+            println!("byte:{} id:{} data:{:x}",o, id, data[o]);
             
             if let Some(v) = decode_i64(data, &mut o) ? {
                 self.push(LiveNode {id, origin, value: LiveValue::Int64(v)});
