@@ -892,6 +892,15 @@ live_register!{
                     }
                 }
 
+                
+            }
+
+
+            threecol = Frame {
+                layout: {flow: Right}
+                walk: {width: Fill, height: Fit}
+    
+
                 harmonic = InstrumentSlider {
                     slider = {
                         slider: {line_color: (COLOR_OSC)}
@@ -899,6 +908,24 @@ live_register!{
                         min: 0
                         max: 1.0
                         label: "Harmonic"
+                    }
+                }
+                harmonicenv = InstrumentBipolarSlider {
+                    slider = {
+                        slider: {line_color: (COLOR_OSC)}
+                        bind: "osc1.harmonicenv"
+                        min: -1.0
+                        max: 1.0
+                        label: "Mod -> Harmonic"
+                    }
+                }
+                harmoniclfo = InstrumentBipolarSlider {
+                    slider = {
+                        slider: {line_color: (COLOR_OSC)}
+                        bind: "osc1.harmoniclfo"
+                        min: -1.0
+                        max: 1.0
+                        label: "LFO -> Harmonic"
                     }
                 }
             }
@@ -964,13 +991,38 @@ live_register!{
                     }
                 }
 
+               
+            }
+            threecol = Frame {
+                layout: {flow: Right}
+                walk: {width: Fill, height: Fit}
+    
+
                 harmonic = InstrumentSlider {
                     slider = {
                         slider: {line_color: (COLOR_OSC)}
-                        bind: "osc1.harmonic"
-                        min: 0.0
+                        bind: "osc2.harmonic"
+                        min: 0
                         max: 1.0
                         label: "Harmonic"
+                    }
+                }
+                harmonicenv = InstrumentBipolarSlider {
+                    slider = {
+                        slider: {line_color: (COLOR_OSC)}
+                        bind: "osc2.harmonicenv"
+                        min: -1.0
+                        max: 1.0
+                        label: "Mod -> Harmonic"
+                    }
+                }
+                harmoniclfo = InstrumentBipolarSlider {
+                    slider = {
+                        slider: {line_color: (COLOR_OSC)}
+                        bind: "osc2.harmoniclfo"
+                        min: -1.0
+                        max: 1.0
+                        label: "LFO -> Harmonic"
                     }
                 }
             }
@@ -1061,7 +1113,7 @@ live_register!{
                             label = {label = {text: "Oscillator 1"}}
                             body = {
                                 type = {dropdown = {bind: "osc1.osc_type"}}
-                                twocol = {harmonic = {slider = {bind: "osc1.harmonic"}}}
+                               threecol = {harmonic = {slider = {bind: "osc1.harmonic"}}}
                                 twocol = {transpose = {slider = {bind: "osc1.transpose"}}}
                                 twocol = {detune = {slider = {bind: "osc1.detune"}}}
                             }
@@ -1070,7 +1122,7 @@ live_register!{
                             label = {label = {text: "Oscillator 2"}}
                             body = {
                                 type = {dropdown = {bind: "osc2.osc_type"}}
-                                twocol = {harmonic = {slider = {bind: "osc2.harmonic"}}}
+                                threecol = {harmonic = {slider = {bind: "osc2.harmonic"}}}
                                 twocol = {transpose = {slider = {bind: "osc2.transpose"}}}
                                 twocol = {detune = {slider = {bind: "osc2.detune"}}}
                             }
