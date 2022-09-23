@@ -97,6 +97,9 @@ pub struct OscSettings {
     #[live(0)] transpose: i64a,
     #[live(0.0)] detune: f32a,
     #[live(0.0)] harmonic: f32a,
+    #[live(0.0)] harmonicenv: f32a,
+    #[live(0.0)] harmoniclfo: f32a,
+   
     
 }
 
@@ -652,7 +655,7 @@ impl OscillatorState {
 
     fn harmonic(&mut self, parameter:f32) -> f32 {
 
-        let h = parameter * 32.0;
+        let h = parameter * 16.0;
         let f_h = h.floor();
         let n_h = f_h + 1.0;
         let n_f = h - f_h;
@@ -740,7 +743,7 @@ impl OscillatorState {
 
     /* end of supersaw specific impl. */
 
-    fn get(&mut self, settings: &OscSettings, _samplerate: f32, hyper: HyperSawGlobalState) -> f32 {
+    fn get(&mut self, settings: &OscSettings, _samplerate: f32, hyper: HyperSawGlobalState, env: f32, lfo: f32) -> f32 {
 
         self.phase += self.delta_phase;
         while self.phase > 1.0 {
@@ -754,7 +757,7 @@ impl OscillatorState {
             OscType::BlampTri => self.blamp_triangle(),
             OscType::SuperSaw => self.supersaw(),
             OscType::HyperSaw => self.hypersaw.get(hyper),
-            OscType::HarmonicSeries => self.harmonic(settings.harmonic.get())
+            OscType::HarmonicSeries => self.harmonic((settings.harmonic.get() + env * settings.harmonicenv.get() + lfo * settings.harmoniclfo.get()).clamp(0.0,1.0) )
         }
     }
     
@@ -1179,12 +1182,13 @@ impl IronFishVoice {
         self.osc1.hypersaw.tick(&state.hypersaw1);
         self.osc2.hypersaw.tick(&state.hypersaw2);
 
-        // sample 
-        let sub = self.subosc.get();        
-        let osc1 = self.osc1.get(&settings.osc1, settings.sample_rate.get(), state.hypersaw1);
-        let osc2 = self.osc2.get(&settings.osc2, settings.sample_rate.get(), state.hypersaw2);
         let volume_envelope = self.volume_envelope.get(&settings.volume_envelope, settings.sample_rate.get());
         let mod_envelope = self.mod_envelope.get(&settings.mod_envelope, settings.sample_rate.get());
+
+        // sample 
+        let sub = self.subosc.get();        
+        let osc1 = self.osc1.get(&settings.osc1, settings.sample_rate.get(), state.hypersaw1,mod_envelope, lfo);
+        let osc2 = self.osc2.get(&settings.osc2, settings.sample_rate.get(), state.hypersaw2,mod_envelope, lfo);
 
         // set up filter
         self.filter1.set_cutoff(&settings.filter1, mod_envelope, settings.sample_rate.get(), touch, lfo);
@@ -1500,7 +1504,13 @@ impl IronFishState {
         let mut remaining = buffer.frame_count();
         let mut bufferidx = 0;
         
-        self.lfo.phase += remaining as f32 * ((20.0 / 44100.0) * self.settings.lfo.rate.get());
+
+        let lfofreq = 0.5 * (2.0).powf(self.settings.lfo.rate.get()*8.0 - 4.0);
+        let lfodphase = 1.0 / (self.settings.sample_rate.get() / lfofreq);
+        
+        
+        self.lfo.phase += remaining as f32 * lfodphase;
+
         
         while self.lfo.phase > 1.0 {
             self.lfo.phase -= 1.0;
