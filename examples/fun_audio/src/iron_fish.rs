@@ -561,17 +561,49 @@ impl OscillatorState {
         return (self.phase * 6.28318530718).sin();
     }
 
-    // supersaw impl.
+    /* begin of supersaw specific impl. */
+
     fn sps_pure(&mut self, phase_idx: usize) -> f32 {
         return (self.supersaw.phase[phase_idx] * 6.28318530718).sin();
     }
 
-    // supersaw impl.
-    fn sps_trivialsaw(self, phase_idx: usize) -> f32 {
-        return self.supersaw.phase[phase_idx] * 2.0 - 1.0
+    fn sps_bitwise_or_zero(self, value: f32) -> u32
+    {
+        let result = (value as u32) | 0;
+        return result;
     }
 
-    // supersaw impl. (FIXME: support arbitrary number of ticks using fmod() so this can be called just once in fill_buffer())
+    // shttp://www.acoustics.hut.fi/publications/papers/smc2010-phaseshaping/
+    fn sps_blep(self, point: f32, dt: f32) -> f32
+    {
+        if point < dt {
+            let mut squared = point/dt - 1.0;
+            squared *= squared;
+            return squared;
+        } 
+        else if point > (1.0-dt) {
+            let mut squared = (point-1.0)/dt + 1.0;
+            squared *= squared;
+            return squared;
+        }
+        else {
+            return 0.0;
+        }
+    }
+
+    fn sps_poly_saw(&mut self, phase_idx: usize) -> f32 {
+        let phase = self.supersaw.phase[phase_idx];
+        let pitch = self.supersaw.delta_phase[phase_idx];
+
+        let mut p1 = phase + 0.5;
+        p1-= self.sps_bitwise_or_zero(p1) as f32;
+
+        let mut saw = 2.0*p1 - 1.0;
+        saw -= self.sps_blep(p1, pitch);
+
+        return saw;
+    }
+
     fn sps_tick(&mut self)
     {
         for n in 0..7 {
@@ -582,14 +614,13 @@ impl OscillatorState {
         }
     }
 
-    // supersaw impl. (FIXME: move functions and initialization into object!)
     fn supersaw(&mut self) -> f32 {
-        let mut main_band =  self.supersaw.dpw[0].get(self.supersaw.phase[0]);
-        main_band -= self.sps_pure(0);
+        let main_band =  self.sps_poly_saw(0);
+        // main_band -= self.sps_pure(0);
 
         let mut side_bands = 0.0;
         for n in 1..7 {
-            side_bands += self.sps_trivialsaw(n); // self.supersaw.dpw[n].get(self.supersaw.phase[n]); 
+            side_bands += self.sps_poly_saw(n);
             if n < 6 {
                 side_bands -= self.sps_pure(n);
             }
@@ -597,7 +628,9 @@ impl OscillatorState {
         
         return main_band*self.supersaw.mix_main + side_bands*self.supersaw.mix_side_bands;
     }
-    
+
+    /* end of supersaw specific impl. */
+
     fn get(&mut self, settings: &OscSettings, _samplerate: f32, hyper: HyperSawGlobalState) -> f32 {
 
         self.phase += self.delta_phase;
