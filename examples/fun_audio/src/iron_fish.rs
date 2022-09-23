@@ -252,7 +252,6 @@ pub struct SuperSawOscillatorState {
     detune: f32,
     mix_main: f32,
     mix_side_bands: f32,
-    dpw: [DPWState;7]
 }
 
 #[derive(Copy, Clone)]
@@ -688,11 +687,6 @@ impl OscillatorState {
                 // lazily initialiizing here (constants courtesy of Alex Shore, the better sounding set of the 2 I have in FM. BISON)
                 // reference: https://github.com/bipolaraudio/FM-BISON/blob/master/literature/Supersaw%20thesis.pdf
                 let sps_coeffs: [f32; 6] = [-0.11002313, -0.06288439, -0.03024148, 0.02953130, 0.06216538, 0.10745242];
-                
-                if !_update {
-                    self.supersaw.dpw[0] = DPWState::default();
-                    self.supersaw.dpw[0].dpw_gain1 = self.supersaw.mix_main;
-                }
 
                 self.supersaw.delta_phase[0] = self.delta_phase;
                
@@ -702,13 +696,6 @@ impl OscillatorState {
                     let freq_offs = freq * offs;
                     let detuned_freq = freq + freq_offs;
                     self.supersaw.delta_phase[n] = (6.28318530718 * detuned_freq)/samplerate;
- 
-                    if !_update {
-                        self.supersaw.dpw[n] = DPWState::default();
-
-                        // FIXME: Stijn, what does this value mean more or less? Not using this oscillator for sidebands ATM.
-                        // self.supersaw.dpw[n].dpw_gain1 = self.supersaw.mix_side_bands;
-                    }
                }
             }
         }
@@ -750,8 +737,7 @@ impl Default for SuperSawOscillatorState{
             delta_phase: [1.414, 1.732, 2.236, 2.646, 3.317, 3.606, 4.123], // square root of primes: 2, 3, 5, 7, 11, 13, 17 (FIXME: initialize in code)
             detune: 0.0,
             mix_main: 1.0,
-            mix_side_bands: 0.0,
-            dpw: [Default::default();7]
+            mix_side_bands: 0.0
         }
     }
 }
