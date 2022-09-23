@@ -834,8 +834,8 @@ live_register!{
                 dropdown = {
                     bind_enum: "OscType"
                     bind: "osc1.osc_type"
-                    items: ["DPWSawPulse","BlampTri",  "Pure", "SuperSaw", "HyperSaw"]
-                    display: ["Saw", "Triangle",  "Sine", "Super Saw", "Hyper Saw"]
+                    items: ["DPWSawPulse","BlampTri",  "Pure", "SuperSaw", "HyperSaw","HarmonicSeries"]
+                    display: ["Saw", "Triangle",  "Sine", "Super Saw", "Hyper Saw","Harmonic"]
                 }
                 Frame {
                     layout: {flow: Right}
@@ -883,6 +883,16 @@ live_register!{
                         label: "Detune"
                     }
                 }
+
+                harmonic = InstrumentSlider {
+                    slider = {
+                        slider: {line_color: (COLOR_OSC)}
+                        bind: "osc1.harmonic"
+                        min: 0
+                        max: 1.0
+                        label: "Harmonic"
+                    }
+                }
             }
         }
     }
@@ -896,8 +906,8 @@ live_register!{
                 dropdown = {
                     bind_enum: "OscType"
                     bind: "osc1.osc_type"
-                    items: ["DPWSawPulse","BlampTri",  "Pure", "SuperSaw","HyperSaw" ]
-                    display: ["Saw", "Triangle",  "Sine", "Super Saw", "Hyper Saw"]
+                    items: ["DPWSawPulse","BlampTri",  "Pure", "SuperSaw","HyperSaw","HarmonicSeries" ]
+                    display: ["Saw", "Triangle",  "Sine", "Super Saw", "Hyper Saw", "Harmonic"]
                 }
                 Frame {
                     layout: {flow: Right}
@@ -943,6 +953,16 @@ live_register!{
                         min: -1.0
                         max: 1.0
                         label: "Detune"
+                    }
+                }
+
+                harmonic = InstrumentSlider {
+                    slider = {
+                        slider: {line_color: (COLOR_OSC)}
+                        bind: "osc1.harmonic"
+                        min: 0.0
+                        max: 1.0
+                        label: "Harmonic"
                     }
                 }
             }
@@ -1033,6 +1053,7 @@ live_register!{
                             label = {label = {text: "Oscillator 1"}}
                             body = {
                                 type = {dropdown = {bind: "osc1.osc_type"}}
+                                twocol = {harmonic = {slider = {bind: "osc1.harmonic"}}}
                                 twocol = {transpose = {slider = {bind: "osc1.transpose"}}}
                                 twocol = {detune = {slider = {bind: "osc1.detune"}}}
                             }
@@ -1041,6 +1062,7 @@ live_register!{
                             label = {label = {text: "Oscillator 2"}}
                             body = {
                                 type = {dropdown = {bind: "osc2.osc_type"}}
+                                twocol = {harmonic = {slider = {bind: "osc2.harmonic"}}}
                                 twocol = {transpose = {slider = {bind: "osc2.transpose"}}}
                                 twocol = {detune = {slider = {bind: "osc2.detune"}}}
                             }
