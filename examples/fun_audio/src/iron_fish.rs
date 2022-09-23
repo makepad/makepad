@@ -21,7 +21,8 @@ pub enum OscType {
     BlampTri,
     Pure,
     SuperSaw,
-    HyperSaw
+    HyperSaw,
+    HarmonicSeries
 }
 
 #[derive(Live, LiveHook, PartialEq, LiveAtomic, Debug, LiveRead)]
@@ -94,7 +95,9 @@ impl Default for LaddFilterCoefficients {
 pub struct OscSettings {
     osc_type: U32A<OscType>,
     #[live(0)] transpose: i64a,
-    #[live(0.0)] detune: f32a
+    #[live(0.0)] detune: f32a,
+    #[live(0.0)] harmonic: f32a,
+    
 }
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead, Clone)]
@@ -271,10 +274,10 @@ impl HyperSawOscillatorState{
     {
         let mut res = 0.0;
         for i in 0..state.new_n_saws{
-            res += OscillatorState::poly_saw(self.phase[i], self.delta_phase[i]);  
+            res += OscillatorState::poly_saw(self.phase[i], self.delta_phase[i])* state.volume_level[i];  
 
-            // FIXME
-            // res +=  self.dpw[i].get(self.phase[i]) * state.volume_level[i];
+            
+            //res +=  self.dpw[i].get3rdorder(self.phase[i], self.delta_phase[i]) * state.volume_level[i];
         };
 
         return res;
@@ -287,7 +290,7 @@ impl HyperSawOscillatorState{
         for i in 0..state.new_n_saws{
 
             self.phase[i]+= self.delta_phase[i];
-            while self.phase[i]>=1.0 {
+            while self.phase[i]>1.0 {
                 self.phase[i]-=1.0;
             }
         }
@@ -298,9 +301,9 @@ impl HyperSawOscillatorState{
             self.delta_phase[i] = delta_phase * state.freq_multiplier[i];
             let prep = samplerate / (freq * state.freq_multiplier[i]); // / samplerate;
             if !_update  {
-                self.dpw[i] = DPWState::default();
+            //    self.dpw[i] = DPWState::default();
             }
-            self.dpw[i].dpw_gain1 = (1.0 / 24.0 * (3.1415 / (2.0 * (3.1415 / prep).sin())).powf(3.0)).powf(1.0 / 3.0); 
+            self.dpw[i].set_gain1((1.0 / 24.0 * (3.1415 / (2.0 * (3.1415 / prep).sin())).powf(3.0)).powf(1.0 / 3.0)); 
     
         }
     }
@@ -417,7 +420,48 @@ impl Default for HyperSawOscillatorState{
 }
 
 #[derive(Copy, Clone)]
-pub struct DPWState {
+pub struct DPWState{
+    x1: f32,
+    x2: f32
+}
+
+impl Default for DPWState{
+    fn default() -> Self {
+        Self{
+            x2: 0.0,
+            x1: 0.0
+            
+        }
+    }
+}
+
+
+impl DPWState{
+    pub fn get2ndorder(&mut self, t: f32, dt: f32)->f32
+    {     
+          let x = 2.*t - 1.;
+          let x0 = x*x;
+          let y = (x0 - self.x1) / (4.*dt);
+          self.x1 = x0;
+          return y;
+    }
+    pub fn get3rdorder(&mut self, t: f32, dt: f32)->f32
+    {     
+        let x = 2.*t - 1.;
+        let x0 = x*x*x - x;
+        let y = ((x0 - self.x1) - (self.x1 - self.x2)) / (24.*dt*dt);
+        self.x2 = self.x1;
+        self.x1 = x0;
+        return y;
+    }
+
+    pub fn set_gain1(&mut self, newgain: f32){
+    }
+    
+} 
+
+#[derive(Copy, Clone)]
+pub struct DPWStateOld {
     dpw_gain1: f32,
     dpw_gain2: f32,
     dpw_diff_b: [f32; 4],
@@ -425,8 +469,12 @@ pub struct DPWState {
     dpw_init_countdown: i8,
 }
 
-impl DPWState 
+impl DPWStateOld
 {
+    pub fn set_gain1(&mut self, newgain: f32){
+        self.dpw_gain1 = newgain;
+    }
+
     pub fn get(&mut self, phase: f32) -> f32
     {
         let triv = 2.0 * phase - 1.0;     
@@ -473,7 +521,7 @@ impl DPWState
  
 }
 
-impl Default for DPWState{
+impl Default for DPWStateOld{
     fn default() -> Self {
         Self{
             dpw_gain1: 1.0,
@@ -552,6 +600,20 @@ impl OscillatorState {
         return (self.phase * 6.28318530718).sin();
     }
 
+    fn harmonic(&mut self, parameter:f32) -> f32 {
+
+        let h = parameter * 32.0;
+        let f_h = h.floor();
+        let n_h = f_h + 1.0;
+        let n_f = h - f_h;
+
+        let phasepi = self.phase * 6.28318530718;
+        let p1 = phasepi * n_h ;
+        let p2 = phasepi * (n_h + 1.0) ;
+        
+        return (p1).sin() * (1.0-n_f) +  (p2).sin() * n_f;
+    }
+
     /* PolyBLEP saw impl. */
 
     fn poly_saw_bitwise_or_zero(value: f32) -> u32
@@ -613,14 +675,14 @@ impl OscillatorState {
 
     fn supersaw(&mut self) -> f32 {
         let mut main_band =  Self::poly_saw(self.supersaw.phase[0], self.supersaw.delta_phase[0]);
-        main_band -= self.sps_pure(0);
+       // main_band -= self.sps_pure(0); keep the root! 
 
         let mut side_bands = 0.0;
         for n in 1..7 {
             side_bands += Self::poly_saw(self.supersaw.phase[n], self.supersaw.delta_phase[n]);
-            if n < 6 {
+            //if n < 6 {
                 side_bands -= self.sps_pure(n); // subtract sin. from any but the highest freq. band
-            }
+            //}
         }
         
         return main_band*self.supersaw.mix_main + side_bands*self.supersaw.mix_side_bands;
@@ -641,7 +703,8 @@ impl OscillatorState {
             //OscType::TrivialSaw => self.trivialsaw(),
             OscType::BlampTri => self.blamp_triangle(),
             OscType::SuperSaw => self.supersaw(),
-            OscType::HyperSaw => self.hypersaw.get(hyper)
+            OscType::HyperSaw => self.hypersaw.get(hyper),
+            OscType::HarmonicSeries => self.harmonic(settings.harmonic.get())
         }
     }
     
@@ -657,12 +720,12 @@ impl OscillatorState {
                 }
 
                 let prep = samplerate / freq;
-                self.dpw.dpw_gain1 = (1.0 / 24.0 * (3.1415 / (2.0 * (3.1415 / prep).sin())).powf(3.0)).powf(1.0 / 3.0);
+                self.dpw.set_gain1((1.0 / 24.0 * (3.1415 / (2.0 * (3.1415 / prep).sin())).powf(3.0)).powf(1.0 / 3.0));
             }
             OscType::HyperSaw => {
                 self.hypersaw.set_freq(freq, samplerate, self.delta_phase, &hypersaw, _update );               
             }
-           
+            OscType::HarmonicSeries => {}
             OscType::SuperSaw => {
                 // look up detune base (interpolated)
                 let detune = supersaw.spread.get();
@@ -964,7 +1027,7 @@ impl FilterState {
     }
     
     fn set_cutoff(&mut self, settings: &FilterSettings, envelope: f32, _sample_rate: f32, touch: f32, lfo: f32) {
-        self.fc = (settings.cutoff.get() + touch * settings.touch_amount.get() + lfo * settings.lfo_amount.get()*0.5 + envelope * settings.envelope_amount.get() * 0.5).clamp(0.0, 1.0);
+        self.fc = (settings.cutoff.get() + touch * settings.touch_amount.get() + lfo * settings.lfo_amount.get()*0.35 + envelope * settings.envelope_amount.get() * 0.5).clamp(0.0, 1.0);
         self.fc *= self.fc * 0.5;
         self.damp = 1.0 - settings.resonance.get();
         let preclamp = 2.0 * ((3.1415 * self.fc).sin());
@@ -1078,6 +1141,8 @@ impl IronFishVoice {
         
         // mix signal
         let noise = random_f32(&mut self.seed) * 2.0 - 1.0;
+        
+        // ew heavy! lerp the sqrts away please! or at least out of the loop.. 
         let pan_left = (1.0-settings.osc_balance.get()).sqrt();
         let pan_right = (settings.osc_balance.get()).sqrt();
         let oscinput = osc1*pan_left + osc2*pan_right + settings.sub_osc.get() * sub + noise * settings.noise.get();
