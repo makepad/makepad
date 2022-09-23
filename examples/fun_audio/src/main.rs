@@ -618,6 +618,14 @@ live_register!{
                         text: "Clear Grid"
                         walk: {width: Fit, height: Fit, margin: 5}
                     }
+                    grid_up = FishButton {
+                        text: "Up"
+                        walk: {width: Fit, height: Fit, margin: 5}
+                    }
+                    grid_down = FishButton {
+                        text: "Down"
+                        walk: {width: Fit, height: Fit, margin: 5}
+                    }
                 }
             }
 
@@ -1410,7 +1418,8 @@ impl App {
         let shift = if let Event::FingerUp(fu) = event {fu.modifiers.shift}else {false};
         if ui.button(ids!(clear_grid)).was_clicked() 
         {
-            sequencer.clear_buttons(ui.cx);
+            
+
             let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
             iron_fish.settings.sequencer.step0.set(0);
             iron_fish.settings.sequencer.step1.set(0);
@@ -1428,7 +1437,57 @@ impl App {
             iron_fish.settings.sequencer.step13.set(0);
             iron_fish.settings.sequencer.step14.set(0);
             iron_fish.settings.sequencer.step15.set(0);
+
+            sequencer.clear_buttons(ui.cx);
         } 
+        
+        if ui.button(ids!(grid_down)).was_clicked() 
+        {
+            let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
+            
+            for j in 0..16 {
+                let bv = 1<<j;
+                let step = iron_fish.settings.sequencer.get_step(j);
+                let mut modstep = step << 1;
+                
+                if (modstep & 1<<16) == 1<<16 { modstep += 1; modstep -= 1<<16};
+                
+                iron_fish.settings.sequencer.set_step(j, modstep);
+                
+            }                
+            
+            for j in 0..16 {
+                let val = iron_fish.settings.sequencer.get_step(j);
+                for i in 0..16 {
+                    let bv = 1<<i;                
+                    sequencer.update_button(ui.cx,j,i, if val & bv == bv {true} else {false});
+                }
+            }
+        }
+
+        if ui.button(ids!(grid_up)).was_clicked() 
+        {
+            log!("grid down!");
+            let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
+            for j in 0..16 {
+                let bv = 1<<j;
+                let step = iron_fish.settings.sequencer.get_step(j);
+                let mut modstep = step >> 1;
+                if (step & 1) == 1 { modstep += 1<<15;}                                
+                
+                iron_fish.settings.sequencer.set_step(j, modstep);
+                
+            }                
+            
+            for j in 0..16 {
+                let val = iron_fish.settings.sequencer.get_step(j);
+                for i in 0..16 {
+                    let bv = 1<<i;                
+                    sequencer.update_button(ui.cx,j,i, if val & bv == bv {true} else {false});
+                }
+            }
+
+        }
 
         if ui.button(ids!(save1)).was_clicked() {self.preset(ui.cx, 1, shift);}
         if ui.button(ids!(save2)).was_clicked() {self.preset(ui.cx, 2, shift);}
