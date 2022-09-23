@@ -271,7 +271,10 @@ impl HyperSawOscillatorState{
     {
         let mut res = 0.0;
         for i in 0..state.new_n_saws{
-            res += self.dpw[i].get(self.phase[i]) * state.volume_level[i];
+            res += OscillatorState::poly_saw(self.phase[i], self.delta_phase[i]);  
+
+            // FIXME
+            // res +=  self.dpw[i].get(self.phase[i]) * state.volume_level[i];
         };
 
         return res;
@@ -549,27 +552,16 @@ impl OscillatorState {
         return (self.phase * 6.28318530718).sin();
     }
 
-    /* begin of supersaw specific impl. */
-    
-    // values adapted from measurements done with actual synthesizer
-    fn sps_calc_mix(&mut self, mix: f32) {
-        // FIXME: here I would assert that mix is [0..1]
-        self.supersaw.mix_main = -0.55366 * mix + 0.99785;
-        self.supersaw.mix_side_bands = -0.73764 * powf(mix, 2.0) + 1.2841 * mix + 0.044372;
-    }
+    /* PolyBLEP saw impl. */
 
-    fn sps_pure(&mut self, phase_idx: usize) -> f32 {
-        return (self.supersaw.phase[phase_idx] * 6.28318530718).sin();
-    }
-
-    fn sps_bitwise_or_zero(self, value: f32) -> u32
+    fn poly_saw_bitwise_or_zero(value: f32) -> u32
     {
         let result = (value as u32) | 0;
         return result;
     }
 
     // http://www.acoustics.hut.fi/publications/papers/smc2010-phaseshaping/
-    fn sps_blep(self, point: f32, dt: f32) -> f32
+    fn poly_saw_blep(point: f32, dt: f32) -> f32
     {
         if point < dt {
             let mut squared = point/dt - 1.0;
@@ -586,17 +578,27 @@ impl OscillatorState {
         }
     }
 
-    fn sps_poly_saw(&mut self, phase_idx: usize) -> f32 {
-        let phase = self.supersaw.phase[phase_idx];
-        let pitch = self.supersaw.delta_phase[phase_idx];
-
+    pub fn poly_saw(phase: f32, pitch /* delta_phase */: f32) -> f32 {
         let mut p1 = phase + 0.5;
-        p1-= self.sps_bitwise_or_zero(p1) as f32;
+        p1-= Self::poly_saw_bitwise_or_zero(p1) as f32;
 
         let mut saw = 2.0*p1 - 1.0;
-        saw -= self.sps_blep(p1, pitch);
+        saw -= Self::poly_saw_blep(p1, pitch);
 
         return saw;
+    }
+
+    /* begin of supersaw specific impl. */
+    
+    // values adapted from measurements done with actual synthesizer
+    fn sps_calc_mix(&mut self, mix: f32) {
+        // FIXME: here I would assert that mix is [0..1]
+        self.supersaw.mix_main = -0.55366 * mix + 0.99785;
+        self.supersaw.mix_side_bands = -0.73764 * powf(mix, 2.0) + 1.2841 * mix + 0.044372;
+    }
+
+    fn sps_pure(&mut self, phase_idx: usize) -> f32 {
+        return (self.supersaw.phase[phase_idx] * 6.28318530718).sin();
     }
 
     fn sps_tick(&mut self)
@@ -610,14 +612,14 @@ impl OscillatorState {
     }
 
     fn supersaw(&mut self) -> f32 {
-        let main_band =  self.sps_poly_saw(0);
-        // main_band -= self.sps_pure(0);
+        let mut main_band =  Self::poly_saw(self.supersaw.phase[0], self.supersaw.delta_phase[0]);
+        main_band -= self.sps_pure(0);
 
         let mut side_bands = 0.0;
         for n in 1..7 {
-            side_bands += self.sps_poly_saw(n);
+            side_bands += Self::poly_saw(self.supersaw.phase[n], self.supersaw.delta_phase[n]);
             if n < 6 {
-                side_bands -= self.sps_pure(n);
+                side_bands -= self.sps_pure(n); // subtract sin. from any but the highest freq. band
             }
         }
         
@@ -635,7 +637,7 @@ impl OscillatorState {
         
         match settings.osc_type.get() {
             OscType::Pure => self.pure(),
-            OscType::DPWSawPulse => self.dpw.get(self.phase),
+            OscType::DPWSawPulse => Self::poly_saw(self.phase, self.delta_phase), // FIXME: put DPW oscillator back 
             //OscType::TrivialSaw => self.trivialsaw(),
             OscType::BlampTri => self.blamp_triangle(),
             OscType::SuperSaw => self.supersaw(),
