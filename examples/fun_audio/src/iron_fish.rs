@@ -1,6 +1,10 @@
 // Iron fish is MIT licensed, (C) Stijn Kuipers
 // Super saw oscillator implementation is MIT licensed (C) Niels J. de Wit
 
+// TO-DO:
+// - Create 'Phase' object to keep track of, tick and sample phases
+// - ...
+
 use {
     std::sync::Arc,
     crate::{
@@ -267,21 +271,26 @@ impl HyperSawOscillatorState{
     {
         let mut res = 0.0;
         for i in 0..state.new_n_saws{
-            self.phase[i]+= self.delta_phase[i];
-            while self.phase[i]>=1.0 {
-                self.phase[i]-=1.0;
-            }
             res += self.dpw[i].get(self.phase[i]) * state.volume_level[i];
         };
-
-       // log!("{} {:?} aaa", res, self.phase);
 
         return res;
     }
 
+    // call tick before or after each get()
+    // this function is separate so that the synth. can let the oscillators run freely, which slightly improves the sound
+    pub fn tick(&mut self, state: &HyperSawGlobalState)
+    {
+        for i in 0..state.new_n_saws{
+
+            self.phase[i]+= self.delta_phase[i];
+            while self.phase[i]>=1.0 {
+                self.phase[i]-=1.0;
+            }
+        }
+    }
+
     pub fn set_freq(&mut self, freq: f32, samplerate: f32, delta_phase: f32, state: &HyperSawGlobalState, _update: bool){      
-        //self.dpw_gain1 = (prep*prep*prep);
-        //self.dpw_gain2 = 1.0/192.0 ;// (1.0 / 24.0 * (3.1415 / (2.0 * (3.1415 * prep).sin())).powf(3.0)).powf(1.0/3.0);
         for i in 0..7 {
             self.delta_phase[i] = delta_phase * state.freq_multiplier[i];
             let prep = samplerate / (freq * state.freq_multiplier[i]); // / samplerate;
@@ -398,7 +407,7 @@ impl Default for HyperSawOscillatorState{
     fn default() -> Self {
         Self{
         phase: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        delta_phase: [0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001, 0.0001],
+        delta_phase: [1.414, 1.732, 2.236, 2.646, 3.317, 3.606, 4.123], // square root of primes: 2, 3, 5, 7, 11, 13, 17 (FIXME: initialize in code)
         dpw: [Default::default();7]
         }
     }
@@ -495,7 +504,6 @@ impl SubOscillatorState {
         while self.phase > 1.0 {
             self.phase -= 1.0
         }
-        // return self.dpw();
         
         return (self.phase * 6.283).sin();
     }
@@ -503,29 +511,10 @@ impl SubOscillatorState {
     fn set_note(&mut self, note: u8, samplerate: f32) {
         let freq = 440.0 * f32::powf(2.0, ((note as f32) - 69.0 - 24.0) / 12.0);
         self.delta_phase = (freq*0.5) / samplerate;
-        //let sampletime = 1.0 / samplerate;
     }
 }
 
 impl OscillatorState {
-    /*
-    fn sps_calc_detune(&mut self, detune: f32) {
-        // FIXME: here I would assert that detune is [0..1]
-        self.sps_detune = 
-        (10028.7312891634*pow(detune, 11.0)) - (50818.8652045924*pow(detune, 10.0)) + (111363.4808729368*pow(detune, 9.0)) -
-        (138150.6761080548*pow(detune, 8.0)) + (106649.6679158292*pow(detune, 7.0)) - (53046.9642751875*pow(detune, 6.0))  + 
-        (17019.9518580080*pow(detune, 5.0))  - (3425.0836591318*pow(detune, 4.0))   + (404.2703938388*pow(detune, 3.0))    - 
-        (24.1878824391*pow(detune, 2.0))     + (0.6717417634*detune)                + 0.0030115596;		
-    }
-    */
-    
-    // supersaw impl.
-    fn sps_calc_mix(&mut self, mix: f32) {
-        // FIXME: here I would assert that mix is [0..1]
-        self.supersaw.mix_main = -0.55366 * mix + 0.99785;
-        self.supersaw.mix_side_bands = -0.73764 * powf(mix, 2.0) + 1.2841 * mix + 0.044372;
-    }
-    
     fn blamp(&mut self, t: f32, dt: f32) -> f32 {
         let mut y = 0.0;
         if 0.0 <= t && t<2.0 * dt {
@@ -544,7 +533,7 @@ impl OscillatorState {
         return y * dt / 15.0
     }
     
-    fn blamptriangle(&mut self) -> f32 {
+    fn blamp_triangle(&mut self) -> f32 {
         let mut tri = 2.0 * (2.0 * self.phase - 1.0).abs() - 1.0;
         
         tri += self.blamp(self.phase, self.delta_phase);
@@ -561,6 +550,13 @@ impl OscillatorState {
     }
 
     /* begin of supersaw specific impl. */
+    
+    // values adapted from measurements done with actual synthesizer
+    fn sps_calc_mix(&mut self, mix: f32) {
+        // FIXME: here I would assert that mix is [0..1]
+        self.supersaw.mix_main = -0.55366 * mix + 0.99785;
+        self.supersaw.mix_side_bands = -0.73764 * powf(mix, 2.0) + 1.2841 * mix + 0.044372;
+    }
 
     fn sps_pure(&mut self, phase_idx: usize) -> f32 {
         return (self.supersaw.phase[phase_idx] * 6.28318530718).sin();
@@ -572,7 +568,7 @@ impl OscillatorState {
         return result;
     }
 
-    // shttp://www.acoustics.hut.fi/publications/papers/smc2010-phaseshaping/
+    // http://www.acoustics.hut.fi/publications/papers/smc2010-phaseshaping/
     fn sps_blep(self, point: f32, dt: f32) -> f32
     {
         if point < dt {
@@ -641,7 +637,7 @@ impl OscillatorState {
             OscType::Pure => self.pure(),
             OscType::DPWSawPulse => self.dpw.get(self.phase),
             //OscType::TrivialSaw => self.trivialsaw(),
-            OscType::BlampTri => self.blamptriangle(),
+            OscType::BlampTri => self.blamp_triangle(),
             OscType::SuperSaw => self.supersaw(),
             OscType::HyperSaw => self.hypersaw.get(hyper)
         }
@@ -654,20 +650,12 @@ impl OscillatorState {
         match settings.osc_type.get() {
             OscType::Pure | OscType::BlampTri => {}
             OscType::DPWSawPulse => {
-                if !_update
-                {
+                if !_update {
                     self.dpw = DPWState::default();
-
                 }
-                //let w = freq * 6.283 / samplerate;
-                //let sampletime = 1.0 / samplerate;
-                let prep = samplerate / freq; // / samplerate;
-                //self.dpw_gain1 = (prep*prep*prep);
-                //self.dpw_gain2 = 1.0/192.0 ;// (1.0 / 24.0 * (3.1415 / (2.0 * (3.1415 * prep).sin())).powf(3.0)).powf(1.0/3.0);
+
+                let prep = samplerate / freq;
                 self.dpw.dpw_gain1 = (1.0 / 24.0 * (3.1415 / (2.0 * (3.1415 / prep).sin())).powf(3.0)).powf(1.0 / 3.0);
-                
-                // println!("gain: {} {} ", self.dpw_gain, prep);
-                //  gain = std::pow(1.f / factorial(dpwOrder) * std::pow(M_PI / (2.f*sin(M_PI*pitch * APP->engine->getSampleTime())),  dpwOrder-1.f), 1.0 / (dpwOrder-1.f));
             }
             OscType::HyperSaw => {
                 self.hypersaw.set_freq(freq, samplerate, self.delta_phase, &hypersaw, _update );               
@@ -1070,9 +1058,11 @@ impl IronFishVoice {
     }
     
     pub fn one(&mut self,state: &IronFishGlobalVoiceState, settings: &IronFishSettings, touch: f32, lfo: f32) -> f32 {
-        // update free running supersaw phases    
+        // update free running super/hyper saw phases    
         self.osc1.sps_tick();
         self.osc2.sps_tick();
+        self.osc1.hypersaw.tick(&state.hypersaw1);
+        self.osc2.hypersaw.tick(&state.hypersaw2);
 
         // sample 
         let sub = self.subosc.get();        
