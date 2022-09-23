@@ -87,6 +87,8 @@ struct DrawButton {
 pub struct SeqButton {
     button: DrawButton,
     state: State,
+    x: usize,
+    y: usize
 }
 
 #[derive(Clone, Debug, Default, Eq, Hash, Copy, PartialEq, FromLiveId)]
@@ -205,6 +207,8 @@ impl Sequencer {
                 let btn = self.buttons.get_or_insert(cx, btn_id, | cx | {
                     SeqButton::new_from_ptr(cx, button)
                 });
+                btn.x = x;
+                btn.y = y;
                 btn.draw_abs(cx, Rect {pos: pos, size: sz});
             }
         }
@@ -277,12 +281,23 @@ impl SequencerImGUI {
     
     pub fn clear_buttons(&self, cx:&mut Cx){
         if let Some(mut inner) = self.inner(){
-            for (_, button) in inner.buttons.iter_mut() {
+            for (_, button) in inner.buttons.iter_mut() {                
                 button.set_is_active(cx, false, Animate::Yes);
             }
         }
     }
     
+    pub fn update_button(&self, cx:&mut Cx, x:usize, y:usize, state: bool){
+        
+        if let Some(mut inner) = self.inner(){
+            for (_, button) in inner.buttons.iter_mut() {
+                if button.x == x && button.y  == y {
+                button.set_is_active(cx, state, Animate::Yes);
+                }
+            }
+        }
+    }
+
     pub fn inner(&self) -> Option<std::cell::RefMut<'_, Sequencer >> {
         self.0.inner()
     }

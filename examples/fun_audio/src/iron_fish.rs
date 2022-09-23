@@ -211,6 +211,56 @@ pub struct SequencerSettings {
     #[live(0)] polyphoniconeshot: u32a,
 }
 
+impl SequencerSettings{
+    pub fn get_step(&self, step: usize) -> u32
+    {
+        match step {
+            0 => return self.step0.get(),
+            1 => return self.step1.get(),
+            2 => return self.step2.get(),
+            3 => return self.step3.get(),
+            4 => return self.step4.get(),
+            5 => return self.step5.get(),
+            6 => return self.step6.get(),
+            7 => return self.step7.get(),
+            8 => return self.step8.get(),
+            9 => return self.step9.get(),
+            10 => return self.step10.get(),
+            11 => return self.step11.get(),
+            12 => return self.step12.get(),
+            13 => return self.step13.get(),
+            14 => return self.step14.get(),
+            15 => return self.step15.get(),
+            _ => 0
+            
+        };
+        return 0;
+    }
+
+    pub fn set_step(&self, step: usize, value: u32) 
+    {
+        match step {
+            0 =>  self.step0.set(value),
+            1 =>  self.step1.set(value),
+            2 =>  self.step2.set(value),
+            3 =>  self.step3.set(value),
+            4 =>  self.step4.set(value),
+            5 =>  self.step5.set(value),
+            6 =>  self.step6.set(value),
+            7 =>  self.step7.set(value),
+            8 =>  self.step8.set(value),
+            9 =>  self.step9.set(value),
+            10 =>  self.step10.set(value),
+            11 =>  self.step11.set(value),
+            12 =>  self.step12.set(value),
+            13 =>  self.step13.set(value),
+            14 =>  self.step14.set(value),
+            15 =>  self.step15.set(value),           
+            _ =>  {}
+            
+        };
+    }
+}
 
 #[derive(Live, LiveHook, LiveAtomic, Debug, LiveRead)]
 #[live_ignore]
