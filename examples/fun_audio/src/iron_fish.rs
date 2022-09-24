@@ -676,12 +676,12 @@ impl OscillatorState {
     fn poly_saw_blep(point: f32, dt: f32) -> f32
     {
         if point < dt {
-            let mut squared = point/dt - 1.0;
+            let mut squared = (point/dt) - 1.0;
             squared *= squared;
-            return squared;
+            return -squared;
         } 
         else if point > (1.0-dt) {
-            let mut squared = (point-1.0)/dt + 1.0;
+            let mut squared = ((point-1.0)/dt) + 1.0;
             squared *= squared;
             return squared;
         }
