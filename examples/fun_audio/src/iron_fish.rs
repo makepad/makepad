@@ -327,17 +327,13 @@ impl HyperSawOscillatorState{
     {
         let mut res = 0.0;
         for i in 0..state.new_n_saws{
-            res += OscillatorState::poly_saw(self.phase[i], self.delta_phase[i])* state.volume_level[i];  
-
-            
-            //res +=  self.dpw[i].get3rdorder(self.phase[i], self.delta_phase[i]) * state.volume_level[i];
+            res += OscillatorState::poly_saw(self.phase[i], self.delta_phase[i]) * state.volume_level[i];              
+            // res +=  self.dpw[i].get3rdorder(self.phase[i], self.delta_phase[i]) * state.volume_level[i];
         };
 
         return res;
     }
 
-    // call tick before or after each get()
-    // this function is separate so that the synth. can let the oscillators run freely, which slightly improves the sound
     pub fn tick(&mut self, state: &HyperSawGlobalState)
     {
         for i in 0..state.new_n_saws{
@@ -354,7 +350,7 @@ impl HyperSawOscillatorState{
             self.delta_phase[i] = delta_phase * state.freq_multiplier[i];
             let prep = samplerate / (freq * state.freq_multiplier[i]); // / samplerate;
             if !_update  {
-            //    self.dpw[i] = DPWState::default();
+                self.dpw[i] = DPWState::default();
             }
             self.dpw[i].set_gain1((1.0 / 24.0 * (3.1415 / (2.0 * (3.1415 / prep).sin())).powf(3.0)).powf(1.0 / 3.0)); 
     
@@ -488,7 +484,6 @@ impl Default for DPWState{
     }
 }
 
-
 impl DPWState{
     pub fn get2ndorder(&mut self, t: f32, dt: f32)->f32
     {     
@@ -603,16 +598,18 @@ pub struct SubOscillatorState {
 }
 
 impl SubOscillatorState {
-    fn get(&mut self) -> f32 {
+    fn get(self) -> f32 {
+        return (self.phase * 6.28318530718).sin();
+    }
+
+    fn tick(&mut self) {
         self.phase += self.delta_phase;
         while self.phase > 1.0 {
             self.phase -= 1.0
         }
-        
-        return (self.phase * 6.283).sin();
-    }
+    }    
     
-    fn set_note(&mut self, note: u8, samplerate: f32) {
+    pub fn set_note(&mut self, note: u8, samplerate: f32) {
         let freq = 440.0 * f32::powf(2.0, ((note as f32) - 69.0 - 24.0) / 12.0);
         self.delta_phase = (freq*0.5) / samplerate;
     }
@@ -713,7 +710,7 @@ impl OscillatorState {
     }
 
     fn sps_pure(&mut self, phase_idx: usize) -> f32 {
-        return (self.supersaw.phase[phase_idx] * 6.28318530718).sin();
+        return (self.supersaw.phase[phase_idx]*6.28318530718).cos();
     }
 
     fn sps_tick(&mut self)
@@ -728,14 +725,14 @@ impl OscillatorState {
 
     fn supersaw(&mut self) -> f32 {
         let mut main_band =  Self::poly_saw(self.supersaw.phase[0], self.supersaw.delta_phase[0]);
-       // main_band -= self.sps_pure(0); keep the root! 
+        // main_band -= self.sps_pure(0);
 
         let mut side_bands = 0.0;
         for n in 1..7 {
             side_bands += Self::poly_saw(self.supersaw.phase[n], self.supersaw.delta_phase[n]);
-            //if n < 6 {
+            if n < 6 {
                 side_bands -= self.sps_pure(n); // subtract sin. from any but the highest freq. band
-            //}
+            }
         }
         
         return main_band*self.supersaw.mix_main + side_bands*self.supersaw.mix_side_bands;
@@ -743,16 +740,23 @@ impl OscillatorState {
 
     /* end of supersaw specific impl. */
 
-    fn get(&mut self, settings: &OscSettings, _samplerate: f32, hyper: HyperSawGlobalState, env: f32, lfo: f32) -> f32 {
-
+    fn tick(&mut self, hyper_global_state: &HyperSawGlobalState)
+    {
+        // internal single phase
         self.phase += self.delta_phase;
         while self.phase > 1.0 {
             self.phase -= 1.0;
         };
-        
+
+        // complex osc. phases
+        self.sps_tick();
+        self.hypersaw.tick(&hyper_global_state);
+    }
+
+    fn get(&mut self, settings: &OscSettings, _samplerate: f32, hyper: HyperSawGlobalState, env: f32, lfo: f32) -> f32 {
         match settings.osc_type.get() {
             OscType::Pure => self.pure(),
-            OscType::DPWSawPulse => Self::poly_saw(self.phase, self.delta_phase), // FIXME: put DPW oscillator back 
+            OscType::DPWSawPulse => Self::poly_saw(self.phase, self.delta_phase), // FIXME: reinstate DPW osc.
             //OscType::TrivialSaw => self.trivialsaw(),
             OscType::BlampTri => self.blamp_triangle(),
             OscType::SuperSaw => self.supersaw(),
@@ -1175,12 +1179,11 @@ impl IronFishVoice {
         self.current_note = b1 as i16;
     }
     
-    pub fn one(&mut self,state: &IronFishGlobalVoiceState, settings: &IronFishSettings, touch: f32, lfo: f32) -> f32 {
-        // update free running super/hyper saw phases    
-        self.osc1.sps_tick();
-        self.osc2.sps_tick();
-        self.osc1.hypersaw.tick(&state.hypersaw1);
-        self.osc2.hypersaw.tick(&state.hypersaw2);
+    pub fn one(&mut self,state: &IronFishGlobalVoiceState, settings: &IronFishSettings, touch: f32, lfo: f32, osc1_gain: f32, osc2_gain: f32) -> f32 {
+        // update phases (all are free running, more or lesss)
+        self.subosc.tick();
+        self.osc1.tick(&state.hypersaw1);
+        self.osc2.tick(&state.hypersaw2);
 
         let volume_envelope = self.volume_envelope.get(&settings.volume_envelope, settings.sample_rate.get());
         let mod_envelope = self.mod_envelope.get(&settings.mod_envelope, settings.sample_rate.get());
@@ -1189,17 +1192,13 @@ impl IronFishVoice {
         let sub = self.subosc.get();        
         let osc1 = self.osc1.get(&settings.osc1, settings.sample_rate.get(), state.hypersaw1,mod_envelope, lfo);
         let osc2 = self.osc2.get(&settings.osc2, settings.sample_rate.get(), state.hypersaw2,mod_envelope, lfo);
+        let noise = random_f32(&mut self.seed) * 2.0 - 1.0;
 
         // set up filter
         self.filter1.set_cutoff(&settings.filter1, mod_envelope, settings.sample_rate.get(), touch, lfo);
         
         // mix signal
-        let noise = random_f32(&mut self.seed) * 2.0 - 1.0;
-        
-        // ew heavy! lerp the sqrts away please! or at least out of the loop.. 
-        let pan_left = (1.0-settings.osc_balance.get()).sqrt();
-        let pan_right = (settings.osc_balance.get()).sqrt();
-        let oscinput = osc1*pan_left + osc2*pan_right + settings.sub_osc.get() * sub + noise * settings.noise.get();
+        let oscinput = osc1*osc1_gain + osc2*osc2_gain + settings.sub_osc.get()*sub + noise*settings.noise.get();
 
         // apply filter
         let filter = self.filter1.get(oscinput, &settings.filter1);
@@ -1208,20 +1207,25 @@ impl IronFishVoice {
         let output = volume_envelope * filter;
 
         // FIXME: why 0.006?
-        return output * 0.006; //* 1000.0;
+        return output * 0.006;
     }
     
     pub fn fill_buffer(&mut self, mix_buffer: &mut AudioBuffer, startidx: usize, frame_count: usize, display_buffer: Option<&mut AudioBuffer>, settings: &IronFishSettings, state: &IronFishGlobalVoiceState, touch: f32, lfo: f32) {
         
-        // log!("blah {} {}", startidx, frame_count);
         let (left, right) = mix_buffer.stereo_mut();
+
+        // FIXME: like many parameters this one is also not interpolated per sample; I have an idea for a proper interpolation object
+        //        and have used it before but right now I'm just going to avoid those sqrt() calls per sample and pray nobody touches that slider mid-note
+        let balance = settings.osc_balance.get();
+        let osc1_gain = (1.0-balance).sqrt();
+        let osc2_gain = balance.sqrt();
         
         if let Some(display_buffer) = display_buffer 
         {
             let (left_disp, right_disp) = display_buffer.stereo_mut();
             for i in startidx..frame_count + startidx 
             {
-                let output = self.one(state, &settings,touch, lfo) * 8.0;
+                let output = self.one(state, &settings,touch, lfo, osc1_gain, osc2_gain) * 6.28;
                 left_disp[i] = output as f32;
                 right_disp[i] = output as f32;
                 left[i] += output as f32;
@@ -1232,7 +1236,7 @@ impl IronFishVoice {
         {
             for i in startidx..frame_count + startidx 
             {
-                let output = self.one(state, &settings, touch, lfo) * 8.0;
+                let output = self.one(state, &settings, touch, lfo, osc1_gain, osc2_gain) * 6.28;
                 left[i] += output as f32;
                 right[i] += output as f32;
             }
