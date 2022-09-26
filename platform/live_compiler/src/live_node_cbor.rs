@@ -108,7 +108,6 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                     return Err("Unmatched closed".into())
                 }
                 let item = stack.pop().unwrap();
-                log!("CLOSING {}", item.count);
                 if item.count > std::u16::MAX as usize {
                     out[item.index] = if item.has_keys {CBOR_MAP_32}else {CBOR_ARRAY_32};
                     let bytes = (item.count as u32).to_be_bytes();
@@ -709,8 +708,6 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
             stack_item.count += 1;
             
             assert_len(o, 1, data) ?;
-            
-            println!("{} byte:{} id:{} data:{:x}", stack_item.has_keys, o, id, data[o]);
             
             if let Some(v) = decode_i64(data, &mut o) ? {
                 self.push(LiveNode {id, origin, value: LiveValue::Int64(v)});
