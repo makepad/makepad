@@ -8,7 +8,6 @@ use makepad_component::imgui::*;
 use makepad_draw_2d::*;
 use makepad_media::*;
 use makepad_media::audio_graph::*;
-use makepad_platform::live_atomic::*;
 
 mod sequencer;
 mod display_audio;
@@ -1439,28 +1438,11 @@ impl App {
         
         for (btn_x,btn_y,active) in sequencer.on_buttons(){
             let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
-            let s = iron_fish.settings.clone();
+            let _s = iron_fish.settings.clone();
             let bit = 1<<btn_y;
             let act = if active{bit} else{0};
-            match btn_x{
-                0=>s.sequencer.step0.set(s.sequencer.step0.get()^bit|act),
-                1=>s.sequencer.step1.set(s.sequencer.step1.get()^bit|act),
-                2=>s.sequencer.step2.set(s.sequencer.step2.get()^bit|act),
-                3=>s.sequencer.step3.set(s.sequencer.step3.get()^bit|act),
-                4=>s.sequencer.step4.set(s.sequencer.step4.get()^bit|act),
-                5=>s.sequencer.step5.set(s.sequencer.step5.get()^bit|act),
-                6=>s.sequencer.step6.set(s.sequencer.step6.get()^bit|act),
-                7=>s.sequencer.step7.set(s.sequencer.step7.get()^bit|act),
-                8=>s.sequencer.step8.set(s.sequencer.step8.get()^bit|act),
-                9=>s.sequencer.step9.set(s.sequencer.step9.get()^bit|act),
-                10=>s.sequencer.step10.set(s.sequencer.step10.get()^bit|act),
-                11=>s.sequencer.step11.set(s.sequencer.step11.get()^bit|act),
-                12=>s.sequencer.step12.set(s.sequencer.step12.get()^bit|act),
-                13=>s.sequencer.step13.set(s.sequencer.step13.get()^bit|act),
-                14=>s.sequencer.step14.set(s.sequencer.step14.get()^bit|act),
-                15=>s.sequencer.step15.set(s.sequencer.step15.get()^bit|act),
-                _=>()
-            }
+            let step = iron_fish.settings.sequencer.get_step(btn_x);
+            iron_fish.settings.sequencer.set_step(btn_x, step^bit|act);
         }
         
         if ui.button(ids!(panic)).was_clicked() {
@@ -1468,44 +1450,24 @@ impl App {
         }
         
         let shift = if let Event::FingerUp(fu) = event {fu.modifiers.shift}else {false};
-        if ui.button(ids!(clear_grid)).was_clicked() 
-        {
-            
-
+        if ui.button(ids!(clear_grid)).was_clicked() {
             let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
-            iron_fish.settings.sequencer.step0.set(0);
-            iron_fish.settings.sequencer.step1.set(0);
-            iron_fish.settings.sequencer.step2.set(0);
-            iron_fish.settings.sequencer.step3.set(0);
-            iron_fish.settings.sequencer.step4.set(0);
-            iron_fish.settings.sequencer.step5.set(0);
-            iron_fish.settings.sequencer.step6.set(0);
-            iron_fish.settings.sequencer.step7.set(0);
-            iron_fish.settings.sequencer.step8.set(0);
-            iron_fish.settings.sequencer.step9.set(0);
-            iron_fish.settings.sequencer.step10.set(0);
-            iron_fish.settings.sequencer.step11.set(0);
-            iron_fish.settings.sequencer.step12.set(0);
-            iron_fish.settings.sequencer.step13.set(0);
-            iron_fish.settings.sequencer.step14.set(0);
-            iron_fish.settings.sequencer.step15.set(0);
-
+            for j in 0..16 {
+                iron_fish.settings.sequencer.set_step(j, 0);
+            }
             sequencer.clear_buttons(ui.cx);
         } 
         
-        if ui.button(ids!(grid_down)).was_clicked() 
-        {
+        if ui.button(ids!(grid_down)).was_clicked() {
             let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
-            
             for j in 0..16 {
-                let bv = 1<<j;
+                //let bv = 1<<j;
                 let step = iron_fish.settings.sequencer.get_step(j);
                 let mut modstep = step << 1;
                 
                 if (modstep & 1<<16) == 1<<16 { modstep += 1; modstep -= 1<<16};
                 
                 iron_fish.settings.sequencer.set_step(j, modstep);
-                
             }                
             
             for j in 0..16 {
@@ -1517,12 +1479,11 @@ impl App {
             }
         }
 
-        if ui.button(ids!(grid_up)).was_clicked() 
-        {
+        if ui.button(ids!(grid_up)).was_clicked() {
             log!("grid down!");
             let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
             for j in 0..16 {
-                let bv = 1<<j;
+                //let bv = 1<<j;
                 let step = iron_fish.settings.sequencer.get_step(j);
                 let mut modstep = step >> 1;
                 if (step & 1) == 1 { modstep += 1<<15;}                                
@@ -1566,16 +1527,15 @@ impl App {
             log!("Loading preset {}", file_name);
             let mut data = Vec::new();
             file.read_to_end(&mut data).unwrap();
-            //if let Ok(data) = makepad_miniz::decompress_to_vec(&data) {
+            if let Ok(data) = makepad_miniz::decompress_to_vec(&data) {
                 let mut nodes = Vec::new();
                 nodes.from_cbor(&data).unwrap();
-                
                 iron_fish.settings.apply_over(cx, &nodes);
                 self.imgui.root_frame().bind_read(cx, &nodes);
-            //}
-            //else {
-           //     log!("Error decompressing preset");
-            //}
+            }
+            else {
+                log!("Error decompressing preset");
+            }
         }
     }
     

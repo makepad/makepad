@@ -542,12 +542,12 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("            },");
         
         tb.add("            LiveValue::BareEnum{base,variant}=>{");
-        tb.add("                if *base != enum_id{");
+        /*tb.add("                if *base != enum_id{");
         tb.add("                    cx.apply_error_wrong_enum_base(live_error_origin!(), index, nodes, enum_id, *base);");
         tb.add("                    index = nodes.skip_node(index);");
         tb.add("                    self.after_apply(cx, apply_from, start_index, nodes);");
         tb.add("                    return index;");
-        tb.add("                }");
+        tb.add("                }");*/
         tb.add("                match variant{");
         for item in &items {
             if let EnumKind::Bare = item.kind {
@@ -562,12 +562,12 @@ fn derive_live_impl_inner(parser: &mut TokenParser, tb: &mut TokenBuilder) -> Re
         tb.add("            },");
         
         tb.add("            LiveValue::NamedEnum{base, variant}=>{");
-        tb.add("                if *base != enum_id{");
+        /*tb.add("                if *base != enum_id{");
         tb.add("                    cx.apply_error_wrong_enum_base(live_error_origin!(), index, nodes, enum_id, *base);");
         tb.add("                    index = nodes.skip_node(index);");
         tb.add("                    self.after_apply(cx, apply_from, start_index, nodes);");
         tb.add("                    return index;");
-        tb.add("                }");
+        tb.add("                }");*/
         tb.add("                match variant{");
         for item in &items {
             if let EnumKind::Named(fields) = &item.kind {

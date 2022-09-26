@@ -4,7 +4,7 @@
 // TO-DO:
 // - Create 'Phase' object to keep track of, tick and sample phases
 // - ...
-
+#![allow(dead_code)]
 use {
     std::sync::Arc,
     crate::{
@@ -34,13 +34,13 @@ pub enum LFOWave {
 }
 
 
-#[derive(Copy,Clone,Live, LiveHook, PartialEq, LiveAtomic, Debug, LiveRead)]
+#[derive(Copy, Clone, Live, LiveHook, PartialEq, LiveAtomic, Debug, LiveRead)]
 pub enum RootNote {
-    A, 
+    A,
     Asharp,
     B,
     #[pick]C,
-    Csharp, 
+    Csharp,
     D,
     Dsharp,
     E,
@@ -50,7 +50,7 @@ pub enum RootNote {
     Gsharp
 }
 
-#[derive(Copy, Clone,Live, LiveHook, PartialEq, LiveAtomic, Debug, LiveRead)]
+#[derive(Copy, Clone, Live, LiveHook, PartialEq, LiveAtomic, Debug, LiveRead)]
 pub enum MusicalScale {
     #[pick] Minor,
     Major,
@@ -99,7 +99,7 @@ pub struct OscSettings {
     #[live(0.0)] harmonic: f32a,
     #[live(0.0)] harmonicenv: f32a,
     #[live(0.0)] harmoniclfo: f32a,
-   
+    
     
 }
 
@@ -214,7 +214,7 @@ pub struct SequencerSettings {
     #[live(0)] polyphoniconeshot: u32a,
 }
 
-impl SequencerSettings{
+impl SequencerSettings {
     pub fn get_step(&self, step: usize) -> u32
     {
         match step {
@@ -239,27 +239,27 @@ impl SequencerSettings{
         };
         return 0;
     }
-
-    pub fn set_step(&self, step: usize, value: u32) 
+    
+    pub fn set_step(&self, step: usize, value: u32)
     {
         match step {
-            0 =>  self.step0.set(value),
-            1 =>  self.step1.set(value),
-            2 =>  self.step2.set(value),
-            3 =>  self.step3.set(value),
-            4 =>  self.step4.set(value),
-            5 =>  self.step5.set(value),
-            6 =>  self.step6.set(value),
-            7 =>  self.step7.set(value),
-            8 =>  self.step8.set(value),
-            9 =>  self.step9.set(value),
-            10 =>  self.step10.set(value),
-            11 =>  self.step11.set(value),
-            12 =>  self.step12.set(value),
-            13 =>  self.step13.set(value),
-            14 =>  self.step14.set(value),
-            15 =>  self.step15.set(value),           
-            _ =>  {}
+            0 => self.step0.set(value),
+            1 => self.step1.set(value),
+            2 => self.step2.set(value),
+            3 => self.step3.set(value),
+            4 => self.step4.set(value),
+            5 => self.step5.set(value),
+            6 => self.step6.set(value),
+            7 => self.step7.set(value),
+            8 => self.step8.set(value),
+            9 => self.step9.set(value),
+            10 => self.step10.set(value),
+            11 => self.step11.set(value),
+            12 => self.step12.set(value),
+            13 => self.step13.set(value),
+            14 => self.step14.set(value),
+            15 => self.step15.set(value),
+            _ => {}
             
         };
     }
@@ -319,132 +319,132 @@ pub struct HyperSawOscillatorState {
     phase: [f32; 7],
     delta_phase: [f32; 7],
     dpw: [DPWState; 7]
-
+    
 }
 
-impl HyperSawOscillatorState{
+impl HyperSawOscillatorState {
     pub fn get(&mut self, state: HyperSawGlobalState) -> f32
     {
         let mut res = 0.0;
-        for i in 0..state.new_n_saws{
-            res += OscillatorState::poly_saw(self.phase[i], self.delta_phase[i]) * state.volume_level[i];              
+        for i in 0..state.new_n_saws {
+            res += OscillatorState::poly_saw(self.phase[i], self.delta_phase[i]) * state.volume_level[i];
             // res +=  self.dpw[i].get3rdorder(self.phase[i], self.delta_phase[i]) * state.volume_level[i];
         };
-
+        
         return res;
     }
-
+    
     pub fn tick(&mut self, state: &HyperSawGlobalState)
     {
-        for i in 0..state.new_n_saws{
-
-            self.phase[i]+= self.delta_phase[i];
+        for i in 0..state.new_n_saws {
+            
+            self.phase[i] += self.delta_phase[i];
             while self.phase[i]>1.0 {
-                self.phase[i]-=1.0;
+                self.phase[i] -= 1.0;
             }
         }
     }
-
-    pub fn set_freq(&mut self, freq: f32, samplerate: f32, delta_phase: f32, state: &HyperSawGlobalState, _update: bool){      
+    
+    pub fn set_freq(&mut self, freq: f32, samplerate: f32, delta_phase: f32, state: &HyperSawGlobalState, _update: bool) {
         for i in 0..7 {
             self.delta_phase[i] = delta_phase * state.freq_multiplier[i];
             let prep = samplerate / (freq * state.freq_multiplier[i]); // / samplerate;
-            if !_update  {
+            if !_update {
                 self.dpw[i] = DPWState::default();
             }
-            self.dpw[i].set_gain1((1.0 / 24.0 * (3.1415 / (2.0 * (3.1415 / prep).sin())).powf(3.0)).powf(1.0 / 3.0)); 
-    
+            self.dpw[i].set_gain1((1.0 / 24.0 * (3.1415 / (2.0 * (3.1415 / prep).sin())).powf(3.0)).powf(1.0 / 3.0));
+            
         }
     }
-
+    
 }
 #[derive(Copy, Clone)]
-pub struct HyperSawGlobalState{
+pub struct HyperSawGlobalState {
     volume_level: [f32; 7],
     freq_multiplier: [f32; 7],
     last_spread: f32,
-    last_diffuse: f32, 
+    last_diffuse: f32,
     orig_level: f32,
-	f_extra_saws: f32,
-	n_extra_saws: usize,
-	f_frac_saw: f32,
-	f_saws: f32,
+    f_extra_saws: f32,
+    n_extra_saws: usize,
+    f_frac_saw: f32,
+    f_saws: f32,
     new_n_saws: usize
 }
 
-impl HyperSawGlobalState{
-    pub fn recalcsaws(&mut self){
-        self.f_extra_saws = self.last_diffuse*6.0;
-        self.n_extra_saws = (self.f_extra_saws.floor()+1.0).min(6.0) as usize;
+impl HyperSawGlobalState {
+    pub fn recalcsaws(&mut self) {
+        self.f_extra_saws = self.last_diffuse * 6.0;
+        self.n_extra_saws = (self.f_extra_saws.floor() + 1.0).min(6.0) as usize;
         if self.f_extra_saws <= 0.000001 {self.n_extra_saws = 0;}
-        self.f_frac_saw = self.f_extra_saws-self.f_extra_saws.floor();
+        self.f_frac_saw = self.f_extra_saws - self.f_extra_saws.floor();
         self.f_saws = 1.0 + self.f_extra_saws;
         self.new_n_saws = self.n_extra_saws + 1;
     }
     
     pub fn downrampfrom1(&mut self, factor: f32, input: f32) -> f32
     {
-        return 1.0 + ((input-1.0)*factor);
+        return 1.0 + ((input - 1.0) * factor);
     }
-
+    
     pub fn recalclevels(&mut self)
     {
-        let new_level = (self.orig_level * self.orig_level)/(self.downrampfrom1(-0.1 ,self.f_saws) ); 
-		
-        for i in 0..self.new_n_saws
-		{
-			self.volume_level[i] = 1.0;
-		};
-
-		if self.f_frac_saw.abs()>0.00001
-		{
-			let fract_level = self.f_frac_saw*self.f_frac_saw;
-			self.volume_level[self.new_n_saws-1 ] = fract_level;
-		}
-		
-		let mut total = 0.0;
-
-		for i in 0..self.new_n_saws
-		{
-			total += self.volume_level[i];
-		}
-       
-        total = 1.0/total;
-		
-        for i in 0..self.new_n_saws
-		{
-			self.volume_level[i] = (self.volume_level[i]) * (total * new_level);
-		}	
-
-     //   log!("{:?} {} {:?}", std::time::Instant::now(), self.new_n_saws, self.volume_level);
-    }
-
-    pub fn recalcfreqs(&mut self){
+        let new_level = (self.orig_level * self.orig_level) / (self.downrampfrom1(-0.1, self.f_saws));
         
-        self.freq_multiplier[0]=1.0;
-
-		for  i in 1..self.new_n_saws
-		{
-			let detune = (((i as f32)/2.0))*(self.last_spread*(1.0/6.0))*(0.5/(self.f_saws*0.5));
-			if i & 2 ==0
-			{
-				self.freq_multiplier[i] = 2.0f32.powf(detune);
-			}
-			else
-			{
-				self.freq_multiplier[i] = 2.0f32.powf(-detune);
-			};
-		};
-
+        for i in 0..self.new_n_saws
+        {
+            self.volume_level[i] = 1.0;
+        };
+        
+        if self.f_frac_saw.abs()>0.00001
+        {
+            let fract_level = self.f_frac_saw * self.f_frac_saw;
+            self.volume_level[self.new_n_saws - 1] = fract_level;
+        }
+        
+        let mut total = 0.0;
+        
+        for i in 0..self.new_n_saws
+        {
+            total += self.volume_level[i];
+        }
+        
+        total = 1.0 / total;
+        
+        for i in 0..self.new_n_saws
+        {
+            self.volume_level[i] = (self.volume_level[i]) * (total * new_level);
+        }
+        
+        //   log!("{:?} {} {:?}", std::time::Instant::now(), self.new_n_saws, self.volume_level);
+    }
+    
+    pub fn recalcfreqs(&mut self) {
+        
+        self.freq_multiplier[0] = 1.0;
+        
+        for i in 1..self.new_n_saws
+        {
+            let detune = (((i as f32) / 2.0)) * (self.last_spread * (1.0 / 6.0)) * (0.5 / (self.f_saws * 0.5));
+            if i & 2 == 0
+            {
+                self.freq_multiplier[i] = 2.0f32.powf(detune);
+            }
+            else
+            {
+                self.freq_multiplier[i] = 2.0f32.powf(-detune);
+            };
+        };
+        
         //log!("{:?} {} {:?}", std::time::Instant::now(), self.new_n_saws, self.freq_multiplier);
     }
 }
 
-impl Default for HyperSawGlobalState{
+impl Default for HyperSawGlobalState {
     fn default() -> Self {
-        Self{
-            volume_level: [0.0,0.0,0.0,0.0,0.0,0.0,0.0],
-            freq_multiplier:[1.0,1.0,1.0,1.0,1.0,1.0,1.0],
+        Self {
+            volume_level: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            freq_multiplier: [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0],
             last_spread: -1.0,
             last_diffuse: -1.0,
             orig_level: 1.0,
@@ -453,30 +453,30 @@ impl Default for HyperSawGlobalState{
             f_frac_saw: 0.0,
             f_saws: 0.0,
             new_n_saws: 0
-          
+            
         }
     }
 }
 
-impl Default for HyperSawOscillatorState{
+impl Default for HyperSawOscillatorState {
     fn default() -> Self {
-        Self{
-        phase: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
-        delta_phase: [1.414, 1.732, 2.236, 2.646, 3.317, 3.606, 4.123], // square root of primes: 2, 3, 5, 7, 11, 13, 17 (FIXME: initialize in code)
-        dpw: [Default::default();7]
+        Self {
+            phase: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+            delta_phase: [1.414, 1.732, 2.236, 2.646, 3.317, 3.606, 4.123], // square root of primes: 2, 3, 5, 7, 11, 13, 17 (FIXME: initialize in code)
+            dpw: [Default::default(); 7]
         }
     }
 }
 
 #[derive(Copy, Clone)]
-pub struct DPWState{
+pub struct DPWState {
     x1: f32,
     x2: f32
 }
 
-impl Default for DPWState{
+impl Default for DPWState {
     fn default() -> Self {
-        Self{
+        Self {
             x2: 0.0,
             x1: 0.0
             
@@ -484,29 +484,29 @@ impl Default for DPWState{
     }
 }
 
-impl DPWState{
-    pub fn get2ndorder(&mut self, t: f32, dt: f32)->f32
-    {     
-          let x = 2.*t - 1.;
-          let x0 = x*x;
-          let y = (x0 - self.x1) / (4.*dt);
-          self.x1 = x0;
-          return y;
+impl DPWState {
+    pub fn get2ndorder(&mut self, t: f32, dt: f32) -> f32
+    {
+        let x = 2. * t - 1.;
+        let x0 = x * x;
+        let y = (x0 - self.x1) / (4. * dt);
+        self.x1 = x0;
+        return y;
     }
-    pub fn get3rdorder(&mut self, t: f32, dt: f32)->f32
-    {     
-        let x = 2.*t - 1.;
-        let x0 = x*x*x - x;
-        let y = ((x0 - self.x1) - (self.x1 - self.x2)) / (24.*dt*dt);
+    pub fn get3rdorder(&mut self, t: f32, dt: f32) -> f32
+    {
+        let x = 2. * t - 1.;
+        let x0 = x * x * x - x;
+        let y = ((x0 - self.x1) - (self.x1 - self.x2)) / (24. * dt * dt);
         self.x2 = self.x1;
         self.x1 = x0;
         return y;
     }
-
-    pub fn set_gain1(&mut self, newgain: f32){
+    
+    pub fn set_gain1(&mut self, _newgain: f32) {
     }
     
-} 
+}
 
 #[derive(Copy, Clone)]
 pub struct DPWStateOld {
@@ -519,13 +519,13 @@ pub struct DPWStateOld {
 
 impl DPWStateOld
 {
-    pub fn set_gain1(&mut self, newgain: f32){
+    pub fn set_gain1(&mut self, newgain: f32) {
         self.dpw_gain1 = newgain;
     }
-
+    
     pub fn get(&mut self, phase: f32) -> f32
     {
-        let triv = 2.0 * phase - 1.0;     
+        let triv = 2.0 * phase - 1.0;
         let sqr = triv * triv;
         
         let poly = sqr * sqr - 2.0 * sqr;
@@ -566,12 +566,12 @@ impl DPWStateOld
         
         return tmp_a[0] * self.dpw_gain2 * 0.005; //* self.dpw_gain;
     }
- 
+    
 }
 
-impl Default for DPWStateOld{
+impl Default for DPWStateOld {
     fn default() -> Self {
-        Self{
+        Self {
             dpw_gain1: 1.0,
             dpw_gain2: 1.0,
             dpw_init_countdown: 4,
@@ -601,17 +601,17 @@ impl SubOscillatorState {
     fn get(self) -> f32 {
         return (self.phase * 6.28318530718).sin();
     }
-
+    
     fn tick(&mut self) {
         self.phase += self.delta_phase;
         while self.phase > 1.0 {
             self.phase -= 1.0
         }
-    }    
+    }
     
     pub fn set_note(&mut self, note: u8, samplerate: f32) {
         let freq = 440.0 * f32::powf(2.0, ((note as f32) - 69.0 - 24.0) / 12.0);
-        self.delta_phase = (freq*0.5) / samplerate;
+        self.delta_phase = (freq * 0.5) / samplerate;
     }
 }
 
@@ -645,43 +645,43 @@ impl OscillatorState {
         tri -= self.blamp(1.0 - t2, self.delta_phase);
         return tri;
     }
-
+    
     fn pure(&mut self) -> f32 {
         return (self.phase * 6.28318530718).sin();
     }
-
-    fn harmonic(&mut self, parameter:f32) -> f32 {
-
+    
+    fn harmonic(&mut self, parameter: f32) -> f32 {
+        
         let h = parameter * 16.0;
         let f_h = h.floor();
         let n_h = f_h + 1.0;
         let n_f = h - f_h;
-
-        let phasepi = self.phase * 6.28318530718;
-        let p1 = phasepi * n_h ;
-        let p2 = phasepi * (n_h + 1.0) ;
         
-        return (p1).sin() * (1.0-n_f) +  (p2).sin() * n_f;
+        let phasepi = self.phase * 6.28318530718;
+        let p1 = phasepi * n_h;
+        let p2 = phasepi * (n_h + 1.0);
+        
+        return (p1).sin() * (1.0 - n_f) + (p2).sin() * n_f;
     }
-
+    
     /* PolyBLEP saw impl. */
-
+    
     fn poly_saw_bitwise_or_zero(value: f32) -> u32
     {
         let result = (value as u32) | 0;
         return result;
     }
-
+    
     // http://www.acoustics.hut.fi/publications/papers/smc2010-phaseshaping/
     fn poly_saw_blep(point: f32, dt: f32) -> f32
     {
         if point < dt {
-            let mut squared = (point/dt) - 1.0;
+            let mut squared = (point / dt) - 1.0;
             squared *= squared;
             return -squared;
-        } 
-        else if point > (1.0-dt) {
-            let mut squared = ((point-1.0)/dt) + 1.0;
+        }
+        else if point > (1.0 - dt) {
+            let mut squared = ((point - 1.0) / dt) + 1.0;
             squared *= squared;
             return squared;
         }
@@ -689,17 +689,17 @@ impl OscillatorState {
             return 0.0;
         }
     }
-
+    
     pub fn poly_saw(phase: f32, pitch /* delta_phase */: f32) -> f32 {
         let mut p1 = phase + 0.5;
-        p1-= Self::poly_saw_bitwise_or_zero(p1) as f32;
-
-        let mut saw = 2.0*p1 - 1.0;
+        p1 -= Self::poly_saw_bitwise_or_zero(p1) as f32;
+        
+        let mut saw = 2.0 * p1 - 1.0;
         saw -= Self::poly_saw_blep(p1, pitch);
-
+        
         return saw;
     }
-
+    
     /* begin of supersaw specific impl. */
     
     // values adapted from measurements done with actual synthesizer
@@ -708,11 +708,11 @@ impl OscillatorState {
         self.supersaw.mix_main = -0.55366 * mix + 0.99785;
         self.supersaw.mix_side_bands = -0.73764 * powf(mix, 2.0) + 1.2841 * mix + 0.044372;
     }
-
+    
     fn sps_pure(&mut self, phase_idx: usize) -> f32 {
-        return (self.supersaw.phase[phase_idx]*6.28318530718).cos();
+        return (self.supersaw.phase[phase_idx] * 6.28318530718).cos();
     }
-
+    
     fn sps_tick(&mut self)
     {
         for n in 0..7 {
@@ -722,11 +722,11 @@ impl OscillatorState {
             }
         }
     }
-
+    
     fn supersaw(&mut self) -> f32 {
-        let mut main_band =  Self::poly_saw(self.supersaw.phase[0], self.supersaw.delta_phase[0]);
+        let main_band = Self::poly_saw(self.supersaw.phase[0], self.supersaw.delta_phase[0]);
         // main_band -= self.sps_pure(0);
-
+        
         let mut side_bands = 0.0;
         for n in 1..7 {
             side_bands += Self::poly_saw(self.supersaw.phase[n], self.supersaw.delta_phase[n]);
@@ -735,11 +735,11 @@ impl OscillatorState {
             }
         }
         
-        return main_band*self.supersaw.mix_main + side_bands*self.supersaw.mix_side_bands;
+        return main_band * self.supersaw.mix_main + side_bands * self.supersaw.mix_side_bands;
     }
-
+    
     /* end of supersaw specific impl. */
-
+    
     fn tick(&mut self, hyper_global_state: &HyperSawGlobalState)
     {
         // internal single phase
@@ -747,12 +747,12 @@ impl OscillatorState {
         while self.phase > 1.0 {
             self.phase -= 1.0;
         };
-
+        
         // complex osc. phases
         self.sps_tick();
         self.hypersaw.tick(&hyper_global_state);
     }
-
+    
     fn get(&mut self, settings: &OscSettings, _samplerate: f32, hyper: HyperSawGlobalState, env: f32, lfo: f32) -> f32 {
         match settings.osc_type.get() {
             OscType::Pure => self.pure(),
@@ -761,12 +761,12 @@ impl OscillatorState {
             OscType::BlampTri => self.blamp_triangle(),
             OscType::SuperSaw => self.supersaw(),
             OscType::HyperSaw => self.hypersaw.get(hyper),
-            OscType::HarmonicSeries => self.harmonic((settings.harmonic.get() + env * settings.harmonicenv.get() + lfo * settings.harmoniclfo.get()).clamp(0.0,1.0) )
+            OscType::HarmonicSeries => self.harmonic((settings.harmonic.get() + env * settings.harmonicenv.get() + lfo * settings.harmoniclfo.get()).clamp(0.0, 1.0))
         }
     }
     
-    fn set_note(&mut self, note: u8, samplerate: f32, settings: &OscSettings, supersaw: &SupersawSettings,hypersaw: &HyperSawGlobalState,  sps_detune_tab: &[f32; 1024], _update: bool) {
-        let freq = (440.0 /6.28318530718 ) * f32::powf(2.0, ((note as f32) - 69.0 + settings.transpose.get() as f32 + settings.detune.get()) / 12.0);
+    fn set_note(&mut self, note: u8, samplerate: f32, settings: &OscSettings, supersaw: &SupersawSettings, hypersaw: &HyperSawGlobalState, sps_detune_tab: &[f32; 1024], _update: bool) {
+        let freq = (440.0 / 6.28318530718) * f32::powf(2.0, ((note as f32) - 69.0 + settings.transpose.get() as f32 + settings.detune.get()) / 12.0);
         self.delta_phase = (6.28318530718 * freq) / samplerate;
         
         match settings.osc_type.get() {
@@ -775,12 +775,12 @@ impl OscillatorState {
                 if !_update {
                     self.dpw = DPWState::default();
                 }
-
+                
                 let prep = samplerate / freq;
                 self.dpw.set_gain1((1.0 / 24.0 * (3.1415 / (2.0 * (3.1415 / prep).sin())).powf(3.0)).powf(1.0 / 3.0));
             }
             OscType::HyperSaw => {
-                self.hypersaw.set_freq(freq, samplerate, self.delta_phase, &hypersaw, _update );               
+                self.hypersaw.set_freq(freq, samplerate, self.delta_phase, &hypersaw, _update);
             }
             OscType::HarmonicSeries => {}
             OscType::SuperSaw => {
@@ -797,16 +797,16 @@ impl OscillatorState {
                 // lazily initialiizing here (constants courtesy of Alex Shore, the better sounding set of the 2 I have in FM. BISON)
                 // reference: https://github.com/bipolaraudio/FM-BISON/blob/master/literature/Supersaw%20thesis.pdf
                 let sps_coeffs: [f32; 6] = [-0.11002313, -0.06288439, -0.03024148, 0.02953130, 0.06216538, 0.10745242];
-
+                
                 self.supersaw.delta_phase[0] = self.delta_phase;
-               
+                
                 for n in 1..7 {
                     // calculate & set sideband phase deltas
                     let offs = self.supersaw.detune * sps_coeffs[n - 1];
                     let freq_offs = freq * offs;
                     let detuned_freq = freq + freq_offs;
-                    self.supersaw.delta_phase[n] = (6.28318530718 * detuned_freq)/samplerate;
-               }
+                    self.supersaw.delta_phase[n] = (6.28318530718 * detuned_freq) / samplerate;
+                }
             }
         }
     }
@@ -840,9 +840,9 @@ impl Default for LFOState {
         }
     }
 }
-impl Default for SuperSawOscillatorState{
+impl Default for SuperSawOscillatorState {
     fn default() -> Self {
-        Self{
+        Self {
             phase: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
             delta_phase: [1.414, 1.732, 2.236, 2.646, 3.317, 3.606, 4.123], // square root of primes: 2, 3, 5, 7, 11, 13, 17 (FIXME: initialize in code)
             detune: 0.0,
@@ -913,7 +913,7 @@ impl Default for EnvelopeState {
 }
 
 impl EnvelopeState {
-    fn get(&mut self, settings: &EnvelopeSettings, samplerate: f32) -> f32 {        
+    fn get(&mut self, settings: &EnvelopeSettings, samplerate: f32) -> f32 {
         self.current_value = self.current_value + self.delta_value;
         self.state_time = self.state_time - 1;
         //println!("st {}", self.state_time);
@@ -1012,10 +1012,10 @@ impl EnvelopeState {
     }
     
     fn nicerange(input: f32, samplerate: f32) -> f32 {
-
+        
         let inputexp = input.powf(0.54);
-        let result = 64.0*((samplerate * 6.0)/64.0).powf(inputexp);
-        return result; 
+        let result = 64.0 * ((samplerate * 6.0) / 64.0).powf(inputexp);
+        return result;
     }
     
     fn trigger_off(&mut self, _velocity: f32, settings: &EnvelopeSettings, samplerate: f32) {
@@ -1084,7 +1084,7 @@ impl FilterState {
     }
     
     fn set_cutoff(&mut self, settings: &FilterSettings, envelope: f32, _sample_rate: f32, touch: f32, lfo: f32) {
-        self.fc = (settings.cutoff.get() + touch * settings.touch_amount.get() + lfo * settings.lfo_amount.get()*0.35 + envelope * settings.envelope_amount.get() * 0.5).clamp(0.0, 1.0);
+        self.fc = (settings.cutoff.get() + touch * settings.touch_amount.get() + lfo * settings.lfo_amount.get() * 0.35 + envelope * settings.envelope_amount.get() * 0.5).clamp(0.0, 1.0);
         self.fc *= self.fc * 0.5;
         self.damp = 1.0 - settings.resonance.get();
         let preclamp = 2.0 * ((3.1415 * self.fc).sin());
@@ -1163,12 +1163,12 @@ impl IronFishVoice {
         self.mod_envelope.trigger_off(velocity, &settings.mod_envelope, settings.sample_rate.get());
     }
     
-    pub fn update_note(&mut self, settings: &IronFishSettings, h: &IronFishGlobalVoiceState ,sps_detune_tab: &[f32; 1024]) {
+    pub fn update_note(&mut self, settings: &IronFishSettings, h: &IronFishGlobalVoiceState, sps_detune_tab: &[f32; 1024]) {
         self.osc1.set_note(self.current_note as u8, settings.sample_rate.get(), &settings.osc1, &settings.supersaw1, &h.hypersaw1, sps_detune_tab, true);
         self.osc2.set_note(self.current_note as u8, settings.sample_rate.get(), &settings.osc2, &settings.supersaw2, &h.hypersaw2, sps_detune_tab, true);
     }
     
-    pub fn note_on(&mut self, b1: u8, b2: u8, settings: &IronFishSettings,h: &IronFishGlobalVoiceState ,sps_detune_tab: &[f32; 1024]) {
+    pub fn note_on(&mut self, b1: u8, b2: u8, settings: &IronFishSettings, h: &IronFishGlobalVoiceState, sps_detune_tab: &[f32; 1024]) {
         
         let velocity = (b2 as f32) / 127.0;
         self.osc1.set_note(b1, settings.sample_rate.get(), &settings.osc1, &settings.supersaw1, &h.hypersaw1, sps_detune_tab, false);
@@ -1179,33 +1179,33 @@ impl IronFishVoice {
         self.current_note = b1 as i16;
     }
     
-    pub fn one(&mut self,state: &IronFishGlobalVoiceState, settings: &IronFishSettings, touch: f32, lfo: f32, osc1_gain: f32, osc2_gain: f32) -> f32 {
+    pub fn one(&mut self, state: &IronFishGlobalVoiceState, settings: &IronFishSettings, touch: f32, lfo: f32, osc1_gain: f32, osc2_gain: f32) -> f32 {
         // update phases (all are free running, more or lesss)
         self.subosc.tick();
         self.osc1.tick(&state.hypersaw1);
         self.osc2.tick(&state.hypersaw2);
-
+        
         let volume_envelope = self.volume_envelope.get(&settings.volume_envelope, settings.sample_rate.get());
         let mod_envelope = self.mod_envelope.get(&settings.mod_envelope, settings.sample_rate.get());
-
-        // sample 
-        let sub = self.subosc.get();        
-        let osc1 = self.osc1.get(&settings.osc1, settings.sample_rate.get(), state.hypersaw1,mod_envelope, lfo);
-        let osc2 = self.osc2.get(&settings.osc2, settings.sample_rate.get(), state.hypersaw2,mod_envelope, lfo);
+        
+        // sample
+        let sub = self.subosc.get();
+        let osc1 = self.osc1.get(&settings.osc1, settings.sample_rate.get(), state.hypersaw1, mod_envelope, lfo);
+        let osc2 = self.osc2.get(&settings.osc2, settings.sample_rate.get(), state.hypersaw2, mod_envelope, lfo);
         let noise = random_f32(&mut self.seed) * 2.0 - 1.0;
-
+        
         // set up filter
         self.filter1.set_cutoff(&settings.filter1, mod_envelope, settings.sample_rate.get(), touch, lfo);
         
         // mix signal
-        let oscinput = osc1*osc1_gain + osc2*osc2_gain + settings.sub_osc.get()*sub + noise*settings.noise.get();
-
+        let oscinput = osc1 * osc1_gain + osc2 * osc2_gain + settings.sub_osc.get() * sub + noise * settings.noise.get();
+        
         // apply filter
         let filter = self.filter1.get(oscinput, &settings.filter1);
         
         // apply envelope
         let output = volume_envelope * filter;
-
+        
         // FIXME: why 0.006?
         return output * 0.006;
     }
@@ -1213,28 +1213,28 @@ impl IronFishVoice {
     pub fn fill_buffer(&mut self, mix_buffer: &mut AudioBuffer, startidx: usize, frame_count: usize, display_buffer: Option<&mut AudioBuffer>, settings: &IronFishSettings, state: &IronFishGlobalVoiceState, touch: f32, lfo: f32) {
         
         let (left, right) = mix_buffer.stereo_mut();
-
+        
         // FIXME: like many parameters this one is also not interpolated per sample; I have an idea for a proper interpolation object
         //        and have used it before but right now I'm just going to avoid those sqrt() calls per sample and pray nobody touches that slider mid-note
         let balance = settings.osc_balance.get();
-        let osc1_gain = (1.0-balance).sqrt();
+        let osc1_gain = (1.0 - balance).sqrt();
         let osc2_gain = balance.sqrt();
         
-        if let Some(display_buffer) = display_buffer 
+        if let Some(display_buffer) = display_buffer
         {
             let (left_disp, right_disp) = display_buffer.stereo_mut();
-            for i in startidx..frame_count + startidx 
+            for i in startidx..frame_count + startidx
             {
-                let output = self.one(state, &settings,touch, lfo, osc1_gain, osc2_gain) * 6.28;
+                let output = self.one(state, &settings, touch, lfo, osc1_gain, osc2_gain) * 6.28;
                 left_disp[i] = output as f32;
                 right_disp[i] = output as f32;
                 left[i] += output as f32;
                 right[i] += output as f32;
             }
         }
-        else 
+        else
         {
-            for i in startidx..frame_count + startidx 
+            for i in startidx..frame_count + startidx
             {
                 let output = self.one(state, &settings, touch, lfo, osc1_gain, osc2_gain) * 6.28;
                 left[i] += output as f32;
@@ -1255,7 +1255,7 @@ pub struct IronFishGlobalVoiceState {
 pub struct IronFishState {
     //from_ui: FromUIReceiver<FromUI>,
     //to_ui: ToUISender<ToUI>,
-    display_buffers: Vec<Option<AudioBuffer>>,
+    display_buffers: Vec<Option<AudioBuffer >>,
     settings: Arc<IronFishSettings>,
     voices: [IronFishVoice; 16],
     activemidinotes: [bool; 256],
@@ -1274,7 +1274,7 @@ pub struct IronFishState {
     lfo: LFOState,
     lfovalue: f32,
     sps_detune_tab: [f32; 1024], // FIXME: move to IronFishGlobalVoiceState
-    g: IronFishGlobalVoiceState   
+    g: IronFishGlobalVoiceState
 }
 
 impl IronFishState {
@@ -1289,17 +1289,17 @@ impl IronFishState {
         }
         else {
             self.internal_note_off(b1, b2);
-        }        
+        }
     }
-
+    
     pub fn internal_note_off(&mut self, b1: u8, b2: u8) {
         for i in 0..self.voices.len() {
             if self.voices[i].active() == b1 as i16 {
                 self.voices[i].note_off(b1, b2, &self.settings)
             }
-        }      
+        }
     }
-
+    
     pub fn note_on(&mut self, b1: u8, b2: u8) {
         if b1 > 127 {return;};
         //log!("note! {} {}", b1,b2);
@@ -1317,10 +1317,10 @@ impl IronFishState {
     pub fn internal_note_on(&mut self, b1: u8, b2: u8) {
         for i in 0..self.voices.len() {
             if self.voices[i].active() == -1 {
-                self.voices[i].note_on(b1, b2, &self.settings,&self.g, &self.sps_detune_tab);
+                self.voices[i].note_on(b1, b2, &self.settings, &self.g, &self.sps_detune_tab);
                 return;
             }
-        }       
+        }
     }
     
     pub fn rebuildarp(&mut self)
@@ -1334,7 +1334,7 @@ impl IronFishState {
         }
         self.arp.melodylength = current;
     }
-
+    
     /*
     pub fn one(&mut self) -> f32 {
         let mut output: f32 = 0.0;
@@ -1420,21 +1420,21 @@ impl IronFishState {
         }
         
         buffer.zero();
-
+        
         let mut pitchdirty: bool = false;
         if self.osc1cache.transpose.get() != self.settings.osc1.transpose.get() {pitchdirty = true;}
         if self.osc1cache.detune.get() != self.settings.osc1.detune.get() {pitchdirty = true;}
         if self.osc2cache.transpose.get() != self.settings.osc2.transpose.get() {pitchdirty = true;}
         if self.osc2cache.detune.get() != self.settings.osc2.detune.get() {pitchdirty = true;}
-
+        
         // FIXME: if oscillator is dirty always re-evaluate/calculate hypersaw settings (situation
         //        would occur where settings were not picked up when switching from supersaw to hypersaw,
         //        that said I'd like those to be separate parameters, and shouldn't this logic just not live here
         //        or even better: not exist in this capacity?)
-        let osc_dirty = 
-            self.osc1cache.osc_type.get() != self.settings.osc1.osc_type.get()
-        ||  self.osc2cache.osc_type.get() != self.settings.osc2.osc_type.get();
-
+        let osc_dirty =
+        self.osc1cache.osc_type.get() != self.settings.osc1.osc_type.get()
+            || self.osc2cache.osc_type.get() != self.settings.osc2.osc_type.get();
+        
         // FIXME: maybe we should rename 'supersaw*' to something generic shared by both types?
         let mut diffuse1dirty: bool = false;
         if osc_dirty || self.g.hypersaw1.last_diffuse != self.settings.supersaw1.diffuse.get()
@@ -1443,7 +1443,7 @@ impl IronFishState {
             self.g.hypersaw1.last_diffuse = self.settings.supersaw1.diffuse.get();
             self.g.hypersaw1.recalcsaws();
         }
-
+        
         let mut diffuse2dirty: bool = false;
         if osc_dirty || self.g.hypersaw2.last_diffuse != self.settings.supersaw2.diffuse.get()
         {
@@ -1456,29 +1456,29 @@ impl IronFishState {
         if osc_dirty || self.g.hypersaw1.last_spread != self.settings.supersaw1.spread.get()
         {
             spread1dirty = true;
-            self.g.hypersaw1.last_spread =  self.settings.supersaw1.spread.get();
+            self.g.hypersaw1.last_spread = self.settings.supersaw1.spread.get();
         }
-
+        
         let mut spread2dirty: bool = false;
         if osc_dirty || self.g.hypersaw2.last_spread != self.settings.supersaw2.spread.get()
         {
             spread2dirty = true;
             self.g.hypersaw2.last_spread = self.settings.supersaw2.spread.get();
         }
-
+        
         let recalchyperlevels1 = diffuse1dirty;
         let recalchyperlevels2 = diffuse2dirty;
-
+        
         if recalchyperlevels1 {
             self.g.hypersaw1.recalclevels();
             spread1dirty = true;
         }
-
+        
         if recalchyperlevels2 {
-            self.g.hypersaw2.recalclevels();            
+            self.g.hypersaw2.recalclevels();
             spread2dirty = true;
         }
-
+        
         if spread1dirty {
             self.g.hypersaw1.recalcfreqs();
         }
@@ -1486,12 +1486,12 @@ impl IronFishState {
         if spread2dirty {
             self.g.hypersaw2.recalcfreqs();
         }
-
+        
         if osc_dirty {
             self.osc1cache.osc_type.set(self.settings.osc1.osc_type.get());
             self.osc2cache.osc_type.set(self.settings.osc2.osc_type.get());
         }
-
+        
         if pitchdirty {
             self.osc1cache.transpose.set(self.settings.osc1.transpose.get());
             self.osc1cache.detune.set(self.settings.osc1.detune.get());
@@ -1504,17 +1504,17 @@ impl IronFishState {
                 }
             }
         }
-
+        
         let mut remaining = buffer.frame_count();
         let mut bufferidx = 0;
         
-
-        let lfofreq = 0.5 * (2.0).powf(self.settings.lfo.rate.get()*8.0 - 4.0);
+        
+        let lfofreq = 0.5 * (2.0).powf(self.settings.lfo.rate.get() * 8.0 - 4.0);
         let lfodphase = 1.0 / (self.settings.sample_rate.get() / lfofreq);
         
         
         self.lfo.phase += remaining as f32 * lfodphase;
-
+        
         
         while self.lfo.phase > 1.0 {
             self.lfo.phase -= 1.0;
@@ -1527,22 +1527,22 @@ impl IronFishState {
             let mut toprocess = remaining;
             if self.sequencer.samplesleftinstep == 0 {
                 
-                if self.settings.sequencer.playing.get(){
-                    if self.lastplaying == false{
+                if self.settings.sequencer.playing.get() {
+                    if self.lastplaying == false {
                         self.lastplaying = true;
                         self.sequencer.currentstep = 15;
                         self.old_step = 0;
                     }
-
-                    if self.sequencer.currentscale != self.settings.sequencer.scale.get(){
+                    
+                    if self.sequencer.currentscale != self.settings.sequencer.scale.get() {
                         self.sequencer.currentscale = self.settings.sequencer.scale.get();
                         self.all_notes_off();
                     }
-                    if self.sequencer.currentrootnote != self.settings.sequencer.rootnote.get(){
+                    if self.sequencer.currentrootnote != self.settings.sequencer.rootnote.get() {
                         self.all_notes_off();
                         self.sequencer.currentrootnote = self.settings.sequencer.rootnote.get();
                     }
-
+                    
                     
                     // process notes!
                     let newstepidx = (self.sequencer.currentstep + 1) % 16;
@@ -1550,44 +1550,41 @@ impl IronFishState {
                     
                     //log!("tick! {:?} {:?}",newstepidx, new_step);
                     // minor scale..
-                    let scalecount = [7,7,7,5];
-                    let scale =[[0,2,3,5,7,8,11],
-                                [0,2,4,5,7,9,11],
-                                [0,2,3,5,7,9,10],
-                                [0,2,5,7,9,12,14]];
-
+                    let scalecount = [7, 7, 7, 5];
+                    let scale = [[0, 2, 3, 5, 7, 8, 11], [0, 2, 4, 5, 7, 9, 11], [0, 2, 3, 5, 7, 9, 10], [0, 2, 5, 7, 9, 12, 14]];
+                    
                     let mut scaleidx = 0;
-                    let rootnoteenum = self.settings.sequencer.rootnote.get() ;
+                    let rootnoteenum = self.settings.sequencer.rootnote.get();
                     
                     let mut rootnote = 12;
-                    if rootnoteenum == RootNote::A{rootnote = 12-3 ;};
-                    if rootnoteenum == RootNote::Asharp{rootnote = 12-2 ;};
-                    if rootnoteenum == RootNote::B{rootnote = 12-1 ;};
-                    if rootnoteenum == RootNote::C{rootnote = 12-0 ;};
-                    if rootnoteenum == RootNote::Csharp{rootnote = 12+1 ;};
-                    if rootnoteenum == RootNote::D{rootnote = 12+2 ;};
-                    if rootnoteenum == RootNote::Dsharp{rootnote = 12+3 ;};
-                    if rootnoteenum == RootNote::E{rootnote = 12+4 ;};
-                    if rootnoteenum == RootNote::F{rootnote = 12+5 ;};
-                    if rootnoteenum == RootNote::Fsharp{rootnote = 12+6 ;};
-                    if rootnoteenum == RootNote::G{rootnote = 12+7 ;};
-                    if rootnoteenum == RootNote::Gsharp{rootnote = 12+8 ;};
+                    if rootnoteenum == RootNote::A {rootnote = 12 - 3;};
+                    if rootnoteenum == RootNote::Asharp {rootnote = 12 - 2;};
+                    if rootnoteenum == RootNote::B {rootnote = 12 - 1;};
+                    if rootnoteenum == RootNote::C {rootnote = 12 - 0;};
+                    if rootnoteenum == RootNote::Csharp {rootnote = 12 + 1;};
+                    if rootnoteenum == RootNote::D {rootnote = 12 + 2;};
+                    if rootnoteenum == RootNote::Dsharp {rootnote = 12 + 3;};
+                    if rootnoteenum == RootNote::E {rootnote = 12 + 4;};
+                    if rootnoteenum == RootNote::F {rootnote = 12 + 5;};
+                    if rootnoteenum == RootNote::Fsharp {rootnote = 12 + 6;};
+                    if rootnoteenum == RootNote::G {rootnote = 12 + 7;};
+                    if rootnoteenum == RootNote::Gsharp {rootnote = 12 + 8;};
                     
                     
-                    if self.settings.sequencer.scale.get() == MusicalScale::Major {scaleidx = 1;} ;
-                    if self.settings.sequencer.scale.get() == MusicalScale::Dorian {scaleidx = 2;} ;
-                    if self.settings.sequencer.scale.get() == MusicalScale::Pentatonic {scaleidx = 3;} ;
-
+                    if self.settings.sequencer.scale.get() == MusicalScale::Major {scaleidx = 1;};
+                    if self.settings.sequencer.scale.get() == MusicalScale::Dorian {scaleidx = 2;};
+                    if self.settings.sequencer.scale.get() == MusicalScale::Pentatonic {scaleidx = 3;};
+                    
                     for i in 0..32 {
                         if self.old_step & (1 << (31 - i)) != 0 {
                             if (new_step & (1 << (31 - i))) == 0 {
                                 //  log!("note off {:?}",scale[i]);
-                                self.internal_note_off(rootnote + scale[scaleidx][(i%scalecount[scaleidx]) as usize] +  (i/scalecount[scaleidx])*12, 127);
+                                self.internal_note_off(rootnote + scale[scaleidx][(i % scalecount[scaleidx]) as usize] + (i / scalecount[scaleidx]) * 12, 127);
                             }
                         } else {
-                            if new_step & (1 << (31 - i)) != 0{
+                            if new_step & (1 << (31 - i)) != 0 {
                                 // log!("note on {:?}",scale[i]);
-                                self.internal_note_on(rootnote + scale[scaleidx][(i%scalecount[scaleidx]) as usize]+  (i/scalecount[scaleidx])*12, 127);
+                                self.internal_note_on(rootnote + scale[scaleidx][(i % scalecount[scaleidx]) as usize] + (i / scalecount[scaleidx]) * 12, 127);
                             }
                         }
                     }
@@ -1596,7 +1593,7 @@ impl IronFishState {
                     self.sequencer.currentstep = newstepidx;
                 }
                 
-                if self.settings.arp.enabled.get(){
+                if self.settings.arp.enabled.get() {
                     self.internal_note_off(self.arp.lastarpnote as u8, 127);
                     
                     if self.activemidinotecount > 0 {
@@ -1613,7 +1610,7 @@ impl IronFishState {
             self.sequencer.samplesleftinstep -= toprocess;
             
             
-            if self.lastplaying && self.settings.sequencer.playing.get() == false{
+            if self.lastplaying && self.settings.sequencer.playing.get() == false {
                 self.all_notes_off();
                 self.lastplaying = false;
             }
@@ -1702,7 +1699,7 @@ impl AudioGraphNode for IronFishState {
             _ => ()
         }
         
-        if data.data0 == 0xb0 && data.data1 == 1{
+        if data.data0 == 0xb0 && data.data1 == 1 {
             self.touch = (data.data2 as f32 - 40.0) / (127.0 - 40.0);
             self.touch += self.settings.touch.offset.get();
             self.touch *= self.settings.touch.scale.get();
@@ -1717,16 +1714,16 @@ impl AudioGraphNode for IronFishState {
 
 impl AudioComponent for IronFish {
     fn get_graph_node(&mut self, _cx: &mut Cx) -> Box<dyn AudioGraphNode + Send> {
-       // self.from_ui.new_channel();
+        // self.from_ui.new_channel();
         
         let mut buffers = Vec::new();
-        buffers.resize(16,None);
+        buffers.resize(16, None);
         
         // precalculate supersaw detune table (heavy polnynomial, based on data sampled from actual synth.)
         // reference: https://github.com/bipolaraudio/FM-BISON/blob/master/literature/Supersaw%20thesis.pdf
         // FIXME: move to it's own function/object to keep things tidy
         let mut sps_detune_tab = [0f32; 1024];
-        for i in 0..1024{
+        for i in 0..1024 {
             let detune = (1.0 / 1024.0) * i as f32;
             sps_detune_tab[i] =
             (10028.7312891634 * pow(detune, 11.0)) - (50818.8652045924 * pow(detune, 10.0)) + (111363.4808729368 * pow(detune, 9.0)) -

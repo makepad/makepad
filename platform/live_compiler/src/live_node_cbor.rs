@@ -167,24 +167,24 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
             }
             
             fn encode_i64(v: i64, out: &mut Vec<u8>) {
-                if v < 0{
+                if v < 0 {
                     let v = ((-v) - 1) as u64;
-                    if v <= (CBOR_NUINT_END - CBOR_NUINT_START) as u64{
+                    if v <= (CBOR_NUINT_END - CBOR_NUINT_START) as u64 {
                         out.push(CBOR_NUINT_START + v as u8);
                     }
-                    else if v <= std::u8::MAX as u64{
+                    else if v <= std::u8::MAX as u64 {
                         out.push(CBOR_NU8);
                         out.extend_from_slice(&(v as u8).to_be_bytes());
                     }
-                    else if v <= std::u16::MAX as u64{
+                    else if v <= std::u16::MAX as u64 {
                         out.push(CBOR_NU16);
                         out.extend_from_slice(&(v as u16).to_be_bytes());
                     }
-                    else if v <= std::u32::MAX as u64{
+                    else if v <= std::u32::MAX as u64 {
                         out.push(CBOR_NU32);
                         out.extend_from_slice(&(v as u32).to_be_bytes());
                     }
-                    else{
+                    else {
                         out.push(CBOR_NU64);
                         out.extend_from_slice(&v.to_be_bytes());
                     }
@@ -237,8 +237,8 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
             
             fn encode_str(s: &str, out: &mut Vec<u8>) {
                 let len = s.len();
-                if len <= (CBOR_UTF8_END-CBOR_UTF8_START) as usize {
-                    out.push(len as u8 | CBOR_UTF8_START);
+                if len <= (CBOR_UTF8_END - CBOR_UTF8_START) as usize {
+                    out.push(len as u8 + CBOR_UTF8_START);
                     out.extend_from_slice(s.as_bytes());
                 }
                 else if len <= std::u8::MAX as usize {
@@ -256,7 +256,7 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                     out.extend_from_slice(&(len as u32).to_be_bytes());
                     out.extend_from_slice(s.as_bytes());
                 }
-                else{
+                else {
                     out.push(CBOR_UTF8_64);
                     out.extend_from_slice(&(len as u64).to_be_bytes());
                     out.extend_from_slice(s.as_bytes());
@@ -289,36 +289,36 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                     encode_f64(*v, &mut out);
                 },
                 LiveValue::Color(v) => {
-                    out.push(1 | CBOR_MAP_START);
+                    out.push(1 + CBOR_MAP_START);
                     encode_str("as", &mut out);
                     encode_u32(*v, &mut out);
                 },
                 LiveValue::Vec2(v) => {
-                    out.push(1 | CBOR_MAP_START);
+                    out.push(1 + CBOR_MAP_START);
                     encode_str("in", &mut out);
-                    out.push(2 | CBOR_ARRAY_START);
+                    out.push(2 + CBOR_ARRAY_START);
                     encode_f32(v.x, &mut out);
                     encode_f32(v.x, &mut out);
                 },
                 LiveValue::Vec3(v) => {
-                    out.push(1 | CBOR_MAP_START);
+                    out.push(1 + CBOR_MAP_START);
                     encode_str("in", &mut out);
-                    out.push(3 | CBOR_ARRAY_START);
+                    out.push(3 + CBOR_ARRAY_START);
                     encode_f32(v.x, &mut out);
                     encode_f32(v.x, &mut out);
                     encode_f32(v.z, &mut out);
                 },
                 LiveValue::Vec4(v) => {
-                    out.push(1 | CBOR_MAP_START);
+                    out.push(1 + CBOR_MAP_START);
                     encode_str("in", &mut out);
-                    out.push(4 | CBOR_ARRAY_START);
+                    out.push(4 + CBOR_ARRAY_START);
                     encode_f32(v.x, &mut out);
                     encode_f32(v.x, &mut out);
                     encode_f32(v.z, &mut out);
                     encode_f32(v.w, &mut out);
                 },
                 LiveValue::BareEnum {variant, ..} => {
-                    out.push(1 | CBOR_MAP_START);
+                    out.push(1 + CBOR_MAP_START);
                     encode_str("if", &mut out);
                     encode_id(*variant, &mut out);
                 },
@@ -327,17 +327,17 @@ impl<T> LiveNodeSliceToCbor for T where T: AsRef<[LiveNode]> {
                     out.push(CBOR_ARRAY_START);
                 },
                 LiveValue::TupleEnum {variant, ..} => {
-                    out.push(1 | CBOR_MAP_START);
+                    out.push(1 + CBOR_MAP_START);
                     encode_str("enum", &mut out);
-                    out.push(2 | CBOR_ARRAY_START);
+                    out.push(2 + CBOR_ARRAY_START);
                     encode_id(*variant, &mut out);
                     stack.push(StackItem {index: out.len(), count: 0, has_keys: false});
                     out.push(CBOR_ARRAY_START);
                 },
                 LiveValue::NamedEnum {variant, ..} => {
-                    out.push(1 | CBOR_MAP_START);
+                    out.push(1 + CBOR_MAP_START);
                     encode_str("enum", &mut out);
-                    out.push(2 | CBOR_ARRAY_START);
+                    out.push(2 + CBOR_ARRAY_START);
                     encode_id(*variant, &mut out);
                     stack.push(StackItem {index: out.len(), count: 0, has_keys: true});
                     out.push(CBOR_MAP_START);
@@ -417,6 +417,7 @@ pub enum LiveNodeFromCborError {
     NotImpl,
     UnexpectedValue,
     ExpectedBareEnumString,
+    StackNotClosed,
     UTF8Error
 }
 
@@ -503,7 +504,7 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
         fn decode_str<'a>(data: &'a [u8], o: &mut usize) -> Result<Option<&'a str>,
         LiveNodeFromCborError> {
             assert_len(*o, 1, data) ?;
-            let len = if data[*o] & CBOR_UTF8_START == CBOR_UTF8_START {
+            let len = if data[*o] >= CBOR_UTF8_START && data[*o] <= CBOR_UTF8_END {
                 let r = (data[*o] - CBOR_UTF8_START) as usize;
                 *o += 1;
                 r
@@ -579,24 +580,24 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
                 match data[*o] {
                     CBOR_NU8 => {
                         *o += 1;
-                        Some(-(read_i8(data, o) ? as i64+1))
+                        Some(-(read_i8(data, o) ? as i64 + 1))
                     }
                     CBOR_NU16 => {
                         *o += 1;
-                        Some(-(read_i16(data, o) ? as i64+1))
+                        Some(-(read_i16(data, o) ? as i64 + 1))
                     }
                     CBOR_NU32 => {
                         *o += 1;
-                        Some(-(read_i32(data, o) ? as i64+1))
+                        Some(-(read_i32(data, o) ? as i64 + 1))
                     }
                     CBOR_NU64 => {
                         *o += 1;
-                        Some(-(read_i64(data, o) ? as i64+1))
+                        Some(-(read_i64(data, o) ? as i64 + 1))
                     }
-                    _ => if let Some(data) = decode_u64(data, o)?{
+                    _ => if let Some(data) = decode_u64(data, o) ? {
                         Some(data as i64)
                     }
-                    else{
+                    else {
                         None
                     }
                 }
@@ -606,7 +607,7 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
         
         fn decode_array_len(data: &[u8], o: &mut usize) -> Result<Option<usize>, LiveNodeFromCborError> {
             assert_len(*o, 1, data) ?;
-            let v = if data[*o] & CBOR_ARRAY_START == CBOR_ARRAY_START {
+            let v = if data[*o] >= CBOR_ARRAY_START && data[*o] <= CBOR_ARRAY_END {
                 let r = Some((data[*o] - CBOR_ARRAY_START) as usize);
                 *o += 1;
                 r
@@ -637,7 +638,7 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
         
         fn decode_map_len(data: &[u8], o: &mut usize) -> Result<Option<usize>, LiveNodeFromCborError> {
             assert_len(*o, 1, data) ?;
-            let v = if data[*o] & CBOR_MAP_START == CBOR_MAP_START {
+            let v = if data[*o] >= CBOR_MAP_START && data[*o] <= CBOR_MAP_END {
                 let r = Some((data[*o] - CBOR_MAP_START) as usize);
                 *o += 1;
                 r
@@ -685,10 +686,9 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
         struct StackItem {len: usize, count: usize, has_keys: bool}
         
         let mut stack = vec![StackItem {count: 0, len: 1, has_keys: false}];
-        
+        let origin = LiveNodeOrigin::field();
         let mut o = 0;
         while o < data.len() {
-            let origin = LiveNodeOrigin::field();
             
             if stack.last().unwrap().count == stack.last().unwrap().len {
                 self.push(LiveNode {id: LiveId(0), origin, value: LiveValue::Close});
@@ -710,7 +710,7 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
             
             assert_len(o, 1, data) ?;
             
-            println!("byte:{} id:{} data:{:x}",o, id, data[o]);
+            println!("{} byte:{} id:{} data:{:x}", stack_item.has_keys, o, id, data[o]);
             
             if let Some(v) = decode_i64(data, &mut o) ? {
                 self.push(LiveNode {id, origin, value: LiveValue::Int64(v)});
@@ -741,11 +741,11 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
                                 return Err(LiveNodeFromCborError::NotImpl)
                             }
                             "if" => { // bare enum
-                                if let Some(id) = decode_id(data, &mut o1) ? {
+                                if let Some(variant) = decode_id(data, &mut o1) ? {
                                     self.push(LiveNode {
                                         id,
                                         origin,
-                                        value: LiveValue::BareEnum {base: LiveId(0), variant: id}
+                                        value: LiveValue::BareEnum {base: LiveId(0), variant}
                                     });
                                     o = o1;
                                     continue;
@@ -794,7 +794,13 @@ impl LiveNodeVecFromCbor for Vec<LiveNode> {
                 }
             };
         }
-        
+        // lets unwind the stack
+        while let Some(item) = stack.pop() {
+            if item.count != item.len {
+                return Err(LiveNodeFromCborError::StackNotClosed)
+            }
+        }
+        self.push(LiveNode {id: LiveId(0), origin, value: LiveValue::Close});
         Ok(())
     }
 }
