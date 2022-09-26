@@ -1479,6 +1479,8 @@ impl App {
             }
         }
 
+        let mut reload_sequencer = false;
+        
         if ui.button(ids!(grid_up)).was_clicked() {
             log!("grid down!");
             let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
@@ -1491,7 +1493,20 @@ impl App {
                 iron_fish.settings.sequencer.set_step(j, modstep);
                 
             }                
-            
+            reload_sequencer = true;
+        }
+
+        if ui.button(ids!(save1)).was_clicked() {self.preset(ui.cx, 1, shift);reload_sequencer = true;}
+        if ui.button(ids!(save2)).was_clicked() {self.preset(ui.cx, 2, shift);reload_sequencer = true;}
+        if ui.button(ids!(save3)).was_clicked() {self.preset(ui.cx, 3, shift);reload_sequencer = true;}
+        if ui.button(ids!(save4)).was_clicked() {self.preset(ui.cx, 4, shift);reload_sequencer = true;}
+        if ui.button(ids!(save5)).was_clicked() {self.preset(ui.cx, 5, shift);reload_sequencer = true;}
+        if ui.button(ids!(save6)).was_clicked() {self.preset(ui.cx, 6, shift);reload_sequencer = true;}
+        if ui.button(ids!(save7)).was_clicked() {self.preset(ui.cx, 7, shift);reload_sequencer = true;}
+        if ui.button(ids!(save8)).was_clicked() {self.preset(ui.cx, 8, shift);reload_sequencer = true;}
+        
+        if reload_sequencer{
+            let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
             for j in 0..16 {
                 let val = iron_fish.settings.sequencer.get_step(j);
                 for i in 0..16 {
@@ -1499,17 +1514,8 @@ impl App {
                     sequencer.update_button(ui.cx,j,i, if val & bv == bv {true} else {false});
                 }
             }
-
         }
 
-        if ui.button(ids!(save1)).was_clicked() {self.preset(ui.cx, 1, shift);}
-        if ui.button(ids!(save2)).was_clicked() {self.preset(ui.cx, 2, shift);}
-        if ui.button(ids!(save3)).was_clicked() {self.preset(ui.cx, 3, shift);}
-        if ui.button(ids!(save4)).was_clicked() {self.preset(ui.cx, 4, shift);}
-        if ui.button(ids!(save5)).was_clicked() {self.preset(ui.cx, 5, shift);}
-        if ui.button(ids!(save6)).was_clicked() {self.preset(ui.cx, 6, shift);}
-        if ui.button(ids!(save7)).was_clicked() {self.preset(ui.cx, 7, shift);}
-        if ui.button(ids!(save8)).was_clicked() {self.preset(ui.cx, 8, shift);}
     }
     
     pub fn preset(&mut self, cx: &mut Cx, index: usize, save: bool) {
