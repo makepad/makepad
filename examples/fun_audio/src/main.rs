@@ -1520,27 +1520,33 @@ impl App {
     
     pub fn preset(&mut self, cx: &mut Cx, index: usize, save: bool) {
         let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
-        let file_name = format!("preset_{}.bin", index);
+        let file_name = format!("preset_{}.txt", index);
         if save {
             let nodes = iron_fish.settings.live_read();
             let data = nodes.to_cbor(0).unwrap();
             let data = makepad_miniz::compress_to_vec(&data, 10);
+            let data = makepad_miniz::base64_encode(&data, &makepad_miniz::BASE64_URL_SAFE);
             log!("Saving preset {}", file_name);
             let mut file = File::create(&file_name).unwrap();
-            file.write_all(&data).unwrap();
+            file.write_all(&data.as_bytes()).unwrap();
         }
         else if let Ok(mut file) = File::open(&file_name) {
             log!("Loading preset {}", file_name);
             let mut data = Vec::new();
             file.read_to_end(&mut data).unwrap();
-            if let Ok(data) = makepad_miniz::decompress_to_vec(&data) {
-                let mut nodes = Vec::new();
-                nodes.from_cbor(&data).unwrap();
-                iron_fish.settings.apply_over(cx, &nodes);
-                self.imgui.root_frame().bind_read(cx, &nodes);
+            if let Ok(data) = makepad_miniz::base64_decode(&data){
+                if let Ok(data) = makepad_miniz::decompress_to_vec(&data) {
+                    let mut nodes = Vec::new();
+                    nodes.from_cbor(&data).unwrap();
+                    iron_fish.settings.apply_over(cx, &nodes);
+                    self.imgui.root_frame().bind_read(cx, &nodes);
+                }
+                else {
+                    log!("Error decompressing preset");
+                }
             }
             else {
-                log!("Error decompressing preset");
+                log!("Error base64 decoding preset");
             }
         }
     }
