@@ -5,7 +5,7 @@ pub const BASE64_URL_SAFE: [u8; 64] = [0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47,
 pub fn base64_encode(inp: &[u8], table: &[u8; 64]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut i = 0;
-    while i + 3 < inp.len() { // hop over in chunks of 3 bytes outputting 4 chars
+    while i + 2 < inp.len() { // hop over in chunks of 3 bytes outputting 4 chars
         out.push(table[(inp[i + 0] >> 2) as usize]);
         out.push(table[((inp[i + 0] & 0x3) << 4 | inp[i + 1] >> 4) as usize]);
         out.push(table[((inp[i + 1] & 0xf) << 2 | inp[i + 2] >> 6) as usize]);
