@@ -1528,7 +1528,7 @@ impl App {
             let data = makepad_miniz::base64_encode(&data, &makepad_miniz::BASE64_URL_SAFE);
             log!("Saving preset {}", file_name);
             let mut file = File::create(&file_name).unwrap();
-            file.write_all(&data.as_bytes()).unwrap();
+            file.write_all(&data).unwrap();
         }
         else if let Ok(mut file) = File::open(&file_name) {
             log!("Loading preset {}", file_name);
