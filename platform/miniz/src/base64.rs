@@ -22,7 +22,7 @@ pub fn base64_encode(inp: &[u8], table: &[u8; 64]) -> Vec<u8> {
         out.push(table[((inp[i + 0] & 0x3) << 4 | inp[i + 1] >> 4) as usize]);
         out.push(table[((inp[i + 1] & 0xf) << 2) as usize]);
     }
-    let end_pad = 3 - inp.len() % 3; // max 3
+    let end_pad = 3 - inp.len() % 3;
     if end_pad == 1 {
         out.push('=' as u8);
     }
