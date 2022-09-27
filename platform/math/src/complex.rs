@@ -92,7 +92,7 @@ fn fft_f32_recursive_pow2(data: &mut [ComplexF32], scratch: &mut [ComplexF32], t
     if data.len() != scratch.len() {panic!()}
     fn is_power_of_2(n: usize)->bool{n != 0 && (!(n & (n - 1))) != 0 }
     if !is_power_of_2(n){ // check power of two
-        panic!();
+        panic!("fft data length must be power of 2");
     };
     scratch.copy_from_slice(data);
     fft_f32_recursive_pow2_inner(data, scratch, n, theta_pi, 1);

@@ -191,7 +191,7 @@ export class WasmWebGL extends WasmWebBrowser {
     
     FromWasmDrawCall(args) {
         var gl = this.gl;
-
+        
         let shader = this.draw_shaders[args.shader_id];
         
         gl.useProgram(shader.program);
