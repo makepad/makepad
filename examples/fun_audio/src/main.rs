@@ -327,7 +327,7 @@ live_register!{
             instance sustain: 0.5
             instance release: 0.2
             
-            fn get_fill(self) -> vec4 {
+            fn pixel(self) -> vec4 {
                 let sdf = Sdf2d::viewport(self.pos * self.rect_size); //mod (self.pos * self.rect_size, 15))
                 let base_color = mix(self.color, self.color2, pow(length((self.pos - vec2(0.5, 0.5)) * 1.2), 2.0));
                 let darker = base_color * 0.85;
@@ -352,7 +352,12 @@ live_register!{
                 sdf.stroke_keep(#xFFC49910, 6.0);
                 sdf.stroke_keep(#xFFC49920, 4.0);
                 sdf.stroke_keep(#xFFC49980, 2.0);
-                sdf.stroke_keep(#xFFFFFFFF, 1.0);
+                sdf.stroke(#xFFFFFFFF, 1.0);
+                /*let fill = sdf.result;
+                sdf.result = #0000;
+                sdf.box(0.,0.,self.rect_size.x, self.rect_size.y, 3.); 
+                sdf.fill(fill);
+                */
                 return sdf.result
             }
         }
@@ -1482,7 +1487,6 @@ impl App {
         let mut reload_sequencer = false;
         
         if ui.button(ids!(grid_up)).was_clicked() {
-            log!("grid down!");
             let iron_fish = self.audio_graph.by_type::<IronFish>().unwrap();
             for j in 0..16 {
                 //let bv = 1<<j;
