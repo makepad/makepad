@@ -5,6 +5,7 @@ pub const BASE64_URL_SAFE: [u8; 64] = [0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47,
 pub fn base64_encode(inp: &[u8], table: &[u8; 64]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut i = 0;
+    
     while i + 2 < inp.len() { // hop over in chunks of 3 bytes outputting 4 chars
         out.push(table[(inp[i + 0] >> 2) as usize]);
         out.push(table[((inp[i + 0] & 0x3) << 4 | inp[i + 1] >> 4) as usize]);
@@ -12,6 +13,7 @@ pub fn base64_encode(inp: &[u8], table: &[u8; 64]) -> Vec<u8> {
         out.push(table[((inp[i + 2] & 0x3f)) as usize]);
         i += 3;
     }
+    
     let bytes_left = inp.len() - i;
     if bytes_left == 1 {
         out.push(table[(inp[i + 0] >> 2) as usize]);
@@ -22,6 +24,7 @@ pub fn base64_encode(inp: &[u8], table: &[u8; 64]) -> Vec<u8> {
         out.push(table[((inp[i + 0] & 0x3) << 4 | inp[i + 1] >> 4) as usize]);
         out.push(table[((inp[i + 1] & 0xf) << 2) as usize]);
     }
+    
     let end_pad = 3 - inp.len() % 3;
     if end_pad == 1 {
         out.push('=' as u8);
@@ -30,27 +33,34 @@ pub fn base64_encode(inp: &[u8], table: &[u8; 64]) -> Vec<u8> {
         out.push('=' as u8);
         out.push('=' as u8);
     }
+    
     out
 }
 
 pub fn base64_decode(inp: &[u8]) -> Result<Vec<u8>, ()> {
     let mut out = Vec::new();
+    
     if inp.len() & 3 != 0 { // base64 should be padded to 4 char chunks
         return Err(())
     }
+    
     for i in (0..inp.len()).step_by(4) {
         let b0 = BASE64_DEC[inp[i + 0] as usize];
         let b1 = BASE64_DEC[inp[i + 1] as usize];
         let b2 = BASE64_DEC[inp[i + 2] as usize];
         let b3 = BASE64_DEC[inp[i + 3] as usize];
+        
         if b0 == 64 || b1 == 64 || b2 == 64 || b3 == 64 {
             return Err(()) // invalid character used
         }
+        
         out.push((b0 << 2) | (b1 >> 4));
         out.push((b1 & 0xf) << 4 | (b2 >> 2));
+        
         if inp[i + 2] != '=' as u8 { // double == at the end skips last byte
             out.push(((b2 & 0x3) << 6) | b3);
         }
     }
+    
     Ok(out)
 }
