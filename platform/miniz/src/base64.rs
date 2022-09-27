@@ -5,41 +5,35 @@ pub const BASE64_URL_SAFE: [u8; 64] = [0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47,
 pub fn base64_encode(inp: &[u8], table: &[u8; 64]) -> String {
     let mut out = String::new();
     let mut i = 0;
-    while i + 3 < inp.len() {
-        out.push(table[inp[i+0] as usize >> 2] as char);
-        out.push(table[(inp[i+0] as usize & 0x3) << 4 | inp[i+1] as usize >> 4] as char);
-        out.push(table[(inp[i+1] as usize & 0xf) << 2 | inp[i+2] as usize >> 6] as char);
-        out.push(table[(inp[i+2] as usize & 0x3f)] as char);
+    while i + 3 < inp.len() { // hop over in chunks of 3 bytes outputting 4 chars
+        out.push(table[inp[i + 0] as usize >> 2] as char);
+        out.push(table[(inp[i + 0] as usize & 0x3) << 4 | inp[i + 1] as usize >> 4] as char);
+        out.push(table[(inp[i + 1] as usize & 0xf) << 2 | inp[i + 2] as usize >> 6] as char);
+        out.push(table[(inp[i + 2] as usize & 0x3f)] as char);
         i += 3;
     }
-    match inp.len() - i {
-        1 => {
-            out.push(table[inp[i + 0] as usize >> 2] as char);
-            out.push(table[(inp[i + 0] as usize & 0x3) << 4] as char);
-        }
-        2 => {
-            out.push(table[inp[i + 0] as usize >> 2] as char);
-            out.push(table[(inp[i + 0] as usize & 0x3) << 4 | inp[i + 1] as usize >> 4] as char);
-            out.push(table[(inp[i + 1] as usize & 0xf) << 2] as char);
-        }
-        _ => ()
+    if inp.len() - i == 1 { // one byte left
+        out.push(table[inp[i + 0] as usize >> 2] as char);
+        out.push(table[(inp[i + 0] as usize & 0x3) << 4] as char);
     }
-    match inp.len() % 3 { // end padding
-        1 => {
-            out.push('=');
-            out.push('=');
-        }
-        2 => {
-            out.push('=');
-        }
-        _ => ()
+    else if inp.len() - i == 2 { // two bytes left
+        out.push(table[inp[i + 0] as usize >> 2] as char);
+        out.push(table[(inp[i + 0] as usize & 0x3) << 4 | inp[i + 1] as usize >> 4] as char);
+        out.push(table[(inp[i + 1] as usize & 0xf) << 2] as char);
+    }
+    if inp.len() % 3 == 1 { // end padding
+        out.push('=');
+        out.push('=');
+    }
+    else if inp.len() % 3 == 2 {
+        out.push('=');
     }
     out
 }
 
 pub fn base64_decode(inp: &[u8]) -> Result<Vec<u8>, ()> {
     let mut out = Vec::new();
-    if inp.len() & 3 != 0 {
+    if inp.len() & 3 != 0 { // base64 should be padded to 4 char chunks
         return Err(())
     }
     for i in (0..inp.len()).step_by(4) {
@@ -52,7 +46,7 @@ pub fn base64_decode(inp: &[u8]) -> Result<Vec<u8>, ()> {
         }
         out.push((b0 << 2) | (b1 >> 4) & 0x3);
         out.push(((b1 & 0xf) << 4) | (b2 >> 2) & 0xf);
-        if inp[i + 2] != '=' as u8{
+        if inp[i + 2] != '=' as u8 {
             out.push(((b2 & 0x3) << 6) | b3);
         }
     }
