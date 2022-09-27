@@ -26,6 +26,13 @@ pub mod deflate;
 pub mod inflate;
 mod shared;
 
+pub mod base64;
+
+pub use crate::base64::base64_encode;
+pub use crate::base64::base64_decode;
+pub use crate::base64::BASE64_STANDARD;
+pub use crate::base64::BASE64_URL_SAFE;
+
 pub use crate::deflate::compress_to_vec;
 pub use crate::deflate::compress_to_vec_zlib;
 
