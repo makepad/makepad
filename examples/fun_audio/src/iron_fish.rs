@@ -1190,7 +1190,7 @@ impl IronFishVoice {
         
         let velocity = (b2 as f32) / 127.0;
 
-        if settings.portamento.get() > 0.0 && prev < 128
+        if settings.portamento.get() > 0.0 //&& prev < 128
          {
             self.notetimetotal = EnvelopeState::nicerange(settings.portamento.get(), settings.sample_rate.get()) ;
             self.notetime = self.notetimetotal;
