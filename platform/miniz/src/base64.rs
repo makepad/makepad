@@ -37,11 +37,17 @@ pub fn base64_encode(inp: &[u8], table: &[u8; 64]) -> Vec<u8> {
     out
 }
 
-pub fn base64_decode(inp: &[u8]) -> Result<Vec<u8>, ()> {
+#[derive(Debug)]
+pub enum Base64DecodeError{
+    WrongPadding,
+    InvalidCharacter
+}
+
+pub fn base64_decode(inp: &[u8]) -> Result<Vec<u8>, Base64DecodeError> {
     let mut out = Vec::new();
     
     if inp.len() & 3 != 0 { // base64 should be padded to 4 char chunks
-        return Err(())
+        return Err(Base64DecodeError::WrongPadding)
     }
     
     for i in (0..inp.len()).step_by(4) {
@@ -51,12 +57,10 @@ pub fn base64_decode(inp: &[u8]) -> Result<Vec<u8>, ()> {
         let b3 = BASE64_DEC[inp[i + 3] as usize];
         
         if b0 == 64 || b1 == 64 || b2 == 64 || b3 == 64 {
-            return Err(()) // invalid character used
+            return Err(Base64DecodeError::InvalidCharacter) // invalid character used
         }
-        
         out.push((b0 << 2) | (b1 >> 4));
         out.push((b1 & 0xf) << 4 | (b2 >> 2));
-        
         if inp[i + 2] != '=' as u8 { // double == at the end skips last byte
             out.push(((b2 & 0x3) << 6) | b3);
         }
