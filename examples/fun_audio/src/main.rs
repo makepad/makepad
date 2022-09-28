@@ -673,6 +673,15 @@ live_register!{
                         label: "Sub"
                     }
                 }
+                porta = InstrumentSlider{
+                    slider = {
+                        slider:{line_color: (COLOR_MIX)}
+                        bind: "portamento"
+                        min: 0.0
+                        max: 1.0
+                        label:"Portamento"
+                    }
+                }
            }
         }        
     }
