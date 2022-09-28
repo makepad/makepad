@@ -1380,7 +1380,7 @@ impl IronFishState {
             self.activeinternalnotes[b1 as usize] = false;
             self.activeinternalnotecount =  self.activeinternalnotecount - 1;
             if self.activeinternalnotecount <= 0 {
-                self.lastnote = 255;
+                //self.lastnote = 255;
                 log!("last note - set to 255");
                 self.activeinternalnotecount = 0;
             }
@@ -1790,7 +1790,7 @@ impl AudioGraphNode for IronFishState {
             self.activeinternalnotes[i] = false;
         }
         self.activemidinotecount = 0;
-        self.lastnote = 255;
+        self.lastnote = 69;
         self.activeinternalnotecount  =0 ;
         self.rebuildarp();
     }
