@@ -16,3 +16,4 @@ class MyWasmApp {
 } 
 
 let app = new MyWasmApp(wasm);
+
