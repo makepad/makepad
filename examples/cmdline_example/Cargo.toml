@@ -5,6 +5,7 @@ edition = "2018"
 
 [dependencies]
 makepad-error-log = {path="../../platform/error_log", version="0.1"}
-
+makepad-miniz = {path="../../platform/miniz", version="0.1"}
+base64 = {version="0.13"}
 [features]
 nightly = ["makepad-error-log/nightly"]
