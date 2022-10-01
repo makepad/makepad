@@ -5,15 +5,18 @@ pub const BASE64_URL_SAFE: [u8; 64] = [0x41, 0x42, 0x43, 0x44, 0x45, 0x46, 0x47,
 pub fn base64_encode(inp: &[u8], table: &[u8; 64]) -> Vec<u8> {
     let mut out = Vec::new();
     let mut i = 0;
-    
+    out.resize(inp.len() + inp.len() / 3 + 4, 0u8);
+    let mut o = 0;
     while i + 2 < inp.len() { // hop over in chunks of 3 bytes outputting 4 chars
-        out.push(table[(inp[i + 0] >> 2) as usize]);
-        out.push(table[((inp[i + 0] & 0x3) << 4 | inp[i + 1] >> 4) as usize]);
-        out.push(table[((inp[i + 1] & 0xf) << 2 | inp[i + 2] >> 6) as usize]);
-        out.push(table[((inp[i + 2] & 0x3f)) as usize]);
+        let out = &mut out[o..o + 4];
+        out[0] = table[(inp[i + 0] >> 2) as usize];
+        out[1] = table[((inp[i + 0] & 0x3) << 4 | inp[i + 1] >> 4) as usize];
+        out[2] = table[((inp[i + 1] & 0xf) << 2 | inp[i + 2] >> 6) as usize];
+        out[3] = table[((inp[i + 2] & 0x3f)) as usize];
         i += 3;
+        o += 4;
     }
-    
+    out.resize(o, 0u8);
     let bytes_left = inp.len() - i;
     if bytes_left == 1 {
         out.push(table[(inp[i + 0] >> 2) as usize]);
@@ -23,8 +26,7 @@ pub fn base64_encode(inp: &[u8], table: &[u8; 64]) -> Vec<u8> {
         out.push(table[(inp[i + 0] >> 2) as usize]);
         out.push(table[((inp[i + 0] & 0x3) << 4 | inp[i + 1] >> 4) as usize]);
         out.push(table[((inp[i + 1] & 0xf) << 2) as usize]);
-    }
-    
+    } 
     let end_pad = 3 - inp.len() % 3;
     if end_pad == 1 {
         out.push('=' as u8);
@@ -38,33 +40,35 @@ pub fn base64_encode(inp: &[u8], table: &[u8; 64]) -> Vec<u8> {
 }
 
 #[derive(Debug)]
-pub enum Base64DecodeError{
+pub enum Base64DecodeError {
     WrongPadding,
     InvalidCharacter
 }
 
-pub fn base64_decode(inp: &[u8]) -> Result<Vec<u8>, Base64DecodeError> {
+pub fn base64_decode(input: &[u8]) -> Result<Vec<u8>, Base64DecodeError> {
     let mut out = Vec::new();
-    
-    if inp.len() & 3 != 0 { // base64 should be padded to 4 char chunks
+    out.resize(input.len() * 3 / 4, 0u8); 
+    if input.len() & 3 != 0 { // base64 should be padded to 4 char chunks
         return Err(Base64DecodeError::WrongPadding)
     }
-    
-    for i in (0..inp.len()).step_by(4) {
-        let b0 = BASE64_DEC[inp[i + 0] as usize];
-        let b1 = BASE64_DEC[inp[i + 1] as usize];
-        let b2 = BASE64_DEC[inp[i + 2] as usize];
-        let b3 = BASE64_DEC[inp[i + 3] as usize];
-        
+    let mut o = 0;
+    let mut i = 0;
+    while i < input.len() {
+        let inp = &input[i..i + 4];
+        let out = &mut out[o..o + 3];
+        let b0 = BASE64_DEC[inp[0] as usize];
+        let b1 = BASE64_DEC[inp[1] as usize];
+        let b2 = BASE64_DEC[inp[2] as usize];
+        let b3 = BASE64_DEC[inp[3] as usize];
         if b0 == 64 || b1 == 64 || b2 == 64 || b3 == 64 {
             return Err(Base64DecodeError::InvalidCharacter) // invalid character used
         }
-        out.push((b0 << 2) | (b1 >> 4));
-        out.push((b1 & 0xf) << 4 | (b2 >> 2));
-        if inp[i + 2] != '=' as u8 { // double == at the end skips last byte
-            out.push(((b2 & 0x3) << 6) | b3);
-        }
+        out[0] = (b0 << 2) | (b1 >> 4);
+        out[1] = (b1 & 0xf) << 4 | (b2 >> 2);
+        out[2] = ((b2 & 0x3) << 6) | b3;
+        i += 4;
+        o += 3;
     }
-    
+    out.resize(o, 0u8);
     Ok(out)
 }
