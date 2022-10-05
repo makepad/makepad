@@ -9,5 +9,5 @@ license = "MIT"
 [dependencies]
 
 [dependencies.makepad-micro-serde]
-path = "../../platform/micro_serde"
+path = "../../libs/micro_serde"
 version = "0.1"

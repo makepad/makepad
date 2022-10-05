@@ -1,14 +1,11 @@
 [package]
-name = "webserver"
+name = "makepad-web-server"
 version = "0.1.0"
 edition = "2018"
 
 [dependencies]
 makepad-http = { path = "http", version = "0.1" }
 makepad-collab-server = {path = "../../studio/collab_server", version = "0.1"}
-#brotli = "3.3.0"
-#deflate = "0.8.2"
-
-
+ 
 [features]
 nightly=[]
