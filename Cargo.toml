@@ -12,9 +12,10 @@ members = [
     "examples/cmdline_example",
     "examples/fun_audio",
     "examples/shader",
-    "platform/wasm_bridge/test",
+    "libs/wasm_bridge/test",
     "studio",
-    "tools/webserver",
+    "tools/auto_version",
+    "tools/web_server",
     "tools/wasm_strip",
     "tools/brotli_check",
 ]
