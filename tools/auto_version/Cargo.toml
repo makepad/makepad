@@ -1,0 +1,10 @@
+[package]
+name = "makepad-auto-version"
+version = "0.1.0"
+edition = "2018"
+
+[dependencies]
+makepad-digest = {path = "../../libs/digest", version = "0.1"}
+
+[features]
+nightly=[]
