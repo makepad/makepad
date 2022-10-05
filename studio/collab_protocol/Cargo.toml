@@ -7,7 +7,7 @@ description = "Makepad collab protocol"
 license = "MIT"
 
 [dependencies]
-makepad-live-id = { path = "../../platform/live_id", version = "0.1"}
-makepad-micro-serde = {path = "../../platform/micro_serde", version = "0.1"}
+makepad-live-id = { path = "../../libs/live_id", version = "0.1"}
+makepad-micro-serde = {path = "../../libs/micro_serde", version = "0.1"}
 makepad-editor-core = {path="../editor_core", version="0.1"}
 

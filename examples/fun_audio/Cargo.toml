@@ -7,7 +7,7 @@ edition = "2018"
 [dependencies]
 makepad-component = { path = "../../component", version = "0.1" }
 makepad-media = { path = "../../media", version = "0.1" }
-makepad-miniz = { path = "../../platform/miniz", version = "0.1" }
+makepad-miniz = { path = "../../libs/miniz", version = "0.1" }
 
 [features]
 nightly = ["makepad-component/nightly", "makepad-media/nightly"]
