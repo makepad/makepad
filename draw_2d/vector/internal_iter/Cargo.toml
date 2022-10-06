@@ -5,6 +5,6 @@ authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Internal iterators"
 license = "MIT OR Apache-2.0"
-metadata.makepad-auto-version = "x"
+metadata.makepad-auto-version = "IRYPDN81OrWG4pc7_lRsqzU5XKU="
 
 [dependencies]

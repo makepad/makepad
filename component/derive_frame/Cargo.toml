@@ -5,7 +5,7 @@ authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Makepad frame component derive macros"
 license = "MIT OR Apache-2.0"
-metadata.makepad-auto-version = "x"
+metadata.makepad-auto-version = "9gm029EFYpfAGmuU9mmgZsdlKJU="
 
 [lib]
 proc-macro = true

@@ -5,9 +5,9 @@ authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "TTF parser"
 license = "MIT OR Apache-2.0"
-metadata.makepad-auto-version = "x"
+metadata.makepad-auto-version = "x3SDCCNonfztgaq_U0TecyEthG0="
 
 [dependencies]
-makepad-font = { path = "../font", version = "0.1" }
-makepad-geometry = { path = "../geometry", version = "0.1" }
-makepad-internal-iter = { path = "../internal_iter", version = "0.1" }
+makepad-font = { path = "../font", version = "0.1.0" }
+makepad-geometry = { path = "../geometry", version = "0.1.0" }
+makepad-internal-iter = { path = "../internal_iter", version = "0.1.0" }

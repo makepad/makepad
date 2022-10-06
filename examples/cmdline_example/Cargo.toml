@@ -1,11 +1,15 @@
 [package]
-name = "cmdline_example"
+name = "makepad-example-cmdline"
 version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
+description = "Makepad cmdline example"
+license = "MIT OR Apache-2.0"
+metadata.makepad-auto-version = "scQx0u9iDdTMAufZr-LkZDZ85a4="
 
 [dependencies]
-makepad-error-log = {path="../../libs/error_log", version="0.1"}
-makepad-miniz = {path="../../libs/miniz", version="0.1"}
+makepad-error-log = {path="../../libs/error_log", version="0.1.0"}
+makepad-miniz = {path="../../libs/miniz", version="0.1.0"}
 
 [features]
 nightly = ["makepad-error-log/nightly"]
