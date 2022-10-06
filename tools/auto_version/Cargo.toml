@@ -1,11 +1,11 @@
 [package]
 name = "makepad-auto-version"
-version = "0.1.0"
+version = "0.5.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Makepad crate auto versioning"
 license = "MIT OR Apache-2.0"
-metadata.makepad-auto-version = "x"
+metadata.makepad-auto-version = "FC4P9vcaOGf5pyqXJbYsWPLdid4="
 
 [dependencies]
 makepad-digest = {path = "../../libs/digest", version = "0.1.0"}

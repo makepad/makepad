@@ -6,4 +6,4 @@ description = "Objective-C Runtime bindings and wrapper for Rust."
 keywords = ["objective-c", "osx", "ios", "cocoa", "uikit"]
 license = "MIT"
 repository = "http://github.com/SSheldon/rust-objc"
-metadata.makepad-auto-version = "x"
+metadata.makepad-auto-version = "yzmfnXSTlAOZPYuN1wrLirR-Hzg="
