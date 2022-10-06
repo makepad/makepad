@@ -153,13 +153,13 @@ fn main() {
             
             let next_version = format!("0.{}.0", version + 1);
             
-            patch_toml(&c.cargo, "package.version", &next_version, write);
-            patch_toml(&c.cargo, "package.metadata.makepad-auto-version", &c.new_sha1, write);
+            patch_cargo(&c.cargo, "package.version", &next_version, write);
+            patch_cargo(&c.cargo, "package.metadata.makepad-auto-version", &c.new_sha1, write);
             // now lets version-up everyone elses dependency on this crate
             for pref in target_deps {
                 let dep_version = format!("{}{}.version", pref, c.package_name);
                 for o in &ver_crates {
-                    patch_toml(&o.cargo, &dep_version, &next_version, write);
+                    patch_cargo(&o.cargo, &dep_version, &next_version, write);
                 }
             }
         }
@@ -168,32 +168,30 @@ fn main() {
     println!("Done");
 }
 
-fn patch_toml(cargo: &Path, toml_path: &str, with: &str, write: bool) -> Option<String> {
-    let cargo_str = fs::read_to_string(&cargo).unwrap();
-    let toml = makepad_toml_parser::parse_toml(&cargo_str).unwrap();
+fn patch_cargo(cargo: &Path, toml_path: &str, with: &str, write: bool) {
+    let old_cargo = fs::read_to_string(&cargo).unwrap();
+    let toml = makepad_toml_parser::parse_toml(&old_cargo).unwrap();
     
     if let Some(Toml::Str(_, span)) = toml.get(toml_path) {
-        let mut ret = String::new();
-        for (i, c) in cargo_str.chars().enumerate() {
+        let mut new_cargo = String::new();
+        for (i, c) in old_cargo.chars().enumerate() {
             if i == span.start {
                 for c in with.chars() {
-                    ret.push(c);
+                    new_cargo.push(c);
                 }
             }
             if i < span.start || i >= span.start + span.len - 2 {
-                ret.push(c);
+                new_cargo.push(c);
             }
         }
         // lets write it back to disk
         if write {
-            fs::File::create(&cargo).unwrap().write_all(ret.as_bytes()).unwrap();
+            fs::File::create(&cargo).unwrap().write_all(new_cargo.as_bytes()).unwrap();
             println!("Updating {:?} with {}", cargo, with);
         }
         else {
             println!("Would have updated {:?} with {}", cargo, with);
         }
-        return Some(ret);
     }
-    None
 }
 
