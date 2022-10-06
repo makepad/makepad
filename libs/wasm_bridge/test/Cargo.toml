@@ -1,8 +1,12 @@
 [package]
-name = "wasm_bridge_test"
+name = "makepad-wasm-bridge-test"
 version = "0.1.0"
+authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
+description = "Makepad wasm bridge test"
+license = "MIT OR Apache-2.0"
+metadata.makepad-auto-version = "eeNQFOUDFF5r0AIA6DZy4AwhwKM="
 
 [dependencies]
-makepad-wasm-bridge = { path = "../", version = "0.1" }
+makepad-wasm-bridge = { path = "../", version = "0.1.0" }
 

@@ -5,7 +5,7 @@ authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Makepad micro replacement for serde"
 license = "MIT OR Apache-2.0"
-metadata.makepad-auto-version = "x"
+metadata.makepad-auto-version = "D9AkBdmMpCoObPQV1GlPfrEZ0CM="
 
 [dependencies]
 makepad-micro-serde-derive = { path = "derive", version = "0.1.0" }

@@ -5,7 +5,7 @@ authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Makepad font data structures"
 license = "MIT OR Apache-2.0"
-metadata.makepad-auto-version = "x"
+metadata.makepad-auto-version = "ozUBY7mXcDO90346mZQsUxmDUJ8="
 
 [dependencies]
 makepad-geometry = { path = "../geometry", version = "0.1.0" }

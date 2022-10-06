@@ -3,11 +3,10 @@ name = "makepad-editor-core"
 version = "0.1.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
-description = "Makepad studio components"
-license = "MIT"
+description = "Makepad editor core"
+license = "MIT OR Apache-2.0"
+metadata.makepad-auto-version = "MTPy7yxHuys5wJI63ovsn0Ugc4U="
 
 [dependencies]
 
-[dependencies.makepad-micro-serde]
-path = "../../libs/micro_serde"
-version = "0.1"
+makepad-micro-serde = {path = "../../libs/micro_serde", version = "0.1.0"}

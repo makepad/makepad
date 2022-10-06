@@ -4,11 +4,12 @@ version = "0.1.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Makepad collab server"
-license = "MIT"
+license = "MIT OR Apache-2.0"
+metadata.makepad-auto-version = "lQ7Dx6o5wOWoitlkmWPVDma-9DY="
 
 [dependencies]
-makepad-live-id = { path = "../../libs/live_id", version = "0.1"}
-makepad-micro-serde = {path = "../../libs/micro_serde", version = "0.1"}
-makepad-editor-core = {path="../editor_core", version="0.1"}
-makepad-collab-protocol = {path="../collab_protocol", version="0.1"}
+makepad-live-id = { path = "../../libs/live_id", version = "0.1.0"}
+makepad-micro-serde = {path = "../../libs/micro_serde", version = "0.1.0"}
+makepad-editor-core = {path="../editor_core", version="0.1.0"}
+makepad-collab-protocol = {path="../collab_protocol", version="0.1.0"}
 
