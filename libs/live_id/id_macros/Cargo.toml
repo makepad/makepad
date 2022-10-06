@@ -5,7 +5,7 @@ authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Makepad live id macros"
 license = "MIT OR Apache-2.0"
-metadata.makepad-auto-version = "x"
+metadata.makepad-auto-version = "r7DUKvgEBgdwQq0aALjvJ7QnTyk="
 
 [lib]
 proc-macro = true

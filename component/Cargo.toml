@@ -5,7 +5,7 @@ authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "Makepad UI components"
 license = "MIT OR Apache-2.0"
-metadata.makepad-auto-version = "x"
+metadata.makepad-auto-version = "HZS5tRlkeh20V19o8VQsa_0G-us="
 
 [dependencies]
 makepad-draw-2d = { path = "../draw_2d", version = "0.1.0" }
