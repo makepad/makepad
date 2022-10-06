@@ -1,5 +1,4 @@
 use std::fs;
-use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use makepad_toml_parser;
 use makepad_toml_parser::Toml;
@@ -175,20 +174,13 @@ fn patch_toml(cargo: &Path, toml_path: &str, with: &str, write: bool) -> Option<
     
     if let Some(Toml::Str(_, span)) = toml.get(toml_path) {
         let mut ret = String::new();
-        let mut inserted = false;
         for (i, c) in cargo_str.chars().enumerate() {
             if i == span.start {
-                inserted = true;
                 for c in with.chars() {
                     ret.push(c);
                 }
             }
             if i < span.start || i >= span.start + span.len - 2 {
-                ret.push(c);
-            }
-        }
-        if !inserted { // end of string or empty string
-            for c in with.chars() {
                 ret.push(c);
             }
         }
