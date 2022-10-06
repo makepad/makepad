@@ -14,6 +14,7 @@ fn main() {
     let mut crate_stack = Vec::new();
     let mut crates = Vec::new();
     
+    // Crate with rs files
     struct Crate {
         cargo: PathBuf,
         rs_files: Vec<PathBuf>,
@@ -33,7 +34,6 @@ fn main() {
             if meta.is_dir() {
                 dirs.push(iter.path());
             }
-            // ok so. if we find a Cargo file here we create a new module stack item.
             if iter.file_name() == "Cargo.toml" {
                 crates.push(Crate {
                     cargo: iter.path(),
@@ -56,13 +56,13 @@ fn main() {
             crate_stack.pop();
         }
     }
+    // scan our filetree and build up a list of crates in our monorepo
     recur_read(Path::new("./"), &ignore_list, &mut crates, &mut crate_stack);
     
-    #[derive(Debug)]
+    // versioned crate
     struct VerCrate {
         package_name: String,
         package_version: String,
-        next_version: RefCell<Option<String >>,
         cargo: PathBuf,
         deps: Vec<String>,
         old_sha1: String,
@@ -81,12 +81,11 @@ fn main() {
     
     let mut ver_crates = Vec::new();
     
+    // iterate all found crates and build up version info/dep info
     for c in crates {
-        // ok now what. now we need to build a dependency tree.
-        //println!("GOT CRATE {:?}", c.cargo);
         let cargo_str = fs::read_to_string(&c.cargo).unwrap();
         let toml = makepad_toml_parser::parse_toml(&cargo_str).unwrap();
-        // alright so we have our toml
+
         let old_sha1 = if let Some(Toml::Str(ver, _)) = toml.get("package.metadata.makepad-auto-version") {
             ver.to_string()
         }
@@ -95,8 +94,8 @@ fn main() {
         };
         let package_name = toml.get("package.name").unwrap().clone().into_str().unwrap();
         let package_version = toml.get("package.version").unwrap().clone().into_str().unwrap();
-        // how do we do this
-        // sha1 all files
+
+        // hash all the rs files
         let mut sha1 = sha1::Sha1::new();
         for file_path in c.rs_files {
             let file_str = fs::read_to_string(file_path).unwrap();
@@ -105,6 +104,7 @@ fn main() {
         let data = sha1.finalise();
         let new_sha1 = String::from_utf8(base64::base64_encode(&data, &base64::BASE64_URL_SAFE)).unwrap();
         let mut deps = Vec::new();
+        // scan our toml file for all dependencies
         for key in toml.keys() {
             for pref in target_deps {
                 if let Some(pref) = key.strip_prefix(pref) {
@@ -114,18 +114,26 @@ fn main() {
                 }
             }
         }
-        // lets find all our dependencies
         ver_crates.push(VerCrate {
             cargo: c.cargo.clone(),
             package_name,
             package_version,
-            next_version: RefCell::new(None),
             deps,
             old_sha1,
             new_sha1,
         });
     }
-    
+
+    let args: Vec<String> = std::env::args().collect();
+    let write = if args.len() >= 2 && args[1] == "-u" {
+        println!("Updating auto versions");
+        true
+    }else {
+        println!("Scanning auto version -- pass -u as argument to update");
+        false
+    };
+        
+    // scan if any of a crates dependencies has a hash change, ifso, up the version
     for c in &ver_crates {
         fn any_dep_changed(c: &VerCrate, ver_crates: &[VerCrate]) -> bool {
             if c.old_sha1 != c.new_sha1 {
@@ -143,27 +151,12 @@ fn main() {
         if any_dep_changed(c, &ver_crates) {
             let ver = c.package_version.strip_prefix("0.").unwrap().strip_suffix(".0").unwrap();
             let version: u64 = ver.parse().unwrap();
-            *c.next_version.borrow_mut() = Some(format!("0.{}.0", version + 1));
-        }
-    }
-
-    let args: Vec<String> = std::env::args().collect();
-    let write = if args.len() >= 2 && args[1] == "-u" {
-        println!("Updating auto versions");
-        true
-    }else {
-        println!("Scanning auto version -- pass -u as argument to update");
-        false
-    };
-    
-    for c in &ver_crates {
-        // ok lets patch up our Cargo.tomls all our 'next versions' should be set
-        if let Some(next_version) = c.next_version.borrow().clone() {
-            // alright so. we have a version update here.
-            // ok so first we patch our own version
+            
+            let next_version = format!("0.{}.0", version + 1);
+            
             patch_toml(&c.cargo, "package.version", &next_version, write);
             patch_toml(&c.cargo, "package.metadata.makepad-auto-version", &c.new_sha1, write);
-            // ok now lets patch everyone elses dependency on this one
+            // now lets version-up everyone elses dependency on this crate
             for pref in target_deps {
                 let dep_version = format!("{}{}.version", pref, c.package_name);
                 for o in &ver_crates {
@@ -172,6 +165,7 @@ fn main() {
             }
         }
     }
+
     println!("Done");
 }
 
