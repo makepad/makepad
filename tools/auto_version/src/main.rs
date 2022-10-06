@@ -146,29 +146,7 @@ fn main() {
             *c.next_version.borrow_mut() = Some(format!("0.{}.0", version + 1));
         }
     }
-    /*
-    for c in &ver_crates{
-        let next_version = "0.1.0";
-        patch_toml(&c.cargo, "package.version", &next_version);
-        patch_toml(&c.cargo, "package.metadata.makepad-auto-version", &c.new_sha1);
-        // ok now lets patch everyone elses dependency on this one
-        let dep_version = format!("dependencies.{}.version",c.package_name);
-        for o in &ver_crates{
-            patch_toml(&o.cargo, &dep_version, &next_version);
-        }
-    }*/
-    /*for c in &ver_crates{
-        let next_version = "0.1.0"; 
-        patch_toml(&c.cargo, "package.version", &next_version, true);
-        patch_toml(&c.cargo, "package.metadata.makepad-auto-version", &c.new_sha1, true);
-        // ok now lets patch everyone elses dependency on this one
-        for pref in target_deps{
-            let dep_version = format!("{}{}.version",pref, c.package_name);
-            for o in &ver_crates{
-                patch_toml(&o.cargo, &dep_version, &next_version, true);
-            }
-        }
-    }*/
+
     let args: Vec<String> = std::env::args().collect();
     let write = if args.len() >= 2 && args[1] == "-u" {
         println!("Updating auto versions");
