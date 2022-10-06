@@ -1,13 +1,17 @@
 [package]
-name = "fun_audio"
+name = "makepad-example-fun-audio"
 version = "0.1.0"
-authors = ["makepaddev"]
+authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
+description = "Makepad fun audio example"
+license = "MIT OR Apache-2.0"
+metadata.makepad-auto-version = "x"
 
 [dependencies]
-makepad-component = { path = "../../component", version = "0.1" }
-makepad-media = { path = "../../media", version = "0.1" }
-makepad-miniz = { path = "../../libs/miniz", version = "0.1" }
+makepad-component = { path = "../../component", version = "0.1.0" }
+makepad-media = { path = "../../media", version = "0.1.0" }
+makepad-miniz = { path = "../../libs/miniz", version = "0.1.0" }
+makepad-base64 = { path = "../../libs/base64", version = "0.1.0" }
 
 [features]
 nightly = ["makepad-component/nightly", "makepad-media/nightly"]

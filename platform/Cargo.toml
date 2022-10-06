@@ -3,50 +3,48 @@ name = "makepad-platform"
 version = "0.1.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
-description = "Makepad renderer"
-license = "MIT"
+description = "Makepad platform layer"
+license = "MIT OR Apache-2.0"
+metadata.makepad-auto-version = "x"
 
 [features]
 nightly = ["makepad-shader-compiler/nightly"]
 
 [dependencies]
-makepad-shader-compiler = { path = "./shader_compiler", version = "0.1" }
+makepad-shader-compiler = { path = "./shader_compiler", version = "0.1.0" }
 
 [target.wasm32-unknown-unknown.dependencies]
-makepad-wasm-bridge = { path = "../libs/wasm_bridge", version = "0.1" }
+makepad-wasm-bridge = { path = "../libs/wasm_bridge", version = "0.1.0" }
 
 [target.aarch64-apple-darwin.dependencies]
-makepad-objc-sys = { path = "./bind/objc-sys", version = "0.1" }
+makepad-objc-sys = { path = "./bind/objc-sys", version = "0.1.0" }
 
 [target.x86_64-apple-darwin.dependencies]
-makepad-objc-sys = { path = "./bind/objc-sys", version = "0.1" }
+makepad-objc-sys = { path = "./bind/objc-sys", version = "0.1.0" }
 
-[target.x86_64-unknown-linux-gnu.dependencies] 
-makepad-glx-sys = { path = "./bind/glx-sys", version = "0.1" }
-makepad-x11-sys = { path = "./bind/x11-sys", version = "0.1" }
-libc = "0.2"
-gl = "0.14"
-time = "0.1.4"
+# other platforms will be fixed soon
+# [target.x86_64-unknown-linux-gnu.dependencies] 
+# makepad-glx-sys = { path = "./bind/glx-sys", version = "0.1.0" }
+# makepad-x11-sys = { path = "./bind/x11-sys", version = "0.1.0" }
+# libc = "0.2"
+# gl = "0.14"
+# time = "0.1.4"
+# [target.armv7-unknown-linux-gnueabihf.dependencies]
+# makepad-glx-sys = { path = "./bind/glx-sys", version = "0.1.0" }
+# makepad-x11-sys = { path = "./bind/x11-sys", version = "0.1.0" }
+# libc = "0.2"
+# gl = "0.14"
+# time = "0.1.4"
+# [target.x86_64-pc-windows-gnu.dependencies]
+# wio = "0.2"
+# time = "0.1.4"
+# [target.x86_64-pc-windows-gnu.dependencies.winapi]
+# version = "0.3"
+# features = ["dwmapi", "libloaderapi", "shellscalingapi", "winuser", "winbase", "d3d11", "d3d11sdklayers", "d3dcommon", "d3dcompiler", "dxgi1_2", "dxgiformat", "dxgitype", "winerror"]
+# [target.x86_64-pc-windows-msvc.dependencies]
+# wio = "0.2"
+# time = "0.1.4"
 
-[target.armv7-unknown-linux-gnueabihf.dependencies]
-makepad-glx-sys = { path = "./bind/glx-sys", version = "0.1" }
-makepad-x11-sys = { path = "./bind/x11-sys", version = "0.1" }
-libc = "0.2"
-gl = "0.14"
-time = "0.1.4"
-
-[target.x86_64-pc-windows-gnu.dependencies]
-wio = "0.2"
-time = "0.1.4"
-
-[target.x86_64-pc-windows-gnu.dependencies.winapi]
-version = "0.3"
-features = ["dwmapi", "libloaderapi", "shellscalingapi", "winuser", "winbase", "d3d11", "d3d11sdklayers", "d3dcommon", "d3dcompiler", "dxgi1_2", "dxgiformat", "dxgitype", "winerror"]
-
-[target.x86_64-pc-windows-msvc.dependencies]
-wio = "0.2"
-time = "0.1.4"
-
-[target.x86_64-pc-windows-msvc.dependencies.winapi]
-version = "0.3"
-features = ["dwmapi","libloaderapi", "shellscalingapi", "winuser", "winbase", "d3d11", "d3d11sdklayers", "d3dcommon", "d3dcompiler", "dxgi1_2", "dxgiformat", "dxgitype", "winerror"]
+# [target.x86_64-pc-windows-msvc.dependencies.winapi]
+# version = "0.3"
+# features = ["dwmapi","libloaderapi", "shellscalingapi", "winuser", "winbase", "d3d11", "d3d11sdklayers", "d3dcommon", "d3dcompiler", "dxgi1_2", "dxgiformat", "dxgitype", "winerror"]

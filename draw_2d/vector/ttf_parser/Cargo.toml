@@ -4,7 +4,8 @@ version = "0.1.0"
 authors = ["Makepad <info@makepad.nl>"]
 edition = "2018"
 description = "TTF parser"
-license = "MIT"
+license = "MIT OR Apache-2.0"
+metadata.makepad-auto-version = "x"
 
 [dependencies]
 makepad-font = { path = "../font", version = "0.1" }
